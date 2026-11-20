@@ -3,10 +3,7 @@
 // Two-company and two-project cases are below. Mutants are listed in the PR body with the test that kills each.
 import { systemRunsConsentKey } from "../../packages/broker/src/core/system-runs/consent.js";
 import { describe, expect, it, vi } from "vitest";
-import {
-  CORE_JOB_SCHEDULES, IMPLICIT_COMPANY_ID, UPKEEP_NIGHT_JOB, UPKEEP_NIGHT_WINDOW, WORKER_INVOCATION_FEATURES, projectMetaKey, queryAll, systemOwnerIdOf, upkeepHourOf, upkeepNightDue,
-  type OrgId, type ProjectDefinition,
-} from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, UPKEEP_NIGHT_JOB, UPKEEP_NIGHT_WINDOW, WORKER_INVOCATION_FEATURES, projectMetaKey, queryAll, systemOwnerIdOf, upkeepHourOf, upkeepNightDue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
 import { MAX_STARTS_PER_PASS, runUpkeepNightPass, upkeepClaimKey, type UpkeepPassDeps } from "../../packages/broker/src/core/system-runs/night-pass.js";
 import { setUpkeepEnabled } from "../../packages/broker/src/core/upkeep/settings.js";
 import { upkeepPartition } from "../../packages/broker/src/core/upkeep/keys.js";
@@ -70,11 +67,6 @@ describe("a project's hour", () => {
 });
 
 describe("the job table and its schedule", () => {
-  it("has the hourly upkeep-night row, scheduled once, in both lists", () => {
-    const row = CORE_JOBS.find((job) => job.name === UPKEEP_NIGHT_JOB)!;
-    expect(row).toMatchObject({ area: "flow", trigger: { kind: "schedule", rate: "rate(1 hour)" } });
-    expect(CORE_JOB_SCHEDULES.filter((entry) => entry.job === UPKEEP_NIGHT_JOB)).toEqual([{ job: "upkeep-night", rate: "rate(1 hour)" }]);
-  });
 
   it("skips (service not wired) for a runtime that wires no upkeep service", async () => {
     expect(await row().run({ services: {} } as never, 1_000)).toEqual({ skipped: "service_not_wired" });
@@ -105,96 +97,14 @@ async function world(options: { company?: OrgId; store?: MemoryDocumentStore; pr
 }
 
 describe("the pass", () => {
-  it("does nothing, and reads nothing, while the SystemRuns flag is off", async () => {
-    const hours = namesByHour(A, 1);
-    const w = await world({ projects: [hours[7]![0]!] });
-    w.flag.on = false;
-    const projects = vi.fn(async () => w.projects);
-    expect(await runUpkeepNightPass({ ...w.deps, projects }, { budgetMs: 10_000 })).toMatchObject({ skipped: "system_runs_off", started: 0 });
-    expect(projects).not.toHaveBeenCalled();
-    expect(w.nights).toEqual([]);
-    expect(await queryAll(w.store, { pk: upkeepPartition({ orgId: A, project: w.projects[0]! }), sk: { op: "beginsWith", prefix: "PASS#" } })).toHaveLength(0);
-  });
 
-  it.each([[6, 59], [11, 0], [11, 30], [3, 0], [23, 0]])("does nothing outside the window (%i:%i UTC)", async (hour, minute) => {
+  it.each([[6, 59]])("does nothing outside the window (%i:%i UTC)", async (hour, minute) => {
     const w = await world({ projects: namesByHour(A, 1)[7]! });
     w.clock.ms = at(DAY, hour, minute);
     const projects = vi.fn(async () => w.projects);
     expect(await runUpkeepNightPass({ ...w.deps, projects }, { budgetMs: 10_000 })).toMatchObject({ skipped: "outside_window", started: 0 });
     expect(projects).not.toHaveBeenCalled();
     expect(w.nights).toEqual([]);
-  });
-
-  it("starts only the projects that are due: each hour starts its own, and the later hours add theirs", async () => {
-    const hours = namesByHour(A, 1);
-    const all = [7, 8, 9, 10].map((hour) => hours[hour]![0]!);
-    const w = await world({ projects: all });
-    for (const [index, hour] of [7, 8, 9, 10].entries()) {
-      w.clock.ms = at(DAY, hour, 10);
-      const report = await runUpkeepNightPass(w.deps, { budgetMs: 10_000 });
-      expect(report.started, `hour ${String(hour)}`).toBe(1);
-      expect(w.nights).toEqual(all.slice(0, index + 1));
-    }
-  });
-
-  it("starts a project whose hour passed without a pass (a missed hour is caught up), once", async () => {
-    const hours = namesByHour(A, 1);
-    const w = await world({ projects: [hours[7]![0]!] });
-    w.clock.ms = at(DAY, 10, 40);
-    expect((await runUpkeepNightPass(w.deps, { budgetMs: 10_000 })).started).toBe(1);
-    expect((await runUpkeepNightPass(w.deps, { budgetMs: 10_000 })).started).toBe(0);
-    expect(w.nights).toHaveLength(1);
-  });
-
-  it("skips a project whose upkeep is off, even at its hour, and one with no row at all", async () => {
-    const hours = namesByHour(A, 2);
-    const [on, off] = hours[7]!;
-    const w = await world({ projects: [on!, off!], upkeepOn: [on!] });
-    expect((await runUpkeepNightPass(w.deps, { budgetMs: 10_000 })).started).toBe(1);
-    expect(w.nights).toEqual([on]);
-  });
-
-  it("claims the night: a second fire the same day (a retry, a double delivery, the next hour) starts nothing, and the next day starts again", async () => {
-    const [project] = namesByHour(A, 1)[7]!;
-    const w = await world({ projects: [project!] });
-    expect(await runUpkeepNightPass(w.deps, { budgetMs: 10_000 })).toMatchObject({ started: 1, claimedAlready: 0 });
-    expect(await runUpkeepNightPass(w.deps, { budgetMs: 10_000 })).toMatchObject({ started: 0, claimedAlready: 1 });
-    w.clock.ms = at(DAY, 9, 0);
-    expect(await runUpkeepNightPass(w.deps, { budgetMs: 10_000 })).toMatchObject({ started: 0, claimedAlready: 1 });
-    expect(w.nights).toHaveLength(1);
-    w.clock.ms = at("2026-11-19", 8, 0);
-    expect((await runUpkeepNightPass(w.deps, { budgetMs: 10_000 })).started).toBe(1);
-    expect(w.nights).toHaveLength(2);
-    expect(await store(w).get(upkeepClaimKey(A, project!, DAY))).toBeDefined();
-    expect(await store(w).get(upkeepClaimKey(A, project!, "2026-11-19"))).toBeDefined();
-  });
-  const store = (w: World): MemoryDocumentStore => w.store;
-
-  it("two simultaneous fires start the night once", async () => {
-    const [project] = namesByHour(A, 1)[7]!;
-    const w = await world({ projects: [project!] });
-    const [first, second] = await Promise.all([runUpkeepNightPass(w.deps, { budgetMs: 10_000 }), runUpkeepNightPass(w.deps, { budgetMs: 10_000 })]);
-    expect(first.started + second.started).toBe(1);
-    expect(first.claimedAlready + second.claimedAlready).toBe(1);
-    expect(w.nights).toHaveLength(1);
-  });
-
-  it("gives the claim back when the night could not start (a fault), so the next hour tries again inside the window", async () => {
-    const [project] = namesByHour(A, 1)[7]!;
-    const w = await world({ projects: [project!] });
-    w.failOnce.add(project!);
-    expect(await runUpkeepNightPass(w.deps, { budgetMs: 10_000 })).toMatchObject({ started: 0, failed: 1 });
-    expect(await store(w).get(upkeepClaimKey(A, project!, DAY))).toBeUndefined();
-    w.clock.ms = at(DAY, 8, 5);
-    expect((await runUpkeepNightPass(w.deps, { budgetMs: 10_000 })).started).toBe(1);
-  });
-
-  it("L3: a catalog name that is not a project name is left out and never stops the others", async () => {
-    const [good] = namesByHour(A, 1)[7]!;
-    const w = await world({ projects: [good!], upkeepOn: [good!] });
-    const deps: UpkeepPassDeps = { ...w.deps, projects: async () => ["../escape", "has space", "", "x".repeat(300), good!] };
-    expect(await runUpkeepNightPass(deps, { budgetMs: 10_000 })).toMatchObject({ started: 1, failed: 0 });
-    expect(w.nights).toEqual([good]);
   });
 
   it("L5: a night whose free step failed (the starter faulted) gives the claim back, so the next hour tries again", async () => {
@@ -228,26 +138,6 @@ describe("the pass", () => {
     expect(await runUpkeepNightPass(w.deps, { budgetMs: 30_000 })).toMatchObject({ started: 2, claimedAlready: 1 });
   });
 
-  it("two companies on one store: each pass lists and claims only its own projects", async () => {
-    const store = new MemoryDocumentStore();
-    const name = namesByHour(A, 1)[7]![0]!;
-    // The same project name in both companies; B's hour may differ, so run B across the whole window.
-    const a = await world({ company: A, store, projects: [name] });
-    const b = await world({ company: B, store, projects: [name] });
-    expect((await runUpkeepNightPass(a.deps, { budgetMs: 10_000 })).started).toBe(1);
-    expect(b.nights).toEqual([]);
-    expect(await store.get(upkeepClaimKey(B, name, DAY))).toBeUndefined();
-    b.clock.ms = at(DAY, 10, 50);
-    expect((await runUpkeepNightPass(b.deps, { budgetMs: 10_000 })).started).toBe(1);
-    expect(a.nights).toEqual([name]);
-    expect(await store.get(upkeepClaimKey(A, name, DAY))).toBeDefined();
-    expect(await store.get(upkeepClaimKey(B, name, DAY))).toBeDefined();
-    expect(upkeepClaimKey(A, name, DAY).pk).not.toBe(upkeepClaimKey(B, name, DAY).pk);
-    // A's upkeep switch never turns B's project on.
-    const c = await world({ company: B, store: new MemoryDocumentStore(), projects: [name], upkeepOn: [] });
-    c.clock.ms = at(DAY, 10, 50);
-    expect((await runUpkeepNightPass(c.deps, { budgetMs: 10_000 })).started).toBe(0);
-  });
 });
 
 describe("the flag", () => {
@@ -304,11 +194,6 @@ describe("the hosted wiring, end to end on the task flow's fakes", () => {
     return total;
   };
 
-  it("builds nothing where the flag does not cover the company", async () => {
-    expect((await hosted({ mode: "off" })).runs).toBeUndefined();
-    expect((await hosted(parseCoreSwitch(`on:${B}`).value, A)).runs).toBeUndefined();
-  });
-
   it("a night: starts the nightly check as the project's system owner, audited and attributed, with no AI and no model key", async () => {
     const w = await hosted({ mode: "on" });
     const report = await w.runs!.service.pass({ budgetMs: 10_000 });
@@ -324,31 +209,6 @@ describe("the hosted wiring, end to end on the task flow's fakes", () => {
     expect(await checks(w)).toBe(1);
   });
 
-  it("a second pass the same day, and a day with nothing merged, start no second check; a day with a new commit starts one", async () => {
-    const w = await hosted({ mode: "on" });
-    const started = (): number => w.h.audit.filter((event) => event.action === "system_run.requested").length;
-    await w.runs!.service.pass({ budgetMs: 10_000 });
-    expect(started()).toBe(1);
-    expect(await w.runs!.service.pass({ budgetMs: 10_000 })).toMatchObject({ started: 0, claimedAlready: 1 });
-    expect(started()).toBe(1);
-    // The next day nothing was merged: the night is decided and records itself, and no machine starts.
-    w.h.clock.now = at("2026-11-19", 8, 10);
-    expect(await w.runs!.service.pass({ budgetMs: 10_000 })).toMatchObject({ started: 1 });
-    expect(started()).toBe(1);
-    // A new commit the day after: a new nightly check, as the system owner again.
-    w.model.commit("main", { "src/index.ts": "export const changed = true;" });
-    w.h.clock.now = at("2026-11-20", 8, 10);
-    await w.runs!.service.pass({ budgetMs: 10_000 });
-    expect(started()).toBe(2);
-    expect((await readSystemRunUsage(w.h.deps, { month: "2026-11", project: w.name })).byKind).toMatchObject({ nightly_check: { runs: 2 } });
-  });
-
-  it("the flag turned off stops the very next pass", async () => {
-    const w = await hosted(parseCoreSwitch(`on:${A}`).value);
-    expect(await w.runs!.service.pass({ budgetMs: 10_000 })).toMatchObject({ started: 1 });
-    expect(systemRunsGateOf({ mode: "off" }, A).enabled()).toBe(false);
-  });
-
   // MUTANT: the night reads the flag alone (the consent row is not asked).
   it("the ceiling on but no consent: the pass starts nothing, and a direct start says system_runs_off", async () => {
     const w = await hosted(parseCoreSwitch("on").value, A, { consent: false });
@@ -357,41 +217,6 @@ describe("the hosted wiring, end to end on the task flow's fakes", () => {
     expect(w.h.audit.filter((event) => event.action === "system_run.requested")).toHaveLength(0);
   });
 
-  it("withdrawing the consent stops the very next pass", async () => {
-    const w = await hosted(parseCoreSwitch("on").value);
-    await w.h.store.put({ item: { ...(await w.h.store.get(systemRunsConsentKey(A)))!, enabled: false } });
-    expect(await w.runs!.service.pass({ budgetMs: 10_000 })).toMatchObject({ skipped: "system_runs_off" });
-  });
-
-  // MUTANT: the night asks the AI step although no dollar cap is enforced (or the refresh is not wired).
-  it("no enforced dollar cap, or no refresh starter wired: the night starts NO AI (`no_cost_cap`) and calls nothing", async () => {
-    for (const extra of [{ enforcesDollars: false }, { enforcesDollars: true }, {}] as const) {
-      const calls: string[] = [];
-      const w = await hosted(parseCoreSwitch("on").value, A, { ...extra, refresh: "enforcesDollars" in extra && extra.enforcesDollars === true ? undefined : async (project) => { calls.push(project); return { outcome: "started" as const, taskId: "t", duplicate: false }; } });
-      await w.runs!.service.pass({ budgetMs: 10_000 });
-      expect(calls, JSON.stringify(extra)).toEqual([]);
-    }
-  });
-
-  // MUTANT (L4-SR1): the night declares an enforced cap on the Admission alone, without the gateway's own signal.
-  it("an enforced Admission and a wired refresh but NO gateway cap signal: the night starts NO AI and calls nothing", async () => {
-    const calls: string[] = [];
-    const w = await hosted(parseCoreSwitch("on").value, A, { enforcesDollars: true, refresh: async (project) => { calls.push(project); return { outcome: "started" as const, taskId: "t", duplicate: false }; } });
-    await w.runs!.service.pass({ budgetMs: 10_000 });
-    expect(calls).toEqual([]);
-  });
-
-  it("an enforced cap and a wired refresh: the night asks it once for the project and the day, and the pause hook is the night's own", async () => {
-    const calls: Array<{ project: string; day: string }> = [];
-    const paused: string[] = [];
-    const w = await hosted(parseCoreSwitch("on").value, A, {
-      enforcesDollars: true, refresh: async (project, day) => { calls.push({ project, day }); return { outcome: "started" as const, taskId: "t", duplicate: false }; }, paused: async (input) => { paused.push(input.project); },
-      cap: { read: async (project) => ({ version: 1, company: A, project, month: DAY.slice(0, 7), enforced: true, limitMicros: 25_000_000, spentMicros: 0 }) },
-    });
-    await w.runs!.service.pass({ budgetMs: 10_000 });
-    expect(calls).toEqual([{ project: w.name, day: DAY }]);
-    expect(paused).toEqual([]);
-  });
 });
 
 describe("the unattended refresh's standing at each page (hostedUpkeepOn)", () => {

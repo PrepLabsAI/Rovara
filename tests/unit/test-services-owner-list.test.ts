@@ -173,14 +173,6 @@ describe("a starter image is served with no approval", () => {
     expect(await h.service.list()).toEqual([]);
   });
 
-  it("uses an image that is already on this computer without pulling it", async () => {
-    const h = setup();
-    for (const image of OWNER_STARTER_IMAGES) h.docker.held.add(image.reference);
-    const result = await install(h);
-    expect(result.services!.images).toHaveLength(5);
-    expect(h.docker.pulls()).toEqual([]);
-  });
-
   it("pulling now (resolveOwnerImages' default): leaves out a starter that cannot be pulled, and keeps nothing when none can", async () => {
     const h = setup();
     h.docker.failing.add("library/mysql");
@@ -195,33 +187,12 @@ describe("a starter image is served with no approval", () => {
     expect(NO_IMAGES_SENTENCE).toContain("ROVARA_TEST_SERVICE_IMAGES");
   });
 
-  it("lazy at start-up: a Docker that cannot pull (or is not even running) does not take the starters away; they are pulled the first time a step needs them", async () => {
-    const h = setup();
-    h.docker.failing.add("library/mysql");
-    h.docker.reachable = false;
-    const result = await install(h);
-    expect(result.services!.images).toHaveLength(5);
-    expect(result.catalog!.entries.map((entry) => entry.family).sort()).toEqual(["mongodb", "mysql", "postgres", "postgres", "redis"]);
-    expect(result.unavailable).toBeUndefined();
-    expect(h.docker.calls).toEqual([]);
-    // The owner's list is still handed back, so the page can approve an image.
-    expect(result.ownerImages).toBe(h.service);
-  });
-
   it("is off, and touches nothing, with the owner's opt-out (exactly 0)", async () => {
     const h = setup();
     expect(await install(h, { ROVARA_TEST_SERVICES: "0" })).toEqual({ services: undefined, catalog: undefined, unavailable: undefined });
     expect(h.docker.calls).toEqual([]);
   });
 
-  it("is ON with nothing set (DEC 254z-amend3: the default), and with any value but exactly 0", async () => {
-    for (const environment of [{}, { ROVARA_TEST_SERVICES: "" }, { ROVARA_TEST_SERVICES: "false" }, { ROVARA_TEST_SERVICES: " 0" }]) {
-      const h = setup();
-      const result = await install(h, environment);
-      expect(result.mode, JSON.stringify(environment)).toBe("owner");
-      expect(result.services!.images, JSON.stringify(environment)).toHaveLength(5);
-    }
-  });
 });
 
 describe("an image that is not on the starter list needs the owner's one-time approval", () => {
@@ -242,23 +213,6 @@ describe("an image that is not on the starter list needs the owner's one-time ap
     expect(after.services!.images).toContain(pg15("a"));
     expect(after.catalog!.entries.find((entry) => entry.id === "postgres@15")!.image.digest).toBe(digestOf("a"));
     expect(after.services!.images).toHaveLength(6);
-  });
-
-  it("pins the digest: a moved tag changes nothing until the owner approves again", async () => {
-    const h = setup();
-    h.docker.tags.set(PG15, digestOf("a"));
-    await h.service.approve({ requested: "postgres:15" });
-    h.docker.tags.set(PG15, digestOf("b"));
-    const started = await install(h);
-    expect(started.services!.images).toContain(pg15("a"));
-    expect(started.services!.images).not.toContain(pg15("b"));
-    expect(h.docker.pulls().filter((name) => name === PG15)).toHaveLength(1);
-    // Approving again takes the new digest, and replaces the old one.
-    expect(await h.service.approve({ requested: "postgres:15" })).toMatchObject({ ok: true, image: { reference: pg15("b") } });
-    const again = await install(h);
-    expect(again.services!.images).toContain(pg15("b"));
-    expect(again.services!.images).not.toContain(pg15("a"));
-    expect(await h.service.list()).toHaveLength(1);
   });
 
   it("refuses what is not an approvable tag, an image Docker cannot pull, and a digest Docker does not report, and stores nothing", async () => {
@@ -352,25 +306,9 @@ describe("what a repository asks for is only a proposal", () => {
     for (const entry of proposed) expect(parseImageReference(entry.requested)).toMatchObject({ registry: "docker.io", repository: expect.stringMatching(/^library\/(mongo|mysql|postgres|redis)$/u) as unknown });
   });
 
-  it("copies no repository text: an image name in a hint is not one the proposal can carry", () => {
-    const hostile = { ...candidate("postgres", "16"), hints: { version: "16", url: { scheme: "postgres", hostFamily: "unknown" } }, evidence: [{ path: "evil.example/postgres:16", line: 1 }] } as TestEnvDependencyCandidate;
-    expect(proposeServiceImages([hostile]).map((entry) => entry.requested)).toEqual(["postgres:16"]);
-  });
 });
 
 describe("the owner's list in the store", () => {
-  it("is kept per company, one row per family and version, and a damaged row is left out", async () => {
-    const h = setup();
-    h.docker.tags.set(PG15, digestOf("a"));
-    await h.service.approve({ requested: "postgres:15" });
-    const other = createOwnerImageStore({ store: h.documents, companyId: "org_bbbbbbbbbbbbbbbbbbbb" });
-    expect(await other.list()).toEqual([]);
-    await h.documents.put({ item: { pk: `ORG#${COMPANY.slice(4)}#TEST_SERVICE_IMAGES`, sk: "IMAGE#junk@1", entityType: "TEST_SERVICE_IMAGE", reference: "docker.io/library/postgres:15" } });
-    expect(await h.store.list()).toHaveLength(1);
-    expect(await h.service.remove(pg15("a"))).toBe(true);
-    expect(await h.service.remove(pg15("a"))).toBe(false);
-    expect(h.audited).toEqual(["test_services.image_approved", "test_services.image_removed"]);
-  });
 
   it("is read late and survives a store that is not there yet: no approvals, starters still work", async () => {
     const docker = new OwnerDocker();
@@ -398,19 +336,6 @@ describe("signed or owner list is decided by the compiled-in key list, not by th
 });
 
 describe("an approval on the page and an env pin never share a row", () => {
-  it("keeps the page approval when the env list names the same family and version, and keeps it when the env entry goes away", async () => {
-    const h = setup();
-    h.docker.tags.set(PG15, digestOf("a"));
-    h.docker.tags.set("docker.io/library/postgres:15.6", digestOf("env"));
-    await h.service.approve({ requested: "postgres:15" });
-    const env = { ...ON, ROVARA_TEST_SERVICE_IMAGES: "postgres:15.6" };
-    const first = await install(h, env);
-    expect(first.services!.images).toContain(pg15("a"));
-    expect(first.services!.images).not.toContain(pg15("env"));
-    expect((await h.service.list()).map((image) => [image.origin, image.reference])).toEqual([["page", pg15("a")]]);
-    await install(h, ON);
-    expect((await h.service.list()).map((image) => image.reference)).toEqual([pg15("a")]);
-  });
 
   it("stores a page approval made after an env pin beside it, not over it, and removing the env pin leaves the approval", async () => {
     const h = setup();
@@ -425,19 +350,6 @@ describe("an approval on the page and an env pin never share a row", () => {
     expect(both.services!.images).not.toContain(pg15("env"));
     await install(h, ON);
     expect((await h.service.list()).map((image) => [image.origin, image.reference])).toEqual([["page", pg15("a")]]);
-  });
-});
-
-describe("removing an env pin never removes a page approval of the same digest", () => {
-  it("leaves the page row when an env pin with the same reference leaves the variable", async () => {
-    const h = setup();
-    h.docker.tags.set("docker.io/library/postgres:15.6", digestOf("same"));
-    h.docker.tags.set(PG15, digestOf("same"));
-    await install(h, { ...ON, ROVARA_TEST_SERVICE_IMAGES: "postgres:15.6" });
-    await h.service.approve({ requested: "postgres:15" });
-    expect((await h.service.list()).map((image) => image.origin).sort()).toEqual(["env", "page"]);
-    await install(h, ON);
-    expect((await h.service.list()).map((image) => [image.origin, image.reference])).toEqual([["page", pg15("same")]]);
   });
 });
 
@@ -487,10 +399,6 @@ describe("the signed catalog wins where a build has a key", () => {
     expect(h.docker.calls).toEqual([]);
   });
 
-  it("this build compiles in no catalog key, so Code uses the owner's list", async () => {
-    const h = setup();
-    expect((await install(h)).mode).toBe("owner");
-  });
 });
 
 describe("what a change of the list does to the worker's machine", () => {

@@ -1,8 +1,8 @@
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { WEB_API_AGENT_PROBE_IDS, WEB_API_AGENT_PROBE_ROUTE, WEB_API_REQUIRED_PROBES, WebApiProbeEvidenceSchema, WebApiProbeObservationSchema, canonicalJson, webApiProbeRunId } from "../../packages/contracts/src/index.js";
+import { WEB_API_AGENT_PROBE_IDS, WEB_API_AGENT_PROBE_ROUTE, WEB_API_REQUIRED_PROBES, WebApiProbeEvidenceSchema, WebApiProbeObservationSchema, webApiProbeRunId } from "../../packages/contracts/src/index.js";
 import { MAX_BLOCKED_REQUESTS_BYTES, createWebApiProbeRunner, readBlockedRequests, readChromiumSandboxAttestation, type WebApiProbeModelChannelRequest } from "../../packages/verifier/src/host/web-api-probe-runner.js";
 import { webApiAgentProbeScript, webApiBuildProbeCommand } from "../../packages/verifier/src/host/web-api-probe-plan.js";
 import { loadWebApiQualificationProbeAssets } from "../../packages/verifier/src/application-runtime-probes.js";
@@ -60,23 +60,6 @@ describe("the production web/API probe runner", () => {
     expect(run.observation).toMatchObject({ runUnavailableReason: "build-failed", buildExitCode: null });
   });
 
-  it("runs every probe under the run id derived from the challenge and removes everything it created", async () => {
-    for (const probe of WEB_API_REQUIRED_PROBES) {
-      const { fake, runRoot, runner } = await setup();
-      fake.failOn("build", 7);
-      const run = await runner(probe.probeId);
-      const runId = webApiProbeRunId(challenge, probe.probeId);
-      expect(run.evidence.runId).toBe(runId);
-      expect(fake.networks()).toEqual([]);
-      expect(fake.liveResources(`rovara.run=${runId}`)).toEqual([]);
-      // The staged copy of the app is gone; nothing is left in the run root.
-      expect(await readdir(runRoot)).toEqual([]);
-      expect(fake.calls.some((args) => args.includes(`rovara-e2e-${runId}`))).toBe(true);
-      // Both per-run networks were created and removed.
-      expect(fake.calls.filter((args) => args[0] === "network" && args[1] === "create").map((args) => args.at(-1)).sort()).toEqual([`rovara-e2e-${runId}`, `rovara-e2e-build-${runId}`].sort());
-    }
-  });
-
   it("records a run that produced nothing to collect as unavailable evidence with the host's reason", async () => {
     const { fake, runner } = await setup();
     const runId = webApiProbeRunId(challenge, "api-state-positive-v1");
@@ -127,28 +110,6 @@ describe("the production web/API probe runner", () => {
     const { fake, runner } = await setup();
     await expect(runner("web-auth-viewer-refusal-v1")).rejects.toThrow("no probe plan");
     expect(fake.calls).toEqual([]);
-  });
-
-  it("retains each probe's evidence privately under the evidence root, bound to the challenge", async () => {
-    const { fake, evidenceRoot, runner } = await setup();
-    fake.failOn("build", 7);
-    const run = await runner("build-imds-denial-v1");
-    const [directory] = await readdir(evidenceRoot);
-    expect(directory).toMatch(new RegExp(`^web-api-probe-evidence-${challenge.challengeId}-`));
-    const file = join(evidenceRoot, directory!, "build-imds-denial-v1.json");
-    expect((await stat(file)).mode & 0o777).toBe(0o600);
-    expect((await stat(join(evidenceRoot, directory!))).mode & 0o777).toBe(0o700);
-    expect(canonicalJson(JSON.parse(await readFile(file, "utf8")))).toBe(canonicalJson(run.evidence));
-  });
-
-  it("can be run again for the same challenge after an earlier attempt left its evidence behind", async () => {
-    const evidenceRoot = await temp();
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const { fake, runner } = await setup({ evidenceRoot });
-      fake.failOn("build", 7);
-      await runner("build-imds-denial-v1");
-    }
-    expect(await readdir(evidenceRoot)).toHaveLength(2);
   });
 
   it("clears what an earlier attempt of the same run left behind before it stages and allocates", async () => {

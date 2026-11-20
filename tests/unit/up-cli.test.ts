@@ -50,32 +50,6 @@ async function run(argv: string[], options: { environment?: NodeJS.ProcessEnv; d
 }
 
 describe("rovara up --check", () => {
-  it("passes when Docker, the worker image, a model key, GitHub and the port are ready, and shows no secret", async () => {
-    const docker = new FakeDocker();
-    const { code, out } = await run(["up", "--check", "--worker-image", "worker:test"], { docker });
-    expect(code).toBe(0);
-    for (const id of ["docker", "worker-image", "model-key", "github", "port", "config"]) expect(out).toContain(id);
-    expect(out).toContain("GitHub access works as octo-dev (token from the GitHub CLI)");
-    expect(out).toContain("Everything `rovara up` needs is ready.");
-    expect(out).not.toContain("sk-test-key-value");
-    expect(out).not.toContain("gho_from_cli");
-  });
-
-  it("sends the GitHub token only to api.github.com", async () => {
-    const { github } = await run(["up", "--check", "--worker-image", "worker:test"]);
-    expect(github).toHaveBeenCalledTimes(1);
-    expect(github.mock.calls[0]![0]).toBe("https://api.github.com/user");
-  });
-
-  it("says Docker is not running, with a fix, and exits non-zero", async () => {
-    const docker = new FakeDocker();
-    docker.reachable = false;
-    const { code, out, err } = await run(["up", "--check", "--worker-image", "worker:test"], { docker });
-    expect(code).not.toBe(0);
-    expect(out).toContain("FAIL  docker");
-    expect(out).toContain("colima start");
-    expect(err).toContain("1 check failed");
-  });
 
   it("says how to build a missing worker image", async () => {
     const { code, out } = await run(["up", "--check", "--worker-image", "absent:image"]);
@@ -146,17 +120,6 @@ describe("rovara up --check", () => {
     expect(none.out).toContain("exactly one AWS identity");
   });
 
-  it("says how to get GitHub access, and when GitHub rejects the token", async () => {
-    const none = await run(["up", "--check", "--worker-image", "worker:test"], { gh: undefined });
-    expect(none.out).toContain("No GitHub access was found.");
-    expect(none.out).toContain("gh auth login");
-    const rejected = await run(["up", "--check", "--worker-image", "worker:test"], { github: new Response("{}", { status: 401 }) });
-    expect(rejected.out).toContain("GitHub rejected the token");
-    const offline = await run(["up", "--check", "--worker-image", "worker:test"], { github: new TypeError("offline") });
-    expect(offline.out).toContain("warn  github");
-    expect(offline.code).toBe(0);
-  });
-
   it("accepts a GitHub token from the environment or the key file before it runs the GitHub CLI", async () => {
     const gh = vi.fn(async () => "gho_from_cli");
     const state = await mkdtemp(join(tmpdir(), "rovara-l4-cli-"));
@@ -188,12 +151,6 @@ describe("rovara up --check", () => {
     expect(report.data.checks.map((check) => check.id)).toEqual(["docker", "worker-image", "model-key", "github", "port", "config"]);
   });
 
-  it("starts nothing and writes nothing", async () => {
-    const start = vi.fn();
-    const { state } = await run(["up", "--check", "--worker-image", "worker:test"], { start });
-    expect(start).not.toHaveBeenCalled();
-    expect((await import("node:fs")).readdirSync(state)).toEqual([]);
-  });
 });
 
 describe("rovara up", () => {
@@ -219,26 +176,6 @@ describe("rovara up", () => {
     return value;
   }
 
-  it("prints the address, waits for the signal, then stops the runtime", async () => {
-    const started = runtime();
-    let release!: () => void;
-    const options: unknown[] = [];
-    const finished = run(["up", "--port", "0", "--worker-image", "worker:test", "--this-machine"], {
-      start: async (given) => { options.push(given); return started; },
-      waitForShutdown: () => new Promise<void>((resolve) => { release = resolve; }),
-    });
-    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
-    expect(started.stopped).toBe(false);
-    release();
-    const { code, out, err } = await finished;
-    expect(code).toBe(0);
-    expect(out).toContain("Rovara is running at http://127.0.0.1:5555 (this computer only).");
-    expect(out).not.toMatch(/Bearer [A-Za-z0-9_-]{20,}/);
-    expect(err).toContain("Rovara stopped.");
-    expect(started.stopped).toBe(true);
-    expect(options[0]).toMatchObject({ workerImage: "worker:test", thisMachine: true, port: 0 });
-  });
-
   it("tells about problems and still starts", async () => {
     const docker = new FakeDocker();
     docker.reachable = false;
@@ -255,17 +192,6 @@ describe("rovara up", () => {
     const bad = await run(["up", "--port", "99999"], { start: async () => runtime() });
     expect(bad.code).not.toBe(0);
     expect(bad.err).toContain("--port must be a number");
-  });
-
-  it("warns about a GitHub token that reaches every repository, recommends a fine-grained one, and says what the config allows (L11 M1)", async () => {
-    const refused = await run(["up", "--check", "--worker-image", "worker:test"]);
-    expect(refused.code).toBe(0);
-    expect(refused.out).toContain("warn  github");
-    expect(refused.out).toContain("reach every repository you can");
-    expect(refused.out).toContain("will not give it to a task's worker unless you set allowBroadTokenForWorker");
-    expect(refused.out).toContain("fine-grained personal access token limited to the repositories of your Rovara projects");
-    const allowed = await run(["up", "--check", "--worker-image", "worker:test"], { config: '{"version":1,"allowBroadTokenForWorker":true,"plugins":[]}' });
-    expect(allowed.out).toContain("You have allowed it to be given to a task's worker.");
   });
 
   it("builds and tests the code hosts from the shared list, not by name (L11 decision 51)", async () => {

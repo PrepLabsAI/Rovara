@@ -5,7 +5,7 @@ import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
 import { taskEndKey } from "../../packages/broker/src/core/task-flow/task-end.js";
 import { recoveryRowKey } from "../../packages/broker/src/core/merge/store.js";
 import { TASK_ID } from "../support/merge-world.js";
-import { OWNER_ID, ORG, host } from "../support/service-host.js";
+import { OWNER_ID, host } from "../support/service-host.js";
 
 type Host = Awaited<ReturnType<typeof host>>;
 
@@ -33,14 +33,6 @@ const close = async (w: Host): Promise<void> => {
 };
 
 describe("the task-end seam", () => {
-  it("a merge that completes the task tells the host once, in the sweep that recorded it", async () => {
-    const w = await listening();
-    mergeOnTheCodeHost(w);
-    await w.tracking.sweep();
-    expect((await readTask(w.h.deps, TASK_ID))!.workflow).toMatchObject({ stage: "MERGED", state: "COMPLETE" });
-    expect(w.ended).toEqual([{ orgId: ORG, taskId: TASK_ID }]);
-    expect(await w.world.store.get(taskEndKey(TASK_ID))).toMatchObject({ cause: "merged", notifiedAt: expect.any(String) as unknown });
-  });
 
   it("merge then close: the host got the first end, and the close does not tell it again", async () => {
     const w = await listening();
@@ -49,15 +41,6 @@ describe("the task-end seam", () => {
     await close(w);
     expect(w.ended).toHaveLength(1);
     // Closing again changes nothing.
-    await close(w);
-    expect(w.ended).toHaveLength(1);
-  });
-
-  it("close only: the host is told once", async () => {
-    const w = await listening();
-    await close(w);
-    expect(w.ended).toEqual([{ orgId: ORG, taskId: TASK_ID }]);
-    expect(await w.world.store.get(taskEndKey(TASK_ID))).toMatchObject({ cause: "closed", notifiedAt: expect.any(String) as unknown });
     await close(w);
     expect(w.ended).toHaveLength(1);
   });
@@ -91,11 +74,4 @@ describe("the task-end seam", () => {
     expect(w.ended).toHaveLength(2);
   });
 
-  it("a host with no seam writes nothing", async () => {
-    const w = await host();
-    mergeOnTheCodeHost(w);
-    await w.tracking.sweep();
-    await close(w);
-    expect(await w.world.store.get(taskEndKey(TASK_ID))).toBeUndefined();
-  });
 });

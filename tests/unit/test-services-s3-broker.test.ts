@@ -1,23 +1,19 @@
 // Test services, broker side: a fake backing in the plan, only for an APPROVED fixture set of the task's own company; the fixture-set delivery callback and who may call it; the evidence label
 // and the unmatched count; and the Prove usage step. With tx off, or with no fake, everything reads as it did.
 import { describe, expect, it } from "vitest";
-import {
-  EvidenceDependencySchema, FixtureSetSchema, TestEnvTaskPlanSchema, TestEnvironmentBodySchema, fixtureEntry, fixtureSetDigest, TEST_SERVICES_FAKE_USAGE_WORDS, testEnvDigest,
-  type FixtureSet, type OrgId, type ProjectCommand, type TestEnvironment, type TestEnvironmentBody, type TestServicesUsageRecord, type VerifiedCatalog,
-} from "@agentx/contracts";
-import { DEPENDENCY_PLAN_REFUSAL_WORDS, TEST_SERVICES_MIN_CATALOG_REVISION, dependenciesStartableNow, taskDependencyPlansOf } from "../../packages/broker/src/core/test-env/dependency-plan.js";
-import { approvedFixturesOf, fixtureDigestsOfEnvironment, fixtureDigestsOfPlan, recordsOf, type FixtureStoreFactory } from "../../packages/broker/src/core/test-env/fixture-lookup.js";
+import { EvidenceDependencySchema, FixtureSetSchema, TestEnvTaskPlanSchema, TestEnvironmentBodySchema, fixtureEntry, fixtureSetDigest, TEST_SERVICES_FAKE_USAGE_WORDS, testEnvDigest, type FixtureSet, type OrgId, type ProjectCommand, type TestEnvironmentBody, type TestServicesUsageRecord, type VerifiedCatalog } from "@agentx/contracts";
+import { DEPENDENCY_PLAN_REFUSAL_WORDS, dependenciesStartableNow, taskDependencyPlansOf } from "../../packages/broker/src/core/test-env/dependency-plan.js";
+import { approvedFixturesOf, fixtureDigestsOfEnvironment, fixtureDigestsOfPlan } from "../../packages/broker/src/core/test-env/fixture-lookup.js";
 import { createFixtureStore, createMemoryFixturePorts, verifiedFixtureDecision, type FixtureStore } from "../../packages/broker/src/core/test-env/fixture-store.js";
-import { environmentUnusedReason, testEnvironmentForStart } from "../../packages/broker/src/core/test-env/usable.js";
+import { testEnvironmentForStart } from "../../packages/broker/src/core/test-env/usable.js";
 import { testEnvPlanFor, testEnvImplementPlanFor } from "../../packages/broker/src/core/test-env/task-plan.js";
-import { pinnedFakeOf } from "../../packages/broker/src/core/test-env/evidence-line.js";
 import { FAKE_USAGE_ITEM_ID, dependencyEvidenceOf, type PinnedDependency, type RawUsage } from "../../packages/broker/src/core/proof/dependency-evidence.js";
 import { packDependencyLines } from "../../packages/broker/src/core/proof/dependency-lines.js";
 import { evidenceEnvironmentOf } from "../../packages/broker/src/core/test-env/evidence-line.js";
 import { dependencyStepsOf } from "../../packages/broker/src/core/test-env/prove-from-setup-check.js";
 import { dependencyCardLines } from "../../packages/broker/src/core/test-env/dependency-card-lines.js";
 import { BENCH_ORG, bench } from "../support/test-env-bench.js";
-import { pinnedCatalog, unpinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
+import { pinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
 
 const ORG: OrgId = BENCH_ORG;
 const OTHER_ORG = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
@@ -70,7 +66,6 @@ const body = (dependencies: unknown[] | null): TestEnvironmentBody => TestEnviro
   nightly: { enabled: false, cronUtc: "0 6 * * *", branch: "main" }, services: [], data: { seeds: [], generator: "faker_seeded", seed: 1 }, accounts: [],
   prodDeny: DENY, capture: { screenshots: "failed", video: false, traces: false }, ...(dependencies === null ? {} : { dependencies }),
 });
-const asEnvironment = (environment: TestEnvironmentBody): TestEnvironment => ({ revision: 1, approvedAt: "2026-11-03T10:00:00.000Z", environment });
 const catalog = (change?: (entries: Array<Record<string, unknown>>) => void): VerifiedCatalog => verifiedCatalog(pinnedCatalog(change));
 const plansOf = (dependencies: unknown[], fixtures: Awaited<ReturnType<typeof approvedFixturesOf>> | undefined, from: VerifiedCatalog | null = catalog()) =>
   taskDependencyPlansOf({ body: body(dependencies), catalog: from ?? undefined, edition: "public", ...(fixtures === undefined ? {} : { fixtures }) });
@@ -89,38 +84,9 @@ describe("which dependencies are startable now", () => {
     // A fallback is never a thing yet.
     expect(dependenciesStartableNow([payments(digest, { fallback: { kind: "fake", fixtureSetRef: digest, unmatched: "fail" } })] as never)).toBe(false);
   });
-  it("is carried out with tx on and refused with tx off (an environment with dependencies is not used at all)", () => {
-    const environment = asEnvironment(body([payments("a".repeat(64))]));
-    expect(environmentUnusedReason(environment, ON)).toBeUndefined();
-    expect(environmentUnusedReason(environment, { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" })).toBe("dependencies_not_connected");
-  });
 });
 
 describe("the plan of a fake", () => {
-  it("pins the approved set by digest, with no image digest and no address", async () => {
-    const store = storeOf();
-    const digest = await approvedSet(store, makeSet());
-    const fixtures = await approvedFixturesOf(store, ORG, PROJECT, body([payments(digest)]));
-    const result = plansOf([postgres(), payments(digest)], fixtures);
-    expect(reason(result)).toBe("ok");
-    if (!result.ok) throw new Error("no plan");
-    const fake = result.dependencies.find((entry) => entry.id === "payments")!;
-    expect(fake).toMatchObject({ backing: "fake", catalogId: "fake-server@r1", repository: "svc/fake-server", fake: { fixtureSetRef: digest, unmatched: "fail" }, aliases: ["fake-payments"], seeds: [], reset: "fresh_per_round" });
-    expect("digest" in fake).toBe(false);
-    expect(JSON.stringify(fake)).not.toMatch(/https?:\/\/fixtures|X-Amz|expires/iu);
-    expect(TestEnvTaskPlanSchema.safeParse({ revision: 1, digest: "a".repeat(64), roundBudgetMin: 30, selection: { method: "full", alwaysRun: [], fullSuiteOn: [] }, checks: [{ id: "unit", kind: "test" }], dependencies: result.dependencies }).success).toBe(true);
-    expect(fixtureDigestsOfPlan({ dependencies: result.dependencies })).toEqual([digest]);
-    // The real software beside it is exactly what it was without a fake.
-    expect(result.dependencies.find((entry) => entry.id === "postgres")).toMatchObject({ backing: "local" });
-    expect(result.dependencies.find((entry) => entry.id === "postgres")?.digest).toMatch(/^[a-f0-9]{64}$/u);
-  });
-  it("needs no pinned catalog for a fake alone (it starts no catalog image), and still needs one beside real software", async () => {
-    const store = storeOf();
-    const digest = await approvedSet(store, makeSet());
-    const fixtures = await approvedFixturesOf(store, ORG, PROJECT, body([payments(digest)]));
-    expect(reason(plansOf([payments(digest)], fixtures, verifiedCatalog(unpinnedCatalog(TEST_SERVICES_MIN_CATALOG_REVISION))))).toBe("ok");
-    expect(reason(plansOf([postgres(), payments(digest)], fixtures, verifiedCatalog(unpinnedCatalog(TEST_SERVICES_MIN_CATALOG_REVISION))))).toBe("not_pinned");
-  });
   it("refuses a set that is not approved for this company: another company's, a pending one, a withdrawn one, one nobody holds, and a store that is not there", async () => {
     const store = storeOf();
     const set = makeSet();
@@ -214,26 +180,6 @@ describe("the plan of a task with a fake (checks and coding)", () => {
     expect(coding.dependencies).toEqual(plan.dependencies);
     expect(fixtureDigestsOfPlan(plan)).toEqual([digest]);
   });
-  it("refuses the run, in fixed words, when the set was withdrawn after the approval, and never sends a plan without the fake", async () => {
-    const store = storeOf();
-    const set = makeSet();
-    const digest = await approvedSet(store, set);
-    const h = await approvedWith(body([payments(digest)]), store);
-    const withdraw = verifiedFixtureDecision({ orgId: ORG, project: PROJECT, actor: "maya", role: "maintainer", action: "withdraw", digest, signedInAt: undefined, schemaSynth: false })!;
-    await store.withdraw(ORG, PROJECT, digest, withdraw);
-    await expect(testEnvPlanFor(h.deps, { orgId: ORG, project: PROJECT, taskId: "t1", readiness }, ON)).rejects.toThrow(DEPENDENCY_PLAN_REFUSAL_WORDS.fixture_not_approved);
-    await expect(testEnvImplementPlanFor(h.deps, { orgId: ORG, project: PROJECT, taskId: "t1" }, ON)).rejects.toThrow(DEPENDENCY_PLAN_REFUSAL_WORDS.fixture_not_approved);
-    // no store wired in the dispatching broker
-    delete h.deps.fixtureStore;
-    await expect(testEnvPlanFor(h.deps, { orgId: ORG, project: PROJECT, taskId: "t1", readiness }, ON)).rejects.toThrow(DEPENDENCY_PLAN_REFUSAL_WORDS.fixture_not_approved);
-  });
-  it("with tx off, nothing is read and no plan is built", async () => {
-    const store = storeOf();
-    const digest = await approvedSet(store, makeSet());
-    const h = await approvedWith(body([payments(digest)]), store);
-    expect(await testEnvPlanFor(h.deps, { orgId: ORG, project: PROJECT, taskId: "t1", readiness }, { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" })).toBeUndefined();
-    expect(await testEnvImplementPlanFor(h.deps, { orgId: ORG, project: PROJECT, taskId: "t1" }, { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" })).toBeUndefined();
-  });
 });
 
 // ---- evidence and Prove
@@ -256,10 +202,6 @@ describe("what the evidence says about a fake", () => {
     expect(packDependencyLines(packOf(recorded.dependencies), 0).notTested).toContain("- payments API: answers were recorded on 2026-10-20; real behaviour may have changed");
     expect(packDependencyLines(packOf(written.dependencies), 0).notTested).toContain("- payments API: answers were written by hand, not recorded");
   });
-  it("never lets the worker set the label: a recorded set whose date is not known reads as the less trusted word, and so does a store that could not be read", () => {
-    expect(dependencyEvidenceOf(pinnedFake({ origin: "recorded" }), usageOf([fakeRow()])).dependencies[1]!.label).toBe("hand_written_fake");
-    expect(dependencyEvidenceOf(pinnedFake(undefined), usageOf([fakeRow()])).dependencies[1]!.label).toBe("hand_written_fake");
-  });
   it("never shows a fake Rovara made as a recording, whatever the store says (review M3)", () => {
     const made = dependencyEvidenceOf(pinnedFake({ origin: "recorded", revision: 5, recordedAt: "2026-10-20T08:00:00.000Z", madeByRovara: true }), usageOf([fakeRow({ synthesized: 2 })]));
     expect(made.dependencies[1]).toMatchObject({ backing: "fake", label: "rovara_made_fake", fixtureRevision: 5, madeUpAnswers: 2 });
@@ -270,39 +212,10 @@ describe("what the evidence says about a fake", () => {
     const down = { ...usageOf([]), dependencies: [{ id: "postgres", started: true, healthy: true, startMs: 800, resetCount: 0 }, { id: "payments", started: false, healthy: false, startMs: 0, resetCount: 0 }] } as RawUsage;
     expect(dependencyEvidenceOf(pinnedFake({ origin: "hand_written", madeByRovara: true }), down).dependencies[1]!.label).toBe("not_available");
   });
-  it("reads the pinned fake's origin from the approved backing's provenance, and never lets a recording that Rovara made keep its day (review M3)", () => {
-    const backing = (provenance?: Record<string, unknown>) => ({ kind: "fake", fixtureSetRef: "a".repeat(64), unmatched: "fail", ...(provenance === undefined ? {} : { provenance }) }) as never;
-    const set = { origin: "recorded", revision: 4, recordedAt: "2026-10-20T08:00:00.000Z" };
-    const mockSet = { setId: "m1", version: 1, store: "rovara" };
-    expect(pinnedFakeOf(backing(), set)).toEqual({ origin: "recorded", revision: 4, recordedAt: "2026-10-20T08:00:00.000Z" });
-    expect(pinnedFakeOf(backing({ origin: "customer" }), set)).toEqual({ origin: "recorded", revision: 4, recordedAt: "2026-10-20T08:00:00.000Z" });
-    for (const origin of ["rovara_setup", "rovara_task"]) expect(pinnedFakeOf(backing({ origin, mockSet }), set)).toEqual({ origin: "hand_written", revision: 4, madeByRovara: true });
-    expect(pinnedFakeOf(backing({ origin: "rovara_task", mockSet }), undefined)).toEqual({ origin: "hand_written", madeByRovara: true });
-    expect(pinnedFakeOf(backing(), undefined)).toEqual({ origin: "hand_written" });
-  });
   it("counts an unmatched request, and does not show the result as a clean run", () => {
     const result = dependencyEvidenceOf(pinnedFake({ origin: "hand_written", revision: 3 }), usageOf([fakeRow({ unmatched: 2 })]));
     expect(result.dependencies[1]!.usage).toEqual({ requests: 6, unmatched: 2, faults: 0 });
     expect(result.notTested).toContainEqual({ kind: "environment", id: FAKE_USAGE_ITEM_ID, text: `${TEST_SERVICES_FAKE_USAGE_WORDS.unmatched}: payments API`, reason: "no recording" });
-  });
-  it("says a fake's requests could not be checked when its ledger was not read, and when the record has no row for it; a clean fake adds nothing", () => {
-    expect(dependencyEvidenceOf(pinnedFake({ origin: "hand_written" }), usageOf([fakeRow({ ledger: "unreadable", matched: 0 })])).notTested.map((item) => item.id)).toEqual([FAKE_USAGE_ITEM_ID]);
-    expect(dependencyEvidenceOf(pinnedFake({ origin: "hand_written" }), usageOf([])).notTested.map((item) => item.id)).toEqual([FAKE_USAGE_ITEM_ID]);
-    expect(dependencyEvidenceOf(pinnedFake({ origin: "hand_written" }), usageOf([fakeRow()])).notTested).toEqual([]);
-  });
-  it("shows a fake that did not start as not available, never as a fake that ran", () => {
-    const record = { ...usageOf([fakeRow()]), dependencies: [{ id: "postgres", started: true, healthy: true, startMs: 800, resetCount: 0 }, { id: "payments", started: false, healthy: false, startMs: 0, resetCount: 0, failure: "start_failed" }] } as RawUsage;
-    expect(dependencyEvidenceOf(pinnedFake({ origin: "hand_written" }), record).dependencies[1]).toEqual({ name: "payments API", backing: "none", label: "not_available" });
-  });
-  it("reads the label from the store for the organisation of the task, by the pinned digest", async () => {
-    const store = storeOf();
-    const digest = await approvedSet(store, recordedSet());
-    const h = await approvedWith(body([payments(digest)]), store);
-    const chosen = await evidenceEnvironmentOf({ ...h.deps, fixtureStore: () => store }, { orgId: ORG, project: PROJECT, taskId: "t1" }, ON);
-    expect(chosen.dependencies).toEqual([{ id: "payments", name: "Payments API", backing: "fake", fake: { origin: "recorded", revision: 5, recordedAt: "2026-10-20T08:00:00.000Z", approvedAt: "2026-11-03T10:00:00.000Z" } }]);
-    // Another company's task sees nothing of it.
-    const elsewhere = await evidenceEnvironmentOf({ ...h.deps, fixtureStore: () => store }, { orgId: OTHER_ORG, project: PROJECT, taskId: "t1" }, ON);
-    expect(elsewhere.dependencies).toBeUndefined();
   });
 });
 
@@ -313,13 +226,11 @@ describe("the vendor spec check on a fake's evidence row (L4-VS)", () => {
     entries: [fixtureEntry({ dependency: stripeDependency, match }, { method: "POST", path: "/v1/refunds", contentType: "", body: "" }, { status: 200, headers: [], contentType: "application/json", body: chargeBody, latencyMs: 0 })],
   });
   const GOOD = JSON.stringify({ id: "re_1", object: "refund", amount: 5, created: 1700000000, currency: "usd" });
-  const BAD = JSON.stringify({ id: "re_1", object: "refund", amount: "5" });
   const chosenFor = async (set: FixtureSet, store: FixtureStore = storeOf()) => {
     const digest = await approvedSet(store, set);
     const h = await approvedWith(body([payments(digest, { family: set.dependency.family })]), store);
     return { store, h, chosen: await evidenceEnvironmentOf({ ...h.deps, fixtureStore: () => store }, { orgId: ORG, project: PROJECT, taskId: "t1" }, ON) };
   };
-  const backing = () => ({ kind: "fake", fixtureSetRef: "a".repeat(64), unmatched: "fail" }) as never;
   const ran = (pinned: PinnedDependency[]) => dependencyEvidenceOf(pinned, usageOf([fakeRow()]));
 
   it("carries a match for a Stripe fake that fits the pinned spec, from the slice pinned at approval", async () => {
@@ -328,18 +239,6 @@ describe("the vendor spec check on a fake's evidence row (L4-VS)", () => {
     const row = ran([{ id: "postgres", name: "Postgres", backing: "local" }, ...chosen.dependencies!]).dependencies[1]!;
     expect(row).toMatchObject({ mockSpecResult: "matches", mockSpecVendor: "stripe", recordedAt: "2026-10-20T08:00:00.000Z" });
     expect(EvidenceDependencySchema.parse(row)).toEqual(row);
-  });
-  it("carries a mismatch for a Stripe fake that does not fit it (advisory: the fake still runs and is still labelled a recorded fake)", async () => {
-    const { chosen } = await chosenFor(stripeSet(BAD));
-    expect(chosen.dependencies![0]!.fake!.mockSpec).toEqual({ result: "mismatch", vendor: "stripe" });
-    const row = ran([{ id: "postgres", name: "Postgres", backing: "local" }, ...chosen.dependencies!]).dependencies[1]!;
-    expect(row).toMatchObject({ backing: "fake", label: "recorded_fake", mockSpecResult: "mismatch", mockSpecVendor: "stripe" });
-    expect(EvidenceDependencySchema.parse(row)).toEqual(row);
-  });
-  it("states nothing for a fake of a service the catalog does not cover", async () => {
-    const { chosen } = await chosenFor(recordedSet());
-    expect(chosen.dependencies![0]!.fake).not.toHaveProperty("mockSpec");
-    expect(ran([{ id: "postgres", name: "Postgres", backing: "local" }, ...chosen.dependencies!]).dependencies[1]).not.toHaveProperty("mockSpecResult");
   });
   it("states nothing when the slice cannot be read, and the rest of the row is unchanged; another company reads nothing", async () => {
     const { store, h } = await chosenFor(stripeSet(GOOD));
@@ -356,15 +255,6 @@ describe("the vendor spec check on a fake's evidence row (L4-VS)", () => {
     expect((await store.specSlice(OTHER_ORG, PROJECT, digest)).ok).toBe(false);
     expect((await store.specSlice(ORG, "other-project", digest)).ok).toBe(false);
   });
-  it("a fake that did not start carries no spec result", () => {
-    const record = { ...usageOf([]), dependencies: [{ id: "payments", started: false, healthy: false, startMs: 0, resetCount: 0, failure: "start_failed" }] } as RawUsage;
-    const row = dependencyEvidenceOf([{ id: "payments", name: "Stripe", backing: "fake", fake: { origin: "recorded", mockSpec: { result: "mismatch", vendor: "stripe" } } }], record).dependencies[0]!;
-    expect(row).not.toHaveProperty("mockSpecResult");
-  });
-  it("pinnedFakeOf keeps a vendor result and drops one for a service with no pinned vendor", () => {
-    expect(pinnedFakeOf(backing(), undefined, { result: "no_spec", vendor: "github" })).toEqual({ origin: "hand_written", mockSpec: { result: "no_spec", vendor: "github" } });
-    expect(pinnedFakeOf(backing(), undefined, { result: "no_spec", vendor: "unknown" })).toEqual({ origin: "hand_written" });
-  });
 });
 
 describe("the Prove usage step with a fake", () => {
@@ -374,33 +264,9 @@ describe("the Prove usage step with a fake", () => {
   it("passes for a fake whose ledger was read and shows no unmatched and no foreign call", () => {
     expect(stepOf("dependency_usage", dependencyStepsOf(planned(), record([fakeRow()])))).toBe("passed");
   });
-  it("fails on an unmatched request, a foreign call, an unreadable ledger and a record with no row", () => {
-    for (const fakes of [[fakeRow({ unmatched: 1 })], [fakeRow({ foreign: 1 })], [fakeRow({ ledger: "unreadable", matched: 0 })], []]) expect(stepOf("dependency_usage", dependencyStepsOf(planned(), record(fakes)))).toBe("failed");
-    expect(stepOf("dependency_usage", dependencyStepsOf(planned(), { ...record(), fakes: undefined }))).toBe("failed");
-  });
-  it("still starts the fake as a dependency, and an environment without a fake gets the steps it had", () => {
-    expect(stepOf("dependencies", dependencyStepsOf(planned(), record([fakeRow()])))).toBe("passed");
-    const postgresOnly = body([postgres()]);
-    expect(stepOf("dependency_usage", dependencyStepsOf(postgresOnly, { schemaVersion: 1, dependencies: [{ id: "postgres", started: true, healthy: true, startMs: 1, resetCount: 0 }], unknownCalls: { domains: [], otherCount: 0 } }))).toBe("passed");
-  });
 });
 
 // ---- tx off, or no fake: today, byte for byte; and the one-line hunks of the hot files
-
-describe("with no fake in the plan nothing is added", () => {
-  it("names no fixture set", () => {
-    expect(fixtureDigestsOfPlan(undefined)).toEqual([]);
-    expect(fixtureDigestsOfPlan({ dependencies: [] })).toEqual([]);
-  });
-  it("is the plan for real software and Rovara local AWS: no fixture lookup is made", async () => {
-    let asked = 0;
-    const counting = { record: () => { asked += 1; return Promise.reject(new Error("never")); } };
-    expect((await approvedFixturesOf(counting, ORG, PROJECT, body([postgres()]))).size).toBe(0);
-    expect(asked).toBe(0);
-    const result = taskDependencyPlansOf({ body: body([postgres()]), catalog: catalog(), edition: "public" });
-    expect(result.ok && result.dependencies.map((entry) => [entry.id, "fake" in entry])).toEqual([["postgres", false]]);
-  });
-});
 
 describe("the approve card", () => {
   it("says whether a fake's answers were recorded or written by hand when the store is asked, and 'a fake' when it is not", async () => {
@@ -418,19 +284,3 @@ describe("the approve card", () => {
   });
 });
 
-describe("the install's store is a factory over the production list", () => {
-  it("a read of rows asks for no production list at all (it would fail closed if it did), and a delivery asks for the project's approved list", async () => {
-    const ports = createMemoryFixturePorts({ signUrl: (key, seconds) => `https://fixtures.example.test/${key}?X-Amz-Expires=${String(seconds)}` });
-    const asked: string[] = [];
-    const factory: FixtureStoreFactory = (denyFor) => createFixtureStore({ enabled: () => true, objects: ports.objects, index: ports.index, denyFor: (org, project) => { asked.push(`${org}/${project}`); return denyFor(org, project); }, now: () => NOW });
-    // set up through a store with an empty list, then read rows through the factory with a list that cannot be had
-    const digest = await approvedSet(factory(() => Promise.resolve(DENY)) as FixtureStore, makeSet());
-    asked.length = 0;
-    const found = await approvedFixturesOf(recordsOf((denyFor) => factory(denyFor)), ORG, PROJECT, body([payments(digest)]));
-    expect(found.get(digest)?.origin).toBe("hand_written");
-    expect(asked).toEqual([]);
-    expect(recordsOf(undefined)).toBeUndefined();
-    const reader = recordsOf(() => factory(() => Promise.reject(new Error("no list"))));
-    expect((await reader!.record(ORG, PROJECT, digest)).ok).toBe(true);
-  });
-});

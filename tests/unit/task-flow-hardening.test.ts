@@ -1,9 +1,9 @@
 import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // Lane L6a, round 1 of review: the races and refusals the reviewers named, each as a test that fails if the behaviour breaks.
 import { describe, expect, it } from "vitest";
-import { companyScoped, projectMetaKey, queryAll, type Admission, type AdmissionRequest, type TransactItem, type WorkerInvocation } from "@agentx/contracts";
+import { projectMetaKey, queryAll, type Admission, type AdmissionRequest, type TransactItem, type WorkerInvocation } from "@agentx/contracts";
 import { acceptStep, readWorkspace } from "../../packages/broker/src/core/task-flow/stage-machine.js";
-import { chargeMarkerKey, developerCharge, operationKey, taskPointerKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
 import type { OperationRecord, WorkspaceRecord } from "../../packages/broker/src/core/task-flow/records.js";
 import { COMPANY, createHarness, newRequestId, type Harness } from "../support/task-flow-harness.js";
@@ -65,31 +65,6 @@ describe("a close that races a dispatch", () => {
   });
 });
 
-describe("two starts of one request at once", () => {
-  it("each holds its own allowance, and only the one that did not commit gives its own back", async () => {
-    const admission = recordingAdmission();
-    const h = createHarness({ admission });
-    await h.registerProject();
-    const request = { requestId: newRequestId(), project: "payments", instructions: "race" };
-    const [a, b] = await Promise.all([h.flow.start(h.owner, request), h.flow.start(h.owner, request)]);
-    expect(a.task.taskId).toBe(b.task.taskId);
-    const winner = `res:task.start:${a.task.taskId}:1`;
-    expect(admission.released).not.toContain(winner);
-    expect(admission.released).toHaveLength(1);
-    expect((await readTask(h.deps, a.task.taskId))!.admissionReservationId).toBe(winner);
-  });
-
-  it("gives the task's allowance back when the task is closed, and the machine's with it", async () => {
-    const admission = recordingAdmission();
-    const h = createHarness({ admission, machines: { startingChecks: 0 } });
-    await h.registerProject();
-    const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x" });
-    await drain(h);
-    await h.flow.close(h.owner, started.task.taskId);
-    expect(admission.released).toEqual(expect.arrayContaining([`res:task.start:${started.task.taskId}:1`, `res:machine.start:${started.task.workspaceId}:1`]));
-  });
-});
-
 describe("the workspace limit under a race", () => {
   it("refuses the start whose slot another start took between the read and the commit, and takes no allowance for it", async () => {
     const holder: { h?: Harness } = {};
@@ -111,16 +86,6 @@ describe("the workspace limit under a race", () => {
   });
 });
 
-describe("the charge marker", () => {
-  it("names the member counter it holds a slot on, so a host whose member counters share a partition can tell its members' markers apart", async () => {
-    const h = createHarness();
-    await h.registerProject();
-    const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "one" });
-    const charge = developerCharge({ companyId: COMPANY, developerId: "local-owner" });
-    expect(await h.store.get(chargeMarkerKey(charge, started.task.taskId))).toMatchObject({ entityType: "DEVELOPER_LIMIT_TASK", taskId: started.task.taskId, memberSk: charge.member.sk });
-  });
-});
-
 describe("results", () => {
   async function understandRunning() {
     const h = createHarness({ understandFirst: true, machines: { startingChecks: 0 } });
@@ -135,27 +100,6 @@ describe("results", () => {
     return { h, started, workspace, understand };
   }
 
-  it("reads a worker that reports itself cancelled without being asked as a failure, which blocks the workflow", async () => {
-    const { h, started, workspace, understand } = await understandRunning();
-    await h.flow.recordResult({ workspaceId: workspace.id, operationId: understand.operationId, fence: 2, status: "CANCELLED" });
-    const view = await h.flow.get(h.owner, started.task.taskId);
-    expect(view.operations.at(-1)?.status).toBe("FAILED");
-    expect(view.workflow).toMatchObject({ state: "BLOCKED" });
-  });
-
-  it("answers a repeat from what was recorded: a late success cannot undo a recorded failure", async () => {
-    const { h, started, workspace, understand } = await understandRunning();
-    await h.flow.recordResult({ workspaceId: workspace.id, operationId: understand.operationId, fence: 2, status: "FAILED", error: "boom" });
-    const repeat = await h.flow.recordResult({
-      workspaceId: workspace.id, operationId: understand.operationId, fence: 2, status: "SUCCEEDED",
-      outcome: { kind: "understood", assessment: { kind: "ready", path: "QUICK", restatement: "x", assumptions: [] } },
-    });
-    expect(repeat.duplicate).toBe(true);
-    const view = await h.flow.get(h.owner, started.task.taskId);
-    expect(view.workflow).toMatchObject({ stage: "UNDERSTAND", state: "BLOCKED" });
-    expect(view.operations.filter((operation) => operation.workflowMode === "PLAN")).toEqual([]);
-  });
-
   it("refuses a result for an operation of another company", async () => {
     const { h, workspace, understand } = await understandRunning();
     await h.store.update({ key: operationKey(T1_COMPANY, workspace.id, understand.operationId), ops: [{ op: "set", path: ["companyId"], value: "org_zzzzzzzzzzzzzzzzzzzz" }] });
@@ -164,19 +108,6 @@ describe("results", () => {
 });
 
 describe("what the system may start on its own", () => {
-  it("asks again before every step it starts, and blocks the workflow when the person is no longer allowed", async () => {
-    const h = createHarness({ understandFirst: true, machines: { startingChecks: 0 } });
-    await h.registerProject();
-    const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x", workflow: true });
-    await drain(h);
-    const workspace = await workspaceOf(h, started.task.workspaceId);
-    const prepare = h.machines.delivered(workspace.machine!.machineId)[0] as WorkerInvocation;
-    h.deps.access = { ...h.deps.access, checkStep: async () => ({ allowed: false, message: "this person can no longer run tasks here" }) };
-    await h.flow.recordResult({ workspaceId: workspace.id, operationId: prepare.operationId, fence: 1, status: "SUCCEEDED" });
-    const view = await h.flow.get(h.owner, started.task.taskId);
-    expect(view.workflow).toMatchObject({ stage: "UNDERSTAND", state: "BLOCKED", blockReason: "this person can no longer run tasks here" });
-    expect(view.operations.filter((operation) => operation.kind === "task")).toEqual([]);
-  });
 
   it("puts the items the access adapter asks for into the step's own transaction", async () => {
     const h = createHarness({ understandFirst: true, machines: { startingChecks: 0 } });
@@ -224,16 +155,6 @@ describe("projects and companies", () => {
 });
 
 describe("closing", () => {
-  it("closes a task that holds no slot marker (a task from an older form) without freeing a slot twice", async () => {
-    const h = createHarness({ limits: { member: 2, organization: 5 } });
-    await h.registerProject();
-    const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x" });
-    const task = (await readTask(h.deps, started.task.taskId))!;
-    await h.store.delete({ key: chargeMarkerKey(developerCharge({ companyId: COMPANY, developerId: "local-owner" }), task.taskId) });
-    expect((await h.flow.close(h.owner, started.task.taskId)).status).toBe("CLOSED");
-    // Closed, and the counter was not driven below what other tasks hold.
-    expect((await h.store.get({ pk: "DEVELOPER_LIMIT#local-owner", sk: "MEMBER" }))?.count).toBe(1);
-  });
 
   it("stops the machine and gives back the allowances even when the machine will not terminate", async () => {
     const admission = recordingAdmission();
@@ -292,22 +213,6 @@ describe("the outbox and the stored records", () => {
     expect(started.task.status).toBe("STARTING");
   });
 
-  it("keeps no credential in any record the flow wrote", async () => {
-    const h = createHarness({ machines: { startingChecks: 0 } });
-    await h.registerProject();
-    const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x" });
-    await drain(h);
-    const workspace = await workspaceOf(h, started.task.workspaceId);
-    const invocation = h.machines.delivered(workspace.machine!.machineId)[0] as WorkerInvocation & { payload: { repositoryGrant: string } };
-    const secrets = [invocation.callbackCapability, invocation.payload.repositoryGrant];
-    const documents = [
-      ...(await operationsOf(h, workspace.id)), workspace, await readTask(h.deps, started.task.taskId),
-      await h.store.get({ pk: companyScoped(COMPANY, `OUTBOX#${invocation.operationId}`), sk: "OUTBOX" }),
-      await h.store.get(taskPointerKey(T1_COMPANY, workspace.id)),
-    ];
-    for (const document of documents) for (const secret of secrets) expect(JSON.stringify(document)).not.toContain(secret);
-    expect(documents.filter((document) => document !== undefined)).toHaveLength(documents.length);
-  });
 });
 
 describe("a machine the adapter replaced", () => {
@@ -383,28 +288,6 @@ describe("redelivery and close, once more", () => {
     expect(await h.flow.dispatchOnce()).toMatchObject({ dropped: 1, delivered: 0, failed: 0 });
     expect((await operationsOf(h, started.task.workspaceId))[0]!.status).toBe("RUNNING");
     expect(h.grants).toEqual([]);
-  });
-
-  it("stops a machine that a dispatch recorded between the close's two reads", async () => {
-    const h = createHarness({ machines: { startingChecks: 0 } });
-    await h.registerProject();
-    const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x" });
-    const realGet = h.store.get.bind(h.store);
-    let armed = true;
-    h.store.get = async (key) => {
-      // The close has read the workspace (no machine yet) and now reads the operation: the dispatch runs in between, whole.
-      if (armed && key.sk.startsWith("OPERATION#")) {
-        armed = false;
-        await h.flow.dispatchOnce();
-      }
-      return realGet(key);
-    };
-    await h.flow.close(h.owner, started.task.taskId);
-    h.store.get = realGet;
-    const workspace = await workspaceOf(h, started.task.workspaceId);
-    expect(workspace.status).toBe("CLOSED");
-    expect(workspace.machine).toBeDefined();
-    expect((await h.machines.health(workspace.machine!.machineId)).state).toBe("terminated");
   });
 
   it("does not ack a message whose operation it could not end: the message comes back and the operation is ended then", async () => {

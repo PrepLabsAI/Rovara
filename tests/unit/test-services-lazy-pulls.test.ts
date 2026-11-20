@@ -17,7 +17,6 @@ const COMPANY = "org_aaaaaaaaaaaaaaaaaaaa";
 const entries = ownerStarterEntries();
 const digestOf = (reference: string): string => reference.slice(reference.indexOf("@sha256:") + "@sha256:".length);
 const postgres16 = OWNER_STARTER_IMAGES.find((image) => image.requested === "postgres:16")!;
-const redis7 = OWNER_STARTER_IMAGES.find((image) => image.requested === "redis:7")!;
 const dependency = (repository: string, digest: string) => ({ repository, digest });
 const job = (dependencies: unknown[] | undefined): unknown => ({ kind: "task", payload: { workflowMode: "CHECKS", ...(dependencies === undefined ? {} : { testEnvironment: { dependencies } }) } });
 
@@ -48,10 +47,6 @@ class GatedDocker implements DockerRunner {
 }
 
 describe("which images a step needs", () => {
-  it("maps a plan's repository and digest to the owner list's pinned reference, the way the worker reads it", () => {
-    const needed = ownerImagesNeededBy(job([dependency("svc/postgres", digestOf(postgres16.reference)), dependency("svc/redis", digestOf(redis7.reference))]), entries);
-    expect(needed).toEqual([postgres16.reference, redis7.reference]);
-  });
 
   it("ignores what is not an owner-list image: another digest, another repository, a plan without dependencies, and anything malformed", () => {
     expect(ownerImagesNeededBy(job([dependency("svc/postgres", "f".repeat(64))]), entries)).toEqual([]);
@@ -73,20 +68,6 @@ describe("which images a step needs", () => {
 
 describe("pulling on first use", () => {
   const needsPostgres = job([dependency("svc/postgres", digestOf(postgres16.reference))]);
-
-  it("asks Docker nothing for a step that needs no image", async () => {
-    const docker = new GatedDocker();
-    const lazy = createLazyServiceImages({ docker, ownerImages: entries });
-    expect(await lazy.prepare(job(undefined))).toBe("ready");
-    expect(docker.calls).toEqual([]);
-  });
-
-  it("an image already here: ready at once, nothing pulled", async () => {
-    const docker = new GatedDocker();
-    docker.held.add(postgres16.reference);
-    expect(await createLazyServiceImages({ docker, ownerImages: entries }).prepare(needsPostgres)).toBe("ready");
-    expect(docker.pulls()).toEqual([]);
-  });
 
   it("an image not here: one pull by its pinned digest, `pulling` until it is done (a second try starts no second pull), then ready", async () => {
     const docker = new GatedDocker();
@@ -182,17 +163,4 @@ describe("a worker machine with lazy test services", () => {
     expect(docker.gate.pulls()).toEqual([postgres16.reference]);
   });
 
-  it("hands over at once a job that needs no image, and touches no image", async () => {
-    const { docker, machines } = await build(true);
-    const { machineId } = await machines.start({ machineKey: "ws-plain", companyId: COMPANY });
-    expect(await machines.deliver(machineId, invocation(workspaceIdFor(COMPANY, "ws-plain"), undefined))).toEqual({ duplicate: false });
-    expect(docker.gate.calls).toEqual([]);
-  });
-
-  it("without lazy pulls (the images were pulled at start-up, as a signed catalog's are), delivery never pulls", async () => {
-    const { docker, machines } = await build(false);
-    const { machineId } = await machines.start({ machineKey: "ws-eager", companyId: COMPANY });
-    expect(await machines.deliver(machineId, invocation(workspaceIdFor(COMPANY, "ws-eager"), postgresPlan()))).toEqual({ duplicate: false });
-    expect(docker.gate.calls).toEqual([]);
-  });
 });

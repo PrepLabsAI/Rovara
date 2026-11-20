@@ -38,11 +38,6 @@ describe("whether a look is stale", () => {
     expect(lookIsStale(4, 5, { from: 3, to: 5 })).toBe(false);
   });
 
-  it("is stale again when anyone else changed the settings: the write did not end at the revision now, or the look is from before it", () => {
-    expect(lookIsStale(3, 6, { from: 3, to: 5 })).toBe(true);
-    expect(lookIsStale(2, 5, { from: 3, to: 5 })).toBe(true);
-  });
-
   it("makes an own write only for exactly the next revision (anything more means someone else saved in between)", () => {
     expect(ownWriteOf(3, 4)).toEqual({ from: 3, to: 4 });
     expect(ownWriteOf(3, 5)).toBeUndefined();

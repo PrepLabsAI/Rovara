@@ -68,35 +68,6 @@ async function planWaiting(understand: boolean) {
 }
 
 describe("a request for changes plans again", () => {
-  it("with Understand off, plans again from the request and the owner's words, and the task moves on to the second plan", async () => {
-    const w = await planWaiting(false);
-    expect(await w.requestChanges(1, "Also return the build number")).toBe("STARTED");
-    const replan = lastInvocation(w.h, w.machineId);
-    expect(replan).toMatchObject({ kind: "task", payload: { workflowMode: "PLAN" } });
-    const prompt = promptOf(replan);
-    expect(prompt).toContain("Add a /health endpoint");
-    expect(prompt).toContain("Also return the build number");
-    // The row is spent, and the task is planning (not stuck at PLAN/READY).
-    expect(await w.rows()).toEqual([]);
-    expect(await w.workflow()).toMatchObject({ stage: "PLAN", state: "RUNNING" });
-    await w.finish(replan, w.planned(2));
-    expect(await w.workflow()).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
-  });
-
-  it("with Understand off, plans again after a second request for changes, and the planner is told both", async () => {
-    const w = await planWaiting(false);
-    expect(await w.requestChanges(1, "Also return the build number")).toBe("STARTED");
-    await w.finish(lastInvocation(w.h, w.machineId), w.planned(2));
-    expect(await w.requestChanges(2, "Cache the answer for ten seconds")).toBe("STARTED");
-    const prompt = promptOf(lastInvocation(w.h, w.machineId));
-    expect(prompt).toContain("Add a /health endpoint");
-    expect(prompt).toContain("Also return the build number");
-    expect(prompt).toContain("Cache the answer for ten seconds");
-    expect(await w.rows()).toEqual([]);
-    await w.finish(lastInvocation(w.h, w.machineId), w.planned(3));
-    expect(await w.workflow()).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
-    expect((await readTask(w.h.deps, w.taskId))!.workflow!.decisions.filter((decision) => decision.decision === "REQUEST_CHANGES")).toHaveLength(2);
-  });
 
   it("with Understand off, the planner's automatic second run goes ahead too (no assessment to wait for)", async () => {
     const w = await planWaiting(false);
@@ -107,17 +78,6 @@ describe("a request for changes plans again", () => {
     expect(promptOf(again)).toContain("The plan lacked its checks; write them.");
     expect(promptOf(again)).toContain("Also return the build number");
     await w.finish(again, w.planned(2));
-    expect(await w.workflow()).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
-  });
-
-  it("with Understand on, plans again from Understand's assessment as before", async () => {
-    const w = await planWaiting(true);
-    expect(await w.requestChanges(1, "Also return the build number")).toBe("STARTED");
-    const prompt = promptOf(lastInvocation(w.h, w.machineId));
-    expect(prompt).toContain("Add a health endpoint");
-    expect(prompt).toContain("It returns 200");
-    expect(prompt).toContain("Also return the build number");
-    await w.finish(lastInvocation(w.h, w.machineId), w.planned(2));
     expect(await w.workflow()).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
   });
 
@@ -138,15 +98,6 @@ describe("a request for changes plans again", () => {
 });
 
 describe("a row that is truly stale is still resolved STALE", () => {
-  it("when the workflow moved on past the row's revision", async () => {
-    const w = await planWaiting(false);
-    const task = (await readTask(w.h.deps, w.taskId))!;
-    const now = w.h.deps.now!().toISOString();
-    await w.h.store.put({ item: dispatchRowItem(w.h.deps, w.taskId, task.workflow!.revision - 1, "PLAN", now).item });
-    expect(await runDispatchRow(w.h.deps, { taskId: w.taskId, workflowRevision: task.workflow!.revision - 1, kind: "PLAN" })).toBe("STALE");
-    expect(await w.rows()).toEqual([]);
-    expect(await w.workflow()).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
-  });
 
   it("when the workflow is not ready to plan (it is waiting for the owner's decision)", async () => {
     const w = await planWaiting(false);

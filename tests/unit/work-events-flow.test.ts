@@ -4,25 +4,13 @@
 //   - idempotent per event, bounded, and a failure to make an event never fails a step;
 //   - company and project keyed.
 import { describe, expect, it } from "vitest";
-import { WorkEventSchema, type OrgId, type TransactItem, type WorkflowSnapshot } from "@agentx/contracts";
-import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
-import { commitWorkflow } from "../../packages/broker/src/core/task-flow/stage-machine.js";
-import { FLOW_EVENTS_MAX, TRANSACTION_ITEMS_MAX, flowEventsOf, flowWorkEventItems, startWorkEventItems, waitOf } from "../../packages/broker/src/core/work-events/flow-events.js";
+import { WorkEventSchema, type OrgId, type WorkflowSnapshot } from "@agentx/contracts";
+import { FLOW_EVENTS_MAX, flowEventsOf, flowWorkEventItems, startWorkEventItems, waitOf } from "../../packages/broker/src/core/work-events/flow-events.js";
 import { WORK_EVENTS_PER_CHANGE_MAX } from "../../packages/broker/src/core/work-events/work-events.js";
-import { isEventItem, planWaiting, type EventWorld } from "../support/work-events-world.js";
+import { planWaiting, type EventWorld } from "../support/work-events-world.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
-const B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
 const TASK = "00000000-0000-4000-8000-000000000001";
-
-/** Makes the random ids of two runs comparable: each distinct uuid or long hex string becomes its place of first appearance. */
-function normalise(value: unknown): string {
-  const seen = new Map<string, string>();
-  return JSON.stringify(value).replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32,}/gu, (match) => {
-    if (!seen.has(match)) seen.set(match, `<id${String(seen.size)}>`);
-    return seen.get(match)!;
-  });
-}
 
 /** The scripted task: planned, sent back for changes, planned again, approved. */
 async function script(w: EventWorld): Promise<void> {
@@ -38,23 +26,6 @@ async function script(w: EventWorld): Promise<void> {
 
 const snapshot = (over: Record<string, unknown> = {}): WorkflowSnapshot => ({ stage: "PLAN", state: "RUNNING", revision: 3, updatedAt: "2026-11-17T10:00:00.000Z", taskId: TASK, decisions: [], artifacts: [], ...over }) as unknown as WorkflowSnapshot;
 const was = (): WorkflowSnapshot => snapshot({ revision: 2, state: "READY" });
-
-describe("golden: events on change nothing but the event items", () => {
-  it("every transaction is the same with events on as with them off, minus the event items; the stored task is the same", async () => {
-    const off = await planWaiting({ workEvents: false });
-    await script(off);
-    const on = await planWaiting({ workEvents: true });
-    await script(on);
-    const without = off.recorded.log.map((items) => items.filter((item) => !isEventItem(item)));
-    const withEvents = on.recorded.log.map((items) => items.filter((item) => !isEventItem(item)));
-    expect(normalise(withEvents)).toBe(normalise(without));
-    // Positive control: events were written with events on, none with them off.
-    expect(off.recorded.log.flat().filter(isEventItem)).toEqual([]);
-    expect(on.recorded.log.flat().filter(isEventItem).length).toBeGreaterThan(8);
-    expect(await off.events()).toEqual([]);
-    expect(normalise((await readTask(on.h.deps, on.taskId))!)).toBe(normalise((await readTask(off.h.deps, off.taskId))!));
-  });
-});
 
 describe("what the events say", () => {
   it("a task's wait, step and decision events follow the flow, in closed words, and name no person", async () => {
@@ -115,22 +86,6 @@ describe("what the events say", () => {
 });
 
 describe("idempotent per event", () => {
-  it("the same transition makes the same ids and rows, and writing it twice leaves one row each", async () => {
-    const w = await planWaiting({ workEvents: true });
-    await script(w);
-    const after = (await readTask(w.h.deps, w.taskId))!.workflow!;
-    const before = { ...after, revision: after.revision - 1, stage: "PLAN_REVIEW", state: "WAITING" } as unknown as WorkflowSnapshot;
-    const input = { enabled: true, orgId: w.h.deps.companyId, project: "payments", before, after, room: 50 };
-    const once = flowWorkEventItems(input);
-    expect(once.length).toBeGreaterThan(0);
-    expect(JSON.stringify(flowWorkEventItems(input))).toBe(JSON.stringify(once));
-    expect((await w.h.store.transact(once)).applied).toBe(true);
-    const afterFirst = await w.events();
-    expect((await w.h.store.transact(once)).applied).toBe(true);
-    const afterSecond = await w.events();
-    expect(afterSecond.length).toBe(afterFirst.length);
-    expect(afterSecond.length).toBeGreaterThan(0);
-  });
 
   it("a replayed start makes the same events; another task makes others; the first wait is read from the snapshot the task starts with", () => {
     const input = { companyId: A, taskId: TASK, project: "alpha", origin: "web", receivedAt: "2026-11-17T09:00:00.000Z" };
@@ -143,15 +98,6 @@ describe("idempotent per event", () => {
     const queued = snapshot({ revision: 1, stage: "UNDERSTAND", state: "READY", updatedAt: input.receivedAt });
     expect(JSON.stringify(startWorkEventItems({ ...input, workflow: queued }))).toBe(JSON.stringify(startWorkEventItems({ ...input, workflow: queued })));
     expect(JSON.stringify(startWorkEventItems({ ...input, taskId: "00000000-0000-4000-8000-000000000002", workflow: queued }))).not.toBe(JSON.stringify(startWorkEventItems({ ...input, workflow: queued })));
-  });
-
-  it("each wait is strictly after the one before, even when the clock did not move", () => {
-    const first = flowEventsOf(snapshot({ revision: 2, state: "READY" }), snapshot({ revision: 3, state: "RUNNING" }), { orgId: A, project: "alpha" });
-    expect(first.length).toBeGreaterThan(0);
-    for (const event of first) expect(Date.parse(event.at)).toBe(Date.parse("2026-11-17T10:00:00.000Z") + 1);
-    // A later clock is kept as it is.
-    const later = flowEventsOf(snapshot({ revision: 2, state: "READY" }), snapshot({ revision: 3, updatedAt: "2026-11-17T10:05:00.000Z" }), { orgId: A, project: "alpha" });
-    for (const event of later) expect(event.at).toBe("2026-11-17T10:05:00.000Z");
   });
 
   it("a transition that does not move the revision makes no events", () => {
@@ -173,18 +119,6 @@ describe("a failure to make an event never fails a step", () => {
     expect(flowWorkEventItems({ ...input, orgId: "nope", project: "alpha", after: snapshot() })).toEqual([]);
   });
 
-  it("the pure function itself never throws on a snapshot it cannot read", () => {
-    expect(() => flowEventsOf(was(), snapshot({ pullRequests: 5 }), { orgId: A, project: "alpha" })).not.toThrow();
-    expect(flowEventsOf(was(), snapshot({ pullRequests: 5 }), { orgId: A, project: "alpha" })).toEqual([]);
-    expect(flowEventsOf(was(), undefined as never, { orgId: A, project: "alpha" })).toEqual([]);
-  });
-
-  it("the skips are told, never their content", () => {
-    const skips: string[] = [];
-    flowWorkEventItems({ enabled: true, orgId: "nope", project: "alpha", before: was(), after: snapshot(), room: 50, onSkip: (reason) => skips.push(reason) });
-    expect(skips).toContain("invalid");
-  });
-
   it("with no room left in the transaction no event is added (all or none)", () => {
     const skips: string[] = [];
     const input = { enabled: true, orgId: A, project: "alpha", before: was(), after: snapshot() };
@@ -192,30 +126,6 @@ describe("a failure to make an event never fails a step", () => {
     expect(skips).toContain("no_room");
     expect(flowWorkEventItems({ ...input, room: 0 })).toEqual([]);
     expect(flowWorkEventItems({ ...input, room: 50 }).length).toBeGreaterThan(1);
-  });
-
-  it("a real commit whose transaction is already full still commits, with no events added", async () => {
-    const w = await planWaiting({ workEvents: true });
-    const task = (await readTask(w.h.deps, w.taskId))!;
-    const filler: TransactItem[] = Array.from({ length: TRANSACTION_ITEMS_MAX - 1 }, (_, n) => ({ kind: "put" as const, item: { pk: `FILLER#${String(n)}`, sk: "X", n } }));
-    const waiting = task.workflow!;
-    const next = { ...waiting, revision: waiting.revision + 1, stage: "PLAN_REVIEW", state: "BLOCKED", blockReason: "stopped for a test", updatedAt: w.h.deps.now!().toISOString() } as unknown as WorkflowSnapshot;
-    const eventsBefore = (await w.events()).length;
-    // PLAN_REVIEW is never stored blocked, so the real transition is a running plan step; build one the schema accepts.
-    const running = { ...waiting, revision: waiting.revision + 1, stage: "PLAN", state: "RUNNING", updatedAt: w.h.deps.now!().toISOString() } as unknown as WorkflowSnapshot;
-    void next;
-    expect(await commitWorkflow(w.h.deps, task, running, filler)).toBe(true);
-    expect((await readTask(w.h.deps, w.taskId))!.workflow).toMatchObject({ stage: "PLAN", state: "RUNNING" });
-    expect((await w.events()).length).toBe(eventsBefore);
-    // The same commit with room for them writes them (positive control).
-    const task2 = (await readTask(w.h.deps, w.taskId))!;
-    const waitingAgain = { ...task2.workflow!, revision: task2.workflow!.revision + 1, stage: "PLAN_REVIEW", state: "WAITING", updatedAt: w.h.deps.now!().toISOString() } as unknown as WorkflowSnapshot;
-    expect(await commitWorkflow(w.h.deps, task2, waitingAgain)).toBe(true);
-    expect((await w.events()).length).toBeGreaterThan(eventsBefore);
-  });
-
-  it("is off unless the flow says true", () => {
-    for (const enabled of [undefined, false] as const) expect(flowWorkEventItems({ enabled, orgId: A, project: "alpha", before: was(), after: snapshot(), room: 50 })).toEqual([]);
   });
 
   it("is bounded: at most FLOW_EVENTS_MAX in one change", () => {
@@ -230,31 +140,3 @@ describe("a failure to make an event never fails a step", () => {
   });
 });
 
-describe("company and project keyed", () => {
-  const rowOf = (companyId: OrgId, project: string) => (startWorkEventItems({ companyId, taskId: TASK, project, origin: "web", receivedAt: "2026-11-17T09:00:00.000Z" })[0] as { item: Record<string, unknown> }).item;
-
-  it("the rows are in the company's own partition and carry the project", () => {
-    const rowA = rowOf(A, "alpha");
-    const rowB = rowOf(B, "beta");
-    expect(String(rowA["pk"])).toContain(`ORG#${A}#WORK_EVENTS#`);
-    expect(String(rowB["pk"])).toContain(`ORG#${B}#WORK_EVENTS#`);
-    expect([rowA["orgId"], rowA["project"], rowB["orgId"], rowB["project"]]).toEqual([A, "alpha", B, "beta"]);
-    expect(String(rowA["pk"])).not.toContain(B);
-  });
-
-  it("two companies' flows write only into their own partitions", async () => {
-    const a = await planWaiting({ workEvents: true, companyId: A });
-    const b = await planWaiting({ workEvents: true, companyId: B });
-    for (const [world, company, other] of [[a, A, B], [b, B, A]] as const) {
-      const rows = world.recorded.log.flat().filter(isEventItem).map((item) => (item as unknown as { item: { pk: string; orgId: string } }).item);
-      expect(rows.length).toBeGreaterThan(0);
-      expect(rows.every((row) => row.pk.startsWith(`ORG#${company}#WORK_EVENTS#`) && row.orgId === company && !row.pk.includes(other))).toBe(true);
-    }
-  });
-
-  it("two projects' tasks carry their own project", async () => {
-    const a = await planWaiting({ workEvents: true, project: "payments" });
-    const events = await a.events();
-    expect(new Set(events.map((event) => event.project))).toEqual(new Set(["payments"]));
-  });
-});

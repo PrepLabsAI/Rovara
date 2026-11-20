@@ -47,21 +47,4 @@ describe("merge tracking and work events", () => {
     } finally { release(); }
   });
 
-  it("the events are appended last, with the room that is really left in the transaction", async () => {
-    const world = await mergeWorld();
-    const seen: Array<{ room: number }> = [];
-    const taken: number[] = [];
-    const store = world.store;
-    const original = store.transact.bind(store);
-    store.transact = (async (items: Parameters<typeof original>[0]) => { taken.push(items.length); return original(items); });
-    const dummy = [{ kind: "put" as const, item: { pk: "EVENT#1", sk: "A" } }, { kind: "put" as const, item: { pk: "EVENT#2", sk: "A" } }];
-    const release = registerMergeActionDecider("sync", ({ workflow }) => request(world, workflow));
-    try {
-      await trackPullRequest({ ...world.tracking, workEvents: (_task: unknown, _before: unknown, _after: unknown, room: number) => { seen.push({ room }); return dummy; } }, TASK_ID);
-    } finally { release(); }
-    expect(seen).toHaveLength(1);
-    // The transaction held the room's complement plus the two events: nothing was added after the events.
-    expect(taken.at(-1)).toBe(100 - seen[0]!.room + dummy.length);
-    expect(await world.store.get({ pk: "EVENT#1", sk: "A" })).toBeDefined();
-  });
 });

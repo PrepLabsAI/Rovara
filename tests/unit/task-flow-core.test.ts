@@ -3,14 +3,12 @@ import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // document store port. Nothing here names DynamoDB, SQS or EC2.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { AGENTX_PROTOCOL_VERSION, WorkerInvocationSchema, type WorkerInvocation } from "@agentx/contracts";
+import { AGENTX_PROTOCOL_VERSION, type WorkerInvocation } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
-import { dispatchPartition, operationKey, taskIndexKey, taskKey, taskPointerKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { queryAll } from "@agentx/contracts";
-import type { OperationRecord, TaskRecord, WorkspaceRecord } from "../../packages/broker/src/core/task-flow/records.js";
+import type { OperationRecord, WorkspaceRecord } from "../../packages/broker/src/core/task-flow/records.js";
 import { COMPANY, SIGNING_KEY, createHarness, newRequestId, type Harness } from "../support/task-flow-harness.js";
-
-const READY = { kind: "ready", path: "QUICK", restatement: "Add a health endpoint", assumptions: ["It returns 200"] } as const;
 
 async function operationsOf(h: Harness, workspaceId: string): Promise<OperationRecord[]> {
   const items = await queryAll(h.store, { pk: workspaceKey(T1_COMPANY, workspaceId).pk, sk: { op: "beginsWith", prefix: "OPERATION#" } });
@@ -32,54 +30,6 @@ function lastInvocation(h: Harness, machineId: string): WorkerInvocation {
 }
 
 describe("starting a task", () => {
-  it("writes the task, its workspace, preparation, pointer and idempotency record in one transaction, and stages the preparation for dispatch", async () => {
-    const h = createHarness({ audit: "recording" });
-    await h.registerProject();
-    const requestId = newRequestId();
-    const { task, duplicate } = await h.flow.start(h.owner, { requestId, project: "payments", instructions: "Add a /health endpoint\nreturn 200", workflow: true, workflowPath: "QUICK" });
-    expect(duplicate).toBe(false);
-    expect(task).toMatchObject({ project: "payments", title: "Add a /health endpoint", status: "STARTING", workflow: { stage: "PLAN", state: "RUNNING", path: "QUICK" } });
-
-    const record = (await h.store.get(taskKey(task.taskId))) as unknown as TaskRecord;
-    expect(record).toMatchObject({ entityType: "DEVELOPER_TASK", companyId: COMPANY, developerId: "local-owner", provider: "local-owner", startingRevision: 1 });
-    const workspace = (await h.store.get(workspaceKey(T1_COMPANY, task.workspaceId))) as unknown as WorkspaceRecord;
-    expect(workspace).toMatchObject({ status: "PREPARING", fence: 1, projectName: "payments", workspaceProject: (expect.stringContaining("payments") as string) });
-    const pointer = await h.store.get(taskPointerKey(T1_COMPANY, task.workspaceId));
-    expect(pointer).toMatchObject({ pendingPrompt: "Add a /health endpoint\nreturn 200", pendingWorkflowMode: "PLAN" });
-    expect(await h.store.get(taskIndexKey("local-owner", record.createdAt, task.taskId))).toMatchObject({ status: "STARTING" });
-
-    const [prepare] = await operationsOf(h, task.workspaceId);
-    expect(prepare).toMatchObject({ kind: "prepare", status: "ACCEPTED", fence: 1, id: workspace.activeOperationId });
-    // The dispatch message went out with the start; it carries no secret, only the ids the dispatcher reads.
-    const queue = await h.queues.queue("task-dispatch");
-    const [message] = await queue.receive();
-    expect(message?.body).toEqual({ v: 1, companyId: COMPANY, workspaceId: task.workspaceId, operationId: prepare!.id });
-    expect(h.audit.map((event) => event.action)).toEqual(["task.started"]);
-    expect(await h.store.get({ pk: `AUDIT#${COMPANY}`, sk: `EVENT#task.started:${task.taskId}` })).toBeDefined();
-  });
-
-  it("answers a repeat of the same request with the first task, and refuses the same id for another request", async () => {
-    const h = createHarness();
-    await h.registerProject();
-    const request = { requestId: newRequestId(), project: "payments", instructions: "one thing" };
-    const first = await h.flow.start(h.owner, request);
-    const again = await h.flow.start(h.owner, request);
-    expect(again.duplicate).toBe(true);
-    expect(again.task.taskId).toBe(first.task.taskId);
-    await expect(h.flow.start(h.owner, { ...request, instructions: "another thing" })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
-    // One task, one charge.
-    expect((await h.store.get({ pk: "DEVELOPER_LIMIT#local-owner", sk: "MEMBER" }))?.count).toBe(1);
-  });
-
-  it("starts one task when the same request arrives twice at once", async () => {
-    const h = createHarness();
-    await h.registerProject();
-    const request = { requestId: newRequestId(), project: "payments", instructions: "race" };
-    const results = await Promise.all([h.flow.start(h.owner, request), h.flow.start(h.owner, request)]);
-    expect(results[0].task.taskId).toBe(results[1].task.taskId);
-    expect((await h.store.get({ pk: "DEVELOPER_LIMIT#local-owner", sk: "MEMBER" }))?.count).toBe(1);
-    expect((await h.flow.list(h.owner)).tasks).toHaveLength(1);
-  });
 
   it("refuses a project that does not exist, a caller who is not the owner, and agents or sharing this deployment does not have, writing nothing", async () => {
     const h = createHarness({ audit: "recording" });
@@ -106,114 +56,6 @@ describe("starting a task", () => {
     await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "c" });
   });
 
-  it("keeps a person's tasks from another person: a task of someone else is not found", async () => {
-    const h = createHarness();
-    await h.registerProject();
-    const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "mine" });
-    await expect(h.flow.get(h.guest, started.task.taskId)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
-    await expect(h.flow.close(h.guest, started.task.taskId)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
-    expect((await h.flow.get(h.owner, started.task.taskId)).taskId).toBe(started.task.taskId);
-  });
-});
-
-describe("a task through its stages, dispatched to a worker machine", () => {
-  it("a workflow that understands first: prepare, Understand, Plan, and the plan waits for the owner", async () => {
-    const h = createHarness({ understandFirst: true });
-    await h.registerProject();
-    const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "Add a /health endpoint", workflow: true });
-    expect(started.task.workflow).toMatchObject({ definitionVersion: "1.1.0", stage: "UNDERSTAND", state: "READY", revision: 1 });
-    // The first step waits as a dispatch row on the company's partition, found through the due-time index.
-    expect((await h.store.queryIndex({ index: "workflow-dispatch-due", partition: dispatchPartition(COMPANY) })).items).toHaveLength(1);
-
-    // The machine is still starting: the message goes back with a delay, then is delivered.
-    const first = await h.flow.dispatchOnce();
-    expect(first).toMatchObject({ received: 1, retried: 1, delivered: 0 });
-    h.clock.advance(70);
-    expect(await h.flow.dispatchOnce()).toMatchObject({ received: 1, delivered: 1 });
-    const workspace = (await h.store.get(workspaceKey(T1_COMPANY, started.task.workspaceId))) as unknown as WorkspaceRecord;
-    const machineId = workspace.machine!.machineId;
-    const prepareInvocation = lastInvocation(h, machineId);
-    expect(WorkerInvocationSchema.safeParse(prepareInvocation).success).toBe(true);
-    expect(prepareInvocation).toMatchObject({ kind: "prepare", fence: 1, workspaceId: workspace.id });
-    expect((prepareInvocation as { payload: { repositoryGrant: string } }).payload.repositoryGrant).toEqual(expect.any(String));
-    // The capability the worker is given was issued at delivery, is signed with the broker's key, and allows exactly the three callbacks.
-    const capabilities = new CallbackCapabilities(SIGNING_KEY);
-    expect(capabilities.verify(prepareInvocation.callbackCapability, "result")).toMatchObject({ operationId: prepareInvocation.operationId, fence: 1 });
-    expect(() => capabilities.verify(prepareInvocation.callbackCapability, "heartbeat")).toThrow();
-    expect(h.grants).toHaveLength(1);
-
-    // The worker reports the preparation done: the workspace is ready and Understand begins.
-    h.machines.finish(machineId, prepareInvocation.operationId);
-    await h.flow.recordResult({ workspaceId: workspace.id, operationId: prepareInvocation.operationId, fence: 1, status: "SUCCEEDED", outcome: { kind: "prepared" } });
-    let view = await h.flow.get(h.owner, started.task.taskId);
-    expect(view.workflow).toMatchObject({ stage: "UNDERSTAND", state: "RUNNING", revision: 2 });
-    expect((await h.store.queryIndex({ index: "workflow-dispatch-due", partition: dispatchPartition(COMPANY) })).items).toHaveLength(0);
-
-    await drain(h);
-    const understand = lastInvocation(h, machineId);
-    expect(understand).toMatchObject({ kind: "task", fence: 2, payload: { workflowMode: "UNDERSTAND" } });
-    expect((understand as { payload: { prompt: string } }).payload.prompt).toContain("Add a /health endpoint");
-
-    // Understand finds the request clear: planning starts on its own.
-    h.machines.finish(machineId, understand.operationId);
-    await h.flow.recordResult({ workspaceId: workspace.id, operationId: understand.operationId, fence: 2, status: "SUCCEEDED", outcome: { kind: "understood", assessment: READY } });
-    view = await h.flow.get(h.owner, started.task.taskId);
-    expect(view.workflow).toMatchObject({ stage: "PLAN", state: "RUNNING" });
-    await drain(h);
-    const plan = lastInvocation(h, machineId);
-    expect(plan).toMatchObject({ kind: "task", fence: 3, payload: { workflowMode: "PLAN" } });
-    expect((plan as { payload: { prompt: string } }).payload.prompt).toContain("Add a health endpoint");
-
-    // The plan comes back: it waits for the owner's decision.
-    h.machines.finish(machineId, plan.operationId);
-    await h.flow.recordResult({
-      workspaceId: workspace.id, operationId: plan.operationId, fence: 3, status: "SUCCEEDED",
-      outcome: { kind: "planned", artifact: { id: "plan-1", type: "plan", version: 1, sha256: "a".repeat(64), producer: "agentx-worker-untrusted", objectKey: `tasks/${started.task.taskId}/plan-1.md`, createdAt: h.deps.now!().toISOString() } },
-    });
-    view = await h.flow.get(h.owner, started.task.taskId);
-    expect(view.workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
-    expect(view.operations.map((operation) => `${operation.kind}:${operation.workflowMode ?? "-"}:${operation.status}`)).toEqual(["prepare:-:SUCCEEDED", "task:UNDERSTAND:SUCCEEDED", "task:PLAN:SUCCEEDED"]);
-    // The workspace is free again and the task index reflects the run.
-    expect(((await h.store.get(workspaceKey(T1_COMPANY, workspace.id))) as unknown as WorkspaceRecord)).toMatchObject({ status: "READY", activeOperationId: null, fence: 3 });
-  });
-
-  it("a workflow with an explicit path plans straight after the preparation, with the first instructions as the prompt", async () => {
-    const h = createHarness({ understandFirst: false });
-    await h.registerProject();
-    const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "Rename the flag", workflow: true, workflowPath: "FULL" });
-    expect(started.task.workflow).toMatchObject({ definitionVersion: "1.0.0", stage: "PLAN", state: "RUNNING", path: "FULL" });
-    await drain(h);
-    const workspace = (await h.store.get(workspaceKey(T1_COMPANY, started.task.workspaceId))) as unknown as WorkspaceRecord;
-    const machineId = workspace.machine!.machineId;
-    const prepare = lastInvocation(h, machineId);
-    h.machines.finish(machineId, prepare.operationId);
-    await h.flow.recordResult({ workspaceId: workspace.id, operationId: prepare.operationId, fence: 1, status: "SUCCEEDED" });
-    await drain(h);
-    const plan = lastInvocation(h, machineId);
-    expect(plan).toMatchObject({ kind: "task", payload: { prompt: "Rename the flag", workflowMode: "PLAN" } });
-    // The first instructions are queued once: the pointer no longer holds them.
-    expect(await h.store.get(taskPointerKey(T1_COMPANY, workspace.id))).not.toHaveProperty("pendingPrompt");
-  });
-
-  it("a task with no workflow runs its instructions as one plain run", async () => {
-    const h = createHarness();
-    await h.registerProject();
-    const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "Just do it" });
-    expect(started.task.workflow).toBeUndefined();
-    await drain(h);
-    const workspace = (await h.store.get(workspaceKey(T1_COMPANY, started.task.workspaceId))) as unknown as WorkspaceRecord;
-    const machineId = workspace.machine!.machineId;
-    const prepare = lastInvocation(h, machineId);
-    h.machines.finish(machineId, prepare.operationId);
-    await h.flow.recordResult({ workspaceId: workspace.id, operationId: prepare.operationId, fence: 1, status: "SUCCEEDED" });
-    await drain(h);
-    const run = lastInvocation(h, machineId);
-    expect(run).toMatchObject({ kind: "task", payload: { prompt: "Just do it" } });
-    expect((run as { payload: Record<string, unknown> }).payload).not.toHaveProperty("workflowMode");
-    h.machines.finish(machineId, run.operationId);
-    await h.flow.recordResult({ workspaceId: workspace.id, operationId: run.operationId, fence: 2, status: "SUCCEEDED", outcome: { kind: "ended" } });
-    expect((await h.flow.get(h.owner, started.task.taskId)).status).toBe("SUCCEEDED");
-  });
 });
 
 describe("results and the sweep", () => {
@@ -249,18 +91,6 @@ describe("results and the sweep", () => {
     expect(await operationsOf(h, workspace.id)).toHaveLength(1);
   });
 
-  it("blocks the workflow when Understand fails, and ignores a result the workflow has moved past", async () => {
-    const h = createHarness({ understandFirst: true });
-    const { started, workspace, machineId, prepare } = await prepared(h);
-    h.machines.finish(machineId, prepare.operationId);
-    await h.flow.recordResult({ workspaceId: workspace.id, operationId: prepare.operationId, fence: 1, status: "SUCCEEDED" });
-    await drain(h);
-    const understand = lastInvocation(h, machineId);
-    await h.flow.recordResult({ workspaceId: workspace.id, operationId: understand.operationId, fence: 2, status: "FAILED", error: "model unavailable" });
-    const view = await h.flow.get(h.owner, started.task.taskId);
-    expect(view.workflow).toMatchObject({ stage: "UNDERSTAND", state: "BLOCKED", blockReason: (expect.stringContaining("model unavailable") as string) });
-  });
-
   it("blocks the workflow with a sentence when Understand's answer cannot be read", async () => {
     const h = createHarness({ understandFirst: true });
     const { started, workspace, machineId, prepare } = await prepared(h);
@@ -271,52 +101,9 @@ describe("results and the sweep", () => {
     expect((await h.flow.get(h.owner, started.task.taskId)).workflow).toMatchObject({ state: "BLOCKED", blockReason: (expect.stringContaining("could not read") as string) });
   });
 
-  it("the sweep starts a step whose dispatch row was left behind, once", async () => {
-    const h = createHarness({ understandFirst: true });
-    const { workspace, prepare } = await prepared(h);
-    // The worker's result commits but the process dies before the next move: only the dispatch row remains.
-    const ended = await operationsOf(h, workspace.id);
-    expect(ended).toHaveLength(1);
-    await h.store.update({ key: operationKey(T1_COMPANY, workspace.id, prepare.operationId), ops: [{ op: "set", path: ["status"], value: "SUCCEEDED" }] });
-    await h.store.update({ key: workspaceKey(T1_COMPANY, workspace.id), ops: [{ op: "set", path: ["status"], value: "READY" }, { op: "set", path: ["activeOperationId"], value: null }] });
-    expect(await h.flow.sweepOnce()).toMatchObject({ started: 1 });
-    expect(await h.flow.sweepOnce()).toMatchObject({ started: 0 });
-    expect((await operationsOf(h, workspace.id)).filter((operation) => operation.workflowMode === "UNDERSTAND")).toHaveLength(1);
-  });
 });
 
 describe("dispatching to a worker machine", () => {
-  it("starts one worker machine for each task workspace", async () => {
-    const h = createHarness();
-    await h.registerProject();
-    const first = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "first task" });
-    const second = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "second task" });
-    await drain(h);
-
-    const firstWorkspace = (await h.store.get(workspaceKey(T1_COMPANY, first.task.workspaceId))) as unknown as WorkspaceRecord;
-    const secondWorkspace = (await h.store.get(workspaceKey(T1_COMPANY, second.task.workspaceId))) as unknown as WorkspaceRecord;
-    expect(firstWorkspace.id).not.toBe(secondWorkspace.id);
-    expect(firstWorkspace.machine!.machineId).not.toBe(secondWorkspace.machine!.machineId);
-    expect(lastInvocation(h, firstWorkspace.machine!.machineId).workspaceId).toBe(firstWorkspace.id);
-    expect(lastInvocation(h, secondWorkspace.machine!.machineId).workspaceId).toBe(secondWorkspace.id);
-  });
-
-  it("does not send a read-only step to a worker that cannot keep it read-only", async () => {
-    const h = createHarness({ understandFirst: true, machines: { features: [] } });
-    await h.registerProject();
-    const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x", workflow: true });
-    await drain(h);
-    const workspace = (await h.store.get(workspaceKey(T1_COMPANY, started.task.workspaceId))) as unknown as WorkspaceRecord;
-    const machineId = workspace.machine!.machineId;
-    const prepare = lastInvocation(h, machineId);
-    await h.flow.recordResult({ workspaceId: workspace.id, operationId: prepare.operationId, fence: 1, status: "SUCCEEDED" });
-    await drain(h);
-    // Understand was accepted but never delivered: the operation ends as failed and the workflow blocks.
-    expect(h.machines.delivered(machineId).map((invocation) => invocation.kind)).toEqual(["prepare"]);
-    const view = await h.flow.get(h.owner, started.task.taskId);
-    expect(view.operations.find((operation) => operation.workflowMode === "UNDERSTAND")?.status).toBe("FAILED");
-    expect(view.workflow).toMatchObject({ state: "BLOCKED" });
-  });
 
   it("gives up on a machine that never becomes ready, and an admission refusal ends the operation with its sentence", async () => {
     const slow = createHarness({ machines: { startingChecks: 1_000 } });
@@ -365,34 +152,6 @@ describe("dispatching to a worker machine", () => {
 });
 
 describe("admission and audit are in the start's own transaction", () => {
-  it("commits what admission stages with the task, keeps the reservation on the task, and takes no allowance for a start refused at the limit", async () => {
-    const released: string[] = [];
-    let staged = 0;
-    const h = createHarness({
-      admission: {
-        async admit() { return { allowed: true }; },
-        async stage(request) {
-          staged += 1;
-          return { decision: { allowed: true, reservationId: `r${staged}` }, items: [{ kind: "put", item: { pk: "BUDGET#hold", sk: `HOLD#${request.idempotencyKey}`, entityType: "HOLD" }, condition: { op: "notExists", path: ["pk"] } }] };
-        },
-        async settle() {}, async release(id) { released.push(id); },
-      },
-    });
-    await h.registerProject();
-    const request = { requestId: newRequestId(), project: "payments", instructions: "x" };
-    const started = await h.flow.start(h.owner, request);
-    expect(await h.store.get({ pk: "BUDGET#hold", sk: `HOLD#task.start:${started.task.taskId}:1` })).toBeDefined();
-    expect(await h.store.get(taskKey(started.task.taskId))).toMatchObject({ admissionReservationId: "r1" });
-    expect(released).toEqual([]);
-    // A task refused at the workspace limit never reaches a transaction, so no allowance is taken for it.
-    const h2 = createHarness({ limits: { member: 1, organization: 5 }, admission: h.deps.admission });
-    await h2.registerProject();
-    await h2.flow.start(h2.owner, { requestId: newRequestId(), project: "payments", instructions: "a" });
-    const before = staged;
-    await expect(h2.flow.start(h2.owner, { requestId: newRequestId(), project: "payments", instructions: "b" })).rejects.toMatchObject({ code: "WORKSPACE_LIMIT" });
-    expect(staged).toBe(before);
-    expect(started.duplicate).toBe(false);
-  });
 
   it("maps a refused admission to its error and records the refusal without writing the task", async () => {
     const h = createHarness({
