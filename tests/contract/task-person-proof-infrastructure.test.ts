@@ -296,14 +296,14 @@ describe("the named TEST proof-only installation gate", () => {
       {
         label: "named",
         template: named,
-        withRoute: "68b6f3773112b50de33dd51f904eb8d88b11e1ce399796da8d24f2c618331152", withoutRoute: "4c7bfd1c54470b7d7a29b6ca16ddfda40613cb3a4034e2714993d148c7d42c44",
-        beforeStepUpRemoval: { withRoute: "28ac511b3de836798c7019b85d17a9b78f1ab41f6612bbca09bc2b88078871ce", withoutRoute: "8ff25bf806a8428450ecb20234834bcb937208beefa487af7a257dbfcb9bc990" },
+        withRoute: "cf7edb8e853a33e3571d5e540ed9b2e12ba2ffad1de11025fa418b36cefb14bf", withoutRoute: "ce829248fbfa91003b34e937522753b586a8d44dc942510b98bb405d132bff1b",
+        beforeStepUpRemoval: { withRoute: "f86d37e81204e6e0be5e38ce6a3459090a94fb922ed44b613909894164b991f7", withoutRoute: "714077a73c71922755b258c164cbb44539302c643be0c9c47429a6b2f6ee362e" },
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "d337df4794e8c7fdf5e3d745b72cf4360b7e6ac8dd5d8b9aee9694c79e418db3", withoutRoute: "80d4a4a9c340ca4ed612dac08e5fd6a562456aa4122cd6d7e7bca8dbee3677c9",
-        beforeStepUpRemoval: { withRoute: "14f9db9630796cb0d931e94aae7a84ab6c3e7823a9dd1721d570f75261ae88cc", withoutRoute: "3c8f70cf97644e22fbddcb27ee00b41c5eeb06628287ae6d22926b07323ea7a7" },
+        withRoute: "4a0bccc95a8de260b550394b7950b2fbef54535045b352cb173de9522e265981", withoutRoute: "98ab4dd3fc8786f5dbae52101f4698538855c08f825448db62fcfef4b21ab45a",
+        beforeStepUpRemoval: { withRoute: "c3dcf92df4006bb1c9b2973bbf7cfd1a7c6fe5fb99fba708f5d43a8c9ee35fd0", withoutRoute: "df50c0cb0b99f3a4cea1d04a782d01f0616aca0c6d81ec5efe571357307929ee" },
       },
       {
         label: "legacy",
@@ -311,8 +311,8 @@ describe("the named TEST proof-only installation gate", () => {
         // #1129, #1131: the company layer, GitHub sign-in, the company-secrets role and the reliability parts in the legacy (production) template too (no step-up: DEC 254zzz73).
         // #1149: re-pinned for the legacy broker's packed environment (names parameter, AGENTX_SETTINGS, the names parameter's read).
         // #1148: re-pinned for the core engine in the legacy template (CoreEngine off by default, the /v1/app route, saved environment images, the core's keys).
-        withRoute: "c07fe8ab40debf3e1fb8700f895c9822ec7200f7e829ecc15bae8ff62052b1cb",
-        withoutRoute: "5cc5bafe4a8a5fa2411069b88d17d73e5afdf2a742787327b7e90b2912df3207",
+        withRoute: "2f0c70d900577da22cc1b54644408ed566a575a37ef40014a7c502418a70eb97",
+        withoutRoute: "6b6ea8102af71072a71f7479b48eee0d2bfe2ba9414b4b88dc51acba923c1a15",
         beforeStepUpRemoval: undefined,
       },
     ] as const;
