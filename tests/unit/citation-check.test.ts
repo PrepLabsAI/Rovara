@@ -50,11 +50,13 @@ describe("checkCitations: the match", () => {
     expect(calls.find((call) => call.path === "src/app.ts")?.untilLine).toBeUndefined();
   });
 
-  it("plain mode accepts a unique quote six lines away using the whole committed file, while prose stays local", async () => {
-    const read: CitationFileReader = async (_repo, _path, _commit, options) => options.untilLine === undefined ? FILE : LINES.slice(0, options.untilLine).join("\n");
+  it("an answer (plain mode) citation whose quote is unique in the file but outside the 3-line window stays source_not_found; checkCitations never uses the whole-file fallback", async () => {
+    const reads: (number | undefined)[] = [];
+    const read: CitationFileReader = async (_repo, _path, _commit, options) => { reads.push(options.untilLine); return options.untilLine === undefined ? FILE : LINES.slice(0, options.untilLine).join("\n"); };
     const citations = [ref(10, quoteOf(16))];
     const plain = await checkCitations(read, citations, { commits, mode: "plain", now: fixedNow });
-    expect(plain.results.map((result) => result.outcome)).toEqual(["source_found"]);
+    expect(plain.results).toMatchObject([{ outcome: "source_not_found", reason: "quote_not_at_line" }]);
+    expect(reads.every((until) => until !== undefined)).toBe(true);
     const prose = await checkCitations(async () => FILE, citations, { commits, now: fixedNow });
     expect(prose.results).toMatchObject([{ outcome: "source_not_found", reason: "quote_not_at_line" }]);
   });

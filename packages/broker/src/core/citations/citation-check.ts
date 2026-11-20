@@ -291,7 +291,7 @@ export function shownCitation(citation: CitationRef): ShownCitation {
 /**
  * Re-reads every citation through `read` and returns one result per citation, in order. Never throws. A source is found only when the citation's repository is bound to exactly its commit,
  * its path is safe, it has a usable quote (in prose: a line and a quote of at least `PROSE_QUOTE_MIN_CHARS`), its file was read within the limits, and the quote is within
- * `CITATION_LINE_SLACK` lines of its line (in plain mode, also a unique whole-file quote, or anywhere when it names none).
+ * `CITATION_LINE_SLACK` lines of its line (in plain mode, anywhere when it names none; never the whole-file fallback).
  */
 export async function checkCitations(read: CitationFileReader | undefined, citations: readonly CitationRef[], options: CitationCheckOptions): Promise<CitationCheck> {
   const prose = (options.mode ?? "prose") !== "plain";
@@ -321,7 +321,7 @@ export async function checkCitations(read: CitationFileReader | undefined, citat
     if (early[index] !== undefined) return;
     const key = keyOf(citation);
     const entry = needs.get(key) ?? { repository: citation.repo, path: citation.path, commit: citation.commit, untilLine: 0, whole: false };
-    const until = prose ? untilLineOf(citation) : undefined;
+    const until = untilLineOf(citation);
     if (until === undefined) entry.whole = true;
     else entry.untilLine = Math.max(entry.untilLine ?? 0, until);
     needs.set(key, entry);
@@ -344,7 +344,8 @@ export async function checkCitations(read: CitationFileReader | undefined, citat
     if (found.kind === "missing") return { outcome: "source_not_found", reason: "file_missing", shown };
     // A reader that answers with something that is not text (a Buffer, say) did not finish the read.
     if (typeof found.text !== "string") return { outcome: "unreadable", reason: "read_failed", shown };
-    const holds = prose ? quoteInWindow(found.text.split(/\r\n|\r|\n/u), citation.line!, usableQuoteOf(citation)!) : citationHolds(found.text, citation);
+    // checkCitations never uses citationHolds' whole-file fallback (that is for setup COMMAND items only, via proposal-verify).
+    const holds = citation.line === undefined ? collapseWhitespace(found.text).includes(usableQuoteOf(citation)!) : quoteInWindow(found.text.split(/\r\n|\r|\n/u), citation.line, usableQuoteOf(citation)!);
     return holds ? { outcome: "source_found", shown } : { outcome: "source_not_found", reason: "quote_not_at_line", shown };
   });
   return { results, complete: results.every((result) => result.outcome !== "unreadable") };
