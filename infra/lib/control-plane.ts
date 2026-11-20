@@ -79,7 +79,7 @@ export interface ControlPlaneStackProps extends StackProps {
  * `<prefix><suffix>` with a suffix from HEALTH_ALARM_SUFFIXES. Every stack of a named app is the
  * same environment, and alarm names are plain strings (naming.alarmName).
  */
-function unlistedAlarms(scope: Construct, prefix: string): string[] {
+function unlistedAlarms(scope: Construct, prefix: string, egressPrefix: string = prefix): string[] {
   const listed = new Set<string>(HEALTH_ALARM_SUFFIXES.map((suffix) => `${prefix}${suffix}`));
   return scope.node.root.node.findAll().flatMap((construct) => {
     // CloudWatch returns a composite alarm only to a DescribeAlarms grant on *, which the broker has not.
@@ -87,10 +87,11 @@ function unlistedAlarms(scope: Construct, prefix: string): string[] {
     if (!(construct instanceof cloudwatch.CfnAlarm)) return [];
     // The foundation's egress alarms keep the live names agentx-<env>-blocked-dns-spike and agentx-<env>-nat-egress-spike-<az>, which the probe's single-word suffixes
     // cannot list. They notify the alerts topic and are not on the admin health route.
-    // Only those names: any other alarm inside EgressAlarms is still refused.
+    // Only those names: any other alarm inside EgressAlarms is still refused. The legacy production install's health alarms are AgentX<suffix>, but its egress alarms (when its
+    // DNS firewall is switched on, agentxDnsFirewall) keep the same agentx-production-* shape, so they are matched under its resource prefix instead (egressPrefix).
     const name = construct.alarmName;
-    if (name !== undefined && !Token.isUnresolved(name) && name.startsWith(prefix) && construct.node.scopes.some((parent) => parent instanceof EgressAlarms)
-      && (name === `${prefix}blocked-dns-spike` || /^nat-egress-spike-[a-z0-9]+-az[0-9]+$/.test(name.slice(prefix.length)))) return [];
+    if (name !== undefined && !Token.isUnresolved(name) && name.startsWith(egressPrefix) && construct.node.scopes.some((parent) => parent instanceof EgressAlarms)
+      && (name === `${egressPrefix}blocked-dns-spike` || /^nat-egress-spike-[a-z0-9]+-az[0-9]+$/.test(name.slice(egressPrefix.length)))) return [];
     if (name !== undefined && !Token.isUnresolved(name) && listed.has(name)) return [];
     return [`the health probe does not read alarm ${construct.node.path} (${String(name)}): name it ${prefix}<suffix> and add the suffix to HEALTH_ALARM_SUFFIXES`];
   });
@@ -1138,7 +1139,7 @@ export class ControlPlaneStack extends Stack {
       // app refuses to synthesize one. This holds when an environment's stacks deploy from one
       // revision, as a release does: a stack deployed alone from a newer revision could add an
       // alarm this broker does not list.
-      this.node.addValidation({ validate: () => unlistedAlarms(this, alarmPrefix) });
+      this.node.addValidation({ validate: () => unlistedAlarms(this, alarmPrefix, naming.env === undefined ? `${naming.resourcePrefix}-` : alarmPrefix) });
       broker.addToRolePolicy(new iam.PolicyStatement({
         actions: ["cloudwatch:DescribeAlarms"],
         resources: [`arn:${this.partition}:cloudwatch:${this.region}:${this.account}:alarm:${alarmPrefix}*`],
