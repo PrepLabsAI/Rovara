@@ -301,6 +301,8 @@ jobs:
       - name: Tests (the ones this change can reach)
         if: needs.plan.outputs.tests == 'changed'
         env:
+          # The nightly-only tests (tests/support/vitest-shared-config.ts) run here too, but only when this change reaches them.
+          ROVARA_NIGHTLY_TESTS: "1"
           CI_EVENT: ${{ github.event_name }}
           CI_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           CI_TITLE: ${{ github.event.pull_request.title }}
@@ -322,6 +324,22 @@ jobs:
           [ -f "$CI_EXTRA_TESTS" ] && chmod o+r "$CI_EXTRA_TESTS"
           $AS_TESTER npm test -- --changed HEAD^1 --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}
           if [ -s "$CI_EXTRA_TESTS" ]; then xargs $AS_TESTER npm test -- --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }} < "$CI_EXTRA_TESTS"; fi
+
+  # The tests too slow for every pull request (nightlyOnlyFiles in tests/support/vitest-shared-config.ts), once a night. A pull request runs one only when its
+  # change reaches it (the "changed" step above).
+  nightly-tests:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run test:nightly
 
   # Real Chromium E2E checks need a Linux ARM64 Docker host, the platform Rovara's runtime targets. This job
   # builds the pinned browser executor image, smoke-tests it with no network, then runs tests/linux against
