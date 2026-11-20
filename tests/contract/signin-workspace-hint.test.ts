@@ -2,6 +2,8 @@
 // slack.com/openid/connect/authorize). The hint is only a convenience: it decides which workspace Slack's own page opens on, never who is signed in.
 // Who is signed in is read from Slack's verified ID token exactly as before; the hint never reaches `complete`.
 import { describe, expect, it } from "vitest";
+import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
+import { SLACK_OIDC_ISSUER, newCompanyInviteCode } from "@agentx/contracts";
 import { slackSignInProvider } from "../../packages/broker/src/developer/providers.js";
 import { API, authorizeQuery, fakeSlack, httpEvent, routeFetch, SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, TEAM, T0 } from "../support/developer-fakes.js";
 import { B, person, SECRET, sharedSignInWorld, WEB, X } from "../support/company-shared-signin-world.js";
