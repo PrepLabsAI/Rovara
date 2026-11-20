@@ -2,7 +2,7 @@ import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // The security rules of the design review in Code's own wiring: the packet route (who may read which reviewer's packet), the one-shot model key of a reviewer's slot, the rule that a design-review operation never gets a key of
 // its own, the blocker-reason rule and its record, the tier a reviewed design is approved at, the hold nobody can answer, and a flow with the switch off. Each test names the rule it holds; a change that loosens a rule fails one of them.
 import { describe, expect, it, vi } from "vitest";
-import { DesignReviewBindingSchema, WORKER_INVOCATION_FEATURES, createCandidateManifest, type PlanDocument } from "@agentx/contracts";
+import { DesignReviewBindingSchema, WORKER_INVOCATION_FEATURES, agentXError, createCandidateManifest, type PlanDocument } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
 import { DESIGN_REVIEW_PACKET_PATH, handleDesignReviewPacket } from "../../packages/broker/src/core/design-review/packet-route.js";
 import { readSlotPacket } from "../../packages/broker/src/core/design-review/packet-store.js";
@@ -59,7 +59,7 @@ describe("the packet route", () => {
     const w = await world();
     const { ask, binding } = await dispatched(w);
     const slot = binding.reviewers[0]!.keySlot;
-    await expect(ask(slot, { stamp: "00000000-0000-4000-8000-000000000000" })).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
+    await expect(ask(slot, { stamp: "00000000-0000-4000-8000-000000000000" })).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN", statusCode: 403 });
     await expect(ask(slot, { stamp: null })).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
   });
 
@@ -73,6 +73,12 @@ describe("the packet route", () => {
     const get = vi.spyOn(w.h.store, "get");
     await expect(handleDesignReviewPacket(w.h.deps, capabilities, request, async () => { throw new Error("refused"); })).rejects.toThrow("refused");
     expect(get).not.toHaveBeenCalled();
+    // The hosted check's refusals (another task's, stale or revoked credentials) are 403 on this route, with their codes and messages unchanged; any other failure keeps its own status.
+    for (const code of ["CALLBACK_FORBIDDEN", "STALE_FENCE"] as const) {
+      await expect(handleDesignReviewPacket(w.h.deps, capabilities, request, async () => { throw agentXError(code, "no longer allowed"); })).rejects.toMatchObject({ code, statusCode: 403, message: `${code}: no longer allowed` });
+    }
+    await expect(handleDesignReviewPacket(w.h.deps, capabilities, request, async () => { throw agentXError("FORBIDDEN", "x"); })).rejects.toMatchObject({ code: "FORBIDDEN", statusCode: 403 });
+    await expect(handleDesignReviewPacket(w.h.deps, capabilities, request, async () => { throw agentXError("NOT_FOUND", "x"); })).rejects.toMatchObject({ code: "NOT_FOUND", statusCode: 404 });
     vi.useFakeTimers();
     try {
       let release!: () => void;
@@ -114,10 +120,10 @@ describe("the packet route", () => {
     const slot = binding.reviewers[0]!.keySlot;
     const issue = (actions: string[], fence = round.operation.fence) => capabilities.issue({ workspaceId: w.workspaceId, operationId: round.operation.id, fence, actions: actions as never, expiresInSeconds: 60 });
     await expect(ask(slot, { capability: issue(["events", "artifacts", "result", "model-access"]) })).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
-    await expect(ask(slot, { capability: issue(["design-review-packet"], round.operation.fence + 1) })).rejects.toMatchObject({ code: "STALE_FENCE" });
+    await expect(ask(slot, { capability: issue(["design-review-packet"], round.operation.fence + 1) })).rejects.toMatchObject({ code: "STALE_FENCE", statusCode: 403 });
     await mintKeys(w, round.operation);
     await answerRound(w, round.operation, () => []);
-    await expect(ask(slot)).rejects.toMatchObject({ code: "STALE_FENCE" });
+    await expect(ask(slot)).rejects.toMatchObject({ code: "STALE_FENCE", statusCode: 403 });
     // An ordinary planning operation has no stored binding: its capability cannot read a packet even if it carried the action.
     const second = await world();
     await toDesignPhase(second);
