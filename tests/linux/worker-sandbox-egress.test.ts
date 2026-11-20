@@ -845,7 +845,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       expect(probe.code, probe.stderr).toBe(0);
       const result = JSON.parse(probe.stdout.trim().split("\n").at(-1) ?? "{}") as Record<string, { status?: number; body?: string; error?: string; addresses?: string[] }>;
       expect(result.local?.status).toBe(200);
-      expect(result.local?.body).toContain("Account");
+      expect(result.local?.body).toContain("Checkout");
       expect(result.dnsDenied).toEqual({ error: "ENOTFOUND" });
       expect(result.dnsAllowed).toEqual({ addresses: [GATEWAY_IP] });
       const isNetworkDenial = (answer: { status?: number; error?: string } | undefined): boolean => answer?.status === undefined && /net::ERR_(ADDRESS_UNREACHABLE|CONNECTION_TIMED_OUT|CONNECTION_REFUSED)\b/u.test(answer?.error ?? "");
