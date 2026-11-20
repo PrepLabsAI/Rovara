@@ -1092,6 +1092,7 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
   let clientId: string;
   let companyId: string | undefined;
   let sessionFacts: AccessCheckContext["session"];
+  let signedInId: string | undefined;
   let companyless = false;
   let joinedByInvite = false;
   if (basic !== undefined) {
@@ -1104,7 +1105,7 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
     if (parsed.data.developerId !== undefined) throw refused();
     // DEC 253z: the person's own token is the one form that may answer for a person with no company yet (the web app's "create your company").
     const authenticated = await authenticateClientToken(deps, authorization, nowSeconds, { companyless: true });
-    ({ developerId, administrator } = authenticated);
+    ({ developerId, administrator, signedInId } = authenticated);
     clientId = authenticated.client.clientId;
     companyId = authenticated.companyId;
     companyless = authenticated.companyless === true;
@@ -1136,7 +1137,7 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
   scope?.check();
   if (access === undefined) throw refused();
   // L4-SIGNIN: a Slack session of the person's own token also names its workspace (a convenience for the browser; best effort: unreadable is left out).
-  const slackTeamId = basic === undefined && sessionFacts?.amr === "slack" ? await slackWorkspaceOf(deps, developerId) : undefined;
+  const slackTeamId = basic === undefined && sessionFacts?.amr === "slack" ? await slackWorkspaceOf(deps, developerId, signedInId) : undefined;
   const answer: AccessCheckResponse = { developerId, displayName: access.displayName, nameChosen: access.nameChosen, administrator, projects: access.projects, notices: access.notices, ...company, ...(slackTeamId === undefined ? {} : { slackTeamId }) };
   const context: AccessCheckContext = { clientId, via: basic === undefined ? "token" : "client_secret", developerId, ...(sessionFacts === undefined ? {} : { session: sessionFacts }), now: deps.now() };
   const ruled = await applyAccessRules(deps.developer.accessRules, context, answer);
@@ -1148,8 +1149,14 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
 }
 
 /** L4-SIGNIN: the Slack workspace id on the person's own stored profile, only when it is a workspace id. Any failure is no workspace: it is a convenience, never a gate. */
-async function slackWorkspaceOf(deps: DeveloperRouteDependencies, developerId: string): Promise<string | undefined> {
+async function slackWorkspaceOf(deps: DeveloperRouteDependencies, developerId: string, signedInId?: string): Promise<string | undefined> {
   try {
+    if (signedInId !== undefined) {
+      const walk = await mergeSurvivor((id) => getSignIn(deps, `DEVELOPER#${id}`), signedInId);
+      // The identity recorded by this session must still belong to its person; never use another person's workspace or fall back to the survivor's.
+      if (walk.survivorId !== developerId) return undefined;
+      return slackWorkspaceHint(walk.signedIn.slackTeamId);
+    }
     return slackWorkspaceHint((await getSignIn<Pick<DeveloperRecord, "slackTeamId">>(deps, `DEVELOPER#${developerId}`))?.slackTeamId);
   } catch {
     return undefined;
@@ -1305,7 +1312,7 @@ async function companylessSession(deps: DeveloperRouteDependencies, client: Sign
  * Spec 063 FR-004, spec 065 FR-003: a registered sign-in client's token, for a live session of its own. The unverified azp
  * only picks which client's audience the token must then verify against. Every refusal is the same 401.
  */
-async function authenticateClientToken(deps: DeveloperRouteDependencies, authorization: string | undefined, nowSeconds: number, options: { companyless?: true } = {}): Promise<{ client: SignInClientRecord; companyId?: string; companyless?: true; developerId: string; administrator: boolean; scopes: ClientScope[]; sessionId: string; amr: DeveloperSignInMethod; startedAt: string; joinedByInvite?: true }> {
+async function authenticateClientToken(deps: DeveloperRouteDependencies, authorization: string | undefined, nowSeconds: number, options: { companyless?: true } = {}): Promise<{ signedInId?: string; client: SignInClientRecord; companyId?: string; companyless?: true; developerId: string; administrator: boolean; scopes: ClientScope[]; sessionId: string; amr: DeveloperSignInMethod; startedAt: string; joinedByInvite?: true }> {
   const refused = () => agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
   let azp: unknown;
   try {
@@ -1345,7 +1352,7 @@ async function authenticateClientToken(deps: DeveloperRouteDependencies, authori
     // access has the person's rights, so every scope.
     const scopes = client.fullAccess === true ? [...CLIENT_SCOPES] : scopesOf(claims.scope).filter((scope) => client.scopes?.includes(scope) === true);
     return {
-      client, ...(companyId === undefined ? {} : { companyId }), ...(companyless ? { companyless: true as const } : {}), developerId: session.developerId, sessionId: claims.sid, amr,
+      client, ...(session.signedInId === undefined ? {} : { signedInId: session.signedInId }), ...(companyId === undefined ? {} : { companyId }), ...(companyless ? { companyless: true as const } : {}), developerId: session.developerId, sessionId: claims.sid, amr,
       administrator: amr === "oidc" && session.administrator === true && !companyless, scopes, startedAt: session.startedAt,
       // DEC 254b (f): what the sign-in server recorded on THIS session at mint, for the company the session is bound to (checked against live membership above).
       ...(session.joinedByInvite === true && !companyless && companyId !== undefined && (session.companyId ?? IMPLICIT_COMPANY_ID) === companyId ? { joinedByInvite: true as const } : {}),
