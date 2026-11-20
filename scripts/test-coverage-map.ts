@@ -151,6 +151,14 @@ function lowerBound(sorted: readonly number[], value: number): number {
 }
 
 /** A glob with `*` only (any run of characters), matched against the whole string; `ignoreCase` for test titles. */
+/**
+ * #1230: whether a test file asserts with a snapshot. A snapshot checks content (a tool definition, an approved sentence, a golden prompt), not which
+ * code ran, so per-test coverage cannot tell two snapshot tests apart from any other test that runs the same lines. Every test in such a file is kept.
+ */
+export function usesSnapshots(source: string): boolean {
+  return /\.(?:toMatchSnapshot|toMatchInlineSnapshot|toMatchFileSnapshot|toThrowErrorMatchingSnapshot|toThrowErrorMatchingInlineSnapshot)\(/u.test(source);
+}
+
 export function globMatch(pattern: string, value: string, ignoreCase = false): boolean {
   const escaped = pattern.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/gu, "\\$&")).join(".*");
   return new RegExp(`^${escaped}$`, ignoreCase ? "iu" : "u").test(value);
@@ -276,7 +284,12 @@ function main(argv: string[]): number {
     const records = readRecords(directory);
     const coverage = buildCoverage(records, sourceReader(directory));
     const keep = readKeep(keepPath);
-    const forcedKeep = new Set(records.filter((record) => record.concurrent || record.failed === true
+    const snapshotFiles = new Map<string, boolean>();
+    const inSnapshotFile = (file: string): boolean => {
+      if (!snapshotFiles.has(file)) snapshotFiles.set(file, existsSync(file) && usesSnapshots(readFileSync(file, "utf8")));
+      return snapshotFiles.get(file) === true;
+    };
+    const forcedKeep = new Set(records.filter((record) => record.concurrent || record.failed === true || inSnapshotFile(record.file)
       || (keep.files ?? []).some((glob) => globMatch(glob, record.file))
       || (keep.titles ?? []).some((glob) => globMatch(glob, record.id, true))
       || (keep.modules ?? []).some((glob) => globMatch(glob, coverage.module.get(record.id) ?? ""))).map((record) => record.id));
