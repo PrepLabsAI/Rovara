@@ -844,6 +844,22 @@ export class ControlPlaneStack extends Stack {
       target: `integrations/${integration.ref}`,
       authorizationType: "NONE",
     });
+    // Worker capabilities authenticate these exact reads in the broker, before company discovery.
+    // Keep ContextToolsListRoute: the recorded 0.5.18 template already used this ID for the catalog GET.
+    if (naming.env !== undefined) {
+      new apigwv2.CfnRoute(this, "ContextToolsListRoute", {
+        apiId: api.ref,
+        routeKey: "GET /v1/internal/context-tools",
+        target: `integrations/${integration.ref}`,
+        authorizationType: "NONE",
+      });
+      new apigwv2.CfnRoute(this, "DesignReviewPacketRoute", {
+        apiId: api.ref,
+        routeKey: "GET /v1/internal/design-review/packet",
+        target: `integrations/${integration.ref}`,
+        authorizationType: "NONE",
+      });
+    }
     // The setup worker authenticates this one source read with its short-lived project-setup
     // capability, which the broker verifies. Keep the API Gateway exception limited to this GET;
     // the generic internal callback route remains POST-only.

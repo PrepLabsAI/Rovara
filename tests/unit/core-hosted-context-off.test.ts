@@ -1,8 +1,4 @@
-// HOTFIX 0.5.33 (DEC 254zzz207), stopgap: on the HOSTED core no stage asks the worker for the context-source list (`GET /v1/internal/context-tools`) and the design review is not wired
-// (its reviewers read `GET /v1/internal/design-review/packet`). Neither route exists on API Gateway and both want a gateway-stamped `x-rovara-workspace` header a hosted worker never sends,
-// so the first hosted task failed CALLBACK_FORBIDDEN. The real hosted root (Team record ON), a real task, and the step each stage would be dispatched as are read back, so what a worker would be sent is
-// what is checked. The LAPTOP path is unchanged and is proved by the existing laptop tests (tests/unit/local-up-flow.test.ts "plan job is told contextSources and GET context-tools answers 200",
-// tests/unit/design-review-flow.test.ts and design-review-local-sources.test.ts, whose reviewers read their packet); `core-team-context.test.ts` keeps the hosted handler itself (unwired) correct.
+// Regression for the original hosted stopgap: the real root now advertises the repaired routes.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
@@ -55,57 +51,56 @@ async function hostedRoot() {
 }
 
 /** The dispatch the stage's step is accepted with on the hosted flow: what the worker is sent (the payload, its capability actions and the features it must list). */
-async function dispatchOf(mode: StepInput["workflowMode"], wireSources = false) {
+async function dispatchOf(mode: StepInput["workflowMode"], reviewer = false) {
   const { w, root } = await hostedRoot();
   const reply = await root.coreTasks!.route({ method: "POST", path: "/v1/dev/tasks", headers: {}, body: JSON.stringify({ requestId: randomUUID(), project: PROJECT, instructions: "Add a health endpoint", workflow: true }) }, { developerId: personA, sessionId: "session", name: "Member" });
   expect(reply?.statusCode, reply?.body).toBe(200);
   const deps = (await root.app.runtimeFor(A)).flow.deps;
-  // Positive control only: proves this file sees a source list when one IS wired (the mutant the hotfix removed).
-  if (wireSources) deps.contextSources = { stageHasSources: async () => true };
+
   const taskId = (JSON.parse(reply!.body) as { task: { taskId: string } }).task.taskId;
   const task = (await readTask(deps, taskId))!;
   // The workspace is free for a step (the machine handshake is not what this file is about).
   const held = (await readWorkspace(deps, task.workspaceId))!;
   await w.store.put({ item: plain({ ...held, status: "READY", activeOperationId: null }) });
   const workspace = (await readWorkspace(deps, task.workspaceId))!;
-  const accepted = await acceptStep(deps, { task, workspace, requestId: randomUUID(), prompt: "read", workflowMode: mode });
+  const accepted = await acceptStep(deps, { task, workspace, requestId: randomUUID(), prompt: "read", workflowMode: mode, ...(reviewer ? { designReview: { version: 1 as const, round: 1 as const, reviewers: [{ role: "critic" as const, keySlot: "r1-critic", packetDigest: "d".repeat(64), model: { provider: "anthropic", modelId: "claude-sonnet-4-6" } }] } } : {}) });
   return { deps, dispatch: accepted.operation?.dispatch, result: accepted.result };
 }
 
-describe("hosted core: no context-source list and no design review packet (hotfix 0.5.33)", () => {
-  it("with the Team record on, flow.deps carries no context sources and no design review runtime", async () => {
+describe("hosted core context and design review restored", () => {
+  it("with the Team record on, flow.deps carries context sources and a design review runtime", async () => {
     const { root } = await hostedRoot();
     expect(root.lessons).toBeDefined();
     const deps = (await root.app.runtimeFor(A)).flow.deps;
     expect(deps.learned).toBeDefined();
-    expect(deps.contextSources).toBeUndefined();
-    expect(deps.designReview).toBeUndefined();
+    expect(deps.contextSources).toBeDefined();
+    expect(deps.designReview).toBeDefined();
   });
 
-  it.each(SOURCE_STAGES)("a hosted %s step is dispatched with no source-list flag, no context-tools capability and no feature to list", async (mode) => {
+  it.each(SOURCE_STAGES)("a hosted %s step advertises its source list, capability and feature", async (mode) => {
     const { dispatch, result } = await dispatchOf(mode);
     expect(result).toBe("STARTED");
+    expect(dispatch?.payload).toMatchObject({ contextSources: true });
+    expect(dispatch?.extraActions).toContain("context-tools");
+    expect(dispatch?.extraActions ?? []).not.toContain("design-review-packet");
+    expect(dispatch?.requires).toContain("task.contextSources.v1");
+  });
+
+  it.each(["IMPLEMENT", "CHECKS"] as const)("%s does not advertise context tools", async mode => {
+    const { dispatch, result } = await dispatchOf(mode);
+    expect(result).toBe("STARTED");
+    expect(dispatch).toBeDefined();
     expect(dispatch?.payload).not.toHaveProperty("contextSources");
     expect(dispatch?.extraActions ?? []).not.toContain("context-tools");
-    expect(dispatch?.extraActions ?? []).not.toContain("design-review-packet");
     expect(dispatch?.requires ?? []).not.toContain("task.contextSources.v1");
   });
 
-  it("the harness would see a source list if one were wired (positive control), and nothing else of the hosted flow changed", async () => {
-    const wired = await dispatchOf("UNDERSTAND", true);
-    expect(wired.dispatch?.payload).toMatchObject({ contextSources: true });
-    expect(wired.dispatch?.extraActions).toContain("context-tools");
-    // The company's second review and the Team record are still built on the hosted flow.
-    const { root } = await hostedRoot();
-    const deps = (await root.app.runtimeFor(A)).flow.deps;
-    expect(deps.secondReview).toBeDefined();
-    expect(deps.learned).toBeDefined();
-  });
-
-  it("a hosted flow with no design review runtime answers the flow's entry points as 'no design review' (no reviewer round, no packet)", async () => {
-    const { root } = await hostedRoot();
-    const deps = (await root.app.runtimeFor(A)).flow.deps;
-    expect(deps.designReview).toBeUndefined();
-    expect(await deps.designReview?.designFirst("Add a health endpoint")).toBeUndefined();
+  it("packet reviewer operations do not advertise context tools", async () => {
+    const { dispatch, result } = await dispatchOf("PLAN_CRITIQUE", true);
+    expect(result).toBe("STARTED");
+    expect(dispatch).toBeDefined();
+    expect(dispatch?.payload).not.toHaveProperty("contextSources");
+    expect(dispatch?.extraActions ?? []).not.toContain("context-tools");
+    expect(dispatch?.requires ?? []).not.toContain("task.contextSources.v1");
   });
 });

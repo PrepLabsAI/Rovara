@@ -160,7 +160,7 @@ describe("setupModelPrice on a hosted route (the ledger's price, not a name matc
     }
     // And the meter itself: one million input and one million output tokens cost exactly the setup price's total.
     const cost = await createHostedMetering().price({ provider: identity.provider, modelId: identity.modelId, tokens: { input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0 } });
-    expect(cost.micros).toBe(Math.round((price!.inputPerMTok + price!.outputPerMTok) * 1_000_000));
+    expect(cost?.micros).toBe(Math.round((price!.inputPerMTok + price!.outputPerMTok) * 1_000_000));
   });
 
   it("is never below the cheaper OpenRouter entry for the same name (that was the under-price risk)", () => {

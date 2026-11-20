@@ -1,3 +1,4 @@
+import { CORE_CONTEXT_WORKER_ROUTES, coreContextWorkerRouteOf, appRouteOf as contextAppRouteOf, devRouteOf as contextDevRouteOf } from "../../packages/broker/src/aws/dev-route-scopes.js";
 // Engine host (lane E2): the core's own handlers mounted on the deployed developer API behind the switch. Off is byte-identical (nothing read, nothing answered); the company comes from
 // membership only and fails closed; another company's task reads exactly like a missing one; unwired parts say so in fixed words; a script token is never made through this API.
 import { randomUUID } from "node:crypto";
@@ -1117,4 +1118,17 @@ it("hosted session read and list keep FULL task figures private even when a read
   }
  }
  expect((await routes.route(get(`/v1/app/sessions/${sessionId}`), foreign))?.statusCode).toBe(404);
+});
+
+it("inventories the four exact context worker routes without person authority", () => {
+  expect(CORE_CONTEXT_WORKER_ROUTES.map(row => `${row.method} ${row.path}`)).toEqual([
+    "GET /v1/internal/context-tools", "GET /v1/internal/design-review/packet", "POST /v1/internal/context-tools/call", "POST /v1/internal/mcp",
+  ]);
+  for (const row of CORE_CONTEXT_WORKER_ROUTES) {
+    expect(coreContextWorkerRouteOf(row.method, row.path)).toEqual({ ...row, requires: "worker" });
+    expect(coreContextWorkerRouteOf(row.method === "GET" ? "POST" : "GET", row.path)).toBeUndefined();
+    expect(coreContextWorkerRouteOf(row.method, `${row.path}/extra`)).toBeUndefined();
+    expect(contextAppRouteOf(row.method, row.path)).toBeUndefined();
+    expect(contextDevRouteOf(row.method, row.path)).toBeUndefined();
+  }
 });

@@ -47,14 +47,15 @@ describe("the broker's core root gives each company's flow a company-bound artif
     expect(a.artifacts).not.toBe(b.artifacts);
   });
 
-  it("wires the hosted second reviewer (the design review is off on the hosted core, hotfix 0.5.33) and fail-safe company autonomy on the real root", async () => {
+  it("wires hosted second review and design review with fail-safe company autonomy", async () => {
     const { root } = await world();
     const a = (await root.app.runtimeFor(A)).flow.deps;
     const b = (await root.app.runtimeFor(B)).flow.deps;
     expect(typeof a.secondReview?.prepare).toBe("function");
-    // Hotfix 0.5.33 (DEC 254zzz207): no hosted design review runtime until the packet route is deployed and its stamp check is a hosted one.
-    expect(a.designReview).toBeUndefined();
-    expect(b.designReview).toBeUndefined();
+    // Each company owns its design runtime.
+    expect(a.designReview).toBeDefined();
+    expect(b.designReview).toBeDefined();
+    expect(a.designReview).not.toBe(b.designReview);
     expect(a.secondReview).not.toBe(b.secondReview);
     expect(await a.autonomy!({ companyId: A } as never)).toEqual({ autonomy: "suggest", unreadable: true });
     expect(await a.autonomy!({ companyId: B } as never)).toEqual({ autonomy: "suggest", noCompany: true });

@@ -234,6 +234,18 @@ function withoutTaskPeopleControls(template: unknown): unknown {
   return template;
 }
 
+function withoutHostedContextRoutes(template: unknown): unknown {
+  const resources = (template as { Resources: Record<string, Resource> }).Resources;
+  const model = resources.ModelAccessRoute!;
+  for (const [id, path] of [["ContextToolsListRoute", "/v1/internal/context-tools"], ["DesignReviewPacketRoute", "/v1/internal/design-review/packet"]]) {
+    expect(resources[id!]).toStrictEqual({ ...model, Properties: { ...model.Properties, RouteKey: `GET ${path}` } });
+    expect(resources[id!]!.Properties.AuthorizationType).toBe("NONE");
+    expect(resources[id!]!.Properties).not.toHaveProperty("AuthorizerId");
+    delete resources[id!];
+  }
+  return template;
+}
+
 // Issue 157 changes the Slack service's code only. These snapshots were recorded from mainline
 // 4a605fd (re-recorded there when mainline merged in), so a named environment's templates must stay
 // as they were, apart from issue 46's dispatch dead-letter alarm, issue 173's reconciler backstop,
@@ -256,7 +268,7 @@ describe("named environment templates", () => {
         // ENV-ROOM 2 (2026-11-17): the broker's names parameter is checked and the names put back in its environment first, as the rest was recorded.
         : stack.stackName === "agentx-staging-control-plane" ? withoutWorkerSandboxEgress(withoutNatEgressControlPlane(withoutGithubSignIn(withoutSwitchoverControlPlaneParity(withoutBrokerNamesParameter(withoutCompanyImportReads(withoutSlackCompanyMode(withoutChatGptKeyDeny(withoutBrokerSlackPoster(withoutSavedEnvSwitch(withoutSavedEnvImages(template, "staging")), "staging")))))), "staging")))
         : stack.stackName === "agentx-staging-slack" ? withoutSlackCompanyService(template) : template;
-      expect(stack.stackName === "agentx-staging-control-plane" ? withoutCoreEngine(withoutTaskPeopleControls(withoutStuckCancelAlarm(withoutUnwaitedTaskBackstop(withoutDispatchDeadLettersAlarm(parity))))) : parity).toMatchSnapshot();
+      expect(stack.stackName === "agentx-staging-control-plane" ? withoutCoreEngine(withoutHostedContextRoutes(withoutTaskPeopleControls(withoutStuckCancelAlarm(withoutUnwaitedTaskBackstop(withoutDispatchDeadLettersAlarm(parity)))))) : parity).toMatchSnapshot();
     }, 120_000);
   }
 });
