@@ -11,7 +11,7 @@ import { createCostLedger, costUsdOf } from "../core/cost/ledger.js";
 import { createSessionService } from "../services/sessions.js";
 import { createNoticeService, type NoticeServiceOptions } from "../services/notices.js";
 import { taskPeopleRecipients } from "./task-people-recipients.js";
-import { createMergeTrackingService, createMilestoneService } from "../services/merge-tracking.js";
+import { createMergeTrackingService, createMilestoneService, VERIFY_MAX_MS } from "../services/merge-tracking.js";
 import { rovaraCheckSource } from "../services/rovara-check.js";
 import { createIdentityMergePeople, type MergePeople } from "../core/merge/people.js";
 import { fixedCodeSettings } from "../core/merge/defaults.js";
@@ -157,7 +157,7 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
       const report = await notices.deliver({ deadlineMs, companyId, scan: notifyScan, maxItems: 100 });
       return report === undefined ? { skipped: "no_notification_transport" } : { ...report };
     }),
-    "merge-tracking": pass(async (store, deadlineMs) => {
+    "merge-tracking": boundedCorePass(flow.deps.store, now, async (store, deadlineMs) => {
       let failed = 0;
       const trackingLog = (entry: Record<string, unknown>) => {
         if (entry["event"] === "sweep.read_failed" || entry["event"] === "sweep.row_failed") failed += 1;
@@ -173,6 +173,6 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
       const report = await tracking.sweep({ budgetMs: Math.max(0, deadlineMs - now()) });
       const tierChecked = now() < deadlineMs ? await tracking.tierChecks() : 0;
       return { ...report, tierChecked, complete: mergeScan.complete && failed === 0, failed };
-    }),
+    }, VERIFY_MAX_MS),
   };
 }
