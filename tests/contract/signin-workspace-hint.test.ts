@@ -6,7 +6,7 @@ import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { SLACK_OIDC_ISSUER, newCompanyInviteCode } from "@agentx/contracts";
 import { slackSignInProvider, slackWorkspaceHint } from "../../packages/broker/src/developer/providers.js";
 import { API, authorizeQuery, fakeSlack, httpEvent, routeFetch, SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, TEAM, T0 } from "../support/developer-fakes.js";
-import { B, SECRET, sharedSignInWorld, WEB } from "../support/company-shared-signin-world.js";
+import { B, person, SECRET, sharedSignInWorld, WEB, X } from "../support/company-shared-signin-world.js";
 import { githubSignInProvider } from "../../packages/broker/src/developer/providers.js";
 import { GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, fakeGithub } from "../support/fake-github.js";
 
@@ -190,6 +190,53 @@ describe("what the web app is told: the offer and the person's own workspace", (
     expect((await w.access(installSession.access)).body).toMatchObject({ slackTeamId: TEAM });
     const oidcSession = await w.signIn("owner");
     expect((await w.access(oidcSession.access)).body).not.toHaveProperty("slackTeamId");
+  });
+
+  it("a merged Slack sign-in stores its verified workspace only on its identity and returns it for the survivor", async () => {
+    const w = world();
+    await w.setup();
+    const id = ownerKeyForSubject(SLACK_OIDC_ISSUER, `${OTHER}:U0NEW0001`);
+    const identity = { pk: `DEVELOPER#${id}`, sk: "META", entityType: "DEVELOPER", developerId: id, provider: "slack", issuer: SLACK_OIDC_ISSUER,
+      subject: `${OTHER}:U0NEW0001`, displayName: "Kept name", email: "kept@example.test", revoked: false, mergedInto: person("owner"),
+      firstSignInAt: "2026-10-01T00:00:00.000Z", lastSignInAt: "2026-10-01T00:00:00.000Z" };
+    w.db.set(identity);
+    const survivor = w.db.get(`DEVELOPER#${person("owner")}`, "META");
+    const signed = await w.signIn("U0NEW0001", { slackTeam: OTHER });
+    expect(signed.refused).toBeUndefined();
+    expect((await w.access(signed.access)).body).toMatchObject({ developerId: person("owner"), companyId: X, companyRole: "owner", slackTeamId: OTHER });
+    const stored = w.db.get(`DEVELOPER#${id}`, "META")!;
+    expect(stored.slackTeamId).toBe(OTHER);
+    const rest = { ...stored };
+    delete rest.slackTeamId;
+    delete rest.slackTeamName;
+    expect(rest).toEqual(identity);
+    expect(w.db.get(`DEVELOPER#${person("owner")}`, "META")).toEqual(survivor);
+    const refreshed = await w.refresh(signed.refresh!);
+    expect(refreshed.status).toBe(200);
+    expect((await w.access(refreshed.body.access_token as string)).body).toMatchObject({ slackTeamId: OTHER });
+    expect((await w.access((await w.signIn("owner")).access)).body).not.toHaveProperty("slackTeamId");
+  });
+
+  it.each(["another person", "unlinked", "revoked"] as const)("a stored session never returns a workspace from an identity that is %s", async (change) => {
+    const w = world();
+    await w.setup();
+    const id = ownerKeyForSubject(SLACK_OIDC_ISSUER, `${OTHER}:U0NEW0001`);
+    await w.signIn("U0NEW0001", { slackTeam: OTHER });
+    const identity = w.db.get(`DEVELOPER#${id}`, "META")!;
+    w.db.set({ ...identity, mergedInto: person("owner") });
+    const signed = await w.signIn("U0NEW0001", { slackTeam: OTHER });
+    expect(signed.refused).toBeUndefined();
+    // A survivor can have its own, different Slack sign-in. It must not supply this session's hint either.
+    w.db.set({ ...w.db.get(`DEVELOPER#${person("owner")}`, "META")!, slackTeamId: TEAM });
+    if (change === "another person") {
+      expect((await w.signIn("bob", { company: B })).refused).toBeUndefined();
+      w.db.set({ ...identity, mergedInto: person("bob") });
+    }
+    if (change === "unlinked") w.db.set(identity);
+    if (change === "revoked") w.db.set({ ...identity, mergedInto: person("owner"), revoked: true });
+    const answer = await w.access(signed.access);
+    expect(answer.status).toBe(200);
+    expect(answer.body).not.toHaveProperty("slackTeamId");
   });
 
   it("a client's own check on a person's behalf (client secret + developer id) never names the workspace", async () => {
