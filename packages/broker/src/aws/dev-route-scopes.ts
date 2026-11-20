@@ -125,6 +125,8 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/feedback-decision", requires: "decisions:decide" },
   // T3: invite administration is full-access only; live company admin/owner membership is still required.
   { method: "POST", path: "/v1/dev/company/preapprovals", requires: "full" },
+  // INVITE-RESEND (DEC 254zzz184): the website-only resend remains behind full access and the route's live company role check.
+  { method: "POST", path: "/v1/dev/company/preapprovals/{inviteId}/resend", requires: "full" },
   { method: "DELETE", path: "/v1/dev/company/preapprovals/{emailHash}", requires: "full" },
   // Lane LM8: the lessons API of one project of the caller's company (core-host/lessons-api.ts). Full access only, like the other company-admin routes; live membership and the project's roster still apply.
   { method: "GET", path: "/v1/dev/projects/{project}/lessons", requires: "full" },

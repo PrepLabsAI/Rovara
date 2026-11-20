@@ -1,7 +1,7 @@
 // DEC 254h: an invite link carries a single-use secret that Code checks at sign-in. The real broker route makes it with a company pre-approval;
 // the real sign-in server spends it, whatever the sign-in method, in the transaction that writes the membership.
-import { describe, expect, it } from "vitest";
-import { COMPANY_INVITE_LINK_PREFIX, SLACK_OIDC_ISSUER, companyInviteCodeHash, companyScoped } from "@agentx/contracts";
+import { describe, expect, it, vi } from "vitest";
+import { COMPANY_INVITE_LINK_PREFIX, SLACK_OIDC_ISSUER, companyInviteCodeHash, companyScoped, newCompanyInviteLink } from "@agentx/contracts";
 import { membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { inviteLinkKey } from "../../packages/broker/src/developer/company-membership.js";
@@ -89,6 +89,90 @@ describe("invite link secret (DEC 254h)", () => {
     // Each still works for its own company.
     expect((await w.access((await w.signIn("noemail", { company: X, invite: forX.secret })).access)).body).toMatchObject({ companyId: X });
     expect((await w.access((await w.signIn("U0INVITE1", { slackTeam: OTHER, company: B, invite: forB.secret })).access)).body).toMatchObject({ companyId: B });
+  });
+
+  it("resend kills the old link, retains its preapproval association, and gives the new bearer link a full expiry window", async () => {
+    const { w, owner } = await ready();
+    const old = await mint(w, owner, "resend@example.test", 1);
+    const emailHash = emailIndexKey("resend@example.test").pk.slice(6);
+    const fresh = newCompanyInviteLink();
+    const expiresAt = await w.company.resend(X, emailHash, 48, person("owner"), fresh.secretHash);
+    expect(fresh.secret).not.toBe(old.secret);
+    expect(expiresAt).toBe(Math.floor(w.now() / 1000) + 48 * 3600);
+    const approval = w.db.get(companyScoped(X, "PREAPPROVAL"), emailIndexKey("resend@example.test").pk)!;
+    expect(approval).toMatchObject({ status: "live", role: "member", inviteHash: fresh.secretHash });
+    expect(linkRow(w, X, old.secret)).toMatchObject({ status: "withdrawn", emailHash });
+    expect(w.db.get(inviteLinkKey(X, fresh.secretHash).pk, inviteLinkKey(X, fresh.secretHash).sk)).toMatchObject({ status: "live", emailHash, expiresAt: approval.expiresAt });
+    expect((await w.signIn("noemail", { company: X, invite: old.secret })).refused).toBe(NOT_INVITED);
+    expect(memberOf(w, person("noemail"))).toBeUndefined();
+    const joined = await w.signIn("noemail", { company: X, invite: fresh.secret });
+    expect((await w.access(joined.access)).body).toMatchObject({ companyId: X, joinedByInvite: true });
+  });
+
+  it("two simultaneous resends leave exactly one live link and one returned secret that works", async () => {
+    const { w, owner } = await ready();
+    const old = await mint(w, owner, "race-resend@example.test");
+    const emailHash = emailIndexKey("race-resend@example.test").pk.slice(6);
+    const first = newCompanyInviteLink(), second = newCompanyInviteLink();
+    const results = await Promise.allSettled([
+      w.company.resend(X, emailHash, 24, person("owner"), first.secretHash),
+      w.company.resend(X, emailHash, 72, person("owner"), second.secretHash),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const live = w.db.find((row) => row.entityType === "COMPANY_INVITE_LINK" && row.companyId === X && row.status === "live");
+    expect(live).toHaveLength(1);
+    expect(live[0]).toMatchObject({ emailHash });
+    expect(linkRow(w, X, old.secret)).toMatchObject({ status: "withdrawn" });
+    const current = w.db.get(companyScoped(X, "PREAPPROVAL"), emailIndexKey("race-resend@example.test").pk)!;
+    const winner = current.inviteHash === first.secretHash ? first.secret : second.secret;
+    expect([first.secretHash, second.secretHash]).toContain(current.inviteHash);
+    expect((await w.signIn("noemail", { company: X, invite: winner })).refused).toBeUndefined();
+    expect(memberOf(w, person("noemail"))).toMatchObject({ companyId: X });
+  });
+
+  it("a lost response after the atomic write leaves the replacement fully live", async () => {
+    const { w, owner } = await ready();
+    const old = await mint(w, owner, "crash@example.test");
+    const emailHash = emailIndexKey("crash@example.test").pk.slice(6);
+    const nextHash = companyInviteCodeHash("rvlink_crash_replacement");
+    const send = w.db.send.bind(w.db);
+    const transact = vi.spyOn(w.db, "send").mockImplementation(async (command) => {
+      const answer = await send(command);
+      if ((command as { constructor?: { name?: string } }).constructor?.name === "TransactWriteCommand") throw new Error("response lost after commit");
+      return answer;
+    });
+    await expect(w.company.resend(X, emailHash, 36, person("owner"), nextHash)).rejects.toThrow("response lost after commit");
+    transact.mockRestore();
+    const approval = w.db.get(companyScoped(X, "PREAPPROVAL"), emailIndexKey("crash@example.test").pk)!;
+    expect(approval).toMatchObject({ status: "live", inviteHash: nextHash });
+    expect(linkRow(w, X, old.secret)).toMatchObject({ status: "withdrawn" });
+    expect(w.db.get(inviteLinkKey(X, nextHash).pk, inviteLinkKey(X, nextHash).sk)).toMatchObject({ status: "live", emailHash, expiresAt: Math.floor(w.now() / 1000) + 36 * 3600 });
+    expect(w.db.find((row) => row.entityType === "COMPANY_INVITE_LINK" && row.companyId === X && row.status === "live")).toHaveLength(1);
+  });
+
+  it("refuses a pending invite whose current link is bound to a different email hash", async () => {
+    const { w, owner } = await ready();
+    await mint(w, owner, "bound@example.test");
+    const emailHash = emailIndexKey("bound@example.test").pk.slice(6);
+    const approval = w.db.get(companyScoped(X, "PREAPPROVAL"), emailIndexKey("bound@example.test").pk)!;
+    const key = inviteLinkKey(X, approval.inviteHash as string);
+    w.db.set({ ...w.db.get(key.pk, key.sk)!, emailHash: "f".repeat(64) });
+    const before = [...w.db.items.values()];
+    await expect(w.company.resend(X, emailHash, 24, person("owner"), companyInviteCodeHash("rvlink_wrong-binding"))).rejects.toThrow("company sign-in unavailable");
+    expect([...w.db.items.values()]).toEqual(before);
+  });
+
+  it("refuses a pending invite whose stored link names another company", async () => {
+    const { w, owner } = await ready();
+    await mint(w, owner, "foreign-link-company@example.test");
+    const emailHash = emailIndexKey("foreign-link-company@example.test").pk.slice(6);
+    const approval = w.db.get(companyScoped(X, "PREAPPROVAL"), emailIndexKey("foreign-link-company@example.test").pk)!;
+    const key = inviteLinkKey(X, approval.inviteHash as string);
+    w.db.set({ ...w.db.get(key.pk, key.sk)!, companyId: B });
+    const before = [...w.db.items.values()];
+    await expect(w.company.resend(X, emailHash, 24, person("owner"), companyInviteCodeHash("rvlink_foreign-company"))).rejects.toThrow("company sign-in unavailable");
+    expect([...w.db.items.values()]).toEqual(before);
   });
 
   it("a double spend race: exactly one of two people joins", async () => {

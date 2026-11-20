@@ -227,6 +227,32 @@ export class CompanySignInStore {
     } }, ...(row.data.status === "live" && row.data.expiresAt > this.seconds() ? link : [])], createdBy);
     return true;
   }
+  /** Atomically replaces a pending invite's one-time link and starts a fresh expiry window. */
+  async resend(companyId: string, emailHash: string, hours: number, createdBy: string, inviteHash: string): Promise<number> {
+    const key = preapprovalHashKey(companyId, emailHash);
+    const parsed = CompanyPreapproval.safeParse(await this.read(key));
+    if (!parsed.success || parsed.data.status !== "live" || parsed.data.expiresAt <= this.seconds() || parsed.data.inviteHash === undefined) throw unavailable();
+    const previous = parsed.data;
+    const oldHash = previous.inviteHash!;
+    const oldLinkKey = inviteLinkKey(companyId, oldHash);
+    const storedLink = await this.read(oldLinkKey) as Record<string, unknown> | undefined;
+    const { pk: storedPk, sk: storedSk, ...oldLinkFields } = storedLink ?? {};
+    const oldLink = storedPk === oldLinkKey.pk && storedSk === oldLinkKey.sk ? CompanyInviteLink.safeParse(oldLinkFields) : undefined;
+    if (oldLink === undefined || !oldLink.success || oldLink.data.companyId !== companyId || oldLink.data.status !== "live" || oldLink.data.expiresAt <= this.seconds() || oldLink.data.emailHash !== emailHash) throw unavailable();
+    const expiresAt = this.seconds() + CompanyExpiryHours.parse(hours) * 3600;
+    const now = this.iso();
+    const newLink = CompanyInviteLink.parse({ entityType: "COMPANY_INVITE_LINK", companyId, status: "live", expiresAt, createdAt: now, createdBy, emailHash });
+    await this.operatorWrite(companyId, "company-preapproval-resend", [
+      { Update: { TableName: this.input.tableName, Key: key, UpdateExpression: "SET inviteHash = :next, expiresAt = :expires",
+        ConditionExpression: "#status = :live AND expiresAt = :oldExpires AND createdAt = :created AND inviteHash = :oldHash",
+        ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":live": "live", ":oldExpires": previous.expiresAt, ":created": previous.createdAt, ":oldHash": oldHash, ":next": inviteHash, ":expires": expiresAt } } },
+      { Update: { TableName: this.input.tableName, Key: oldLinkKey, UpdateExpression: "SET #status = :withdrawn",
+        ConditionExpression: "#status = :live AND expiresAt = :expires AND emailHash = :emailHash",
+        ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":live": "live", ":withdrawn": "withdrawn", ":expires": oldLink.data.expiresAt, ":emailHash": emailHash } } },
+      { Put: { TableName: this.input.tableName, Item: { ...inviteLinkKey(companyId, inviteHash), ...newLink }, ConditionExpression: "attribute_not_exists(pk)" } },
+    ], createdBy);
+    return expiresAt;
+  }
   async list(companyId: string): Promise<{ preapprovals: Array<z.infer<typeof CompanyPreapproval> & { emailHash: string }>; more: boolean }> {
     const started = this.input.now();
     const pk = companyScoped(OrgIdSchema.parse(companyId), "PREAPPROVAL");

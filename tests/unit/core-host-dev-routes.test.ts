@@ -1010,6 +1010,16 @@ it("inventories exactly four worker-only saved image callbacks without exposing 
   expect([...APP_ROUTES, ...DEV_ROUTES].some(row => row.path.includes("/v1/internal/"))).toBe(false);
 });
 
+it("keeps invite resend on the broker's full-access developer boundary only", async () => {
+  const { APP_ROUTES, appRouteOf, devRouteOf } = await import("../../packages/broker/src/aws/dev-route-scopes.js");
+  const path = "/v1/dev/company/preapprovals/" + "b".repeat(64) + "/resend";
+  expect(devRouteOf("POST", path)).toMatchObject({ path: "/v1/dev/company/preapprovals/{inviteId}/resend", requires: "full" });
+  expect(devRouteOf("GET", path)).toBeUndefined();
+  expect(devRouteOf("POST", path + "/extra")).toBeUndefined();
+  expect(appRouteOf("POST", path)).toBeUndefined();
+  expect(APP_ROUTES.some((row) => row.path.includes("/company/preapprovals"))).toBe(false);
+});
+
 
 describe("known-failing hosted route ownership", () => {
   it("owns only GET and Undo POST, refuses writes while verification is off", async () => {
