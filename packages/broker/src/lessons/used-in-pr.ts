@@ -43,6 +43,8 @@ export type LessonsUsedReader = (input: LessonsUsedInput) => Promise<LessonsUsed
 
 let reader: LessonsUsedReader | undefined;
 export function setLessonsUsedReader(next: LessonsUsedReader | undefined): void { reader = next; }
+/** The reader in force now, so a test can put back exactly what it found (tests/support/module-state.ts). */
+export function currentLessonsUsedReader(): LessonsUsedReader | undefined { return reader; }
 /** The lessons the task used, or none: never throws (a description never waits on, or fails because of, lessons). */
 export async function lessonsUsedForTask(input: LessonsUsedInput): Promise<LessonsUsedSummary | undefined> {
   const read = reader;
