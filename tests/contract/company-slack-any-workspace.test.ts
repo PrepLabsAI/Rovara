@@ -81,7 +81,7 @@ describe("a merged sign-in is seated as its survivor (company layer on)", () => 
     w.db.set({ pk: `DEVELOPER#${from}`, sk: "META", entityType: "DEVELOPER", developerId: from, provider: "slack", issuer: SLACK_OIDC_ISSUER, subject: "U0MERGED1", displayName: "Merged",
       revoked: false, firstSignInAt: "2026-10-01T00:00:00.000Z", lastSignInAt: "2026-10-01T00:00:00.000Z", mergedInto: into, ...extra });
 
-  it("a merged Slack id signs in as the survivor, in the survivor's company, and neither record is rewritten", async () => {
+  it("a merged Slack id signs in as the survivor, in the survivor's company, and only its workspace metadata is updated", async () => {
     const w = world();
     await w.setup();
     const merged = slackId("U0MERGED1");
@@ -90,7 +90,11 @@ describe("a merged sign-in is seated as its survivor (company layer on)", () => 
     const signed = await w.signIn("U0MERGED1", { slackTeam: TEAM });
     expect(signed.refused).toBeUndefined();
     expect((await w.access(signed.access)).body).toMatchObject({ developerId: person("owner"), companyId: X, companyRole: "owner" });
-    expect(JSON.stringify([w.db.get(`DEVELOPER#${merged}`, "META"), w.db.get(`DEVELOPER#${person("owner")}`, "META")])).toBe(before);
+    const kept = { ...w.db.get(`DEVELOPER#${merged}`, "META")! };
+    expect(kept.slackTeamId).toBe(TEAM);
+    delete kept.slackTeamId;
+    delete kept.slackTeamName;
+    expect(JSON.stringify([kept, w.db.get(`DEVELOPER#${person("owner")}`, "META")])).toBe(before);
     expect(w.db.find((row) => row.entityType === "SESSION" && row.developerId === merged)).toEqual([]);
     expect((await w.refresh(signed.refresh!)).status).toBe(200);
   });
