@@ -92,4 +92,6 @@ export const sharedVitestSettings = {
   globalSetup: ["tests/support/test-temp-dir.ts"] as string[],
   passWithNoTests: false,
   testTimeout: 60_000,
+  // #1263: setup and teardown hooks do the same heavy work as tests (a large import, a synth), so they get the same 60 s, not vitest's 10 s default.
+  hookTimeout: 60_000,
 } as const;
