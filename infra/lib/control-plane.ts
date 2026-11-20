@@ -32,13 +32,13 @@ import {
   aws_sqs as sqs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import { E2E_ARTIFACT_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, OUTBOX_PENDING_INDEX, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX, TEST_SERVICES_SETTING_VARIABLE, TEST_SERVICE_IMAGES_SETTING_VARIABLE, EGRESS_ADDRESSES_PARAMETER_PATTERN, EGRESS_ADDRESSES_VARIABLE, NAT_EGRESS_ADDRESSES_OUTPUT, WORKER_SANDBOX_EGRESS_DEFAULT, WORKER_SANDBOX_EGRESS_SETTING_VARIABLE, WORKER_SANDBOX_EGRESS_VALUES } from "@agentx/contracts";
+import { environmentRolePath, E2E_ARTIFACT_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, OUTBOX_PENDING_INDEX, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX, TEST_SERVICES_SETTING_VARIABLE, TEST_SERVICE_IMAGES_SETTING_VARIABLE, EGRESS_ADDRESSES_PARAMETER_PATTERN, EGRESS_ADDRESSES_VARIABLE, NAT_EGRESS_ADDRESSES_OUTPUT, WORKER_SANDBOX_EGRESS_DEFAULT, WORKER_SANDBOX_EGRESS_SETTING_VARIABLE, WORKER_SANDBOX_EGRESS_VALUES } from "@agentx/contracts";
 import { EgressAlarms } from "./egress-alarms.js";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { ChannelAdapters } from "./channel-adapters.js";
 import { CoreEngine, TEST_SERVICES_PARAMETER, TEST_SERVICE_IMAGES_PARAMETER } from "./core-engine.js";
 import { CompanySecrets } from "./company-secrets.js";
-import { SavedEnvImages } from "./saved-env-images.js";
+import { LEGACY_SAVED_ENV_ROLES_CONTEXT, SavedEnvImages, legacySavedEnvRolesMode } from "./saved-env-images.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
 import { TaskPersonProof } from "./task-person-proof.js";
 import { addBrokerDeadLetterQueues, addBrokerName, addBrokerSetting, addDerivedBrokerVariable, brokerEnvironmentName, brokerNamesParameterArn } from "./broker-names.js";
@@ -1127,7 +1127,11 @@ export class ControlPlaneStack extends Stack {
       // the broker. Named environments only (the legacy template is unchanged). It publishes the output contract (briefs/lead4/L4-SE-OUTPUT-CONTRACT.md) and gives the broker the three role ARNs and the prefix; the broker gets no new policy statement
       // (the trust names its role and the boundary allows the AssumeRole). Nothing assumes a role until the broker's switch is on.
       // #1148: the legacy install too (its repositories under rovara-env/production; the feature stays off until SavedEnvironments is on).
-      new SavedEnvImages(this, "SavedEnvImages", { env: naming.env ?? "production", brokerRole: broker.role! }).expose(this, broker);
+      // The legacy install's roles are at the root path, which the broker refuses; moving them takes two deploys (`-c agentxLegacySavedEnvRoles=none`, then `=path`; saved-env-images.ts). Unset: unchanged.
+      const savedEnvRoles = legacySavedEnvRolesMode(this.node.tryGetContext(LEGACY_SAVED_ENV_ROLES_CONTEXT), naming.env);
+      if (savedEnvRoles !== "none") {
+        new SavedEnvImages(this, "SavedEnvImages", { env: naming.env ?? "production", brokerRole: broker.role!, ...(savedEnvRoles === "path" ? { rolePath: environmentRolePath("production") } : {}) }).expose(this, broker);
+      }
       // Spec 025 A13: the admin health route reads the environment's alarms, by name, and
       // the depths of its dead-letter queues. Read-only, and on exactly these resources.
       const alarmPrefix = naming.alarmName("");

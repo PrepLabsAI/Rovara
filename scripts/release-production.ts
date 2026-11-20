@@ -8,8 +8,10 @@ import {
   assertDigestImage,
   buildAndPushImage,
   buildAndPushWorker,
+  assertSavedEnvRolesNotReverted,
   describeStack,
   ensureRepository,
+  legacySavedEnvRolesContext,
   optionalControlPlaneParameters,
   parseReleaseArgs,
   profileArgs,
@@ -191,6 +193,7 @@ export function reusableImage(runner: Runner, options: ReleaseOptions, image: De
 export async function releaseProduction(
   options: ProductionReleaseOptions,
 ): Promise<ProductionReleaseManifest | undefined> {
+  legacySavedEnvRolesContext(); // refuse a bad AGENTX_LEGACY_SAVED_ENV_ROLES before anything is built
   if (options.dryRun) {
     process.stdout.write([
       "AgentX production release plan:",
@@ -453,6 +456,9 @@ function assertFoundationHasNoPendingChanges(runner: Runner, options: ReleaseOpt
 }
 
 function deployControlPlane(runner: Runner, options: ReleaseOptions, foundation: StackDescription): void {
+  // The legacy saved environment roles switch (AGENTX_LEGACY_SAVED_ENV_ROLES: root, none or path) rides along as a CDK context, so a later release keeps the roles where the install moved them.
+  const savedEnvRolesContext = legacySavedEnvRolesContext();
+  if (stackExists(runner, options.region, CONTROL_PLANE_STACK)) assertSavedEnvRolesNotReverted(describeStack(runner, options.region, CONTROL_PLANE_STACK));
   runner.run("npx", [
     "cdk",
     "deploy",
@@ -466,6 +472,7 @@ function deployControlPlane(runner: Runner, options: ReleaseOptions, foundation:
     "agentxDeploymentMode=ec2-ebs",
     "-c",
     `agentxRegion=${options.region}`,
+    ...savedEnvRolesContext,
     ...profileArgs(options.profile),
     ...optionalControlPlaneParameters(),
     ...CONTROL_PLANE_FOUNDATION_PARAMETERS.flatMap((name) => ["--parameters", `${CONTROL_PLANE_STACK}:${name}=${stackOutput(foundation, name)}`]),
@@ -487,7 +494,10 @@ function usage(): string {
     `  --allow-dirty              Explicitly allow releasing an uncommitted checkout\n` +
     `  --skip-checks              Skip typecheck, lint, and tests\n` +
     `  --dry-run                  Print the release stages without changing AWS\n` +
-    `  --help                     Show this help\n`;
+    `  --help                     Show this help\n\n` +
+    `Environment:\n` +
+    `  AGENTX_LEGACY_SAVED_ENV_ROLES  root (default), none or path: where the saved environment registry roles are. Passed to the control plane deploy as\n` +
+    `                             -c agentxLegacySavedEnvRoles=<value>. A release must carry the value the install is at (path once the roles moved to /agentx/production/).\n`;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

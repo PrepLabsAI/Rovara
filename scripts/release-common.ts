@@ -496,6 +496,33 @@ export function optionalControlPlaneParameters(): string[] {
   });
 }
 
+/** The environment variable that carries the legacy saved environment roles switch (CDK context `agentxLegacySavedEnvRoles`: root, none or path; infra/lib/saved-env-images.ts) into the production release. */
+export const LEGACY_SAVED_ENV_ROLES_ENVIRONMENT = "AGENTX_LEGACY_SAVED_ENV_ROLES";
+const LEGACY_SAVED_ENV_ROLES_VALUES = ["root", "none", "path"];
+/** The deployed stack's saved environment role ARN output; a path-style ARN means the install already moved its roles under `/agentx/production/`. */
+const SAVED_ENV_PUSH_ROLE_ARN_OUTPUT = "SavedEnvImgPushRoleArn";
+
+/**
+ * The `-c` flags that carry the switch to `cdk deploy`. Unset: none, so the default (today's template) holds. A release must carry the value the install is currently at, else it would put
+ * the roles back where they were: an unknown value throws.
+ */
+export function legacySavedEnvRolesContext(environment: Readonly<Record<string, string | undefined>> = process.env): string[] {
+  const value = environment[LEGACY_SAVED_ENV_ROLES_ENVIRONMENT];
+  if (value === undefined || value === "") return [];
+  if (!LEGACY_SAVED_ENV_ROLES_VALUES.includes(value)) {
+    throw new Error(`${LEGACY_SAVED_ENV_ROLES_ENVIRONMENT} must be one of ${LEGACY_SAVED_ENV_ROLES_VALUES.join(", ")} (got ${JSON.stringify(value)})`);
+  }
+  return ["-c", `agentxLegacySavedEnvRoles=${value}`];
+}
+
+/** Refuses a release that would revert a moved install: the deployed control plane has its saved environment roles under `/agentx/production/` but the release would build the root-path default (or `none`). */
+export function assertSavedEnvRolesNotReverted(deployed: StackDescription, environment: Readonly<Record<string, string | undefined>> = process.env): void {
+  const arn = deployed.Outputs?.find((output) => output.OutputKey === SAVED_ENV_PUSH_ROLE_ARN_OUTPUT)?.OutputValue;
+  if (arn === undefined || !arn.includes(":role/agentx/production/")) return;
+  if (environment[LEGACY_SAVED_ENV_ROLES_ENVIRONMENT] === "path") return;
+  throw new Error(`the deployed control plane has its saved environment roles under /agentx/production/; set ${LEGACY_SAVED_ENV_ROLES_ENVIRONMENT}=path so this release keeps them there (the pipeline's build project must carry it)`);
+}
+
 function controlPlaneParameterDefinitions(): Array<{ parameter: string; environment: string }> {
   return [
     { parameter: "OidcIssuer", environment: "AGENTX_OIDC_ISSUER" },

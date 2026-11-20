@@ -19,6 +19,7 @@
 import { Aws, CfnOutput, Duration, Stack, aws_ecr as ecr, aws_iam as iam, type aws_lambda as lambda } from "aws-cdk-lib";
 import { Construct } from "constructs";
 import {
+  environmentRolePath,
   SAVED_ENV_KEEP_DEFAULT,
   SAVED_ENV_MANAGE_ACTIONS,
   SAVED_ENV_PULL_ACTIONS,
@@ -47,9 +48,36 @@ import {
 const SCAN_ACTIONS: readonly string[] = ["ecr:StartImageScan", "ecr:DescribeImageScanFindings"];
 export const SAVED_ENV_PUSH_ROLE_ACTIONS: readonly string[] = SAVED_ENV_PUSH_ACTIONS.filter((action) => !SCAN_ACTIONS.includes(action));
 
+/**
+ * The legacy install (no agentxEnv context) has no stack-wide role-path aspect, so its saved environment roles were created at the root path, which the broker refuses (it requires
+ * `role/agentx/<env>/<name>`). An IAM role's path cannot change in place and these roles have fixed names, so CloudFormation cannot replace them in one step: moving them takes TWO deploys of
+ * the control plane, steered by the CDK context `-c agentxLegacySavedEnvRoles=<value>`:
+ *   - `root` (the default when the context is absent): today's template, the roles at the root path.
+ *   - `none` (deploy 1): the legacy control plane has no SavedEnvImages at all (no roles, no repository creation template, no outputs, no broker variables), so CloudFormation deletes the root-path roles.
+ *   - `path` (deploy 2): SavedEnvImages is back, every role at `/agentx/production/` (contracts `environmentRolePath`), so the ARNs are the ones the broker accepts.
+ * Named environments never use it: they get their path from the stack-wide aspect, and the context is REFUSED for them (a thrown error), not ignored.
+ */
+export const LEGACY_SAVED_ENV_ROLES_CONTEXT = "agentxLegacySavedEnvRoles";
+export const LEGACY_SAVED_ENV_ROLES_MODES = ["root", "none", "path"] as const;
+export type LegacySavedEnvRolesMode = (typeof LEGACY_SAVED_ENV_ROLES_MODES)[number];
+
+/** The mode for an install: `root` when the context is absent; an unknown value, or any value on a named environment, throws. */
+export function legacySavedEnvRolesMode(value: unknown, env: string | undefined): LegacySavedEnvRolesMode {
+  if (value === undefined) return "root";
+  if (env !== undefined) {
+    throw new Error(`${LEGACY_SAVED_ENV_ROLES_CONTEXT} is for the legacy install only; the named environment ${JSON.stringify(env)} puts its saved environment roles under ${environmentRolePath(env)} already`);
+  }
+  if (typeof value !== "string" || !(LEGACY_SAVED_ENV_ROLES_MODES as readonly string[]).includes(value)) {
+    throw new Error(`unsupported ${LEGACY_SAVED_ENV_ROLES_CONTEXT} ${JSON.stringify(value)}; expected ${LEGACY_SAVED_ENV_ROLES_MODES.join(", ")} or unset`);
+  }
+  return value as LegacySavedEnvRolesMode;
+}
+
 export interface SavedEnvImagesProps {
   /** The named environment (`staging`, `prod`). */
   readonly env: string;
+  /** An explicit IAM path for the three roles. Unset (the default): no path is set here (a named environment's aspect adds it; the legacy install's roles stay at the root path). */
+  readonly rolePath?: string;
   /** The role the broker runs as: the three roles trust it and nothing else. */
   readonly brokerRole: iam.IRole;
 }
@@ -69,6 +97,7 @@ export class SavedEnvImages extends Construct {
     const sessionRole = (logicalId: string, roleName: string, description: string, actions: readonly string[], withToken: boolean): iam.Role => {
       const role = new iam.Role(this, logicalId, {
         roleName,
+        ...(props.rolePath === undefined ? {} : { path: props.rolePath }),
         description,
         // Only the broker's role. A same-account trust that names a role ARN needs no statement in that role's own policy.
         assumedBy: new iam.ArnPrincipal(props.brokerRole.roleArn),
