@@ -31,9 +31,9 @@ describe("which runs passed in full (passedFullRuns)", () => {
     expect(passedFullRuns(fullRun(CURRENT), CURRENT)).toEqual([]);
     expect(passedFullRuns(fullRun(FULL, () => ({ app: { slug: "someone-else" } })), CURRENT)).toEqual([]);
   });
-  it("refuses a run whose linux-runtime did not run green (#1185: a reuse skips it, so the reused run must have run it)", () => {
-    expect(passedFullRuns(fullRun(FULL).filter((run) => run.name !== "linux-runtime"), CURRENT)).toEqual([]);
-    expect(passedFullRuns(fullRun(FULL, (name) => (name === "linux-runtime" ? { conclusion: "skipped" } : {})), CURRENT)).toEqual([]);
+  it("does not need linux-runtime: CI no longer runs it (#1192), so a full push run skips it", () => {
+    expect(passedFullRuns(fullRun(FULL).filter((run) => run.name !== "linux-runtime"), CURRENT)).toEqual([FULL]);
+    expect(passedFullRuns(fullRun(FULL, (name) => (name === "linux-runtime" ? { conclusion: "skipped" } : {})), CURRENT)).toEqual([FULL]);
   });
   it("refuses an affected or reused run (no ci-mode (full), or no test shards)", () => {
     expect(passedFullRuns(fullRun(FULL).filter((run) => run.name !== "ci-mode (full)"), CURRENT)).toEqual([]);
@@ -62,13 +62,11 @@ describe("the reuse proof (findReuse)", () => {
   it("plans as before when the pull request is behind its base (the merge tree is not the head's)", async () => {
     expect(await findReuse(input({ treeOf: (rev) => (rev === "HEAD" ? "2".repeat(40) : TREE) }))).toBeUndefined();
   });
-  it("never reuses for a push, a manual run, the nightly schedule, or a pull request labelled full-ci or linux-ci", async () => {
+  it("never reuses for a push, a manual run, the nightly schedule, or a pull request labelled full-ci", async () => {
     expect(await findReuse(input({ event: "push" }))).toBeUndefined();
     expect(await findReuse(input({ event: "workflow_dispatch" }))).toBeUndefined();
-    // #1185: the scheduled run exists to run the Linux runtime check fresh
     expect(await findReuse(input({ event: "schedule" }))).toBeUndefined();
     expect(await findReuse(input({ labels: ["full-ci"] }))).toBeUndefined();
-    expect(await findReuse(input({ labels: ["linux-ci"] }))).toBeUndefined();
   });
   it("reuses only a push run of this workflow on exactly the head commit", async () => {
     for (const over of [{ event: "pull_request" }, { head_sha: "b".repeat(40) }, { path: ".github/workflows/other.yml" }, { id: FULL + 1 }]) {

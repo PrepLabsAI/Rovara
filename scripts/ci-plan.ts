@@ -8,10 +8,8 @@
 // when files in their area change (the device emulator check: only device code, DEC 254zn); a Markdown-only change that no test reads runs nothing but the plan. Anything shared (vitest config, package.json, the lockfile,
 // tests/support, the workflow) falls back to the whole test suite, and the lint settings to the whole lint.
 //
-// The Linux runtime check (#1185) is the slowest job (~26 min) and runs in neither mode by default: it runs when its area changes (LINUX_PATTERNS), once per batch
-// (each push to code/next), every night (the scheduled run, which runs it and nothing else heavy), and on request (the `linux-ci` or `full-ci` label, or a manual
-// run's `linux` input). A FULL pull request ("Batch ...", "Sync mainline ...") whose change does not reach its area does not run it: that tree is checked on
-// code/next's push or that night.
+// The Linux runtime check (#1185, #1192) is the slowest job (~26 min) and no longer runs in CI, for mainline or code/next: only a manual run's `linux` input
+// runs it here. The production release runs it on a temporary EC2 machine instead (#1192).
 //
 // Node runs this file directly, before `npm ci`, so it imports only Node's own modules and uses only erasable syntax. (The docs-only rule that lived in
 // scripts/ci-docs-only.ts is here now.)
@@ -88,8 +86,6 @@ export interface PlanInput {
 }
 
 export const FULL_LABEL = "full-ci";
-/** #1185: a pull request labelled like this runs the Linux runtime check whatever it changes. */
-export const LINUX_LABEL = "linux-ci";
 /** #1185, #1189: runs that always run the Linux runtime check: the nightly scheduled run on mainline. Not a push: CI's pushes are code/next's, and the owner
  * decided (2026-11-19) the check guards what goes into mainline (which deploys), not code/next. */
 export const LINUX_EVENTS: readonly string[] = [];
@@ -227,8 +223,7 @@ export function relatedTests(changed: readonly string[], packages: readonly Pack
 }
 
 /**
- * #1185: whether the Linux runtime check runs: once per batch and every night (LINUX_EVENTS), on request (the `linux-ci` or `full-ci` label, a manual run's
- * input), and when the change reaches its area (LINUX_PATTERNS), including a pull request whose changed-file list is empty (unknown, so it runs).
+ * #1185, #1192: whether the Linux runtime check runs in CI: only for a manual run that asks for it (its `linux` input).
  */
 export function linuxRuns(input: Pick<PlanInput, "event" | "forceLinux">): boolean {
   // #1192 (owner decision 2026-11-19): the Linux runtime check no longer runs in CI, for mainline or code/next: not on a pull request, a push, a label or the
@@ -301,9 +296,9 @@ export function planOutputs(plan: Plan): Record<string, string> {
 //
 // A pull request whose code is exactly what an earlier FULL push run of this workflow tested and passed (a pinned code/next -> mainline pull request, a sync) does not
 // run the suite again. The proof, all of it required, everything else plans as before:
-//   - this is a pull request (never a push, a manual run or the nightly schedule) without the `full-ci` or `linux-ci` label, and the tree this run tests (the merge commit) is byte-for-byte the pull request head's tree (the pull request is up to date);
+//   - this is a pull request (never a push, a manual run or the nightly schedule) without the `full-ci` label, and the tree this run tests (the merge commit) is byte-for-byte the pull request head's tree (the pull request is up to date);
 //   - a DIFFERENT run of this workflow (.github/workflows/ci.yml), triggered by a push of exactly that head commit (so it tested exactly that tree), has, among its own
-//     GitHub Actions check runs on that commit, the latest `local`, `ci-mode (full)`, `linux-runtime` and every `test (n/8)` completed with success: a full run that passed as a whole
+//     GitHub Actions check runs on that commit, the latest `local`, `ci-mode (full)` and every `test (n/8)` completed with success: a full run that passed as a whole
 //     (a run that itself reused something has no test shards, so a reuse is never reused);
 //   - GitHub answers every read in time. Any refusal, rate limit, timeout or doubt: no reuse.
 // Reuse runs the plan, `ci-mode (full)`, port-guard and the gate; quick, build, the test shards and the runtime checks are skipped. The gate names the reused run.
@@ -313,8 +308,8 @@ export interface ReuseRun { id: number; event: string; head_sha: string; path: s
 export type Reuse = { runUrl: string; runId: number } | undefined;
 const RUN_OF_JOB = /^https:\/\/github\.com\/[^/]+\/[^/]+\/actions\/runs\/(\d+)\/job\/\d+$/u;
 const SHA_PATTERN = /^[0-9a-f]{40}$/u;
-// `linux-runtime` too: a push run always runs it (#1185 LINUX_EVENTS), and a reuse skips it, so the reused run must have run it green.
-export const REUSE_REQUIRED_CHECKS = ["local", "ci-mode (full)", "linux-runtime", ...Array.from({ length: FULL_SHARDS }, (_, index) => `test (${index + 1}/${FULL_SHARDS})`)];
+// Not `linux-runtime`: CI no longer runs it (#1192, it runs on manual request only), so a push run skips it and there is no result to stand on.
+export const REUSE_REQUIRED_CHECKS = ["local", "ci-mode (full)", ...Array.from({ length: FULL_SHARDS }, (_, index) => `test (${index + 1}/${FULL_SHARDS})`)];
 
 /** The runs (ids) among these check runs whose own latest `local`, `ci-mode (full)` and test shards all completed with success; never `currentRunId`. Newest first. */
 export function passedFullRuns(runs: readonly ReuseCheckRun[], currentRunId: number): number[] {
@@ -350,8 +345,8 @@ export interface ReuseInput {
 /** A full pass of byte-identical code this pull request's run may stand on, or undefined (then the run plans as before). Never throws. */
 export async function findReuse(input: ReuseInput): Promise<Reuse> {
   try {
-    // A pull request only: never a push, a manual run, or the nightly schedule (#1185: it exists to run the Linux runtime check fresh). A label that asks for a run (`full-ci`, `linux-ci`) runs it.
-    if (input.event !== "pull_request" || input.labels.includes(FULL_LABEL) || input.labels.includes(LINUX_LABEL)) return undefined;
+    // A pull request only: never a push, a manual run, or the nightly schedule. The `full-ci` label asks for a real run.
+    if (input.event !== "pull_request" || input.labels.includes(FULL_LABEL)) return undefined;
     if (!SHA_PATTERN.test(input.headSha) || !Number.isSafeInteger(input.currentRunId) || input.currentRunId <= 0 || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(input.repository)) return undefined;
     const tested = input.treeOf("HEAD"); const head = input.treeOf(input.headSha);
     if (tested === undefined || head === undefined || tested !== head) return undefined;
