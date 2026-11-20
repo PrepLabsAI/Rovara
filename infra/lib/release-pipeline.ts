@@ -19,6 +19,17 @@ export const AGENTX_RELEASE_REPOSITORY_NAME = "Rovara";
 export const AGENTX_RELEASE_BRANCH = "mainline";
 // Must not match the broker's `agentx-*` CodeBuild gate allow-list, or a worker could start a release.
 export const AGENTX_RELEASE_PROJECT_NAME = "release-agentx-production";
+// #1242: the staging release's project, under the same rule as the production one.
+export const AGENTX_STAGING_RELEASE_PROJECT_NAME = "release-agentx-staging";
+export const AGENTX_RELEASE_PIPELINE_NAME = "AgentXProductionRelease";
+/** The pipeline's last stage. Its inbound transition stays disabled: enabling it is the manual approval that promotes staging's commit (#1242). */
+export const AGENTX_PRODUCTION_STAGE = "Production";
+/** The staging release build's own role, by a fixed name: the staging account's release role trusts exactly this role (staging-release-access.ts). */
+export const AGENTX_STAGING_BUILD_ROLE_NAME = "agentx-release-staging-build";
+/** The role in the staging account that the staging release runs as (staging-release-access.ts). */
+export const AGENTX_STAGING_RELEASE_ROLE_NAME = "agentx-staging-release";
+/** The AWS profile the staging build writes for that role: assumed from the build's own credentials, and assumed again by each AWS CLI and CDK process. */
+export const AGENTX_STAGING_PROFILE = "agentx-staging";
 export const AGENTX_PRODUCTION_WORKER_REPOSITORY = "agentx-worker-production";
 export const AGENTX_RELEASE_AWS_CLI_VERSION = "2.36.47";
 export const AGENTX_RELEASE_STACKS = [
@@ -66,64 +77,50 @@ export class ReleasePipelineStack extends Stack {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
+    const stagingAccountId = new CfnParameter(this, "StagingAccountId", {
+      type: "String",
+      allowedPattern: "^[0-9]{12}$",
+      description: "The AWS account of the staging environment, which every mainline release deploys to before production (#1242)",
+    });
+    const stagingReleaseRoleArn = `arn:${this.partition}:iam::${stagingAccountId.valueAsString}:role/${AGENTX_STAGING_RELEASE_ROLE_NAME}`;
+    const pipelineArn = `arn:${this.partition}:codepipeline:${this.region}:${this.account}:${AGENTX_RELEASE_PIPELINE_NAME}`;
+
     const project = new codebuild.PipelineProject(this, "ReleaseBuild", {
       projectName: AGENTX_RELEASE_PROJECT_NAME,
       description: "Runs npm run release:prod for AgentX mainline commits",
-      environment: {
-        buildImage: codebuild.LinuxArmBuildImage.AMAZON_LINUX_2023_STANDARD_3_0,
-        // 8 vCPUs: the release runs the whole test suite (as an unprivileged account), about 16 minutes. 32 vCPUs only helps
-        // with more test files at once, which makes the trusted-base rule-file reads fail intermittently (#569).
-        computeType: codebuild.ComputeType.LARGE,
-        privileged: true,
-      },
-      concurrentBuildLimit: 1,
-      // #1151: a release that runs the full checks (CI proof not proven) and rebuilds the worker took over 60 minutes; one proven by CI takes 5-15.
-      timeout: Duration.minutes(120),
-      cache: codebuild.Cache.local(codebuild.LocalCacheMode.DOCKER_LAYER),
-      logging: { cloudWatch: { logGroup } },
-      buildSpec: codebuild.BuildSpec.fromObject({
-        version: "0.2",
-        env: {
-          shell: "bash",
-          // #1118: the release's typecheck (tsc -b) needs about 4 GB of heap since mainline took code/next; Node's default limit on this
-          // 16 GB build machine is lower, and tsc died with "JavaScript heap out of memory". 8 GB leaves the tests' own processes room.
-          variables: { NODE_OPTIONS: "--max-old-space-size=8192", AWS_CLI_VERSION: AGENTX_RELEASE_AWS_CLI_VERSION, GITLEAKS_VERSION: "8.30.1", GITLEAKS_SHA256: "e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080" },
-        },
-        phases: {
-          install: {
-            // Tools go under /opt so the release's dirty-tree check sees an untouched checkout.
-            commands: [
-              'node_version="$(cat .node-version)"',
-              'node_archive="node-v${node_version}-linux-arm64.tar.xz"',
-              'curl -fsSL -o "/tmp/${node_archive}" "https://nodejs.org/dist/v${node_version}/${node_archive}"',
-              'curl -fsSL "https://nodejs.org/dist/v${node_version}/SHASUMS256.txt" | grep " ${node_archive}$" | (cd /tmp && sha256sum -c -)',
-              'mkdir -p /opt/node && tar -xJf "/tmp/${node_archive}" -C /opt/node --strip-components=1',
-              'curl -fsSL -o /tmp/awscliv2.zip "https://awscli.amazonaws.com/awscli-exe-linux-aarch64-${AWS_CLI_VERSION}.zip"',
-              "unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install --install-dir /opt/aws-cli --bin-dir /opt/aws-cli/bin",
-              // The port guard's tests run the real secret scan (tests/unit/port-guard.test.ts): the same gitleaks release CI pins, for this machine's arm64.
-              'curl -fsSL -o /tmp/gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_arm64.tar.gz"',
-              'echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -',
-              "mkdir -p /opt/gitleaks && tar -xzf /tmp/gitleaks.tar.gz -C /opt/gitleaks gitleaks",
-              'export PATH="/opt/node/bin:/opt/aws-cli/bin:/opt/gitleaks:$PATH"',
-              "node --version && npm --version && aws --version && gitleaks version && docker buildx version",
-            ],
-          },
-          pre_build: {
-            commands: ["npm ci"],
-          },
-          build: {
-            commands: [
-              // #1145: skip the typecheck, lint and tests only when GitHub CI's gate already passed on exactly this code (the same file tree; scripts/release-ci-proof.ts).
-              // Not proven (behind mainline, CI not green, GitHub unreachable): every check runs, as before. The proof itself never fails the build.
-              `if node scripts/release-ci-proof.ts --repository ${AGENTX_RELEASE_REPOSITORY_OWNER}/${AGENTX_RELEASE_REPOSITORY_NAME} --github-app-stack ${AGENTX_RELEASE_STACKS[0]} --region "$AWS_REGION"; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; ` +
-                'npm run release:prod -- --region "$AWS_REGION" --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS',
-            ],
-          },
-        },
-        artifacts: {
-          files: ["cdk.out/agentx-production-release.json"],
-          "discard-paths": "yes",
-        },
+      ...releaseProjectSettings(logGroup),
+      buildSpec: releaseBuildSpec({
+        // #1242: the first thing the production release does is close the gate it came through, so that only this promotion gets in; the next
+        // staging commit waits in front of Production until someone enables the transition again.
+        firstCommands: [
+          `aws codepipeline disable-stage-transition --pipeline-name ${AGENTX_RELEASE_PIPELINE_NAME} --stage-name ${AGENTX_PRODUCTION_STAGE} --transition-type Inbound --reason "${PROMOTION_GATE_REASON}"`,
+        ],
+        release: 'npm run release:prod -- --region "$AWS_REGION" --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS',
+      }),
+    });
+
+    // #1242: the staging release runs the same release in the staging account. CI's proof reads GitHub with this account's GitHub App first (the
+    // build's own credentials); the release itself then runs as the staging account's release role, through a profile that every AWS CLI and CDK
+    // process assumes afresh, so a long release never outlives one role session.
+    const stagingRole = new iam.Role(this, "StagingReleaseBuildRole", {
+      roleName: AGENTX_STAGING_BUILD_ROLE_NAME,
+      assumedBy: new iam.ServicePrincipal("codebuild.amazonaws.com"),
+      description: "The staging release build: CI's proof in this account, then the release as the staging account's release role",
+    });
+    const stagingProject = new codebuild.PipelineProject(this, "StagingReleaseBuild", {
+      projectName: AGENTX_STAGING_RELEASE_PROJECT_NAME,
+      description: "Runs npm run release:prod in the staging account for AgentX mainline commits (#1242)",
+      role: stagingRole,
+      ...releaseProjectSettings(logGroup),
+      buildSpec: releaseBuildSpec({
+        firstCommands: [],
+        variables: { STAGING_RELEASE_ROLE_ARN: stagingReleaseRoleArn },
+        beforeRelease: [
+          "mkdir -p ~/.aws",
+          `printf '[profile ${AGENTX_STAGING_PROFILE}]\\nrole_arn = %s\\ncredential_source = EcsContainer\\nrole_session_name = staging-release\\nregion = %s\\n' "$STAGING_RELEASE_ROLE_ARN" "$AWS_REGION" >> ~/.aws/config`,
+          `aws sts get-caller-identity --profile ${AGENTX_STAGING_PROFILE}`,
+        ],
+        release: `npm run release:prod -- --region "$AWS_REGION" --profile ${AGENTX_STAGING_PROFILE} --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS`,
       }),
     });
 
@@ -177,6 +174,21 @@ export class ReleasePipelineStack extends Stack {
       useConnection,
     ];
     for (const policy of policies) project.addToRolePolicy(policy);
+    project.addToRolePolicy(new iam.PolicyStatement({
+      sid: "ClosePromotionGate",
+      actions: ["codepipeline:DisableStageTransition"],
+      resources: [`${pipelineArn}/${AGENTX_PRODUCTION_STAGE}`, pipelineArn],
+    }));
+    // The staging build needs only CI's proof here (the GitHub App's key and the control plane's description) and the staging account's role.
+    for (const policy of policies.filter((policy) => policy.sid === "ReadGithubAppKeyForCiProof" || policy.sid === "ReadReleaseStacks")) {
+      stagingProject.addToRolePolicy(policy);
+    }
+    stagingProject.addToRolePolicy(useConnection);
+    stagingProject.addToRolePolicy(new iam.PolicyStatement({
+      sid: "AssumeStagingReleaseRole",
+      actions: ["sts:AssumeRole"],
+      resources: [stagingReleaseRoleArn],
+    }));
 
     const sourceRole = new iam.Role(this, "SourceActionRole", {
       assumedBy: new iam.AccountRootPrincipal(),
@@ -186,6 +198,7 @@ export class ReleasePipelineStack extends Stack {
 
     const sourceOutput = new codepipeline.Artifact("Source");
     const releaseOutput = new codepipeline.Artifact("ReleaseManifest");
+    const stagingOutput = new codepipeline.Artifact("StagingReleaseManifest");
     const source = new actions.CodeStarConnectionsSourceAction({
       actionName: "GitHub",
       connectionArn: connectionArn.valueAsString,
@@ -198,11 +211,12 @@ export class ReleasePipelineStack extends Stack {
     });
 
     new codepipeline.Pipeline(this, "Pipeline", {
-      pipelineName: "AgentXProductionRelease",
+      pipelineName: AGENTX_RELEASE_PIPELINE_NAME,
       pipelineType: codepipeline.PipelineType.V2,
-      // Each merge is released on its own, in order: a waiting release is never replaced by a newer one
-      // (#114), so a failure always points at one merge.
-      executionMode: codepipeline.ExecutionMode.QUEUED,
+      // #1242: every merge goes to staging; production takes staging's newest commit only when someone enables the transition into Production.
+      // A run waiting in front of a disabled transition is replaced by a newer one only in SUPERSEDED mode, which is what makes one promotion carry
+      // every merge since the last. (QUEUED, #114, kept each merge apart; two merges that land while staging is deploying now go to staging together.)
+      executionMode: codepipeline.ExecutionMode.SUPERSEDED,
       // aws-cdk-lib types Bucket.isWebsite as `boolean | undefined`, which exactOptionalPropertyTypes rejects for IBucket.
       artifactBucket: artifactBucket as s3.IBucket,
       crossAccountKeys: false,
@@ -210,7 +224,21 @@ export class ReleasePipelineStack extends Stack {
       stages: [
         { stageName: "Source", actions: [source] },
         {
-          stageName: "Release",
+          stageName: "Staging",
+          actions: [
+            new actions.CodeBuildAction({
+              actionName: "ReleaseStaging",
+              project: stagingProject,
+              input: sourceOutput,
+              outputs: [stagingOutput],
+            }),
+          ],
+        },
+        {
+          stageName: AGENTX_PRODUCTION_STAGE,
+          // The manual approval: enable this transition (console, or `aws codepipeline enable-stage-transition`) to promote the commit waiting here.
+          transitionToEnabled: false,
+          transitionDisabledReason: PROMOTION_GATE_REASON,
           actions: [
             new actions.CodeBuildAction({
               actionName: "ReleaseProduction",
@@ -233,4 +261,82 @@ export class ReleasePipelineStack extends Stack {
       }],
     });
   }
+}
+
+/** Why the transition into Production is disabled; also the reason the production release gives when it closes it again. */
+// CodePipeline allows only letters, digits, spaces and !@().*?- in a transition's reason.
+export const PROMOTION_GATE_REASON = "Production waits for a manual approval - enable this transition to release the commit waiting here (issue 1242)";
+
+function releaseProjectSettings(logGroup: logs.ILogGroup) {
+  return {
+    environment: {
+      buildImage: codebuild.LinuxArmBuildImage.AMAZON_LINUX_2023_STANDARD_3_0,
+      // 8 vCPUs: the release runs the whole test suite (as an unprivileged account), about 16 minutes. 32 vCPUs only helps
+      // with more test files at once, which makes the trusted-base rule-file reads fail intermittently (#569).
+      computeType: codebuild.ComputeType.LARGE,
+      privileged: true,
+    },
+    concurrentBuildLimit: 1,
+    // #1151: a release that runs the full checks (CI proof not proven) and rebuilds the worker took over 60 minutes; one proven by CI takes 5-15.
+    timeout: Duration.minutes(120),
+    cache: codebuild.Cache.local(codebuild.LocalCacheMode.DOCKER_LAYER),
+    logging: { cloudWatch: { logGroup } },
+  };
+}
+
+interface ReleaseBuildSpec {
+  /** Commands before the tools are installed. */
+  firstCommands: string[];
+  variables?: Record<string, string>;
+  /** Commands after CI's proof, before the release. */
+  beforeRelease?: string[];
+  release: string;
+}
+
+function releaseBuildSpec(spec: ReleaseBuildSpec): codebuild.BuildSpec {
+  return codebuild.BuildSpec.fromObject({
+    version: "0.2",
+    env: {
+      shell: "bash",
+      // #1118: the release's typecheck (tsc -b) needs about 4 GB of heap since mainline took code/next; Node's default limit on this
+      // 16 GB build machine is lower, and tsc died with "JavaScript heap out of memory". 8 GB leaves the tests' own processes room.
+      variables: { NODE_OPTIONS: "--max-old-space-size=8192", AWS_CLI_VERSION: AGENTX_RELEASE_AWS_CLI_VERSION, GITLEAKS_VERSION: "8.30.1", GITLEAKS_SHA256: "e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080", ...spec.variables },
+    },
+    phases: {
+      install: {
+        // Tools go under /opt so the release's dirty-tree check sees an untouched checkout.
+        commands: [
+          ...spec.firstCommands,
+          'node_version="$(cat .node-version)"',
+          'node_archive="node-v${node_version}-linux-arm64.tar.xz"',
+          'curl -fsSL -o "/tmp/${node_archive}" "https://nodejs.org/dist/v${node_version}/${node_archive}"',
+          'curl -fsSL "https://nodejs.org/dist/v${node_version}/SHASUMS256.txt" | grep " ${node_archive}$" | (cd /tmp && sha256sum -c -)',
+          'mkdir -p /opt/node && tar -xJf "/tmp/${node_archive}" -C /opt/node --strip-components=1',
+          'curl -fsSL -o /tmp/awscliv2.zip "https://awscli.amazonaws.com/awscli-exe-linux-aarch64-${AWS_CLI_VERSION}.zip"',
+          "unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install --install-dir /opt/aws-cli --bin-dir /opt/aws-cli/bin",
+          // The port guard's tests run the real secret scan (tests/unit/port-guard.test.ts): the same gitleaks release CI pins, for this machine's arm64.
+          'curl -fsSL -o /tmp/gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_arm64.tar.gz"',
+          'echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -',
+          "mkdir -p /opt/gitleaks && tar -xzf /tmp/gitleaks.tar.gz -C /opt/gitleaks gitleaks",
+          'export PATH="/opt/node/bin:/opt/aws-cli/bin:/opt/gitleaks:$PATH"',
+          "node --version && npm --version && aws --version && gitleaks version && docker buildx version",
+        ],
+      },
+      pre_build: {
+        commands: ["npm ci"],
+      },
+      build: {
+        commands: [
+          // #1145: skip the typecheck, lint and tests only when GitHub CI's gate already passed on exactly this code (the same file tree; scripts/release-ci-proof.ts).
+          // Not proven (behind mainline, CI not green, GitHub unreachable): every check runs, as before. The proof itself never fails the build.
+          `if node scripts/release-ci-proof.ts --repository ${AGENTX_RELEASE_REPOSITORY_OWNER}/${AGENTX_RELEASE_REPOSITORY_NAME} --github-app-stack ${AGENTX_RELEASE_STACKS[0]} --region "$AWS_REGION"; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; ` +
+            [...(spec.beforeRelease ?? []), spec.release].join(" && "),
+        ],
+      },
+    },
+    artifacts: {
+      files: ["cdk.out/agentx-production-release.json"],
+      "discard-paths": "yes",
+    },
+  });
 }
