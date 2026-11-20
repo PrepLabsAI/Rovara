@@ -12,13 +12,14 @@ import { WorkerSettingsStack } from "../../infra/lib/worker-settings.js";
 import {
   AGENTX_RELEASE_PROJECT_NAME,
   AGENTX_RELEASE_TRIGGER_PATHS,
-  AGENTX_STAGING_BUILD_ROLE_NAME,
-  AGENTX_STAGING_RELEASE_PROJECT_NAME,
-  AGENTX_STAGING_RELEASE_ROLE_NAME,
+  AGENTX_BETA_BUILD_ROLE_NAME,
+  AGENTX_BETA_RELEASE_PROJECT_NAME,
+  AGENTX_BETA_RELEASE_ROLE_NAME,
   PROMOTION_GATE_REASON,
   ReleasePipelineStack,
 } from "../../infra/lib/release-pipeline.js";
-import { StagingReleaseAccessStack } from "../../infra/lib/staging-release-access.js";
+import { BetaDomainStack } from "../../infra/lib/beta-domain.js";
+import { BetaReleaseAccessStack } from "../../infra/lib/beta-release-access.js";
 import { SlackOrchestratorStack } from "../../infra/lib/slack-orchestrator.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
@@ -444,10 +445,10 @@ describe("production release pipeline", () => {
   const statements = policies.flatMap((policy) => policy.Properties.PolicyDocument.Statement);
   const actionsOf = (statement: Statement) => [statement.Action].flat();
 
-  it("starts a V2 pipeline only for filtered mainline pushes, with a full Git clone, staging first and production behind a disabled transition", () => {
+  it("starts a V2 pipeline only for filtered mainline pushes, with a full Git clone, beta first and production behind a disabled transition", () => {
     template.hasResourceProperties("AWS::CodePipeline::Pipeline", {
       PipelineType: "V2",
-      // #1242: a run waiting at the disabled transition is replaced by a newer one only in SUPERSEDED mode, so a promotion takes staging's newest commit.
+      // #1242: a run waiting at the disabled transition is replaced by a newer one only in SUPERSEDED mode, so a promotion takes beta's newest commit.
       ExecutionMode: "SUPERSEDED",
       DisableInboundStageTransitions: [{ StageName: "Production", Reason: PROMOTION_GATE_REASON }],
       Triggers: [{
@@ -477,7 +478,7 @@ describe("production release pipeline", () => {
       Properties: { Stages: Array<{ Name: string; Actions: Array<{ Name: string; Configuration: { ProjectName: unknown } }> }> };
     }>;
     expect(pipeline?.Properties.Stages.map((stage) => `${stage.Name}:${stage.Actions.map((action) => action.Name).join(",")}`))
-      .toEqual(["Source:GitHub", "Staging:ReleaseStaging", "Production:ReleaseProduction"]);
+      .toEqual(["Source:GitHub", "Beta:ReleaseBeta", "Production:ReleaseProduction"]);
   });
 
   it("gives the transition into Production a reason CodePipeline accepts", () => {
@@ -488,7 +489,7 @@ describe("production release pipeline", () => {
   const projects = Object.values(template.findResources("AWS::CodeBuild::Project")) as Array<{
     Properties: { Name: string; Source: { BuildSpec: unknown }; ServiceRole: unknown };
   }>;
-  /** A build spec as text; the staging one is a join around the staging account parameter. */
+  /** A build spec as text; the beta one is a join around the beta account parameter. */
   const buildSpecOf = (name: string): string => {
     const spec = projects.find((project) => project.Properties.Name === name)?.Properties.Source.BuildSpec;
     if (typeof spec === "string") return spec;
@@ -506,32 +507,32 @@ describe("production release pipeline", () => {
     expect(buildSpec).not.toContain("--profile");
   });
 
-  it("runs the staging release in the staging account, as its release role, after CI's proof in this account", () => {
+  it("runs the beta release in the beta account, as its release role, after CI's proof in this account", () => {
     template.hasResourceProperties("AWS::CodeBuild::Project", {
-      Name: AGENTX_STAGING_RELEASE_PROJECT_NAME,
+      Name: AGENTX_BETA_RELEASE_PROJECT_NAME,
       ConcurrentBuildLimit: 1,
       TimeoutInMinutes: 120,
       Environment: Match.objectLike({ Type: "ARM_CONTAINER", ComputeType: "BUILD_GENERAL1_LARGE", PrivilegedMode: true }),
     });
-    template.hasResourceProperties("AWS::IAM::Role", { RoleName: AGENTX_STAGING_BUILD_ROLE_NAME });
-    template.hasParameter("StagingAccountId", { Type: "String", AllowedPattern: "^[0-9]{12}$" });
-    const buildSpec = buildSpecOf(AGENTX_STAGING_RELEASE_PROJECT_NAME);
+    template.hasResourceProperties("AWS::IAM::Role", { RoleName: AGENTX_BETA_BUILD_ROLE_NAME });
+    template.hasParameter("BetaAccountId", { Type: "String", AllowedPattern: "^[0-9]{12}$" });
+    const buildSpec = buildSpecOf(AGENTX_BETA_RELEASE_PROJECT_NAME);
     expect(buildSpec).not.toContain("disable-stage-transition");
     const proof = buildSpec.indexOf("node scripts/release-ci-proof.ts");
-    const profile = buildSpec.indexOf("[profile agentx-staging]");
+    const profile = buildSpec.indexOf("[profile agentx-beta]");
     expect(proof).toBeGreaterThan(-1);
     expect(profile).toBeGreaterThan(proof);
     expect(buildSpec).toContain("credential_source = EcsContainer");
-    expect(buildSpec).toContain(`:role/${AGENTX_STAGING_RELEASE_ROLE_NAME}`);
-    expect(buildSpec).toContain('npm run release:prod -- --region \\"$AWS_REGION\\" --profile agentx-staging --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS');
+    expect(buildSpec).toContain(`:role/${AGENTX_BETA_RELEASE_ROLE_NAME}`);
+    expect(buildSpec).toContain('npm run release:prod -- --region \\"$AWS_REGION\\" --profile agentx-beta --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS');
     expect(buildSpec.match(/--skip-checks/gu)).toHaveLength(1);
     expect(buildSpec).not.toMatch(/--allow-dirty/);
-    // The staging build's own rights: CI's proof here, and the staging account's release role; nothing that deploys in this account.
-    const stagingPolicy = Object.values(template.findResources("AWS::IAM::Policy")).find((policy) =>
-      JSON.stringify((policy as { Properties: { Roles: unknown } }).Properties.Roles).includes("StagingReleaseBuildRole")) as
+    // The beta build's own rights: CI's proof here, and the beta account's release role; nothing that deploys in this account.
+    const betaPolicy = Object.values(template.findResources("AWS::IAM::Policy")).find((policy) =>
+      JSON.stringify((policy as { Properties: { Roles: unknown } }).Properties.Roles).includes("BetaReleaseBuildRole")) as
       { Properties: { PolicyDocument: { Statement: Statement[] } } } | undefined;
-    const sids = (stagingPolicy?.Properties.PolicyDocument.Statement ?? []).map((statement) => statement.Sid).filter(Boolean);
-    expect(sids).toEqual(expect.arrayContaining(["ReadGithubAppKeyForCiProof", "ReadReleaseStacks", "AssumeStagingReleaseRole"]));
+    const sids = (betaPolicy?.Properties.PolicyDocument.Statement ?? []).map((statement) => statement.Sid).filter(Boolean);
+    expect(sids).toEqual(expect.arrayContaining(["ReadGithubAppKeyForCiProof", "ReadReleaseStacks", "AssumeBetaReleaseRole"]));
     expect(sids).not.toContain("AssumeCdkBootstrapRoles");
     expect(sids).not.toContain("ProductionWorkerRepository");
   });
@@ -571,7 +572,7 @@ describe("production release pipeline", () => {
 
   it("keeps the release projects outside the broker's CodeBuild gate allow-list", () => {
     expect(AGENTX_RELEASE_PROJECT_NAME).not.toMatch(/^agentx-/i);
-    expect(AGENTX_STAGING_RELEASE_PROJECT_NAME).not.toMatch(/^agentx-/i);
+    expect(AGENTX_BETA_RELEASE_PROJECT_NAME).not.toMatch(/^agentx-/i);
   });
 
   it("grants no wildcard actions and scopes release permissions to production resources", () => {
@@ -595,22 +596,22 @@ describe("production release pipeline", () => {
   });
 });
 
-describe("staging release access (#1242)", () => {
-  const template = Template.fromStack(new StagingReleaseAccessStack(new App(), "TestStagingReleaseAccess", { env: { region: "us-east-1" } }));
+describe("beta release access (#1242)", () => {
+  const template = Template.fromStack(new BetaReleaseAccessStack(new App(), "TestBetaReleaseAccess", { env: { region: "us-east-1" } }));
   const statements = (Object.values(template.findResources("AWS::IAM::Policy")) as Array<{
     Properties: { PolicyDocument: { Statement: Array<{ Sid?: string; Action: string | string[]; Resource: unknown }> } };
   }>).flatMap((policy) => policy.Properties.PolicyDocument.Statement);
 
-  it("trusts only the release account's staging build role", () => {
+  it("trusts only the release account's beta build role", () => {
     template.hasParameter("ReleaseAccountId", { Type: "String", AllowedPattern: "^[0-9]{12}$" });
     const [role] = Object.values(template.findResources("AWS::IAM::Role")) as Array<{
       Properties: { RoleName: string; AssumeRolePolicyDocument: { Statement: Array<{ Principal: unknown; Condition: unknown }> } };
     }>;
-    expect(role?.Properties.RoleName).toBe(AGENTX_STAGING_RELEASE_ROLE_NAME);
+    expect(role?.Properties.RoleName).toBe(AGENTX_BETA_RELEASE_ROLE_NAME);
     expect(role?.Properties.AssumeRolePolicyDocument.Statement).toHaveLength(1);
     const trust = JSON.stringify(role?.Properties.AssumeRolePolicyDocument.Statement[0]);
     expect(trust).toContain('"ArnEquals":{"aws:PrincipalArn"');
-    expect(trust).toContain(`:role/${AGENTX_STAGING_BUILD_ROLE_NAME}`);
+    expect(trust).toContain(`:role/${AGENTX_BETA_BUILD_ROLE_NAME}`);
     expect(trust).toContain('{"Ref":"ReleaseAccountId"}');
   });
 
@@ -621,6 +622,24 @@ describe("staging release access (#1242)", () => {
     expect(statements.filter((statement) => statement.Resource === "*").flatMap((statement) => [statement.Action].flat())).toEqual(["ecr:GetAuthorizationToken"]);
     expect(actions).not.toContain("secretsmanager:GetSecretValue");
     expect(actions).not.toContain("ecr:CreateRepository");
+  });
+});
+
+describe("beta domain (#1242)", () => {
+  const template = Template.fromStack(new BetaDomainStack(new App(), "TestBetaDomain", { env: { region: "us-east-1" } }));
+
+  it("maps the whole beta API, at its one $default stage, onto a regional TLS 1.2 domain with a DNS-validated certificate", () => {
+    template.hasParameter("DomainName", { Type: "String" });
+    template.hasParameter("ApiId", { Type: "String", AllowedPattern: "^[a-z0-9]{10}$" });
+    template.hasResourceProperties("AWS::CertificateManager::Certificate", { DomainName: { Ref: "DomainName" }, ValidationMethod: "DNS" });
+    template.hasResourceProperties("AWS::ApiGatewayV2::DomainName", {
+      DomainName: { Ref: "DomainName" },
+      DomainNameConfigurations: [Match.objectLike({ EndpointType: "REGIONAL", SecurityPolicy: "TLS_1_2" })],
+    });
+    template.hasResourceProperties("AWS::ApiGatewayV2::ApiMapping", { ApiId: { Ref: "ApiId" }, Stage: "$default" });
+    template.resourceCountIs("AWS::ApiGatewayV2::ApiMapping", 1);
+    template.hasOutput("RegionalDomainName", {});
+    template.hasOutput("RegionalHostedZoneId", {});
   });
 });
 
