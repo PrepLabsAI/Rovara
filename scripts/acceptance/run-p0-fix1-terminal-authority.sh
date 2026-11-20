@@ -33,4 +33,4 @@ IMAGE_INFO=$(docker image inspect "$IMAGE" --format '{{.RepoDigests}} {{.Os}} {{
   exit 2
 }
 case "$IMAGE_INFO" in *"$IMAGE"*' linux arm64'*) ;; *) echo "UNAVAILABLE: local pinned Docker image identity or platform does not match" >&2; exit 2 ;; esac
-exec "$NODE" node_modules/vitest/vitest.mjs run tests/e2e/project-setup-terminal-authority-fix1.test.ts --reporter=verbose
+exec "$NODE" node_modules/vitest/vitest.mjs run tests/e2e/project-setup-terminal-authority.test.ts --reporter=verbose
