@@ -869,7 +869,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     expect(result.code).not.toBe(0);
     // Every step after the gateway starts depends on a LIVE gateway, so a gateway that dies at once fails the boot at whichever of them first sees it dead: the start, the running check, the bridge-port isolation (it execs into the gateway to find
     // its port, sandbox-egress.sh se_container_port_index, so it fails closed on a dead one) or the boot probe. Exactly these four, nothing else (an unrelated failure must not pass for this one).
-    expect(result.failure).toMatch(/^(could not start the sandbox egress gateway|the sandbox egress gateway is not running on its two networks|could not set and verify sandbox bridge port isolation|the sandbox egress gateway did not pass its checks.*)$/u);
+    expect(result.failure?.trim()).toMatch(/^(could not start the sandbox egress gateway|the sandbox egress gateway is not running on its two networks|could not set and verify sandbox bridge port isolation|the sandbox egress gateway did not pass its checks.*)$/u);
     // And the failure is because the gateway is dead, with no sandbox started by the stage and the worker given nothing.
     // (Docker may be restarting it under its `unless-stopped` policy, so "running" is not stable: what proves it died is its own exit code 3 or a restart.)
     const state = await docker("inspect", "--format", "{{.State.ExitCode}}|{{.RestartCount}}", "rovara-egw");
