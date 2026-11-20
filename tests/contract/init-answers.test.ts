@@ -20,8 +20,8 @@ const everyFlag: InitFlags = {
   permissionBoundary: "", operatorPrincipal: "",
   alertEmail: "ops@example.com",
   budget: "0",
-  githubAccount: "acme", githubAccountType: "organization", githubAppName: "AgentX acme (staging)",
-  slackAppName: "AgentX acme (staging)", slackAppPostedMessages: "accept",
+  githubAccount: "acme", githubAccountType: "organization", githubAppName: "Rovara acme (staging)",
+  slackAppName: "Rovara acme (staging)", slackAppPostedMessages: "accept",
 };
 
 /** These fixtures intentionally keep an own property whose value is undefined. */
@@ -80,8 +80,8 @@ describe("init questions", () => {
       models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "us.anthropic.claude-haiku-4-5-20251001-v1:0", worker: "us.anthropic.claude-sonnet-4-6" },
       alert: { kind: "email", address: "ops@example.com" },
       budget: { monthlyUsd: 260, scope: "account" },
-      github: { account: "acme", accountType: "organization", appName: "AgentX acme (staging)" },
-      slack: { appName: "AgentX acme (staging)", appPostedMessages: "accept" },
+      github: { account: "acme", accountType: "organization", appName: "Rovara acme (staging)" },
+      slack: { appName: "Rovara acme (staging)", appPostedMessages: "accept" },
       // Spec 048 FR-020: your email and the developer sign-in are settings now.
       adminEmail: "ops@example.com", signinMethods: "slack",
       createdAt: "2026-09-27T00:00:00.000Z",
@@ -108,7 +108,7 @@ describe("init questions", () => {
     const prompter = scriptedPrompter(settingsScript({ flags: everyFlag }));
     const { answers } = await collectInitAnswers({ ...base, flags: everyFlag, prompter });
     expect(prompter.asked).toEqual(["Install name", "Change the advanced settings?"]);
-    expect(answers.github.appName).toBe("AgentX acme (staging)");
+    expect(answers.github.appName).toBe("Rovara acme (staging)");
   });
 
   it("states GLM 4.7's trade-off and Claude Haiku 4.5's model-access need when chosen", async () => {
@@ -465,8 +465,14 @@ describe("the questions an export bundle already answered (FR-026)", () => {
 });
 
 describe("spec 048 FR-026: app names", () => {
-  it("names both apps AgentX <owner> (<install name>)", () => {
-    expect(defaultAppName({ owner: "acme", env: "staging" })).toBe("AgentX acme (staging)");
+  it("names both apps Rovara <owner> (<install name>)", () => {
+    expect(defaultAppName({ owner: "acme", env: "staging" })).toBe("Rovara acme (staging)");
+  });
+
+  it("keeps the owner at the GitHub name limit and drops it above the limit", () => {
+    const env = "a".repeat(20);
+    expect(defaultAppName({ owner: "a".repeat(4), env })).toBe(`Rovara ${"a".repeat(4)} (${env})`);
+    expect(defaultAppName({ owner: "a".repeat(5), env })).toBe(`Rovara (${env})`);
   });
 
   it("the longest owner and install name still fit, and both apps match", async () => {
@@ -474,7 +480,7 @@ describe("spec 048 FR-026: app names", () => {
     const env = "abcdefghij-klmnopqrs";
     expect(env.length).toBe(20);
     const name = defaultAppName({ owner, env });
-    expect(name).toBe("AgentX (abcdefghij-klmnopqrs)");
+    expect(name).toBe("Rovara (abcdefghij-klmnopqrs)");
     expect(name.length).toBeLessThanOrEqual(GITHUB_APP_NAME_LIMIT);
 
     const prompter = scriptedPrompter([...settingsScript({ env, owner, advanced: { alertEmail: "ops@example.com" } }), ""]);

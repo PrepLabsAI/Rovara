@@ -21,11 +21,11 @@ export { CLASSIFIER_MODEL_CHOICES, GITHUB_APP_NAME_LIMIT, ORCHESTRATOR_MODEL_CHO
 
 /** Spec 048 FR-026: one default name for the GitHub app and the Slack app, with the install name in
  * it. GitHub app names are unique across GitHub, so the owner is in it too; when that is longer
- * than GitHub's 34 characters, the owner is dropped at its word boundary. "AgentX (<install name>)"
+ * than GitHub's 34 characters, the owner is dropped at its word boundary. "Rovara (<install name>)"
  * always fits: install names are at most 20 characters. */
 export function defaultAppName(input: { owner: string; env: string }): string {
-  const full = `AgentX ${input.owner} (${input.env})`;
-  return full.length <= GITHUB_APP_NAME_LIMIT ? full : `AgentX (${input.env})`;
+  const full = `Rovara ${input.owner} (${input.env})`;
+  return full.length <= GITHUB_APP_NAME_LIMIT ? full : `Rovara (${input.env})`;
 }
 
 export const DEFAULT_ORCHESTRATOR_MODEL = DEFAULT_BEDROCK_MODELS.orchestrator;
