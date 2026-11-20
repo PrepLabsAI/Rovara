@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { ORCHESTRATION_TOOL_NAMES, assertOrchestrationOnly, createOrchestrationTools } from "../../packages/orchestrator/src/orchestration-tools.js";
+import {
+  ORCHESTRATION_TOOL_NAMES,
+  RETIRED_PULL_REQUEST_TOOLS,
+  assertOrchestrationOnly,
+  createOrchestrationTools,
+} from "../../packages/orchestrator/src/orchestration-tools.js";
 import type { OrchestrationApi } from "../../packages/orchestrator/src/orchestration-tools.js";
 import { lastAssistantResponse } from "../../packages/orchestrator/src/control-plane-api.js";
 import { pollOperation } from "../../packages/orchestrator/src/event-client.js";
@@ -28,6 +33,81 @@ describe("pi orchestration boundary", () => {
     expect(prompt).toContain("Never inspect, edit, or execute project source yourself");
     expect(prompt).toContain("Never publish automatically");
     expect(prompt).toContain("<project-instructions>");
+  });
+
+  it("names every retired pull-request tool and its replacement action", () => {
+    const prompt = orchestratorSystemPrompt("Delegate.");
+    for (const [tool, action] of Object.entries(RETIRED_PULL_REQUEST_TOOLS)) {
+      expect(prompt).toContain(`${tool} → agentx_manage_pull_request action "${action}"`);
+    }
+    expect(prompt).toContain("If a call to a retired name fails, use agentx_manage_pull_request instead.");
+  });
+
+  it("characterizes the in-house agentx_* tools byte-for-byte with no connector catalogs (regression guard)", () => {
+    const api = {
+      submitTask: vi.fn(),
+      taskStatus: vi.fn(),
+      taskResult: vi.fn(),
+      followUp: vi.fn(),
+      createPullRequest: vi.fn(),
+      managePullRequest: vi.fn<OrchestrationApi["managePullRequest"]>(),
+      pullRequestResult: vi.fn(),
+    };
+    const tools = createOrchestrationTools(api, {
+      workspaceId: crypto.randomUUID(),
+      conversationId: crypto.randomUUID(),
+    });
+    expect(tools.map(({ name }) => name)).toEqual(ORCHESTRATION_TOOL_NAMES);
+    expect(api.managePullRequest).not.toHaveBeenCalled();
+    expect(tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters })))
+      .toMatchSnapshot();
+  });
+
+  it("keeps the five tools outside the pull-request lifecycle byte-for-byte (regression guard)", () => {
+    const api = { submitTask: vi.fn(), taskStatus: vi.fn(), taskResult: vi.fn(), followUp: vi.fn(), createPullRequest: vi.fn(), managePullRequest: vi.fn<OrchestrationApi["managePullRequest"]>(), pullRequestResult: vi.fn() };
+    const unchanged = ["agentx_submit_task", "agentx_create_pull_request", "agentx_task_status", "agentx_task_result", "agentx_follow_up"];
+    const tools = createOrchestrationTools(api, { workspaceId: crypto.randomUUID(), conversationId: crypto.randomUUID() })
+      .filter((tool) => unchanged.includes(tool.name));
+    expect(tools.map((tool) => tool.name)).toEqual(unchanged);
+    expect(api.managePullRequest).not.toHaveBeenCalled();
+    expect(tools.map(({ name, label, description, parameters }) => ({ name, label, description, parameters }))).toMatchSnapshot();
+  });
+
+  it("submits an interactive task once and waits for its final response", async () => {
+    const operationId = "11111111-1111-4111-8111-111111111111";
+    const api = {
+      submitTask: vi.fn().mockResolvedValue({ operation: { id: operationId } }),
+      taskStatus: vi.fn(),
+      taskResult: vi.fn().mockResolvedValue({ operationId, status: "SUCCEEDED", response: "Remote answer" }),
+      followUp: vi.fn(),
+      createPullRequest: vi.fn(),
+      managePullRequest: vi.fn<OrchestrationApi["managePullRequest"]>(),
+      pullRequestResult: vi.fn(),
+    };
+    const tool = createOrchestrationTools(api, {
+      workspaceId: crypto.randomUUID(),
+      conversationId: crypto.randomUUID(),
+    }).find(({ name }) => name === "agentx_submit_task");
+    expect(tool).toBeDefined();
+    if (tool === undefined) throw new Error("expected the submit-task tool");
+
+    const result = await tool.execute(
+      "tool-call",
+      { prompt: "inspect it" },
+      undefined,
+      undefined,
+      {} as never,
+    );
+
+    expect(api.submitTask).toHaveBeenCalledTimes(1);
+    expect(api.taskResult).toHaveBeenCalledTimes(1);
+    expect(api.taskStatus).not.toHaveBeenCalled();
+    expect(api.managePullRequest).not.toHaveBeenCalled();
+    expect(result.content).toEqual([{ type: "text", text: JSON.stringify({
+      operationId,
+      status: "SUCCEEDED",
+      response: "Remote answer",
+    }) }]);
   });
 
   it("publishes only through the explicit pull request tool", async () => {
