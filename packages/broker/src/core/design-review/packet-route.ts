@@ -8,7 +8,7 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 //   - looks the slot up in the STORED binding's reviewers (the merge step reads no packet; an unknown or malformed slot gets the same fixed refusal);
 //   - serves the packet the broker STORED for that slot, byte for byte, after checking it hashes to the digest the binding carries (it never rebuilds one);
 //   - answers the contract's delivery fields only, at most 2 MB, never cached, and refuses once the round is recorded on the task.
-import { DesignReviewBindingSchema, PACKET_DELIVERY_BYTES_MAX, PacketDeliverySchema, agentXError, packetDigestOf, type DesignReviewBinding } from "@agentx/contracts";
+import { AgentXError, DesignReviewBindingSchema, PACKET_DELIVERY_BYTES_MAX, PacketDeliverySchema, agentXError, packetDigestOf, type DesignReviewBinding } from "@agentx/contracts";
 import type { CallbackCapabilities } from "../../callbacks.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
@@ -42,7 +42,15 @@ async function roundRecorded(deps: TaskFlowDeps, operation: OperationRecord, rou
   return (task.workflow?.designReview?.rounds ?? []).some((recorded) => recorded.round === round);
 }
 
+/** A credential this route refuses (another task's, stale, revoked) is 403 here, not the shared mapping's 409; the codes and every other route are unchanged. */
 export async function handleDesignReviewPacket(deps: TaskFlowDeps, capabilities: Pick<CallbackCapabilities, "verify">, request: BrokerRequest, authorize?: (claims: ReturnType<CallbackCapabilities["verify"]>) => Promise<void>): Promise<BrokerResponse> {
+  try { return await servePacket(deps, capabilities, request, authorize); } catch (error) {
+    if (error instanceof AgentXError && (error.code === "CALLBACK_FORBIDDEN" || error.code === "STALE_FENCE") && error.statusCode !== 403) throw new AgentXError(error.code, error.message.slice(error.code.length + 2), 403);
+    throw error;
+  }
+}
+
+async function servePacket(deps: TaskFlowDeps, capabilities: Pick<CallbackCapabilities, "verify">, request: BrokerRequest, authorize?: (claims: ReturnType<CallbackCapabilities["verify"]>) => Promise<void>): Promise<BrokerResponse> {
   return withinTaskTokenDeadline(async (deadline) => {
     const token = request.headers[CAPABILITY_HEADER];
     if (token === undefined || token === "") throw agentXError("CALLBACK_FORBIDDEN", "callback capability is required");
