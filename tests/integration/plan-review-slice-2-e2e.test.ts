@@ -28,7 +28,7 @@ const SAM: PageReader = { developerId: "7".repeat(64), name: "Sam Lee", slackUse
 /** Someone signed in who is not in the channel. */
 const OMAR_OUTSIDE: PageReader = { developerId: "8".repeat(64), name: "Omar Diaz", slackUserId: "U0OMAR0001" };
 
-/** The coding plan: claim 2.1 carries decision d1, Above or Below, and AgentX recommends Below. */
+/** The coding plan: claim 2.1 carries decision d1, Above or Below, and Rovara recommends Below. */
 const PLAN = planDocument({
   title: "Show a retry banner",
   why: [{ text: "People miss that a payment failed.", author: "Maya" }],
@@ -152,12 +152,12 @@ describe("deciding and commenting on the task page, end to end", () => {
     tab.byId("decide-approve").click();
     expect(tab.byId("decide-title").textContent).toBe("Approve Coding plan v1");
     expect(tab.byId("decide-submit").textContent).toBe("Approve and start coding");
-    expect(readable(tab.byId("decide-changed-list"))).toBe("Where does the banner go?: You chose Above (AgentX recommended Below)");
+    expect(readable(tab.byId("decide-changed-list"))).toBe("Where does the banner go?: You chose Above (Rovara recommended Below)");
     expect(tab.byId("decide-comments-title").textContent).toBe("Comments to send (2)");
     expect(codingRuns(e2e)).toEqual([]);
     tab.byId("decide-submit").click();
     await tab.settle();
-    expect(tab.byId("decide-status").textContent).toBe("Sent. AgentX is on the next step.");
+    expect(tab.byId("decide-status").textContent).toBe("Sent. Rovara is on the next step.");
     await e2e.settle();
 
     // The card is edited: who approved, one answer changed, two comments included.
@@ -217,7 +217,7 @@ describe("deciding and commenting on the task page, end to end", () => {
     const marked = { prompts: e2e.prompts.length, turns: e2e.turns.length };
     tab.byId("decide-submit").click();
     await tab.settle();
-    expect(tab.byId("decide-status").textContent).toBe("Sent. AgentX is on the next step.");
+    expect(tab.byId("decide-status").textContent).toBe("Sent. Rovara is on the next step.");
     await e2e.settle();
     expect(codingRuns(e2e)).toEqual([]);
 
@@ -240,7 +240,7 @@ describe("deciding and commenting on the task page, end to end", () => {
     expect(readable(thread)).toContain("Above reads better on a phone.");
     expect(readable(thread)).toContain("from v1");
     const reply = thread.querySelector(".replies")!;
-    expect(reply.querySelector(".chip")!.textContent).toBe("AgentX");
+    expect(reply.querySelector(".chip")!.textContent).toBe("Rovara");
     expect(reply.querySelector(".comment-text")!.textContent).toBe("Done: Moved the banner above the pay button.");
     const whole = v2.document.querySelector('[data-comments="document"]')!;
     expect(whole.querySelector(".replies .comment-text")!.textContent).toBe("Not changed because: The copy is already one short line.");
@@ -315,7 +315,7 @@ describe("deciding and commenting on the task page, end to end", () => {
     first.byId("decide-submit").click();
     second.byId("decide-submit").click();
     await Promise.all([first.settle(), second.settle()]);
-    expect(first.byId("decide-status").textContent).toBe("Sent. AgentX is on the next step.");
+    expect(first.byId("decide-status").textContent).toBe("Sent. Rovara is on the next step.");
     expect(second.byId("decide-error").textContent).toBe(`Already approved by ${MAYA.name} a moment ago.`);
     expect(second.byId("decide-dialog").open).toBe(true);
     expect(second.byId("decide-note").value).toBe("Ship it.");
@@ -396,10 +396,10 @@ describe("deciding and commenting on the task page, end to end", () => {
     const posts = e2e.slack.posts.length;
     const sam = await openTaskPage(e2e, SAM, { search: "?doc=coding-plan" });
     const form = await sam.comment("claim:2.1", "Why is Below the recommended place?", { ask: true });
-    expect(readable(form)).toContain("Ask AgentX to reply to this comment");
+    expect(readable(form)).toContain("Ask Rovara to reply to this comment");
     expect(queue.sent).toHaveLength(1);
     const waiting = await openTaskPage(e2e, SAM, { search: "?doc=coding-plan" });
-    expect(readable(waiting.document.querySelector('[data-comments="claim:2.1"]')!)).toContain("AgentX is answering…");
+    expect(readable(waiting.document.querySelector('[data-comments="claim:2.1"]')!)).toContain("Rovara is answering…");
 
     // The Slack service answers it from the task's facts, with no tools, and writes the answer back.
     const turns = await answerPageComments(e2e, queue, "Below keeps the pay button first; Above is the other choice.");
@@ -410,9 +410,9 @@ describe("deciding and commenting on the task page, end to end", () => {
     expect(turns[0]!.modelInput).toContain("Asked by a teammate. You cannot approve, choose answers or make decisions; if asked to, say only the owner decides on the page.");
     const answered = await openTaskPage(e2e, SAM, { search: "?doc=coding-plan" });
     const thread = answered.document.querySelector('[data-comments="claim:2.1"]')!;
-    expect(readable(thread.querySelector(".replies .comment-meta")!)).toMatch(/^AgentX \(AI\) · answering Sam Lee /);
+    expect(readable(thread.querySelector(".replies .comment-meta")!)).toMatch(/^Rovara \(AI\) · answering Sam Lee /);
     expect(thread.querySelector(".replies .comment-text")!.textContent).toBe("Below keeps the pay button first; Above is the other choice.");
-    expect(readable(thread)).not.toContain("AgentX is answering…");
+    expect(readable(thread)).not.toContain("Rovara is answering…");
     expect(e2e.slack.posts.length).toBe(posts);
     expect(e2e.chatQueue).toEqual([]);
     expect(e2e.workflow().decisions).toEqual([]);
@@ -427,13 +427,13 @@ describe("deciding and commenting on the task page, end to end", () => {
     // An older service reads the queue with the schema it knows; this message is not one, so it is dropped, never run.
     const [message] = queue.sent.splice(0);
     expect(SlackRequestMessageSchema.safeParse(JSON.parse(message!.body)).success).toBe(false);
-    expect(readable((await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan" })).document.querySelector('[data-comments="document"]')!)).toContain("AgentX is answering…");
+    expect(readable((await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan" })).document.querySelector('[data-comments="document"]')!)).toContain("Rovara is answering…");
     vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 11 * 60_000 });
     try {
       const later = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan" });
       const thread = readable(later.document.querySelector('[data-comments="document"]')!);
       expect(thread).toContain("Is the banner shown on retries too?");
-      expect(thread).toContain("AgentX couldn't answer this one.");
+      expect(thread).toContain("Rovara couldn't answer this one.");
     } finally {
       vi.useRealTimers();
     }
@@ -455,8 +455,8 @@ describe("deciding and commenting on the task page, end to end", () => {
     await answerPageComments(e2e, queue, "Above is seen first; Below is less in the way.");
     const page = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan", scripts: false });
     const text = page.text();
-    for (const expected of ["You're the task owner.", "It is placed near the pay button.", "Where does the banner go?", "Above", "Below", "AgentX recommends",
-      "Sam Lee", "Above reads better on a phone.", "AgentX (AI) · answering Sam Lee", "Above is seen first; Below is less in the way.", "Comments on this document", "2 comments"]) {
+    for (const expected of ["You're the task owner.", "It is placed near the pay button.", "Where does the banner go?", "Above", "Below", "Rovara recommends",
+      "Sam Lee", "Above reads better on a phone.", "Rovara (AI) · answering Sam Lee", "Above is seen first; Below is less in the way.", "Comments on this document", "2 comments"]) {
       expect(text).toContain(expected);
     }
     // The controls that need the script stay hidden, so nothing on the page does nothing.

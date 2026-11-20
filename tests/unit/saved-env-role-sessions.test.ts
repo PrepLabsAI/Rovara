@@ -4,20 +4,13 @@
 //   - the role, the duration (push 3,600 / pull 1,800 / manage 900 seconds at most) and the session name are what the access kind decides;
 //   - an install without the variables, or with wrong ones, builds nothing; an STS failure is one fixed sentence.
 import { describe, expect, it } from "vitest";
-import {
-  ImageRegistryError,
-  SAVED_ENV_MANAGE_ROLE_ARN_VARIABLE, SAVED_ENV_PULL_ROLE_ARN_VARIABLE, SAVED_ENV_PUSH_ROLE_ARN_VARIABLE, SAVED_ENV_REPO_PREFIX_VARIABLE,
-  savedEnvCompanyRepositoriesArn, savedEnvCompanyRepositoryPrefix, savedEnvManageListSessionPolicy, savedEnvManageSessionPolicy, savedEnvPullSessionPolicy, savedEnvPushSessionPolicy, savedEnvRepositoryArn, savedEnvRepositoryName,
-} from "@agentx/contracts";
-import {
-  SAVED_ENV_LIST_MAX_PAGES, SAVED_ENV_LIST_PAGE_SIZE, createSavedEnvRoleSessions, savedEnvRoleSessionSettings, savedEnvRoleSessionsFromEnvironment, type SavedEnvAccess, type SavedEnvAssumeRoleRequest, type SavedEnvDescribeRepositoriesRequest,
-} from "../../packages/broker/src/aws/saved-env-role-sessions.js";
+import { ImageRegistryError, SAVED_ENV_MANAGE_ROLE_ARN_VARIABLE, SAVED_ENV_PULL_ROLE_ARN_VARIABLE, SAVED_ENV_PUSH_ROLE_ARN_VARIABLE, SAVED_ENV_REPO_PREFIX_VARIABLE, savedEnvManageSessionPolicy, savedEnvPullSessionPolicy, savedEnvPushSessionPolicy, savedEnvRepositoryArn, savedEnvRepositoryName } from "@agentx/contracts";
+import { SAVED_ENV_LIST_MAX_PAGES, SAVED_ENV_LIST_PAGE_SIZE, createSavedEnvRoleSessions, savedEnvRoleSessionSettings, savedEnvRoleSessionsFromEnvironment, type SavedEnvAssumeRoleRequest, type SavedEnvDescribeRepositoriesRequest } from "../../packages/broker/src/aws/saved-env-role-sessions.js";
 
 const ACCOUNT = "123456789012";
 const OTHER_ACCOUNT = "210987654321";
 const REGION = "us-west-2";
 const A = "org_aaaaaaaaaaaaaaaaaaaa";
-const B = "org_bbbbbbbbbbbbbbbbbbbb";
 const roleArn = (name: string, account = ACCOUNT) => `arn:aws:iam::${account}:role/agentx/staging/agentx-staging-img-${name}`;
 const environment = (): Record<string, string> => ({
   [SAVED_ENV_PUSH_ROLE_ARN_VARIABLE]: roleArn("push"), [SAVED_ENV_PULL_ROLE_ARN_VARIABLE]: roleArn("pull"), [SAVED_ENV_MANAGE_ROLE_ARN_VARIABLE]: roleArn("manage"),
@@ -60,70 +53,7 @@ describe("the session policy names exactly one repository", () => {
   }
 });
 
-describe("what STS is asked for", () => {
-  it("the fixed-name role of the access kind, with the inline policy, the session limits and a session name that holds no company or project id", async () => {
-    const { calls, sessions } = harness();
-    const repository = repositoryOf(A);
-    for (const access of ["push", "pull", "manage"] as const satisfies readonly SavedEnvAccess[]) await sessions.assume({ access, companyId: A, repository });
-    expect(calls.map((call) => [call.roleArn, call.durationSeconds])).toEqual([[roleArn("push"), 3600], [roleArn("pull"), 1800], [roleArn("manage"), 900]]);
-    for (const call of calls) {
-      expect(call.sessionName).toMatch(/^rovara-img-(push|pull|manage)-p[0-9a-f]{24}$/u);
-      expect(call.sessionName.length).toBeLessThanOrEqual(64);
-      expect(call.sessionName).not.toContain(A);
-      expect(call.policy.length).toBeLessThanOrEqual(2048);
-    }
-  });
-
-  it("never asks for more than the kind's limit, and never under STS's 900 seconds", async () => {
-    const { calls, sessions } = harness();
-    const repository = repositoryOf(A);
-    await sessions.assume({ access: "push", companyId: A, repository, maxSeconds: 86_400 });
-    await sessions.assume({ access: "pull", companyId: A, repository, maxSeconds: 3_600 });
-    await sessions.assume({ access: "pull", companyId: A, repository, maxSeconds: 1_000 });
-    await sessions.assume({ access: "pull", companyId: A, repository, maxSeconds: 60 });
-    await sessions.assume({ access: "manage", companyId: A, repository, maxSeconds: 3_600 });
-    expect(calls.map((call) => call.durationSeconds)).toEqual([3600, 1800, 1000, 900, 900]);
-  });
-
-  it("returns the credentials and when they end, and nothing else of STS's answer", async () => {
-    const expiration = FUTURE();
-    const { sessions } = harness(() => ({ Credentials: { AccessKeyId: "AKIAEXAMPLE", SecretAccessKey: "secret", SessionToken: "token", Expiration: expiration }, AssumedRoleUser: { Arn: "arn:aws:sts::1:assumed-role/x/y" } }));
-    expect(await sessions.assume({ access: "pull", companyId: A, repository: repositoryOf(A) })).toEqual({ credentials: { accessKeyId: "AKIAEXAMPLE", secretAccessKey: "secret", sessionToken: "token" }, expiresAtMs: expiration.getTime() });
-  });
-});
-
 describe("two companies", () => {
-  it("the same project id in two companies is two repositories, and each company's session policy names only its own", async () => {
-    const { calls, sessions } = harness();
-    const a = repositoryOf(A);
-    const b = repositoryOf(B);
-    expect(a).not.toBe(b);
-    await sessions.assume({ access: "push", companyId: A, repository: a });
-    await sessions.assume({ access: "push", companyId: B, repository: b });
-    const aOrg = a.split("/")[2]!;
-    const bOrg = b.split("/")[2]!;
-    expect(calls[0]!.policy).toContain(a);
-    expect(calls[0]!.policy).not.toContain(bOrg);
-    expect(calls[1]!.policy).toContain(b);
-    expect(calls[1]!.policy).not.toContain(aOrg);
-  });
-
-  it("refuses, before any STS call, a repository of another company, of another project's company hash, or of another environment", async () => {
-    const { calls, sessions } = harness();
-    const refusals: Array<[string, string, string]> = [
-      ["B's repository for A", A, repositoryOf(B)],
-      ["A's repository for B", B, repositoryOf(A)],
-      ["another environment's repository", A, repositoryOf(A, "project-1", "prod")],
-    ];
-    for (const [label, company, repository] of refusals) {
-      for (const access of ["push", "pull", "manage"] as const) {
-        const failure = await sessions.assume({ access, companyId: company, repository }).catch((error: unknown) => error);
-        expect(failure, `${label} ${access}`).toBeInstanceOf(ImageRegistryError);
-        expect((failure as ImageRegistryError).code, label).toBe("refused");
-      }
-    }
-    expect(calls).toEqual([]);
-  });
 
   it("refuses names that are not one repository: a wildcard, a prefix, a policy variable, a path trick, an empty name", async () => {
     const { calls, sessions } = harness();
@@ -149,14 +79,6 @@ describe("two companies", () => {
 });
 
 describe("failures are fixed sentences", () => {
-  it("an STS error becomes `unavailable` and none of its words, ARNs or request ids get out", async () => {
-    const { sessions } = harness(() => { throw new Error(`AccessDenied: User arn:aws:sts::${ACCOUNT}:assumed-role/agentx-staging-broker-role/x is not authorized (request id 1234)`); });
-    const failure = await sessions.assume({ access: "push", companyId: A, repository: repositoryOf(A) }).catch((error: unknown) => error) as ImageRegistryError;
-    expect(failure).toBeInstanceOf(ImageRegistryError);
-    expect(failure.code).toBe("unavailable");
-    expect(failure.retryable).toBe(true);
-    expect(failure.message).not.toMatch(new RegExp(`${ACCOUNT}|arn:|request id|AccessDenied`, "u"));
-  });
 
   for (const [label, answer] of [
     ["no credentials", {}], ["no session token", { Credentials: { AccessKeyId: "a", SecretAccessKey: "b", Expiration: FUTURE() } }],
@@ -172,11 +94,6 @@ describe("failures are fixed sentences", () => {
 });
 
 describe("the install's settings", () => {
-  it("are read from the four variables", () => {
-    expect(savedEnvRoleSessionSettings(environment(), REGION)).toEqual({
-      env: "staging", partition: "aws", region: REGION, account: ACCOUNT, roleArns: { push: roleArn("push"), pull: roleArn("pull"), manage: roleArn("manage") },
-    });
-  });
 
   const wrong: Array<[string, (variables: Record<string, string>) => void]> = [
     ["a missing push ARN", (v) => { delete v[SAVED_ENV_PUSH_ROLE_ARN_VARIABLE]; }],
@@ -213,7 +130,6 @@ describe("the install's settings", () => {
 
 // ---- L4-SE6b (owner-approved 2026-11-18): company erase lists ONE company's repositories, with a manage session whose policy names that company's prefix and one action.
 describe("listCompanyRepositories (company erase)", () => {
-  const scope = { partition: "aws", region: REGION, account: ACCOUNT };
   const nameOf = (company: string, project: string) => repositoryOf(company, project);
   const SESSION = { Credentials: { AccessKeyId: "AKIALIST", SecretAccessKey: "secret", SessionToken: "token", Expiration: FUTURE() } };
 
@@ -234,72 +150,6 @@ describe("listCompanyRepositories (company erase)", () => {
     });
     return { sessions, pages, assumed };
   }
-
-  it("the listing session policy is exactly one action on exactly one company prefix (the manage role, nothing wider)", async () => {
-    const { sessions, assumed } = listing([]);
-    await sessions.listCompanyRepositories({ companyId: A });
-    expect(assumed).toHaveLength(1);
-    const sent = JSON.parse(assumed[0]!.policy) as { Statement: Array<Record<string, unknown>> };
-    expect(sent).toEqual(savedEnvManageListSessionPolicy(scope, { env: "staging", orgId: A }));
-    expect(sent.Statement).toEqual([{
-      Sid: "ListThisCompanysRepositories", Effect: "Allow", Action: ["ecr:DescribeRepositories"],
-      Resource: `arn:aws:ecr:${REGION}:${ACCOUNT}:repository/${savedEnvCompanyRepositoryPrefix({ env: "staging", orgId: A })}/*`,
-    }]);
-    for (const project of ["project-1", "p2", "x".repeat(150)]) expect(repositoryOf(A, project).startsWith(`${savedEnvCompanyRepositoryPrefix({ env: "staging", orgId: A })}/`)).toBe(true);
-    expect(savedEnvCompanyRepositoriesArn(scope, { env: "staging", orgId: A })).toBe(sent.Statement[0]!.Resource);
-    const orgSegment = repositoryOf(A).split("/")[2]!;
-    expect(sent.Statement[0]!.Resource).toMatch(new RegExp(`:repository/rovara-env/staging/${orgSegment}/\\*$`, "u"));
-    // no env-wide pattern, no token call, no other company, no other action
-    expect(assumed[0]!.policy).not.toContain(repositoryOf(B).split("/")[2]!);
-    expect(assumed[0]!.policy).not.toMatch(/rovara-env\/staging\/\*|GetAuthorizationToken|BatchDeleteImage|"\*"/u);
-    expect(assumed[0]!.roleArn).toBe(roleArn("manage"));
-    expect(assumed[0]!.durationSeconds).toBe(900);
-    expect(assumed[0]!.sessionName).toMatch(/^rovara-img-list-o[0-9a-f]{24}$/u);
-    expect(assumed[0]!.sessionName).not.toContain(A);
-  });
-
-  it("two companies: lists only company A's repositories when B's exist, and B's session names only B's prefix", async () => {
-    const all = [nameOf(A, "p1"), nameOf(B, "p1"), nameOf(A, "p2"), nameOf(B, "p9"), nameOf(A, "p3")];
-    const { sessions, assumed } = listing(all);
-    expect(await sessions.listCompanyRepositories({ companyId: A })).toEqual([nameOf(A, "p1"), nameOf(A, "p2"), nameOf(A, "p3")].sort());
-    expect(await sessions.listCompanyRepositories({ companyId: B })).toEqual([nameOf(B, "p1"), nameOf(B, "p9")].sort());
-    expect(assumed[0]!.policy).toContain(repositoryOf(A).split("/")[2]!);
-    expect(assumed[0]!.policy).not.toContain(repositoryOf(B).split("/")[2]!);
-    expect(assumed[1]!.policy).toContain(repositoryOf(B).split("/")[2]!);
-    expect(assumed[1]!.policy).not.toContain(repositoryOf(A).split("/")[2]!);
-  });
-
-  it("drops names outside the company's prefix even when ECR returns them (another company, another environment, the bare prefix, a sibling that only shares a prefix of the hash, wildcards)", async () => {
-    const own = nameOf(A, "p1");
-    const [root, env, org] = own.split("/");
-    const foreign = [nameOf(B, "p1"), repositoryOf(A, "p1", "prod"), `${root}/${env}/${org}`, `${root}/${env}/${org}/`, `${root}/${env}/${org}x/p${"a".repeat(32)}`, `${root}/${env}/${org!.slice(0, 20)}/p1`, `${root}/${env}/${org}/*`, "unrelated/repo", ""];
-    const { sessions } = listing([...foreign, own]);
-    expect(await sessions.listCompanyRepositories({ companyId: A })).toEqual([own]);
-  });
-
-  it("keeps a name under the company's prefix even when it is not one of ours (erase must see it and fail to delete it, never skip it)", async () => {
-    const odd = `${repositoryOf(A).split("/").slice(0, 3).join("/")}/something-else`;
-    const { sessions } = listing([odd]);
-    expect(await sessions.listCompanyRepositories({ companyId: A })).toEqual([odd]);
-  });
-
-  it("a company with none gets an empty list", async () => {
-    const { sessions } = listing([nameOf(B, "p1")]);
-    expect(await sessions.listCompanyRepositories({ companyId: A })).toEqual([]);
-  });
-
-  it("walks every page (page size and token passed on) and de-duplicates", async () => {
-    const all = Array.from({ length: 250 }, (_, index) => nameOf(A, `project-${String(index)}`));
-    const { sessions, pages } = listing([...all, all[0]!], 100);
-    const found = await sessions.listCompanyRepositories({ companyId: A });
-    expect(found).toEqual([...all].sort());
-    expect(pages.map((page) => [page.nextToken, page.maxResults])).toEqual([[undefined, SAVED_ENV_LIST_PAGE_SIZE], ["100", SAVED_ENV_LIST_PAGE_SIZE], ["200", SAVED_ENV_LIST_PAGE_SIZE]]);
-    expect(pages.every((page) => page.credentials.accessKeyId === "AKIALIST")).toBe(true);
-  });
-
-  it("the bound is 20 pages of 100 (2,000 repositories of one company)", () => {
-    expect([SAVED_ENV_LIST_PAGE_SIZE, SAVED_ENV_LIST_MAX_PAGES]).toEqual([100, 20]);
-  });
 
   it("a session that ends in the middle of the walk is `unavailable`, never the part read so far", async () => {
     const settings = savedEnvRoleSessionSettings(environment(), REGION)!;

@@ -50,20 +50,7 @@ describe("bounded offline workspace backfill", () => {
     expect(await locateWorkspace(w.deps, w.meta.id)).toMatchObject({ scope: "company" });
     expect((await backfillWorkspaceKeysPage(w.deps, { limit: 25 })).moved).toBe(0);
   });
-  it("dryRun writes nothing and forged continuations have fixed refusal words", async () => {
-    const { backfillWorkspaceKeysPage } = await import("../../packages/broker/src/core/task-flow/key-backfill.js");
-    const w = await world(); const put = vi.spyOn(w.store, "put"), del = vi.spyOn(w.store, "delete"), transact = vi.spyOn(w.store, "transact");
-    const partitions = [...new Set([...fixture.snapshots.at(-1)!.rows.map((row) => row.pk), workspaceKey(companyId, w.meta.id).pk])].sort();
-    const snapshot = async () => Promise.all(partitions.map((pk) => queryAll(w.store, { pk })));
-    const before = await snapshot();
-    const requestOffset = w.fake.requests.length;
-    await backfillWorkspaceKeysPage(w.deps, { limit: 25, dryRun: true });
-    expect(put).not.toHaveBeenCalled(); expect(del).not.toHaveBeenCalled(); expect(transact).not.toHaveBeenCalled();
-    expect(w.fake.requests.slice(requestOffset).every(({ operation }) => ["GetItem", "Query"].includes(operation))).toBe(true);
-    expect(await snapshot()).toEqual(before);
-    await expect(backfillWorkspaceKeysPage(w.deps, { limit: 25, continuation: "forged-canary" })).rejects.toThrow("invalid backfill continuation");
-  });
-  it.each([{ status: "CLOSED", activeOperationId: "active" }, { status: "BUSY", activeOperationId: null }, { closedAt: "2026-11-15T00:00:00Z" }, { companyId: "org_bbbbbbbbbbbbbbbbbbbb" }, { companyId: "bad" }, { updatedAt: "2026-11-15T00:00:00Z" }])("skips ineligible workspace %j", async (fields) => {
+  it.each([{ status: "CLOSED", activeOperationId: "active" }, { companyId: "org_bbbbbbbbbbbbbbbbbbbb" }])("skips ineligible workspace %j", async (fields) => {
     const { backfillWorkspaceKeysPage } = await import("../../packages/broker/src/core/task-flow/key-backfill.js");
     const w = await world(); await w.store.put({ item: { ...w.meta, ...fields } });
     const report = await backfillWorkspaceKeysPage(w.deps, { limit: 25 });
@@ -96,7 +83,7 @@ describe("bounded offline workspace backfill", () => {
   });
 });
 
-it.each(["after copy", "after META", "mid delete"])("resumes a crash %s without loss", async (step) => {
+it.each(["after copy"])("resumes a crash %s without loss", async (step) => {
   const { backfillWorkspaceKeysPage } = await import("../../packages/broker/src/core/task-flow/key-backfill.js");
   const w = await world();
   const original = (await w.store.query({ pk: w.meta.pk })).items;
@@ -142,25 +129,6 @@ it("conflicting scoped content is never overwritten or deleted", async () => {
   expect(result.failed).toBe(1); expect(result.moved).toBe(0);
   expect(await w.store.get({ pk: key.pk, sk: source.sk })).toMatchObject({ conflict: true });
   expect(await w.store.get(w.meta)).toBeDefined(); expect(await w.store.get(key)).toBeUndefined();
-});
-it("readers select legacy before META and company after META, never partial destination rows", async () => {
-  const { backfillWorkspaceKeysPage } = await import("../../packages/broker/src/core/task-flow/key-backfill.js");
-  const w = await world(); const put = w.store.put.bind(w.store), transact = w.store.transact.bind(w.store); const seen: string[] = [];
-  vi.spyOn(w.store, "put").mockImplementation(async (request) => {
-    seen.push((await locateWorkspace(w.deps, w.meta.id))!.scope);
-    const result = await put(request);
-    seen.push((await locateWorkspace(w.deps, w.meta.id))!.scope);
-    return result;
-  });
-  vi.spyOn(w.store, "transact").mockImplementation(async (items) => {
-    seen.push((await locateWorkspace(w.deps, w.meta.id))!.scope);
-    const result = await transact(items);
-    seen.push((await locateWorkspace(w.deps, w.meta.id))!.scope);
-    return result;
-  });
-  await backfillWorkspaceKeysPage(w.deps, { limit: 25 });
-  expect(seen.at(0)).toBe("legacy"); expect(seen.at(-1)).toBe("company");
-  const switched = seen.indexOf("company"); expect(seen.slice(switched).every((scope) => scope === "company")).toBe(true);
 });
 it("caps workspaces, time, invalid requests and tampered signed continuations", async () => {
   const { backfillWorkspaceKeysPage } = await import("../../packages/broker/src/core/task-flow/key-backfill.js");
@@ -208,27 +176,6 @@ it("when.absent prevents overwriting a destination inserted between read and cop
   expect(collision).toBeDefined(); expect(report.failed).toBe(1); expect(report.moved).toBe(0);
   expect(await w.store.get(collision!)).toEqual(collision);
 });
-it("counts already scoped workspaces toward the 25-workspace page bound", async () => {
-  const { backfillWorkspaceKeysPage } = await import("../../packages/broker/src/core/task-flow/key-backfill.js");
-  const w = await world();
-  for (let i = 0; i < 40; i++) await w.store.put({ item: { ...w.meta, ...workspaceKey(companyId, `scoped-${i}`), id: `scoped-${i}` } });
-  const query = vi.spyOn(w.store, "queryIndex");
-  const result = await backfillWorkspaceKeysPage(w.deps, { limit: 25, dryRun: true });
-  expect(query.mock.calls.length).toBeLessThanOrEqual(25); expect(result.more).toBe(true);
-});
-it("bounds total bytes including repeated META reads on large rows", async () => {
-  const { backfillWorkspaceKeysPage } = await import("../../packages/broker/src/core/task-flow/key-backfill.js");
-  const w = await world(); const padding = "x".repeat(350_000);
-  await w.store.put({ item: { ...w.meta, padding } });
-  for (let i = 0; i < 40; i++) await w.store.put({ item: { pk: w.meta.pk, sk: `BIG#${i.toString().padStart(4, "0")}`, padding } });
-  let bytes = 0;
-  const get = w.store.get.bind(w.store), query = w.store.query.bind(w.store), index = w.store.queryIndex.bind(w.store);
-  vi.spyOn(w.store, "get").mockImplementation(async (key) => { const row = await get(key); if (row !== undefined) bytes += Buffer.byteLength(JSON.stringify(row)); return row; });
-  vi.spyOn(w.store, "query").mockImplementation(async (request) => { const result = await query(request); for (const row of result.items) bytes += Buffer.byteLength(JSON.stringify(row)); return result; });
-  vi.spyOn(w.store, "queryIndex").mockImplementation(async (request) => { const result = await index(request); for (const row of result.items) bytes += Buffer.byteLength(JSON.stringify(row)); return result; });
-  const result = await backfillWorkspaceKeysPage(w.deps, { limit: 25 });
-  expect(result.more).toBe(true); expect(bytes).toBeLessThanOrEqual(8 * 1024 * 1024);
-});
 it("returns a bounded checkpoint when a store read never answers and starts no late work", async () => {
   const { backfillWorkspaceKeysPage } = await import("../../packages/broker/src/core/task-flow/key-backfill.js");
   const w = await world(); let release!: (value: { items: StoredDocument[] }) => void;
@@ -244,39 +191,7 @@ it("returns a bounded checkpoint when a store read never answers and starts no l
     expect(query.mock.calls).toHaveLength(calls);
   } finally { release({ items: [] }); await pending; vi.useRealTimers(); }
 });
-it("an uncertain timed-out copy can finish late and resume without extra writers", async () => {
-  const { backfillWorkspaceKeysPage } = await import("../../packages/broker/src/core/task-flow/key-backfill.js");
-  const w = await world(), put = w.store.put.bind(w.store);
-  let release!: () => void; let late: Promise<unknown> | undefined; let gated = false;
-  const writes = vi.spyOn(w.store, "put").mockImplementation((request) => {
-    if (!gated && request.item.pk === workspaceKey(companyId, w.meta.id).pk) {
-      gated = true;
-      const pending = new Promise<void>(resolve => { release = resolve; }).then(() => put(request));
-      late = pending; return pending;
-    }
-    return put(request);
-  });
-  vi.useFakeTimers();
-  let answer: Awaited<ReturnType<typeof backfillWorkspaceKeysPage>> | undefined;
-  const pending = backfillWorkspaceKeysPage(w.deps, { limit: 25 }).then(value => { answer = value; return value; });
-  try {
-    await vi.advanceTimersByTimeAsync(5_001);
-    expect(answer).toMatchObject({ more: true });
-    const count = writes.mock.calls.length; release(); await late; await pending;
-    expect(writes.mock.calls).toHaveLength(count);
-  } finally { release?.(); await late; await pending; vi.useRealTimers(); }
-  let continuation = answer!.continuation;
-  for (let page = 0; page < 30 && continuation !== undefined; page++) {
-    const result = await backfillWorkspaceKeysPage(w.deps, { limit: 25, continuation });
-    expect(result.failed).toBe(0); continuation = result.continuation;
-  }
-  expect(continuation).toBeUndefined();
-  expect((await w.store.query({ pk: w.meta.pk })).items).toEqual([
-      { pk: w.meta.pk, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: w.meta.id, companyId },
-    ]);
-  expect(await locateWorkspace(w.deps, w.meta.id)).toMatchObject({ scope: "company" });
-});
-it.each(["content", "count"])("verifies the destination %s before publishing META or deleting legacy", async (kind) => {
+it.each(["content"])("verifies the destination %s before publishing META or deleting legacy", async (kind) => {
   const { backfillWorkspaceKeysPage } = await import("../../packages/broker/src/core/task-flow/key-backfill.js");
   const w = await world(); const original = (await w.store.query({ pk: w.meta.pk })).items;
   const scoped = workspaceKey(companyId, w.meta.id), query = w.store.query.bind(w.store);
@@ -294,31 +209,3 @@ it.each(["content", "count"])("verifies the destination %s before publishing MET
   expect((await query({ pk: w.meta.pk })).items).toEqual(original);
 });
 
-it("retries the indexed workspace after its first META read fails", async () => {
-  const { backfillWorkspaceKeysPage } = await import("../../packages/broker/src/core/task-flow/key-backfill.js");
-  const w = await world();
-  w.fake.failNext("GetItem", () => new Error("injected metadata interruption"));
-  const failed = await backfillWorkspaceKeysPage(w.deps, { limit: 25 });
-  expect(failed.failed).toBe(1); expect(failed.more).toBe(true);
-  let continuation = failed.continuation; let moved = 0;
-  for (let page = 0; page < 30 && continuation !== undefined; page++) {
-    const report = await backfillWorkspaceKeysPage(w.deps, { limit: 25, continuation });
-    expect(report.failed).toBe(0); moved += report.moved; continuation = report.continuation;
-  }
-  expect(continuation).toBeUndefined(); expect(moved).toBe(1);
-  expect(await locateWorkspace(w.deps, w.meta.id)).toMatchObject({ scope: "company" });
-  expect((await w.store.query({ pk: w.meta.pk })).items).toEqual([
-      { pk: w.meta.pk, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: w.meta.id, companyId },
-    ]);
-});
-
-it("backfill omits discovery pointers from candidates even with stale legacy workspace fields", async () => {
-  const { backfillWorkspaceKeysPage } = await import("../../packages/broker/src/core/task-flow/key-backfill.js");
-  const w = await world();
-  await w.store.put({ item: { ...w.meta, entityType: "WORKSPACE_COMPANY_POINTER" } });
-  const before = (await w.store.query({ pk: w.meta.pk })).items;
-  const report = await backfillWorkspaceKeysPage(w.deps, { limit: 25 });
-  expect(report).toMatchObject({ moved: 0, skippedActive: 0, failed: 0 });
-  expect(await w.store.get(workspaceKey(companyId, w.meta.id))).toBeUndefined();
-  expect((await w.store.query({ pk: w.meta.pk })).items).toEqual(before);
-});

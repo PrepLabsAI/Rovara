@@ -12,7 +12,7 @@ import { assertSetupIsolation } from "./setup-isolation.js";
 import { setupWorkspaceKey, startRunNetwork } from "./setup-network.js";
 import { TASK_SANDBOX_IMAGE_ENVIRONMENT, gatewayEgressFor, sandboxNetworkFromEnvironment, type TaskShellSelection } from "./task-sandbox.js";
 import type { RunNetwork } from "./setup-network.js";
-import { setupModelPrice } from "./setup-agent-price.js";
+import { modelSpendIsMetered, setupModelPrice } from "./setup-agent-price.js";
 import { createDockerCli, type DockerCli } from "./swebench/containers.js";
 import { EVAL_WORKER_IMAGE_VARIABLE } from "./verification/eval-wiring.js";
 import { runSetupEvalDryRun } from "./verification/eval-dry-run.js";
@@ -76,9 +76,9 @@ export async function runSetupAgentInvocation(
   const image = environment[TASK_SANDBOX_IMAGE_ENVIRONMENT];
   if (image === undefined || image === "") throw agentXError("RUNTIME_UNAVAILABLE", SETUP_RUN_REFUSED_MESSAGES.noSandboxImage);
   // Money: a setup run is metered by the model proxy (the broker's spend ledger) and priced from the catalog; without either it does not start.
-  const proxy = environment["AGENTX_MODEL_PROXY_URL"];
-  if (proxy === undefined || proxy === "") throw agentXError("RUNTIME_UNAVAILABLE", SETUP_RUN_REFUSED_MESSAGES.noModelProxy);
-  const price = setupModelPrice(dependencies.model);
+  // Hotfix 0.5.33: the boot-time proxy (laptop) OR the invocation's own model route (hosted, metered through the control plane); neither refuses.
+  if (!modelSpendIsMetered(environment, invocation.payload)) throw agentXError("RUNTIME_UNAVAILABLE", SETUP_RUN_REFUSED_MESSAGES.noModelProxy);
+  const price = setupModelPrice(dependencies.model, invocation.payload.modelRoute);
   const docker = dependencies.docker ?? createDockerCli();
   const callback = dependencies.setupAgent;
   // On a laptop (`rovara up`) the worker is walled in by its own sandbox network and name server: the run joins that network, and the Docker socket guard does not let a worker make a network of its own or

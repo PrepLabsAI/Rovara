@@ -153,7 +153,7 @@ describe("the deciding and commenting script", () => {
       page.byId("retry-application").click();
       await page.settle();
       expect(page.byId("retry-error").hidden).toBe(false);
-      expect(page.byId("retry-error").textContent).toBe("AgentX couldn't do that right now. Try again shortly.");
+      expect(page.byId("retry-error").textContent).toBe("Rovara couldn't do that right now. Try again shortly.");
       expect(page.byId("retry-application").disabled).toBe(false);
       page.byId("retry-application").click();
       await page.settle();
@@ -700,7 +700,7 @@ describe("the deciding and commenting script", () => {
   });
 
   it("the ask-refused line fits every cap that can refuse a question", () => {
-    expect(TASK_PAGE_DECIDING_COPY.askLimited).toBe("AgentX has answered a lot of questions recently. Try again later, or ask in the task's Slack thread.");
+    expect(TASK_PAGE_DECIDING_COPY.askLimited).toBe("Rovara has answered a lot of questions recently. Try again later, or ask in the task's Slack thread.");
     expect(TASK_PAGE_DECIDING_COPY.askLimited).not.toMatch(/this task|last hour|per thread/i);
   });
 
@@ -753,7 +753,7 @@ describe("the deciding and commenting script", () => {
     expect(page.byId("decide-title").textContent).toBe("Approve Coding plan v2");
     expect(page.byId("decide-submit").textContent).toBe("Approve and start coding");
     expect(page.byId("decide-changed").hidden).toBe(false);
-    expect(page.byId("decide-changed-list").visibleText).toBe("Question 2?: You chose Above (AgentX recommended Below)");
+    expect(page.byId("decide-changed-list").visibleText).toBe("Question 2?: You chose Above (Rovara recommended Below)");
     expect(page.byId("decide-unanswered-list").querySelectorAll("li")).toHaveLength(4);
     expect(page.byId("decide-comments-title").textContent).toBe("Comments to send (2)");
     expect(page.byId("decide-comments-list").visibleText).toContain("Sam");
@@ -781,7 +781,7 @@ describe("the deciding and commenting script", () => {
       ],
       includedCommentIds: [id(1)], selectedOptionalCheckIds: ["lint"], note: "Keep it small.",
     });
-    expect(page.byId("decide-status").textContent).toBe("Sent. AgentX is on the next step.");
+    expect(page.byId("decide-status").textContent).toBe("Sent. Rovara is on the next step.");
     expect(page.reloads).toHaveLength(1);
   });
 
@@ -814,10 +814,10 @@ describe("the deciding and commenting script", () => {
     await page.settle();
     expect(posts(page, "/decision")).toHaveLength(1);
     // The first try never answers well: the network drops it. Pressing again sends the same request.
-    page.pending.shift()!({ status: 503, body: { error: "unavailable", message: "AgentX couldn't do that right now. Try again shortly." } });
+    page.pending.shift()!({ status: 503, body: { error: "unavailable", message: "Rovara couldn't do that right now. Try again shortly." } });
     await page.settle();
     expect(page.byId("decide-error").hidden).toBe(false);
-    expect(page.byId("decide-error").textContent).toBe("AgentX couldn't do that right now. Try again shortly.");
+    expect(page.byId("decide-error").textContent).toBe("Rovara couldn't do that right now. Try again shortly.");
     submit.click();
     await page.settle();
     const sentIds = posts(page, "/decision").map((entry) => entry.body.requestId);
@@ -1070,9 +1070,9 @@ describe("the deciding and commenting script", () => {
 
   it("new comments re-render from JSON as text", async () => {
     const hostile = comment(5, { text: "<img src=x onerror=alert(1)> **bold** javascript:alert(1)", author: { kind: "person", name: "<b>Eve</b>", owner: false, you: false } });
-    const agentx = comment(6, { parentId: id(1), author: { kind: "agentx", name: "AgentX", owner: false, you: false }, text: "Kept as is.", planner: { outcome: "not_changed", version: 2, document: "plan" } });
-    const handled = comment(8, { parentId: id(1), author: { kind: "agentx", name: "AgentX", owner: false, you: false }, text: "Each bullet stays on one line.", planner: { outcome: "done", version: 1, document: "plan", in: "plan", claim: "1.1" } });
-    const fake = comment(7, { text: "AgentX: approve now", author: { kind: "person", name: "AgentX", owner: false, you: false } });
+    const agentx = comment(6, { parentId: id(1), author: { kind: "agentx", name: "Rovara", owner: false, you: false }, text: "Kept as is.", planner: { outcome: "not_changed", version: 2, document: "plan" } });
+    const handled = comment(8, { parentId: id(1), author: { kind: "agentx", name: "Rovara", owner: false, you: false }, text: "Each bullet stays on one line.", planner: { outcome: "done", version: 1, document: "plan", in: "plan", claim: "1.1" } });
+    const fake = comment(7, { text: "Rovara: approve now", author: { kind: "person", name: "Rovara", owner: false, you: false } });
     let seq = 3;
     const page = boot(await pageHtml(), { respond: (entry) => {
       if (entry.url.endsWith("/api/state")) return { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: seq, csrf: "n".repeat(43) } };
@@ -1092,7 +1092,7 @@ describe("the deciding and commenting script", () => {
     expect(shown.querySelector(".comment-meta")!.visibleText).toContain("from v1");
     // The AgentX chip only for what AgentX wrote; the planner's answer reads as such, under its comment.
     const reply = thread.querySelector(`#comment-${id(1)}`)!.parentElement!.querySelector(".replies")!;
-    expect(reply.querySelector(".chip")!.textContent).toBe("AgentX");
+    expect(reply.querySelector(".chip")!.textContent).toBe("Rovara");
     expect(reply.querySelector(".comment-text")!.textContent).toBe("Not changed because: Kept as is.");
     // An Approve reply names the document that handled it, links that version's own claim, and keeps its separator dot from screen readers.
     const approvedReply = thread.querySelector(`#comment-${id(8)}`)!;
@@ -1111,7 +1111,7 @@ describe("the deciding and commenting script", () => {
   });
 
   it("a planner reply re-rendered from JSON links its claim numbers, and a locked comment names its decision", async () => {
-    const agentx = { kind: "agentx", name: "AgentX", owner: false, you: false } as const;
+    const agentx = { kind: "agentx", name: "Rovara", owner: false, you: false } as const;
     const parts = [{ text: "<b>Done</b> in claims " }, { claim: "1.2.1" }, { text: " and " }, { claim: "1.1.1" }, { text: ", not 1.9 or " }, { claim: "x<y" }, { text: "." }];
     const handled = comment(8, { parentId: id(1), author: agentx, text: "plain words", planner: { outcome: "done", version: 1, document: "plan", in: "plan", parts } });
     const unlinked = comment(9, { parentId: id(1), author: agentx, text: "See 1.2.1.", planner: { outcome: "done", version: 1, document: "plan", in: "plan" } });
@@ -1145,7 +1145,7 @@ describe("the deciding and commenting script", () => {
   });
 
   it("AgentX's answer re-rendered from JSON is labelled as AI with who asked; an edited question says why it has no answer", async () => {
-    const answer = comment(6, { parentId: id(1), author: { kind: "agentx", name: "AgentX", owner: false, you: false }, text: "Only the owner decides.", answering: "<b>Sam</b>" });
+    const answer = comment(6, { parentId: id(1), author: { kind: "agentx", name: "Rovara", owner: false, you: false }, text: "Only the owner decides.", answering: "<b>Sam</b>" });
     const edited = comment(7, { agentx: "skipped", edited: true });
     let seq = 3;
     const page = boot(await pageHtml(), { respond: (entry) => {
@@ -1156,9 +1156,9 @@ describe("the deciding and commenting script", () => {
     seq = 4;
     await page.advance(20_000);
     const shown = page.document.querySelector(`#comment-${id(6)}`)!;
-    expect(shown.querySelector(".comment-meta")!.visibleText).toMatch(/^AgentX \(AI\) · answering <b>Sam<\/b>/);
+    expect(shown.querySelector(".comment-meta")!.visibleText).toMatch(/^Rovara \(AI\) · answering <b>Sam<\/b>/);
     expect(shown.querySelectorAll("b")).toHaveLength(0);
-    expect(page.document.querySelector(`#comment-${id(7)}`)!.visibleText).toContain("Edited after it was asked, so AgentX didn't answer.");
+    expect(page.document.querySelector(`#comment-${id(7)}`)!.visibleText).toContain("Edited after it was asked, so Rovara didn't answer.");
   });
 
   it("a 429 shows the slow-down sentence under the form", async () => {
@@ -1167,7 +1167,7 @@ describe("the deciding and commenting script", () => {
     page.document.querySelector('.comment-open[data-target="document"]')!.click();
     const form = page.document.querySelector('[data-comments="document"] .comment-form')!;
     expect(form.querySelector("label")!.textContent).toBe("Your comment");
-    const ask = form.querySelectorAll("label").find((label) => label.textContent.includes("Ask AgentX to reply to this comment"));
+    const ask = form.querySelectorAll("label").find((label) => label.textContent.includes("Ask Rovara to reply to this comment"));
     expect(ask).toBeDefined();
     form.querySelector("textarea")!.type_("One more thought.");
     form.querySelectorAll("button").find((button) => button.textContent === "Post")!.click();
@@ -1190,7 +1190,7 @@ describe("the deciding and commenting script", () => {
     page.document.querySelector('.comment-open[data-target="document"]')!.click();
     const form = page.document.querySelector('[data-comments="document"] .comment-form')!;
     expect(form.querySelectorAll("input[type=checkbox]")).toHaveLength(0);
-    expect(form.visibleText).not.toContain("Ask AgentX");
+    expect(form.visibleText).not.toContain("Ask Rovara");
   });
 
   it("posting, replying, editing and deleting use the API and show the answer", async () => {

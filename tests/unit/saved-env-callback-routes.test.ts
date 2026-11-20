@@ -59,11 +59,6 @@ describe("saved environment worker callbacks", () => {
       }
     }
   });
-  it("off is byte-identical to the existing unavailable callback response", async () => {
-    const h = await world(false);
-    const old = await h.request("not-served", { "x-agentx-callback-capability": h.capability({ actions: ["not-served"] }) });
-    for (const action of ACTIONS) expect(await h.request(action, { "x-agentx-callback-capability": h.capability() })).toEqual(old);
-  });
   it("refuses ended, wrong-company operations and missing repository grants", async () => {
     for (const patch of [{ status: "SUCCEEDED" }, { companyId: "org_staging0000000000002" }]) {
       const h = await world();

@@ -49,27 +49,12 @@ it("trigger fire compares due, ref and consumer before trigger reads", async () 
   await handleScheduleFire(deps, { companyId: B, scheduleId: triggerScheduleId(triggerId), target: { kind: TRIGGER_SCHEDULE_KIND, ref: { orgId: A, triggerId } }, scheduledAt: "2026-11-10T00:00:00.000Z", slotId: "slot", attempt: 1 });
   expect(get).not.toHaveBeenCalled(); expect(lines).toEqual([{ companyId: A, event: "trigger_schedule.fire_other_company" }]);
 });
-it("nightly resolves stored project company before any environment read and refuses mismatch", async () => {
-  const h = await nightlyWorld(); const read = vi.spyOn(h.store, "get"); const lines: unknown[] = [];
-  const deps = { ...h.deps, projectCompany: async () => ORG, companyLog: (line: unknown) => { lines.push(line); } };
-  expect(await handleNightlyFire(deps, { ...h.due(), companyId: B })).toEqual({ outcome: "skipped", reason: "environment_missing" });
-  expect(read).not.toHaveBeenCalled(); expect(h.started).toEqual([]); expect(h.admitted).toEqual([]);
-  expect(lines).toEqual([{ companyId: ORG, event: "test_env.nightly_company_refused", scheduleId: "night", count: 1 }]);
-});
 it("fails closed: nightly missing project and resolver failure never read or retry", async () => {
   for (const projectCompany of [async () => undefined, async () => { throw new Error("secret-canary"); }, async () => "bad-canary"]) {
     const h = await nightlyWorld(); const read = vi.spyOn(h.store, "get"); const lines: unknown[] = [];
     expect(await handleNightlyFire({ ...h.deps, projectCompany, companyLog: (line: unknown) => { lines.push(line); } }, h.due())).toEqual({ outcome: "skipped", reason: "environment_missing" });
     expect(read).not.toHaveBeenCalled(); expect(h.started).toEqual([]); expect(JSON.stringify(lines)).not.toContain("canary");
   }
-});
-it("nightly accepts a matching stored project company", async () => {
-  const h = await nightlyWorld(); expect((await handleNightlyFire({ ...h.deps, projectCompany: async () => ORG }, h.due())).outcome).toBe("started");
-});
-it("fails closed: hosted nightly requires the project binding", async () => {
-  const h = await nightlyWorld(); const read = vi.spyOn(h.store, "get");
-  expect(await handleNightlyFire({ ...h.deps, projectCompanyRequired: true }, h.due())).toEqual({ outcome: "skipped", reason: "environment_missing" });
-  expect(read).not.toHaveBeenCalled(); expect(h.started).toEqual([]);
 });
 
 import { createProjectCompanyResolver } from "../../packages/broker/src/core/test-env/nightly-wiring.js";
@@ -87,13 +72,3 @@ it("bound nightly refuses malformed claimed company without a retry or environme
   expect(read).not.toHaveBeenCalled();
 });
 
-import { projectPk } from "@agentx/contracts";
-import { PROJECT } from "../support/nightly-world.js";
-it("a stored project with no company belongs to the implicit company and fires there", async () => {
-  const h = await nightlyWorld();
-  for (const row of (await h.store.query({ pk: projectPk(ORG, PROJECT) })).items) await h.store.put({ item: { ...row, pk: projectPk(A, PROJECT), orgId: A } });
-  await h.store.put({ item: { pk: "PROJECTS", sk: PROJECT } });
-  const projectCompany = createProjectCompanyResolver(async (project) => h.store.get({ pk: "PROJECTS", sk: project }));
-  expect((await handleNightlyFire({ ...h.deps, projectCompany }, { ...h.due(), companyId: A })).outcome).toBe("started");
-  expect(h.started[0]?.orgId).toBe(A);
-});

@@ -2,12 +2,13 @@
 // after the role; refusals are fixed words with no echo; two companies and two projects never meet; with no model wired the answer is the fixed "not set up" outcome; a script token never reaches it.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { ANSWER_WORDS, AnswerResponseSchema, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
+import { ANSWER_WORDS, AgentXError, AnswerResponseSchema, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createCoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { isAnswersPath, routeHostedAnswers, type HostedAnswersWiring } from "../../packages/broker/src/core-host/answer-routes.js";
+import { AnswerModelRefused } from "../../packages/broker/src/core/answers/ports.js";
 import type { AnswerRepositoryHandle } from "../../packages/broker/src/core/answers/code-source.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { FAKE_COMPANY, createFakeWorld } from "../support/core-host-fakes.js";
@@ -30,6 +31,7 @@ function setup(standings: Record<string, "view" | "manage"> = {}, projects: Reco
   const store = new MemoryDocumentStore();
   const calls: string[] = [];
   const standingCalls: string[] = [];
+  const logs: Array<Record<string, unknown>> = [];
   const model = scriptedModel([answer([goodSentence])]);
   const wiring: HostedAnswersWiring = {
     standing: async (personId, companyId, project) => { standingCalls.push(`${companyId}/${project}/${personId}`); const access = standings[`${companyId}/${project}/${personId}`]; return access === "manage" ? { access, basis: "company-admin" } : access === "view" ? { access } : { access: "none" }; },
@@ -37,10 +39,10 @@ function setup(standings: Record<string, "view" | "manage"> = {}, projects: Reco
     model: () => model,
   };
   const post = async (companyId: OrgId, personId: string, body: unknown, overrides: Partial<HostedAnswersWiring> = {}, path = PATH) => {
-    const answerResponse = await routeHostedAnswers({ request: { method: "POST", path, headers: {}, body: typeof body === "string" ? body : JSON.stringify(body) }, path, personId, companyId, store, wiring: { ...wiring, ...overrides }, now: () => T0 });
+    const answerResponse = await routeHostedAnswers({ request: { method: "POST", path, headers: {}, body: typeof body === "string" ? body : JSON.stringify(body) }, path, personId, companyId, store, wiring: { ...wiring, ...overrides }, now: () => T0, log: (entry) => logs.push(entry) });
     return { status: answerResponse.statusCode, body: JSON.parse(answerResponse.body ?? "{}") as Record<string, unknown>, raw: answerResponse.body ?? "" };
   };
-  return { store, post, calls, standingCalls, model };
+  return { store, post, calls, standingCalls, model, logs };
 }
 const ask = (extra: Record<string, unknown> = {}) => ({ requestId: `req-${randomUUID().slice(0, 12)}`, question: "How long do refunds last?", ...extra });
 
@@ -112,6 +114,41 @@ describe("the answer route: two companies and two projects", () => {
     expect(keys.every((pk) => pk.startsWith(`ORG#${A}#`) || pk.startsWith(`ORG#${B}#`))).toBe(true);
     expect(keys.some((pk) => pk.startsWith(`ORG#${A}#`))).toBe(true);
     expect(keys.some((pk) => pk.startsWith(`ORG#${B}#`))).toBe(true);
+  });
+});
+
+describe("the answer route: fixed failure logging", () => {
+  it.each([new Error("PROVIDER-CANARY"), new AgentXError("RUNTIME_UNAVAILABLE", "PROVIDER-CANARY", 503)])("logs a construction failure once, including structured runtime errors", async (error) => {
+    const w = setup({ [`${A}/alpha/ada`]: "view" });
+    const result = await w.post(A, "ada", ask({ question: "QUESTION-CANARY" }), { model: () => { throw error; } });
+    expect(result.status).toBe(503);
+    expect(w.logs.filter((entry) => entry.event === "answer.failed")).toEqual([{ component: "answers", event: "answer.failed", cause: "unexpected" }]);
+    expect(JSON.stringify(w.logs)).not.toMatch(/CANARY/);
+  });
+
+  it.each([new Error("PROVIDER-CANARY"), new AnswerModelRefused("unavailable"), new AnswerModelRefused("not_set_up")])("logs a later-turn model failure once and keeps the degraded not_found", async (error) => {
+    const w = setup({ [`${A}/alpha/ada`]: "view" });
+    const result = await w.post(A, "ada", ask({ question: "QUESTION-CANARY" }), { model: () => scriptedModel([tool({ tool: "code_read", repo: "web", path: "src/refund.ts", from: 1, to: 7 }), error]) });
+    expect(result.status).toBe(200);
+    expect(result.body).toMatchObject({ outcome: "not_found", text: "" });
+    expect(w.logs.filter((entry) => entry.event === "answer.failed")).toEqual([{ component: "answers", event: "answer.failed", cause: "model_unavailable" }]);
+    expect(JSON.stringify(w.logs)).not.toMatch(/CANARY/);
+  });
+
+  it("logs a rejected availability check and keeps not_set_up", async () => {
+    const w = setup({ [`${A}/alpha/ada`]: "view" });
+    const result = await w.post(A, "ada", ask({ question: "QUESTION-CANARY" }), { model: () => ({ ...w.model, available: async () => { throw new Error("PROVIDER-CANARY"); } }) });
+    expect(result.status).toBe(200);
+    expect(result.body["outcome"]).toBe("not_set_up");
+    expect(w.logs).toEqual([{ component: "answers", event: "answer.failed", cause: "model_unavailable" }]);
+  });
+
+  it("logs a fixed repository failure code without logging the question or answer", async () => {
+    const w = setup({ [`${A}/alpha/ada`]: "view" });
+    const result = await w.post(A, "ada", ask({ question: "QUESTION-CANARY" }), { repositories: async () => { throw new Error("ANSWER-CANARY"); } });
+    expect(result.status).toBe(503);
+    expect(w.logs).toContainEqual({ component: "answers", event: "answer.failed", cause: "repository_unavailable" });
+    expect(JSON.stringify(w.logs)).not.toMatch(/QUESTION-CANARY|ANSWER-CANARY/);
   });
 });
 

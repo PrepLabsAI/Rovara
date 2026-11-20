@@ -58,6 +58,20 @@ const ask = (root: Awaited<ReturnType<typeof setup>>["root"], personId: string) 
   root.lessons!.answer({ method: "GET", path: "/v1/dev/projects/payments/lessons", query: new URLSearchParams() }, { personId });
 
 describe("the core root with the hosted people port", () => {
+  it("builds the company's lessons when the switch is on: the lessons API answers (a missing project is a plain not-found, not 'switched off')", async () => {
+    const { root } = await setup({ lessons: "on" });
+    expect(root.lessons).toBeDefined();
+    await root.app.runtimeFor(A);
+    await expect(ask(root, MEMBER_A)).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  it("answers from live membership: a person of another company, or none, never reads this company's lessons", async () => {
+    const { root, rows } = await setup({ lessons: "on" });
+    await root.app.runtimeFor(A);
+    await expect(ask(root, id(99))).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+    rows.delete(`signin|COMPANY_MEMBER#${MEMBER_A}|COMPANY`);
+    await expect(ask(root, MEMBER_A)).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+  });
 
   it("authenticates before any company runtime is built: an unknown person, or one of no company, never reaches runtimeFor", async () => {
     const { root } = await setup({ lessons: "on" });
@@ -69,11 +83,24 @@ describe("the core root with the hosted people port", () => {
     expect(built.mock.calls.map(([company]) => company)).toEqual([A]);
   });
 
+  it("with the switch on, the team record and its knowledge search are built for the company too; eligible context sources are wired on the hosted core", async () => {
+    const { root } = await setup({ lessons: "on" });
+    expect(root.lessons).toBeDefined();
+    const runtime = await root.app.runtimeFor(A);
+    expect(runtime.flow.deps.learned).toBeDefined();
+    expect(runtime.flow.deps.contextSources).toBeDefined();
+  });
+
   it("does not build lessons while the lessons switch is off, with the port given", async () => {
     for (const lessons of [undefined, "off", "", "typo"]) {
       const { root } = await setup({ ...(lessons === undefined ? {} : { lessons }) });
       expect(root.lessons).toBeUndefined();
     }
+  });
+
+  it("is not built without the people (reported, as before) and not on an install with no sign-in table", async () => {
+    const { root } = await setup({ lessons: "on", withPeople: false });
+    expect(root.lessons).toBeUndefined();
   });
 
   it("serves lessons only to companies the switch names", async () => {

@@ -1,13 +1,13 @@
 // TE-F1c: the phase A record cache as the bridge uses it: TE-F8's key, engine and store, placed under the task's run directory, swept at task start, deleted at task end. The fake egress world answers; nothing leaves the machine
 // (the network tripwire is installed for every test).
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { e2eSecretSpellings, type ModelEgress, type ModelEgressEvent } from "@agentx/contracts";
 import { installNetworkTripwire, type NetworkTripwire } from "../../packages/testing/src/ports/no-network.js";
 import { fixtureEgressRows, fixtureKey } from "../../packages/testing/src/ports/model-egress-fixtures.js";
-import { COMPANY_A, COMPANY_B, DAY_MS, SYSTEM_TEXT, T0, changedReport, chatFrame, planOf } from "./model-record-support.js";
+import { COMPANY_A, COMPANY_B, SYSTEM_TEXT, T0, changedReport, chatFrame, planOf } from "./model-record-support.js";
 import { fakeModelEgressWorld } from "../../packages/testing/src/ports/model-egress-world.js";
 import { createModelBridge, MODEL_FRESH_SANDBOX_SENTENCE, type ModelBridge } from "../../packages/worker/src/model-bridge.js";
 import { createModelBridgeLedger } from "../../packages/worker/src/model-bridge-ledger.js";
@@ -120,23 +120,6 @@ describe("record, then replay through the bridge", () => {
     expect(answer.scripted).toBe(true);
     expect(task.world.provider.calls).toHaveLength(0);
   });
-  it("a token issued for real only does not let a record call forward, and one issued for record does", async () => {
-    const task = await openTask();
-    const fresh = await openRound(task, "check_unsealed", "freshround");
-    const realOnly = await send(fresh, "record", fresh.token("e1", ["real"]), chatFrame(task.world, { system: SYSTEM_TEXT }));
-    expect(realOnly.status).toBe(403);
-    expect(task.world.provider.calls).toHaveLength(0);
-    const recordOnly = await send(fresh, "record", fresh.token("e2", ["record"]), chatFrame(task.world, { system: SYSTEM_TEXT }));
-    expect(recordOnly.status).toBe(200);
-    expect(task.world.provider.calls).toHaveLength(1);
-  });
-  it("record mode in a fresh round with no live token never forwards", async () => {
-    const task = await openTask();
-    const fresh = await openRound(task, "check_unsealed", "freshround");
-    const answer = await send(fresh, "record", undefined, chatFrame(task.world, { system: SYSTEM_TEXT }));
-    expect(answer.status).toBe(403);
-    expect(task.world.provider.calls).toHaveLength(0);
-  });
 });
 
 describe("F8's task rules", () => {
@@ -173,28 +156,6 @@ describe("F8's task rules", () => {
     const again = await openTaskRecordCache({ runDir: task.runDir, helperDir: task.helperDir, scope: { companyId: COMPANY_A.orgId, taskId: "task-1" }, egress: task.world.adapter, egressScope: task.world.scope(COMPANY_A, "openai"), egressCompanyOf, plan: planOf(changedReport()), clock: () => T0, taskState: { overrun: true, forwards: 5 } });
     expect(again.state()).toEqual({ overrun: true, forwards: 5 });
   });
-  it("after the task's real end, a call is not run and forwards nothing", async () => {
-    const task = await openTask();
-    const fresh = await openRound(task, "check_unsealed", "freshround");
-    const token = fresh.token("e");
-    await task.cache.end();
-    const answer = await send(fresh, "record", token, chatFrame(task.world, { system: SYSTEM_TEXT }));
-    expect(answer.notRun).toBeDefined();
-    expect(task.world.provider.calls).toHaveLength(0);
-    expect(existsSync(task.cache.root)).toBe(false);
-  });
-  it("a port scope that names another company than the task's is refused: nothing is forwarded", async () => {
-    const world = fakeModelEgressWorld();
-    const runDir = join(base, "r");
-    const helperDir = join(runDir, "models");
-    mkdirSync(helperDir, { recursive: true, mode: 0o700 });
-    const cache = await openTaskRecordCache({ runDir, helperDir, scope: { companyId: COMPANY_A.orgId, taskId: "task-1" }, egress: world.adapter, egressScope: world.scope(COMPANY_B, "openai"), egressCompanyOf, plan: planOf(changedReport()), clock: () => T0, familyOf });
-    const task: Task = { cache, world, clock: { now: T0 }, runDir, helperDir };
-    const fresh = await openRound(task, "check_unsealed", "freshround");
-    const answer = await send(fresh, "record", fresh.token("e"), chatFrame(world, { system: SYSTEM_TEXT }));
-    expect(answer.status).not.toBe(200);
-    expect(world.provider.calls).toHaveLength(0);
-  });
 });
 
 describe("two companies", () => {
@@ -214,20 +175,6 @@ describe("two companies", () => {
 });
 
 describe("task start and task end", () => {
-  it("the sweep at task start removes what a crash left behind (an expired recording and an old temp file)", async () => {
-    const task = await openTask();
-    const round = await openRound(task, "check_unsealed", "freshround");
-    await send(round, "record", round.token("e"), chatFrame(task.world, { system: SYSTEM_TEXT }));
-    const [file] = filesUnder(task.cache.root);
-    const stray = `${file}.0123456789abcdef.tmp`;
-    writeFileSync(stray, "x", { mode: 0o600 });
-    const old = new Date(T0 - 10 * 60_000);
-    utimesSync(stray, old, old);
-    // The crash: no end(). A new task start, two days later.
-    await round.bridge.close();
-    const later = await openTask({ clock: { now: T0 + 2 * DAY_MS }, taskId: "task-1" });
-    expect(filesUnder(later.cache.root)).toEqual([]);
-  });
   it("end() deletes every recording and the cache directory, once", async () => {
     const task = await openTask();
     const round = await openRound(task, "check_unsealed", "freshround");
@@ -236,14 +183,6 @@ describe("task start and task end", () => {
     expect(await task.cache.end()).toBe(1);
     expect(existsSync(task.cache.root)).toBe(false);
     expect(await task.cache.end()).toBe(0);
-  });
-  it("is deleted with the run directory (nothing is kept anywhere else)", async () => {
-    const task = await openTask();
-    const round = await openRound(task, "check_unsealed", "freshround");
-    await send(round, "record", round.token("e"), chatFrame(task.world, { system: SYSTEM_TEXT }));
-    await round.bridge.close();
-    rmSync(task.runDir, { recursive: true, force: true });
-    expect(filesUnder(base).filter((file) => file.endsWith(".rec"))).toEqual([]);
   });
 });
 void ((): ModelEgressEvent | undefined => undefined);

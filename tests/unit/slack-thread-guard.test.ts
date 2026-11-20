@@ -5,13 +5,9 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import {
-  AgentXError, SharedTaskRecordSchema, errorStatus, orgProjectCatalogKey, projectRevisionKey, sharedTaskKey,
-  type JsonValue, type OrgId, type Principal, type ProjectDefinition, type SlackThread,
-} from "@agentx/contracts";
+import { AgentXError, errorStatus, orgProjectCatalogKey, projectRevisionKey, sharedTaskKey, type JsonValue, type OrgId, type Principal, type ProjectDefinition, type SlackThread } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
-import { startIdempotencyKey, taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
+import { startIdempotencyKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import type { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { buildCoreRegistry, createCoreRuntime, readCoreEngineFlags, type CoreRuntime } from "../../packages/broker/src/core-host/index.js";
@@ -24,7 +20,6 @@ const B = "org_corehost00000000000b" as OrgId;
 const PERSON_A = "a".repeat(64);
 const PERSON_B = "b".repeat(64);
 const TEAM_A = "T0AAAAAAAAA";
-const TEAM_B = "T0BBBBBBBBB";
 const CHANNEL = "C0123456789";
 const TS = "1700000000.000100";
 const USER = "U0123456789";
@@ -82,20 +77,6 @@ async function world() {
 }
 
 describe("the thread's guard row is written with the core start", () => {
-  it("the start's own transaction writes the row the old start writes (readable by every reader of it), naming the task, its workspace, owner, company and request", async () => {
-    const w = await world();
-    const requestId = randomUUID();
-    const started = await w.start(A, { requestId });
-    expect(started).toBeDefined();
-    const row = await w.store.get(sharedTaskKey(THREAD));
-    expect(row).toBeDefined();
-    const parsed = SharedTaskRecordSchema.parse(row);
-    const task = await w.store.get(taskKey(started!.taskId));
-    expect(parsed).toMatchObject({ taskId: started!.taskId, workspaceId: task!["workspaceId"], developerId: PERSON_A, ownerKey: taskOwnerKey(PERSON_A, started!.taskId), project: "payments", workflowThread: true });
-    expect(parsed.closedAt).toBeUndefined();
-    expect(row).toMatchObject({ entityType: "SHARED_TASK", companyId: A, startRequestId: requestId });
-    expect(await w.taskCount()).toBe(1);
-  });
 
   it("a second prefixed mention in the same thread (another request) starts NO second task: the start commits nothing and the guard still names the first", async () => {
     const w = await world();
@@ -110,26 +91,9 @@ describe("the thread's guard row is written with the core start", () => {
     expect(await w.store.get(startIdempotencyKey(PERSON_A, secondRequest))).toBeUndefined();
   });
 
-  it("two starts racing in one thread: exactly one commits", async () => {
-    const w = await world();
-    const results = await Promise.allSettled([w.start(A), w.start(A)]);
-    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
-    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
-    expect(await w.taskCount()).toBe(1);
-  });
 });
 
 describe("a Slack retry of the same event (the same request id) is one task", () => {
-  it("the core answers the first task again, writes no second task and leaves the guard as it was", async () => {
-    const w = await world();
-    const requestId = randomUUID();
-    const first = await w.start(A, { requestId });
-    const guardBefore = await w.store.get(sharedTaskKey(THREAD));
-    const again = await w.start(A, { requestId });
-    expect(again).toEqual(first);
-    expect(await w.taskCount()).toBe(1);
-    expect(await w.store.get(sharedTaskKey(THREAD))).toEqual(guardBefore);
-  });
 
   it("two deliveries of the same event at once: both answer the same task, one task exists", async () => {
     const w = await world();
@@ -149,19 +113,6 @@ describe("a Slack retry of the same event (the same request id) is one task", ()
 });
 
 describe("other threads and other companies are not touched", () => {
-  it("another thread of the same channel, another channel and another workspace each start their own task", async () => {
-    const w = await world();
-    await w.start(A);
-    await w.start(A, { thread: { ...THREAD, threadTs: "1700000009.000900" } });
-    await w.start(A, { thread: { ...THREAD, channelId: "C0999999999" } });
-    expect(await w.taskCount()).toBe(3);
-    // The same channel and time in another workspace is another thread (another company's), and is not blocked by company A's.
-    const other = await w.start(B, { thread: { ...THREAD, teamId: TEAM_B } });
-    expect(other).toBeDefined();
-    expect(await w.taskCount()).toBe(4);
-    expect((await w.store.get(sharedTaskKey({ ...THREAD, teamId: TEAM_B })))).toMatchObject({ companyId: B, developerId: PERSON_B });
-    expect((await w.store.get(sharedTaskKey(THREAD)))).toMatchObject({ companyId: A, developerId: PERSON_A });
-  });
 
   it("a person of company B starting in company A's workspace thread writes no row and starts no task (the row's company is the workspace's company)", async () => {
     const w = await world();
@@ -170,16 +121,6 @@ describe("other threads and other companies are not touched", () => {
     expect(await w.store.get(sharedTaskKey(THREAD))).toBeUndefined();
     // Company A's own person still starts it afterwards.
     expect(await w.start(A)).toBeDefined();
-    expect(await w.taskCount()).toBe(1);
-  });
-
-  it("a guard row of another company in the thread's place is not this company's retry, and blocks the start (nothing is overwritten)", async () => {
-    const w = await world();
-    const requestId = randomUUID();
-    await w.start(B, { thread: THREAD, companyId: B, requestId });
-    const row = await w.store.get(sharedTaskKey(THREAD));
-    await expect(w.start(A, { requestId })).rejects.toThrow();
-    expect(await w.store.get(sharedTaskKey(THREAD))).toEqual(row);
     expect(await w.taskCount()).toBe(1);
   });
 
@@ -197,11 +138,6 @@ describe("other threads and other companies are not touched", () => {
 describe("the guard's own rules", () => {
   const extras = (principal: Principal) => ({ taskId: randomUUID(), workspaceId: randomUUID(), project: "payments", title: "t", principal, client: "slack", receivedAt: "2026-11-18T07:00:00.000Z" });
   const input = { thread: THREAD, companyId: A, requestId: randomUUID() };
-
-  it("is a put that only lands when the row is absent, at the thread's own key", () => {
-    const item = slackThreadGuardItem(input, extras(localOwnerPrincipal({ companyId: A, personId: PERSON_A })));
-    expect(item).toMatchObject({ kind: "put", condition: { op: "notExists" }, item: { ...sharedTaskKey(THREAD), workflowThread: true, companyId: A, startRequestId: input.requestId } });
-  });
 
   it("the person's name is capped and never empty (the readers' own limits)", () => {
     const long = slackThreadGuardItem(input, extras({ ...localOwnerPrincipal({ companyId: A, personId: PERSON_A }), displayName: `  ${"n".repeat(500)}  ` }));

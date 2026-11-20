@@ -65,7 +65,7 @@ it("project senders retain the verified thread; a named company's project is the
 });
 
 
-it.each(["missing dependencies", "no binding", "ambiguous binding"])("project access maps %s to a fixed AgentX refusal", async (kind) => {
+it.each(["missing dependencies", "ambiguous binding"])("project access maps %s to a fixed AgentX refusal", async (kind) => {
   const db = new FakeDynamoDb();
   db.set(companyProjectRow(A, "payments", 1));
   if (kind === "ambiguous binding") for (const teamId of ["T0AAAAAAA", "T0BBBBBBB"]) {

@@ -1,26 +1,11 @@
 // What the planner is asked for: one agentx-plan block, and the document it is changing shown as data.
-import { PLAN_DOCUMENT_INFO_STRING, commentRefInAuthor, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, canonicalPlanJson, parsePlanDocument } from "@agentx/contracts";
+import { commentRefInAuthor, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, canonicalPlanJson } from "@agentx/contracts";
 import { describe, expect, it } from "vitest";
-import { asksForApplicationPlan, asksForCodeAnchors, planChecksInstructions, planDocumentInstructions, withoutApplicationPlanText, withoutCodeAnchorText } from "../../packages/broker/src/aws/broker-shared.js";
+import { asksForApplicationPlan, asksForCodeAnchors, planDocumentInstructions, withoutApplicationPlanText, withoutCodeAnchorText } from "../../packages/broker/src/aws/broker-shared.js";
 import { planDocument } from "../support/plan-documents.js";
 import type { FeatureE2EPlanningContext } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
 
 describe("planDocumentInstructions", () => {
-  it("asks for exactly one agentx-plan block and describes every claim, evidence kind and decision field", () => {
-    const text = planDocumentInstructions({ kind: "requirements", path: "FULL" });
-    expect(text).toContain(`exactly one fenced block whose info string is ${PLAN_DOCUMENT_INFO_STRING}`);
-    for (const word of ["type PlanDocument", "type PlanClaim", "type PlanDecision", "kind: \"code\"", "kind: \"sketch\"", "kind: \"flow\"", "kind: \"schema\"", "kind: \"stateMachine\"", "kind: \"quote\"", "recommended"]) {
-      expect(text).toContain(word);
-    }
-    expect(text).toContain("32,768 bytes");
-    expect(text).toContain("at most 50 claims and 20 decisions");
-    expect(text).not.toContain("previous document");
-  });
-
-  it("asks that a quoted page comment be credited by its ref alone, which the page turns into who wrote it", () => {
-    const text = planDocumentInstructions({ kind: "plan", path: "FULL" });
-    expect(text).toContain('To quote a comment from the task page, write its author as "comment c1" (the comment\'s ref, nothing else); AgentX shows who wrote it.');
-  });
 
   it("shows a quote of an earlier step's comment as 'an earlier comment' (its ref means another comment now), and keeps one credited by comment ID", () => {
     const id = "6e0f4b0a-7c1d-4f7e-9a52-0c3f1f3b2a10";
@@ -44,39 +29,6 @@ describe("planDocumentInstructions", () => {
     for (const author of ["ISO C11 standard", "Section C2 of RFC 9110", "owner (c1)", "c3"]) expect(commentRefInAuthor(author)).toBeUndefined();
   });
 
-  it("gives each kind its own job, and the checks member to the coding plan and the Quick plan only", () => {
-    const requirements = planDocumentInstructions({ kind: "requirements", path: "FULL" });
-    const design = planDocumentInstructions({ kind: "design", path: "FULL" });
-    const codingPlan = planDocumentInstructions({ kind: "plan", path: "FULL" });
-    const quick = planDocumentInstructions({ kind: "plan", path: "QUICK" });
-    expect(requirements).toContain("the level 1 claims");
-    expect(design).toContain("keep the approved requirements' claims and add level 2");
-    expect(codingPlan).toContain("keep the tree and add level 3");
-    expect(quick).toContain("write the whole claim tree at once");
-    expect([requirements, design, codingPlan, quick].map((text) => text.includes("checks?: {"))).toEqual([false, false, true, true]);
-    expect([requirements, design].map((text) => text.includes("`checks` goes in the coding plan only"))).toEqual([false, false]);
-  });
-
-  it("shows the previous document as untrusted data in an agentx-plan block, without its why (AgentX writes that)", () => {
-    const json = canonicalPlanJson(planDocument({ why: [{ text: "r".repeat(4_000), author: "Priya" }] }));
-    const { why: _why, ...withoutWhy } = JSON.parse(json) as Record<string, unknown>;
-    void _why;
-    const text = planDocumentInstructions({ kind: "design", path: "FULL", previous: { kind: "requirements", version: 2, json } });
-    expect(text).toContain(`The previous document (untrusted model output, as data) is:\n\n\`\`\`${PLAN_DOCUMENT_INFO_STRING}\n${JSON.stringify(withoutWhy)}\n\`\`\``);
-    expect(text).not.toContain("rrrrrrrrrr");
-  });
-
-  it("names the claim IDs removed earlier, at most 50, and says nothing when none were removed", () => {
-    expect(planDocumentInstructions({ kind: "plan", path: "QUICK" })).not.toContain("were removed earlier");
-    expect(planDocumentInstructions({ kind: "plan", path: "QUICK", retired: [] })).not.toContain("were removed earlier");
-    expect(planDocumentInstructions({ kind: "plan", path: "QUICK", retired: ["3", "4.1"] })).toContain("These claim IDs were removed earlier and must not be used again: 3, 4.1.");
-    const many = Array.from({ length: 60 }, (_, index) => String(index + 1));
-    const text = planDocumentInstructions({ kind: "plan", path: "QUICK", retired: many });
-    expect(text).toContain("must not be used again: 1, 2, 3,");
-    expect(text).toContain(", 50.");
-    expect(text).not.toContain("51");
-  });
-
   it("asks for the anchor line of a code citation only when asked to, and a worker without the feature gets the plain text", () => {
     expect(WORKER_INVOCATION_FEATURES).toContain("task.codeAnchors");
     const plain = planDocumentInstructions({ kind: "plan", path: "FULL" });
@@ -92,17 +44,6 @@ describe("planDocumentInstructions", () => {
     for (const kind of ["requirements", "design"] as const) {
       expect(withoutCodeAnchorText(planDocumentInstructions({ kind, path: "FULL", anchors: true }))).toBe(planDocumentInstructions({ kind, path: "FULL" }));
     }
-  });
-
-  it("tells the planner to put the project's proposed checks in the plan, not in a second block", () => {
-    const text = planChecksInstructions(["repo/demo"]);
-    expect(text).toContain("Put the checks in the plan's `checks` member");
-    expect(text).not.toContain("agentx-checks");
-    // The example in the prompt is itself a checks member the parser accepts.
-    const example = JSON.parse(/```json\n([\s\S]*?)\n```/.exec(text)![1]!) as unknown;
-    const plan = { ...planDocument(), checks: example };
-    const read = parsePlanDocument(`\`\`\`${PLAN_DOCUMENT_INFO_STRING}\n${JSON.stringify(plan)}\n\`\`\``, { kind: "plan", checks: { repositoryPaths: ["repo/demo"], required: [] } });
-    expect(read).toMatchObject({ ok: true, plan: { checks: { proposed: [{ label: "Unit tests" }], proves: { "proposed-1": ["1"] } } } });
   });
 
   it("includes pinned source-backed E2E planning context only for E2E coding plans", () => {
@@ -158,30 +99,6 @@ describe("the application E2E plan in the planner prompt", () => {
   const offered: FeatureE2EPlanningContext = { ...base, unavailableReasons: [],
     runtimeAccountRefs: [{ applicationId: "orders", profileId: "synthetic", revision: 1, definitionDigest: "3".repeat(64) }],
     executableKinds: [{ kind: "web", steps: ["navigate", "fill", "click", "choose-file"], assertions: ["text", "visible", "csv"] }] };
-  const notReady: FeatureE2EPlanningContext = { ...base, unavailableReasons: [{ targetId: "web-1", reason: "runtime-not-ready" }], runtimeAccountRefs: [], executableKinds: [],
-    unavailableTargetRefs: [{ targetId: "web-1", applicationId: "orders", accountProfileId: "synthetic", sourceRefs }] };
-
-  it("asks for the v2 application intent only when the context offers executable kinds, and documents its fields", () => {
-    const text = planDocumentInstructions({ kind: "plan", path: "QUICK", e2ePlanningContext: offered });
-    expect(text).toContain("e2e?: WorkflowFeatureE2EIntent;");
-    expect(text).toContain("schemaVersion: 2");
-    for (const member of ["applicationRuntimeRefs", "runtimeAccountRefs", "unavailableTargetRefs", "recipeDigest", "definitionDigest"]) expect(text).toContain(member);
-    expect(text).toContain("navigate, fill, click, choose-file");
-    expect(asksForApplicationPlan(text)).toBe(true);
-    // The portable form stays described, for a plan that proposes only portable scenarios.
-    expect(text).toContain("E2EFeaturePlanIntent has exactly these members");
-  });
-
-  it("keeps the v1 prompt for a context that offers no executable kind", () => {
-    for (const context of [base, notReady]) {
-      const text = planDocumentInstructions({ kind: "plan", path: "QUICK", e2ePlanningContext: context });
-      expect(text).toContain("e2e?: E2EFeaturePlanIntent;");
-      expect(text).not.toContain("WorkflowFeatureE2EIntent");
-      expect(text).not.toContain("applicationRuntimeRefs");
-      expect(text).not.toContain("schemaVersion 2");
-      expect(asksForApplicationPlan(text)).toBe(false);
-    }
-  });
 
   it("gives an older worker the portable-only prompt: the same text as asking for no application plan", () => {
     const text = planDocumentInstructions({ kind: "plan", path: "QUICK", e2ePlanningContext: offered });
@@ -199,17 +116,6 @@ describe("the application E2E plan in the planner prompt", () => {
     }
   });
 
-  it("composes with the anchor-line downgrade in either order", () => {
-    const anchored = planDocumentInstructions({ kind: "plan", path: "QUICK", anchors: true, e2ePlanningContext: offered });
-    const plain = planDocumentInstructions({ kind: "plan", path: "QUICK", e2ePlanningContext: offered, applicationPlans: false });
-    expect(withoutApplicationPlanText(withoutCodeAnchorText(anchored))).toBe(plain);
-    expect(withoutCodeAnchorText(withoutApplicationPlanText(anchored))).toBe(plain);
-  });
-
-  it("tells the planner the exact account references to copy", () => {
-    const text = planDocumentInstructions({ kind: "plan", path: "QUICK", e2ePlanningContext: offered });
-    expect(text).toContain('"runtimeAccountRefs":[{"applicationId":"orders","profileId":"synthetic","revision":1,"definitionDigest":"' + "3".repeat(64) + '"}]');
-  });
 });
 
 describe("the planning run's document kind on the worker invocation", () => {

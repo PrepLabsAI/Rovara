@@ -33,6 +33,17 @@ const count = (html: string, pattern: RegExp): number => html.match(pattern)?.le
 const visible = (html: string) => html.replace(/<(style|script)[\s\S]*?<\/\1>/g, "").replace(/<[^>]+>/g, " ");
 
 describe("read-only task page", () => {
+  it("uses Rovara in normal and unavailable titles and all task error pages", async () => {
+    expect((await render({})).body).toContain("<title>Rovara task ·");
+    for (const [load, status] of [[async () => { throw Object.assign(new Error("private"), { code: "TASK_NOT_FOUND" }); }, 404], [async () => { throw Object.assign(new Error("private"), { code: "TASK_ACCESS_DENIED" }); }, 404], [async () => { throw Object.assign(new Error("private"), { code: "TASK_ACCESS_DENIED", owners: ["Maya"] }); }, 403], [async () => { throw new Error("private"); }, 503]] as const) {
+      const web = createTaskWeb({ authenticateSession: async () => caller, getTaskDocumentView: load });
+      const response = await web(request(`/review/${taskId}/task`, SESSION), pageUrl);
+      expect(response.statusCode).toBe(status);
+      expect(response.body).toContain("<title>Rovara</title>");
+      expect(response.body).not.toMatch(/AgentX|\bCLI\b|terminal|agentx login/);
+    }
+  });
+
   it("sends a signed-out reader to sign in and back to the task page", async () => {
     const web = createTaskWeb({ authenticateSession: async () => undefined, getTaskDocumentView: async () => view });
     const answer = await web(request(`/review/${taskId}/task`), new URL(`https://agentx.example.test/review/${taskId}/task`));
@@ -153,12 +164,12 @@ describe("read-only task page", () => {
     const made = await render({ checks: [{ label: "npm test", passed: true, madeByRovara: true }, { label: "lint", passed: true }] });
     expect(made.body).toContain("<li>npm test: Passed (Made by Rovara, never change proof)</li>");
     expect(made.body).toContain("<li>lint: Passed</li>");
-    expect(proposed.body).toContain("<li>Unit &lt;tests&gt; (proposed by AgentX): Not run yet</li>");
+    expect(proposed.body).toContain("<li>Unit &lt;tests&gt; (proposed by Rovara): Not run yet</li>");
     const reviewOnly = await render({ checks: [], checksNote: "No automated checks apply: Only <b>docs</b> change. Review only." });
     expect(reviewOnly.body).toContain("No automated checks apply: Only &lt;b&gt;docs&lt;/b&gt; change. Review only.");
     expect(reviewOnly.body).not.toContain("No checks are set up");
-    const unreadable = await render({ checks: [{ label: "npm test", passed: undefined }], checksNote: "AgentX could not read the proposed checks." });
-    expect(unreadable.body).toContain("AgentX could not read the proposed checks.");
+    const unreadable = await render({ checks: [{ label: "npm test", passed: undefined }], checksNote: "Rovara could not read the proposed checks." });
+    expect(unreadable.body).toContain("Rovara could not read the proposed checks.");
     expect(unreadable.body).toContain("<li>npm test: Not run yet</li>");
   });
 
@@ -181,8 +192,8 @@ describe("read-only task page", () => {
     const section = (body: string): string => /<section id="checks" aria-label="Checks">[\s\S]*?<\/section>/.exec(body)![0];
 
     it("links to the coding plan's table from one line, after any checks note, when a structured coding plan has checks", async () => {
-      const answer = await render({ documents: [structuredDoc("coding plan", 3, plan)], checks: structuredChecks, checksNote: "AgentX could not read the <b>proposed</b> checks." });
-      expect(section(answer.body)).toBe('<section id="checks" aria-label="Checks"><h2>Checks</h2><p>AgentX could not read the &lt;b&gt;proposed&lt;/b&gt; checks.</p><p><a href="#coding-plan-v3-checks">See the checks in the coding plan.</a></p></section>');
+      const answer = await render({ documents: [structuredDoc("coding plan", 3, plan)], checks: structuredChecks, checksNote: "Rovara could not read the <b>proposed</b> checks." });
+      expect(section(answer.body)).toBe('<section id="checks" aria-label="Checks"><h2>Checks</h2><p>Rovara could not read the &lt;b&gt;proposed&lt;/b&gt; checks.</p><p><a href="#coding-plan-v3-checks">See the checks in the coding plan.</a></p></section>');
       expect(answer.body).toContain('<section id="coding-plan-v3-checks" class="checks">');
       expect(answer.body).toContain("Unit &lt;tests&gt;");
       expect(count(answer.body, /npm test/g)).toBe(1);
@@ -256,7 +267,7 @@ describe("a task page that fits a phone and says each thing once", () => {
     expect(checksSection((await render({ stage: "Checks", checksRan: true, checks: waiting })).body)).toContain("<li>npm test: Not run yet</li>");
     // The review-only and unreadable notes stay.
     expect(checksSection((await render({ stage: "Coding plan", checks: [], checksNote: "No automated checks apply. Review only." })).body)).toContain("No automated checks apply. Review only.");
-    expect(checksSection((await render({ stage: "Coding plan", checks: waiting, checksNote: "AgentX could not read the proposed checks." })).body)).toContain("AgentX could not read the proposed checks.");
+    expect(checksSection((await render({ stage: "Coding plan", checks: waiting, checksNote: "Rovara could not read the proposed checks." })).body)).toContain("Rovara could not read the proposed checks.");
   });
 
   it("says no checks are set up only once the checks step is reached, never at requirements, design or the coding plan", async () => {
@@ -1317,7 +1328,7 @@ describe("deciding and commenting on the task page (slice 2)", () => {
       { id: "00000000-0000-4000-8000-000000000001", document: "plan" as const, version: 1, target: { kind: "claim" as const, id: "1" }, author: { kind: "person" as const, name: "Sam", owner: false, you: false }, text: "Looks fine.", createdAt: "2026-10-11T10:00:00.000Z", edited: true, deleted: false, sent: true, rev: 2, agentx: "not_answered" as const },
       { id: "00000000-0000-4000-8000-000000000002", document: "plan" as const, version: 2, target: { kind: "document" as const }, author: { kind: "person" as const, name: "Priya", owner: true, you: true }, text: "", createdAt: "2026-10-11T10:00:00.000Z", edited: false, deleted: true, sent: false, rev: 2 },
       { id: "00000000-0000-4000-8000-000000000003", document: "plan" as const, version: 2, target: { kind: "claim" as const, id: "2" }, author: { kind: "person" as const, name: "Priya", owner: true, you: true }, text: "Why?", createdAt: "2026-10-11T10:00:00.000Z", edited: false, deleted: false, sent: false, rev: 1, agentx: "couldnt" as const },
-      { id: "00000000-0000-4000-8000-000000000004", parentId: "00000000-0000-4000-8000-000000000001", document: "plan" as const, version: 1, target: { kind: "claim" as const, id: "1" }, author: { kind: "agentx" as const, name: "AgentX", owner: false, you: false }, text: "Kept.", createdAt: "2026-10-11T10:00:00.000Z", edited: false, deleted: false, sent: false, rev: 1, planner: { outcome: "not_changed" as const, version: 2, document: "plan" as const } },
+      { id: "00000000-0000-4000-8000-000000000004", parentId: "00000000-0000-4000-8000-000000000001", document: "plan" as const, version: 1, target: { kind: "claim" as const, id: "1" }, author: { kind: "agentx" as const, name: "Rovara", owner: false, you: false }, text: "Kept.", createdAt: "2026-10-11T10:00:00.000Z", edited: false, deleted: false, sent: false, rev: 1, planner: { outcome: "not_changed" as const, version: 2, document: "plan" as const } },
     ];
     for (const access of [owner, commenter]) {
       const { body } = await deciding({ access, pageComments: comments, pageSuggestions: [{ document: "plan", decisionId: "d1", optionId: "five", name: "Sam", you: false }] });

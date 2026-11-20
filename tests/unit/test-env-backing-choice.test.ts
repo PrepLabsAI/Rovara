@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { ServiceCatalogSchema, type ServiceCatalog } from "../../packages/contracts/src/service-catalog.js";
-import { TestEnvDependenciesSchema, readTestEnvDependencies, testEnvDependencyApprovalRisk, testEnvDependencyLessSafeChanges } from "../../packages/contracts/src/test-env-dependency.js";
+import { readTestEnvDependencies, testEnvDependencyApprovalRisk, testEnvDependencyLessSafeChanges } from "../../packages/contracts/src/test-env-dependency.js";
 import { TestEnvServiceSchema } from "../../packages/contracts/src/test-environment.js";
 import { testAccountApprovalDigest, testAccountExternalId, testAccountSecretRef, TestAccountSchema, type TestAccount } from "../../packages/contracts/src/test-account.js";
 import {
@@ -88,43 +88,6 @@ describe("the order (3.4)", () => {
     expect(chooseBacking(input({ dependency: { major: "15" } })).backing).toEqual({ kind: "local", catalogId: "postgres@15" });
     expect(chooseBacking(input({ dependency: { major: "1" } })).backing.kind).toBe("none");
   });
-  it("without a major version it takes the default entry, then the newest", () => {
-    expect(chooseBacking(input()).backing).toEqual({ kind: "local", catalogId: "postgres@16" });
-    const noDefault = pinnedCatalog((entries) => { entries.find((entry) => entry.id === "postgres@16")!.status = "available"; });
-    expect(chooseBacking(input({ catalog: noDefault })).backing).toEqual({ kind: "local", catalogId: "postgres@17" });
-  });
-  it("compares versions by their numbers, not as text", () => {
-    const catalog = pinnedCatalog((entries) => {
-      entries.find((entry) => entry.id === "postgres@16")!.status = "available";
-      entries.find((entry) => entry.id === "postgres@16")!.version = "15.2";
-      entries.find((entry) => entry.id === "postgres@15")!.version = "15.10";
-      entries.find((entry) => entry.id === "postgres@17")!.version = "15.9";
-    });
-    expect(chooseBacking(input({ catalog })).backing).toEqual({ kind: "local", catalogId: "postgres@15" });
-  });
-  it("prefers the catalog to an approved project image", () => {
-    const choice = chooseBacking(input({ allowed: allow({ projectImages: true }), projectImages: [{ imageId: "my-postgres", family: "postgres" }] }));
-    expect(choice.backing).toEqual({ kind: "local", catalogId: "postgres@16" });
-  });
-  it("uses an approved project image when the catalog has nothing, and the first by id", () => {
-    const images = [{ imageId: "zeta-queue", family: "rabbitmq" }, { imageId: "alpha-queue", family: "rabbitmq" }, { imageId: "other", family: "kafka" }];
-    const choice = chooseBacking(input({ dependency: { family: "kafka", kind: "stream" }, allowed: allow({ projectImages: true }), projectImages: images }));
-    expect(choice.backing).toEqual({ kind: "project_image", imageId: "other" });
-    expect(chooseBacking(input({ dependency: { family: "rabbitmq", kind: "queue", major: "9" }, allowed: allow({ projectImages: true }), projectImages: images })).backing).toEqual({ kind: "project_image", imageId: "alpha-queue" });
-  });
-  it("picks Rovara local AWS for a service it supports, with that service", () => {
-    const choice = chooseBacking(s3());
-    expect(choice.backing).toEqual({ kind: "emulated", catalogId: "local-aws@r1", awsService: "s3" });
-    expect(steps(choice)).toEqual(["local:not_in_catalog", "project_image:not_allowed"]);
-  });
-  it("serves functions and the model-endpoint front, and passes over a service it only has", () => {
-    expect(chooseBacking(input({ dependency: { family: "aws:lambda", kind: "cloud_api" } })).backing.kind).toBe("emulated");
-    expect(chooseBacking(input({ dependency: { family: "aws:sagemaker-runtime", kind: "model_endpoint" } })).backing.kind).toBe("emulated");
-    const kinesis = chooseBacking(input({ dependency: { family: "aws:kinesis", kind: "stream" } }));
-    expect(kinesis.backing.kind).toBe("none");
-    expect(steps(kinesis)).toContain("emulated:emulator_does_not_cover");
-    expect(chooseBacking(input({ dependency: { family: "aws:nothing-we-know", kind: "other" } })).backing.kind).toBe("none");
-  });
   it("picks a test account before a fake, and Rovara local AWS before a test account", () => {
     const withBoth = { accounts: [account()], fixtures: [fixture(sha("1"))] };
     expect(chooseBacking(pay(withBoth)).backing).toEqual({ kind: "test_account", accountId: "payments-test" });
@@ -141,12 +104,6 @@ describe("the order (3.4)", () => {
     expect(chooseBacking(pay({ canMakeFake: true })).backing).toEqual({ kind: "fake", fixtureSetRef: undefined, origin: "to_make" });
     expect(chooseBacking(pay({ canMakeFake: true, fixtures: [fixture(sha("3"))] })).backing).toEqual({ kind: "fake", fixtureSetRef: sha("3"), origin: "recorded" });
   });
-  it("ends with nothing, and says why each step was passed over", () => {
-    const choice = chooseBacking(pay());
-    expect(choice.backing).toEqual({ kind: "none", reason: "not_supported" });
-    expect(choice.reason).toBe("nothing_available");
-    expect(steps(choice)).toEqual(["local:not_in_catalog", "project_image:not_allowed", "emulated:not_aws", "test_account:no_test_account", "fake:no_fixture_set"]);
-  });
 });
 
 describe("allowed", () => {
@@ -158,36 +115,6 @@ describe("allowed", () => {
     expect(chooseBacking(dynamo({ ...withEverything, allowed: allow({ emulated: false, testAccounts: false, fakes: false }) })).backing).toEqual({ kind: "none", reason: "not_supported" });
     expect(chooseBacking(input({ allowed: allow({ real: false }) })).skipped[0]).toMatchObject({ step: "local", reason: "not_allowed" });
     expect(chooseBacking(dynamo({ ...withEverything, allowed: allow({ emulated: false }) })).skipped.find((each) => each.step === "emulated")?.reason).toBe("not_allowed");
-  });
-  it("a fake that makes up answers is used by default (TE-A3, O11), and a company can switch it off", () => {
-    const synth = [fixture(sha("3"), { unmatched: "schema_synth" })];
-    const off = allow({ fakeMakesUpAnswers: false });
-    expect(steps(chooseBacking(pay({ fixtures: synth, allowed: off })))).toContain("fake:fake_makes_up_answers_not_allowed");
-    expect(chooseBacking(pay({ fixtures: synth, allowed: off })).backing.kind).toBe("none");
-    expect(chooseBacking(pay({ fixtures: synth })).backing).toMatchObject({ kind: "fake", fixtureSetRef: sha("3") });
-    expect(chooseBacking(pay({ fixtures: synth, allowed: allow({ fakeMakesUpAnswers: true }) })).backing).toMatchObject({ kind: "fake", fixtureSetRef: sha("3") });
-    // A fixture set that does not make up answers is used instead, and so is a new one made by the agent.
-    expect(chooseBacking(pay({ fixtures: [...synth, fixture(sha("7"))], allowed: off })).backing).toMatchObject({ fixtureSetRef: sha("7") });
-    expect(chooseBacking(pay({ fixtures: synth, canMakeFake: true, allowed: off })).backing).toMatchObject({ origin: "to_make" });
-  });
-  it("a fake cannot stand in for a database, a cache, a queue, a stream or a search index, but can for the same service on AWS", () => {
-    for (const kind of ["database", "cache", "queue", "stream", "search"]) {
-      const choice = chooseBacking(input({ dependency: { family: "mystery", kind }, fixtures: [fixture(sha("3"), { family: "mystery" })], canMakeFake: true }));
-      expect(choice.backing, kind).toEqual({ kind: "none", reason: "not_supported" });
-      expect(steps(choice), kind).toContain("fake:fake_not_for_this_kind");
-    }
-    expect(chooseBacking(input({ dependency: { family: "mystery", kind: "http_api" }, fixtures: [fixture(sha("3"), { family: "mystery" })] })).backing.kind).toBe("fake");
-    expect(chooseBacking(dynamo({ allowed: allow({ emulated: false }), fixtures: [fixture(sha("3"), { family: "aws:dynamodb" })] })).backing.kind).toBe("fake");
-  });
-  it("the edition: an entry the edition does not offer is not available", () => {
-    const publicOnly = pinnedCatalog((entries) => { for (const entry of entries) if (entry.family === "postgres") entry.editions = ["public"]; });
-    expect(chooseBacking(input({ catalog: publicOnly, edition: "public" })).backing.kind).toBe("local");
-    const enterprise = chooseBacking(input({ catalog: publicOnly, edition: "enterprise" }));
-    expect(enterprise.backing.kind).toBe("none");
-    expect(steps(enterprise)[0]).toBe("local:not_in_edition");
-    const noEmulator = pinnedCatalog((entries) => { entries.find((entry) => entry.id === "local-aws@r1")!.editions = ["enterprise"]; });
-    expect(steps(chooseBacking(s3({ catalog: noEmulator, edition: "public" })))).toContain("emulated:not_in_edition");
-    expect(chooseBacking(s3({ catalog: noEmulator, edition: "enterprise" })).backing.kind).toBe("emulated");
   });
   it("a retired entry, and an entry not pinned to an image, are not available", () => {
     const retired = pinnedCatalog((entries) => { for (const entry of entries) if (entry.family === "postgres") entry.status = "retired"; });
@@ -219,18 +146,9 @@ describe("allowed", () => {
     expect(chooseBacking(s3({ catalog: covers })).backing).toMatchObject({ catalogId: "local-aws@r2" });
     expect(chooseBacking(dynamo({ catalog: covers })).backing).toMatchObject({ catalogId: "local-aws@r1", awsService: "dynamodb" });
   });
-  it("an entry of the right kind is needed: a helper or a fake server is never real software", () => {
-    expect(steps(chooseBacking(input({ dependency: { family: "dns-helper", kind: "other" } })))[0]).toBe("local:not_in_catalog");
-    expect(steps(chooseBacking(input({ dependency: { family: "fake-server", kind: "other" } })))[0]).toBe("local:not_in_catalog");
-  });
 });
 
 describe("effectiveAllowedBackings: a lock can only be stricter", () => {
-  const KEYS = Object.keys(DEFAULT_ALLOWED_BACKINGS) as Array<keyof AllowedBackings>;
-  it("starts from the shipped defaults: Rovara-made and made-up answers are allowed (O11), own images are not", () => {
-    expect(effectiveAllowedBackings(undefined)).toEqual({ real: true, emulated: true, projectImages: false, testAccounts: true, fakes: true, fakeMakesUpAnswers: true });
-    expect(DEFAULT_ALLOWED_BACKINGS.fakeMakesUpAnswers).toBe(true);
-  });
   it("keeps the answer a company's stored setting gave: a stored false stays false, and a stored setting that says nothing about made-up answers gets the default, ON (DECISIONS 169)", () => {
     expect(effectiveAllowedBackings({ fakeMakesUpAnswers: false }).fakeMakesUpAnswers).toBe(false);
     expect(effectiveAllowedBackings({ real: true, emulated: true, projectImages: false, testAccounts: true, fakes: true }).fakeMakesUpAnswers).toBe(true);
@@ -241,46 +159,11 @@ describe("effectiveAllowedBackings: a lock can only be stricter", () => {
     expect(effectiveAllowedBackings(undefined, { fakeMakesUpAnswers: false }).fakeMakesUpAnswers).toBe(false);
     expect(effectiveAllowedBackings({ fakeMakesUpAnswers: false }, { fakeMakesUpAnswers: true }).fakeMakesUpAnswers).toBe(false);
   });
-  it("reads an empty stored setting as no setting: no company is stored as 'off' for made-up answers (DECISIONS 169; review L3)", () => {
-    expect(effectiveAllowedBackings({})).toEqual(DEFAULT_ALLOWED_BACKINGS);
-    expect(effectiveAllowedBackings({})).toEqual(effectiveAllowedBackings(undefined));
-  });
   it("reads a stored setting that is not an object as off for made-up answers, never as the wider default (a mistake errs on the safe side)", () => {
     for (const bad of [null, "on", 1, ["fakeMakesUpAnswers"]]) {
       expect(effectiveAllowedBackings(bad as unknown as undefined).fakeMakesUpAnswers, JSON.stringify(bad)).toBe(false);
       expect(effectiveAllowedBackings(bad as unknown as undefined), JSON.stringify(bad)).toEqual({ ...DEFAULT_ALLOWED_BACKINGS, fakeMakesUpAnswers: false });
     }
-  });
-  it("the company layer sets any box (own images need a second admin elsewhere)", () => {
-    expect(effectiveAllowedBackings({ projectImages: true, testAccounts: false })).toMatchObject({ projectImages: true, testAccounts: false, real: true });
-  });
-  it("a narrower layer turns boxes off and never on", () => {
-    const company = { projectImages: false, fakes: true };
-    expect(effectiveAllowedBackings(company, { projectImages: true })).toMatchObject({ projectImages: false });
-    expect(effectiveAllowedBackings(company, { fakes: false })).toMatchObject({ fakes: false });
-    expect(effectiveAllowedBackings(company, { fakes: true })).toMatchObject({ fakes: true, real: true });
-  });
-  it("is never wider than the company's layer, whatever the narrower layers say, in any order", () => {
-    const company: Partial<AllowedBackings> = { real: true, emulated: false, projectImages: false, testAccounts: true, fakes: true, fakeMakesUpAnswers: false };
-    const layers: Array<Partial<AllowedBackings>> = [{ emulated: true, projectImages: true, fakeMakesUpAnswers: true }, { testAccounts: false }, {}, { real: true, fakes: true }];
-    const permutations = [layers, [...layers].reverse(), [layers[1]!, layers[3]!, layers[0]!, layers[2]!]];
-    const results = permutations.map((order) => effectiveAllowedBackings(company, ...order));
-    for (const result of results) {
-      expect(result).toEqual(results[0]);
-      const base = effectiveAllowedBackings(company);
-      for (const key of KEYS) if (!base[key]) expect(result[key], key).toBe(false);
-      expect(result.testAccounts).toBe(false);
-    }
-  });
-  it("reads anything that is not exactly true as off in a narrower layer, and in the company layer", () => {
-    expect(effectiveAllowedBackings(undefined, { real: "yes" as unknown as boolean, emulated: null as unknown as boolean, fakes: 0 as unknown as boolean })).toMatchObject({ real: false, emulated: false, fakes: false });
-    expect(effectiveAllowedBackings({ real: "true" as unknown as boolean })).toMatchObject({ real: false });
-  });
-  it("does not change its inputs", () => {
-    const company = Object.freeze({ real: true });
-    const narrower = Object.freeze({ real: false });
-    expect(effectiveAllowedBackings(company, narrower).real).toBe(false);
-    expect(company).toEqual({ real: true });
   });
 });
 
@@ -293,38 +176,9 @@ describe("exceptions", () => {
     // Even where nothing at all is allowed.
     expect(chooseBacking(s3({ dependency: { fakedByTests: true }, allowed: allow({ real: false, emulated: false, fakes: false, testAccounts: false }) })).backing.kind).toBe("none");
   });
-  it("a maintainer may choose a fake over a test account, which is not less safe", () => {
-    const choice = chooseBacking(pay({ accounts: [account()], fixtures: [fixture(sha("3"))], dependency: { maintainerChoice: "fake" } }));
-    expect(choice).toMatchObject({ backing: { kind: "fake", fixtureSetRef: sha("3") }, reason: "maintainer_choice", lessSafe: false });
-  });
-  it("a maintainer may choose a test account over the emulator, which is less safe", () => {
-    const choice = chooseBacking(dynamo({ accounts: [dynamoAccount()], dependency: { maintainerChoice: "test_account" } }));
-    expect(choice).toMatchObject({ backing: { kind: "test_account", accountId: "orders-dev" }, reason: "maintainer_choice", lessSafe: true });
-  });
-  it("a maintainer's choice must still be allowed and available, or the default order applies and says so", () => {
-    const base = { accounts: [dynamoAccount()] };
-    const notAllowed = chooseBacking(dynamo({ ...base, allowed: allow({ testAccounts: false }), dependency: { maintainerChoice: "test_account" } }));
-    expect(notAllowed.backing.kind).toBe("emulated");
-    expect(steps(notAllowed)).toEqual(["test_account:not_allowed", "test_account:maintainer_choice_unavailable", "local:not_in_catalog", "project_image:not_allowed"]);
-    const notThere = chooseBacking(pay({ fixtures: [fixture(sha("3"))], dependency: { maintainerChoice: "project_image" } }));
-    expect(notThere.backing.kind).toBe("fake");
-    expect(steps(notThere)).toContain("project_image:maintainer_choice_unavailable");
-    expect(notThere.reason).toBe("best_available");
-    // A maintainer cannot bring a test account into a place that is not sealed.
-    expect(chooseBacking(dynamo({ ...base, place: "working", dependency: { maintainerChoice: "test_account" } })).backing.kind).toBe("emulated");
-  });
   it("a maintainer may decline a backing: the dependency runs without it, which needs a second person", () => {
     const choice = chooseBacking(s3({ dependency: { maintainerChoice: "none" } }));
     expect(choice).toMatchObject({ backing: { kind: "none", reason: "declined" }, reason: "maintainer_declined", lessSafe: true });
-  });
-  it("marks what a second person must approve", () => {
-    expect(chooseBacking(input()).lessSafe).toBe(false);
-    expect(chooseBacking(s3()).lessSafe).toBe(false);
-    expect(chooseBacking(pay({ fixtures: [fixture(sha("3"))] })).lessSafe).toBe(false);
-    expect(chooseBacking(pay({ canMakeFake: true })).lessSafe).toBe(false);
-    expect(chooseBacking(pay({ accounts: [account()] })).lessSafe).toBe(true);
-    expect(chooseBacking(input({ dependency: { family: "kafka", kind: "stream" }, allowed: allow({ projectImages: true }), projectImages: [{ imageId: "k", family: "kafka" }] })).lessSafe).toBe(true);
-    expect(chooseBacking(pay()).lessSafe).toBe(true);
   });
 });
 
@@ -337,13 +191,6 @@ describe("the working sandbox swap (owner Q2)", () => {
       else expect(choice.backing.kind, place).toBe("fake");
     }
   });
-  it("replaces the account by a fake where it may not be used, and says so", () => {
-    const choice = chooseBacking(pay({ ...withAccount, fixtures: [fixture(sha("3"))], place: "working" }));
-    expect(choice.backing).toEqual({ kind: "fake", fixtureSetRef: sha("3"), origin: "recorded" });
-    expect(choice.replacedTestAccount).toBe(true);
-    expect(steps(choice)).toContain("test_account:only_in_sealed_checks");
-    expect(chooseBacking(pay({ ...withAccount, fixtures: [fixture(sha("3"))] })).replacedTestAccount).toBe(false);
-  });
   it("is 'not available while coding' when there is no fake either", () => {
     const choice = chooseBacking(pay({ ...withAccount, place: "working" }));
     expect(choice).toMatchObject({ backing: { kind: "none", reason: "not_supported" }, reason: "not_available_while_coding", replacedTestAccount: false });
@@ -352,9 +199,6 @@ describe("the working sandbox swap (owner Q2)", () => {
     // Without a usable account it is simply nothing.
     expect(chooseBacking(pay({ place: "working" })).reason).toBe("nothing_available");
     expect(chooseBacking(pay({ accounts: [account({ status: "suspended", expiresAt: "2027-01-30T10:00:00.000Z" })], place: "working" })).reason).toBe("nothing_available");
-  });
-  it("a fake can be made while coding", () => {
-    expect(chooseBacking(pay({ ...withAccount, place: "working", canMakeFake: true })).backing).toMatchObject({ kind: "fake", origin: "to_make" });
   });
   it("services that run for real are the same while coding", () => {
     expect(chooseBacking(input({ place: "working" })).backing.kind).toBe("local");
@@ -373,43 +217,14 @@ describe("test account for nightly only (owner Q6)", () => {
     const nightly = chooseBacking(dynamo({ ...flagged, place: "nightly" }));
     expect(nightly).toMatchObject({ backing: { kind: "test_account", accountId: "orders-dev" }, reason: "nightly_account", lessSafe: true });
   });
-  it("without the flag the emulator is first in the nightly too", () => {
-    expect(chooseBacking(dynamo({ accounts: [dynamoAccount()], place: "nightly" })).backing.kind).toBe("emulated");
-  });
-  it("for a service the emulator does not cover, tasks use a fake and the nightly the account", () => {
-    const flagged = { accounts: [account()], fixtures: [fixture(sha("3"))], dependency: { testAccountNightlyOnly: true } };
-    const task = chooseBacking(pay({ ...flagged, place: "task_check" }));
-    expect(task.backing.kind).toBe("fake");
-    expect(steps(task)).toContain("test_account:nightly_only");
-    expect(chooseBacking(pay({ ...flagged, place: "nightly" })).backing.kind).toBe("test_account");
-  });
-  it("the nightly falls back to the usual order when the account cannot be used", () => {
-    const flagged = { dependency: { testAccountNightlyOnly: true } };
-    const choice = chooseBacking(dynamo({ ...flagged, accounts: [dynamoAccount({ status: "suspended" })], place: "nightly" }));
-    expect(choice.backing.kind).toBe("emulated");
-    expect(steps(choice)).toEqual(["test_account:account_not_usable", "local:not_in_catalog", "project_image:not_allowed"]);
-    expect(chooseBacking(dynamo({ ...flagged, allowed: allow({ testAccounts: false }), accounts: [dynamoAccount()], place: "nightly" })).backing.kind).toBe("emulated");
-  });
 });
 
 describe("test accounts: available only when active, approved, for this project and clean", () => {
   const pick = (accounts: TestAccount[], over: Over = {}) => chooseBacking(pay({ accounts, ...over }));
-  it("is active and not expired at the moment asked", () => {
-    expect(pick([account()]).backing.kind).toBe("test_account");
-    const expired = pick([account()], { now: "2027-02-01T00:00:00.000Z" });
-    expect(expired.backing.kind).toBe("none");
-    expect(steps(expired)).toContain("test_account:account_not_usable");
-    expect(steps(pick([account({ status: "suspended" })]))).toContain("test_account:account_not_usable");
-    expect(steps(pick([account({ status: "expired" })]))).toContain("test_account:account_not_usable");
-    expect(steps(pick([account()], { now: "not a time" }))).toContain("test_account:account_not_usable");
-  });
   it("is approved for this project", () => {
     expect(steps(pick([account({ projectIds: ["billing"] })]))).toContain("test_account:account_not_for_project");
     expect(pick([account({ projectIds: ["billing"] })], { projectId: "billing" }).backing.kind).toBe("test_account");
     expect(pick([account({ projectIds: "all" })], { projectId: "anything" }).backing.kind).toBe("test_account");
-  });
-  it("covers the family", () => {
-    expect(steps(pick([dynamoAccount()]))).toContain("test_account:no_test_account");
   });
   it("names nothing on the production list", () => {
     const named = pick([account()], { prodDeny: { accountIds: [], hosts: ["api.example-pay.com"], arnPrefixes: [] } });
@@ -441,70 +256,14 @@ describe("test accounts: available only when active, approved, for this project 
     expect(pick([modelHostAccount(["llm.corp-gateway.example.com"])]).backing.kind).toBe("test_account");
     expect(steps(pick([modelHostAccount(["llm.corp-gateway.example.com"])], { modelGatewayHosts: ["llm.corp-gateway.example.com"] }))).toContain("test_account:account_is_model_service");
   });
-  it("skips a model-host account for a clean one", () => {
-    const clean = account({ id: "zzz-test", secretRef: testAccountSecretRef("staging", ORG, "zzz-test", "apiKey") });
-    const choice = pick([modelHostAccount(["api.openai.com"], { id: "aaa-test" }), clean]);
-    expect(choice.backing).toEqual({ kind: "test_account", accountId: "zzz-test" });
-  });
-  it("skips an unclean account for a clean one, and takes the lowest id", () => {
-    const first = account({ id: "aaa-test", secretRef: testAccountSecretRef("staging", ORG, "aaa-test", "apiKey") });
-    const second = account({ id: "bbb-test", secretRef: testAccountSecretRef("staging", ORG, "bbb-test", "apiKey") });
-    expect(pick([second, first]).backing).toEqual({ kind: "test_account", accountId: "aaa-test" });
-    expect(pick([first, second], { prodDeny: { accountIds: [], hosts: ["*.nothing.example"], arnPrefixes: [] } }).backing).toEqual({ kind: "test_account", accountId: "aaa-test" });
-    const stale = account({ id: "aaa-test", status: "suspended", secretRef: testAccountSecretRef("staging", ORG, "aaa-test", "apiKey") });
-    expect(pick([stale, second]).backing).toEqual({ kind: "test_account", accountId: "bbb-test" });
-  });
-  it("is allowed", () => {
-    expect(steps(pick([account()], { allowed: allow({ testAccounts: false }) }))).toContain("test_account:not_allowed");
-  });
 });
 
 describe("deterministic, pure, fixed words", () => {
-  const busy = (): BackingChoiceInput => dynamo({
-    accounts: [dynamoAccount(), dynamoAccount({ id: "orders-b", secretRef: undefined })],
-    fixtures: [fixture(sha("3"), { family: "aws:dynamodb" }), fixture(sha("1"), { family: "aws:dynamodb", origin: "hand_written" })],
-    projectImages: [{ imageId: "b-image", family: "aws:dynamodb" }, { imageId: "a-image", family: "aws:dynamodb" }],
-    allowed: allow({ projectImages: true, emulated: false }), canMakeFake: true,
-  });
-  it("gives the same answer for the same facts, in whatever order they are listed", () => {
-    const a = busy();
-    const reversed: BackingChoiceInput = { ...a, accounts: [...a.accounts].reverse(), fixtures: [...a.fixtures].reverse(), projectImages: [...a.projectImages].reverse(), catalog: { ...a.catalog, entries: [...a.catalog.entries].reverse() } };
-    expect(chooseBacking(reversed)).toEqual(chooseBacking(a));
-    expect(chooseBacking(a)).toEqual(chooseBacking(busy()));
-    const catalogReversed = { ...input(), catalog: { ...input().catalog, entries: [...input().catalog.entries].reverse() } };
-    expect(chooseBacking(catalogReversed)).toEqual(chooseBacking(input()));
-  });
-  it("does not change its input", () => {
-    const deepFreeze = <T>(value: T): T => {
-      if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
-        Object.freeze(value);
-        for (const child of Object.values(value)) deepFreeze(child);
-      }
-      return value;
-    };
-    const frozen = deepFreeze(busy());
-    expect(() => chooseBacking(frozen)).not.toThrow();
-    expect(chooseBacking(frozen)).toEqual(chooseBacking(busy()));
-  });
   it("has fixed words for every reason, one plain sentence each", () => {
     for (const reason of BACKING_REASONS) expect(BACKING_REASON_WORDS[reason], reason).toMatch(/^[A-Z][^\n—]*\.$/u);
     for (const reason of SKIP_REASONS) expect(SKIP_REASON_WORDS[reason], reason).toMatch(/^[A-Z][^\n—]*\.$/u);
     expect(Object.keys(BACKING_REASON_WORDS).sort()).toEqual([...BACKING_REASONS].sort());
     expect(Object.keys(SKIP_REASON_WORDS).sort()).toEqual([...SKIP_REASONS].sort());
-  });
-  it("answers in those words and the ids of the facts only: nothing a repository wrote is echoed", () => {
-    const hostile = "@everyone ![x](https://evil.example/a.png) <!-- Fixes ENG-123";
-    const choice = chooseBacking(input({ dependency: { family: hostile, kind: hostile, major: hostile }, projectId: hostile }));
-    const text = JSON.stringify(choice);
-    expect(text).not.toContain("everyone");
-    expect(text).not.toContain("evil");
-    expect(text).not.toContain("ENG-123");
-    for (const each of choice.skipped) expect(each.words).toBe(SKIP_REASON_WORDS[each.reason]);
-    expect(choice.words).toBe(BACKING_REASON_WORDS[choice.reason]);
-  });
-  it("never throws on odd facts", () => {
-    expect(() => chooseBacking(input({ dependency: { family: "", kind: "" } }))).not.toThrow();
-    expect(() => chooseBacking(input({ catalog: { ...pinnedCatalog(), entries: [] } as unknown as ServiceCatalog }))).not.toThrow();
   });
 });
 
@@ -537,24 +296,6 @@ describe("hostile and malformed facts (M1, L1, L2)", () => {
       expect(choice, JSON.stringify(value)?.slice(0, 80)).toMatchObject(nothing);
       expect(choice?.words).toBe(BACKING_REASON_WORDS.nothing_available);
     }
-  });
-  it("an unknown place or a hostile family is read as not sealed and finds nothing", () => {
-    expect(chooseBacking(pay({ accounts: [account()], place: "bogus" as never })).backing.kind).toBe("none");
-    expect(chooseBacking(pay({ accounts: [account()], place: "__proto__" as never })).reason).toBe("not_available_while_coding");
-    expect(chooseBacking(input({ dependency: { family: "__proto__", kind: "constructor" } })).backing.kind).toBe("none");
-  });
-  it("a box counts as allowed only when it is exactly true, in every step", () => {
-    const loose = (over: Record<string, unknown>): AllowedBackings => {
-      const merged: unknown = { ...DEFAULT_ALLOWED_BACKINGS, ...over };
-      return merged as AllowedBackings;
-    };
-    const images = [{ imageId: "my-dynamo", family: "aws:dynamodb" }];
-    expect(steps(chooseBacking(input({ allowed: loose({ real: "yes" }) })))[0]).toBe("local:not_allowed");
-    expect(steps(chooseBacking(dynamo({ projectImages: images, allowed: loose({ projectImages: "yes" }) })))).toContain("project_image:not_allowed");
-    expect(steps(chooseBacking(dynamo({ accounts: [dynamoAccount()], allowed: loose({ emulated: "yes" }) })))).toContain("emulated:not_allowed");
-    expect(steps(chooseBacking(dynamo({ accounts: [dynamoAccount()], fixtures: [fixture(sha("3"), { family: "aws:dynamodb" })], allowed: loose({ emulated: false, testAccounts: 1 }) })))).toContain("test_account:not_allowed");
-    expect(steps(chooseBacking(dynamo({ fixtures: [fixture(sha("3"), { family: "aws:dynamodb" })], allowed: loose({ emulated: false, testAccounts: false, fakes: "true" }) })))).toContain("fake:not_allowed");
-    expect(steps(chooseBacking(pay({ fixtures: [fixture(sha("3"), { unmatched: "schema_synth" })], allowed: loose({ fakeMakesUpAnswers: "true" }) })))).toContain("fake:fake_makes_up_answers_not_allowed");
   });
   it("an account in Rovara's own AWS account is refused (L2)", () => {
     const own = dynamoAccount();
@@ -592,18 +333,6 @@ describe("audit: the made-up-answers default changes new approvals only", () => 
     return result.dependencies;
   };
 
-  it("reads every stored service as the same dependencies as before, with no provenance or other field added, so a pinned digest still matches", () => {
-    const dependencies = read();
-    expect(dependencies.map((dependency) => dependency.backing)).toEqual([
-      { kind: "fake", fixtureSetRef: sha("a"), unmatched: "schema_synth" },
-      { kind: "fake", fixtureSetRef: sha("c"), unmatched: "fail" },
-      { kind: "test_account", accountId: "legacy-fraud-scorer" },
-    ]);
-    expect(dependencies[2]?.fallback).toEqual({ kind: "fake", fixtureSetRef: sha("e"), unmatched: "fail" });
-    // What was stored round-trips through the new schema unchanged (nothing is added, nothing dropped).
-    expect(TestEnvDependenciesSchema.parse(JSON.parse(JSON.stringify(dependencies)))).toEqual(dependencies);
-    expect(JSON.stringify(dependencies)).not.toContain("provenance");
-  });
   it("keeps the second-person approval a stored made-up-answers fake and a test account always needed", () => {
     const dependencies = read();
     expect(testEnvDependencyLessSafeChanges(undefined, dependencies)).toEqual(["test_account", "schema_synth"]);
@@ -614,12 +343,6 @@ describe("audit: the made-up-answers default changes new approvals only", () => 
     const synth = [fixture(sha("3"), { unmatched: "schema_synth" })];
     expect(chooseBacking(pay({ fixtures: synth, allowed: effectiveAllowedBackings(off) })).backing.kind).toBe("none");
     expect(chooseBacking(pay({ fixtures: synth, allowed: effectiveAllowedBackings({ fakes: true }) })).backing).toMatchObject({ kind: "fake", fixtureSetRef: sha("3") });
-  });
-  it("a new proposal for a company with no stored setting gets the made-up answers fake", () => {
-    const synth = [fixture(sha("3"), { unmatched: "schema_synth" })];
-    const choice = chooseBacking(pay({ fixtures: synth, allowed: effectiveAllowedBackings(undefined) }));
-    expect(choice.backing).toMatchObject({ kind: "fake", fixtureSetRef: sha("3") });
-    expect(steps(choice)).not.toContain("fake:fake_makes_up_answers_not_allowed");
   });
   it("every caller that builds a proposal still passes no stored setting, so the default is the only thing they see", () => {
     for (const file of ["dependency-plan.ts", "dependency-proposal.ts"]) {

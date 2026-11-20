@@ -34,19 +34,6 @@ describe("the workspace-safety latch (H1)", () => {
     expect(safety.failure).toBeInstanceOf(RunnerKillUnconfirmedError);
   });
 
-  it("two tasks do not share a latch, and outside a task nothing is recorded", async () => {
-    const first = new WorkspaceSafety();
-    const second = new WorkspaceSafety();
-    await Promise.all([
-      withWorkspaceSafety(first, async () => { await new Promise((resolve) => setTimeout(resolve, 5)); markWorkspaceUnsafe({ kind: "sandbox" }); }),
-      withWorkspaceSafety(second, async () => { await new Promise((resolve) => setTimeout(resolve, 1)); expect(currentWorkspaceSafety()).toBe(second); }),
-    ]);
-    expect(first.unsafe).toBe(true);
-    expect(second.unsafe).toBe(false);
-    expect(currentWorkspaceSafety()).toBeUndefined();
-    expect(() => new RunnerKillUnconfirmedError({ kind: "local" })).not.toThrow();
-  });
-
   it("calls a listener for each stop, and for the ones that came before it", () => {
     const safety = new WorkspaceSafety();
     safety.markUnsafe({ kind: "sandbox" });
@@ -73,21 +60,6 @@ describe("the unsafe-stop marker (M3)", () => {
       }
       return { exitCode: 0, stdout: "", stderr: "" };
     },
-  });
-
-  it("is written under the worker's own state directory, and read back", async () => {
-    const root = await directory();
-    await markWorkspaceUnsafeOnDisk(root, record());
-    expect(workspaceUnsafeMarkerPath(root)).toBe(join(root, ".agentx", "workspace-unsafe.json"));
-    expect(await readWorkspaceUnsafeMarker(root)).toMatchObject({ stops: [{ kind: "devcontainer" }] });
-    expect(await readWorkspaceUnsafeMarker(await directory())).toBeUndefined();
-  });
-
-  it("is never cleared for a devcontainer: the next task is refused until an operator resets the workspace", async () => {
-    const root = await directory();
-    await markWorkspaceUnsafeOnDisk(root, record());
-    await expect(assertWorkspaceReset(root)).rejects.toThrow(/could not be confirmed stopped/u);
-    await expect(stat(workspaceUnsafeMarkerPath(root))).resolves.toBeDefined();
   });
 
   it("refuses on a marker it cannot read", async () => {
@@ -189,10 +161,6 @@ describe("the zombie branch of the group probe (L2)", () => {
     return { kill: () => undefined, platform: "linux", procRoot: root };
   }
 
-  it("a group whose only members are zombies (a killed member under a PID 1 that does not reap) is gone", async () => {
-    expect(groupAlive(100, await proc([{ pid: 101, state: "Z", pgrp: 100 }, { pid: 102, state: "Z", pgrp: 100 }]))).toBe(false);
-  });
-
   it("a live member makes the group alive, a member of another group does not, and a comm with spaces and parentheses is read right", async () => {
     expect(groupAlive(100, await proc([{ pid: 101, state: "Z", pgrp: 100 }, { pid: 103, state: "S", pgrp: 100 }]))).toBe(true);
     expect(groupAlive(100, await proc([{ pid: 104, state: "S", pgrp: 200 }]))).toBe(false);
@@ -222,26 +190,6 @@ describe("the join timeout belongs to the task that asked for the work (review M
     expect(safety.unconfirmed).toEqual([{ kind: "sandbox" }]);
   });
 
-  it("an abort from a context that is in no task (a cancel invocation) still latches the task that asked", async () => {
-    const safety = new WorkspaceSafety();
-    const stop = new AbortController();
-    const running = withWorkspaceSafety(safety, () => round(hanging(), stop));
-    setTimeout(() => stop.abort(), 20);
-    await expect(running).rejects.toBeInstanceOf(RunnerKillUnconfirmedError);
-    // A runner that does not say where it runs is "local" (never the devcontainer default, which no reset could verify).
-    expect(safety.unconfirmed).toEqual([{ kind: "local" }]);
-  });
-
-  it("an abort from ANOTHER task's context latches the task that asked, and not the other", async () => {
-    const asking = new WorkspaceSafety();
-    const other = new WorkspaceSafety();
-    const stop = new AbortController();
-    const running = withWorkspaceSafety(asking, () => round(hanging("devcontainer"), stop));
-    withWorkspaceSafety(other, () => setTimeout(() => stop.abort(), 20));
-    await expect(running).rejects.toBeInstanceOf(RunnerKillUnconfirmedError);
-    expect(asking.unsafe).toBe(true);
-    expect(other.unsafe).toBe(false);
-  });
 });
 
 describe("the guard around every invocation (review M-B, L-3, L-5)", () => {

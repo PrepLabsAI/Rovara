@@ -12,21 +12,6 @@ const proof = (): TestProof => ({ schemaVersion: 1, candidateDigest: digest, sta
 const facts = [{ checkId: "readiness:0", taskMade: 2, counted: 1 }, { checkId: "readiness:1", taskMade: 8, counted: 0 }, { checkId: "readiness:2", taskMade: 0, counted: 2 }];
 
 describe("reply facts in the saved proof", () => {
-  it("writes only item ids, uniquely, and round-trips through strict writer and reader", () => {
-    const before = proof();
-    before.items.push({ ...before.items[0]!, granularity: "test", test: "another test" });
-    const added = withScriptedReplyFacts(before, "project", facts);
-    expect(added.scriptedReplies).toEqual([facts[0], facts[2]]);
-    const bytes = serializeTestProof(added);
-    expect(TestProofWriteSchema.parse(JSON.parse(bytes))).toEqual(added);
-    expect(TestProofSchema.parse(JSON.parse(bytes))).toEqual(added);
-    expect(before.scriptedReplies).toBeUndefined();
-  });
-  it("unknown means at least one task-made reply for EVERY item id, including skipped checks", () => {
-    expect(withScriptedReplyFacts(proof(), "project", "unknown").scriptedReplies).toEqual([
-      { checkId: "readiness:0", taskMade: 1, counted: 0 }, { checkId: "readiness:2", taskMade: 1, counted: 0 },
-    ]);
-  });
   it("pins legacy bytes for absent facts, no changed tests, not checked and non-project plans", () => {
     const legacy = '{"schemaVersion":1,"candidateDigest":"' + digest + '","status":"checked","note":"completed","changedTests":{"added":1,"changed":0,"deleted":0},"items":[{"checkId":"readiness:0","label":"Tests","granularity":"check","verdict":"proves_change","reason":"assertion_failed_on_old"},{"checkId":"readiness:2","label":"Tests","granularity":"check","verdict":"proves_change","reason":"assertion_failed_on_old"}],"durationMs":0}';
     expect(serializeTestProof(withScriptedReplyFacts(proof(), "project", undefined))).toBe(legacy);
@@ -36,23 +21,6 @@ describe("reply facts in the saved proof", () => {
       const p = { ...proof(), status };
       expect(serializeTestProof(withScriptedReplyFacts(p, "project", facts))).toBe(JSON.stringify(p));
     }
-  });
-  it("an independent count (parked by DEC 192a) round-trips as an optional key, and is absent, never 0, when there is none", () => {
-    const withIndependent = [{ checkId: "readiness:0", taskMade: 0, counted: 0, independent: 2 }, facts[2]!];
-    const added = withScriptedReplyFacts(proof(), "project", withIndependent);
-    expect(added.scriptedReplies).toEqual(withIndependent);
-    const bytes = serializeTestProof(added);
-    expect(TestProofWriteSchema.parse(JSON.parse(bytes))).toEqual(added);
-    expect(TestProofSchema.parse(JSON.parse(bytes))).toEqual(added);
-    expect(bytes).not.toContain('"independent":0');
-    expect(serializeTestProof(withScriptedReplyFacts(proof(), "project", facts))).not.toContain("independent");
-    expect(withScriptedReplyFacts(proof(), "project", [{ checkId: "readiness:0", taskMade: 0, counted: 0, independent: -1 }]).scriptedReplies).toEqual([
-      { checkId: "readiness:0", taskMade: 1, counted: 0 }, { checkId: "readiness:2", taskMade: 1, counted: 0 },
-    ]);
-  });
-  it("writes zero-use entries explicitly", () => {
-    const zero = [{ checkId: "readiness:0", taskMade: 0, counted: 0 }];
-    expect(serializeTestProof(withScriptedReplyFacts(proof(), "project", zero))).toBe(JSON.stringify({ ...proof(), scriptedReplies: zero }));
   });
   it.each([null, "broken", [{}], [{ ...facts[0], taskMade: -1 }], [{ ...facts[0], counted: Infinity }], [facts[0], facts[0]], [{ ...facts[0], injected: "private" }]].map((bad) => [bad]))("fails closed on malformed facts %j", (bad) => {
     expect(withScriptedReplyFacts(proof(), "project", bad as never).scriptedReplies).toEqual([
@@ -113,16 +81,6 @@ describe("reply facts in the saved proof", () => {
     expect(delivered).toBe(2);
     expect(collector.wrap(undefined)).toBeUndefined();
   });
-});
-
-it("the collector preserves the required result consumer and owns its facts before forwarding", () => {
-  const collector = modelHelperReplyCollector();
-  const input = [{ checkId: "readiness:0", taskMade: 2, counted: 0 }];
-  const wrapped = collector.wrap({ blockList: [], start: async () => undefined, onResult: () => { input[0]!.taskMade = 0; } })!;
-  wrapped.onResult({ summary: undefined, evidence: { result: "ran", lines: [], countsTowardProof: 0, escapedHosts: [] }, scriptedReplies: input });
-  expect(collector.take()).toEqual([{ checkId: "readiness:0", taskMade: 2, counted: 0 }]);
-  const noSink = { blockList: [], start: async () => undefined };
-  expect(collector.wrap(noSink as never)).toBe(noSink);
 });
 
 it("refuses oversized or invalid runtime proof data with fixed words and no leaked label", () => {

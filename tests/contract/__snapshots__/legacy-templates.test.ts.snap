@@ -5506,13 +5506,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               "Ref": "SlackViaChannel",
             },
             "STATE_TABLE_NAME": {
-              "Fn::If": [
-                "SlackCompanyModeOnBF1D0D56",
-                {
-                  "Ref": "State1C20CC9A",
-                },
-                "",
-              ],
+              "Ref": "State1C20CC9A",
             },
             "TASK_TOKEN_KEY_ARN": {
               "Fn::GetAtt": [
@@ -5756,6 +5750,26 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                     },
                     ":secret:agentx/production/developer-oidc-??????",
                   ],
+                ],
+              },
+            },
+            {
+              "Action": "dynamodb:PutItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "ORG#org_????????????????????#AUDIT",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:LeadingKeys": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
                 ],
               },
             },

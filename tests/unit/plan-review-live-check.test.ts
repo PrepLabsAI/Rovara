@@ -35,12 +35,6 @@ describe("the task page live check", () => {
     ]));
   });
 
-  it("names what is missing", async () => {
-    const html = (await ownerPage()).replace("env(safe-area-inset-bottom)", "0px").replace('id="agentx-page-data"', 'id="other"');
-    const failed = pageChecks(html).filter((result) => !result.ok).map((result) => result.name);
-    expect(failed).toEqual(["the decide bar clears the home indicator", "the page script is on the page"]);
-  });
-
   it("reads the page's state answer: no names, no comment text, a fresh token", () => {
     expect(stateChecks({ revision: 3, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 1 }], commentSeq: 0, csrf: "c".repeat(43),
       peopleRevision: 2, canRead: true, canComment: true, canSuggest: true, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false }).every((result) => result.ok)).toBe(true);

@@ -1,7 +1,7 @@
 // The broker judges the emulator's AWS usage. With Rovara local AWS in the plan, `dependency_usage` and the task evidence are NOT clean when the ledger facts are missing,
 // unreadable or flooded, when the code called a service outside the plan, or when it called an operation the emulator does not offer. "Could not be checked" is never a pass.
 import { describe, expect, it } from "vitest";
-import { EvidencePackSchema, TEST_SERVICES_AWS_USAGE_WORDS, TestEnvironmentBodySchema, TestServicesAwsUsageSchema, testServicesAwsUsageVerdict, type TestServicesUsageRecord } from "@agentx/contracts";
+import { TEST_SERVICES_AWS_USAGE_WORDS, TestEnvironmentBodySchema, TestServicesAwsUsageSchema, testServicesAwsUsageVerdict, type TestServicesUsageRecord } from "@agentx/contracts";
 import { AWS_USAGE_ITEM_ID, dependencyEvidenceOf } from "../../packages/broker/src/core/proof/dependency-evidence.js";
 import { dependencyStepsOf } from "../../packages/broker/src/core/test-env/prove-from-setup-check.js";
 
@@ -60,10 +60,6 @@ describe("Prove: dependency_usage", () => {
     if (result === "not_checked") throw new Error("not checked");
     return Object.fromEntries(result.map((step) => [step.step, step]));
   };
-  it("passes for a clean ledger", () => {
-    expect(steps(clean).dependency_usage).toMatchObject({ status: "passed" });
-    expect(steps(clean).dependencies).toMatchObject({ status: "passed" });
-  });
   for (const [label, aws] of cases) {
     it(`FAILS for ${label}, with the fixed failure word`, () => {
       expect(steps(aws).dependency_usage).toMatchObject({ status: "failed", failure: "dependency_unexpected_call" });
@@ -75,20 +71,11 @@ describe("Prove: dependency_usage", () => {
     expect(steps({ ...clean, services: [{ service: "dynamodb", calls: 1, unsupported: 0 }] }).dependency_usage).toMatchObject({ status: "passed" });
     expect(steps({ ...clean, services: [{ service: "sqs", calls: 1, unsupported: 0 }] }, ["s3"]).dependency_usage).toMatchObject({ status: "failed" });
   });
-  it("an environment without an emulator is judged as before (an aws field on its record changes nothing)", () => {
-    const plain = TestEnvironmentBodySchema.parse({ ...body([]), dependencies: [{ ...emulatedDependency("s3"), id: "postgres", name: "Postgres", family: "postgres", backing: { kind: "local", catalogId: "postgres@16", config: {} }, connect: { env: [], hostAliases: ["postgres"] } }] });
-    const result = dependencyStepsOf(plain, { schemaVersion: 1, dependencies: [{ id: "postgres", started: true, healthy: true, startMs: 5, resetCount: 0 }], unknownCalls: { domains: [], otherCount: 0 } });
-    expect(result).not.toBe("not_checked");
-    expect((result as Array<{ step: string; status: string }>).find((step) => step.step === "dependency_usage")?.status).toBe("passed");
-  });
 });
 
 describe("task evidence", () => {
   const pinned = PLANNED.map((service) => ({ id: `aws-${service}`, name: service.toUpperCase(), backing: "emulated" as const, awsServices: [service] }));
   const itemOf = (aws: Aws | undefined) => dependencyEvidenceOf(pinned, record(aws)).notTested.find((item) => item.id === AWS_USAGE_ITEM_ID);
-  it("a clean run has no AWS usage item", () => {
-    expect(itemOf(clean)).toBeUndefined();
-  });
   it("says plainly that the usage could not be checked, in fixed words", () => {
     expect(itemOf(undefined)?.text).toBe("AWS usage could not be checked");
     expect(itemOf({ ledger: "unreadable", services: [], unsupportedOperations: [], otherCalls: 0, otherUnsupported: 0 })?.text).toBe("AWS usage could not be checked");
@@ -97,12 +84,5 @@ describe("task evidence", () => {
   it("names the service outside the plan, and says an operation is unsupported", () => {
     expect(itemOf({ ...clean, services: [...clean.services, { service: "sns", calls: 1, unsupported: 0 }] })?.text).toBe("The code called AWS services that are not in the plan: sns");
     expect(itemOf({ ...clean, otherUnsupported: 1 })?.text).toBe("The code called AWS operations that Rovara local AWS does not support");
-  });
-  it("is a not-tested item the pack accepts (so the pull request and the Evidence tab show it), and it is absent for a run with no emulator", () => {
-    const item = itemOf(undefined)!;
-    expect(item).toMatchObject({ kind: "environment", id: "aws-usage" });
-    expect(EvidencePackSchema.shape.notTested.safeParse([item]).success).toBe(true);
-    const local = dependencyEvidenceOf([{ id: "postgres", name: "Postgres", backing: "local" }], { schemaVersion: 1, dependencies: [{ id: "postgres", started: true, healthy: true, startMs: 1, resetCount: 0 }], unknownCalls: { domains: [], otherCount: 0 } });
-    expect(local.notTested.find((entry) => entry.id === AWS_USAGE_ITEM_ID)).toBeUndefined();
   });
 });

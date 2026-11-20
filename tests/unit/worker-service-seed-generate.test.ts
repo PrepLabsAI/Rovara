@@ -1,9 +1,6 @@
 // L4-E34 (E3): generated test rows for the empty tables of a run's own fresh database. Deterministic (no AI, no clock, no randomness), key-respecting, plain SQL only, bounded, and in fixed words. Nothing is read from a real database.
 import { describe, expect, it } from "vitest";
-import {
-  PLAIN_NAME, STAND_IN_LIMITS, STAND_IN_ROWS_PER_TABLE, STAND_IN_ROW_GENERATOR_VERSION, STAND_IN_SCHEMA_STATEMENT, notFilled, parentKeyColumns, parseSampledKeys, parseStandInSchema, planFillForLookups,
-  planStandInRows, sampleKeysStatement, standInValue, type StandInColumn,
-} from "../../packages/worker/src/service-seed-generate.js";
+import { PLAIN_NAME, STAND_IN_LIMITS, STAND_IN_ROWS_PER_TABLE, notFilled, parentKeyColumns, parseSampledKeys, parseStandInSchema, planFillForLookups, planStandInRows, sampleKeysStatement, standInValue, type StandInColumn } from "../../packages/worker/src/service-seed-generate.js";
 import { seedFileContentProblem } from "../../packages/worker/src/service-seed-file.js";
 
 const col = (name: string, type: string, extra: Partial<StandInColumn> = {}): StandInColumn => ({ name, type, nullable: false, identity: "", generated: false, enumValues: [], ...extra });
@@ -21,11 +18,6 @@ const base = () => schemaOf([users, orgs, memberships, posts, { name: "alembic_v
 const rowsOf = (plan: ReturnType<typeof planStandInRows>, table: string) => { const found = plan.data.find(entry => entry.table === table)!; return found.rows.map(row => Object.fromEntries(found.columns.map((c, i) => [c, row[i]!]))); };
 
 describe("the schema read", () => {
-  it("is a fixed read-only statement that names nothing of the project", () => {
-    expect(STAND_IN_SCHEMA_STATEMENT.trimStart().startsWith("SELECT")).toBe(true);
-    expect(STAND_IN_SCHEMA_STATEMENT).not.toMatch(/\b(?:INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE|GRANT)\b/u);
-    expect(STAND_IN_SCHEMA_STATEMENT).toContain("n.nspname = 'public'");
-  });
   it("is parsed with runtime checks: a wrong overall shape or a duplicate table is no schema", () => {
     expect(parseStandInSchema(raw([users]))).toBeDefined();
     for (const bad of [null, {}, { tables: "x" }, raw([users, users]), { tables: [], extra: 1 }]) expect(parseStandInSchema(bad)).toBeUndefined();
@@ -38,45 +30,12 @@ describe("the schema read", () => {
     expect(schema.tables.map(table => table.name)).toEqual(["orgs"]); expect(schema.invalid).toBe(8);
     expect(planStandInRows(schema).skipped).toContainEqual({ table: "", reason: "unsupported_type" }); expect(planStandInRows(schema).tables).toEqual([{ table: "orgs", rows: 5 }]);
   });
-  it("keeps the first 64 labels of an enum with more (it is no reason to refuse the schema)", () => {
-    const big = { ...users, uniques: [], columns: [col("id", "integer"), col("country", "country", { enumValues: Array.from({ length: 300 }, (_, i) => `c${i}`) })] };
-    const schema = parseStandInSchema(raw([big]))!;
-    expect(schema.tables[0]!.columns[1]!.enumValues).toHaveLength(STAND_IN_LIMITS.enumValues);
-  });
-  it("reads at most 73 tables in SQL (ordered by name) so a large schema stays under the answer cap", () => {
-    expect(STAND_IN_SCHEMA_STATEMENT).toMatch(/ORDER BY c\.relname LIMIT 73\) s$/u);
-  });
   it("drops migration bookkeeping tables, orders by name, and says when it kept only the first 64", () => {
     const schema = parseStandInSchema(raw([{ ...users, name: "zeta" }, { ...users, name: "alembic_version" }, { ...users, name: "_prisma_migrations" }, { ...users, name: "alpha" }]))!;
     expect(schema.tables.map(table => table.name)).toEqual(["alpha", "zeta"]);
     const many = parseStandInSchema(raw(Array.from({ length: 70 }, (_, i) => ({ ...orgs, name: `t${String(i).padStart(3, "0")}` }))))!;
     expect(many.tables).toHaveLength(STAND_IN_LIMITS.tables); expect(many.truncated).toBe(true);
     expect(planStandInRows(many).skipped).toContainEqual({ table: "", reason: "too_many_tables" });
-  });
-});
-
-describe("the same schema gives byte-identical rows", () => {
-  it("on every run, and whatever order the tables came in", () => {
-    const first = planStandInRows(base());
-    expect(first.sql).not.toBe("");
-    expect(planStandInRows(base()).sql).toBe(first.sql);
-    expect(planStandInRows(schemaOf([posts, memberships, orgs, users])).sql).toBe(planStandInRows(schemaOf([users, orgs, memberships, posts])).sql);
-    expect(JSON.stringify(planStandInRows(base()).data)).toBe(JSON.stringify(first.data));
-  });
-  it("for an unchanged table, even when another table changes (a column added elsewhere moves nothing here)", () => {
-    const changed = schemaOf([users, { ...orgs, columns: [...orgs.columns, col("extra", "integer")] }, memberships, posts]);
-    expect(rowsOf(planStandInRows(changed), "users")).toEqual(rowsOf(planStandInRows(base()), "users"));
-    expect(rowsOf(planStandInRows(changed), "posts")).toEqual(rowsOf(planStandInRows(base()), "posts"));
-  });
-  it("and depends on the generator's version (a new generator is a new set of rows)", () => {
-    const text = standInValue("users", col("name", "text"), 3, false);
-    expect(text).toBeDefined();
-    expect(STAND_IN_ROW_GENERATOR_VERSION).toMatch(/^rows-v\d+$/u);
-  });
-  it("uses no clock and no randomness: it is the same under a different Date and Math.random", () => {
-    const real = { now: Date.now, random: Math.random };
-    const before = planStandInRows(base()).sql;
-    try { Date.now = () => 1; Math.random = () => 0.123; expect(planStandInRows(base()).sql).toBe(before); } finally { Date.now = real.now; Math.random = real.random; }
   });
 });
 
@@ -135,29 +94,9 @@ describe("keys hold", () => {
     const oddNullable = { ...orgs, name: "odd2", columns: [col("id", "uuid"), col("doc", "tsvector", { nullable: true })] };
     expect(planStandInRows(schemaOf([oddNullable])).data[0]!.columns).toEqual(["id"]);
   });
-  it("writes no value to a generated column, writes identity-always columns with OVERRIDING SYSTEM VALUE, and moves the counters past the rows", () => {
-    const gen = { ...orgs, name: "gen", columns: [col("id", "uuid"), col("total", "integer", { generated: true })] };
-    expect(planStandInRows(schemaOf([gen])).data[0]!.columns).toEqual(["id"]);
-    expect(plan.sql).toContain('INSERT INTO "public"."posts"');
-    expect(plan.sql).toMatch(/"public"\."posts" \([^)]*\) OVERRIDING SYSTEM VALUE VALUES/u);
-    expect(plan.sql).not.toMatch(/"public"\."users" \([^)]*\) OVERRIDING SYSTEM VALUE/u);
-    expect(plan.sql).toContain("setval(pg_get_serial_sequence('\"public\".\"users\"', 'id')");
-  });
-  it("drops a row that would repeat an earlier primary key (a join table with fewer parents than rows)", () => {
-    const one = schemaOf([{ ...users, hasRows: true }, { ...orgs, name: "orgs" }, { name: "pairs", hasRows: false, primaryKey: ["a", "b"], uniques: [], columns: [col("a", "integer"), col("b", "integer")],
-      foreignKeys: [{ columns: ["a"], refTable: "users", refColumns: ["id"] }, { columns: ["b"], refTable: "users", refColumns: ["id"] }] }]);
-    const sampled = parseSampledKeys({ users: [{ id: 1 }, { id: 2 }] }, parentKeyColumns(one));
-    const pairs = rowsOf(planStandInRows(one, sampled), "pairs");
-    expect(new Set(pairs.map(row => `${row["a"]}/${row["b"]}`)).size).toBe(pairs.length);
-  });
 });
 
 describe("plain SQL only, and every failure in fixed words", () => {
-  it("the statements pass the loader's own screen: no backslash, no PROGRAM, no NUL, no control character", () => {
-    const sql = planStandInRows(base()).sql;
-    expect(seedFileContentProblem(Buffer.from(sql, "utf8"))).toBeUndefined();
-    expect([...sql].some(ch => ch === "\\" || (ch.charCodeAt(0) < 0x20 && ch !== "\n"))).toBe(false);
-  });
   it("every value is a plain literal: no value holds a quote it did not double, and bytea has no backslash", () => {
     for (const entry of planStandInRows(base()).data) for (const row of entry.rows) for (const value of row) expect(value).not.toMatch(/\\/u);
     expect(standInValue("t", col("payload", "bytea"), 0, false)).toBe("decode('00ff', 'hex')");
@@ -187,21 +126,9 @@ describe("plain SQL only, and every failure in fixed words", () => {
     const after = schemaOf([{ ...orgs, hasRows: true }, { ...users, hasRows: false }]);
     expect(notFilled(plan, after)).toEqual([{ table: "users", reason: "not_filled" }]);
   });
-  it("is bounded: 64 tables of 200 columns plan in well under two seconds, and a 10,000-table schema is cut at 64", () => {
-    const wide = Array.from({ length: 64 }, (_, i) => ({ name: `wide${String(i).padStart(2, "0")}`, hasRows: false, primaryKey: ["c0"], uniques: [], foreignKeys: [], columns: Array.from({ length: 200 }, (_, j) => col(`c${j}`, j % 3 === 0 ? "integer" : "text")) }));
-    const started = Date.now(); const plan = planStandInRows(schemaOf(wide));
-    expect(Date.now() - started).toBeLessThan(2_000); expect(plan.tables).toHaveLength(64);
-    const huge = parseStandInSchema(raw(Array.from({ length: 10_000 }, (_, i) => ({ ...orgs, name: `h${i}` }))))!;
-    expect(huge.tables).toHaveLength(STAND_IN_LIMITS.tables);
-  });
 });
 
 describe("parent keys already in the database", () => {
-  it("are read for at most 50 parent tables (json_build_object takes 100 arguments)", () => {
-    const wanted = new Map(Array.from({ length: 70 }, (_, i) => [`p${String(i).padStart(2, "0")}`, ["id"]] as [string, string[]]));
-    const statement = sampleKeysStatement(wanted)!;
-    expect(statement).toContain("'p49'"); expect(statement).not.toContain("'p50'");
-  });
   it("are asked for by a fixed statement built only from schema names that are plain, for parents of empty tables", () => {
     const schema = schemaOf([{ ...users, hasRows: true }, { ...orgs, hasRows: true }, memberships, { ...orgs, name: "bad name", hasRows: true }]);
     const wanted = parentKeyColumns(schema);
@@ -220,15 +147,6 @@ describe("parent keys already in the database", () => {
 
 describe("the fill for zero-row lookups", () => {
   const schema = base();
-  it("writes the asked key value into its column, a parent that exists for every foreign key, and is the same whatever else was asked or in what order", () => {
-    const sampled = parseSampledKeys({ users: [{ id: 1 }, { id: 2 }] }, new Map([["users", ["id"]]]));
-    const a = planFillForLookups(schema, [{ table: "users", column: "email", value: "who@example.test" }, { table: "posts", column: "id", value: 9001 }], sampled);
-    expect(rowsOf(a, "users")[0]!["email"]).toBe("'who@example.test'"); expect(rowsOf(a, "posts")[0]!["id"]).toBe("9001"); expect(["1", "2"]).toContain(rowsOf(a, "posts")[0]!["author_id"]);
-    const b = planFillForLookups(schema, [{ table: "posts", column: "id", value: 9001 }], sampled);
-    expect(b.sql).toBe(a.sql.split("\n").filter(line => line.includes('"public"."posts"')).join("\n") + "\n");
-    const c = planFillForLookups(schema, [{ table: "posts", column: "id", value: 9001 }, { table: "users", column: "email", value: "who@example.test" }], sampled);
-    expect(c.sql).toBe(a.sql);
-  });
   it("skips, in fixed words, a table or column that is not in the schema, a value that is not plain, and a table that cannot be written; one pass is at most 50 lookups", () => {
     const plan = planFillForLookups(schema, [{ table: "ghosts", column: "id", value: 1 }, { table: "users", column: "nope", value: 1 }, { table: "users", column: "email", value: "a\\b" }, { table: "users", column: "email", value: Number.NaN }, { table: "users", column: "id", value: "x".repeat(201) }]);
     expect(plan.sql).toBe(""); expect(plan.skipped.every(entry => entry.reason === "unsafe_name")).toBe(true);

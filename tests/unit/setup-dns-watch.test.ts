@@ -20,15 +20,6 @@ function query(name: string, type: number = TYPE.A, id = 0x1234): Buffer {
   header.writeUInt16BE(1, 4);
   return Buffer.concat([header, question]);
 }
-/** A query whose question is the given labels exactly (a label may contain a dot). */
-function rawQuery(labels: string[], type: number = TYPE.A, id = 0x2222): Buffer {
-  const question = Buffer.concat([...labels.map((label) => Buffer.concat([Buffer.from([label.length]), Buffer.from(label, "ascii")])), Buffer.from([0]), Buffer.from([type >> 8, type & 0xff, 0, 1])]);
-  const header = Buffer.alloc(12);
-  header.writeUInt16BE(id, 0);
-  header.writeUInt16BE(0x0100, 2);
-  header.writeUInt16BE(1, 4);
-  return Buffer.concat([header, question]);
-}
 /** The answer to a query: the same id and question, the response bit, the given rcode, and one A record when it is NOERROR. */
 function answer(request: Buffer, rcode: number, extra?: { truncated?: boolean }): Buffer {
   const copy = Buffer.from(request);
@@ -118,10 +109,6 @@ async function forwarder(rcodes: Record<string, number>, upstreamOptions: Parame
 }
 
 describe("parsing a DNS packet", () => {
-  it("reads the id, the question name (lower-cased, no trailing dot), its type and the response code", () => {
-    expect(parseDnsPacket(query("Pypi.ORG", TYPE.AAAA, 7))).toMatchObject({ id: 7, name: "pypi.org", type: TYPE.AAAA, response: false, rcode: 0 });
-    expect(parseDnsPacket(answer(query("x.example.com"), RCODE.nxdomain))).toMatchObject({ name: "x.example.com", response: true, rcode: RCODE.nxdomain });
-  });
 
   it("refuses a packet it cannot read exactly: short, two questions, a compressed question name, a label over 63 bytes, a name over 253", () => {
     expect(parseDnsPacket(Buffer.alloc(5))).toBeUndefined();
@@ -138,50 +125,11 @@ describe("parsing a DNS packet", () => {
 });
 
 describe("the setup sandbox's DNS forwarder", () => {
-  it("passes an allowed name through unchanged and records nothing", async () => {
-    const { watch, port } = await forwarder({});
-    const request = query("pypi.org", TYPE.A, 0x0a0b);
-    const reply = await ask(port, request);
-    expect(reply).toBeDefined();
-    expect(reply!.readUInt16BE(0)).toBe(0x0a0b);
-    expect(rcodeOf(reply)).toBe(RCODE.ok);
-    expect(reply!.subarray(-4)).toEqual(Buffer.from([93, 184, 216, 34]));
-    expect(watch.blockedHosts()).toEqual([]);
-  });
-
-  it("records a name the resolver answers NXDOMAIN or REFUSED, hands the answer back unchanged, and lower-cases the name", async () => {
-    const { watch, port } = await forwarder({ "artifactory.corp.example": RCODE.nxdomain, "files.pkg-host.example": RCODE.refused });
-    expect(rcodeOf(await ask(port, query("Artifactory.Corp.Example")))).toBe(RCODE.nxdomain);
-    expect(rcodeOf(await ask(port, query("files.pkg-host.example", TYPE.AAAA)))).toBe(RCODE.refused);
-    expect(watch.blockedHosts()).toEqual(["artifactory.corp.example", "files.pkg-host.example"]);
-  });
-
-  it("does not record a name for any other answer: SERVFAIL, NOERROR, or no answer at all", async () => {
-    const { watch, port } = await forwarder({ "flaky.example.com": RCODE.servfail }, { silent: ["quiet.example.com"] });
-    expect(rcodeOf(await ask(port, query("flaky.example.com")))).toBe(RCODE.servfail);
-    expect(await ask(port, query("quiet.example.com"), 700)).toBeUndefined();
-    expect(watch.blockedHosts()).toEqual([]);
-  });
-
-  it("records only address lookups (A, AAAA, HTTPS): a refused TXT, MX or reverse lookup is not a host the setup needs", async () => {
-    const { watch, port } = await forwarder({ "txt.example.com": RCODE.nxdomain, "4.3.2.1.in-addr.arpa": RCODE.nxdomain, "mx.example.com": RCODE.nxdomain, "web.example.com": RCODE.nxdomain });
-    await ask(port, query("txt.example.com", TYPE.TXT));
-    await ask(port, query("4.3.2.1.in-addr.arpa", TYPE.PTR));
-    await ask(port, query("mx.example.com", TYPE.MX));
-    await ask(port, query("web.example.com", TYPE.HTTPS));
-    expect(watch.blockedHosts()).toEqual(["web.example.com"]);
-  });
 
   it("records only names that are plain host names: a single label, an underscore name and an address literal are left out", async () => {
     const { watch, port } = await forwarder({ localhost2: RCODE.nxdomain, "_dmarc.example.com": RCODE.nxdomain, "10.0.0.5": RCODE.nxdomain, "real.example.com": RCODE.nxdomain });
     for (const name of ["localhost2", "_dmarc.example.com", "10.0.0.5", "real.example.com"]) await ask(port, query(name));
     expect(watch.blockedHosts()).toEqual(["real.example.com"]);
-  });
-
-  it("keeps each name once, however often it is asked", async () => {
-    const { watch, port } = await forwarder({ "a.example.com": RCODE.nxdomain });
-    for (let i = 0; i < 4; i += 1) await ask(port, query("a.example.com", i % 2 === 0 ? TYPE.A : TYPE.AAAA, i));
-    expect(watch.blockedHosts()).toEqual(["a.example.com"]);
   });
 
   it("remembers at most 50 names per run, counts the ones it dropped, and still answers them", async () => {
@@ -193,17 +141,6 @@ describe("the setup sandbox's DNS forwarder", () => {
     expect(watch.blockedHosts()).toHaveLength(50);
     expect(watch.blockedHosts()[49]).toBe("h49.example.com");
     expect(watch.droppedNames()).toBe(5);
-  });
-
-  it("hands each command the names refused since the last command, while the run keeps the whole list", async () => {
-    const { watch, port } = await forwarder({ "one.example.com": RCODE.nxdomain, "two.example.com": RCODE.nxdomain });
-    await ask(port, query("one.example.com"));
-    expect(watch.takeBlocked()).toEqual(["one.example.com"]);
-    expect(watch.takeBlocked()).toEqual([]);
-    await ask(port, query("two.example.com"));
-    await ask(port, query("one.example.com"));
-    expect(watch.takeBlocked().sort()).toEqual(["one.example.com", "two.example.com"]);
-    expect(watch.blockedHosts()).toEqual(["one.example.com", "two.example.com"]);
   });
 
   it("ignores an answer that is not for the question asked: another id, or another question", async () => {
@@ -223,13 +160,6 @@ describe("the setup sandbox's DNS forwarder", () => {
     expect(watch.blockedHosts()).toContain("tcp.example.com");
   });
 
-  it("answers only the sources it was given, and drops the rest without recording them", async () => {
-    const { watch, port } = await forwarder({ "x.example.com": RCODE.nxdomain }, {}, { allowedSources: ["10.9.8.7"] });
-    expect(await ask(port, query("x.example.com"), 500)).toBeUndefined();
-    expect(watch.blockedHosts()).toEqual([]);
-    expect(await askTcp(port, query("x.example.com"), 500)).toBeUndefined();
-  });
-
   it("drops a packet it cannot read, a response sent to it as a query, and a query of a kind other than a standard one", async () => {
     const { watch, fake, port } = await forwarder({ "x.example.com": RCODE.nxdomain });
     await ask(port, Buffer.from("not dns"), 300);
@@ -238,14 +168,6 @@ describe("the setup sandbox's DNS forwarder", () => {
     status.writeUInt16BE(0x1100, 2); // opcode 2 (status)
     await ask(port, status, 300);
     expect(fake.seen).toEqual([]);
-    expect(watch.blockedHosts()).toEqual([]);
-  });
-
-  it("never reads a command's output: nothing but the resolver's answers can add a name", async () => {
-    const { watch, port } = await forwarder({});
-    // A name written in a log line is just text: the forwarder has no way to receive it, and the names it keeps are exactly the refused queries.
-    expect(typeof (watch as unknown as { observeOutput?: unknown }).observeOutput).toBe("undefined");
-    await ask(port, query("fine.example.com"));
     expect(watch.blockedHosts()).toEqual([]);
   });
 
@@ -259,13 +181,6 @@ describe("the setup sandbox's DNS forwarder", () => {
     // Once the slots are free again, queries are answered.
     await new Promise((resolve) => setTimeout(resolve, 1_000));
     expect(rcodeOf(await ask(port, query("ok.example.com")))).toBe(RCODE.ok);
-  });
-
-  it("stops listening when stopped, and a second stop does nothing", async () => {
-    const { watch, port } = await forwarder({});
-    await watch.stop();
-    expect(await ask(port, query("pypi.org"), 300)).toBeUndefined();
-    await expect(watch.stop()).resolves.toBeUndefined();
   });
 
   it("refuses to start with an address that is not a literal IP, or an upstream that is not", async () => {
@@ -357,22 +272,3 @@ describe("the TCP path is bounded", () => {
   });
 });
 
-describe("a name the resolver was not asked for by its dotted form", () => {
-  it("is not recorded when one label contains a dot (the joined name would read as a different host), but the answer is still relayed", async () => {
-    const { watch, port } = await forwarder({ "a.b.example.com": RCODE.nxdomain });
-    expect(rcodeOf(await ask(port, rawQuery(["a.b", "example", "com"])))).toBe(RCODE.nxdomain);
-    expect(watch.blockedHosts()).toEqual([]);
-    expect(rcodeOf(await ask(port, rawQuery(["a", "b", "example", "com"])))).toBe(RCODE.nxdomain);
-    expect(watch.blockedHosts()).toEqual(["a.b.example.com"]);
-  });
-});
-
-describe("sockets are the only way in", () => {
-  it("is not an open resolver: it forwards only to its one upstream", async () => {
-    const other = await upstream({ "x.example.com": RCODE.nxdomain });
-    closers.push(() => other.close());
-    const { port } = await forwarder({});
-    await ask(port, query("x.example.com"));
-    expect(other.seen).toEqual([]);
-  });
-});

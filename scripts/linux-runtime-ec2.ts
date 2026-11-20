@@ -82,9 +82,11 @@ export function parseArgs(argv: readonly string[]): Options {
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 // The steps, read from the workflow.
 
-export interface Step { name: string; run: string; env: Record<string, string> }
+export interface Step { name: string; run: string; env: Record<string, string>; afterStep?: number }
 export interface WorkflowSteps { steps: Step[]; replaced: string[]; skipped: string[] }
 
+/** `(success() || failure()) && steps.<id>.outcome == 'success'`, exactly (CI-REL-LAYOUT); <id> must name an earlier run step. */
+const AFTER_SETUP = /^\(success\(\) \|\| failure\(\)\) && steps\.([A-Za-z_][A-Za-z0-9_-]*)\.outcome == 'success'$/u;
 /** The bootstrap does these instead; anything else a `uses:` step brings is refused. */
 const REPLACED_ACTIONS = [/^actions\/checkout@/u, /^actions\/setup-node@/u];
 
@@ -93,6 +95,8 @@ export function linuxRuntimeSteps(workflowYaml: string): WorkflowSteps {
   const job = workflow.jobs?.["linux-runtime"];
   if (job?.steps === undefined) throw new Error("ci.yml has no linux-runtime job with steps");
   const out: WorkflowSteps = { steps: [], replaced: [], skipped: [] };
+  // CI-REL-LAYOUT: the one condition this runner reproduces: run after a named setup step succeeded, even when a sibling check failed.
+  const ids = new Map<string, number>();
   job.steps.forEach((raw, index) => {
     const uses = typeof raw.uses === "string" ? raw.uses : undefined;
     const run = typeof raw.run === "string" ? raw.run : undefined;
@@ -111,10 +115,17 @@ export function linuxRuntimeSteps(workflowYaml: string): WorkflowSteps {
       if (/docker login ghcr\.io/u.test(run)) { out.skipped.push(name); return; }
       throw new Error(`linux-runtime step "${name}" reads a workflow expression, which this runner cannot supply`);
     }
-    if (raw.if !== undefined || raw["continue-on-error"] !== undefined || raw.shell !== undefined || raw["working-directory"] !== undefined) {
+    let afterStep: number | undefined;
+    if (raw.if !== undefined) {
+      const match = typeof raw.if === "string" ? AFTER_SETUP.exec(raw.if) : null;
+      afterStep = match === null ? undefined : ids.get(match[1]!);
+      if (afterStep === undefined) throw new Error(`linux-runtime step "${name}" sets if/continue-on-error/shell/working-directory, which this runner does not reproduce`);
+    }
+    if (raw["continue-on-error"] !== undefined || raw.shell !== undefined || raw["working-directory"] !== undefined) {
       throw new Error(`linux-runtime step "${name}" sets if/continue-on-error/shell/working-directory, which this runner does not reproduce`);
     }
-    out.steps.push({ name, run, env });
+    if (typeof raw.id === "string") ids.set(raw.id, out.steps.length);
+    out.steps.push(afterStep === undefined ? { name, run, env } : { name, run, env, afterStep });
   });
   return out;
 }
@@ -187,11 +198,13 @@ export function stepsScript(steps: readonly Step[], keepGoing: boolean): string 
       `cat > $W/steps/${n}.run <<'${delimiter}'`, ...wrapper.map((line) => line.replaceAll("$W", WORK)), delimiter,
       `chown runner:runner $W/steps/${n}.sh $W/steps/${n}.run`,
     );
-    const guard = keepGoing ? "" : 'if [ "$failed" = 0 ]; then ';
+    // A step gated on a setup step runs when that step passed, whatever its siblings did (Actions: success() || failure() is false only after cancellation).
+    const gate = step.afterStep === undefined ? 'if [ "$failed" = 0 ]; then ' : `if [ "\${ok_${String(step.afterStep + 1).padStart(2, "0")}:-0}" = 1 ]; then `;
+    const guard = keepGoing ? "" : gate;
     const close = keepGoing ? "" : `; else printf '%s\\tskipped\\t0\\t%s\\n' ${n} ${shellQuote(step.name)} >> $W/summary.tsv; fi`;
     lines.push(
       `${guard}echo "::rovara-step-begin ${n} "${shellQuote(step.name)}; s=$(date +%s); sudo -u runner -H bash $W/steps/${n}.run 2>&1; rc=$?; e=$(( $(date +%s) - s )); ` +
-        `if [ $rc = 0 ]; then st=passed; else st=failed; failed=1; fi; printf '%s\\t%s\\t%s\\t%s\\n' ${n} "$st" "$e" ${shellQuote(step.name)} >> $W/summary.tsv; echo "::rovara-step-end ${n} $st $e"${close}`,
+        `if [ $rc = 0 ]; then st=passed; ok_${n}=1; else st=failed; failed=1; fi; printf '%s\\t%s\\t%s\\t%s\\n' ${n} "$st" "$e" ${shellQuote(step.name)} >> $W/summary.tsv; echo "::rovara-step-end ${n} $st $e"${close}`,
     );
   });
   lines.push("echo '::rovara-summary-begin'", "cat $W/summary.tsv", "echo '::rovara-summary-end'", 'exit "$failed"');

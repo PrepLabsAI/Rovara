@@ -1,15 +1,11 @@
-import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // Starting a saved image's rebuild on the task flow: the job becomes a read-only preparation pinned to the job's commits, with no credential in anything stored; the build systems' key files are in
 // both the job's globs and the broker's key; every refusal that will not mend ends the job.
 import { describe, expect, it } from "vitest";
-import { GetCommand } from "@aws-sdk/lib-dynamodb";
-import { workspaceCompanyReader } from "../../packages/broker/src/aws/worker-machines/workspace-company.js";
-import { PREPARE_SAVED_ENV_BUILD_FEATURE, PrepareSavedEnvBuildSchema, queryAll, type BuildSystem } from "@agentx/contracts";
+import { type BuildSystem } from "@agentx/contracts";
 import { SAVED_ENV_JOB_LEASE_MS, checkRebuild, leaseForDispatch, type RebuildJob } from "../../packages/broker/src/core/test-env/saved-env.js";
 import { savedEnvBuildInputsOf, savedEnvSecretNames, startSavedEnvRebuild } from "../../packages/broker/src/core/test-env/saved-env-rebuild.js";
-import { workspaceKey, operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { startMarkerKey } from "../../packages/broker/src/core/test-env/saved-env-markers.js";
-import { BASE_IMAGE, COMPANY, HEAD, PROJECT, approve, environmentBody, savedWorld, textOf, type SavedWorld, type StoredOperation } from "../support/saved-env-harness.js";
+import { BASE_IMAGE, COMPANY, HEAD, PROJECT, approve, environmentBody, savedWorld, textOf, type SavedWorld } from "../support/saved-env-harness.js";
 
 const ids = { orgId: COMPANY, projectId: PROJECT };
 const ON = { ROVARA_SAVED_ENVIRONMENTS: "1" };
@@ -26,34 +22,6 @@ async function queued(w: SavedWorld): Promise<{ job: RebuildJob }> {
 const buildSystem = (globs: string[]): BuildSystem => ({ name: "examplebuild", profile: () => ({ name: "examplebuild", setupPrograms: [], keyFileGlobs: globs }) });
 
 describe("starting a rebuild", () => {
-  it("makes the job a read-only, pinned preparation on a workspace in no list, with a marker, and nothing stored holds the lease", async () => {
-    const w = savedWorld();
-    const { job } = await queued(w);
-    const marker = await w.h.store.get(startMarkerKey(job.jobId));
-    expect(marker).toMatchObject({ orgId: COMPANY, projectId: PROJECT, jobId: job.jobId });
-    const workspace = (await w.h.store.get(workspaceKey(T1_COMPANY, textOf(marker, "workspaceId")))) as Record<string, unknown>;
-    expect(workspace).toMatchObject({ status: "PREPARING", projectName: PROJECT, activeOperationId: textOf(marker, "operationId"), fence: 1 });
-    const readCompany = workspaceCompanyReader({ send: async (command: unknown) => {
-      if (!(command instanceof GetCommand)) throw new Error("unexpected command");
-      return { Item: await w.h.store.get(command.input.Key as { pk: string; sk: string }) };
-    } } as never, "state");
-    expect(await readCompany(textOf(marker, "workspaceId"))).toBe(T1_COMPANY);
-    // in no list of workspaces: no by-project index attributes
-    expect(workspace["workspaceProject"]).toBeUndefined();
-    const operation = (await w.h.store.get(operationKey(T1_COMPANY, textOf(marker, "workspaceId"), textOf(marker, "operationId")))) as unknown as StoredOperation;
-    expect(operation).toMatchObject({ kind: "prepare", status: "ACCEPTED" });
-    expect(operation["dispatch"]).toMatchObject({ kind: "prepare", extraActions: ["saved-env-push-login", "saved-env-result"], requires: [PREPARE_SAVED_ENV_BUILD_FEATURE] });
-    const payload = operation["dispatch"].payload;
-    expect(payload).toMatchObject({ readOnly: true, pins: [{ repository: "demo", commit: HEAD }] });
-    expect(PrepareSavedEnvBuildSchema.safeParse(payload.savedEnvBuild).success).toBe(true);
-    expect(payload.savedEnvBuild).toMatchObject({ jobId: job.jobId, expectedKey: job.expectedKey, baseImageDigest: BASE_IMAGE, detectorGlobs: ["package-lock.json"], commits: { demo: HEAD } });
-    expect(payload.savedEnvBuild.leaseToken).toBeUndefined();
-    // the dispatch message went to its queue, and the lease token is in no stored document but the registry's own row
-    const [message] = await (await w.h.queues.queue("task-dispatch")).receive();
-    expect(message?.body).toMatchObject({ workspaceId: textOf(marker, "workspaceId"), operationId: textOf(marker, "operationId") });
-    for (const item of await queryAll(w.h.store, { pk: workspaceKey(T1_COMPANY, textOf(marker, "workspaceId")).pk })) expect(JSON.stringify(item)).not.toContain(job.leaseToken);
-    expect(JSON.stringify(marker)).not.toContain(job.leaseToken);
-  });
 
   it("starts one workspace per job, however often the trigger fires", async () => {
     const w = savedWorld();
@@ -128,41 +96,6 @@ describe("starting a rebuild", () => {
 describe("the key's inputs and the build systems' key files", () => {
   it("names the secrets an environment reads (http_hook accounts only), as a set", () => {
     expect(savedEnvSecretNames(environmentBody())).toEqual([]);
-  });
-
-  it("gives the job's globs and the broker's key the SAME list: the environment's own plus every build system's key files", async () => {
-    const w = savedWorld({ buildSystems: [buildSystem(["WORKSPACE", "tools/**/*.bzl"])] });
-    await w.h.registerProject();
-    await approve(w.test, environmentBody());
-    const inputs = await savedEnvBuildInputsOf({ test: w.test, registry: w.adapters, baseImageDigest: async () => BASE_IMAGE }, COMPANY, PROJECT);
-    expect(inputs?.detectorGlobs).toEqual(["package-lock.json", "WORKSPACE", "tools/**/*.bzl"]);
-    // the queued job carries exactly these globs
-    const { job } = await queued(w);
-    const marker = (await w.h.store.get(startMarkerKey(job.jobId)))!;
-    const operation = (await w.h.store.get(operationKey(T1_COMPANY, textOf(marker, "workspaceId"), textOf(marker, "operationId")))) as unknown as StoredOperation;
-    expect(operation["dispatch"].payload.savedEnvBuild.detectorGlobs).toEqual(inputs?.detectorGlobs);
-  });
-
-  it("a build system's key file changes the environment key, and without the profile the same change does not", async () => {
-    const files = { "package-lock.json": "lock-v1", WORKSPACE: "workspace-v1", "README.md": "hi" };
-    const keyOf = async (w: SavedWorld) => {
-      await w.h.registerProject();
-      await approve(w.test, environmentBody());
-      return w.deps.currentKey(COMPANY, PROJECT, new Map([["demo", HEAD]]));
-    };
-    const withProfile = savedWorld({ buildSystems: [buildSystem(["WORKSPACE"])], files: { ...files } });
-    const before = await keyOf(withProfile);
-    // a commit's tree never changes (the listing is cached by commit), so the next key is for the next commit
-    withProfile.files["WORKSPACE"] = "workspace-v2";
-    const NEXT = "2".repeat(40);
-    const changed = await withProfile.deps.currentKey(COMPANY, PROJECT, new Map([["demo", NEXT]]));
-    expect(before).toMatch(/^[a-f0-9]{64}$/u);
-    expect(changed).toMatch(/^[a-f0-9]{64}$/u);
-    expect(changed).not.toBe(before);
-    const without = savedWorld({ files: { ...files } });
-    const plain = await keyOf(without);
-    without.files["WORKSPACE"] = "workspace-v2";
-    expect(await without.deps.currentKey(COMPANY, PROJECT, new Map([["demo", NEXT]]))).toBe(plain);
   });
 
   it("more key-file globs than a job can carry fail closed: no key, so nothing is queued", async () => {

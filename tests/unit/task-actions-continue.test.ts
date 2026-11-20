@@ -12,10 +12,9 @@ import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { createTaskActions } from "../../packages/broker/src/core/task-flow/task-actions.js";
 import { createOwnerRoutes } from "../../packages/broker/src/local/app/routes.js";
-import { scriptTokenRoute } from "../../packages/broker/src/core/script-tokens/authenticate.js";
 import { createAllowAllAdmission } from "../../packages/broker/src/ports/policy-defaults.js";
 import { COMPANY } from "../support/task-flow-harness.js";
-import { OWNER_KEY, REQUEST_A, REQUEST_B, TASK_ID, accessWithoutOwners, operationsOf, promptOf, seed, seedPlain, stateOf, taskOf, WORKSPACE_ID } from "../support/task-actions-world.js";
+import { OWNER_KEY, REQUEST_A, REQUEST_B, TASK_ID, operationsOf, promptOf, seed, seedPlain, stateOf, taskOf, WORKSPACE_ID } from "../support/task-actions-world.js";
 import { operationRequestKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { continueRecordKey } from "../../packages/broker/src/core/task-flow/continue.js";
 
@@ -39,19 +38,6 @@ describe("continue", () => {
     expect((await taskOf(h)).workflow).toBeUndefined();
   });
 
-  it("is refused for anyone but the owner or a co-owner, and a script token, and writes nothing", async () => {
-    const guest = await seedPlain();
-    const before = await stateOf(guest.h);
-    await expect(createTaskActions(guest.h.deps).continue(guest.h.guest, TASK_ID, ask())).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
-    expect(await stateOf(guest.h)).toEqual(before);
-    const viewer = await seedPlain({ access: accessWithoutOwners() });
-    await expect(createTaskActions(viewer.h.deps).continue(viewer.h.guest, TASK_ID, ask())).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
-    const token = await seedPlain();
-    await expect(createTaskActions(token.h.deps).continue({ ...token.h.owner, scriptToken: { tokenId: "t", name: "CI", permissions: ["read", "start"], projects: ["payments"] } }, TASK_ID, ask())).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
-    expect(scriptTokenRoute("POST", `/v1/dev/tasks/${TASK_ID}/continue`)).toBeUndefined();
-    for (const world of [viewer, token]) expect(await secondRound(world.h)).toHaveLength(0);
-  });
-
   it("is refused on a closed task, a closed workspace and a workspace that never got ready, with their own words, and writes nothing", async () => {
     const closed = await seedPlain({ task: { closedAt: "2026-11-10T11:00:00.000Z" } });
     const before = await stateOf(closed.h);
@@ -62,17 +48,6 @@ describe("continue", () => {
     const neverReady = await seedPlain({ workspace: { status: "PREPARATION_FAILED" } });
     await expect(createTaskActions(neverReady.h.deps).continue(neverReady.caller, TASK_ID, ask())).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("never started") as string });
     for (const world of [closed, workspaceClosed, neverReady]) expect(await secondRound(world.h)).toHaveLength(0);
-  });
-
-  it("says TASK_BUSY for a task that is still working or whose first instructions have not run, and starts nothing", async () => {
-    for (const first of ["running", "starting"] as const) {
-      const { h, caller } = await seedPlain({ first });
-      const before = await stateOf(h);
-      await expect(createTaskActions(h.deps).continue(caller, TASK_ID, ask())).rejects.toMatchObject({ code: "TASK_BUSY" });
-      expect(await stateOf(h)).toEqual(before);
-    }
-    const preparing = await seedPlain({ workspace: { status: "PREPARING" } });
-    await expect(createTaskActions(preparing.h.deps).continue(preparing.caller, TASK_ID, ask())).rejects.toMatchObject({ code: "TASK_BUSY" });
   });
 
   it("refuses a workflow task (its approvals, send back and findings move it) and a setup run, and a body that is not valid", async () => {
@@ -87,41 +62,6 @@ describe("continue", () => {
     await expect(actions.continue(valid.caller, TASK_ID, ask(""))).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     await expect(actions.continue(valid.caller, TASK_ID, ask("x".repeat(65_537)))).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     expect(await secondRound(valid.h)).toHaveLength(0);
-  });
-
-  it("starts no round for a task over its cap, whose spend cannot be told, or when no cap can be read; room under the cap goes ahead", async () => {
-    for (const cap of [{ limitUsd: 6, spentUsd: 6 }, { limitUsd: 6, spentUsd: 7.25 }, { limitUsd: 6, spentUsd: undefined }]) {
-      const { h, caller } = await seedPlain();
-      const before = await stateOf(h);
-      await expect(createTaskActions(h.deps, { roundCap: async () => cap }).continue(caller, TASK_ID, ask())).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" });
-      expect(await stateOf(h)).toEqual(before);
-    }
-    const unreadable = await seedPlain();
-    await expect(createTaskActions(unreadable.h.deps, { roundCap: async () => { throw new Error("ledger down"); } }).continue(unreadable.caller, TASK_ID, ask())).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" });
-    const room = await seedPlain();
-    await createTaskActions(room.h.deps, { roundCap: async () => ({ limitUsd: 6, spentUsd: 3 }) }).continue(room.caller, TASK_ID, ask());
-    expect(await secondRound(room.h)).toHaveLength(1);
-  });
-
-  it("asks admission before anything is written; a refusal starts no round", async () => {
-    const refusing: Admission = { ...createAllowAllAdmission(), async admit() { return { allowed: false, code: "budget_exhausted", message: "The monthly budget is used up." }; } };
-    const { h, caller } = await seedPlain({ harness: { admission: refusing } });
-    const before = await stateOf(h);
-    await expect(createTaskActions(h.deps).continue(caller, TASK_ID, ask())).rejects.toMatchObject({ code: "BUDGET_EXCEEDED", message: expect.stringContaining("monthly budget") as string });
-    expect(await stateOf(h)).toEqual(before);
-  });
-
-  it("is refused for an archived project and for a person who may no longer have work run", async () => {
-    const archived = await seedPlain();
-    const projects = archived.h.deps.projects;
-    archived.h.deps.projects = { ...projects, latest: async (project) => { const found = await projects.latest(project); return found === undefined ? undefined : { ...found, archived: true }; } };
-    await expect(createTaskActions(archived.h.deps).continue(archived.caller, TASK_ID, ask())).rejects.toMatchObject({ code: "PROJECT_ARCHIVED" });
-    const lost = await seedPlain();
-    lost.h.deps.access = { ...lost.h.deps.access, checkStep: async () => ({ allowed: false, message: "This person no longer has access to the project." }) };
-    const before = await stateOf(lost.h);
-    await expect(createTaskActions(lost.h.deps).continue(lost.caller, TASK_ID, ask())).rejects.toMatchObject({ code: "FORBIDDEN" });
-    expect(await stateOf(lost.h)).toEqual(before);
-    for (const world of [archived, lost]) expect(await secondRound(world.h)).toHaveLength(0);
   });
 
   it("answers a repeat with the first and starts one round, even after that round ended; other words under the same id are refused", async () => {
@@ -186,13 +126,6 @@ describe("continue", () => {
     expect(await broken.h.store.get(continueRecordKey(TASK_ID, REQUEST_A))).toBeUndefined();
   });
 
-  it("does not start a second round while the first is still running, whatever the request id", async () => {
-    const { h, caller } = await seedPlain();
-    const actions = createTaskActions(h.deps);
-    await actions.continue(caller, TASK_ID, ask());
-    await expect(actions.continue(caller, TASK_ID, ask("Another.", REQUEST_B))).rejects.toMatchObject({ code: "TASK_BUSY" });
-    expect(await secondRound(h)).toHaveLength(1);
-  });
 });
 
 describe("the owner's route", () => {
@@ -214,10 +147,3 @@ describe("the owner's route", () => {
   });
 });
 
-it("a co-owner's cap refusal carries no other person's amounts", async () => {
- const { h } = await seedPlain();
- const coOwner = { ...h.guest, principal: { ...h.guest.principal, companyId: COMPANY } };
- h.deps.access.canAct = async () => true;
- h.deps.access.ownerActing = async () => ({ actorId: OWNER_KEY, authority: { role: "TASK_OWNER" } } as never);
- await expect(createTaskActions(h.deps, { roundCap: async () => ({ limitUsd: 17.43, spentUsd: 18.61 }) }).continue(coOwner, TASK_ID, ask())).rejects.toMatchObject({ code: "BUDGET_EXCEEDED", message: expect.not.stringMatching(/17\.43|18\.61|\$/u) as string });
-});

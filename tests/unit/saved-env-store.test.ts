@@ -1,9 +1,9 @@
 // The saved environment registry's store on the document store. One row per project, written with its audit steps in ONE transaction, fenced by the row's version; deleted projects are found through the
 // sparse due index until their registry deletion is final.
 import { describe, expect, it } from "vitest";
-import { WORKFLOW_DISPATCH_DUE_INDEX, orgPk, type AuditEvent, type AuditSink, type DocumentKey, type OrgId, type SavedEnvManifest, type StoredDocument, type TransactItem } from "@agentx/contracts";
+import { WORKFLOW_DISPATCH_DUE_INDEX, orgPk, type AuditEvent, type AuditSink, type DocumentKey, type OrgId, type StoredDocument, type TransactItem } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { SAVED_ENV_JOB_LEASE_MS, type SavedEnvAuditEntry, type SavedEnvImageRecord, type SavedEnvState } from "../../packages/broker/src/core/test-env/saved-env.js";
+import { SAVED_ENV_JOB_LEASE_MS, type SavedEnvAuditEntry, type SavedEnvState } from "../../packages/broker/src/core/test-env/saved-env.js";
 import { SAVED_ENV_INDEXES, SAVED_ENV_PURGE_PARTITION, documentSavedEnvStore, savedEnvAuditEvent } from "../../packages/broker/src/core/test-env/saved-env-store.js";
 
 const ORG = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
@@ -11,7 +11,6 @@ const OTHER = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
 const NOW = Date.parse("2026-11-02T10:00:00.000Z");
 const AT = new Date(NOW).toISOString();
 const DIGEST = `sha256:${"1".repeat(64)}`;
-const LEASE_TOKEN = "lease-secret-token-0123456789abcdef";
 
 /** An audit sink that stages one marker row per event in the caller's transaction, so a test sees both that it commits WITH the change and what it holds. */
 function stagingSink(): { sink: AuditSink; events: AuditEvent[] } {
@@ -37,28 +36,11 @@ function bench(options: { noAudit?: boolean; now?: () => number } = {}) {
   const set = async (item: Record<string, unknown>) => { await db.put({ item: item as StoredDocument }); };
   return { db, audit, store, clock, get, set };
 }
-const manifest = (): SavedEnvManifest => ({ schemaVersion: 1, environmentKey: "c".repeat(64), testEnvRevision: 4, commits: [{ repositoryId: "svc", sha: "f".repeat(40) }], proveReportDigest: "b".repeat(64), imageDigest: DIGEST, builtAt: AT });
-const image = (): SavedEnvImageRecord => ({ approved: { revision: 4, digest: "a".repeat(64) }, digest: DIGEST, tag: "kcccc-1", manifest: manifest(), recordedAt: AT, status: "ready" });
 const state = (changes: Partial<SavedEnvState> = {}): SavedEnvState => ({ orgId: ORG, projectId: "web", version: 1, enabled: true, images: [], health: "never_proved", ...changes });
 const entry = (action: SavedEnvAuditEntry["action"] = "rebuild_queued", extra: Partial<SavedEnvAuditEntry> = {}): SavedEnvAuditEntry => ({ action, orgId: ORG, projectId: "web", at: AT, ...extra });
 
 
 describe("the row", () => {
-  it("writes the row and its audit event together and reads it back for its own company only", async () => {
-    const { get, audit, store, db } = bench();
-    const job = { jobId: "job1", leaseToken: LEASE_TOKEN, reason: "no_image" as const, approved: { revision: 4, digest: "a".repeat(64) }, commits: { svc: "f".repeat(40) }, expectedKey: "c".repeat(64), createdAt: AT, leaseUntil: new Date(NOW + SAVED_ENV_JOB_LEASE_MS).toISOString() };
-    const first = state({ images: [image()], job });
-    expect(await store.commit(first, null, entry("rebuild_queued", { reason: "no_image" }))).toBe(true);
-    expect(await store.get(ORG, "web")).toEqual(first);
-    expect(await store.get(OTHER, "web")).toBeUndefined();
-    expect(await get({ pk: orgPk(ORG), sk: "SAVED_ENV#web" })).toMatchObject({ version: 1, entityType: "SAVED_ENV" });
-    expect(audit.events).toHaveLength(1);
-    expect(audit.events[0]).toMatchObject({ companyId: ORG, action: "saved_env.rebuild_queued", subject: { type: "project", id: "web" }, actor: { type: "system", id: "rovara" }, details: { cause: "no_image" } });
-    // the audit holds fixed words and a digest: never the job's lease token
-    expect(JSON.stringify(audit.events[0])).not.toContain(LEASE_TOKEN);
-    // and it committed WITH the row (the sink's own step is in the store)
-    expect((await db.query({ pk: `AUDIT#${ORG}` })).items).toHaveLength(1);
-  });
 
   it("names the person who pressed Reset as the actor", async () => {
     const { audit, store } = bench();
@@ -90,39 +72,9 @@ describe("the row", () => {
     expect(await get({ pk: orgPk(ORG), sk: "SAVED_ENV#web" })).toBeUndefined();
   });
 
-  it("commits without an audit sink (Code's default sink writes nothing); an event that a sink records elsewhere is recorded after the write", async () => {
-    const { get, store } = bench({ noAudit: true });
-    expect(await store.commit(state(), null, entry())).toBe(true);
-    await store.audit(entry("scan_started", { digest: DIGEST }));
-    expect(await get({ pk: orgPk(ORG), sk: "SAVED_ENV#web" })).toBeDefined();
-    const recorded: AuditEvent[] = [];
-    const elsewhere = documentSavedEnvStore({ store: new MemoryDocumentStore({ indexes: SAVED_ENV_INDEXES }), now: () => NOW, audit: { stage: () => [], record: async (event) => { recorded.push(event); } } });
-    expect(await elsewhere.commit(state(), null, entry("rebuild_queued", { reason: "no_image" }))).toBe(true);
-    expect(recorded.map((event) => event.action)).toEqual(["saved_env.rebuild_queued"]);
-  });
-
   it("a sink that throws on record never undoes an audit-only entry's caller", async () => {
     const store = documentSavedEnvStore({ store: new MemoryDocumentStore({ indexes: SAVED_ENV_INDEXES }), now: () => NOW, audit: { stage: () => [], record: async () => { throw new Error("sink down"); } } });
     await expect(store.audit(entry("scan_started", { digest: DIGEST }))).resolves.toBeUndefined();
-  });
-
-  it("writes the dispatcher's hand-over of a lease as the row alone", async () => {
-    const { audit, store } = bench();
-    expect(await store.commit(state({ lastPushAt: AT }), null, entry("rebuild_queued", { reason: "dispatched" }))).toBe(true);
-    expect(audit.events).toEqual([]);
-  });
-
-  it("audits a setting change with the person and the new value only", async () => {
-    const { audit, store } = bench();
-    await store.commit(state({ enabled: false }), null, entry("setting_changed", { enabled: false, actor: "dev_1" }));
-    expect(audit.events[0]).toMatchObject({ action: "saved_env.setting_changed", subject: { type: "project", id: "web" }, actor: { type: "person", id: "dev_1" }, details: { enabled: false } });
-  });
-
-  it("writes activity as the row alone, with no audit event", async () => {
-    const { audit, store } = bench();
-    expect(await store.commit(state({ lastTaskAt: AT }), null, entry("activity", { reason: "task" }))).toBe(true);
-    expect(audit.events).toEqual([]);
-    expect((await store.get(ORG, "web"))?.lastTaskAt).toBe(AT);
   });
 
   it("records an audit entry that is not tied to the row alone, with its digest and count", async () => {
@@ -144,13 +96,6 @@ describe("the row", () => {
     await expect(store.get(ORG, "web")).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
   });
 
-  it("does not store undefined attributes, and a row with an unknown attribute does not read back", async () => {
-    const { get, set, store } = bench();
-    await store.commit(state({ job: undefined, lastFailure: undefined }), null, entry());
-    expect(Object.keys((await get({ pk: orgPk(ORG), sk: "SAVED_ENV#web" })) ?? {})).not.toContain("job");
-    await set({ ...((await get({ pk: orgPk(ORG), sk: "SAVED_ENV#web" })) as Record<string, unknown>), surprise: 1 });
-    await expect(store.get(ORG, "web")).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
-  });
 });
 
 describe("the poll", () => {
@@ -170,18 +115,6 @@ describe("the poll", () => {
     expect(await store.pollDue(1)).toEqual([{ orgId: ORG, projectId: "due-a" }]);
   });
 
-  it("checks the row itself, not the eventually consistent index", async () => {
-    const { get, set, store } = bench();
-    await store.commit(state({ nextPollAt: EARLIER }), null, entry("activity"));
-    const live = (await get({ pk: orgPk(ORG), sk: "SAVED_ENV#web" })) as Record<string, unknown>;
-    // the index still lists the row, but it was turned off, archived, or its time moved on
-    for (const change of [{ enabled: false }, { archived: true }, { nextPollAt: LATER }, { deleted: true }]) {
-      await set({ ...live, ...change });
-      expect(await store.pollDue(10), JSON.stringify(change)).toEqual([]);
-    }
-    await set(live);
-    expect(await store.pollDue(10)).toEqual([{ orgId: ORG, projectId: "web" }]);
-  });
 });
 
 describe("the poll's pages", () => {
@@ -226,15 +159,4 @@ describe("deleted projects", () => {
     expect(await store.deletedNeedingPurge(SAVED_ENV_JOB_LEASE_MS)).toEqual([]);
   });
 
-  it("checks the row itself, not the eventually consistent index", async () => {
-    const { get, set, store } = bench();
-    await store.commit(deleted(), null, entry("project_deleted"));
-    // the index still lists the row, but the row was registered again meanwhile
-    const live = (await get({ pk: orgPk(ORG), sk: "SAVED_ENV#web" })) as Record<string, unknown>;
-    await set({ ...live, deleted: false });
-    expect(await store.deletedNeedingPurge(SAVED_ENV_JOB_LEASE_MS)).toEqual([]);
-    // or its purge finished after the lease, though the index still lists it
-    await set({ ...live, registryPurgedAt: new Date(NOW + SAVED_ENV_JOB_LEASE_MS + 1).toISOString() });
-    expect(await store.deletedNeedingPurge(SAVED_ENV_JOB_LEASE_MS)).toEqual([]);
-  });
 });

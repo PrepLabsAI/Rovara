@@ -128,6 +128,17 @@ describe("named staging templates against the 0.5.18 staging live routes", () =>
     expect(resources.DeveloperSignInCoreAppRoute6D4AEEF7).toBeUndefined();
   });
 
+  it("adds exactly the two capability-authenticated GET routes with unique keys and the broker target", () => {
+    const resources = controlPlane.Resources!;
+    for (const [id, path] of [["ContextToolsListRoute", "/v1/internal/context-tools"], ["DesignReviewPacketRoute", "/v1/internal/design-review/packet"]]) {
+      expect(resources[id!]).toEqual({ ...resources.ModelAccessRoute, Properties: { ...resources.ModelAccessRoute!.Properties, RouteKey: `GET ${path}` } });
+      expect(resources[id!]!.Properties?.AuthorizationType).toBe("NONE");
+      expect(resources[id!]!.Properties).not.toHaveProperty("AuthorizerId");
+    }
+    const keys = Object.values(resources).filter(row => row.Type === "AWS::ApiGatewayV2::Route").map(row => row.Properties?.RouteKey);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
   it("adds no route whose key a removed live route still holds", () => {
     // Every HttpApi route of the live 0.5.18 staging control plane (logical ID + route key), from its live template.
     const live = (JSON.parse(readFileSync(new URL("../fixtures/switchover/staging-0518-control-plane-routes.json", import.meta.url), "utf8")) as Record<string, Template>)["agentx-staging-control-plane"]!;

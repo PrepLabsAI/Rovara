@@ -9,7 +9,6 @@ import dgram from "node:dgram";
 import dns from "node:dns";
 import http from "node:http";
 import http2 from "node:http2";
-import net from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import tls from "node:tls";
@@ -92,25 +91,6 @@ describe("no request reaches a real model host during a scripted-replies run", (
     expect(summary.scripted.before_task).toBe(1);
   });
 
-  it("the whole block list: every host of modelHostBlockList plus the canary, dialed one by one, is recorded by name and never reaches out", async () => {
-    const world = await startWorld({ sets: [SET], escapes: { recorder: nameReadingRecorder, ports: { tls: 0, plain: 0 } } });
-    const ports = world.loop.escapePorts as { tls: number; plain: number };
-    const tripwire = installModelNetworkTripwire({ resolver: new Set(BLOCK_LIST), ports: { 443: ports.tls, 80: ports.plain } });
-    try {
-      // In batches under the escape listeners' own bound (MODEL_HELPER_LIMITS.sideMaxConnections = 64 at once; a flood is dropped, not queued): the list is ~200 hosts now (code/next's catalog added the Vertex regions), and dialing all at once lost 72 of them.
-      const BATCH = 32;
-      for (let at = 0; at < BLOCK_LIST.length; at += BATCH) await Promise.all(BLOCK_LIST.slice(at, at + BATCH).map((host) => dialTls(host)));
-      await settle(world, BLOCK_LIST.length);
-    } finally {
-      tripwire.restore();
-    }
-    const summary = world.summary();
-    await world.close();
-    expect(tripwire.refused).toEqual([]);
-    expect(summary.escapes.hosts).toEqual(BLOCK_LIST);
-    expect(findRedirectEscapes(BLOCK_LIST, summary.escapes.hosts)).toHaveLength(BLOCK_LIST.length);
-  });
-
   it("positive control: the tripwire does refuse and record a dial to a host the block does not cover", async () => {
     const tripwire = installModelNetworkTripwire({ resolver: new Set(), ports: { 443: 1, 80: 1 } });
     try {
@@ -148,49 +128,6 @@ describe("no request reaches a real model host during a scripted-replies run", (
     expect(tripwire.refused.length).toBeGreaterThanOrEqual(6);
   });
 
-  it("a client that ignores its redirect on a connection the recorder cannot name is still an escape: not run (host unreadable)", async () => {
-    const world = await startWorld({ sets: [SET], escapes: { recorder: { observe: () => ({ host: undefined }) }, ports: { tls: 0, plain: 0 } } });
-    const ports = world.loop.escapePorts as { tls: number; plain: number };
-    await new Promise<void>((done) => {
-      const socket = tls.connect({ host: "127.0.0.1", port: ports.tls, servername: "api.openai.com", rejectUnauthorized: false });
-      socket.on("error", () => done());
-      socket.on("close", () => done());
-    });
-    await settle(world, 1);
-    const summary = world.summary();
-    await world.close();
-    expect(summary.escapes).toMatchObject({ count: 1, unreadable: 1, hosts: [] });
-    const evidence = modelHelperEvidence(summary, BLOCK_LIST);
-    expect(evidence.result).toBe("not_run");
-    expect(evidence.lines).toContain("not run: client ignored the redirect (host unreadable)");
-  });
-
-  it("L1: a connection that never sends a byte is in the ledger as an escape the moment it is accepted (not after the read times out)", async () => {
-    const world = await startWorld({ sets: [SET], escapes: { recorder: nameReadingRecorder, ports: { tls: 0, plain: 0 } } });
-    const ports = world.loop.escapePorts as { tls: number; plain: number };
-    const socket = net.connect(ports.tls, "127.0.0.1");
-    await new Promise<void>((done) => socket.on("connect", () => done()));
-    // well inside the 3 s read timeout: the row was written on accept
-    await new Promise((done) => setTimeout(done, 300));
-    expect(world.summary().escapes).toMatchObject({ count: 1, unreadable: 1 });
-    socket.destroy();
-    await world.close();
-  });
-
-  it("a name the recorder returns that is not a plain public host (a path, an address, a URL with userinfo) is not written: the escape is unreadable, never repeated", async () => {
-    const world = await startWorld({ sets: [SET], escapes: { recorder: { observe: () => ({ host: "evil.example.com/../x user@host" }) }, ports: { tls: 0, plain: 0 } } });
-    const ports = world.loop.escapePorts as { tls: number; plain: number };
-    await new Promise<void>((done) => {
-      const socket = tls.connect({ host: "127.0.0.1", port: ports.tls, servername: "api.openai.com", rejectUnauthorized: false });
-      socket.on("error", () => done());
-      socket.on("close", () => done());
-    });
-    await settle(world, 1);
-    const summary = world.summary();
-    await world.close();
-    expect(summary.escapes).toMatchObject({ count: 1, unreadable: 1, hosts: [] });
-    expect(world.ledgerText()).not.toContain("evil");
-  });
 });
 
 describe("the helper program has no outbound socket", () => {

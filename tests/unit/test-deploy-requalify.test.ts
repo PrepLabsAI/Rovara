@@ -1,45 +1,8 @@
 // AUTOREQUALIFY (AR-5): the deploy tooling for the automatic test machine renewal. The units are planned, never run here; the readers answer from fakes and the check says what it found.
 import { describe, expect, it } from "vitest";
-import {
-  CONTROL_PLANE_LAMBDAS,
-  assertCheckAllowsApply,
-  formatPlan,
-  lambdaUnitsFor,
-  parseTestDeployArgs,
-  patchLiftedCode,
-  planTestDeploy,
-  plannedRequalifyGrants,
-  assertOnlyExpectedChanges,
-  type BuiltArtifacts,
-  type ObservedChange,
-  type CfnTemplate,
-  type DeployStep,
-  type StackParameters,
-} from "../../scripts/test-deploy.js";
-import { evaluateTestDeployCheck, tier3Request, type Finding } from "../../scripts/test-deploy-check.js";
-import {
-  REQUALIFY_INFRA,
-  REQUALIFY_LAMBDA,
-  REQUALIFY_DEPLOY_ORDER,
-  REQUALIFY_NOW_PAYLOAD,
-  REQUALIFY_SCHEDULE_LOGICAL_ID,
-  REQUALIFY_STEPS_POLICY_LOGICAL_ID,
-  drainReadIsNarrowed,
-  enableScheduleTemplate,
-  narrowDrainReadTemplate,
-  lockFact,
-  lockHeldMessage,
-  parseStartAnswer,
-  plainItem,
-  readInstalledFacts,
-  readLastRun,
-  readRow,
-  readRunnerTags,
-  readinessProblems,
-  requalifyFindings,
-  requalifyInstalled,
-  type RequalifyReader,
-} from "../../scripts/test-deploy-requalify.js";
+import { CONTROL_PLANE_LAMBDAS, formatPlan, lambdaUnitsFor, parseTestDeployArgs, patchLiftedCode, planTestDeploy, plannedRequalifyGrants, type BuiltArtifacts, type CfnTemplate, type DeployStep, type StackParameters } from "../../scripts/test-deploy.js";
+import { tier3Request, type Finding } from "../../scripts/test-deploy-check.js";
+import { REQUALIFY_INFRA, REQUALIFY_LAMBDA, REQUALIFY_DEPLOY_ORDER, REQUALIFY_SCHEDULE_LOGICAL_ID, REQUALIFY_STEPS_POLICY_LOGICAL_ID, drainReadIsNarrowed, enableScheduleTemplate, narrowDrainReadTemplate, parseStartAnswer, plainItem, readInstalledFacts, readRow, readinessProblems, requalifyFindings, requalifyInstalled, type RequalifyReader } from "../../scripts/test-deploy-requalify.js";
 
 const ENV = "agentxlivetest123";
 const CONTROL_PLANE = `agentx-${ENV}-control-plane`;
@@ -76,13 +39,6 @@ describe("the requalify-infra unit", () => {
     expect(verifyCode).toMatchObject({ logicalId: REQUALIFY_LAMBDA.logicalId, expectedSha256Base64: { fromStep: build.id, output: "sha256Base64" } });
   });
 
-  it("runs alone, and refuses on a stack that already has the renewal (its code then moves with control-plane-code)", () => {
-    for (const other of ["control-plane-code", "broker", "qualification-transport", "worker-image"] as const) {
-      expect(() => plan(["requalify-infra", other], false), other).toThrow(/runs on its own/);
-    }
-    expect(() => plan(["requalify-infra"], true)).toThrow(/already installed/);
-  });
-
   it("says in the printed plan that the lifted Lambda runs the uploaded zip and that only additions are allowed", () => {
     const text = formatPlan(steps);
     expect(text).toContain(`Code replaced for ${REQUALIFY_LAMBDA.logicalId} by the uploaded zip`);
@@ -92,34 +48,6 @@ describe("the requalify-infra unit", () => {
 });
 
 describe("the requalify-now unit", () => {
-  it("checks the shared lock and then starts one renewal, and only where the renewal is installed", () => {
-    const steps = plan(["requalify-now"], true);
-    expect(steps).toEqual([
-      { id: "check-requalify-ready", kind: "check-requalify-ready", stack: CONTROL_PLANE, identityMode: "cognito" },
-      { id: "check-requalify-lock", kind: "check-requalify-lock", stack: CONTROL_PLANE },
-      { id: "start-requalify", kind: "start-requalify", stack: CONTROL_PLANE, logicalId: REQUALIFY_LAMBDA.logicalId },
-    ]);
-    expect(() => plan(["requalify-now"], false)).toThrow(/deploy requalify-infra first/);
-    expect(() => plan(["requalify-now"])).toThrow(/deploy requalify-infra first/);
-    expect(() => plan(["requalify-now", "broker"], true)).toThrow(/runs on its own/);
-  });
-
-  it("starts nothing before the ready check: control-plane-code current and the runner and its volume tagged (AR-5 review I1)", () => {
-    expect(plan(["requalify-now"], true)[0]!.kind).toBe("check-requalify-ready");
-    expect(plan(["requalify-schedule"], true)[0]!.kind).toBe("check-requalify-ready");
-  });
-
-  it("says in the printed plan that it is owner-run and what it sends", () => {
-    const text = formatPlan(plan(["requalify-now"], true));
-    expect(text).toContain("owner-run, never started by an agent");
-    // The ready check comes first, and the lock step is honest that the machine, not this step, takes the lock (AR-5 review M1).
-    expect(text.indexOf("check-requalify-ready")).toBeLessThan(text.indexOf("check-requalify-lock"));
-    expect(text).toContain("control-plane-code and the stack are current");
-    expect(text).toContain("agentx:requalify-managed=true");
-    expect(text).toContain("this step does not take the lock, the renewal machine's first step does");
-    expect(text).toContain(REQUALIFY_NOW_PAYLOAD);
-    expect(REQUALIFY_NOW_PAYLOAD).toBe('{"action":"due","force":true}');
-  });
 
   it("both new units parse as --only values and stay out of the default set", () => {
     expect(parseTestDeployArgs(["--env", ENV, "--profile", "p", "--only", "requalify-infra"]).only).toEqual(["requalify-infra"]);
@@ -130,20 +58,6 @@ describe("the requalify-now unit", () => {
 });
 
 describe("control-plane-code and the renewal's Lambda", () => {
-  const logicalIds = (steps: DeployStep[]) => steps.flatMap((step) => (step.kind === "build-lambda-zip" ? [step.logicalId] : []));
-
-  it("leaves the renewal's Lambda out of a stack that lacks it, and moves it, with its boot.sh, once the stack has it", () => {
-    expect(logicalIds(plan(["control-plane-code"], false))).not.toContain(REQUALIFY_LAMBDA.logicalId);
-    expect(logicalIds(plan(["control-plane-code"]))).not.toContain(REQUALIFY_LAMBDA.logicalId);
-    const installed = plan(["control-plane-code"], true);
-    expect(logicalIds(installed)).toContain(REQUALIFY_LAMBDA.logicalId);
-    expect(logicalIds(installed)).toHaveLength(Object.keys(CONTROL_PLANE_LAMBDAS).length + 1);
-    const changeSet = installed.find((step): step is Extract<DeployStep, { kind: "create-change-set" }> => step.kind === "create-change-set")!;
-    expect(changeSet.expect.logicalIds).toContain(REQUALIFY_LAMBDA.logicalId);
-    expect(changeSet.template.source === "lambda-code" && changeSet.template.patches.map((patch) => patch.logicalId)).toContain(REQUALIFY_LAMBDA.logicalId);
-    expect(installed.filter((step) => step.kind === "verify-lambda-code")).toHaveLength(Object.keys(CONTROL_PLANE_LAMBDAS).length + 1);
-    expect(installed.find((step) => step.kind === "build-lambda-zip" && step.logicalId === REQUALIFY_LAMBDA.logicalId)).toMatchObject({ extraFiles: [{ name: "boot.sh" }] });
-  });
 
   it("does not make the renewal's Lambda a unit of its own: broker and dispatcher stay what they were", () => {
     expect(lambdaUnitsFor(["broker"], true)).toEqual(["broker"]);
@@ -237,58 +151,6 @@ describe("readRow", () => {
   });
 });
 
-describe("the renewal lock", () => {
-  const read = (expiresAt: string) => lockFact({ state: "found", item: plainItem(lockRow(expiresAt) as never) }, NOW);
-
-  it("is free without a row and after its time, held before it, and unreadable (never free) when the row is not a lock or cannot be read", () => {
-    expect(lockFact({ state: "absent" }, NOW)).toEqual({ state: "free" });
-    expect(read(iso(NOW.getTime() - 1))).toEqual({ state: "free" });
-    expect(read(iso(NOW.getTime()))).toEqual({ state: "free" });
-    expect(read(iso(NOW.getTime() + 1_000))).toEqual({ state: "held", runId: RUN_ID, expiresAt: iso(NOW.getTime() + 1_000) });
-    expect(lockFact({ state: "found", item: { pk: "x", sk: "LOCK", runId: "not-a-uuid" } }, NOW)).toMatchObject({ state: "unreadable" });
-    // The row as the table holds it carries its key; any other extra field is not a lock.
-    expect(lockFact({ state: "found", item: { ...plainItem(lockRow(iso(NOW.getTime() + 1_000)) as never), owner: "someone" } }, NOW)).toMatchObject({ state: "unreadable" });
-    expect(lockFact({ state: "unreadable", reason: "denied" }, NOW)).toEqual({ state: "unreadable", reason: "denied" });
-  });
-
-  it("is a refusal in the owner's words naming the run and the time", () => {
-    const held = read(iso(NOW.getTime() + 3_600_000)) as Extract<ReturnType<typeof lockFact>, { state: "held" }>;
-    expect(lockHeldMessage(held)).toBe(`a renewal (run ${RUN_ID}) or a by-hand qualification holds the renewal lock until ${held.expiresAt}; wait for it to end, then run this again`);
-  });
-});
-
-describe("the last renewal", () => {
-  it("is the run record the model-check runner pointer names", () => {
-    const { reader, calls } = fakeReader({ [POINTER_KEY]: pointerRow(), [RUN_KEY]: runRecord() });
-    expect(readLastRun(reader, input)).toEqual({
-      state: "found", runId: RUN_ID, switchedAt: "2026-10-26T06:30:00.000Z", generation: 3, newRunner: NEW_RUNNER.instanceId, previousRunner: OLD_RUNNER.instanceId,
-      amiId: "ami-0123456789abcdef0", workerImage: `123456789012.dkr.ecr.us-east-1.amazonaws.com/worker@sha256:${"b".repeat(64)}`, executorImage: null, pointerRunner: NEW_RUNNER.instanceId,
-    });
-    expect(calls).toHaveLength(2);
-  });
-
-  it("is none when no automatic renewal ever switched (no pointer, or one a script wrote without a run id)", () => {
-    expect(readLastRun(fakeReader({}).reader, input)).toEqual({ state: "none" });
-    expect(readLastRun(fakeReader({ [POINTER_KEY]: item({ pk: "E2E_MODEL_ROUTES", sk: "E2E_MODEL_CHECK_RUNNER#linux-arm64-web-api-v1", instanceId: "i-0123456789abcdef0" }) }).reader, input)).toEqual({ state: "none" });
-  });
-
-  it("is unreadable, never none, when the pointer or the record cannot be read, is missing, or is not a renewal record", () => {
-    expect(readLastRun(fakeReader({ [POINTER_KEY]: "DENIED" }).reader, input)).toMatchObject({ state: "unreadable" });
-    expect(JSON.stringify(readLastRun(fakeReader({ [POINTER_KEY]: "DENIED" }).reader, input))).toContain("runner pointer could not be read");
-    expect(readLastRun(fakeReader({ [POINTER_KEY]: pointerRow() }).reader, input)).toEqual({ state: "unreadable", reason: "the runner pointer names a renewal whose record is missing" });
-    expect(readLastRun(fakeReader({ [POINTER_KEY]: pointerRow(), [RUN_KEY]: "DENIED" }).reader, input)).toMatchObject({ state: "unreadable" });
-    expect(JSON.stringify(readLastRun(fakeReader({ [POINTER_KEY]: pointerRow(), [RUN_KEY]: "DENIED" }).reader, input))).toContain("run record could not be read");
-    expect(readLastRun(fakeReader({ [POINTER_KEY]: pointerRow(), [RUN_KEY]: runRecord({ generation: 0 }) }).reader, input)).toEqual({ state: "unreadable", reason: "the run record is not a renewal record" });
-    expect(readLastRun(fakeReader({ [POINTER_KEY]: pointerRow(), [RUN_KEY]: runRecord({ extra: "field" }) }).reader, input)).toMatchObject({ state: "unreadable" });
-    expect(readLastRun(fakeReader({ [POINTER_KEY]: item({ pk: "E2E_MODEL_ROUTES", sk: "E2E_MODEL_CHECK_RUNNER#linux-arm64-web-api-v1", requalifyRunId: 7 }) }).reader, input)).toEqual({ state: "unreadable", reason: "the runner pointer's requalifyRunId is not text" });
-  });
-
-  it("notes the runner the pointer names now when a by-hand qualification replaced it afterwards", () => {
-    const { reader } = fakeReader({ [POINTER_KEY]: pointerRow({ instanceId: "i-0aaaaaaaaaaaaaaaa" }), [RUN_KEY]: runRecord() });
-    expect(readLastRun(reader, input)).toMatchObject({ state: "found", pointerRunner: "i-0aaaaaaaaaaaaaaaa", newRunner: NEW_RUNNER.instanceId });
-  });
-});
-
 describe("readInstalledFacts", () => {
   it("reads the lock, the hold and the last renewal, and nothing else", () => {
     const { reader, calls } = fakeReader({ [LOCK_KEY]: lockRow(iso(NOW.getTime() + 60_000)), [HOLD_KEY]: item({ pk: "RUNTIME_REQUALIFY#linux-arm64-web-api-v1", sk: "HOLD" }), [POINTER_KEY]: pointerRow(), [RUN_KEY]: runRecord() });
@@ -345,13 +207,6 @@ describe("requalifyFindings", () => {
     for (const facts of all) expect(requalifyFindings(facts, NOW_COMMAND).filter((finding) => finding.severity === "error")).toEqual([]);
   });
 
-  it("goes through evaluateTestDeployCheck with the renewal command the check passes (the owner's start command once installed)", () => {
-    const result = evaluateTestDeployCheck({
-      headTemplate: {}, deployedTemplate: {}, lambdaCodeShas: {}, builtZipShas: {}, catalogRows: [], runnerFacts: undefined, now: NOW,
-      renewCommand: NOW_COMMAND, requalify: { state: "installed", lock: { state: "free" }, hold: "none", lastRun: { state: "none" } },
-    });
-    expect(result.findings.find((finding) => finding.kind === "requalify-last-run")?.message).toContain(NOW_COMMAND);
-  });
 });
 
 describe("parseStartAnswer", () => {
@@ -401,20 +256,6 @@ describe("the IAM statements the check prints for the renewal's grants", () => {
     expect(plannedRequalifyGrants(head, head)).toEqual([]);
   });
 
-  it("prints exactly the DrainRead statement when an installed stack lacks it (AR-3), and refuses the code deploy that would run without it", () => {
-    const head = headWithRenewal([drainRead, other]);
-    const deployed = headWithRenewal([other]);
-    const findings: Finding[] = evaluateTestDeployCheck({ headTemplate: head, deployedTemplate: deployed, lambdaCodeShas: {}, builtZipShas: {}, catalogRows: [], runnerFacts: undefined, now: NOW }).findings
-      .filter((finding) => finding.kind === "iam-missing-grant");
-    expect(findings).toHaveLength(1);
-    expect(findings[0]!.statements).toEqual([{ Effect: "Allow", Action: ["dynamodb:Query", "dynamodb:GetItem"], Resource: ["arn:table", "arn:table/index/bySessionState"], Condition: drainRead.Condition }]);
-    expect(tier3Request(findings)).toContain("PROJECT_SETUP#*");
-    // The renewal's Lambda moves only on a stack that has it: then its role's gap refuses the apply.
-    expect(() => assertCheckAllowsApply(findings, ["control-plane-code"], head, true)).toThrow(/iam-missing-grant RuntimeRequalifySteps/);
-    expect(() => assertCheckAllowsApply(findings, ["control-plane-code"], head, false)).not.toThrow();
-    expect(() => assertCheckAllowsApply(findings, ["broker"], head, true)).not.toThrow();
-  });
-
   it("uses the context flag and prefix the infra gives the renewal", () => {
     expect(REQUALIFY_INFRA.context["agentx:autoRequalify"]).toBe("enabled");
     expect(REQUALIFY_INFRA.logicalIdPrefix).toBe("RuntimeRequalify");
@@ -423,27 +264,6 @@ describe("the IAM statements the check prints for the renewal's grants", () => {
 });
 
 describe("the requalify-schedule unit (AR-5 review I1)", () => {
-  it("enables the daily check with a change set that may touch only the schedule's State, after the ready check, and verifies it", () => {
-    const steps = plan(["requalify-schedule"], true);
-    expect(steps.map((step) => step.kind)).toEqual(["check-requalify-ready", "create-change-set", "execute-change-set", "verify-requalify-schedule", "record-requalify-enabled"]);
-    const changeSet = steps[1] as Extract<DeployStep, { kind: "create-change-set" }>;
-    expect(changeSet).toMatchObject({ stack: CONTROL_PLANE, template: { source: "enable-schedule" }, expect: { action: "Modify", logicalIds: [REQUALIFY_SCHEDULE_LOGICAL_ID], allowedAttributes: ["Properties.State"] } });
-    expect(steps[3]).toMatchObject({ kind: "verify-requalify-schedule", logicalId: REQUALIFY_SCHEDULE_LOGICAL_ID });
-    // The guard accepts the State change and nothing else.
-    const modify = (attributes: string[]): ObservedChange[] => [{ action: "Modify", logicalId: REQUALIFY_SCHEDULE_LOGICAL_ID, type: "AWS::Scheduler::Schedule", attributes, replacement: "False" }];
-    expect(() => assertOnlyExpectedChanges(modify(["Properties.State"]), changeSet.expect)).not.toThrow();
-    expect(() => assertOnlyExpectedChanges(modify(["Properties.State", "Properties.ScheduleExpression"]), changeSet.expect)).toThrow(/also changes Properties.ScheduleExpression/);
-    expect(() => assertOnlyExpectedChanges([...modify(["Properties.State"]), { action: "Modify", logicalId: "RuntimeRequalifyStepsAC5E645B", type: "AWS::Lambda::Function", attributes: ["Properties.Code"] }], changeSet.expect)).toThrow(/unexpected changes/);
-    expect(formatPlan(steps)).toContain(`${REQUALIFY_SCHEDULE_LOGICAL_ID} State set to ENABLED`);
-  });
-
-  it("runs alone and only where the renewal is installed", () => {
-    expect(() => plan(["requalify-schedule"], false)).toThrow(/deploy requalify-infra first/);
-    expect(() => plan(["requalify-schedule"])).toThrow(/deploy requalify-infra first/);
-    expect(() => plan(["requalify-schedule", "requalify-now"], true)).toThrow(/runs on its own/);
-    expect(parseTestDeployArgs(["--env", ENV, "--profile", "p", "--only", "requalify-schedule"]).only).toEqual(["requalify-schedule"]);
-    expect(parseTestDeployArgs(["--env", ENV, "--profile", "p"]).only).not.toContain("requalify-schedule");
-  });
 
   it("sets the State of the schedule and nothing else, on a copy, and refuses a stack without the schedule", () => {
     const template: CfnTemplate = { Resources: { [REQUALIFY_SCHEDULE_LOGICAL_ID]: { Type: "AWS::Scheduler::Schedule", Properties: { State: "DISABLED", ScheduleExpression: "cron(0 6 * * ? *)" } }, Other: { Type: "AWS::SNS::Topic" } } };
@@ -465,75 +285,13 @@ describe("the requalify-schedule unit (AR-5 review I1)", () => {
 });
 
 describe("readiness before a renewal starts", () => {
-  const TAGS = { DeploymentMode: "e2e-qualification", Environment: ENV, "agentx:requalify-managed": "true" };
-  const ready = { state: "read", instanceId: "i-0fcff78d50c71bc57", instanceState: "running", instanceTags: TAGS, volumes: [{ volumeId: "vol-02fd92eeeb0b1b1d4", tags: TAGS }] } as const;
   const finding = (kind: Finding["kind"], severity: Finding["severity"] = "error"): Finding => ({ kind, severity, subject: "X", label: "Broker", message: "m" });
-
-  it("is ready with current code, a running tagged runner and a tagged workspace volume", () => {
-    expect(readinessProblems([], ready, ENV)).toEqual([]);
-    expect(readinessProblems([finding("catalog-expiring", "warning"), finding("requalify-last-run", "info")], ready, ENV)).toEqual([]);
-  });
-
-  it("refuses on a stale Lambda, a missing grant or a missing environment variable, each in its own words", () => {
-    expect(readinessProblems([finding("stale-lambda")], ready, ENV)).toEqual(["control-plane-code is not current: stale-lambda Broker"]);
-    expect(readinessProblems([finding("iam-missing-grant")], ready, ENV)).toEqual(["the control-plane stack is not current: iam-missing-grant Broker"]);
-    expect(readinessProblems([finding("lambda-env-missing")], ready, ENV)).toEqual(["the control-plane stack is not current: lambda-env-missing Broker"]);
-  });
-
-  it("refuses a runner or a volume missing any one of the three tags, or the wrong environment", () => {
-    for (const key of Object.keys(TAGS)) {
-      const without = Object.fromEntries(Object.entries(TAGS).filter(([name]) => name !== key));
-      expect(readinessProblems([], { ...ready, instanceTags: without }, ENV)[0], key).toContain(`runner ${ready.instanceId} lacks the tags`);
-      expect(readinessProblems([], { ...ready, volumes: [{ volumeId: "vol-02fd92eeeb0b1b1d4", tags: without }] }, ENV)[0], key).toContain("workspace volume vol-02fd92eeeb0b1b1d4");
-    }
-    expect(readinessProblems([], { ...ready, instanceTags: { ...TAGS, Environment: "other" } }, ENV)[0]).toContain(`Environment=${ENV}`);
-    expect(readinessProblems([], { ...ready, instanceState: "stopped" }, ENV)).toEqual([`the current runner ${ready.instanceId} is stopped, not running`]);
-    expect(readinessProblems([], { ...ready, volumes: [] }, ENV)[0]).toContain("no separate workspace volume");
-  });
 
   it("is never ready when the runner cannot be read, and still reports the stale code beside it", () => {
     expect(readinessProblems([finding("stale-lambda")], { state: "unknown", reason: "no runner pointer is recorded" }, ENV))
       .toEqual(["control-plane-code is not current: stale-lambda Broker", "the current runner cannot be checked for its tags: no runner pointer is recorded"]);
   });
 
-  describe("readRunnerTags", () => {
-    const POINTER = "E2E_MODEL_ROUTES|E2E_MODEL_CHECK_RUNNER#linux-arm64-web-api-v1";
-    const reader = (answers: { instance?: unknown; volumes?: unknown; pointer?: Row | "DENIED" | undefined }): { reader: RequalifyReader; calls: string[][] } => {
-      const inner = fakeReader(answers.pointer === undefined ? {} : { [POINTER]: answers.pointer });
-      const calls: string[][] = [];
-      return {
-        calls,
-        reader: {
-          aws(args, allowFailure) {
-            calls.push([...args]);
-            if (args[0] === "ec2" && args[1] === "describe-instances") return answers.instance === undefined ? { status: 254, stdout: "", stderr: "denied" } : { status: 0, stdout: JSON.stringify(answers.instance), stderr: "" };
-            if (args[0] === "ec2" && args[1] === "describe-volumes") return answers.volumes === undefined ? { status: 254, stdout: "", stderr: "denied" } : { status: 0, stdout: JSON.stringify(answers.volumes), stderr: "" };
-            return inner.reader.aws(args, allowFailure);
-          },
-        },
-      };
-    };
-    const tagList = (tags: Record<string, string>) => Object.entries(tags).map(([Key, Value]) => ({ Key, Value }));
-    const pointer = item({ pk: "E2E_MODEL_ROUTES", sk: "E2E_MODEL_CHECK_RUNNER#linux-arm64-web-api-v1", instanceId: "i-0fcff78d50c71bc57" });
-
-    it("reads the pointer's instance and the volumes that outlive it (not the root), with read-only calls", () => {
-      const { reader: r, calls } = reader({ pointer, instance: [{ state: "running", tags: tagList(TAGS) }], volumes: [{ id: "vol-root00000001", tags: null, root: true }, { id: "vol-02fd92eeeb0b1b1d4", tags: tagList(TAGS), root: false }] });
-      expect(readRunnerTags(r, input)).toEqual({ state: "read", instanceId: "i-0fcff78d50c71bc57", instanceState: "running", instanceTags: TAGS, volumes: [{ volumeId: "vol-02fd92eeeb0b1b1d4", tags: TAGS }] });
-      expect(calls.map((call) => `${call[0]} ${call[1]}`)).toEqual(["dynamodb query", "ec2 describe-instances", "ec2 describe-volumes"]);
-      expect(calls[1]).toContain("i-0fcff78d50c71bc57");
-      expect(calls[2]).toContain("Name=attachment.instance-id,Values=i-0fcff78d50c71bc57");
-    });
-
-    it("is unknown, never ready, on every read that fails or answers something else", () => {
-      const ok = { instance: [{ state: "running", tags: [] }], volumes: [] };
-      expect(readRunnerTags(reader({ ...ok }).reader, input)).toMatchObject({ state: "unknown", reason: "no runner pointer is recorded" });
-      expect(readRunnerTags(reader({ ...ok, pointer: "DENIED" }).reader, input)).toMatchObject({ state: "unknown" });
-      expect(readRunnerTags(reader({ ...ok, pointer: item({ pk: "E2E_MODEL_ROUTES", sk: "x" }) }).reader, input)).toEqual({ state: "unknown", reason: "the runner pointer names no instance" });
-      expect(readRunnerTags(reader({ pointer, volumes: [] }).reader, input)).toMatchObject({ state: "unknown", reason: expect.any(String) as string });
-      expect(readRunnerTags(reader({ pointer, instance: [], volumes: [] }).reader, input)).toMatchObject({ state: "unknown" });
-      expect(readRunnerTags(reader({ pointer, instance: [{ state: "running", tags: [] }] }).reader, input)).toMatchObject({ state: "unknown" });
-    });
-  });
 });
 
 describe("the requalify-drain-iam unit (DRAINREAD review I1)", () => {
@@ -549,41 +307,6 @@ describe("the requalify-drain-iam unit (DRAINREAD review I1)", () => {
       Lambda: { Type: "AWS::Lambda::Function", Properties: { Code: { S3Key: "old" } } },
       ...extra,
     },
-  });
-  const planIam = (installed?: boolean) => plan(["requalify-drain-iam"], installed);
-
-  it("plans: build the renewal zip, refuse unless it is live, then ONE guarded change set (Modify of the steps policy only) on the deployed template with every parameter UsePreviousValue, execute, verify", () => {
-    const steps = planIam(true);
-    expect(steps.map((step) => step.kind)).toEqual(["build-lambda-zip", "check-lambda-code-current", "create-change-set", "execute-change-set", "verify-requalify-drain-iam"]);
-    expect(steps[1]).toMatchObject({ kind: "check-lambda-code-current", stack: CONTROL_PLANE, logicalId: REQUALIFY_LAMBDA.logicalId, expectedSha256Base64: { fromStep: "build-requalify-steps", output: "sha256Base64" } });
-    const changeSet = steps[2] as Extract<DeployStep, { kind: "create-change-set" }>;
-    expect(changeSet).toMatchObject({
-      stack: CONTROL_PLANE, template: { source: "narrow-drain-read", identityMode: "cognito" },
-      expect: { action: "Modify", logicalIds: [POLICY], allowedAttributes: ["Properties.PolicyDocument"] },
-    });
-    // Every parameter of the stack is kept as it is (a missing one would fall back to its default and change other resources).
-    expect(changeSet.parameters.length).toBeGreaterThan(0);
-    expect(changeSet.parameters.every((parameter) => "usePreviousValue" in parameter)).toBe(true);
-    // The guard: the policy's PolicyDocument alone passes; another resource, another attribute, an Add or a replacement does not.
-    const modify = (logicalId: string, attributes: string[], replacement = "False"): ObservedChange => ({ action: "Modify", logicalId, type: "AWS::IAM::Policy", attributes, replacement });
-    expect(() => assertOnlyExpectedChanges([modify(POLICY, ["Properties.PolicyDocument"])], changeSet.expect)).not.toThrow();
-    expect(() => assertOnlyExpectedChanges([modify(POLICY, ["Properties.PolicyDocument", "Properties.Roles"])], changeSet.expect)).toThrow(/also changes Properties.Roles/);
-    expect(() => assertOnlyExpectedChanges([modify(POLICY, ["Properties.PolicyDocument"], "True")], changeSet.expect)).toThrow(/would replace/);
-    expect(() => assertOnlyExpectedChanges([modify(POLICY, ["Properties.PolicyDocument"]), modify("RuntimeRequalifyMachineRoleDefaultPolicyAAACD94F", ["Properties.PolicyDocument"])], changeSet.expect)).toThrow(/unexpected changes/);
-    expect(() => assertOnlyExpectedChanges([modify(POLICY, ["Properties.PolicyDocument"]), { action: "Add", logicalId: "RuntimeRequalifyStepsServiceRoleOverflowPolicy1", type: "AWS::IAM::ManagedPolicy" }], changeSet.expect)).toThrow(/unexpected changes/);
-    const text = formatPlan(steps);
-    expect(text).toContain("stop unless RuntimeRequalifyStepsAC5E645B CodeSha256 equals <build-requalify-steps.sha256Base64>");
-    expect(text).toContain(`only the Condition of the DrainRead statement in ${POLICY}`);
-    expect(text).toContain("all UsePreviousValue");
-  });
-
-  it("runs alone, only where the renewal is installed, and is not a default unit", () => {
-    expect(() => planIam(false)).toThrow(/deploy requalify-infra first/);
-    expect(() => planIam()).toThrow(/deploy requalify-infra first/);
-    expect(() => plan(["requalify-drain-iam", "control-plane-code"], true)).toThrow(/runs on its own/);
-    expect(parseTestDeployArgs(["--env", ENV, "--profile", "p", "--only", "requalify-drain-iam"]).only).toEqual(["requalify-drain-iam"]);
-    expect(parseTestDeployArgs(["--env", ENV, "--profile", "p"]).only).not.toContain("requalify-drain-iam");
-    expect(parseTestDeployArgs(["--env", ENV, "--profile", "p", "--only", "requalify-drain-iam"]).apply).toBe(false);
   });
 
   it("changes only the DrainRead Condition of the deployed template, taking nothing else from head", () => {

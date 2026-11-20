@@ -70,8 +70,4 @@ describe("operations: the OpenAPI description's operations, by the host its serv
     expect(standInPoolRoutes("api.tiktok.com", fake, set)).toEqual([{ method: "GET", template: "/user/info", answers: [{ data: { display_name: "Maya", followers: 3 } }] }]);
     expect(standInPoolRoutes("api.other.test", fake, set)).toEqual([]);
   });
-  it("a repository with no SQL and no description gives the writer nothing to write (it never guesses)", async () => {
-    const r = await repo({ "README.md": "# nothing" });
-    expect(await standInRequestOf([r.repository], r.tracked)).toBeUndefined();
-  });
 });

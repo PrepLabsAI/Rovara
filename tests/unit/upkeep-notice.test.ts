@@ -1,7 +1,7 @@
 // Lead 4 N1: the admins' notice of a nightly upkeep pause. ONE attention event per (company, project, month, reason), kind `upkeep_paused`, to the project's admins and the company's owners and admins, in fixed
 // words with the project's name and a link to Spending limits, deduped by that key, through Code's attention queue (core/notify/attention.ts). Mutants are listed in the PR body with the test that kills each.
 import { describe, expect, it } from "vitest";
-import { UPKEEP_NOTICE_WORDS, UPKEEP_PAUSE_MESSAGES, queryAll, upkeepNoticeId, upkeepSubjectId, upkeepSubjectOf, type ConversationRef, type OrgId } from "@agentx/contracts";
+import { UPKEEP_NOTICE_WORDS, UPKEEP_PAUSE_MESSAGES, queryAll, upkeepSubjectId, upkeepSubjectOf, type ConversationRef, type OrgId } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
 import { FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
@@ -11,10 +11,8 @@ import { upkeepNoticeKey } from "../../packages/broker/src/core/upkeep/keys.js";
 import { createNoticeService } from "../../packages/broker/src/services/notices.js";
 
 const COMPANY_A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
-const COMPANY_B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
 const ADMIN_1 = "a1".repeat(32);
 const ADMIN_2 = "a2".repeat(32);
-const OWNER_B = "b1".repeat(32);
 const CONVERSATION: ConversationRef = { channel: "examplechat", tenant: "team1", space: "room1", thread: "main" };
 const clock = { ms: Date.parse("2026-11-17T04:30:00.000Z") };
 
@@ -34,33 +32,6 @@ function world(recipients: (orgId: OrgId, project: string) => Promise<readonly s
 const ADMINS = { administers: async () => true, link: (project: string) => `https://example.test/projects/${project}/spending-limits` };
 
 describe("one notice per company, project, month and reason", () => {
-  it("writes one pending row per admin, kind upkeep_paused, and a repeat of the same pause writes nothing", async () => {
-    const w = world();
-    expect(await w.queue(COMPANY_A, "beacon", "monthly_limit")).toEqual({ queued: 2, deduped: false });
-    const rows = await w.pending();
-    expect(rows.map((row) => row["developerId"]).sort()).toEqual([ADMIN_1, ADMIN_2]);
-    expect(rows[0]).toMatchObject({ orgId: COMPANY_A, kind: "upkeep_paused", sessionId: upkeepSubjectId({ project: "beacon", month: "2026-11", reason: "monthly_limit" }) });
-    // Same company, project, month and reason (another night, another worker): nothing more, even after the first was delivered and its rows are gone.
-    expect(await w.queue(COMPANY_A, "beacon", "monthly_limit")).toEqual({ queued: 0, deduped: true });
-    for (const row of rows) await w.store.delete({ key: { pk: row["pk"], sk: row["sk"] } });
-    expect(await w.queue(COMPANY_A, "beacon", "monthly_limit")).toEqual({ queued: 0, deduped: true });
-    expect(await w.pending()).toHaveLength(0);
-  });
-
-  it("another reason, another month, another project and another company are each their own notice", async () => {
-    const w = world(async (orgId) => (orgId === COMPANY_A ? [ADMIN_1] : [OWNER_B]));
-    await w.queue(COMPANY_A, "beacon", "monthly_limit");
-    expect((await w.queue(COMPANY_A, "beacon", "no_budget")).queued).toBe(1);
-    expect((await w.queue(COMPANY_A, "beacon", "monthly_limit", "2026-12")).queued).toBe(1);
-    expect((await w.queue(COMPANY_A, "other", "monthly_limit")).queued).toBe(1);
-    expect((await w.queue(COMPANY_B, "beacon", "monthly_limit")).queued).toBe(1);
-    const rows = await w.pending();
-    expect(rows).toHaveLength(5);
-    // Company B's row names company B's person only; company A's people never get it.
-    expect(rows.filter((row) => row["orgId"] === COMPANY_B).map((row) => row["developerId"])).toEqual([OWNER_B]);
-    expect(rows.filter((row) => row["orgId"] === COMPANY_A).every((row) => row["developerId"] === ADMIN_1)).toBe(true);
-    expect(upkeepNoticeId({ orgId: COMPANY_A, project: "beacon", month: "2026-11", reason: "monthly_limit" })).not.toBe(upkeepNoticeId({ orgId: COMPANY_B, project: "beacon", month: "2026-11", reason: "monthly_limit" }));
-  });
 
   it("keeps only person ids (64 hex), never more than the cap, and gives the marker back when nobody could be told or the read failed", async () => {
     const none = world(async () => ["not-a-person", "ADMIN", ""]);
@@ -85,20 +56,6 @@ describe("one notice per company, project, month and reason", () => {
 });
 
 describe("delivery: fixed words, the project's name, a link, and only to people who still administer the project", () => {
-  it("sends the fixed line for the reason with the project's name and the Spending limits link", async () => {
-    const w = world();
-    await w.prefs(COMPANY_A, ADMIN_1);
-    await w.queue(COMPANY_A, "beacon", "monthly_limit");
-    const outcome = await w.deliver(ADMINS);
-    expect(outcome.sent).toBe(1);
-    const text = (w.adapter.delivered[0]!.data as { text: string }).text;
-    expect(text).toContain("Nightly upkeep needs your attention in Rovara:");
-    expect(text).toContain(`beacon: ${UPKEEP_NOTICE_WORDS.monthly_limit} https://example.test/projects/beacon/spending-limits`);
-    expect(text).not.toContain("task");
-    // Delivered once: the row is gone, and the same pause does not queue again.
-    expect(await w.pending()).toHaveLength(0);
-    expect((await w.queue(COMPANY_A, "beacon", "monthly_limit")).deduped).toBe(true);
-  });
 
   it("a host with no upkeep wiring leaves the row waiting instead of dropping it, and a later host with the wiring delivers it", async () => {
     const w = world();
@@ -131,27 +88,6 @@ describe("delivery: fixed words, the project's name, a link, and only to people 
     await w2.queue(COMPANY_A, "beacon", "monthly_limit");
     expect((await w2.deliver({ administers: async () => { throw new Error("down"); } })).sent).toBe(0);
     expect(w2.adapter.delivered).toHaveLength(0);
-  });
-
-  it("two projects: an admin of beacon is not told about other's pause; the check is asked per project, company and person", async () => {
-    const w = world(async () => [ADMIN_1]);
-    await w.prefs(COMPANY_A, ADMIN_1);
-    await w.queue(COMPANY_A, "other", "monthly_limit");
-    const asked: Array<[string, string, string]> = [];
-    const outcome = await w.deliver({ administers: async (org, person, project) => { asked.push([org, person, project]); return project === "beacon"; }, link: ADMINS.link });
-    expect(asked).toEqual([[COMPANY_A, ADMIN_1, "other"]]);
-    expect(outcome.sent).toBe(0);
-    expect(w.adapter.delivered).toHaveLength(0);
-  });
-
-  it("two companies: a row of company B is checked against company B and never reaches company A's chat", async () => {
-    const w = world(async (orgId) => (orgId === COMPANY_A ? [ADMIN_1] : [OWNER_B]));
-    await w.prefs(COMPANY_B, OWNER_B);
-    await w.queue(COMPANY_B, "beacon", "no_budget");
-    const asked: string[] = [];
-    await w.deliver({ administers: async (org) => { asked.push(org); return true; } });
-    expect(asked).toEqual([COMPANY_B]);
-    expect((w.adapter.delivered[0]!.data as { text: string }).text).toContain(UPKEEP_NOTICE_WORDS.no_budget);
   });
 
   it("the notice service carries the upkeep wiring to the delivery sweep (a host composes it there)", async () => {

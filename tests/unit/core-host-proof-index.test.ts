@@ -126,6 +126,22 @@ describe("GET /v1/dev/tasks/{id}/evidence on a core task", () => {
     });
   });
 
+  it.each(["CRITIC", "SECURITY"])("a failure-marked PASS from %s stays unknown through the hosted evidence route", async (role) => {
+    const w = await world();
+    const owner = w.person(OWNER_ID, FAKE_COMPANY);
+    const taskId = await w.taskOf(owner, FAKE_COMPANY);
+    const stored = (await w.fake.store.get(taskKey(taskId)))!;
+    const workflow = stored["workflow"] as unknown as { reviews: Array<{ role: string; status: string; failureReason?: string }> };
+    const review = workflow.reviews.find((entry) => entry.role === role)!;
+    review.status = "PASS";
+    review.failureReason = "SESSION_FAILED";
+    await w.fake.store.put({ item: { ...stored, workflow } });
+    const answer = body(await w.read(owner, taskId));
+    expect(answer["status"]).toBe(200);
+    const items = answer["items"] as Array<{ id: string; verdict: string }>;
+    expect(items.find((item) => item.id === (role === "CRITIC" ? "review:code" : "review:security"))?.verdict).toBe("unknown");
+  });
+
   it("with no kept pack, answers only what Rovara recorded and no failures key", async () => {
     const w = await world();
     const owner = w.person(OWNER_ID, FAKE_COMPANY);

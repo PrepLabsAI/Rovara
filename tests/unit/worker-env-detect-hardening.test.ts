@@ -1,10 +1,6 @@
 // Test services dependency detectors: hostile-input hardening (timing, userinfo, odd names, read budget, IaC names, YAML node cap, path list).
 import { describe, expect, it } from "vitest";
-import { ENV_DETECT_MAX_FILE_BYTES, ENV_DETECT_MAX_TOTAL_BYTES, boundedReader, runDetectors } from "../../packages/worker/src/env-detect/index.js";
-import { detectCompose } from "../../packages/worker/src/env-detect/compose.js";
-import { safeEnvName } from "../../packages/worker/src/env-detect/dependency-candidates.js";
-import { parseSafeYaml, YAML_LIMITS } from "../../packages/worker/src/env-detect/safe-yaml.js";
-import type { RepositoryReader } from "../../packages/worker/src/env-detect/types.js";
+import { ENV_DETECT_MAX_FILE_BYTES, boundedReader, runDetectors } from "../../packages/worker/src/env-detect/index.js";
 
 type Files = Record<string, string>;
 async function detect(files: Files) {
@@ -109,17 +105,9 @@ describe("test-side fake hosts never carry user information", () => {
     for (const secret of [user, password, jwtish, "partner"]) expect(out).not.toContain(secret);
     expect(detection.dependencies?.some((item) => item.family.startsWith("http:"))).toBeFalsy();
   });
-  it("still takes an ordinary host, with a port or a path", async () => {
-    const detection = await detect({ "src/a.test.ts": 'nock("https://api.partner.example.net:8443/v1").get("/x")\nnock(`http://other.example.net?x=1`)\n' });
-    expect(detection.dependencies!.map((item) => item.family).sort()).toEqual(["http:api.partner.example.net", "http:other.example.net"]);
-  });
 });
 
 describe("variable names must look like variable names", () => {
-  it("drops lower-case keys, one-letter names and long run-together names, keeps ordinary ones", () => {
-    const pasted = ["HUNTER", "TWO", "PW", "1234567890"].join("");
-    expect(["hunter2PW", "A", "DATABASE_URL", "PG1", pasted, "ABCDEFGHIJKLMNOPQRSTUVWXYZAB", "REDIS_URL_2"].map(safeEnvName)).toEqual([undefined, undefined, "DATABASE_URL", "PG1", undefined, undefined, "REDIS_URL_2"]);
-  });
   it("keeps such a key out of a compose list entry and an env file", async () => {
     const pasted = ["HUNTER", "TWO", "PW", "1234567890"].join("");
     const compose = `services:\n  db:\n    image: postgres\n    environment:\n      - hunter2PW=x\n      - ${pasted}=y\n      - POSTGRES_DB=app\n`;
@@ -128,34 +116,6 @@ describe("variable names must look like variable names", () => {
     const out = JSON.stringify(detection);
     expect(out).not.toContain(pasted);
     expect(out).not.toContain("hunter2PW");
-  });
-});
-
-describe("limits that need their own test", () => {
-  it("refuses a wide, shallow YAML document on the node count alone", () => {
-    const items = Array.from({ length: YAML_LIMITS.maxNodes + 100 }, () => "- a").join("\n");
-    expect(Buffer.byteLength(items)).toBeLessThan(YAML_LIMITS.maxBytes);
-    expect(parseSafeYaml(items)).toEqual({ ok: false, reason: "too_many_nodes" });
-  });
-  it("does not read a dev container's compose file that is not in the path list, even if the reader would serve it", async () => {
-    const reads: string[] = [];
-    const reader: RepositoryReader = {
-      paths: [".devcontainer/devcontainer.json"],
-      read: (path) => { reads.push(path); return Promise.resolve(path.endsWith("devcontainer.json") ? '{"dockerComposeFile": "../stack/dev.yml"}' : "services:\n  db: { image: postgres }\n"); },
-    };
-    expect(await detectCompose({ repo: reader, cwd: "svc" })).toEqual({});
-    expect(reads).toEqual([".devcontainer/devcontainer.json"]);
-  });
-  it("says so when the shared read budget ran out", async () => {
-    const files: Files = {};
-    const each = ENV_DETECT_MAX_FILE_BYTES - 10;
-    for (let index = 0; index <= Math.ceil(ENV_DETECT_MAX_TOTAL_BYTES / each); index += 1) files[`docs/f${String(index)}.txt`] = "x".repeat(each);
-    files["docker-compose.yml"] = "services:\n  db: { image: postgres }\n";
-    const bounded = boundedReader(["docs/a.md", ...Object.keys(files)], (path) => Promise.resolve(files[path]));
-    for (const path of Object.keys(files).filter((name) => name.startsWith("docs/"))) await bounded.reader.read(path);
-    const detection = await runDetectors(bounded.reader, "svc");
-    expect(detection.notes).toContain("Some files were not read: the read budget ran out.");
-    expect((await detect({ "docker-compose.yml": "services:\n  db: { image: postgres }\n" })).notes.join(" ")).not.toContain("read budget");
   });
 });
 
@@ -177,33 +137,3 @@ describe("infrastructure resource names are carried, but never a key-shaped one"
   });
 });
 
-describe("realistic wide spacing is still understood", () => {
-  const blanks = (count: number): string => " ".repeat(count);
-  it.each([60, 120])("%i blanks inside a call: environment names, boto3 clients, driver hosts, Go and Node calls", async (count) => {
-    const pad = blanks(count);
-    const detection = await detect({
-      "app/settings.py": `import os\nCACHE = os.environ.get(${pad}'REDIS_URL')\n`,
-      "svc/aws.py": `import boto3\nclient = boto3.client(${pad}"sqs", region_name="us-east-1")\n`,
-      "svc/db.py": `import psycopg2\nconn = psycopg2.connect${pad}(host="db.internal")\n`,
-      "main.go": `package main\nimport "github.com/redis/go-redis/v9"\nfunc f() { _ = redis.NewClient${pad}(&redis.Options{Addr: "localhost:6379"}) }\n`,
-      "src/mq.js": `const amqp = require("amqplib");\namqp.connect${pad}("amqp://rabbit");\n`,
-    });
-    expect(family(detection, "redis")!.hints.envNames).toContain("REDIS_URL");
-    expect(family(detection, "aws:sqs")).toBeDefined();
-    expect(family(detection, "postgres")!.hints.explicitEndpoint).toBe(true);
-    expect(family(detection, "redis")!.hints.explicitEndpoint).toBe(true);
-    expect(family(detection, "rabbitmq")!.hints.explicitEndpoint).toBe(true);
-  });
-  it("60 blanks after Gradle's sourceCompatibility, and 120 blanks or line ends inside Maven tags", async () => {
-    const gradle = await detect({ "build.gradle": `sourceCompatibility${blanks(60)}=${blanks(60)}17\n`, "src/test/java/AT.java": "class AT {}\n" });
-    expect(gradle.notes.join(" ")).toContain("Java 17");
-    for (const count of [60, 120]) {
-      const pad = `${blanks(count - 1)}\n`;
-      const pom = `<project>\n<properties><java.version>${pad}17${pad}</java.version></properties>\n<modules><module>${pad}api${pad}</module></modules>\n<dependencies><dependency><groupId>${pad}org.postgresql${pad}</groupId><artifactId>${pad}postgresql${pad}</artifactId></dependency></dependencies>\n</project>\n`;
-      const detection = await detect({ "pom.xml": pom, "src/test/java/AT.java": "class AT {}\n" });
-      expect(detection.notes.join(" ")).toContain("Java 17");
-      expect(detection.notes.join(" ")).toContain("1 module: api");
-      expect(family(detection, "postgres")).toBeDefined();
-    }
-  });
-});

@@ -29,6 +29,8 @@ jobs:
     needs: test
     if: vars.AGENTX_PUBLISH_ENABLED == 'true'
     runs-on: ubuntu-24.04-arm
+    # The emulated amd64 build of the worker is slower than a native one; bounded so a stuck build cannot hold the release open.
+    timeout-minutes: 90
     permissions: { contents: read, id-token: write }
     outputs:
       worker: ${{ steps.push.outputs.worker }}
@@ -83,10 +85,14 @@ jobs:
       # step as the linux-runtime job in ci.yml); production hosts (Amazon Linux 2023) have no such restriction.
       - if: vars.AGENTX_PUBLISH_EXECUTOR_IMAGE == 'true'
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || echo "no AppArmor userns restriction on this kernel"
+      # Register amd64 emulation before assuming the publish role, using a pinned binfmt image.
+      - uses: docker/setup-qemu-action@v3
+        with: { platforms: amd64, image: tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 }
       - uses: aws-actions/configure-aws-credentials@v5
         with: { role-to-assume: "${{ vars.AGENTX_PUBLISH_ROLE_ARN }}", aws-region: us-east-1 }
       - uses: aws-actions/amazon-ecr-login@v2
         with: { registry-type: public }
+      # The runner is arm64, so the worker's linux/amd64 half (DEC 254zm) is built under emulation: register amd64 only (arm64 is native here).
       - uses: docker/setup-buildx-action@v3
       - id: push
         # Without an explicit shell, GitHub Actions runs a Linux run: step's script as plain
@@ -110,10 +116,17 @@ jobs:
             [ "$image" = slack ] && dockerfile=environments/slack/Dockerfile
             [ "$image" = executor ] && dockerfile=environments/e2e-executor/Dockerfile
             repo="public.ecr.aws/$ALIAS/agentx-$image"
-            # --provenance=false --sbom=false: without them, buildx pushes an OCI image *index*
-            # (the tagged manifest plus attached provenance/SBOM attestations) instead of a single
-            # linux/arm64 image manifest, and the digest this job would read back is the index's,
-            # not the image's — the wrong thing to pin the release to.
+            # The worker is a multi-architecture image (DEC 254zm): one index digest whose linux/arm64 image is what every install has always run and
+            # whose linux/amd64 image is what the x86 machine sizes pull. The Slack and executor images stay arm64 only.
+            case "$image" in
+              worker) platforms=linux/arm64,linux/amd64 ;;
+              *) platforms=linux/arm64 ;;
+            esac
+            # --provenance=false --sbom=false: without them, buildx adds provenance/SBOM attestation
+            # entries to the pushed OCI image (an index even for one platform), and the digest this job
+            # would read back is the index's, not the image's: the wrong thing to pin the release to.
+            # With them, a single-platform push is one image manifest and the worker's is an index
+            # that lists exactly its platforms.
             if [ "$image" = executor ]; then
               # The executor is built into the local Docker, smoke-tested as the host runs it (Chromium's sandbox on), and that same loaded image is pushed, so the
               # published bytes are the smoke-tested bytes. A failing smoke test stops the job before anything is pushed.
@@ -125,7 +138,7 @@ jobs:
                 exit 1
               fi
             else
-              docker buildx build --platform linux/arm64 --provenance=false --sbom=false --file "$dockerfile" --tag "$repo:$VERSION" --push --metadata-file "$RUNNER_TEMP/$image.json" .
+              docker buildx build --platform "$platforms" --provenance=false --sbom=false --file "$dockerfile" --tag "$repo:$VERSION" --push --metadata-file "$RUNNER_TEMP/$image.json" .
               digest=$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/$image.json")
             fi
             # Don't trust the local build metadata alone: read back what the registry actually
@@ -139,6 +152,14 @@ jobs:
             if [ "$registry_digest" != "$digest" ]; then
               echo "::error::registry digest $registry_digest for $repo:$VERSION does not match the pushed digest $digest" >&2
               exit 1
+            fi
+            if [ "$image" = worker ]; then
+              # The registry, not the build, says which platforms the worker digest serves: a release whose worker lacks either one must not ship.
+              served=$(docker buildx imagetools inspect --raw "$repo:$VERSION" | jq -r '[.manifests[]?.platform | select(. != null) | "\(.os)/\(.architecture)"] | sort | join(",")')
+              if [ "$served" != "linux/amd64,linux/arm64" ]; then
+                echo "::error::the worker image $repo:$VERSION serves \"$served\", not linux/amd64 and linux/arm64" >&2
+                exit 1
+              fi
             fi
             echo "$image=$repo@$registry_digest" >> "$GITHUB_OUTPUT"
           done

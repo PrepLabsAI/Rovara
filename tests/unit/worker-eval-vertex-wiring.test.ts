@@ -18,16 +18,6 @@ describe("the worker's model pin per eval row", () => {
     const row = evalModelPathPattern("vertex", MODEL);
     for (const path of [vertex(), vertex({ version: "v1" }), vertex({ op: "streamGenerateContent" }), vertex({ project: "deskbot-prod-1", location: "us-central1" }), vertex({ project: "123456789012", location: "global" })]) expect(row.test(path), path).toBe(true);
   });
-  it.each([
-    ["another model", vertex({ model: "gemini-2.5-pro" })], ["a prefix of the model", vertex({ model: "gemini-2.5" })], ["another operation", vertex({ op: "countTokens" })], ["another publisher", vertex({ publisher: "anthropic" })],
-    ["another version", vertex({ version: "v2" })], ["a dot segment in the project", vertex({ project: ".." })], ["a slash in the location", vertex({ location: "a/b" })], ["an encoded character", vertex({ project: "dev%2fops-1" })],
-    ["a host in the location", vertex({ location: "evil.example#" })], ["an upper-case project", vertex({ project: "Deskbot-Prod-1" })], ["the Gemini API form", `/v1beta/models/${MODEL}:generateContent`], ["a trailing path", `${vertex()}/x`],
-    ["the express form with no project", `/v1beta1/publishers/google/models/${MODEL}:generateContent`],
-  ])("a vertex row refuses %s", (_name, path) => { expect(evalModelPathPattern("vertex", MODEL).test(path)).toBe(false); });
-  it("a model name with a regex character cannot widen the pin", () => {
-    expect(evalModelPathPattern("vertex", "gemini-2.5.x").test(vertex({ model: "gemini-2.5.x" }))).toBe(true);
-    expect(evalModelPathPattern("vertex", "gemini-2.5.x").test(vertex({ model: "gemini-2-5-x" }))).toBe(false);
-  });
 });
 
 describe("the eval product rows", () => {

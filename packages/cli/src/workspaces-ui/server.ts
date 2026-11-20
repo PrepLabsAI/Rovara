@@ -114,12 +114,10 @@ export async function startWorkspacesUiServer(input: {
       try {
         return json(response, 200, { ok: true, data: await input.read() });
       } catch (error) {
-        // An AgentX error already says what to do about it ("run agentx login <url>"), without its
-        // code prefix, which means nothing to whoever is reading the page; anything else is this
-        // CLI's own fault and is not repeated back to the page.
-        const message = error instanceof AgentXError
-          ? error.message.slice(error.code.length + 2)
-          : "AgentX could not be read; check the terminal";
+        // Keep command-line details out of the browser's error message.
+        const message = error instanceof AgentXError && error.code === "AUTH_REQUIRED"
+          ? "Your Rovara sign-in has ended. Start signing in again."
+          : "Rovara could not load your projects. Try again shortly.";
         return json(response, 200, { ok: false, error: message });
       }
     }
@@ -128,7 +126,7 @@ export async function startWorkspacesUiServer(input: {
 
   const server: Server = createServer((request, response) => {
     handle(request, response).catch(() => {
-      if (!response.headersSent) send(response, 500, "text/plain; charset=utf-8", "agentx could not answer that\n");
+      if (!response.headersSent) send(response, 500, "text/plain; charset=utf-8", "Rovara could not answer that\n");
       else response.end();
     });
   });

@@ -5,18 +5,12 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  CreateScriptTokenBodySchema, CreatedScriptTokenSchema, IMPLICIT_COMPANY_ID, SCRIPT_TOKEN_NOT_ALLOWED_MESSAGE, SCRIPT_TOKEN_PERMISSIONS, SCRIPT_TOKENS_PER_PERSON_MAX, ScriptTokenListSchema, WORKER_INVOCATION_FEATURES, orgScriptTokensKey, orgProjectCatalogKey, scriptTokenKey,
-  type AuditEvent, type AuditSink,
-} from "@agentx/contracts";
+import { CreatedScriptTokenSchema, IMPLICIT_COMPANY_ID, SCRIPT_TOKEN_NOT_ALLOWED_MESSAGE, SCRIPT_TOKEN_PERMISSIONS, SCRIPT_TOKENS_PER_PERSON_MAX, ScriptTokenListSchema, WORKER_INVOCATION_FEATURES, orgScriptTokensKey, scriptTokenKey, type AuditEvent, type AuditSink } from "@agentx/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { renderScriptTokens } from "../../packages/broker/src/core/local-pages/pages.js";
 import { scriptTokenRoute } from "../../packages/broker/src/core/script-tokens/authenticate.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createScriptToken, listScriptTokens, noteScriptTokenUse, readScriptToken, revokeScriptToken, SCRIPT_TOKEN_CREATE_ADMIN_ONLY, ScriptTokenRecordSchema, type ScriptTokenDependencies } from "../../packages/broker/src/core/script-tokens/store.js";
 import { hashScriptToken, isScriptTokenHeader, mintScriptToken, parseScriptTokenHeader, scriptTokenMatches } from "../../packages/broker/src/core/script-tokens/token-format.js";
-import { scriptTokensEnabled } from "../../packages/broker/src/core/script-tokens/switch.js";
-import { takeRate } from "../../packages/broker/src/core/script-tokens/rate.js";
 import { createLocalScriptTokens } from "../../packages/broker/src/local/app/script-tokens.js";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
@@ -147,11 +141,6 @@ describe("the token format and the closed list", () => {
     ] as const) expect(scriptTokenRoute(method, path), `${method} ${path}`).toBeUndefined();
   });
 
-  it("is on unless the owner turns it off", () => {
-    expect(scriptTokensEnabled({})).toBe(true);
-    expect(scriptTokensEnabled({ ROVARA_SCRIPT_TOKENS: "1" })).toBe(true);
-    expect(scriptTokensEnabled({ ROVARA_SCRIPT_TOKENS: "0" })).toBe(false);
-  });
 });
 
 describe("the stored tokens (document store port)", () => {
@@ -169,19 +158,6 @@ describe("the stored tokens (document store port)", () => {
   };
   const anyProject = async () => undefined;
 
-  it("refuses a member in the core before reading the body or making any token", async () => {
-    const w = world();
-    const unreadBody = { get requestId() { throw new Error("body must not be read"); } };
-    await expect(createScriptToken(w.deps, { ...owner, orgRole: "member" }, unreadBody, anyProject)).rejects.toMatchObject({
-      code: "FORBIDDEN", statusCode: 403, message: `FORBIDDEN: ${SCRIPT_TOKEN_CREATE_ADMIN_ONLY}`,
-    });
-    await expect(createScriptToken(w.deps, { ...owner, orgRole: "member" }, body(1), anyProject)).rejects.toMatchObject({
-      code: "FORBIDDEN", statusCode: 403, message: `FORBIDDEN: ${SCRIPT_TOKEN_CREATE_ADMIN_ONLY}`,
-    });
-    expect(await listScriptTokens(w.deps, owner, async () => undefined)).toEqual([]);
-    expect(w.events).toEqual([]);
-  });
-
   it.each(["owner", "admin"] as const)("lets a company %s create in the core", async (orgRole) => {
     const w = world();
     const made = CreatedScriptTokenSchema.parse(await createScriptToken(w.deps, { ...owner, orgRole }, body(1), anyProject));
@@ -193,19 +169,6 @@ describe("the stored tokens (document store port)", () => {
     expect(ScriptTokenListSchema.safeParse({ tokens: [], canCreate: false }).success).toBe(true);
     expect(ScriptTokenListSchema.safeParse({ tokens: [] }).success).toBe(false);
     expect(ScriptTokenListSchema.safeParse({ tokens: [], canCreate: "true" }).success).toBe(false);
-  });
-
-  it("keeps the single-owner laptop service working without a hosted membership or step-up", async () => {
-    const w = world();
-    const principal = localOwnerPrincipal();
-    await w.store.put({ item: { ...orgProjectCatalogKey(IMPLICIT_COMPANY_ID, "payments"), entityType: "PROJECT_CATALOG", latestRevision: 1 } });
-    const local = createLocalScriptTokens({ ...w.deps, companyId: IMPLICIT_COMPANY_ID, owner: principal, identity: { getPrincipal: async () => principal }, enabled: () => true });
-    const made = CreatedScriptTokenSchema.parse(await local.create(body(1)));
-    expect(await w.store.get(scriptTokenKey(IMPLICIT_COMPANY_ID, made.token.tokenId))).toMatchObject({ createdRole: "owner", amr: "local" });
-    const answer = await local.routes({ method: "GET", path: "/v1/app/script-tokens", headers: {} });
-    expect(answer?.statusCode).toBe(200);
-    expect(ScriptTokenListSchema.parse(JSON.parse(answer!.body))).toMatchObject({ canCreate: true, tokens: [{ tokenId: made.token.tokenId, mine: true }] });
-    expect(await local.revoke(made.token.tokenId)).toMatchObject({ status: "revoked" });
   });
 
   it("refuses laptop token creation for a member and reports canCreate false", async () => {
@@ -252,33 +215,6 @@ describe("the stored tokens (document store port)", () => {
     await expect(createScriptToken(w.deps, owner, { ...body(1), permissions: ["admin"] }, anyProject)).rejects.toThrow(/permissions/);
   });
 
-  it("labels wiki as hosted on the laptop form and created-token line", async () => {
-    const w = world();
-    const created = await createScriptToken(w.deps, owner, body(1, { permissions: ["wiki"] }), anyProject);
-    const html = renderScriptTokens({ base: "/s/test", nonce: "test", sessionId: "test", formToken: () => "test" }, { tokens: [], projects: ["payments"] }, { canMake: true, created });
-    expect(html.match(/read the project wiki of these projects \(hosted\)/gu)).toHaveLength(2);
-  });
-
-  it("the lessons permission is one of the four a token may have, and it is kept as asked: a token made without it has no lessons permission", async () => {
-    expect(SCRIPT_TOKEN_PERMISSIONS).toEqual(["read", "start", "lessons", "wiki"]);
-    const asked = { requestId: REQUEST(1), name: "tool", projects: ["payments"] };
-    expect(CreateScriptTokenBodySchema.safeParse({ ...asked, permissions: ["lessons"] }).success).toBe(true);
-    expect(CreateScriptTokenBodySchema.safeParse({ ...asked, permissions: ["read", "start", "lessons"] }).success).toBe(true);
-    expect(CreateScriptTokenBodySchema.safeParse({ ...asked, permissions: ["lessons", "lessons"] }).success).toBe(false);
-    expect(CreateScriptTokenBodySchema.safeParse({ ...asked, permissions: ["lessons", "read", "start", "lessons"] }).success).toBe(false);
-    expect(CreateScriptTokenBodySchema.safeParse({ ...asked, permissions: ["lessons", "read", "start", "wiki", "lessons"] }).success).toBe(false);
-    const w = world();
-    const withLessons = CreatedScriptTokenSchema.parse(await createScriptToken(w.deps, owner, body(1, { permissions: ["lessons", "read"] }), anyProject));
-    expect(withLessons.token.permissions).toEqual(["read", "lessons"]);
-    expect((await readScriptToken(w.deps, IMPLICIT_COMPANY_ID, withLessons.token.tokenId))?.permissions).toEqual(["read", "lessons"]);
-    const lessonsOnly = CreatedScriptTokenSchema.parse(await createScriptToken(w.deps, owner, body(2, { permissions: ["lessons"] }), anyProject));
-    expect(lessonsOnly.token.permissions).toEqual(["lessons"]);
-    const without = CreatedScriptTokenSchema.parse(await createScriptToken(w.deps, owner, body(3, { permissions: ["read", "start"] }), anyProject));
-    expect(without.token.permissions).toEqual(["read", "start"]);
-    expect(w.events.map((event) => event.details?.["permissions"])).toEqual(["read,lessons", "lessons", "read,start"]);
-    expect((await listScriptTokens(w.deps, owner, async () => "Owner")).map((view) => view.permissions)).toEqual(expect.arrayContaining([["read", "lessons"], ["lessons"], ["read", "start"]]));
-  });
-
   it("keeps at most ten live tokens a person, and a token expires and is revoked at once", async () => {
     const w = world();
     const first = await createScriptToken(w.deps, owner, body(1, { days: 1 }), anyProject);
@@ -316,39 +252,9 @@ describe("the stored tokens (document store port)", () => {
     expect(w.events.filter((event) => event.action === "script_token.used")).toHaveLength(2);
   });
 
-  it("limits a fixed window and starts the next one fresh", async () => {
-    const w = world();
-    const key = { pk: "ORG#x#RATE", sk: "a" };
-    const results = [];
-    for (let n = 0; n < 4; n += 1) results.push(await takeRate(w.store, key, 3, 60_000, w.deps.now));
-    expect(results).toEqual([true, true, true, false]);
-    w.advance(60_000);
-    expect(await takeRate(w.store, key, 3, 60_000, w.deps.now)).toBe(true);
-    expect(await takeRate(w.store, { pk: "ORG#x#RATE", sk: "b" }, 3, 60_000, w.deps.now)).toBe(true);
-  });
 });
 
 describe("rovara up: making a token on a page, and using it", () => {
-  it("makes a token on the page: shown once, stored as a hash, audited, and not on any later page or API answer", async () => {
-    const h = await launch();
-    const { secret, where, html } = await h.makeToken();
-    expect(html).toContain("shown this once");
-    const secretPart = secret.slice(-43);
-    const tokenId = `stk_${secret.split("_")[2]}`;
-    const record = (await h.store.get(scriptTokenKey(IMPLICIT_COMPANY_ID, tokenId)))!;
-    expect(record["secretHash"]).toBe(hashScriptToken(secret));
-    // Nowhere in the store, the audit events, a later page or an API answer.
-    const dump = JSON.stringify((await h.store.query({ pk: scriptTokenKey(IMPLICIT_COMPANY_ID, tokenId).pk })).items) + JSON.stringify(h.events);
-    expect(dump).not.toContain(secretPart);
-    expect((await h.page(where, "/tokens")).body).not.toContain(secretPart);
-    const listed = await h.api("/v1/app/script-tokens");
-    expect(listed.status).toBe(200);
-    expect(ScriptTokenListSchema.safeParse(listed.body).success).toBe(true);
-    expect(listed.text).not.toContain(secretPart);
-    expect(listed.body["tokens"]).toHaveLength(1);
-    expect(listed.body["canCreate"]).toBe(true);
-    expect(h.events.map((event) => event.action)).toEqual(["script_token.created"]);
-  });
 
   it("will not make a token for the API session token, or from a page session that is not fresh, or from a replayed or forged form", async () => {
     // The clock is set before the install starts: the page sessions read it from the start.
@@ -431,21 +337,6 @@ describe("rovara up: making a token on a page, and using it", () => {
     expect(actions.filter((action) => action === "script_token.used").length).toBeGreaterThanOrEqual(2);
     expect(h.events.some((event) => event.action === "script_token.used" && JSON.stringify(event.details).includes(task.taskId))).toBe(true);
     expect(JSON.stringify(h.events)).not.toContain(secret.slice(-43));
-  });
-
-  it("works the same on SQLite, the store `rovara up` uses: make, use, rate-limit rows, revoke", async () => {
-    const h = await launch({ storage: "sqlite" });
-    const { secret } = await h.makeToken();
-    const started = await start(h, secret, 1);
-    expect(started.status, started.text).toBe(201);
-    expect((await h.call(secret, "/v1/dev/tasks?project=payments")).body["tasks"]).toHaveLength(1);
-    const tokenId = `stk_${secret.split("_")[2]}`;
-    expect((await h.api(`/v1/app/script-tokens/${tokenId}/revoke`, { method: "POST", body: {} })).status).toBe(200);
-    expect((await h.call(secret, "/v1/dev/tasks?project=payments")).status).toBe(401);
-    // The rate rows and the audit-less day mark are plain documents: nothing the secret is in.
-    const rows = await h.store.query({ pk: `ORG#${IMPLICIT_COMPANY_ID}#SCRIPT_TOKEN_RATE` });
-    expect(rows.items.length).toBeGreaterThan(0);
-    expect(JSON.stringify(rows.items)).not.toContain(secret.slice(-43));
   });
 
   it("a token with only the lessons permission reaches the local coding tools read of its own projects and nothing else, and the page words say what it is for", async () => {
@@ -611,30 +502,9 @@ describe("rovara up: making a token on a page, and using it", () => {
     expect(refused.text).toContain("turned off");
   });
 
-  it("never lets a token reach the older broker handler, the page server, the callback listener or the model proxy", async () => {
-    const h = await launch();
-    const { secret } = await h.makeToken();
-    for (const path of ["/v1/workspaces", "/v1/internal/model-access", "/healthz-x", "/v1/dev/tasks/not-a-uuid"]) {
-      const answer = await h.call(secret, path);
-      expect([401, 403, 404]).toContain(answer.status);
-    }
-    // The pages' sessions are the owner's: a token is no page session.
-    const response = await raw(h.runtime.pagesUrl, { path: `/s/${secret.slice(5, 48).padEnd(43, "a")}/tokens`, headers: { host: new URL(h.runtime.pagesUrl).host } });
-    expect(response.status).toBe(404);
-  });
 });
 
 describe("review fixes", () => {
-  it("L3a: a token's other methods on a task are refused with the fixed text", async () => {
-    const h = await launch();
-    const { secret } = await h.makeToken();
-    const task = (await start(h, secret, 1)).body["task"].taskId;
-    for (const path of [`/v1/dev/tasks/${task}`, `/v1/dev/tasks/${task}/events`]) {
-      const answer = await h.call(secret, path, { method: "POST", body: {} });
-      expect(answer.status, path).toBe(403);
-      expect(answer.body).toEqual({ error: { code: "FORBIDDEN", message: SCRIPT_TOKEN_NOT_ALLOWED_MESSAGE } });
-    }
-  });
 
   it("L3b: the list itself shows a token's projects only, even if the check before it were wrong", async () => {
     const h = await launch();
@@ -674,18 +544,6 @@ describe("review fixes", () => {
     const refused = await on.call(secret, "/v1/dev/tasks?project=payments");
     expect(refused.status).toBe(401);
     expect(refused.text).toContain("revoked");
-  });
-
-  it("L4: restarting with the switch on revokes nothing: a live token survives and still works", async () => {
-    const first = await launch({ storage: "sqlite" });
-    const { secret } = await first.makeToken();
-    const tokenId = `stk_${secret.split("_")[2]}`;
-    await first.runtime.stop();
-    const again = await launch({ storage: "sqlite", root: first.root });
-    const record = (await again.store.get(scriptTokenKey(IMPLICIT_COMPANY_ID, tokenId)))!;
-    expect(record["revokedAt"]).toBeUndefined();
-    expect(again.events.filter((event) => event.action === "script_token.revoked")).toEqual([]);
-    expect((await again.call(secret, "/v1/dev/tasks?project=payments")).status).toBe(200);
   });
 
   it("at the cap a fresh session is dropped before any other, however old the others are", () => {

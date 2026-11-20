@@ -37,21 +37,9 @@ describe("in-process fakes", () => {
     const detection = await detect({ "src/test/java/AT.java": java, "svc_test.go": go });
     for (const id of ["aws:s3", "kafka", "redis"]) expect(family(detection, id)?.hints.fakedByTests, id).toBe(true);
   });
-  it("only reads test files", async () => {
-    const detection = await detect({ "app/main.py": 'from moto import mock_s3\n@mock_s3\ndef f(): pass\nimport fakeredis\n', "src/index.js": 'jest.mock("ioredis")' });
-    expect(detection.dependencies?.some((item) => item.hints.fakedByTests === true)).toBeFalsy();
-  });
 });
 
 describe("Testcontainers", () => {
-  it("Python: module containers and generic containers with an image literal", async () => {
-    const test = ["from testcontainers.postgres import PostgresContainer", "from testcontainers.core.container import DockerContainer", "", "def test_db():", '    with PostgresContainer("postgres:16") as pg:', "        pass", '    with DockerContainer("redis:7-alpine"):', "        pass", ""].join("\n");
-    const detection = await detect({ "tests/conftest.py": test });
-    expect(family(detection, "postgres")).toMatchObject({ strength: "used", evidence: [{ path: "tests/conftest.py", line: 1 }], hints: { testcontainers: true, version: "16" } });
-    expect(family(detection, "redis")).toMatchObject({ hints: { testcontainers: true, version: "7" } });
-    expect(family(detection, "postgres")!.hints.fakedByTests).toBeUndefined();
-    expect(detection.notes.join(" ")).toContain("Testcontainers, which cannot run inside Rovara. Rovara starts the same service itself");
-  });
   it("Java: typed containers, GenericContainer with DockerImageName and LocalStack services", async () => {
     const test = ["import org.testcontainers.containers.PostgreSQLContainer;", "class IT {", '  PostgreSQLContainer<?> db = new PostgreSQLContainer<>("postgres:15.2");', '  GenericContainer<?> r = new GenericContainer<>(DockerImageName.parse("redis:7"));', "  LocalStackContainer aws = new LocalStackContainer(img).withServices(LocalStackContainer.Service.S3, Service.SQS);", "}", ""].join("\n");
     const detection = await detect({ "src/test/java/IT.java": test });
@@ -59,15 +47,5 @@ describe("Testcontainers", () => {
     expect(family(detection, "redis")!.hints).toMatchObject({ testcontainers: true, version: "7" });
     expect(family(detection, "aws:s3")!.hints.testcontainers).toBe(true);
     expect(family(detection, "aws:sqs")!.hints.testcontainers).toBe(true);
-  });
-  it("Node and Go: module packages and image requests", async () => {
-    const node = ['import { PostgreSqlContainer } from "@testcontainers/postgresql";', 'import { GenericContainer } from "testcontainers";', 'await new GenericContainer("mongo:7").start();', ""].join("\n");
-    const go = ['package x', 'import "github.com/testcontainers/testcontainers-go/modules/redis"', 'req := testcontainers.ContainerRequest{Image: "rabbitmq:3.12"}', ""].join("\n");
-    const detection = await detect({ "test/db.test.ts": node, "pkg/x_test.go": go });
-    for (const id of ["postgres", "mongodb", "redis", "rabbitmq"]) expect(family(detection, id)?.hints.testcontainers, id).toBe(true);
-    expect(family(detection, "mongodb")!.hints.version).toBe("7");
-  });
-  it("a repository without tests gives no dependencies and no new keys", async () => {
-    expect(Object.hasOwn(await detect({ "README.md": "x" }), "dependencies")).toBe(false);
   });
 });

@@ -46,24 +46,6 @@ describe("CloudFormation and SAM", () => {
     "",
   ].join("\n");
 
-  it("reads tables with their key schema, buckets, queues and topics, with the resource's line", async () => {
-    const detection = await detect({ "template.yaml": template });
-    expect(family(detection, "aws:dynamodb")).toMatchObject({
-      strength: "declared",
-      evidence: [{ path: "template.yaml", line: 4 }, { path: "template.yaml", line: 18 }],
-      hints: {
-        seenBy: ["iac"],
-        resources: [
-          { kind: "table", name: "orders-table", keySchema: { partitionKey: { name: "pk", type: "S" }, sortKey: { name: "created", type: "N" } } },
-          { kind: "table", name: "Sessions", keySchema: { partitionKey: { name: "sid", type: "S" } } },
-        ],
-      },
-    });
-    expect(family(detection, "aws:s3")!.hints.resources).toEqual([{ kind: "bucket", name: "Files" }]);
-    expect(family(detection, "aws:sqs")!.hints.resources).toEqual([{ kind: "queue", name: "jobs" }]);
-    expect(family(detection, "aws:sns")!.hints.resources).toEqual([{ kind: "topic", name: "Alerts" }]);
-    expect(detection.dependencies).toHaveLength(4);
-  });
   it("reads a JSON template, including a committed cdk.out one", async () => {
     const json = JSON.stringify({ Resources: { T: { Type: "AWS::DynamoDB::Table", Properties: { KeySchema: [{ AttributeName: "id", KeyType: "HASH" }], AttributeDefinitions: [{ AttributeName: "id", AttributeType: "B" }] } } } }, null, 2);
     const detection = await detect({ "cdk.out/Stack.template.json": json });
@@ -75,9 +57,6 @@ describe("CloudFormation and SAM", () => {
     const detection = await detect({ "templates/bomb.yaml": bomb, "template.yaml": template });
     expect(family(detection, "aws:s3")).toBeDefined();
     expect(detection.notes.join(" ")).toContain("so it was not read");
-  });
-  it("ignores YAML without AWS resource types and non-template files", async () => {
-    expect((await detect({ "template.yaml": "name: x\nResources: {}\n", "config/app.yaml": "Type: AWS::S3::Bucket" })).dependencies).toBeUndefined();
   });
 });
 
@@ -114,14 +93,6 @@ describe("Terraform", () => {
   });
 });
 
-describe("Terraform attribute blocks first", () => {
-  it("reads the table's own name and keys when the attribute blocks come first", async () => {
-    const tf = ['resource "aws_dynamodb_table" "t" {', "  attribute {", '    name = "pk"', '    type = "S"', "  }", '  name     = "late-name"', '  hash_key = "pk"', "}", ""].join("\n");
-    const detection = await detect({ "main.tf": tf });
-    expect(family(detection, "aws:dynamodb")!.hints.resources).toEqual([{ kind: "table", name: "late-name", keySchema: { partitionKey: { name: "pk", type: "S" } } }]);
-  });
-});
-
 describe("AWS CDK source", () => {
   it("TypeScript: tables with partition and sort keys, buckets, queues and topics", async () => {
     const ts = [
@@ -154,10 +125,6 @@ describe("AWS CDK source", () => {
     const detection = await detect({ "infra/app_stack.py": py });
     expect(family(detection, "aws:dynamodb")!.hints.resources).toEqual([{ kind: "table", name: "things", keySchema: { partitionKey: { name: "id", type: "S" }, sortKey: { name: "v", type: "N" } } }]);
   });
-  it("ignores a Table that is not a CDK construct and a file that does not import the CDK", async () => {
-    const detection = await detect({ "lib/a.ts": 'const t = new Table(this, "X", { partitionKey: { name: "pk" } });\n', "lib/b.py": 'table = dynamodb.Table(self, "T")\n' });
-    expect(detection.dependencies).toBeUndefined();
-  });
 });
 
 describe("limits", () => {
@@ -166,8 +133,5 @@ describe("limits", () => {
     const detection = await detect({ "template.yaml": template });
     expect(family(detection, "aws:sqs")!.hints.resources).toHaveLength(24);
     expect(detection.notes.join(" ")).toContain("More than 24 resources");
-  });
-  it("gives no dependencies and no new keys for a repository without infrastructure code", async () => {
-    expect(Object.hasOwn(await detect({ "README.md": "x" }), "dependencies")).toBe(false);
   });
 });

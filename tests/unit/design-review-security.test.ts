@@ -1,8 +1,8 @@
 import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // The security rules of the design review in Code's own wiring: the packet route (who may read which reviewer's packet), the one-shot model key of a reviewer's slot, the rule that a design-review operation never gets a key of
 // its own, the blocker-reason rule and its record, the tier a reviewed design is approved at, the hold nobody can answer, and a flow with the switch off. Each test names the rule it holds; a change that loosens a rule fails one of them.
-import { describe, expect, it } from "vitest";
-import { DesignReviewBindingSchema, type PlanDocument } from "@agentx/contracts";
+import { describe, expect, it, vi } from "vitest";
+import { DesignReviewBindingSchema, WORKER_INVOCATION_FEATURES, createCandidateManifest, type PlanDocument } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
 import { DESIGN_REVIEW_PACKET_PATH, handleDesignReviewPacket } from "../../packages/broker/src/core/design-review/packet-route.js";
 import { readSlotPacket } from "../../packages/broker/src/core/design-review/packet-store.js";
@@ -19,7 +19,7 @@ import { operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { COMPANY, SIGNING_KEY } from "../support/task-flow-harness.js";
 import { runDueDispatches } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { UNPRICED_REFERENCE_PRICE, spendAcceptedFor, unpricedNoteOf, unpricedReferencePriceOf } from "../../packages/broker/src/local/app/design-review.js";
-import { answerRound, choose, localDesignReview, design, mintKeys, nextJob, taskOf, toDesignPhase, toRound, waitingWithBlocker, world, type World } from "../support/design-review-flow-world.js";
+import { answerRound, choose, localDesignReview, design, finish, mintKeys, nextJob, taskOf, toDesignPhase, toRound, waitingWithBlocker, world, planned, type World } from "../support/design-review-flow-world.js";
 
 const CAPABILITY = "x-agentx-callback-capability";
 const STAMP = "x-rovara-workspace";
@@ -61,6 +61,30 @@ describe("the packet route", () => {
     const slot = binding.reviewers[0]!.keySlot;
     await expect(ask(slot, { stamp: "00000000-0000-4000-8000-000000000000" })).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
     await expect(ask(slot, { stamp: null })).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
+  });
+
+  it("uses trusted hosted authorization without a laptop stamp and refuses before packet reads on a rejected or late check", async () => {
+    const w = await world();
+    const { round, binding } = await dispatched(w);
+    const request = { method: "GET", path: `${DESIGN_REVIEW_PACKET_PATH}?slot=${binding.reviewers[0]!.keySlot}`, headers: { [CAPABILITY]: round.invocation.callbackCapability } };
+    const authorize = vi.fn(async () => undefined);
+    expect((await handleDesignReviewPacket(w.h.deps, capabilities, request, authorize)).statusCode).toBe(200);
+    expect(authorize).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: w.workspaceId, operationId: round.operation.id }));
+    const get = vi.spyOn(w.h.store, "get");
+    await expect(handleDesignReviewPacket(w.h.deps, capabilities, request, async () => { throw new Error("refused"); })).rejects.toThrow("refused");
+    expect(get).not.toHaveBeenCalled();
+    vi.useFakeTimers();
+    try {
+      let release!: () => void;
+      const held = new Promise<void>(resolve => { release = resolve; });
+      const answer = handleDesignReviewPacket(w.h.deps, capabilities, request, () => held);
+      const rejected = expect(answer).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+      await vi.advanceTimersByTimeAsync(30_001);
+      await rejected;
+      release();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(get).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); get.mockRestore(); }
   });
 
   it("refuses a slot the stored binding does not hold, the merge slot, and a slot name that is not a slot's shape, all with the same words", async () => {
@@ -140,6 +164,17 @@ describe("a reviewer's model key", () => {
     const slot = binding.reviewers[0]!.keySlot;
     expect(await slotGrants(w).local.slotGrants.describeSlot(operation, "r1-other")).toBeUndefined();
     expect(await slotGrants(w, { model: "other" }).local.slotGrants.describeSlot(operation, slot)).toBeUndefined();
+  });
+
+  it("is never the operation's own: a design-review operation is known as one, an ordinary one is not", async () => {
+    const w = await world();
+    const { round } = await dispatched(w);
+    const { local } = slotGrants(w);
+    expect(await local.isDesignReviewOperation({ workspaceId: w.workspaceId, operationId: round.operation.id })).toBe(true);
+    const other = await world();
+    await toDesignPhase(other);
+    const planning = await nextJob(other);
+    expect(await slotGrants(other).local.isDesignReviewOperation({ workspaceId: other.workspaceId, operationId: planning.operation.id })).toBe(false);
   });
 });
 
@@ -265,6 +300,21 @@ describe("which round an accepted \"price unknown\" is for", () => {
   });
 });
 
+describe("the hold nobody can answer", () => {
+  it("ends the review as not run with a plain word, and the design goes to the owner: a task is never stranded at a cost choice it cannot be asked", async () => {
+    const w = await world({ price: false });
+    await toRound(w);
+    expect((await taskOf(w)).workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING", reviewPhase: "DESIGN", designReview: { status: "not_run", notRunReason: "cost_declined" } });
+  });
+});
+
+describe("the cost hold on this install", () => {
+  it("is answerable in the local wiring: the owner's page offers the choices, so a hold waits for the owner instead of ending the review", async () => {
+    const { local } = slotGrants(await world());
+    expect(local.runtime.holdAnswerable).toBe(true);
+  });
+});
+
 describe("a design that went through no review", () => {
   it("says so in plain words on the page and in the Proof line, with the reason in fixed words", async () => {
     const w = await world({ price: false });
@@ -282,7 +332,10 @@ describe("a design that went through no review", () => {
     const plan: PlanDocument = {
       schemaVersion: 1, title: "Retry", why: [{ text: "Timed-out payments are dropped.", author: "Priya" }], claims: [{ id: "1", text: "A timed-out payment is retried once." }], notChanging: ["Refunds stay as they are."], risks: ["A retry could charge twice."], decisions: [],
     };
-    const body = workflowPullRequestBody(task, waiting, undefined, undefined, { lessonsUsed: NO_LESSONS_USED, proof: { plan, design: proofDesignOf(context) } });
+    // This projection is after code review; the design review above still did not run.
+    const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "1".repeat(40), treeSha: "2".repeat(40), baseCommitSha: "3".repeat(40) }]);
+    const reviewed = { ...waiting, candidate, reviews: (["CRITIC", "SECURITY"] as const).map((role) => ({ operationId: task.taskId, candidateDigest: candidate.digest, role, provider: "test", version: "1", status: "PASS" as const, findings: [], readOnly: true, recordedAt: "2026-11-19T00:00:00.000Z" })) };
+    const body = workflowPullRequestBody(task, reviewed as typeof waiting, undefined, undefined, { lessonsUsed: NO_LESSONS_USED, proof: { plan, design: proofDesignOf(context) } });
     expect(body).toContain("<summary>Requirements and proof: ");
     expect(body).toContain("Design review did not run: no price is known");
   });
@@ -299,5 +352,29 @@ describe("a reviewer's packet once the round is recorded", () => {
     void task;
     await expect(ask(slot)).rejects.toMatchObject({ code: "FORBIDDEN" });
     void round;
+  });
+});
+
+describe("the switch", () => {
+  it("is off: no review is made, no row, no key, and the task plans as it did before the stage existed", async () => {
+    const w = await world({ flag: false });
+    const prepare = await nextJob(w);
+    await finish(w, prepare.operation, { kind: "prepared", base: [{ repositoryId: "demo", baseCommitSha: "b".repeat(40) }] });
+    const understand = await nextJob(w);
+    await finish(w, understand.operation, { kind: "understood", assessment: { kind: "ready", path: "QUICK", restatement: "Retry once.", assumptions: [], design: { needed: true, reasons: ["data_model"], note: "x" } } });
+    const planning = await nextJob(w);
+    expect(planning.invocation.payload).toMatchObject({ workflowMode: "PLAN" });
+    expect((planning.invocation.payload as { prompt: string }).prompt).not.toContain("rovara-design-meta");
+    const after = (await taskOf(w)).workflow;
+    expect(after.designReview).toBeUndefined();
+    expect(after.path).toBe("QUICK");
+    await finish(w, planning.operation, planned(w, planning.operation, "plan", "# Plan\nDo it.\n", 1));
+    // The plan gets the plan check of every coding plan (a read-only step), and nothing of the design review: no binding, no packet, no key.
+    const check = await nextJob(w);
+    expect(check.operation).toMatchObject({ workflowMode: "PLAN_CRITIQUE" });
+    expect(check.operation.designReview).toBeUndefined();
+    expect(check.invocation.payload).not.toHaveProperty("designReview");
+    expect((await taskOf(w)).workflow.designReview).toBeUndefined();
+    void WORKER_INVOCATION_FEATURES;
   });
 });

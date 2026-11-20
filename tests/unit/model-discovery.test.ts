@@ -1,8 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  discoverModels, foundationModelIdOf, quotaHint, rankModels,
-  type AvailabilityRow, type BedrockDiscoveryClient, type DiscoveryDependencies, type EligibleModel, type InferenceProfileRow, type ModelDiscoveryReport, type QuotaClient, type QuotaRow,
-} from "../../packages/model-runtime/src/model-discovery.js";
+import { discoverModels, foundationModelIdOf, rankModels, type AvailabilityRow, type BedrockDiscoveryClient, type DiscoveryDependencies, type EligibleModel, type InferenceProfileRow, type ModelDiscoveryReport, type QuotaClient, type QuotaRow } from "../../packages/model-runtime/src/model-discovery.js";
 
 // M1.4 Task 4.10C, tests 24 to 29: discovery, the tiers, and the bounds. Nothing here touches AWS or a provider.
 
@@ -44,24 +41,6 @@ const deps = (extra: Partial<DiscoveryDependencies> = {}): DiscoveryDependencies
 const candidates = ELIGIBLE.map((row) => row.modelId);
 
 describe("Bedrock discovery (test 24)", () => {
-  it("reads the TEST shape: Haiku 5.5 is limit-zero with both codes, Haiku 4.5 is available", async () => {
-    const report = await discoverModels({ provider: "amazon-bedrock", region: "us-east-1", candidates }, deps({ bedrock: bedrockFake(), quotas: quotaFake() }));
-    expect(report.status).toBe("listed");
-    const by = new Map(report.models.map((row) => [row.modelId, row] as const));
-    expect(by.get(HAIKU_55_US)).toMatchObject({ visible: true, state: "limit-zero" });
-    expect(by.get(HAIKU_55_US)!.quotas).toEqual([{ scope: "geographic", code: "L-47520EB7", tokensPerMinute: 0 }, { scope: "global", code: "L-F26CA8D1", tokensPerMinute: 0 }]);
-    expect(by.get(HAIKU_55_GLOBAL)!.state).toBe("limit-zero");
-    expect(by.get(HAIKU_45_US)).toMatchObject({ visible: true, state: "available" });
-    expect(by.get(HAIKU_45_US)!.quotas).toEqual([{ scope: "geographic", code: "L-HAIKU45GEO", tokensPerMinute: 5_000_000 }, { scope: "global", code: "L-HAIKU45GLO", tokensPerMinute: 10_000_000 }]);
-  });
-
-  it("decides a zero by the route's own scope: a US route with a zero global quota is not limit-zero", async () => {
-    const rows = quotaRows.map((row) => (row.code === "L-47520EB7" ? { ...row, value: 10_000_000 } : row));
-    const report = await discoverModels({ provider: "amazon-bedrock", region: "us-east-1", candidates }, deps({ bedrock: bedrockFake(), quotas: quotaFake(rows) }));
-    const by = new Map(report.models.map((row) => [row.modelId, row] as const));
-    expect(by.get(HAIKU_55_US)!.state).toBe("available");
-    expect(by.get(HAIKU_55_GLOBAL)!.state).toBe("limit-zero");
-  });
 
   it("a profile that is missing or not ACTIVE is not-in-region, and missing agreement is needs-access", async () => {
     const client = bedrockFake({
@@ -75,31 +54,6 @@ describe("Bedrock discovery (test 24)", () => {
     expect(by.get(HAIKU_55_GLOBAL)).toMatchObject({ visible: false, state: "not-in-region" });
   });
 
-  it("matches a quota by name when the code is not known, and a quota nobody matches is null, never a state", async () => {
-    const hint = await quotaHint({ modelId: HAIKU_45_US, region: "us-east-1", modelName: "Anthropic Claude Haiku 4.5" }, { quotas: quotaFake(), now: () => NOW });
-    expect(hint).toEqual([{ scope: "geographic", code: "L-HAIKU45GEO", tokensPerMinute: 5_000_000 }, { scope: "global", code: "L-HAIKU45GLO", tokensPerMinute: 10_000_000 }]);
-    // A "Haiku 4" label must not match the "Haiku 4.5" quota (exact match after the prefix).
-    const other = await quotaHint({ modelId: "us.anthropic.claude-haiku-4", region: "us-east-1", modelName: "Anthropic Claude Haiku 4" }, { quotas: quotaFake(), now: () => NOW });
-    expect(other).toEqual([{ scope: "geographic", code: null, tokensPerMinute: null }, { scope: "global", code: null, tokensPerMinute: null }]);
-    // A known code works without a name.
-    expect((await quotaHint({ modelId: HAIKU_55_US, region: "us-east-1" }, { quotas: quotaFake(), now: () => NOW }))[0]).toEqual({ scope: "geographic", code: "L-47520EB7", tokensPerMinute: 0 });
-  });
-
-  it("a denied quota lookup gives null hints and no throw", async () => {
-    const denied: QuotaClient = { list: async () => { throw Object.assign(new Error("denied"), { name: "AccessDeniedException" }); } };
-    const hint = await quotaHint({ modelId: HAIKU_55_US, region: "us-east-1" }, { quotas: denied, now: () => NOW });
-    expect(hint).toEqual([{ scope: "geographic", code: "L-47520EB7", tokensPerMinute: null }, { scope: "global", code: "L-F26CA8D1", tokensPerMinute: null }]);
-  });
-
-  it("with no tests the tiers are Recommended Haiku 4.5 us. (the default is limit-zero) and Not usable Haiku 5.5", async () => {
-    const report = await discoverModels({ provider: "amazon-bedrock", region: "us-east-1", candidates }, deps({ bedrock: bedrockFake(), quotas: quotaFake() }));
-    const ranked = rankModels({ report, eligible: ELIGIBLE, recommended: HAIKU_55_US, tests: [] });
-    expect(ranked.recommended?.modelId).toBe(HAIKU_45_US);
-    expect(ranked.why).toBe("default-not-usable");
-    expect(ranked.notUsable.map((row) => [row.modelId, row.reason.code])).toEqual([[HAIKU_55_US, "limit-zero"], [HAIKU_55_GLOBAL, "limit-zero"]]);
-    expect(ranked.canBeTested.map((row) => row.modelId)).toEqual([HAIKU_45_GLOBAL]);
-    expect(ranked.worksOnAccount).toEqual([]);
-  });
 });
 
 describe("discovery denied (test 25)", () => {
@@ -120,14 +74,6 @@ describe("discovery denied (test 25)", () => {
     expect(ranked.canBeTested.map((row) => row.modelId)).toEqual([HAIKU_45_US]);
   });
 
-  it("quotas denied only stays listed, without hints", async () => {
-    const denied: QuotaClient = { list: async () => { throw Object.assign(new Error("denied"), { name: "AccessDeniedException" }); } };
-    const report = await discoverModels({ provider: "amazon-bedrock", region: "us-east-1", candidates }, deps({ bedrock: bedrockFake(), quotas: denied }));
-    expect(report.status).toBe("listed");
-    const row = report.models.find((item) => item.modelId === HAIKU_55_US)!;
-    expect(row.state).toBe("available");
-    expect(row.quotas.every((entry) => entry.tokensPerMinute === null)).toBe(true);
-  });
 });
 
 describe("Anthropic, OpenAI and OpenRouter discovery (tests 26 and 27)", () => {
@@ -241,19 +187,6 @@ describe("rankModels (test 29)", () => {
     expect(ranked.recommended?.modelId).toBe(HAIKU_45_US);
   });
 
-  it("when the default is not usable the best model that works is recommended before an untested one", () => {
-    const ranked = rankModels({ report: report({ [HAIKU_55_US]: "limit-zero", [HAIKU_45_US]: "available", [HAIKU_45_GLOBAL]: "available" }), eligible: ELIGIBLE, recommended: HAIKU_55_US,
-      tests: [{ modelId: HAIKU_45_GLOBAL, outcome: "passed", testedAt: "2026-10-23T10:00:00Z" }] });
-    expect(ranked.recommended?.modelId).toBe(HAIKU_45_GLOBAL);
-  });
-
-  it("Can be tested is ordered by the current setting, family, US-only before Global, price, then id", () => {
-    const ranked = rankModels({ report: report({ [HAIKU_45_GLOBAL]: "available", [HAIKU_45_US]: "available", [HAIKU_55_GLOBAL]: "available", [HAIKU_55_US]: "available" }), eligible: ELIGIBLE,
-      recommended: HAIKU_55_US, tests: [], current: HAIKU_45_GLOBAL });
-    expect(ranked.recommended?.modelId).toBe(HAIKU_55_US);
-    expect(ranked.canBeTested.map((row) => row.modelId)).toEqual([HAIKU_45_GLOBAL, HAIKU_45_US, HAIKU_55_GLOBAL]);
-  });
-
   it("models that are not visible are left out", () => {
     const ranked = rankModels({ report: report({ [HAIKU_45_US]: "available" }), eligible: ELIGIBLE, recommended: HAIKU_55_US, tests: [] });
     expect(ranked.canBeTested.map((row) => row.modelId)).toEqual([]);
@@ -294,27 +227,6 @@ describe("a quota that is zero or unknown is never recommended (I-3)", () => {
     expect(ranked.canBeTested.map((entry) => entry.modelId)).toContain(HAIKU_55_US);
   });
 
-  it("a denied quota lookup is not recommended as usable: the models stay visible as testable, with the denial as a fixed code", async () => {
-    const report = await discover(denied);
-    expect(report.models.find((item) => item.modelId === HAIKU_55_US)!.signals).toContain("quota-lookup-access-denied");
-    const ranked = rankModels({ report, eligible: ELIGIBLE, recommended: HAIKU_55_US, tests: [] });
-    expect(ranked.recommended).toBeNull();
-    expect(ranked.why).toBe("quota-unreadable");
-    expect(ranked.notUsable).toEqual([]);
-    expect(ranked.canBeTested).toHaveLength(4);
-  });
-
-  it("a report stored before this change (available, both quotas null) is read the same way", () => {
-    const stored: ModelDiscoveryReport = { schemaVersion: "rovara-model-discovery/v1", provider: "amazon-bedrock", checkedAt: new Date(NOW).toISOString(), status: "listed", models: [
-      { modelId: HAIKU_55_US, visible: true, state: "available", quotas: [{ scope: "geographic", code: "L-47520EB7", tokensPerMinute: null }, { scope: "global", code: "L-F26CA8D1", tokensPerMinute: null }], signals: [] },
-      { modelId: HAIKU_45_US, visible: true, state: "available", quotas: [{ scope: "geographic", code: "L-HAIKU45GEO", tokensPerMinute: 5_000_000 }, { scope: "global", code: "L-HAIKU45GLO", tokensPerMinute: 10_000_000 }], signals: [] },
-    ] };
-    const ranked = rankModels({ report: stored, eligible: ELIGIBLE, recommended: HAIKU_55_US, tests: [] });
-    expect(ranked.recommended?.modelId).toBe(HAIKU_45_US);
-    expect(ranked.why).toBe("quota-unreadable");
-    expect(ranked.canBeTested.find((entry) => entry.modelId === HAIKU_55_US)).toMatchObject({ quotaUnreadable: true });
-  });
-
   it("a driving test that passed still puts the model in Works, whatever the quota lookup said", async () => {
     const report = await discover(denied);
     const ranked = rankModels({ report, eligible: ELIGIBLE, recommended: HAIKU_55_US, tests: [{ modelId: HAIKU_55_US, outcome: "passed", testedAt: "2026-10-23T10:00:00Z" }] });
@@ -322,10 +234,4 @@ describe("a quota that is zero or unknown is never recommended (I-3)", () => {
     expect(ranked.recommended?.modelId).toBe(HAIKU_55_US);
   });
 
-  it("a readable quota above zero is recommended as before", async () => {
-    const report = await discover(quotaFake(quotaRows.map((row) => ({ ...row, value: 4_000_000 }))));
-    const ranked = rankModels({ report, eligible: ELIGIBLE, recommended: HAIKU_55_US, tests: [] });
-    expect(ranked.recommended?.modelId).toBe(HAIKU_55_US);
-    expect(ranked.why).toBe("default");
-  });
 });

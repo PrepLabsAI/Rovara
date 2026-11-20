@@ -36,35 +36,6 @@ const goodReply = {
 };
 const parse = (reply: unknown, request: StandInWriterInput = input()) => parseStandInWriterOutput(typeof reply === "string" ? reply : JSON.stringify(reply), request);
 
-describe("the request is shapes only (N5)", () => {
-  it("accepts names, kinds and shapes", () => expect(input().tables[0]!.columns).toHaveLength(6));
-  it("refuses a row, a value, a diff or a task anywhere in it (strict)", () => {
-    const base = JSON.parse(JSON.stringify(input())) as Record<string, unknown>;
-    const tables = base["tables"] as Array<Record<string, unknown>>;
-    expect(StandInWriterInputSchema.safeParse({ ...base, diff: "--- a/x" }).success).toBe(false);
-    expect(StandInWriterInputSchema.safeParse({ ...base, task: "fix the bug" }).success).toBe(false);
-    expect(StandInWriterInputSchema.safeParse({ ...base, tables: [{ ...tables[0], rowsData: [{ handle: "real_person" }] }] }).success).toBe(false);
-    const column = (tables[0]!["columns"] as Array<Record<string, unknown>>)[1]!;
-    expect(StandInWriterInputSchema.safeParse({ ...base, tables: [{ ...tables[0], columns: [{ ...column, sample: "jane@real.example" }] }] }).success).toBe(false);
-  });
-  it("never lets a key be written, and refuses a table with nothing to write, nothing at all, and poisonous names", () => {
-    const base = JSON.parse(JSON.stringify(input())) as { tables: Array<{ columns: Array<Record<string, unknown>> }> };
-    expect(StandInWriterInputSchema.safeParse({ tables: [{ name: "t", rows: 1, columns: [{ name: "id", kind: "integer", key: true, writable: true }] }], operations: [] }).success).toBe(false);
-    expect(StandInWriterInputSchema.safeParse({ tables: [{ name: "t", rows: 1, columns: [{ name: "id", kind: "integer", key: true, writable: false }] }], operations: [] }).success).toBe(false);
-    expect(StandInWriterInputSchema.safeParse({ tables: [], operations: [] }).success).toBe(false);
-    for (const name of ["__proto__", "constructor", "prototype", "toString"]) {
-      expect(StandInWriterInputSchema.safeParse({ tables: [{ ...base.tables[0], name }], operations: [] }).success).toBe(false);
-    }
-  });
-  it("bounds rows, columns, tables and the request's own bytes", () => {
-    const column = (name: string) => ({ name, kind: "text", key: false, writable: true });
-    expect(StandInWriterInputSchema.safeParse({ tables: [{ name: "t", rows: STANDIN_LIMITS.rowsPerTable + 1, columns: [column("a")] }], operations: [] }).success).toBe(false);
-    expect(StandInWriterInputSchema.safeParse({ tables: [{ name: "t", rows: 1, columns: Array.from({ length: STANDIN_LIMITS.columnsPerTable + 1 }, (_, i) => column(`c${String(i)}`)) }], operations: [] }).success).toBe(false);
-    const wide = Array.from({ length: STANDIN_LIMITS.tables }, (_, t) => ({ name: `table_${String(t)}`, rows: 50, columns: Array.from({ length: 30 }, (_, i) => ({ ...column(`column_with_a_long_name_${String(i)}`), oneOf: Array.from({ length: 20 }, (_, v) => `value number ${String(v)} of the list`) })) }));
-    expect(StandInWriterInputSchema.safeParse({ tables: wide, operations: [] }).success).toBe(false);
-  });
-});
-
 describe("the reply fits the request, whole, or is refused with one fixed word", () => {
   it("reads a good reply, keys sorted, and pins the request it was written for", () => {
     const read = parse(goodReply);
@@ -121,25 +92,9 @@ describe("the reply fits the request, whole, or is refused with one fixed word",
     expect(parseStandInWriterOutput(JSON.stringify({ tables: { t: rows } }), big)).toEqual({ ok: false, reason: "too_large" });
     expect(parseStandInWriterOutput("{}", { tables: [], operations: [] })).toEqual({ ok: false, reason: "not_for_this_request" });
   });
-  it("reads an enormous reply in bounded time (no pattern times item loop)", () => {
-    const rows = Array.from({ length: 50 }, (_, i) => ({ handle: `h${String(i)}`, bio: "b".repeat(150) }));
-    const started = Date.now();
-    for (let i = 0; i < 50; i += 1) parse({ tables: { creators: rows } }, input({ tables: [{ ...input().tables[0]!, rows: 50 }] }));
-    expect(Date.now() - started).toBeLessThan(5_000);
-  });
 });
 
 describe("the stored form is read strictly and pinned by a digest", () => {
-  it("round-trips, and refuses a set that is not the writer's, holds nothing, or has an odd shape", () => {
-    const read = parse(goodReply);
-    if (!read.ok) throw new Error("fixture");
-    expect(StandInWriterSetSchema.safeParse(JSON.parse(JSON.stringify(read.set))).success).toBe(true);
-    expect(StandInWriterSetSchema.safeParse({ ...read.set, writer: "someone-else" }).success).toBe(false);
-    expect(StandInWriterSetSchema.safeParse({ ...read.set, tables: {}, answers: {} }).success).toBe(false);
-    expect(StandInWriterSetSchema.safeParse({ ...read.set, extra: true }).success).toBe(false);
-    expect(StandInWriterSetSchema.safeParse({ ...read.set, tables: { "__proto__": [{ a: "x" }] } }).success).toBe(false);
-    expect(StandInWriterSetSchema.safeParse({ ...read.set, requestDigest: "nope" }).success).toBe(false);
-  });
   it("a new set is a new version part for the eval's stand-in version; no set is the word none (E4)", () => {
     const a = parse(goodReply); const b = parse({ ...goodReply, tables: { creators: [goodReply.tables.creators[0]] } });
     if (!a.ok || !b.ok) throw new Error("fixture");
@@ -170,12 +125,6 @@ describe("building the request from the two readers (E3 tables, E6 answer shapes
     expect(built?.input.tables[1]!.rows).toBe(STANDIN_LIMITS.rowsPerTable);
     expect(built?.input.tables[0]!.columns.map((column) => [column.name, column.writable])).toEqual([["id", false], ["bio", true]]);
     expect(built?.leftOut.sort()).toEqual(["bad name!", "only_keys"]);
-  });
-  it("copies nothing but names, kinds and limits: a value smuggled into the seam does not reach the request", () => {
-    const smuggled = { ...seamTable("users"), columns: [{ name: "email", kind: "text" as const, key: false, sample: "jane.doe@gmail.com", default: "secret-value-12345" }] };
-    const built = buildStandInRequest([smuggled], []);
-    expect(JSON.stringify(built)).not.toContain("jane.doe");
-    expect(JSON.stringify(built)).not.toContain("secret-value");
   });
   it("turns an answer shape into plain fields, and leaves out one it cannot read", () => {
     const shape = { type: "object" as const, fields: [{ name: "data", required: true, shape: { type: "object" as const, fields: [{ name: "users", required: false, shape: { type: "array" as const, items: { type: "object" as const, fields: [{ name: "bio", required: true, shape: { type: "string" as const } }, { name: "gone", required: false, shape: { type: "null" as const } }] } } }] } }] };

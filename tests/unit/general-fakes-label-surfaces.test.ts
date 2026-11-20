@@ -98,4 +98,6 @@ describe("the label wherever a check is said to have passed", () => {
   });
 });
 
-const workflowPullRequestBodyFooter = (w: WorkflowSnapshot): string => workflowPullRequestBody({ title: "T" }, w, "# Plan\n", "https://rovara.example/review/x/task", {});
+const workflowPullRequestBodyFooter = (w: WorkflowSnapshot): string => workflowPullRequestBody({ title: "T" }, {
+  ...w, reviews: (["CRITIC", "SECURITY"] as const).map((role) => ({ operationId: randomUUID(), candidateDigest: code.digest, role, provider: "test", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: now })),
+}, "# Plan\n", "https://rovara.example/review/x/task", {});

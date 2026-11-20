@@ -36,6 +36,35 @@ const read = (config: CompanyReadsConfiguration, caller: CompanyReadCaller, targ
 const failure = async (promise: Promise<unknown>) => promise.then(() => { throw new Error("expected a refusal"); }, (error: Error & { code?: string; status?: number }) => error);
 
 describe("two companies, both routes: each administrator sees their own company and nothing else", () => {
+  it("the audit read answers each administrator their own company's records, with names", async () => {
+    const { config } = await world();
+    const ada = await read(config, ADA, url(AUDIT)) as { records: Array<{ eventId: string; actor: { name: string } }> };
+    const bo = await read(config, BO, url(AUDIT)) as { records: Array<{ eventId: string; actor: { name: string } }> };
+    expect(ada.records.map((record) => record.eventId).sort()).toEqual(["evt_a0", "evt_a1", "evt_a2"]);
+    expect(bo.records.map((record) => record.eventId).sort()).toEqual(["evt_b0", "evt_b1", "evt_b2"]);
+    expect(new Set(ada.records.map((record) => record.actor.name))).toEqual(new Set(["Ada"]));
+    expect(new Set(bo.records.map((record) => record.actor.name))).toEqual(new Set(["Bo"]));
+  });
+
+  it("keeps sign-ins in the existing audit route's separate filtered view", async () => {
+    const { config, store } = await world();
+    await seedAudit(store, COMPANY_A, { eventId: "signin_a", at: "2026-11-10T10:03:00.000Z", action: "signin.refused", actor: { type: "person", id: ADA.developerId }, details: { method: "slack", cause: "not_invited" } });
+    const changeLog = await read(config, ADA, url(AUDIT)) as { records: Array<{ eventId: string }> };
+    const signIns = await read(config, ADA, url(AUDIT, { kind: "sign-in" })) as { records: Array<{ eventId: string; method?: string; cause?: string }> };
+    expect(changeLog.records.some((record) => record.eventId === "signin_a")).toBe(false);
+    expect(signIns.records).toContainEqual(expect.objectContaining({ eventId: "signin_a", method: "slack", cause: "not_invited" }));
+    expect(await failure(read(config, NOBODY, url(AUDIT, { kind: "sign-in" })))).toMatchObject({ code: "FORBIDDEN" });
+    expect((await failure(read(config, ADA, url(AUDIT, { kind: "unknown" })))).code).toBe("CONFIG_INVALID");
+  });
+
+  it("the event read answers each administrator their own company's events", async () => {
+    const { config, a, b } = await world();
+    const window = { from: "2026-11-01T00:00:00.000Z", to: "2026-11-30T00:00:00.000Z" };
+    const ada = await read(config, ADA, url(EVENTS, window)) as { events: Array<{ id: string }> };
+    const bo = await read(config, BO, url(EVENTS, window)) as { events: Array<{ id: string }> };
+    expect(ada.events.map((event) => event.id)).toEqual([a]);
+    expect(bo.events.map((event) => event.id)).toEqual([b]);
+  });
 
   it("neither body, nor any refusal, carries the other company's id", async () => {
     const { config, store } = await world();
@@ -52,9 +81,26 @@ describe("two companies, both routes: each administrator sees their own company 
       expect(text).not.toContain(BO.developerId);
     }
   });
+
+  it("a cursor from one company's page does not open the other's", async () => {
+    const { config } = await world();
+    const first = await read(config, ADA, url(AUDIT, { limit: "1" })) as { next?: string };
+    expect(first.next).toBeDefined();
+    const refused = await failure(read(config, BO, url(AUDIT, { limit: "1", cursor: first.next! })));
+    expect(refused).toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: that cursor is not valid" });
+  });
 });
 
 describe("who may read: a company administrator, resolved from membership", () => {
+  it("refuses a caller who is not an administrator, on both routes, with the same words and no read", async () => {
+    const { config, store } = await world();
+    const probe = countingReadOnly(store);
+    const guarded = { ...config, store: probe.store };
+    for (const target of [url(AUDIT), url(EVENTS, { from: "2026-11-01T00:00:00.000Z" })]) {
+      expect(await failure(read(guarded, NOBODY, target))).toMatchObject({ code: "FORBIDDEN", message: "FORBIDDEN: only a company administrator can read this" });
+    }
+    expect(probe.queries()).toBe(0);
+  });
 
   it("answers the sign-in-again refusal, and reads nothing, when the caller's company cannot be resolved (no fallback to the implicit company)", async () => {
     const { config, store } = await world();
@@ -103,11 +149,20 @@ describe("who may read: a live owner or admin of the caller's own company", () =
   }
   const ids = (page: unknown) => (page as { records: Array<{ eventId: string }> }).records.map((record) => record.eventId).sort();
 
+  it("an owner and an admin read their own company's records and events, and nothing of the other company", async () => {
+    const { config, a } = await live();
+    for (const caller of [OWNER, ADMIN]) {
+      expect(ids(await read(config, caller, url(AUDIT)))).toEqual(["evt_a0", "evt_a1", "evt_a2"]);
+      expect((await read(config, caller, url(EVENTS, { from: "2026-11-01T00:00:00.000Z" })) as { events: Array<{ id: string }> }).events.map((event) => event.id)).toEqual([a]);
+    }
+    expect(ids(await read(config, OWNER_B, url(AUDIT)))).toEqual(["evt_b0", "evt_b1", "evt_b2"]);
+  });
+
   it("refuses a member, a person with no membership, and a role the reader does not know, with the fixed words and no read", async () => {
     const { config, store } = await live({ membershipOf: async (developerId) => (developerId === "7".repeat(64) ? { companyId: COMPANY_A, role: "stranger" as never } : roles[developerId]) });
     const probe = countingReadOnly(store);
     for (const caller of [MEMBER, NOBODY, { developerId: "7".repeat(64), administrator: false }]) {
-      for (const target of [url(AUDIT), url(EVENTS, { from: "2026-11-01T00:00:00.000Z" })]) {
+      for (const target of [url(AUDIT), url(AUDIT, { kind: "sign-in" }), url(EVENTS, { from: "2026-11-01T00:00:00.000Z" })]) {
         expect(await failure(read({ ...config, store: probe.store }, caller, target))).toMatchObject({ code: "FORBIDDEN", message: "FORBIDDEN: only a company administrator can read this" });
       }
     }
@@ -127,6 +182,18 @@ describe("who may read: a live owner or admin of the caller's own company", () =
     expect(ids(await read(config, { ...OWNER, companyId: COMPANY_A }, url(AUDIT)))).toEqual(["evt_a0", "evt_a1", "evt_a2"]);
   });
 
+  it("refuses everyone but a Rovara administrator where the install gives no live role reader, or no company resolver", async () => {
+    const { config } = await live();
+    const { membershipOf: _dropped, ...noRoles } = config;
+    void _dropped;
+    expect(await failure(read(noRoles, OWNER, url(AUDIT)))).toMatchObject({ code: "FORBIDDEN" });
+    const { companyOf: _alsoDropped, ...noResolver } = config;
+    void _alsoDropped;
+    expect(await failure(read(noResolver, OWNER, url(AUDIT)))).toMatchObject({ code: "FORBIDDEN" });
+    // Even a role reader that names the install's one (implicit) company opens nothing without a resolver: that install's reads stay the Rovara administrator's.
+    expect(await failure(read({ ...noResolver, membershipOf: async () => ({ companyId: IMPLICIT_COMPANY_ID, role: "owner" as const }) }, OWNER, url(AUDIT)))).toMatchObject({ code: "FORBIDDEN" });
+  });
+
   it("answers the sign-in-again refusal when the live role cannot be read, never the cause", async () => {
     const { config } = await live({ membershipOf: async () => { throw new Error("membership store down: secret"); } });
     const refusal = await failure(read(config, OWNER, url(AUDIT)));
@@ -140,6 +207,12 @@ describe("the query string", () => {
     const { config } = await world();
     const page = await read(config, ADA, url(AUDIT, { person: ADA.developerId, action: "task.*", from: "2026-11-10T10:01:00.000Z", to: "2026-11-10T10:02:00.000Z", limit: "10" })) as { records: unknown[] };
     expect(page.records).toHaveLength(2);
+  });
+
+  it("passes the event filters through, and reads `kinds` as a comma list", async () => {
+    const { config } = await world();
+    const page = await read(config, ADA, url(EVENTS, { from: "2026-11-01T00:00:00.000Z", kinds: "step_started,cost_settled", project: "billing-service", person: "dev_ada" })) as { events: unknown[] };
+    expect(page.events).toHaveLength(1);
   });
 
   it("refuses a repeated parameter, an unknown one, and an empty one, with fixed words that echo nothing", async () => {
@@ -159,6 +232,20 @@ describe("the query string", () => {
     const { config } = await world();
     expect(await failure(read(config, ADA, url("/v1/dev/client/company/audit")))).toMatchObject({ code: "NOT_FOUND" });
     expect(await failure(read(config, ADA, url("/v1/dev/client/company/events/x")))).toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  it("looks up a name for each person once, and no more than a page's worth", async () => {
+    const { config } = await world();
+    const asked: string[] = [];
+    await read({ ...config, personName: async (id) => { asked.push(id); return "N"; } }, ADA, url(AUDIT));
+    expect(asked).toEqual([ADA.developerId]);
+  });
+
+  it("asks for a name with the caller's company, so a lookup can refuse a person of another company", async () => {
+    const { config } = await world();
+    const seen: Array<[string, string]> = [];
+    await read({ ...config, personName: async (id, company) => { seen.push([id, company]); return "N"; } }, ADA, url(AUDIT));
+    expect(seen).toEqual([[ADA.developerId, COMPANY_A]]);
   });
 
   it("falls back to the person's id when no name is known, or the lookup fails", async () => {

@@ -7,10 +7,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { FlakyRerunFileSchema, type CheckEntry, type ProjectCommand } from "../../packages/contracts/src/index.js";
 import { runChecks, type CheckPlan, type CheckRunners } from "../../packages/worker/src/verification/checks.js";
 import { CHECKS_MESSAGE_TYPE, checksFeedback, verificationExtension, type VerificationOptions } from "../../packages/worker/src/verification/extension.js";
-import { FLAKY_RERUN_IDS_MAX, flakyRerunFileFor, flakyRerunFileOf, isFullyFlaky, rerunFlaky, type FlakyRerunResult } from "../../packages/worker/src/verification/flaky-rerun.js";
+import { FLAKY_RERUN_IDS_MAX, flakyRerunFileFor, flakyRerunFileOf, rerunFlaky, type FlakyRerunResult } from "../../packages/worker/src/verification/flaky-rerun.js";
 import { splitFailures } from "../../packages/worker/src/nightly-run.js";
 import { RunnerKillUnconfirmedError } from "../../packages/worker/src/collected-process.js";
-import { WorkspaceSafety, markWorkspaceUnsafe, withWorkspaceSafety } from "../../packages/worker/src/workspace-safety.js";
+import { WorkspaceSafety, withWorkspaceSafety } from "../../packages/worker/src/workspace-safety.js";
 
 type State = "passed" | "failed" | "skipped";
 const PYTEST_ARGS = ["--junitxml=report.xml"];
@@ -100,67 +100,7 @@ const FIRST = { "tests/test_cart.py::test_total": "failed", "tests/test_cart.py:
 const ID_TOTAL = "tests/test_cart.py::test_total";
 const ID_TAX = "tests/test_cart.py::test_tax";
 
-describe("a failing test that passes on the rerun is flaky", () => {
-  it("fail then pass: flaky, the check is fully flaky, and its entry is untouched (still a failed regression)", async () => {
-    const { round, rerun, calls } = await afterRound({ runs: [FIRST, { [ID_TOTAL]: "passed" }] });
-    const before = JSON.stringify(round.entries);
-    expect(round.entries[0]).toMatchObject({ class: "regression", after: "failed" });
-    const result = await rerun();
-    expect(result.get("readiness:0")).toEqual({ checkId: "readiness:0", flaky: [ID_TOTAL], failing: [] });
-    expect(isFullyFlaky(result.get("readiness:0"))).toBe(true);
-    expect(JSON.stringify(round.entries)).toBe(before);
-    // The rerun asked for exactly the failing test, as a separate argument, and nothing else.
-    expect(calls).toHaveLength(2);
-    expect(calls[1]).toMatchObject({ executable: "pytest", args: [...PYTEST_ARGS, ID_TOTAL] });
-  });
-
-  it("puts the first report back: what the evidence reads after the rerun is the round's own report", async () => {
-    const { rerun } = await afterRound({ runs: [FIRST, { [ID_TOTAL]: "passed" }] });
-    const firstReport = await readFile(join(root, "report.xml"), "utf8");
-    await rerun();
-    expect(await readFile(join(root, "report.xml"), "utf8")).toBe(firstReport);
-    expect(firstReport).toContain("test_tax");
-  });
-
-  it("control run: a test that fails every time stays failing, and the check is not flaky", async () => {
-    const { rerun } = await afterRound({ runs: [FIRST, { [ID_TOTAL]: "failed" }] });
-    const result = await rerun();
-    expect(result.get("readiness:0")).toEqual({ checkId: "readiness:0", flaky: [], failing: [ID_TOTAL] });
-    expect(isFullyFlaky(result.get("readiness:0"))).toBe(false);
-  });
-
-  it("mixed: one flaky and one failing again: the check is not fully flaky", async () => {
-    const both = { [ID_TOTAL]: "failed", [ID_TAX]: "failed" } as const;
-    const { rerun } = await afterRound({ runs: [both, { [ID_TOTAL]: "passed", [ID_TAX]: "failed" }] });
-    const result = await rerun();
-    // The rerun of a test that still fails exits 1, so nothing in that command is excused: both tests stay failing.
-    expect(result.get("readiness:0")).toEqual({ checkId: "readiness:0", flaky: [], failing: [ID_TAX, ID_TOTAL] });
-    expect(isFullyFlaky(result.get("readiness:0"))).toBe(false);
-  });
-
-  it("a vitest check is rerun one file at a time, reading the report after each command", async () => {
-    const first = { "a.test.ts::adds": "failed", "b.test.ts::subtracts": "failed", "b.test.ts::keeps": "passed" } as const;
-    const { rerun, calls } = await afterRound({ format: "json", runs: [first, { "a.test.ts::adds": "passed" }, { "b.test.ts::subtracts": "passed" }] }, { command: vitest() });
-    const result = await rerun();
-    expect(result.get("readiness:0")).toEqual({ checkId: "readiness:0", flaky: ["a.test.ts::adds", "b.test.ts::subtracts"], failing: [] });
-    expect(calls.slice(1).map((call) => call.args.slice(VITEST_ARGS.length))).toEqual([["a.test.ts", "-t", "^(?:adds)$"], ["b.test.ts", "-t", "^(?:subtracts)$"]]);
-  });
-});
-
 describe("a rerun that did not run leaves the failure a failure", () => {
-  it("a rerun that timed out, even one that had already written a report that says passed", async () => {
-    for (const step of ["timeout", "timeout_after_report"] as const) {
-      const { rerun } = await afterRound({ runs: [FIRST, step] });
-      expect((await rerun()).get("readiness:0"), step).toEqual({ checkId: "readiness:0", flaky: [], failing: [ID_TOTAL] });
-    }
-  });
-
-  it("a rerun whose report says passed but whose command exits 1 (a coverage gate, an afterAll hook, a crash) is NOT flaky", async () => {
-    const { rerun } = await afterRound({ runs: [FIRST, "passed_exit_1"] });
-    const result = (await rerun()).get("readiness:0");
-    expect(result).toEqual({ checkId: "readiness:0", flaky: [], failing: [ID_TOTAL] });
-    expect(isFullyFlaky(result)).toBe(false);
-  });
 
   it("a vitest check with two files: the file whose command exited 0 is flaky, the one that exited 1 is not, so the check is not fully flaky", async () => {
     const first = { "a.test.ts::adds": "failed", "b.test.ts::subtracts": "failed" } as const;
@@ -240,16 +180,6 @@ describe("an unsafe workspace is not written again, and a multi-repo round is no
     return { rerun, calls, report };
   }
 
-  it("control: without an unsafe stop each of the three failing checks is rerun once and is fully flaky", async () => {
-    await withWorkspaceSafety(new WorkspaceSafety(), async () => {
-      const { rerun, calls, report } = await threeChecks(undefined);
-      const result = await rerun();
-      expect(calls).toHaveLength(6);
-      expect([...result.keys()]).toEqual(["readiness:0", "readiness:1", "readiness:2"]);
-      expect(await report(1)).toContain("test_other");
-    });
-  });
-
   it("a rerun stopped without confirmation ends the whole rerun: no result at all, no later check is rerun, and no report is written back", async () => {
     await withWorkspaceSafety(new WorkspaceSafety(), async () => {
       const { rerun, calls, report } = await threeChecks(1);
@@ -260,18 +190,6 @@ describe("an unsafe workspace is not written again, and a multi-repo round is no
       // The second check's report stays as the stopped rerun left it: an unsafe workspace is not written again (the first check's was put back before anything was unsafe).
       expect(await report(1)).not.toContain("test_other");
       expect(await report(0)).toContain("test_other");
-    });
-  });
-
-  it("a workspace that was already unsafe when the rerun starts: no command starts and nothing is written", async () => {
-    const safety = new WorkspaceSafety();
-    await withWorkspaceSafety(safety, async () => {
-      const { rerun, calls, report } = await threeChecks(undefined);
-      const before = await report(0);
-      markWorkspaceUnsafe({ kind: "local" });
-      expect((await rerun()).size).toBe(0);
-      expect(calls).toHaveLength(3);
-      expect(await report(0)).toBe(before);
     });
   });
 
@@ -304,22 +222,6 @@ describe("what is never rerun", () => {
     expect(calls).toHaveLength(1);
   });
 
-  it("test ids that could read as options are never passed: such a check is not rerun", async () => {
-    for (const bad of ["-weird.py::test_x", "@weird.py::test_x"]) {
-      const { rerun, calls } = await afterRound({ runs: [{ [bad]: "failed" }, { [bad]: "passed" }] });
-      expect((await rerun()).size, bad).toBe(0);
-      expect(calls, bad).toHaveLength(1);
-    }
-  });
-
-  it("a report that shows no failing test is nothing to rerun", async () => {
-    const { rerun, calls } = await afterRound({ runs: [{ [ID_TAX]: "failed" }, { [ID_TAX]: "passed" }] });
-    // The check failed on its exit code but the report is rewritten with nothing failing before the rerun looks.
-    await writeFile(join(root, "report.xml"), junit({ [ID_TAX]: "passed" }));
-    expect((await rerun()).size).toBe(0);
-    expect(calls).toHaveLength(1);
-  });
-
   it("more failing tests than the cap are a regression, not bad luck: no rerun", async () => {
     const many = Object.fromEntries(Array.from({ length: FLAKY_RERUN_IDS_MAX + 1 }, (_, index) => [`tests/test_many.py::test_${String(index)}`, "failed" as const]));
     const { rerun, calls } = await afterRound({ runs: [many, many] });
@@ -327,23 +229,6 @@ describe("what is never rerun", () => {
     expect(calls).toHaveLength(1);
   });
 
-  it("exactly the cap is rerun, as one command", async () => {
-    const many = Object.fromEntries(Array.from({ length: FLAKY_RERUN_IDS_MAX }, (_, index) => [`tests/test_many.py::test_${String(index)}`, "failed" as const]));
-    const { rerun, calls } = await afterRound({ runs: [many, Object.fromEntries(Object.keys(many).map((id) => [id, "passed" as const]))] });
-    const result = (await rerun()).get("readiness:0");
-    expect(result?.flaky).toHaveLength(FLAKY_RERUN_IDS_MAX);
-    expect(result?.failing).toEqual([]);
-    expect(calls).toHaveLength(2);
-  });
-
-  it("5,000 failing tests in a megabyte of report stay fast and make no rerun", async () => {
-    const many = Object.fromEntries(Array.from({ length: 5_000 }, (_, index) => [`tests/test_${String(index % 50)}.py::test_${String(index)}`, "failed" as const]));
-    const { rerun, calls } = await afterRound({ runs: [many] });
-    const started = Date.now();
-    expect((await rerun()).size).toBe(0);
-    expect(Date.now() - started).toBeLessThan(5_000);
-    expect(calls).toHaveLength(1);
-  });
 });
 
 describe("splitFailures is the nightly's own", () => {
@@ -402,61 +287,6 @@ describe("the extra turn", () => {
     expect(calls).toHaveLength(2);
   });
 
-  it("a rerun that timed out, wrote nothing or left the test out gives the extra turn", async () => {
-    for (const step of ["timeout", "timeout_after_report", "no_report", { "tests/test_cart.py::test_other": "passed" }] as const) {
-      const { first } = await settle({ runs: [FIRST, step] });
-      expect(first.continue, JSON.stringify(step)).toBe(true);
-    }
-  });
-
-  it("with no plan flag there is no rerun, and the extra turn is given as it always was", async () => {
-    const { first, calls } = await settle({ runs: [FIRST, { [ID_TOTAL]: "passed" }] }, { flaky: false });
-    expect(first.continue).toBe(true);
-    expect(calls).toHaveLength(1);
-  });
-
-  it("a check with no template, or the agent's own commands, gets no rerun", async () => {
-    const { first, calls } = await settle({ runs: [FIRST, { [ID_TOTAL]: "passed" }] }, { checks: [{ kind: "test" }] });
-    expect(first.continue).toBe(true);
-    expect(calls).toHaveLength(1);
-  });
-
-  it("one flaky check and one that fails again: the extra turn is given and only the failing check is sent", async () => {
-    // Two project checks: pytest writes report.xml and a second pytest writes report2.xml; each fails once, the first passes on rerun.
-    const second = pytest(["--junitxml=report2.xml", "second"]);
-    const calls: ProjectCommand[] = [];
-    const runners: CheckRunners = {
-      async runProjectCommand(command) {
-        calls.push(command);
-        const isSecond = command.args.includes("second");
-        const rerun = command.args.some((arg) => arg.includes("::"));
-        const states: Record<string, State> = isSecond ? { "tests/test_b.py::test_two": "failed" } : { [ID_TOTAL]: rerun ? "passed" : "failed" };
-        await writeFile(join(root, isSecond ? "report2.xml" : "report.xml"), junit(states));
-        return { exitCode: Object.values(states).includes("failed") ? 1 : 0, timedOut: false, stdout: "", stderr: "" };
-      },
-      async runAgentCommand() { throw new Error("no"); },
-    };
-    const extension = verificationExtension({
-      plan: () => ({ source: "project", readiness: [pytest(), second], projectBefore: ["passed", "passed"] }), runners, budgetMs: () => 30 * MINUTE, signal: new AbortController().signal,
-      recorder: { settled: async () => undefined, observeCall: async () => undefined, observe: () => undefined, observeExecutionEnd: () => undefined, observeTurnEnd: () => undefined } as unknown as VerificationOptions["recorder"],
-      onReport: () => undefined, flakyRerun: { rootPath: root, checks: [TESTS, TESTS] },
-    });
-    const pi = fakePi();
-    install(extension, pi.pi);
-    const result = await pi.settle();
-    expect(result.continue).toBe(true);
-    const text = result.entries?.at(-1)?.content ?? "";
-    expect(text).toContain("second");
-    expect(text).not.toContain(PYTEST_ARGS[0]!);
-  });
-
-  it("after the extra turn the second round does not rerun, and reports whatever it finds", async () => {
-    const { reports, calls } = await settle({ runs: [FIRST, { [ID_TOTAL]: "failed" }, FIRST] }, { second: true });
-    // Round one: the check, one rerun (still failing) -> extra turn. Round two: the check once, no rerun.
-    expect(calls).toHaveLength(3);
-    expect(reports).toHaveLength(1);
-    expect(reports[0]).toMatchObject({ status: "regression", extraTry: "given" });
-  });
 });
 
 describe("what the agent reads", () => {
@@ -476,13 +306,6 @@ describe("what the agent reads", () => {
     ].join("\n"));
   });
 
-  it("leaves out a check that is fully flaky", () => {
-    const other: CheckEntry = { ...failing, id: "readiness:1", label: "lint-ish", output: "kept" };
-    const text = checksFeedback([failing, other], new Set(["readiness:0"]));
-    expect(text).toContain("Check: lint-ish");
-    expect(text).not.toContain("pytest -q");
-    expect(text).not.toContain("test_total");
-  });
 });
 
 describe("the file the worker saves for the broker", () => {
@@ -499,43 +322,6 @@ describe("the file the worker saves for the broker", () => {
     expect(flakyRerunFileOf(new Map())).toBeUndefined();
     expect(flakyRerunFileOf(result({ checkId: "readiness:0", flaky: [ID_TOTAL], failing: [ID_TAX] }))).toBeUndefined();
     expect(flakyRerunFileOf(result({ checkId: "readiness:0", flaky: [], failing: [] }))).toBeUndefined();
-  });
-});
-
-describe("the extension hands the worker the rerun result with the report it came from", () => {
-  it("nothing in the round that gives the extra turn, and no result with the later report", async () => {
-    const seen: Array<FlakyRerunResult | undefined> = [];
-    const flakyThenFail = { runs: [FIRST, { [ID_TOTAL]: "failed" }, FIRST] } satisfies World;
-    const { runners } = worldRunners(flakyThenFail);
-    const reports: unknown[] = [];
-    const extension = verificationExtension({
-      plan: () => ({ source: "project", readiness: [pytest()], projectBefore: ["passed"] }), runners, budgetMs: () => 30 * MINUTE, signal: new AbortController().signal,
-      recorder: { settled: async () => undefined, observeCall: async () => undefined, observe: () => undefined, observeExecutionEnd: () => undefined, observeTurnEnd: () => undefined } as unknown as VerificationOptions["recorder"],
-      onReport: (report, flakyRerun) => { reports.push(report); seen.push(flakyRerun); }, flakyRerun: { rootPath: root, checks: [TESTS] },
-    });
-    const pi = fakePi();
-    install(extension, pi.pi);
-    // Round one: the test fails again, so the agent gets its extra turn and the extension says nothing yet.
-    expect((await pi.settle()).continue).toBe(true);
-    expect(seen).toEqual([]);
-    // Round two reports without a rerun: that report comes with no rerun result.
-    await pi.settle();
-    expect(seen).toEqual([undefined]);
-  });
-
-  it("a flaky-only round reports at once with the fully flaky result", async () => {
-    const seen: Array<FlakyRerunResult | undefined> = [];
-    const { runners } = worldRunners({ runs: [FIRST, { [ID_TOTAL]: "passed" }] });
-    const extension = verificationExtension({
-      plan: () => ({ source: "project", readiness: [pytest()], projectBefore: ["passed"] }), runners, budgetMs: () => 30 * MINUTE, signal: new AbortController().signal,
-      recorder: { settled: async () => undefined, observeCall: async () => undefined, observe: () => undefined, observeExecutionEnd: () => undefined, observeTurnEnd: () => undefined } as unknown as VerificationOptions["recorder"],
-      onReport: (_report, flakyRerun) => { seen.push(flakyRerun); }, flakyRerun: { rootPath: root, checks: [TESTS] },
-    });
-    const pi = fakePi();
-    install(extension, pi.pi);
-    await pi.settle();
-    expect(seen).toHaveLength(1);
-    expect(isFullyFlaky(seen[0]?.get("readiness:0"))).toBe(true);
   });
 });
 

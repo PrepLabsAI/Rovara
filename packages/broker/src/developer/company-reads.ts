@@ -32,7 +32,7 @@ export interface CompanyReadCaller { developerId: string; administrator: boolean
 export const COMPANY_READ_FORBIDDEN = "only a company administrator can read this";
 export const COMPANY_READ_REFUSED = "sign in again to read the company's records";
 const QUERY_REFUSED = "the query is not valid";
-const AUDIT_KEYS = new Set(["from", "to", "project", "person", "action", "limit", "cursor"]);
+const AUDIT_KEYS = new Set(["from", "to", "project", "person", "action", "kind", "limit", "cursor"]);
 const EVENT_KEYS = new Set(["from", "to", "kinds", "project", "taskId", "person", "limit", "cursor"]);
 const LIMIT = /^[1-9][0-9]{0,3}$/u;
 const NAME_MAX = 200;

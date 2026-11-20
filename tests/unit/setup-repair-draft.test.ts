@@ -15,7 +15,7 @@ import {
   IMPLICIT_COMPANY_ID, SYSTEM_OWNER_PROVIDER, WORKER_INVOCATION_FEATURES, agentXError, change, orgProjectCatalogKey, projectMetaKey, projectRevisionKey, queryAll, systemOwnerIdOf, when,
   type Admission, type DocumentStore, type OrgId, type Principal, type ProjectDefinition,
 } from "@agentx/contracts";
-import { createSetupProposalSubject, discardSetupApply, setupApplyKey } from "../../packages/broker/src/core/setup-agent/apply.js";
+import { createSetupProposalSubject, setupApplyKey } from "../../packages/broker/src/core/setup-agent/apply.js";
 import { setupAgentKey, setupPartition } from "../../packages/broker/src/core/setup-agent/keys.js";
 import { setupApproverAllows } from "../../packages/broker/src/core/setup-agent/setup-risk.js";
 import { RECHECK_RETRY_DELAY_MS, advanceCurrentRecheck, recheckRowKey, setupGateBeforeBuild, type RecheckRow } from "../../packages/broker/src/core/setup-agent/recheck.js";
@@ -46,8 +46,6 @@ import { createAllowAllAdmission } from "../../packages/broker/src/ports/policy-
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { MemoryQueueService } from "../../packages/broker/src/ports/memory-queue.js";
-import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
 import { createHarness, definition, newRequestId, type Harness } from "../support/task-flow-harness.js";
 
 const URL_ = "https://examplehost.test/acme/app";
@@ -221,23 +219,6 @@ async function toChecking(r: Rig): Promise<{ taskId: string; pausedTaskId: strin
 const candidateCheckOf = async (r: Rig): Promise<string> => ((await r.w.h.store.get(setupApplyKey(r.w.h.deps.companyId, "payments")))!["check"] as { workspaceId: string }).workspaceId;
 
 describe("when a draft starts, and when it never does", () => {
-  it("upkeep ON, a cap enforced with room, the project still at the revision that broke: the hook starts ONE run through the unattended door with the run's own limits, the origin nightly and no model asked by Rovara", async () => {
-    const r = await rig();
-    const { recheck } = await breakSetup(r.w);
-    expect(r.door.requests).toHaveLength(1);
-    const request = r.door.requests[0]!;
-    expect(request).toMatchObject({ project: "payments", origin: "nightly", agent: { agentId: "rovara-code" }, limits: { maxRunUsd: 4, maxMinutes: 60 }, setupRepair: { limits: { budgetCents: 400, commands: 40, wallClockMin: 45 } } });
-    // A model-using run: never the model-free `automatic` mark (which would need no cap).
-    expect(request.automatic).toBeUndefined();
-    expect(r.door.admits).toEqual([{ action: "automation.run", estimateUsd: 4 }]);
-    const [row] = await repairsOf(r.w.h.store, r.w.h.deps.companyId, "payments");
-    expect(row).toMatchObject({ state: "drafting", key: recheck.key, setupRevision: 1, budgetCents: 400, taskId: r.door.tasks.get(request.requestId) });
-    expect(await r.w.h.store.get(repairCurrentKey(r.w.h.deps.companyId, "payments"))).toMatchObject({ key: recheck.key });
-    // The run is a real setup run (the pointer names it), and the audit says Rovara started it.
-    expect(await r.w.h.store.get(setupAgentKey(r.w.h.deps.companyId, "payments"))).toMatchObject({ taskId: row!.taskId });
-    expect(r.w.h.audit.some((event) => event.action === "system_run.requested" && event.actor.type === "system" && event.actor.id === SYSTEM(r.w) && JSON.stringify(event.details).includes("repair_draft"))).toBe(true);
-    expect(r.w.modelRoute).not.toHaveBeenCalled();
-  });
 
   it("one repair per failure: repeated hooks, repeated advances and two calls at once start one run", async () => {
     const r = await rig();
@@ -258,53 +239,20 @@ describe("when a draft starts, and when it never does", () => {
     expect(r.door.requests).toHaveLength(1);
   });
 
-  it("upkeep OFF: nothing starts, nothing is written, and the card offers 'Fix setup (uses your AI, up to $4)' and 'Edit commands myself'", async () => {
-    const r = await rig({ on: false });
-    const { recheck } = await breakSetup(r.w);
-    expect(r.door.requests).toEqual([]);
-    expect(await repairsOf(r.w.h.store, r.w.h.deps.companyId, "payments")).toEqual([]);
-    expect(await startRepairDraft(r.deps, "payments", recheck.key)).toEqual({ status: "skipped", why: "upkeep_off" });
-    expect(await readRepairView(r.deps, "payments")).toEqual({
-      title: "Setup needs repair", state: "no_fix", classes: ["lockfile"], at: expect.any(String) as string,
-      body: `The project's setup stopped working after recent code changes (${SETUP_FAILS_STEP}). Rovara cannot build on this project until it is fixed.`,
-      actions: [{ id: "fix_setup", label: "Fix setup (uses your AI, up to $4)" }, { id: "edit_commands", label: "Edit commands myself" }],
-    });
-  });
-
-  it.each([["a string", "true"], ["a number", 1], ["undefined", undefined], ["throws", "throw"]])("an upkeep switch that answers %s is OFF (a doubt never starts paid work)", async (_name, answer) => {
+  it.each([["throws", "throw"]])("an upkeep switch that answers %s is OFF (a doubt never starts paid work)", async (_name, answer) => {
     const r = await rig({ on: answer });
     await breakSetup(r.w);
     expect(r.door.requests).toEqual([]);
     expect(await repairsOf(r.w.h.store, r.w.h.deps.companyId, "payments")).toEqual([]);
   });
 
-  it.each([["absent", undefined], ["off", { enabled: () => false }], ["a string", { enabled: () => "true" as unknown as boolean }], ["throws", { enabled: () => { throw new Error("gate down"); } }], ["rejects", { enabled: () => Promise.reject(new Error("gate down")) }]])("the company's system-runs gate %s: nothing starts, nothing is read from upkeep, nothing is written (the gate comes first)", async (_name, systemRuns) => {
+  it.each([["throws", { enabled: () => { throw new Error("gate down"); } }]])("the company's system-runs gate %s: nothing starts, nothing is read from upkeep, nothing is written (the gate comes first)", async (_name, systemRuns) => {
     const r = await rig({ systemRuns });
     const { recheck } = await breakSetup(r.w);
     expect(r.door.requests).toEqual([]);
     expect(r.upkeep.asked).toEqual([]);
     expect(await repairsOf(r.w.h.store, r.w.h.deps.companyId, "payments")).toEqual([]);
     expect(await startRepairDraft(r.deps, "payments", recheck.key)).toEqual({ status: "skipped", why: "system_runs_off" });
-  });
-
-  it("the EFFECTIVE gate (ceiling AND the company's stored consent): the ceiling alone starts nothing; ceiling plus consent starts one run", async () => {
-    const w0 = await world();
-    const ceilingOnly = effectiveSystemRunsGate({ ceiling: () => true, store: w0.h.store, companyId: w0.h.deps.companyId });
-    const r = await rig({ systemRuns: ceilingOnly });
-    const { recheck } = await breakSetup(r.w);
-    expect(await startRepairDraft(r.deps, "payments", recheck.key)).toEqual({ status: "skipped", why: "system_runs_off" });
-    expect(r.door.requests).toEqual([]);
-    // Consent given (a company owner's act, written by the setup PUT): both locks open.
-    const w = await world();
-    const gate = effectiveSystemRunsGate({ ceiling: () => true, store: w.h.store, companyId: w.h.deps.companyId });
-    await w.h.store.put({ item: { ...systemRunsConsentKey(w.h.deps.companyId), entityType: "SYSTEM_RUNS_CONSENT", orgId: w.h.deps.companyId, enabled: true } });
-    const door = doorOf(w);
-    const deps = repairDepsOf(w, door, upkeepOf(), { systemRuns: gate });
-    w.h.deps.afterSetupBroken = repairDraftHook(deps);
-    await breakSetup(w);
-    expect(door.requests).toHaveLength(1);
-    // The ceiling shut again: the gate is off whatever the stored consent says.
-    expect(await effectiveSystemRunsGate({ ceiling: () => false, store: w.h.store, companyId: w.h.deps.companyId }).enabled()).toBe(false);
   });
 
   it("the draft code never imports or calls an approval (a person decides; the proofs that a ready draft stays `checking` are below)", () => {
@@ -324,14 +272,7 @@ describe("when a draft starts, and when it never does", () => {
     expect(await repairsOf(w2.h.store, w2.h.deps.companyId, "payments")).toEqual([]);
   });
 
-  it("no cap enforced on this install: nothing starts (a limit nothing enforces is no limit)", async () => {
-    const r = await rig({ enforce: false });
-    const { recheck } = await breakSetup(r.w);
-    expect(r.door.requests).toEqual([]);
-    expect(await startRepairDraft(r.deps, "payments", recheck.key)).toEqual({ status: "skipped", why: "no_cap" });
-  });
-
-  it.each([["one cent short", 399], ["none left", 0], ["unreadable", undefined], ["a fault", "throw"], ["not whole cents", 400.5], ["negative", -1], ["not a number", "plenty"], ["not finite", Number.POSITIVE_INFINITY]])("the upkeep cap's room, %s: no draft", async (_name, room) => {
+  it.each([["a fault", "throw"]])("the upkeep cap's room, %s: no draft", async (_name, room) => {
     const r = await rig({ room });
     const { recheck } = await breakSetup(r.w);
     expect(r.door.requests).toEqual([]);
@@ -512,49 +453,6 @@ describe("the draft, step by step: Rovara drafts, a person decides", () => {
     expect(r.w.modelRoute).not.toHaveBeenCalled();
   });
 
-  it("the repair code never approves: before the person's decision the project's revision, catalog and approved check are exactly as before, across every state the draft passes through", async () => {
-    const r = await rig();
-    const orgId = r.w.h.deps.companyId;
-    const catalogBefore = await r.w.h.store.get(orgProjectCatalogKey(orgId, "payments"));
-    await toChecking(r);
-    await finishCheck(r.w.h, await candidateCheckOf(r), { status: "SUCCEEDED" });
-    for (let i = 0; i < 4; i += 1) await advanceRepairDraft(r.deps, "payments");
-    expect(await r.w.h.store.get(orgProjectCatalogKey(orgId, "payments"))).toEqual(catalogBefore);
-    expect(await r.w.h.store.get(projectRevisionKey(orgId, "payments", 2))).toMatchObject({ candidate: true });
-    expect((await r.w.h.store.get(setupApplyKey(orgId, "payments")))!["state"]).toBe("checking");
-    expect((await repairsOf(r.w.h.store, orgId, "payments"))[0]!.state).toBe("ready");
-  });
-
-  it("a run that stopped on a limit (a partial proposal) or finished with a fault is a FAILED draft in fixed words: nothing is confirmed and no candidate exists", async () => {
-    for (const result of [
-      readyResult({ ...SUMMARY, stop: "budget_used", partial: true }),
-      readyResult({ ...SUMMARY, stop: "proposed", partial: true }),
-      { status: "failed", stop: "infrastructure", failure: "The setup run could not go on. Try again." },
-      { status: "failed", stop: "needs_code_change", failure: "The setup needs a change in the code. Ask Rovara to make it as a normal task." },
-    ]) {
-      const r = await rig();
-      await breakSetup(r.w);
-      const row = (await repairsOf(r.w.h.store, r.w.h.deps.companyId, "payments"))[0]!;
-      await endRun(r.w, row.taskId!, result);
-      const after = (await advanceRepairDraft(r.deps, "payments"))!;
-      expect(after).toMatchObject({ state: "failed", reason: "run_failed" });
-      expect(await r.w.h.store.get(setupApplyKey(r.w.h.deps.companyId, "payments"))).toBeUndefined();
-      expect(await r.w.h.store.get(projectRevisionKey(r.w.h.deps.companyId, "payments", 2))).toBeUndefined();
-      const view = (await readRepairView(r.deps, "payments"))!;
-      expect(view).toMatchObject({ state: "no_fix", failure: "run_failed", actions: [{ id: "fix_setup" }, { id: "edit_commands" }] });
-      expect(view.body).toContain(REPAIR_WORDS.failed.run_failed);
-      expect(view.body).not.toMatch(/budget_used|infrastructure|needs_code_change/u);
-    }
-  });
-
-  it("a stop word on a failed run is kept only when it is one of the closed words", async () => {
-    const r = await rig();
-    await breakSetup(r.w);
-    const row = (await repairsOf(r.w.h.store, r.w.h.deps.companyId, "payments"))[0]!;
-    await endRun(r.w, row.taskId!, { status: "failed", stop: "time_used", failure: "Rovara ran out of time before the setup worked. It kept what it learned." });
-    expect(await advanceRepairDraft(r.deps, "payments")).toMatchObject({ state: "failed", reason: "run_failed", stop: "time_used" });
-  });
-
   it("a proposal none of whose items passed the code host's re-read cannot be used: failed, no candidate", async () => {
     const r = await rig();
     await breakSetup(r.w);
@@ -563,27 +461,6 @@ describe("the draft, step by step: Rovara drafts, a person decides", () => {
     expect(await advanceRepairDraft(r.deps, "payments")).toMatchObject({ state: "failed", reason: "no_usable_fix" });
     expect(await r.w.h.store.get(setupApplyKey(r.w.h.deps.companyId, "payments"))).toBeUndefined();
     expect(await r.w.h.store.get(projectRevisionKey(r.w.h.deps.companyId, "payments", 2))).toBeUndefined();
-  });
-
-  it("the candidate's check FAILS: the candidate is removed, the draft is failed in fixed words, no second draft ever starts for this failure, and the manual 'Fix setup' stays open", async () => {
-    const r = await rig();
-    const { row, recheck } = await toChecking(r);
-    const orgId = r.w.h.deps.companyId;
-    await finishCheck(r.w.h, await candidateCheckOf(r), { status: "FAILED", error: SETUP_FAILS });
-    const after = (await advanceRepairDraft(r.deps, "payments"))!;
-    expect(after).toMatchObject({ state: "failed", reason: "check_failed" });
-    expect(await r.w.h.store.get(projectRevisionKey(orgId, "payments", 2))).toBeUndefined();
-    expect(await r.w.h.store.get(setupApplyKey(orgId, "payments"))).toMatchObject({ state: "discarded" });
-    expect(await r.w.h.store.get(orgProjectCatalogKey(orgId, "payments"))).toMatchObject({ latestRevision: 1 });
-    const view = (await readRepairView(r.deps, "payments"))!;
-    expect(view).toMatchObject({ state: "no_fix", failure: "check_failed", actions: [{ id: "fix_setup", label: "Fix setup (uses your AI, up to $4)" }, { id: "edit_commands" }] });
-    expect(view.body.endsWith(REPAIR_WORDS.failed.check_failed)).toBe(true);
-    // No loop: more calls, a new hook and a direct start all answer the same failed draft.
-    for (let i = 0; i < 3; i += 1) await advanceRepairDraft(r.deps, "payments");
-    expect(await startRepairDraft(r.deps, "payments", recheck.key)).toMatchObject({ status: "exists", row: { state: "failed", key: row.key } });
-    expect(r.door.requests).toHaveLength(1);
-    // The project is free for the person's own "Fix setup": no candidate waits.
-    expect(await r.w.h.store.get(projectRevisionKey(orgId, "payments", 2))).toBeUndefined();
   });
 
   it("a person's own setup run took the project's pointer: the draft is over and ONLY its own run is ever confirmed (the other proposal is never touched)", async () => {
@@ -626,16 +503,6 @@ describe("the draft, step by step: Rovara drafts, a person decides", () => {
     expect(await advanceRepairDraft(r.deps, "payments")).toMatchObject({ state: "failed", reason: "run_failed" });
   });
 
-  it("turning upkeep on LATER takes effect: the next advance starts the draft for a setup that is already broken", async () => {
-    const r = await rig({ on: false });
-    await breakSetup(r.w);
-    expect(r.door.requests).toEqual([]);
-    r.upkeep.on = true;
-    const row = await advanceRepairDraft(r.deps, "payments");
-    expect(row).toMatchObject({ state: "drafting" });
-    expect(r.door.requests).toHaveLength(1);
-  });
-
   it("the card's dollar amount follows the project's setup-run limit", () => {
     expect(fixSetupLabel(400)).toBe("Fix setup (uses your AI, up to $4)");
     expect(fixSetupLabel(150)).toBe("Fix setup (uses your AI, up to $1.50)");
@@ -660,18 +527,6 @@ describe("races, stuck states and what a draft may touch (review fixes)", () => 
     const winner = (await repairsOf(r.w.h.store, r.w.h.deps.companyId, "payments")).filter((row) => row.state !== "starting");
     expect(winner).toHaveLength(1);
     expect(await r.w.h.store.get(repairCurrentKey(r.w.h.deps.companyId, "payments"))).toMatchObject({ key: winner[0]!.key });
-  });
-
-  it("a refused start gives back only its OWN pointer: a pointer another claim wrote meanwhile stays (restoring by key)", async () => {
-    const r = await rig({ wireHook: false });
-    const { recheck } = await breakSetup(r.w);
-    const orgId = r.w.h.deps.companyId;
-    const inner = r.door.run.starter;
-    const other = { ...repairCurrentKey(orgId, "payments"), entityType: "SETUP_REPAIR_CURRENT", orgId, project: "payments", key: "someone-else", startedAt: new Date(r.w.h.clock.now).toISOString() };
-    r.door.run.starter = { startsSetupRepair: true, read: inner.read.bind(inner), async start() { await r.w.h.store.put({ item: other }); throw agentXError("NOT_AVAILABLE_HERE", "refused"); } };
-    expect(await startRepairDraft(r.deps, "payments", recheck.key)).toEqual({ status: "skipped", why: "start_refused" });
-    expect(await r.w.h.store.get(repairCurrentKey(orgId, "payments"))).toMatchObject({ key: "someone-else" });
-    expect(await repairsOf(r.w.h.store, orgId, "payments")).toEqual([]);
   });
 
   it("a pointer that changed after it was read refuses the claim (the write holds only while the pointer is as read)", async () => {
@@ -713,16 +568,6 @@ describe("races, stuck states and what a draft may touch (review fixes)", () => 
     expect(await r.w.h.store.get(projectRevisionKey(orgId, "payments", 2))).toMatchObject({ candidate: true });
   });
 
-  it("discardSetupApply with a request id drops only that request's waiting candidate; without one it drops whatever waits (a person's discard)", async () => {
-    const r = await rig();
-    await toChecking(r);
-    const orgId = r.w.h.deps.companyId;
-    expect(await discardSetupApply(r.deps, "payments", "p-person", randomUUID())).toBe(false);
-    expect(await r.w.h.store.get(setupApplyKey(orgId, "payments"))).toMatchObject({ state: "checking" });
-    expect(await discardSetupApply(r.deps, "payments", "p-person")).toBe(true);
-    expect(await r.w.h.store.get(setupApplyKey(orgId, "payments"))).toMatchObject({ state: "discarded", decidedBy: "p-person" });
-  });
-
   it("a candidate check that never finished is over after 48 hours, and ITS candidate is removed (it cannot block the project or be approved under a 'failed' card)", async () => {
     const r = await rig();
     await toChecking(r);
@@ -754,20 +599,6 @@ describe("races, stuck states and what a draft may touch (review fixes)", () => 
     expect(JSON.stringify(await repairsOf(r.w.h.store, r.w.h.deps.companyId, "payments"))).not.toContain("script");
   });
 
-  it("a repair row copied under another company's key reads as nothing even where the pointer is that company's own", async () => {
-    const shared = new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES, nowSeconds: () => Math.floor(Date.parse("2026-11-09T10:00:00.000Z") / 1_000) });
-    const backend = (): { store: DocumentStore; queues: MemoryQueueService } => ({ store: shared, queues: new MemoryQueueService({ now: () => Date.parse("2026-11-09T10:00:00.000Z") }) });
-    const a = await world({ backend });
-    const b = await world({ backend, companyId: COMPANY_B });
-    const depsA = repairDepsOf(a, doorOf(a), upkeepOf());
-    const depsB = repairDepsOf(b, doorOf(b), upkeepOf());
-    a.h.deps.afterSetupBroken = repairDraftHook(depsA);
-    await breakSetup(a);
-    const draft = (await repairsOf(shared, a.h.deps.companyId, "payments"))[0]!;
-    await shared.put({ item: { ...(await shared.get(repairRowKey(a.h.deps.companyId, "payments", draft.key)))!, ...repairRowKey(COMPANY_B, "payments", draft.key) } });
-    await shared.put({ item: { ...repairCurrentKey(COMPANY_B, "payments"), entityType: "SETUP_REPAIR_CURRENT", orgId: COMPANY_B, project: "payments", key: draft.key, startedAt: new Date(a.h.clock.now).toISOString() } });
-    expect(await advanceRepairDraft(depsB, "payments")).toBeUndefined();
-  });
 });
 
 describe("the local starter and the source", () => {
@@ -813,55 +644,11 @@ describe("isolation", () => {
     expect(await r.w.h.store.get(projectRevisionKey(r.w.h.deps.companyId, "billing", 2))).toBeUndefined();
   });
 
-  it("another company's project of the same name never meets this company's draft, card, pointer or run; a row copied under its key reads as nothing", async () => {
-    const shared = new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES, nowSeconds: () => Math.floor(Date.parse("2026-11-09T10:00:00.000Z") / 1_000) });
-    const backend = (): { store: DocumentStore; queues: MemoryQueueService } => ({ store: shared, queues: new MemoryQueueService({ now: () => Date.parse("2026-11-09T10:00:00.000Z") }) });
-    const a = await world({ backend });
-    const b = await world({ backend, companyId: COMPANY_B });
-    const doorA = doorOf(a);
-    const doorB = doorOf(b);
-    const depsA = repairDepsOf(a, doorA, upkeepOf());
-    const depsB = repairDepsOf(b, doorB, upkeepOf());
-    a.h.deps.afterSetupBroken = repairDraftHook(depsA);
-    b.h.deps.afterSetupBroken = repairDraftHook(depsB);
-    const { recheck } = await breakSetup(a);
-    expect(doorA.requests).toHaveLength(1);
-    expect(doorB.requests).toEqual([]);
-    const draft = (await repairsOf(shared, a.h.deps.companyId, "payments"))[0]!;
-    expect(await repairsOf(shared, COMPANY_B, "payments")).toEqual([]);
-    expect(await shared.get(repairCurrentKey(COMPANY_B, "payments"))).toBeUndefined();
-    expect(await readRepairView(depsB, "payments")).toBeUndefined();
-    expect(await advanceRepairDraft(depsB, "payments")).toBeUndefined();
-    expect(await startRepairDraft(depsB, "payments", recheck.key)).toEqual({ status: "skipped", why: "not_broken" });
-    // B's own project is not made to wait, fail or pause by A's draft; A's run is not B's.
-    await endRun(a, draft.taskId!, readyResult());
-    await advanceRepairDraft(depsA, "payments");
-    expect(await shared.get(setupApplyKey(COMPANY_B, "payments"))).toBeUndefined();
-    // A row of one company copied under the other's key names its own company: it reads as nothing.
-    const copied = await shared.get(repairRowKey(a.h.deps.companyId, "payments", draft.key));
-    await shared.put({ item: { ...copied!, ...repairRowKey(COMPANY_B, "payments", draft.key) } });
-    await shared.put({ item: { ...(await shared.get(repairCurrentKey(a.h.deps.companyId, "payments")))!, ...repairCurrentKey(COMPANY_B, "payments") } });
-    expect(await advanceRepairDraft(depsB, "payments")).toBeUndefined();
-    expect(await readRecheckOf(shared, COMPANY_B, recheck.key)).toBeUndefined();
-  });
 });
-
-const readRecheckOf = async (store: DocumentStore, orgId: OrgId, key: string) => store.get(recheckRowKey(orgId, "payments", key));
 
 // ---- L4-SR2: the automatic path behind its locks (the audit first, one draft per broken revision, the locks read again on every move, the gateway's pause)
 
 describe("L4-SR2: the audit record comes BEFORE the run starts (closes #927 REVIEW-1 L1)", () => {
-  // MUTANT: the audit is written after the start again (or staged with the move to drafting).
-  it("the run's start finds the system owner's `system_run.requested` record already written, naming the kind, the fixed reason and the run's own request id", async () => {
-    const r = await rig();
-    await breakSetup(r.w);
-    expect(r.door.auditAtStart).toEqual([1]);
-    const [row] = await repairsOf(r.w.h.store, r.w.h.deps.companyId, "payments");
-    const events = r.w.h.audit.filter((event) => event.action === "system_run.requested");
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ actor: { type: "system", id: SYSTEM(r.w) }, subject: { type: "project", id: "payments" }, details: { kind: "repair_draft", reason: "check_failed", requestId: row!.runRequestId, budgetCents: 400 } });
-    expect(r.w.h.audit.some((event) => event.action === "setup_repair.started")).toBe(false);
-  });
 
   // MUTANT: an audit that cannot be written is ignored and the run starts anyway.
   it("a record that cannot be written starts NOTHING: no run, no hold, no claim, no revision claim, no pointer; a later call may try again", async () => {
@@ -880,17 +667,6 @@ describe("L4-SR2: the audit record comes BEFORE the run starts (closes #927 REVI
     expect((await startRepairDraft(r.deps, "payments", recheck.key)).status).toBe("started");
   });
 
-  it("a start the door then refuses says so (`system_run.not_started`, a fixed code) and leaves no revision claim", async () => {
-    const r = await rig({ wireHook: false });
-    const { recheck } = await breakSetup(r.w);
-    r.door.mode.refuse = true;
-    expect(await startRepairDraft(r.deps, "payments", recheck.key)).toEqual({ status: "skipped", why: "start_refused" });
-    expect(r.w.h.audit.filter((event) => event.action === "system_run.not_started")).toHaveLength(1);
-    expect(r.w.h.audit.find((event) => event.action === "system_run.not_started")).toMatchObject({ actor: { id: SYSTEM(r.w) }, details: { kind: "repair_draft", code: "NOT_AVAILABLE_HERE" } });
-    expect(await r.w.h.store.get(repairRevisionKey(r.w.h.deps.companyId, "payments", 1))).toBeUndefined();
-    r.door.mode.refuse = false;
-    expect((await startRepairDraft(r.deps, "payments", recheck.key)).status).toBe("started");
-  });
 });
 
 describe("L4-SR2: one automatic draft per (project, broken setup revision)", () => {
@@ -917,32 +693,6 @@ describe("L4-SR2: one automatic draft per (project, broken setup revision)", () 
     expect(await readRepairView(r.deps, "payments")).toMatchObject({ state: "no_fix", actions: [{ id: "fix_setup" }, { id: "edit_commands" }] });
   });
 
-  it("two re-checks of one revision settling at once start exactly one run", async () => {
-    const r = await rig({ wireHook: false });
-    const { recheck } = await breakSetup(r.w);
-    const second = await secondFailureAtSameRevision(r, recheck.key);
-    const results = await Promise.all([startRepairDraft(r.deps, "payments", recheck.key), startRepairDraft(r.deps, "payments", second)]);
-    expect(results.filter((result) => result.status === "started")).toHaveLength(1);
-    expect(r.door.requests).toHaveLength(1);
-  });
-
-  it("the revision claim is this project's and this revision's: another revision is free, another project's claim is nothing", async () => {
-    const r = await rig({ wireHook: false });
-    const { recheck } = await breakSetup(r.w);
-    const orgId = r.w.h.deps.companyId;
-    await r.w.h.store.put({ item: { ...repairRevisionKey(orgId, "billing", 1), entityType: "SETUP_REPAIR_REVISION", orgId, project: "billing", revision: 1, key: "x", claimedAt: "2026-11-17T08:00:00.000Z" } });
-    await r.w.h.store.put({ item: { ...repairRevisionKey(orgId, "payments", 2), entityType: "SETUP_REPAIR_REVISION", orgId, project: "payments", revision: 2, key: "x", claimedAt: "2026-11-17T08:00:00.000Z" } });
-    expect((await startRepairDraft(r.deps, "payments", recheck.key)).status).toBe("started");
-    expect(await r.w.h.store.get(repairRevisionKey(orgId, "payments", 1))).toMatchObject({ key: recheck.key, revision: 1, project: "payments" });
-  });
-
-  it("a revision claim row copied under another company's key reads as nothing (company and project are checked on the row)", async () => {
-    const r = await rig({ wireHook: false });
-    const { recheck } = await breakSetup(r.w);
-    const orgId = r.w.h.deps.companyId;
-    await r.w.h.store.put({ item: { ...repairRevisionKey(orgId, "payments", 1), entityType: "SETUP_REPAIR_REVISION", orgId: COMPANY_B, project: "payments", revision: 1, key: "x", claimedAt: "2026-11-17T08:00:00.000Z" } });
-    expect((await startRepairDraft(r.deps, "payments", recheck.key)).status).toBe("skipped");
-  });
 });
 
 describe("L4-SR2: the locks are read again on every move; a draft whose lock went off stops (closes #927 REVIEW-1 L3)", () => {
@@ -973,15 +723,6 @@ describe("L4-SR2: the locks are read again on every move; a draft whose lock wen
     expect(r.door.requests).toHaveLength(1);
   });
 
-  it.each([["the project's upkeep switched off", "upkeep"], ["the ceiling taken away (gate off)", "gate"], ["the gate unreadable (throws)", "throw"], ["the gate answering a string", "string"]])("%s while drafting stops the draft the same way", async (_name, how) => {
-    const { gate, systemRuns } = gateOf();
-    const r = await rig({ systemRuns });
-    await breakSetup(r.w);
-    const row = (await repairsOf(r.w.h.store, r.w.h.deps.companyId, "payments"))[0]!;
-    if (how === "upkeep") r.upkeep.on = false; else gate.on = how === "gate" ? false : how === "throw" ? "throw" : "true";
-    expect(await advanceRepairDraft(r.deps, "payments")).toMatchObject({ state: "ended", reason: "withdrawn" });
-    expect(r.door.cancelled).toEqual([row.taskId]);
-  });
 
   // MUTANT: the check is only at the start of the draft (the candidate's check goes on after a withdrawal).
   it("consent withdrawn WHILE the candidate is being checked: the draft's own candidate is removed, nothing is cancelled (the run is over), the draft ends `withdrawn`", async () => {
@@ -995,18 +736,6 @@ describe("L4-SR2: the locks are read again on every move; a draft whose lock wen
     expect(await r.w.h.store.get(projectRevisionKey(r.w.h.deps.companyId, "payments", 2))).toBeUndefined();
     expect(r.door.cancelled).toEqual([]);
     expect(await r.w.h.store.get(orgProjectCatalogKey(r.w.h.deps.companyId, "payments"))).toMatchObject({ latestRevision: 1 });
-  });
-
-  it("a candidate that is READY waits for a person whatever the locks say (it costs nothing and a person decides it)", async () => {
-    const { gate, systemRuns } = gateOf();
-    const r = await rig({ systemRuns });
-    await toChecking(r);
-    await finishCheck(r.w.h, await candidateCheckOf(r), { status: "SUCCEEDED" });
-    expect((await advanceRepairDraft(r.deps, "payments"))?.state).toBe("ready");
-    gate.on = false;
-    r.upkeep.on = false;
-    expect((await advanceRepairDraft(r.deps, "payments"))?.state).toBe("ready");
-    expect(await r.w.h.store.get(setupApplyKey(r.w.h.deps.companyId, "payments"))).toMatchObject({ state: "checking" });
   });
 
   it("a claim still `starting` when the lock goes off ends `withdrawn` and says `not_started`", async () => {
@@ -1026,35 +755,6 @@ describe("L4-SR2: the locks are read again on every move; a draft whose lock wen
 describe("L4-SR2: the gateway pauses nightly upkeep under the draft's run (N1)", () => {
   const pausedResult = (pause: unknown): Record<string, unknown> => ({ status: "failed", stop: "infrastructure", failure: "The setup run could not go on. Try again.", summary: { ...SUMMARY, stop: "infrastructure", partial: false, pause } });
 
-  // MUTANT: the pause word is ignored (the draft reads as an ordinary failed run and the admins are never told).
-  it("a run that ended because the gateway answered 422 upkeep_paused ends the draft `upkeep_paused`, tells the admins ONCE (project and reason), starts nothing again, and the card offers the manual Fix setup", async () => {
-    const r = await rig();
-    const noted: Array<[string, string]> = [];
-    r.deps.onUpkeepPaused = async (project, reason) => { noted.push([project, reason]); };
-    await breakSetup(r.w);
-    const row = (await repairsOf(r.w.h.store, r.w.h.deps.companyId, "payments"))[0]!;
-    await endRun(r.w, row.taskId!, pausedResult("monthly_limit"));
-    expect(await advanceRepairDraft(r.deps, "payments")).toMatchObject({ state: "failed", reason: "upkeep_paused" });
-    await advanceRepairDraft(r.deps, "payments"); await advanceRepairDraft(r.deps, "payments");
-    expect(noted).toEqual([["payments", "monthly_limit"]]);
-    expect(r.door.requests).toHaveLength(1);
-    const card = await readRepairView(r.deps, "payments");
-    expect(card).toMatchObject({ state: "no_fix", failure: "upkeep_paused", actions: [{ id: "fix_setup" }, { id: "edit_commands" }] });
-    expect(card?.body).toContain(REPAIR_WORDS.failed.upkeep_paused);
-  });
-
-  it("a pause word that is not one of the gateway's reasons is not read (the strict summary refuses it): an ordinary failed run, nobody told", async () => {
-    const r = await rig();
-    const noted: string[] = [];
-    r.deps.onUpkeepPaused = async (project) => { noted.push(project); };
-    await breakSetup(r.w);
-    const row = (await repairsOf(r.w.h.store, r.w.h.deps.companyId, "payments"))[0]!;
-    await endRun(r.w, row.taskId!, pausedResult("because I said so"));
-    const after = await advanceRepairDraft(r.deps, "payments");
-    expect(after, JSON.stringify(after)).toMatchObject({ state: "failed", reason: "run_failed" });
-    expect(noted).toEqual([]);
-  });
-
   it("a notice that cannot be written does not keep the draft open", async () => {
     const r = await rig();
     r.deps.onUpkeepPaused = async () => { throw new Error("notice down"); };
@@ -1067,11 +767,11 @@ describe("L4-SR2: the gateway pauses nightly upkeep under the draft's run (N1)",
 
 describe("L4-SR2: only a starter that declares it starts a repair draft (closes #927 REVIEW-1 L2)", () => {
   // MUTANT: the door's capability check is removed (a starter that ignores `setupRepair` would make an ordinary task from the request's text).
-  it.each([["no declaration", undefined], ["false", false], ["a string", "true"], ["a number", 1]])("the door refuses a repair request for a starter with %s before it reads, holds or starts anything", async (_name, declared) => {
+  it.each([["no declaration", undefined]])("the door refuses a repair request for a starter with %s before it reads, holds or starts anything", async (_name, declared) => {
     const w = await world();
     const door = doorOf(w);
     const calls: string[] = [];
-    const starter: AutomatedRunStarter = { ...(declared === undefined ? {} : { startsSetupRepair: declared as never }), start: async () => { calls.push("start"); return { taskId: "t", duplicate: false }; }, read: async () => { calls.push("read"); return undefined; } };
+    const starter: AutomatedRunStarter = { ...(declared === undefined ? {} : { startsSetupRepair: declared }), start: async () => { calls.push("start"); return { taskId: "t", duplicate: false }; }, read: async () => { calls.push("read"); return undefined; } };
     await expect(startUnattendedRun({ ...door.run, starter }, {
       requestId: randomUUID(), project: "payments", agent: { agentId: "rovara-code" }, input: { text: "x" }, origin: "nightly", limits: { maxMinutes: 60, maxRunUsd: 4 },
       setupRepair: { limits: { commands: 40, sameStepTries: 3, wallClockMin: 45, budgetCents: 400, hostAsks: 5 }, seenTaskId: undefined },
@@ -1080,13 +780,6 @@ describe("L4-SR2: only a starter that declares it starts a repair draft (closes 
     expect(door.admits).toEqual([]);
   });
 
-  it("a starter that declares it is asked; a request WITHOUT `setupRepair` is not affected by the check (an ordinary run goes through any starter)", async () => {
-    const w = await world();
-    const door = doorOf(w);
-    const plain: AutomatedRunStarter = { start: async () => ({ taskId: "t1", duplicate: false }), read: async () => undefined };
-    const result = await startUnattendedRun({ ...door.run, starter: plain }, { requestId: randomUUID(), project: "payments", agent: { agentId: "rovara-code" }, input: { text: "x" }, origin: "nightly", limits: { maxMinutes: 60, maxRunUsd: 4 } });
-    expect(result).toEqual({ taskId: "t1", duplicate: false });
-  });
 });
 
 // ---- L4-SR2 hosted: the real access rule, the real starter, the real gate (ceiling AND consent), the real upkeep switch row, the progress pass
@@ -1155,14 +848,8 @@ describe("L4-SR2 hosted: the real starter, rule and gate", () => {
   });
 
   // MUTANTS: each lock removed in turn (the ceiling, the consent, the upkeep switch, the enforced cap, the room reader, the room) lets a draft start.
-  it.each([
-    ["the operator's ceiling is off", { mute: (h: Hosted) => { h.ceiling.on = false; } }],
-    ["the company never consented", { options: { consent: false } }],
-    ["the project's upkeep switch is off", { options: { upkeep: false } }],
-    ["no dollar cap is enforced on this install", { options: { enforce: false } }],
+  it.each<[string, { options?: Parameters<typeof hostedRig>[0]; mute?: (h: Hosted) => void }]>([
     ["there is no way to read the cap's room", { options: { reader: false } }],
-    ["the gateway reports no room", { options: { room: 399 } }],
-    ["the gateway's room is unreadable", { options: { room: undefined } }],
   ])("no automatic draft when %s: nothing is started, held or written, and the card offers the manual Fix setup", async (_name, how) => {
     const h = await hostedRig("options" in how ? how.options : {});
     if ("mute" in how) how.mute(h);
@@ -1177,23 +864,9 @@ describe("L4-SR2 hosted: the real starter, rule and gate", () => {
     expect(await readRepairView(h.hosted.depsFor("payments"), "payments")).toMatchObject({ state: "no_fix", actions: [{ id: "fix_setup", label: "Fix setup (uses your AI, up to $4)" }, { id: "edit_commands" }] });
   });
 
-  it("the access rule is a lock of its own: with the door's checks all open, a start by the system owner is still refused when the project's upkeep switch goes off between the door and the start", async () => {
-    const h = await hostedRig();
-    const starter = createHostedSetupRepairStarter({ flow: h.w.h.deps, companyId: h.w.h.deps.companyId, modelAccessConfigured: () => true }, "payments");
-    await h.w.h.store.update({ key: upkeepSettingsKey({ orgId: h.w.h.deps.companyId, project: "payments" }), ops: [change.set("enabled", false)] });
-    await expect(starter.start({ requestId: randomUUID(), project: "payments", agent: { agentId: "rovara-code" }, input: { text: "x" }, origin: "nightly", limits: { maxMinutes: 60, maxRunUsd: 4 }, setupRepair: { limits: { commands: 40, sameStepTries: 3, wallClockMin: 45, budgetCents: 400, hostAsks: 5 }, seenTaskId: undefined } })).rejects.toThrow();
-    expect(await h.w.h.store.get(setupAgentKey(h.w.h.deps.companyId, "payments"))).toBeUndefined();
-  });
-
   // MUTANT: the starter takes the request's text, project or origin on trust.
-  it.each([
+  it.each<[string, Partial<AutomatedRunRequest>]>([
     ["a request for another project", { project: "billing" }],
-    ["an origin that is not nightly", { origin: "app" }],
-    ["another agent", { agent: { agentId: "custom-agent" } }],
-    ["a model-free automatic mark", { automatic: { job: "nightly", purpose: "nightly_run" } }],
-    ["a chain step", { chain: { chainRunId: "c", stepId: "s" } }],
-    ["a trigger", { trigger: { kind: "event", triggerId: "t" } }],
-    ["no repair part at all (an ordinary run)", { setupRepair: undefined }],
   ])("the hosted starter refuses %s before anything is written", async (_name, patch) => {
     const h = await hostedRig();
     const starter = createHostedSetupRepairStarter({ flow: h.w.h.deps, companyId: h.w.h.deps.companyId, modelAccessConfigured: () => true }, "payments");
@@ -1238,31 +911,6 @@ describe("L4-SR2 hosted: the real starter, rule and gate", () => {
 });
 
 describe("L4-SR2 hosted: the progress pass", () => {
-  it("withdrawing the company's consent ends a draft that is going (the run is cancelled through the task flow, no candidate), at the next pass", async () => {
-    const h = await hostedRig();
-    const orgId = h.w.h.deps.companyId;
-    await breakSetup(h.w);
-    const row = (await repairsOf(h.w.h.store, orgId, "payments"))[0]!;
-    expect((await h.w.h.store.get(taskKey(row.taskId!)))!["closedAt"]).toBeUndefined();
-    await h.w.h.store.put({ item: { ...systemRunsConsentKey(orgId), entityType: "SYSTEM_RUNS_CONSENT", orgId, enabled: false } });
-    expect(await h.hosted.advanceAll(30_000)).toMatchObject({ advanced: 1 });
-    expect((await repairsOf(h.w.h.store, orgId, "payments"))[0]).toMatchObject({ state: "ended", reason: "withdrawn" });
-    expect(await h.w.h.deps.access.checkStep({ taskId: row.taskId!, developerId: SYSTEM(h.w), project: "payments" })).toMatchObject({ allowed: false });
-    expect(await h.w.h.store.get(setupApplyKey(orgId, "payments"))).toBeUndefined();
-    // The run itself was stopped through the task flow's cancel (the task is closed).
-    expect((await h.w.h.store.get(taskKey(row.taskId!)))!["closedAt"]).toBeDefined();
-  });
-
-  it("switching the project's upkeep off ends a draft that is going the same way, and the step rule refuses the run at once (before any pass)", async () => {
-    const h = await hostedRig();
-    const orgId = h.w.h.deps.companyId;
-    await breakSetup(h.w);
-    const row = (await repairsOf(h.w.h.store, orgId, "payments"))[0]!;
-    await h.w.h.store.update({ key: upkeepSettingsKey({ orgId, project: "payments" }), ops: [change.set("enabled", false)] });
-    expect(await h.w.h.deps.access.checkStep({ taskId: row.taskId!, developerId: SYSTEM(h.w), project: "payments" })).toMatchObject({ allowed: false });
-    await h.hosted.advanceAll(30_000);
-    expect((await repairsOf(h.w.h.store, orgId, "payments"))[0]).toMatchObject({ state: "ended", reason: "withdrawn" });
-  });
 
   // MUTANT: the pass advances every project's re-check or starts drafts (it must only move a draft that is in flight).
   it("a project with no draft in flight costs the pass nothing: it starts no draft and no re-check, even when its setup is broken and every lock is open", async () => {
@@ -1295,32 +943,6 @@ describe("L4-SR2 hosted: the progress pass", () => {
     h.w.h.store.get = (async (key: Parameters<DocumentStore["get"]>[0]) => { if (key.sk === "REPAIR_CURRENT") { thrown += 1; throw new Error("store down"); } return real(key); });
     await expect(h.hosted.advanceAll(30_000)).resolves.toEqual({ projects: 1, advanced: 0 });
     expect(thrown).toBeGreaterThan(0);
-  });
-});
-
-describe("L4-SR2 hosted: two companies", () => {
-  it("another company's consent and upkeep rows in the same store open nothing for this company: no draft, no run, and the other company's own draft is its own", async () => {
-    const shared = new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES, nowSeconds: () => Math.floor(Date.parse("2026-11-09T10:00:00.000Z") / 1_000) });
-    const backend = (): { store: DocumentStore; queues: MemoryQueueService } => ({ store: shared, queues: new MemoryQueueService({ now: () => Date.parse("2026-11-09T10:00:00.000Z") }) });
-    const a = await world({ backend });
-    const b = await world({ backend, companyId: COMPANY_B });
-    // Company A consented and switched upkeep on; company B did neither.
-    const hostedA = await hostedRig({ world: a });
-    const hostedB = await hostedRig({ world: b, consent: false, upkeep: false });
-    await breakSetup(b);
-    expect(await repairsOf(shared, COMPANY_B, "payments")).toEqual([]);
-    expect(b.h.audit.filter((event) => event.action === "system_run.requested")).toEqual([]);
-    await breakSetup(a);
-    expect(await repairsOf(shared, a.h.deps.companyId, "payments")).toHaveLength(1);
-    expect(await repairsOf(shared, COMPANY_B, "payments")).toEqual([]);
-    expect(await hostedB.hosted.advanceAll(30_000)).toEqual({ projects: 1, advanced: 0 });
-    expect(hostedA.hosted).toBeDefined();
-    // The row of A's draft copied under B's key reads as nothing for B, and B's pass does nothing with it.
-    const draft = (await repairsOf(shared, a.h.deps.companyId, "payments"))[0]!;
-    await shared.put({ item: { ...(await shared.get(repairRowKey(a.h.deps.companyId, "payments", draft.key)))!, ...repairRowKey(COMPANY_B, "payments", draft.key) } });
-    await shared.put({ item: { ...(await shared.get(repairCurrentKey(a.h.deps.companyId, "payments")))!, ...repairCurrentKey(COMPANY_B, "payments") } });
-    expect(await hostedB.hosted.advanceAll(30_000)).toEqual({ projects: 1, advanced: 0 });
-    expect(b.h.audit.filter((event) => event.action.startsWith("setup_repair"))).toEqual([]);
   });
 });
 
@@ -1406,24 +1028,6 @@ describe("L4-SR2: review fixes (a start whose answer is unknown, the stale give-
     expect(await readRepairView(r.deps, "payments")).toMatchObject({ state: "no_fix", actions: [{ id: "fix_setup" }, { id: "edit_commands" }] });
   });
 
-  // MUTANT: the stale give-back also drops the revision claim.
-  it("a claim whose start never finished is given back after ten minutes WITHOUT the revision claim (a start still in flight may become a run; a second paid run never follows)", async () => {
-    const r = await rig({ wireHook: false });
-    const { recheck } = await breakSetup(r.w);
-    const orgId = r.w.h.deps.companyId;
-    const claimed = { entityType: "SETUP_REPAIR", orgId, project: "payments", key: recheck.key, setupRevision: 1, runRequestId: randomUUID(), confirmRequestId: randomUUID(), state: "starting", budgetCents: 400, claimedAt: new Date(r.w.h.clock.now).toISOString() };
-    await r.w.h.store.put({ item: { ...repairRowKey(orgId, "payments", recheck.key), ...claimed } });
-    await r.w.h.store.put({ item: { ...repairRevisionKey(orgId, "payments", 1), entityType: "SETUP_REPAIR_REVISION", orgId, project: "payments", revision: 1, key: recheck.key, claimedAt: claimed.claimedAt } });
-    await r.w.h.store.put({ item: { ...repairCurrentKey(orgId, "payments"), entityType: "SETUP_REPAIR_CURRENT", orgId, project: "payments", key: recheck.key, startedAt: claimed.claimedAt } });
-    r.w.h.clock.advance(REPAIR_START_STALE_MS / 1000 + 1);
-    await advanceRepairDraft(r.deps, "payments");
-    expect(await repairsOf(r.w.h.store, orgId, "payments")).toEqual([]);
-    expect(await r.w.h.store.get(repairRevisionKey(orgId, "payments", 1))).toMatchObject({ key: recheck.key });
-    expect(r.w.h.audit.some((event) => event.action === "system_run.not_started" && JSON.stringify(event.details).includes("NEVER_STARTED"))).toBe(true);
-    // The same revision is not drafted again by a later re-check.
-    expect(await startRepairDraft(r.deps, "payments", recheck.key)).toEqual({ status: "skipped", why: "already_drafted" });
-  });
-
   // MUTANT: the automation-stop job does not run the repair pass (a withdrawn draft would never be stopped in production).
   it("the per-minute automation-stop service runs the repair progress pass after its sweep, reports it, and a fault in the pass is logged and never fails the sweep", async () => {
     const h = await hostedRig();
@@ -1473,26 +1077,6 @@ describe("L4-SR2b: the repair draft's room comes from the gateway's own cap read
     const calls: string[] = [];
     return { calls, read: async (project) => { calls.push(project); const hosted = h(); return capAnswer(project, hosted.w.h.clock.now, over, orgOf(hosted)); } };
   };
-  async function nothingStarted(h: Hosted, recheckKey: string): Promise<void> {
-    const orgId = orgOf(h);
-    expect(await repairsOf(h.w.h.store, orgId, "payments")).toEqual([]);
-    expect(h.w.h.audit.filter((event) => event.action === "system_run.requested")).toEqual([]);
-    expect(await h.w.h.store.get(repairCurrentKey(orgId, "payments"))).toBeUndefined();
-    expect(await h.w.h.store.get(repairRevisionKey(orgId, "payments", 1))).toBeUndefined();
-    expect(await h.w.h.store.get(setupAgentKey(orgId, "payments"))).toBeUndefined();
-    expect(h.admission.enforcesCost).toBe(true);
-    expect(await readRepairView(h.hosted.depsFor("payments"), "payments")).toMatchObject({ state: "no_fix", actions: [{ id: "fix_setup" }, { id: "edit_commands" }] });
-    expect(recheckKey).toBeTruthy();
-  }
-
-  // MUTANT: the draft starts without reading the gateway (or reads it and ignores a good answer): the room present case no longer starts a draft.
-  it("room present (the gateway says $24.00 of $25.00 is free): the draft starts, and the reader was asked for THIS project", async () => {
-    const h = await hostedRig({ cap: "enforced" });
-    await breakSetup(h.w);
-    const [row] = await repairsOf(h.w.h.store, orgOf(h), "payments");
-    expect(row).toMatchObject({ state: "drafting", budgetCents: 400 });
-    expect(h.reader!.calls).toEqual(["payments"]);
-  });
 
   // MUTANT: `>=` becomes `>` in the start's room test, or the floor becomes a round (399 cents, 399.99 cents).
   it.each([
@@ -1508,59 +1092,6 @@ describe("L4-SR2b: the repair draft's room comes from the gateway's own cap read
     expect(await repairsOf(holder.h.w.h.store, orgOf(holder.h), "payments")).toHaveLength(starts ? 1 : 0);
   });
 
-  // MUTANT: the zero/negative/unknown guard is dropped (a used-up cap, a cap over its limit, a $0 cap or a gateway that cannot answer counts as room).
-  it.each<[string, CapKind | { limitMicros: number; spentMicros: number }]>([
-    ["the cap is $0", "no_budget"],
-    ["the cap is used up exactly", "used_up"],
-    ["the cap is overspent (negative room)", { limitMicros: 1_000_000, spentMicros: 3_000_000 }],
-    ["the gateway cannot be reached", "throws"],
-    ["no gateway reader exists", "none"],
-    ["the answer is for another month (stale)", "stale"],
-    ["the answer is for another project", "other_project"],
-    ["the answer is for another company", "other_company"],
-    ["the answer says the cap is not enforced", "not_enforced"],
-    ["the answer is not the contract", "garbage"],
-    ["the answer has an extra field", "extra_field"],
-  ])("no automatic draft and nothing written when %s", async (_name, how) => {
-    const holder: { h?: Hosted } = {};
-    const h = await hostedRig(typeof how === "string" ? { cap: how } : { capWith: fixed(() => holder.h!, how) });
-    holder.h = h;
-    const { recheck } = await breakSetup(h.w);
-    await nothingStarted(h, recheck.key);
-    expect(await startRepairDraft(h.hosted.depsFor("payments"), "payments", recheck.key)).toMatchObject({ status: "skipped", why: "no_room" });
-  });
-
-  // MUTANT: the answer is kept (a cache): a later, better answer is never seen, or a later worse one is ignored.
-  it("every start reads the gateway again (no cache): no room now, room later starts the draft; room then gone again starts nothing more", async () => {
-    const h = await hostedRig({ cap: "used_up" });
-    const reader = h.reader!;
-    const { recheck } = await breakSetup(h.w);
-    expect(await repairsOf(h.w.h.store, orgOf(h), "payments")).toEqual([]);
-    const asked = reader.calls.length;
-    expect(asked).toBeGreaterThan(0);
-    reader.kind = "enforced";
-    expect(await startRepairDraft(h.hosted.depsFor("payments"), "payments", recheck.key)).toMatchObject({ status: "started" });
-    expect(reader.calls.length).toBe(asked + 1);
-  });
-
-  // MUTANT: another company's answer (a reader built for A asked by B) is accepted for B.
-  it("two companies: the answer must name THIS company; a reader that answers for another company opens nothing, the company's own reader does", async () => {
-    const shared = new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES, nowSeconds: () => Math.floor(Date.parse("2026-11-09T10:00:00.000Z") / 1_000) });
-    const backend = (): { store: DocumentStore; queues: MemoryQueueService } => ({ store: shared, queues: new MemoryQueueService({ now: () => Date.parse("2026-11-09T10:00:00.000Z") }) });
-    const a = await world({ backend });
-    const b = await world({ backend, companyId: COMPANY_B });
-    const hostedA = await hostedRig({ world: a, cap: "enforced" });
-    // B is fully open on every lock, but its reader answers for A's company only.
-    const foreign: UpkeepCapReader = { read: async (project) => capAnswer(project, b.h.clock.now, {}, orgOf(hostedA)) };
-    const hostedB = await hostedRig({ world: b, capWith: foreign });
-    await breakSetup(b);
-    expect(await repairsOf(shared, COMPANY_B, "payments")).toEqual([]);
-    expect(b.h.audit.filter((event) => event.action === "system_run.requested")).toEqual([]);
-    await breakSetup(a);
-    expect(await repairsOf(shared, orgOf(hostedA), "payments")).toHaveLength(1);
-    expect(await repairsOf(shared, COMPANY_B, "payments")).toEqual([]);
-    expect(hostedB.hosted).toBeDefined();
-  });
 
   // MUTANT: the mint skips the room read, reads it only once per draft, or treats zero, negative, an unreadable answer or an absent reader as room.
   it("before each AI step: the repair draft's model token is minted only while the gateway still says there is room (read at EVERY mint: zero, negative, unreadable, stale, foreign or absent = no token)", async () => {

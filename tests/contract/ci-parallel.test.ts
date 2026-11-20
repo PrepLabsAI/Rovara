@@ -77,11 +77,38 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     expect(test.strategy.matrix.shard).toBe("${{ fromJSON(needs.plan.outputs.shards) }}");
     const all = test.steps.find((step) => step.name === "Tests (the whole suite)")!;
     expect(all.if).toBe("needs.plan.outputs.tests == 'all'");
-    expect(all.run).toBe("npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
+    // #1200: $AS_TESTER is empty on GitHub's runner and drops root to an ordinary account on CodeBuild's.
+    expect(all.run).toBe("$AS_TESTER npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
     const changed = test.steps.find((step) => step.name === "Tests (the ones this change can reach)")!;
     expect(changed.if).toBe("needs.plan.outputs.tests == 'changed'");
-    expect(changed.run).toContain("npm test -- --changed HEAD^1 --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
-    expect(changed.run).toContain("xargs npm test -- --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
+    expect(changed.run).toContain("$AS_TESTER npm test -- --changed HEAD^1 --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
+    expect(changed.run).toContain("xargs $AS_TESTER npm test -- --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
+  });
+
+  // #1200: a pull request into mainline from this repository runs its shards on the account's CodeBuild runner (infra/lib/ci-runner.ts); a fork's and
+  // every other run use GitHub's free runner. The tests run as an ordinary account there, since CodeBuild runs the job as root.
+  it("runs the shards of a same-repository pull request into mainline on the CodeBuild runner, as an ordinary account, and everything else on GitHub's", async () => {
+    const test = (await workflow()).jobs.test as Job & { "runs-on"?: string };
+    expect(test["runs-on"]).toBe("${{ (github.event_name == 'pull_request' && github.base_ref == 'mainline' && github.event.pull_request.head.repo.full_name == github.repository) && format('codebuild-rovara-ci-tests-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-latest' }}");
+    const order = test.steps.map((step) => step.name ?? step.uses ?? "");
+    const asTester = test.steps.find((step) => step.name === "Run the tests as an ordinary account (CodeBuild only)")!;
+    expect(order.indexOf(asTester.name!)).toBeGreaterThan(order.indexOf("Unpack the build output"));
+    expect(order.indexOf(asTester.name!)).toBeLessThan(order.findIndex((name) => name.startsWith("Tests (")));
+    expect(asTester.run).toContain('if [ "$(id -u)" != 0 ]; then exit 0; fi');
+    expect(asTester.run).toContain('as="setpriv --reuid=65534 --regid=65534 --clear-groups"');
+    // A GitHub runner's environment: short HOME and TMPDIR (socket paths), enterable PATH only, no AWS_* or npm_* variables, a writable step summary.
+    expect(asTester.run).toContain('echo "AS_TESTER=$as env $unset_vars HOME=/tmp/h TMPDIR=/tmp/t PATH=$tester_path GITHUB_STEP_SUMMARY=/tmp/h/step-summary.md /usr/bin/python3 /tmp/h/reaper.py" >> "$GITHUB_ENV"');
+    // the container's PID 1 does not reap orphans: the tests run under a child subreaper
+    expect(asTester.run).toContain("ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0)");
+    // the application spool's ancestry check: nothing above the checkout writable by others
+    expect(asTester.run).toContain('while [ "$path" != / ]; do chmod go-w "$path"; path="$(dirname "$path")"; done');
+    expect(asTester.run).toContain("grep -oiE '^(aws|npm)_[a-z0-9_]*'");
+    const gitleaks = test.steps.find((step) => step.name === "Install gitleaks 8.30.1 (checksum pinned)")!;
+    expect(gitleaks.run).toContain("gitleaks_8.30.1_linux_${arch}.tar.gz");
+    // Every other job stays on GitHub's runners.
+    for (const [name, job] of Object.entries((await workflow()).jobs)) {
+      if (name !== "test") expect(String((job as { "runs-on"?: string })["runs-on"]), name).not.toContain("codebuild");
+    }
   });
 
   it("reports a check called `ci-mode (full)` only in a full run, for the merge to require", async () => {
@@ -115,7 +142,6 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     expect(job["runs-on"]).toBe("ubuntu-24.04-arm");
     // Only when the plan says its area changed (always in a full run).
     expect(job.if).toBe("needs.plan.outputs.linux == 'true'");
-    expect(job.steps.every((step) => step.if === undefined)).toBe(true);
     const run = job.steps.map((step) => step.run ?? "").join("\n");
     // The job installs the firewall by running the heredoc inside boot.sh as it is (never a copy of the rules), before anything builds or runs a container.
     const firewall = job.steps.map((step) => step.run ?? "").find((text) => text.includes("<<'FIREWALL'"))!;
@@ -136,6 +162,39 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     expect(run.indexOf("executor-smoke.ts")).toBeLessThan(run.indexOf("npx vitest run tests/linux"));
     expect(run).not.toMatch(/seccomp=unconfined|--privileged|--cap-add|--no-sandbox/);
     expect(run).toContain("npx vitest run tests/linux");
+  });
+
+  it("runs independent Linux checks after a failed check, only after setup and the executor smoke check succeed", async () => {
+    const job = (await workflow()).jobs["linux-runtime"]!;
+    const firstTest = job.steps.findIndex((step) => (step.run ?? "").startsWith("npx vitest run"));
+    expect(firstTest).toBeGreaterThan(0);
+    const setup = job.steps.slice(0, firstTest);
+    // Setup remains sequential: failed checkout, firewall, image build or package build skips the smoke check.
+    expect(setup.every((step) => step.if === undefined)).toBe(true);
+    expect(setup.filter((step) => step.id !== undefined).map((step) => step.id)).toEqual(["runtime_setup"]);
+    expect(setup.at(-1)).toMatchObject({
+      id: "runtime_setup",
+      run: "npx tsx scripts/executor-smoke.ts rovara-e2e-executor:ci",
+    });
+    const checks = job.steps.slice(firstTest);
+    expect(checks.map((step) => step.name)).toEqual([
+      "Linux runtime tests",
+      "Docker 25 DNS regression (dind 25.0.5)",
+      "Model channel (scripted route)",
+      "Agent steps (scripted route)",
+      "Agent qualification probes (scripted route)",
+      "Mid-step values never reach the model (scripted route)",
+      "Native browser journey",
+      "Native M1.3 journeys",
+      "Native M1.4 journeys",
+      "Sandbox egress gateway (boot stage on real Docker)",
+    ]);
+    for (const step of checks) {
+      expect(step.run, step.name).toMatch(/^npx vitest run /u);
+      // The status functions remove Actions' implicit success() gate; the outcome keeps failed/skipped setup closed.
+      // Neither status function is true after cancellation, unlike always().
+      expect(step.if, step.name).toBe("(success() || failure()) && steps.runtime_setup.outcome == 'success'");
+    }
   });
 
   it("runs the Docker 25 DNS regression test once, in its own step under the same gate as the other Linux tests, and keeps it out of the generic step", async () => {

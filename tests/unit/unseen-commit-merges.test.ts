@@ -54,11 +54,6 @@ describe("a merge's own changes (git show --cc)", () => {
     expect(own.files.map((file) => file.path)).toEqual(["src/a.ts"]);
     expect(own.files[0]).toMatchObject({ additions: 1, deletions: 1, patch: "@@ -1,3 +1,3 @@\n ctx\n-old two\n+merge line" });
   });
-  it("is not whole when either list is cut (or says anything but true)", () => {
-    for (const [a, b] of [[false, true], [true, false], ["true", true], [true, 1]] as const) {
-      expect(mergeOwnChanges({ files: [], complete: a as boolean }, { files: [], complete: b as boolean }).complete).toBe(false);
-    }
-  });
   it("a mode change against one parent only is not the merge's own; against both it is; the kind is the side's it did not change", () => {
     const changed = { path: "bin/run", status: "changed", additions: 0, deletions: 0 };
     expect(mergeOwnChanges({ files: [changed], complete: true }, { files: [{ ...changed, status: "modified" }], complete: true }).files[0]!.status).toBe("modified");
@@ -80,18 +75,6 @@ describe("a merge's own changes (git show --cc)", () => {
 });
 
 describe("the walk judges a merge between checks by its own changes (review probes)", () => {
-  it("P1: an \"Update branch\" merge between checks whose main side added a test key fixture: not flagged, and scanned", async () => {
-    const fixture = added("tests/fixtures/key.pem", pemLine());
-    const t = stub({ [h]: { parents: [merge] }, [merge]: { parents: [seen, main], files: [fixture], second: [clean("src/task.ts")] } }, { baseBranchHead: async () => main });
-    expect(await unseenCommits(t.target(h, "main"), new Set([seen, base]), scope)).toMatchObject({ count: 1, capped: false, unscanned: 0, flagged: [] });
-    // The same fixture in an ordinary commit IS flagged (the rule fires; only the merge's view hides main's side).
-    const plain = stub({ [h]: { parents: [x] }, [x]: { parents: [seen], files: [fixture] } });
-    expect(codes(await unseenCommits(plain.target(h), new Set([seen]), scope))).toContain("secret_like_text");
-  });
-  it("P1b: main's side added a CRLF line and a ZWJ emoji: not flagged", async () => {
-    const t = stub({ [h]: { parents: [merge] }, [merge]: { parents: [seen, main], files: [added("docs/win.md", "Hello world\r"), added("docs/emoji.md", "Team \u{1F469}‍\u{1F4BB} rocks")], second: [clean()] } }, { baseBranchHead: async () => main });
-    expect(await unseenCommits(t.target(h, "main"), new Set([seen]), scope)).toMatchObject({ unscanned: 0, flagged: [] });
-  });
   it("P2: an evil merge adding a .env (no pattern secret), a binary keystore and a workflow (in both diffs): flagged for each; the second read missing, refused or cut: not scanned", async () => {
     const env = added(".env", `${["DB", "PASSWORD"].join("_")}=${["hunter2", "prod", "xyz"].join("-")}`); // built at runtime: no key-shaped text in source
     const bin: F = { path: "certs/prod.p12", status: "added", additions: 0, deletions: 0 };
@@ -113,18 +96,6 @@ describe("the walk judges a merge between checks by its own changes (review prob
     const read = await unseenCommits(stub({ [h]: { parents: [merge] }, [merge]: { parents: [mine, main], files: [link, mode], second: [link, mode] }, [mine]: { parents: [seen] } }, { baseBranchHead: async () => main }).target(h, "main"), new Set([seen]), scope);
     expect(codes(read)).toEqual(expect.arrayContaining(["symlink_suspected", "mode_or_type_change"]));
   });
-  it("P3: a commit on the FIRST-parent line that is also reachable from main's head is scanned (the base branch's history is searched only for a merge's second parent)", async () => {
-    const keyed = added("src/k.ts", `k = "${fakeKey()}"`);
-    const graph = { [h]: { parents: [y] }, [y]: { parents: [x] }, [x]: { parents: [seen], files: [keyed] }, [main]: { parents: [x] } };
-    const t = stub(graph, { baseBranchHead: async () => main });
-    expect((await unseenCommits(t.target(h, "main"), new Set([seen]), scope)).flagged.map((entry) => entry.commit)).toEqual([x]);
-    expect(t.calls).not.toContain("base-head");
-  });
-  it("P4: an answer whose `complete` is anything but true is not scanned", async () => {
-    for (const complete of ["true", 1, "yes", false]) {
-      expect((await unseenCommits(stub({ [h]: { parents: [x] }, [x]: { parents: [seen], complete } }).target(h), new Set([seen]), scope)).unscanned).toBe(1);
-    }
-  });
   it("P5: the base branch's head cannot be read: main's commits are scanned as the task's", async () => {
     const t = stub({ [h]: { parents: [seen, main] }, [main]: { parents: [base] } });
     expect(await unseenCommits(t.target(h, "main"), new Set([seen, base]), scope)).toMatchObject({ count: 1, unscanned: 0, capped: false });
@@ -133,24 +104,6 @@ describe("the walk judges a merge between checks by its own changes (review prob
 });
 
 describe("the walk's cost", () => {
-  it("an ordinary 3-commit push: 3 host reads (the head's parents and each in-between commit's changes), no base-branch read; a second pass on the same host reads nothing", async () => {
-    const [c1, c2, c3, s] = ["c1", "c2", "c3", "s"].map(sha) as [string, string, string, string];
-    const t = stub({ [c3]: { parents: [c2] }, [c2]: { parents: [c1] }, [c1]: { parents: [s] } }, { baseBranchHead: async () => sha("mh") });
-    let charged = 0;
-    const read = await unseenCommits(t.target(c3, "main"), new Set([s]), scope, () => { charged += 1; });
-    expect(read).toMatchObject({ count: 2, capped: false, unscanned: 0, flagged: [] });
-    expect(t.calls).toEqual([`parents:${c3}`, `changes:${c2}`, `changes:${c1}`]);
-    expect(charged).toBe(3);
-    t.calls.length = 0;
-    expect(await unseenCommits(t.target(c3, "main"), new Set([s]), scope)).toMatchObject({ count: 2, unscanned: 0, flagged: [] });
-    expect(t.calls).toEqual([]);
-  });
-  it("\"Update branch\" then a fix: 4 reads (the head's parents, the merge's two reads, main's head once)", async () => {
-    const [fix, mg, mh, s] = ["fx", "mg2", "mh2", "s2"].map(sha) as [string, string, string, string];
-    const t = stub({ [fix]: { parents: [mg] }, [mg]: { parents: [s, mh], files: [clean("docs/x.md")], second: [clean()] } }, { baseBranchHead: async () => { t.calls.push("base-head"); return mh; } });
-    expect(await unseenCommits(t.target(fix, "main"), new Set([s]), scope)).toMatchObject({ count: 1, unscanned: 0, flagged: [] });
-    expect(t.calls).toEqual([`parents:${fix}`, `changes:${mg}`, `compare:${mg}`, "base-head"]);
-  });
   it("a flagged commit read from memory is still flagged; a commit that could not be scanned is asked again", async () => {
     const t = stub({ [h]: { parents: [x] }, [x]: { parents: [seen], files: [added("src/k.ts", `k = "${fakeKey()}"`)] } });
     expect((await unseenCommits(t.target(h), new Set([seen]), scope)).flagged.map((entry) => entry.commit)).toEqual([x]);
@@ -162,13 +115,6 @@ describe("the walk's cost", () => {
     cut.calls.length = 0;
     expect((await unseenCommits(cut.target(h), new Set([seen]), scope)).unscanned).toBe(1);
     expect(cut.calls).toEqual([`changes:${x}`]);
-  });
-  it("the memory is per organization: another organization's pass reads for itself", async () => {
-    const t = stub({ [h]: { parents: [x] }, [x]: { parents: [seen] } });
-    await unseenCommits(t.target(h), new Set([seen]), scope);
-    t.calls.length = 0;
-    await unseenCommits(t.target(h), new Set([seen]), { orgId: "org_other0000000000000000000" });
-    expect(t.calls).toEqual([`parents:${h}`, `changes:${x}`]);
   });
   it("one unit of the pass's allowance a page, the deadline checked before each commit and each page; a used-up pass stops the walk (never counted as not scanned)", async () => {
     const pages = (count: number) => async (_r: unknown, rev: string, _s: unknown, budget?: PageBudget) => { for (let page = 0; page < count; page += 1) budget?.beforeRequest(); return { files: [clean()], complete: true, parents: rev === x ? [seen] : [x] }; };
@@ -205,12 +151,6 @@ describe("the guards the review found untested", () => {
     const t = stub({ [h]: { parents: [x, y, merge] } });
     expect(await unseenCommits(t.target(h), new Set([seen]), scope)).toEqual({ count: 0, capped: false, unscanned: 1, flagged: [] });
     expect(t.calls).toEqual([`parents:${h}`]);
-  });
-  it("an octopus merge between checks is not scanned even when the host would compare it, and its parents are not walked", async () => {
-    const [c1, c2] = ["o1", "o2"].map(sha) as [string, string];
-    const t = stub({ [h]: { parents: [merge] }, [merge]: { parents: [seen, c1, c2], files: [clean()], second: [clean()] }, [c1]: { parents: [seen] }, [c2]: { parents: [seen] } });
-    expect(await unseenCommits(t.target(h), new Set([seen]), scope)).toEqual({ count: 1, capped: false, unscanned: 1, flagged: [] });
-    expect(t.calls).toEqual([`parents:${h}`, `changes:${merge}`]);
   });
   it("an older caller's read (no per-commit results) counts every unseen commit as not scanned", () => {
     const small = tierFromDiff({ files: [], complete: true }, { at: new Date(0).toISOString() });

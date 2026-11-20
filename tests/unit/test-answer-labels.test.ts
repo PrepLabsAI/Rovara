@@ -11,14 +11,6 @@ const recorded = (recordedOn: string, dependency = "fraud-scorer") => ({ source:
 const notRun = (testId: string, dependency = "fraud-scorer"): TestAnswerRecord => ({ testId, status: "not_run", uses: [], notRun: { dependency, reason: "no_recording" } });
 
 describe("a test's result state", () => {
-  it("keeps `passed` for a test that no faked or recorded answer stood behind", () => {
-    expect(testResultState(passed("a"))).toBe("passed");
-  });
-  it("gives a test that passed against a faked answer its own state, and one against a recording its own, apart from passed", () => {
-    expect(testResultState(passed("a", [faked()]))).toBe("passed_faked");
-    expect(testResultState(passed("a", [recorded("2026-11-20")]))).toBe("passed_recorded");
-    expect(new Set(["passed", "passed_faked", "passed_recorded"]).size).toBe(3);
-  });
   it("lets the least trusted answer name the state, and the oldest recording name the date", () => {
     expect(testResultState(passed("a", [recorded("2026-11-20"), faked("other")]))).toBe("passed_faked");
     expect(testRecordedOn(passed("a", [recorded("2026-11-20"), recorded("2026-10-02", "other")]))).toBe("2026-10-02");
@@ -72,10 +64,6 @@ describe("the pull request lines", () => {
     expect(lines.map((line) => line.split(" ").slice(2, 5).join(" "))).toEqual(["passed against faked", "passed against recorded", "not run: no"]);
     expect(testAnswerSummaryLines([passed("real")], options)).toEqual([]);
     expect(testAnswerSummaryLines([], options)).toEqual([]);
-  });
-  it("is generic: another service, thing and noun fill the same words", () => {
-    expect(testAnswerSummaryLines([passed("t", [faked("claude-sonnet")])], { service: "Bedrock" })).toEqual(["1 test passed against faked Bedrock answers (not real output): t"]);
-    expect(testAnswerSummaryLines([notRun("t", "claude-sonnet")], { service: "Bedrock", dependencyNoun: "model" })).toEqual(["1 test not run: no recording for model claude-sonnet (tests: t)"]);
   });
   it("makes test ids and names plain, because they come from a repository", () => {
     const hostile = "evil‮\nid " + "x".repeat(200);

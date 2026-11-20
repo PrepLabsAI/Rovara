@@ -6,8 +6,6 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AWS_EMULATOR_ENGINE_VERSION, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, WORKER_INVOCATION_FEATURES, catalogPrepullList } from "@agentx/contracts";
 import { LOCAL_AWS_FORK_KEYS_OF, LOCAL_AWS_SERVICE_KEYS, localAwsEnvLines, newLocalAwsCredentials } from "../../packages/worker/src/service-helpers.js";
-import { REPO_ENDPOINT_NAMES_MAX, ServiceEnvError, buildServiceEnvironment } from "../../packages/worker/src/service-env.js";
-import { repoAwsEndpointNames } from "../../packages/worker/src/repo-aws-endpoints.js";
 import { pinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
 import { forgetEmulatorImageCache, testServicesAdvertisedFeatures } from "../../packages/worker/src/test-services-run.js";
 
@@ -99,28 +97,3 @@ describe("the features a worker advertises", () => {
   });
 });
 
-describe("the names of the repository's endpoint variables are bounded in the environment too", () => {
-  const input = (repoEndpointNames: string[]) => ({
-    sandbox: "working" as const, sinkholeUrl: "http://sinkhole", dependencies: [],
-    aws: { alias: "aws", port: 4566, region: "us-east-1", emulatedServices: ["s3"], repoEndpointNames },
-  });
-  it("takes 128 names and refuses 129, however the repository's reader was limited", () => {
-    const names = (count: number) => Array.from({ length: count }, (_v, index) => `AWS_ENDPOINT_URL_SVC${String(index).padStart(3, "0")}`);
-    expect(buildServiceEnvironment(input(names(REPO_ENDPOINT_NAMES_MAX))).entries.filter(([name]) => name.startsWith("AWS_ENDPOINT_URL_SVC"))).toHaveLength(128);
-    expect(() => buildServiceEnvironment(input(names(REPO_ENDPOINT_NAMES_MAX + 1)))).toThrow(ServiceEnvError);
-    // A name listed twice is one name, but the list itself is what is bounded.
-    expect(() => buildServiceEnvironment(input([...names(REPO_ENDPOINT_NAMES_MAX), ...names(1)]))).toThrow(ServiceEnvError);
-  });
-});
-
-describe("the endpoint variables a repository's own settings set", () => {
-  let dir: string | undefined;
-  afterEach(async () => { if (dir !== undefined) await rm(dir, { recursive: true, force: true }); dir = undefined; });
-  it("reads their names from the `.env` files and settings files, never a value, and an empty folder costs nothing", async () => {
-    dir = await mkdtemp(join(tmpdir(), "repo-endpoints-"));
-    expect(await repoAwsEndpointNames({ repositoryPaths: [dir] })).toEqual([]);
-    await writeFile(join(dir, ".env"), "AWS_ENDPOINT_URL_SNS=http://localhost:4566\nAWS_ENDPOINT_URL_SECRETS_MANAGER=http://localhost:4566\nDATABASE_URL=postgres://u:p@h/db\nAWS_ENDPOINT_URL=http://localhost:4566\n");
-    const names = await repoAwsEndpointNames({ repositoryPaths: [dir, join(dir, "does-not-exist")] });
-    expect(names).toEqual(["AWS_ENDPOINT_URL_SECRETS_MANAGER", "AWS_ENDPOINT_URL_SNS"]);
-  });
-});

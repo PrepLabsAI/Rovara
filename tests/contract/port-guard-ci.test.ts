@@ -2,8 +2,8 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import YAML from "yaml";
 
-interface Step { name?: string; run?: string; uses?: string; env?: Record<string, string>; with?: Record<string, unknown> }
-interface Job { if?: string; needs?: string | string[]; steps: Step[]; permissions?: unknown }
+interface Step { if?: string; "continue-on-error"?: unknown; name?: string; run?: string; uses?: string; env?: Record<string, string>; with?: Record<string, unknown> }
+interface Job { "continue-on-error"?: unknown; if?: string; needs?: string | string[]; steps: Step[]; permissions?: unknown }
 interface Workflow { on: Record<string, unknown>; permissions?: unknown; jobs: Record<string, Job> }
 
 const workflow = async () => YAML.parse(await readFile(".github/workflows/ci.yml", "utf8")) as Workflow;
@@ -23,6 +23,22 @@ describe("CI runs on code/next and checks the port there (docs/porting.md), and 
     expect(Object.keys(jobs).sort()).toEqual(["build", "ci-mode", "device-runtime", "linux-runtime", "live-aws", "local", "plan", "port-guard", "quick", "test"]);
     for (const [name, job] of Object.entries(jobs)) expect(JSON.stringify(job.needs ?? []), name).not.toContain("port-guard");
     expect(jobs.quick!.steps.map((step) => step.run ?? "").join("\n")).not.toContain("port-guard");
+  });
+
+  it("keeps Linux failures fatal while allowing independent checks to report, without changing other jobs' step gates", async () => {
+    const { jobs } = await workflow();
+    const linux = jobs["linux-runtime"]!;
+    expect(linux["continue-on-error"]).toBeUndefined();
+    for (const step of linux.steps) expect(step["continue-on-error"], step.name).toBeUndefined();
+    const checks = linux.steps.filter((step) => (step.run ?? "").startsWith("npx vitest run"));
+    expect(checks).toHaveLength(10);
+    for (const step of checks) {
+      expect(step.if, step.name).toBe("(success() || failure()) && steps.runtime_setup.outcome == 'success'");
+    }
+    for (const [name, job] of Object.entries(jobs)) {
+      if (name === "linux-runtime") continue;
+      for (const step of job.steps) expect(step.if ?? "", name).not.toContain("success() || failure()");
+    }
   });
 
   it("runs the guard over the commits code/next holds beyond mainline, on a push to code/next or a pull request into it, with no secret", async () => {
@@ -56,7 +72,9 @@ describe("CI runs on code/next and checks the port there (docs/porting.md), and 
     expect(JSON.stringify(job)).not.toContain("secrets.");
     // the downloaded scanner is pinned by version and checked against a checksum before it runs
     expect(run).toMatch(/gitleaks\/releases\/download\/v\d+\.\d+\.\d+\//);
-    expect(run).toMatch(/[0-9a-f]{64} {2}\S+gitleaks\.tar\.gz" \| sha256sum --check/);
+    // #1200: the arm64 or the x64 build, for the runner, each with its pinned checksum.
+    expect(run).toMatch(/arch=arm64; sum=[0-9a-f]{64}; else arch=x64; sum=[0-9a-f]{64}; fi/);
+    expect(run).toContain('echo "${sum}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check -');
   });
 
   it("installs the same pinned gitleaks in the test job, so the secret-scan tests in port-guard.test.ts run there and do not fail for a missing scanner", async () => {

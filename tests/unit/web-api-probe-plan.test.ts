@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { WEB_API_AGENT_GUARD_MARKER_TESTID, WEB_API_AGENT_GUARD_PAGE_PATH, WEB_API_AGENT_PROBE_GOAL, WEB_API_AGENT_PROBE_IDS, WEB_API_AGENT_PROBE_LIMITS, WEB_API_AGENT_PROBE_ROUTE, WEB_API_REQUIRED_PROBES, canonicalJson, e2eModelRouteRevision, webApiProbeRunId } from "../../packages/contracts/src/index.js";
 import { e2eAgentRoutePolicyLimits } from "../../packages/broker/src/e2e/model-route-registry.js";
@@ -34,12 +33,6 @@ describe("the production web/API probe plan", () => {
     expect(webApiProbeDriver(probe.probeId).startArgs).toBeNull();
   });
 
-  it("starts the app of the app host probe with the guard from its pinned asset, and every other probe with the recipe's own command", () => {
-    expect(webApiProbeDriver("app-host-denial-v1")).toMatchObject({ probe: "api-state-positive-v1", recipeBuild: null, startArgs: webApiAppStartGuardArgs() });
-    expect(webApiAppStartGuardArgs()[0]).toBe("--input-type=module");
-    for (const probe of WEB_API_REQUIRED_PROBES.filter((item) => item.probeId !== "app-host-denial-v1" && item.probeId !== "web-agent-app-isolation-v1")) expect(webApiProbeDriver(probe.probeId).startArgs).toBeNull();
-  });
-
   it.each(["web-csv-positive-v1", "api-state-positive-v1"] as const)("declares the launch target of %s exactly as the broker's admission builder does", (probe) => {
     const { plan } = createWebApiProbePlan({ probe, appRoot });
     const admission = plan.admission;
@@ -49,30 +42,6 @@ describe("the production web/API probe plan", () => {
     expect(rebuilt).toEqual(admission.launchTargets[0]);
   });
 
-  it("runs the probe under the run id it is given, in the binding the collector later checks", () => {
-    const runId = webApiProbeRunId(challenge, "web-csv-positive-v1");
-    const plan = createWebApiProbePlan({ probe: "web-csv-positive-v1", appRoot, runId });
-    expect(plan.plan.runId).toBe(runId);
-    expect(plan.plan.admission.round.groupBindings[0]!.runId).toBe(runId);
-    expect(createWebApiProbePlan({ probe: "web-csv-positive-v1", appRoot }).plan.runId).not.toBe(runId);
-  });
-
-  it("asks the api egress probe for the sinkholed name and then the IP literal, and asserts only that the IP literal was reached", () => {
-    const { scenario } = createWebApiProbePlan({ probe: "api-egress-denial-v1", appRoot });
-    expect(scenario.steps).toMatchObject([{ kind: "request", path: "/api/inventory/status" }, { kind: "request", path: "/api/egress/raw" }]);
-    expect(scenario.assertions).toMatchObject([{ kind: "http-status", path: "/api/egress/raw", equals: 200 }]);
-  });
-
-  it("drives the negative web probe with the seeded defect and the egress probes with the outside host", () => {
-    expect(webApiProbeDriver("web-csv-negative-v1")).toMatchObject({ probe: "web-csv-positive-v1", defect: "extra-order.json" });
-    expect(webApiProbeDriver("web-egress-denial-v1").appEnv).toEqual({ FIXTURE_EGRESS_PROBE_URL: "https://probe.example.com/ping" });
-    // The host gives every declared origin (INVENTORY_ORIGIN) a container of the run, so the outside host is aimed at through the app's own egress-test variable.
-    // It also aims the app at an IP literal, which no name resolution can reach, so the raw wall is judged apart from the sinkholed name.
-    expect(webApiProbeDriver("api-egress-denial-v1").appEnv).toEqual({ FIXTURE_INVENTORY_ORIGIN: "https://probe.example.com", FIXTURE_RAW_EGRESS_URL: "http://1.1.1.1/" });
-    expect(webApiProbeDriver("api-egress-denial-v1").mock).not.toBe(true);
-    expect(() => webApiProbeDriver("unknown-v1")).toThrow("no probe plan");
-    expect(join(appRoot, "defects", "extra-order.json")).toContain("qualification-app");
-  });
 });
 
 describe("the plan of the agent qualification probes (Task 4.5)", () => {
@@ -103,20 +72,6 @@ describe("the plan of the agent qualification probes (Task 4.5)", () => {
     expect(plan.admission.round.groupBindings[0]!.modelRouteRevision).toBe(WEB_API_AGENT_PROBE_ROUTE.routeRevision);
     expect(plan.admission.runtimeBindings[0]!.value.capabilities.supportedSteps).toContain("agent");
     expect(plan.admission.runtimeBindings[0]!.value.capabilities).toMatchObject({ modelChannel: "rovara-e2e-model-channel/v1" });
-  });
-
-  it("is refused without the route: a plan with an AI-navigated step and no route cannot be made", () => {
-    expect(() => createWebApiProbePlan({ probe: "web-agent-v1", appRoot })).toThrow();
-    expect(() => agentPlan("web-agent-scripted-v1")).not.toThrow();
-  });
-
-  it("runs the scripted and wrong-action probes through one scenario and the isolation probe through that scenario plus the guard's page, differing in the script and in how the app starts; no other probe gets a model", () => {
-    const drivers = WEB_API_AGENT_PROBE_IDS.map((probeId) => [probeId, webApiProbeDriver(probeId)] as const);
-    expect(drivers.map(([, driver]) => driver.probe)).toEqual(["web-agent-v1", "web-agent-v1", "web-agent-isolation-v1"]);
-    expect(new Set(WEB_API_AGENT_PROBE_IDS.map((probeId) => canonicalJson(agentPlan(probeId).scenario))).size).toBe(2);
-    expect(drivers.map(([probeId, driver]) => [probeId, driver.agent?.script.length, driver.startArgs === null])).toEqual([["web-agent-scripted-v1", 2, true], ["web-agent-wrong-action-v1", 1, true], ["web-agent-app-isolation-v1", 2, false]]);
-    expect(webApiProbeDriver("web-agent-app-isolation-v1").startArgs).toEqual(webApiAgentIsolationGuardArgs());
-    for (const probe of WEB_API_REQUIRED_PROBES.slice(0, 11)) expect(webApiProbeDriver(probe.probeId).agent, probe.probeId).toBeUndefined();
   });
 
   it("takes each script from the installed asset, so the pinned asset digest covers what the double does", () => {

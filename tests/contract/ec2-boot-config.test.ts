@@ -121,11 +121,11 @@ describe("EC2 worker user data", () => {
     expect(worstCase.openRouterProviders).toHaveLength(512);
     expect(worstCase.anthropicSecretArn).toHaveLength(SECRET_ARN_MAX_LENGTH);
     const compressed = Buffer.from(ec2WorkerUserData(worstCase, bootScript), "base64").length;
-    // EC2 measures user data before base64 encoding; at least 1.5 KB of it stays free for boot changes. It was 4 KB until the opt-in
+    // EC2 measures user data before base64 encoding; at least 1 KB of it stays free for boot changes. It was 4 KB until the opt-in
     // TEST qualification hook (about 1.5 KB compressed) and the executor image setting were added, then 2 KB until the container firewall
-    // rules (about 330 bytes compressed) landed: this worst case sets every value at its maximum at once, which no real worker's
-    // configuration does.
-    expect(compressed).toBeLessThanOrEqual(EC2_USER_DATA_MAX_BYTES - 1_536 - HEADROOM_MARGIN_BYTES);
+    // rules (about 330 bytes compressed) landed, then 1.5 KB until the setup-run rules and their state file (about 600 bytes compressed,
+    // 2026-11-20) landed: this worst case sets every value at its maximum at once, which no real worker's configuration does.
+    expect(compressed).toBeLessThanOrEqual(EC2_USER_DATA_MAX_BYTES - 1_024 - HEADROOM_MARGIN_BYTES);
   });
 
   it("measures the limit on the compressed user data, not the script (#229)", () => {

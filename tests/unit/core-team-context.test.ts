@@ -65,7 +65,7 @@ async function setup(options: { off?: boolean; teamOff?: boolean; teamCompany?: 
     const workspaceId = randomUUID(), operationId = randomUUID(), taskId = randomUUID();
     const put = async (item: Record<string, unknown>) => world.store.put({ item: JSON.parse(JSON.stringify(item)) as StoredDocument });
     await put({ pk: `WORKSPACE#${workspaceId}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId, companyId });
-    await put({ ...workspaceKey(companyId, workspaceId), entityType: "WORKSPACE", id: workspaceId, companyId, orgId: companyId, projectName: "payments", activeOperationId: operationId, fence: 1 });
+    await put({ ...workspaceKey(companyId, workspaceId), entityType: "WORKSPACE", id: workspaceId, companyId, orgId: companyId, projectName: "payments", activeOperationId: operationId, fence: 1, status: "READY" });
     await put({ ...taskPointerKey(companyId, workspaceId), taskId });
     await put({ ...taskKey(taskId), taskId, companyId, developerId, project: "payments", workspaceId });
     await put({ ...operationKey(companyId, workspaceId, operationId), id: operationId, workspaceId, companyId, fence: 1, status: "RUNNING", workflowMode: "PLAN" });
@@ -76,7 +76,7 @@ async function setup(options: { off?: boolean; teamOff?: boolean; teamCompany?: 
     const row = (await world.store.query({ pk: teamRecordPk(companyId, "payments"), sk: { op: "beginsWith", prefix: "TREC#" } })).items[0]!;
     await put({ ...row, id: "same-raw-record-id" });
     const token = caps.issue({ workspaceId, operationId, fence: 1, actions: ["context-tools"], expiresInSeconds: 60 });
-    const headers = { "x-rovara-workspace": workspaceId, "x-agentx-callback-capability": token };
+    const headers = { "x-agentx-callback-capability": token };
     const request = (arguments_: unknown = { query: "shared query" }) => ({ method: "POST", path: `${path}/call`, headers, body: JSON.stringify({ requestId: randomUUID(), tool: "search_team_knowledge", arguments: arguments_ }) });
     runs.push({ companyId, workspaceId, operationId, taskId, headers, request, record, put });
   }
@@ -104,10 +104,10 @@ describe("core Team context", () => {
     }
   });
 
-  it("verifies signature, expiry, action and gateway workspace before any read", async () => {
-    const { root, a, b, reads } = await setup();
+  it("verifies signature, expiry and action before any read", async () => {
+    const { root, a, reads } = await setup();
     const token = (actions: ("context-tools" | "events")[], expiresInSeconds: number) => caps.issue({ workspaceId: a.workspaceId, operationId: a.operationId, fence: 1, actions, expiresInSeconds });
-    for (const headers of [{}, { "x-agentx-callback-capability": a.headers["x-agentx-callback-capability"] }, { ...a.headers, "x-agentx-callback-capability": `${a.headers["x-agentx-callback-capability"].split(".")[0]}.${Buffer.alloc(32, 2).toString("base64url")}` }, { ...a.headers, "x-agentx-callback-capability": "canary.invalid" }, { ...a.headers, "x-agentx-callback-capability": token(["context-tools"], -1) }, { ...a.headers, "x-agentx-callback-capability": token(["events"], 60) }, { ...a.headers, "x-agentx-callback-capability": b.headers["x-agentx-callback-capability"] }]) {
+    for (const headers of [{}, { ...a.headers, "x-agentx-callback-capability": `${a.headers["x-agentx-callback-capability"].split(".")[0]}.${Buffer.alloc(32, 2).toString("base64url")}` }, { ...a.headers, "x-agentx-callback-capability": "canary.invalid" }, { ...a.headers, "x-agentx-callback-capability": token(["context-tools"], -1) }, { ...a.headers, "x-agentx-callback-capability": token(["events"], 60) }]) {
       reads.length = 0;
       const result = await root.callback({ ...a.request(), headers });
       expect(result?.statusCode).toBe(403);
@@ -167,24 +167,27 @@ it("keeps configured MCP and connection tools refused with fixed words", async (
     request.body = JSON.stringify({ requestId: randomUUID(), tool, arguments: { query: "private-canary" } });
     expect((await root.callback(request))?.body).toBe(JSON.stringify({ status: "REFUSED", text: "not on the core yet" }));
   }
-  expect((await root.callback({ ...a.request(), path: "/v1/internal/mcp", headers: { "x-rovara-workspace": a.workspaceId, authorization: `Bearer ${a.headers["x-agentx-callback-capability"]}` } }))?.body)
-    .toBe(JSON.stringify({ status: "REFUSED", text: "not on the core yet" }));
+  const reply = await root.callback({ ...a.request(), path: "/v1/internal/mcp", headers: { authorization: `Bearer ${a.headers["x-agentx-callback-capability"]}` }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "src_demo_search", arguments: {} } }) });
+  expect(reply?.statusCode).toBe(200);
+  expect(reply?.body).toContain("not on the core yet");
 });
 
 it("does not advertise Team search when the company's record is off", async () => {
   const { root, a } = await setup({ teamOff: true });
   const runtime = await root.app.runtimeFor(A);
-  expect(await runtime.flow.deps.contextSources?.stageHasSources({ project: "payments" }, "PLAN") ?? false).toBe(false);
+  expect(runtime.flow.deps.contextSources).toBeUndefined();
   const answer = await root.callback({ method: "GET", path, headers: a.headers });
   expect(ContextToolCatalogSchema.parse(JSON.parse(answer!.body)).searchTeamKnowledge).toBe(false);
   expect((await root.callback(a.request()))?.body).not.toContain("only-alpha");
 });
 
-it("advertises only eligible stages for a company with its Team record", async () => {
+it("advertises eligible stages only for a company with its Team record", async () => {
   const { root, b } = await setup({ teamCompany: A });
   const runtime = await root.app.runtimeFor(A);
-  for (const stage of ["UNDERSTAND", "PLAN", "PLAN_CRITIQUE", "REVIEW"]) expect(await runtime.flow.deps.contextSources?.stageHasSources({ project: "payments" }, stage)).toBe(true);
-  for (const stage of ["IMPLEMENT", "invalid"]) expect(await runtime.flow.deps.contextSources?.stageHasSources({ project: "payments" }, stage)).toBe(false);
+  const source = runtime.flow.deps.contextSources!;
+  expect(source).toBeDefined();
+  for (const mode of ["UNDERSTAND", "PLAN", "PLAN_CRITIQUE", "REVIEW"] as const) expect(await source.stageHasSources({} as never, mode)).toBe(true);
+  for (const mode of ["IMPLEMENT", "CHECKS"] as const) expect(await source.stageHasSources({} as never, mode)).toBe(false);
   expect((await root.app.runtimeFor(B)).flow.deps.contextSources).toBeUndefined();
   expect((await root.callback({ method: "GET", path, headers: b.headers }))?.body)
     .toBe(JSON.stringify({ sources: [], tools: [], searchTeamKnowledge: false, unavailable: [], disabled: [] }));

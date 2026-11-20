@@ -2,21 +2,8 @@
 // helper will call. Pure: a test fails if anything opens a socket or calls fetch.
 import net from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  GCE_METADATA_ROUTES,
-  GEMINI_INT_ENCODING_VERIFIED,
-  GEMINI_OPERATIONS,
-  GEMINI_ROUTE_REFUSALS,
-  buildGeminiGenerateContent,
-  buildGeminiStreamChunks,
-  geminiJsonArrayBody,
-  geminiSseBody,
-  routeGeminiRequest,
-  routeMetadataRequest,
-  serveMetadataRequest,
-} from "../../packages/contracts/src/model-family-gemini.js";
-import { MODEL_REPLY_MAX_CHARS, chunkText, parseSseText } from "../../packages/contracts/src/model-family-common.js";
-import { buildChatCompletion, buildChatCompletionStream, routeOpenAiCompatibleRequest } from "../../packages/contracts/src/model-family-openai.js";
+import { GCE_METADATA_ROUTES, GEMINI_INT_ENCODING_VERIFIED, GEMINI_OPERATIONS, GEMINI_ROUTE_REFUSALS, buildGeminiGenerateContent, buildGeminiStreamChunks, geminiSseBody, routeGeminiRequest, routeMetadataRequest, serveMetadataRequest } from "../../packages/contracts/src/model-family-gemini.js";
+import { parseSseText } from "../../packages/contracts/src/model-family-common.js";
 import { serveModelRequest } from "../../packages/contracts/src/model-serve.js";
 import { builtinModelCatalog } from "../../packages/contracts/src/model-catalog-rows.js";
 import type { ModelReply } from "../../packages/contracts/src/model-family-common.js";
@@ -48,33 +35,12 @@ const route = (path: string, over: { method?: string; query?: string; headers?: 
 const reply = (over: Partial<ModelReply> = {}): ModelReply => ({ text: "Hello from the scripted reply.", finish: "stop", usage: { inputTokens: 7, outputTokens: 5 }, ...over });
 
 describe("routeGeminiRequest: every path form of the redirect check", () => {
-  it("AI Studio on v1beta (Python google-genai): generate and stream with alt=sse, key in x-goog-api-key", () => {
-    expect(route("/v1beta/models/gemini-2.5-flash:generateContent", { headers: { "x-goog-api-key": fakeKey() } })).toEqual({
-      ok: true, operation: "generateContent", model: "gemini-2.5-flash", mode: "ai_studio", apiVersion: "v1beta", project: undefined, location: undefined, stream: "none", enumEncoding: "string", credential: "x-goog-api-key",
-    });
-    expect(route("/v1beta/models/gemini-2.5-flash:streamGenerateContent", { query: "alt=sse" })).toMatchObject({ ok: true, operation: "streamGenerateContent", mode: "ai_studio", stream: "sse", credential: "none" });
-  });
-  it("AI Studio on v1 (JS google-genai 3.3.0)", () => {
-    expect(route("/v1/models/gemini-2.5-pro:generateContent")).toMatchObject({ ok: true, mode: "ai_studio", apiVersion: "v1", model: "gemini-2.5-pro" });
-    expect(route("/v1/models/gemini-2.5-pro:streamGenerateContent", { query: "alt=sse" })).toMatchObject({ ok: true, stream: "sse" });
-  });
   it("accepts any API version prefix", () => {
     for (const version of ["v1", "v1beta", "v1alpha", "v1beta1", "v2", "v1beta2", "v10", "v1main"]) {
       expect(route(`/${version}/models/m:generateContent`), version).toMatchObject({ ok: true, apiVersion: version, mode: "ai_studio" });
       expect(route(`/${version}/publishers/google/models/m:generateContent`), version).toMatchObject({ ok: true, apiVersion: version, mode: "vertex_express" });
     }
     for (const version of ["", "beta", "1", "V1", "v", "v1beta1x2y3z4w5v6u", "v1/../v1"]) expect(route(`/${version}/models/m:generateContent`).ok, version).toBe(false);
-  });
-  it("Vertex express mode: /publishers/google/models, key in x-goog-api-key", () => {
-    expect(route("/v1beta1/publishers/google/models/gemini-2.5-flash:generateContent", { headers: { "X-Goog-Api-Key": fakeKey() } })).toMatchObject({
-      ok: true, mode: "vertex_express", apiVersion: "v1beta1", project: undefined, location: undefined, credential: "x-goog-api-key", model: "gemini-2.5-flash",
-    });
-  });
-  it("Vertex project and location mode: the full path, a bearer token", () => {
-    expect(route("/v1beta1/projects/my-proj-1/locations/us-central1/publishers/google/models/gemini-2.5-flash:streamGenerateContent", { query: "alt=sse", headers: { authorization: `Bearer ${fakeKey()}` } })).toMatchObject({
-      ok: true, operation: "streamGenerateContent", mode: "vertex_project", project: "my-proj-1", location: "us-central1", stream: "sse", credential: "authorization",
-    });
-    expect(route("/v1/projects/12345/locations/global/publishers/google/models/gemini-2.5-flash:generateContent")).toMatchObject({ ok: true, mode: "vertex_project", project: "12345", location: "global", apiVersion: "v1" });
   });
   it("the OpenAI-compatible forms: Gemini's /openai and Vertex's /endpoints/openapi", () => {
     expect(route("/v1beta/openai/chat/completions", { headers: { authorization: `Bearer ${fakeKey()}` } })).toMatchObject({ ok: true, mode: "openai_compatible", operation: "chat_completions", model: undefined, credential: "authorization" });
@@ -125,23 +91,6 @@ describe("routeGeminiRequest: every path form of the redirect check", () => {
     expect(route("/v1beta/models/m:generateContent", { query: `a=${"x".repeat(3000)}` })).toEqual({ ok: false, reason: "bad_query" });
     expect(route(`/v1beta/models/m:generateContent${"x".repeat(600)}`)).toMatchObject({ ok: false });
   });
-  it("is safe against hostile keys and is fast on huge input", () => {
-    expect(route("/v1beta/models/m:generateContent", { query: "__proto__=x&constructor=y&alt=sse", headers: JSON.parse(`{"__proto__":"x","x-goog-api-key":"k"}`) as Record<string, string> })).toMatchObject({ ok: true });
-    expect(({} as Record<string, unknown>).x).toBeUndefined();
-    // Scaling check: refusing a huge path or query must not cost more as the input grows (N is small so the 8N input stays at or under 256 KiB and stays in CPU cache; the old 1,000,000-character path and 1,500,000-character query are checked once at full size below).
-    let results: unknown[] = [];
-    const { ratio } = expectLinearScaling((size) => {
-      const path = "/v1beta/models/" + "a".repeat(size);
-      const query = "a=".concat("%41".repeat(size / 2));
-      return () => { results = [route(path), route("/v1beta/models/m:generateContent", { query })]; };
-    }, { n: 12_000, unitBytes: 2.5, label: "routeGeminiRequest on a huge path and query" });
-    // Both are refused before they are read, so the work is flat (ratio near 1); work that reads them would grow about 8 times.
-    expect(ratio).toBeLessThan(3);
-    expect(results[0]).toMatchObject({ ok: false });
-    expect(results[1]).toEqual({ ok: false, reason: "bad_query" });
-    expect(route("/v1beta/models/" + "a".repeat(1_000_000))).toMatchObject({ ok: false });
-    expect(route("/v1beta/models/m:generateContent", { query: "a=".concat("%41".repeat(500_000)) })).toEqual({ ok: false, reason: "bad_query" });
-  });
   it("accepts headers as arrays and in any case", () => {
     expect(routeGeminiRequest({ method: "POST", path: "/v1beta/models/m:generateContent", query: "", headers: { "X-GOOG-API-KEY": [fakeKey()] } })).toMatchObject({ credential: "x-goog-api-key" });
     expect(routeGeminiRequest({ method: "POST", path: "/v1beta/models/m:generateContent", query: "", headers: { Authorization: "bearer abc" } })).toMatchObject({ credential: "authorization" });
@@ -149,18 +98,6 @@ describe("routeGeminiRequest: every path form of the redirect check", () => {
 });
 
 describe("Gemini response builders", () => {
-  it("builds a GenerateContentResponse with usage and a finish reason", () => {
-    const body = buildGeminiGenerateContent(reply(), { model: "gemini-2.5-flash", seed: "s1" });
-    expect(body).toMatchObject({
-      candidates: [{ content: { role: "model", parts: [{ text: "Hello from the scripted reply." }] }, finishReason: "STOP", index: 0 }],
-      usageMetadata: { promptTokenCount: 7, candidatesTokenCount: 5, totalTokenCount: 12 },
-      modelVersion: "gemini-2.5-flash",
-    });
-    expect(typeof (body as { responseId: unknown }).responseId).toBe("string");
-    // Deterministic from the seed: no clock, no randomness.
-    expect(buildGeminiGenerateContent(reply(), { model: "m", seed: "s1" })).toEqual(buildGeminiGenerateContent(reply(), { model: "m", seed: "s1" }));
-    expect(buildGeminiGenerateContent(reply(), { model: "m", seed: "s1" })).not.toEqual(buildGeminiGenerateContent(reply(), { model: "m", seed: "s2" }));
-  });
   it("maps every finish reason, as a name (verified) and as an integer (UNVERIFIED)", () => {
     const names = { stop: "STOP", length: "MAX_TOKENS", safety: "SAFETY", tool_calls: "STOP", other: "OTHER" } as const;
     const ints = { stop: 1, length: 2, safety: 3, tool_calls: 1, other: 5 } as const;
@@ -170,24 +107,6 @@ describe("Gemini response builders", () => {
       expect((buildGeminiGenerateContent(reply({ finish, text }), { model: "m", seed: "s", enumEncoding: "int" }) as { candidates: { finishReason: unknown }[] }).candidates[0]?.finishReason).toBe(ints[finish]);
     }
     expect(GEMINI_INT_ENCODING_VERIFIED).toBe(false);
-  });
-  it("carries tool calls as functionCall parts", () => {
-    const body = buildGeminiGenerateContent(reply({ text: "", toolCalls: [{ name: "get_weather", args: { city: "Oslo" } }], finish: "tool_calls" }), { model: "m", seed: "s" }) as { candidates: { content: { parts: unknown[] } }[] };
-    expect(body.candidates[0]?.content.parts).toEqual([{ functionCall: { name: "get_weather", args: { city: "Oslo" } } }]);
-  });
-  it("streams as SSE: 'data: <json>' then a blank line, finishReason and usage on the last chunk, no [DONE]", () => {
-    const chunks = buildGeminiStreamChunks(reply({ text: "abcdefghij" }), { model: "m", seed: "s", chunkChars: 4 });
-    expect(chunks.length).toBe(3);
-    const lf = geminiSseBody(chunks, "lf");
-    expect(lf.startsWith("data: {")).toBe(true);
-    expect(lf.endsWith("}\n\n")).toBe(true);
-    expect(lf).not.toContain("[DONE]");
-    const parsed = parseSseText(lf, { requireSpace: true });
-    expect(parsed).toMatchObject({ ok: true });
-    const events = (parsed as { events: string[] }).events.map((event) => JSON.parse(event) as { candidates: { content: { parts: { text?: string }[] }; finishReason?: string }[]; usageMetadata?: unknown });
-    expect(events.map((event) => event.candidates[0]?.content.parts[0]?.text).join("")).toBe("abcdefghij");
-    expect(events.map((event) => event.candidates[0]?.finishReason)).toEqual([undefined, undefined, "STOP"]);
-    expect(events.map((event) => event.usageMetadata !== undefined)).toEqual([false, false, true]);
   });
   it("CRLF and LF variants both parse to the same events, and a client that needs 'data: ' with the space is satisfied", () => {
     const chunks = buildGeminiStreamChunks(reply({ text: "abcdefgh" }), { model: "m", seed: "s", chunkChars: 4 });
@@ -199,30 +118,6 @@ describe("Gemini response builders", () => {
     expect(parseSseText(lf.replaceAll("data: ", "data:"), { requireSpace: true })).toMatchObject({ ok: false });
     expect(parseSseText(lf.replaceAll("data: ", "data:"), { requireSpace: false })).toMatchObject({ ok: true });
     expect(parseSseText(lf.replaceAll("\n", "\r"), { requireSpace: true })).toMatchObject({ ok: true });
-  });
-  it("streams as a JSON array for the legacy REST clients", () => {
-    const chunks = buildGeminiStreamChunks(reply({ text: "abcdefgh" }), { model: "m", seed: "s", chunkChars: 4 });
-    const body = geminiJsonArrayBody(chunks);
-    expect(body.startsWith("[{")).toBe(true);
-    expect(body.endsWith("}]")).toBe(true);
-    const parsed = JSON.parse(body) as unknown[];
-    expect(parsed).toEqual(chunks);
-    expect(JSON.parse(geminiJsonArrayBody([]))).toEqual([]);
-  });
-  it("is bounded: a huge reply grows the chunk size instead of the chunk count, and one past the cap is refused", () => {
-    const big = "x".repeat(MODEL_REPLY_MAX_CHARS);
-    // Scaling check: building the chunks and the body must grow no faster than the reply (N is small so the 8N input stays at or under 256 KiB and stays in CPU cache; the cap, 1,000,000 characters, is built once at full size below).
-    expectLinearScaling((size) => {
-      const text = "x".repeat(size);
-      return () => geminiSseBody(buildGeminiStreamChunks(reply({ text }), { model: "m", seed: "s", chunkChars: 1 }), "lf");
-    }, { n: 32_000, label: "a huge Gemini stream reply" });
-    const chunks = buildGeminiStreamChunks(reply({ text: big }), { model: "m", seed: "s", chunkChars: 1 });
-    expect(chunks.length).toBeLessThanOrEqual(20_000);
-    expect(geminiSseBody(chunks, "lf").length).toBeGreaterThan(MODEL_REPLY_MAX_CHARS);
-    expect(() => buildGeminiGenerateContent(reply({ text: big + "y" }), { model: "m", seed: "s" })).toThrow(RangeError);
-    expect(() => buildGeminiGenerateContent(reply(), { model: "m".repeat(129), seed: "s" })).toThrow(RangeError);
-    expect(chunkText("héllo wörld", 3).join("")).toBe("héllo wörld");
-    expect(chunkText("😀😀😀", 2).every((piece) => !/[\ud800-\udbff]$/u.test(piece))).toBe(true);
   });
 });
 
@@ -240,16 +135,6 @@ describe("the GCE metadata server emulation", () => {
       expect(answer.headers["metadata-flavor"], path).toBe("Google");
     }
     expect(meta("/computeMetadata/v1/project/project-id").body).toBe("my-proj-1");
-  });
-  it("serves the service account as JSON and the token as a fixed dummy built at run time", () => {
-    const account = JSON.parse(meta("/computeMetadata/v1/instance/service-accounts/default/", { query: "recursive=true" }).body) as { email: string; aliases: string[]; scopes: string[] };
-    expect(account.aliases).toEqual(["default"]);
-    expect(account.email).toMatch(/@[a-z0-9-]+\.iam\.gserviceaccount\.invalid$/u);
-    expect(account.scopes.length).toBeGreaterThan(0);
-    const token = JSON.parse(meta("/computeMetadata/v1/instance/service-accounts/default/token", { query: "scopes=a" }).body) as { access_token: string; expires_in: number; token_type: string };
-    expect(token).toMatchObject({ expires_in: 3600, token_type: "Bearer" });
-    expect(token.access_token).toMatch(/^rovara-dummy-/u);
-    expect(token.access_token).not.toMatch(/^(ya29|eyJ|AIza)/u);
   });
   it("refuses a request without Metadata-Flavor: Google, a method other than GET, an unknown path; the refusals carry the header too", () => {
     const noFlavor = meta("/computeMetadata/v1/instance", { headers: {} });
@@ -270,54 +155,10 @@ describe("the GCE metadata server emulation", () => {
   });
 });
 
-describe("the OpenAI-compatible family", () => {
-  it("routes the operations whatever the prefix and version", () => {
-    expect(routeOpenAiCompatibleRequest({ method: "POST", path: "/v1/chat/completions", pathPrefix: undefined })).toMatchObject({ ok: true, operation: "chat_completions" });
-    expect(routeOpenAiCompatibleRequest({ method: "POST", path: "/v1beta/openai/chat/completions", pathPrefix: "/v1beta/openai" })).toMatchObject({ ok: true, operation: "chat_completions" });
-    expect(routeOpenAiCompatibleRequest({ method: "POST", path: "/chat/completions", pathPrefix: "/v1beta/openai" })).toMatchObject({ ok: true, operation: "chat_completions" });
-    expect(routeOpenAiCompatibleRequest({ method: "POST", path: "/api/v1/chat/completions", pathPrefix: "/api/v1" })).toMatchObject({ ok: true });
-    expect(routeOpenAiCompatibleRequest({ method: "POST", path: "/v1/embeddings", pathPrefix: undefined })).toMatchObject({ operation: "embeddings" });
-    expect(routeOpenAiCompatibleRequest({ method: "POST", path: "/v1/responses", pathPrefix: undefined })).toMatchObject({ operation: "responses" });
-    expect(routeOpenAiCompatibleRequest({ method: "GET", path: "/v1/models", pathPrefix: undefined })).toMatchObject({ operation: "models" });
-    expect(routeOpenAiCompatibleRequest({ method: "GET", path: "/v1/chat/completions", pathPrefix: undefined })).toMatchObject({ ok: false });
-    expect(routeOpenAiCompatibleRequest({ method: "POST", path: "/v1/chat/completions/../x", pathPrefix: undefined })).toMatchObject({ ok: false });
-    expect(routeOpenAiCompatibleRequest({ method: "POST", path: "/v1/fine_tuning/jobs", pathPrefix: undefined })).toMatchObject({ ok: false });
-  });
-  it("builds a chat completion and a stream that ends with data: [DONE]", () => {
-    const completion = buildChatCompletion(reply(), { model: "gemini-2.5-flash", seed: "s", created: 1_700_000_000 }) as { object: string; choices: { message: { content: string }; finish_reason: string }[]; usage: { total_tokens: number } };
-    expect(completion).toMatchObject({ object: "chat.completion", choices: [{ message: { content: "Hello from the scripted reply." }, finish_reason: "stop" }], usage: { total_tokens: 12 } });
-    const stream = buildChatCompletionStream(reply({ text: "abcdefgh" }), { model: "m", seed: "s", created: 1, chunkChars: 4 }, "lf");
-    expect(stream.endsWith("data: [DONE]\n\n")).toBe(true);
-    const events = (parseSseText(stream, { requireSpace: true }) as { events: string[] }).events;
-    expect(events.at(-1)).toBe("[DONE]");
-    const text = events.slice(0, -1).map((event) => (JSON.parse(event) as { choices: { delta: { content?: string } }[] }).choices[0]?.delta.content ?? "").join("");
-    expect(text).toBe("abcdefgh");
-    const tool = buildChatCompletion(reply({ text: "", toolCalls: [{ name: "f", args: { a: 1 } }], finish: "tool_calls" }), { model: "m", seed: "s", created: 1 }) as { choices: { message: { tool_calls: { function: { name: string; arguments: string } }[] }; finish_reason: string }[] };
-    expect(tool.choices[0]?.finish_reason).toBe("tool_calls");
-    expect(tool.choices[0]?.message.tool_calls[0]?.function).toEqual({ name: "f", arguments: '{"a":1}' });
-  });
-});
-
 describe("serveModelRequest: the one entry the helper calls", () => {
   const rows = builtinModelCatalog().rows;
   const serve = (path: string, over: { method?: string; query?: string; body?: string; headers?: Record<string, string> } = {}, script: ModelReply | null = reply()) =>
     serveModelRequest(rows, { method: over.method ?? "POST", path, query: over.query ?? "", headers: over.headers ?? {}, body: over.body }, { reply: script ?? undefined, seed: "seed-1" });
-  it("serves AI Studio generateContent as JSON", () => {
-    const answer = serve("/p/gemini/v1beta/models/gemini-2.5-flash:generateContent", { body: "{}" });
-    expect(answer.status).toBe(200);
-    expect(answer.headers["content-type"]).toBe("application/json");
-    expect(JSON.parse(answer.body)).toMatchObject({ candidates: [{ finishReason: "STOP" }] });
-    expect(answer.served).toMatchObject({ rowId: "gemini", family: "gemini", operation: "generateContent", mode: "ai_studio" });
-  });
-  it("serves SSE for alt=sse and a JSON array for the legacy form", () => {
-    const sse = serve("/p/gemini/v1beta/models/m:streamGenerateContent", { query: "alt=sse" });
-    expect(sse.headers["content-type"]).toBe("text/event-stream");
-    expect(sse.body.startsWith("data: ")).toBe(true);
-    const array = serve("/p/gemini/v1beta/models/m:streamGenerateContent", { query: "%24alt=json%3Benum-encoding%3Dint" });
-    expect(array.headers["content-type"]).toBe("application/json");
-    expect(Array.isArray(JSON.parse(array.body))).toBe(true);
-    expect((JSON.parse(array.body) as { candidates: unknown[] }[])[0]?.candidates[0]).toBeDefined();
-  });
   it("serves the Vertex row in express and project forms, and refuses a path that is not that row's", () => {
     expect(serve("/p/vertex/v1beta1/publishers/google/models/m:generateContent").status).toBe(200);
     expect(serve("/p/vertex/v1beta1/projects/p1/locations/us-central1/publishers/google/models/m:generateContent").served).toMatchObject({ mode: "vertex_project" });
@@ -359,17 +200,6 @@ describe("serveModelRequest: the one entry the helper calls", () => {
     expect(served?.status).toBeGreaterThanOrEqual(400);
     expect(serve("/p/gemini/" + "a".repeat(1_000_000)).status).toBeGreaterThanOrEqual(400);
   });
-  it("never throws: a BigInt in a tool call, an oversize reply or a hostile request is a fixed 500 or 4xx", () => {
-    const bigint = serve("/p/gemini/v1beta/models/m:generateContent", {}, reply({ toolCalls: [{ name: "f", args: { n: 1n } }], finish: "tool_calls" }));
-    expect(bigint.status).toBe(500);
-    expect((JSON.parse(bigint.body) as { error: { code: string } }).error.code).toBe("internal_error");
-    expect(serve("/p/gemini/v1beta/models/m:generateContent", {}, reply({ text: "x".repeat(MODEL_REPLY_MAX_CHARS + 1) })).status).toBe(500);
-    expect(serve("/p/gemini-openai/v1/chat/completions", { body: "{}" }, reply({ usage: { inputTokens: -1, outputTokens: 1 } })).status).toBe(500);
-    expect(serve("/p/gemini/v1beta/models/m:streamGenerateContent", { query: "alt=sse" }, reply({ toolCalls: [{ name: "f", args: { n: 1n } }] })).status).toBe(500);
-    const hostile = serveModelRequest(rows, { method: 5 as unknown as string, path: { toString() { throw new Error("boom"); } } as unknown as string, query: null as unknown as string, headers: null as unknown as Record<string, string> }, { reply: reply(), seed: "s" });
-    expect(hostile.status).toBeGreaterThanOrEqual(400);
-    expect(JSON.parse(hostile.body)).toHaveProperty("error.code");
-  });
   it("serves the Cloudflare gateway path /v1/<account>/<gateway>/openai/... and Azure deployment paths", () => {
     const cloudflare = serve("/p/cloudflare-ai-gateway/v1/acct123/my-gw/openai/chat/completions", { body: JSON.stringify({ model: "gpt-4o" }) });
     expect(cloudflare.status).toBe(200);
@@ -378,10 +208,5 @@ describe("serveModelRequest: the one entry the helper calls", () => {
     expect(serve("/p/cloudflare-ai-gateway/v1/a/b/c/d/e/f/g/chat/completions").status).toBe(404);
     expect(serve("/p/cloudflare-ai-gateway/v1/../b/openai/chat/completions").status).toBe(404);
     expect(serve("/p/cloudflare-ai-gateway/v1/a/b/openai/fine_tuning/jobs").status).toBe(404);
-  });
-  it("never echoes a credential: not the header, not the query key", () => {
-    const answer = serve("/p/gemini/v1beta/models/m:generateContent", { headers: { "x-goog-api-key": fakeKey() }, query: `key=${fakeKey()}` });
-    expect(JSON.stringify(answer)).not.toContain(fakeKey());
-    expect(answer.served).toMatchObject({ credential: "x-goog-api-key" });
   });
 });

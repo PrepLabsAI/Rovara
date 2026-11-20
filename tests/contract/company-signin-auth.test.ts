@@ -5,6 +5,7 @@ import { companyScoped, IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { signinCompanyWorld } from "../support/signin-company-world.js";
 import { httpEvent, VERIFIER } from "../support/developer-fakes.js";
 import { companyMembershipFromDynamo } from "../../packages/broker/src/aws/company-check.js";
+import type { CompanySignInAuditInput } from "../../packages/broker/src/developer/company-signin-audit.js";
 import { authenticateDeveloper, authenticateDeveloperSessionId, companyPreapprovalsThroughLambda, routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
@@ -108,6 +109,21 @@ it("token company is never authority, including a forged implicit-company claim"
   expect(await authenticateDeveloper(h.deps, { ...h.claims, companyId: IMPLICIT_COMPANY_ID })).toMatchObject({ developerId: h.claims.sub });
   h.db.set({ ...h.row("COMPANY_MEMBERSHIP"), companyId: B });
   await expect(authenticateDeveloper(h.deps, { ...h.claims, companyId: A })).rejects.toMatchObject({ statusCode: 401, message: SIGN_IN_AGAIN });
+});
+
+it("records a sign-in outcome only for the company resolved from membership", async () => {
+  const h = signinCompanyWorld(); await h.create(A);
+  const rows: CompanySignInAuditInput[] = [];
+  h.deps.signInAudit = async (row) => { rows.push(row); };
+  const succeeded = await h.signInCompany(A, "known-person", "shared@example.test");
+  expect(succeeded.statusCode).toBe(302);
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toMatchObject({ companyId: A, method: "cli", outcome: "succeeded" });
+  expect(rows[0]).not.toHaveProperty("token");
+
+  const unknown = await h.signInCompany(A, "unknown-person", "unknown@example.test");
+  expect(unknown.statusCode).toBe(302);
+  expect(rows).toHaveLength(1);
 });
 
 it("operator's explicit since cutoff is stored and also enforced on refresh", async () => {

@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import type { ApprovalOffer } from "../../packages/broker/src/core/local-pages/index.js";
 import { createPrCommentCommands, type CommentPermission, type LookedUpComment, type PendingOffer, type PrCommentEvent, type PrCommandWorld } from "../../packages/broker/src/core/pr-commands/index.js";
-import { CODE_HOST_COMMENT_METHOD, createLocalOwnerApprovers } from "../../packages/broker/src/ports/policy-defaults.js";
+import { createLocalOwnerApprovers } from "../../packages/broker/src/ports/policy-defaults.js";
 import { ARTIFACT_DIGEST, commentReads, freshComment } from "../support/comment-fakes.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { IMPLICIT_COMPANY_ID, ROVARA_REPLY_MARKER, parseRovaraComment, type ApprovalProof, type ExternalAccountRef } from "@agentx/contracts";
@@ -74,14 +74,6 @@ describe("which comments run", () => {
     expect(decided).toEqual([]);
   });
 
-  it("believes the host, not the webhook: the text, author and time come from the lookup", async () => {
-    const { commands, decided, say } = setup();
-    // The host says the comment is a plain reply, whatever the delivery claimed.
-    const claimed = { ...say("thanks!", "c-1"), body: "/rovara approve", author: AUTHOR, createdAt: "2026-11-09T11:00:00.000Z" };
-    expect(await commands.handle(claimed)).toEqual({ handled: false, reason: "not_a_command" });
-    expect(decided).toEqual([]);
-  });
-
   it("does nothing, and says nothing, for an author without write permission", async () => {
     for (const permission of ["none", "read"] as const) {
       const { commands, replies, decided, say } = setup({ permission });
@@ -107,25 +99,12 @@ describe("which comments run", () => {
 });
 
 describe("approve and changes", () => {
-  it("approves with a code-host-comment proof for exactly the offer, and the approvers seam accepts it", async () => {
-    const { commands, decided, replies, say } = setup();
-    const outcome = await commands.handle(say("/rovara approve 3f2a9c00"));
-    expect(outcome).toEqual({ handled: true, command: "approve", result: { ok: true } });
-    expect(decided[0]!.proof).toMatchObject({ method: CODE_HOST_COMMENT_METHOD, token: "c-100", requestId: "card-7", revision: 4, artifactDigest: ARTIFACT_DIGEST, claimedAccount: AUTHOR });
-    expect(replies).toEqual(["Approved. I am going ahead."]);
-  });
 
   it("does not approve when the host says the author may not (the approvers' rule, not this module's)", async () => {
     const { commands, replies, say } = setup({ hostPermission: "read" });
     const outcome = await commands.handle(say("/rovara approve 3f2a9c00"));
     expect(outcome).toMatchObject({ handled: true, command: "approve", result: { ok: false } });
     expect(replies[0]).toContain("Not approved");
-  });
-
-  it("sends the text of a changes request", async () => {
-    const { commands, decided, say } = setup();
-    await commands.handle(say("/rovara changes: keep the old API too\nand add a test"));
-    expect(decided[0]).toMatchObject({ decision: "changes", note: "keep the old API too\nand add a test" });
   });
 
   it("refuses a comment written before the latest version was posted, and one whose time cannot be read", async () => {

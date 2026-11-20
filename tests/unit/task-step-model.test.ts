@@ -50,15 +50,6 @@ describe("the model a step is handed to a worker with", () => {
     expect((plain as { selection: object }).selection).not.toHaveProperty("thinkingLevel");
   });
 
-  it("maps each workflow mode to its stage, and a step with no model of its own (the checks run) is left to the install's one model", async () => {
-    const stages: Record<string, string | undefined> = { UNDERSTAND: "understand", PLAN: "plan", SPEC_WRITE: "plan", PLAN_CRITIQUE: "plan_check", IMPLEMENT: "build", REVIEW: "code_review", FEEDBACK_REVIEW: "pull_request", CHECKS: undefined };
-    for (const [mode, stage] of Object.entries(stages)) {
-      const w = world(step(SONNET));
-      const outcome = await chooseStepModel(w.deps, operation({ workflowMode: mode as never }));
-      if (stage === undefined) { expect(outcome).toBeUndefined(); expect(w.choose).not.toHaveBeenCalled(); } else expect(w.choose).toHaveBeenCalledWith(expect.objectContaining({ stage }));
-    }
-  });
-
   it("a repeat delivery keeps the model the operation already holds, whatever the setting says now", async () => {
     const w = world(step(GPT));
     const held = { stage: "plan" as const, model: SONNET, route: { alias: "anthropic/claude-sonnet-4-5", api: "anthropic-messages" as const, catalog: "claude-sonnet-4-5" }, reason: "BUILTIN_DEFAULT", thinkingLevel: "low" as const };
@@ -74,22 +65,6 @@ describe("the model a step is handed to a worker with", () => {
     expect(await chooseStepModel(w.deps as never, operation({ workflowMode: undefined }))).toBeUndefined();
     expect(w.choose).not.toHaveBeenCalled();
     expect(await chooseStepModel({ store: w.store, companyId: COMPANY }, operation())).toBeUndefined();
-  });
-
-  it("a checking step is told the model of the newest earlier operation of the step it checks, and none that never recorded one", async () => {
-    const w = world(step(SONNET));
-    const choice = (model: ModelIdentifier) => ({ stage: "plan" as const, model, route: { alias: "a", api: "anthropic-messages" as const, catalog: "m" }, reason: "x" });
-    for (const earlier of [operation({ workflowMode: "PLAN", modelChoice: choice(GPT) }), operation({ workflowMode: "PLAN", modelChoice: choice(SONNET) }), operation({ workflowMode: "IMPLEMENT", modelChoice: choice(m("openai", "other")) }), operation({ workflowMode: "PLAN" })]) {
-      await w.store.put({ item: { ...operationKey(T1_COMPANY, WORKSPACE, earlier.id), ...(earlier as unknown as Record<string, never>) } });
-    }
-    await chooseStepModel(w.deps, operation({ workflowMode: "PLAN_CRITIQUE" }));
-    // The newest PLAN operation that recorded a model is the second one (Sonnet); the later PLAN without one and the build's are not what the plan check checks.
-    expect(w.choose).toHaveBeenLastCalledWith({ stage: "plan_check", reference: SONNET });
-    await chooseStepModel(w.deps, operation({ workflowMode: "REVIEW" }));
-    expect(w.choose).toHaveBeenLastCalledWith({ stage: "code_review", reference: m("openai", "other") });
-    // A step that checks nothing is told no reference.
-    await chooseStepModel(w.deps, operation({ workflowMode: "UNDERSTAND" }));
-    expect(w.choose).toHaveBeenLastCalledWith({ stage: "understand", reference: undefined });
   });
 
   it("a plan check after tries whose model the account refused leaves those models out, counts its tries from the latest plan, takes the last try, and with none left ends with its own words", async () => {

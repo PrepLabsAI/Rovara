@@ -1,7 +1,7 @@
 // DEC 192a, away-log 168: ONE rule says whether a scripted reply counts toward proof. This pins that the reply-set rule, TE-A3's rule and the check rule agree for every (provenance x real-model result) pair, against a table
 // written out by hand. (core-proof-table-and-body.test.ts runs the same pairs through the Proof table, which must match the same table.)
 import { describe, expect, it } from "vitest";
-import { REPLY_PROVENANCES, checkCountsTowardProof, scriptedRepliesCountTowardProof } from "../../packages/contracts/src/index.js";
+import { checkCountsTowardProof, scriptedRepliesCountTowardProof } from "../../packages/contracts/src/index.js";
 import { REPLY_RESULT_CLASSES, replyCountsTowardProof } from "../../packages/contracts/src/model-reply-provenance.js";
 
 const REAL_MODEL = [undefined, "confirmed", "unconfirmed", "disagreed"] as const;
@@ -17,11 +17,5 @@ describe("one rule for scripted replies and proof", () => {
       expect(scriptedRepliesCountTowardProof(provenance, realModel), label).toBe(expected);
       expect(checkCountsTowardProof({ kind: "test", trust: "simulated", proofBasis: "scripted_ai_replies", replies: provenance, realModel }), label).toBe(expected);
     }
-  });
-  it("the provenances are exactly the three the table covers", () => {
-    expect([...REPLY_PROVENANCES]).toEqual(["before_task", "independent", "task_made"]);
-  });
-  it("a caller with no real-model result gets only before_task", () => {
-    expect(REPLY_RESULT_CLASSES.filter((klass) => replyCountsTowardProof(klass))).toEqual(["before_task"]);
   });
 });

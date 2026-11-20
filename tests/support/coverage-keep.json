@@ -18,6 +18,9 @@
     "packages/*sign-in*",
     "packages/*token-verif*",
     "packages/*verify-token*",
-    "packages/*task-token*"
+    "packages/*task-token*",
+    "packages/*script-tokens/authenticate*",
+    "packages/*script-tokens/token-format*",
+    "packages/*model-gateway/token*"
   ]
 }

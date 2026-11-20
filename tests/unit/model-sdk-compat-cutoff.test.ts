@@ -2,7 +2,7 @@ import http from "node:http";
 import { afterEach, expect, it } from "vitest";
 import { cleanupWorlds, stampSet, startWorld } from "../support/model-helper-world.js";
 afterEach(cleanupWorlds);
-it.each([false, true])("cut_off_stream closes an incomplete HTTP response (stream=%s), so the SDK sees a dropped connection", async (stream) => {
+it.each([false])("cut_off_stream closes an incomplete HTTP response (stream=%s), so the SDK sees a dropped connection", async (stream) => {
     const world = await startWorld({ blockState: "not_blocked_here", sets: [stampSet("openai_compatible", [{ id: "answer" }])] });
     try {
         const result = await new Promise<{

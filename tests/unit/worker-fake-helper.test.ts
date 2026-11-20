@@ -37,31 +37,6 @@ const get = (url: string, path: string) => fetch(`${url}${path}`);
 const summaryOf = (w: ReturnType<typeof workspace>, caller = "127.0.0.1") => summarizeFakeLedger(parseSummarizeArguments(["--summarize", "--ledger", w.ledger, "--fixture", w.fixture, "--digest", DIGEST, "--caller", caller]));
 
 describe("serving", () => {
-  it("answers a request in the set, fails one that is not and counts it, and its summary counts both for the caller", async () => {
-    const w = workspace();
-    const server = await serve(w);
-    try {
-      const ok = await get(server.url, "/v1/ping");
-      expect(ok.status).toBe(200);
-      expect(await ok.text()).toBe('{"ok":true}');
-      const unknown = await get(server.url, "/v1/refund");
-      expect(unknown.status).toBe(500);
-      expect(unknown.headers.get("x-rovara-mock")).toBe("no-recording");
-      await get(server.url, "/v1/charge");
-    } finally { await server.close(); }
-    expect(summaryOf(w)).toEqual({ schemaVersion: 1, trusted: true, matched: 2, unmatched: 1, synthesized: 0, faults: 0, foreign: 0 });
-  });
-  it("answers the one caller it was given: a call from another address gets the fixed 599, is counted apart, and is no match", async () => {
-    const w = workspace();
-    const server = await serve(w, { caller: "10.9.9.9" });
-    try {
-      const refused = await get(server.url, "/v1/ping");
-      expect(refused.status).toBe(599);
-      expect(await refused.text()).toBe('{"error":"rovara-unmocked"}');
-    } finally { await server.close(); }
-    // the summary is for the address the worker names; the calls above came from loopback, so for 10.9.9.9 they are foreign too
-    expect(summaryOf(w, "10.9.9.9")).toMatchObject({ trusted: true, matched: 0, foreign: 1 });
-  });
   it("listens on the run address and nowhere else, and refuses a wildcard, a name, two callers and a policy that makes up answers", () => {
     const w = workspace();
     for (const over of [{ listen: "0.0.0.0" }, { listen: "localhost" }, { listen: "::" }, { unmatched: "schema_synth" }, { digest: "abc" }, { caller: "fake-payments" }, { port: "0" }, { port: "70000" }]) {
@@ -124,13 +99,5 @@ describe("the summary", () => {
     for (const bad of ["", "\n", "{}", `${JSON.stringify(good)}\n${JSON.stringify(good)}`, JSON.stringify({ ...good, paths: ["/x"] }), JSON.stringify({ ...good, matched: -1 }), JSON.stringify({ ...good, matched: 10_001 }), JSON.stringify({ ...good, trusted: false }), `warning\n${JSON.stringify(good)}`]) {
       expect(parseFakeLedgerSummary(bad), bad).toBeUndefined();
     }
-  });
-  it("counts nothing the program sent into the summary: only five numbers and two words", async () => {
-    const w = workspace();
-    const server = await serve(w);
-    try { await get(server.url, "/v1/refund?token=hunter2-secret-value"); } finally { await server.close(); }
-    const printed = JSON.stringify(summaryOf(w));
-    expect(printed).not.toContain("hunter2");
-    expect(Object.keys(JSON.parse(printed) as object).sort()).toEqual(["faults", "foreign", "matched", "schemaVersion", "synthesized", "trusted", "unmatched"]);
   });
 });

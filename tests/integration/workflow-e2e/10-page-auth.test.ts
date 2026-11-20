@@ -63,7 +63,7 @@ const V2 = planDocument({ ...PLAN, claims: [{ id: "1", text: "Add a retry banner
 const EDITS = [{ path: "repo/demo/greeting.ts", content: "export const banner = 'Retry';\n" }];
 const NO_ACCESS = "You don't have access to this task.";
 const SLOW_DOWN = "You've posted a lot in the last 10 minutes. Try again in a few minutes.";
-const ASK_LIMITED = "AgentX has answered a lot of questions recently. Try again later, or ask in the task's Slack thread.";
+const ASK_LIMITED = "Rovara has answered a lot of questions recently. Try again later, or ask in the task's Slack thread.";
 const DAY = 24 * 60 * 60 * 1000;
 
 /** Maya and Sam are in the project's channel; nobody else is. */
@@ -684,7 +684,7 @@ describe("Suite 10: page and auth", () => {
       expect(codingRuns(e2e)).toHaveLength(1);
       const pageWon = (approvals[0] as { via?: string }).via === "PAGE";
       if (pageWon) {
-        expect(tab.byId("decide-status").textContent).toBe("Sent. AgentX is on the next step.");
+        expect(tab.byId("decide-status").textContent).toBe("Sent. Rovara is on the next step.");
         // The Slack press lost: the owner is told the card is out of date, never that saving failed.
         const shown = [...e2e.slack.responses.map((response) => response.text), ...e2e.slack.ephemerals.map((message) => visibleSlackText(message.text))];
         expect(shown.some((text) => /out of date|already/i.test(text))).toBe(true);
@@ -871,7 +871,7 @@ describe("Suite 10: page and auth", () => {
       expect(tab.byId("decide-comments-title").textContent).toBe("Comments to send (3)");
       tab.byId("decide-submit").click();
       await tab.settle();
-      expect(tab.byId("decide-status").textContent).toBe("Sent. AgentX is on the next step.");
+      expect(tab.byId("decide-status").textContent).toBe("Sent. Rovara is on the next step.");
       await e2e.settle();
       expect(e2e.slack.lastPostWithAction("agentx_workflow_approve").text).toContain("AgentX answered 2 of 3 comments from v1.");
       // The planner was told to write to the person who commented, and to suggest only what exists.
@@ -977,7 +977,7 @@ describe("Suite 10: comments sent with an approval", () => {
     expect(tab.byId("decide-comments-title").textContent).toBe("Comments to send (2)");
     tab.byId("decide-submit").click();
     await tab.settle();
-    expect(tab.byId("decide-status").textContent).toBe("Sent. AgentX is on the next step.");
+    expect(tab.byId("decide-status").textContent).toBe("Sent. Rovara is on the next step.");
     await e2e.settle();
     expect(e2e.workflow()).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
     expect(e2e.workflow().artifacts.at(-1)).toMatchObject({ type: "plan", version: 1 });
@@ -1007,7 +1007,7 @@ describe("Suite 10: comments sent with an approval", () => {
     // Under the instruction: Done in the coding plan, linked to the claim that cites it in coding plan v1.
     const design = await openTaskPage(e2e, OWNER, { search: "?doc=design" });
     const done = design.document.querySelector('#design [data-comments="document"] .replies')!;
-    expect(done.querySelector(".chip")!.textContent).toBe("AgentX");
+    expect(done.querySelector(".chip")!.textContent).toBe("Rovara");
     expect(readable(done.querySelector(".comment-meta")!)).toContain("from coding plan v1");
     expect(done.querySelector(".comment-meta [aria-hidden]")!.textContent).toBe("· ");
     expect(done.querySelector(".comment-text")!.textContent).toBe("Done in the coding plan: Each bullet stays on one line.");
@@ -1017,9 +1017,9 @@ describe("Suite 10: comments sent with an approval", () => {
     // Under the question: AgentX's own answer, and, clearly apart from it, the planner's outcome (a capital letter after the colon).
     const replies = design.document.querySelectorAll('#design [data-comments="claim:1"] .replies li');
     expect(replies).toHaveLength(2);
-    expect(replies[0]!.querySelector(".chip")!.textContent).toBe("AgentX (AI)");
+    expect(replies[0]!.querySelector(".chip")!.textContent).toBe("Rovara (AI)");
     expect(replies[0]!.querySelector(".comment-text")!.textContent).toBe("Both steps are needed, so they stay.");
-    expect(replies[1]!.querySelector(".chip")!.textContent).toBe("AgentX");
+    expect(replies[1]!.querySelector(".chip")!.textContent).toBe("Rovara");
     expect(readable(replies[1]!.querySelector(".comment-meta")!)).toContain("from coding plan v1");
     expect(replies[1]!.querySelector(".comment-text")!.textContent).toBe("Not changed in the coding plan: The two steps stay as they are.");
     expect(replies[1]!.querySelector(".comment-link")).toBeNull();
@@ -1031,7 +1031,7 @@ describe("Suite 10: comments sent with an approval", () => {
     expect(served.querySelector('#design [data-comments="document"] .replies .comment-meta [aria-hidden]')!.textContent).toBe("· ");
     expect(served.querySelectorAll('#design [data-comments="claim:1"] .replies .comment-text').map((node) => node.textContent))
       .toEqual(["Both steps are needed, so they stay.", "Not changed in the coding plan: The two steps stay as they are."]);
-    expect(served.querySelectorAll('#design [data-comments="claim:1"] .replies .chip').map((node) => node.textContent)).toEqual(["AgentX (AI)", "AgentX"]);
+    expect(served.querySelectorAll('#design [data-comments="claim:1"] .replies .chip').map((node) => node.textContent)).toEqual(["Rovara (AI)", "Rovara"]);
     // Neither comment reads "Not answered", and the page never shows a planner's label.
     expect(design.text()).not.toContain("Not answered");
     expect(design.text()).not.toMatch(/\bc[0-9]+\b/);
@@ -1096,7 +1096,7 @@ describe("Suite 10: comments sent with an approval", () => {
     await approveDesignOnPage(e2e);
     for (const reader of [OWNER, SAM]) {
       const shown = await footers(e2e, reader, 1);
-      expect(shown.map((footer) => footer.textContent)).toEqual([reader === OWNER ? "Your comment" : "Maya Chen's comment", "A comment (paraphrased by AgentX)", "A comment (paraphrased by AgentX)"]);
+      expect(shown.map((footer) => footer.textContent)).toEqual([reader === OWNER ? "Your comment" : "Maya Chen's comment", "A comment (paraphrased by Rovara)", "A comment (paraphrased by Rovara)"]);
       // The made-up words still link to the thread they claim; the one with no comment links nowhere.
       expect(shown[1]!.querySelector("a")!.getAttribute("href")).toBe(`#comment-${idOf(e2e, INSTRUCTION)}`);
       expect(shown[2]!.querySelector("a")).toBeNull();
@@ -1125,7 +1125,7 @@ describe("Suite 10: comments sent with an approval", () => {
     rewriteStoredPlan(e2e, (json) => json.replace(`comment:${idOf(e2e, INSTRUCTION)}`, `owner (comment ${instructionRef})`).replace(`comment:${idOf(e2e, QUESTION)}`, `owner (comment ${instructionRef})`));
     expect(e2e.s3.objects.get(String(e2e.workflow().artifacts.at(-1)!.objectKey))).toContain(`owner (comment ${instructionRef})`);
     const shown = await footers(e2e, OWNER, 1);
-    expect(shown.map((footer) => footer.textContent)).toEqual(["Your comment", "A comment (paraphrased by AgentX)"]);
+    expect(shown.map((footer) => footer.textContent)).toEqual(["Your comment", "A comment (paraphrased by Rovara)"]);
     expect(shown[0]!.querySelector("a")!.getAttribute("href")).toBe(`#comment-${idOf(e2e, INSTRUCTION)}`);
     expect(readable((await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan", scripts: false })).document.body)).not.toContain(`owner (comment ${instructionRef})`);
   }, 180_000);
@@ -1207,12 +1207,12 @@ describe("Suite 10: comments sent with an approval", () => {
     }
   }, 180_000);
 
-  it("the Comment form's checkbox reads 'Ask AgentX to reply to this comment'", async () => {
+  it("the Comment form's checkbox reads 'Ask Rovara to reply to this comment'", async () => {
     const e2e = await waitingPlan({ queue: recordingQueue() });
     const tab = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan" });
     tab.document.querySelector('.comment-open[data-target="claim:1"]')!.click();
     const form = tab.document.querySelector('[data-comments="claim:1"] .comment-form')!;
-    expect(form.querySelectorAll("label").map((label) => readable(label))).toContain("Ask AgentX to reply to this comment");
+    expect(form.querySelectorAll("label").map((label) => readable(label))).toContain("Ask Rovara to reply to this comment");
     expect(readable(form)).not.toContain("Ask AgentX to answer");
   }, 120_000);
 
@@ -1223,7 +1223,7 @@ describe("Suite 10: comments sent with an approval", () => {
     expect(tab.document.querySelector(".decision-id")).toBeNull();
     radio(tab, "d1", "above").click();
     tab.byId("decide-approve").click();
-    expect(readable(tab.byId("decide-changed-list"))).toBe("Where does the banner go?: You chose Above (AgentX recommended Below)");
+    expect(readable(tab.byId("decide-changed-list"))).toBe("Where does the banner go?: You chose Above (Rovara recommended Below)");
   }, 120_000);
 
   it("AgentX's answer names a decision by its question from the document it was asked on, never shows a label, and leaves real text alone; it is told to point to Request changes in Slack or a comment", async () => {

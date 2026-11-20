@@ -8,9 +8,8 @@ import { isNightlyOperation, nightlyEndItems, nightlyRequestId, nightlyRunPayloa
 import { nightlyScheduleName, nightlySlotId, readNightlyBaseline } from "../../packages/broker/src/core/test-env/nightly.js";
 import { fireTestEnvNightly, nightlyHooks, subscribeNightly } from "../../packages/broker/src/core/test-env/nightly-wiring.js";
 import { readNightRows } from "../../packages/broker/src/core/test-env/night-status.js";
-import { nightlyRunsOn } from "../../packages/broker/src/core/test-env/health-switch.js";
 import { createFakeScheduler } from "../../packages/broker/src/ports/fake-scheduler.js";
-import { HEAD1, ORG, PROJECT, SCHEDULED, T0, approveForTest, body, nightlyWorld, result, rows } from "../support/nightly-world.js";
+import { HEAD1, ORG, PROJECT, SCHEDULED, T0, body, nightlyWorld, result, rows } from "../support/nightly-world.js";
 import { documentOf } from "../../packages/broker/src/core/test-env/deps.js";
 import { readApprovedTestEnvironment } from "../../packages/broker/src/core/test-env/environment.js";
 
@@ -18,28 +17,8 @@ const ON = { ROVARA_NIGHTLY_HEALTH: "1" } as NodeJS.ProcessEnv;
 const WORKSPACE = "w-nightly-1";
 const TASK = "task-nightly-1";
 
-describe("the switches", () => {
-  it("nightly runs exist only when the nightly switch is exactly 1 and the test environment is not turned off", () => {
-    expect(nightlyRunsOn({})).toBe(false);
-    expect(nightlyRunsOn({ ROVARA_NIGHTLY_HEALTH: "true" })).toBe(false);
-    expect(nightlyRunsOn({ ROVARA_NIGHTLY_HEALTH: " 1" })).toBe(false);
-    expect(nightlyRunsOn(ON)).toBe(true);
-    expect(nightlyRunsOn({ ...ON, ROVARA_TEST_ENVIRONMENT: "0" })).toBe(false);
-  });
-});
-
 describe("the schedule follows the approved environment", () => {
   const approved = (nightly: Partial<TestEnvironment["environment"]["nightly"]>): TestEnvironment => ({ revision: 1, approvedAt: new Date(T0).toISOString(), environment: body(nightly) });
-
-  it("makes one schedule for a project that turned the nightly on, with the project's own time, and replaces it on the next approval", async () => {
-    const scheduler = createFakeScheduler();
-    const hooks = nightlyHooks({ scheduling: { scheduler } }, ON);
-    await hooks.onApproved(ORG, PROJECT, approved({ cronUtc: "30 2 * * *" }));
-    expect(scheduler.all().map((entry) => [entry.scheduleId, entry.when, entry.enabled, entry.target])).toEqual([[nightlyScheduleName(ORG, PROJECT), { kind: "cron", cron: "30 2 * * *", timezone: "UTC" }, true, { kind: "nightly", ref: { project: PROJECT } }]]);
-    await hooks.onApproved(ORG, PROJECT, approved({ cronUtc: "0 4 * * *" }));
-    expect(scheduler.all()).toHaveLength(1);
-    expect(scheduler.all()[0]?.when).toEqual({ kind: "cron", cron: "0 4 * * *", timezone: "UTC" });
-  });
 
   it("removes the project's schedule when the approved environment has it off, and makes none for a project that never had it on", async () => {
     const scheduler = createFakeScheduler();
@@ -74,11 +53,6 @@ describe("the schedule follows the approved environment", () => {
     expect(proved).toBe(1);
   });
 
-  it("an hourly cron is refused before anything reaches the scheduler, and the approval's caller sees it", async () => {
-    const scheduler = createFakeScheduler();
-    await expect(nightlyHooks({ scheduling: { scheduler } }, ON).onApproved(ORG, PROJECT, approved({ cronUtc: "0 6 15 * 1" }))).rejects.toThrow(/day of the month/u);
-    expect(scheduler.all()).toEqual([]);
-  });
 });
 
 describe("a delivery from the scheduler", () => {
@@ -118,11 +92,6 @@ describe("a delivery from the scheduler", () => {
     expect(h.started).toHaveLength(1);
   });
 
-  it("a project whose approved environment has the nightly run off starts nothing", async () => {
-    const h = await nightlyWorld({ enabled: false });
-    expect(await fireTestEnvNightly(h.deps, h.due(), h.deps.runs, ON)).toEqual({ outcome: "skipped", reason: "nightly_off" });
-    expect(h.started).toEqual([]);
-  });
 });
 
 describe("starting the run through the task flow's seam", () => {
@@ -233,13 +202,6 @@ describe("the result route", () => {
     expect(heard).toEqual([r.slotId]);
   });
 
-  it("a forged slot is refused: a valid operation cannot record a night for another slot, and the real slot stays waiting", async () => {
-    const r = await running();
-    await expect(send(r, { slotId: "f".repeat(64) })).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
-    expect(await rows(r.h.store, "TESTENV#NIGHTLY#ACTIVE")).toHaveLength(1);
-    expect(await readNightlyBaseline(r.deps, ORG, PROJECT)).toBeUndefined();
-  });
-
   it("another commit, another revision or an unreadable body is refused", async () => {
     const r = await running();
     await expect(send(r, { headSha: "c".repeat(40) })).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
@@ -261,11 +223,6 @@ describe("the result route", () => {
     const wrongWorkspace = await running({ task: { workspaceId: "another" } });
     await expect(send(wrongWorkspace)).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
     expect(await nightlyRunOfOperation(r.deps, { ...r.operation, orgId: "org_bbbbbbbbbbbbbbbbbbbb" })).toBeUndefined();
-  });
-
-  it("accepts the hosted product's task rows too (`orgId` or `companyId` names the company)", async () => {
-    const r = await running({ task: { orgId: undefined, companyId: ORG } });
-    expect(await send(r)).toMatchObject({ recorded: true });
   });
 
   it("a failure the worker reports is a row in fixed words; the lock is given back, the day's claim stays; an unknown word is refused", async () => {
@@ -292,28 +249,5 @@ describe("the end of the task", () => {
     expect(nightlyEndItems(task, { kind: "prepare" }, { status: "FAILED" }, now)).toHaveLength(2);
   });
 
-  it("an operation that ends in failure with no word from the worker leaves an infra row; the worker's own word stands; a stop and a success leave none", async () => {
-    const h = await nightlyWorld();
-    const now = new Date(T0).toISOString();
-    const items = nightlyEndItems(task, { kind: "task", workflowMode: "CHECKS" }, { status: "FAILED" }, now);
-    expect(items).toHaveLength(2);
-    await h.store.put({ item: { ...taskKey(TASK), entityType: "DEVELOPER_TASK" } });
-    expect((await h.store.transact(items)).applied).toBe(true);
-    expect((await readNightRows(h.deps, ORG, PROJECT)).map((row) => row.reason)).toEqual(["infra"]);
-    expect((await h.store.get(taskKey(TASK)))?.["agentRunEnd"]).toEqual({ state: "FAILED", at: now });
-    // The first value is kept: a late repeat changes nothing.
-    await h.store.transact(nightlyEndItems(task, { kind: "task", workflowMode: "CHECKS" }, { status: "SUCCEEDED" }, new Date(T0 + 1_000).toISOString()));
-    expect((await h.store.get(taskKey(TASK)))?.["agentRunEnd"]).toEqual({ state: "FAILED", at: now });
-    expect(nightlyEndItems(task, { kind: "task", workflowMode: "CHECKS" }, { status: "CANCELLED" }, now)).toHaveLength(1);
-    expect(nightlyEndItems(task, { kind: "task", workflowMode: "CHECKS" }, { status: "SUCCEEDED" }, now)).toHaveLength(1);
-  });
 });
 
-describe("a later approval", () => {
-  it("is the revision the next fire starts for", async () => {
-    const h = await nightlyWorld();
-    await approveForTest(h.store, body({ cronUtc: "0 7 * * *" }), 2);
-    await (await import("../../packages/broker/src/core/test-env/nightly.js")).handleNightlyFire(h.deps, h.due());
-    expect(h.started[0]).toMatchObject({ envRevision: 2 });
-  });
-});

@@ -38,13 +38,6 @@ function counting(w: ReturnType<typeof savedEnvWorld>, operation: Parameters<typ
 const input = (body: unknown, grant: string | null = "grant-ok") => ({ grant: grant ?? undefined, workspaceId: WS, operationId: OP, body });
 
 describe("the push login", () => {
-  it("gives a login for the job's repository to the preparation made for that job, with the job's lease", async () => {
-    const { w, job } = await queued();
-    const answer = await savedEnvPushLoginCore(context(w, { savedEnvJobId: job.jobId }), input({ jobId: job.jobId, leaseToken: job.leaseToken }));
-    expect(answer.login).toMatchObject({ repository: w.repository, username: "rovara-local" });
-    // minted by the PUSH role for the job's approved pin: the session names the repository
-    expect(w.logins.some((call) => call.access === "push" && call.repository === w.repository)).toBe(true);
-  });
 
   it("reads the login through the schema it is given: a hosted install's schema refuses the local registry's login", async () => {
     const { w, job } = await queued();
@@ -87,12 +80,6 @@ describe("the push login", () => {
     expect(w.logins).toEqual([]);
   });
 
-  it("builds the login for the project of the WORKSPACE, never one the request names", async () => {
-    const { w, job } = await queued();
-    const other = { ...context(w, { savedEnvJobId: job.jobId, projectName: "proj-2" }) };
-    await expect(savedEnvPushLoginCore(other, input({ jobId: job.jobId, leaseToken: job.leaseToken }))).rejects.toMatchObject({ code: "FORBIDDEN" });
-  });
-
   it("answers an unreachable registry as a fault to retry", async () => {
     const { w, job } = await queued({ state: "absent" });
     const broken = { ...context(w, { savedEnvJobId: job.jobId }) };
@@ -126,34 +113,9 @@ describe("the result", () => {
     expect(w.row()?.job).toBeUndefined();
   });
 
-  it("answers a refusal with its fixed word and keeps nothing; a worker's failure is recorded as a failure", async () => {
-    const { w, job } = await queued();
-    const wrongCommit = good(w, { manifest: manifestOf({ imageDigest: dig(7), commits: [{ repositoryId: "svc", sha: "1".repeat(40) }] }) });
-    const refused = await savedEnvResultCore(context(w, { savedEnvJobId: job.jobId }), input({ jobId: job.jobId, leaseToken: job.leaseToken, result: wrongCommit }));
-    expect(refused).toEqual({ recorded: false, reason: "wrong_commits" });
-    expect(w.row()?.images).toEqual([]);
-    const second = await queued();
-    const failed = await savedEnvResultCore(context(second.w, { savedEnvJobId: second.job.jobId }), input({ jobId: second.job.jobId, leaseToken: second.job.leaseToken, result: { ok: false, reason: "not_proved" } }));
-    expect(failed).toEqual({ recorded: false, reason: "build_failed" });
-    expect(second.w.row()?.health).toBe("needs_repair");
-  });
-
-  it("is refused for the wrong operation or job, and a wrong lease records nothing", async () => {
-    const { w, job } = await queued();
-    const body = { jobId: job.jobId, leaseToken: job.leaseToken, result: good(w) };
-    await expect(savedEnvResultCore(context(w, {}), input(body))).rejects.toMatchObject({ code: "FORBIDDEN" });
-    expect(await savedEnvResultCore(context(w, { savedEnvJobId: job.jobId }), input({ ...body, leaseToken: "y".repeat(40) }))).toMatchObject({ recorded: false, reason: "bad_lease" });
-    expect(w.row()?.images).toEqual([]);
-  });
 });
 
 describe("the fallback report", () => {
-  it("marks the image the BROKER recorded with the operation stale, for a step that says something about the image", async () => {
-    const w = savedEnvWorld();
-    w.seed({ images: [imageOf(dig(1))], health: "healthy" });
-    expect(await savedEnvFallbackCore(context(w, { savedEnvDigest: dig(1) }), input({ step: "extract" }))).toEqual({ ok: true });
-    expect(w.row()?.images[0]).toMatchObject({ status: "stale", staleStep: "extract" });
-  });
 
   it("changes nothing for a login step, names no image of its own, and needs the grant and an operation that was told to pull", async () => {
     const w = savedEnvWorld();

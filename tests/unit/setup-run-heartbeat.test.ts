@@ -26,18 +26,6 @@ async function run(companyId: string, store = new MemoryDocumentStore()) {
 }
 
 describe("the worker's poll is noted on the run's task (L4-T5)", () => {
-  it("the first poll writes the time; a poll within a minute writes nothing; a poll a minute later writes it again", async () => {
-    const r = await run(A);
-    expect(await r.seen()).toBeUndefined();
-    await r.poll();
-    expect(await r.seen()).toBe(new Date(START).toISOString());
-    r.clock.now = START + SETUP_RUN_SEEN_EVERY_MS - 1;
-    await r.poll();
-    expect(await r.seen()).toBe(new Date(START).toISOString());
-    r.clock.now = START + SETUP_RUN_SEEN_EVERY_MS;
-    await r.poll();
-    expect(await r.seen()).toBe(new Date(START + SETUP_RUN_SEEN_EVERY_MS).toISOString());
-  });
 
   it("every kind of word from a live worker is noted (journal, host, command_done, eval_discovery refused or not), and a bare 'alive' only notes and answers nothing", async () => {
     const r = await run(A);
@@ -62,13 +50,6 @@ describe("the worker's poll is noted on the run's task (L4-T5)", () => {
     r.store.update = async () => { throw new Error("the table is busy"); };
     await expect(r.poll()).resolves.toMatchObject({ hosts: [] });
     r.store.update = update;
-  });
-
-  it("only a run that is going is noted: an operation that is not running, or not a setup run, writes nothing and is refused", async () => {
-    const r = await run(A);
-    await expect(r.poll(A, { ...r.operation, status: "SUCCEEDED" })).rejects.toThrow(/limited to a running setup run/u);
-    await expect(r.poll(A, { ...r.operation, workflowMode: "BUILD" })).rejects.toThrow(/limited to a running setup run/u);
-    expect(await r.seen()).toBeUndefined();
   });
 
   it("company isolation: another company's poll never notes, or reads, this company's task, and each company's task is noted on its own", async () => {

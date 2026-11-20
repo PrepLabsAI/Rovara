@@ -42,6 +42,16 @@ describe("the capture program's browser", () => {
     expect(code).toContain("chromiumSandbox: true");
     for (const forbidden of ["remote-debugging-port", "remote-debugging-address", "connectOverCDP", "launchLocalChromium", "openEvidenceChromium", "--no-sandbox"]) expect(code, forbidden).not.toContain(forbidden);
   });
+
+  it("keeps the shared browser-evidence driver on Playwright's pipe with no TCP debugging listener", () => {
+    const driver = readFileSync("packages/verifier/src/executor/browser-evidence-chromium.ts", "utf8");
+    const launch = driver.slice(driver.indexOf("export async function openEvidenceChromium"));
+    expect(launch).toContain("chromium.launch(");
+    expect(launch).not.toContain("launchLocalChromium");
+    expect(launch).not.toContain("connectOverCDP");
+    expect(launch).not.toContain("--remote-debugging-port");
+    expect(launch).not.toContain("--remote-debugging-address");
+  });
 });
 
 // TE-H1 slice 3: an app behind a login. The program signs in ONCE, after the app is up and before any page; a sign-in that did not work is its only line after the app's own (no page of a signed-out app is taken); the values come

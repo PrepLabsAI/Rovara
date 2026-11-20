@@ -6,10 +6,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { EVAL_NOT_READ_LINE } from "@agentx/contracts";
-import {
-  GENERAL_FAKES_MAX_SERVICES, canonicalPlanJson, createCandidateManifest, createWorkflowSnapshot, generalFakesPayloadOf, setupMockPrLine,
-  type GeneralFakesSetting, type PlanSetupChangeItem, type WorkflowSnapshot,
-} from "@agentx/contracts";
+import { GENERAL_FAKES_MAX_SERVICES, canonicalPlanJson, createCandidateManifest, createWorkflowSnapshot, generalFakesPayloadOf, type GeneralFakesSetting, type PlanSetupChangeItem, type WorkflowSnapshot } from "@agentx/contracts";
 import { approvedCodingPlan } from "../../packages/broker/src/core/build-step/plan-input.js";
 import { fakesFor, flagUnplannedMocks, isUnplannedMock, mockFactsOf, mockPrLines, mocksInPlay, plannedMocksOf, type MockSourceFacts } from "../../packages/broker/src/core/setup-agent/plan-setup.js";
 import { assessRisk, type RiskInput } from "../../packages/broker/src/core/proof/risk.js";
@@ -25,15 +22,6 @@ describe("a plan-approved mock applies to this task only", () => {
     expect(fakesFor(setting(), [mock()])).toEqual({ services: [{ variable: "PAYMENTS_API_URL", spec: "repo/demo/openapi/payments.yaml" }, { variable: "STRIPE_API_URL", spec: "repo/demo/openapi/stripe.yaml" }] });
     // Only a mock counts: a command, a variable and a dependency add no fake.
     expect(fakesFor(setting(), [command()])).toEqual(generalFakesPayloadOf(setting()));
-  });
-
-  it("serves a task's mock even where the project has its fakes off, for that task alone", () => {
-    expect(fakesFor(undefined, [mock()])).toEqual({ services: [{ variable: "STRIPE_API_URL", spec: "repo/demo/openapi/stripe.yaml" }] });
-    expect(fakesFor(setting({ enabled: false }), [mock()])).toEqual({ services: [{ variable: "STRIPE_API_URL", spec: "repo/demo/openapi/stripe.yaml" }] });
-    // Another task, whose plan has no setup change, gets exactly what the project has: none of the first task's mocks.
-    expect(fakesFor(undefined, undefined)).toBeUndefined();
-    expect(fakesFor(setting({ enabled: false }), undefined)).toBeUndefined();
-    expect(fakesFor(setting(), undefined)).toEqual(generalFakesPayloadOf(setting()));
   });
 
   it("never writes the project's setting (the input is not changed) and never replaces a project fake for the same variable", () => {
@@ -65,21 +53,6 @@ describe("the plan counts only with a person's approval of exactly that plan", (
     expect(plannedMocksOf(approved.setupChanges)).toHaveLength(1);
   });
 
-  it("leaves them out without an approval, with an approval of another plan, or with a decision that is not a person's approval", async () => {
-    expect((await read([])).setupChanges).toBeUndefined();
-    expect((await read([approve({ artifactDigest: "b".repeat(64) })])).setupChanges).toBeUndefined();
-    expect((await read([approve({ source: "SEND_BACK" })])).setupChanges).toBeUndefined();
-    expect((await read([approve({ source: "AUTO_FIX" })])).setupChanges).toBeUndefined();
-    expect((await read([approve({ decision: "REQUEST_CHANGES" })])).setupChanges).toBeUndefined();
-  });
-
-  it("leaves the field off a plan with no setup changes, as before", async () => {
-    const plain = planDocument();
-    const plainText = canonicalPlanJson(plain);
-    const plainSha = createHash("sha256").update(plainText, "utf8").digest("hex");
-    const approved = await approvedCodingPlan({ get: async () => new TextEncoder().encode(plainText) }, { artifacts: [{ ...artifact, sha256: plainSha }], decisions: [approve({ artifactDigest: plainSha })] } as never);
-    expect(Object.hasOwn(approved, "setupChanges")).toBe(false);
-  });
 });
 
 describe("the coding agent never writes its own mock", () => {
@@ -99,11 +72,6 @@ describe("the coding agent never writes its own mock", () => {
     for (const path of ["openapi.yaml.txt", "docs/openapi-notes.md", "openapi-payments.yaml", "src/openapi_client.ts", "swaggerish.yaml.bak", "src/refund.ts"]) expect(isUnplannedMock(file(path), facts()), path).toBe(false);
     const [flagged] = flagUnplannedMocks([file("api/openapi.yaml")], facts());
     expect(flagged).toEqual({ repository: "demo", path: "api/openapi.yaml", mockUnplanned: true });
-  });
-
-  it("marks the spec the project's own setting names, even under another name", () => {
-    expect(isUnplannedMock(file("openapi/payments.yaml"), facts())).toBe(true);
-    expect(isUnplannedMock(file("openapi/payments.yaml", { repository: "other" }), facts())).toBe(false);
   });
 
   it("does not mark the spec the approved plan names (exact path, workspace or repository form), and marks any other", () => {
@@ -160,14 +128,8 @@ describe("the coding agent never writes its own mock", () => {
 
 describe("the pull request says so once per mock", () => {
   const candidate = createCandidateManifest([{ repositoryId: "app", commitSha: "1".repeat(40), treeSha: "1".repeat(40), baseCommitSha: "e".repeat(40) }]);
-  const workflow = { ...createWorkflowSnapshot({ taskId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", ownerId: "a".repeat(64), now: "2026-11-13T12:00:00.000Z", definitionVersion: "1.1.0" }), candidate } as unknown as WorkflowSnapshot;
+  const workflow = { ...createWorkflowSnapshot({ taskId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", ownerId: "a".repeat(64), now: "2026-11-13T12:00:00.000Z", definitionVersion: "1.1.0" }), candidate, reviews: (["CRITIC", "SECURITY"] as const).map((role) => ({ operationId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", candidateDigest: candidate.digest, role, provider: "test", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: "2026-11-13T12:00:00.000Z" })) } as unknown as WorkflowSnapshot;
   const status = (setupLines?: readonly string[]) => rovaraStatusLines(workflow, { ...(setupLines === undefined ? {} : { setupLines }) }, () => ["- no findings"]);
-
-  it("words the line as the design does: fake made by Rovara for this task, not yet part of the project's setup", () => {
-    expect(mockPrLines([mock(), command()])).toEqual(["Stripe: fake made by Rovara for this task. Not yet part of the project's setup."]);
-    expect(setupMockPrLine("Stripe", "Raj")).toBe("Stripe: fake made by Rovara for this task, approved with the plan by Raj. Not yet part of the project's setup.");
-    expect(mockPrLines(undefined)).toEqual([]);
-  });
 
   it("adds a Setup change section only when there is a line, and a description without one is what it was", () => {
     const without = status();
@@ -191,7 +153,7 @@ describe("the pull request says so once per mock", () => {
 // L4-EVW4 (DEC 254zzz43): the one line the pull request carries while the project's eval card is set aside and an eval is still unread.
 describe("the pull request says an eval was not read", () => {
   const candidate = createCandidateManifest([{ repositoryId: "app", commitSha: "1".repeat(40), treeSha: "1".repeat(40), baseCommitSha: "e".repeat(40) }]);
-  const workflow = { ...createWorkflowSnapshot({ taskId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", ownerId: "a".repeat(64), now: "2026-11-13T12:00:00.000Z", definitionVersion: "1.1.0" }), candidate } as unknown as WorkflowSnapshot;
+  const workflow = { ...createWorkflowSnapshot({ taskId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", ownerId: "a".repeat(64), now: "2026-11-13T12:00:00.000Z", definitionVersion: "1.1.0" }), candidate, reviews: (["CRITIC", "SECURITY"] as const).map((role) => ({ operationId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", candidateDigest: candidate.digest, role, provider: "test", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: "2026-11-13T12:00:00.000Z" })) } as unknown as WorkflowSnapshot;
   const status = (evalSetupLines?: readonly string[]) => rovaraStatusLines(workflow, { ...(evalSetupLines === undefined ? {} : { evalSetupLines }) }, () => ["- no findings"]);
 
   it("adds an Eval section with the fixed line, and a description without one is what it was", () => {

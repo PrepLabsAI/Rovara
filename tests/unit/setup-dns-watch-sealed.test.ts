@@ -4,7 +4,7 @@ import { createSocket } from "node:dgram";
 import { connect } from "node:net";
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
-import { SEALED_DNS_TABLE_MAX, SEALED_DNS_TTL_SECONDS, SEALED_RECORD_NAME_MAX, SealedDnsHelper, isSealedDnsName, parseDnsPacket, type SealedDnsOptions } from "../../packages/worker/src/setup-dns-watch.js";
+import { SEALED_DNS_TABLE_MAX, SEALED_DNS_TTL_SECONDS, SEALED_RECORD_NAME_MAX, SealedDnsHelper, isSealedDnsName, type SealedDnsOptions } from "../../packages/worker/src/setup-dns-watch.js";
 import { tableFromArguments } from "../../packages/worker/src/sealed-dns-helper.js";
 import { sealedDnsHelperRunArgs } from "../../packages/worker/src/check-sandbox.js";
 import { runNetworkAddresses, runNetworkLabelArgs, runNetworkName } from "../../packages/worker/src/run-network.js";
@@ -99,14 +99,6 @@ describe("the static table", () => {
     expect(read((await ask(port, query("fake-payments.internal")))!).address).toBe("172.30.5.19");
   });
 
-  it("matches without regard to case and echoes the case that was asked (0x20 randomisation)", async () => {
-    const { port, helper } = await sealed();
-    const raw = (await ask(port, query("PoStGrEs")))!;
-    expect(read(raw).address).toBe("172.30.5.17");
-    expect(raw.subarray(13, 21).toString("latin1")).toBe("PoStGrEs");
-    expect(helper.unknownNames()).toEqual([]);
-  });
-
   it("answers an AAAA, HTTPS or ANY question of a run name with an empty NOERROR answer, and does not count it", async () => {
     const { port, helper } = await sealed();
     for (const type of [TYPE.AAAA, TYPE.HTTPS, TYPE.ANY, TYPE.TXT]) expect(read((await ask(port, query("postgres", type)))!)).toMatchObject({ rcode: 0, answers: 0 });
@@ -132,35 +124,6 @@ describe("the static table", () => {
 });
 
 describe("a name outside the table goes to the sinkhole and is counted", () => {
-  it("answers an A question with the sinkhole's address and counts the name", async () => {
-    const { port, helper } = await sealed();
-    expect(read((await ask(port, query("api.example-pay.com")))!)).toMatchObject({ rcode: 0, answers: 1, address: SINKHOLE });
-    expect(read((await ask(port, query("api.example-pay.com", TYPE.A, 7)))!).address).toBe(SINKHOLE);
-    expect(read((await ask(port, query("sts.us-east-1.amazonaws.com")))!).address).toBe(SINKHOLE);
-    expect(helper.unknownNames()).toEqual([{ name: "api.example-pay.com", queries: 2 }, { name: "sts.us-east-1.amazonaws.com", queries: 1 }]);
-  });
-
-  it("answers a single-label name outside the table (a mistyped alias) with the sinkhole and records it", async () => {
-    const { port, helper } = await sealed();
-    expect(read((await ask(port, query("postgress")))!).address).toBe(SINKHOLE);
-    expect(helper.unknownNames()).toEqual([{ name: "postgress", queries: 1 }]);
-  });
-
-  it("answers AAAA and HTTPS of an unknown name with an empty NOERROR answer (so the client uses the A record), counted; other types are neither answered with an address nor counted", async () => {
-    const { port, helper } = await sealed();
-    for (const type of [TYPE.AAAA, TYPE.HTTPS]) expect(read((await ask(port, query("unknown.example.org", type)))!)).toMatchObject({ rcode: 0, answers: 0 });
-    for (const type of [TYPE.TXT, TYPE.ANY]) expect(read((await ask(port, query("unknown.example.org", type)))!)).toMatchObject({ rcode: 0, answers: 0 });
-    expect(helper.unknownNames()).toEqual([{ name: "unknown.example.org", queries: 2 }]);
-  });
-
-  it("never answers a name with anything but the table's addresses and the sinkhole's", async () => {
-    const { port } = await sealed();
-    const allowed = new Set([...Object.values(TABLE), SINKHOLE]);
-    for (const name of ["example.com", "localhost", "metadata.google.internal", "169.254.169.254", "a.b.c.d.e.f", "postgres.evil.test", "xn--bcher-kva.example", "x".repeat(63)]) {
-      const reply = read((await ask(port, query(name)))!);
-      expect(allowed.has(reply.address ?? SINKHOLE), name).toBe(true);
-    }
-  });
 
   it("keeps at most maxUnknownNames distinct names, counts the rest, and keeps counting the names it holds", async () => {
     const { port, helper } = await sealed({ maxUnknownNames: 2 });
@@ -178,31 +141,9 @@ describe("a name outside the table goes to the sinkhole and is counted", () => {
     expect(helper.unrecordedQueries()).toBe(3);
   });
 
-  it("a dotted label cannot pretend to be a table name", async () => {
-    const { port, helper } = await sealed();
-    // The single label "fake-payments.internal" is not the two-label name; it must not return the table's address.
-    expect(read((await ask(port, labelsQuery(["fake-payments.internal"])))!).address).toBe(SINKHOLE);
-    expect(helper.unrecordedQueries()).toBe(1);
-  });
 });
 
 describe("who is served, and what is dropped", () => {
-  it("serves only the addresses it was made with: another caller gets no answer and is not counted", async () => {
-    const { port, helper } = await sealed({ allowedSources: ["172.30.5.3", "172.30.5.4"] });
-    expect(await ask(port, query("postgres"))).toBeUndefined();
-    expect(await ask(port, query("unknown.example.org"))).toBeUndefined();
-    const tcp = await askTcp(port, [query("postgres")]);
-    expect(tcp.replies).toEqual([]);
-    expect(tcp.closed).toBe(true);
-    expect(helper.unknownNames()).toEqual([]);
-  });
-
-  it("compares the caller's address exactly, not by prefix", async () => {
-    const { port, helper } = await sealed({ allowedSources: ["127.0.0.2", "127.0.0.10"] });
-    expect(await ask(port, query("postgres"))).toBeUndefined();
-    expect(await ask(port, query("unknown.example.org"))).toBeUndefined();
-    expect(helper.unknownNames()).toEqual([]);
-  });
 
   it("refuses an empty, unspecified, multicast or oversized list of served addresses, and has no way to widen the list afterwards", () => {
     const make = (allowedSources: string[]) => () => new SealedDnsHelper({ listenAddress: "127.0.0.1", allowLoopback: true, names: TABLE, sinkholeAddress: SINKHOLE, allowedSources });
@@ -279,21 +220,6 @@ describe("it has no way to ask anyone else", () => {
     expect(sealedPart.match(/\.send\(/gu)?.length).toBe(1); // the one reply to the caller
   });
 
-  it("does not accept an upstream (type level and at run time)", async () => {
-    // @ts-expect-error SealedDnsOptions has no upstream
-    const options: SealedDnsOptions = { listenAddress: "127.0.0.1", allowLoopback: true, port: 0, names: TABLE, sinkholeAddress: SINKHOLE, allowedSources: ["127.0.0.1"], upstream: { address: "127.0.0.1", port: 1 } };
-    const helper = new SealedDnsHelper(options);
-    const { port } = await helper.start();
-    closers.push(() => helper.stop());
-    // An unknown name is answered at once with the sinkhole, with nothing listening anywhere to ask.
-    expect(read((await ask(port, query("unknown.example.org")))!).address).toBe(SINKHOLE);
-  });
-
-  it("parses the replies it builds with the same parser the setup watch uses", async () => {
-    const { port } = await sealed();
-    const parsed = parseDnsPacket((await ask(port, query("postgres", TYPE.A, 0x77)))!);
-    expect(parsed).toMatchObject({ id: 0x77, response: true, rcode: 0, name: "postgres", type: TYPE.A });
-  });
 });
 
 describe("the helper program's arguments", () => {

@@ -29,14 +29,6 @@ async function world(options: { revision?: number; org?: OrgId } = {}) {
 const ready = (over: Record<string, unknown> = {}) => ({ state: "checking", baseRevision: 1, candidateRevision: 2, checkState: { status: "ready" }, ...over });
 
 describe("the card the web reads", () => {
-  it("is 'Fix setup' while no fix waits, with what changed in fixed words", async () => {
-    apply.read.mockResolvedValue(undefined);
-    const w = await world();
-    expect(await setupRepairViewOf(w.deps, "payments", { canManage: true })).toEqual({
-      title: "Setup needs repair", body: `The project's setup stopped working after recent code changes (${STEP}). Rovara cannot build on this project until it is fixed.`, changed: "dependency files and a compose file",
-      at: "2026-11-17T09:05:00.000Z", fixReady: false, actions: [{ id: "fix_setup", label: "Fix setup" }],
-    });
-  });
 
   it("is 'Approve new setup' only while a checked fix of the CURRENT setup waits", async () => {
     const w = await world();

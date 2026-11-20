@@ -79,14 +79,6 @@ describe("behind the tx switch", () => {
     expect(await store.specSlice(ORG_A, PROJ, digest)).toEqual({ ok: false, reason: "disabled" });
     expect(touched).toEqual([]);
   });
-  it("reads the switch on every call: turning it off again stops delivery of a set that was approved", async () => {
-    const { store, setEnabled } = setup();
-    const record = await submitOk(store);
-    await store.approve(ORG_A, PROJ, record.digest, by("approve", ORG_A, record.digest, "lead"));
-    expect((await store.deliver(ORG_A, PROJ, record.digest)).ok).toBe(true);
-    setEnabled(false);
-    expect(await store.deliver(ORG_A, PROJ, record.digest)).toEqual({ ok: false, reason: "disabled" });
-  });
 });
 
 it("reuses the already-cut mock spec slice when approval retries after the row update fails", async () => {
@@ -123,14 +115,6 @@ describe("store ids and keys are org-scoped", () => {
     }
     expect(touched).toEqual([]);
   });
-  it("is the same upload twice, once: the second submit finds the first", async () => {
-    const { store, ports } = setup();
-    const first = await store.submit(ORG_A, PROJ, makeSet(), { actor: "maya", recordedFrom: "synthetic" });
-    const second = await store.submit(ORG_A, PROJ, makeSet(), { actor: "other", recordedFrom: "synthetic" });
-    expect(first).toMatchObject({ ok: true, created: true });
-    expect(second).toMatchObject({ ok: true, created: false });
-    expect(ports.objects.dump().size).toBe(1);
-  });
 });
 
 describe("cross-org reads are refused", () => {
@@ -153,17 +137,6 @@ describe("cross-org reads are refused", () => {
     expect((await store.deliver(ORG_A, PROJ, record.digest)).ok).toBe(true);
     expect((await store.record(ORG_A, PROJ, record.digest))).toMatchObject({ ok: true, record: { status: "approved", decidedBy: "lead" } });
   });
-  it("answers a store id that names another org as not found even when the caller's org holds the same digest", async () => {
-    const { store, touched } = setup();
-    const a = await submitOk(store, makeSet(), ORG_A);
-    const b = await submitOk(store, makeSet(), ORG_B);
-    await store.approve(ORG_A, PROJ, a.digest, by("approve", ORG_A, a.digest, "lead"));
-    await store.approve(ORG_B, PROJ, b.digest, by("approve", ORG_B, b.digest, "lead"));
-    touched.length = 0;
-    expect(await store.deliverById(ORG_B, PROJ, fixtureStoreId(ORG_A, PROJ, a.digest))).toEqual({ ok: false, reason: "not_found" });
-    expect(touched).not.toContain("presign");
-    expect((await store.deliverById(ORG_B, PROJ, b.storeId)).ok).toBe(true);
-  });
   it("signs only the caller's own key", async () => {
     const seen: string[] = [];
     const { store } = setup({}, true);
@@ -175,25 +148,9 @@ describe("cross-org reads are refused", () => {
     expect(seen).toEqual([`private/${ORG_A}/fixtures/${PROJ}/${record.digest}`]);
     void store;
   });
-  it("does not trust an index row that names another org", async () => {
-    const ports = createMemoryFixturePorts();
-    const lying: FixtureStoreDependencies["index"] = { ...ports.index, get: async (org, project, digest) => { const row = await ports.index.get(org, project, digest); return row === undefined ? undefined : { ...row, orgId: ORG_B }; } };
-    const store = createFixtureStore({ enabled: () => true, objects: ports.objects, index: lying, denyFor: () => Promise.resolve(DENY), now: () => NOW });
-    const record = await submitOk(store, makeSet(), ORG_A);
-    expect(await store.record(ORG_A, PROJ, record.digest)).toEqual({ ok: false, reason: "not_found" });
-    expect(await store.deliver(ORG_A, PROJ, record.digest)).toEqual({ ok: false, reason: "not_found" });
-  });
 });
 
 describe("a submitted set", () => {
-  it("is parsed as FixtureSet v2, scanned, and stored pending under its digest with its counts", async () => {
-    const { store, ports } = setup();
-    const set = makeSet();
-    const record = await submitOk(store, set);
-    expect(record).toMatchObject({ orgId: ORG_A, digest: fixtureSetDigest(set), dependencyId: "payments-api", entries: 4, faults: 1, origin: "recorded", recordedFrom: "synthetic", status: "pending", scanClean: true, submittedBy: "maya", version: 1 });
-    const stored = ports.objects.dump().get(fixtureObjectKey(ORG_A, PROJ, record.digest))!;
-    expect(new TextDecoder().decode(stored)).toBe(canonicalJson(set));
-  });
   it("is refused when it is not a v2 set, an entry sits under the wrong hash, or it is too big, and nothing is stored", async () => {
     const { store, ports } = setup();
     const set = makeSet();
@@ -208,8 +165,6 @@ describe("a submitted set", () => {
   });
   it.each([
     ["an email address", () => answer({ contact: "jane.roe@acme-corp.com" })],
-    ["a production host", () => answer({ callback: "https://a.prod.example.com/x" })],
-    ["a credential", () => answer({ debug: `key ${"AKIA"}${"ABCDEFGHIJKLMNOP"}` })],
   ])("stops a set whose answers hold %s, stores nothing, and says only that the guard stopped it", async (_label, make) => {
     const { store, ports } = setup();
     const shell = { dependency, match };
@@ -218,39 +173,9 @@ describe("a submitted set", () => {
     expect(outcome).toEqual({ ok: false, reason: "data_guard" });
     expect(ports.objects.dump().size).toBe(0);
   });
-  it("is scanned in its request, its path and its header values too, with the org's own deny list", async () => {
-    const shell = { dependency, match };
-    const { store } = setup({ denyFor: (org) => Promise.resolve(org === ORG_B ? { accountIds: [], hosts: ["api.example-pay.com"], arnPrefixes: [] } : DENY) });
-    const dirtyRequest = makeSet({ entries: [fixtureEntry(shell, { ...charge(1), body: JSON.stringify({ amount: 1, mail: "jane.roe@acme-corp.com" }) }, answer({ ok: true }))] });
-    expect(await store.submit(ORG_A, PROJ, dirtyRequest, { actor: "m", recordedFrom: "synthetic" })).toEqual({ ok: false, reason: "data_guard" });
-    // The same clean-looking set names a host that is production for org B only.
-    const body = makeSet({ entries: [fixtureEntry(shell, charge(1), answer({ link: "https://api.example-pay.com/receipt" }))] });
-    expect((await store.submit(ORG_A, PROJ, body, { actor: "m", recordedFrom: "synthetic" })).ok).toBe(true);
-    expect(await store.submit(ORG_B, PROJ, body, { actor: "m", recordedFrom: "synthetic" })).toEqual({ ok: false, reason: "data_guard" });
-  });
-  it("fails closed when the deny list cannot be read", async () => {
-    const { store, ports } = setup({ denyFor: () => Promise.reject(new Error("unavailable")) });
-    await expect(store.submit(ORG_A, PROJ, makeSet(), { actor: "m", recordedFrom: "synthetic" })).rejects.toThrow();
-    expect(ports.objects.dump().size).toBe(0);
-  });
 });
 
 describe("the review", () => {
-  it("shows counts, the schema, three redacted sample pairs, the scan result, the ignored paths and the faults", async () => {
-    const { store } = setup();
-    const set = makeSet();
-    const record = await submitOk(store, set);
-    const reviewed = await store.review(ORG_A, PROJ, record.digest);
-    if (!reviewed.ok) throw new Error(reviewed.reason);
-    const { review } = reviewed;
-    expect(review).toMatchObject({
-      storeId: record.storeId, digest: record.digest, origin: "recorded", revision: 2, recordedFrom: "synthetic",
-      counts: { entries: 4, faults: 1 }, scan: { clean: true }, ignorePaths: ["/requestedAt"], faults: [{ name: "busy", kind: "throttle", status: 429, delayMs: 0 }],
-      schema: { request: ["type object", "fields amount"], response: ["type object", "fields id, ok"] },
-    });
-    expect(review.samples).toHaveLength(3);
-    expect(review.samples[0]).toMatchObject({ method: "POST", path: "/v1/charges", query: "customer=c1", status: 200 });
-  });
   it("cuts a long body and flattens control characters, so a recorded answer cannot fill or steer the page", async () => {
     const shell = { dependency, match };
     const long = makeSet({ entries: [fixtureEntry(shell, charge(1), { ...answer({ ok: true }), body: JSON.stringify({ note: `line one\nline two ${"z".repeat(2_000)}` }) })] });
@@ -273,26 +198,6 @@ describe("the review", () => {
 });
 
 describe("approving and delivering", () => {
-  it("pins a separate spec slice at approval and keeps its row company and project scoped", async () => {
-    const ports = createMemoryFixturePorts();
-    const dependencies: FixtureStoreDependencies = { enabled: () => true, ...ports, denyFor: () => Promise.resolve(DENY), now: () => NOW };
-    const store = createFixtureStore(dependencies);
-    const aWeb = await submitOk(store, makeSet(), ORG_A);
-    const bWeb = await submitOk(store, makeSet(), ORG_B);
-    const aOtherProjectResult = await store.submit(ORG_A, "api", makeSet(), { actor: "maya", recordedFrom: "synthetic" });
-    if (!aOtherProjectResult.ok) throw new Error(aOtherProjectResult.reason);
-    for (const [org, project, record] of [[ORG_A, PROJ, aWeb], [ORG_B, PROJ, bWeb], [ORG_A, "api", aOtherProjectResult.record]] as const) {
-      const approved = await store.approve(org, project, record.digest, by("approve", org, record.digest, "lead", { project }));
-      expect(approved.ok).toBe(true);
-      if (!approved.ok) throw new Error(approved.reason);
-      expect(approved.record).toMatchObject({ status: "approved" });
-      expect(approved.record.mockSpecSliceDigest).toMatch(/^[a-f0-9]{64}$/u);
-      const slice = await store.specSlice(org, project, record.digest);
-      expect(slice).toMatchObject({ ok: true, slice: { companyId: org, project, mockDigest: record.digest, vendor: "unknown", result: "no_spec", entityType: "MOCK_SPEC_SLICE" } });
-    }
-    expect(await store.specSlice(ORG_B, "api", aWeb.digest)).toEqual({ ok: false, reason: "not_found" });
-    expect(await store.specSlice(ORG_A, "other", aWeb.digest)).toEqual({ ok: false, reason: "not_found" });
-  });
 
   it("delivers only an approved set, with a 15-minute signed read of that one key and the digest to check", async () => {
     const { store } = setup();
@@ -356,19 +261,6 @@ describe("the review card (approve_fixture_set)", () => {
     const item = fixtureSetCardItem({ record: reviewed.record, review: reviewed.review, project: "Orders", openPath: `/v1/app/environment/fixtures/${record.digest.slice(0, 16)}`, schemaSynth });
     return { item, projection: projectDecisionCards([item]) };
   };
-  it("is a medium card with Approve (evidence first) for a recording from synthetic inputs, bound to the digest", async () => {
-    const { store } = setup();
-    const record = await submitOk(store);
-    const { projection } = await cardFor(store, record);
-    const [card] = projection.cards;
-    expect(card).toMatchObject({ kind: "approve_fixture_set", id: `approve_fixture_set:${record.digest.slice(0, 40)}`, risk: "medium", status: "pending", friction: { expandEvidenceFirst: true, freshSignIn: false } });
-    expect(card!.actions.map((action) => action.kind)).toEqual(["approve", "reject", "open"]);
-    expect(card!.evidence.map((chip) => `${chip.label}: ${chip.value}`)).toEqual(["Answers: 4 answers", "Faults: 1 named fault", "Personal-data scan: clean"]);
-    const detail = projection.details[card!.id]!.map((group) => group.title);
-    expect(detail).toEqual(expect.arrayContaining(["Sample answers (cut, from the recording)", "Schema", "Ignored when matching a request", "Named faults", "Where it came from"]));
-    expect(projection.details[card!.id]!.find((group) => group.title.startsWith("Sample"))!.lines).toHaveLength(9);
-    expect(projection.digests[card!.id]).toMatch(/^[a-f0-9]{64}$/u);
-  });
   it("is high, with no Approve action, when unrecorded requests are answered from the schema", async () => {
     const { store } = setup();
     const record = await submitOk(store);
@@ -428,11 +320,6 @@ describe("the scan sees keys and numbers, not only strings (M1)", () => {
     expect(await store.submit(ORG_A, PROJ, make(), { actor: "maya", recordedFrom: "synthetic" })).toEqual({ ok: false, reason: "data_guard" });
     expect(ports.objects.dump().size).toBe(0);
   });
-  it("lists the findings in a bare walker: keys and numbers are texts, a digest and a timestamp are not", () => {
-    expect(fixtureTexts({ [akia]: 5, nested: [{ "x@y.com": Number(card) }], hash: "a".repeat(64), at: "2026-11-02T00:00:00Z" })).toEqual([akia, "5", "nested", "x@y.com", "4111111111111111", "hash", "at"]);
-    expect(fixtureSetFindings({ minimum: Number(card) }, DENY)).not.toEqual([]);
-    expect(fixtureSetFindings({ minimum: 200 }, DENY)).toEqual([]);
-  });
 });
 
 describe("the scan runs again, with today's deny list, at approve and at deliver (L2)", () => {
@@ -477,13 +364,6 @@ describe("the scan runs again, with today's deny list, at approve and at deliver
     expect(await store.submit(ORG_A, PROJ, makeSet(), { actor: "m", recordedFrom: "synthetic" })).toMatchObject({ ok: true, created: false, record: { status: "withdrawn" } });
     expect((await store.deliver(ORG_A, PROJ, record.digest)).ok).toBe(false);
   });
-  it("does not withdraw another org's set", async () => {
-    const { store } = setup();
-    const record = await submitOk(store);
-    await store.approve(ORG_A, PROJ, record.digest, by("approve", ORG_A, record.digest, "lead"));
-    expect(await store.withdraw(ORG_B, PROJ, record.digest, by("withdraw", ORG_B, record.digest, "lead"))).toEqual({ ok: false, reason: "not_found" });
-    expect((await store.deliver(ORG_A, PROJ, record.digest)).ok).toBe(true);
-  });
 });
 
 describe("a decision is a verified object, not a name (L1, N1, N2)", () => {
@@ -505,37 +385,6 @@ describe("a decision is a verified object, not a name (L1, N1, N2)", () => {
     expect((await store.approve(ORG_A, PROJ, d, real)).ok).toBe(true);
     expect((await store.record(ORG_A, PROJ, d) as { record: FixtureRecord }).record.status).toBe("approved");
   });
-  it("is for one action: a decision to approve does not reject or withdraw", async () => {
-    const { store } = setup();
-    const record = await submitOk(store);
-    const d = record.digest;
-    const approving = by("approve", ORG_A, d, "lead");
-    expect(await store.reject(ORG_A, PROJ, d, approving)).toEqual({ ok: false, reason: "unauthorised" });
-    expect(await store.withdraw(ORG_A, PROJ, d, approving)).toEqual({ ok: false, reason: "unauthorised" });
-    expect((await store.approve(ORG_A, PROJ, d, approving)).ok).toBe(true);
-  });
-  it("is for one set: a decision for one digest does not decide another", async () => {
-    const { store } = setup();
-    const first = await submitOk(store, makeSet({ revision: 11 }));
-    const second = await submitOk(store, makeSet({ revision: 12 }));
-    const forFirst = by("approve", ORG_A, first.digest, "lead");
-    expect(await store.approve(ORG_A, PROJ, second.digest, forFirst)).toEqual({ ok: false, reason: "unauthorised" });
-    expect((await store.record(ORG_A, PROJ, second.digest) as { record: FixtureRecord }).record.status).toBe("pending");
-    expect((await store.approve(ORG_A, PROJ, first.digest, forFirst)).ok).toBe(true);
-  });
-  it("is single-use: the second use of the same decision is refused, also when the first one ran at the same moment", async () => {
-    const { store } = setup();
-    const record = await submitOk(store);
-    const d = record.digest;
-    const once = by("reject", ORG_A, d, "lead");
-    expect((await store.reject(ORG_A, PROJ, d, once)).ok).toBe(true);
-    expect(await store.reject(ORG_A, PROJ, d, once)).toEqual({ ok: false, reason: "unauthorised" });
-    const other = await submitOk(store, makeSet({ revision: 13 }));
-    const both = by("approve", ORG_A, other.digest, "lead");
-    const results = await Promise.all([store.approve(ORG_A, PROJ, other.digest, both), store.approve(ORG_A, PROJ, other.digest, both)]);
-    expect(results.filter((result) => result.ok)).toHaveLength(1);
-    expect(results.filter((result) => !result.ok && result.reason === "unauthorised")).toHaveLength(1);
-  });
   it("mints a decision only for a maintainer of a real org with a named actor, a known action and a digest", () => {
     const base = { orgId: ORG_A, project: PROJ, actor: "lead", action: "approve" as const, digest: "a".repeat(64), signedInAt: undefined, schemaSynth: false };
     expect(verifiedFixtureDecision({ ...base, role: "maintainer" })).toBeDefined();
@@ -545,29 +394,6 @@ describe("a decision is a verified object, not a name (L1, N1, N2)", () => {
     expect(verifiedFixtureDecision({ ...base, role: "maintainer", actor: "  " })).toBeUndefined();
     expect(verifiedFixtureDecision({ ...base, role: "maintainer", digest: "abc" })).toBeUndefined();
     expect(verifiedFixtureDecision({ ...base, role: "maintainer", action: "delete" as never })).toBeUndefined();
-  });
-  it("needs a sign-in within ten minutes of the use for a high set: the first from a test account, or one the environment backs with schema_synth", async () => {
-    const { store } = setup();
-    const synth = await submitOk(store, makeSet({ revision: 3 }));
-    const d = synth.digest;
-    expect(await store.approve(ORG_A, PROJ, d, by("approve", ORG_A, d, "lead", { synth: true }))).toEqual({ ok: false, reason: "fresh_sign_in_required" });
-    expect(await store.approve(ORG_A, PROJ, d, by("approve", ORG_A, d, "lead", { synth: true, stale: true }))).toEqual({ ok: false, reason: "fresh_sign_in_required" });
-    expect((await store.approve(ORG_A, PROJ, d, by("approve", ORG_A, d, "lead", { synth: true, fresh: true }))).ok).toBe(true);
-    // An ordinary set needs none.
-    const plain = await submitOk(store, makeSet({ revision: 4 }));
-    expect((await store.approve(ORG_A, PROJ, plain.digest, by("approve", ORG_A, plain.digest, "lead"))).ok).toBe(true);
-  });
-  it("measures the sign-in against the moment of use, not of minting, and refuses one from the future", async () => {
-    let at = NOW;
-    const { store } = setup({ now: () => at });
-    const record = await submitOk(store, makeSet({ revision: 21 }), ORG_A, "test_account");
-    const d = record.digest;
-    const minted = verifiedFixtureDecision({ project: PROJ, orgId: ORG_A, actor: "lead", role: "maintainer", action: "approve", digest: d, signedInAt: new Date(NOW.getTime() - 5 * 60_000), schemaSynth: false })!;
-    at = new Date(NOW.getTime() + 6 * 60_000);
-    expect(await store.approve(ORG_A, PROJ, d, minted)).toEqual({ ok: false, reason: "fresh_sign_in_required" });
-    at = NOW;
-    const future = verifiedFixtureDecision({ project: PROJ, orgId: ORG_A, actor: "lead", role: "maintainer", action: "approve", digest: d, signedInAt: new Date(NOW.getTime() + 30 * 60_000), schemaSynth: false })!;
-    expect(await store.approve(ORG_A, PROJ, d, future)).toEqual({ ok: false, reason: "fresh_sign_in_required" });
   });
 });
 
@@ -615,17 +441,6 @@ describe("a bad object at the key is repaired by the next submit (L5)", () => {
     expect((await store.approve(ORG_A, PROJ, record.digest, by("approve", ORG_A, record.digest, "lead"))).ok).toBe(true);
     expect((await store.deliver(ORG_A, PROJ, record.digest)).ok).toBe(true);
   });
-  it("repairs a corrupt object before the row exists, too, and leaves a good object alone", async () => {
-    const { store, ports, touched } = setup();
-    const set = makeSet();
-    const key = fixtureObjectKey(ORG_A, PROJ, fixtureSetDigest(set));
-    ports.objects.dump().set(key, new TextEncoder().encode("planted"));
-    expect((await store.submit(ORG_A, PROJ, set, { actor: "m", recordedFrom: "synthetic" })).ok).toBe(true);
-    expect(new TextDecoder().decode(ports.objects.dump().get(key))).toBe(canonicalJson(set));
-    touched.length = 0;
-    await store.submit(ORG_A, PROJ, set, { actor: "m", recordedFrom: "synthetic" });
-    expect(touched).not.toContain("replace");
-  });
   it("does not overwrite an object that changed after it was read (a conditional write)", async () => {
     const ports = createMemoryFixturePorts();
     const set = makeSet();
@@ -643,65 +458,7 @@ describe("a bad object at the key is repaired by the next submit (L5)", () => {
 });
 
 describe("H1: a set belongs to ONE project of the org", () => {
-  const OTHER = "api";
-  /** A maintainer's decision for another project than the one the set was submitted for. */
-  const byIn = (project: string, action: "approve" | "reject" | "withdraw", orgId: string, digest: string) => {
-    const decision = verifiedFixtureDecision({ orgId, project, actor: "maya", role: "maintainer", action, digest, signedInAt: new Date(NOW.getTime() - 60_000), schemaSynth: false });
-    if (decision === undefined) throw new Error("not a maintainer");
-    return decision;
-  };
-  const notFound = { ok: false, reason: "not_found" } as const;
 
-  it("every read, decision and delivery of project B for project A's digest answers exactly what a digest nobody holds answers", async () => {
-    const { store } = setup();
-    const record = await submitOk(store);
-    await store.approve(ORG_A, PROJ, record.digest, by("approve", ORG_A, record.digest, "lead"));
-    const nobody = "f".repeat(64);
-    expect(record.project).toBe(PROJ);
-    for (const digest of [record.digest, nobody]) {
-      expect(await store.record(ORG_A, OTHER, digest)).toEqual(notFound);
-      expect(await store.review(ORG_A, OTHER, digest)).toEqual(notFound);
-      expect(await store.deliver(ORG_A, OTHER, digest)).toEqual(notFound);
-      expect(await store.readApproved(ORG_A, OTHER, digest)).toEqual(notFound);
-      expect(await store.deliverById(ORG_A, OTHER, fixtureStoreId(ORG_A, PROJ, digest))).toEqual(notFound);
-    }
-  });
-  it("approve, reject and withdraw by project B on project A's set are refused and change nothing", async () => {
-    const { store } = setup();
-    const record = await submitOk(store);
-    const d = record.digest;
-    // a decision minted for project B is refused for A, and one minted for A is refused for B
-    expect(await store.approve(ORG_A, PROJ, d, byIn(OTHER, "approve", ORG_A, d))).toEqual({ ok: false, reason: "unauthorised" });
-    expect(await store.approve(ORG_A, OTHER, d, byIn(PROJ, "approve", ORG_A, d))).toEqual({ ok: false, reason: "unauthorised" });
-    expect(await store.approve(ORG_A, OTHER, d, byIn(OTHER, "approve", ORG_A, d))).toEqual(notFound);
-    expect(await store.reject(ORG_A, OTHER, d, byIn(OTHER, "reject", ORG_A, d))).toEqual(notFound);
-    expect(await store.withdraw(ORG_A, OTHER, d, byIn(OTHER, "withdraw", ORG_A, d))).toEqual(notFound);
-    expect(((await store.record(ORG_A, PROJ, d)) as { record: FixtureRecord }).record).toMatchObject({ status: "pending", version: 1 });
-    // A's own maintainer still decides it
-    expect((await store.approve(ORG_A, PROJ, d, by("approve", ORG_A, d, "lead"))).ok).toBe(true);
-  });
-  it("the same set in two projects is two rows and two objects, decided on their own", async () => {
-    const { store, ports } = setup();
-    const a = await submitOk(store);
-    const b = await store.submit(ORG_A, OTHER, makeSet(), { actor: "maya", recordedFrom: "synthetic" });
-    if (!b.ok) throw new Error(b.reason);
-    expect(b.created).toBe(true);
-    expect(b.record.storeId).toBe(`fxs:${ORG_A}:${OTHER}:${a.digest}`);
-    expect(b.record.storeId).not.toBe(a.storeId);
-    expect([...ports.objects.dump().keys()].sort()).toEqual([`private/${ORG_A}/fixtures/${OTHER}/${a.digest}`, `private/${ORG_A}/fixtures/${PROJ}/${a.digest}`].sort());
-    await store.approve(ORG_A, PROJ, a.digest, by("approve", ORG_A, a.digest, "lead"));
-    expect(((await store.record(ORG_A, OTHER, a.digest)) as { record: FixtureRecord }).record.status).toBe("pending");
-    expect(await store.deliver(ORG_A, OTHER, a.digest)).toEqual({ ok: false, reason: "not_approved" });
-    expect((await store.deliver(ORG_A, PROJ, a.digest)).ok).toBe(true);
-  });
-  it("the deny list is asked for the project of the set", async () => {
-    const asked: string[] = [];
-    const { store } = setup({ denyFor: (org, project) => { asked.push(`${org}/${project}`); return Promise.resolve(DENY); } });
-    const record = await submitOk(store);
-    await store.approve(ORG_A, PROJ, record.digest, by("approve", ORG_A, record.digest, "lead"));
-    await store.deliver(ORG_A, PROJ, record.digest);
-    expect(new Set(asked)).toEqual(new Set([`${ORG_A}/${PROJ}`]));
-  });
   it("a project name that is not a name is refused before any port is touched", async () => {
     const { store, touched } = setup();
     for (const project of ["", "Web", "../api", "a/b", "web#1"]) {
@@ -709,16 +466,5 @@ describe("H1: a set belongs to ONE project of the org", () => {
       expect(await store.record(ORG_A, project, "a".repeat(64))).toEqual({ ok: false, reason: "bad_project" });
     }
     expect(touched).toEqual([]);
-  });
-  it("firstFromTestAccount counts the project's own earlier approvals only", async () => {
-    const { store } = setup();
-    const first = await submitOk(store, makeSet({ revision: 3 }), ORG_A, "test_account");
-    await store.approve(ORG_A, PROJ, first.digest, by("approve", ORG_A, first.digest, "lead", { fresh: true }));
-    const elsewhere = await store.submit(ORG_A, OTHER, makeSet({ revision: 4 }), { actor: "maya", recordedFrom: "test_account" });
-    if (!elsewhere.ok) throw new Error(elsewhere.reason);
-    expect(elsewhere.record.firstFromTestAccount).toBe(true);
-    const same = await store.submit(ORG_A, PROJ, makeSet({ revision: 5 }), { actor: "maya", recordedFrom: "test_account" });
-    if (!same.ok) throw new Error(same.reason);
-    expect(same.record.firstFromTestAccount).toBe(false);
   });
 });

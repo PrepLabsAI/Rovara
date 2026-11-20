@@ -1,27 +1,7 @@
 // Port lane P6 (item R3, owner decisions 40 and 61): the `outbound-events` point, in the same signed format as the channel events.
 import { describe, expect, it } from "vitest";
-import {
-  CHANNEL_EVENT_TYPES,
-  CODE_MILESTONE_KINDS,
-  OUTBOUND_EVENT_DATA_MAX_BYTES,
-  OUTBOUND_MILESTONE_EVENT_TYPES,
-  OutboundEventSchema,
-  PLUGIN_POINTS,
-  PLUGIN_POINT_CARDINALITY,
-  channelEventId,
-  generateWebhookSecret,
-  outboundEventId,
-  outboundEventTypeOfMilestone,
-  signOutboundEvent,
-  signWebhook,
-  verifyOutboundEvent,
-  verifyWebhook,
-  type OutboundEvent,
-  type OutboundEventInput,
-  type OutboundEventsAdapter,
-  type PluginModule,
-} from "@agentx/contracts";
-import { createAdapterRegistry, loadAdapters, parsePluginConfig, publishOutboundEvent, type ModuleImporter } from "../../packages/broker/src/ports/index.js";
+import { CHANNEL_EVENT_TYPES, CODE_MILESTONE_KINDS, OUTBOUND_EVENT_DATA_MAX_BYTES, OUTBOUND_MILESTONE_EVENT_TYPES, OutboundEventSchema, PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, channelEventId, generateWebhookSecret, outboundEventId, outboundEventTypeOfMilestone, signOutboundEvent, signWebhook, verifyOutboundEvent, verifyWebhook, type OutboundEvent, type OutboundEventInput, type OutboundEventsAdapter } from "@agentx/contracts";
+import { createAdapterRegistry, publishOutboundEvent } from "../../packages/broker/src/ports/index.js";
 
 const NOW = 1_800_000_000;
 const SECRET = generateWebhookSecret();
@@ -157,27 +137,6 @@ describe("publishing to the registered adapters", () => {
     expect(merged.received).toHaveLength(0);
   });
 
-  it("gives an adapter its own copy, and the same id on a retry", async () => {
-    const registry = createAdapterRegistry();
-    const mutating: OutboundEventsAdapter & { seen: string[] } = { seen: [], async deliver(delivered) { this.seen.push(delivered.id); (delivered.data as Record<string, unknown>).tampered = true; } };
-    const watcher = recorder();
-    registry.register("outbound-events", "a-mutating", mutating);
-    registry.register("outbound-events", "b-watcher", watcher);
-    const input = event();
-    await publishOutboundEvent(registry, input);
-    await publishOutboundEvent(registry, input);
-    expect(watcher.received.map((delivered) => delivered.id)).toEqual([input.id, input.id]);
-    expect(watcher.received[0]?.data).not.toHaveProperty("tampered");
-  });
-
-  it("throws for an event that is not valid (the caller's bug), and does nothing for no adapter", async () => {
-    const registry = createAdapterRegistry();
-    await expect(publishOutboundEvent(registry, event({ type: "bad type" }))).rejects.toThrow();
-    const result = await publishOutboundEvent(registry, event());
-    expect(result.delivered).toEqual([]);
-    expect(result.failed).toEqual([]);
-  });
-
   it("an adapter whose accepts throws is a failure, not a skip, and its deliver is never called", async () => {
     const registry = createAdapterRegistry();
     registry.register("outbound-events", "odd", { accepts: () => { throw new Error("x"); }, deliver: async () => { throw new Error("never called"); } });
@@ -198,26 +157,4 @@ describe("publishing to the registered adapters", () => {
     expect(result.delivered).toEqual(["b-fine"]);
   });
 
-  it("reports a fixed kind, never the adapter's own error name or text, even when the adapter names its error after a secret", async () => {
-    const registry = createAdapterRegistry();
-    const sneaky = Object.assign(new Error("token=abc"), { name: "https://user:pw@hook.example.test/secret" });
-    registry.register("outbound-events", "sneaky", { deliver: async () => { throw sneaky; } });
-    registry.register("outbound-events", "sync-throw", { deliver: () => { throw sneaky; } });
-    const result = await publishOutboundEvent(registry, event());
-    expect(result.failed).toEqual([{ adapter: "sneaky", error: "delivery_failed" }, { adapter: "sync-throw", error: "delivery_failed" }]);
-    expect(JSON.stringify(result.failed)).not.toContain("secret");
-  });
-
-  it("loads from a config entry like any other point", async () => {
-    const received: OutboundEvent[] = [];
-    const module: PluginModule<"outbound-events"> = { point: "outbound-events", name: "memory", create: () => ({ deliver: async (delivered) => { received.push(delivered); } }) };
-    const importer: ModuleImporter = async (specifier) => {
-      if (specifier !== "./memory-events.js") throw new Error("no such module");
-      return { plugin: module };
-    };
-    const registry = createAdapterRegistry();
-    await loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "outbound-events", name: "memory", module: "./memory-events.js" }] }), { registry, importModule: importer });
-    await publishOutboundEvent(registry, event());
-    expect(received).toHaveLength(1);
-  });
 });

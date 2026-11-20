@@ -1,3 +1,9 @@
+import { isContextSourceStage } from "@agentx/contracts";
+import { createHostedDesignReview } from "../core-host/hosted-design-review.js";
+import { DESIGN_REVIEW_PACKET_PATH, storedBindingOf } from "../core/design-review/packet-route.js";
+import { readTaskTokenRecords } from "../core/model-gateway/records.js";
+import { withinTaskTokenDeadline } from "../core/model-gateway/deadline.js";
+import { coreContextWorkerRouteOf } from "./dev-route-scopes.js";
 import { previewRateReaderFromEnvironment } from "../core-host/start-estimates-rate-read.js";
 import { startEstimates } from "../core/cost/start-estimates.js";
 import { hostedPreviewContext } from "../core-host/start-estimates.js";
@@ -34,7 +40,7 @@ import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
   HostedSavedEnvRegistryAuthSchema,
   DEFAULT_CODE_SETTINGS,
-  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, LESSONS_REFLECT_QUEUE, IMPLICIT_COMPANY_ID, evalStandInsOn, codeRepositoriesOf, OrgRoleSchema, agentXError, WIKI_BUILD_WORDS, isContextSourceStage,
+  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, LESSONS_REFLECT_QUEUE, IMPLICIT_COMPANY_ID, evalStandInsOn, codeRepositoriesOf, OrgRoleSchema, agentXError, WIKI_BUILD_WORDS,
   when, isSystemOwnerId, type PolicySource, type AdapterRegistry, type HostedPolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
 import { wakeMergeTracking } from "../services/merge-tracking.js";
@@ -111,7 +117,6 @@ import { sessionBindingsOf } from "../core/sessions/bindings.js";
 import { createLocalAfterMerge } from "../local/app/after-merge.js";
 import { hostedAutonomy, reviewerRoomUsd } from "../core-host/reviewer-authority.js";
 import { createHostedReviewers } from "../core-host/hosted-reviewers.js";
-import { createHostedDesignReview } from "../core-host/hosted-design-review.js";
 import type { PolicyHookInstall } from "../core/policy-hook/index.js";
 import { applyHostedPolicyHook } from "../core/policy-hook/hosted.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
@@ -333,7 +338,7 @@ export interface BrokerCoreRoot {
   handleEvent(event: unknown, options?: { remainingMs?: number | undefined }): Promise<unknown>;
   /**
    * A worker's callback (`/v1/internal/workspaces/<id>/operations/<id>/<action>`) for a workspace a CORE task holds: served by that company's core callback layer (its capability, its
-   * repository grant exchange, the lessons' load report), or a gateway-stamped context-tools request verified before reads. `undefined`: not a core workspace, or the switch is off.
+   * repository grant exchange, the lessons' load report), or a signed context/packet request verified before reads. `undefined`: not a core workspace, or the switch is off.
    */
   callback(request: BrokerRequest): Promise<BrokerResponse | undefined>;
 }
@@ -884,7 +889,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       ciReporting: inputs.ciReporting === undefined ? policyCiReporting(policySource) : inputs.ciReporting,
       services: (flow, wiring) => {
         flow.deps.secondReview = createHostedReviewers({ flow: flow.deps, registry, companyId, offered: engineOffered, taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task) }).secondReview;
-        createHostedDesignReview({ flow: flow.deps, registry, companyId, offered: engineOffered, taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task), env, blobs: registry.require("object-storage") });
+        createHostedDesignReview({ flow: flow.deps, registry, companyId, offered: engineOffered,
+          taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task),
+          env, blobs: registry.require("object-storage") });
         const choice = modelChoices.choiceFor(companyId);
         if (choice !== undefined) {
           // Validate immediately before broker-side dispatch handoff, including start, callbacks and scheduled relays.
@@ -1288,6 +1295,18 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       return typeof workspaceId === "string" && WORKSPACE_ID.test(workspaceId) ? workspaceId : undefined;
     } catch { return undefined; }
   };
+  const designReviewPacketWorkspaceOf = (request: BrokerRequest): string | undefined => {
+    if (request.method !== "GET" || request.path.split("?")[0] !== DESIGN_REVIEW_PACKET_PATH) return undefined;
+    const token = request.headers["x-agentx-callback-capability"];
+    if (typeof token !== "string" || token.length === 0 || token.length > 4096) return undefined;
+    try {
+      capabilities ??= new CallbackCapabilities(Buffer.from(inputs.callbackSigningKey));
+      const claims = capabilities.verify(token, "design-review-packet");
+      if (!WORKSPACE_ID.test(claims.workspaceId) || !WORKSPACE_ID.test(claims.operationId) || !Number.isSafeInteger(claims.fence) || claims.fence < 1
+        || !Number.isFinite(claims.expiresAt) || claims.expiresAt <= Math.floor(Date.now() / 1000)) return undefined;
+      return claims.workspaceId;
+    } catch { return undefined; }
+  };
   const companyOfWorkspace = workspaceCompanyReader(inputs.documentClient, inputs.stateTableName);
   // S2: the install administrator's cancel of a core task's workspace, in the workspace's own company's runtime (its discovery pointer and scoped record name the company; a company the
   // core does not serve, or a workspace with no company, answers like a missing workspace).
@@ -1336,6 +1355,14 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         return createCallbackService({
           ...(saved === undefined || !saved.session.config.enabled ? {} : { savedEnv: { deps: saved, inspectGrant: (grant: string) => grants.inspect(grant), registryAuthSchema: HostedSavedEnvRegistryAuthSchema } }),
           ...(gateway === undefined ? {} : { modelGateway: gateway }),
+          authorizeDesignReviewPacket: async (claims) => withinTaskTokenDeadline(async (deadline) => {
+            const { task, operation, workspace } = await readTaskTokenRecords(runtime.flow.deps, claims, deadline);
+            if ((workspace.orgId !== undefined && workspace.orgId !== companyId) || typeof task.developerId !== "string" || task.developerId === ""
+              || !["ACCEPTED", "DISPATCHING", "RUNNING"].includes(operation.status)) throw agentXError("CALLBACK_FORBIDDEN", "this operation cannot read that packet");
+            storedBindingOf(operation);
+            if (!(await runtime.flow.deps.access.checkStep(task)).allowed) throw agentXError("CALLBACK_FORBIDDEN", "this operation cannot read that packet");
+            deadline.check();
+          }),
           flow: runtime.flow.deps,
           blobs: registry.require("object-storage"),
           // The grants the dispatcher issued for this company's workers (the same key derivation), exchanged here for a credential.
@@ -1454,7 +1481,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     async callback(request) {
       if (coreTasks === undefined) return undefined;
       // L5: settings that cannot be read refuse the core's context tools too.
-      if (settingsBlocked && (request.path.split("?")[0] ?? "") === "/v1/internal/context-tools") return callbackAnswer(503, "CORE_SWITCH_BLOCKED", CORE_SETTINGS_REFUSAL_WORDS);
+      if (settingsBlocked && coreContextWorkerRouteOf(request.method, request.path.split("?")[0] ?? "") !== undefined) return callbackAnswer(503, "CORE_SWITCH_BLOCKED", CORE_SETTINGS_REFUSAL_WORDS);
       const context = await handleCoreContextTools(request, {
         capabilities: { verify: (token, action) => new CallbackCapabilities(Buffer.from(inputs.callbackSigningKey)).verify(token, action) },
         ownerOfWorkspace: (workspaceId) => ownerOfWorkspace(table, workspaceId),
@@ -1463,8 +1490,12 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       });
       if (context !== undefined) return context;
       // L2b: a worker's model-access request names its workspace only inside its signed capability (checked here before any read; the handler checks it again).
-      const workspaceId = modelAccessWorkspaceOf(request) ?? CORE_CALLBACK.exec(request.path.split("?")[0] ?? "")?.[1];
-      if (workspaceId === undefined || await ownerOfWorkspace(table, workspaceId) !== "core") return undefined;
+      const packetRequest = request.path.split("?")[0] === DESIGN_REVIEW_PACKET_PATH;
+      const packetWorkspace = designReviewPacketWorkspaceOf(request);
+      if (packetRequest && packetWorkspace === undefined) return callbackAnswer(403, "CALLBACK_FORBIDDEN", "this operation cannot read that packet");
+      const workspaceId = packetWorkspace ?? modelAccessWorkspaceOf(request) ?? CORE_CALLBACK.exec(request.path.split("?")[0] ?? "")?.[1];
+      if (workspaceId === undefined) return undefined;
+      if (await ownerOfWorkspace(table, workspaceId) !== "core") return packetRequest ? callbackAnswer(403, "CALLBACK_FORBIDDEN", "this operation cannot read that packet") : undefined;
       if (settingsBlocked) return callbackAnswer(503, "CORE_SWITCH_BLOCKED", CORE_SETTINGS_REFUSAL_WORDS);
       // A core workspace is never the old routes' (engine-boundary.ts): any refusal here is the core's, in fixed words.
       const companyId = await companyOfWorkspace(workspaceId);

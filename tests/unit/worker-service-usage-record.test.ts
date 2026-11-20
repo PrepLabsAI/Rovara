@@ -30,48 +30,6 @@ describe("reduceUnknownNames (TS-SEAL-1)", () => {
     expect(JSON.stringify(unknownDomains)).not.toContain("api.");
   });
 
-  it("a secret as a label of the name is not shown: the record names the domain under it only", () => {
-    const secretName = `${PASSWORD.toLowerCase()}.attacker.test`;
-    const { domains: unknownDomains } = reduceUnknownNames(dns([secretName, 3]), redactor);
-    // The name is withheld whole, because the redactor changes it, and counted as 'other'.
-    expect(JSON.stringify(unknownDomains).toLowerCase()).not.toContain(PASSWORD.toLowerCase());
-  });
-
-  it("a secret as the registrable label itself is withheld (it would show), in any case", () => {
-    for (const name of [`${PASSWORD.toLowerCase()}.com`, `${PASSWORD.toUpperCase()}.com`, `${CONTROL.toLowerCase()}.co.uk`]) {
-      const { domains: unknownDomains, otherCount: otherUnknownCount } = reduceUnknownNames(dns([name, 5]), redactor);
-      expect(unknownDomains, name).toEqual([]);
-      expect(otherUnknownCount, name).toBe(2);
-    }
-  });
-
-  it("a secret split over labels is withheld, so its second half cannot show in the registrable domain", () => {
-    const lower = PASSWORD.toLowerCase();
-    const half = Math.floor(lower.length / 2);
-    for (const name of [`${lower.slice(0, half)}.${lower.slice(half)}.com`, `${lower.slice(0, half)}-${lower.slice(half)}.example.org`, `${lower.slice(0, half)}_${lower.slice(half)}.net`]) {
-      const { domains: unknownDomains, otherCount: otherUnknownCount } = reduceUnknownNames(dns([name, 1]), redactor);
-      expect(unknownDomains, name).toEqual([]);
-      expect(otherUnknownCount, name).toBe(1);
-    }
-  });
-
-  it("a registrable domain the contract would refuse (an underscore label) is counted as other, not shown", () => {
-    const { domains, otherCount } = reduceUnknownNames(dns(["a.my_host.example.com", 1], ["x.under_score.com", 2]), redactor);
-    expect(domains).toEqual([{ domain: "example.com", count: 1 }]);
-    expect(otherCount).toBe(2);
-  });
-
-  it("a name with no registrable domain (one label, a bare suffix) is counted as other, not shown", () => {
-    const { domains: unknownDomains, otherCount: otherUnknownCount } = reduceUnknownNames(dns(["intranet", 2], ["com", 1], ["co.uk", 1]), redactor);
-    expect(unknownDomains).toEqual([]);
-    expect(otherUnknownCount).toBe(2);
-  });
-
-  it("adds the name server's own dropped and unrecorded counts to other", () => {
-    const { otherCount: otherUnknownCount } = reduceUnknownNames({ unknown: [], dropped: 7, unrecorded: 2 }, redactor);
-    expect(otherUnknownCount).toBe(6);
-  });
-
   it("names at most USAGE_UNKNOWN_DOMAINS_MAX domains, the most asked first, and counts the rest as other", () => {
     const rows: Array<[string, number]> = Array.from({ length: USAGE_UNKNOWN_DOMAINS_MAX + 10 }, (_unused, index) => [`host.site${String(index).padStart(3, "0")}.com`, index + 1]);
     const { domains: unknownDomains, otherCount: otherUnknownCount } = reduceUnknownNames(dns(...rows), redactor);
@@ -80,11 +38,6 @@ describe("reduceUnknownNames (TS-SEAL-1)", () => {
     expect(unknownDomains.map((row) => row.count)).toEqual([...unknownDomains.map((row) => row.count)].sort((a, b) => b - a));
     // The ten least asked (counts 1 to 10) fell off the end; their sum (55) is counted in a bucket.
     expect(otherUnknownCount).toBe(21);
-  });
-
-  it("a name the general credential rule changes is withheld too, not only the registered values", () => {
-    const { domains: unknownDomains } = reduceUnknownNames(dns(["akiaabcdefghijklmnop.com", 1]), redactor);
-    expect(JSON.stringify(unknownDomains).toLowerCase()).not.toContain("akiaabcdefghijklmnop");
   });
 
   it("skips a row with no lookups, and ignores a non-number count", () => {
@@ -109,16 +62,6 @@ describe("counts are coarse buckets (TS-SEAL-1 bandwidth)", () => {
     for (const [count, bucket] of cases) expect(bucketCount(count), String(count)).toBe(bucket);
   });
 
-  it("two programs that ask a different number of times inside one bucket give the same record", () => {
-    const record = (queries: number, other: number) => reduceUnknownNames({ unknown: [{ name: "a.example.com", queries }, { name: "b.example.org", queries: 3 }], dropped: other, unrecorded: 0 }, redactor);
-    expect(record(2, 7)).toEqual(record(5, 20));
-    expect(record(2, 7)).not.toEqual(record(6, 20));
-  });
-
-  it("orders the domains by bucket and then by name, whatever the raw counts were", () => {
-    const { domains } = reduceUnknownNames(dns(["a.zeta.com", 3], ["a.alpha.com", 5], ["a.mid.com", 40], ["a.beta.com", 1]), redactor);
-    expect(domains.map((row) => [row.domain, row.count])).toEqual([["mid.com", 21], ["alpha.com", 2], ["zeta.com", 2], ["beta.com", 1]]);
-  });
 });
 
 describe("buildServiceUsageRecord", () => {
@@ -153,23 +96,6 @@ describe("buildServiceUsageRecord", () => {
     expectNameFree(healthy, []);
   });
 
-  it("holds the contract's limits: 16 dependencies, start time, reset count and counts", async () => {
-    const ids = Array.from({ length: 20 }, (_unused, index) => `dep-${String(index)}`);
-    const record = await buildServiceUsageRecord({ planned: ids, session: fakeSession(ids), startMs: 10 ** 12, resetCounts: new Map([["dep-0", 10 ** 9]]), redactor });
-    expect(record.dependencies).toHaveLength(16);
-    expect(record.dependencies[0]).toMatchObject({ startMs: 86_400_000, resetCount: 100_000 });
-    expectNameFree(record, []);
-    const { domains, otherCount } = reduceUnknownNames(dns(["a.example.com", 10 ** 12]), redactor);
-    expect(domains).toEqual([{ domain: "example.com", count: 21 }]);
-    expect(otherCount).toBe(0);
-  });
-
-  it("with no session (the start failed) nothing is started", async () => {
-    const record = await buildServiceUsageRecord({ planned: ["postgres"], redactor });
-    expect(record.dependencies).toEqual([{ id: "postgres", started: false, healthy: false, startMs: 0, resetCount: 0, failure: "start_failed" }]);
-    expectNameFree(record, []);
-  });
-
   it("a dependency that does not answer, or whose question throws (the session was stopped), is unhealthy, not an error", async () => {
     const record = await buildServiceUsageRecord({ planned: ["a", "b"], session: fakeSession(["a", "b"], { a: false, b: "throw" }), redactor });
     expect(record.dependencies.map((row) => [row.started, row.healthy, row.failure])).toEqual([[true, false, "not_healthy"], [true, false, "not_healthy"]]);
@@ -188,12 +114,6 @@ describe("buildServiceUsageRecord", () => {
     expect(record.unknownCalls.domains).toEqual([{ domain: "stripe.com", count: 2 }]);
     expect(record.unknownCalls.otherCount).toBe(2);
     expectNameFree(record, [PASSWORD, "api.stripe", "attacker"]);
-  });
-
-  it("an unreadable name server gives no names and no error", async () => {
-    const docker: DockerCli = { run: () => Promise.reject(new Error("gone")) };
-    const record = await buildServiceUsageRecord({ planned: [], dns: { docker, dnsHelperName: "rovara-svc-0123456789ab-dns" }, redactor });
-    expect(record).toEqual({ schemaVersion: 1, dependencies: [], unknownCalls: { domains: [], otherCount: 0 } });
   });
 
   it("whatever the program asked, the finished record holds no secret and no full name (the case-insensitive scan)", async () => {

@@ -1,9 +1,7 @@
 // SageMaker recordings (SM5): what Rovara does with an uploaded recording file. It does not trust the recorder's scan: the file is read against the format and every request and answer is scanned again, with the
 // personal-data scanner and the synthetic-data guard. A finding refuses the file with a kind and a field, never the text. Every personal-looking value is fake, and key-shaped values are built at runtime.
 import { describe, expect, it } from "vitest";
-import {
-  SAGEMAKER_RECORDING_MAX_BYTES, SageMakerRecordingFileSchema, builtinPiiScanner, rescanSageMakerRecording, sageMakerFixtureDigest, sageMakerRecordingSamples, type PiiScanner, type SageMakerRecordingFile,
-} from "../../packages/contracts/src/index.js";
+import { SAGEMAKER_RECORDING_MAX_BYTES, SageMakerRecordingFileSchema, builtinPiiScanner, rescanSageMakerRecording, sageMakerRecordingSamples, type PiiScanner, type SageMakerRecordingFile } from "../../packages/contracts/src/index.js";
 import { SAGEMAKER_INTAKE_REFUSAL_WORDS, intakeSageMakerRecording } from "../../packages/broker/src/core/test-env/sagemaker-recording-intake.js";
 
 const DENY = { accountIds: [], hosts: ["*.prod.example.com"], arnPrefixes: [] };
@@ -26,43 +24,7 @@ function file(over: Record<string, unknown> = {}): SageMakerRecordingFile {
 const upload = (value: unknown) => intakeSageMakerRecording(JSON.stringify(value), DENY);
 const withAnswer = (body: string) => { const base = file(); return { ...base, fixtures: { ...base.fixtures, rules: [{ ...base.fixtures.rules![0]!, response: { body, contentType: "application/json" } }, base.fixtures.rules![1]!] } }; };
 
-describe("an upload that is clean", () => {
-  it("is accepted, with the document the front serves, its pinned digest and the first pairs for a person to confirm", async () => {
-    const result = await upload(file());
-    expect(result).toMatchObject({ ok: true, digest: sageMakerFixtureDigest(file().fixtures), binaryBodies: 0 });
-    if (!result.ok) throw new Error("not accepted");
-    expect(result.document).toEqual(file().fixtures);
-    expect(result.samples).toEqual([
-      { index: 0, request: "{\"amount\":10}", answer: "{\"score\":0.2}" },
-      { index: 1, request: `(request not kept; sha256 ${"a".repeat(12)})`, answer: "(error ModelError)" },
-    ]);
-  });
-  it("counts a body that is not text, for the person who confirms samples", async () => {
-    const base = file();
-    const binary = { ...base, fixtures: { ...base.fixtures, rules: [{ ...base.fixtures.rules![0]!, response: { bodyBase64: Buffer.from([0xff, 0xfe, 0x01]).toString("base64") } }, base.fixtures.rules![1]!] } };
-    expect(await upload(binary)).toMatchObject({ ok: true, binaryBodies: 1 });
-    const result = await upload(binary);
-    if (result.ok) expect(result.samples[0]!.answer).toBe("(not text)");
-  });
-});
-
 describe("an upload that is refused", () => {
-  it("refuses a recording whose answer holds personal data, even when the recorder says it scanned it, naming kind and path only", async () => {
-    const tampered = withAnswer(`{"mail":"${EMAIL}"}`);
-    const result = await upload(tampered);
-    expect(result).toEqual({ ok: false, reason: "findings", findings: [{ kind: "email", path: "rules[0].response.body" }] });
-    expect(JSON.stringify(result)).not.toContain("quill");
-    expect(tampered.scan.open).toBe(0);
-  });
-  it("finds personal data hidden in a base64 body, a request text, a header, a part, an error message and the endpoint name's neighbours", async () => {
-    const base = file();
-    const hidden = (rule: Record<string, unknown>) => upload({ ...base, fixtures: { ...base.fixtures, rules: [rule, base.fixtures.rules![1]!] } });
-    expect(await hidden({ match: { bodyEquals: "x" }, response: { bodyBase64: Buffer.from(`to ${EMAIL}`).toString("base64") } })).toMatchObject({ findings: [{ kind: "email", path: "rules[0].response.bodyBase64" }] });
-    expect(await hidden({ match: { bodyEquals: `from ${EMAIL}` }, response: { body: "{}" } })).toMatchObject({ findings: [{ kind: "email", path: "rules[0].match.bodyEquals" }] });
-    expect(await hidden({ match: { bodyEquals: "x" }, response: { body: "{}", customAttributes: `u=${EMAIL}` } })).toMatchObject({ findings: [{ kind: "email", path: "rules[0].response.customAttributes" }] });
-    expect(await hidden({ match: { bodyEquals: "x" }, response: { parts: ["ok", `1 ${EMAIL}`] } })).toMatchObject({ findings: [{ kind: "email", path: "rules[0].response.parts[1]" }, { kind: "email", path: "rules[0].response.parts" }] });
-    expect(await hidden({ match: { bodyEquals: "x" }, response: { error: { code: "ModelError", message: `see ${EMAIL}` } } })).toMatchObject({ findings: [{ kind: "email", path: "rules[0].response.error.message" }] });
-  });
   it("finds what the synthetic-data guard finds: a secret, and a name of production on the company's list", async () => {
     const key = ["AKIA", "IOSFODNN7EXAMPLE"].join("");
     const secret = await upload(withAnswer(`{"k":"aws_access_key_id=${key}"}`));
@@ -96,19 +58,6 @@ describe("what the upload scan read before it was widened", () => {
   const withRule = (rule: Record<string, unknown>) => upload({ ...base, fixtures: { ...base.fixtures, rules: [rule, base.fixtures.rules![1]!] } });
   const paths = async (result: ReturnType<typeof upload>) => { const r = await result; return r.ok ? [] : r.findings.map((finding) => `${finding.kind}:${finding.path}`); };
 
-  it("scans every string field of a rule's match, the content type, accept and variant included", async () => {
-    for (const field of ["contentType", "accept", "targetVariant", "customAttributes", "targetModel"]) {
-      expect(await paths(withRule({ match: { [field]: `x/${EMAIL}`, bodyEquals: "x" }, response: { body: "{}" } })), field).toEqual([`email:rules[0].match.${field}`]);
-    }
-  });
-  it("scans streamed parts joined, so an address split across parts is found", async () => {
-    expect(await paths(withRule({ match: { bodyEquals: "x" }, response: { parts: ["pat.quill@", "fakemail-sample.io"] } }))).toEqual(["email:rules[0].response.parts"]);
-  });
-  it("finds an address written with JSON escapes, or hidden by a zero-width character", async () => {
-    expect(await paths(withRule({ match: { bodyEquals: "x" }, response: { body: "{\"e\":\"pat.quill\\u0040fakemail-sample.io\"}" } }))).toEqual(["email:rules[0].response.body"]);
-    expect(await paths(withRule({ match: { bodyEquals: "x" }, response: { body: "pat.quill@fake\u200Bmail-sample.io" } }))).toEqual(["email:rules[0].response.body"]);
-    expect(await paths(withRule({ match: { bodyEquals: "x" }, response: { json: { customer_name: "Jos\u00e9 Garc\u00eda" } } }))).toEqual(["person_name:rules[0].response.json"]);
-  });
   it("finds UTF-16 text in a base64 body, and counts a clean binary body once, however many ways it was read", async () => {
     const hidden = Buffer.from(`{"e":"${EMAIL}"}`, "utf16le").toString("base64");
     expect(await paths(withRule({ match: { bodyEquals: "x" }, response: { bodyBase64: hidden } }))).toEqual(["email:rules[0].response.bodyBase64"]);

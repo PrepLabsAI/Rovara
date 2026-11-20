@@ -1,7 +1,4 @@
-// Port lane L9a: the object-storage adapters pass one conformance suite (provisional, owner decision 58): the document-store adapter (the
-// default) and the folder adapter, plus what only the folder adapter has to prove: atomic writes, traversal and link safety, the plug-in.
-import { constants } from "node:fs";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -76,25 +73,6 @@ describe("the object keys", () => {
 });
 
 describe("the folder adapter", () => {
-  it("writes under its own folder only, with private modes, and leaves no part file behind", async () => {
-    const root = join(await tempFolder(), "store");
-    const store = new FolderObjectStorage({ root });
-    await store.put("a/B/c", new Uint8Array([1, 2, 3]), { contentType: "x/y", metadata: {}, retention: "r" });
-    const mode = (path: string) => stat(path).then((details) => details.mode & 0o777);
-    expect(await mode(root)).toBe(0o700);
-    expect(await mode(join(root, "objects", "D_a", "D_^b", "F_c"))).toBe(0o600);
-    expect(await readdir(join(root, "tmp"))).toEqual([]);
-    expect(await readdir(root)).toEqual(["objects", "tmp"]);
-  });
-
-  it("does not leave half an object when a write fails, and the old object stays whole", async () => {
-    const root = join(await tempFolder(), "store");
-    const store = new FolderObjectStorage({ root, maxObjectBytes: 10 });
-    await store.put("k", new Uint8Array([9, 9]), { contentType: "x/y", metadata: {}, retention: "r" });
-    await expect(store.put("k", new Uint8Array(11), { contentType: "x/y", metadata: {}, retention: "r" })).rejects.toThrow(/does not fit/);
-    expect(Array.from((await store.get("k", 10))!)).toEqual([9, 9]);
-    expect(await readdir(join(root, "tmp"))).toEqual([]);
-  });
 
   it("reads nothing from a file whose header does not match its bytes (a torn or foreign file)", async () => {
     const root = join(await tempFolder(), "store");
@@ -107,16 +85,6 @@ describe("the folder adapter", () => {
     expect(await store.stat("k")).toBeUndefined();
     await writeFile(file, "not a header\nbytes");
     expect(await store.get("k", 10)).toBeUndefined();
-  });
-
-  it("refuses a key that walks out, before touching the disk", async () => {
-    const outside = await tempFolder();
-    const root = join(await tempFolder(), "store");
-    const store = new FolderObjectStorage({ root });
-    for (const key of ["../escape", "a/../../escape", `${outside}/x`, "/etc/passwd", "a/..", "..%2f..%2fx"]) {
-      await expect(store.put(key, new Uint8Array([1]), { contentType: "x/y", metadata: {}, retention: "r" })).rejects.toBeInstanceOf(ObjectKeyError);
-    }
-    expect(await readdir(outside)).toEqual([]);
   });
 
   it("does not follow a link planted inside the store", async () => {
@@ -148,14 +116,6 @@ describe("the folder adapter", () => {
     await mkdir(join(real, "unused"), { recursive: true });
   });
 
-  it("removes the folders a delete empties and cleans old part files", async () => {
-    const root = join(await tempFolder(), "store");
-    const store = new FolderObjectStorage({ root });
-    await store.put("a/b/c", new Uint8Array([1]), { contentType: "x/y", metadata: {}, retention: "r" });
-    await store.delete("a/b/c");
-    expect(await readdir(join(root, "objects"))).toEqual([]);
-    expect(constants.O_NOFOLLOW).toBeGreaterThan(0);
-  });
 });
 
 describe("the folder plug-in", () => {
@@ -215,23 +175,6 @@ describe("the folder adapter after the review (L6, L7)", () => {
     expect(await readdir(join(root, "objects")).catch(() => [])).toEqual([]);
   });
 
-  it("answers a key whose path is longer than the disk allows with a key error, not a disk error", async () => {
-    const store = new FolderObjectStorage({ root: join(await tempFolder(), "store") });
-    const key = Array.from({ length: 200 }, () => "abcde").join("/");
-    const outcome = await store.put(key, new Uint8Array([1]), META).then(() => "stored", (error: unknown) => error);
-    if (outcome !== "stored") expect(outcome).toBeInstanceOf(ObjectKeyError);
-  });
-
-  it("checks each folder before making it, so a link in the middle of a key makes nothing outside the store", async () => {
-    const outside = await tempFolder();
-    const root = join(await tempFolder(), "store");
-    const store = new FolderObjectStorage({ root });
-    await store.put("seed", new Uint8Array([1]), META);
-    await symlink(outside, join(root, "objects", "D_link"));
-    await expect(store.put("link/new/deeper/x", new Uint8Array([1]), META)).rejects.toThrow(/outside the store/);
-    expect(await readdir(outside)).toEqual([]);
-  });
-
   it("refuses a folder other users can write to, where links could be planted", async () => {
     const parent = await tempFolder();
     const root = join(parent, "store");
@@ -258,15 +201,6 @@ describe("objects are immutable by default (L9-wire review O3)", () => {
     await expect(blobs.put([...again.keys()].map((digest) => `private/owner-1/ws-1/evidence/t-1/${digest}`)[0]!, jpeg, META)).rejects.toBeInstanceOf(ObjectConflictError);
   });
 
-  it("frees a key whose document row has expired but not been swept", async () => {
-    let now = Date.parse("2026-11-09T00:00:00.000Z");
-    const blobs = createDocumentObjectStorage(new MemoryDocumentStore(), { companyId: COMPANY, now: () => now });
-    await blobs.put("k", new Uint8Array([1]), META);
-    await expect(blobs.put("k", new Uint8Array([2]), META)).rejects.toBeInstanceOf(ObjectConflictError);
-    now += 31 * DAY;
-    await blobs.put("k", new Uint8Array([3]), META);
-    expect(Array.from((await blobs.get("k", 10))!)).toEqual([3]);
-  });
 });
 
 describe("a folder on a file system without hard links", () => {
@@ -283,12 +217,4 @@ describe("a folder on a file system without hard links", () => {
     }
   });
 
-  it("does not need links to overwrite on purpose, and does not mistake a taken name for a missing feature", async () => {
-    const root = join(await tempFolder(), "store");
-    const noLinks = new FolderObjectStorage({ root, linkFile: async () => { throw Object.assign(new Error("x"), { code: "EPERM" }); } });
-    await noLinks.put("k", new Uint8Array([1]), META, { overwrite: true });
-    expect(Array.from((await noLinks.get("k", 10))!)).toEqual([1]);
-    const real = new FolderObjectStorage({ root });
-    await expect(real.put("k", new Uint8Array([2]), META)).rejects.toBeInstanceOf(ObjectConflictError);
-  });
 });

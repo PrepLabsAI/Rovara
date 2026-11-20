@@ -141,7 +141,7 @@ describe("spec 048 phase 2: richer forms", () => {
     const field = hub.state().question?.fields?.find((each) => each.name === "engine");
     expect(field?.choices).toEqual([
       { value: "templates", label: "Published templates (recommended)" },
-      { value: "cdk", label: "From AgentX's source code, for contributors" },
+      { value: "cdk", label: "From Rovara's source code, for contributors" },
     ]);
   });
 });

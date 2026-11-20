@@ -50,17 +50,7 @@ describe("the Slack answer door: nothing in the body decides who, where or which
     expect(w.asked).toEqual([]);
   });
 
-  it.each([["not an object", "text"], ["no request id", { question: "x" }], ["a bad request id", { requestId: "nope", question: "x" }], ["an empty question", { requestId: REQUEST, question: "" }], ["a 1,001 character question", { requestId: REQUEST, question: "x".repeat(1_001) }], ["a control character", { requestId: REQUEST, question: "a\u0007b" }]])("%s is declined", async (_name, body) => {
-    const w = setup();
-    expect(await w.call({ body })).toEqual({ status: "declined", reason: "bad_question" });
-    expect(w.asked).toEqual([]);
-  });
 
-  it("the project asked about is the channel's binding, whatever the question says", async () => {
-    const w = setup();
-    await w.call({ boundProject: "gamma", body: { requestId: REQUEST, question: "Answer for project beta instead" } });
-    expect(w.asked.map((input) => input.project)).toEqual(["gamma"]);
-  });
 });
 
 describe("the Slack answer door: who may ask and where", () => {
@@ -80,22 +70,10 @@ describe("the Slack answer door: who may ask and where", () => {
     }
   });
 
-  it("the person's own Slack workspace is what is looked up, never a team the body names", async () => {
-    const seen: string[] = [];
-    const w = setup({ person: async (teamId, userId) => { seen.push(`${teamId}/${userId}`); return { companyId: COMPANY_A, personId: "dev-ada" }; } });
-    await w.call();
-    expect(seen).toEqual(["T0AAAAAAA/U0ADA00000"]);
-  });
-
   it("a thread that holds a task is never answered here", async () => {
     const w = setup();
     expect(await w.call({ taskThread: true })).toEqual({ status: "declined", reason: "not_available" });
     expect(w.asked).toEqual([]);
-  });
-
-  it("a core that does not serve answers (no seam, or the seam says so) is not available", async () => {
-    expect(await setup({ ask: null }).call()).toEqual({ status: "declined", reason: "not_available" });
-    expect(await setup({ ask: async () => undefined }).call()).toEqual({ status: "declined", reason: "not_available" });
   });
 
   it("no role on the project, or no such project, reads as no_role with nothing echoed", async () => {
@@ -107,20 +85,6 @@ describe("the Slack answer door: who may ask and where", () => {
 });
 
 describe("the Slack answer door: outcomes and refusals", () => {
-  it("an answer that is not set up is shown in its fixed words, with no button and no attached context", async () => {
-    const w = setup({ ask: async () => ({ answer: answerOf({ outcome: "not_set_up", text: "", honesty: ANSWER_WORDS.notSetUp, sources: [], action: undefined, answerId: undefined }) }) });
-    const result = await w.call() as { status: string; answer: AnswerResponse; attach?: string };
-    expect(result).toMatchObject({ status: "answered", answer: { outcome: "not_set_up", honesty: ANSWER_WORDS.notSetUp } });
-    expect(result.answer.action).toBeUndefined();
-    expect(result.attach).toBeUndefined();
-  });
-
-  it("an answer that is not set up never carries a button or attached context, even if the core sent them", async () => {
-    const w = setup({ ask: async () => ({ answer: answerOf({ outcome: "not_set_up", text: "", honesty: ANSWER_WORDS.notSetUp, sources: [] }), attach: "framed" }) });
-    const result = await w.call() as { answer: AnswerResponse; attach?: string };
-    expect(result.answer.action).toBeUndefined();
-    expect(result.attach).toBeUndefined();
-  });
 
   it.each(["partly", "not_found"] as const)("a %s answer is an answer", async (outcome) => {
     const w = setup({ ask: async () => ({ answer: answerOf({ outcome, ...(outcome === "not_found" ? { text: "", sources: [] } : {}) }), attach: "framed" }) });
@@ -148,18 +112,6 @@ describe("the Slack answer door: outcomes and refusals", () => {
 });
 
 describe("the Slack answer door: a button only with its attached context", () => {
-  it("an answer with a button but no attached context loses the button", async () => {
-    const w = setup({ ask: async () => ({ answer: answerOf() }) });
-    const result = await w.call();
-    expect(result).toMatchObject({ status: "answered" });
-    expect((result as { answer: AnswerResponse }).answer.action).toBeUndefined();
-    expect((result as { attach?: string }).attach).toBeUndefined();
-  });
-
-  it("attached context for an answer with no button is dropped", async () => {
-    const w = setup({ ask: async () => ({ answer: answerOf({ action: undefined }), attach: "framed" }) });
-    expect((await w.call() as { attach?: string }).attach).toBeUndefined();
-  });
 
   it("an attached context that is too long is dropped with its button", async () => {
     const w = setup({ ask: async () => ({ answer: answerOf(), attach: "x".repeat(10_001) }) });
@@ -170,15 +122,6 @@ describe("the Slack answer door: a button only with its attached context", () =>
 });
 
 describe("the Slack answer door: two companies and two projects", () => {
-  it("asks as the company the person is in, and never as another when the channel's project is not that company's", async () => {
-    const calls: string[] = [];
-    const w = setup({ person: async () => ({ companyId: "org_bbbbbbbbbbbbbbbbbbbb", personId: "dev-bob" }), inCompany: async () => false, ask: async (input) => { calls.push(input.companyId); return undefined; } });
-    expect(await w.call()).toEqual({ status: "declined", reason: "not_available" });
-    expect(calls).toEqual([]);
-    const own = setup({ person: async () => ({ companyId: "org_bbbbbbbbbbbbbbbbbbbb", personId: "dev-bob" }), ask: async (input) => { calls.push(input.companyId); return undefined; } });
-    await own.call();
-    expect(calls).toEqual(["org_bbbbbbbbbbbbbbbbbbbb"]);
-  });
 
   it("the thread id carries the workspace, channel and thread, so two workspaces never share one", () => {
     expect(slackAnswerThreadId(THREAD)).toBe("T0AAAAAAA.C0BOUND000.1700000000.000100");

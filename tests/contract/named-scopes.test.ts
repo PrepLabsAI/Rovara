@@ -17,7 +17,7 @@ import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const NAMED: readonly ClientScope[] = ["profile:name", "projects:members", "projects:create", "tasks:read", "tasks:start", "tasks:act", "tasks:share", "decisions:decide"];
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
-const sample = (path: string) => path.replaceAll("{emailHash}", "a".repeat(64)).replace(/\{[A-Za-z]+\}/g, "x1");
+const sample = (path: string) => path.replaceAll("{emailHash}", "a".repeat(64)).replaceAll("{inviteId}", "a".repeat(64)).replace(/\{[A-Za-z]+\}/g, "x1");
 
 // ---- The table ----
 

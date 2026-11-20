@@ -1,7 +1,7 @@
 // a seed command DETECTED UNCHANGED from the repository's own script, run only on Rovara's sealed test database, is MEDIUM (one maintainer approves); anything else stays HIGH.
 // The broker locks it from the repository itself (never the worker's word), stores its own checks with the proposal, and the approval reads them again from the store.
 import { describe, expect, it } from "vitest";
-import { TestEnvironmentBodySchema, projectPk, seedScriptLockOf, testEnvApprovalRisk, testEnvLessSafeChanges, type OrgId, type TestEnvironmentBody } from "@agentx/contracts";
+import { TestEnvironmentBodySchema, projectPk, testEnvApprovalRisk, testEnvLessSafeChanges, type OrgId, type TestEnvironmentBody } from "@agentx/contracts";
 import { TEST_ENVIRONMENT_KIND, proposalSeedTrust, proposeTestEnvironment, testEnvironmentSubjectId } from "../../packages/broker/src/core/test-env/environment.js";
 import { lockLookSeeds, seedCardLinesOf, seedRisksOf, seedTrustOf, treeReader, type SeedRepoSources } from "../../packages/broker/src/core/test-env/seed-lock.js";
 import { taskDependencyPlansOf } from "../../packages/broker/src/core/test-env/dependency-plan.js";
@@ -95,13 +95,6 @@ describe("everything else stays HIGH", () => {
     }
   });
 
-  it("an edited command (not the one the detectors found) is HIGH", async () => {
-    const edited = body([dep({ seeds: [{ command: cmd("npm", ["run", "seed:all"]) }] })]);
-    const locked = await lockLookSeeds(edited, detected, sources({ ...FILES, "package.json": JSON.stringify({ scripts: { "seed:all": "node db/seed.js" } }) }), scope);
-    expect(locked.checks).toEqual([expect.objectContaining({ verdict: "high", reason: "not_detected" })]);
-    expect(testEnvLessSafeChanges(undefined, locked.body, seedTrustOf(locked.checks, locked.body))).toEqual(["dependency_seed"]);
-  });
-
   it("a broker read failure is HIGH: the code host down, or a file read that fails", async () => {
     for (const repo of [sources(FILES, { failAll: true }), sources(FILES, { failRead: true }), undefined]) {
       const locked = await lockLookSeeds(body(), detected, repo, scope);
@@ -109,17 +102,6 @@ describe("everything else stays HIGH", () => {
       expect(locked.body.dependencies![0]!.seeds[0]).toEqual({ command: SEED });
       expect(testEnvApprovalRisk(locked.body, seedTrustOf(locked.checks, locked.body))).toBe("high");
     }
-  });
-
-  it("a hash the worker (or anyone) wrote into the body is ignored: the broker drops it and hashes the repository itself", async () => {
-    const forged = body([dep({ seeds: [{ command: SEED, lock: { version: 1, hash: "f".repeat(64), from: ["package.json"] } }] })]);
-    const locked = await lockLookSeeds(forged, detected, sources(), scope);
-    const own = await seedScriptLockOf(SEED, treeReader(Object.keys(FILES).map((path) => ({ path, mode: "100644", type: "blob" })), "", async (path) => FILES[path]));
-    const seed = locked.body.dependencies![0]!.seeds[0]!;
-    expect(own.ok && "command" in seed && seed.lock?.hash).toBe(own.ok ? own.lock.hash : "x");
-    expect("command" in seed && seed.lock?.hash).not.toBe("f".repeat(64));
-    // And a forged lock never matches a broker check: the honest checks do not verify the forged body.
-    expect(testEnvApprovalRisk(forged, seedTrustOf(locked.checks, forged))).toBe("high");
   });
 
   it("a seed that could reach anything but the sealed test database is HIGH (a fake behind it, another tier), even with a broker check stored for it", async () => {

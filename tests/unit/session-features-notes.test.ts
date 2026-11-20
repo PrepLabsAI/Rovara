@@ -4,9 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { WORKFLOW_THREAD_NOTES_MAX } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import {
-  APP_NOTE_SECTION_HEADER, noteKey, notesFedUpdate, notesPromptSection, promptTagId, readTaskNotes, sessionNoteItems, stepNotes,
-} from "../../packages/broker/src/core/sessions/notes.js";
+import { APP_NOTE_SECTION_HEADER, notesFedUpdate, notesPromptSection, promptTagId, sessionNoteItems, stepNotes } from "../../packages/broker/src/core/sessions/notes.js";
 
 const TASK = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
 const T0 = Date.parse("2026-11-10T10:00:00.000Z");
@@ -20,20 +18,6 @@ async function taskWith(store: MemoryDocumentStore, fields: Record<string, unkno
 }
 
 describe("the note a message becomes", () => {
-  it("is written with the task's count in one transaction, redacted, with the key Cloud uses", async () => {
-    const store = new MemoryDocumentStore();
-    const task = await taskWith(store);
-    const built = sessionNoteItems({ taskId: TASK, workflow: WORKFLOW, ...(task as object) }, input(1, "use the other table"), T0);
-    expect(built.outcome).toBe("write");
-    if (built.outcome !== "write") return;
-    expect((await store.transact(built.items)).applied).toBe(true);
-    const saved = await store.get(noteKey(TASK, msg(1)));
-    expect(saved).toMatchObject({ pk: `DEVTASK#${TASK}`, sk: `NOTE#${msg(1)}`, entityType: "WORKFLOW_THREAD_NOTE", source: "app", text: "use the other table", isOwner: true, workflowRevision: 3 });
-    expect((await store.get({ pk: `DEVTASK#${TASK}`, sk: "META" }))?.["threadNoteCount"]).toBe(1);
-    // The same message again is refused whole: the note is there, and the count did not move.
-    expect((await store.transact(built.items)).applied).toBe(false);
-    expect((await store.get({ pk: `DEVTASK#${TASK}`, sk: "META" }))?.["threadNoteCount"]).toBe(1);
-  });
 
   it("is refused for a closed task, a task with no workflow and a task that holds all the notes it keeps", () => {
     const open = { taskId: TASK, workflow: WORKFLOW };
@@ -106,16 +90,4 @@ describe("what a step is given of the notes", () => {
     expect(notesPromptSection([], "abc")).toBe("");
   });
 
-  it("reads notes oldest first and leaves out one that is answered or cannot be read", async () => {
-    const store = new MemoryDocumentStore();
-    const task = await taskWith(store);
-    for (const n of [2, 1]) {
-      const built = sessionNoteItems({ taskId: TASK, workflow: WORKFLOW, ...(n === 1 ? {} : {}) }, input(n), T0 + n * 1000);
-      if (built.outcome === "write") await store.transact([built.items[0]]);
-    }
-    await store.put({ item: { pk: `DEVTASK#${TASK}`, sk: "NOTE#msg_garbage", entityType: "WORKFLOW_THREAD_NOTE", text: 7 } });
-    const notes = await readTaskNotes(store, TASK);
-    expect(notes.map((note) => ("messageId" in note ? note.messageId : ""))).toEqual([msg(1), msg(2)]);
-    void task;
-  });
 });

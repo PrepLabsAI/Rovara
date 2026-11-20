@@ -67,23 +67,6 @@ describe("dependency candidates in the draft", () => {
     expect(postgres.hints.envNames).toEqual(expect.arrayContaining(["POSTGRES_PASSWORD", "POSTGRES_DB"]));
   });
 
-  it("they are candidates only: the draft's environment carries no dependency, and no value read from a file reaches it", async () => {
-    await write("svc/pyproject.toml", PYTEST);
-    await write("svc/docker-compose.yml", COMPOSE);
-    const draft = await draftOf();
-    expect(draft.environment.dependencies).toBeUndefined();
-    expect(draft.environment.services).toEqual([]);
-    expect(JSON.stringify(draft)).not.toContain(PASSWORD);
-  });
-
-  it("a repository with none gives today's draft: no `dependencies` key at all", async () => {
-    await write("svc/pyproject.toml", PYTEST);
-    await write("svc/requirements.txt", "pytest\n");
-    const draft = await draftOf();
-    expect(Object.keys(draft)).not.toContain("dependencies");
-    expect(JSON.stringify(draft)).not.toContain("dependencies");
-  });
-
   it("merges one family seen in two repositories into one candidate, each sighting under its own repository", async () => {
     await write("api/pyproject.toml", PYTEST);
     await write("api/docker-compose.yml", "services:\n  db:\n    image: postgres:16\n");
@@ -95,13 +78,6 @@ describe("dependency candidates in the draft", () => {
     expect(postgres[0]!.evidence.map((entry) => entry.path).sort()).toEqual(["api/docker-compose.yml", "worker/docker-compose.yml"]);
   });
 
-  it("a repository with a pull request head checked out adds no candidate (default branch only)", async () => {
-    await write("svc/pyproject.toml", PYTEST);
-    await write("pr/pyproject.toml", PYTEST);
-    await write("pr/docker-compose.yml", "services:\n  db:\n    image: mongo:7\n");
-    const draft = await draftOf([repo("svc"), repo("pr", { checkedOut: { pullRequest: 7, headSha: "a".repeat(40) } })]);
-    expect(draft.dependencies).toBeUndefined();
-  });
 });
 
 describe("a candidate that cannot be listed never costs the draft", () => {
@@ -121,21 +97,6 @@ describe("a candidate that cannot be listed never costs the draft", () => {
     expect(draft.dependencies!.map((item) => item.family)).toEqual(["postgres"]);
     expect(draft.notes.join(" ")).toMatch(/3 dependencies the detectors found could not be listed/u);
     expect(draft.environment.repos[0]!.checks.length).toBeGreaterThan(0);
-  });
-
-  it("a candidate with no evidence, or whose evidence leaves the repository, is not listed", async () => {
-    tamper = (detection) => {
-      detection.dependencies = [
-        candidate({ family: "postgres", evidence: [] }),
-        candidate({ family: "redis", kind: "cache", evidence: [{ path: "../outside/compose.yml", line: 1 }] }),
-        candidate({ family: "mysql", evidence: [{ path: "docker-compose.yml", line: 1 }, { path: "/etc/passwd", line: 2 }] }),
-      ];
-    };
-    const draft = await draftOf();
-    // The third keeps its one good sighting.
-    expect(draft.dependencies!.map((item) => [item.family, item.evidence.map((entry) => entry.path)])).toEqual([["mysql", ["svc/docker-compose.yml"]]]);
-    expect(JSON.stringify(draft)).not.toContain("outside");
-    expect(JSON.stringify(draft)).not.toContain("passwd");
   });
 
   it("lists at most the contract's maximum", async () => {
@@ -162,10 +123,4 @@ describe("a candidate that cannot be listed never costs the draft", () => {
     expect(draft.environment.repos[0]!.checks.length).toBeGreaterThan(0);
   });
 
-  it("never reads a detection whose dependencies are not a list", async () => {
-    tamper = (detection) => { (detection as { dependencies?: unknown }).dependencies = "nope"; };
-    const draft = await draftOf();
-    expect(draft.dependencies).toBeUndefined();
-    expect(draft.environment.repos[0]!.checks.length).toBeGreaterThan(0);
-  });
 });

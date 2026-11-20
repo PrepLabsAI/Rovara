@@ -96,6 +96,8 @@ export interface CallbackDeps {
   wikiBuild?: Omit<WikiBuildCallbackDeps, "store" | "companyId" | "now"> | undefined;
   /** The project's context sources (the monitoring connections and MCP servers the owner ticked). Absent: a stage is told there are none. */
   contextSources?: ContextSourcesRuntime;
+  /** Trusted hosted authority; absent on the laptop, whose gateway stamp remains mandatory. */
+  authorizeDesignReviewPacket?: (claims: ReturnType<CallbackCapabilities["verify"]>) => Promise<void>;
   /**
    * Books the model usage a batch of the worker's events reports (a deployed install: core-host/usage-booking.ts), BEFORE the batch is acknowledged. A booking that fails fails the batch, so
    * the worker sends it again (booking counts each usage once). Absent: nothing is booked here (the laptop books each call at its model proxy). An answer with `spendStop` (a cap the run reached,
@@ -316,7 +318,7 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
     let savedResult = "INTERNAL";
     try {
       // The design review's reviewers read their packets here (a GET; the capability names the action and the stored binding names the slots).
-      if (request.method === "GET" && (request.path.split("?")[0] ?? "") === DESIGN_REVIEW_PACKET_PATH) return await handleDesignReviewPacket(deps.flow, capabilities, request);
+      if (request.method === "GET" && (request.path.split("?")[0] ?? "") === DESIGN_REVIEW_PACKET_PATH) return await handleDesignReviewPacket(deps.flow, capabilities, request, deps.authorizeDesignReviewPacket);
       // A stage reads the project's sources here (the capability names `context-tools`; the gateway stamps the workspace).
       const bare = request.path.split("?")[0] ?? "";
       if (request.method === "GET" && bare === MODEL_ACCESS_PATH && typeof deps.modelGateway?.gatewayUrl === "string" && deps.modelGateway.gatewayUrl.trim() !== "") return await handleModelAccess(deps.flow, capabilities, deps.modelGateway, request);
