@@ -2316,7 +2316,7 @@
     "tests/unit/worker-env-detect-env-config.test.ts": 0.032,
     "tests/unit/worker-env-detect-go.test.ts": 0.055,
     "tests/unit/worker-env-detect-guarded.test.ts": 24.864,
-    "tests/unit/worker-env-detect-hardening.test.ts": 164.016,
+    "tests/unit/worker-env-detect-hardening.test.ts": 1,
     "tests/unit/worker-env-detect-iac-resources.test.ts": 0.066,
     "tests/unit/worker-env-detect-java.test.ts": 0.045,
     "tests/unit/worker-env-detect-merge.test.ts": 0.033,

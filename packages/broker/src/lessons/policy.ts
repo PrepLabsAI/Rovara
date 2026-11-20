@@ -103,6 +103,8 @@ export function resolveLoadBudget(setting: LoadBudgetSetting | undefined, caps: 
 export const OFF_SWITCH_CAP: LearningMode = "Collect";
 let lessonsSwitchGate: () => boolean = () => learnedLessonsOn(process.env);
 export function setLearnedLessonsGate(gate: (() => boolean) | undefined): void { lessonsSwitchGate = gate ?? (() => learnedLessonsOn(process.env)); }
+/** The gate in force now, so a test can put back exactly what it found (tests/support/module-state.ts). */
+export function currentLearnedLessonsGate(): () => boolean { return lessonsSwitchGate; }
 /** Whether the install's lessons switch is on now; an unreadable switch is off. */
 export function learnedLessonsSwitchOn(): boolean { try { return lessonsSwitchGate() === true; } catch { return false; } }
 
@@ -164,6 +166,8 @@ function stricterApproval(project: ApprovalPolicy, floor: ApprovalPolicy, hasFlo
  */
 let autoApplyGate: () => boolean = () => false;
 export function setAutoApplyGate(gate: () => boolean): void { autoApplyGate = gate; }
+/** The gate in force now, so a test can put back exactly what it found (tests/support/module-state.ts). */
+export function currentAutoApplyGate(): () => boolean { return autoApplyGate; }
 /** Whether the install's auto-apply switch is on now; an unreadable switch is off. */
 export function autoApplyOn(): boolean { try { return autoApplyGate() === true; } catch { return false; } }
 const clampAuto = <T extends string | undefined>(level: T): T | "one" => (level === "auto" ? "one" : level);
