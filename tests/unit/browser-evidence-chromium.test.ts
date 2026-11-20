@@ -7,10 +7,10 @@ import { tmpdir } from "node:os";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { chromium, type Browser } from "playwright-core";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { BROWSER_EVIDENCE_DEFAULT_MASK_SELECTORS, BROWSER_EVIDENCE_SCREENSHOT_MAX_BYTES } from "../../packages/contracts/src/browser-evidence.js";
 import { runBrowserEvidence } from "../../packages/verifier/src/executor/browser-evidence.js";
-import { createChromiumEvidenceDriver, startProjectApp, type ProjectApp } from "../../packages/verifier/src/executor/browser-evidence-chromium.js";
+import { createChromiumEvidenceDriver, openEvidenceChromium, startProjectApp, type ProjectApp } from "../../packages/verifier/src/executor/browser-evidence-chromium.js";
 
 const haveChromium = existsSync(chromium.executablePath());
 const FIXTURE = join(process.cwd(), "tests/fixtures/browser-evidence-app");
@@ -42,6 +42,25 @@ const driverFor = (port: number, startCommand = command) => {
 };
 
 describe.skipIf(!haveChromium)("browser evidence in a real Chromium", () => {
+  it("launches over Playwright's pipe without a debugging port and still takes a screenshot", async () => {
+    const launch = vi.spyOn(chromium, "launch");
+    const local = await openEvidenceChromium({ signal: AbortSignal.timeout(30_000) });
+    try {
+      const options = launch.mock.calls.at(-1)?.[0];
+      expect(options).toBeDefined();
+      expect(options?.args ?? []).not.toContain("--remote-debugging-port=0");
+      expect(options?.args ?? []).not.toContain("--remote-debugging-address=127.0.0.1");
+      const page = await local.browser.newPage();
+      await page.setContent("<main>pipe screenshot</main>");
+      const screenshot = await page.screenshot({ type: "jpeg" });
+      expect([...screenshot.subarray(0, 3)]).toEqual([0xff, 0xd8, 0xff]);
+      expect(screenshot.byteLength).toBeGreaterThan(0);
+    } finally {
+      await local.close();
+      launch.mockRestore();
+    }
+  }, 30_000);
+
   it("starts the app for each side, shows the changed page before and after, and says Not run for a page that does not load", async () => {
     const port = await freePort();
     const got = await runBrowserEvidence({ isolation: "sandbox", routes: ["/checkout", "/missing"], notShown: [], moreNotShown: 0, maskSelectors: [...BROWSER_EVIDENCE_DEFAULT_MASK_SELECTORS], driver: driverFor(port) });
