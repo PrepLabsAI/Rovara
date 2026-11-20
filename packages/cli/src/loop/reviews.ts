@@ -39,6 +39,9 @@ function runHeadless(command: string, args: readonly string[], input: ReviewerIn
       clearTimeout(timer);
       resolve(code === 0 ? { ok: true, text: out } : { ok: false, reason: `${command} exited ${code ?? "on a signal"}: ${redactText(err.trim().split("\n").pop() ?? "").slice(0, 200)}` });
     });
+    // A reviewer that exits before reading its whole prompt closes the pipe: the write then fails with EPIPE. That is not a crash: the
+    // outcome is the child's own exit, which `close` above reports, so the write error is only noted here and never thrown.
+    child.stdin.on("error", () => undefined);
     child.stdin.end(input.prompt);
   });
 }
