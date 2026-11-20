@@ -163,13 +163,13 @@ describe("what the web app is told: the offer and the person's own workspace", (
     w.db.set(identity);
     const send = w.db.send.bind(w.db);
     let refused = 0;
-    w.db.send = (async (command: { input?: { UpdateExpression?: string; Key?: { pk?: string } } }) => {
+    w.db.send = async (command: { input?: { UpdateExpression?: string; Key?: { pk?: string } } }) => {
       if (command.input?.Key?.pk === `DEVELOPER#${id}` && command.input.UpdateExpression?.startsWith("SET slackTeamId")) {
         refused += 1;
         throw Object.assign(new Error("Rate exceeded"), { name: "ProvisionedThroughputExceededException" });
       }
       return send(command as never);
-    }) as typeof w.db.send;
+    };
     const signed = await w.signIn("U0NEW0001", { slackTeam: OTHER });
     expect(refused).toBe(1);
     expect(signed.refused).toBeUndefined();
