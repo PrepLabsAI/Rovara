@@ -100,7 +100,7 @@ export async function gatherEc2Facts(options: { region: string; env?: string }):
 
   const version = (await ec2.send(new DescribeLaunchTemplateVersionsCommand({
     LaunchTemplateId: foundation.Ec2WorkerLaunchTemplateId,
-    Versions: ["$Default"],
+    Versions: ["$Latest"],
   }))).LaunchTemplateVersions?.[0]?.LaunchTemplateData;
   const ssm = new SSMClient(config);
   const imageParameter = version?.ImageId?.startsWith("resolve:ssm:") ? version.ImageId.slice("resolve:ssm:".length) : undefined;

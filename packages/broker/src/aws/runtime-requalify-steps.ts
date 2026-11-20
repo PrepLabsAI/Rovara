@@ -313,7 +313,7 @@ async function activeRunnerCount(deps: RequalifyStepsDependencies): Promise<numb
 }
 
 async function preflight(deps: RequalifyStepsDependencies): Promise<NonNullable<RequalifyState["preflight"]>> {
-  const template = (await deps.ec2.send(new DescribeLaunchTemplateVersionsCommand({ LaunchTemplateId: deps.expectedBinding.launchTemplateId, Versions: ["$Default"] }))).LaunchTemplateVersions?.[0]?.LaunchTemplateData;
+  const template = (await deps.ec2.send(new DescribeLaunchTemplateVersionsCommand({ LaunchTemplateId: deps.expectedBinding.launchTemplateId, Versions: ["$Latest"] }))).LaunchTemplateVersions?.[0]?.LaunchTemplateData;
   const problem = launchTemplateShapeProblem(template);
   if (problem !== undefined) throw new Error(problem);
   // The binding is derived from deployment settings; a registered runtime built from another binding means the derivation is wrong, and every project would stop matching it.

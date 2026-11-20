@@ -11,9 +11,8 @@ const workflow = async () => YAML.parse(await readFile(".github/workflows/ci.yml
 describe("CI runs on code/next and checks the port there (docs/porting.md), and mainline's pull requests run as before", () => {
   it("keeps the pull request and manual triggers as they were and adds a push to code/next only", async () => {
     const { on } = await workflow();
-    // #1185/#1192 added a nightly run on the default branch (a schedule fires only on the default branch).
+    // #1185 added the nightly run (the device emulator check); its cron is pinned in ci-parallel.test.ts.
     expect(Object.keys(on).sort()).toEqual(["pull_request", "push", "schedule", "workflow_dispatch"]);
-    expect(on.schedule).toEqual([{ cron: "0 6 * * *" }]);
     expect(on.pull_request).toEqual({ types: ["opened", "synchronize", "reopened", "ready_for_review", "labeled"] });
     expect(on.push).toEqual({ branches: ["code/next"] });
   });
