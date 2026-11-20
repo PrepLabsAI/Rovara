@@ -1,4 +1,4 @@
-// Golden tests for the setup agent's proposal re-read (W1, lead 4): pinned BEFORE the citation check moved into core/citations/citation-check.ts, so the move is proven byte-identical.
+// Golden tests for the setup agent's proposal re-read (W1, lead 4), updated for the unique whole-file quote fallback.
 // Every verdict, every `final`, and every call the reader receives (repository, path, commit, untilLine, timeoutMs) is pinned for holds / fails / unreadable / limits.
 import { describe, expect, it } from "vitest";
 import type { SetupProposal } from "@agentx/contracts";
@@ -37,7 +37,7 @@ function fakeReader(files: Record<string, string | undefined | Error>, onCall?: 
 }
 const fixedNow = () => 1_000;
 
-describe("setup proposal verify (golden, pinned before the W1 move)", () => {
+describe("setup proposal verify (golden, with unique quote fallback)", () => {
   it("pins the constants", () => {
     expect({ VERIFY_READS_MAX, VERIFY_CONCURRENCY, VERIFY_DEADLINE_MS, VERIFY_READ_TIMEOUT_MS, VERIFY_LINE_SLACK, VERIFY_QUOTE_MIN_CHARS }).toEqual({
       VERIFY_READS_MAX: 40, VERIFY_CONCURRENCY: 4, VERIFY_DEADLINE_MS: 20_000, VERIFY_READ_TIMEOUT_MS: 8_000, VERIFY_LINE_SLACK: 3, VERIFY_QUOTE_MIN_CHARS: 8,
@@ -64,9 +64,9 @@ describe("setup proposal verify (golden, pinned before the W1 move)", () => {
     expect(result).toEqual({ items: { far: "unverified", gone: "unverified", past: "unverified", value: "unverified" }, final: true });
   });
 
-  it("the window is exactly 3 lines either side of the cited line", async () => {
+  it("the window accepts repeated quotes only within 3 lines either side of the cited line", async () => {
     const lines = Array.from({ length: 20 }, (_, index) => `line number ${index + 1} here`);
-    const text = lines.join("\n");
+    const text = [...lines, ...lines].join("\n");
     const at = (line: number, quoteLine: number) => citationHolds(text, { line, quote: `line number ${quoteLine} here` });
     expect([at(10, 7), at(10, 13), at(10, 6), at(10, 14), at(1, 4), at(1, 5), at(20, 17), at(20, 16)]).toEqual([true, true, false, false, true, false, true, false]);
   });
@@ -79,6 +79,58 @@ describe("setup proposal verify (golden, pinned before the W1 move)", () => {
     expect(citationHolds("12345678", { line: 1, quote: "12345678" })).toBe(true);
     expect(citationHolds("some text here", { line: 1 })).toBe(false);
     expect(citationHolds("some text here", { line: 2, quote: "some text here" })).toBe(false);
+  });
+
+  it.each([
+    { name: "off-by-6 unique quote accepted", quote: "run: npm ci", locations: [34], want: "verified" },
+    { name: "duplicate quote refused, including beyond the old read prefix", quote: "run: npm ci", locations: [22, 55], want: "unverified" },
+    { name: "missing quote refused", quote: "run: npm ci", locations: [], want: "unverified" },
+    { name: "partial command prefix refused", quote: "run: pnpm ci", locations: [34], want: "unverified" },
+    { name: "partial command suffix refused", quote: "run: npm cia", locations: [34], want: "unverified" },
+    { name: "quote clipped before command suffix refused", quote: "run: npm ci", source: "run: npm cia", locations: [34], want: "unverified" },
+    { name: "quote clipped after command prefix refused", quote: "npm ci # install", source: "pnpm ci # install", locations: [34], want: "unverified" },
+  ])("unique whole-file fallback: $name", async ({ quote, locations, want, source }) => {
+    const lines = Array.from({ length: 60 }, (_, index) => `# filler ${index + 1}`);
+    for (const line of locations) lines[line - 1] = source ?? quote;
+    const text = lines.join("\n");
+    // Like the real code host, honor prefix requests: uniqueness must see even a late second hit.
+    const read: CitationFileReader = async (repository, path, commit, options) => {
+      if (repository !== "demo" || path !== ".github/workflows/ci.yml" || commit !== SHA) return undefined;
+      return options.untilLine === undefined ? text : lines.slice(0, options.untilLine).join("\n");
+    };
+    const result = await verifyProposalDetailed(read, proposalOf({
+      setup: [commandsItem("s", ["npm ci"], [cite(28, quote, { kind: "ci", path: ".github/workflows/ci.yml" })])],
+    }), { now: fixedNow });
+    expect(result).toEqual({ items: { s: want }, final: true });
+  });
+
+  it("keeps a nearby citation verified when a whole-file read would exceed the code-host cap", async () => {
+    const read: CitationFileReader = async (_repository, _path, _commit, options) => {
+      if (options.untilLine === undefined) throw new Error("file too large");
+      return PACKAGE;
+    };
+    expect(await verifyProposalDetailed(read, proposalOf({ setup: [commandsItem("s", ["npm ci"], [cite(3, '"ci": "npm ci"')])] }), { now: fixedNow }))
+      .toEqual({ items: { s: "verified" }, final: true });
+  });
+
+  it("a failed full-file fallback leaves only its missed citation unchecked, preserving a nearby citation of the same file", async () => {
+    const read: CitationFileReader = async (_repository, _path, _commit, options) => {
+      if (options.untilLine === undefined) throw new Error("file too large");
+      return PACKAGE;
+    };
+    const proposal = proposalOf({ setup: [
+      commandsItem("near", ["npm ci"], [cite(3, '"ci": "npm ci"')]),
+      commandsItem("far", ["npm run build"], [cite(3, "run: npm run build")]),
+    ] });
+    expect(await verifyProposalDetailed(read, proposal, { now: fixedNow }))
+      .toEqual({ items: { near: "verified", far: "unchecked" }, final: false });
+  });
+
+  it("counts whitespace-equivalent and overlapping occurrences as duplicates outside the window", () => {
+    const prefix = "# filler\n".repeat(10);
+    expect(citationHolds(`${prefix}run: npm ci`, { line: 1, quote: "run:   npm ci" })).toBe(true);
+    expect(citationHolds(`${prefix}run: npm ci\nrun:   npm ci`, { line: 1, quote: "run: npm ci" })).toBe(false);
+    expect(citationHolds(`${prefix}aaaaaaaaa`, { line: 1, quote: "aaaaaaaa" })).toBe(false);
   });
 
   it("unreadable: a read that throws leaves the item unchecked and the result NOT final", async () => {
