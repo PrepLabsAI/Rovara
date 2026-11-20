@@ -18,8 +18,9 @@
 // Nothing here names a provider; the code host is whatever the repository's record names, and a host that cannot read a merge (`mergeObservation`) is simply never seen merged.
 import {
   IMPLICIT_COMPANY_ID, OrgIdSchema, companyScoped, blockWorkflow, INDEX_EXPIRY_ATTRIBUTE, TRACKING_GATE_SECONDS, TRACKING_HEARTBEAT_MINUTES, change, hostRateLimitRetryAt, observeWorkflowPullRequest, queryAll, when,
-  type OrgId, type ReadBudget, type RegistryView, type TransactItem, type WorkflowSnapshot,
+  type CodeHost, type OrgId, type ReadBudget, type RegistryView, type TransactItem, type WorkflowSnapshot,
 } from "@agentx/contracts";
+import { withHostRequests } from "../core/merge/host-requests.js";
 import { SWEEP_INTERVAL_MS, type MergeRecoveryResult } from "../core/merge/budget.js";
 import type { RepositoryResolver } from "../core/merge/host-port.js";
 import { changeRequestRef } from "../core/merge/host-port.js";
@@ -57,6 +58,10 @@ export const TRACKING_FAILURE_MAX_MS = TRACKING_HEARTBEAT_MINUTES * 60_000;
 export const SWEEP_MAX_ROWS = 10;
 export const SWEEP_MAX_REQUESTS = 256;
 export const SWEEP_MAX_MS = 20_000;
+/** Additional time for the entire verification path, including project/store reads and persistence. */
+export const VERIFY_MAX_MS = 15_000;
+/** Cold changedFiles expands to eight HTTP requests including authorization. A second, hard transport cap bounds expansion and retries. */
+const SWEEP_MAX_HTTP_REQUESTS = SWEEP_MAX_REQUESTS * 8;
 /** One task's lighter-flow checks: their own allowance of requests, and at most this much of a pass's time (the reviewer calls are bounded on their own). */
 export const TIER_CHECKS_MAX_REQUESTS = 256;
 export const TIER_CHECKS_MAX_MS = 4 * 60_000;
@@ -111,27 +116,83 @@ export async function wakeMergeTracking(store: Pick<TaskFlowDeps["store"], "upda
 }
 
 /** A budget for one sweep: a request allowance and a deadline shared by everything it reads. `stop` ends its timer. */
-export function createReadBudget(now: () => number, limits: { requests: number; ms: number } = { requests: SWEEP_MAX_REQUESTS, ms: SWEEP_MAX_MS }): { budget: ReadBudget; stop: () => void } {
+export function createReadBudget(now: () => number, limits: { requests: number; ms: number } = { requests: SWEEP_MAX_REQUESTS, ms: SWEEP_MAX_MS }): { budget: ReadBudget; check: () => void; used: () => number; stop: () => void } {
   const controller = new AbortController();
   const startedAt = now();
   let requests = 0;
   const timer = setTimeout(() => controller.abort(), limits.ms);
   timer.unref();
+  const check = () => {
+    if (controller.signal.aborted || now() >= startedAt + limits.ms) {
+      controller.abort();
+      throw exhaustedReadBudget();
+    }
+  };
   return {
-    stop: () => clearTimeout(timer),
+    stop: () => clearTimeout(timer), check, used: () => requests,
     budget: {
       signal: controller.signal,
       beforeRequest: () => {
-        if (controller.signal.aborted || now() >= startedAt + limits.ms || requests >= limits.requests) {
+        check();
+        if (requests >= limits.requests) {
           controller.abort();
-          const exhausted = new Error("the sweep used its request allowance");
-          exhausted.name = "GithubBudgetExhaustedError";
-          throw exhausted;
+          throw exhaustedReadBudget();
         }
         requests += 1;
       },
     },
   };
+}
+
+function exhaustedReadBudget(): Error {
+  const error = new Error("the sweep used its request allowance or deadline");
+  error.name = "GithubBudgetExhaustedError";
+  return error;
+}
+
+/** Check both sides of every await, including persistence. Storage writes are joined, never abandoned. */
+const HOST_WRITES = new Set(["open", "reconcileChangeRequest", "updateChangeRequest", "merge", "markReady", "requestReviewers", "reply", "postComment", "upsertSummaryCheck", "put", "update", "delete", "transact"]);
+function guardedCalls<T extends object>(target: T, check: () => void, before: () => void = check, signal?: AbortSignal): T {
+  return new Proxy(target, {
+    get(object, property) {
+      const value = Reflect.get(object, property, object) as unknown;
+      if (typeof value !== "function") return value;
+      return async (...args: unknown[]) => {
+        before();
+        const pending: Promise<unknown> = Reflect.apply(value, object, args) as Promise<unknown>;
+        let cancel: (() => void) | undefined;
+        try {
+          // Reads can be discarded safely. Writes (including storage) are always joined.
+          const result: unknown = signal === undefined || HOST_WRITES.has(String(property)) ? await pending : await Promise.race([
+            pending,
+            new Promise<never>((_resolve, reject) => {
+              cancel = () => reject(exhaustedReadBudget());
+              if (signal.aborted) cancel();
+              else signal.addEventListener("abort", cancel, { once: true });
+            }),
+          ]);
+          check();
+          return result;
+        } finally {
+          if (cancel !== undefined) signal?.removeEventListener("abort", cancel);
+        }
+      };
+    },
+  });
+}
+
+/** Registry lookup stays synchronous; only code-host calls are wrapped. Other adapter points retain their semantics. */
+function guardedHosts(registry: RegistryView, guard: (host: CodeHost) => CodeHost): RegistryView {
+  return new Proxy(registry, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target) as unknown;
+      if (typeof value !== "function") return value;
+      return (...args: unknown[]) => {
+        const result: unknown = Reflect.apply(value, target, args);
+        return (property === "get" || property === "require") && args[0] === "code-host" && result !== undefined ? guard(result as CodeHost) : result;
+      };
+    },
+  });
 }
 
 /** The repository of a task's project, on the code host its record names (and the runner that reads that host's build logs, when one is registered). */
@@ -200,9 +261,12 @@ export interface MergeTrackingService {
 }
 
 export function createMergeTrackingService(options: MergeTrackingServiceOptions): MergeTrackingService {
-  const { flow, registry, companyId, milestones, now, people, settings } = options;
+  const { flow: inputFlow, registry, companyId, milestones, now, people, settings } = options;
+  let sweepCheck: (() => void) | undefined;
+  let sweepStop: (() => void) | undefined;
+  const store = guardedCalls(inputFlow.store, () => sweepCheck?.());
+  const flow = { ...inputFlow, store, projects: guardedCalls(inputFlow.projects, () => sweepCheck?.()) };
   if (!OrgIdSchema.safeParse(companyId).success) throw new Error("the merge tracking company is invalid");
-  const store = flow.store;
   const log = options.log ?? (() => undefined);
   const timeline = options.timeline ?? sessionTimeline();
   const pollMs = options.pollMs ?? TRACKING_POLL_MS;
@@ -213,10 +277,12 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     return record === undefined ? undefined : mergeTaskOf(record, companyId);
   };
 
+  let sweepHostGuard: ((host: CodeHost) => CodeHost) | undefined;
   const givenResolver = options.repository ?? createRepositoryResolver(flow, registry);
-  const resolver: RepositoryResolver = (project, revision, repositoryId, orgId) => {
-    if (orgId !== companyId) return Promise.resolve(undefined);
-    return givenResolver(project, revision, repositoryId, companyId);
+  const resolver: RepositoryResolver = async (project, revision, repositoryId, orgId) => {
+    if (orgId !== companyId) return undefined;
+    const home = await givenResolver(project, revision, repositoryId, companyId);
+    return home === undefined || sweepHostGuard === undefined ? home : { ...home, codeHost: sweepHostGuard(home.codeHost) };
   };
 
   const verdictSource = createPullRequestVerdictSource(flow);
@@ -446,6 +512,11 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
   const runSweep = async (budgetMs: number): Promise<{ attempted: number }> => {
     if (!Number.isFinite(budgetMs) || budgetMs <= 0) return { attempted: 0 };
     const deadline = now() + Math.min(budgetMs, SWEEP_MAX_MS);
+    const hardDeadline = deadline + VERIFY_MAX_MS;
+    const total = createReadBudget(now, { requests: SWEEP_MAX_REQUESTS, ms: hardDeadline - now() });
+    const http = createReadBudget(now, { requests: SWEEP_MAX_HTTP_REQUESTS, ms: hardDeadline - now() });
+    sweepCheck = total.check;
+    sweepStop = () => { total.stop(); http.stop(); };
     scan.complete = false;
     if (!cooldownRead) {
       cooldownRead = true;
@@ -464,13 +535,21 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     }
     if (rows.length === 0) return { attempted: 0 };
     const left = deadline - now();
-    if (left <= 0) return { attempted: 0 };
-    const { budget, stop } = createReadBudget(now, { requests: SWEEP_MAX_REQUESTS, ms: left });
+    // ONE host-operation counter covers verification and reconciliation across every row.
+    const reconciliation = createReadBudget(now, { requests: SWEEP_MAX_REQUESTS, ms: Math.max(0, left) });
+    const budget: ReadBudget = { signal: reconciliation.budget.signal, beforeRequest: () => { reconciliation.check(); total.check(); } };
+    sweepHostGuard = (host) => guardedCalls(host, () => { reconciliation.check(); total.check(); }, () => {
+      reconciliation.check();
+      // Refuse further host calls without cancelling the store reads/writes needed to schedule a retry.
+      if (total.used() >= SWEEP_MAX_REQUESTS) throw exhaustedReadBudget();
+      total.budget.beforeRequest();
+    }, reconciliation.budget.signal);
     let attempted = 0;
     try {
       for (const row of rows) {
-        // A code host that said "slow down" in this sweep pauses the rest of it.
-        if (cooldownUntil !== undefined || budget.signal.aborted || now() >= deadline) { scan.complete = false; break; }
+        // A selected row gets its own verification allowance even when the scan spent the sweep time.
+        // Later rows wait once the sweep is spent; a host cooldown always pauses every row.
+        if (cooldownUntil !== undefined || total.used() >= SWEEP_MAX_REQUESTS || now() >= hardDeadline || (attempted > 0 && (budget.signal.aborted || now() >= deadline))) { scan.complete = false; break; }
         if (await loadTask(row.taskId) === undefined) continue;
         attempted += 1;
         const versionBefore = await trackingVersions(row.taskId);
@@ -479,10 +558,28 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
         try {
           // The changed files are read from the code host once for the code the pull requests hold (review H3): until then the risk is high. A host that cannot answer now is asked again soon.
           const task = await readTask(flow, row.taskId);
-          if (task !== undefined) unverified = (await verifyPublishedChanges(flow, task, budget.beforeRequest)) === "unavailable";
+          if (task !== undefined) {
+            const startedAt = now();
+            const httpBefore = http.used();
+            const verification = createReadBudget(now, { requests: SWEEP_MAX_REQUESTS, ms: Math.min(VERIFY_MAX_MS, Math.max(0, hardDeadline - now())) });
+            const check = () => { verification.check(); total.check(); };
+            const charge = () => { check(); verification.budget.beforeRequest(); total.budget.beforeRequest(); };
+            const verificationFlow = {
+              ...flow, store: guardedCalls(flow.store, check, check, verification.budget.signal), projects: guardedCalls(flow.projects, check, check, verification.budget.signal),
+              ...(flow.codeHosts === undefined ? {} : { codeHosts: guardedHosts(flow.codeHosts, (host) => guardedCalls(host, check, charge, verification.budget.signal)) }),
+            };
+            try {
+              unverified = (await withHostRequests({ signal: verification.budget.signal, beforeRequest: () => { check(); http.budget.beforeRequest(); } }, () => verifyPublishedChanges({
+                ...verificationFlow,
+                log: (entry) => flow.log?.(entry["event"] === "build_step.changed_files_unavailable" ? { ...entry, ms: Math.max(0, now() - startedAt), requests: verification.used(), requestUnit: "code_host_operations", httpRequests: http.used() - httpBefore } : entry),
+              }, task, check))) === "unavailable";
+            } finally {
+              verification.stop();
+            }
+          }
           // A task whose planning steps were skipped owes the lighter flow's checks on its current head. They take model calls, so they run in a pass of their own with an allowance of their own (`tierChecks`), never inside this sweep.
           if (task?.workflow !== undefined && skippedPlanning(task.workflow.flow)) await markTierDue(row.taskId);
-          result = await reconcileTrackingTask(deps, row.taskId, budget);
+          result = await withHostRequests({ signal: budget.signal, beforeRequest: () => { budget.beforeRequest(); http.budget.beforeRequest(); } }, () => reconcileTrackingTask(deps, row.taskId, budget));
         } catch (error) {
           const limitedUntil = hostRateLimitRetryAt(error);
           result = limitedUntil !== undefined ? { kind: "RETRY", retryAt: limitedUntil, scope: "github-global" } : { kind: "RETRY", retryAt: now() + pollMs, scope: "task" };
@@ -493,7 +590,9 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
         if (result.kind === "RETRY" && result.scope === "github-global") break;
       }
     } finally {
-      stop();
+      sweepHostGuard = undefined;
+      total.stop();
+      reconciliation.stop();
     }
     return { attempted };
   };
@@ -510,7 +609,7 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     deps,
     sweep(sweepOptions) {
       // One sweep at a time: a second call while one runs is the same sweep.
-      sweeping ??= runSweep(sweepOptions?.budgetMs ?? SWEEP_MAX_MS).finally(() => { sweeping = undefined; });
+      sweeping ??= runSweep(sweepOptions?.budgetMs ?? SWEEP_MAX_MS).finally(() => { sweepCheck = undefined; sweepStop?.(); sweepStop = undefined; sweeping = undefined; });
       return sweeping;
     },
     async wake(taskId) {

@@ -1,3 +1,4 @@
+import { guardedHostFetch } from "../../../core/merge/host-requests.js";
 import { createHash, createSign } from "node:crypto";
 import { githubUserOfCode, userControlledInstallations, UserAuthorizationRefused, type ControlledInstallation } from "./user-authorization.js";
 import { DEPLOYMENT_STATES_OF_GITHUB } from "./events.js";
@@ -450,7 +451,7 @@ export class GitHubAppCredentialProvider {
 
   constructor(private readonly options: GitHubAppCredentialProviderOptions) {
     if (typeof options.appId === "string" && !GITHUB_APP_ID.test(options.appId)) throw new Error("GitHub App ID must be numeric");
-    this.fetchImplementation = options.fetchImplementation ?? fetch;
+    this.fetchImplementation = guardedHostFetch(options.fetchImplementation ?? fetch);
     this.now = options.now ?? Date.now;
   }
 

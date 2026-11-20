@@ -8,15 +8,16 @@ export const CORE_PASS_MAX_BYTES = 4 * 1024 * 1024;
 class PassExhausted extends Error {}
 
 /** Cooperative bound: join every awaited call; never race storage against a timeout and leave a late writer behind. */
-export function boundedCorePass(store: DocumentStore, now: () => number, work: (store: DocumentStore, deadlineMs: number) => Promise<Record<string, unknown>>): CoreService {
+export function boundedCorePass(store: DocumentStore, now: () => number, work: (store: DocumentStore, deadlineMs: number) => Promise<Record<string, unknown>>, reserveMs = 0): CoreService {
   return {
     async pass({ budgetMs }) {
       if (!Number.isFinite(budgetMs) || budgetMs <= 0) return { complete: false, reason: "budget" };
       const ms = Math.min(budgetMs, CORE_PASS_MAX_MS);
       const deadline = now() + ms;
+      const hardDeadline = deadline + reserveMs;
       let operations = 0, bytes = 0, items = 0, expired = false, exhausted = false;
-      const check = () => { if (expired || now() >= deadline || bytes > CORE_PASS_MAX_BYTES || items > CORE_PASS_MAX_ITEMS) { exhausted = true; throw new PassExhausted(); } };
-      const timer = setTimeout(() => { expired = true; }, ms);
+      const check = () => { if (expired || now() >= hardDeadline || bytes > CORE_PASS_MAX_BYTES || items > CORE_PASS_MAX_ITEMS) { exhausted = true; throw new PassExhausted(); } };
+      const timer = setTimeout(() => { expired = true; }, ms + reserveMs);
       timer.unref();
       // Guard every store operation, including internal reads/writes of the existing services. No key rewriting or tenant inference here.
       const limited = new Proxy(store, {
