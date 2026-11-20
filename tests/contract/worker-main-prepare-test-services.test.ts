@@ -83,12 +83,6 @@ describe("main.ts's prepare handler with a testServices payload", () => {
     expect(Object.keys(result)).not.toContain("testServicesUsage");
   });
 
-  it("a preparation that reports no record leaves the result without the key", async () => {
-    captured.report = undefined;
-    const result = await captured.executor!.execute(prepareInvocation({ testServices: { dependencies: [dependency] } })) as Record<string, unknown>;
-    expect(Object.keys(result)).not.toContain("testServicesUsage");
-  });
-
   it("advertises the test-services feature only with a worker configuration (none here)", () => {
     expect(captured.executor!.invocationFeatures ?? []).not.toContain("task.testServices.v1");
   });

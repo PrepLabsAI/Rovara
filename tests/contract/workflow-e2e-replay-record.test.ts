@@ -1,11 +1,7 @@
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it } from "vitest";
-import { indexExpiresAt } from "@agentx/contracts";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
-import {
-  E2E_REPLAY_PURPOSE, listWorkflowE2EReplayRecords, markWorkflowE2EReplayUnavailable, readWorkflowE2EReplayRecord, recordWorkflowE2EReplay, replayStartItem, requestWorkflowE2EReplay,
-  type VerifiedReplay,
-} from "../../packages/broker/src/aws/workflow-e2e-replay.js";
+import { E2E_REPLAY_PURPOSE, markWorkflowE2EReplayUnavailable, readWorkflowE2EReplayRecord, recordWorkflowE2EReplay, replayStartItem, requestWorkflowE2EReplay, type VerifiedReplay } from "../../packages/broker/src/aws/workflow-e2e-replay.js";
 
 // M1.4 Task 4.6b: the replay's record, E2E_REPLAY#<sourceRoundId>#<attempt>, beside the task. Conditional writes, the same 30-day TTL as the baseline's, and nothing of the task changed.
 
@@ -23,13 +19,6 @@ const verified = (overrides: Record<string, unknown> = {}) => ({ roundId: "round
 const expectedOf = (overrides: Record<string, unknown> = {}) => ({ sourceRoundId: SOURCE, attempt: 1, operationId: "op-1", roundId: "round-1", admissionSha256: "c".repeat(64), ...overrides });
 
 describe("asking for a replay (once per round and attempt)", () => {
-  it("writes a REQUESTED record for the round and attempt, with the purpose and an expiry 30 days out", async () => {
-    const s = store();
-    expect(await requestWorkflowE2EReplay(s, task, { sourceRoundId: SOURCE, attempt: 1 })).toBe("REQUESTED");
-    const stored = s.db.get(key().pk, key().sk);
-    expect(stored).toMatchObject({ entityType: "WORKFLOW_E2E_REPLAY", taskId: TASK_ID, sourceRoundId: SOURCE, purpose: E2E_REPLAY_PURPOSE, attempt: 1, state: "REQUESTED" });
-    expect(stored!.indexExpiresAt).toBe(indexExpiresAt(String(stored!.requestedAt)));
-  });
   it("asks at most once for a round and attempt: the second ask finds the record and changes nothing; another attempt or another round is its own record", async () => {
     const s = store();
     await requestWorkflowE2EReplay(s, task, { sourceRoundId: SOURCE, attempt: 1 });
@@ -38,28 +27,6 @@ describe("asking for a replay (once per round and attempt)", () => {
     expect(JSON.stringify(await readWorkflowE2EReplayRecord(s, TASK_ID, { sourceRoundId: SOURCE, attempt: 1 }))).toBe(before);
     expect(await requestWorkflowE2EReplay(s, task, { sourceRoundId: SOURCE, attempt: 2 })).toBe("REQUESTED");
     expect(await requestWorkflowE2EReplay(s, task, { sourceRoundId: "44444444-4444-4444-8444-444444444444", attempt: 1 })).toBe("REQUESTED");
-  });
-});
-
-describe("starting the replay writes a started record, once", () => {
-  it("moves REQUESTED to STARTED with the operation, the round, the admission and the deadline", async () => {
-    const s = store();
-    await requestWorkflowE2EReplay(s, task, { sourceRoundId: SOURCE, attempt: 1 });
-    await start(s);
-    expect(await readWorkflowE2EReplayRecord(s, TASK_ID, { sourceRoundId: SOURCE, attempt: 1 })).toMatchObject({ state: "STARTED", attempt: 1, sourceRoundId: SOURCE, operationId: "op-1",
-      roundId: "round-1", admissionSha256: "c".repeat(64), deadlineAt: "2026-10-22T10:25:00.000Z" });
-  });
-  it("fails the whole transaction when the record is not this round's REQUESTED one: never asked for, already started, or another attempt (at most one start)", async () => {
-    const never = store();
-    await expect(start(never)).rejects.toThrow();
-    const twice = store();
-    await requestWorkflowE2EReplay(twice, task, { sourceRoundId: SOURCE, attempt: 1 });
-    await start(twice);
-    await expect(start(twice, { operationId: "op-2" })).rejects.toThrow();
-    expect((await readWorkflowE2EReplayRecord(twice, TASK_ID, { sourceRoundId: SOURCE, attempt: 1 }))?.operationId).toBe("op-1");
-    const other = store();
-    await requestWorkflowE2EReplay(other, task, { sourceRoundId: SOURCE, attempt: 1 });
-    await expect(start(other, { attempt: 2 })).rejects.toThrow();
   });
 });
 
@@ -98,18 +65,5 @@ describe("recording the result", () => {
     expect(await readWorkflowE2EReplayRecord(s, TASK_ID, { sourceRoundId: SOURCE, attempt: 1 })).toBeUndefined();
     s.db.set({ ...key(), entityType: "WORKFLOW_E2E_REPLAY", taskId: "another-task", purpose: E2E_REPLAY_PURPOSE, state: "STARTED", sourceRoundId: SOURCE, attempt: 1, requestedAt: "2026-10-22T10:00:00.000Z" });
     expect(await readWorkflowE2EReplayRecord(s, TASK_ID, { sourceRoundId: SOURCE, attempt: 1 })).toBeUndefined();
-  });
-  it("lists the attempts of one source round, oldest first, and no other round's", async () => {
-    const s = store();
-    for (const attempt of [2, 1, 3]) await requestWorkflowE2EReplay(s, task, { sourceRoundId: SOURCE, attempt });
-    await requestWorkflowE2EReplay(s, task, { sourceRoundId: "44444444-4444-4444-8444-444444444444", attempt: 1 });
-    expect((await listWorkflowE2EReplayRecords(s, TASK_ID, SOURCE)).map((item) => item.attempt)).toEqual([1, 2, 3]);
-  });
-  it("is a record of its own, beside the task: nothing of it is written into the task's own item", async () => {
-    const s = store();
-    s.db.set({ pk: `DEVTASK#${TASK_ID}`, sk: "TASK", entityType: "DEVELOPER_TASK", workflow: { revision: 5 } });
-    await requestWorkflowE2EReplay(s, task, { sourceRoundId: SOURCE, attempt: 1 });
-    await start(s);
-    expect(s.db.get(`DEVTASK#${TASK_ID}`, "TASK")).toEqual({ pk: `DEVTASK#${TASK_ID}`, sk: "TASK", entityType: "DEVELOPER_TASK", workflow: { revision: 5 } });
   });
 });

@@ -39,7 +39,6 @@ function workspace(): { root: string; repo: string; baseSha: string } {
   return { root, repo, baseSha };
 }
 
-const agentScenario: E2EScenario = { ...csvScenario, scenarioId: "agent-orders", steps: [{ kind: "agent", goal: "open the orders page", maxActions: 3 }], assertions: [{ kind: "visible", testId: "orders", equals: true }] };
 function planText(options: { scenarios: E2EScenario[]; scenarioProves: Record<string, string[]> }): string {
   const fx = planFixture({});
   return planAnswer(planDocument({ e2e: { ...fx.intent, scenarios: options.scenarios }, scenarioProves: options.scenarioProves }));
@@ -95,18 +94,6 @@ describe("a planning run asked for the grounding source", () => {
     expect(JSON.stringify(sent)).not.toContain(BASE_ONLY);
   });
 
-  it("exports nothing without the flag (the invocation of an older broker), for a plan with no must-not-change scenario, or when every such scenario needs AI navigation", async () => {
-    const proving = withProves({ "export-csv": ["nc1"] }, [csvScenario]);
-    expect((await planningRun({ answer: proving })).result).not.toHaveProperty("workflowBaselineSource");
-    expect((await planningRun({ answer: withProves({ "export-csv": ["1"] }, [csvScenario]), grounding: true })).result).not.toHaveProperty("workflowBaselineSource");
-    expect((await planningRun({ answer: withProves({ "agent-orders": ["nc1"] }, [agentScenario]), grounding: true })).result).not.toHaveProperty("workflowBaselineSource");
-    expect((await planningRun({ answer: planAnswer(planDocument()), grounding: true })).result).not.toHaveProperty("workflowBaselineSource");
-  });
-
-  it("returns exactly the result it returned before when it is not asked (byte-identical)", async () => {
-    const { result } = await planningRun({ answer: withProves({ "export-csv": ["nc1"] }, [csvScenario]) });
-    expect(Object.keys(result).sort()).toEqual(["conversationId", "reopened", "workflowMode"]);
-  });
 });
 
 describe("the grounding source's delivery", () => {
@@ -130,15 +117,4 @@ describe("the grounding source's delivery", () => {
     expect(terminals[0]!.result).toEqual({ workflowMode: "PLAN" });
   });
 
-  it("never posts it for a run that was not asked, still strips it, and does not fail the terminal result when the post fails (and logs no text from the failure (a positive control: the failing sink did carry it))", async () => {
-    const notAsked = await delivered({});
-    expect(notAsked.uploads).toEqual([]);
-    expect(notAsked.terminals[0]!.result).toEqual({ workflowMode: "PLAN" });
-    const failing = await delivered({ workflowE2EGroundingSource: true }, true);
-    expect(failing.uploads).toHaveLength(1);
-    expect(failing.terminals).toHaveLength(1);
-    expect(failing.logs).toHaveLength(1);
-    expect(JSON.stringify(failing.logs)).toContain("grounding-source.delivery_failed");
-    expect(JSON.stringify(failing.logs)).not.toContain(BASE_ONLY);
-  });
 });

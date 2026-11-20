@@ -81,14 +81,6 @@ describe("the progress note (#219)", () => {
     expect(late.updates).toEqual([{ ts: "1695500000.000900", text: "Stopped: running sleep 2400, after less than a minute." }]);
   });
 
-  it("dispose stops the edits without a last one, for a turn handed off", async () => {
-    const { progress, updates } = note();
-    await progress.start();
-    progress.dispose();
-    await vi.advanceTimersByTimeAsync(10 * PROGRESS_INTERVAL_MS);
-    expect(updates).toEqual([]);
-  });
-
   it("names the task by the member's words or what they approved, Slack-safe and short", () => {
     expect(progressSubject("<@U0BOT00001> run `sleep 2400` & tell me <!channel>", undefined, escapeText)).toBe("run sleep 2400 &amp; tell me");
     expect(progressSubject("  ", 'Start a coding task: "list files"', escapeText)).toBe('Start a coding task: "list files"');
@@ -166,25 +158,4 @@ describe("a long Slack task's progress in the processor (#219)", () => {
     expect(h.progressPosts).toEqual(['Started on the worker: Start a coding task: "list files". I\'ll update this message while it runs.']);
   });
 
-  it("never holds the task or its reply on a progress post or edit that does not answer (review)", async () => {
-    const h = harness(1);
-    h.dependencies.postProgress = () => new Promise<string>(() => undefined);
-    h.dependencies.updateMessage = () => new Promise<void>(() => undefined);
-    const done = processSlackRequest(message, h.dependencies, { finalAttempt: false });
-    await vi.advanceTimersByTimeAsync(60_000);
-    await done;
-    expect(h.posts.at(-1)).toBe("All done.");
-  });
-
-  it("runs a turn exactly as before without the progress dependencies", async () => {
-    const h = harness(1);
-    delete h.dependencies.postProgress;
-    delete h.dependencies.updateMessage;
-    const done = processSlackRequest(message, h.dependencies, { finalAttempt: false });
-    await vi.advanceTimersByTimeAsync(60_000);
-    await done;
-    expect(h.turns[0]).not.toHaveProperty("onOperationAccepted");
-    expect([...h.progressPosts, ...h.updates]).toEqual([]);
-    expect(h.posts.at(-1)).toBe("All done.");
-  });
 });

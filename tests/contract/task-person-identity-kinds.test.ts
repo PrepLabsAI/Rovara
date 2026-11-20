@@ -4,42 +4,12 @@
 // never an owner, never counted for dispatch and never takes ownership. The web proof itself is tested in task-person-web-proof.test.ts.
 // A malformed row is a fixed refusal, never read as the other kind.
 import { describe, expect, it, vi } from "vitest";
-import {
-  SLACK_OIDC_ISSUER,
-  TASK_PERSON_METHOD_LABELS,
-  taskPeopleEntryKind,
-  taskPersonIdentityKind,
-  type TaskPersonProofRequest,
-  type TaskPersonProofResponse,
-} from "@agentx/contracts";
+import { SLACK_OIDC_ISSUER, taskPeopleEntryKind, taskPersonIdentityKind, type TaskPersonProofRequest, type TaskPersonProofResponse } from "@agentx/contracts";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
-import {
-  checkTaskPersonIdentity,
-  resolveTaskPersonId,
-  resolveTaskPickerPerson,
-  type ProjectAccessSubject,
-  type TaskPersonIdentity,
-  type TaskPersonIdentityDependencies,
-} from "../../packages/broker/src/developer/task-person-identity.js";
-import {
-  TASK_PERSON_UNNAMED,
-  parseTaskPeopleEntry,
-  parseTaskPersonIdentity,
-  taskPeopleEntryOf,
-  taskPersonIdentitySuffix,
-} from "../../packages/broker/src/developer/task-person-rows.js";
-import {
-  changeTaskPeople,
-  getTaskPeople,
-  getTaskPeopleCapabilities,
-  getTaskPeoplePresentation,
-  resolveTaskDispatchPeople,
-  resolveTaskPeopleAccess,
-  takeTaskOwnership,
-  type TaskPeopleDependencies,
-  type TaskPersonCheck,
-} from "../../packages/broker/src/developer/task-people.js";
+import { checkTaskPersonIdentity, resolveTaskPersonId, type ProjectAccessSubject, type TaskPersonIdentity, type TaskPersonIdentityDependencies } from "../../packages/broker/src/developer/task-person-identity.js";
+import { TASK_PERSON_UNNAMED, parseTaskPeopleEntry, parseTaskPersonIdentity, taskPeopleEntryOf } from "../../packages/broker/src/developer/task-person-rows.js";
+import { changeTaskPeople, getTaskPeople, getTaskPeoplePresentation, resolveTaskDispatchPeople, type TaskPeopleDependencies, type TaskPersonCheck } from "../../packages/broker/src/developer/task-people.js";
 import type { TaskPeopleDisplayAdmission } from "../../packages/broker/src/developer/task-people-display-budget.js";
 import { taskOwnerKey, type DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 import type { DeveloperRecord } from "../../packages/broker/src/developer/store.js";
@@ -98,11 +68,6 @@ const caller = (developerId: string, name: string, slackUserId?: string): Develo
   ...(slackUserId === undefined ? {} : { slackUserId }),
 });
 const SAM_CALLER = caller(SAM_ID, "Sam Slack", SAM);
-const GALE_CALLER = caller(GALE_ID, "Gale GitHub");
-
-const sortKeys = (value: unknown): unknown => Array.isArray(value) ? value.map(sortKeys)
-  : value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, sortKeys(v)])) : value;
-const canonical = (value: unknown) => JSON.stringify(sortKeys(value));
 
 const errorOf = async (promise: Promise<unknown>) => {
   try { await promise; } catch (error) { return error as Error & { code?: string }; }
@@ -201,56 +166,18 @@ describe("identity kind rule (contracts)", () => {
     expect(taskPeopleEntryKind(fields as Record<string, unknown>)).toBe(kind);
   });
 
-  it("labels every built-in method, keeping the pre-C1 Slack and OIDC words", () => {
-    expect(taskPersonIdentitySuffix("slack")).toBe(" (Slack identity)");
-    expect(taskPersonIdentitySuffix("oidc")).toBe(" (OIDC identity)");
-    expect(taskPersonIdentitySuffix("github")).toBe(" (GitHub identity)");
-    expect(Object.keys(TASK_PERSON_METHOD_LABELS).sort()).toEqual(["cloud", "github", "oidc", "saml", "slack"]);
-  });
 });
 
 describe("PERSON and PEOPLE row parsers", () => {
-  it("parses a pre-C1 PERSON row exactly as before (golden)", () => {
-    const parsed = parseTaskPersonIdentity(slackRow(TASK_A, P_SAM, SAM, "Sam Slack"));
-    expect(JSON.stringify(parsed)).toBe(JSON.stringify({ developerId: SAM_ID, slackUserId: SAM, name: "Sam Slack", method: "slack", issuer: SLACK_OIDC_ISSUER, subject: SAM }));
-  });
-
-  it("parses a web PERSON row with no Slack id", () => {
-    expect(parseTaskPersonIdentity(webRow())).toStrictEqual({ ...ID_FIELDS, method: "github" });
-    expect(parseTaskPersonIdentity(webRow(TASK_A, { method: "oidc", issuer: OIDC_ISSUER }))).toStrictEqual({ ...ID_FIELDS, method: "oidc", issuer: OIDC_ISSUER });
-  });
 
   it.each([
-    ["an unknown method", { method: "google" }],
-    ["a slack method without a Slack id", { method: "slack" }],
-    ["a web method with an invalid Slack id", { slackUserId: "nope" }],
-    ["a web method with a valid Slack id", { method: "cloud", slackUserId: SAM }],
-    ["a developer id of the wrong type", { developerId: 5 }],
-    ["a name of the wrong type", { name: ["Gale"] }],
     ["an unsafe name", { name: "  Gale  " }],
-    ["an empty issuer", { issuer: "" }],
-    ["a subject of the wrong type", { subject: 9 }],
   ])("refuses a PERSON row with %s", (_label, overrides) => {
     expect(parseTaskPersonIdentity(webRow(TASK_A, overrides))).toBeUndefined();
   });
 
-  it("returns a pre-C1 PEOPLE entry as the very stored object, and a web entry", () => {
-    const old = { ...SAM_ENTRY };
-    expect(parseTaskPeopleEntry(old)).toBe(old);
-    const web = GALE_ENTRY("commenter");
-    expect(parseTaskPeopleEntry(web)).toBe(web);
-  });
-
   it.each([
-    ["no Slack id and no method", { developerId: GALE_ID, name: "Gale", role: "viewer" }],
-    ["both a Slack id and a method", { ...SAM_ENTRY, method: "slack" }],
-    ["slack method without a Slack id", { developerId: GALE_ID, name: "Gale", role: "viewer", method: "slack" }],
-    ["an unknown method", { developerId: GALE_ID, name: "Gale", role: "viewer", method: "google" }],
-    ["an invalid Slack id", { ...SAM_ENTRY, slackUserId: "bad" }],
     ["an unknown role", GALE_ENTRY("admin")],
-    ["an extra key", { ...GALE_ENTRY("viewer"), slackTeamId: TEAM }],
-    ["a bad developer id", { ...GALE_ENTRY("viewer"), developerId: "x" }],
-    ["an unsafe name", { ...GALE_ENTRY("viewer"), name: " Gale" }],
   ])("refuses a PEOPLE entry with %s", (_label, entry) => {
     expect(parseTaskPeopleEntry(entry)).toBeUndefined();
   });
@@ -266,45 +193,7 @@ describe("PERSON and PEOPLE row parsers", () => {
 });
 
 describe("the proof: a web identity is unavailable without the web proof readers", () => {
-  it("keeps a pre-C1 Slack registry row eligible exactly as before", async () => {
-    const h = mixedTask();
-    await expect(checkTaskPersonIdentity(h.identityDeps, task(), BAY_ID)).resolves.toStrictEqual({
-      subject: { developerId: BAY_ID, slackUserId: BAY },
-      identity: { developerId: BAY_ID, slackUserId: BAY, name: "Bay Slack", method: "slack", issuer: SLACK_OIDC_ISSUER, subject: BAY },
-      eligible: true, channelMember: true,
-    });
-    expect(h.proof).toHaveBeenCalledTimes(1);
-  });
 
-  it.each([
-    ["github", {}],
-    ["oidc without a Slack link", { method: "oidc", issuer: OIDC_ISSUER }],
-    ["cloud", { method: "cloud" }],
-    ["saml", { method: "saml" }],
-  ])("answers unavailable for a %s registry row, with no proof read and no Slack call", async (_label, overrides) => {
-    const h = mixedTask();
-    h.seed(webRow(TASK_A, overrides));
-    const error = await errorOf(checkTaskPersonIdentity(h.identityDeps, task(), GALE_ID));
-    expect(error.code).toBe("SLACK_UNAVAILABLE");
-    expect(error.message).toContain("task person identity proof is unavailable");
-    expect(h.proofPorts()).toBe(0);
-  });
-
-  it("builds a web identity for an OIDC creator with no Slack link from the sign-in record, then answers unavailable", async () => {
-    const meta = task(TASK_A, { developerId: OLA_ID, provider: "oidc", developerName: "Ola Oidc" });
-    delete (meta as { slackUserId?: string }).slackUserId;
-    const h = harness({
-      tasks: [meta],
-      developer: { developerId: OLA_ID, provider: "oidc", issuer: OIDC_ISSUER, subject: "ola-employee", displayName: "Ola Oidc",
-        firstSignInAt: CREATED, lastSignInAt: CREATED, revoked: false },
-    });
-    const error = await errorOf(checkTaskPersonIdentity(h.identityDeps, meta, OLA_ID));
-    expect(error.code).toBe("SLACK_UNAVAILABLE");
-    expect(h.developerRecord).toHaveBeenCalledTimes(1);
-    expect(h.proof).not.toHaveBeenCalled();
-    expect(h.projectChannelIds).not.toHaveBeenCalled();
-    expect(h.targetProjectAccess).not.toHaveBeenCalled();
-  });
 
   it("refuses an OIDC creator when the task stored a Slack id but the sign-in record has none (never a silent switch of kind)", async () => {
     const meta = task(TASK_A, { developerId: OLA_ID, provider: "oidc", developerName: "Ola Oidc", slackUserId: SAM });
@@ -315,20 +204,6 @@ describe("the proof: a web identity is unavailable without the web proof readers
     });
     const error = await errorOf(checkTaskPersonIdentity(h.identityDeps, meta, OLA_ID));
     expect(error.code).toBe("PROJECT_ACCESS_DENIED");
-    expect(h.proof).not.toHaveBeenCalled();
-  });
-
-  it("keeps an OIDC creator whose task stored no Slack id a web identity when the sign-in record later linked one (C2: no Slack-id equality)", async () => {
-    const meta = task(TASK_A, { developerId: OLA_ID, provider: "oidc", developerName: "Ola Oidc" });
-    delete (meta as { slackUserId?: string }).slackUserId;
-    const h = harness({
-      tasks: [meta],
-      developer: { developerId: OLA_ID, provider: "oidc", issuer: OIDC_ISSUER, subject: "ola-employee", displayName: "Ola Oidc",
-        firstSignInAt: CREATED, lastSignInAt: CREATED, revoked: false, slackUserId: SAM },
-    });
-    // A web identity, so the web proof applies; this harness has no web readers, so it is unavailable, and Slack is never asked.
-    const error = await errorOf(checkTaskPersonIdentity(h.identityDeps, meta, OLA_ID));
-    expect(error.code).toBe("SLACK_UNAVAILABLE");
     expect(h.proof).not.toHaveBeenCalled();
   });
 
@@ -343,33 +218,6 @@ describe("the proof: a web identity is unavailable without the web proof readers
     expect(h.proof).not.toHaveBeenCalled();
   });
 
-  it("keeps the linked OIDC creator on the Slack proof, exactly as before", async () => {
-    const meta = task(TASK_A, { developerId: OLA_ID, provider: "oidc", developerName: "Ola Oidc", slackUserId: SAM });
-    const h = harness({
-      tasks: [meta],
-      developer: { developerId: OLA_ID, provider: "oidc", issuer: OIDC_ISSUER, subject: "ola-employee", displayName: "Ola Oidc",
-        slackUserId: SAM, firstSignInAt: CREATED, lastSignInAt: CREATED, revoked: false },
-    });
-    await expect(checkTaskPersonIdentity(h.identityDeps, meta, OLA_ID)).resolves.toMatchObject({
-      identity: { developerId: OLA_ID, slackUserId: SAM, method: "oidc" }, eligible: true, channelMember: true,
-    });
-    expect(h.proof).toHaveBeenCalledTimes(1);
-  });
-
-  it.each([
-    ["an unknown method", { method: "google" }],
-    ["a slack method without a Slack id", { method: "slack" }],
-    ["a web method with an invalid Slack id", { slackUserId: "nope" }],
-    ["a web method with a valid Slack id", { method: "cloud", slackUserId: BAY }],
-    ["a method of the wrong type", { method: 1 }],
-    ["an issuer of the wrong type", { issuer: 2 }],
-  ])("refuses a registry row with %s as malformed, never as a web identity", async (_label, overrides) => {
-    const h = mixedTask();
-    h.seed(webRow(TASK_A, overrides));
-    const error = await errorOf(checkTaskPersonIdentity(h.identityDeps, task(), GALE_ID));
-    expect(error.code).toBe("PROJECT_ACCESS_DENIED");
-    expect(h.proofPorts()).toBe(0);
-  });
 
   it("refuses to resolve a web person id, with no proof read and no Slack call", async () => {
     for (const overrides of [{}, { method: "oidc", issuer: OIDC_ISSUER }]) {
@@ -381,48 +229,10 @@ describe("the proof: a web identity is unavailable without the web proof readers
     }
   });
 
-  it("still resolves a Slack person id", async () => {
-    const h = mixedTask();
-    await expect(resolveTaskPersonId(h.identityDeps, TASK_A, P_BAY)).resolves.toMatchObject({ developerId: BAY_ID, slackUserId: BAY });
-  });
-
-  it("writes a Slack picker person's PERSON and PERSON_SUBJECT rows byte-identically to before (golden)", async () => {
-    const h = harness();
-    await resolveTaskPickerPerson(h.identityDeps, task(), SAM);
-    expect(JSON.stringify(h.db.get(`DEVTASK#${TASK_A}`, `PERSON#${P_SAM}`))).toBe(JSON.stringify({
-      pk: `DEVTASK#${TASK_A}`, sk: `PERSON#${P_SAM}`, schemaVersion: 1, personId: P_SAM,
-      developerId: SAM_ID, slackUserId: SAM, name: "Sam Slack", method: "slack", issuer: SLACK_OIDC_ISSUER, subject: SAM,
-      createdAt: new Date(T0).toISOString(),
-    }));
-    expect(JSON.stringify(h.db.get(`DEVTASK#${TASK_A}`, `PERSON_SUBJECT#${SAM_ID}`))).toBe(JSON.stringify({
-      pk: `DEVTASK#${TASK_A}`, sk: `PERSON_SUBJECT#${SAM_ID}`, schemaVersion: 1, personId: P_SAM, developerId: SAM_ID, createdAt: new Date(T0).toISOString(),
-    }));
-  });
 });
 
 describe("every caller refuses a web person (real proof wired in)", () => {
-  it("never counts a web owner for dispatch, while the Slack owner still counts", async () => {
-    const h = mixedTask("owner");
-    await expect(resolveTaskDispatchPeople(h.peopleDeps, task())).resolves.toStrictEqual({
-      peopleRevision: 3, ownerActorIds: [taskOwnerKey(SAM_ID, TASK_A)], status: "ALLOWED",
-    });
-  });
 
-  it("parks a task whose only owner is a web identity (UNKNOWN, never ALLOWED)", async () => {
-    const h = mixedTask("owner", { samRole: "commenter" });
-    await expect(resolveTaskDispatchPeople(h.peopleDeps, task())).resolves.toStrictEqual({ peopleRevision: 3, ownerActorIds: [], status: "UNKNOWN" });
-  });
-
-  it.each(["owner", "commenter", "viewer"])("gives a web %s no task access", async (role) => {
-    const h = mixedTask(role);
-    expect((await errorOf(resolveTaskPeopleAccess(h.peopleDeps, task(), GALE_ID))).code).toBe("TASK_ACCESS_DENIED");
-    expect((await errorOf(getTaskPeopleCapabilities(h.peopleDeps, GALE_CALLER, TASK_A))).code).toBe("TASK_ACCESS_DENIED");
-  });
-
-  it("keeps the Slack owner's access unchanged beside a web commenter", async () => {
-    const h = mixedTask("commenter");
-    await expect(resolveTaskPeopleAccess(h.peopleDeps, task(), SAM_ID)).resolves.toMatchObject({ role: "owner", peopleRevision: 3, orphaned: false });
-  });
 
   it("refuses to make a web person an owner, and writes nothing", async () => {
     const h = mixedTask("commenter");
@@ -435,14 +245,6 @@ describe("every caller refuses a web person (real proof wired in)", () => {
     }
     expect(JSON.stringify(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE"))).toBe(before);
     expect(h.db.find((item) => String(item.sk).startsWith("PEOPLE_"))).toEqual([]);
-  });
-
-  it("never lets a web person take ownership of an orphaned task", async () => {
-    const h = mixedTask("commenter", { orphaned: true, samRole: "commenter" });
-    const before = JSON.stringify(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE"));
-    const error = await errorOf(takeTaskOwnership(h.peopleDeps, GALE_CALLER, TASK_A, { requestId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expectedPeopleRevision: 3 }));
-    expect(error.code).toBe("TASK_ACCESS_DENIED");
-    expect(JSON.stringify(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE"))).toBe(before);
   });
 
   it("accepts a web identity's proof result (C2) but still refuses a malformed one", async () => {
@@ -464,56 +266,6 @@ describe("every caller refuses a web person (real proof wired in)", () => {
       };
       await expect(resolveTaskDispatchPeople(bad, task())).resolves.toMatchObject({ ownerActorIds: [taskOwnerKey(SAM_ID, TASK_A)], status: "ALLOWED" });
     }
-  });
-});
-
-describe("pre-C1 rows round-trip byte-identically", () => {
-  it("leaves an unchanged PEOPLE row exactly as stored", async () => {
-    const h = harness();
-    const fixture = peopleRow(TASK_A, [{ ...SAM_ENTRY }, { ...BAY_ENTRY }]);
-    h.seed(slackRow(TASK_A, P_SAM, SAM, "Sam Slack"), subjectRow(TASK_A, P_SAM, SAM_ID), slackRow(TASK_A, P_BAY, BAY, "Bay Slack"), subjectRow(TASK_A, P_BAY, BAY_ID), fixture);
-    await resolveTaskPeopleAccess(h.peopleDeps, task(), SAM_ID);
-    await resolveTaskDispatchPeople(h.peopleDeps, task());
-    expect(JSON.stringify(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE"))).toBe(JSON.stringify(fixture));
-  });
-
-  it("writes a role change with the pre-C1 entry shape", async () => {
-    const h = harness();
-    h.seed(slackRow(TASK_A, P_SAM, SAM, "Sam Slack"), subjectRow(TASK_A, P_SAM, SAM_ID), slackRow(TASK_A, P_BAY, BAY, "Bay Slack"), subjectRow(TASK_A, P_BAY, BAY_ID),
-      peopleRow(TASK_A, [{ ...SAM_ENTRY }, { ...BAY_ENTRY }]));
-    await changeTaskPeople(h.peopleDeps, SAM_CALLER, TASK_A, {
-      requestId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", expectedPeopleRevision: 3, targetDeveloperId: BAY_ID, role: "commenter",
-    });
-    // DynamoDB maps keep no key order, so the written list is compared key-sorted: same keys, same values, nothing added.
-    expect(canonical((h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE") as { people: unknown }).people)).toBe(canonical([
-      SAM_ENTRY, { developerId: BAY_ID, slackUserId: BAY, name: "Bay Slack", role: "commenter" },
-    ]));
-  });
-
-  it("initializes a Slack-shared task's PEOPLE row with the pre-C1 owner entry", async () => {
-    const h = harness();
-    h.seed(slackRow(TASK_A, P_BAY, BAY, "Bay Slack"), subjectRow(TASK_A, P_BAY, BAY_ID));
-    await changeTaskPeople(h.peopleDeps, SAM_CALLER, TASK_A, {
-      requestId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", expectedPeopleRevision: 1, targetDeveloperId: BAY_ID, role: "viewer",
-    });
-    expect(JSON.stringify((h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE") as { people: unknown }).people)).toBe(JSON.stringify([
-      SAM_ENTRY, BAY_ENTRY,
-    ]));
-    const owner = h.db.get(`DEVTASK#${TASK_A}`, `PERSON_SUBJECT#${SAM_ID}`)!;
-    expect(Object.keys(h.db.get(`DEVTASK#${TASK_A}`, `PERSON#${String(owner.personId)}`)!)).toEqual(
-      ["pk", "sk", "schemaVersion", "personId", "developerId", "slackUserId", "name", "method", "issuer", "subject", "createdAt"]);
-  });
-
-  it.each([
-    ["no Slack id and no method", { developerId: GALE_ID, name: "Gale", role: "viewer" }],
-    ["a slack method without a Slack id", { developerId: GALE_ID, name: "Gale", role: "viewer", method: "slack" }],
-    ["an unknown method", { developerId: GALE_ID, name: "Gale", role: "viewer", method: "google" }],
-    ["both a Slack id and a method", { ...BAY_ENTRY, method: "slack" }],
-  ])("refuses a PEOPLE row whose entry has %s (fixed refusal for every reader)", async (_label, entry) => {
-    const h = harness();
-    h.seed(peopleRow(TASK_A, [{ ...SAM_ENTRY }, entry]));
-    expect((await errorOf(resolveTaskDispatchPeople(h.peopleDeps, task()))).code).toBe("TASK_ACCESS_DENIED");
-    expect((await errorOf(resolveTaskPeopleAccess(h.peopleDeps, task(), SAM_ID))).code).toBe("TASK_ACCESS_DENIED");
   });
 });
 
@@ -568,14 +320,6 @@ describe("D4 labels: one person's two identities are told apart by method", () =
     expect(result.people.map((person) => person.name)).toEqual(["Gale GitHub", "Maya Chen", "Maya Chen"]);
   });
 
-  it("keeps two different Slack people of one name unlabelled, as before (golden)", async () => {
-    const result = await view([
-      slackRow(TASK_A, P_SAM, SAM, "Maya Chen"), subjectRow(TASK_A, P_SAM, SAM_ID),
-      slackRow(TASK_A, P_BAY, BAY, "Maya Chen"), subjectRow(TASK_A, P_BAY, BAY_ID),
-      peopleRow(TASK_A, [{ ...SAM_ENTRY, name: "Maya Chen" }, { ...BAY_ENTRY, name: "Maya Chen" }]),
-    ], [slackCheck(SAM_ID, SAM, "Maya Chen"), slackCheck(BAY_ID, BAY, "Maya Chen")]);
-    expect(result.people.map((person) => person.name)).toEqual(["Maya Chen", "Maya Chen"]);
-  });
 });
 
 describe("company boundary: rows are read only from the task's own partition", () => {

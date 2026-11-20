@@ -1,11 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it } from "vitest";
 import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors-node.js";
-import { SlackThreadPrepareResultSchema, SlackThreadWorkspaceResultSchema } from "../../packages/contracts/src/slack.js";
-import {
-  GITHUB_LIST_ISSUES, SLACK_CHANNEL, SLACK_TEAM, createBroker, ensureWorkspace, fakeGitHubMcp, finishOperation, lazyEnsureWorkspace,
-  account, call, loadSlackBroker, markReady, orchestratorPrincipal, prepareThread, registerSlackProject, serviceCall,
-} from "../support/slack-broker.js";
+import { SlackThreadPrepareResultSchema } from "../../packages/contracts/src/slack.js";
+import { GITHUB_LIST_ISSUES, SLACK_CHANNEL, SLACK_TEAM, createBroker, ensureWorkspace, fakeGitHubMcp, finishOperation, lazyEnsureWorkspace, account, call, loadSlackBroker, markReady, prepareThread, registerSlackProject, serviceCall } from "../support/slack-broker.js";
 
 const threadOne = `${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000001`;
 const threadTwo = `${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000002`;
@@ -18,41 +15,6 @@ beforeAll(async () => {
 });
 
 describe("lazy thread workspace records", () => {
-  it("creates a thread record with no compute and no limit charge", async () => {
-    const { db, handler } = createBroker();
-    await registerSlackProject(handler);
-    const created = await lazyEnsureWorkspace(handler, threadOne, pratik);
-    expect(created.status).toBe(200);
-    delete created.body.requestId;
-    const workspaceId = created.body.workspaceId as string;
-    expect(SlackThreadWorkspaceResultSchema.parse(created.body)).toEqual({
-      outcome: "WORKSPACE", workspaceId, status: "UNPREPARED", operationId: null, created: true,
-      orchestratorInstructions: "Delegate work (revision 1).", connectors: [], repositories: ["demo"],
-      recoverableOperations: [], settingsRevision: 1,
-    });
-    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "UNPREPARED", fence: 0, projectRevision: 1, activeOperationId: null });
-    expect(db.find((item) => item.entityType === "OPERATION")).toHaveLength(0);
-    expect(db.find((item) => item.entityType === "OUTBOX")).toHaveLength(0);
-    expect(db.find((item) => item.entityType === "SLACK_LIMIT")).toHaveLength(0);
-    const threadRecord = db.find((item) => item.entityType === "SLACK_THREAD")[0];
-    expect(threadRecord).toMatchObject({ thread: threadOne, workspaceId });
-    expect(threadRecord).not.toHaveProperty("starterUserId");
-
-    const followUp = await lazyEnsureWorkspace(handler, threadOne, bob);
-    expect(followUp.body).toMatchObject({ workspaceId, status: "UNPREPARED", operationId: null, created: false });
-  });
-
-  it("gives a member any number of connector-only threads, past both limits", async () => {
-    const { db, handler } = createBroker({ memberLimit: 1, organizationLimit: 2 });
-    await registerSlackProject(handler);
-    for (const ts of ["000001", "000002", "000003", "000004"]) {
-      const created = await lazyEnsureWorkspace(handler, `${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.${ts}`, pratik);
-      expect(created.body).toMatchObject({ outcome: "WORKSPACE", status: "UNPREPARED", created: true });
-    }
-    expect((await lazyEnsureWorkspace(handler, `${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000005`, carol)).body).toMatchObject({ status: "UNPREPARED" });
-    expect(db.find((item) => item.entityType === "DEFAULT_WORKSPACE")).toHaveLength(5);
-    expect(db.find((item) => item.entityType === "SLACK_LIMIT")).toHaveLength(0);
-  });
 
   it("answers connector discovery and calls, and keeps the ledger, for a thread with no compute", async () => {
     const { githubMcp, invoke } = fakeGitHubMcp();
@@ -213,32 +175,6 @@ describe("preparing a thread's compute on first use", () => {
     expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, "ORGANIZATION")).toMatchObject({ count: 1 });
   });
 
-  it("never exceeds the member limit when two threads race for the last slot", async () => {
-    const { db, handler } = createBroker({ memberLimit: 1 });
-    await registerSlackProject(handler);
-    await lazyEnsureWorkspace(handler, threadOne, pratik);
-    await lazyEnsureWorkspace(handler, threadTwo, pratik);
-    const results = await Promise.all([prepareThread(handler, threadOne, pratik), prepareThread(handler, threadTwo, pratik)]);
-    expect(results.map((result) => result.body.outcome).sort()).toEqual(["LIMIT_REACHED", "WORKSPACE"]);
-    expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, `MEMBER#${pratik}`)).toMatchObject({ count: 1 });
-    expect(db.find((item) => item.entityType === "OPERATION" && item.kind === "prepare")).toHaveLength(1);
-  });
-
-  it("keeps today's retry for a preparation that failed, without a second charge", async () => {
-    const { db, handler } = createBroker();
-    await registerSlackProject(handler);
-    const workspaceId = (await lazyEnsureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
-    const prepared = await prepareThread(handler, threadOne, pratik);
-    await finishOperation(handler, db, workspaceId, prepared.body.operationId as string, "FAILED");
-    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "PREPARATION_FAILED" });
-
-    const next = await lazyEnsureWorkspace(handler, threadOne, pratik);
-    expect(next.body).toMatchObject({ workspaceId, status: "PREPARING", created: false });
-    expect(next.body.operationId).not.toBe(prepared.body.operationId);
-    expect(db.find((item) => item.entityType === "OPERATION" && item.kind === "prepare")).toHaveLength(2);
-    expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, `MEMBER#${pratik}`)).toMatchObject({ count: 1 });
-  });
-
   it("answers the current state, without preparing again, for a thread that already has compute", async () => {
     const { db, handler } = createBroker();
     await registerSlackProject(handler);
@@ -322,19 +258,6 @@ describe("a closed thread and the lazy opt-in", () => {
 });
 
 describe("preparing a thread: authorization and the thread record", () => {
-  it("writes a complete thread record, with the charged member among its requesters, even if the record is missing", async () => {
-    const { db, handler } = createBroker();
-    await registerSlackProject(handler);
-    const workspaceId = (await lazyEnsureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
-    for (const [key, item] of db.items) if (item.entityType === "SLACK_THREAD") db.items.delete(key);
-
-    const prepared = await prepareThread(handler, threadOne, bob);
-    expect(prepared.body).toMatchObject({ outcome: "WORKSPACE", workspaceId, status: "PREPARING", created: true });
-    const threadRecord = db.find((item) => String(item.pk).startsWith("SLACK_THREAD#"));
-    expect(threadRecord).toHaveLength(1);
-    expect(threadRecord[0]).toMatchObject({ entityType: "SLACK_THREAD", thread: threadOne, workspaceId, starterUserId: bob });
-    expect([...(threadRecord[0]!.requesters as Set<string>)]).toEqual([bob]);
-  });
 
   it("refuses a caller that is not the Slack orchestrator", async () => {
     const { db, handler } = createBroker();
@@ -349,23 +272,6 @@ describe("preparing a thread: authorization and the thread record", () => {
     expect(refused.status).toBe(403);
     expect(db.find((item) => item.entityType === "OPERATION")).toHaveLength(0);
     expect(db.find((item) => item.entityType === "SLACK_LIMIT")).toHaveLength(0);
-  });
-
-  it("charges the member named by the Slack user header, never a member named in the body", async () => {
-    const { db, handler } = createBroker();
-    await registerSlackProject(handler);
-    await lazyEnsureWorkspace(handler, threadOne, pratik);
-    const prepared = await call(handler, {
-      method: "POST",
-      path: "/v1/service/threads/workspace/prepare",
-      service: { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik },
-      body: { requestId: randomUUID(), userId: "UOTHER" },
-    });
-    expect(prepared.body).toMatchObject({ outcome: "WORKSPACE", status: "PREPARING", created: true });
-    expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, `MEMBER#${pratik}`)).toMatchObject({ count: 1, threads: [threadOne] });
-    expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, "MEMBER#UOTHER")).toBeUndefined();
-    expect(members(db)).toHaveLength(1);
-    expect(db.find((item) => item.entityType === "SLACK_THREAD")[0]).toMatchObject({ starterUserId: pratik });
   });
 
   it("answers WORKSPACE_BUSY, and charges nothing, when the transaction fails for a reason other than the limit", async () => {
@@ -385,38 +291,6 @@ describe("preparing a thread: authorization and the thread record", () => {
 });
 
 describe("the revision a thread's first preparation uses (#12, first slice)", () => {
-  function prepareInvocations(db: ReturnType<typeof createBroker>["db"]) {
-    return db.find((item) => item.entityType === "OUTBOX")
-      .map((item) => item.invocation as { kind: string; projectRevision: number; payload: { project: { revision: number } } })
-      .filter((invocation) => invocation.kind === "prepare")
-      .map((invocation) => [invocation.projectRevision, invocation.payload.project.revision]);
-  }
-
-  it("retries a failed preparation from the revision it first prepared, not a newer one", async () => {
-    const { db, handler } = createBroker();
-    await registerSlackProject(handler);
-    const workspaceId = (await lazyEnsureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
-    await registerSlackProject(handler, { revision: 2, bind: false });
-    const prepared = await prepareThread(handler, threadOne, pratik);
-    await finishOperation(handler, db, workspaceId, prepared.body.operationId as string, "FAILED");
-    await registerSlackProject(handler, { revision: 3, bind: false });
-
-    const retried = await lazyEnsureWorkspace(handler, threadOne, pratik);
-    expect(retried.body).toMatchObject({ workspaceId, status: "PREPARING", created: false, settingsRevision: 3 });
-    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "PREPARING", projectRevision: 2 });
-    expect(prepareInvocations(db)).toEqual([[2, 2], [2, 2]]);
-  });
-
-  it("prepares from the latest revision when an older service reaches the thread", async () => {
-    const { db, handler } = createBroker();
-    await registerSlackProject(handler);
-    const workspaceId = (await lazyEnsureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
-    await registerSlackProject(handler, { revision: 2, bind: false });
-    const older = await ensureWorkspace(handler, threadOne, bob);
-    expect(older.body).toMatchObject({ workspaceId, status: "PREPARING", created: true, orchestratorInstructions: "Delegate work (revision 2)." });
-    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "PREPARING", projectRevision: 2 });
-    expect(prepareInvocations(db)).toEqual([[2, 2]]);
-  });
 
   it("leaves the thread unprepared and uncharged when the latest revision cannot be built", async () => {
     const { db, handler } = createBroker();

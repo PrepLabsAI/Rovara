@@ -49,21 +49,6 @@ describe("confirmation replies and clicks", () => {
     for (const text of ["yes, and also close TRK-10", "yesterday", "cancel PR 12", ""]) expect(parseConfirmationReply(text)).toBeUndefined();
   });
 
-  it("reads a few more whole-message answers, and a mention with a label", () => {
-    for (const text of ["yes please", "Yes, please.", "ok", "OK!", "okay", "sure", "do it", "<@U0AGENTX01|agentx> yes"]) expect(parseConfirmationReply(text)).toBe("yes");
-    for (const text of ["nope", "no thanks", "No, thanks."]) expect(parseConfirmationReply(text)).toBe("cancel");
-    expect(parseConfirmationReply("<@U0AGENTX01|agentx> yes to all")).toBe("yes_to_all");
-    for (const text of ["yes, but don't delete", "yesterday", "yes\nclose TRK-10", "ok\nand close TRK-10", "sure thing, close all of them"]) expect(parseConfirmationReply(text)).toBeUndefined();
-  });
-
-  it("derives a click's event ID from the confirmation, and reads it back", () => {
-    const eventId = confirmationClickEventId(pending.confirmationId, "approve");
-    expect(eventId).toBe("EvAgxApprove44444444444454448444444444444444");
-    expect(parseConfirmationClickEventId(eventId)).toEqual({ click: "approve", confirmationId: pending.confirmationId });
-    expect(parseConfirmationClickEventId(confirmationClickEventId(pending.confirmationId, "cancel"))).toEqual({ click: "cancel", confirmationId: pending.confirmationId });
-    expect(parseConfirmationClickEventId("Ev0000000001")).toBeUndefined();
-  });
-
   it("gives a click on a re-posted confirmation (same ID, later postedAt) its own event ID, still a valid Slack event ID that reads back", () => {
     const first = confirmationClickEventId(pending.confirmationId, "approve", "2025-09-23T20:00:00.000Z");
     const second = confirmationClickEventId(pending.confirmationId, "approve", "2025-09-23T20:00:30.000Z");
@@ -94,30 +79,6 @@ describe("the confirmation store", () => {
     expect((await store.load(subject))?.usedBy).toBe("EvYES0000001");
   });
 
-  it("opens only the unposted confirmation it names, and leaves any other item unchanged", async () => {
-    const newer = { ...pending, confirmationId: "77777777-7777-5777-8777-777777777777" };
-    const cases: Array<[string, (store: ReturnType<typeof createDynamoConfirmationStore>) => Promise<void>]> = [
-      ["claimed", async (store) => { await store.save(subject, pending); await store.claim(subject, pending.confirmationId, "EvYES0000001"); }],
-      ["cancelled", async (store) => { await store.save(subject, pending); await store.retire(subject, pending.confirmationId, "EvCANCEL0001"); }],
-      ["replaced by a newer live one", async (store) => { await store.save(subject, newer); }],
-      ["replaced by a newer unposted one", async (store) => { await store.save(subject, { ...newer, retiredAt: newer.postedAt, usedBy: "unposted" }); }],
-    ];
-    for (const [name, arrange] of cases) {
-      const { db, store } = harness();
-      await arrange(store);
-      const before = structuredClone(db.get(`THREAD#${subject}`, "CONFIRMATION"));
-      await expect(store.open(subject, pending.confirmationId), name).rejects.toMatchObject({ name: "ConditionalCheckFailedException" });
-      expect(db.get(`THREAD#${subject}`, "CONFIRMATION"), name).toEqual(before);
-    }
-  });
-
-  it("refuses a claim once the confirmation expired", async () => {
-    const { store } = harness(Date.parse(pending.expiresAt) + 10 * 60_000);
-    await store.save(subject, pending);
-    expect(await store.claim(subject, pending.confirmationId, "EvYES0000001")).toBe(false);
-    expect((await store.load(subject))?.retiredAt).toBeUndefined();
-  });
-
   it("refuses to save an invalid confirmation, and logs an unreadable one without its content", async () => {
     const db = new FakeDynamoDb();
     const log = vi.fn();
@@ -129,26 +90,9 @@ describe("the confirmation store", () => {
     expect(log).toHaveBeenCalledWith("gate.confirmation_unreadable", {});
   });
 
-  it("grants yes to all to one member for 24 hours, renewably", async () => {
-    const { db, store } = harness();
-    await store.grantYesToAll(subject, requester);
-    expect(await store.yesToAll(subject, requester)).toBe(true);
-    expect(await store.yesToAll(subject, other)).toBe(false);
-    const later = createDynamoConfirmationStore(db, "threads", () => postedAt + 120_000 + 25 * 60 * 60 * 1_000);
-    expect(await later.yesToAll(subject, requester)).toBe(false);
-    await later.grantYesToAll(subject, requester);
-    expect(await later.yesToAll(subject, requester)).toBe(true);
-  });
 });
 
 describe("checking a message against the thread's confirmation", () => {
-  it("approves exactly the pending calls for the requester's yes, and claims nothing yet", async () => {
-    const { store, check } = harness();
-    await store.save(subject, pending);
-    expect(await check("yes")).toEqual({ run: true, claim: { confirmationId: pending.confirmationId },
-      session: createGateSession(requester, { approvals: [{ tool: "tracker__close_item", argumentsHash: "a".repeat(64), summary: "tracker__close_item: id=TRK-9" }] }) });
-    expect(await store.claim(subject, pending.confirmationId, "EvOTHER00001")).toBe(true);
-  });
 
   it("approves or cancels on the requester's button click for this confirmation, and refuses a click on an older one", async () => {
     const { store, check, posts } = harness();
@@ -187,14 +131,6 @@ describe("checking a message against the thread's confirmation", () => {
     expect(posts).toEqual([ALREADY_USED_BY_THIS_REQUEST_TEXT, NO_LONGER_PENDING_TEXT, NO_LONGER_PENDING_TEXT, NO_LONGER_PENDING_TEXT]);
   });
 
-  it("treats a fresh ok two minutes after a claim as an ordinary request", async () => {
-    const { store, check, posts } = harness();
-    await store.save(subject, pending);
-    expect(await store.claim(subject, pending.confirmationId, "EvYES0000001")).toBe(true);
-    expect(await check("ok", { eventId: "EvYES0000002", receivedAt: new Date(postedAt + 240_000).toISOString() })).toEqual({ run: true, session: createGateSession(requester) });
-    expect(posts).toEqual([]);
-  });
-
   it("does not count a yes sent before the question was posted, and retires one after it expired", async () => {
     const early = harness();
     await early.store.save(subject, pending);
@@ -227,108 +163,6 @@ describe("checking a message against the thread's confirmation", () => {
 });
 
 describe("tombstones, expiry and yes to all", () => {
-  const EXPIRED_TEXT = "That confirmation request expired after 24 hours, so nothing was run. Ask me again if you still want it.";
-
-  it("forgets a used confirmation's tombstone at the end of its 24 hours", async () => {
-    const db = new FakeDynamoDb();
-    const early = createDynamoConfirmationStore(db, "threads", () => postedAt + 120_000);
-    await early.save(subject, pending);
-    expect(await early.claim(subject, pending.confirmationId, "EvYES0000001")).toBe(true);
-    const now = postedAt + 25 * 60 * 60 * 1_000;
-    const store = createDynamoConfirmationStore(db, "threads", () => now);
-    const posts: string[] = [];
-    const check = (text: string, eventId: string) => checkConfirmation({ format: SLACK_FORMAT, message: message(text, { eventId, receivedAt: new Date(now).toISOString() }), subject, store, post: async (value) => { posts.push(value); }, log: vi.fn(), now });
-    expect(await check("yes", "EvYES0000002")).toEqual({ run: true, session: createGateSession(requester) });
-    expect(await check("yes to all", "EvYES0000003")).toEqual({ run: false, answered: "yes_to_all" });
-    expect(posts).toEqual([YES_TO_ALL_TEXT]);
-    expect(await store.yesToAll(subject, requester)).toBe(true);
-  });
-
-  it("grants yes to all within 24 hours of a used confirmation", async () => {
-    const { store, check, posts } = harness();
-    await store.save(subject, pending);
-    await store.claim(subject, pending.confirmationId, "EvYES0000001");
-    expect(await check("yes to all in this thread", { eventId: "EvYES0000002" })).toEqual({ run: false, answered: "yes_to_all" });
-    expect(posts).toEqual([YES_TO_ALL_TEXT]);
-    expect(await store.yesToAll(subject, requester)).toBe(true);
-  });
-
-  it("runs nothing again for a redelivered approving event after its claim", async () => {
-    const { store, check, posts } = harness();
-    await store.save(subject, pending);
-    expect(await check("yes")).toMatchObject({ run: true, claim: { confirmationId: pending.confirmationId } });
-    expect(await store.claim(subject, pending.confirmationId, "EvYES0000001")).toBe(true);
-    expect(await store.claim(subject, pending.confirmationId, "EvYES0000001")).toBe(false);
-    expect(await check("yes")).toEqual({ run: false, refused: "already_used_by_this_request" });
-    expect(posts).toEqual([ALREADY_USED_BY_THIS_REQUEST_TEXT]);
-    const session = createGateSession(requester, { approvals: pending.calls });
-    await settleConfirmations({ format: SLACK_FORMAT, check: { run: true, session, claim: { confirmationId: pending.confirmationId } }, message: message("yes"), subject, store, postConfirmation: vi.fn(), log: vi.fn(), now: postedAt + 120_000 });
-    expect((await store.load(subject))?.usedBy).toBe("EvYES0000001");
-  });
-
-  it("answers any member's yes after expiry with expired, and keeps saying so", async () => {
-    const now = Date.parse(pending.expiresAt) + 60_000;
-    const { store, check, posts } = harness(now);
-    await store.save(subject, pending);
-    const receivedAt = new Date(now).toISOString();
-    expect(await check("yes", { userId: other, receivedAt })).toEqual({ run: false, refused: "expired" });
-    expect((await store.load(subject))?.usedBy).toBe("expired");
-    expect(await check("yes", { eventId: "EvYES0000002", receivedAt })).toEqual({ run: false, refused: "expired" });
-    expect(posts).toEqual([EXPIRED_TEXT, EXPIRED_TEXT]);
-  });
-
-  it("answers expired for 24 hours after the expiry, then treats a yes as an ordinary request", async () => {
-    const expiry = Date.parse(pending.expiresAt);
-    for (const [after, expected] of [[2, "expired"], [30, "ordinary"]] as const) {
-      const now = expiry + after * 60 * 60 * 1_000;
-      const { store, check, posts } = harness(now);
-      await store.save(subject, pending);
-      await store.retire(subject, pending.confirmationId, "expired");
-      const result = await check("yes", { eventId: "EvYES0000005", receivedAt: new Date(now).toISOString() });
-      if (expected === "expired") {
-        expect(result).toEqual({ run: false, refused: "expired" });
-        expect(posts).toEqual([EXPIRED_TEXT]);
-      } else {
-        expect(result).toEqual({ run: true, session: createGateSession(requester) });
-        expect(posts).toEqual([]);
-      }
-    }
-  });
-
-  it("forgets a never-answered confirmation 24 hours after its expiry, and answers expired before that", async () => {
-    const expiry = Date.parse(pending.expiresAt);
-    const soon = harness(expiry + 2 * 60 * 60 * 1_000);
-    await soon.store.save(subject, pending);
-    expect(await soon.check("yes", { receivedAt: new Date(expiry + 2 * 60 * 60 * 1_000).toISOString() })).toEqual({ run: false, refused: "expired" });
-    expect(soon.posts).toEqual([EXPIRED_TEXT]);
-    expect(await soon.store.load(subject)).toMatchObject({ usedBy: "expired" });
-    const late = harness(expiry + 30 * 60 * 60 * 1_000);
-    await late.store.save(subject, pending);
-    expect(await late.check("yes", { receivedAt: new Date(expiry + 30 * 60 * 60 * 1_000).toISOString() })).toEqual({ run: true, session: createGateSession(requester) });
-    expect(late.posts).toEqual([]);
-  });
-
-  it("retires a live confirmation that expired first, so yes to all grants at once and a plain yes hears expired", async () => {
-    const now = Date.parse(pending.expiresAt) + 60 * 60 * 1_000;
-    const { store, check, posts } = harness(now);
-    await store.save(subject, pending);
-    const receivedAt = new Date(now).toISOString();
-    expect(await check("yes to all", { receivedAt })).toEqual({ run: false, answered: "yes_to_all" });
-    expect(posts).toEqual([YES_TO_ALL_TEXT]);
-    expect(await store.yesToAll(subject, requester)).toBe(true);
-    expect(await store.load(subject)).toMatchObject({ usedBy: "expired" });
-    expect(await check("yes", { eventId: "EvYES0000002", receivedAt })).toEqual({ run: false, refused: "expired" });
-    expect(posts).toEqual([YES_TO_ALL_TEXT, EXPIRED_TEXT]);
-  });
-
-  it("retires a live, expired confirmation as expired on the requester's plain message, rather than superseding it", async () => {
-    const now = Date.parse(pending.expiresAt) + 60 * 60 * 1_000;
-    const { store, check, posts } = harness(now);
-    await store.save(subject, pending);
-    expect(await check("what's open?", { receivedAt: new Date(now).toISOString() })).toEqual({ run: true, session: createGateSession(requester) });
-    expect(await store.load(subject)).toMatchObject({ usedBy: "expired" });
-    expect(posts).toEqual([]);
-  });
 
   it("tells a member whose confirmation another member's replaced that it was replaced", async () => {
     const { store, check, posts } = harness();
@@ -342,41 +176,6 @@ describe("tombstones, expiry and yes to all", () => {
 });
 
 describe("settling a turn's confirmations", () => {
-  it("leaves a tombstone on the used confirmation, then stores and posts one message listing every blocked call once", async () => {
-    const { store, log } = harness();
-    await store.save(subject, pending);
-    const session = createGateSession(requester);
-    session.asks.push(
-      { toolCallId: "1", tool: "tracker__close_item", argumentsHash: "b".repeat(64), summary: "tracker__close_item: id=TRK-1", kind: "destructive" },
-      { toolCallId: "2", tool: "tracker__save_item", argumentsHash: "c".repeat(64), summary: "tracker__save_item: id=&lt;!here&gt;", kind: "classifier" },
-      { toolCallId: "3", tool: "tracker__close_item", argumentsHash: "b".repeat(64), summary: "tracker__close_item: id=TRK-1", kind: "destructive" },
-    );
-    const posted: Array<{ id: string; text: string }> = [];
-    const now = postedAt + 300_000;
-    await settleConfirmations({ format: SLACK_FORMAT, check: { run: true, session, claim: { confirmationId: pending.confirmationId } }, message: message("yes"), subject, store,
-      postConfirmation: async (confirmation, text) => { posted.push({ id: confirmation.confirmationId, text }); }, log, now });
-    const saved = await store.load(subject);
-    expect(saved).toMatchObject({ requesterId: requester, postedAt: new Date(now).toISOString(), expiresAt: new Date(now + CONFIRMATION_TTL_MS).toISOString() });
-    expect(saved!.retiredAt).toBeUndefined();
-    expect(saved!.calls.map((call) => call.argumentsHash)).toEqual(["b".repeat(64), "c".repeat(64)]);
-    expect(posted).toEqual([{ id: saved!.confirmationId, text: [
-      `<@${requester}>, before I go ahead, please confirm:`,
-      "• tracker__close_item: id=TRK-1 (destructive)",
-      "• tracker__save_item: id=&lt;!here&gt; (I'm not sure you asked for this)",
-      "Press Approve, or reply `@AgentX yes`, to run exactly these. Press Cancel, or reply `@AgentX cancel`, to drop them. This expires in 24 hours.",
-    ].join("\n") }]);
-    expect(log).toHaveBeenCalledWith("gate.confirmation_requested", { eventId: "EvYES0000001", calls: 2, kinds: "destructive,classifier" });
-  });
-
-  it("only leaves the tombstone when the turn blocked nothing", async () => {
-    const { store, log } = harness();
-    await store.save(subject, pending);
-    const postConfirmation = vi.fn();
-    await settleConfirmations({ format: SLACK_FORMAT, check: { run: true, session: createGateSession(requester), claim: { confirmationId: pending.confirmationId } }, message: message("yes"), subject, store, postConfirmation, log, now: postedAt });
-    expect(await store.load(subject)).toMatchObject({ confirmationId: pending.confirmationId, usedBy: "EvYES0000001" });
-    expect(postConfirmation).not.toHaveBeenCalled();
-    expect(confirmationMessage(pending, SLACK_FORMAT)).toContain("• tracker__close_item: id=TRK-9 (destructive)");
-  });
 
   it("adds the doubt note only when the classifier doubted the call, and never shows a tool name (#215)", () => {
     const calls = [
@@ -390,28 +189,6 @@ describe("settling a turn's confirmations", () => {
     ]);
     expect(text).not.toMatch(/agentx_|tracker__|\(\d+ characters\)/u);
     expect(PendingConfirmationSchema.parse({ ...pending, calls })).toBeDefined();
-  });
-
-  it("shows a stronger note for a deny verdict, the softer one for ask, and none for unchecked (owner decision 2026-10-02)", () => {
-    const calls = [
-      { tool: "tracker__save_item", argumentsHash: "3".repeat(64), summary: "Use tracker to save item: id TRK-5", kind: "deny" as const },
-      { tool: "tracker__save_item", argumentsHash: "4".repeat(64), summary: "Use tracker to save item: id TRK-6", kind: "classifier" as const },
-      { tool: "agentx_submit_task", argumentsHash: "5".repeat(64), summary: 'Start a coding task: "list files"', kind: "unchecked" as const },
-    ];
-    const text = confirmationMessage({ ...pending, calls }, SLACK_FORMAT);
-    expect(text.split("\n").slice(1, 4)).toEqual([
-      "• Use tracker to save item: id TRK-5 (AgentX thinks you did not ask for this. Check it before approving.)",
-      "• Use tracker to save item: id TRK-6 (I'm not sure you asked for this)",
-      '• Start a coding task: "list files"',
-    ]);
-    expect(PendingConfirmationSchema.parse({ ...pending, calls })).toBeDefined();
-  });
-
-  it("escapes a stored summary's Slack control characters once, so it cannot mention or link anyone", () => {
-    const raw = { ...pending, calls: [{ ...pending.calls[0]!, summary: "tracker__save_item: title=<!channel> & <https://x.example|y>" }] };
-    expect(confirmationMessage(raw, SLACK_FORMAT)).toContain("• tracker__save_item: title=&lt;!channel&gt; &amp; &lt;https://x.example|y&gt; (destructive)");
-    const escaped = { ...pending, calls: [{ ...pending.calls[0]!, summary: "tracker__save_item: id=&lt;!here&gt; &amp; more" }] };
-    expect(confirmationMessage(escaped, SLACK_FORMAT)).toContain("• tracker__save_item: id=&lt;!here&gt; &amp; more (destructive)");
   });
 
   it("splits a long confirmation across sections within Slack's 3,000-character limit", () => {

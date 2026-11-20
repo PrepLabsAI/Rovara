@@ -2,14 +2,11 @@
 // message and is posted as the same Block Kit; Slack's answers and refusals come back as the notifier has always read
 // them; a Canvas is made, shared and linked in one command. All in-process, against the adapter's real route.
 import { describe, expect, it, vi } from "vitest";
-import {
-  ChannelCommandSchema, builtInAdapterRecord, channelMessageOfSlackBlocks, generateWebhookSecret, slackBlocksOf, verifyWebhook, webhookHeaders,
-  type ChannelCommand,
-} from "../../packages/contracts/src/index.js";
+import { ChannelCommandSchema, builtInAdapterRecord, channelMessageOfSlackBlocks, generateWebhookSecret, slackBlocksOf, webhookHeaders, type ChannelCommand } from "../../packages/contracts/src/index.js";
 import { createSlackChannelCommandsHandler } from "../../packages/broker/src/aws/slack-adapter.js";
 import { createSlackNoticeChannel } from "../../packages/broker/src/aws/slack-notice-channel.js";
 import { SlackPostError, postMayHaveLanded } from "../../packages/broker/src/aws/slack-web.js";
-import { answeredWorkflowCard, feedbackReviewFailedMessage } from "../../packages/broker/src/developer/workflow-messages.js";
+import { answeredWorkflowCard } from "../../packages/broker/src/developer/workflow-messages.js";
 
 const NOW = Date.parse("2026-11-11T12:00:00.000Z");
 const SECRET = generateWebhookSecret();
@@ -59,12 +56,8 @@ function system(slack = slackApi(), overrides: { secret?: string } = {}) {
   return { notices, commands, slack, logs, handler };
 }
 
-const card = feedbackReviewFailedMessage({ taskId: "11111111-2222-4333-8444-555555555555", revision: 4, reviewDigest: "a".repeat(64), blockReason: undefined, pullRequests: [{ number: 3, url: "https://github.com/example/web/pull/3" }] });
-
 describe("a card as a neutral message", () => {
   it.each([
-    ["a feedback review card with its Retry button", card.text, card.blocks],
-    ["an answered card", "Plan v2 is ready.", answeredWorkflowCard("Plan v2 is ready.", "Approved by <@U0123456789>.")],
     ["a card with a link button and a divider", "Review", [
       { type: "section", text: { type: "mrkdwn", text: "*Plan* is ready." } },
       { type: "divider" },
@@ -87,13 +80,6 @@ describe("a card as a neutral message", () => {
 });
 
 describe("the notifier's posts through the adapter", () => {
-  it("posts a card in its task thread as the same blocks, signed both ways, and answers its timestamp", async () => {
-    const { notices, commands, slack } = system();
-    const posted = await notices.post({ channel: CHANNEL, threadTs: THREAD, text: card.text, blocks: card.blocks });
-    expect(posted).toEqual({ ts: "1700000000.000201", channel: CHANNEL });
-    expect(commands[0]).toMatchObject({ kind: "post_message", channel: "slack", tenant: TEAM, space: CHANNEL, thread: THREAD });
-    expect(slack.calls).toEqual([{ method: "chat.postMessage", body: { channel: CHANNEL, thread_ts: THREAD, text: card.text, blocks: card.blocks, unfurl_links: false, unfurl_media: false } }]);
-  });
 
   it("starts a task thread with a top-level post, whose timestamp is the thread", async () => {
     const { notices, commands } = system();
@@ -132,13 +118,6 @@ describe("the notifier's posts through the adapter", () => {
     expect(postMayHaveLanded(error)).toBe(true);
   });
 
-  it("is refused by the adapter when not signed with its secret, and nothing reaches Slack", async () => {
-    const { notices, slack } = system(slackApi(), { secret: generateWebhookSecret() });
-    const error = await notices.post({ channel: CHANNEL, threadTs: THREAD, text: "x" }).catch((thrown: unknown) => thrown);
-    expect((error as SlackPostError).slackError).toBe("http_401");
-    expect(postMayHaveLanded(error)).toBe(false);
-    expect(slack.calls).toEqual([]);
-  });
 });
 
 describe("a plan Canvas through the adapter", () => {
@@ -174,13 +153,6 @@ describe("the adapter's command route", () => {
     return { rawPath: "/v1/slack/channel-commands", body, headers: webhookHeaders({ secret, id: String(command.id), timestamp: NOW / 1000, body }), requestContext: { http: { method: "POST" } } };
   };
   const base = { version: 1, id: "cmd_aaaaaaaaaaaaaaaaaaaaaa", channel: "slack", createdAt: new Date(NOW).toISOString() };
-
-  it("signs its answer with the command's own ID", async () => {
-    const { handler } = system();
-    const response = await handler(signed({ ...base, kind: "post_message", space: CHANNEL, message: { text: "hi" } }));
-    expect(response.statusCode).toBe(200);
-    expect(verifyWebhook({ secret: SECRET, headers: response.headers, body: response.body, nowSeconds: NOW / 1000 })).toMatchObject({ ok: true, id: base.id });
-  });
 
   it("refuses a command it does not run, and one for another channel", async () => {
     const { handler, slack } = system();

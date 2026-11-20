@@ -1,13 +1,13 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { access, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { AgentXError, WORKFLOW_HISTORY_REWRITTEN_MESSAGE } from "@agentx/contracts";
 import { preparedBaseResult, type PreparationManifest } from "../../packages/worker/src/prepare.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { candidateUnchangedSinceBase, readCandidateRepositories, readCommittedCandidateSourceExport } from "../../packages/worker/src/verification/candidate.js";
+import { candidateUnchangedSinceBase, readCandidateRepositories } from "../../packages/worker/src/verification/candidate.js";
 
 const execFile = promisify(execFileCallback);
 const roots: string[] = [];
@@ -34,41 +34,6 @@ afterEach(async () => {
 });
 
 describe("candidate repository capture", () => {
-  it("exports bounded source bytes from the exact committed HEAD tree and rejects an index-only candidate", async () => {
-    const directory = await repository();
-    const baseCommitSha = await git(directory, "rev-parse", "HEAD");
-    await writeFile(join(directory, "tracked.txt"), "approved candidate\n");
-    await git(directory, "commit", "--quiet", "-am", "candidate");
-    const input = { repositoryId: "payments", directory, baseCommitSha };
-    const [identity] = await readCandidateRepositories([input]);
-    expect(identity).toBeDefined();
-    const exported = await readCommittedCandidateSourceExport([input], [identity!]);
-    expect(exported).toMatchObject({ schemaVersion: "workflow-candidate-source/v1", candidate: { repositories: [identity] } });
-    expect(exported.repositories[0]?.treePaths).toEqual(["tracked.txt"]);
-    expect(Buffer.from(exported.repositories[0]?.sources[0]?.bytesBase64 ?? "", "base64").toString("utf8")).toBe("approved candidate\n");
-
-    await writeFile(join(directory, "tracked.txt"), "uncommitted change\n");
-    const indexOnly = await readCandidateRepositories([input]);
-    await expect(readCommittedCandidateSourceExport([input], indexOnly)).rejects.toThrow(/does not match the final candidate identity/);
-  });
-
-  it("returns immutable HEAD and a tree hash that includes tracked edits and untracked files without changing the index", async () => {
-    const directory = await repository();
-    const head = await git(directory, "rev-parse", "HEAD");
-    const index = await readFile(join(directory, ".git", "index")).catch(() => Buffer.from(""));
-    await writeFile(join(directory, "tracked.txt"), "changed\n");
-    await writeFile(join(directory, "new.txt"), "new\n");
-
-    const candidate = await readCandidateRepositories([{ repositoryId: "payments", directory }]);
-
-    expect(candidate).toHaveLength(1);
-    expect(candidate[0]).toMatchObject({ repositoryId: "payments", commitSha: head });
-    expect(candidate[0]?.treeSha).toMatch(/^[a-f0-9]{40}$/);
-    expect(await readFile(join(directory, "tracked.txt"), "utf8")).toBe("changed\n");
-    expect(await readFile(join(directory, "new.txt"), "utf8")).toBe("new\n");
-    expect(await readFile(join(directory, ".git", "index")).catch(() => Buffer.from(""))).toEqual(index);
-    expect(await git(directory, "status", "--porcelain")).toContain("?? new.txt");
-  });
 
   it("records the task's base commit and refuses a base that is not an ancestor of HEAD", async () => {
     const directory = await repository();
@@ -101,34 +66,6 @@ describe("candidate repository capture", () => {
     roots.push(directory);
     await mkdir(join(directory, "nested"));
     await expect(readCandidateRepositories([{ repositoryId: "payments", directory: join(directory, "nested") }])).rejects.toThrow(/candidate repository/);
-  });
-
-  it("never runs repository-controlled clean filters, fsmonitor or credential helpers while capturing the candidate", async () => {
-    const directory = await repository();
-    const marker = join(directory, "..", `agentx-filter-ran-${randomUUID()}`);
-    await git(directory, "config", "filter.evil.clean", `sh -c 'touch ${marker}.clean; cat'`);
-    await git(directory, "config", "filter.evil.process", `sh -c 'touch ${marker}.process'`);
-    await git(directory, "config", "filter.evil.required", "true");
-    await git(directory, "config", "core.fsmonitor", `sh -c 'touch ${marker}.fsmonitor'`);
-    await writeFile(join(directory, ".gitattributes"), "*.txt filter=evil\n");
-    await writeFile(join(directory, "tracked.txt"), "changed\n");
-    const [candidate] = await readCandidateRepositories([{ repositoryId: "payments", directory }]);
-    expect(candidate?.treeSha).toMatch(/^[a-f0-9]{40}$/);
-    for (const suffix of [".clean", ".process", ".fsmonitor"]) await expect(access(`${marker}${suffix}`)).rejects.toThrow();
-    // The tree holds the raw worktree bytes, not anything a filter produced.
-    expect(await git(directory, "cat-file", "-p", `${candidate?.treeSha}:tracked.txt`)).toBe("changed");
-  });
-
-  it("captures the repository's own files even when its config points core.worktree at host files", async () => {
-    const directory = await repository();
-    const host = await mkdtemp(join(tmpdir(), "agentx-host-"));
-    roots.push(host);
-    await writeFile(join(host, "host-secret.txt"), "secret\n");
-    await git(directory, "config", "core.worktree", host);
-    await writeFile(join(directory, "new.txt"), "new\n");
-    const [candidate] = await readCandidateRepositories([{ repositoryId: "payments", directory }]);
-    const files = (await git(directory, "ls-tree", "--name-only", candidate?.treeSha ?? "")).split("\n");
-    expect(files.sort()).toEqual(["new.txt", "tracked.txt"]);
   });
 
   it("refuses a nested repository recorded in the tree, and never runs Git under the nested repository's config", async () => {

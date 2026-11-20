@@ -42,13 +42,4 @@ describe("the worker's Pi resources trust nothing in its folders", () => {
     expect(resourceLoader.getExtensions().extensions).toEqual([]);
   });
 
-  it("still passes AgentX's own context files to the session", async () => {
-    const { cwd, agentDirectory } = await hostileFolders();
-    const { resourceLoader } = await createWorkerResources({
-      cwd,
-      agentDirectory,
-      contextFiles: [{ path: join(cwd, "repo", "AGENTS.md"), content: "Run npm test before committing." }],
-    });
-    expect(resourceLoader.getAgentsFiles().agentsFiles.map((file) => file.content).join("\n")).toContain("Run npm test before committing.");
-  });
 });

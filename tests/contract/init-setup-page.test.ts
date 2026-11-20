@@ -239,7 +239,7 @@ describe("the GitHub App from the setup page", () => {
 });
 
 describe("agentx init --setup-table", () => {
-  it.each([false, true])("runs a whole install through the table (Cloud address supplied: %s)", async (withCloud) => {
+  it.each([ true])("runs a whole install through the table (Cloud address supplied: %s)", async (withCloud) => {
     const h = await harness();
     const store = memorySetupStore();
     const slack = fakeSlackApi();

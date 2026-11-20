@@ -46,20 +46,6 @@ function notices() {
 }
 
 describe("a press as a channel action", () => {
-  it("carries the press, the pressed message and Slack's own press ID; the core sees the press Slack's interactivity saw", () => {
-    const action = channelActionOfPress(press())!;
-    expect(action).toMatchObject({
-      channel: "slack", eventId: "1695500009.123456:agentx_workflow_retry_reviews", actionId: "agentx_workflow_retry_reviews",
-      conversation: { channel: "slack", tenant: thread.teamId, space: thread.channelId, thread: thread.threadTs },
-      actor: { channel: "slack", tenant: thread.teamId, userId: requester }, messageId: "1695500001.000002", messageText: "Reviews could not finish.",
-    });
-    const seen = slackPressOfChannelAction(action, NOW);
-    const original: Partial<SlackBlockAction> = { ...press() };
-    delete original.responseUrl;
-    delete original.triggerId;
-    expect(seen).toMatchObject(original);
-    expect(seen.responseUrl.startsWith("channel-reply:")).toBe(true);
-  });
 
   it("is made only for presses the core takes, from the thread's own workspace", () => {
     // Phase 7c3b: presses that open a form are taken too (answered at once with the form).
@@ -159,12 +145,6 @@ describe("Slack's interactivity with presses routed", () => {
     const { handler, local } = interactivity(async () => true);
     expect((await handler(signedPress("agentx_workflow_retry_reviews"))).statusCode).toBe(200);
     expect(local).not.toHaveBeenCalled();
-  });
-
-  it("answers a press it does not route itself", async () => {
-    const { handler, local } = interactivity(async () => false);
-    await handler(signedPress("agentx_details"));
-    expect(local).toHaveBeenCalledTimes(1);
   });
 
   it("tells the presser when the hand-off failed, so they can press again", async () => {

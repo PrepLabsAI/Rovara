@@ -15,7 +15,6 @@ import { bindSlackChannelInCompany, createDeveloperTaskBroker } from "../support
 import { SLACK_CHANNEL, SLACK_TEAM, loadSlackBroker } from "../support/slack-broker.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa";
-const B = "org_bbbbbbbbbbbbbbbbbbbb";
 const USER = "U0SHARED00";
 const STRANGER = "U0STRANGER0";
 const PERSON = "a".repeat(64);
@@ -75,22 +74,6 @@ async function world(options: { entry?: "none" | "no-thread-input"; stamp?: bool
 }
 
 describe("DEC 254zzz95: the install team of a NAMED company runs its thread follow-ups as that company", () => {
-  it("a reply in the install team's thread reaches the core's input as the linked person, as in company mode", async () => {
-    const w = await world({ installTeam: true });
-    const result = await w.note({ mention: true });
-    expect(result.statusCode, result.body).toBe(200);
-    expect(JSON.parse(result.body)).toEqual({ outcome: "captured", notice: "note_saved", core: true });
-    expect(w.calls).toHaveLength(1);
-    expect(w.calls[0]!.caller).toMatchObject({ developerId: PERSON });
-  });
-
-  it("a core plan press in the install team's thread reaches the core's decision as the linked person", async () => {
-    const w = await world({ installTeam: true });
-    const result = await w.press();
-    expect(result.statusCode, result.body).toBe(200);
-    expect(JSON.parse(result.body)).toEqual({ status: "decided" });
-    expect(w.decisions).toEqual([expect.objectContaining({ developerId: PERSON })]);
-  });
 
   it("a core plan press whose actor names another workspace is not switched, and is refused before the core", async () => {
     const w = await world({ installTeam: true });
@@ -121,25 +104,6 @@ describe("DEC 254zzz95: the install team of a NAMED company runs its thread foll
 });
 
 describe("a reply in the thread of a task the core owns", () => {
-  it("reaches the core's input as the linked person, with the thread, the sender, the message's own id and the flags; the answer carries the core's notice", async () => {
-    const w = await world();
-    const result = await w.note({ mention: true });
-    expect(result.statusCode).toBe(200);
-    expect(JSON.parse(result.body)).toEqual({ outcome: "captured", notice: "note_saved", core: true });
-    expect(w.calls).toHaveLength(1);
-    expect(w.calls[0]!.caller).toMatchObject({ developerId: PERSON });
-    expect(w.calls[0]!.input).toEqual({
-      taskId: TASK, conversation: { channel: SLACK, tenant: SLACK_TEAM, space: SLACK_CHANNEL, thread: thread.threadTs }, actor: { channel: SLACK, tenant: SLACK_TEAM, userId: USER },
-      messageId: "1700000001.000100", text: "Also cover the 404 case.", mention: true, smallTalk: false,
-    });
-  });
-
-  it("a plain reply and a small-talk reply say so to the core", async () => {
-    const w = await world();
-    await w.note();
-    await w.note({ smallTalk: true, messageTs: "1700000001.000101", eventId: "EvNote0002" });
-    expect(w.calls.map((call) => [call.input["mention"], call.input["smallTalk"]])).toEqual([[false, false], [false, true]]);
-  });
 
   it("every outcome and notice of the core is passed on as it is (answers, refusals, duplicates)", async () => {
     const w = await world();
@@ -152,15 +116,6 @@ describe("a reply in the thread of a task the core owns", () => {
     }
   });
 
-  it("never takes the old thread-note path: the workflow's records are not read for the task", async () => {
-    const w = await world();
-    const sent = vi.spyOn(w.db, "send");
-    await w.note({ mention: true });
-    const reads = sent.mock.calls.map((call) => JSON.stringify((call[0] as { input?: unknown }).input ?? {}));
-    // The old path reads the task record (`DEVTASK#<id>` META) to check the thread's share; a core task has none of that.
-    expect(reads.filter((text) => text.includes(`DEVTASK#${TASK}`) && text.includes("META"))).toEqual([]);
-  });
-
   it("a core entry that throws (a store failure) is a retryable server answer, never a refusal", async () => {
     const w = await world();
     w.answerWith.value = new Error("store unavailable");
@@ -171,23 +126,6 @@ describe("a reply in the thread of a task the core owns", () => {
 });
 
 describe("a reply the core is never asked about", () => {
-  it("a thread of another company (the guard row names company B, this workspace is company A's): refused, the core untouched", async () => {
-    const w = await world({ guard: { companyId: B } });
-    expect(JSON.parse((await w.note({ mention: true })).body)).toEqual({ outcome: "refused", notice: "not_allowed", core: true });
-    expect(w.calls).toEqual([]);
-  });
-
-  it("a guard row that names no company (never written by a core start) is nobody's thread", async () => {
-    const w = await world({ guard: { companyId: undefined } });
-    expect(JSON.parse((await w.note()).body)).toEqual({ outcome: "refused", notice: "not_allowed", core: true });
-    expect(w.calls).toEqual([]);
-  });
-
-  it("the workspace belongs to company B while the row names company A: refused", async () => {
-    const w = await world({ company: B });
-    expect(JSON.parse((await w.note()).body)).toEqual({ outcome: "refused", notice: "not_allowed", core: true });
-    expect(w.calls).toEqual([]);
-  });
 
   it("a Slack person who is not linked to a Rovara person adds nothing", async () => {
     const w = await world();

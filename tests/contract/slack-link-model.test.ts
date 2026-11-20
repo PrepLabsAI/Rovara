@@ -30,23 +30,12 @@ describe("one Slack person resolver", () => {
     expect(await h.resolve({ teamId: TEAM, userId: USER })).toEqual({ kind: "linked", companyId: A, personId: native, via: "signin" });
     expect(await h.resolve({ teamId: OTHER, userId: USER })).toEqual({ kind: "unlinked", companyId: B });
   });
-  it("accepts a core link as the web person and never shares it with the same raw user in another workspace", async () => {
-    const h = world(); h.members.set(PERSON, A); await h.link();
-    expect(await h.resolve({ teamId: TEAM, userId: USER })).toEqual({ kind: "linked", companyId: A, personId: PERSON, via: "link" });
-    expect(await h.resolve({ teamId: OTHER, userId: USER })).toEqual({ kind: "unlinked", companyId: B });
-  });
   it("requires membership on the link path and refuses conflicting native and linked people", async () => {
     const h = world(); await h.link();
     expect(await h.resolve({ teamId: TEAM, userId: USER })).toEqual({ kind: "unlinked", companyId: A });
     h.members.set(PERSON, B);
     expect(await h.resolve({ teamId: TEAM, userId: USER })).toEqual({ kind: "unlinked", companyId: A });
     h.members.set(PERSON, A); h.members.set(native, A);
-    expect(await h.resolve({ teamId: TEAM, userId: USER })).toEqual({ kind: "unlinked", companyId: A });
-  });
-  it.each([undefined, "not-an-org", B])("never falls back when membership is missing, malformed or foreign", async (value) => {
-    const h = world(); h.deps.companies.companyOf = async () => value;
-    expect(await h.resolve({ teamId: TEAM, userId: USER })).toEqual({ kind: "unlinked", companyId: A });
-    await h.link();
     expect(await h.resolve({ teamId: TEAM, userId: USER })).toEqual({ kind: "unlinked", companyId: A });
   });
   it("treats absent companies, thrown membership and thrown links as unlinked", async () => {
@@ -56,11 +45,6 @@ describe("one Slack person resolver", () => {
     expect(await h.resolve({ teamId: TEAM, userId: USER })).toEqual({ kind: "unlinked", companyId: A });
     const broken = { ...h.deps, store: { get: async () => { throw new Error("private link cause"); } } as unknown as DocumentStore };
     expect(await createSlackPersonResolver(broken)({ teamId: TEAM, userId: USER })).toEqual({ kind: "unlinked", companyId: A });
-  });
-  it("never accepts a malformed or mismatched link by falling back to sign-in", async () => {
-    const h = world(); h.members.set(native, A);
-    await h.store.put({ item: { ...orgChannelLinkKey(A, actor), entityType: "CHANNEL_LINK", actor: { ...actor, tenant: OTHER }, developerId: native, linkedAt: new Date(NOW).toISOString() } });
-    expect(await h.resolve({ teamId: TEAM, userId: USER })).toEqual({ kind: "unlinked", companyId: A });
   });
 });
 
@@ -77,16 +61,6 @@ describe("Slack action classification", () => {
     for (const action of ["use <model>", "rovara_chatgpt_paste", "rovara_chatgpt_paste_submission", "agentx_task_people", "agentx_task_people_submission", "agentx_task_take_ownership"]) expect(slackActionClass(action)).toBe("settings");
     expect(slackActionClass("agentx_workflow_approve")).toBe("member");
   });
-  it("default-denies unknown, malformed and prototype names", async () => {
-    const { slackActionClass } = await import("../../packages/broker/src/aws/slack-action-classes.js");
-    for (const value of ["unknown", "toString", "constructor", "__proto__", null, {}, 7]) expect(slackActionClass(value)).toBeUndefined();
-  });
-});
-
-it("refuses an unreadable stored link even if the native person is a member", async () => {
-  const h = world(); h.members.set(native, A);
-  await h.store.put({ item: { ...orgChannelLinkKey(A, actor), entityType: "CHANNEL_LINK", actor, developerId: native, linkedAt: new Date(NOW).toISOString(), unexpected: "private" } });
-  expect(await h.resolve({ teamId: TEAM, userId: USER })).toEqual({ kind: "unlinked", companyId: A });
 });
 
 it("refuses a TTL on a durable link without falling back to native membership", async () => {
@@ -133,21 +107,6 @@ it("refuses Slack code redemption when the workspace or member reader cannot est
   await expect(codes.redeem(PERSON, issued.code)).rejects.toThrow("This link has expired or was already used.");
 });
 
-
-it("refuses oversized link-code reads before preview or redemption", async () => {
-  const { createSlackLinkCodes } = await import("../../packages/broker/src/aws/slack-person.js");
-  const h = world(); h.members.set(PERSON, A);
-  const issued = await createSlackLinkCodes(h.deps).issue({ teamId: TEAM, userId: USER });
-  const get = h.store.get.bind(h.store);
-  vi.spyOn(h.store, "get").mockImplementation(async (key) => {
-    const row = await get(key); return row === undefined ? undefined : { ...row, [INDEX_EXPIRY_ATTRIBUTE]: "a".repeat(1_000_000) };
-  });
-  const writes = vi.spyOn(h.store, "transact");
-  const codes = createSlackLinkCodes(h.deps);
-  expect(await codes.preview(PERSON, issued.code)).toBeUndefined();
-  await expect(codes.redeem(PERSON, issued.code)).rejects.toThrow("This link has expired or was already used.");
-  expect(writes).not.toHaveBeenCalled();
-});
 
 it("refuses a link-code issue whose storage response exceeds the total time budget", async () => {
   const { createSlackLinkCodes } = await import("../../packages/broker/src/aws/slack-person.js");

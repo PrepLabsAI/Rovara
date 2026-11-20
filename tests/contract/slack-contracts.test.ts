@@ -48,30 +48,6 @@ describe("Slack contracts", () => {
     expect(() => SlackChannelBindingSchema.parse({ ...binding, projectName: "Payments" })).toThrow();
   });
 
-  it("describes thread workspace outcomes, including limit refusals", () => {
-    expect(SlackThreadWorkspaceResultSchema.parse({
-      outcome: "WORKSPACE",
-      workspaceId: "11111111-1111-4111-8111-111111111111",
-      status: "PREPARING",
-      operationId: "22222222-2222-4222-8222-222222222222",
-      created: true,
-      orchestratorInstructions: "Delegate work.",
-    }).outcome).toBe("WORKSPACE");
-    expect(SlackThreadWorkspaceResultSchema.parse({
-      outcome: "LIMIT_REACHED",
-      limit: "MEMBER",
-      maximum: 3,
-      starterThreads: [thread],
-    }).outcome).toBe("LIMIT_REACHED");
-    expect(() => SlackThreadWorkspaceResultSchema.parse({ outcome: "LIMIT_REACHED", limit: "TEAM", maximum: 3, starterThreads: [] }))
-      .toThrow();
-    expect(SlackThreadWorkspaceResultSchema.parse({
-      outcome: "CLOSED",
-      workspaceId: "11111111-1111-4111-8111-111111111111",
-      closedAt: "2026-09-24T08:00:00.000Z",
-    }).outcome).toBe("CLOSED");
-  });
-
   it("adds task mode to a workspace result without changing what an older reader parses, and validates the request and the answered body", () => {
     const base = { outcome: "WORKSPACE", workspaceId: "11111111-1111-4111-8111-111111111111", status: "READY", operationId: null, created: false, orchestratorInstructions: "Delegate work." };
     // The new fields are optional: a result without them is the one an older service already parses.

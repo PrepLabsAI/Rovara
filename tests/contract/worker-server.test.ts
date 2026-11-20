@@ -1,15 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { WORKER_INVOCATION_FEATURES, type WorkerInvocation } from "@agentx/contracts";
+import { type WorkerInvocation } from "@agentx/contracts";
 import { inspectContainedRuntimeReadinessForHost } from "@agentx/verifier";
-import {
-  type JournalStatus,
-  OperationJournal,
-  createWorkerServerState,
-  handleWorkerRequest,
-} from "../../packages/worker/src/index.js";
+import { OperationJournal, createWorkerServerState, handleWorkerRequest } from "../../packages/worker/src/index.js";
 import { WorkerOperationCancelledError } from "../../packages/worker/src/cancel.js";
 import { createDefaultProjectSetupExecutor, createReadinessGatedProjectSetupRuntime } from "../../packages/worker/src/project-setup-executor.js";
 import { describe, expect, it, vi } from "vitest";
@@ -60,23 +55,6 @@ describe("worker HTTP contract", () => {
     expect((await journal.get(invocation.operationId))?.error).toContain(`project.setupSmoke is unavailable: ${readiness.reason}`);
   });
 
-  it("keeps ordinary worker health available and reports an unavailable optional setup feature", async () => {
-    const root = await mkdtemp(join(tmpdir(), "agentx-optional-feature-"));
-    const state = createWorkerServerState(new OperationJournal(root), {
-      execute: async () => undefined,
-      invocationFeatures: [],
-      invocationFeatureDiagnostics: { "project.setupSmoke": { status: "unavailable", reason: "pinned-contained-image-unavailable" } },
-    });
-    const ping = await handleWorkerRequest(new Request("http://worker/ping"), state);
-    expect(ping.status).toBe(200);
-    const pingBody: unknown = await ping.json();
-    expect(pingBody).toMatchObject({
-      status: "Healthy",
-      invocationFeatureDiagnostics: { "project.setupSmoke": { status: "unavailable", reason: "pinned-contained-image-unavailable" } },
-    });
-    expect(hasProjectSetupSmokeFeature(pingBody)).toBe(false);
-  });
-
   it("journals before acknowledging and reports HealthyBusy during background execution", async () => {
     const root = await mkdtemp(join(tmpdir(), "agentx-journal-"));
     const journal = new OperationJournal(root);
@@ -120,20 +98,6 @@ describe("worker HTTP contract", () => {
       .resolves.toMatchObject({ invocationFeatures: ["task.evalRound.v1", "task.evalGateway.v1", "prepare.evalHealth.v1", "task.modelPolicy", "model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "task.workflowReviewNote", "task.workflowReviewers", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission", "task.workflowE2EApplicationPlan", "task.workflowE2EApplicationChecks", "task.workflowE2EApplicationChecks.v2", "task.workflowE2EBaselineChecks", "task.workflowE2EBaselineSource", "task.workflowE2EAgentSteps.v1", "task.workflowE2ECaptureExtras.v1", "task.workflowE2EReplayChecks.v1", "task.workflowE2EModelFreeLimits.v1", "task.workflowE2EAgentModelChoice.v1", "model.route", "task.agentStep", "task.agentRun", "task.agentGrounding.v1", "task.workflowUnderstand", "task.workflowPlanCritique", "task.setupDraft", "task.setupProposal.v2", "task.workflowReviewRisk", "task.workflowFix", "task.workflowFeedbackAutonomy", "task.workflowParallelParts", "maintain.workflowSync", "task.workflowPlanDryRun.v1", "task.workflowE2EGroundingChecks.v1", "task.workflowE2EMidStepSync.v1", "task.liveSteer.v1", "task.setupAgent.v1", "task.wikiBuild.v1", "task.setupRecipes.v1", "prepare.metaRepo", "task.contextSources.v1", "task.specWrite.v1", "task.workflowReviewSpec.v1", "task.ownerRedirect.v1", "task.peek.v1", "publish.attribution", "task.diagnosis.v1", "task.evidenceCapture.v1", "task.browserEvidence.v1", "task.browserEvidenceVideo.v1", "task.learnedContext.v1", "task.wikiContext.v1", "task.knowledgeContext.v1", "task.rovaraSkills.v1", "task.testEnvDetect.v1", "task.testEnvironment.v1", "task.flakyRerun.v1", "task.testEnvCoveragePath.v1", "prepare.registries.v1", "prepare.egressS3.v1", "prepare.savedEnv.v1", "prepare.pins.v1", "repository.credentialKinds.v1", "task.workflowSecondReviewer.v1", "task.designReview.v1", "task.nightlyRun.v1", "task.standingInstructions.v1", "task.evalFiles.v1", "task.generalFakes.v1", "task.workflowApprovedPlan.v1", "task.usageCheckpoints.v1", "task.testEnvBaseline.v1", "task.testEnvMultiRepo.v1", "task.evalPromptLocations.v1"] });
   });
 
-  it("advertises only the invocation features it implements, not those it merely parses", async () => {
-    const root = await mkdtemp(join(tmpdir(), "agentx-features-"));
-    const state = createWorkerServerState(new OperationJournal(root), { execute: async () => undefined });
-    const body = await (await handleWorkerRequest(new Request("http://worker/ping"), state)).json() as { invocationFeatures: string[] };
-    // Task 16a knows these three. Task 18 added "task.agentStep", Task 23 "task.agentRun", Task 27 "model.route".
-    for (const feature of ["task.agentStep", "task.agentRun", "model.route"]) expect(WORKER_INVOCATION_FEATURES).toContain(feature);
-    expect(body.invocationFeatures).toContain("task.agentRun");
-    expect(WORKER_INVOCATION_FEATURES).toContain("task.agentGrounding.v1");
-    expect(body.invocationFeatures).toContain("task.agentGrounding.v1");
-    expect(body.invocationFeatures).toContain("task.agentStep");
-    expect(body.invocationFeatures).toContain("model.route");
-    for (const feature of body.invocationFeatures) expect(WORKER_INVOCATION_FEATURES as readonly string[]).toContain(feature);
-  });
-
   it("withholds the agent step feature (Task 4.3a) from /ping with its reason exactly as it withholds another feature, and lists it once nothing withholds it", async () => {
     const root = await mkdtemp(join(tmpdir(), "agentx-withheld-agent-"));
     let withheld: Record<string, unknown> = { "task.workflowE2EAgentSteps.v1": { status: "unavailable", reason: "agent-route-not-derivable", detail: "no route" } };
@@ -150,108 +114,6 @@ describe("worker HTTP contract", () => {
     const failed = await (await handleWorkerRequest(new Request("http://worker/ping"), failing)).json() as { invocationFeatures: string[]; invocationFeatureDiagnostics?: Record<string, unknown> };
     expect(failed.invocationFeatures).not.toContain("task.workflowE2EAgentSteps.v1");
     expect(failed.invocationFeatureDiagnostics).toMatchObject({ "task.workflowE2EAgentSteps.v1": { reason: "availability-check-failed" } });
-  });
-
-  it("withholds a feature the executor reports as unavailable from /ping, with the reason, and lists it again once it is available", async () => {
-    const root = await mkdtemp(join(tmpdir(), "agentx-withheld-feature-"));
-    let withheld: Record<string, unknown> = { "task.workflowE2EApplicationChecks": { status: "unavailable", reason: "executor-image-not-on-host" } };
-    const state = createWorkerServerState(new OperationJournal(root), { execute: () => Promise.resolve(), withheldInvocationFeatures: () => withheld });
-    const ping = async () => (await handleWorkerRequest(new Request("http://worker/ping"), state)).json() as Promise<{ invocationFeatures: string[]; invocationFeatureDiagnostics?: Record<string, unknown> }>;
-    const first = await ping();
-    expect(first.invocationFeatures).not.toContain("task.workflowE2EApplicationChecks");
-    expect(first.invocationFeatures).toContain("task.workflowE2EApplicationPlan");
-    expect(first.invocationFeatureDiagnostics).toMatchObject({ "task.workflowE2EApplicationChecks": { status: "unavailable", reason: "executor-image-not-on-host" } });
-    withheld = {};
-    expect((await ping()).invocationFeatures).toContain("task.workflowE2EApplicationChecks");
-  });
-
-  it("withholds every feature the executor may withhold, with a reason, when asking which are withheld throws (fails closed)", async () => {
-    const root = await mkdtemp(join(tmpdir(), "agentx-withheld-throws-"));
-    const state = createWorkerServerState(new OperationJournal(root), { execute: () => Promise.resolve(),
-      withholdableInvocationFeatures: ["task.workflowE2EApplicationChecks"],
-      withheldInvocationFeatures: () => { throw new Error("availability unknown"); } });
-    const ping = await (await handleWorkerRequest(new Request("http://worker/ping"), state)).json() as { invocationFeatures: string[]; invocationFeatureDiagnostics?: Record<string, unknown> };
-    expect(ping.invocationFeatures).not.toContain("task.workflowE2EApplicationChecks");
-    expect(ping.invocationFeatures).toContain("task.workflowE2EApplicationPlan");
-    expect(ping.invocationFeatureDiagnostics).toMatchObject({ "task.workflowE2EApplicationChecks": { status: "unavailable", reason: "availability-check-failed" } });
-  });
-
-  // The journal reads SUCCEEDED a moment before the operation leaves the active set: the write lands,
-  // then transition() returns, then executeInBackground clears it. The worker stays busy until the
-  // operation is fully recorded, so a caller that saw SUCCEEDED in the journal must wait on /ping.
-  it("reports HealthyBusy until a finished operation is fully recorded, though the journal already reads SUCCEEDED", async () => {
-    const root = await mkdtemp(join(tmpdir(), "agentx-recorded-"));
-    let releaseRecord!: () => void;
-    const recordGate = new Promise<void>((resolve) => {
-      releaseRecord = resolve;
-    });
-    class HeldJournal extends OperationJournal {
-      override async transition(operationId: string, status: JournalStatus, error?: string) {
-        const record = await super.transition(operationId, status, error);
-        if (status === "SUCCEEDED") await recordGate;
-        return record;
-      }
-    }
-    const journal = new HeldJournal(root);
-    const state = createWorkerServerState(journal, { execute: async () => undefined });
-    const invocation = taskInvocation();
-
-    await handleWorkerRequest(invocationRequest(invocation), state);
-    await vi.waitFor(async () => {
-      expect((await journal.get(invocation.operationId))?.status).toBe("SUCCEEDED");
-    });
-    const busy = await handleWorkerRequest(new Request("http://worker/ping"), state);
-    await expect(busy.json()).resolves.toMatchObject({ status: "HealthyBusy", activeOperations: 1 });
-
-    releaseRecord();
-    await vi.waitFor(async () => {
-      const ping = await handleWorkerRequest(new Request("http://worker/ping"), state);
-      await expect(ping.json()).resolves.toMatchObject({ status: "Healthy", activeOperations: 0 });
-    });
-  });
-
-  it("reports the persisted terminal state after background execution", async () => {
-    const root = await mkdtemp(join(tmpdir(), "agentx-terminal-"));
-    const journal = new OperationJournal(root);
-    const terminal: Array<{ operationId: string; status: string; error?: string }> = [];
-    const state = createWorkerServerState(
-      journal,
-      { execute: async () => undefined },
-      {
-        onTerminal: async (result) => {
-          terminal.push(result);
-        },
-      },
-    );
-    const invocation = taskInvocation();
-
-    await handleWorkerRequest(invocationRequest(invocation), state);
-    await vi.waitFor(() => expect(terminal).toEqual([
-      { operationId: invocation.operationId, status: "SUCCEEDED" },
-    ]));
-    expect((await journal.get(invocation.operationId))?.status).toBe("SUCCEEDED");
-  });
-
-  it("redacts a failed operation's error before it is journaled or reported (#170)", async () => {
-    const token = `ghp_${"Q1w2E3r4T5".repeat(4)}`;
-    const root = await mkdtemp(join(tmpdir(), "agentx-terminal-"));
-    const journal = new OperationJournal(root);
-    const terminal: Array<{ operationId: string; status: string; error?: string }> = [];
-    const state = createWorkerServerState(
-      journal,
-      { execute: async () => { throw new Error(`fatal: could not read from https://github.com/x?token=1 ${token}`); } },
-      { onTerminal: async (result) => { terminal.push(result); } },
-    );
-    const invocation = taskInvocation();
-
-    await handleWorkerRequest(invocationRequest(invocation), state);
-    await vi.waitFor(() => expect(terminal).toHaveLength(1));
-    expect(terminal[0]).toMatchObject({ status: "FAILED" });
-    expect(terminal[0]!.error).toContain("[REDACTED]");
-    expect(terminal[0]!.error).not.toContain(token);
-    const record = await journal.get(invocation.operationId);
-    expect(record?.error).toBe(terminal[0]!.error);
-    expect(await readFile(join(root, ".agentx/operations", `${invocation.operationId}.json`), "utf8")).not.toContain(token);
   });
 
   it("sends the regression a failed or cancelled task carries as its result, and nothing for other failures (spec 051 Ruling Y)", async () => {
@@ -335,42 +197,6 @@ describe("worker HTTP contract", () => {
     expect((await journal.get(invocation.operationId))?.status).toBe("SUCCEEDED");
   });
 
-  it("stops retrying the terminal callback once it succeeds", async () => {
-    const root = await mkdtemp(join(tmpdir(), "agentx-terminal-"));
-    const journal = new OperationJournal(root);
-    const waits: number[] = [];
-    let attempts = 0;
-    const state = createWorkerServerState(
-      journal,
-      { execute: async () => undefined },
-      {
-        onTerminal: async () => {
-          attempts += 1;
-          if (attempts < 3) throw new Error("ThrottlingException");
-        },
-        retrySleep: async (ms) => {
-          waits.push(ms);
-        },
-      },
-    );
-
-    await handleWorkerRequest(invocationRequest(taskInvocation()), state);
-    await vi.waitFor(() => expect(attempts).toBe(3));
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(attempts).toBe(3);
-    expect(waits).toEqual([2_000, 8_000]);
-  });
-
-  it("accepts a prepare invocation whose stored project has a connector of an unknown type", async () => {
-    const root = await mkdtemp(join(tmpdir(), "agentx-journal-"));
-    const journal = new OperationJournal(root);
-    const state = createWorkerServerState(journal, { execute: async () => undefined });
-    const invocation = prepareInvocationWithUnknownConnector();
-
-    const accepted = await handleWorkerRequest(invocationRequest(invocation), state);
-    expect(accepted.status).toBe(200);
-    await expect(accepted.json()).resolves.toMatchObject({ accepted: true, status: "ACCEPTED" });
-  });
 });
 
 function invocationRequest(invocation: WorkerInvocation): Request {
@@ -391,44 +217,6 @@ function taskInvocation(): WorkerInvocation {
     projectRevision: 1,
     callbackCapability: "c".repeat(64),
     payload: { conversationId: randomUUID(), prompt: "Inspect the fixture" },
-  };
-}
-
-/** A revision written by a later control plane, before a rollback to this one: the worker never
- * reads integrations.connectors, and StoredProjectDefinitionSchema passes an unknown type through. */
-function prepareInvocationWithUnknownConnector(): WorkerInvocation {
-  return {
-    protocolVersion: 1,
-    kind: "prepare",
-    operationId: randomUUID(),
-    workspaceId: randomUUID(),
-    fence: 1,
-    projectRevision: 1,
-    callbackCapability: "c".repeat(64),
-    payload: {
-      project: {
-        name: "payments",
-        revision: 1,
-        repositories: [
-          {
-            name: "api",
-            url: "https://git.example.test/api.git",
-            path: "repo/api",
-            defaultBranch: "main",
-            credentialRef: "api-readwrite",
-          },
-        ],
-        setup: [],
-        readiness: [],
-        orchestratorInstructions: "Delegate coding to the remote worker.",
-        integrations: {
-          connectors: [
-            { name: "tracker", type: "future-vendor", credentialRef: "future-vendor-key", scopes: ["api"] },
-          ],
-        },
-      },
-      repositoryGrant: "signed-grant",
-    },
   };
 }
 

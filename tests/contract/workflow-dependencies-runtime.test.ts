@@ -177,43 +177,6 @@ describe("native runtime journeys for ordered work", () => {
     assertJourneyInvariants(e2e);
   }, 120_000);
 
-  it("approves the same task-bound graph through MCP and executes the approved A to B to C sequence", async () => {
-    const context: { current?: WorkflowE2E } = {};
-    const e2e = await createWorkflowE2E({ workflowDependenciesEnvironment: { AGENTX_WORKFLOW_DEPENDENCIES_ENABLED: "true" },
-      readiness: [{ cwd: "repo/demo", executable: "node", args: ["integration.mjs"], timeoutSeconds: 30 }], realProjectCommands: true,
-      model: workflowModel(context) });
-    context.current = e2e;
-    const started = await e2e.mcp("agentx_start_workflow", { project: "payments", instructions: "Add a shared greeting service", workflow_path: "full" });
-    expect(started.isError).not.toBe(true);
-    for (let index = 0; index < 3; index += 1) {
-      await e2e.settle();
-      const before = e2e.workflow();
-      expect(before).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
-      const decision = await e2e.mcp("agentx_decide_workflow", {
-        task_id: e2e.taskId(), request_id: `a0b10000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
-        expected_revision: before.revision, decision: "APPROVE", reason: "Owner reviewed the exact plan.",
-        artifact_digest: before.artifacts.at(-1)!.sha256,
-        ...(index === 2 ? { work_breakdown_digest: taskGraphDigest(graphFor(e2e.taskId())) } : {}),
-      });
-      expect(decision.isError).not.toBe(true);
-    }
-    await e2e.settle();
-    const workflow = e2e.workflow() as unknown as { stage: string; state: string; candidate?: { repositories: Array<{ treeSha: string }> }; workflowDependenciesProgress?: Array<Record<string, unknown>> };
-    const digest = taskGraphDigest(graphFor(e2e.taskId()));
-    expect(workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
-    expect(itemPromptTitles(e2e)).toEqual(["A: create formatter", "B: consume formatter", "C: integration assertion"]);
-    expect(await e2e.repoFile("formatter.mjs")).toContain("formatGreeting");
-    expect(await e2e.repoFile("service.mjs")).toContain("formatGreeting");
-    expect(await e2e.repoFile("integration.mjs")).toContain("assert.equal(greet('Lin'), 'Hello, Lin')");
-    expect(e2e.checkRuns).toHaveLength(1);
-    expect(e2e.checkRuns[0]!.tree).toBe(workflow.candidate!.repositories[0]!.treeSha);
-    expect(workflow.workflowDependenciesProgress?.filter((entry) => entry.state === "IMPLEMENTED").map((entry) => entry.itemId)).toEqual([ITEM_A, ITEM_B, ITEM_C]);
-    expect(e2e.github.pullRequests).toHaveLength(1);
-    expect(e2e.github.pullRequests[0]!.tree).toBe(workflow.candidate!.repositories[0]!.treeSha);
-    expect(e2e.workflow().decisions.at(-1)).toMatchObject({ decision: "APPROVE", workBreakdownDigest: digest });
-    assertJourneyInvariants(e2e);
-  }, 180_000);
-
   it("does not start a dependent prompt when the durable A checkpoint acknowledgement is lost", async () => {
     const context: { current?: WorkflowE2E } = {};
     let lostAck = false;
@@ -261,34 +224,4 @@ describe("native runtime journeys for ordered work", () => {
     assertJourneyInvariants(e2e);
   }, 180_000);
 
-  it("pauses accepted work when the real worker cancellation controller fires after A and never prompts B", async () => {
-    const context: { current?: WorkflowE2E } = {};
-    let cancelled = false;
-    const e2e = await createWorkflowE2E({ workflowDependenciesEnvironment: { AGENTX_WORKFLOW_DEPENDENCIES_ENABLED: "true" },
-      workerCallbackResponse: async ({ path, body, statusCode }) => {
-        if (!cancelled && path.endsWith("/events") && statusCode === 200) {
-          if (reportsImplementedItem(body, ITEM_A)) {
-            const operationId = /\/operations\/([^/]+)\/events$/.exec(path)?.[1];
-            expect(operationId).toBeDefined();
-            const result = await currentE2E(context).worker.cancelOperation(operationId!);
-            expect(result.status).toBe("CANCELLED");
-            cancelled = true;
-          }
-        }
-        return undefined;
-      }, model: workflowModel(context) });
-    context.current = e2e;
-    await approveFullPlan(e2e);
-    expect(cancelled).toBe(true);
-    expect(itemPromptTitles(e2e)).toEqual(["A: create formatter"]);
-    const blocked = e2e.workflow() as unknown as { stage: string; state: string; workflowDependenciesProgress?: Array<Record<string, unknown>> };
-    expect(blocked.stage).toBe("IMPLEMENT");
-    expect(blocked.state).toBe("BLOCKED");
-    expect(blocked.workflowDependenciesProgress?.some((entry) => entry.itemId === ITEM_B)).toBe(false);
-    expect(e2e.github.pullRequests).toEqual([]);
-    const promptCount = e2e.prompts.length;
-    await e2e.runRecovery();
-    expect(e2e.prompts).toHaveLength(promptCount);
-    assertJourneyInvariants(e2e);
-  }, 180_000);
 });

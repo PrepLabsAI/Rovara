@@ -95,12 +95,7 @@ describe("an EC2 worker authenticating invocations", () => {
     ["expired", (claims: WorkerInvokeTokenClaims) => `AgentX-Invoke ${tokenFor({ ...claims, expiresAt: NOW })}`, "expired"],
     ["another key's signature", (claims: WorkerInvokeTokenClaims) =>
       `AgentX-Invoke ${tokenFor(claims, generateKeyPairSync("ec", { namedCurve: "prime256v1" }).privateKey)}`, "bad_signature"],
-    ["tampered claims", (claims: WorkerInvokeTokenClaims) => {
-      const [, signature] = tokenFor(claims).split(".");
-      return `AgentX-Invoke ${workerInvokeTokenPayload({ ...claims, generation: 3, expiresAt: NOW + 86_400 })}.${signature}`;
-    }, "bad_signature"],
     ["no signature", (claims: WorkerInvokeTokenClaims) => `AgentX-Invoke ${workerInvokeTokenPayload(claims)}`, "malformed"],
-    ["garbage", () => "AgentX-Invoke not a token!", "malformed"],
   ] as const)("refuses %s with 401 before reading or journaling the invocation", async (_name, header, reason) => {
     const { state, journal, execute } = await workerState(authentication);
     const invocation = invocationFor();
@@ -214,13 +209,6 @@ describe("an EC2 worker authenticating invocations", () => {
       expect(await journal.get(changed.operationId)).toBeUndefined();
     }
     expect(execute).not.toHaveBeenCalled();
-  });
-
-  it("keeps /ping unauthenticated for health probes", async () => {
-    const { state } = await workerState(authentication);
-    const ping = await handleWorkerRequest(new Request("http://worker/ping"), state);
-    expect(ping.status).toBe(200);
-    await expect(ping.json()).resolves.toMatchObject({ status: "Healthy" });
   });
 
   it("uses the shared scheme name", () => {

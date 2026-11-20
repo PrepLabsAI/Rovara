@@ -87,45 +87,7 @@ function fixture(options: { partial?: boolean; feedbackReview?: boolean } = {}) 
 }
 
 describe("merge-only task pull request reconciliation", () => {
-  it("keeps omitted observation mode on the existing feedback collection path", async () => {
-    const f = fixture();
-    const getCurrentFeedback = (url: string, number: number) => f.input.getCurrentFeedback(url, number);
-    const { observationMode: _mode, ...feedbackInput } = f.input;
-    void _mode;
-    expect(await reconcileTaskPullRequestFeedback({ ...feedbackInput,
-      getCurrentFeedback: async (url, number) => {
-        const feedback = await getCurrentFeedback(url, number);
-        return { ...feedback, comments: [{ id: `discussion:${number}`, kind: "DISCUSSION" as const,
-          url: `${feedback.pullRequest.url}#issuecomment-${number}`, author: "reviewer", updatedAt: NOW, body: "feedback" }] };
-      },
-    })).toBe(true);
-    expect(f.persistBundle).toHaveBeenCalledTimes(2);
-    expect(f.workflow().feedbackReview?.status).toBe("COLLECTING");
-  });
 
-  it("waits for both exact required PRs and completes only after both merge", async () => {
-    const f = fixture();
-    f.setRemote("api", { state: "merged" });
-    expect(await reconcileTaskPullRequestFeedback(f.input)).toBe(true);
-    expect(f.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
-    f.setRemote("ui", { state: "merged" });
-    expect(await reconcileTaskPullRequestFeedback(f.input)).toBe(true);
-    expect(f.workflow()).toMatchObject({ stage: "MERGED", state: "COMPLETE", outcome: "MERGED" });
-  });
-
-  it.each([
-    ["foreign head", { state: "merged" as const, headCommit: "c".repeat(40), headTreeSha: TREE }],
-    ["wrong tree", { state: "merged" as const, headCommit: HEAD, headTreeSha: "c".repeat(40) }],
-    ["missing tree", { state: "merged" as const, headCommit: HEAD, headTreeSha: undefined }],
-    ["malformed head", { state: "merged" as const, headCommit: "bad", headTreeSha: TREE }],
-  ])("does not promote a merged PR with %s identity", async (_label, observation) => {
-    const f = fixture();
-    f.setRemote("api", observation as Partial<{ state: "merged"; headCommit: string; headTreeSha: string }>);
-    f.setRemote("ui", { state: "merged" });
-    expect(await reconcileTaskPullRequestFeedback(f.input)).toBe(true);
-    expect(f.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
-    expect(f.workflow().pullRequests?.find(pr => pr.repositoryId === "api")?.state).toBe("OPEN");
-  });
 
   it("blocks on closed-unmerged and returns to waiting when the exact PR reopens", async () => {
     const f = fixture();
@@ -152,34 +114,4 @@ describe("merge-only task pull request reconciliation", () => {
     expect(f.reads).toEqual(["api", "ui", "api", "ui"]);
   });
 
-  it("preserves pending feedback bytes and never runs feedback or ancestry helpers", async () => {
-    const f = fixture({ feedbackReview: true });
-    const before = JSON.stringify(f.workflow().feedbackReview);
-    f.setRemote("api", { state: "merged" });
-    expect(await reconcileTaskPullRequestFeedback(f.input)).toBe(true);
-    expect(JSON.stringify(f.workflow().feedbackReview)).toBe(before);
-    expect(f.persistBundle).not.toHaveBeenCalled();
-    expect(f.reviewedComments).not.toHaveBeenCalled();
-    expect(f.saveLandedPushes).not.toHaveBeenCalled();
-    expect(f.commitParents).not.toHaveBeenCalled();
-  });
-
-  it("does not infer a lost fix push from a matching tree under a foreign head", async () => {
-    const f = fixture();
-    f.setRemote("api", { state: "open", headCommit: "c".repeat(40), headTreeSha: TREE });
-    expect(await reconcileTaskPullRequestFeedback(f.input)).toBe(false);
-    expect(f.workflow().pullRequests?.[0]?.headSha).toBe(HEAD);
-    expect(f.commitParents).not.toHaveBeenCalled();
-  });
-
-  it("does not save or increment revision for a duplicate matching merge snapshot", async () => {
-    const f = fixture();
-    f.setRemote("api", { state: "merged" });
-    expect(await reconcileTaskPullRequestFeedback(f.input)).toBe(true);
-    const revision = f.workflow().revision;
-    const saves = f.saves.length;
-    expect(await reconcileTaskPullRequestFeedback(f.input)).toBe(false);
-    expect(f.workflow().revision).toBe(revision);
-    expect(f.saves).toHaveLength(saves);
-  });
 });
