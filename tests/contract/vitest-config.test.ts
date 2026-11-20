@@ -1,5 +1,6 @@
 // CDK synth tests take more than 10 s under a loaded full gate (three gates hit it in phase 15e), so
 // the default test timeout leaves room for them (final review M4).
+import { readdirSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import config from "../../vitest.config.js";
 import nativeP0Config from "../../vitest.native-p0.config.js";
@@ -23,6 +24,11 @@ describe("the test runner's configuration", () => {
     expect(nightlyOnlyFiles).toContain("tests/unit/eval-question-simulation.test.ts");
     // #1236: the detectors' growth check runs nightly, and in a pull request only when the change reaches it.
     expect(nightlyOnlyFiles).toContain("tests/unit/worker-env-detect-growth.test.ts");
+    expect(nightlyOnlyFiles).toContain("tests/unit/local-up-flow.test.ts");
+    // Every workflow-e2e suite, read from the folder, so a new one is nightly-only too.
+    const workflowE2e = readdirSync("tests/integration/workflow-e2e").filter((name) => name.endsWith(".test.ts")).map((name) => `tests/integration/workflow-e2e/${name}`);
+    expect(workflowE2e.length).toBeGreaterThan(10);
+    expect(nightlyOnlyFiles).toEqual(expect.arrayContaining(workflowE2e));
     expect(config.test?.exclude).toEqual(expect.arrayContaining(nightlyOnlyFiles));
     expect(nightlyConfig.test?.include).toEqual([...nightlyOnlyFiles, ...postDeployFiles]);
     expect(nightlyConfig.test?.passWithNoTests).toBe(false);
