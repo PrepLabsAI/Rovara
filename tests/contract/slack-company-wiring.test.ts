@@ -224,7 +224,10 @@ describe("the Slack Lambda's export", () => {
     expect(made[0]).toEqual({ slackInstallTeamOnly: INSTALL, installTeamCompany: expect.any(Function) as unknown });
     expect(Object.keys(made[1]!).sort()).toEqual(["onWorkspaceRemoved", "workspaces"]);
     expect((await on({ requestContext: {}, body: JSON.stringify({ team_id: OTHER }) })).body).toBe("company");
-    expect((await on({ requestContext: {}, body: JSON.stringify({ team_id: INSTALL }) })).body).toBe("legacy");
+    // #1300: the install's team takes today's handler only while its binding names the built-in company. This Lambda has no table to read here, so the binding is
+    // unreadable and the install's team fails closed to the company handler (slack-company-split.test.ts covers both bindings).
+    expect((await on({ requestContext: {}, body: JSON.stringify({ team_id: INSTALL }) })).body).toBe("company");
+    expect((await on({ requestContext: {}, body: "" })).body).toBe("legacy");
     made.length = 0;
     // No broker to issue notices: stays today's handler.
     createAwsSlackHandlerFromEnvironment({ ...ON, BROKER_FUNCTION_NAME: "" }, make as never);

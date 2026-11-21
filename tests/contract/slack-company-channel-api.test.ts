@@ -43,14 +43,14 @@ const actionSurfaces = () => {
   const company = vi.fn<ChannelActionSurface>(async () => ({ statusCode: 200, body: "company" }));
   return { legacy, company };
 };
-function wiring(): SlackCompanyWiring {
+function wiring(installOnLegacy: () => Promise<boolean> = async () => true): SlackCompanyWiring {
   const workspaces = {
     store: new MemoryDocumentStore(), getProject: async () => ({ companyId: A }), linkUrl: (code: string) => `https://example.test/review/link/${code}`,
     requireCompany: async (team: string): Promise<string> => { if (team !== INSTALL && team !== OTHER) throw new Error("private-directory-cause"); return team === INSTALL ? A : B; },
     tokenForEvent: async (team: string) => ({ companyId: team === INSTALL ? A : B, token: "token" }),
     tokenForCompany: async () => "token",
   };
-  return { legacyTeamId: INSTALL, workspaces, companies: { companyOf: async () => A }, forget: vi.fn() };
+  return { legacyTeamId: INSTALL, installOnLegacy, workspaces, companies: { companyOf: async () => A }, forget: vi.fn() };
 }
 
 describe("the tenant read", () => {
@@ -154,6 +154,16 @@ describe("switch on", () => {
     expect(presses[0]).toHaveBeenCalledTimes(1); expect(presses[1]).toHaveBeenCalledTimes(1);
     expect(await finish(finishEvent(INSTALL))).toBe("connected");
     expect(await finish(finishEvent(OTHER))).toBe("refused");
+  });
+
+  it("#1300: once the install's workspace is bound to a named company, its messages, presses and finishes take the company piece", async () => {
+    const { m, routers, presses } = makers();
+    const pieces = channelApiSlackPieces(m, wiring(async () => false));
+    const router = pieces.router(), press = pieces.presses(), finish = pieces.finish();
+    expect((await router(message(), { projectName: "p" })).body).toBe("router-1");
+    expect((await press(action(), {}))?.body).toBe("presses-1");
+    expect(await finish(finishEvent(INSTALL))).toBe("refused");
+    expect(routers[0]).not.toHaveBeenCalled(); expect(presses[0]).not.toHaveBeenCalled();
   });
 });
 

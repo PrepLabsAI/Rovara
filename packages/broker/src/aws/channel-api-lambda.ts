@@ -45,9 +45,13 @@ export function channelApiSlackCompany(env: NodeJS.ProcessEnv): SlackCompanyWiri
 }
 
 /** The finish's own split: only a finish naming exactly the install's team is today's; any other (or unreadable) team gets the company finish, which refuses. */
-export function splitChatGptFinishByTeam(legacy: Finish, company: Finish | undefined, legacyTeamId: string): Finish {
+export function splitChatGptFinishByTeam(legacy: Finish, company: Finish | undefined, legacyTeamId: string, installOnLegacy?: () => Promise<boolean>): Finish {
   if (company === undefined) return legacy;
-  return (event) => ((event as { teamId?: unknown }).teamId === legacyTeamId ? legacy : company)(event);
+  // #1300: the install's team keeps today's finish only while it is on the legacy path.
+  return async (event) => {
+    if ((event as { teamId?: unknown }).teamId !== legacyTeamId) return await company(event);
+    return await (installOnLegacy === undefined || await installOnLegacy() ? legacy : company)(event);
+  };
 }
 
 /** Each Slack piece, made once. Off (no wiring), each maker is called with no argument and its piece is returned as it is. */
@@ -57,9 +61,9 @@ export function channelApiSlackPieces(makers: ChannelApiSlackMakers, wiring: Sla
   const legacy: SlackCompanyDependencies = { slackInstallTeamOnly: wiring.legacyTeamId };
   const company: SlackCompanyDependencies = { workspaces: wiring.workspaces, ...(wiring.companies === undefined ? {} : { companies: wiring.companies }), onWorkspaceRemoved: (team) => wiring.forget(team) };
   return {
-    router: () => splitChannelSurfaceByTenant(makers.router(legacy), makers.router(company), wiring.legacyTeamId),
-    presses: () => splitChannelActionSurfaceByTenant(makers.presses(legacy), makers.presses(company), wiring.legacyTeamId),
-    finish: () => splitChatGptFinishByTeam(makers.finish(legacy), makers.finish(company), wiring.legacyTeamId),
+    router: () => splitChannelSurfaceByTenant(makers.router(legacy), makers.router(company), wiring.legacyTeamId, wiring.installOnLegacy),
+    presses: () => splitChannelActionSurfaceByTenant(makers.presses(legacy), makers.presses(company), wiring.legacyTeamId, wiring.installOnLegacy),
+    finish: () => splitChatGptFinishByTeam(makers.finish(legacy), makers.finish(company), wiring.legacyTeamId, wiring.installOnLegacy),
   };
 }
 

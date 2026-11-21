@@ -257,13 +257,13 @@ describe("DEC 254zzz98 (delta review H1): a named company's Slack thread never r
     w.db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `CONVERSATION#${conversationId}`, conversationId });
   }
 
-  async function refusedWithoutWrites(w: World, route: { method: string; path: string; body?: unknown }) {
+  async function refusedWithoutWrites(w: World, route: { method: string; path: string; body?: unknown }, message = "Slack channel is not bound to a project") {
     const before = structuredClone(w.db.find(() => true));
     let writes = 0;
     w.db.onWrite(() => { writes += 1; });
     const answer = await call(w.handler, { ...route, service });
     expect(answer.status, JSON.stringify(answer.body)).toBe(403);
-    expect(answer.body).toMatchObject({ error: { code: "FORBIDDEN", message: "Slack channel is not bound to a project" } });
+    expect(answer.body).toMatchObject({ error: { code: "FORBIDDEN", message } });
     expect(JSON.stringify(answer.body)).not.toMatch(/builtin|secret|built-in/);
     expect(w.db.find(() => true)).toEqual(before);
     expect(writes).toBe(0);
@@ -320,7 +320,9 @@ describe("DEC 254zzz98 (delta review H1): a named company's Slack thread never r
   it.each(["GET", "PUT"])("%s project model refuses the namesake before reading or writing selection", async (method) => {
     const w = await world({ installCompany: A });
     w.db.set(companyBinding(A)); w.db.set(foreignRevision());
-    await refusedWithoutWrites(w, { method, path: method === "GET" ? "/v1/service/project/models" : "/v1/service/project/model", ...(method === "PUT" ? { body: model } : {}) });
+    // #1300: the install's team, bound to a named company, is served by the company path, which refuses a model write from Slack as needing the web (still before any read or write).
+    await refusedWithoutWrites(w, { method, path: method === "GET" ? "/v1/service/project/models" : "/v1/service/project/model", ...(method === "PUT" ? { body: model } : {}) },
+      method === "PUT" ? "That needs a web sign-in. Open it in Rovara." : undefined);
   });
 
   it.each(["swebench", "batches"])("SWE-bench projectModel refuses the namesake through service %s", async (route) => {

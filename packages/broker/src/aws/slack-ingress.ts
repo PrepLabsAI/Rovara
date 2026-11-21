@@ -1697,7 +1697,7 @@ export function createAwsSlackHandlerFromEnvironment(env: NodeJS.ProcessEnv = pr
   // DEC 254zzz80 (R2-F1): the install team's company (its operator binding) picks where its channel bindings are read: a NAMED company's own partition, else the legacy keys.
   const legacy = make({ slackInstallTeamOnly: wiring.legacyTeamId, installTeamCompany: (team) => wiring.workspaces.requireCompany(team) });
   const company = make({ workspaces: wiring.workspaces, ...(wiring.companies === undefined ? {} : { companies: wiring.companies }), onWorkspaceRemoved: (team) => wiring.forget(team) });
-  return splitBySlackIngressTeam(legacy, company, wiring.legacyTeamId);
+  return splitBySlackIngressTeam(legacy, company, wiring.legacyTeamId, wiring.installOnLegacy);
 }
 
 export const handler = createAwsSlackHandlerFromEnvironment();
