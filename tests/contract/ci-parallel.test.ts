@@ -113,12 +113,13 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     expect(changed.run).toContain("xargs $AS_TESTER npm test -- --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
   });
 
-  // #1200: a pull request into mainline from this repository runs its shards on the account's CodeBuild runner (infra/lib/ci-runner.ts); a fork's and
-  // every other run use GitHub's free runner. The tests run as an ordinary account there, since CodeBuild runs the job as root.
-  it("runs the shards of a same-repository pull request into mainline on the CodeBuild runner, as an ordinary account, and everything else on GitHub's", async () => {
-    const test = (await workflow()).jobs.test as Job & { "runs-on"?: string };
-    // #1259: a merge-queue run is always this repository's, into mainline.
-    expect(test["runs-on"]).toBe("${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.base_ref == 'mainline' && github.event.pull_request.head.repo.full_name == github.repository)) && format('codebuild-rovara-ci-tests-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-latest' }}");
+  // #1200, #1278: the plan picks the runner (ci-plan.ts testRunner): an urgent same-repository pull request into mainline, or its merge-queue run, runs its
+  // shards on the account's CodeBuild runner (infra/lib/ci-runner.ts); every other run uses GitHub's free runner. The tests run as an ordinary account on
+  // CodeBuild, since it runs the job as root.
+  it("runs the shards on the CodeBuild runner only when the plan says so, as an ordinary account there, and everything else on GitHub's", async () => {
+    const test = (await workflow()).jobs.test as Job & { "runs-on"?: string; needs?: string[] };
+    expect(test.needs).toContain("plan");
+    expect(test["runs-on"]).toBe("${{ needs.plan.outputs.runner == 'codebuild' && format('codebuild-rovara-ci-tests-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-latest' }}");
     const order = test.steps.map((step) => step.name ?? step.uses ?? "");
     const asTester = test.steps.find((step) => step.name === "Run the tests as an ordinary account (CodeBuild only)")!;
     expect(order.indexOf(asTester.name!)).toBeGreaterThan(order.indexOf("Unpack the build output"));
@@ -161,6 +162,8 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
       CI_QUEUE_HEAD_REF: "${{ github.event.merge_group.head_ref }}",
       CI_REPOSITORY: "${{ github.repository }}",
       GH_TOKEN: "${{ github.token }}",
+      // #1278: a fork's pull request never runs on CodeBuild.
+      CI_SAME_REPO: "${{ github.event.pull_request.head.repo.full_name == github.repository }}",
       // #1259: the merge queue's base for a merge-queue run.
       CI_BASE_REF: "${{ github.base_ref || github.event.merge_group.base_ref }}",
       BASE_SHA: "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}",
@@ -170,9 +173,11 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     expect(step.run).toContain('node "$PLAN_SCRIPT"');
     // Untrusted text (the title) reaches the script through the environment, never spliced into the shell.
     expect(step.run).not.toContain("github.event.pull_request.title");
-    // #1262: reading statuses is all the plan widens its token for; it passes the reused run on.
-    expect(plan.permissions).toEqual({ contents: "read", statuses: "read" });
+    // #1262: reading statuses, and (#1278) a merge-queue run's pull request labels, is all the plan widens its token for; it passes the reused run
+    // and the test runner on.
+    expect(plan.permissions).toEqual({ contents: "read", statuses: "read", issues: "read", "pull-requests": "read" });
     expect((plan as Job & { outputs?: Record<string, string> }).outputs?.reuse_run).toBe("${{ steps.plan.outputs.reuse_run }}");
+    expect((plan as Job & { outputs?: Record<string, string> }).outputs?.runner).toBe("${{ steps.plan.outputs.runner }}");
   });
 
   it("runs the Linux runtime check on an ARM64 runner, behind the same Markdown-only skip as the other heavy jobs", async () => {
