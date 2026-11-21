@@ -5483,21 +5483,12 @@ const TASK_PATH_PREFIX = "/v1/dev/tasks/";
  * Lane E2: what this route answers for an id with no task behind it, said for a core task the caller may not see here. The same request is routed with a fresh id that has no rows (so
  * nothing of the core task is read), and the real id is put back in the answer: its input checks, wrong-method answer and words are exactly a missing task's.
  */
-async function answerAsMissing(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL, taskId: string, rest: string): Promise<unknown> {
-  const stand = randomUUID();
-  const swap = (text: string) => text.replaceAll(stand, taskId);
-  // Rebuilt from the parts the route matched (never a search for the id in the raw path, which may be percent-encoded): the stand-in path always names the stand-in id.
-  const path = `/v1/dev/tasks/${stand}${rest}${url.search}`;
-  const standUrl = new URL(path, url);
-  // The stand-in has no stamp, so this can never come back here; checked anyway, failing closed.
-  if (await ownerOfTaskId(deps, stand) !== "workflow") throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
-  try {
-    const value = await routeDeveloperTaskRequest(deps, caller, { ...request, path, ...(request.body === undefined ? {} : { body: request.body.replaceAll(taskId, stand) }) }, standUrl);
-    return JSON.parse(swap(JSON.stringify(value ?? null))) as unknown;
-  } catch (error) {
-    if (error instanceof Error) error.message = swap(error.message);
-    throw error;
-  }
+/**
+ * A missing task's answer, the same for every task route: TASK_NOT_FOUND in the words loadOwnedTask uses (a malformed ID is never echoed back). A task the core does
+ * not show this caller and a task the retired spec 056 workflow started both answer with it, so neither can be told from a task that does not exist.
+ */
+function answerAsMissing(taskId: string): never {
+  throw agentXError("TASK_NOT_FOUND", TASK_ID.test(taskId) ? `no task ${taskId} of yours` : "that is not a task ID of yours");
 }
 
 
@@ -5538,9 +5529,9 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
     // A method the route table has no row for is not a route here either (developer-routes.ts refuses it before sign-in; this keeps the router's own answer the same).
     if (!TASK_ROUTE_PATTERNS.some((pattern) => pattern.test(url.pathname)) || devRouteOf(request.method, url.pathname) === undefined) throw agentXError("NOT_FOUND", "route not found");
     const entryTaskId = safeDecode(entry[1]);
-    if (await ownerOfTaskId(deps, entryTaskId, TASK_ENTRY_AREAS[operation]) === "core") return serveCoreTask(deps.coreTasks, request, caller, entryTaskId, () => answerAsMissing(deps, caller, request, url, entryTaskId, entry[2]));
+    if (await ownerOfTaskId(deps, entryTaskId, TASK_ENTRY_AREAS[operation]) === "core") return serveCoreTask(deps.coreTasks, request, caller, entryTaskId, () => Promise.resolve(answerAsMissing(entryTaskId)));
     // A task the retired spec 056 workflow started has no reader any more: it answers exactly like a missing task.
-    return answerAsMissing(deps, caller, request, url, entryTaskId, entry[2]);
+    return answerAsMissing(entryTaskId);
   }
   const route = /^\/v1\/dev\/tasks\/([^/]+)\/merge$/.exec(url.pathname);
   const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
