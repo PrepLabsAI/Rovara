@@ -2,6 +2,7 @@
 // `sealedDnsHelperRunArgs`). Loading the whole `@agentx/contracts` barrel takes about 210 MB of RSS, and on linux-runtime (CI 41791561884) the sealed helper was OOM-killed (exit 137, oom=true) before it
 // bound .2:53, so every sealed lookup failed. The helpers' modules therefore import only node built-ins, each other, and the small `@agentx/contracts/dns-helper` entry, which loads about 55 MB.
 // The limit stays: the helper sits on a network an untrusted program can reach. These tests pin what the helpers load, measure the contracts part, and pin the limit.
+// vitest: fresh-modules (it measures this process's memory, which a shared worker's module graph would inflate.)
 import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";

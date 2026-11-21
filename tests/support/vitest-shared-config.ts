@@ -55,6 +55,11 @@ export const postDeployFiles = [
 // other helpers), need a fresh module graph: with shared modules an earlier file has already loaded the real module, so the mock would not take effect, and a
 // mock a file sets up would stay for the files after it. They run in the "fresh-modules" project (vitest.config.ts); every other file runs in "shared-modules",
 // where one worker loads each module once for all its files. Found from the files' own source, so a new file is placed without a list to edit.
+// The files that time work against itself (tests/support/scaling.ts: N against 8N) also keep a fresh worker: a heap that holds every module the worker has
+// loaded makes garbage collection pauses longer, and a pause in the 8N run reads as work that grew faster than linear.
+const TIMING_HELPER = "tests/support/scaling.ts";
+// A file can also ask for one itself, with this comment line, when what it tests is how modules load or it reads state no other rule here finds.
+const ASKS_FOR_FRESH_MODULES = /^\/\/ vitest: fresh-modules\b/mu;
 const MOCKS_MODULES = /\bvi\.(?:mock|doMock|unmock|importMock|resetModules)\(/;
 const LOCAL_IMPORT = /\bfrom\s+["'](\.{1,2}\/[^"']+)["']|\bimport\s*\(\s*["'](\.{1,2}\/[^"']+)["']\s*\)/g;
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -91,10 +96,32 @@ function moduleMockingTestFiles(): string[] {
     }
   }
   return ["tests", "packages"].flatMap((directory) => filesUnder(directory, (name) => name.endsWith(".test.ts")))
-    .filter((file) => MOCKS_MODULES.test(sourceOf(file)) || localImports(file).some((path) => mocking.has(path)))
+    .filter((file) => MOCKS_MODULES.test(sourceOf(file)) || ASKS_FOR_FRESH_MODULES.test(sourceOf(file)) || localImports(file).some((path) => mocking.has(path) || path === TIMING_HELPER))
     .sort();
 }
 export const moduleMockingFiles = moduleMockingTestFiles();
+
+// A worker that shares modules keeps every module its files load, so one group for every shared file grew a worker past CI's heap. The shared files are
+// split into groups by the package they load (vitest gives each group its own workers and stops them when the group ends), so each worker holds only its
+// group's modules. A file goes to the first group below whose package it imports; the broker's files split further by area (the start of the file name).
+const PACKAGE_IMPORT = /(?:packages\/|@agentx\/)([a-z0-9-]+)/gu;
+const BROKER_WORKFLOWS_AND_SLACK = /^(?:e2e|workflow|test|task|plan|loop|design|change|action|ticket|rule|mutation|review|fix|spec|pull|evidence|baseline|stage|slack|channel|github|hosted|gateway|connector|signin|chatgpt|web|device|linear|access)-/u;
+function sharedGroupOf(file: string): string {
+  const packages = new Set([...sourceOf(file).matchAll(PACKAGE_IMPORT)].map((match) => match[1]!));
+  const own = /^packages\/([^/]+)\//u.exec(file)?.[1];
+  if (own) packages.add(own);
+  if (packages.has("broker")) return BROKER_WORKFLOWS_AND_SLACK.test(posix.basename(file)) ? "broker-workflows-and-slack" : "broker-core";
+  if (["worker", "model-runtime", "verifier", "mcp", "orchestrator"].some((name) => packages.has(name))) return "worker";
+  if (["cli", "aws-adapters", "local-adapters", "gateway", "slack-service"].some((name) => packages.has(name))) return "cli-and-install";
+  return "contracts-and-tools";
+}
+export const sharedGroupNames = ["broker-core", "broker-workflows-and-slack", "worker", "cli-and-install", "contracts-and-tools"] as const;
+const mockingSet = new Set(moduleMockingFiles);
+/** Each shared group's test files (every test file that is not in moduleMockingFiles lands in exactly one). */
+export const sharedModuleGroups: Record<(typeof sharedGroupNames)[number], string[]> = Object.fromEntries(sharedGroupNames.map((name) => [name, [] as string[]])) as never;
+for (const file of ["tests", "packages"].flatMap((directory) => filesUnder(directory, (name) => name.endsWith(".test.ts"))).sort()) {
+  if (!mockingSet.has(file)) sharedModuleGroups[sharedGroupOf(file) as (typeof sharedGroupNames)[number]].push(file);
+}
 
 export const sharedVitestSettings = {
   coverage: { enabled: false },

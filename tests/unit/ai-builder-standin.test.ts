@@ -2,6 +2,7 @@
 // Real here: the git repository, the project's own eval command (a child process), the plan, the metered stage, the egress route check, the baseline measurement, the question-level comparison, the
 // changed-prompt classifier, the broker's eval-round reader, the evidence pack and the pull request description. Stand-ins: the model (a local stub), the money (a scripted meter), the sandbox (a checkout).
 // Tests named "KNOWN GAP" pin what Rovara does TODAY (G1, the Vertex-shaped client, was closed by L4-EVV: see the Vertex describe below) where a customer would expect more; each is listed in briefs/lead4/L4-VX-SCOPE.md. When a gap is closed, its test is changed on purpose.
+// vitest: fresh-modules (in some shuffled orders of the whole suite its check makes one extra eval run, 50 model calls and not 40, even in a process of its own; kept out of the shared workers until that is traced.)
 import { randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
