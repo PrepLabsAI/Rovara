@@ -6,6 +6,7 @@ import { githubWorkflowPullRequestKey, type GithubWorkflowPullRequestRecord } fr
 import { parseGitHubRepository, type GitHubPullRequestFeedback } from "../github-app.js";
 import { verifyGithubWebhookSignature } from "../plugins/code-host/github/signature.js";
 import { isConditional } from "./broker-shared.js";
+import { readTaskStamp, type EngineStateTable } from "./engine-boundary.js";
 import { boundedCompanyReads, recordInCompany } from "./company-check.js";
 import { feedbackReopenedMeasure, type FeedbackReviewMeasure } from "../developer/feedback-review-measures.js";
 
@@ -118,6 +119,14 @@ export async function findLinkedGithubWorkflowPullRequest(input: {
   return item as unknown as GithubWorkflowPullRequestRecord;
 }
 
+/** The legacy path never owns a core task. Stamp read/validation errors propagate before any feedback write. */
+async function legacyGithubWorkflowOwnsTask(table: EngineStateTable, taskId: string): Promise<boolean> {
+  if ((await readTaskStamp(table, taskId))?.engine !== "core") return true;
+  // Aggregate only: no task, repository, company or comment content crosses into the log.
+  console.log(JSON.stringify({ component: "broker", event: "github_webhook.core_task_skipped" }));
+  return false;
+}
+
 /** Requires the PR index, live workflow snapshot, pinned project repo and GitHub App identity to agree. */
 export async function authorizeLinkedGithubWebhook(input: {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -140,6 +149,7 @@ export async function authorizeLinkedGithubWebhook(input: {
     number: input.scope.pullRequestNumber,
   });
   if (linked === undefined) return false;
+  if (!await legacyGithubWorkflowOwnsTask(input, linked.taskId)) return false;
   const task = await input.loadTask(linked.taskId);
   const workflow = task?.workflow;
   if (task === undefined || workflow === undefined || !tracksLinkedPullRequests(workflow)
@@ -209,6 +219,7 @@ export const GITHUB_HEAD_LAG_WINDOW_MS = 10 * 60_000;
 export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullRequestFeedbackInput): Promise<boolean> {
   const linked = await findLinkedGithubWorkflowPullRequest(input);
   if (!linked) throw new GithubWebhookRefusal("GitHub pull request is not linked to an AgentX workflow");
+  if (!await legacyGithubWorkflowOwnsTask(input, linked.taskId)) return false;
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const task = await input.loadTask(linked.taskId);
     const current = task?.workflow;

@@ -21,7 +21,7 @@
   "packages/broker/src/aws/eval-batch-tick.ts": 1,
   "packages/broker/src/aws/eval-batch.ts": 1,
   "packages/broker/src/aws/failed-preparation.ts": 1,
-  "packages/broker/src/aws/github-webhooks.ts": 1,
+  "packages/broker/src/aws/github-webhooks.ts": 2,
   "packages/broker/src/aws/operation-events.ts": 1,
   "packages/broker/src/aws/outbox-failure.ts": 3,
   "packages/broker/src/aws/outbox-publisher.ts": 2,
