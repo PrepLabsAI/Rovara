@@ -3,6 +3,9 @@ import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { CI_RUNNER_PROJECT, CiRunnerStack } from "../../infra/lib/ci-runner.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
 
 // #1200: CI's CodeBuild-hosted runner for the test shards of pull requests into mainline, an opt-in stack apart from the production app.
 type Resource = { Properties: Record<string, unknown> };

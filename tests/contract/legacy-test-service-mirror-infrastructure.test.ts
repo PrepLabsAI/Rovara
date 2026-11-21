@@ -2,6 +2,9 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { testServiceMirrorRepositories } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { TEST_SERVICE_MIRROR_READ_ACTIONS, TEST_SERVICE_MIRROR_READ_SID } from "../../infra/lib/test-service-mirror.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
 
 // #1159: production (the legacy template) holds its own copies of the test-service starter images, as a named environment does: the five ECR repositories under
 // agentx-production--test-services/, in AgentXProductionFoundation (where the worker role lives), and the worker role's read of exactly those. The worker's boot stage reads the
