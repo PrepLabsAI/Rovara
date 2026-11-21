@@ -107,7 +107,7 @@ Add one entry to the Log and set M1.1 to done, with: the deployed commit SHA; bo
 | Pull request | draft https://github.com/abhishek255/rovara-orders-web-fixture/pull/1, CI green |
 
 Pass criteria from the plan:
-- At least one browser scenario FAILED on a real candidate before a repair: **not exercised live** (the agent's first CSV export passed its browser scenarios). The repair loop was exercised live through the security review (two send-backs, each re-running the browser round). The browser FAILED → send-back → PASS path is covered by `tests/e2e/m1-web-journey.test.ts` in CI `linux-runtime`.
+- At least one browser scenario FAILED on a real candidate before a repair: **not exercised live** (the agent's first CSV export passed its browser scenarios). The repair loop was exercised live through the security review (two send-backs, each re-running the browser round). The browser FAILED → send-back → PASS path is covered by `tests/e2e/m1-web-journey.test.ts` in CI `linux-runtime`. (Note 2026-11-21: tests/e2e/m1-web-journey.test.ts and m1-3-journeys.test.ts were deleted with the retired spec 056 engine, DEC 254zzz309; their replacement is the CORE-BROWSER-JOURNEYS lane.)
 - PASS on the repaired candidate: yes (three verified rounds).
 - Draft PR in `rovara-orders-web-fixture` with green CI: yes.
 - Rovara page shows the scenario results: task page shows the qualified round.
