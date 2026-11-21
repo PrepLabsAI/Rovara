@@ -335,7 +335,8 @@ export function planOutputs(plan: Plan): Record<string, string> {
 export const QUEUE_STATUS_CONTEXT = "ci/local";
 export const QUEUE_STATUS_CREATOR = "github-actions[bot]";
 const SHA = /^[0-9a-f]{40}$/u;
-const QUEUE_HEAD_REF = /^refs\/heads\/gh-readonly-queue\/mainline\/pr-([1-9][0-9]{0,8})-[0-9a-f]{40}$/u;
+// #1295: the queues of mainline and code/next.
+const QUEUE_HEAD_REF = /^refs\/heads\/gh-readonly-queue\/(?:mainline|code\/next)\/pr-([1-9][0-9]{0,8})-[0-9a-f]{40}$/u;
 
 export interface QueueStatus { id?: number; context?: string; state?: string; target_url?: string | null; creator?: { login?: string } | null }
 export interface QueueReuseInput {
@@ -351,7 +352,7 @@ export interface QueueReuseInput {
 }
 export type QueueReuse = { reused: true; pullRequest: number; mergeCommit: string; runUrl: string } | { reused: false; reason: string };
 
-/** The pull request a merge-queue branch holds, from merge_group.head_ref; undefined when it is not the queue's branch for mainline. */
+/** The pull request a merge-queue branch holds, from merge_group.head_ref; undefined when it is not the queue's branch for mainline or code/next. */
 export function queuePullRequest(headRef: string): number | undefined {
   const match = QUEUE_HEAD_REF.exec(headRef);
   return match === null ? undefined : Number(match[1]);
