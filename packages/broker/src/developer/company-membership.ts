@@ -51,7 +51,7 @@ type Write = NonNullable<TransactWriteCommandInput["TransactItems"]>[number];
  * then holds it), and the successor, who must be a live member of the same company (any role) at the moment the removal commits.
  */
 export interface RemovalFence { expectedRole?: Member["role"]; successorId?: string }
-export type CompanyJoin = { ok: true; membership: Member; viaPreapproval?: true } | { ok: false; reason: "not_invited" | "member_elsewhere" | "member_revoked"; attributedCompanyId?: string };
+export type CompanyJoin = { ok: true; membership: Member; viaPreapproval?: true } | { ok: false; reason: "not_invited" | "member_elsewhere" | "member_revoked" | "invite_email_mismatch" | "invite_email_unverified"; attributedCompanyId?: string };
 const refused = (): CompanyJoin => ({ ok: false, reason: "not_invited" });
 const unavailable = () => new Error("company sign-in unavailable");
 const conditional = (error: unknown) => error instanceof Error && (error.name === "ConditionalCheckFailedException" || error.name === "TransactionCanceledException");
@@ -128,36 +128,35 @@ export class CompanySignInStore {
     } catch { return refused(); }
   }
   /**
-   * DEC 254h: join by an invite link's secret, whatever the sign-in method and whether or not the identity has an email. The secret must be live,
+   * DEC 254h / DEC 254zzz218: join by an invite link's secret only when this sign-in's provider-verified email matches its binding. Every current or future sign-in method must pass its current provider-verified email through this guard before redeeming an invite. Missing verified email refuses a new membership; request fields and saved profile emails are not proof. The secret must be live,
    * unexpired and stored under exactly this company, and its pre-approval still live and the very one it was made with. One transaction writes
-   * the membership and spends both, so exactly one person ever joins by one secret. Every failure is the one "not invited" answer; a person who
+   * the membership and spends both, so exactly one person ever joins by one secret. Only email proof failures get specific guidance; a person who
    * is already a member anywhere spends nothing. A live member of this very company is signed in as before whatever `invite=` says (the secret is
    * then neither checked nor spent, and the sign-in is not "joined by invite"): an admitted sign-in never means a secret was valid.
    */
-  async joinByInvite(input: { personId: string; companyId: string; inviteHash: string }): Promise<CompanyJoin> {
+  async joinByInvite(input: { personId: string; companyId: string; inviteHash: string; verifiedEmail?: string }): Promise<CompanyJoin> {
     if (!CompanyPersonId.safeParse(input.personId).success || !OrgIdSchema.safeParse(input.companyId).success || !/^[a-f0-9]{64}$/.test(input.inviteHash)) return refused();
     try {
       const existing = await this.membership(input.personId);
       if (existing !== undefined) return this.memberResult(existing, input.companyId);
       if (!await this.companyExists(input.companyId)) return refused();
       const linkKey = inviteLinkKey(input.companyId, input.inviteHash);
-      const stored = await this.read(linkKey) as Record<string, unknown> | undefined;
-      const { pk: storedPk, sk: storedSk, ...fields } = stored ?? {};
-      const link = storedPk === linkKey.pk && storedSk === linkKey.sk ? CompanyInviteLink.safeParse(fields) : undefined;
+      const link = await this.liveInviteLink(input.companyId, linkKey);
       if (link === undefined) return refused();
-      if (!link.success || link.data.companyId !== input.companyId || link.data.status !== "live" || link.data.expiresAt <= this.seconds()) return refused();
-      const approvalKey = preapprovalHashKey(input.companyId, link.data.emailHash);
+      const approvalKey = preapprovalHashKey(input.companyId, link.emailHash);
       const approval = CompanyPreapproval.safeParse(await this.read(approvalKey));
       if (!approval.success || approval.data.status !== "live" || approval.data.expiresAt <= this.seconds() || approval.data.inviteHash !== input.inviteHash) return refused();
+      if (input.verifiedEmail === undefined || !CompanyEmail.safeParse(input.verifiedEmail).success) return { ok: false, reason: "invite_email_unverified" };
+      if (emailIndexKey(CompanyEmail.parse(input.verifiedEmail)).pk.slice(6) !== link.emailHash) return { ok: false, reason: "invite_email_mismatch" };
       const at = this.iso();
       const member: Member = { entityType: "COMPANY_MEMBERSHIP", personId: input.personId, companyId: input.companyId, role: approval.data.role, joinedAt: at, joinedVia: "preapproval" };
       const writes: Write[] = [
         { Put: { TableName: this.input.tableName, Item: { ...membershipKey(input.personId), ...member }, ConditionExpression: "attribute_not_exists(pk)" } },
         this.memberMirror(member),
         { Update: { TableName: this.input.tableName, Key: linkKey, UpdateExpression: "SET #status = :used, usedBy = :person, usedAt = :at",
-          ConditionExpression: "#status = :live AND expiresAt > :now AND companyId = :company AND createdAt = :created",
+          ConditionExpression: "#status = :live AND expiresAt > :now AND companyId = :company AND createdAt = :created AND emailHash = :emailHash",
           ExpressionAttributeNames: { "#status": "status" },
-          ExpressionAttributeValues: { ":used": "used", ":person": input.personId, ":at": at, ":live": "live", ":now": this.seconds(), ":company": input.companyId, ":created": link.data.createdAt } } },
+          ExpressionAttributeValues: { ":used": "used", ":person": input.personId, ":at": at, ":live": "live", ":now": this.seconds(), ":company": input.companyId, ":created": link.createdAt, ":emailHash": link.emailHash } } },
         { Update: { TableName: this.input.tableName, Key: approvalKey, UpdateExpression: "SET #status = :used, usedBy = :person, usedAt = :at",
           ConditionExpression: "#status = :live AND expiresAt > :now AND expiresAt = :expires AND #role = :role AND createdAt = :created AND inviteHash = :hash",
           ExpressionAttributeNames: { "#status": "status", "#role": "role" },
@@ -172,6 +171,15 @@ export class CompanySignInStore {
       }
       return { ok: true, membership: member, viaPreapproval: true };
     } catch { return refused(); }
+  }
+  /** Validate the exact company and secret row before using its email binding. */
+  private async liveInviteLink(companyId: string, key: { pk: string; sk: string }): Promise<z.infer<typeof CompanyInviteLink> | undefined> {
+    const stored = await this.read(key) as Record<string, unknown> | undefined;
+    const { pk, sk, ...fields } = stored ?? {};
+    if (pk !== key.pk || sk !== key.sk) return undefined;
+    const link = CompanyInviteLink.safeParse(fields);
+    if (!link.success || link.data.companyId !== companyId || link.data.status !== "live" || link.data.expiresAt <= this.seconds()) return undefined;
+    return link.data;
   }
   /** Every mutation and its durable log commit together. Logs contain only fixed events and opaque ids. */
   async operatorWrite(companyId: string, event: string, writes: Write[], personId?: string, memberAudit?: { createdBy: string; createdAt: string; fromRole: Member["role"]; toRole: Member["role"]; ownerOverride?: true; successorId?: string }): Promise<void> {

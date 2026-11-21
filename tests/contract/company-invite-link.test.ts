@@ -36,31 +36,82 @@ const linkRow = (w: SharedSignInWorld, company: string, secret: string) => { con
 const memberOf = (w: SharedSignInWorld, id: string) => w.db.get(membershipKey(id).pk, membershipKey(id).sk);
 
 describe("invite link secret (DEC 254h)", () => {
-  it("the pre-approval route answers a secret once; a person from another Slack workspace joins with it and spends it and its pre-approval", async () => {
+  it("the pre-approval route binds a secret to the verified email and spends it once", async () => {
     const { w, owner } = await ready();
-    const invite = await mint(w, owner, "someone@example.test");
+    const invite = await mint(w, owner, "carol@example.test");
     expect(invite.secret.startsWith(COMPANY_INVITE_LINK_PREFIX)).toBe(true);
     expect(invite.secret.length).toBeGreaterThanOrEqual(COMPANY_INVITE_LINK_PREFIX.length + 32);
-    const approval = w.db.get(companyScoped(X, "PREAPPROVAL"), emailIndexKey("someone@example.test").pk)!;
+    const approval = w.db.get(companyScoped(X, "PREAPPROVAL"), emailIndexKey("carol@example.test").pk)!;
     expect(new Date(invite.expiresAt).getTime()).toBe((approval.expiresAt as number) * 1000);
     expect(linkRow(w, X, invite.secret)).toMatchObject({ entityType: "COMPANY_INVITE_LINK", companyId: X, status: "live", expiresAt: approval.expiresAt, createdAt: approval.createdAt, createdBy: person("owner") });
     expect(approval.inviteHash).toBe(companyInviteCodeHash(invite.secret));
     // Another invitation answers another secret.
     expect((await mint(w, owner, "other@example.test")).secret).not.toBe(invite.secret);
 
-    const joined = await w.signIn("U0INVITE1", { slackTeam: OTHER, company: X, invite: invite.secret });
+    const joined = await w.signIn("carol", { company: X, invite: invite.secret });
     expect(joined.refused).toBeUndefined();
-    const id = slackId(`${OTHER}:U0INVITE1`);
+    const id = person("carol");
     expect((await w.access(joined.access)).body).toMatchObject({ developerId: id, companyId: X, companyRole: "member", joinedByInvite: true });
     expect(memberOf(w, id)).toMatchObject({ companyId: X, role: "member", joinedVia: "preapproval" });
     expect(linkRow(w, X, invite.secret)).toMatchObject({ status: "used", usedBy: id, usedAt: expect.any(String) as unknown });
-    expect(w.db.get(companyScoped(X, "PREAPPROVAL"), emailIndexKey("someone@example.test").pk)).toMatchObject({ status: "used", usedBy: id });
+    expect(w.db.get(companyScoped(X, "PREAPPROVAL"), emailIndexKey("carol@example.test").pk)).toMatchObject({ status: "used", usedBy: id });
     // Used: nobody else gets in with it, and the answer is the same as for a secret that never existed.
-    const again = await w.signIn("U0INVITE2", { slackTeam: OTHER, company: X, invite: invite.secret });
-    const unknown = await w.signIn("U0INVITE2", { slackTeam: OTHER, company: X, invite: `${COMPANY_INVITE_LINK_PREFIX}${"A".repeat(32)}` });
+    const again = await w.signIn("dana", { company: X, invite: invite.secret });
+    const unknown = await w.signIn("dana", { company: X, invite: `${COMPANY_INVITE_LINK_PREFIX}${"A".repeat(32)}` });
     expect(again.refused).toBe(NOT_INVITED);
     expect(unknown.refused).toBe(NOT_INVITED);
-    expect(memberOf(w, slackId(`${OTHER}:U0INVITE2`))).toBeUndefined();
+    expect(memberOf(w, person("dana"))).toBeUndefined();
+  });
+
+  it("a mismatch and an identity without verified email are refused without spending the invite", async () => {
+    const { w, owner } = await ready();
+    const invite = await mint(w, owner, "carol@example.test");
+    const mismatch = await w.signIn("dana", { company: X, invite: invite.secret });
+    expect(mismatch.refused).toBe("This invite is for another email");
+    const missing = await w.signIn("noemail", { company: X, invite: invite.secret });
+    expect(missing.refused).toBe("This sign-in has no verified email. Sign in with the invited email.");
+    expect(memberOf(w, person("dana"))).toBeUndefined();
+    expect(memberOf(w, person("noemail"))).toBeUndefined();
+    expect(linkRow(w, X, invite.secret)).toMatchObject({ status: "live" });
+    expect(w.db.get(companyScoped(X, "PREAPPROVAL"), emailIndexKey("carol@example.test").pk)).toMatchObject({ status: "live" });
+    expect(w.logs).toContainEqual(expect.objectContaining({ event: "signin.refused", reason: "invite_email_mismatch" }));
+    expect(w.logs).toContainEqual(expect.objectContaining({ event: "signin.refused", reason: "invite_email_unverified" }));
+    expect(JSON.stringify(w.logs)).not.toContain("carol@example.test");
+    const matching = await w.signIn("carol", { company: X, invite: invite.secret });
+    expect((await w.access(matching.access)).body).toMatchObject({ companyId: X, companyRole: "member", joinedByInvite: true });
+  });
+
+  it("two companies: a secret for X never admits into B, even with company=B, and B's never into X", async () => {
+    const { w, owner } = await ready();
+    const forX = await mint(w, owner, "carol@example.test");
+    // bob is B's first admin (email pre-approval); he mints B's own secret.
+    const bob = await w.signIn("bob", { company: B });
+    expect((await w.access(bob.access)).body).toMatchObject({ companyId: B, companyRole: "admin" });
+    const forB = await mint(w, bob.access!, "dana@example.test");
+    expect((await w.signIn("noemail", { company: B, invite: forX.secret })).refused).toBe(NOT_INVITED);
+    expect((await w.signIn("U0INVITE1", { slackTeam: OTHER, company: X, invite: forB.secret })).refused).toBe(NOT_INVITED);
+    expect(memberOf(w, person("noemail"))).toBeUndefined();
+    expect(linkRow(w, X, forX.secret)).toMatchObject({ status: "live" });
+    expect(linkRow(w, B, forB.secret)).toMatchObject({ status: "live" });
+    // The store itself looks a secret up only under the company asked for.
+    expect(await w.company.joinByInvite({ personId: person("noemail"), companyId: B, inviteHash: companyInviteCodeHash(forX.secret) })).toEqual({ ok: false, reason: "not_invited" });
+    // Each still works for its own company.
+    expect((await w.access((await w.signIn("carol", { company: X, invite: forX.secret })).access)).body).toMatchObject({ companyId: X });
+    expect((await w.access((await w.signIn("dana", { company: B, invite: forB.secret })).access)).body).toMatchObject({ companyId: B });
+  });
+
+  it("a mismatching identity racing the eligible person cannot win", async () => {
+    const { w, owner } = await ready();
+    const invite = await mint(w, owner, "carol@example.test");
+    const results = await Promise.all([
+      w.signIn("dana", { company: X, invite: invite.secret }),
+      w.signIn("carol", { company: X, invite: invite.secret }),
+    ]);
+    expect(results.filter((result) => result.refused === undefined)).toHaveLength(1);
+    expect(["This invite is for another email", NOT_INVITED]).toContain(results.find((result) => result.refused !== undefined)?.refused);
+    expect(memberOf(w, person("dana"))).toBeUndefined();
+    expect(memberOf(w, person("carol"))).toMatchObject({ companyId: X });
+    expect(linkRow(w, X, invite.secret)).toMatchObject({ status: "used", usedBy: person("carol") });
   });
 
   it("refuses a pending invite whose current link is bound to a different email hash", async () => {
@@ -79,26 +130,64 @@ describe("invite link secret (DEC 254h)", () => {
     const { w, owner } = await ready();
     const invite = await mint(w, owner, "race@example.test");
     const hash = companyInviteCodeHash(invite.secret);
-    const both = await Promise.all([person("erin"), person("frank")].map((personId) => w.company.joinByInvite({ personId, companyId: X, inviteHash: hash })));
+    const both = await Promise.all([person("erin"), person("frank")].map((personId) => w.company.joinByInvite({ personId, companyId: X, inviteHash: hash, verifiedEmail: "race@example.test" })));
     expect(both.filter((result) => result.ok)).toHaveLength(1);
     expect(both.filter((result) => result.ok && result.viaPreapproval === true)).toHaveLength(1);
     expect([memberOf(w, person("erin")), memberOf(w, person("frank"))].filter((row) => row !== undefined)).toHaveLength(1);
   });
 
+  it("uses the invite store's trim and lowercase normalization for the binding", async () => {
+    const { w, owner } = await ready();
+    const invite = await mint(w, owner, "\u00a0Alice@Example.test\u2003");
+    const result = await w.company.joinByInvite({ personId: person("erin"), companyId: X, inviteHash: companyInviteCodeHash(invite.secret), verifiedEmail: " \tALICE@Example.test \u2003" });
+    expect(result).toMatchObject({ ok: true, viaPreapproval: true });
+    expect(linkRow(w, X, invite.secret)).toMatchObject({ status: "used", usedBy: person("erin") });
+  });
+
+  // CompanyEmail rejects non-ASCII/unparsable addresses before emailIndexKey trims and lowercases
+  // the whole address (local part AND domain). It performs no alias, dot, NFC or NFKC folding.
+  it.each([
+    { name: "plus tag", invited: "ana@example.test", lookalike: "ana+x@example.test", reason: "invite_email_mismatch" },
+    { name: "local-part dot on a non-Gmail domain", invited: "ana@example.test", lookalike: "a.na@example.test", reason: "invite_email_mismatch" },
+    { name: "trailing domain dot", invited: "ana@example.test", lookalike: "ana@example.test.", reason: "invite_email_unverified" },
+    { name: "Kelvin sign", invited: "kate@example.test", lookalike: "\u212Aate@example.test", reason: "invite_email_unverified" },
+    { name: "fullwidth compatibility character", invited: "kate@example.test", lookalike: "\uFF4Bate@example.test", reason: "invite_email_unverified" },
+    { name: "NFD decomposed accent", invited: "jose@example.test", lookalike: "jose\u0301@example.test", reason: "invite_email_unverified" },
+    { name: "NFC composed accent", invited: "jose@example.test", lookalike: "jos\u00E9@example.test", reason: "invite_email_unverified" },
+  ])("refuses $name without folding it into the invited email", async ({ invited, lookalike, reason }) => {
+    const { w, owner } = await ready();
+    const invite = await mint(w, owner, invited);
+    const personId = person("erin");
+    const proof = { personId, companyId: X, inviteHash: companyInviteCodeHash(invite.secret) };
+    const approvalPk = companyScoped(X, "PREAPPROVAL");
+    const approvalSk = emailIndexKey(invited).pk;
+    const sent = w.db.commandNames().length;
+    expect(await w.company.joinByInvite({ ...proof, verifiedEmail: lookalike })).toEqual({ ok: false, reason });
+    expect(w.db.commandNames().slice(sent)).not.toContain("TransactWriteCommand");
+    expect(memberOf(w, personId)).toBeUndefined();
+    expect(linkRow(w, X, invite.secret)).toMatchObject({ status: "live" });
+    expect(w.db.get(approvalPk, approvalSk)).toMatchObject({ status: "live" });
+    // Only the canonical mailbox, with the existing trim/lowercase normalization, can spend it.
+    expect(await w.company.joinByInvite({ ...proof, verifiedEmail: ` \t${invited.toUpperCase()} \u2003` })).toMatchObject({ ok: true, viaPreapproval: true });
+    expect(memberOf(w, personId)).toMatchObject({ companyId: X, joinedVia: "preapproval" });
+    expect(linkRow(w, X, invite.secret)).toMatchObject({ status: "used", usedBy: personId });
+    expect(w.db.get(approvalPk, approvalSk)).toMatchObject({ status: "used", usedBy: personId });
+  });
+
   it("expired, withdrawn and replaced: each is the same refusal and admits nobody", async () => {
     const { w, owner } = await ready();
     const short = await mint(w, owner, "short@example.test", 1);
-    const withdrawn = await mint(w, owner, "gone@example.test");
-    expect((await w.call("DELETE", `${PATH}/${emailIndexKey("gone@example.test").pk.slice(6)}`, owner)).status).toBe(200);
+    const withdrawn = await mint(w, owner, "carol@example.test");
+    expect((await w.call("DELETE", `${PATH}/${emailIndexKey("carol@example.test").pk.slice(6)}`, owner)).status).toBe(200);
     expect(linkRow(w, X, withdrawn.secret)).toMatchObject({ status: "withdrawn" });
     // Withdrawn, then the same email invited again: the old secret stays dead, the new one works.
-    const replaced = await mint(w, owner, "gone@example.test");
+    const replaced = await mint(w, owner, "carol@example.test");
     expect((await w.signIn("noemail", { company: X, invite: withdrawn.secret })).refused).toBe(NOT_INVITED);
     w.tick(3_600_001);
     expect((await w.signIn("U0INVITE1", { slackTeam: OTHER, company: X, invite: short.secret })).refused).toBe(NOT_INVITED);
     expect(memberOf(w, person("noemail"))).toBeUndefined();
     expect(memberOf(w, slackId(`${OTHER}:U0INVITE1`))).toBeUndefined();
-    expect((await w.access((await w.signIn("noemail", { company: X, invite: replaced.secret })).access)).body).toMatchObject({ companyId: X, joinedByInvite: true });
+    expect((await w.access((await w.signIn("carol", { company: X, invite: replaced.secret })).access)).body).toMatchObject({ companyId: X, joinedByInvite: true });
   });
 
   it("authorize refuses a secret with no company, too long, or from a company-bound client, before anything is stored", async () => {
@@ -122,7 +211,7 @@ describe("invite link secret (DEC 254h)", () => {
 
   it("a refused secret attempts no write at all: used, expired, withdrawn, replaced, or a row naming another company", async () => {
     const { w, owner } = await ready();
-    const used = await mint(w, owner, "used@example.test");
+    const used = await mint(w, owner, "erin@example.test");
     await w.signIn("erin", { company: X, invite: used.secret });
     const withdrawn = await mint(w, owner, "gone@example.test");
     await w.call("DELETE", `${PATH}/${emailIndexKey("gone@example.test").pk.slice(6)}`, owner);
@@ -148,10 +237,10 @@ describe("invite link secret (DEC 254h)", () => {
     const live = await mint(w, owner, "live@example.test");
     w.db.set({ ...membershipKey(person("bob")), entityType: "COMPANY_MEMBERSHIP", personId: person("bob"), companyId: B, role: "member", joinedAt: "2026-01-01T00:00:00.000Z" });
     w.tick(3_600_001);
-    const cases = [[used.secret, X, "frank"], [withdrawn.secret, X, "frank"], [replaced.secret, X, "frank"], [expired.secret, X, "frank"], [copied.secret, B, "frank"], [spent.secret, X, "frank"], [lapsed.secret, X, "frank"], [live.secret, X, "bob"]] as const;
-    for (const [secret, company, who] of cases) {
+    const cases = [[used.secret, X, "frank", "erin@example.test"], [withdrawn.secret, X, "frank", "withdrawn@example.test"], [replaced.secret, X, "frank", "replaced@example.test"], [expired.secret, X, "frank", "expired@example.test"], [copied.secret, B, "frank", "copied@example.test"], [spent.secret, X, "frank", "spent@example.test"], [lapsed.secret, X, "frank", "lapsed@example.test"], [live.secret, X, "bob", "live@example.test"]] as const;
+    for (const [secret, company, who, verifiedEmail] of cases) {
       const sent = w.db.commandNames().length;
-      const answer = await w.company.joinByInvite({ personId: person(who), companyId: company, inviteHash: companyInviteCodeHash(secret) });
+      const answer = await w.company.joinByInvite({ personId: person(who), companyId: company, inviteHash: companyInviteCodeHash(secret), verifiedEmail });
       expect(answer).toEqual(who === "bob" ? { ok: false, reason: "member_elsewhere", attributedCompanyId: B } : { ok: false, reason: "not_invited" });
       expect(w.db.commandNames().slice(sent)).not.toContain("TransactWriteCommand");
     }
@@ -161,6 +250,7 @@ describe("invite link secret (DEC 254h)", () => {
 
   it.each([
     ["the secret is spent", (w: SharedSignInWorld, link: { pk: string; sk: string }) => w.db.set({ ...w.db.get(link.pk, link.sk)!, status: "used" })],
+    ["the invited email hash is rewritten", (w: SharedSignInWorld, link: { pk: string; sk: string }) => w.db.set({ ...w.db.get(link.pk, link.sk)!, emailHash: "f".repeat(64) })],
     ["the secret's row is rewritten", (w: SharedSignInWorld, link: { pk: string; sk: string }) => w.db.set({ ...w.db.get(link.pk, link.sk)!, createdAt: "2020-01-01T00:00:00.000Z" })],
     ["the pre-approval is withdrawn", (w: SharedSignInWorld) => { const key = { pk: companyScoped(X, "PREAPPROVAL"), sk: emailIndexKey("mid@example.test").pk }; w.db.set({ ...w.db.get(key.pk, key.sk)!, status: "withdrawn" }); }],
     ["the pre-approval names another secret", (w: SharedSignInWorld) => { const key = { pk: companyScoped(X, "PREAPPROVAL"), sk: emailIndexKey("mid@example.test").pk }; w.db.set({ ...w.db.get(key.pk, key.sk)!, inviteHash: "e".repeat(64) }); }],
@@ -175,7 +265,7 @@ describe("invite link secret (DEC 254h)", () => {
       if (!changed && command.constructor.name === "TransactWriteCommand") { changed = true; change(w, link); }
       return send(command);
     };
-    const answer = await w.company.joinByInvite({ personId: person("frank"), companyId: X, inviteHash: companyInviteCodeHash(invite.secret) });
+    const answer = await w.company.joinByInvite({ personId: person("frank"), companyId: X, inviteHash: companyInviteCodeHash(invite.secret), verifiedEmail: "mid@example.test" });
     expect(changed).toBe(true);
     expect(answer.ok && answer.viaPreapproval === true).toBe(false);
     expect(memberOf(w, person("frank"))?.companyId).not.toBe(X);

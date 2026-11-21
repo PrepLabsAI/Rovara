@@ -23,11 +23,11 @@ export const person = (subject: string) => ownerKeyForSubject(OIDC_ISSUER, subje
 export const OWN_SIGNIN = "your company signs in with its own sign-in method";
 type Answer = { status: number; body: Record<string, unknown> };
 
-function buildWorld(options: { administrator?: boolean; slackUsers?: FakeSlackUser[] } = {}) {
+function buildWorld(options: { administrator?: boolean; slackUsers?: FakeSlackUser[]; oidcUsers?: FakeOidcUser[] } = {}) {
   const users: FakeOidcUser[] = ["owner", "carol", "bob", "dana", "legacy", "erin", "frank"].map((sub) => ({ sub, email: `${sub}@example.test`, email_verified: true, name: `${sub} person`, groups: ["admins"] }));
   // DEC 254h: a person whose identity carries no email at all.
   users.push({ sub: "noemail", name: "No Email", groups: ["admins"] });
-  const h = identityHarness({ oidc: options.administrator === true ? { administrator: { claim: "groups", values: ["admins"] } } : {}, oidcUsers: users, slackUsers: options.slackUsers ?? [] });
+  const h = identityHarness({ oidc: options.administrator === true ? { administrator: { claim: "groups", values: ["admins"] } } : {}, oidcUsers: options.oidcUsers ?? users, slackUsers: options.slackUsers ?? [] });
   // As production wires it with the company layer on (DEC 254e): the install's Slack app takes any workspace.
   h.deps.providers.slack = slackSignInProvider({ anyWorkspace: true, teamId: TEAM, credentials: async () => ({ clientId: SLACK_CLIENT_ID, clientSecret: SLACK_CLIENT_SECRET }), fetch: h.fetch, jwks: h.slack.jwks, now: h.now });
   const company = new CompanySignInStore({ documentClient: h.db, tableName: "signin", now: h.now });
@@ -50,6 +50,7 @@ function buildWorld(options: { administrator?: boolean; slackUsers?: FakeSlackUs
     if (tokens.status !== 200) return { refused: `exchange ${tokens.status}` };
     return { access: tokens.body.access_token as string, refresh: tokens.body.refresh_token as string, refused: undefined };
   };
+  const providerSignIn = h.signIn.bind(h);
   const refresh = async (token: string, cli = false) => {
     if (cli) return h.refresh(token);
     const response = await h.http(httpEvent("POST", "/v1/auth/token", { grant_type: "refresh_token", client_id: "web-app", client_secret: SECRET, refresh_token: token }));
@@ -105,10 +106,10 @@ function buildWorld(options: { administrator?: boolean; slackUsers?: FakeSlackUs
     return first;
   };
   const oidcSignIn = (subject: string, query: Record<string, string>) => h.signIn("oidc", subject, { query });
-  return { ...h, company, invites, operator, signIn, oidcSignIn, browserSession, refresh, routes, call, callWith, callOn, access, cliCheck, sessionOf, setup, issuerRow };
+  return { ...h, company, invites, operator, signIn, providerSignIn, oidcSignIn, browserSession, refresh, routes, call, callWith, callOn, access, cliCheck, sessionOf, setup, issuerRow };
 }
 
 
 /** Named, so the world's type does not lean on a path the strict check cannot name. */
 export type SharedSignInWorld = ReturnType<typeof buildWorld> & { deps: DeveloperIdentityDependencies };
-export const sharedSignInWorld = (options: { administrator?: boolean; slackUsers?: FakeSlackUser[] } = {}): SharedSignInWorld => buildWorld(options);
+export const sharedSignInWorld = (options: { administrator?: boolean; slackUsers?: FakeSlackUser[]; oidcUsers?: FakeOidcUser[] } = {}): SharedSignInWorld => buildWorld(options);
