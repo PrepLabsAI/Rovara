@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import * as ts from "typescript";
 import { E2EAppRecipeSchema, E2ERepositoryInspectionSchema, E2ESetupProposalSchema, type E2EAppRecipe, type E2ERepositoryInspection, type E2ESetupProposal, type E2ETarget } from "./e2e-node.js";
 import { canonicalJson } from "./canonical-json.js";
 import { bindE2EApplicationAccountTargets, e2eAnonymousVariantOf, readE2EApplicationProjectContract, type E2EApplicationProjectContract } from "./e2e-application-accounts.js";
@@ -13,67 +12,7 @@ const MAX_SOURCE_FILE_BYTES = 512 * 1024;
 const unsafePathPart = /^(?:\.git|\.github|\.aws|\.ssh|\.env(?:\..*)?|secrets?|credentials?|.*(?:token|password|private[-_]?key).*)$/i;
 const runnerUnsafe = e2eRunnerUnsafePath;
 
-export type E2EPortableSourceInspection = Readonly<{ parseable: boolean; exports: readonly Readonly<{ name: string; kind: "callable" | "data" | "unresolved" }>[] }>;
-/** Bounded AST-only capability classification; it never loads or evaluates candidate code. */
-export function inspectE2EPortableSource(source: string, path: string): E2EPortableSourceInspection {
-  if (Buffer.byteLength(source, "utf8") > MAX_SOURCE_FILE_BYTES) return { parseable: false, exports: [] };
-  const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
-  if (!/^(?:js|mjs|cjs|jsx|ts|tsx)$/.test(ext)) return { parseable: false, exports: [] };
-  const kind = ext === "tsx" ? ts.ScriptKind.TSX : ext === "jsx" ? ts.ScriptKind.JSX : /^(?:js|mjs|cjs)$/.test(ext) ? ts.ScriptKind.JS : ts.ScriptKind.TS;
-  const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, kind);
-  if ((file as ts.SourceFile & { parseDiagnostics: readonly ts.Diagnostic[] }).parseDiagnostics.length > 0) return { parseable: false, exports: [] };
-  const declarations = new Map<string, ts.Expression>();
-  const directCallable = new Set<string>();
-  for (const statement of file.statements) {
-    if (ts.isFunctionDeclaration(statement) && statement.name && statement.body) directCallable.add(statement.name.text);
-    if (ts.isVariableStatement(statement)) for (const declaration of statement.declarationList.declarations) {
-      if (ts.isIdentifier(declaration.name) && declaration.initializer) declarations.set(declaration.name.text, declaration.initializer);
-    }
-  }
-  const resolve = (expression: ts.Expression, visited = new Set<string>(), budget = { steps: 0 }): "callable" | "data" | "unresolved" => {
-    if (++budget.steps > 128) return "unresolved";
-    if (ts.isArrowFunction(expression) || ts.isFunctionExpression(expression)) return "callable";
-    if (ts.isClassExpression(expression)) return "data";
-    if (ts.isIdentifier(expression)) {
-      const name = expression.text;
-      if (directCallable.has(name)) return "callable";
-      if (visited.has(name)) return "unresolved";
-      const value = declarations.get(name);
-      if (!value) return "unresolved";
-      const next = new Set(visited); next.add(name);
-      return resolve(value, next, budget);
-    }
-    return "data";
-  };
-  const output = new Map<string, "callable" | "data" | "unresolved">();
-  for (const statement of file.statements) {
-    if (ts.isExportAssignment(statement)) {
-      if (!statement.isExportEquals) output.set("default", resolve(statement.expression));
-      continue;
-    }
-    if (ts.isExportDeclaration(statement)) {
-      if (statement.isTypeOnly || statement.moduleSpecifier || !statement.exportClause || !ts.isNamedExports(statement.exportClause)) continue;
-      for (const element of statement.exportClause.elements) {
-        if (element.isTypeOnly) continue;
-        const name = element.name.text;
-        const localName = element.propertyName?.text ?? name;
-        const value = declarations.get(localName);
-        output.set(name, directCallable.has(localName) ? "callable" : value ? resolve(value, new Set([localName])) : "unresolved");
-      }
-      continue;
-    }
-    const modifiers = ts.canHaveModifiers(statement) ? ts.getModifiers(statement) ?? [] : [];
-    if (!modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)) continue;
-    const isDefault = modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword);
-    if (ts.isFunctionDeclaration(statement) && statement.body && (statement.name || isDefault)) output.set(isDefault ? "default" : statement.name!.text, "callable");
-    else if (ts.isClassDeclaration(statement)) output.set(isDefault ? "default" : statement.name?.text ?? "default", "data");
-    else if (ts.isVariableStatement(statement)) for (const declaration of statement.declarationList.declarations) {
-      if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
-      output.set(isDefault ? "default" : declaration.name.text, resolve(declaration.initializer, new Set([declaration.name.text])));
-    }
-  }
-  return { parseable: true, exports: [...output].map(([name, value]) => ({ name, kind: value })).sort((a, b) => a.name.localeCompare(b.name)) };
-}
+export type { E2EPortableSourceInspection } from "./e2e-portable-source.js";
 
 export type VerifiedE2ESource = E2ESourceSnapshot["sources"][number];
 export type VerifiedE2ESourceSnapshot = E2ESourceSnapshot;

@@ -10,7 +10,9 @@
     "./model-helper": "./dist/model-helper-entry.js",
     "./general-fakes-helper": "./dist/general-fakes-helper-entry.js",
     "./eval-standin-helper": "./dist/eval-standin-helper-entry.js",
-    "./audit-record-v1": "./dist/audit-record-v1.js"
+    "./audit-record-v1": "./dist/audit-record-v1.js",
+    "./public-suffix": "./dist/public-suffix.js",
+    "./e2e-execution-plan": "./dist/e2e-execution-plan-entry.js"
   },
   "types": "./dist/index.d.ts",
   "sideEffects": false,

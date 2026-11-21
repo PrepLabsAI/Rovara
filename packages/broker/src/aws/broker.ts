@@ -55,8 +55,7 @@ import {
   E2ERoundSchema,
   buildE2ESharedView,
   CandidateManifestSchema,
-  selectE2EExecutionPlan,
-  inspectE2ERepository, inspectE2ERepositoryBeforeContractApiTargets,
+    inspectE2ERepository, inspectE2ERepositoryBeforeContractApiTargets,
   proposeE2ESetup,
   WEB_API_RUNTIME_PROFILE_ID,
   verifyE2ESourceSnapshot,
@@ -275,6 +274,7 @@ import {
   workflowPublicationContextDigest,
   cutEvidenceReason, EVAL_PLAN_DELIVERY_ACTION,
 } from "@agentx/contracts";
+import { selectE2EExecutionPlan } from "@agentx/contracts/e2e-execution-plan";
 import { compileE2EScenarios, collectE2EActualCliRun, qualifyE2ECollection, e2eSnapshotSourceDigest, parseE2EFirstPartyCapture, e2ePrivateTransferMaxBytes, decodeE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { renderE2EMcpProjection, renderE2EPageHtml, renderE2EScenarioRowsHtml, renderE2EScenarioSlackBlocks, renderE2ESlackBlocks, renderE2ENotifierSlackBlocks } from "../e2e-presentation.js";
 import type { DisplayArtifact } from "../e2e/application-display.js";

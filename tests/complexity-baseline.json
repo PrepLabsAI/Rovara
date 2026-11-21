@@ -730,7 +730,7 @@
     "packages/contracts/src/e2e-application-execution-plan.ts": 147,
     "packages/contracts/src/e2e-application-execution.ts": 22,
     "packages/contracts/src/e2e-application.ts": 52,
-    "packages/contracts/src/e2e-catalog.ts": 598,
+    "packages/contracts/src/e2e-catalog.ts": 531,
     "packages/contracts/src/e2e-execution-plan.ts": 228,
     "packages/contracts/src/e2e-model-channel.ts": 37,
     "packages/contracts/src/e2e-native-recipes.ts": 134,
