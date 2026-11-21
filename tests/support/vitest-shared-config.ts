@@ -40,6 +40,15 @@ export const nightlyOnlyFiles = [
 // slack-workflow-e2e: 32 Slack-to-draft-pull-request journeys in one process (about 115 s).
 export const postDeployFiles = [
   "tests/integration/slack-workflow-e2e.test.ts",
+  // #1272: more integration journeys, about 7.5 test-minutes in all: the real `rovara up` task flow under attack (stage-selection-adversarial), pull
+  // request publication and maintenance against real local git remotes, the worker's real session rerunning checks, the install qualification web
+  // journey, and the workflow-e2e harness's own self-tests (its suites are already nightly).
+  "tests/unit/stage-selection-adversarial.test.ts",
+  "tests/integration/pull-request-publication.test.ts",
+  "tests/integration/worker-verification.test.ts",
+  "tests/unit/install-qualification-web.test.ts",
+  "tests/contract/workflow-e2e-harness.test.ts",
+  "tests/integration/pull-request-maintenance.test.ts",
 ];
 
 // Test files that mock modules (vi.mock, vi.doMock, vi.unmock, vi.importMock, vi.resetModules), or import a helper under tests/ that does (directly or through
