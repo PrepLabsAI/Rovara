@@ -177,7 +177,7 @@ describe("what the web app is told: the offer and the person's own workspace", (
     expect(w.db.get(`DEVELOPER#${id}`, "META")).toEqual(identity);
   });
 
-  it.each(["another person", "unlinked", "revoked"] as const)("a stored session never returns a workspace from an identity that is %s", async (change) => {
+  it.each(["another person", "unlinked", "revoked"] as const)("refuses access when the stored session's identity is %s", async (change) => {
     const w = world();
     await w.setup();
     const id = ownerKeyForSubject(SLACK_OIDC_ISSUER, `${OTHER}:U0NEW0001`);
@@ -195,8 +195,9 @@ describe("what the web app is told: the offer and the person's own workspace", (
     if (change === "unlinked") w.db.set(identity);
     if (change === "revoked") w.db.set({ ...identity, mergedInto: person("owner"), revoked: true });
     const answer = await w.access(signed.access);
-    expect(answer.status).toBe(200);
+    expect(answer.status).toBe(401);
     expect(answer.body).not.toHaveProperty("slackTeamId");
+    expect(answer.body).not.toHaveProperty("developerId");
   });
 
   it("a client's own check on a person's behalf (client secret + developer id) never names the workspace", async () => {
