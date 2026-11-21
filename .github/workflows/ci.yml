@@ -175,9 +175,9 @@ jobs:
         timeout-minutes: 5
         run: node scripts/complexity.ts check
 
-  # The type check, beside `quick` instead of before its lint (it took about 5 of quick's 7 minutes): `npm run typecheck:all` is `npm run typecheck` (tsc -b)
-  # followed by the stricter type check (tsconfig.lint.json, which also covers tests/ and scripts/), which may not add errors beyond tests/typecheck-baseline.json
-  # (issue #50, scripts/typecheck-baseline.ts). It runs whenever `quick` does.
+  # The type check, beside `quick` instead of before its lint: `npm run typecheck:all` builds the packages (`tsc -b`)
+  # then checks tests/ and scripts/ in parallel incremental shards (issue #1327, scripts/typecheck-shards.ts), restoring
+  # `.tsbuildinfo` + built declarations from `actions/cache` so unchanged projects are skipped across runs. It runs whenever `quick` does.
   typecheck:
     needs: plan
     if: needs.plan.outputs.docs_only != 'true' && needs.plan.outputs.mode != 'reuse'
@@ -192,6 +192,17 @@ jobs:
       - name: "typecheck: npm ci"
         timeout-minutes: 15
         run: npm ci
+      - name: "typecheck: restore TypeScript build info cache"
+        uses: actions/cache@v4
+        with:
+          path: |
+            packages/*/dist
+            infra/dist
+            node_modules/.cache/tsc-shards
+          key: tsc-typecheck-v1-${{ runner.os }}-${{ hashFiles('package-lock.json', 'tsconfig*.json', 'packages/*/tsconfig.json', 'infra/tsconfig.json', 'scripts/typecheck-shards.ts') }}-${{ github.sha }}
+          restore-keys: |
+            tsc-typecheck-v1-${{ runner.os }}-${{ hashFiles('package-lock.json', 'tsconfig*.json', 'packages/*/tsconfig.json', 'infra/tsconfig.json', 'scripts/typecheck-shards.ts') }}-
+            tsc-typecheck-v1-${{ runner.os }}-
       - name: "typecheck: npm run typecheck:all"
         timeout-minutes: 15
         run: npm run typecheck:all

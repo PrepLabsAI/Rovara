@@ -1204,7 +1204,6 @@
     "scripts/test-deploy.ts": 258,
     "scripts/test-model-canary.ts": 33,
     "scripts/test-qualify-runtime.ts": 29,
-    "scripts/test-services-mirror.ts": 15,
-    "scripts/typecheck-baseline.ts": 1
+    "scripts/test-services-mirror.ts": 15
   }
 }
