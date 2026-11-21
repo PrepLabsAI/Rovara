@@ -47,7 +47,6 @@ import { TEST_ORG, testProjectPk } from "../support/orgs.js";
 // M1.3 native journeys. Each case is a whole path of an application round on a real Docker host, gated like `m1-web-journey.test.ts`: it needs Docker and the executor image, so it runs
 // where the CI `linux-runtime` job provides them (ROVARA_DOCKER=1, ROVARA_EXECUTOR_IMAGE) and skips cleanly everywhere else. Locally, colima's Docker works too
 // (DOCKER_HOST=unix:///Users/<you>/.colima/default/docker.sock), with TMPDIR and CONTAINED_FOUNDATION_EVIDENCE_DIR under the home folder, because the run directories are shared with the VM.
-const dockerReady = process.env.ROVARA_DOCKER === "1";
 /** The process Docker CLI, with each command's arguments shown to `observe` just before it runs. */
 const observed = (cli: DockerCli, observe: ((args: string[]) => void) | undefined): DockerCli => (observe === undefined ? cli : { run: (args, opts) => { observe(args); return cli.run(args, opts); } });
 const EXECUTOR_IMAGE = process.env.ROVARA_EXECUTOR_IMAGE ?? "rovara-e2e-executor:ci";
@@ -136,7 +135,11 @@ type JourneyInput = Readonly<{ fixtureRoot: string; planningFiles: readonly stri
   apiRuntime?: boolean;
   plan(context: PlanningContext): { title: string; claims: Array<{ id: string; text: string }>; plannerIntent: object } | Promise<{ title: string; claims: Array<{ id: string; text: string }>; plannerIntent: object }> }>;
 
-describe.runIf(dockerReady)("M1.3 native journeys", () => {
+// RETIRED (owner/controller DEC 254zzz309, 2026-11-21): this journey drives the spec 056 engine that Pratik's 8f1be0a80
+// ("The developer task routes no longer reach the old engine; its tests go") retired; POST /v1/dev/tasks now starts only on the core,
+// so every start here is refused. Skipped in place (ci.yml names this file; CI-defining files must equal code/next's).
+// Replacement: lane CORE-BROWSER-JOURNEYS (browser plan round -> send-back -> publication on the core engine). Lost coverage: DEFERRED-CHECKS.
+describe.skip("M1.3 native journeys", () => {
   const roots: string[] = [];
   afterAll(async () => { for (const dir of roots.splice(0)) await rm(dir, { recursive: true, force: true }).catch(() => undefined); }, 120_000);
 

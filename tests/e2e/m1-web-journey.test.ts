@@ -48,7 +48,6 @@ import { TEST_ORG, testProjectPk } from "../support/orgs.js";
 // It needs Docker and the executor image, so it runs where the CI `linux-runtime` job provides them (ROVARA_DOCKER=1, ROVARA_EXECUTOR_IMAGE) and skips cleanly everywhere else.
 // Locally, colima's Docker works too (DOCKER_HOST=unix:///Users/<you>/.colima/default/docker.sock), with CONTAINED_FOUNDATION_EVIDENCE_DIR pointing at a fresh private
 // directory under the home folder, because the run directories are shared with the Docker VM and the VM only sees the home folder.
-const dockerReady = process.env.ROVARA_DOCKER === "1";
 const EXECUTOR_IMAGE = process.env.ROVARA_EXECUTOR_IMAGE ?? "rovara-e2e-executor:ci";
 
 const FIXTURE_ROOT = join(import.meta.dirname, "../fixtures/e2e-web-api-app");
@@ -92,7 +91,11 @@ async function stageCandidates(root: string) {
   return { fixed, defective };
 }
 
-describe.runIf(dockerReady)("M1 native web journey: a failing browser round, send-back, a passing round, publication", () => {
+// RETIRED (owner/controller DEC 254zzz309, 2026-11-21): this journey drives the spec 056 engine that Pratik's 8f1be0a80
+// ("The developer task routes no longer reach the old engine; its tests go") retired; POST /v1/dev/tasks now starts only on the core,
+// so every start here is refused. Skipped in place (ci.yml names this file; CI-defining files must equal code/next's).
+// Replacement: lane CORE-BROWSER-JOURNEYS (browser plan round -> send-back -> publication on the core engine). Lost coverage: DEFERRED-CHECKS.
+describe.skip("M1 native web journey: a failing browser round, send-back, a passing round, publication", () => {
   const roots: string[] = [];
   afterAll(async () => { for (const dir of roots.splice(0)) await rm(dir, { recursive: true, force: true }).catch(() => undefined); }, 120_000);
 
