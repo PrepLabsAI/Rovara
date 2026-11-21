@@ -81,12 +81,13 @@ export function scoreSource(text: string, fileName = "source.ts"): FunctionScore
     if (t.isReturnStatement(parent) || (t.isArrowFunction(parent) && parent.body === node)) {
       let outer: TypeScript.Node | undefined = parent;
       while (outer !== undefined && !isFunction(outer)) outer = outer.parent;
-      if (outer !== undefined) return `(returned by ${nameOf(outer as TypeScript.FunctionLikeDeclaration)})`;
+      if (outer !== undefined) return `(returned by ${nameOf(outer)})`;
     }
     return "(anonymous)";
   };
 
   /** Scores one function body (or the top level); a nested function is queued as its own entry. */
+  const isNodeList = (body: TypeScript.Node | readonly TypeScript.Node[]): body is readonly TypeScript.Node[] => Array.isArray(body);
   const score = (body: TypeScript.Node | readonly TypeScript.Node[]): number => {
     let total = 0;
     const visit = (node: TypeScript.Node, nesting: number): void => {
@@ -141,7 +142,8 @@ export function scoreSource(text: string, fileName = "source.ts"): FunctionScore
       total += 1;
       visit(otherwise, nesting + 1);
     };
-    for (const node of Array.isArray(body) ? body : [body as TypeScript.Node]) visit(node, 0);
+    const nodes: readonly TypeScript.Node[] = isNodeList(body) ? body : [body];
+    for (const node of nodes) visit(node, 0);
     return total;
   };
   const parentThroughParens = (node: TypeScript.Node): TypeScript.Node => {
@@ -270,40 +272,53 @@ function positive(value: string | undefined, fallback: number, name: string): nu
   return parsed;
 }
 
+function scoreRepository(): FileScore[] {
+  return listSourceFiles().map((file) => scoreFile(file, readFileSync(file, "utf8")));
+}
+function excessCounts(files: readonly FileScore[]): Counts {
+  return Object.fromEntries(files.filter((file) => file.excess > 0).map((file) => [file.file, file.excess]));
+}
+
+/** `report`: the ranking, or one file's every function over the threshold with `--file`. */
+function report(argv: readonly string[]): void {
+  const sort = flag(argv, "--sort") ?? "hotspot";
+  if (sort !== "hotspot" && sort !== "complexity") throw new Error("--sort must be hotspot or complexity");
+  const days = positive(flag(argv, "--days"), 90, "--days");
+  const only = flag(argv, "--file");
+  const rows = rankFiles(only === undefined ? scoreRepository() : [scoreFile(only, readFileSync(only, "utf8"))], churn(days), sort);
+  if (argv.includes("--json")) {
+    console.log(JSON.stringify(rows, null, 2));
+    return;
+  }
+  const limits = only === undefined
+    ? { top: positive(flag(argv, "--top"), 25, "--top"), worst: positive(flag(argv, "--worst"), 5, "--worst") }
+    : { top: 1, worst: Number.MAX_SAFE_INTEGER };
+  console.log(formatReport(rows, { ...limits, days, sort }));
+}
+
+/** `check`: the CI ratchet, with an annotation on the pull request for each file that got worse. */
+function check(): number {
+  const result = compareToBaseline(parseBaseline(readFileSync(BASELINE_PATH, "utf8")), excessCounts(scoreRepository()));
+  (result.pass ? console.log : console.error)(result.lines.join("\n"));
+  if (process.env.GITHUB_ACTIONS === "true") for (const line of result.raised) console.log(`::error file=${BASELINE_PATH}::${line}`);
+  return result.pass ? 0 : 1;
+}
+
+/** `update` lowers the baseline where files got simpler; `init` writes it from scratch (once, when the check was introduced). */
+function writeBaseline(mode: "update" | "init"): void {
+  const current = excessCounts(scoreRepository());
+  const next = mode === "init" ? current : lowerBaseline(parseBaseline(readFileSync(BASELINE_PATH, "utf8")), current);
+  writeFileSync(BASELINE_PATH, formatBaseline(next));
+  console.log(`Wrote ${BASELINE_PATH}: ${Object.values(next).filter((excess) => excess > 0).length} files.`);
+}
+
 // Usage, from the repository root:
 //   node scripts/complexity.ts report [--top 25] [--days 90] [--sort hotspot|complexity] [--worst 5] [--file <path>] [--json]
 //   node scripts/complexity.ts check | update | init
 if (process.argv[1]?.endsWith("complexity.ts")) {
   const [mode, ...argv] = process.argv.slice(2);
-  const scored = () => listSourceFiles().map((file) => scoreFile(file, readFileSync(file, "utf8")));
-  const excessCounts = (files: readonly FileScore[]): Counts => Object.fromEntries(files.filter((file) => file.excess > 0).map((file) => [file.file, file.excess]));
-  if (mode === "report") {
-    const sort = flag(argv, "--sort") ?? "hotspot";
-    if (sort !== "hotspot" && sort !== "complexity") throw new Error("--sort must be hotspot or complexity");
-    const days = positive(flag(argv, "--days"), 90, "--days");
-    const only = flag(argv, "--file");
-    const files = only === undefined ? scored() : [scoreFile(only, readFileSync(only, "utf8"))];
-    const rows = rankFiles(files, churn(days), sort);
-    if (argv.includes("--json")) console.log(JSON.stringify(rows, null, 2));
-    else console.log(formatReport(rows, { top: only === undefined ? positive(flag(argv, "--top"), 25, "--top") : 1, days, sort, worst: only === undefined ? positive(flag(argv, "--worst"), 5, "--worst") : Number.MAX_SAFE_INTEGER }));
-  } else if (mode === "check" || mode === "update" || mode === "init") {
-    const current = excessCounts(scored());
-    if (mode === "init") {
-      writeFileSync(BASELINE_PATH, formatBaseline(current));
-      console.log(`Wrote ${BASELINE_PATH}: ${Object.keys(current).length} files.`);
-    } else {
-      const baseline = parseBaseline(readFileSync(BASELINE_PATH, "utf8"));
-      if (mode === "update") {
-        writeFileSync(BASELINE_PATH, formatBaseline(lowerBaseline(baseline, current)));
-        console.log(`Lowered ${BASELINE_PATH} where files got simpler.`);
-      } else {
-        const result = compareToBaseline(baseline, current);
-        (result.pass ? console.log : console.error)(result.lines.join("\n"));
-        if (process.env.GITHUB_ACTIONS === "true") for (const line of result.raised) console.log(`::error file=${BASELINE_PATH}::${line}`);
-        process.exitCode = result.pass ? 0 : 1;
-      }
-    }
-  } else {
-    throw new Error("usage: node scripts/complexity.ts report|check|update|init");
-  }
+  if (mode === "report") report(argv);
+  else if (mode === "check") process.exitCode = check();
+  else if (mode === "update" || mode === "init") writeBaseline(mode);
+  else throw new Error("usage: node scripts/complexity.ts report|check|update|init");
 }
