@@ -6,6 +6,7 @@ import { developerIdForSlackUser, endSessions, grantProjectAccess, projectGrant,
 import { readWorkspaceLimits } from "../../packages/broker/src/developer/limits.js";
 import { emailIndexKey } from "../../packages/broker/src/developer/store.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { buildDeveloperProjectGrantWrites } from "../../packages/broker/src/aws/project-grant-writes.js";
 
 const ADMIN = { issuer: "https://identity.example.test", subject: "admin-subject" };
 type AdminActionFixtureOverrides = Omit<Partial<AdminActionDependencies>, "signInTableName"> & { signInTableName?: string | undefined };
@@ -59,6 +60,48 @@ describe("who a developer is (E8, Q4)", () => {
 });
 
 describe("grants (FR-013.1)", () => {
+  it("builds only the conditional forward grant and its reverse row, without sending a command", () => {
+    const writes = buildDeveloperProjectGrantWrites({
+      tableName: "state", project: "payments", developerId: "person", companyId: "org_aaaaaaaaaaaaaaaaaaaa",
+      grantedBy: ADMIN, grantedAt: "2026-10-02T09:00:00.000Z", grantId: "grant-fixture",
+    });
+    expect(writes).toEqual([
+      { Put: { TableName: "state", Item: {
+        pk: "ORG#org_aaaaaaaaaaaaaaaaaaaa#MEMBER#person", sk: "PROJECT#payments", entityType: "MEMBERSHIP",
+        ownerKey: "person", projectName: "payments", role: "developer", grantId: "grant-fixture",
+        grantedBy: ADMIN, grantedAt: "2026-10-02T09:00:00.000Z",
+      }, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: { TableName: "state", Item: {
+        pk: "ORG#org_aaaaaaaaaaaaaaaaaaaa#PROJECT_MEMBERS#payments", sk: "DEVELOPER#person",
+        entityType: "PROJECT_MEMBER", role: "developer", grantedAt: "2026-10-02T09:00:00.000Z",
+      } } },
+    ]);
+  });
+
+  it("sends the paired grant in one transaction and makes no standalone writes", async () => {
+    const d = deps();
+    const commands: unknown[] = [];
+    const send = d.documentClient.send.bind(d.documentClient);
+    d.documentClient = { send: async (command) => { commands.push(command); return send(command); } };
+    expect(await grantProjectAccess(d, ADMIN, "payments", "person", "org_aaaaaaaaaaaaaaaaaaaa")).toEqual({ granted: true, already: false });
+    const transactions = commands.filter((command) => command instanceof TransactWriteCommand);
+    expect(transactions).toHaveLength(1);
+    expect(commands.some((command) => command instanceof PutCommand)).toBe(false);
+    expect(transactions[0]?.input.TransactItems).toEqual([
+      { Put: { TableName: "state", Item: {
+        pk: "ORG#org_aaaaaaaaaaaaaaaaaaaa#MEMBER#person", sk: "PROJECT#payments", entityType: "MEMBERSHIP",
+        ownerKey: "person", projectName: "payments", role: "developer", grantId: expect.stringMatching(/^[0-9a-f-]{36}$/u) as unknown,
+        grantedBy: ADMIN, grantedAt: "2026-10-02T09:00:00.000Z",
+      }, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: { TableName: "state", Item: {
+        pk: "ORG#org_aaaaaaaaaaaaaaaaaaaa#PROJECT_MEMBERS#payments", sk: "DEVELOPER#person",
+        entityType: "PROJECT_MEMBER", role: "developer", grantedAt: "2026-10-02T09:00:00.000Z",
+      } } },
+    ]);
+    expect(d.db.get("ORG#org_aaaaaaaaaaaaaaaaaaaa#MEMBER#person", "PROJECT#payments")).toMatchObject({ role: "developer" });
+    expect(d.db.get("ORG#org_aaaaaaaaaaaaaaaaaaaa#PROJECT_MEMBERS#payments", "DEVELOPER#person")).toMatchObject({ role: "developer" });
+  });
+
   it("grants developer access once, keeps an administrator row as it is, and revokes only a developer row", async () => {
     const d = deps();
     const id = developerIdForSlackUser("U0ADA00001");
@@ -102,6 +145,7 @@ describe("a grant that races another write (FR-013.1)", () => {
     await expect(grantProjectAccess(d, ADMIN, "payments", id)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     expect(d.db.get(`MEMBER#${id}`, "PROJECT#payments")).toMatchObject({ role: "administrator" });
     expect(d.db.get(`MEMBER#${id}`, "PROJECT#payments")).not.toHaveProperty("grantedBy");
+    expect(d.db.get("PROJECT_MEMBERS#payments", `DEVELOPER#${id}`)).toBeUndefined();
   });
 
   it("says already granted when a developer row won the race", async () => {

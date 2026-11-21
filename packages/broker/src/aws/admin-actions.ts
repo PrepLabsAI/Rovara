@@ -14,6 +14,7 @@ import { ownerKeyForSubject } from "./lambda.js";
 import { ownPartitionRow, recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
 import { grantKeyFor, namedCompany, projectMemberRowKeyFor, projectMembersPkFor } from "./company-layout.js";
 import { OrgIdSchema } from "@agentx/contracts";
+import { buildDeveloperProjectGrantWrites } from "./project-grant-writes.js";
 
 export interface AdminActionDependencies {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -173,15 +174,10 @@ export async function grantProjectAccess(deps: AdminActionDependencies, admin: {
   if (current?.role === "developer") return { granted: true, already: true };
   const grantedAt = new Date(deps.now()).toISOString();
   try {
-    await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
-      { Put: {
-        TableName: deps.tableName,
-        Item: { ...grantKeyFor(companyId, developerId, project), entityType: "MEMBERSHIP", ownerKey: developerId, projectName: project, role: "developer",
-          grantId: randomUUID(), grantedBy: admin, grantedAt },
-        ConditionExpression: "attribute_not_exists(pk)",
-      } },
-      { Put: { TableName: deps.tableName, Item: { ...projectMemberKey(project, developerId, companyId), entityType: "PROJECT_MEMBER", role: "developer", grantedAt } } },
-    ] }));
+    await deps.documentClient.send(new TransactWriteCommand({ TransactItems: buildDeveloperProjectGrantWrites({
+      tableName: deps.tableName, project, developerId, ...(companyId === undefined ? {} : { companyId }),
+      grantedBy: admin, grantedAt, grantId: randomUUID(),
+    }) }));
   } catch (error) {
     if (!conditionFailed(error)) throw error;
     // A row appeared between the read and the write: say what it is rather than assume.
