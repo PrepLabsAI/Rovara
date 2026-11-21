@@ -30,6 +30,12 @@ const FOUNDATION_STACK = "AgentXProductionFoundation";
 const RUNTIME_STACK = "AgentXProductionRuntime";
 export const SLACK_ORCHESTRATOR_STACK = "AgentXSlackOrchestrator";
 export const SLACK_ORCHESTRATOR_REPOSITORY = "agentx-slack-orchestrator";
+// #1277: the firewall setting the live foundation was deployed with (infra/lib/agent-dns-firewall.ts; tests/contract/release-dns-firewall.test.ts keeps the names in step). Not
+// imported from infra: this script loads before the build.
+const DNS_FIREWALL_CONTEXT_KEY = "agentxDnsFirewall";
+const EGRESS_ALLOW_DOMAINS_CONTEXT_KEY = "agentxEgressAllowDomains";
+const DNS_FIREWALL_MODE_OUTPUT = "DnsFirewallMode";
+const EGRESS_ALLOW_DOMAINS_OUTPUT = "EgressAllowDomains";
 const PRODUCTION_FLAGS = ["--reuse-unchanged-worker", "--require-existing-foundation", "--create-slack-orchestrator"];
 const RELEASE_TAG_PATTERN = /^release-\d{8}T\d{6}Z-([a-f0-9]{7,40})$/;
 
@@ -253,13 +259,15 @@ export async function releaseProduction(
     throw new Error("AGENTX_MODEL_PROVIDER and AGENTX_MODEL_ID are required for the first production release");
   }
 
+  let firewallContext: string[] = [];
   if (!stackExists(runner, options.region, FOUNDATION_STACK)) {
     if (options.requireExistingFoundation) {
       throw new Error(`${FOUNDATION_STACK} does not exist; create it with a reviewed manual release first`);
     }
     deployFoundation(runner, options);
   } else {
-    assertFoundationHasNoPendingChanges(runner, options);
+    firewallContext = foundationFirewallContext(describeStack(runner, options.region, FOUNDATION_STACK));
+    assertFoundationHasNoPendingChanges(runner, options, firewallContext);
   }
   const foundation = describeStack(runner, options.region, FOUNDATION_STACK);
 
@@ -276,6 +284,7 @@ export async function releaseProduction(
     "agentxDeploymentMode=ec2-ebs",
     "-c",
     `agentxRegion=${options.region}`,
+    ...firewallContext,
     ...profileArgs(options.profile),
     "--parameters",
     `${RUNTIME_STACK}:WorkerImageUri=${workerImage}`,
@@ -291,8 +300,8 @@ export async function releaseProduction(
   // field an older worker image does not know about fails the task. Publishing the image first
   // means every worker booted after this point is the tolerant side of the window; a worker
   // already running keeps its image until the idle reaper stops it.
-  deployControlPlane(runner, options, foundation);
-  const slackOrchestratorImage = await releaseSlackOrchestrator(runner, options, identity.Account, revision, foundation);
+  deployControlPlane(runner, options, foundation, firewallContext);
+  const slackOrchestratorImage = await releaseSlackOrchestrator(runner, options, identity.Account, revision, foundation, firewallContext);
 
   const manifest: ProductionReleaseManifest = {
     releasedAt: new Date().toISOString(),
@@ -323,6 +332,7 @@ async function releaseSlackOrchestrator(
   accountId: string,
   revision: string,
   foundation: StackDescription,
+  firewallContext: readonly string[],
 ): Promise<string | undefined> {
   const exists = stackExists(runner, options.region, SLACK_ORCHESTRATOR_STACK);
   if (!exists && !options.createSlackOrchestrator) {
@@ -369,6 +379,7 @@ async function releaseSlackOrchestrator(
     "agentxDeploymentMode=ec2-ebs",
     "-c",
     `agentxRegion=${options.region}`,
+    ...firewallContext,
     ...profileArgs(options.profile),
     ...parameter("OrchestratorImageUri", image),
     ...parameter("OrchestratorImageRepositoryName", "agentx-slack-orchestrator"),
@@ -429,7 +440,27 @@ function deployFoundation(runner: Runner, options: ReleaseOptions): void {
   ]);
 }
 
-function assertFoundationHasNoPendingChanges(runner: Runner, options: ReleaseOptions): void {
+/**
+ * #1277: the CDK context that synthesizes the live foundation's DNS firewall, read from the outputs it was deployed with. A foundation with no firewall gives none (the legacy
+ * default, off). A foundation that has a firewall but no recorded mode (deployed before #1277) is refused: guessing watch or block could switch the live last rule.
+ */
+export function foundationFirewallContext(foundation: StackDescription): string[] {
+  const output = (key: string) => foundation.Outputs?.find((entry) => entry.OutputKey === key)?.OutputValue;
+  const mode = output(DNS_FIREWALL_MODE_OUTPUT);
+  if (mode === undefined) {
+    if (output("ProjectAllowListId") !== undefined) {
+      throw new Error(
+        `${FOUNDATION_STACK} has a DNS firewall but does not record its mode; deploy it once with the -c ${DNS_FIREWALL_CONTEXT_KEY} and -c ${EGRESS_ALLOW_DOMAINS_CONTEXT_KEY} it was deployed with, so releases keep it`,
+      );
+    }
+    return [];
+  }
+  if (mode !== "off" && mode !== "watch" && mode !== "block") throw new Error(`${FOUNDATION_STACK} output ${DNS_FIREWALL_MODE_OUTPUT} must be off, watch or block`);
+  const domains = output(EGRESS_ALLOW_DOMAINS_OUTPUT);
+  return ["-c", `${DNS_FIREWALL_CONTEXT_KEY}=${mode}`, ...(domains ? ["-c", `${EGRESS_ALLOW_DOMAINS_CONTEXT_KEY}=${domains}`] : [])];
+}
+
+function assertFoundationHasNoPendingChanges(runner: Runner, options: ReleaseOptions, firewallContext: readonly string[]): void {
   const result = runner.capture("npx", [
     "cdk",
     "diff",
@@ -441,6 +472,7 @@ function assertFoundationHasNoPendingChanges(runner: Runner, options: ReleaseOpt
     "agentxDeploymentMode=ec2-ebs",
     "-c",
     `agentxRegion=${options.region}`,
+    ...firewallContext,
     ...profileArgs(options.profile),
   ], true);
   if (result.status !== 0) {
@@ -452,7 +484,7 @@ function assertFoundationHasNoPendingChanges(runner: Runner, options: ReleaseOpt
   }
 }
 
-function deployControlPlane(runner: Runner, options: ReleaseOptions, foundation: StackDescription): void {
+function deployControlPlane(runner: Runner, options: ReleaseOptions, foundation: StackDescription, firewallContext: readonly string[]): void {
   runner.run("npx", [
     "cdk",
     "deploy",
@@ -466,6 +498,7 @@ function deployControlPlane(runner: Runner, options: ReleaseOptions, foundation:
     "agentxDeploymentMode=ec2-ebs",
     "-c",
     `agentxRegion=${options.region}`,
+    ...firewallContext,
     ...profileArgs(options.profile),
     ...optionalControlPlaneParameters(),
     ...CONTROL_PLANE_FOUNDATION_PARAMETERS.flatMap((name) => ["--parameters", `${CONTROL_PLANE_STACK}:${name}=${stackOutput(foundation, name)}`]),

@@ -24,6 +24,14 @@ export function dnsFirewallMode(value: unknown, legacyInstall: boolean): DnsFire
 export const EGRESS_ALLOW_DOMAINS_CONTEXT_KEY = "agentxEgressAllowDomains";
 
 /**
+ * #1277: the legacy production install's foundation outputs the firewall setting it was deployed with, and a release reads it back (scripts/release-production.ts) and synthesizes
+ * with the same context. Without this a release, which passes no firewall context, synthesizes the firewall away, and the drift guard blocks every release.
+ */
+export const DNS_FIREWALL_MODE_OUTPUT = "DnsFirewallMode";
+/** The extra allowed domains (EGRESS_ALLOW_DOMAINS_CONTEXT_KEY) the foundation was deployed with, comma separated; absent when there are none. */
+export const EGRESS_ALLOW_DOMAINS_OUTPUT = "EgressAllowDomains";
+
+/**
  * The priority of the rule group's association with the VPC. This is a different scale from the rule priorities inside the group (100, 150 and 200). Resolver rejects 100 and 9900
  * as reserved ("[RSLVR-02017] ... Provide a number between "100" and "9900"", both bounds exclusive), so a valid association priority is 101..9899.
  */
