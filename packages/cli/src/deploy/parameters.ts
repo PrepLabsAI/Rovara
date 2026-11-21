@@ -79,10 +79,8 @@ export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>
   "control-plane": ["BudgetMonthlyUsd", "BudgetScope", "SlackAppPostedMessages", "SlackThreadTurnsPerMinute", "SlackMemberWorkspaceLimit", "SlackOrganizationWorkspaceLimit", "McpConfirmElicitation", "TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled", "TaskPersonProofEnabled", "WorkflowDependenciesEnabled",
     // Spec 062: channel adapters and Slack through the channel API, as the operator set them (agentx config set).
     "ChannelAdapters", "SlackViaChannel",
-    // Migration plan v3.2 lane E2: the core engine switch (agentx config set coreEngine.switch).
-    "CoreEngine",
     // Migration plan v3.2 lane E2: retain every core setting the operator may tune across upgrades.
-    "CoreAllowedCompanies", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons", "CoreSystemRuns",
+    "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons", "CoreSystemRuns",
     // Core switch-on blocker (2026-11-17): the model gateway's origin and the agent model (agentx config set coreEngine.modelGatewayUrl / coreEngine.agentModel).
     "CoreModelGatewayHost", "CoreAgentModel",
     // DEC 254z-amend3: the test services switch (default on); an operator's opt-out survives every upgrade.

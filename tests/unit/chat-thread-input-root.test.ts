@@ -53,7 +53,7 @@ async function world(options: { chatThreads?: boolean } = {}) {
     return { Item: rows.get(`${input.TableName}|${input.Key.pk}|${input.Key.sk}`) };
   } };
   const root = createBrokerCoreRoot({
-    env: { ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all" }, documentClient: client, stateTableName: STATE, signInTableName: SIGN_IN, callbackSigningKey: secret.toString(), repositoryGrantKey: secret,
+    env: {}, documentClient: client, stateTableName: STATE, signInTableName: SIGN_IN, callbackSigningKey: secret.toString(), repositoryGrantKey: secret,
     codeModules: () => ({}) as never, repositoryCredential: async () => { throw new Error("unused"); }, origin: () => "https://api.example", log: () => undefined,
     now: () => new Date(fake.clock.now), ciReporting: { honest: true, ciMode: async () => "sandbox_only" as const },
     services: () => Object.fromEntries(["merge-tracking", "session-sweep", "notify-deliver", "admission-hold-sweep"].map((name) => [name, { pass: async () => ({}) }])),

@@ -23,9 +23,9 @@ const projectOf = (name: string): ProjectDefinition => ({
 const PATH = "/v1/app/projects/payments/environment-image";
 const get = (path: string) => ({ method: "GET", path, headers: {}, body: "" });
 
-function appOver(world: FakeWorld, env: NodeJS.ProcessEnv): CoreHostApp {
+function appOver(world: FakeWorld): CoreHostApp {
   return createCoreHostApp({
-    env, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
+    modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
     runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: HONEST_CI }),
   });
 }
@@ -38,7 +38,7 @@ async function setup(enabled = true) {
       await world.store.put({ item: { ...orgProjectCatalogKey(companyId, name), entityType: "PROJECT_CATALOG", latestRevision: 1 } });
     }
   }
-  const app = appOver(world, { ROVARA_CORE_ENGINE: "on" });
+  const app = appOver(world);
   const members = new Map<string, CompanyMembership>();
   const companyOf = vi.fn(async (caller: DeployedCaller) => members.get(caller.principal.personId + caller.principal.companyId));
   const callerOf = (companyId: string, role: CompanyMembership["role"] = "owner"): DeployedCaller => {

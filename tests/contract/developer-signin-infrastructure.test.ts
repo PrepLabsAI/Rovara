@@ -919,7 +919,7 @@ describe("task key deployment boundary coverage", () => {
 
 // IAM headroom: frozen data captured from d605c7b24b0ac3ce4c2b015d8a70d1195593391a, plus the 16 additions of lane E2 (reviewed one by one): the broker's five queue actions on
 // each core dispatch queue (granted on the queues' own policies, #663), the core job schedules' role invoking the broker (#663), and the dispatcher's four reads of the core
-// dispatch queue and its deleter start under CoreEngineIsOn (R2 step 4). Nothing was removed.
+// dispatch queue and its deleter start (R2 step 4; under the CoreEngineIsOn condition until #1275 removed it). Nothing was removed.
 // Kept in this existing test because this lane cannot add files under the port guard.
 type AccessTuple = [principal: string, effect: string, action: string, resource: string, condition: string];
 const symbolicTypes: Record<string, string> = {

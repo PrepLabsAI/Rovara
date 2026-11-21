@@ -13,8 +13,9 @@ describe("the core engine in the legacy (production) template (#1148)", () => {
   let template: Template;
   beforeAll(() => { template = buildAgentXApp().synth().getStackByName("AgentXControlPlane").template as Template; }, 300_000);
 
-  it("has the CoreEngine switch, off by default", () => {
-    expect(template.Parameters.CoreEngine).toMatchObject({ Default: "off" });
+  it("has no CoreEngine switch (#1275)", () => {
+    expect(template.Parameters).not.toHaveProperty("CoreEngine");
+    expect(template.Parameters).not.toHaveProperty("CoreAllowedCompanies");
   });
 
   it("serves /v1/app/* through the broker, as a named environment does", () => {
@@ -22,15 +23,16 @@ describe("the core engine in the legacy (production) template (#1148)", () => {
     expect(routes).toContain("ANY /v1/app/{proxy+}");
   });
 
-  it("names the core's queues for production, and enables its schedules and the dispatcher's core consumer only while the switch is on", () => {
+  it("names the core's queues for production, and enables its schedules and the dispatcher's core consumer (no switch, #1275)", () => {
     const queues = ofType(template, "AWS::SQS::Queue").map(([, queue]) => queue.Properties.QueueName).filter((name) => typeof name === "string");
     expect(queues).toEqual(expect.arrayContaining(["agentx-production-core-dispatch", "agentx-production-core-dispatch-dead", "agentx-production-lessons-reflect", "agentx-production-lessons-reflect-dead"]));
     const schedules = ofType(template, "AWS::Scheduler::Schedule").filter(([id]) => id.startsWith("CoreEngineJobs"));
     expect(schedules.length).toBeGreaterThan(0);
-    for (const [id, schedule] of schedules) expect(JSON.stringify(schedule.Properties.State), id).toMatch(/Fn::If/u);
+    // Every schedule is ENABLED except the upkeep night, which follows CoreSystemRuns.
+    for (const [id, schedule] of schedules) expect(JSON.stringify(schedule.Properties.State), id).toMatch(id.startsWith("CoreEngineJobsJobUpkeepNight") ? /Fn::If/u : /^"ENABLED"$/u);
     const coreMappings = ofType(template, "AWS::Lambda::EventSourceMapping").filter(([, mapping]) => JSON.stringify(mapping.Properties.EventSourceArn).includes("CoreEngineJobsQueue"));
     expect(coreMappings).toHaveLength(1);
-    expect(JSON.stringify(coreMappings[0]![1].Properties.Enabled)).toMatch(/Fn::If/u);
+    expect(coreMappings[0]![1].Properties.Enabled).toBe(true);
   });
 
   it("keeps core company rows (ORG#) away from the State stream's outbox publisher", () => {

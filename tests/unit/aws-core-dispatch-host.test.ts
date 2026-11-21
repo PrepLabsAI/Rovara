@@ -10,7 +10,7 @@ import { modelSelectionPolicyKey } from "../../packages/broker/src/core/model-se
 // refuses in fixed words what it does not have.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { CORE_ENGINE_VARIABLE, change, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type ProjectDefinition, type QueueService } from "@agentx/contracts";
+import { change, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type ProjectDefinition, type QueueService } from "@agentx/contracts";
 import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { MemoryQueueService } from "../../packages/broker/src/ports/memory-queue.js";
@@ -55,7 +55,7 @@ const definition: ProjectDefinition = {
 interface SqsRecord { messageId: string; receiptHandle: string; body: string; eventSource: string; eventSourceARN: string; attributes: { ApproximateReceiveCount: string } }
 
 /** The core's task flow for two companies on one store and one queue, and the EC2 machines of each through one fleet. */
-async function createWorld(options: { enabled?: boolean; /** L4-SQS: the deps of one batch as the dispatcher builds them (default: the flow's own). */ wrapDeps?: (deps: TaskFlowDeps) => TaskFlowDeps; /** L4-SQS: what the host's SQS ChangeMessageVisibility does (default: nothing). */ changeVisibilityTo?: CoreDispatchHostDependencies["changeVisibility"] } = {}) {
+async function createWorld(options: { /** L4-SQS: the deps of one batch as the dispatcher builds them (default: the flow's own). */ wrapDeps?: (deps: TaskFlowDeps) => TaskFlowDeps; /** L4-SQS: what the host's SQS ChangeMessageVisibility does (default: nothing). */ changeVisibilityTo?: CoreDispatchHostDependencies["changeVisibility"] } = {}) {
   const machinesWorld = createSessionMachinesWorld();
   const store = new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES });
   const queues = new MemoryQueueService();
@@ -79,12 +79,11 @@ async function createWorld(options: { enabled?: boolean; /** L4-SQS: the deps of
   }
   const changeVisibility = vi.fn<CoreDispatchHostDependencies["changeVisibility"]>(options.changeVisibilityTo ?? (async () => undefined));
   const depsFor = vi.fn((companyId: OrgId, dispatchQueues: Parameters<CoreDispatchHostDependencies["depsFor"]>[1]) => (options.wrapDeps ?? ((deps: TaskFlowDeps) => deps))(depsOf(companyId, dispatchQueues)));
-  const host = createCoreDispatchHost({ enabled: () => options.enabled ?? true, companyOfWorkspace, depsFor, changeVisibility, log: () => undefined });
+  const host = createCoreDispatchHost({ companyOfWorkspace, depsFor, changeVisibility, log: () => undefined });
   const deliverEc2 = vi.fn(async () => "DELIVERED" as const);
   const markDispatching = vi.fn(async () => true);
   const today = vi.fn(createDispatcherHandler({ deliverEc2, markDispatching, markDelivered: async () => undefined, markFailed: async () => undefined, maxAttempts: 50, log: () => undefined }));
-  const serves = vi.fn(() => options.enabled ?? true);
-  const handler = withCoreDispatch(today, { coreQueueArn: CORE_QUEUE_ARN, serves, host: async () => host, log: () => undefined });
+  const handler = withCoreDispatch(today, { coreQueueArn: CORE_QUEUE_ARN, host: async () => host, log: () => undefined });
   /** Takes the core's staged dispatch messages off its queue, as the outbox relay would put them on SQS. */
   const staged = async (): Promise<SqsRecord[]> => {
     const queue = await queues.queue("task-dispatch");
@@ -94,7 +93,7 @@ async function createWorld(options: { enabled?: boolean; /** L4-SQS: the deps of
   };
   const again = (record: SqsRecord): SqsRecord => ({ ...record, receiptHandle: `rh-${randomUUID()}`, attributes: { ApproximateReceiveCount: String(Number(record.attributes.ApproximateReceiveCount) + 1) } });
   const start = async (company: OrgId) => (await flows.get(company)!.start({ principal: localOwnerPrincipal({ companyId: company }), client: "test", origin: "app" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint" })).task;
-  return { depsOf, machinesWorld, fleet, store, flows, host, handler, today, serves, deliverEc2, markDispatching, changeVisibility, depsFor, staged, again, start };
+  return { depsOf, machinesWorld, fleet, store, flows, host, handler, today, deliverEc2, markDispatching, changeVisibility, depsFor, staged, again, start };
 }
 
 const failures = (answer: unknown) => (answer as { batchItemFailures: Array<{ itemIdentifier: string }> }).batchItemFailures.map((failure) => failure.itemIdentifier);
@@ -192,7 +191,7 @@ describe("the dispatcher's router", () => {
   it("is today's handler itself where the core queue is not configured (the legacy template)", () => {
     const today = createDispatcherHandler({ markDispatching: async () => true, markDelivered: async () => undefined, markFailed: async () => undefined });
     const host = vi.fn();
-    for (const coreQueueArn of [undefined, "", "   "]) expect(withCoreDispatch(today, { coreQueueArn, serves: () => true, host })).toBe(today);
+    for (const coreQueueArn of [undefined, "", "   "]) expect(withCoreDispatch(today, { coreQueueArn, host })).toBe(today);
     expect(host).not.toHaveBeenCalled();
   });
 
@@ -207,35 +206,17 @@ describe("the dispatcher's router", () => {
     expect((w.today.mock.calls[0]![0] as { Records: unknown[] }).Records).toEqual([todays]);
     expect(failures(answer).sort()).toEqual([todays.messageId, core!.messageId].sort());
     expect(w.depsFor).toHaveBeenCalledTimes(1);
-    // A batch of today's records alone is passed through untouched, the same event object, and the switch is not even read.
-    w.serves.mockClear();
+    // A batch of today's records alone is passed through untouched, the same event object.
     const event = { Records: [todays] };
     await w.handler(event);
     expect(w.today.mock.calls[1]![0]).toBe(event);
-    expect(w.serves).not.toHaveBeenCalled();
   });
 
-  it("reads the switch per batch and, while it is off, neither builds nor asks the core: the core records come back", async () => {
-    const host = vi.fn(async () => { throw new Error("must not be built while off"); });
-    const today = vi.fn(async () => ({ batchItemFailures: [] }));
-    let on = false;
-    const logs: Array<Record<string, unknown>> = [];
-    const handler = withCoreDispatch(today, { coreQueueArn: CORE_QUEUE_ARN, serves: () => on, host, log: (entry) => logs.push(entry) });
-    const record = { messageId: "m-1", receiptHandle: "rh", body: JSON.stringify({ v: 1, companyId: COMPANY_A, workspaceId: randomUUID(), operationId: randomUUID() }), eventSourceARN: CORE_QUEUE_ARN };
-    expect(failures(await handler({ Records: [record] }))).toEqual(["m-1"]);
-    expect(host).not.toHaveBeenCalled();
-    expect(today).not.toHaveBeenCalled();
-    expect(logs).toEqual([{ event: "dispatch.core_off", records: 1 }]);
-    // Switched on between batches: the next batch builds the core (here it fails to, and the record still comes back).
-    on = true;
-    expect(failures(await handler({ Records: [record] }))).toEqual(["m-1"]);
-    expect(host).toHaveBeenCalledTimes(1);
-  });
 });
 
 describe("the core on the dispatcher", () => {
   const env = (overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv => ({
-    [CORE_ENGINE_VARIABLE]: `on:${COMPANY_A}`, CORE_DISPATCH_QUEUE_URL: "https://sqs.us-west-2.amazonaws.com/111122223333/agentx-staging-core-dispatch",
+    CORE_DISPATCH_QUEUE_URL: "https://sqs.us-west-2.amazonaws.com/111122223333/agentx-staging-core-dispatch",
     CORE_DISPATCH_DEAD_LETTER_URL: "https://sqs.us-west-2.amazonaws.com/111122223333/agentx-staging-core-dispatch-dead", STATE_TABLE_NAME: "State",
     ARTIFACT_BUCKET_NAME: "artifacts", AWS_REGION: "us-west-2", EC2_WORKER_SUBNETS: "us-west-2a=subnet-0aaaaaaaaaaaaaaaa", EC2_WORKER_LAUNCH_TEMPLATE_ID: "lt-0123456789abcdef0", ...overrides,
   });
@@ -258,7 +239,7 @@ describe("the core on the dispatcher", () => {
   it("refuses merge tracking on a dispatch-only runtime with a fixed typed error", async () => {
     const world = createFakeWorld();
     const app = createCoreHostApp({
-      env: env(), modules: world.modules, context: () => world.context(), dispatchOnly: true, servedCompanies: async () => [],
+      modules: world.modules, context: () => world.context(), dispatchOnly: true, servedCompanies: async () => [],
       runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: refusingTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(), log: () => undefined, services: () => ({ "merge-tracking": { pass: async () => ({}) } }) }),
     });
     await expect(app.runtimeFor(COMPANY_A)).rejects.toMatchObject({ name: "DispatchOnlyMergeTrackingError", message: DISPATCH_ONLY_MERGE_TRACKING_REFUSED });
@@ -280,7 +261,7 @@ describe("the core on the dispatcher", () => {
   });
 
   it("builds the declared learned input separately for each company's runtime", async () => {
-    const made = inputs(env({ [CORE_ENGINE_VARIABLE]: "on", ROVARA_CORE_LESSONS: "on" }));
+    const made = inputs(env({ ROVARA_CORE_LESSONS: "on" }));
     const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
     const readers = new Map([COMPANY_A, COMPANY_B].map((company) => [company, vi.fn(async () => ({}))]));
     const declared = vi.fn((_registry: unknown, company: string) => hostedDispatcherFlow(made.inputs.env, readers.get(company)));
@@ -294,7 +275,7 @@ describe("the core on the dispatcher", () => {
 
   it("DEC 254zm: each company's runtime is told its OWN projects' approved test environments (a step's plan), never another company's", async () => {
     const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
-    const made = inputs(env({ [CORE_ENGINE_VARIABLE]: "on" }));
+    const made = inputs(env({}));
     const built = createDispatcherCoreHost({ ...made.inputs, extraModules: createFakeWorld().modules.filter((module) => owed.has(module.point)), flow: { standingInstructions: null, modelAccess: null, learned: null } });
     const a = await built.app.runtimeFor(COMPANY_A);
     const b = await built.app.runtimeFor(COMPANY_B);
@@ -314,7 +295,7 @@ describe("the core on the dispatcher", () => {
   });
 
   it("L4-TSU: each company's runtime on the dispatcher carries its own taskSpendUsd over its own cost ledger: another company's row for the same task id is never counted, and what is not known throws in fixed words", async () => {
-    const made = inputs(env({ [CORE_ENGINE_VARIABLE]: "on" }));
+    const made = inputs(env({}));
     const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
     const logs: Array<Record<string, unknown>> = [];
     const built = createDispatcherCoreHost({ ...made.inputs, log: (entry) => { logs.push(entry); }, flow: () => ({ standingInstructions: null, modelAccess: null, learned: null }), extraModules: createFakeWorld().modules.filter((module) => owed.has(module.point)) });
@@ -342,10 +323,10 @@ describe("the core on the dispatcher", () => {
   });
 
   it("L4-TA6: each company's runtime on the dispatcher carries its own taskCapUsd (the live cap automatic fixing is held to) from the host's input, and nothing when the host gives none; the deployed dispatcher gives it", async () => {
-    const made = inputs(env({ [CORE_ENGINE_VARIABLE]: "on" }));
+    const made = inputs(env({}));
     const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
     const wiring = { flow: () => ({ standingInstructions: null, modelAccess: null, learned: null }), extraModules: createFakeWorld().modules.filter((module) => owed.has(module.point)) };
-    const settings = { allowedCompanies: "all" as const, taskCapMicros: 1_000_000, companyDayCapMicros: 25_000_000 };
+    const settings = { taskCapMicros: 1_000_000, companyDayCapMicros: 25_000_000 };
     const built = createDispatcherCoreHost({ ...made.inputs, ...wiring, taskCapUsd: (registry, companyId) => hostedTaskCapUsd({ store: registry.require("storage"), companyId, settings }) });
     const [a, b] = [await built.app.runtimeFor(COMPANY_A), await built.app.runtimeFor(COMPANY_B)];
     expect(typeof a.flow.deps.taskCapUsd).toBe("function");
@@ -367,7 +348,7 @@ describe("the core on the dispatcher", () => {
   });
 
   it("lead 4 A1: each company's runtime on the dispatcher carries its own wiki reader, which gives a step nothing for another company's workspace or when no switch is on", async () => {
-    const made = inputs(env({ [CORE_ENGINE_VARIABLE]: "on" }));
+    const made = inputs(env({}));
     const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
     const built = createDispatcherCoreHost({ ...made.inputs, flow: () => ({ standingInstructions: null, modelAccess: null, learned: null }), extraModules: createFakeWorld().modules.filter((module) => owed.has(module.point)) });
     const [a, b] = [await built.app.runtimeFor(COMPANY_A), await built.app.runtimeFor(COMPANY_B)];
@@ -380,7 +361,7 @@ describe("the core on the dispatcher", () => {
 
   it("L4-ART: each company's runtime on the dispatcher carries a company-bound artifacts reader: its own workspaces' documents read, another company's and a key outside the flow's shapes read as not there", async () => {
     const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
-    const made = inputs(env({ [CORE_ENGINE_VARIABLE]: "on" }));
+    const made = inputs(env({}));
     const logs: Array<Record<string, unknown>> = [];
     const built = createDispatcherCoreHost({ ...made.inputs, log: (entry) => { logs.push(entry); }, extraModules: createFakeWorld().modules.filter((module) => owed.has(module.point)), flow: { standingInstructions: null, modelAccess: null, learned: null } });
     const [a, b] = [await built.app.runtimeFor(COMPANY_A), await built.app.runtimeFor(COMPANY_B)];
@@ -410,7 +391,7 @@ describe("the core on the dispatcher", () => {
     const extraModules = createFakeWorld().modules.filter((module) => owed.has(module.point));
     const gatewayEnv = { ROVARA_CORE_MODEL_GATEWAY_URL: "https://gateway.example.test/", ROVARA_CORE_AGENT_MODEL: "claude-sonnet-4-5" };
     const built = async (extra: Record<string, string | undefined>) => {
-      const made = inputs(env({ [CORE_ENGINE_VARIABLE]: "on", ...extra }));
+      const made = inputs(env({ ...extra }));
       const host = createDispatcherCoreHost({ ...made.inputs, extraModules, flow: () => hostedDispatcherFlow(made.inputs.env)! });
       return [(await host.app.runtimeFor(COMPANY_A)).flow.deps.evalGatewayUrl, (await host.app.runtimeFor(COMPANY_B)).flow.deps.evalGatewayUrl] as const;
     };
@@ -471,7 +452,7 @@ describe("the core on the dispatcher", () => {
     const extraModules = createFakeWorld().modules.filter((module) => owed.has(module.point));
     const route = { route: async () => ({ alias: "claude-sonnet-5-5", api: "anthropic-messages" as const, catalog: "claude-sonnet-5-5" }) };
     const flow = { standingInstructions: null, modelAccess: route, learned: null };
-    const made = inputs(env({ [CORE_ENGINE_VARIABLE]: "on" }));
+    const made = inputs(env({}));
     // The dispatcher always consults stored state, and absence uses the configured default.
     const plain = await createDispatcherCoreHost({ ...made.inputs, extraModules, flow }).app.runtimeFor(COMPANY_A);
     expect(await plain.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { reason: "INSTALL_MODEL", route: { alias: "claude-sonnet-5-5" } } });
@@ -488,7 +469,7 @@ describe("the core on the dispatcher", () => {
     const noRoute = await createDispatcherCoreHost({ ...made.inputs, extraModules, flow: { ...flow, modelAccess: null }, env: { ...made.inputs.env, ROVARA_CORE_AGENT_MODEL_CHOICE: "on" } }).app.runtimeFor(COMPANY_A);
     expect(await noRoute.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: false });
     // Fresh rows are company scoped. A's missing row uses the default, even when B has a fresh choice.
-    const host = createDispatcherCoreHost({ ...made.inputs, extraModules, flow, env: { ...made.inputs.env, [CORE_ENGINE_VARIABLE]: "on", ROVARA_CORE_AGENT_MODEL_CHOICE: "on" } });
+    const host = createDispatcherCoreHost({ ...made.inputs, extraModules, flow, env: { ...made.inputs.env, ROVARA_CORE_AGENT_MODEL_CHOICE: "on" } });
     const a = await host.app.runtimeFor(COMPANY_A);
     const b = await host.app.runtimeFor(COMPANY_B);
     expect(await a.flow.deps.modelAccess!.route()).toStrictEqual(await route.route());
@@ -523,7 +504,6 @@ describe("the core on the dispatcher", () => {
   it("builds nothing until a core record arrives, and then refuses by name while the security-list points are owed: the record comes back, no machine is started", async () => {
     const { world, inputs: given } = inputs(env());
     const { app, host } = createDispatcherCoreHost(given);
-    expect(app.serving).toBe(true);
     // The dispatcher runs no job and relays no outbox.
     expect(await app.handleScheduledJob({ source: "agentx.core-job", job: "dispatch-sweep" })).toEqual({ skipped: "dispatch_only" });
     expect(await app.relayOutbox([COMPANY_A])).toEqual([]);
@@ -537,14 +517,6 @@ describe("the core on the dispatcher", () => {
     expect(refused).toBeInstanceOf(CoreRegistryError);
     for (const point of ["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]) expect(refused.message).toContain(point);
     for (const point of ["worker-machines (", "storage (", "queue (", "code-host (", "check-runner ("]) expect(refused.message).not.toContain(point);
-  });
-
-  it("takes nothing with the switch off and builds no registry", async () => {
-    const { inputs: given } = inputs(env({ [CORE_ENGINE_VARIABLE]: "off" }));
-    const { app, host } = createDispatcherCoreHost(given);
-    expect(app.serving).toBe(false);
-    expect(host.take([{ messageId: "m", body: JSON.stringify({ v: 1, companyId: COMPANY_A, workspaceId: randomUUID(), operationId: randomUUID() }) }])).toEqual(new Set());
-    await expect(app.registry()).rejects.toThrow("the core engine is off");
   });
 
   it("refuses in fixed words what the dispatcher does not have: a code host, a person, a repository credential", async () => {

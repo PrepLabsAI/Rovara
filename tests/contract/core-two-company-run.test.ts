@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { expect, it, vi } from "vitest";
 import { z } from "zod";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
-import { LEARNED_CONTEXT_FEATURE, ROVARA_CODE_AGENT_ID, WorkflowSnapshotSchema, change, companyScoped, createCandidateManifest, createWorkflowSnapshot, orgProjectCatalogKey, projectRevisionKey, runCostKey, sessionBindingKey, type OrgId, type WorkerMachines, type StoredDocument, type WorkerInvocation } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, LEARNED_CONTEXT_FEATURE, ROVARA_CODE_AGENT_ID, WorkflowSnapshotSchema, change, companyScoped, createCandidateManifest, createWorkflowSnapshot, orgProjectCatalogKey, projectRevisionKey, runCostKey, sessionBindingKey, type OrgId, type WorkerMachines, type StoredDocument, type WorkerInvocation } from "@agentx/contracts";
 import { createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
 import { createBrokerCoreServices } from "../../packages/broker/src/aws/core-job-services.js";
 import { createCoreDispatchHost } from "../../packages/broker/src/aws/worker-machines/core-dispatch-host.js";
@@ -58,7 +58,7 @@ async function world(options: { noSigner?: boolean; offeredModels?: OfferedModel
   } };
   const key = makeKey("t".repeat(16));
   const root = createBrokerCoreRoot({
-    env: { ROVARA_CORE_ENGINE: `on:${A}:${B}`, ROVARA_CORE_ALLOWED_COMPANIES: `${A}:${B}`, ROVARA_CORE_MODEL_GATEWAY_URL: gateway, ROVARA_CORE_AGENT_MODEL: MODEL, ROVARA_CORE_LESSONS: "on" },
+    env: { ROVARA_CORE_MODEL_GATEWAY_URL: gateway, ROVARA_CORE_AGENT_MODEL: MODEL, ROVARA_CORE_LESSONS: "on" },
     documentClient: client, stateTableName: "state", signInTableName: "signin", callbackSigningKey: SIGNING, repositoryGrantKey: Buffer.alloc(32, 1),
     repositoryCredential: async () => ({ token: "fake" }), codeModules: () => ({}) as never,
     ...(options.noSigner ? {} : { taskTokens: () => ({ signer: taskKeySigner(signerOf(key)), issuer: "https://api.example/v1/auth" }) }),
@@ -75,7 +75,6 @@ async function world(options: { noSigner?: boolean; offeredModels?: OfferedModel
   const caller = (developerId: string) => ({ developerId, sessionId: "session", name: "Member" });
   const start = (developerId: string) => root.coreTasks!.route({ method: "POST", path: "/v1/dev/tasks", headers: {}, body: JSON.stringify({ requestId: randomUUID(), project: "payments", instructions: "Add retry handling" }) }, caller(developerId));
   const dispatch = createCoreDispatchHost({
-    enabled: () => root.app.serving,
     companyOfWorkspace: workspaceCompanyReader(client, "state"),
     depsFor: async (companyId, queues) => {
       const flow = (await root.app.runtimeFor(companyId)).flow;
@@ -106,7 +105,7 @@ async function world(options: { noSigner?: boolean; offeredModels?: OfferedModel
   return { w, root, caller, start, dispatchOnce, invocation, callback, client };
 }
 
-it("runs two companies through start, dispatch, callbacks, broker model access, review and one shared merge scan; C starts on the old path", async () => {
+it("runs two companies through start, dispatch, callbacks, broker model access, review and one shared merge scan; every company's new task starts on the core", async () => {
   const h = await world();
   const broker = await createAdminBroker({ core: h.root });
   const runs: Array<{ companyId: string; person: string; taskId: string; workspaceId: string; job: WorkerInvocation }> = [];
@@ -224,17 +223,12 @@ it("runs two companies through start, dispatch, callbacks, broker model access, 
   await h.w.store.put({ item: foreignRow });
   const query = vi.spyOn(h.w.store, "query");
   const jobReport = await h.root.handleEvent({ source: "agentx.core-job", job: "merge-tracking" }) as { companies: Array<{ companyId: string; outcome: string; report: { attempted: number } }> };
-  expect(jobReport.companies.map((entry) => [entry.companyId, entry.outcome, entry.report?.attempted])).toEqual([[A, "ran", 1], [B, "ran", 1]]);
+  expect(jobReport.companies.map((entry) => [entry.companyId, entry.outcome, entry.report?.attempted])).toEqual([[IMPLICIT_COMPANY_ID, "ran", 0], [A, "ran", 1], [B, "ran", 1]]);
   expect(query.mock.calls.filter(([input]) => input.pk === "WORKFLOW_MERGE_RECOVERY")).toHaveLength(1);
   expect(await h.w.store.get(recoveryRowKey(foreignId))).toEqual(foreignRow);
   for (const companyId of [A, B]) expect(query.mock.calls.find(([input]) => input.pk === companyScoped(companyId, "TIER_CHECKS_DUE"))?.[0].filter).toEqual({ op: "eq", path: ["companyId"], value: companyId });
-  const oldStart = vi.fn(async () => ({ engine: "workflow", companyId: C }));
-  const coreAnswer = await h.start(personC);
-  expect(coreAnswer).toBeUndefined();
-  const oldAnswer = coreAnswer ?? await oldStart();
-  expect(oldAnswer).toEqual({ engine: "workflow", companyId: C });
-  expect(oldStart).toHaveBeenCalledOnce();
-  expect(h.root.app.engineForNewTask(C)).toBe("workflow");
+  // #1275: no switch, so C's new tasks start on the core too.
+  expect(h.root.app.engineForNewTask(C)).toBe("core");
 });
 
 it("refuses the entire company's runtime when the gateway has no task signer", async () => {

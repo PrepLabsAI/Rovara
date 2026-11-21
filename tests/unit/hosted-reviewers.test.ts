@@ -43,7 +43,7 @@ async function world() {
   const now = () => new Date(h.clock.now);
   const metering = createHostedMetering();
   const ledger = createHostedLedger({ store: h.store, metering, now });
-  const settings = { allowedCompanies: [A, B], taskCapMicros: 5_000_000, companyDayCapMicros: 10_000_000 };
+  const settings = { taskCapMicros: 5_000_000, companyDayCapMicros: 10_000_000 };
   h.deps.admission = createHostedAdmission({ store: h.store, ledger, settings, now, runStopWired: true });
   const registry = { names: () => [], require: (point: string) => point === "storage" ? h.store : point === "metering" ? metering : point === "audit-sink" ? h.deps.audit : {} } as unknown as RegistryView;
   const offered = vi.fn(async (): Promise<unknown> => access());

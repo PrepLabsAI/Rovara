@@ -1,11 +1,10 @@
 // Engine host (lane E2): every task is pinned to one engine when it starts, and keeps it.
 //
 // The stamp is its own small item, `TASK_ENGINE#<taskId>` / `STAMP`, written only by the core's start, in the start's own transaction (the core's `startExtras` seam), so a core task and its stamp
-// exist together or not at all. A task with no stamp is a spec 056 workflow task: every task that exists today, and every task started while the switch is off. So with the switch off nothing new
-// is written anywhere, and no task record changes shape (the workflow's strict readers never meet a new field).
+// exist together or not at all. A task with no stamp is a spec 056 workflow task: a task started while the core engine switch was off, before #1275 removed it. No workflow task record changes
+// shape (the workflow's strict readers never meet a new field).
 //
-// Routing reads the stamp, never the switch: a flip of the switch changes where the NEXT task starts and nothing else. A running core task finishes on the core after the switch is turned off;
-// a running workflow task finishes on the workflow after it is turned on.
+// Routing reads the stamp: every NEW task starts on the core, and a running workflow task finishes on the workflow (until that workflow is removed, #1274).
 import { when, type DocumentKey, type DocumentStore, type StoredDocument, type TransactItem } from "@agentx/contracts";
 import { CORE_AREAS, coreAreaOn, flagSnapshot, type CoreArea, type CoreEngineFlags } from "./flags.js";
 
@@ -20,9 +19,9 @@ export const engineStampKey = (taskId: string): DocumentKey => ({ pk: `TASK_ENGI
 export interface EngineStamp {
   /** `core` when the task's flow runs on the core. */
   engine: Engine;
-  /** Each area's engine for this task. With one combined switch all three agree; a later lane may narrow one. */
+  /** Each area's engine for this task. All three agree. */
   areas: Readonly<Record<CoreArea, Engine>>;
-  /** The switches the task started under (`flagSnapshot`). */
+  /** The setting the task started under (`flagSnapshot`): `cc=on` since #1275; an older stamp holds the switch values of its time. */
   flags: string;
   stampedAt: string;
 }
@@ -73,7 +72,7 @@ export async function engineOfStoredTask(store: Pick<DocumentStore, "get">, task
 
 /**
  * Where the root looks, cheaply, to learn which companies have ever started a task on the core (the stamp is per task, and there is no list of them). The rows share one partition so they can be
- * listed: while the switch is off the root serves the core's tasks of EVERY company that has one (their sweeps and jobs), so an install that never switched on builds nothing and asks for nothing.
+ * listed: the root serves the core's tasks of EVERY company that has one (their sweeps and jobs).
  */
 export const CORE_IN_USE_PARTITION = "CORE_ENGINE_IN_USE";
 export const coreInUseKey = (companyId: string): DocumentKey => ({ pk: CORE_IN_USE_PARTITION, sk: `ORG#${companyId}` });

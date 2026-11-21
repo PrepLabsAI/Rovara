@@ -24,9 +24,9 @@ const project = (name: string): ProjectDefinition => ({
   repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "host-app" }],
 });
 
-function appOver(world: FakeWorld, env: NodeJS.ProcessEnv): CoreHostApp {
+function appOver(world: FakeWorld): CoreHostApp {
   return createCoreHostApp({
-    env, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
+    modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
     runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: HONEST_CI }),
   });
 }
@@ -48,7 +48,7 @@ async function setupWorld(options: { env?: NodeJS.ProcessEnv; gateway?: boolean;
   await register(world, FAKE_COMPANY, "payments");
   await register(world, OTHER, "payments");
   await register(world, OTHER, "ledger");
-  const app = appOver(world, options.env ?? { ROVARA_CORE_ENGINE: "on" });
+  const app = appOver(world);
   const people = new Map<string, Person>();
   const person = (personId: string, companyId: string, role: CompanyMembership["role"], grant?: Person["grant"]): DeployedCaller => {
     const caller: DeployedCaller = { principal: { companyId, personId, displayName: `Name ${personId}`, roles: [role], provider: HOSTED_IDENTITY_PROVIDER }, client: "cloud" };

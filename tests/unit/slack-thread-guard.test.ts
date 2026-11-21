@@ -10,7 +10,7 @@ import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/
 import { startIdempotencyKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import type { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { buildCoreRegistry, createCoreRuntime, readCoreEngineFlags, type CoreRuntime } from "../../packages/broker/src/core-host/index.js";
+import { CORE_ENGINE_ON, buildCoreRegistry, createCoreRuntime, type CoreRuntime } from "../../packages/broker/src/core-host/index.js";
 import type { CoreEntryCaller, CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
 import { isOwnSlackStart, slackThreadGuardItem, startSlackWorkflowOnCore, type SlackCoreStartInput } from "../../packages/broker/src/aws/slack-core-start.js";
 import { FAKE_COMPANY, createFakeWorld } from "../support/core-host-fakes.js";
@@ -52,7 +52,7 @@ async function world() {
     await fake.store.put({ item: { ...projectRevisionKey(companyId, PROJECT.name, PROJECT.revision), entityType: "PROJECT", definition: JSON.parse(JSON.stringify(PROJECT)) as JsonValue } });
     await fake.store.put({ item: { ...orgProjectCatalogKey(companyId, PROJECT.name), entityType: "PROJECT_CATALOG", latestRevision: PROJECT.revision } });
     const runtime = createCoreRuntime({
-      registry, companyId, flags: readCoreEngineFlags({ ROVARA_CORE_ENGINE: "on" }), callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
+      registry, companyId, flags: CORE_ENGINE_ON, callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
       repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(fake.clock.now), log: () => undefined,
     });
     const principal = localOwnerPrincipal({ companyId, personId });

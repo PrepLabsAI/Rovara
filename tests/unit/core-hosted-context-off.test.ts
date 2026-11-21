@@ -36,7 +36,7 @@ async function hostedRoot() {
   } };
   const key = makeKey("t".repeat(16));
   const root = createBrokerCoreRoot({
-    env: { ROVARA_CORE_ENGINE: `on:${A}`, ROVARA_CORE_ALLOWED_COMPANIES: A, ROVARA_CORE_MODEL_GATEWAY_URL: "https://gateway.example", ROVARA_CORE_AGENT_MODEL: "claude-sonnet-4-6", ROVARA_CORE_LESSONS: "on" },
+    env: { ROVARA_CORE_MODEL_GATEWAY_URL: "https://gateway.example", ROVARA_CORE_AGENT_MODEL: "claude-sonnet-4-6", ROVARA_CORE_LESSONS: "on" },
     documentClient: client, stateTableName: "state", signInTableName: "signin", callbackSigningKey: "k".repeat(32), repositoryGrantKey: Buffer.alloc(32, 1),
     repositoryCredential: async () => ({ token: "fake" }), codeModules: () => ({}) as never,
     taskTokens: () => ({ signer: taskKeySigner(signerOf(key)), issuer: "https://api.example/v1/auth" }),

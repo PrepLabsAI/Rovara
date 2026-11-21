@@ -53,7 +53,7 @@ async function world(options: { env?: NodeJS.ProcessEnv } = {}) {
   const refused: string[] = [];
   const hosted = new Map<string, ReturnType<typeof createHostedEvidence>>();
   const app: CoreHostApp = createCoreHostApp({
-    env: { ROVARA_CORE_ENGINE: "on" }, modules: fake.modules, context: () => fake.context(), nowMs: () => fake.clock.now,
+    modules: fake.modules, context: () => fake.context(), nowMs: () => fake.clock.now,
     runtime: (registry, companyId) => {
       // The wiring under test: exactly what aws/core-engine-root.ts hands each company's flow.
       const evidence = createHostedEvidence({ blobs: registry.require("object-storage"), store: registry.require("storage"), companyId: companyId, env: options.env ?? {}, now: () => fake.clock.now, log: (entry) => logs.push(entry), refused: (reason) => refused.push(reason) });

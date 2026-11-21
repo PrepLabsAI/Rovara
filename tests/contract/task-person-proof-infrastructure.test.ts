@@ -77,13 +77,13 @@ function parentRemainderDigest(template: TemplateJson, named = true): string {
   withoutCoreModelAccessRoute(remainder);
   // The core engine's named-environment addition (E2) is checked in full by core-engine-infrastructure.test.ts. A named environment must carry it (its shape is asserted as it is removed);
   // #1148: the legacy template carries it too now (off by default), and its digest pins it whole, so only a named template has it taken out.
-  if (named && remainder.Parameters?.CoreEngine !== undefined) {
+  if (named && remainder.Parameters?.CoreTaskCapUsd !== undefined) {
     withoutCoreEngine(remainder);
     // The switch-over parity additions of a named control plane (switchover-parity-infrastructure.test.ts); shape asserted, then taken out.
     withoutSwitchoverControlPlaneParity(remainder);
     // L4-EGR: the NatEgressAddresses parameter and the broker variable that reads it (egress-addresses-infrastructure.test.ts).
     withoutNatEgressControlPlane(remainder);
-  } else if (named) expect(JSON.stringify(remainder), "only a template without the core engine switch may skip its removal").not.toContain("CoreEngine");
+  } else if (named) expect(JSON.stringify(remainder), "only a template without the core engine may skip its removal").not.toContain("CoreEngine");
   delete remainder.Parameters?.TaskPersonProofEnabled;
   // Spec 059's default-OFF runtime graph addition is asserted exactly below; exclude only that
   // named parameter and its corresponding Broker environment reference from the proof-only hash.
@@ -314,15 +314,16 @@ describe("the named TEST proof-only installation gate", () => {
         // #1148: re-pinned for the core engine in the legacy template (CoreEngine off by default, the /v1/app route, saved environment images, the core's keys).
         // SIGNIN-STATE-TABLE: re-pinned for ONE change: the sign-in function's STATE_TABLE_NAME is the plain Ref to State instead of an Fn::If on SlackCompanyModeOn to "" (rule D: with the old
         // Fn::If put back, the old pins 5e7b09b2... and 40317b61... held). Named and foreign are unchanged (withoutSlackCompanyMode takes the variable out in both forms).
-        withRoute: "e2e5356f32d994932404dd8147336996aa5cd897b89c7e17998e1540848786c1",
-        withoutRoute: "73dec60e0ae54317d76cc9443a59ac1b2df17ae4ae6007650f2b79b7bb8f1ac6",
+        // #1275: re-pinned for removing the core engine switch (the legacy-templates snapshot diff is exactly that).
+        withRoute: "e07dd4159c119f01af79e029eca73c35fff9cc4098ad8341f946a5070517cded",
+        withoutRoute: "7f704d79dc046c8f3fb1c6141eeb0cfcc8f21fe9cc1ab1380fdbee2f55db74ff",
         beforeStepUpRemoval: undefined,
       },
     ] as const;
-    expect(named.Parameters?.CoreEngine, "named has the core engine switch").toBeDefined();
-    expect(foreign.Parameters?.CoreEngine, "foreign has the core engine switch").toBeDefined();
-    // #1148: the legacy (production) template has the core engine too, off by default.
-    expect(legacy.Parameters?.CoreEngine, "legacy has the core engine switch, off").toMatchObject({ Default: "off" });
+    expect(named.Parameters?.CoreTaskCapUsd, "named has the core engine").toBeDefined();
+    expect(foreign.Parameters?.CoreTaskCapUsd, "foreign has the core engine").toBeDefined();
+    // #1148: the legacy (production) template has the core engine too.
+    expect(legacy.Parameters?.CoreTaskCapUsd, "legacy has the core engine").toBeDefined();
     for (const { label, template, withRoute, withoutRoute, beforeStepUpRemoval } of digestCases) {
       const creatorChecks = developerSignInConditionCheckEntries(template);
       {

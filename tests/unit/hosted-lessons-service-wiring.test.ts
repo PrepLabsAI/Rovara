@@ -86,7 +86,7 @@ async function setup(options: { lessons?: string; gateway?: boolean; answer?: (n
     return await (options.answer ?? (() => new Response(JSON.stringify({ model: MODEL, content: [{ type: "text", text: reply() }] }), { status: 200, headers: { "content-type": "application/json" } })))(seen.length - 1, entry);
   }) as unknown as typeof fetch;
   const root = createBrokerCoreRoot({
-    env: { ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all", ...(options.lessons === undefined ? {} : { ROVARA_CORE_LESSONS: options.lessons }) },
+    env: { ...(options.lessons === undefined ? {} : { ROVARA_CORE_LESSONS: options.lessons }) },
     documentClient: client, stateTableName: "state", signInTableName: "signin", callbackSigningKey: secret.toString(), repositoryGrantKey: secret,
     codeModules: () => ({}) as never, repositoryCredential: async () => { throw new Error("unused"); }, origin: () => "https://api.example", log: options.log ?? (() => undefined),
     now: () => new Date(world.clock.now), ciReporting: { honest: true, ciMode: async () => "sandbox_only" as const },

@@ -1,9 +1,9 @@
 import type { TaskMoneyV1 } from "@agentx/contracts";
 import { logWorkspacePointerIntegrity } from "../core/task-flow/workspace-pointer.js";
 // Engine boundary (migration plan v3.2 lane E2, step 6 part): every AWS entry point that reads or acts on an EXISTING task goes by the task's stored engine (its stamp,
-// core-host/engine-stamp.ts), never by the switch.
+// core-host/engine-stamp.ts).
 //
-//   - A task with no stamp (every task that exists today, and every task started while the switch is off) is a spec 056 workflow task: today's AWS readers answer it, unchanged.
+//   - A task with no stamp (a task started while the core engine switch was off, before #1275 removed it) is a spec 056 workflow task: today's AWS readers answer it, unchanged.
 //   - A task stamped `core` is the core's. The developer task routes hand it to the core's own handlers (`CoreTaskEntry`, the core host's dev routes: company-aware, they check the
 //     caller's company on every read). Nothing on the AWS side reads its record, its workspace or its operations. Without a core entry on this install, or for an operation the core
 //     does not serve yet, the answer is a fixed refusal that never says more than a missing task would to someone who may not see it.
@@ -335,8 +335,8 @@ export async function serveCoreTask(entry: CoreTaskEntry | undefined, request: B
 }
 
 /**
- * The developer start, through the core where the switch sends this caller's company (lane E2 step 6). `undefined`: the old start answers it (no core entry on this install, a company the
- * switch does not send to the core, or a person with no member company). Otherwise the core's answer, as the developer routes return it.
+ * The developer start, through the core (lane E2 step 6; every member company's new task since #1275). `undefined`: the old start answers it (no core entry on this install, or a person
+ * with no member company). Otherwise the core's answer, as the developer routes return it.
  */
 export async function startOnCore(entry: CoreTaskEntry | undefined, request: BrokerRequest, caller: CoreEntryCaller): Promise<{ value: unknown } | undefined> {
   if (entry === undefined || !isStart(request)) return undefined;

@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as codeModules from "../../packages/broker/src/core-host/code-modules.js";
 import { createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
 import { createFakeWorld } from "../support/core-host-fakes.js";
+import { ensureCoreInUse } from "../../packages/broker/src/core-host/engine-stamp.js";
 import { IMPLICIT_COMPANY_ID, orgChannelLinkKey, orgDeveloperChannelLinkKey, when, type AuditEvent, type AuditSink, type OrgId, type StoredDocument } from "@agentx/contracts";
 import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
@@ -348,7 +349,7 @@ describe("person erase: bounded and resumable", () => {
 });
 
 describe("scheduled person erase resume (L13)", () => {
-  function scheduled(w: World, switchValue = `on:${A}`) {
+  function scheduled(w: World) {
     const fakes = createFakeWorld();
     const modules = fakes.modules.filter((module) => !["identity", "admission", "metering", "audit-sink", "approvers"].includes(module.point)).map((module) => {
       if (module.point === "storage") return { ...module, create: () => w.store };
@@ -358,7 +359,7 @@ describe("scheduled person erase resume (L13)", () => {
     const adapterModules = vi.spyOn(codeModules, "codeAdapterModules").mockReturnValue(modules);
     try {
       return createBrokerCoreRoot({
-        env: { ROVARA_CORE_ENGINE: switchValue, ROVARA_CORE_ALLOWED_COMPANIES: "all" },
+        env: {},
         documentClient: { send: async () => { throw new Error("unexpected sign-in read"); } }, stateTableName: "state", signInTableName: "signin",
         codeModules: () => ({} as codeModules.CodeModuleDeps),
         callbackSigningKey: "k".repeat(32), repositoryGrantKey: Buffer.alloc(32, 1), repositoryCredential: async () => { throw new Error("unused"); },
@@ -383,8 +384,10 @@ describe("scheduled person erase resume (L13)", () => {
     await w.store.put({ item: pending(A) });
     await w.store.put({ item: pending(B) });
     const before = JSON.stringify(await w.store.get(pending(B)));
+    // The jobs run for the install's own company and every company holding core tasks (its in-use mark).
+    await ensureCoreInUse(w.store, A);
     const root = scheduled(w);
-    expect(await root.app.handleScheduledJob(event)).toMatchObject({ job: event.job, companies: [{ companyId: A, outcome: "ran", report: { finished: 1, owed: 0 } }] });
+    expect(await root.app.handleScheduledJob(event)).toMatchObject({ job: event.job, companies: [{ companyId: IMPLICIT_COMPANY_ID, outcome: "ran" }, { companyId: A, outcome: "ran", report: { finished: 1, owed: 0 } }] });
     expect(left(w, ours.prefixes)).toBe(0);
     expect(left(w, theirs.prefixes)).toBe(10);
     expect(await w.store.get(pending(A))).toBeUndefined();
@@ -406,8 +409,9 @@ describe("scheduled person erase resume (L13)", () => {
       w.clock.now += 100;
       return result;
     } };
+    await ensureCoreInUse(w.store, A);
     const root = scheduled(w);
-    expect(await root.app.handleScheduledJob(event, { remainingMs: 20_100 })).toMatchObject({ companies: [{ report: { owed: 2 } }] });
+    expect(await root.app.handleScheduledJob(event, { remainingMs: 20_100 })).toMatchObject({ companies: [{ companyId: IMPLICIT_COMPANY_ID }, { companyId: A, report: { owed: 2 } }] });
     expect(stops.length).toBeGreaterThan(0);
     for (const stop of stops) expect(stop).toBeLessThanOrEqual(deadline);
     expect(left(w, first.prefixes)).toBe(0);
@@ -415,13 +419,4 @@ describe("scheduled person erase resume (L13)", () => {
     expect(await w.store.get(pending(A, OTHER))).toBeDefined();
   });
 
-  it("off jobs are byte-identical and leave seeded erases and evidence untouched", async () => {
-    const w = world();
-    const ours = await task(w, MALLORY, A);
-    await w.store.put({ item: pending(A) });
-    const root = scheduled(w, "off");
-    expect(JSON.stringify(await root.app.handleScheduledJob(event))).toBe('{"skipped":"off"}');
-    expect(await w.store.get(pending(A))).toEqual(pending(A));
-    expect(left(w, ours.prefixes)).toBe(10);
-  });
 });

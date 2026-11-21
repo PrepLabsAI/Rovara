@@ -11,13 +11,12 @@ import { RUN_START_ACTION } from "../../packages/broker/src/core/task-flow/money
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { createFakeWorld } from "../support/core-host-fakes.js";
 import { ADDRESS, ISSUER, fakeService, makeKey, signerOf } from "./policy-hook-fixture.js";
-import { COMPANY_A_ID, COMPANY_B_ID } from "../../packages/testing/src/isolation/two-company.js";
+import { COMPANY_A_ID } from "../../packages/testing/src/isolation/two-company.js";
 
 const adapters = vi.hoisted(() => ({ modules: [] as unknown[] }));
 vi.mock("../../packages/broker/src/core-host/code-modules.js", async (original) => ({ ...await original<object>(), codeAdapterModules: () => adapters.modules }));
 
 const A = COMPANY_A_ID as OrgId;
-const B = COMPANY_B_ID as OrgId;
 const hookKey = makeKey("hook");
 const JWKS = "https://rules.example/keys";
 const HOOK = JSON.stringify({ address: ADDRESS, jwks: JWKS, thumbprints: [policyHookKeyThumbprint(hookKey.jwk)] });
@@ -40,7 +39,7 @@ function world(locks: Record<string, number>, options: { env?: NodeJS.ProcessEnv
     return { Item: await w.store.get(command.input.Key as { pk: string; sk: string }) };
   } };
   const root = createBrokerCoreRoot({
-    env: { ROVARA_CORE_ENGINE: `on:${A}:${B}`, ROVARA_CORE_ALLOWED_COMPANIES: `${A}:${B}`, ROVARA_CORE_TASK_CAP_USD: "25", ROVARA_POLICY_HOOK: HOOK, ...options.env },
+    env: { ROVARA_CORE_TASK_CAP_USD: "25", ROVARA_POLICY_HOOK: HOOK, ...options.env },
     documentClient: client, stateTableName: "state", signInTableName: "signin", callbackSigningKey: "k".repeat(32), repositoryGrantKey: Buffer.alloc(32, 1),
     repositoryCredential: async () => ({ token: "fake" }), codeModules: () => ({}) as never,
     policyHookInstall: () => ({ issuer: ISSUER, signer: signerOf(makeKey("install")) }),

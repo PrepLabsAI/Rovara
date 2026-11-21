@@ -6,18 +6,16 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { companyDayKey } from "../../packages/broker/src/core/cost/ledger.js";
 import {
   COMPANY_DAY_CAP_REACHED, COMPANY_NOT_ALLOWED, HOSTED_IDENTITY_PROVIDER, SPEND_UNKNOWN, UNKNOWN_MODEL_PRICE,
-  createHostedAdmission, createHostedIdentity, createHostedLedger, createHostedMetering, hostedSecurityModules, readHostedAdmissionSettings,
+  createHostedAdmission, createHostedIdentity, createHostedLedger, createHostedMetering, readHostedAdmissionSettings,
 } from "../../packages/broker/src/core-host/hosted-modules.js";
-import { buildCoreRegistry } from "../../packages/broker/src/core-host/registry.js";
 import { costMicrosOf } from "../../packages/broker/src/core/cost/price-table.js";
 import { githubLinkReaderOver, linkGithubAccount } from "../../packages/broker/src/core/people/github-links.js";
-import { coreAdapter } from "../../packages/broker/src/core-host/registry.js";
 
 const ORG = "org_staging0000000000001" as OrgId;
 const OTHER = "org_staging0000000000002" as OrgId;
 const TASK = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
 const NOW = new Date("2026-11-15T10:00:00.000Z");
-const SETTINGS = { allowedCompanies: [ORG], taskCapMicros: 5_000_000, companyDayCapMicros: 25_000_000 };
+const SETTINGS = { taskCapMicros: 5_000_000, companyDayCapMicros: 25_000_000 };
 
 const usage = (modelId: string, input: number, output: number) => ({ provider: "anthropic", modelId, tokens: { input, output, cacheRead: 0, cacheWrite: 0 } });
 const entry = (entryId: string, micros: number, overrides: Partial<MeterEntry> = {}): MeterEntry => ({ companyId: ORG, entryId, at: NOW.toISOString(), usage: usage(`m-${String(micros)}`, micros, 0), taskId: TASK, ...overrides });
@@ -63,9 +61,9 @@ describe("the staging admission", () => {
 });
 
 describe("the admission for every company (DEC 229a)", () => {
-  it("reads `all` with the caps, and lets any company with its own id in, never the laptop's implicit company or a malformed id, still under the caps", async () => {
-    const read = readHostedAdmissionSettings({ ROVARA_CORE_ALLOWED_COMPANIES: "all", ROVARA_CORE_COMPANY_DAY_CAP_USD: "1" });
-    expect(read).toEqual({ settings: { allowedCompanies: "all", taskCapMicros: 5_000_000, companyDayCapMicros: 1_000_000 } });
+  it("reads the caps, and lets any company with its own id in, never the laptop's implicit company or a malformed id, still under the caps", async () => {
+    const read = readHostedAdmissionSettings({ ROVARA_CORE_COMPANY_DAY_CAP_USD: "1" });
+    expect(read).toEqual({ settings: { taskCapMicros: 5_000_000, companyDayCapMicros: 1_000_000 } });
     if (!("settings" in read)) throw new Error("unreachable");
     const store = new MemoryDocumentStore();
     const ledger = createHostedLedger({ store, metering: exactMeter, now: () => NOW });
@@ -75,8 +73,7 @@ describe("the admission for every company (DEC 229a)", () => {
     // The caps still hold for every company.
     await ledger.recordUsage(entry("d", 1_000_000, { companyId: OTHER, taskId: "11111111-2222-4333-8444-555555555555" }));
     expect(await admission.admit(start({ companyId: OTHER, idempotencyKey: "second" }))).toEqual({ allowed: false, code: "company_day_cap", message: COMPANY_DAY_CAP_REACHED });
-    expect(readHostedAdmissionSettings({ ROVARA_CORE_ALLOWED_COMPANIES: "all", ROVARA_CORE_TASK_CAP_USD: "0" })).toHaveProperty("problem");
-    expect(readHostedAdmissionSettings({ ROVARA_CORE_ALLOWED_COMPANIES: "ALL" })).toHaveProperty("problem");
+    expect(readHostedAdmissionSettings({ ROVARA_CORE_TASK_CAP_USD: "0" })).toHaveProperty("problem");
   });
 });
 
@@ -159,12 +156,3 @@ describe("the deployed identity point with linked GitHub accounts (L4-GH)", () =
   });
 });
 
-describe("the step 5 modules", () => {
-  const storage = coreAdapter({ point: "storage", name: "memory", owner: "test", create: () => new MemoryDocumentStore() });
-  const context = { installCompanyId: IMPLICIT_COMPANY_ID, now: () => NOW, env: {}, clients: {}, log: () => undefined };
-
-  it("refuse the registry when no company is allowed, rather than let every company in", async () => {
-    const modules = hostedSecurityModules({ env: {}, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined } });
-    await expect(buildCoreRegistry({ modules: [storage, ...modules], context, areas: [] })).rejects.toThrow("no company is allowed on the core engine");
-  });
-});

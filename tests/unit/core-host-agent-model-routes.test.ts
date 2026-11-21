@@ -16,9 +16,9 @@ const DEFAULT = "claude-sonnet-5-5";
 const SERVICES = () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } });
 const HONEST_CI = { honest: true as const, ciMode: () => "their_ci_fix" as const };
 
-function appOver(world: FakeWorld, env: NodeJS.ProcessEnv): CoreHostApp {
+function appOver(world: FakeWorld): CoreHostApp {
   return createCoreHostApp({
-    env, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
+    modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
     runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: HONEST_CI }),
   });
 }
@@ -28,7 +28,7 @@ const bodyOf = (answer: { body: string } | undefined) => JSON.parse(answer!.body
 
 function setup() {
   const world = createFakeWorld();
-  const app = appOver(world, { ROVARA_CORE_ENGINE: "on" });
+  const app = appOver(world);
   const reader = createFakeOfferedModels();
   const members = new Map<string, CompanyMembership>();
   const choices = new Map<string, AgentModelChoice>();

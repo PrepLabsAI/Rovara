@@ -166,15 +166,15 @@ describe("the strict contract (Cloud's reader parses this)", () => {
 // ---- Through the dev routes: the live role from membership, the caller's company, script tokens, other methods ----
 
 const get = (path: string, method = "GET") => ({ method, path, headers: {}, body: "" });
-function appOver(w: FakeWorld, env: NodeJS.ProcessEnv): CoreHostApp {
+function appOver(w: FakeWorld): CoreHostApp {
   return createCoreHostApp({
-    env, modules: w.modules, context: () => w.context(), nowMs: () => w.clock.now,
+    modules: w.modules, context: () => w.context(), nowMs: () => w.clock.now,
     runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(w.clock.now), log: () => undefined, services: () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } }), ciReporting: { honest: true as const, ciMode: () => "their_ci_fix" as const } }),
   });
 }
-async function over(switches: NodeJS.ProcessEnv = { ROVARA_CORE_ENGINE: "on" }) {
+async function over() {
   const w = createFakeWorld();
-  const app = appOver(w, switches);
+  const app = appOver(w);
   const roles = new Map<string, OrgRole>();
   const companyOf = vi.fn(async (caller: DeployedCaller): Promise<CompanyMembership | undefined> => {
     const role = roles.get(caller.principal.personId + caller.principal.companyId);

@@ -1,19 +1,19 @@
-// Engine host (migration plan v3.2 lane E2): the core engine switch's deployment half, on the synthesised templates. Ported from the monolith's core-engine infrastructure test.
+// Engine host (migration plan v3.2 lane E2): the core engine's deployment half, on the synthesised templates. Ported from the monolith's core-engine infrastructure test.
 // What must hold:
-//   1. the switch: a stack parameter CoreEngine, off by default, plain text only, a plain variable on the broker, set by `agentx config set coreEngine.switch`, kept by an upgrade;
+//   1. no switch (#1275): no CoreEngine or CoreAllowedCompanies parameter, no switch variable on either function, no `coreEngine.switch` config key;
 //   2. the core dispatch queue: its own queue and dead letters, a redrive limit above the core's 20 attempts, the existing dispatch queue unchanged, granted to the broker only, on the queues' own
 //      policies (the broker role's inline policy is at its size limit);
-//   3. the job schedules: one per scheduled row of the core's job table, enabled only while the switch is not off, through a role that can invoke the broker and nothing else;
+//   3. the job schedules: one per scheduled row of the core's job table, enabled (the upkeep night follows CoreSystemRuns), through a role that can invoke the broker and nothing else;
 //   4. no new deploy-role service: CloudFormation's actions for these resource types are within the deploy role's and the boundary's services, and the new role has no fixed name.
-//   5. (step 4) the dispatcher consumes the core queue: its own mapping, enabled only while the switch is not off, one record per invocation; reads of exactly that queue on its role; the
-//      deleter start and the callback signing key only while the switch is not off; no EC2 terminate; the State table's outbox pending index. The legacy template has none of it.
+//   5. (step 4) the dispatcher consumes the core queue: its own mapping, enabled, one record per invocation; reads of exactly that queue on its role; the deleter start and the callback
+//      signing key; no EC2 terminate; the State table's outbox pending index.
 // Dropped from the monolith's test, with reason: the packed-settings and Slack-ingress cases (Code's broker does not pack settings; the ingress wiring comes with the Slack step), the catalog
 // repositories (another lane's), and the IAM simulation (Code has no simulator support; the services check stands in).
 import { App, Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import {
-  BOUNDARY_SERVICES, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_MODEL_GATEWAY_URL_VARIABLE, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, OUTBOX_PENDING_INDEX, CORE_ENGINE_BROKER_WIRED, CORE_DISPATCH_MAX_RECEIVES, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, HEALTH_ALARM_SUFFIXES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
+  BOUNDARY_SERVICES, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_MODEL_GATEWAY_URL_VARIABLE, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, OUTBOX_PENDING_INDEX, CORE_DISPATCH_MAX_RECEIVES, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, HEALTH_ALARM_SUFFIXES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
   SERVICE_ROLE_SERVICES, coreAttentionEmailFunctionName, coreDispatchDeadLetterName, coreDispatchQueueName,
 } from "@agentx/contracts";
 import { CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PATTERN, CORE_ANSWERS_MODEL_VARIABLE, CORE_CLAUDE_AGENT_MODEL, CORE_LEARNING_MODEL_MAX_LENGTH, CORE_LEARNING_MODEL_PATTERN, CORE_LEARNING_MODEL_VARIABLE, isCoreLearningModelId } from "@agentx/contracts";
@@ -22,8 +22,8 @@ import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { CORE_BROKER_QUEUE_ACTIONS, CORE_DISPATCHER_QUEUE_ACTIONS, CORE_DISPATCH_DEAD_LETTERS_ALARM } from "../../infra/lib/core-engine.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { DISPATCH_ATTEMPTS_MAX } from "../../packages/broker/src/core/task-flow/dispatch.js";
-import { CORE_ENGINE_VARIABLE as BROKER_SWITCH_VARIABLE, CORE_JOBS, CORE_SCHEDULE_SOURCE, parseCoreSwitch, readCoreEngineFlags } from "../../packages/broker/src/core-host/index.js";
-import { configKey, coreEngineValueWhenWired } from "../../packages/cli/src/config/keys.js";
+import { CORE_JOBS, CORE_SCHEDULE_SOURCE } from "../../packages/broker/src/core-host/index.js";
+import { configKey } from "../../packages/cli/src/config/keys.js";
 import { OPERATOR_PARAMETERS } from "../../packages/cli/src/deploy/parameters.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
@@ -51,9 +51,6 @@ const dispatcher = resources(named, "AWS::Lambda::Function").find(([id]) => /^Di
 const dispatcherVariables = (dispatcher[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
 const dispatcherRoleId = ((dispatcher[1].Properties.Role as { "Fn::GetAtt": [string, string] })["Fn::GetAtt"])[0];
 
-const ORG_A = `org_${"a1".repeat(10)}`;
-const ORG_B = `org_${"z9".repeat(10)}`;
-
 /** A packed AGENTX_SETTINGS (Fn::Join of `code=` and value pieces) as code -> piece. */
 function packedSettings(variables: Record<string, unknown>): Map<string, unknown> {
   const parts = (variables.AGENTX_SETTINGS as { "Fn::Join": [string, unknown[]] })["Fn::Join"][1];
@@ -79,11 +76,8 @@ describe("the model gateway settings (stack parameters CoreModelGatewayHost and 
     }
   });
 
-  it("make room in the broker: its switch is packed (sw) and the channel adapters' secret prefix is derived; the dispatcher keeps its own switch variable", () => {
-    expect(packedSettings(brokerVariables).get("sw")).toStrictEqual({ Ref: "CoreEngine" });
+  it("make room in the broker: the channel adapters' secret prefix is derived", () => {
     expect(brokerVariables).not.toHaveProperty("CHANNEL_ADAPTER_SECRET_PREFIX");
-    expect(dispatcherVariables[CORE_ENGINE_VARIABLE]).toStrictEqual({ Ref: "CoreEngine" });
-    expect(packedSettings(dispatcherVariables).has("sw")).toBe(false);
   });
 
   it("are used by nothing else (no IAM, no other function), in the named and the app's template alike", () => {
@@ -174,61 +168,35 @@ describe("the hosted lessons learning model (stack parameter CoreLearningModel)"
   });
 });
 
-describe("the switch (stack parameter CoreEngine)", () => {
-  const parameter = json.Parameters.CoreEngine!;
-
-  it("is a stack parameter in a named environment: off by default, at most 64 characters", () => {
-    expect(parameter).toMatchObject({ Default: "off", MaxLength: 64, AllowedPattern: CORE_ENGINE_PARAMETER_PATTERN });
-  });
-
-  it("takes off, on, drain, or one or two company ids, and nothing that could carry a separator", () => {
-    const allowed = new RegExp(parameter.AllowedPattern!, "u");
-    for (const value of ["off", "on", "drain", `on:${ORG_A}`, `on:${ORG_A}:${ORG_B}`]) expect(allowed.test(value), value).toBe(true);
-    for (const value of ["", "OFF", "On", "0", "1", "true", "on:", "on:org_x", `on:${ORG_A}:`, `on:${ORG_A}:${ORG_B}:${ORG_A}`, `on:${ORG_A},${ORG_B}`, `on:${ORG_A}=1`, `on: ${ORG_A}`, `on:${ORG_A.toUpperCase()}`, `on:${ORG_A}/x`, "off\n", `on:${ORG_A}"`, `drain:${ORG_A}`, "on:org_" + "a".repeat(21)]) {
-      expect(allowed.test(value), JSON.stringify(value)).toBe(false);
+describe("no core engine switch (#1275)", () => {
+  it("declares no CoreEngine or CoreAllowedCompanies parameter, in the named, the app's and the legacy template alike", () => {
+    for (const template of [json, inApp, legacy.toJSON() as Json]) {
+      expect(template.Parameters).not.toHaveProperty("CoreEngine");
+      expect(template.Parameters).not.toHaveProperty("CoreAllowedCompanies");
+      expect(JSON.stringify(template)).not.toMatch(/"Ref":"Core(Engine|AllowedCompanies)"/u);
+      expect(Object.keys(template.Conditions ?? {}).some((id) => id.includes("CoreEngineIsOn"))).toBe(false);
     }
   });
 
-  it("is read by the broker's own parser as the value it names: every value the parameter takes is a clean switch, never a reported problem", () => {
-    expect(BROKER_SWITCH_VARIABLE).toBe(CORE_ENGINE_VARIABLE);
-    for (const value of ["off", "on", "drain", `on:${ORG_A}`, `on:${ORG_A}:${ORG_B}`]) {
-      expect(parseCoreSwitch(value).problem, value).toBeUndefined();
-      expect(readCoreEngineFlags({ [CORE_ENGINE_VARIABLE]: value }).problems).toEqual([]);
+  it("gives neither function a switch: no packed sw or ac, no ROVARA_CORE_ENGINE or ROVARA_CORE_ALLOWED_COMPANIES variable", () => {
+    for (const [name, variables] of [["broker", brokerVariables], ["dispatcher", dispatcherVariables]] as const) {
+      const pieces = packedSettings(variables);
+      expect(pieces.has("sw"), name).toBe(false);
+      expect(pieces.has("ac"), name).toBe(false);
+      expect(variables, name).not.toHaveProperty("ROVARA_CORE_ENGINE");
+      expect(variables, name).not.toHaveProperty("ROVARA_CORE_ALLOWED_COMPANIES");
     }
-    expect(readCoreEngineFlags({ [CORE_ENGINE_VARIABLE]: `on:${ORG_A}:${ORG_B}` }).combined).toEqual({ mode: "on-for", companies: [ORG_A, ORG_B] });
   });
 
-  it("reaches the broker packed in its settings (sw; core switch-on blocker 2026-11-17: room for the gateway settings)", () => {
-    expect(brokerVariables).not.toHaveProperty(CORE_ENGINE_VARIABLE);
-    expect(JSON.stringify(brokerVariables.AGENTX_SETTINGS)).toMatch(/sw=",\{"Ref":"CoreEngine"\}/u);
+  it("has no `coreEngine.switch` config key, and an upgrade keeps neither parameter", () => {
+    expect(() => configKey("coreEngine.switch")).toThrow();
+    expect(OPERATOR_PARAMETERS["control-plane"]).not.toContain("CoreEngine");
+    expect(OPERATOR_PARAMETERS["control-plane"]).not.toContain("CoreAllowedCompanies");
   });
 
-  it("is in the legacy (production) template too since #1148, off by default, with its queue under production's name (tests/contract/legacy-core-engine-infrastructure.test.ts)", () => {
-    const legacyJson = legacy.toJSON() as Json;
-    expect(legacyJson.Parameters.CoreEngine).toMatchObject({ Default: "off" });
-    const text = JSON.stringify(legacyJson);
+  it("is in the legacy (production) template too since #1148, with its queue under production's name (tests/contract/legacy-core-engine-infrastructure.test.ts)", () => {
+    const text = JSON.stringify(legacy.toJSON());
     for (const word of ["agentx-production-core-dispatch", CORE_JOB_EVENT_SOURCE]) expect(text, word).toContain(word);
-  });
-
-  it("is set with `agentx config set coreEngine.switch`, refused before anything changes when it is not a clean value, and an upgrade keeps it", () => {
-    const entry = configKey("coreEngine.switch");
-    expect(entry.target).toEqual({ kind: "stack-parameter", part: "control-plane", parameter: "CoreEngine" });
-    expect(entry.defaultValue).toBe("off");
-    // L6: the broker runs the core engine, so every clean value is accepted (switching on still needs an allowed-companies list; the default `none` refuses every company).
-    expect(CORE_ENGINE_BROKER_WIRED).toBe(true);
-    expect(entry.parse(" off ")).toBe("off");
-    for (const value of ["on", "drain", `on:${ORG_A}`, `on:${ORG_A}:${ORG_B}`]) {
-      expect(entry.parse(value), value).toBe(value);
-      expect(new RegExp(CORE_ENGINE_PARAMETER_PATTERN, "u").test(value), value).toBe(true);
-      expect(coreEngineValueWhenWired(value)).toBe(value);
-    }
-    expect(coreEngineValueWhenWired(" on ")).toBe("on");
-    for (const value of ["", "1", "true", "on:", "drained", `drain:${ORG_A}`, `on:${ORG_A},${ORG_B}`, `on:${ORG_A}:${ORG_B}:${ORG_A}`]) {
-      expect(() => entry.parse(value), value).toThrow("coreEngine.switch must be off, on, drain, or on:<company id>");
-    }
-    // The refusal never echoes the value it was given.
-    expect(() => entry.parse("on:secret-looking-text")).toThrow(expect.objectContaining({ message: expect.not.stringContaining("secret-looking-text") as string }) as Error);
-    expect(OPERATOR_PARAMETERS["control-plane"]).toContain("CoreEngine");
   });
 });
 
@@ -333,24 +301,22 @@ describe("the core job schedules", () => {
     }
   });
 
-  it("run only while the switch is not off: the state is a condition on the parameter, and the resources are always there", () => {
+  it("are enabled, and the upkeep night follows CoreSystemRuns; the resources are always there", () => {
     const conditions = json.Conditions!;
-    const conditionId = Object.keys(conditions).find((id) => id.includes("CoreEngineIsOn"))!;
-    expect(conditions[conditionId]).toEqual({ "Fn::Not": [{ "Fn::Equals": [{ Ref: "CoreEngine" }, "off"] }] });
     const systemRunsId = Object.keys(conditions).find((id) => id.includes("CoreSystemRunsIsOn"))!;
     for (const [id, schedule] of schedules) {
       const job = (JSON.parse(String((schedule.Properties.Target as { Input: string }).Input)) as { job: string }).job;
-      // L4-P1: every row but the upkeep night follows the engine switch alone; the upkeep night follows the engine switch AND the CoreSystemRuns flag (default off, so it is DISABLED until an operator turns it on).
-      expect(schedule.Properties.State, id).toEqual({ "Fn::If": [job === "upkeep-night" ? systemRunsId : conditionId, "ENABLED", "DISABLED"] });
+      // L4-P1: every row but the upkeep night is ENABLED; the upkeep night follows the CoreSystemRuns flag (default off, so it is DISABLED until an operator turns it on).
+      expect(schedule.Properties.State, id).toEqual(job === "upkeep-night" ? { "Fn::If": [systemRunsId, "ENABLED", "DISABLED"] } : "ENABLED");
       expect(schedule.Condition, id).toBeUndefined();
     }
     expect(group[1].Condition).toBeUndefined();
   });
 
-  it("holds the hourly upkeep night off until both the engine and CoreSystemRuns are on, and adds exactly that one schedule (owner DEC 254zzl)", () => {
+  it("holds the hourly upkeep night off until CoreSystemRuns is on, and adds exactly that one schedule (owner DEC 254zzl)", () => {
     const conditions = json.Conditions!;
     const systemRunsId = Object.keys(conditions).find((id) => id.includes("CoreSystemRunsIsOn"))!;
-    expect(conditions[systemRunsId]).toEqual({ "Fn::And": [{ "Fn::Not": [{ "Fn::Equals": [{ Ref: "CoreEngine" }, "off"] }] }, { "Fn::Not": [{ "Fn::Equals": [{ Ref: "CoreSystemRuns" }, "off"] }] }] });
+    expect(conditions[systemRunsId]).toEqual({ "Fn::Not": [{ "Fn::Equals": [{ Ref: "CoreSystemRuns" }, "off"] }] });
     const night = schedules.filter(([, schedule]) => (JSON.parse(String((schedule.Properties.Target as { Input: string }).Input)) as { job: string }).job === "upkeep-night");
     expect(night).toHaveLength(1);
     expect(night[0]![1].Properties.ScheduleExpression).toBe("rate(1 hour)");
@@ -477,9 +443,8 @@ describe("the dispatcher as the core queue's consumer (step 4)", () => {
   const queueId = resources(named, "AWS::SQS::Queue").find(([, resource]) => resource.Properties.QueueName === coreDispatchQueueName("staging"))![0];
   const deadId = resources(named, "AWS::SQS::Queue").find(([, resource]) => resource.Properties.QueueName === coreDispatchDeadLetterName("staging"))![0];
   const mappings = resources(named, "AWS::Lambda::EventSourceMapping").filter(([, mapping]) => JSON.stringify(mapping.Properties.EventSourceArn).includes(queueId));
-  const isOn = Object.keys(json.Conditions ?? {}).find((name) => name.includes("CoreEngineIsOn"))!;
 
-  it("reads the queue through one mapping of its own, one record per invocation, reporting each failure, enabled only while the switch is not off", () => {
+  it("reads the queue through one mapping of its own, one record per invocation, reporting each failure, always enabled", () => {
     expect(mappings).toHaveLength(1);
     const [, mapping] = mappings[0]!;
     expect(mapping.Properties.FunctionName).toEqual({ Ref: dispatcher[0] });
@@ -487,7 +452,7 @@ describe("the dispatcher as the core queue's consumer (step 4)", () => {
     expect(mapping.Properties.BatchSize).toBe(CORE_DISPATCH_BATCH_SIZE);
     expect(CORE_DISPATCH_BATCH_SIZE).toBe(1);
     expect(mapping.Properties.FunctionResponseTypes).toEqual(["ReportBatchItemFailures"]);
-    expect(mapping.Properties.Enabled).toEqual({ "Fn::If": [isOn, true, false] });
+    expect(mapping.Properties.Enabled).toBe(true);
     // The DispatchQueue's own mapping is untouched (positive control).
     expect(resources(named, "AWS::Lambda::EventSourceMapping").filter(([id]) => id.startsWith("DispatchQueueMapping"))).toHaveLength(1);
   });
@@ -506,13 +471,13 @@ describe("the dispatcher as the core queue's consumer (step 4)", () => {
     expect(JSON.stringify((json.Resources[mappings[0]![0]] as unknown as { DependsOn?: unknown }).DependsOn ?? [])).toContain(defaultPolicy[0]);
   });
 
-  it("starts the deleter only while the switch is not off, by a policy of its own under the condition, and holds no EC2 terminate", () => {
+  it("starts the deleter by a policy of its own (no condition), and holds no EC2 terminate", () => {
     const core = resources(named, "AWS::IAM::Policy").filter(([id]) => id.includes("CoreEngineJobs") && id.includes("DispatcherCorePolicy"));
     expect(core).toHaveLength(1);
-    expect(core[0]![1].Condition).toBe(isOn);
+    expect(core[0]![1].Condition).toBeUndefined();
     expect(core[0]![1].Properties.Roles).toEqual([{ Ref: dispatcherRoleId }]);
     const statements = (core[0]![1].Properties.PolicyDocument as { Statement: Statement[] }).Statement;
-    // The deleter's start, and the one secret that holds the callback signing key (read by name; exactly that secret's ARN), both only while the switch is not off.
+    // The deleter's start, and the one secret that holds the callback signing key (read by name; exactly that secret's ARN).
     expect(statements).toHaveLength(2);
     expect(statements[0]).toMatchObject({ Sid: "CoreStartSessionDeleter", Effect: "Allow", Action: "states:StartExecution" });
     expect(JSON.stringify(statements[0]!.Resource)).toContain("Deleter");
@@ -523,13 +488,12 @@ describe("the dispatcher as the core queue's consumer (step 4)", () => {
     }
   });
 
-  it("is told the switch, the queue's ARN and URLs, and the callback signing key only while the switch is not off", () => {
-    expect(dispatcherVariables[CORE_ENGINE_VARIABLE]).toEqual({ Ref: "CoreEngine" });
+  it("is told the queue's ARN and URLs, and the callback signing key's secret name", () => {
     expect(dispatcherVariables[CORE_DISPATCH_QUEUE_ARN_VARIABLE]).toEqual({ "Fn::GetAtt": [queueId, "Arn"] });
     expect(dispatcherVariables[CORE_DISPATCH_QUEUE_URL_VARIABLE]).toEqual({ Ref: queueId });
     expect(dispatcherVariables[CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE]).toEqual({ Ref: deadId });
-    // The key itself is never an environment value: only the name of its secret, and only while the switch is not off.
-    expect(dispatcherVariables.CALLBACK_SIGNING_KEY_SECRET_ID).toEqual({ "Fn::If": [isOn, "agentx/staging/callback-key", ""] });
+    // The key itself is never an environment value: only the name of its secret.
+    expect(dispatcherVariables.CALLBACK_SIGNING_KEY_SECRET_ID).toBe("agentx/staging/callback-key");
     expect(dispatcherVariables).not.toHaveProperty("CALLBACK_SIGNING_KEY");
     // The install's own workers place a core workspace's worker: the same values the broker places a sign-in client's project with.
     expect(dispatcherVariables.EC2_WORKER_SUBNETS).toEqual({ Ref: "Ec2WorkerSubnets" });
@@ -545,7 +509,7 @@ describe("the dispatcher as the core queue's consumer (step 4)", () => {
     expect(pending.Projection.ProjectionType).toBe("ALL");
   });
 
-  it("is in the legacy (production) template too since #1148: the dispatcher's core variables, its core mapping, the conditional policy and the outbox pending index", () => {
+  it("is in the legacy (production) template too since #1148: the dispatcher's core variables, its core mapping, its core policy and the outbox pending index", () => {
     const text = JSON.stringify(legacy.toJSON());
     expect((resources(legacy, "AWS::Lambda::Function").find(([id]) => /^Dispatcher[0-9A-F]{8}$/u.test(id))![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables).toHaveProperty("EC2_WORKER_SUBNETS");
     for (const word of [CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, "DispatcherCorePolicy", "DispatcherMapping", OUTBOX_PENDING_INDEX.name]) expect(text, word).toContain(word);
@@ -607,10 +571,9 @@ describe("L1a broker environment derivation", () => {
     expect(broker[1].Properties.Environment).toBeDefined();
   });
 
-  it("constrains all five kept core settings and passes them to both functions without IAM changes", () => {
+  it("constrains the kept core settings and passes them to both functions without IAM changes", () => {
     const parameters = inApp.Parameters as Record<string, { Default?: string; AllowedPattern?: string; MaxLength?: number }>;
     expect(parameters).toMatchObject({
-      CoreAllowedCompanies: { Default: "none", AllowedPattern: "^(none|all|org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", MaxLength: 64 },
       CoreTaskCapUsd: { Default: "5", AllowedPattern: "^([1-9][0-9]{0,2}|1000)$", MaxLength: 4 },
       CoreCompanyDayCapUsd: { Default: "25", AllowedPattern: "^([1-9][0-9]{0,2}|1000)$", MaxLength: 4 },
       CoreLessons: { Default: "off", AllowedPattern: "^(off|on|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", MaxLength: 64 },
@@ -625,7 +588,7 @@ describe("L1a broker environment derivation", () => {
       expect(variables.AGENTX_SETTINGS).toBeDefined();
       expect(variables.ROVARA_POLICY_HOOK).toEqual({ Ref: "CorePolicyHook" });
       expect(variables).not.toHaveProperty("ROVARA_CORE_ALLOWED_COMPANIES");
-      expect(JSON.stringify(variables)).toContain("CoreAllowedCompanies");
+      expect(JSON.stringify(variables)).not.toContain("CoreAllowedCompanies");
       expect(JSON.stringify(variables)).toContain("CoreTaskCapUsd");
       expect(JSON.stringify(variables)).toContain("CoreCompanyDayCapUsd");
       expect(JSON.stringify(variables)).toContain("CoreLessons");
@@ -649,7 +612,9 @@ describe("L1a broker environment derivation", () => {
     // #1148: re-pinned for the core engine in the legacy template (CoreEngine off by default).
     // SIGNIN-STATE-TABLE: re-pinned for ONE change: the sign-in function's STATE_TABLE_NAME is the plain Ref to State instead of an Fn::If on SlackCompanyModeOn to "" (rule D: with the
     // old Fn::If put back, the old pin db40b76d... held; the legacy-templates snapshot diff is that one hunk).
-    expect(digest(legacy.toJSON())).toBe("f15083c44efe613e69041046d5daf9b74fe81958ecfb2c20639a30701ab93b99");
+    // #1275: re-pinned for removing the core engine switch (the CoreEngine and CoreAllowedCompanies parameters, their packed sw/ac pieces and the dispatcher's ROVARA_CORE_ENGINE, the
+    // CoreEngineIsOn condition: schedules ENABLED, the dispatcher's core mapping enabled, its core policy and callback key unconditional). The legacy-templates snapshot diff is exactly that.
+    expect(digest(legacy.toJSON())).toBe("33220db5faf6815c6effbb6c57c7b495eb26d73fe7fdf6b21bb10433718659d4");
   });
 });
 import { createHash } from "node:crypto";

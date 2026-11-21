@@ -5,7 +5,7 @@ import { createBroker, loadSlackBroker } from "../../support/slack-broker.js";
 import { createHarness } from "../../support/task-flow-harness.js";
 import { workspaceOperations } from "../../../packages/broker/src/core/task-flow/reads.js";
 import { stampForNewTask, stampItem } from "../../../packages/broker/src/core-host/engine-stamp.js";
-import { readCoreEngineFlags } from "../../../packages/broker/src/core-host/flags.js";
+import { CORE_ENGINE_ON } from "../../../packages/broker/src/core-host/flags.js";
 import type { processGithubWorkflowEvent } from "../../../packages/broker/src/aws/broker.js";
 import type { DeveloperTaskActions } from "../../../packages/broker/src/aws/developer-task-actions.js";
 import { requireOperation } from "../../../packages/broker/src/aws/cancellation.js";
@@ -30,7 +30,7 @@ describe("T1 Part 0 AWS reader boundary", () => {
     const [operation] = await workspaceOperations(h.deps, started.task.workspaceId);
     expect(operation).toBeDefined();
     const stamp = stampItem(h.deps.companyId, started.task.taskId,
-      stampForNewTask(readCoreEngineFlags({ ROVARA_CORE_ENGINE: "on" }), h.deps.companyId, h.deps.now!()));
+      stampForNewTask(CORE_ENGINE_ON, h.deps.companyId, h.deps.now!()));
     const prefix = `ORG#${operation!.companyId}#`;
     // Keep the legacy fixture explicit after T1 changes the core's default key constructors.
     const rows = (await h.store.query({ pk: operation!.pk })).items.map(row => ({

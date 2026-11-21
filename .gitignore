@@ -12,7 +12,6 @@ docs/*
 !docs/porting.md
 !docs/ports.md
 !docs/local.md
-!docs/core-switch-on-runbook.md
 !docs/specs/
 !docs/decisions/
 !docs/learnings/

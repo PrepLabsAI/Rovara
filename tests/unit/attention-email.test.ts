@@ -101,9 +101,9 @@ describe("the switch", () => {
     expect(reads).toEqual([]);
   });
 
-  it("is wired into the core root only behind the switch, with one attempt per invoke, and Code's own default stays when it is off", () => {
+  it("is wired into the core root with one attempt per invoke (no engine switch since #1275), and Code's own default stays when it is off", () => {
     const root = readFileSync("packages/broker/src/aws/core-engine-root.ts", "utf8");
-    expect(root).toContain("const attention = coreActive ? attentionEmailFromEnvironment({ env, lambda: () => new LambdaClient({ maxAttempts: 1 }),");
+    expect(root).toContain("const attention = attentionEmailFromEnvironment({ env, lambda: () => new LambdaClient({ maxAttempts: 1 }),");
     expect(root).toContain("...(attention === undefined ? [] : [attentionEmailModule(attention.sender)])");
     // Batch 14: the same seams, now spread next to the upkeep and human-edit ones.
     // Batch b18 (#1030): the attention email's seams ride in one notification object beside the chat thread's.

@@ -171,7 +171,7 @@ function root(env: NodeJS.ProcessEnv, client: BrokerCoreRootInputs["documentClie
     repositoryCredential: async () => { throw new Error("unused"); }, codeModules: () => brokerCoreModuleDeps(env), origin: () => "https://api.example", log: () => undefined,
   });
 }
-const ON = { ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG_A, ...ENV };
+const ON = { ...ENV };
 const capability = (workspaceId: string, actions: string[] = ["model-access"]) => new CallbackCapabilities(Buffer.from(SIGNING)).issue({ workspaceId, operationId: randomUUID(), fence: 1, actions: actions as never, expiresInSeconds: 600 });
 
 describe("the broker's core root: a worker's model-access request", () => {

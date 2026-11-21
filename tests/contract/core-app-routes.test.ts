@@ -1,7 +1,7 @@
 import { CORE_CONTEXT_WORKER_ROUTES, coreContextWorkerRouteOf, appRouteOf as contextAppRouteOf, devRouteOf as contextDevRouteOf } from "../../packages/broker/src/aws/dev-route-scopes.js";
 // Lane L12: the core engine's own /v1/app/* routes on the broker's HTTP API (sessions, decision cards, how we work, script tokens, person erase).
-//   - Off (no core entry): every /v1/app/* path on the core's route answers "route not found" and reads nothing; on any other route the broker answers as before (the golden is in
-//     aws-core-root-golden.test.ts).
+//   - Off (no core entry): every /v1/app/* path on the core's route answers "route not found" and reads nothing; on any other route the broker answers as before
+//     (since #1275 the core entry is missing only while the core settings cannot be read).
 //   - On: a method and path with no row in the route table is refused before anyone is authenticated; the developer token is verified by the broker; a sign-in client reaches a row only
 //     with its scope; the core gets the verified caller (DEC 254zzz73: no step-up) and never the credential; the company is the caller's LIVE membership.
 //   - Two companies over one core: a person of one company never sees or reaches the other's script tokens or people.
@@ -248,7 +248,7 @@ async function coreOver(world: FakeWorld): Promise<{ entry: CoreAppEntry; log: A
   }
   const log: Array<Record<string, unknown>> = [];
   const app = createCoreHostApp({
-    env: { ROVARA_CORE_ENGINE: "on" }, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
+    modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
     runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: { honest: true as const, ciMode: () => "their_ci_fix" as const } }),
   });
   const membershipOf = membershipWithRoleFromDynamo(db, "signin");
@@ -258,7 +258,7 @@ async function coreOver(world: FakeWorld): Promise<{ entry: CoreAppEntry; log: A
   });
   const registry = await app.registry();
   const personErase = createPersonEraseRoute({
-    app, standing: personStandingFromDynamo(db, "signin"), companyOf: async (who) => await membershipOf(who.principal.personId),
+    standing: personStandingFromDynamo(db, "signin"), companyOf: async (who) => await membershipOf(who.principal.personId),
     eraseDeps: () => ({ store: registry.require("storage"), audit: registry.require("audit-sink"), objects: { deleteEveryVersion: async () => true }, eraseLearning: noLearningToErase, eraseWiki: noWikiToErase, now: () => world.clock.now }),
   });
   return { entry: coreAppEntryFrom({ routes, personErase, deployedCallerOf: deployedCallerFromMembership(membershipOf), log: (entry) => log.push(entry) }), log };

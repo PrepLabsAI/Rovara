@@ -1,8 +1,8 @@
 // Engine host (lane E2, step 5): the security-list points a deployed install fills for the FIRST staging run, as adapter modules for BOTH roots (the broker's, aws/core-engine-root.ts, and the
 // dispatcher's `extraModules`). None is ever `isDefault` (the registry's NEVER_DEFAULT rule refuses laptop defaults on these points), and none falls back to a laptop rule.
 //
-//   admission   An allow-list of company ids (the founders' test company on staging) and two dollar caps, per task and per company per UTC day, read from the core's own cost ledger
-//               (core/cost/ledger.ts: the task's total and the company's day row) until the Cloud gateway holds money. Any other company is refused with fixed words.
+//   admission   Every company with its own id (never the laptop's implicit company; #1275 removed the allow-list) and two dollar caps, per task and per company per UTC day, read from the
+//               core's own cost ledger (core/cost/ledger.ts: the task's total and the company's day row) until the Cloud gateway holds money. Any other company id is refused with fixed words.
 //               The day cap is a HELD allowance (lane L8, core/cost/holds.ts): an admission that may spend takes a hold on the company's day in the same transaction as the change
 //               (`stage()`, a task start: the path's planning allowance, never more than the task cap) or in its own (`admit()`: the estimate, or a fixed amount for a model call of
 //               unknown cost), so concurrent starts see each other. Booked usage (core-host/usage-booking.ts, from the workers' usage reports) draws the task's hold down; `settle`
@@ -46,11 +46,6 @@ const OWNER = "E2 step 5 (the first staging run)";
 
 // ---- settings (the function's environment)
 
-/**
- * The companies that may start work on the core: `all` (every company with its own id: DEC 229a, the owner's "everyone", still under the caps) or `org_...[:org_...]`. Absent or
- * empty: no company may (the admission module refuses to build).
- */
-export const CORE_ALLOWED_COMPANIES_VARIABLE = "ROVARA_CORE_ALLOWED_COMPANIES";
 /** The per-task cap in whole dollars. Default 5. */
 export const CORE_TASK_CAP_VARIABLE = "ROVARA_CORE_TASK_CAP_USD";
 /** The per-company, per-UTC-day cap in whole dollars. Default 25. */
@@ -60,12 +55,7 @@ export const DEFAULT_COMPANY_DAY_CAP_USD = 25;
 /** The highest cap either setting may hold, in dollars: a typo of extra digits refuses instead of lifting the cap. */
 const CAP_MAX_USD = 1_000;
 
-/** The value of CORE_ALLOWED_COMPANIES_VARIABLE that lets every company in (never the implicit laptop company). */
-export const ALL_COMPANIES = "all";
-
 export interface HostedAdmissionSettings {
-  /** `all`: every company with its own id (DEC 229a); else exactly these. */
-  allowedCompanies: readonly OrgId[] | typeof ALL_COMPANIES;
   taskCapMicros: number;
   companyDayCapMicros: number;
 }
@@ -77,25 +67,17 @@ const wholeDollars = (raw: string | undefined, fallback: number): number | undef
   return value <= CAP_MAX_USD ? value : undefined;
 };
 
-/** The admission's settings, or a fixed problem (never the value read). The implicit laptop company is never allowed: a deployed company has its own id. */
+/** The admission's settings, or a fixed problem (never the value read). Every company with its own id may start work (DEC 229a; #1275 removed the allow-list), under the caps. */
 export function readHostedAdmissionSettings(env: NodeJS.ProcessEnv): { settings: HostedAdmissionSettings } | { problem: string } {
-  const raw = env[CORE_ALLOWED_COMPANIES_VARIABLE]?.trim() ?? "";
-  if (raw === "" || raw === "none") return { problem: "no company is allowed on the core engine" };
   const task = wholeDollars(env[CORE_TASK_CAP_VARIABLE], DEFAULT_TASK_CAP_USD);
   const day = wholeDollars(env[CORE_COMPANY_DAY_CAP_VARIABLE], DEFAULT_COMPANY_DAY_CAP_USD);
-  if (raw === ALL_COMPANIES) {
-    if (task === undefined || day === undefined) return { problem: "a spend cap is not a whole number of dollars from 1 to 1000" };
-    return { settings: { allowedCompanies: ALL_COMPANIES, taskCapMicros: task * 1_000_000, companyDayCapMicros: day * 1_000_000 } };
-  }
-  const ids = raw.split(":");
-  if (ids.some((id) => !OrgIdSchema.safeParse(id).success || id === IMPLICIT_COMPANY_ID)) return { problem: "an allowed company id is not well formed" };
   if (task === undefined || day === undefined) return { problem: "a spend cap is not a whole number of dollars from 1 to 1000" };
-  return { settings: { allowedCompanies: [...new Set(ids)] as OrgId[], taskCapMicros: task * 1_000_000, companyDayCapMicros: day * 1_000_000 } };
+  return { settings: { taskCapMicros: task * 1_000_000, companyDayCapMicros: day * 1_000_000 } };
 }
 
 // ---- admission
 
-export const COMPANY_NOT_ALLOWED = "This company is not on the core engine's list for this install yet.";
+export const COMPANY_NOT_ALLOWED = "This company cannot start work on this install.";
 export const COMPANY_DAY_CAP_REACHED = "This company has reached today's spending limit on this install. Try again tomorrow (UTC).";
 export const TASK_CAP_REACHED = "This task has reached its spending limit on this install.";
 /** L2-5 (b): the task cap that bound was its project's own per-task limit: who can raise it. */
@@ -186,9 +168,8 @@ function holdMicrosOf(request: AdmissionRequest, estimate: Cost | undefined, set
 /** The staging admission (see the file comment). */
 export function createHostedAdmission(options: HostedAdmissionOptions): Admission {
   const { settings, ledger, store } = options;
-  const listed = settings.allowedCompanies === ALL_COMPANIES ? undefined : new Set<string>(settings.allowedCompanies);
-  // `all`: any well-formed company id of its own; the implicit laptop company never.
-  const isAllowed = (companyId: string): boolean => (listed === undefined ? OrgIdSchema.safeParse(companyId).success && companyId !== IMPLICIT_COMPANY_ID : listed.has(companyId));
+  // Any well-formed company id of its own; the implicit laptop company never.
+  const isAllowed = (companyId: string): boolean => OrgIdSchema.safeParse(companyId).success && companyId !== IMPLICIT_COMPANY_ID;
 
   /**
    * The decision and, when allowed, the steps that take its hold and keep both caps at commit, with the reservation id when it holds something. Any spend that cannot be read as dollars
@@ -563,8 +544,8 @@ export interface HostedSecurityInputs {
 }
 
 /**
- * The step 5 modules, in build order (metering before admission, which reads the ledger over the registry's store and meter). The admission module refuses to build without an allow-list,
- * so the whole registry is refused (the switch then serves nothing) rather than run with every company let in.
+ * The step 5 modules, in build order (metering before admission, which reads the ledger over the registry's store and meter). The admission module refuses to build without readable caps,
+ * so the whole registry is refused rather than run with no spending limit.
  */
 export function hostedSecurityModules(inputs: HostedSecurityInputs): CoreAdapterModule[] {
   return [

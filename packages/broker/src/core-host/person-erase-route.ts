@@ -1,7 +1,6 @@
-// Person erase on the deployed API (row 13.1): `POST /v1/app/people/<personId>/erase`, mountable next to the core's own handlers behind the switch (`ROVARA_CORE_ENGINE`, default off).
+// Person erase on the deployed API (row 13.1): `POST /v1/app/people/<personId>/erase`, mounted next to the core's own handlers.
 //
 // Rules:
-//   - Off (the default) is byte-identical: `route` answers `undefined` for every request without reading anything.
 //   - The caller's company and live role come from MEMBERSHIP (`companyOf`), never from a header, a query, a body or a token claim; a reader that throws or answers nothing is a sign-in refusal.
 //     The principal the sign-in vouched for must be of that company.
 //   - Only an owner or an admin of the company may erase (the live role from membership), and only from the Rovara website's own client (DEC 254zzz91); a script
@@ -13,7 +12,6 @@
 import { AgentXError, ON_THE_WEBSITE_MESSAGE, OrgRoleSchema, PERSON_ERASE_OWED_WORDS, PersonEraseReceiptSchema, PersonEraseRequestSchema, agentXError, type OrgRole, type Principal } from "@agentx/contracts";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { erasePerson, isErasablePersonId, type PersonEraseDeps } from "../core/people/erase.js";
-import type { CoreHostApp } from "./app.js";
 
 const ERASE_PATH = /^\/v1\/app\/people\/([^/]+)\/erase$/u;
 const ORG_ID = /^org_[0-9a-z]{20}$/u;
@@ -32,7 +30,6 @@ export interface PersonEraseCaller {
 }
 
 export interface PersonEraseRouteOptions {
-  app: Pick<CoreHostApp, "serving">;
   companyOf(caller: PersonEraseCaller): Promise<{ companyId: string; role: OrgRole } | undefined>;
   /** The engine erase's ports for this company (the State store, the evidence bucket's version delete, the company's audit sink, the learning erase). */
   eraseDeps(companyId: string): PersonEraseDeps;
@@ -52,7 +49,6 @@ function bodyOf(request: BrokerRequest): unknown {
 export function createPersonEraseRoute(options: PersonEraseRouteOptions): { route(request: BrokerRequest, caller: PersonEraseCaller): Promise<BrokerResponse | undefined> } {
   return {
     async route(request, caller) {
-      if (!options.app.serving) return undefined;
       const path = request.path.split("?")[0] ?? request.path;
       const match = ERASE_PATH.exec(path);
       if (match === null || request.method !== "POST") return undefined;

@@ -72,7 +72,7 @@ describe("booking a core operation's usage events", () => {
     expect(await w.store.get(companyDayKey(ORG, DAY))).toMatchObject({ usdMicros: 0, uncountedEntries: 2 });
     const entries = (await w.store.query({ pk: costPartition(ORG, w.taskId), sk: { op: "beginsWith", prefix: "ENTRY#" } })).items;
     expect(entries.map((e) => [e["provider"], e["micros"]])).toEqual([[UNREADABLE_USAGE_PROVIDER, undefined], [UNREADABLE_USAGE_PROVIDER, undefined]]);
-    const admission = createHostedAdmission({ settings: { allowedCompanies: "all", taskCapMicros: 5_000_000, companyDayCapMicros: 25_000_000 }, store: w.store, ledger: w.ledger, now: () => NOW });
+    const admission = createHostedAdmission({ settings: { taskCapMicros: 5_000_000, companyDayCapMicros: 25_000_000 }, store: w.store, ledger: w.ledger, now: () => NOW });
     expect(await admission.admit({ companyId: ORG, idempotencyKey: "next", action: "task.start", subject: { type: "task", id: randomUUID() } })).toEqual({ allowed: false, code: "spend_unknown", message: SPEND_UNKNOWN });
   });
 
@@ -152,7 +152,7 @@ describe("the usage of an operation that already ended (stopped or closed) is st
 describe("the broker root's money wiring (one company's runtime)", () => {
   it("refuses another company's operation, books its own over the registry's store and hosted meter, and sweeps its own holds", async () => {
     const store = new MemoryDocumentStore();
-    const modules = hostedSecurityModules({ env: { ROVARA_CORE_ALLOWED_COMPANIES: "all" }, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined }, runStopWired: true });
+    const modules = hostedSecurityModules({ env: {}, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined }, runStopWired: true });
     const registry = await buildCoreRegistry({ modules: [coreAdapter({ point: "storage", name: "memory", owner: "test", create: () => store }), ...modules], context: { installCompanyId: IMPLICIT_COMPANY_ID, now: () => NOW, env: {}, clients: {}, log: () => undefined }, areas: [] });
     const money = coreMoneyWiring(registry, COMPANY_A_ID, () => NOW);
     const operation = { id: randomUUID(), workspaceId: randomUUID(), companyId: COMPANY_B_ID } as unknown as OperationRecord;
@@ -201,7 +201,7 @@ it("books missing calls alongside reported tokens as awaiting_usage with no doll
   expect(pending).toMatchObject({ usageMissingCalls: 2, reason: "missing_usage" });
   expect(pending).not.toHaveProperty("micros");
   expect(await w.ledger.companyDayCost(ORG, DAY)).toMatchObject({ usdMicros: 3_000_000, uncountedEntries: 2 });
-  const admission = createHostedAdmission({ store: w.store, ledger: w.ledger, settings: { allowedCompanies: "all", companyDayCapMicros: 100_000_000, taskCapMicros: 100_000_000 }, now: () => NOW });
+  const admission = createHostedAdmission({ store: w.store, ledger: w.ledger, settings: { companyDayCapMicros: 100_000_000, taskCapMicros: 100_000_000 }, now: () => NOW });
   expect(await admission.admit({ companyId: ORG, idempotencyKey: "missing", action: "task.start", subject: { type: "task", id: randomUUID() } })).toMatchObject({ allowed: false, code: "spend_unknown", message: SPEND_UNKNOWN });
 });
 it("missing-only calls have no guessed empty-report amount; legacy empty reports are explicitly estimated", async () => {
@@ -265,7 +265,7 @@ it.each([
   expect(report?.usageMissingCalls ?? 0).toBe(missing ? 1 : 0);
   await w.booking.bookOperationEvents(w.operation, [event(report)]);
   expect(await w.ledger.companyDayCost(ORG, DAY)).toMatchObject({ uncountedEntries: missing ? 1 : 0 });
-  const admission = createHostedAdmission({ store: w.store, ledger: w.ledger, settings: { allowedCompanies: "all", companyDayCapMicros: 100_000_000, taskCapMicros: 100_000_000 }, now: () => NOW });
+  const admission = createHostedAdmission({ store: w.store, ledger: w.ledger, settings: { companyDayCapMicros: 100_000_000, taskCapMicros: 100_000_000 }, now: () => NOW });
   expect(await admission.admit({ companyId: ORG, idempotencyKey: "refusal-check", action: "task.start", subject: { type: "task", id: randomUUID() } })).toMatchObject(missing ? { allowed: false, code: "spend_unknown" } : { allowed: true });
 });
 
