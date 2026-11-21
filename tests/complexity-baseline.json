@@ -31,7 +31,7 @@
     "packages/broker/src/aws/company-member-handover.ts": 6,
     "packages/broker/src/aws/company-member-routes.ts": 116,
     "packages/broker/src/aws/connector-metrics.ts": 9,
-    "packages/broker/src/aws/core-backfill-runner.ts": 45,
+    "packages/broker/src/aws/core-backfill-runner.ts": 44,
     "packages/broker/src/aws/core-code-host.ts": 12,
     "packages/broker/src/aws/core-engine-root.ts": 84,
     "packages/broker/src/aws/core-project-backfill.ts": 70,
