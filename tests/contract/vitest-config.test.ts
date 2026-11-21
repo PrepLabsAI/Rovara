@@ -4,10 +4,19 @@ import { readdirSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import config from "../../vitest.config.js";
 import nativeP0Config from "../../vitest.native-p0.config.js";
+import linuxConfig from "../../vitest.linux.config.js";
 import nightlyConfig from "../../vitest.nightly.config.js";
 import { moduleMockingFiles, nativeP0Files, nightlyOnlyFiles, postDeployFiles, sharedGroupNames, sharedModuleGroups } from "../support/vitest-shared-config.js";
 
 describe("the test runner's configuration", () => {
+  it("keeps the Linux Docker profile in one isolated project so CLI exclusions apply", () => {
+    expect(linuxConfig.test?.projects).toBeUndefined();
+    expect(linuxConfig.test?.include).toEqual(["tests/linux/**/*.test.ts"]);
+    expect(linuxConfig.test?.isolate).toBe(true);
+    expect(linuxConfig.test?.globalSetup).toEqual(config.test?.globalSetup);
+    expect(linuxConfig.test?.testTimeout).toBe(config.test?.testTimeout);
+  });
+
   it("gives every test, CDK synths included, 60 seconds", () => {
     expect(config.test?.testTimeout).toBe(60_000);
     // #1263: and every setup or teardown hook the same 60 seconds.

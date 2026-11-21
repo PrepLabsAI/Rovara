@@ -6,12 +6,14 @@
 // Revisions are lane 1's (revision readers). So that these grant tests do not depend on which revision layout the readers of this commit use, `project()` seeds the
 // company's own-layout revision rows exactly as staging holds them AND a legacy revision row stamped with the same company. Grants are only ever seeded in ONE layout.
 import { createHash } from "node:crypto";
+import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it } from "vitest";
 import { AgentXError, IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import { checkProjectAccess, routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { grantProjectAccess, listProjectMembers, projectGrant, projectMemberKey, revokeProjectAccess } from "../../packages/broker/src/aws/admin-actions.js";
+import type { AdminActionDependencies } from "../../packages/broker/src/aws/admin-actions.js";
 import { liveCompanyGrantRole, membershipWithRoleFromDynamo, projectGrantRoleFromDynamo } from "../../packages/broker/src/aws/core-engine-root.js";
 import { companyKey } from "../../packages/broker/src/developer/company-membership.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -89,6 +91,50 @@ function world() {
 }
 
 describe("DEC 254zzz80 grants: a named company's grants live only in its own partition", () => {
+  it("writes the same person and project independently in two companies and both legacy scopes", async () => {
+    const db = new FakeDynamoDb();
+    const transactions: TransactWriteCommand[] = [];
+    const actions: AdminActionDependencies = {
+      documentClient: db, tableName: "State", limitDefaults: { member: 0, organization: 0 }, now: () => NOW,
+    };
+    const send = actions.documentClient.send.bind(actions.documentClient);
+    actions.documentClient = { send: async (command) => {
+      if (command instanceof TransactWriteCommand) transactions.push(command);
+      return send(command);
+    } };
+    const by = { issuer: "https://signin.example.test", subject: OWNER };
+    for (const [companyId, forward, reverse] of [
+      [A, `ORG#${A}#MEMBER#${MEMBER}`, `ORG#${A}#PROJECT_MEMBERS#same`],
+      [B, `ORG#${B}#MEMBER#${MEMBER}`, `ORG#${B}#PROJECT_MEMBERS#same`],
+      [undefined, `MEMBER#${MEMBER}`, "PROJECT_MEMBERS#same"],
+      [IMPLICIT_COMPANY_ID, `MEMBER#${MEMBER}`, "PROJECT_MEMBERS#same"],
+    ] as const) {
+      // Isolate the two equivalent legacy layouts so each must actually write.
+      if (companyId === IMPLICIT_COMPANY_ID) {
+        expect(await revokeProjectAccess(actions, "same", MEMBER)).toEqual({ revoked: true });
+        transactions.length = 0;
+      }
+      const before = transactions.length;
+      expect(await grantProjectAccess(actions, by, "same", MEMBER, companyId)).toEqual({ granted: true, already: false });
+      expect(transactions).toHaveLength(before + 1);
+      const writes = transactions.at(-1)?.input.TransactItems;
+      expect(writes).toHaveLength(2);
+      expect(writes).toEqual([
+        { Put: { TableName: "State", Item: {
+          pk: forward, sk: "PROJECT#same", entityType: "MEMBERSHIP", ownerKey: MEMBER,
+          projectName: "same", role: "developer", grantId: expect.stringMatching(/^[0-9a-f-]{36}$/u) as unknown,
+          grantedBy: by, grantedAt: "2026-11-18T19:56:52.000Z",
+        }, ConditionExpression: "attribute_not_exists(pk)" } },
+        { Put: { TableName: "State", Item: {
+          pk: reverse, sk: `DEVELOPER#${MEMBER}`, entityType: "PROJECT_MEMBER", role: "developer", grantedAt: "2026-11-18T19:56:52.000Z",
+        } } },
+      ]);
+      expect(db.get(forward, "PROJECT#same")).toMatchObject({ role: "developer" });
+      expect(db.get(reverse, `DEVELOPER#${MEMBER}`)).toMatchObject({ role: "developer" });
+    }
+    expect(db.find((row) => row.entityType === "MEMBERSHIP" || row.entityType === "PROJECT_MEMBER")).toHaveLength(6);
+  });
+
   it("the exact staging shape: the owner with 15 own-layout grants (and no legacy grant row) sees all 15", async () => {
     const w = world();
     const projects = Array.from({ length: 15 }, (_, index) => `demo-${String(index).padStart(2, "0")}`);
