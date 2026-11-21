@@ -79,6 +79,7 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
       ["typecheck: npm ci", undefined, 15, "npm ci"],
       ["typecheck: npm run typecheck:all", undefined, 15, "npm run typecheck:all"],
     ]);
+    expect(typecheck.steps.some((step) => (step.uses ?? "").startsWith("actions/cache@"))).toBe(true);
   });
 
   it("runs the release check as its own job beside `quick`, when the plan says the release area changed", async () => {

@@ -15,10 +15,10 @@ npm test
 npm run infra:synth
 ```
 
-`npm run typecheck:all` also type-checks tests/ and scripts/ (tsconfig.lint.json). Those files still
-have known errors, listed per file in tests/typecheck-baseline.json. The check fails if a file gets
-more errors than its baseline or a new file gets any. After you fix some, run
-`npm run typecheck:baseline` to lower the baseline and commit it. It never raises a count.
+`npm run typecheck:all` builds the packages (`tsc -b`) and type-checks `tests/` and `scripts/` in
+parallel incremental shards (`scripts/typecheck-shards.ts`), writing `.tsbuildinfo` files under
+`node_modules/.cache/tsc-shards/` so repeat runs skip unchanged shards. Every file covered by
+`tsconfig.lint.json` must type-check with zero errors.
 
 `npm run lint` lints the whole repository with the rules of `eslint .`, but in shards (scripts/lint-shards.ts): one eslint
 process per group of directories, each with its own, smaller TypeScript program, then one for everything else. One process
