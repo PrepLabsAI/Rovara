@@ -43,6 +43,15 @@ describe("the test runner's configuration", () => {
   // #1242: the integration journeys that belong after a beta environment never run on code merge, not even in an affected run.
   it("leaves the post-deploy journeys out of every pull request and push run, affected runs included, and runs them nightly", async () => {
     expect(postDeployFiles).toContain("tests/integration/slack-workflow-e2e.test.ts");
+    // #1272: and six more integration journeys.
+    for (const file of [
+      "tests/unit/stage-selection-adversarial.test.ts",
+      "tests/integration/pull-request-publication.test.ts",
+      "tests/integration/worker-verification.test.ts",
+      "tests/unit/install-qualification-web.test.ts",
+      "tests/contract/workflow-e2e-harness.test.ts",
+      "tests/integration/pull-request-maintenance.test.ts",
+    ]) expect(postDeployFiles).toContain(file);
     expect(config.test?.exclude).toEqual(expect.arrayContaining(postDeployFiles));
     const previous = process.env.ROVARA_NIGHTLY_TESTS;
     process.env.ROVARA_NIGHTLY_TESTS = "1";
