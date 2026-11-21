@@ -9,13 +9,12 @@ interface Workflow { on: Record<string, unknown>; permissions?: unknown; jobs: R
 const workflow = async () => YAML.parse(await readFile(".github/workflows/ci.yml", "utf8")) as Workflow;
 
 describe("CI runs on code/next and checks the port there (docs/porting.md), and mainline's pull requests run as before", () => {
-  it("keeps the pull request and manual triggers as they were and adds a push to code/next only", async () => {
+  it("keeps the pull request and manual triggers as they were, and no push trigger (#1295: code/next's merge queue checks it instead)", async () => {
     const { on } = await workflow();
     // #1185 added the nightly run (the device emulator check); its cron is pinned in ci-parallel.test.ts.
     // #1259: and the merge queue on mainline (port-guard itself never runs there: see its `if`).
-    expect(Object.keys(on).sort()).toEqual(["merge_group", "pull_request", "push", "schedule", "workflow_dispatch"]);
+    expect(Object.keys(on).sort()).toEqual(["merge_group", "pull_request", "schedule", "workflow_dispatch"]);
     expect(on.pull_request).toEqual({ types: ["opened", "synchronize", "reopened", "ready_for_review", "labeled"] });
-    expect(on.push).toEqual({ branches: ["code/next"] });
   });
 
   it("keeps the port guard a check of its own, outside `quick` and the `local` gate, with nothing waiting on it", async () => {
@@ -42,11 +41,11 @@ describe("CI runs on code/next and checks the port there (docs/porting.md), and 
     }
   });
 
-  it("runs the guard over the commits code/next holds beyond mainline, on a push to code/next or a pull request into it, with no secret", async () => {
+  it("runs the guard over the commits code/next holds beyond mainline, in code/next's merge-queue run or a pull request into it, with no secret", async () => {
     const { jobs } = await workflow();
     const job = jobs["port-guard"]!;
     expect(job.if).toBe(
-      "github.event_name == 'push' || (github.event_name == 'pull_request' && github.base_ref == 'code/next' && github.event.pull_request.draft != true)",
+      "(github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/code/next') || (github.event_name == 'pull_request' && github.base_ref == 'code/next' && github.event.pull_request.draft != true)",
     );
     expect(job.needs).toBeUndefined();
     const run = job.steps.map((step) => step.run ?? "").join("\n");
