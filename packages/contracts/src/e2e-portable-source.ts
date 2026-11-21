@@ -68,6 +68,20 @@ function recordNamedExports(
   }
 }
 
+function recordVariableExports(
+  statement: ts.VariableStatement,
+  isDefault: boolean,
+  declarations: ReadonlyMap<string, ts.Expression>,
+  directCallable: ReadonlySet<string>,
+  output: Map<string, E2EPortableExportKind>,
+): void {
+  for (const declaration of statement.declarationList.declarations) {
+    if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
+    const exportName = isDefault ? "default" : declaration.name.text;
+    output.set(exportName, resolveExpressionKind(declaration.initializer, declarations, directCallable, new Set([declaration.name.text])));
+  }
+}
+
 function recordModifiedExport(
   statement: ts.Statement,
   declarations: ReadonlyMap<string, ts.Expression>,
@@ -82,10 +96,7 @@ function recordModifiedExport(
   } else if (ts.isClassDeclaration(statement)) {
     output.set(isDefault ? "default" : statement.name?.text ?? "default", "data");
   } else if (ts.isVariableStatement(statement)) {
-    for (const declaration of statement.declarationList.declarations) {
-      if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
-      output.set(isDefault ? "default" : declaration.name.text, resolveExpressionKind(declaration.initializer, declarations, directCallable, new Set([declaration.name.text])));
-    }
+    recordVariableExports(statement, isDefault, declarations, directCallable, output);
   }
 }
 
