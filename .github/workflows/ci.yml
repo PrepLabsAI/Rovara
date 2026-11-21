@@ -703,11 +703,11 @@ jobs:
             fi
           fi
           node "$GATE_SCRIPT"
-      # #1262: a pull request into mainline from this repository marks the merge commit it tested (github.sha) with the gate's verdict: commit status ci/local,
+      # #1262: a pull request into mainline (or, #1295, code/next: both have a merge queue) from this repository marks the merge commit it tested (github.sha) with the gate's verdict: commit status ci/local,
       # the tree in its description and this run as its address. The merge queue reuses only github-actions[bot]'s newest success on a commit whose tree is the
       # queue's own (scripts/ci-plan.ts findQueueReuse). A fork's token cannot write statuses, so a fork marks nothing; a failed mark costs only the reuse.
       - name: Mark the tested merge commit for the merge queue
-        if: always() && github.event_name == 'pull_request' && github.base_ref == 'mainline' && github.event.pull_request.head.repo.full_name == github.repository && (steps.gate.outcome == 'success' || steps.gate.outcome == 'failure')
+        if: always() && github.event_name == 'pull_request' && (github.base_ref == 'mainline' || github.base_ref == 'code/next') && github.event.pull_request.head.repo.full_name == github.repository && (steps.gate.outcome == 'success' || steps.gate.outcome == 'failure')
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
