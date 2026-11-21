@@ -20,6 +20,7 @@ import { withoutNatEgressControlPlane } from "../support/egress-addresses-templa
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { removePackedPieces, unpackedBrokerVariables, withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
 import { withoutSlackCompanyMode } from "../support/slack-company-template.js";
+import { withoutBrokerMemberConditionCheck } from "../support/broker-member-condition-check-template.js";
 
 skipLambdaBundling();
 
@@ -329,7 +330,10 @@ describe("the named TEST proof-only installation gate", () => {
     expect(foreign.Parameters?.CoreTaskCapUsd, "foreign has the core engine").toBeDefined();
     // #1148: the legacy (production) template has the core engine too.
     expect(legacy.Parameters?.CoreTaskCapUsd, "legacy has the core engine").toBeDefined();
-    for (const { label, template, withRoute, withoutRoute, beforeStepUpRemoval, beforeCapabilityRoutes } of digestCases) {
+    for (const { label, template: currentTemplate, withRoute, withoutRoute, beforeStepUpRemoval, beforeCapabilityRoutes } of digestCases) {
+      // SIGNIN-MEMBER-CONDITIONCHECK, DEC 254zzz282 B014-A: pin and remove only
+      // the new broker member statement; retain the creator fence and every historical digest.
+      const template = withoutBrokerMemberConditionCheck(currentTemplate);
       const creatorChecks = developerSignInConditionCheckEntries(template);
       {
         expect(creatorChecks, `${label} has exactly one broker creator identity fence`).toHaveLength(1);

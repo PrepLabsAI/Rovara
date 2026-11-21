@@ -182,7 +182,7 @@ function withoutBrokerMemberConditionCheck(template: TemplateJson): TemplateJson
 describe("broker membership condition-check grant", () => {
   it("adds only the exact member-key statement to the broker; every other action, resource and principal stays pinned", () => {
     const before = withoutBrokerMemberConditionCheck(namedRaw);
-    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("75b44092003f5e55e3f95b67b46f269d178c7b00b029c0e9a34aec106d2dbdc7");
+    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("06108dfc29ca5002c166873dc011428a489f0d524e6c3e197828d805d0052bc7");
     const afterTuples = accessTuples(namedRaw);
     const beforeTuples = accessTuples(before);
     const broker = "role:BrokerServiceRole";

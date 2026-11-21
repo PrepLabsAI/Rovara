@@ -15,6 +15,8 @@ import { withoutDnsFirewall, withoutDnsFirewallAccess, withoutSwitchoverControlP
 import { normalizedTemplate } from "../support/template-snapshot.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { withoutSlackCompanyMode, withoutSlackCompanyService } from "../support/slack-company-template.js";
+import { createHash } from "node:crypto";
+import { withoutBrokerMemberConditionCheck } from "../support/broker-member-condition-check-template.js";
 
 skipLambdaBundling();
 
@@ -286,7 +288,13 @@ describe("named environment templates", () => {
   });
   for (const stack of stacks) {
     it(`${stack.stackName} is unchanged`, () => {
-      const template = normalizedTemplate(stack);
+      let template = normalizedTemplate(stack);
+      // SIGNIN-MEMBER-CONDITIONCHECK, DEC 254zzz282 B014-A: pin the new full synth
+      // before the existing normalizers, then preserve every old policy/snapshot assertion.
+      if (stack.stackName === "agentx-staging-control-plane") {
+        expect(createHash("sha256").update(JSON.stringify(template)).digest("hex")).toBe("ef7ec71baeba564d5fa957374727f876d1602a7a43ced9676ff93219402c04dd");
+        template = withoutBrokerMemberConditionCheck(template);
+      }
       const parity = stack.stackName === "agentx-staging-foundation" ? withoutNatEgressAddresses(withoutDnsFirewall(template))
         : stack.stackName === "agentx-staging-access" ? withoutSavedEnvAccess(withoutDnsFirewallAccess(template), "staging")
         // ENV-ROOM 2 (2026-11-17): the broker's names parameter is checked and the names put back in its environment first, as the rest was recorded.
