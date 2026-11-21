@@ -271,7 +271,12 @@ it("withholds legacy spend from real reader and co-owner roles while retaining t
   const deps = developerTaskRouteDependencies({ documentClient: h.db, tableName: "test", tasks: h.actions, now: Date.now, developer: { issuer: "https://example.test", signInTableName: "signin" }, companies: { membershipOf: async () => ({ companyId, role: "member" }) } } as unknown as Parameters<typeof developerTaskRouteDependencies>[0], caller);
   const view = await taskView(deps, task, { events: 0, details: false, actor });
   if (visible) expect(view).toMatchObject({ spent: { usd: 28.4812 }, workflow: { designReview: { spentUsd: 2.83 } } });
-  else { expect(view).not.toHaveProperty("spent"); for (const figure of [28.4812, 2.83, 17.43, 3.91, 0.87, 5.67, 9.73, 18.61, 1.81]) expect(JSON.stringify(view)).not.toContain(String(figure)); }
+  else {
+    expect(view).not.toHaveProperty("spent");
+    // #1287: the view's timestamps are blanked first: "...01:57:01.815Z" contains 1.81. Any other text still counts, so a figure leaking as "$2.83" fails.
+    const text = JSON.stringify(view).replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z/gu, "<time>");
+    for (const figure of [28.4812, 2.83, 17.43, 3.91, 0.87, 5.67, 9.73, 18.61, 1.81]) expect(text).not.toContain(String(figure));
+  }
  }
 });
 
