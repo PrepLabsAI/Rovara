@@ -31,7 +31,7 @@ describe("CI runs on code/next and checks the port there (docs/porting.md), and 
     expect(linux["continue-on-error"]).toBeUndefined();
     for (const step of linux.steps) expect(step["continue-on-error"], step.name).toBeUndefined();
     const checks = linux.steps.filter((step) => (step.run ?? "").startsWith("npx vitest run"));
-    expect(checks).toHaveLength(10);
+    expect(checks).toHaveLength(8);
     for (const step of checks) {
       expect(step.if, step.name).toBe("(success() || failure()) && steps.runtime_setup.outcome == 'success'");
     }

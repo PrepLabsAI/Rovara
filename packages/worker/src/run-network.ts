@@ -43,7 +43,7 @@ export const RUN_NETWORK_WORKSPACE_LABEL = "rovara.run-network.workspace";
 export const RUN_NETWORK_FIRST_OCTETS = "172.30";
 // A literal, not `SETUP_NETWORK_SLOTS`: this module and setup-network.ts import each other (setup-network -> task-sandbox -> model-helper-block -> run-network -> setup-network). When setup-network.ts is the first of them a process loads,
 // run-network.ts runs while setup-network.ts has not defined its constants yet, and under Vitest (shared module graphs) a name read from a module still loading is `undefined`: `RUN_NETWORK_SLOTS` became `undefined`, `assertSlot`'s upper bound
-// never held and `isModelHelperAddress` refused every helper address. A literal cannot be caught by the load order. tests/unit/worker-run-network-import-order.test.ts pins it to the setup network's count (they share the slot hash) in every load order.
+// never held and `isModelHelperAddress` refused every helper address. A literal cannot be caught by the load order. tests/unit/model-helper-run-network-import-order.test.ts pins it to the setup network's count (they share the slot hash) in every load order.
 export const RUN_NETWORK_SLOTS = 253;
 /** The last octet of the model helper's address in a slot (TE-F1b). Reserved: see the header. */
 export const RUN_NETWORK_MODEL_HELPER_OCTET = 9;
