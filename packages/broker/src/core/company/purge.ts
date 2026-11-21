@@ -396,7 +396,7 @@ function projectRetirementVerdict(pk: string, sk: string, companyId: string, fie
   const projectPrefix = `ORG#${companyId}#PROJECT#`;
   const canonicalProject = pk.startsWith(projectPrefix) ? pk.slice(projectPrefix.length)
     : pk === `ORG#${companyId}#PROJECT_CATALOG` && sk.startsWith("PROJECT#") ? sk.slice("PROJECT#".length)
-      : (fields === "this" || (companyId === IMPLICIT_COMPANY_ID && fields === "none")) && pk.startsWith("PROJECT#") ? pk.slice("PROJECT#".length) : undefined;
+      : (fields === "this" || (companyId === IMPLICIT_COMPANY_ID && fields === "none")) ? legacyProjectName(pk, sk) : undefined;
   if (canonicalProject !== undefined && /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(canonicalProject)) {
     if (fields === "other" || fields === "conflicting") return { act: "conflicting" };
     return { act: "retire-project", project: canonicalProject, meta: sk === "META", kind: kindOf(pk, companyId) };
@@ -959,4 +959,10 @@ export async function resumeCompanyPurges(deps: CompanyPurgeDeps, budgetMs: numb
 /** The purge's prefix delete over an object storage that keeps no versions (the laptop's folder store). A deployed install passes the bucket's own version delete instead. */
 export function unversionedPurgeObjects(objects: { deletePrefix(prefix: string): Promise<boolean> }): CompanyPurgeObjects {
   return { deleteEveryVersion: async (prefix) => await objects.deletePrefix(prefix) };
+}
+
+/** The implicit layout's catalogue is content too: drain it under the same retained-generation fence as revisions. */
+function legacyProjectName(pk: string, sk: string): string | undefined {
+  if (pk.startsWith("PROJECT#")) return pk.slice("PROJECT#".length);
+  return pk === "PROJECT_CATALOG" && sk.startsWith("PROJECT#") ? sk.slice("PROJECT#".length) : undefined;
 }
