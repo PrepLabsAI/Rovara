@@ -34,6 +34,41 @@ async function checkFileChecksums(
   }
 }
 
+/** JSON with every object's keys sorted, so two entries compare by content and not by the order their keys were written in. */
+function canonical(value: unknown): string {
+  return JSON.stringify(value, (_key, inner: unknown) =>
+    inner !== null && typeof inner === "object" && !Array.isArray(inner)
+      ? Object.fromEntries(Object.entries(inner as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : inner,
+  );
+}
+
+/** Each package of the release against the rebuild's: present in both, the same checksum and the same whole entry; and the same enterprise packages. */
+function comparePackages(manifest: ReleaseManifest, rebuilt: ReleaseManifest, problems: string[]): void {
+  const rebuiltPackagesById = new Map(rebuilt.packages.map((p) => [p.assetId, p]));
+  const releasePackageIds = new Set(manifest.packages.map((p) => p.assetId));
+  for (const pkg of manifest.packages) {
+    const rebuiltPkg = rebuiltPackagesById.get(pkg.assetId);
+    if (rebuiltPkg === undefined) {
+      problems.push(`${pkg.file}: rebuilding from current source did not produce this package`);
+    } else if (rebuiltPkg.sha256 !== pkg.sha256) {
+      problems.push(
+        `${pkg.file}: does not match a rebuild from current source (release has ${pkg.sha256}, rebuild has ${rebuiltPkg.sha256})`,
+      );
+    } else if (canonical(rebuiltPkg) !== canonical(pkg)) {
+      problems.push(`${pkg.file}: its release.json entry (parts or parameter names) does not match a rebuild from current source`);
+    }
+  }
+  if (canonical(manifest.enterprisePackages ?? []) !== canonical(rebuilt.enterprisePackages ?? [])) {
+    problems.push("release.json: its enterprise packages do not match a rebuild from current source");
+  }
+  for (const rebuiltPkg of rebuilt.packages) {
+    if (!releasePackageIds.has(rebuiltPkg.assetId)) {
+      problems.push(`${rebuiltPkg.file}: rebuilding from current source produces a package not present in this release`);
+    }
+  }
+}
+
 /**
  * Verifies a release directory two ways:
  *  1. Every file release.json lists (each template, each package) is read back off disk and its
@@ -44,7 +79,9 @@ async function checkFileChecksums(
  *     package's checksum is compared against that rebuild, catching a release that no longer
  *     matches what the current checkout would produce. Drift is reported in both directions: a
  *     release entry the rebuild no longer produces, and a rebuilt template or package the release
- *     doesn't have.
+ *     doesn't have. A package's whole entry (its parts and parameter names) must match the rebuild's, not
+ *     only its checksum, and so must the enterprise packages: with the images, which a rebuild leaves out,
+ *     that is all of release.json, so a second build to diff release.json against is not needed (#1336).
  */
 export async function verifyRelease(input: VerifyReleaseInput): Promise<VerifyReleaseResult> {
   const dir = resolve(input.dir);
@@ -90,23 +127,7 @@ export async function verifyRelease(input: VerifyReleaseInput): Promise<VerifyRe
       }
     }
 
-    const rebuiltPackagesById = new Map(rebuilt.packages.map((p) => [p.assetId, p]));
-    const releasePackageIds = new Set(manifest.packages.map((p) => p.assetId));
-    for (const pkg of manifest.packages) {
-      const rebuiltPkg = rebuiltPackagesById.get(pkg.assetId);
-      if (rebuiltPkg === undefined) {
-        problems.push(`${pkg.file}: rebuilding from current source did not produce this package`);
-      } else if (rebuiltPkg.sha256 !== pkg.sha256) {
-        problems.push(
-          `${pkg.file}: does not match a rebuild from current source (release has ${pkg.sha256}, rebuild has ${rebuiltPkg.sha256})`,
-        );
-      }
-    }
-    for (const rebuiltPkg of rebuilt.packages) {
-      if (!releasePackageIds.has(rebuiltPkg.assetId)) {
-        problems.push(`${rebuiltPkg.file}: rebuilding from current source produces a package not present in this release`);
-      }
-    }
+    comparePackages(manifest, rebuilt, problems);
     const releaseLegal = new Map((manifest.legalDocuments ?? []).map((document) => [document.file, document.sha256]));
     const rebuiltLegal = new Map((rebuilt.legalDocuments ?? []).map((document) => [document.file, document.sha256]));
     for (const [file, sha256] of releaseLegal) {

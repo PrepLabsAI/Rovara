@@ -1196,7 +1196,7 @@
     "scripts/release-ci-proof.ts": 7,
     "scripts/release-production.ts": 12,
     "scripts/release/build.ts": 4,
-    "scripts/release/verify.ts": 12,
+    "scripts/release/verify.ts": 5,
     "scripts/report-suspect-project-admins.ts": 39,
     "scripts/test-coverage-map.ts": 77,
     "scripts/test-deploy-check.ts": 40,

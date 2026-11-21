@@ -235,8 +235,6 @@ jobs:
         timeout-minutes: 15
         run: |
           npm run release:build -- --version 0.0.0-ci --out "$RUNNER_TEMP/release-a"
-          npm run release:build -- --version 0.0.0-ci --out "$RUNNER_TEMP/release-b"
-          diff "$RUNNER_TEMP/release-a/release.json" "$RUNNER_TEMP/release-b/release.json"
           npm run release:verify -- "$RUNNER_TEMP/release-a"
 
   # Builds the packages once and hands the output to the test shards (they used to run `npm run build` eight times).
