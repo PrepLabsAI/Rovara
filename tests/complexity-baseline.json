@@ -54,7 +54,7 @@
     "packages/broker/src/aws/github-connect-routes.ts": 36,
     "packages/broker/src/aws/github-credentials.ts": 3,
     "packages/broker/src/aws/github-lifecycle.ts": 5,
-    "packages/broker/src/aws/github-webhooks.ts": 265,
+    "packages/broker/src/aws/github-webhooks.ts": 266,
     "packages/broker/src/aws/health-probes.ts": 7,
     "packages/broker/src/aws/hosted-intake-routes.ts": 21,
     "packages/broker/src/aws/install-company-import.ts": 15,
