@@ -4,9 +4,9 @@ import { join, resolve } from "node:path";
 import {
   E2EScenarioBundleSchema, E2EPolicySchema,
   ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
-  canonicalJson, e2eScenarioBundleDigest, selectE2EExecutionPlan,
-  verifyE2ESourceSnapshot, E2ERunBindingSchema, E2ERoundSchema, type E2EPlanSelectionInput, type E2ESourceSnapshot,
+  canonicalJson, e2eScenarioBundleDigest,   verifyE2ESourceSnapshot, E2ERunBindingSchema, E2ERoundSchema, type E2EPlanSelectionInput, type E2ESourceSnapshot,
 } from "@agentx/contracts";
+import { selectE2EExecutionPlan } from "@agentx/contracts/e2e-execution-plan";
 import { compileE2EScenarios, runE2EActualCli, collectE2EActualCliRun, e2eSnapshotSourceDigest, observeInstalledRuntimeManifestForHost } from "@agentx/verifier";
 import type { WorkerInvocation } from "@agentx/contracts";
 

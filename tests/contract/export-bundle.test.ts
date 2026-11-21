@@ -623,7 +623,9 @@ describe("writeExportBundle", () => {
       const result = await writeExportBundle({ dir, answers: cognitoAnswers(), release: fakeRelease() });
       expect(result.files.length).toBeGreaterThan(0);
     } finally {
-      process.env = savedEnv;
+      // Put the variables back in place: replacing process.env would leave the file's own cleanup (skipLambdaBundling) resetting the old object, and its
+      // CDK_CONTEXT_JSON would reach the next file in this worker (a release build refuses it, deploy-release.test.ts).
+      for (const [key, value] of Object.entries(savedEnv)) if (key.startsWith("AWS_")) process.env[key] = value;
     }
   });
 });

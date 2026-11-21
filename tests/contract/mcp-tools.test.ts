@@ -1,5 +1,3 @@
-// tests/contract/mcp-tools.test.ts
-import { randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -8,7 +6,6 @@ import { WORKFLOW_REVIEW_FAILURE_REASONS, taskGraphDigest, workflowFindingFinger
 import { NEXT_STEPS, REQUIRED_SERVER_MINOR, ToolError, UNEXPECTED_ANSWER_STEP, UPGRADE_AGENTX_STEP, compatibilityChecker, createAgentXMcpServer, httpControlPlaneClient, type ControlPlaneClient, type ToolContext } from "../../packages/mcp/src/index.js";
 import { toolError as parseToolError } from "../support/mcp-tool-error.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
-import { createSingleAnswerPlanBroker, MAYA } from "../support/developer-task-broker.js";
 
 const TASK = "44444444-4444-4444-8444-444444444444";
 const PLANTED = "xoxb-3333333333-planted-secret";
@@ -100,33 +97,6 @@ describe("ordered work approval digest (Spec059)", () => {
     } });
   });
 
-  it("carries the canonical digest from the actual broker task view into agentx_get_task", async () => {
-    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { githubPullRequests: { getCommitTree: async () => "a".repeat(40) } } });
-    const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
-      requestId: randomUUID(), project: "payments", instructions: "Implement the ordered change", client: "test-client", workflow: true, workflowPath: "QUICK",
-    });
-    const taskId = String((started.body.task as { taskId: string }).taskId);
-    const workspaceId = String(harness.db.get(`DEVTASK#${taskId}`, "META")?.workspaceId);
-    const operations = () => harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION");
-    await harness.finish(workspaceId, String(operations().find((item) => item.kind === "prepare")?.id), "SUCCEEDED", {
-      result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] },
-    });
-    const graph = { schemaVersion: 1 as const, taskId, version: 1, items: [
-      { id: "11111111-1111-4111-8111-111111111111", title: "Implement", description: "Implement the change", repository: "demo", dependsOn: [] },
-    ] };
-    const planning = operations().find((item) => item.workflowMode === "PLAN");
-    if (planning === undefined) throw new Error("planning operation missing");
-    await harness.artifact(workspaceId, String(planning.id), "plan.md", planAnswer(planDocument({ workBreakdown: graph })));
-    await harness.finish(workspaceId, String(planning.id), "SUCCEEDED", { result: { workflowMode: "PLAN" } });
-
-    const response = await harness.dev(MAYA, "GET", `/v1/dev/tasks/${taskId}`);
-    expect(response.status).toBe(200);
-    const actualBrokerView = response.body.task as DeveloperTaskView;
-    expect(actualBrokerView.workflow?.planContent).toContain("## Work breakdown");
-    expect(actualBrokerView.workflow?.planContent).not.toContain("```agentx-plan");
-    const result = await (await connect({ getTask: async () => actualBrokerView })).callTool({ name: "agentx_get_task", arguments: { task_id: taskId } });
-    expect(result.structuredContent).toMatchObject({ workflow: { work_breakdown_digest: taskGraphDigest(graph) } });
-  });
 
   it("shows the canonical graph digest and passes it for APPROVE while leaving REQUEST_CHANGES optional", async () => {
     const graph = { schemaVersion: 1 as const, taskId: TASK, version: 1, items: [

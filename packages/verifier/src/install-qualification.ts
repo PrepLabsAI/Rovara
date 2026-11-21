@@ -4,13 +4,13 @@ import { networkInterfaces, release as osRelease } from "node:os";
 import { join, resolve } from "node:path";
 import {
   canonicalJson, createCandidateManifest, e2EDefaultSyntheticAccountDefinition, e2EPortableApprovalBindingDigest, runtimeInstallChallengeDigest,
-  e2eScenarioBundleDigest, e2ePortableOperationDescriptorDigest, inspectE2ERepository, selectE2EExecutionPlan,
-  type E2EPolicy, type E2EScenario, type E2ESourceSnapshot, type RuntimeInstallChallenge,
+  e2eScenarioBundleDigest, e2ePortableOperationDescriptorDigest, inspectE2ERepository,   type E2EPolicy, type E2EScenario, type E2ESourceSnapshot, type RuntimeInstallChallenge,
   RuntimeInstallChallengeSchema, RuntimeInstallationProposalSchema,
   WEB_API_QUALIFICATION_APP_MANIFEST_PREFIX, WEB_API_QUALIFICATION_APP_TREE_DIGEST, WEB_API_REQUIRED_PROBES, WEB_API_RUNTIME_PROFILE_ID, webApiProbeAssetManifestPath,
   webApiQualificationAppTreeDigest, WEB_API_RUNTIME_SCOPE, WebApiProbeEvidenceSchema, WebApiProbeObservationSchema, WebApiRuntimeInstallProposalSchema,
   evaluateWebApiProbeObservation, type WebApiProbeObservation, type WebApiProbeRun, type WebApiRuntimeInstallProposal,
 } from "@agentx/contracts";
+import { selectE2EExecutionPlan } from "@agentx/contracts/e2e-execution-plan";
 import { compileE2EScenarios, type E2EImmutableCompilationContext } from "./scenarios.js";
 import { runE2EActualCli } from "./runtime-cli.js";
 import { parseE2EReport } from "./result-adapter.js";

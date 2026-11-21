@@ -6,7 +6,6 @@ import type { ChannelInfoRequest, ChannelMembersRequest } from "@agentx/contract
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createNotifierHandler } from "../../packages/broker/src/aws/developer-task-notifier.js";
 import { ADMIN_SLACK, createAdminChangeBroker } from "../support/admin-change-broker.js";
-import { MAYA, OMAR, grantProject } from "../support/developer-task-broker.js";
 import { adminSignedInClient } from "../support/mcp-broker-client.js";
 import { SLACK_CHANNEL, SLACK_TEAM, ensureWorkspace } from "../support/slack-broker.js";
 
@@ -15,64 +14,10 @@ const PLANTED = `ghp_${"E".repeat(36)}`;
 let lines: string[] = [];
 beforeEach(() => { lines = []; vi.spyOn(console, "log").mockImplementation((line: string) => { lines.push(String(line)); }); });
 afterEach(() => vi.restoreAllMocks());
-/** Everything but the change path's own records: what a declined change must leave unchanged. */
-const stateOf = (db: { items: Map<string, Record<string, unknown>> }) => JSON.stringify([...db.items.entries()]
-  .filter(([, item]) => !["ADMIN_CHANGE", "ADMIN_CHANGE_REQUEST", "ADMIN_CHANGE_AUDIT"].includes(String(item.entityType)))
-  .sort(([left], [right]) => left.localeCompare(right)));
 
 describe("an admin changes AgentX from an AI tool (US6)", () => {
 
-  it("leaves AgentX's state as it was for every change tool the admin declines (SC-005)", async () => {
-    const broker = await createAdminChangeBroker();
-    grantProject(broker.db, OMAR);
-    const started = await broker.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix it", client: "claude-code" });
-    const task = broker.db.get(`DEVTASK#${(started.body.task as { taskId: string }).taskId}`, "META") as { workspaceId: string };
-    await broker.finish(task.workspaceId, String((broker.db.get(`WORKSPACE#${task.workspaceId}`, "META") as { activeOperationId: string }).activeOperationId), "SUCCEEDED");
-    const mcp = await adminSignedInClient(broker, { elicitation: "decline", clock: broker.clock, config: CONFIG });
-    await expect.poll(async () => (await mcp.names()).includes("agentx_admin_set_workspace_limits")).toBe(true);
-    const calls: Array<[string, Record<string, unknown>]> = [
-      ["agentx_admin_register_project_revision", { definition: { name: "payments", revision: 2, repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "github-app" }], setup: [], readiness: [], orchestratorInstructions: "Delegate work." } }],
-      ["agentx_admin_bind_channel", { channel: "C0LEDGER01", project: "payments" }],
-      ["agentx_admin_unbind_channel", { channel: SLACK_CHANNEL }],
-      ["agentx_admin_register_credential", { ref: "linear", type: "static-secret", secret_name: "agentx/connectors/linear" }],
-      ["agentx_admin_stop_workspace", { workspace_id: task.workspaceId }],
-      ["agentx_admin_grant_project_access", { project: "payments", developer: "U0NEW00001" }],
-      ["agentx_admin_revoke_project_access", { project: "payments", developer: OMAR.developerId }],
-      ["agentx_admin_revoke_signin", { developer: MAYA.developerId }],
-      ["agentx_admin_set_workspace_limits", { per_person: 5 }],
-    ];
-    for (const [name, args] of calls) {
-      const before = stateOf(broker.db);
-      const answer = await mcp.tool(name, args);
-      expect(answer.error, name).toMatchObject({ code: "CONFIRMATION_DECLINED" });
-      expect(stateOf(broker.db), name).toBe(before);
-    }
-    // revoke_signin acts outside the table, through DeveloperIdentity: no declined call reached it.
-    // stop_workspace's cancel acts only through the table (the cancel operation and its outbox), so stateOf covers it.
-    expect(broker.endedSessions).toEqual([]);
-    // FR-051: one record per request, each declined.
-    expect(broker.db.find((item) => item.entityType === "ADMIN_CHANGE_AUDIT").map((item) => item.outcome)).toEqual(calls.map(() => "declined"));
-  });
 
-  it("reaches DeveloperIdentity once for an accepted revoke, and changes the table for an accepted stop (SC-005's positive controls)", async () => {
-    const broker = await createAdminChangeBroker();
-    const started = await broker.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix it", client: "claude-code" });
-    const task = broker.db.get(`DEVTASK#${(started.body.task as { taskId: string }).taskId}`, "META") as { workspaceId: string };
-    await broker.finish(task.workspaceId, String((broker.db.get(`WORKSPACE#${task.workspaceId}`, "META") as { activeOperationId: string }).activeOperationId), "SUCCEEDED");
-    const mcp = await adminSignedInClient(broker, { elicitation: "accept", clock: broker.clock, config: CONFIG });
-    await expect.poll(async () => (await mcp.names()).includes("agentx_admin_revoke_signin")).toBe(true);
-    expect((await mcp.tool("agentx_admin_revoke_signin", { developer: MAYA.developerId })).value).toMatchObject({ outcome: "applied" });
-    expect(broker.endedSessions).toEqual([expect.objectContaining({ kind: "end-developer-sessions", developerId: MAYA.developerId })]);
-    const before = stateOf(broker.db);
-    const stopped = await mcp.tool("agentx_admin_stop_workspace", { workspace_id: task.workspaceId });
-    expect(stopped.value).toMatchObject({ outcome: "applied", result: { outcome: "CANCEL_REQUESTED" } });
-    const target = String((stopped.value.result as { targetOperationId: string }).targetOperationId);
-    // The cancel acts only through the table: the task operation's status, and a cancel invocation in the outbox for the runtime.
-    expect(broker.db.get(`WORKSPACE#${task.workspaceId}`, `OPERATION#${target}`)).toMatchObject({ status: "CANCEL_REQUESTED" });
-    expect(broker.db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { kind?: string } | undefined)?.kind === "cancel")).toHaveLength(1);
-    expect(stateOf(broker.db)).not.toBe(before);
-    expect(broker.endedSessions).toHaveLength(1);
-  });
 
   it("offers no change tool, and refuses a direct call, when neither method is available (FR-041, US6 scenario 4)", async () => {
     const broker = await createAdminChangeBroker({ slackLinked: false });

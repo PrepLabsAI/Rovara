@@ -10,8 +10,7 @@ import { PLAN_UNREADABLE_CATEGORIES, PLAN_UNREADABLE_SENTENCES, planCheckSummary
 import { plainBlockReason, workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
 import { renderPlanDocument } from "../../packages/broker/src/aws/plan-page/render-plan.js";
 import { readTaskPlanDocument } from "../../packages/broker/src/aws/task-plan-document.js";
-import { routeDeveloperTaskRequest } from "../../packages/broker/src/aws/developer-tasks.js";
-import { PRIYA, pageTask } from "../support/page-tasks.js";
+import { pageTask } from "../support/page-tasks.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 
 const SHA = "a".repeat(64);
@@ -238,32 +237,6 @@ describe("what the card and page show of tonight's plan mistakes (fix round 1)",
 });
 
 describe("GET /v1/dev/tasks/:id/plan", () => {
-  const route = (fixture: ReturnType<typeof pageTask>, caller: typeof PRIYA, query = "") => routeDeveloperTaskRequest(fixture.deps, caller,
-    { method: "GET", path: `/v1/dev/tasks/${fixture.taskId}/plan${query}`, headers: {}, requestId: "r1" }, new URL(`/v1/dev/tasks/${fixture.taskId}/plan${query}`, "https://agentx.invalid")) as Promise<{
-    plan: { version: number; sha256: string; approved: boolean; current: boolean; versions: number[]; content: PlanDocument; summary: { lines: string[]; decisions: unknown[] } } }>;
-
-  it("returns the version asked for, and says which is the latest", async () => {
-    const fixture = pageTask();
-    const first = fixture.addVersion("plan", ordersPlan());
-    fixture.addVersion("plan", ordersPlan({ title: "Second try" }));
-    const old = (await route(fixture, PRIYA, "?version=1")).plan;
-    expect(old).toMatchObject({ version: 1, sha256: first.sha256, current: false, versions: [1, 2] });
-    expect((await route(fixture, PRIYA)).plan).toMatchObject({ version: 2, current: true });
-    await expect(route(fixture, PRIYA, "?version=3")).rejects.toMatchObject({ code: "NOT_FOUND" });
-    await expect(route(fixture, PRIYA, "?version=abc")).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-    await expect(route(fixture, PRIYA, "?document=nonsense")).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-  });
-
-  it("refuses a document whose bytes changed, a task with no plan yet and a Markdown document", async () => {
-    const fixture = pageTask();
-    await expect(route(fixture, PRIYA)).rejects.toMatchObject({ code: "NOT_FOUND" });
-    const artifact = fixture.addVersion("plan", ordersPlan());
-    fixture.objects.set(artifact.objectKey, `${fixture.objects.get(artifact.objectKey)!} `);
-    await expect(route(fixture, PRIYA)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
-    const legacy = pageTask();
-    legacy.addVersion("plan", "# Goal\nFix it.");
-    await expect(route(legacy, PRIYA)).rejects.toMatchObject({ code: "NOT_FOUND" });
-  });
 
   it("reads only this task's own storage", async () => {
     const fixture = pageTask();

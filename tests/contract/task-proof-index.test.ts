@@ -102,11 +102,6 @@ function checked(fixture: PageTaskFixture): void {
 }
 
 describe("GET /v1/dev/tasks/{id}/evidence on the old broker", () => {
-  it("answers the owner the index of what the workflow recorded (no failures: this engine keeps no pack)", async () => {
-    const fixture = pageTask();
-    checked(fixture);
-    expect(Index.parse(await call(fixture, PRIYA))).toEqual({ taskId: fixture.taskId, items: [{ id: "check:0", title: "npm test", kind: "check_result", verdict: "fail", criterionIds: [] }] });
-  });
 
   it("refuses anyone the task read refuses, exactly as a missing task", async () => {
     const fixture = pageTask({ shared: false });

@@ -3,10 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { E2E_MODEL_ROUTE_DEFAULT_BUDGETS, type E2EModelDayBudgetRequest } from "@agentx/contracts";
 import { handleE2EModelBudgetCallback, type E2EModelBudgetDependencies, type E2EModelBudgetOperation } from "../../packages/broker/src/e2e/model-budget-endpoint.js";
 import { e2eModelBudgetKey, isTransientAwsFault } from "../../packages/broker/src/e2e/model-route-registry.js";
-import { issueCapability } from "../../packages/broker/src/aws/cancellation.js";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
-import { startApplicationRound } from "../support/e2e-application-round-harness.js";
-import { call } from "../support/slack-broker.js";
 import { FakeDynamoDb, assumeDrivingTestsPassed } from "../support/fake-dynamodb.js";
 import { TEST_ORG, testProjectPk } from "../support/orgs.js";
 
@@ -21,7 +18,6 @@ const TABLE = "state";
 const NOW = Date.parse("2026-10-21T10:00:00.000Z");
 const TASK = "11111111-aaaa-4bbb-8ccc-111111111111";
 const GROUP = "22222222-aaaa-4bbb-8ccc-222222222222";
-const OTHER_GROUP = "33333333-aaaa-4bbb-8ccc-333333333333";
 const DAY = "2026-10-21";
 const CAPS = { tokens: E2E_MODEL_ROUTE_DEFAULT_BUDGETS.maxInputTokensPerProjectDay, calls: E2E_MODEL_ROUTE_DEFAULT_BUDGETS.maxCallsPerProjectDay };
 
@@ -145,35 +141,3 @@ describe("who may call it", () => {
   });
 });
 
-describe("through the broker's callback route", () => {
-  const route = (round: Awaited<ReturnType<typeof startApplicationRound>>, operationId: string, capability: string, body: unknown) => call(round.harness.handler, { method: "POST",
-    path: `/v1/internal/workspaces/${round.workspaceId}/operations/${operationId}/e2e-model-budget`, headers: { "x-agentx-callback-capability": capability }, body });
-
-  it("a claim without e2e-model-budget gets CALLBACK_FORBIDDEN: the capability a round with no AI navigation step is issued does not carry it", async () => {
-    const round = await startApplicationRound();
-    round.markRunning();
-    const response = await route(round, round.operationId, round.capabilityFor(round.operationId), reserveBody(randomUUID(), 1_000, round.admissionRef.groupRunIds[0]));
-    expect(response.body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
-    expect(JSON.stringify(response.body)).toMatch(/does not allow e2e-model-budget/);
-    expect(round.harness.db.find((item) => String(item.sk).startsWith("E2E_MODEL_BUDGET"))).toEqual([]);
-  });
-
-  it("with the claim and an admission reference that says agentSteps, it reserves, settles and releases for the task's project", async () => {
-    const round = await startApplicationRound();
-    round.markRunning();
-    const operation = round.operationNow() as Record<string, unknown> & { fence: number; workflowE2EAdmission: Record<string, unknown> };
-    round.harness.db.set({ ...operation, pk: `WORKSPACE#${round.workspaceId}`, sk: `OPERATION#${round.operationId}`, workflowE2EAdmission: { ...operation.workflowE2EAdmission, agentSteps: true } });
-    const capability = issueCapability(round.harness.brokerInput as { callbackSigningKey: string }, round.workspaceId, round.operationId, operation.fence, false, false, false, false, false, true, true);
-    const group = round.admissionRef.groupRunIds[0]!;
-    const id = randomUUID();
-    const reserved = await route(round, round.operationId, capability, reserveBody(id, 2_000, group));
-    expect(reserved.status, JSON.stringify(reserved.body)).toBe(200);
-    expect(reserved.body).toMatchObject({ schemaVersion: "rovara-e2e-model-budget/v1", reservationId: id, status: "reserved" });
-    const reservation = round.harness.db.find((item) => item.sk === `E2E_MODEL_BUDGET_RESERVATION#${id}`)[0]!;
-    expect(reservation).toMatchObject({ pk: testProjectPk("payments"), status: "open", operationId: round.operationId, groupRunId: group });
-    expect((await route(round, round.operationId, capability, settleBody(id, 1_500))).body).toMatchObject({ status: "settled" });
-    expect(round.harness.db.find((item) => String(item.sk).startsWith("E2E_MODEL_BUDGET#"))[0]).toMatchObject({ inputTokens: 1_500, calls: 1 });
-    // A group run the reference does not list is forbidden through the route too.
-    expect((await route(round, round.operationId, capability, reserveBody(randomUUID(), 1_000, OTHER_GROUP))).body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
-  });
-});

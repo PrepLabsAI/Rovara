@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildSync } from "esbuild";
@@ -13,7 +14,6 @@ const SRC = "packages/contracts/src";
 const EFFECTS = new Map<string, string>([
   ["e2e-safe-data.ts", "a check of the typed-array intrinsics that throws when the runtime lacks them; it changes nothing"],
   ["owner-starter-images.ts", "parses the module's own built-in list against its schema at load, so a bad entry throws; it changes nothing outside the module"],
-  ["public-suffix-rules.ts", "freezes the module's own rule set (its add, delete and clear methods); it touches no other object"],
 ]);
 
 function walk(directory: string): string[] {
@@ -26,7 +26,7 @@ describe("the contracts package is free of side effects", () => {
     expect(manifest.sideEffects).toBe(false);
   });
 
-  it("has no module that runs code at load time, apart from the three listed", () => {
+  it("has no module that runs code at load time, apart from the two listed", () => {
     const found = new Map<string, string[]>();
     for (const path of walk(SRC)) {
       const source = ts.createSourceFile(path, readFileSync(path, "utf8"), ts.ScriptTarget.Latest, true);
@@ -43,7 +43,7 @@ describe("the contracts package is free of side effects", () => {
   });
 
   it("lets a bundler drop the barrel and the TypeScript compiler from a program that uses one small module", () => {
-    // `errors.ts` needs only zod. The compiler is imported by one contracts file (e2e-catalog.ts); with the flag the bundle never loads it.
+    // `errors.ts` needs only zod. The compiler is imported by one contracts file (e2e-portable-source.ts, behind `@agentx/contracts/e2e-execution-plan`).
     const result = buildSync({
       stdin: { contents: 'export { agentXError } from "./errors.js";', resolveDir: join(process.cwd(), SRC), loader: "ts" }, bundle: true, platform: "node", format: "esm", target: "node22", write: false, metafile: true,
       logLevel: "silent", external: ["zod", "@aws-crypto/sha256-js"], tsconfigRaw: { compilerOptions: { verbatimModuleSyntax: true } },
@@ -51,5 +51,14 @@ describe("the contracts package is free of side effects", () => {
     const inputs = Object.keys(result.metafile.inputs);
     expect(inputs.some((input) => input.includes("node_modules/typescript/"))).toBe(false);
     expect(inputs.length).toBeLessThan(40);
+  });
+
+  it("does not load the TypeScript compiler when importing the root barrel in Node", () => {
+    const loaded = execFileSync(
+      process.execPath,
+      ["--input-type=module", "-e", 'await import("@agentx/contracts"); const { createRequire } = await import("node:module"); const req = createRequire(import.meta.url); console.log(Object.keys(req.cache).some((p) => p.includes("typescript")));'],
+      { encoding: "utf8" },
+    ).trim();
+    expect(loaded).toBe("false");
   });
 });

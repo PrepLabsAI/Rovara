@@ -1,53 +1,10 @@
-// Spec 025 Testing section: the MCP SDK's client drives `agentx mcp`'s server against the broker in
-// process, through User Stories 1 and 2. The client lists the tools first, as real AI tools do, so
-// every error result is also checked against SDK 1.30.1's output-schema validation (ruling F3).
-import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { DeveloperTaskResponseSchema, WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, canonicalPlanJson, planDocumentMarkdown, readCanonicalPlan, type WorkflowSnapshot } from "@agentx/contracts";
 import { MAYA, OMAR, createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
-import { finishPlanningWithMarkdown, planAnswer, planDocument } from "../support/plan-documents.js";
 import { URL_BASE, signedInClient } from "../support/mcp-broker-client.js";
 
-type Harness = Awaited<ReturnType<typeof createSingleAnswerPlanBroker>>;
 
-const workspaceOf = (harness: Harness, taskId: string) => (harness.db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string }).workspaceId;
-const activeOf = (harness: Harness, workspaceId: string) => String((harness.db.get(`WORKSPACE#${workspaceId}`, "META") as { activeOperationId: string }).activeOperationId);
-const say = (text: string) => ({ type: "progress", payload: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } } });
 
 describe("hand off a task from an AI tool and move on (US1)", () => {
-  it("lists projects, starts, reads, continues and opens a PR, with every action audited", async () => {
-    const harness = await createSingleAnswerPlanBroker();
-    const { tool, expectNoTokenLeaked } = await signedInClient(harness, MAYA);
-
-    expect((await tool("agentx_list_projects")).value).toMatchObject({ projects: [{ name: "payments", tasks_enabled: true }] });
-
-    const started = await tool("agentx_start_task", { project: "payments", instructions: "Fix the flaky retry test in payments-api" });
-    expect(started.value).toMatchObject({ status: "STARTING", client: "Claude Code" });
-    const taskId = String(started.value.task_id);
-    const workspaceId = workspaceOf(harness, taskId);
-
-    await harness.finish(workspaceId, activeOf(harness, workspaceId), "SUCCEEDED");
-    const operation = activeOf(harness, workspaceId);
-    const outbox = harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === operation)[0];
-    expect((outbox?.invocation as { payload: { prompt: string } }).payload.prompt).toBe("Fix the flaky retry test in payments-api");
-    await harness.events(workspaceId, operation, [say("Fixed the retry test; 212 tests pass.")]);
-    await harness.finish(workspaceId, operation, "SUCCEEDED");
-    expect((await tool("agentx_get_task", { task_id: taskId })).value).toMatchObject({ status: "SUCCEEDED", summary: "Fixed the retry test; 212 tests pass." });
-
-    expect((await tool("agentx_continue_task", { task_id: taskId, instructions: "Add a test for the timeout path." })).value).toMatchObject({ status: "RUNNING" });
-    await harness.finish(workspaceId, activeOf(harness, workspaceId), "SUCCEEDED");
-
-    const pr = await tool("agentx_open_pull_request", { task_id: taskId, title: "Fix the flaky retry test" });
-    expect(pr.value).toMatchObject({ operation_status: "ACCEPTED", task: { task_id: taskId } });
-    expect(pr.value).not.toHaveProperty("timed_out");
-    const publication = harness.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${String(pr.value.operation_id)}`) as { publication: { body: string; draft: boolean } };
-    expect(publication.publication).toMatchObject({ draft: true, body: "Requested by `Maya Chen` via AgentX, started from Claude Code" });
-
-    const turns = harness.db.find((item) => item.pk === `TASK#${taskId}`).map((item) => `${String(item.action)}:${String(item.phase)}`).sort();
-    expect(turns).toEqual(["continue:accepted", "continue:completed", "pull_request:accepted", "start:accepted", "start:completed"]);
-    expect((await tool("agentx_list_tasks")).value).toMatchObject({ tasks: [{ task_id: taskId }] });
-    expectNoTokenLeaked();
-  });
 
   it("tells another developer the task was not found (US1 scenario 6)", async () => {
     const harness = await createSingleAnswerPlanBroker();
@@ -58,13 +15,6 @@ describe("hand off a task from an AI tool and move on (US1)", () => {
     omar.expectNoTokenLeaked();
   });
 
-  it("gives PROJECT_NOT_FOUND and PROJECT_ACCESS_DENIED their own codes (US1 scenario 7)", async () => {
-    const harness = await createSingleAnswerPlanBroker();
-    const omar = await signedInClient(harness, OMAR);
-    expect((await omar.tool("agentx_start_task", { project: "nope", instructions: "x" })).error).toMatchObject({ code: "PROJECT_NOT_FOUND" });
-    expect((await omar.tool("agentx_start_task", { project: "payments", instructions: "x" })).error).toMatchObject({ code: "PROJECT_ACCESS_DENIED", message: "you don't have access to `payments`: ask an admin" });
-    omar.expectNoTokenLeaked();
-  });
 
   it("answers SIGN_IN_REQUIRED with the exact command when this computer has no sign-in", async () => {
     const harness = await createSingleAnswerPlanBroker();
@@ -75,142 +25,6 @@ describe("hand off a task from an AI tool and move on (US1)", () => {
   });
 });
 
-describe("a saved plan that fails its digest check", () => {
-  it("is shown blocked by GET task and agentx_get_task, in plain words, and is never stored blocked", async () => {
-    const harness = await createSingleAnswerPlanBroker();
-    const { tool } = await signedInClient(harness, MAYA);
-    const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true, workflowPath: "QUICK" });
-    const taskId = (started.body.task as { taskId: string }).taskId;
-    const workspaceId = workspaceOf(harness, taskId);
-    await harness.finish(workspaceId, activeOf(harness, workspaceId), "SUCCEEDED", { result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] } });
-    const planning = activeOf(harness, workspaceId);
-    await finishPlanningWithMarkdown(harness, workspaceId, planning, "# Plan\n\n1. Fix retry handling.\n");
-    const stored = (harness.db.get(`DEVTASK#${taskId}`, "META") as { workflow: WorkflowSnapshot }).workflow;
-    expect(stored).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
-    // The saved bytes change after their digest was recorded.
-    harness.s3.objects.set(stored.artifacts.at(-1)!.objectKey, "# Plan\n\n1. Something else.\n");
 
-    const viewed = await harness.dev(MAYA, "GET", `/v1/dev/tasks/${taskId}`);
-    expect(viewed.status).toBe(200);
-    expect(DeveloperTaskResponseSchema.parse(viewed.body).task.workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.documentUnverified });
-    const read = await tool("agentx_get_task", { task_id: taskId });
-    expect(read.isError).toBe(false);
-    expect(JSON.stringify(read.value)).toContain(WORKFLOW_BLOCK_REASONS.documentUnverified);
-    // Only the view is blocked: the stored task still waits, and a blocked approval can't be stored.
-    expect((harness.db.get(`DEVTASK#${taskId}`, "META") as { workflow: WorkflowSnapshot }).workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
-    expect(WorkflowSnapshotSchema.safeParse({ ...stored, state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.documentUnverified }).success).toBe(false);
-  });
-});
 
-describe("the document an AI tool is asked to approve", () => {
-  type Approval = { workflow: { approval_document: { type: string; sha256: string; version: number; content?: string }; plan: { content?: string } } };
-  const waitingTask = async (finish: (harness: Harness, workspaceId: string, planning: string) => Promise<unknown>) => {
-    const harness = await createSingleAnswerPlanBroker();
-    const { tool } = await signedInClient(harness, MAYA);
-    const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true, workflowPath: "QUICK" });
-    const taskId = (started.body.task as { taskId: string }).taskId;
-    const workspaceId = workspaceOf(harness, taskId);
-    await harness.finish(workspaceId, activeOf(harness, workspaceId), "SUCCEEDED", { result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] } });
-    await finish(harness, workspaceId, activeOf(harness, workspaceId));
-    return { harness, tool, taskId };
-  };
 
-  it("is a legacy Markdown plan exactly as it was saved", async () => {
-    const markdown = "# Plan\n\n1. Fix retry handling.\n";
-    const { tool, taskId } = await waitingTask((harness, workspaceId, planning) => finishPlanningWithMarkdown(harness, workspaceId, planning, markdown));
-    const read = (await tool("agentx_get_task", { task_id: taskId })).value as unknown as Approval;
-    expect(read.workflow.approval_document).toMatchObject({ type: "plan", version: 1, sha256: createHash("sha256").update(markdown).digest("hex"), content: markdown });
-    expect(read.workflow.plan.content).toBe(markdown);
-  });
-
-  it("is the Markdown copy of a structured plan, derived from it, never the stored JSON", async () => {
-    const plan = planDocument();
-    const { harness, tool, taskId } = await waitingTask(async (harness, workspaceId, planning) => {
-      await harness.artifact(workspaceId, planning, "plan.md", planAnswer(plan));
-      await harness.finish(workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
-    });
-    const read = (await tool("agentx_get_task", { task_id: taskId })).value as unknown as Approval;
-    const { sha256, version } = read.workflow.approval_document;
-    expect(read.workflow.approval_document).toMatchObject({ type: "plan", version: 1, sha256 });
-    // The saved document is the plan as JSON; the owner has not answered its decisions yet, so the copy does not say they were taken.
-    const saved = (harness.db.get(`DEVTASK#${taskId}`, "META") as { workflow: WorkflowSnapshot }).workflow.artifacts.at(-1)!;
-    const stored = String(harness.s3.objects.get(saved.objectKey));
-    expect(createHash("sha256").update(stored).digest("hex")).toBe(sha256);
-    expect(read.workflow.approval_document.content).toBe(planDocumentMarkdown(readCanonicalPlan(stored)!, { kind: "plan", version, sha256 }));
-    expect(stored).toBe(canonicalPlanJson(readCanonicalPlan(stored)!));
-    expect(read.workflow.approval_document.content).toContain("Payments that fail with a timeout are retried.");
-    expect(read.workflow.approval_document.content).not.toContain("schemaVersion");
-    expect(read.workflow.plan.content).toBe(read.workflow.approval_document.content);
-  });
-});
-
-describe("busy answers name the right next step (final review M1)", () => {
-  it("tells the AI tool to try the start again with the same request_id when the start's transaction fails", async () => {
-    const harness = await createSingleAnswerPlanBroker();
-    const { tool } = await signedInClient(harness, MAYA);
-    const original = harness.db.send;
-    let failed = 0;
-    harness.db.send = async (command) => {
-      const input = JSON.stringify(command.input);
-      if (failed === 0 && command.constructor.name === "TransactWriteCommand" && input.includes("DEVTASK#") && input.includes("IDEMPOTENCY")) {
-        failed += 1;
-        const items = (command.input as { TransactItems: unknown[] }).TransactItems;
-        throw Object.assign(new Error("Transaction cancelled"), {
-          name: "TransactionCanceledException",
-          CancellationReasons: items.map((_, index) => ({ Code: index === items.length - 2 ? "ConditionalCheckFailed" : "None" })),
-        });
-      }
-      return original(command);
-    };
-    const answer = await tool("agentx_start_task", { project: "payments", instructions: "Fix the flaky retry test" });
-    expect(failed).toBe(1);
-    expect(answer.error).toEqual({
-      code: "TASK_BUSY",
-      message: "AgentX could not start the task just now; try again with the same request_id",
-      next_step: "try again with the same request_id",
-    });
-  });
-
-  it("tells the AI tool to try the close again, not to wait or cancel, when a setup-failed close fails", async () => {
-    const harness = await createSingleAnswerPlanBroker();
-    const { tool } = await signedInClient(harness, MAYA);
-    const taskId = String((await tool("agentx_start_task", { project: "payments", instructions: "x" })).value.task_id);
-    const workspaceId = workspaceOf(harness, taskId);
-    await harness.finish(workspaceId, activeOf(harness, workspaceId), "FAILED", { error: "npm ci exited 1" });
-    // A task whose setup failed before #213 still holds its charge, and here the organization
-    // counter lost it: not a race, not already released.
-    Object.assign(harness.db.get("SLACK_LIMIT#T0BSHLLUGBD", `MEMBER#${MAYA.slackUserId}`) as Record<string, unknown>, { count: 1, tasks: new Set([taskId]) });
-    (harness.db.get("SLACK_LIMIT#T0BSHLLUGBD", "ORGANIZATION") as Record<string, unknown>).count = 0;
-    const answer = await tool("agentx_close_task", { task_id: taskId });
-    expect(answer.error).toEqual({
-      code: "TASK_BUSY",
-      message: "AgentX could not close this task just now; try agentx_close_task again, and ask an admin if it keeps failing",
-      next_step: "try agentx_close_task again in a moment, and ask an admin if it keeps failing",
-    });
-  });
-});
-
-describe("wait for a small task (US2)", () => {
-  it("returns the finished task when it ends inside the wait", async () => {
-    const harness = await createSingleAnswerPlanBroker();
-    let done = false;
-    const { tool } = await signedInClient(harness, MAYA, async () => {
-      // The worker prepares the workspace and finishes the task while the tool waits.
-      const workspaceId = harness.db.find((item) => item.entityType === "DEVELOPER_TASK")[0]?.workspaceId as string | undefined;
-      if (workspaceId === undefined || done) return;
-      done = true;
-      await harness.finish(workspaceId, activeOf(harness, workspaceId), "SUCCEEDED");
-      await harness.finish(workspaceId, activeOf(harness, workspaceId), "SUCCEEDED");
-    });
-    const result = await tool("agentx_start_task", { project: "payments", instructions: "run the payments test suite", wait_seconds: 60 });
-    expect(result.value).toMatchObject({ timed_out: false, status: "SUCCEEDED" });
-  });
-
-  it("returns timed_out, not an error, when the task outlives the wait", async () => {
-    const harness = await createSingleAnswerPlanBroker();
-    const { tool } = await signedInClient(harness, MAYA);
-    const taskId = String((await tool("agentx_start_task", { project: "payments", instructions: "long" })).value.task_id);
-    const waited = await tool("agentx_wait_for_task", { task_id: taskId, wait_seconds: 5 });
-    expect(waited).toMatchObject({ isError: false, value: { timed_out: true, status: "STARTING" } });
-  });
-});

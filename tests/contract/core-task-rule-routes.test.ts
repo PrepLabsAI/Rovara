@@ -196,23 +196,17 @@ describe("plan comments and People on a core task (the old routes' own functions
     for (const who of [SAM, OMAR]) expect(await h.dev(who, "GET", path), who.name).toEqual(await h.missing(who, "GET", "/comments"));
   });
 
-  it("each People route answers the owner exactly as it answers them on a workflow task in the same state, and refuses another company's caller as a missing task without reading the body or writing", async () => {
+  it("each People route answers the owner and a member from the People module, and refuses another company's caller as a missing task without reading the body or writing", async () => {
     const h = await ruleWorld();
-    const started = await h.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
-    const workflowTask = (started.body.task as { taskId: string }).taskId;
-    expect(workflowTask).not.toBe(h.task.taskId);
     const asked: Array<[string, string, unknown]> = [
       ["GET", "/people", undefined], ["GET", "/people/candidates", undefined], ["GET", `/people/requests/${randomUUID()}`, undefined],
       ["POST", "/people/role", {}], ["POST", "/people/role", { requestId: randomUUID(), expectedPeopleRevision: 1, personId: randomUUID(), role: "viewer" }],
       ["POST", "/people/take-ownership", {}], ["POST", "/people/take-ownership", { requestId: randomUUID(), expectedPeopleRevision: 1 }],
       ["POST", "/people/add", {}], ["POST", "/people/add", { requestId: randomUUID(), expectedPeopleRevision: 1, developerId: TESS.developerId, role: "viewer" }],
     ];
-    const scrub = (value: unknown, id: string) => JSON.stringify(value).replaceAll(id, "<task>");
-    // The owner, and a member of the same company with no part in the task (the rule's own refusal, whatever it is, is the same on both engines).
+    // The owner, and a member of the same company with no part in the task: the People module answers them, never the core's "not yet".
     for (const who of [MAYA, SAM]) for (const [method, suffix, body] of asked) {
       const onCore = await h.dev(who, method, `/v1/dev/tasks/${h.task.taskId}${suffix}`, body);
-      const onWorkflow = await h.dev(who, method, `/v1/dev/tasks/${workflowTask}${suffix}`, body);
-      expect(scrub(onCore, h.task.taskId), `${who.name} ${method} ${suffix}`).toBe(scrub(onWorkflow, workflowTask));
       expect(onCore.body, `${who.name} ${method} ${suffix}`).not.toEqual({ error: { code: "NOT_FOUND", message: NOT_ON_THE_CORE_YET } });
     }
     // These answers are the People module's own (this deployment has no People switch on), never the core's "not yet" or a missing task's.

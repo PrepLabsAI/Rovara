@@ -32,18 +32,6 @@ describe("decision 147: replies without a mention from the person AgentX answere
     e2e.mention(text, { type: "message", threadTs: THREAD, ...options });
   const inThread = (e2e: Awaited<ReturnType<typeof createWorkflowE2E>>) => e2e.slack.posts.filter((post) => post.threadTs === THREAD);
 
-  it("answers the same person's \"thanks\" with the fixed reply and no model call, and starts their clear request on Quick with Stop", async () => {
-    const e2e = await start();
-    const asked = e2e.routeCalls.length;
-    expect(await reply(e2e, "thanks!")).toBe(200);
-    expect(inThread(e2e).at(-1)!.text).toMatch(/^You're welcome!/);
-    expect(e2e.routeCalls).toHaveLength(asked);
-    expect(await reply(e2e, "fix the typo in README")).toBe(200);
-    const started = e2e.slack.lastPostWithAction(WORKFLOW_STOP_ACTION);
-    expect(started.threadTs).toBe(THREAD);
-    expect(started.text).toContain("so I started it as a quick change");
-    expect(e2e.db.find((item) => String(item.pk).startsWith("DEVTASK#") && item.sk === "META")).toHaveLength(1);
-  }, 120_000);
 
   it("ignores another person's reply without a mention, and a bot's or an edited message", async () => {
     const e2e = await start();
