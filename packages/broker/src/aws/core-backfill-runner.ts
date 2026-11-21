@@ -8,7 +8,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, type GetCommand } from "@aws-sdk/lib-dynamodb";
 import { catalogBackfill } from "./project-catalog-backfill.js";
 import { backfillCorePage, checkCorePeople } from "./core-project-backfill.js";
-import { LEGACY_MOVE_REGIONS } from "./legacy-install-move.js";
+import { operatorRegion } from "./legacy-install-move.js";
 
 export function parseCoreBackfillArguments(args: string[]) {
   const values = new Map<string, string>(); let dryRun = true, peopleCheck = false, action: "discover" | "verify" | "unmark" | "undo-run" | undefined, mark = false;
@@ -53,8 +53,7 @@ export async function readCoreMappingFile(path: string): Promise<Record<string, 
 }
 async function main() {
   const args = parseCoreBackfillArguments(process.argv.slice(2));
-  const region = process.env["AWS_REGION"] ?? "";
-  if (!LEGACY_MOVE_REGIONS.includes(region)) throw new Error("core backfill region refused");
+  const region = operatorRegion(process.env, "core backfill region refused");
   const signal = AbortSignal.timeout(5000);
   const mapping = await readCoreMappingFile(args.file);
   signal.throwIfAborted();

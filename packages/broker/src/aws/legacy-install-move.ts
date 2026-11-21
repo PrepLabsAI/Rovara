@@ -20,31 +20,44 @@ export type LegacyMoveArguments =
 /** The fixed refusal for any argument list that is not exactly one move. */
 export const LEGACY_MOVE_ARGUMENTS_REFUSED = "legacy install move arguments refused";
 
-export function parseLegacyMoveArguments(args: readonly string[]): LegacyMoveArguments {
+/** The region of an operator run (AWS_REGION): one of LEGACY_MOVE_REGIONS, or a fixed refusal. Shared with the project backfill runner. */
+export function operatorRegion(env: NodeJS.ProcessEnv, refusal: string): string {
+  const region = env["AWS_REGION"] ?? "";
+  if (!LEGACY_MOVE_REGIONS.includes(region)) throw new Error(refusal);
+  return region;
+}
+
+const MOVE_FLAGS = ["--state-table", "--slack-team", "--github-installation", "--from", "--to", "--by"];
+const refuse = (): never => { throw new Error(LEGACY_MOVE_ARGUMENTS_REFUSED); };
+
+/** Each flag once, each with a value; `--apply` once at most. */
+function readFlags(args: readonly string[]): { values: Map<string, string>; apply: boolean } {
   const values = new Map<string, string>();
   let apply = false;
   for (let index = 0; index < args.length; index++) {
     const flag = args[index]!;
-    if (flag === "--apply") { if (apply) throw new Error(LEGACY_MOVE_ARGUMENTS_REFUSED); apply = true; continue; }
-    if (!["--state-table", "--slack-team", "--github-installation", "--from", "--to", "--by"].includes(flag) || values.has(flag)) throw new Error(LEGACY_MOVE_ARGUMENTS_REFUSED);
+    if (flag === "--apply") { if (apply) refuse(); apply = true; continue; }
+    if (!MOVE_FLAGS.includes(flag) || values.has(flag)) refuse();
     const value = args[++index];
-    if (value === undefined || value.startsWith("--")) throw new Error(LEGACY_MOVE_ARGUMENTS_REFUSED);
-    values.set(flag, value);
+    if (value === undefined || value.startsWith("--")) refuse();
+    values.set(flag, value!);
   }
-  const tableName = values.get("--state-table"), from = values.get("--from"), to = values.get("--to"), by = values.get("--by");
+  return { values, apply };
+}
+
+export function parseLegacyMoveArguments(args: readonly string[]): LegacyMoveArguments {
+  const { values, apply } = readFlags(args);
+  const tableName = values.get("--state-table") ?? refuse(), from = values.get("--from") ?? refuse(), to = values.get("--to") ?? refuse(), by = values.get("--by") ?? refuse();
   const team = values.get("--slack-team"), installation = values.get("--github-installation");
-  if (tableName === undefined || !/^[A-Za-z0-9_.-]{3,255}$/.test(tableName) || from === undefined || to === undefined || by === undefined || (team === undefined) === (installation === undefined)) {
-    throw new Error(LEGACY_MOVE_ARGUMENTS_REFUSED);
-  }
+  if (!/^[A-Za-z0-9_.-]{3,255}$/.test(tableName) || (team === undefined) === (installation === undefined)) refuse();
   if (team !== undefined) return { kind: "slack", tableName, teamId: team, from, to, by, apply };
-  if (!/^[1-9][0-9]{0,15}$/.test(installation!)) throw new Error(LEGACY_MOVE_ARGUMENTS_REFUSED);
+  if (!/^[1-9][0-9]{0,15}$/.test(installation!)) refuse();
   return { kind: "github", tableName, installationId: Number(installation), from, to, by, apply };
 }
 
 async function main(): Promise<void> {
   const args = parseLegacyMoveArguments(process.argv.slice(2));
-  const region = process.env["AWS_REGION"] ?? "";
-  if (!LEGACY_MOVE_REGIONS.includes(region)) throw new Error("legacy install move region refused");
+  const region = operatorRegion(process.env, "legacy install move region refused");
   const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region, maxAttempts: 1 }));
   try {
     const result = args.kind === "slack"
