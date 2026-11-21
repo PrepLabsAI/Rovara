@@ -6,7 +6,7 @@ import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
 import { createSlackLinkCodes, createSlackPersonResolver, slackBindingCompany, slackCompanyPerson, slackCompanyProject, type SlackCompanyDependencies, type SlackWorkspaceAccess } from "./slack-person.js";
 import { latestRevisionRowFor } from "./company-layout.js";
 import { namedCompanySlackBinding, slackChannelBindingKeyFor } from "./slack-company-layout.js";
-import { companyThenInstallLinkCodes, installAdapterLinkCodes, splitBySlackTeam, withoutSlackCompanyMode } from "./slack-company-split.js";
+import { companyThenInstallLinkCodes, installAdapterLinkCodes, installTeamOnLegacyPath, splitBySlackTeam, withoutSlackCompanyMode } from "./slack-company-split.js";
 import { answerSlackLinkNotice, isSlackLinkNoticeEvent, slackCompanyDependenciesFromEnvironment } from "./slack-company-wiring.js";
 import { askSlackAnswerForIdentity } from "./slack-answers.js";
 import { askSlackModelAccessForIdentity } from "./slack-model-access.js";
@@ -1057,7 +1057,11 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   // naming no team get a handler built without `workspaces` (today's legacy path); every other team gets the company path.
   const company = dependencies.workspaces === undefined ? undefined
     : brokerEventHandler(core, { ...dependencies, ...(dependencies.companies === undefined && dependencies.slackCompanies !== undefined ? { companies: dependencies.slackCompanies } : {}) });
-  return splitBySlackTeam(brokerEventHandler(core, company === undefined ? dependencies : installTeamView(dependencies)), company, dependencies.slackWorkspaceLegacyTeamId);
+  // #1300: the install's team takes today's handler only while its workspace binding names the built-in company; moved to a named company, it is served like any other team.
+  const legacyTeam = dependencies.slackWorkspaceLegacyTeamId;
+  const workspaces = dependencies.workspaces;
+  const installOnLegacy = legacyTeam === undefined || workspaces === undefined ? undefined : installTeamOnLegacyPath((team) => workspaces.requireCompany(team), legacyTeam);
+  return splitBySlackTeam(brokerEventHandler(core, company === undefined ? dependencies : installTeamView(dependencies)), company, legacyTeam, installOnLegacy);
 }
 
 /**

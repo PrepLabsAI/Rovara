@@ -3,8 +3,33 @@
 // broker exactly; a request naming another team goes to the company handler. With no `workspaces` at all (the switch off) there is only today's handler.
 // Choosing by a field the request carries is safe: each handler still checks the request in full (IAM for direct invokes, signatures and sign-in for HTTP), and the company
 // handler's own binding checks decide what another team may do. Naming the install's team only ever selects today's checks.
-import { parseSlackThreadSubject } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, parseSlackThreadSubject } from "@agentx/contracts";
 import { previewLinkCode, redeemLinkCode, type ChannelLinkDependencies } from "./channel-links.js";
+
+/**
+ * #1300: whether the install's own team is on the legacy path NOW. It is only while its workspace binding names the built-in company; bound to a named company (an operator
+ * move, legacy-install-move.ts), the install's team is served like any other team, by the company path. A read binding is kept a minute per container. A
+ * binding that cannot be read is not the legacy path, for that request only: the company path's own checks then refuse (fail closed).
+ */
+export function installTeamOnLegacyPath(companyOf: (teamId: string) => Promise<string | undefined>, teamId: string, now: () => number = Date.now): () => Promise<boolean> {
+  let cached: { at: number; value: boolean } | undefined;
+  return async () => {
+    if (cached !== undefined && now() - cached.at < 60_000) return cached.value;
+    try {
+      const value = await companyOf(teamId) === IMPLICIT_COMPANY_ID;
+      cached = { at: now(), value };
+      return value;
+    } catch {
+      // Not kept: the next request reads the binding again.
+      return false;
+    }
+  };
+}
+
+/** For a split: the legacy handler while the install's team is on the legacy path, else the company handler. Only asked for an event that names the install's team. */
+function byInstallBinding<E, C, R>(legacy: (event: E, context?: C) => R, company: (event: E, context?: C) => R, onLegacy: () => Promise<boolean>): (event: E, context?: C) => R {
+  return (event, context) => onLegacy().then((on) => (on ? legacy : company)(event, context)) as unknown as R;
+}
 
 /** A header by name, as the broker reads headers (names compared without case). */
 function header(headers: unknown, name: string): unknown[] {
@@ -78,10 +103,14 @@ export function withoutSlackCompanyMode<T extends { workspaces?: unknown; slackC
   return (installTeamId === undefined ? legacy : { ...legacy, slackInstallTeamOnly: installTeamId }) as T;
 }
 
-/** Two handlers, one per mode, built once; `company` undefined means the switch is off and `legacy` is today's handler, returned as it is. */
-export function splitBySlackTeam<E, C, R>(legacy: (event: E, context?: C) => R, company: ((event: E, context?: C) => R) | undefined, legacyTeamId: string | undefined): (event: E, context?: C) => R {
+/**
+ * Two handlers, one per mode, built once; `company` undefined means the switch is off and `legacy` is today's handler, returned as it is. `installOnLegacy` (#1300): an event
+ * naming the install's team takes the legacy handler only while that team is on the legacy path (installTeamOnLegacyPath); absent, it always does, as before.
+ */
+export function splitBySlackTeam<E, C, R>(legacy: (event: E, context?: C) => R, company: ((event: E, context?: C) => R) | undefined, legacyTeamId: string | undefined, installOnLegacy?: () => Promise<boolean>): (event: E, context?: C) => R {
   if (company === undefined) return legacy;
-  return (event, context) => (slackCompanyServes(event, legacyTeamId) ? company : legacy)(event, context);
+  const install = installOnLegacy === undefined ? legacy : byInstallBinding(legacy, company, installOnLegacy);
+  return (event, context) => (slackCompanyServes(event, legacyTeamId) ? company : slackRequestTeam(event).named ? install : legacy)(event, context);
 }
 
 type LinkCodes = { preview(personId: string, code: string): Promise<{ channel: string; maskedUserId: string } | undefined>; redeem(personId: string, code: string): Promise<unknown> };
@@ -172,10 +201,14 @@ export function slackIngressTeam(event: unknown): { named: false } | { named: tr
   } catch { return { named: true, team: undefined }; }
 }
 
-/** The Slack Lambda's two handlers. Fail closed: only an event naming no team, or exactly the install's team in every field, reaches today's handler. */
-export function splitBySlackIngressTeam<E, R>(legacy: (event: E) => R, company: (event: E) => R, legacyTeamId: string): (event: E) => R {
+/**
+ * The Slack Lambda's two handlers. Fail closed: only an event naming no team, or exactly the install's team in every field, reaches today's handler; the install's team only
+ * while it is on the legacy path (`installOnLegacy`, #1300; absent, always, as before).
+ */
+export function splitBySlackIngressTeam<E, R>(legacy: (event: E) => R, company: (event: E) => R, legacyTeamId: string, installOnLegacy?: () => Promise<boolean>): (event: E) => R {
+  const install = installOnLegacy === undefined ? legacy : byInstallBinding(legacy, company, installOnLegacy);
   return (event) => {
     const found = slackIngressTeam(event);
-    return (found.named && found.team !== legacyTeamId ? company : legacy)(event);
+    return (found.named ? (found.team !== legacyTeamId ? company : install) : legacy)(event);
   };
 }
