@@ -13,7 +13,7 @@ import {
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
 import { NAT_EGRESS_ADDRESSES_OUTPUT } from "@agentx/contracts";
-import { AgentDnsFirewall, DNS_FIREWALL_CONTEXT_KEY, EGRESS_ALLOW_DOMAINS_CONTEXT_KEY, dnsFirewallMode, installAgentAllowDomains, parseExtraAllowDomains } from "./agent-dns-firewall.js";
+import { AgentDnsFirewall, DNS_FIREWALL_CONTEXT_KEY, DNS_FIREWALL_MODE_OUTPUT, EGRESS_ALLOW_DOMAINS_CONTEXT_KEY, EGRESS_ALLOW_DOMAINS_OUTPUT, dnsFirewallMode, installAgentAllowDomains, parseExtraAllowDomains } from "./agent-dns-firewall.js";
 import { EgressAlarms, alertsTopicFromName } from "./egress-alarms.js";
 import { Ec2WorkerFoundation } from "./ec2-workers.js";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
@@ -225,13 +225,19 @@ export class ProductionFoundationStack extends Stack {
     if (firewallMode !== "off") {
       const firewallEnv = naming.env ?? naming.environmentTagValue;
       const baseAllowDomains = installAgentAllowDomains(props.deploymentRegion, Aws.ACCOUNT_ID);
+      const extraAllowDomains = parseExtraAllowDomains(this.node.tryGetContext(EGRESS_ALLOW_DOMAINS_CONTEXT_KEY), baseAllowDomains);
       const dnsFirewall = new AgentDnsFirewall(this, "AgentDnsFirewall", {
         env: firewallEnv,
         vpcId: vpc.ref,
         baseAllowDomains,
-        extraAllowDomains: parseExtraAllowDomains(this.node.tryGetContext(EGRESS_ALLOW_DOMAINS_CONTEXT_KEY), baseAllowDomains),
+        extraAllowDomains,
         mode: firewallMode,
       });
+      // #1277: the legacy install records the setting it was deployed with, so a release synthesizes the same firewall (a named environment's release path is unchanged).
+      if (naming.env === undefined) {
+        new CfnOutput(this, DNS_FIREWALL_MODE_OUTPUT, { value: firewallMode });
+        if (extraAllowDomains.length > 0) new CfnOutput(this, EGRESS_ALLOW_DOMAINS_OUTPUT, { value: extraAllowDomains.join(",") });
+      }
       // The project list's id, for whatever keeps the approved project domains on it (the template never owns its contents).
       new CfnOutput(this, "ProjectAllowListId", { value: dnsFirewall.projectAllowListId });
       new EgressAlarms(this, "EgressAlarms", {
