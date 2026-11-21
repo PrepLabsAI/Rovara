@@ -363,14 +363,14 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     expect(gate.steps.some((step) => step.env?.NEEDS === "${{ toJSON(needs) }}")).toBe(true);
   });
 
-  // #1262: the gate marks the merge commit it judged, for the merge queue to reuse; only a same-repository pull request into mainline, never a fork's.
-  it("marks a same-repository pull request's tested merge commit with the gate's verdict, as status ci/local, with only statuses: write", async () => {
+  // #1262: the gate marks the merge commit it judged, for the merge queue to reuse; only a same-repository pull request into mainline or code/next (#1295), never a fork's.
+  it("marks a same-repository pull request's tested merge commit (into mainline or code/next, the two queued branches) with the gate's verdict, as status ci/local, with only statuses: write", async () => {
     const { jobs } = await workflow();
     const gate = jobs.local!;
     expect(gate.permissions).toEqual({ contents: "read", statuses: "write" });
     expect(gate.steps.find((step) => step.name === "Every job passed?")?.id).toBe("gate");
     const mark = gate.steps.find((step) => step.name === "Mark the tested merge commit for the merge queue")!;
-    expect(mark.if).toBe("always() && github.event_name == 'pull_request' && github.base_ref == 'mainline' && github.event.pull_request.head.repo.full_name == github.repository && (steps.gate.outcome == 'success' || steps.gate.outcome == 'failure')");
+    expect(mark.if).toBe("always() && github.event_name == 'pull_request' && (github.base_ref == 'mainline' || github.base_ref == 'code/next') && github.event.pull_request.head.repo.full_name == github.repository && (steps.gate.outcome == 'success' || steps.gate.outcome == 'failure')");
     expect(mark.env).toEqual({
       GH_TOKEN: "${{ github.token }}",
       REPOSITORY: "${{ github.repository }}",
