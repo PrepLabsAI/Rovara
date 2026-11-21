@@ -1329,6 +1329,60 @@ async function routeServiceRequest(dependencies: AwsBrokerDependencies, tasks: D
   return await observeConnectorRoute(request.method, serviceUrl.pathname, () => routeWorkspaceRequest(dependencies, request, serviceUrl, identity));
 }
 
+// GitHub's webhook deliveries (#1315): verified by signature, with one retry on a freshly read secret.
+async function routeGithubWebhook(dependencies: AwsBrokerDependencies, request: BrokerHttpRequest): Promise<ReturnType<typeof json>> {
+  if (request.method !== "POST") return json({ error: { code: "NOT_FOUND", message: "route not found" } }, request.requestId, 404);
+  if (request.body === undefined || dependencies.githubWebhookSecret === undefined) {
+    return json({ error: { code: "RUNTIME_UNAVAILABLE", message: "GitHub webhook handling is not configured" } }, request.requestId, 503);
+  }
+  const notConfigured = () => json({ error: { code: "RUNTIME_UNAVAILABLE", message: "GitHub webhook handling is not configured" } }, request.requestId, 503);
+  const readWebhookSecret = async (refresh: boolean): Promise<string | undefined> => {
+    try {
+      return await dependencies.githubWebhookSecret?.(refresh ? { refresh: true } : undefined);
+    } catch (error) {
+      if (isWebhookSecretMissing(error)) return undefined;
+      throw error;
+    }
+  };
+  try {
+    const secret = await readWebhookSecret(false);
+    if (secret === undefined) return notConfigured();
+    // Guided onboarding PR 3: an `installation` event (uninstalled, suspended, unsuspended) marks the binding; it is verified by the same signature check first.
+    const deliver = (webhookSecret: string) => dependencies.githubBindings !== undefined && isGithubInstallationEvent(request.headers)
+      ? handleGithubInstallationWebhook({ rawBody: request.body ?? "", headers: request.headers, secret: webhookSecret, bindings: dependencies.githubBindings, log: brokerLogLine })
+      : handleGithubWebhook({
+      documentClient: dependencies.documentClient,
+      tableName: dependencies.tableName,
+      rawBody: request.body ?? "",
+      headers: request.headers,
+      secret: webhookSecret,
+      ...(dependencies.githubBindings === undefined ? {} : { companyForInstallation: (id: number) => dependencies.githubBindings!.ownerOf(id) }),
+      authorizeRepository: (scope) => githubEventStillAuthorized(dependencies, { kind: "PULL_REQUEST", action: "authorize", ...scope, number: scope.pullRequestNumber }),
+      process: (workflowEvent, deliveryId) => processGithubWorkflowEvent(dependencies, workflowEvent, deliveryId),
+      now: () => new Date().toISOString(),
+    });
+    let result;
+    try {
+      result = await deliver(secret);
+    } catch (error) {
+      if (!(error instanceof GithubWebhookRefusal) || error.message !== GITHUB_WEBHOOK_SIGNATURE_INVALID) throw error;
+      // The secret may have been changed since this container read it. The signature is checked before a delivery is
+      // reserved, so verifying once more with a fresh copy has no side effect.
+      const renewed = await readWebhookSecret(true);
+      if (renewed === undefined) return notConfigured();
+      if (renewed === secret) throw error;
+      result = await deliver(renewed);
+    }
+    if (result.status === "IN_PROGRESS") return json({ delivery: result.status, deliveryId: result.deliveryId }, request.requestId, 503);
+    return json({ delivery: result.status, deliveryId: result.deliveryId }, request.requestId);
+  } catch (error) {
+    if (error instanceof GithubWebhookRefusal) return json({ error: { code: "FORBIDDEN", message: error.message } }, request.requestId, 403);
+    if (error instanceof GithubWebhookRetryableError) return json({ error: { code: "RUNTIME_UNAVAILABLE", message: "GitHub webhook processing will be retried" } }, request.requestId, 503);
+    if (error instanceof AgentXError && error.code === "RUNTIME_UNAVAILABLE") return json({ error: { code: error.code, message: "GitHub webhook processing will be retried" } }, request.requestId, 503);
+    throw error;
+  }
+}
+
 
 function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBrokerDependencies) {
   // Spec 025: the broker actions the developer task routes call, built once per handler.
@@ -1602,58 +1656,7 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
         if (request.method !== "POST" || dependencies.linearWebhook === undefined) return json({ error: { code: "NOT_FOUND", message: "route not found" } }, request.requestId, 404);
         return linearWebhookResponse(await handleLinearAppWebhook(dependencies.linearWebhook, { rawBody: request.body, headers: request.headers }), request.requestId);
       }
-      if (url.pathname === "/v1/github/webhooks") {
-        if (request.method !== "POST") return json({ error: { code: "NOT_FOUND", message: "route not found" } }, request.requestId, 404);
-        if (request.body === undefined || dependencies.githubWebhookSecret === undefined) {
-          return json({ error: { code: "RUNTIME_UNAVAILABLE", message: "GitHub webhook handling is not configured" } }, request.requestId, 503);
-        }
-        const notConfigured = () => json({ error: { code: "RUNTIME_UNAVAILABLE", message: "GitHub webhook handling is not configured" } }, request.requestId, 503);
-        const readWebhookSecret = async (refresh: boolean): Promise<string | undefined> => {
-          try {
-            return await dependencies.githubWebhookSecret?.(refresh ? { refresh: true } : undefined);
-          } catch (error) {
-            if (isWebhookSecretMissing(error)) return undefined;
-            throw error;
-          }
-        };
-        try {
-          const secret = await readWebhookSecret(false);
-          if (secret === undefined) return notConfigured();
-          // Guided onboarding PR 3: an `installation` event (uninstalled, suspended, unsuspended) marks the binding; it is verified by the same signature check first.
-          const deliver = (webhookSecret: string) => dependencies.githubBindings !== undefined && isGithubInstallationEvent(request.headers)
-            ? handleGithubInstallationWebhook({ rawBody: request.body ?? "", headers: request.headers, secret: webhookSecret, bindings: dependencies.githubBindings, log: brokerLogLine })
-            : handleGithubWebhook({
-            documentClient: dependencies.documentClient,
-            tableName: dependencies.tableName,
-            rawBody: request.body ?? "",
-            headers: request.headers,
-            secret: webhookSecret,
-            ...(dependencies.githubBindings === undefined ? {} : { companyForInstallation: (id: number) => dependencies.githubBindings!.ownerOf(id) }),
-            authorizeRepository: (scope) => githubEventStillAuthorized(dependencies, { kind: "PULL_REQUEST", action: "authorize", ...scope, number: scope.pullRequestNumber }),
-            process: (workflowEvent, deliveryId) => processGithubWorkflowEvent(dependencies, workflowEvent, deliveryId),
-            now: () => new Date().toISOString(),
-          });
-          let result;
-          try {
-            result = await deliver(secret);
-          } catch (error) {
-            if (!(error instanceof GithubWebhookRefusal) || error.message !== GITHUB_WEBHOOK_SIGNATURE_INVALID) throw error;
-            // The secret may have been changed since this container read it. The signature is checked before a delivery is
-            // reserved, so verifying once more with a fresh copy has no side effect.
-            const renewed = await readWebhookSecret(true);
-            if (renewed === undefined) return notConfigured();
-            if (renewed === secret) throw error;
-            result = await deliver(renewed);
-          }
-          if (result.status === "IN_PROGRESS") return json({ delivery: result.status, deliveryId: result.deliveryId }, request.requestId, 503);
-          return json({ delivery: result.status, deliveryId: result.deliveryId }, request.requestId);
-        } catch (error) {
-          if (error instanceof GithubWebhookRefusal) return json({ error: { code: "FORBIDDEN", message: error.message } }, request.requestId, 403);
-          if (error instanceof GithubWebhookRetryableError) return json({ error: { code: "RUNTIME_UNAVAILABLE", message: "GitHub webhook processing will be retried" } }, request.requestId, 503);
-          if (error instanceof AgentXError && error.code === "RUNTIME_UNAVAILABLE") return json({ error: { code: error.code, message: "GitHub webhook processing will be retried" } }, request.requestId, 503);
-          throw error;
-        }
-      }
+      if (url.pathname === "/v1/github/webhooks") return await routeGithubWebhook(dependencies, request);
       // Spec 043: an eval runner's callbacks, authorized by the run's own capability.
       const evalCallback = isSwebenchCallbackPath(url.pathname);
       if (request.method === "POST" && evalCallback !== undefined) {
