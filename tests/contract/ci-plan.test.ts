@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  AFFECTED_SHARDS, FULL_SHARDS, MAX_EXTRA_TESTS, affectedPackages, fullReason, linuxRuns, planCi, planOutputs, relatedTests, type PackageInfo, type PlanInput,
+  AFFECTED_SHARDS, FULL_SHARDS, MAX_EXTRA_TESTS, affectedPackages, fullReason, isChangeEvent, linuxRuns, planCi, planOutputs, relatedTests, type PackageInfo, type PlanInput,
 } from "../../scripts/ci-plan.js";
 
 // Paths here are made up on purpose: a real path named in a test would make that file run full CI.
@@ -187,5 +187,34 @@ describe("when the Linux runtime check runs", () => {
     const plan = planCi(input({ event: "schedule", changed: [] }));
     expect(plan).toMatchObject({ mode: "affected", tests: "none", lint: "all", release: false, linux: false, docsOnly: false });
     expect(planOutputs(plan)).toMatchObject({ linux: "false", tests: "none" });
+  });
+});
+
+// #1259: the merge queue tests each pull request merged onto the latest mainline. Its run (merge_group) is judged like a pull request, on the files the group
+// changes against the queue's base; it has no labels and no title, so only the files decide.
+describe("the merge queue's run (merge_group)", () => {
+  const queued = (overrides: Partial<PlanInput>): PlanInput => input({ event: "merge_group", labels: [], title: "", baseRef: "mainline", ...overrides });
+  it("is a change event, like a pull request, and not a run that does everything", () => {
+    expect(isChangeEvent("merge_group")).toBe(true);
+    expect(isChangeEvent("pull_request")).toBe(true);
+    for (const event of ["push", "workflow_dispatch", "schedule"]) expect(isChangeEvent(event), event).toBe(false);
+    expect(fullReason({ event: "merge_group", labels: [], title: "" })).toBeUndefined();
+  });
+  it("plans an affected run from the files the group changes, the same as the pull request would", () => {
+    const changed = ["packages/other-d/src/x.ts"];
+    const queuedPlan = planCi(queued({ changed }));
+    const { modeReason, ...asQueued } = queuedPlan;
+    const { modeReason: prReason, ...asPull } = planCi(input({ changed }));
+    expect(asQueued).toEqual(asPull);
+    expect(queuedPlan).toMatchObject({ mode: "affected", tests: "changed", shards: AFFECTED_SHARDS, lint: "changed", linux: false });
+    expect(modeReason).toContain("merge queue");
+    expect(prReason).toBe("a pull request");
+  });
+  it("runs the whole suite when a shared file changes or no file is listed, and never the Linux runtime check", () => {
+    expect(planCi(queued({ changed: [".github/workflows/sample.yml"] }))).toMatchObject({ mode: "affected", tests: "all", shards: FULL_SHARDS, linux: false });
+    expect(planCi(queued({ changed: [] }))).toMatchObject({ tests: "all", release: true, linux: false });
+  });
+  it("skips everything but the plan for a Markdown-only group", () => {
+    expect(planCi(queued({ changed: ["docs/sample/guide.md"] }))).toMatchObject({ docsOnly: true, tests: "none", lint: "none", release: false });
   });
 });
