@@ -54,11 +54,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # #1262: a merge-queue run reads the pull request's merge commit statuses (ci-plan.ts findQueueReuse) to reuse its pass of byte-identical code.
+    # #1278: and reads the labels of a merge-queue run's pull request (urgent ones run their test shards on CodeBuild).
     permissions:
       contents: read
       statuses: read
+      issues: read
+      pull-requests: read
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
+      # #1278: where the test shards run: codebuild (an urgent pull request into mainline, or its merge-queue run) or github.
+      runner: ${{ steps.plan.outputs.runner }}
       docs_only: ${{ steps.plan.outputs.docs_only }}
       tests: ${{ steps.plan.outputs.tests }}
       shards: ${{ steps.plan.outputs.shards }}
@@ -88,6 +93,8 @@ jobs:
           CI_QUEUE_HEAD_REF: ${{ github.event.merge_group.head_ref }}
           CI_REPOSITORY: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
+          # #1278: a fork's pull request never runs on CodeBuild.
+          CI_SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
           # #1259: a merge-queue run's base is the queue's (merge_group.base_ref is refs/heads/mainline; ci-plan.ts drops the prefix).
           CI_BASE_REF: ${{ github.base_ref || github.event.merge_group.base_ref }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
@@ -235,9 +242,9 @@ jobs:
     needs: [plan, build]
     if: needs.plan.outputs.tests != 'none'
     name: test (${{ matrix.shard }}/${{ strategy.job-total }})
-    # #1200: a pull request into mainline from this repository runs its shards on the account's CodeBuild ARM runner (infra/lib/ci-runner.ts), where they
-    # don't wait for a free GitHub runner; everything else (code/next, a fork's pull request) runs them on GitHub's free runner, as before.
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.base_ref == 'mainline' && github.event.pull_request.head.repo.full_name == github.repository)) && format('codebuild-rovara-ci-tests-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-latest' }}
+    # #1200, #1278: the plan picks the runner. An urgent pull request into mainline from this repository (or its merge-queue run) runs its shards on the
+    # account's CodeBuild ARM runner (infra/lib/ci-runner.ts), where they don't wait for a free GitHub runner; everything else runs them on GitHub's free runner.
+    runs-on: ${{ needs.plan.outputs.runner == 'codebuild' && format('codebuild-rovara-ci-tests-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-latest' }}
     # 40, not 25: shard 2 passed 25 minutes on 2026-11-14 as code/next grew (PRs #612, #517 cancelled at the limit); shards 1, 3, 4 take 17-21.
     timeout-minutes: 40
     strategy:
