@@ -1087,6 +1087,165 @@ function operatorEventRefused(event: string, error: unknown): void {
   brokerLogLine({ event, reason: error instanceof Error ? `${error.name}: ${error.message}`.replace(/\s+/gu, " ").slice(0, 200) : "unknown" });
 }
 
+/** #1315: the HTTP request the event handler routes, and the caller it identified from the request's JWT claims. */
+type BrokerHttpRequest = ReturnType<typeof adaptHttpApiEvent>;
+type BrokerCallerIdentity = ReturnType<typeof identityFromJwtClaims>;
+
+/**
+ * POST /v1/admin/projects/setup-proposals (#1315: moved out of the event handler unchanged). An administrator's GitHub repository and ref are captured from the
+ * trusted source, inspected, and turned into a setup proposal, stored once under its own digest.
+ */
+async function routeSetupProposal(dependencies: AwsBrokerDependencies, request: BrokerHttpRequest, identity: BrokerCallerIdentity, body: unknown): Promise<ReturnType<typeof json>> {
+  if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+  if (!dependencies.projectSetupSource) throw agentXError("RUNTIME_UNAVAILABLE", "trusted project source capture is not configured");
+  const requestBody = z.object({ repositoryUrl: z.string().url().max(500), ref: z.string().min(1).max(255) }).strict().parse(body);
+  const urlParts = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i.exec(requestBody.repositoryUrl);
+  if (!urlParts?.[1] || !urlParts[2]) throw agentXError("CONFIG_INVALID", "setup repository must be a canonical GitHub repository URL");
+  const snapshot = await dependencies.projectSetupSource.capture({ repositoryUrl: requestBody.repositoryUrl, ref: requestBody.ref });
+  const candidate = snapshot.candidate;
+  const sourceRepository = candidate.repositories.length === 1 ? candidate.repositories[0] : undefined;
+  const expectedRepositoryId = `${urlParts[1]}/${urlParts[2]}`;
+  if (!sourceRepository || sourceRepository.repositoryId.toLowerCase() !== expectedRepositoryId.toLowerCase()) throw agentXError("FORBIDDEN", "captured source repository does not match the selected repository");
+  verifyE2ESourceSnapshot(snapshot, candidate);
+  const inspection = inspectE2ERepository(snapshot, candidate).inspection;
+  // Web and API targets are proposed against the qualified runtime profile when this installation has one READY (Ruling Y4: one row per kind).
+  const readyProfiles = dependencies.e2eFeatureRuntimeCatalogId === undefined ? []
+    : await readReadyE2ERuntimeProfiles({ runtimeCatalogId: dependencies.e2eFeatureRuntimeCatalogId, profileId: WEB_API_RUNTIME_PROFILE_ID, now: Date.now(),
+      read: (key) => getItem<Record<string, unknown>>(dependencies, key) });
+  const proposal = proposeE2ESetup({ inspection, snapshot, expectedCandidate: candidate, readyProfiles });
+  const agentRoute = await plannedAgentRoute(dependencies);
+  const policy = projectSetupPolicy(proposal, agentRoute);
+  const aiNavigation = agentRoute === undefined ? null : agentRouteSummary(agentRoute.definition, { drivingTest: agentRoute.drivingTest });
+  const aiNavigationUntested = agentRoute === undefined ? await untestedAgentRouteNote(dependencies) : null;
+  const repositoryName = urlParts[2].replace(/\.git$/i, "");
+  const cleanedRepositoryName = repositoryName.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 63);
+  const registeredRepositoryId = /^[a-z]/.test(cleanedRepositoryName) ? cleanedRepositoryName : `repo-${cleanedRepositoryName}`.slice(0, 63);
+  const artifact = {
+    schemaVersion: "project-setup-source-proposal/v1",
+    issuerOwnerKey: identity.ownerKey,
+    repositoryUrl: requestBody.repositoryUrl,
+    selectedRef: requestBody.ref,
+    identityMapping: { schemaVersion: "github-source-to-agentx-registration/v1", sourceRepositoryId: expectedRepositoryId, registeredRepositoryId },
+    candidate,
+    snapshot: { ...snapshot, sources: snapshot.sources.map(source => ({ ...source, bytesBase64: Buffer.from(source.bytes).toString("base64"), bytes: undefined })) },
+    proposal,
+    policy,
+    ...(aiNavigation === null ? {} : { aiNavigation }),
+  };
+  const artifactBytes = canonicalJson(artifact);
+  if (Buffer.byteLength(artifactBytes, "utf8") > MAX_SETUP_PROPOSAL_BYTES) throw agentXError("RUNTIME_UNAVAILABLE", "immutable setup proposal exceeds its bounded object size");
+  const artifactDigest = createHash("sha256").update(artifactBytes, "utf8").digest("hex");
+  const proposalRef = `project-setup-proposals/${identity.ownerKey}/${artifactDigest}.json`;
+  try {
+    await dependencies.s3.send(new PutObjectCommand({
+      Bucket: dependencies.artifactBucketName,
+      Key: proposalRef,
+      Body: artifactBytes,
+      ContentType: "application/json",
+      Metadata: { sha256: artifactDigest, owner: identity.ownerKey, candidate: candidate.digest },
+      IfNoneMatch: "*",
+    }));
+  } catch (error) {
+    const code = error && typeof error === "object" ? (error as { name?: unknown; $metadata?: { httpStatusCode?: unknown } }).name : undefined;
+    const status = error && typeof error === "object" ? (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata?.httpStatusCode : undefined;
+    if (code !== "PreconditionFailed" && status !== 412) throw error;
+    const retained = await readStoredText(dependencies.s3, dependencies.artifactBucketName, proposalRef, MAX_SETUP_PROPOSAL_BYTES);
+    if (retained !== artifactBytes) throw agentXError("RUNTIME_UNAVAILABLE", "content-addressed setup proposal object conflicts with its expected bytes");
+  }
+  return json({ proposalRef, proposalSha256: artifactDigest, candidateDigest: candidate.digest, commitSha: snapshot.commitSha, treeSha: snapshot.treeSha, proposal, policy, aiNavigation, aiNavigationUntested }, request.requestId);
+}
+
+/** POST /v1/admin/projects/setup-approvals (#1315: moved out of the event handler unchanged): records an administrator's decision on a stored setup proposal, after checking its digest and owner again. */
+async function routeSetupApproval(dependencies: AwsBrokerDependencies, request: BrokerHttpRequest, identity: BrokerCallerIdentity, body: unknown): Promise<ReturnType<typeof json>> {
+  if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+  const approvalInput = z.object({ projectName: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/), proposalRef: z.string().min(1).max(512), proposalSha256: z.string().regex(/^[a-f0-9]{64}$/), decision: z.enum(["approve", "decline"]) }).strict().parse(body);
+  const expectedPrefix = `project-setup-proposals/${identity.ownerKey}/`;
+  if (!approvalInput.proposalRef.startsWith(expectedPrefix) || approvalInput.proposalRef !== `${expectedPrefix}${approvalInput.proposalSha256}.json`) throw agentXError("FORBIDDEN", "setup proposal reference is outside the authenticated administrator scope");
+  const stored = await readStoredText(dependencies.s3, dependencies.artifactBucketName, approvalInput.proposalRef, MAX_SETUP_PROPOSAL_BYTES);
+  if (!stored || createHash("sha256").update(stored, "utf8").digest("hex") !== approvalInput.proposalSha256) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup proposal is missing or its digest changed");
+  let artifact: Record<string, unknown>;
+  try {
+    const decoded: unknown = JSON.parse(stored);
+    if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) throw new Error("invalid");
+    artifact = decoded as Record<string, unknown>;
+  } catch { throw agentXError("RUNTIME_UNAVAILABLE", "stored setup proposal is unreadable"); }
+  if (artifact.schemaVersion !== "project-setup-source-proposal/v1" || artifact.issuerOwnerKey !== identity.ownerKey) throw agentXError("FORBIDDEN", "stored setup proposal belongs to another administrator");
+  const storedSnapshot = artifact.snapshot;
+  if (!storedSnapshot || typeof storedSnapshot !== "object" || Array.isArray(storedSnapshot)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source snapshot is missing");
+  const snapshotObject = storedSnapshot as Record<string, unknown>;
+  const rawSources = snapshotObject.sources;
+  if (!Array.isArray(rawSources)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source inventory is invalid");
+  const sources = rawSources.map((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source item is invalid");
+    const source = raw as Record<string, unknown>;
+    if (typeof source.path !== "string" || typeof source.sha256 !== "string" || typeof source.bytesBase64 !== "string" || source.kind !== "blob") throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source item is invalid");
+    return { path: source.path, sha256: source.sha256, bytes: Buffer.from(source.bytesBase64, "base64"), kind: "blob" as const };
+  });
+  const snapshot = { ...snapshotObject, sources } as unknown as E2ESourceSnapshot;
+  const candidate = snapshot.candidate;
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup candidate is invalid");
+  verifyE2ESourceSnapshot(snapshot, candidate);
+  const inspection = inspectE2ERepository(snapshot, candidate).inspection;
+  const proposal = verifyE2ESetupProposal(E2ESetupProposalSchema.parse(artifact.proposal), snapshot, candidate);
+  const agentRoute = await plannedAgentRoute(dependencies);
+  const policy = projectSetupPolicy(proposal, agentRoute);
+  if (!sameJsonContent(artifact.policy, policy)) {
+    // A proposal made under an earlier default is not approvable now, but a decision already recorded for it is still answered the same way (an idempotent retry).
+    const decided = await getItem<Record<string, unknown>>(dependencies, { pk: `PROJECT_SETUP#${approvalInput.projectName}`, sk: `PROPOSAL#${approvalInput.proposalSha256}` });
+    if (decided) {
+      if (decided.ownerKey !== identity.ownerKey || decided.decision !== approvalInput.decision) throw agentXError("PROJECT_REVISION_MISMATCH", "setup proposal already has a different immutable decision");
+      return json({ proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, decision: approvalInput.decision, duplicate: true }, request.requestId);
+    }
+    // The only difference is the AI navigation route: the installation's provider, model, secret or OpenRouter policy changed (or another approval moved the registry) since the proposal.
+    if (sameJsonContent({ ...(artifact.policy as Record<string, unknown>), modelRouteRevision: null, limits: null }, { ...policy, modelRouteRevision: null, limits: null })) {
+      // With no route now, the settings were not read or no longer give a usable route; they have not been shown to have changed.
+      if (agentRoute === undefined) {
+        const untested = await untestedAgentRouteNote(dependencies);
+        throw agentXError("RUNTIME_UNAVAILABLE", `${E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved}: ${untested !== null ? `${untested.sentence}; run the driving test, then propose the setup again`
+          : "The AI navigation settings of this installation could not be read, or no longer give a usable route; propose the setup again once they can be"}`);
+      }
+      throw agentXError("RUNTIME_UNAVAILABLE", `${E2E_MODEL_ROUTE_CHANGED_REAPPROVE}: The AI navigation settings changed; propose the setup again, then approve the new proposal`);
+    }
+    throw agentXError("RUNTIME_UNAVAILABLE", "this setup proposal was made under an earlier default policy and can no longer be approved: propose the setup again (re-propose the setup), then approve the new proposal");
+  }
+  const identityMapping = artifact.identityMapping;
+  if (!identityMapping || typeof identityMapping !== "object" || Array.isArray(identityMapping)
+    || (identityMapping as Record<string, unknown>).schemaVersion !== "github-source-to-agentx-registration/v1"
+    || (identityMapping as Record<string, unknown>).sourceRepositoryId !== candidate.repositories[0]?.repositoryId
+    || typeof (identityMapping as Record<string, unknown>).registeredRepositoryId !== "string") throw agentXError("RUNTIME_UNAVAILABLE", "stored setup repository identity mapping is invalid");
+  const canonicalArtifact = { ...artifact, snapshot: { ...snapshotObject, sources: sources.map(source => ({ path: source.path, sha256: source.sha256, kind: source.kind, bytesBase64: source.bytes.toString("base64") })) }, proposal };
+  if (canonicalJson(canonicalArtifact) !== stored || proposeE2ESetup({ inspection, snapshot, expectedCandidate: candidate }).candidateDigest !== proposal.candidateDigest) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup proposal does not match its source-derived bytes");
+  const approvalKey = { pk: `PROJECT_SETUP#${approvalInput.projectName}`, sk: `PROPOSAL#${approvalInput.proposalSha256}` };
+  const existing = await getItem<Record<string, unknown>>(dependencies, approvalKey);
+  if (existing) {
+    if (existing.ownerKey !== identity.ownerKey || existing.decision !== approvalInput.decision) throw agentXError("PROJECT_REVISION_MISMATCH", "setup proposal already has a different immutable decision");
+    return json({ proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, decision: approvalInput.decision, duplicate: true }, request.requestId);
+  }
+  // The approval that pins a route records it first: revision n+1 only when the route's digest changed, conditionally, never overwriting a revision. A route that is no
+  // longer the one the proposal showed is refused here, before the approval is recorded.
+  if (approvalInput.decision === "approve" && policy.modelRouteRevision !== null) {
+    const unreadable = () => agentXError("RUNTIME_UNAVAILABLE", `${E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved}: The AI navigation settings of this installation could not be read; propose the setup again once they can be`);
+    if (dependencies.e2eAgentInstallation === undefined) throw unreadable();
+    let installation: E2EAgentInstallation;
+    try { installation = await dependencies.e2eAgentInstallation(); } catch { throw unreadable(); }
+    try {
+      // The revision row records who approved it and for which project (audit; the installation's route is one for every project).
+      await approveE2EAgentRoute({ documentClient: dependencies.documentClient, tableName: dependencies.tableName }, installation, policy.modelRouteRevision,
+        { approvedBy: identity.ownerKey, projectName: approvalInput.projectName });
+    } catch (error) {
+      if (error instanceof E2EModelRouteError) throw agentXError("RUNTIME_UNAVAILABLE", error.message);
+      throw error;
+    }
+  }
+  await dependencies.documentClient.send(new PutCommand({ TableName: dependencies.tableName, Item: {
+    ...approvalKey, entityType: "PROJECT_SETUP_APPROVAL", ownerKey: identity.ownerKey, projectName: approvalInput.projectName,
+    proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, candidateDigest: proposal.candidateDigest,
+    repositoryUrl: artifact.repositoryUrl, identityMapping, decision: approvalInput.decision, approvedAt: new Date().toISOString(),
+    policyDigest: createHash("sha256").update(canonicalJson(policy), "utf8").digest("hex"), policy, targetIds: proposal.targets.map(target => target.targetId),
+  }, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" }));
+  return json({ proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, decision: approvalInput.decision, duplicate: false }, request.requestId);
+}
+
 function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBrokerDependencies) {
   // Spec 025: the broker actions the developer task routes call, built once per handler.
   const tasks = developerTaskActions(dependencies);
@@ -1600,153 +1759,11 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
       }
 
       if (request.method === "POST" && url.pathname === "/v1/admin/projects/setup-proposals") {
-        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-        if (!dependencies.projectSetupSource) throw agentXError("RUNTIME_UNAVAILABLE", "trusted project source capture is not configured");
-        const requestBody = z.object({ repositoryUrl: z.string().url().max(500), ref: z.string().min(1).max(255) }).strict().parse(body);
-        const urlParts = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i.exec(requestBody.repositoryUrl);
-        if (!urlParts?.[1] || !urlParts[2]) throw agentXError("CONFIG_INVALID", "setup repository must be a canonical GitHub repository URL");
-        const snapshot = await dependencies.projectSetupSource.capture({ repositoryUrl: requestBody.repositoryUrl, ref: requestBody.ref });
-        const candidate = snapshot.candidate;
-        const sourceRepository = candidate.repositories.length === 1 ? candidate.repositories[0] : undefined;
-        const expectedRepositoryId = `${urlParts[1]}/${urlParts[2]}`;
-        if (!sourceRepository || sourceRepository.repositoryId.toLowerCase() !== expectedRepositoryId.toLowerCase()) throw agentXError("FORBIDDEN", "captured source repository does not match the selected repository");
-        verifyE2ESourceSnapshot(snapshot, candidate);
-        const inspection = inspectE2ERepository(snapshot, candidate).inspection;
-        // Web and API targets are proposed against the qualified runtime profile when this installation has one READY (Ruling Y4: one row per kind).
-        const readyProfiles = dependencies.e2eFeatureRuntimeCatalogId === undefined ? []
-          : await readReadyE2ERuntimeProfiles({ runtimeCatalogId: dependencies.e2eFeatureRuntimeCatalogId, profileId: WEB_API_RUNTIME_PROFILE_ID, now: Date.now(),
-            read: (key) => getItem<Record<string, unknown>>(dependencies, key) });
-        const proposal = proposeE2ESetup({ inspection, snapshot, expectedCandidate: candidate, readyProfiles });
-        const agentRoute = await plannedAgentRoute(dependencies);
-        const policy = projectSetupPolicy(proposal, agentRoute);
-        const aiNavigation = agentRoute === undefined ? null : agentRouteSummary(agentRoute.definition, { drivingTest: agentRoute.drivingTest });
-        const aiNavigationUntested = agentRoute === undefined ? await untestedAgentRouteNote(dependencies) : null;
-        const repositoryName = urlParts[2].replace(/\.git$/i, "");
-        const cleanedRepositoryName = repositoryName.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 63);
-        const registeredRepositoryId = /^[a-z]/.test(cleanedRepositoryName) ? cleanedRepositoryName : `repo-${cleanedRepositoryName}`.slice(0, 63);
-        const artifact = {
-          schemaVersion: "project-setup-source-proposal/v1",
-          issuerOwnerKey: identity.ownerKey,
-          repositoryUrl: requestBody.repositoryUrl,
-          selectedRef: requestBody.ref,
-          identityMapping: { schemaVersion: "github-source-to-agentx-registration/v1", sourceRepositoryId: expectedRepositoryId, registeredRepositoryId },
-          candidate,
-          snapshot: { ...snapshot, sources: snapshot.sources.map(source => ({ ...source, bytesBase64: Buffer.from(source.bytes).toString("base64"), bytes: undefined })) },
-          proposal,
-          policy,
-          ...(aiNavigation === null ? {} : { aiNavigation }),
-        };
-        const artifactBytes = canonicalJson(artifact);
-        if (Buffer.byteLength(artifactBytes, "utf8") > MAX_SETUP_PROPOSAL_BYTES) throw agentXError("RUNTIME_UNAVAILABLE", "immutable setup proposal exceeds its bounded object size");
-        const artifactDigest = createHash("sha256").update(artifactBytes, "utf8").digest("hex");
-        const proposalRef = `project-setup-proposals/${identity.ownerKey}/${artifactDigest}.json`;
-        try {
-          await dependencies.s3.send(new PutObjectCommand({
-            Bucket: dependencies.artifactBucketName,
-            Key: proposalRef,
-            Body: artifactBytes,
-            ContentType: "application/json",
-            Metadata: { sha256: artifactDigest, owner: identity.ownerKey, candidate: candidate.digest },
-            IfNoneMatch: "*",
-          }));
-        } catch (error) {
-          const code = error && typeof error === "object" ? (error as { name?: unknown; $metadata?: { httpStatusCode?: unknown } }).name : undefined;
-          const status = error && typeof error === "object" ? (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata?.httpStatusCode : undefined;
-          if (code !== "PreconditionFailed" && status !== 412) throw error;
-          const retained = await readStoredText(dependencies.s3, dependencies.artifactBucketName, proposalRef, MAX_SETUP_PROPOSAL_BYTES);
-          if (retained !== artifactBytes) throw agentXError("RUNTIME_UNAVAILABLE", "content-addressed setup proposal object conflicts with its expected bytes");
-        }
-        return json({ proposalRef, proposalSha256: artifactDigest, candidateDigest: candidate.digest, commitSha: snapshot.commitSha, treeSha: snapshot.treeSha, proposal, policy, aiNavigation, aiNavigationUntested }, request.requestId);
+        return await routeSetupProposal(dependencies, request, identity, body);
       }
 
       if (request.method === "POST" && url.pathname === "/v1/admin/projects/setup-approvals") {
-        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-        const approvalInput = z.object({ projectName: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/), proposalRef: z.string().min(1).max(512), proposalSha256: z.string().regex(/^[a-f0-9]{64}$/), decision: z.enum(["approve", "decline"]) }).strict().parse(body);
-        const expectedPrefix = `project-setup-proposals/${identity.ownerKey}/`;
-        if (!approvalInput.proposalRef.startsWith(expectedPrefix) || approvalInput.proposalRef !== `${expectedPrefix}${approvalInput.proposalSha256}.json`) throw agentXError("FORBIDDEN", "setup proposal reference is outside the authenticated administrator scope");
-        const stored = await readStoredText(dependencies.s3, dependencies.artifactBucketName, approvalInput.proposalRef, MAX_SETUP_PROPOSAL_BYTES);
-        if (!stored || createHash("sha256").update(stored, "utf8").digest("hex") !== approvalInput.proposalSha256) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup proposal is missing or its digest changed");
-        let artifact: Record<string, unknown>;
-        try {
-          const decoded: unknown = JSON.parse(stored);
-          if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) throw new Error("invalid");
-          artifact = decoded as Record<string, unknown>;
-        } catch { throw agentXError("RUNTIME_UNAVAILABLE", "stored setup proposal is unreadable"); }
-        if (artifact.schemaVersion !== "project-setup-source-proposal/v1" || artifact.issuerOwnerKey !== identity.ownerKey) throw agentXError("FORBIDDEN", "stored setup proposal belongs to another administrator");
-        const storedSnapshot = artifact.snapshot;
-        if (!storedSnapshot || typeof storedSnapshot !== "object" || Array.isArray(storedSnapshot)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source snapshot is missing");
-        const snapshotObject = storedSnapshot as Record<string, unknown>;
-        const rawSources = snapshotObject.sources;
-        if (!Array.isArray(rawSources)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source inventory is invalid");
-        const sources = rawSources.map((raw) => {
-          if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source item is invalid");
-          const source = raw as Record<string, unknown>;
-          if (typeof source.path !== "string" || typeof source.sha256 !== "string" || typeof source.bytesBase64 !== "string" || source.kind !== "blob") throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source item is invalid");
-          return { path: source.path, sha256: source.sha256, bytes: Buffer.from(source.bytesBase64, "base64"), kind: "blob" as const };
-        });
-        const snapshot = { ...snapshotObject, sources } as unknown as E2ESourceSnapshot;
-        const candidate = snapshot.candidate;
-        if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup candidate is invalid");
-        verifyE2ESourceSnapshot(snapshot, candidate);
-        const inspection = inspectE2ERepository(snapshot, candidate).inspection;
-        const proposal = verifyE2ESetupProposal(E2ESetupProposalSchema.parse(artifact.proposal), snapshot, candidate);
-        const agentRoute = await plannedAgentRoute(dependencies);
-        const policy = projectSetupPolicy(proposal, agentRoute);
-        if (!sameJsonContent(artifact.policy, policy)) {
-          // A proposal made under an earlier default is not approvable now, but a decision already recorded for it is still answered the same way (an idempotent retry).
-          const decided = await getItem<Record<string, unknown>>(dependencies, { pk: `PROJECT_SETUP#${approvalInput.projectName}`, sk: `PROPOSAL#${approvalInput.proposalSha256}` });
-          if (decided) {
-            if (decided.ownerKey !== identity.ownerKey || decided.decision !== approvalInput.decision) throw agentXError("PROJECT_REVISION_MISMATCH", "setup proposal already has a different immutable decision");
-            return json({ proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, decision: approvalInput.decision, duplicate: true }, request.requestId);
-          }
-          // The only difference is the AI navigation route: the installation's provider, model, secret or OpenRouter policy changed (or another approval moved the registry) since the proposal.
-          if (sameJsonContent({ ...(artifact.policy as Record<string, unknown>), modelRouteRevision: null, limits: null }, { ...policy, modelRouteRevision: null, limits: null })) {
-            // With no route now, the settings were not read or no longer give a usable route; they have not been shown to have changed.
-            if (agentRoute === undefined) {
-              const untested = await untestedAgentRouteNote(dependencies);
-              throw agentXError("RUNTIME_UNAVAILABLE", `${E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved}: ${untested !== null ? `${untested.sentence}; run the driving test, then propose the setup again`
-                : "The AI navigation settings of this installation could not be read, or no longer give a usable route; propose the setup again once they can be"}`);
-            }
-            throw agentXError("RUNTIME_UNAVAILABLE", `${E2E_MODEL_ROUTE_CHANGED_REAPPROVE}: The AI navigation settings changed; propose the setup again, then approve the new proposal`);
-          }
-          throw agentXError("RUNTIME_UNAVAILABLE", "this setup proposal was made under an earlier default policy and can no longer be approved: propose the setup again (re-propose the setup), then approve the new proposal");
-        }
-        const identityMapping = artifact.identityMapping;
-        if (!identityMapping || typeof identityMapping !== "object" || Array.isArray(identityMapping)
-          || (identityMapping as Record<string, unknown>).schemaVersion !== "github-source-to-agentx-registration/v1"
-          || (identityMapping as Record<string, unknown>).sourceRepositoryId !== candidate.repositories[0]?.repositoryId
-          || typeof (identityMapping as Record<string, unknown>).registeredRepositoryId !== "string") throw agentXError("RUNTIME_UNAVAILABLE", "stored setup repository identity mapping is invalid");
-        const canonicalArtifact = { ...artifact, snapshot: { ...snapshotObject, sources: sources.map(source => ({ path: source.path, sha256: source.sha256, kind: source.kind, bytesBase64: source.bytes.toString("base64") })) }, proposal };
-        if (canonicalJson(canonicalArtifact) !== stored || proposeE2ESetup({ inspection, snapshot, expectedCandidate: candidate }).candidateDigest !== proposal.candidateDigest) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup proposal does not match its source-derived bytes");
-        const approvalKey = { pk: `PROJECT_SETUP#${approvalInput.projectName}`, sk: `PROPOSAL#${approvalInput.proposalSha256}` };
-        const existing = await getItem<Record<string, unknown>>(dependencies, approvalKey);
-        if (existing) {
-          if (existing.ownerKey !== identity.ownerKey || existing.decision !== approvalInput.decision) throw agentXError("PROJECT_REVISION_MISMATCH", "setup proposal already has a different immutable decision");
-          return json({ proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, decision: approvalInput.decision, duplicate: true }, request.requestId);
-        }
-        // The approval that pins a route records it first: revision n+1 only when the route's digest changed, conditionally, never overwriting a revision. A route that is no
-        // longer the one the proposal showed is refused here, before the approval is recorded.
-        if (approvalInput.decision === "approve" && policy.modelRouteRevision !== null) {
-          const unreadable = () => agentXError("RUNTIME_UNAVAILABLE", `${E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved}: The AI navigation settings of this installation could not be read; propose the setup again once they can be`);
-          if (dependencies.e2eAgentInstallation === undefined) throw unreadable();
-          let installation: E2EAgentInstallation;
-          try { installation = await dependencies.e2eAgentInstallation(); } catch { throw unreadable(); }
-          try {
-            // The revision row records who approved it and for which project (audit; the installation's route is one for every project).
-            await approveE2EAgentRoute({ documentClient: dependencies.documentClient, tableName: dependencies.tableName }, installation, policy.modelRouteRevision,
-              { approvedBy: identity.ownerKey, projectName: approvalInput.projectName });
-          } catch (error) {
-            if (error instanceof E2EModelRouteError) throw agentXError("RUNTIME_UNAVAILABLE", error.message);
-            throw error;
-          }
-        }
-        await dependencies.documentClient.send(new PutCommand({ TableName: dependencies.tableName, Item: {
-          ...approvalKey, entityType: "PROJECT_SETUP_APPROVAL", ownerKey: identity.ownerKey, projectName: approvalInput.projectName,
-          proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, candidateDigest: proposal.candidateDigest,
-          repositoryUrl: artifact.repositoryUrl, identityMapping, decision: approvalInput.decision, approvedAt: new Date().toISOString(),
-          policyDigest: createHash("sha256").update(canonicalJson(policy), "utf8").digest("hex"), policy, targetIds: proposal.targets.map(target => target.targetId),
-        }, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" }));
-        return json({ proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, decision: approvalInput.decision, duplicate: false }, request.requestId);
+        return await routeSetupApproval(dependencies, request, identity, body);
       }
 
       if (request.method === "POST" && url.pathname === "/v1/admin/projects") {
