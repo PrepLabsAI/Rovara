@@ -146,14 +146,13 @@ jobs:
       - name: "checks: npm ci"
         timeout-minutes: 15
         run: npm ci
-      # `npm run typecheck:all` is `npm run typecheck` (tsc -b) followed by the stricter type check (tsconfig.lint.json, which also covers tests/ and scripts/), which may
-      # not add errors beyond tests/typecheck-baseline.json (issue #50, scripts/typecheck-baseline.ts). A separate `npm run typecheck` step ran the same tsc -b first.
-      - name: "checks: npm run typecheck:all"
+      # The lint reads the packages' declarations, so they are built first (tsc -b, about a minute). The type check is its own job, `typecheck`, beside this one.
+      - name: "checks: npm run build"
         timeout-minutes: 15
-        run: npm run typecheck:all
+        run: npm run build
       # The whole repository with the rules of `eslint .`, but in shards (scripts/lint-shards.ts), two eslint processes at a time. One process
       # over the whole repository needed more than 6 GB; each shard stays under a 4 GB heap cap. It reads the packages' declarations that
-      # typecheck:all's tsc -b just built. A pull request that changes no lint setting lints only its changed TypeScript files, each in its own shard's program.
+      # the build just made. A pull request that changes no lint setting lints only its changed TypeScript files, each in its own shard's program.
       - name: "checks: npm run lint"
         if: needs.plan.outputs.lint == 'all'
         timeout-minutes: 15
@@ -175,6 +174,27 @@ jobs:
       - name: "checks: complexity ratchet"
         timeout-minutes: 5
         run: node scripts/complexity.ts check
+
+  # The type check, beside `quick` instead of before its lint (it took about 5 of quick's 7 minutes): `npm run typecheck:all` is `npm run typecheck` (tsc -b)
+  # followed by the stricter type check (tsconfig.lint.json, which also covers tests/ and scripts/), which may not add errors beyond tests/typecheck-baseline.json
+  # (issue #50, scripts/typecheck-baseline.ts). It runs whenever `quick` does.
+  typecheck:
+    needs: plan
+    if: needs.plan.outputs.docs_only != 'true' && needs.plan.outputs.mode != 'reuse'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - name: "typecheck: npm ci"
+        timeout-minutes: 15
+        run: npm ci
+      - name: "typecheck: npm run typecheck:all"
+        timeout-minutes: 15
+        run: npm run typecheck:all
 
   # The release check, beside `quick` instead of after it: the packages built, the stacks synthesized, and two release builds that must be identical and
   # verify. It runs when the release area changed (always in a FULL run).
@@ -652,7 +672,7 @@ jobs:
 
   # The one check a pull request needs. It runs even when a job before it failed or was cancelled.
   local:
-    needs: [plan, quick, build, test, linux-runtime, ci-mode, release-check]
+    needs: [plan, quick, typecheck, build, test, linux-runtime, ci-mode, release-check]
     if: always() && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 5

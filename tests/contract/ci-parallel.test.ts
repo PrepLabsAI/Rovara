@@ -24,9 +24,9 @@ const workflow = async () => YAML.parse(await readFile(".github/workflows/ci.yml
 describe("CI runs its checks side by side, as the plan says (a Markdown-only change skips them all)", () => {
   it("has the jobs of the plan-driven CI, each waiting only on the plan (and the build, for the tests), and no job left over from before", async () => {
     const { jobs } = await workflow();
-    expect(Object.keys(jobs).sort()).toEqual(["build", "ci-mode", "device-runtime", "linux-runtime", "live-aws", "local", "nightly-tests", "plan", "port-guard", "quick", "release-check", "test"]);
+    expect(Object.keys(jobs).sort()).toEqual(["build", "ci-mode", "device-runtime", "linux-runtime", "live-aws", "local", "nightly-tests", "plan", "port-guard", "quick", "release-check", "test", "typecheck"]);
     expect(jobs.plan!.needs).toBeUndefined();
-    for (const name of ["ci-mode", "quick", "build", "linux-runtime", "device-runtime", "release-check"]) expect(jobs[name]!.needs, name).toBe("plan");
+    for (const name of ["ci-mode", "quick", "typecheck", "build", "linux-runtime", "device-runtime", "release-check"]) expect(jobs[name]!.needs, name).toBe("plan");
     expect(jobs.test!.needs).toEqual(["plan", "build"]);
     expect(jobs["port-guard"]!.needs).toBeUndefined();
     expect(jobs["nightly-tests"]!.needs).toBeUndefined();
@@ -56,15 +56,29 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     const parts = quick.steps.filter((step) => step.run !== undefined).map((step) => [step.name, step.if, step["timeout-minutes"], step.run] as const);
     expect(parts).toEqual([
       ["checks: npm ci", undefined, 15, "npm ci"],
-      ["checks: npm run typecheck:all", undefined, 15, "npm run typecheck:all"],
+      ["checks: npm run build", undefined, 15, "npm run build"],
       ["checks: npm run lint", "needs.plan.outputs.lint == 'all'", 15, "npm run lint"],
       ["checks: lint the changed files", "needs.plan.outputs.lint == 'changed'", 15, expect.stringContaining('node scripts/lint-shards.ts --files "$RUNNER_TEMP/changed.txt"')],
       // #1294: the complexity ratchet, on every run that has checks (it parses only, a few seconds).
       ["checks: complexity ratchet", undefined, 5, "node scripts/complexity.ts check"],
     ]);
-    // typecheck:all runs tsc -b itself, so a separate `npm run typecheck` step only repeated it; the release check is its own job (below).
-    expect(quick.steps.some((step) => step.run === "npm run typecheck")).toBe(false);
+    // The type check and the release check are jobs of their own (below).
+    expect(quick.steps.some((step) => (step.run ?? "").includes("typecheck"))).toBe(false);
     expect(quick["timeout-minutes"]).toBe(30);
+  });
+
+  it("runs the type check as its own job beside `quick`, whenever `quick` runs", async () => {
+    const { jobs } = await workflow();
+    const typecheck = jobs.typecheck! as Job & { "runs-on"?: string };
+    expect(typecheck["runs-on"]).toBe("ubuntu-latest");
+    expect(typecheck.permissions).toBeUndefined();
+    expect(JSON.stringify(typecheck)).not.toContain("secrets.");
+    expect(typecheck.if).toBe(jobs.quick!.if);
+    const parts = typecheck.steps.filter((step) => step.run !== undefined).map((step) => [step.name, step.if, step["timeout-minutes"], step.run] as const);
+    expect(parts).toEqual([
+      ["typecheck: npm ci", undefined, 15, "npm ci"],
+      ["typecheck: npm run typecheck:all", undefined, 15, "npm run typecheck:all"],
+    ]);
   });
 
   it("runs the release check as its own job beside `quick`, when the plan says the release area changed", async () => {
