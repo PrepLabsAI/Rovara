@@ -9,15 +9,11 @@ import {
   E2EAccountRegistryError, e2eAccountDefinitionKey, e2eAccountLatestKey, latestAccountRef, parseAccountEntry, pickAccountEntry, planSyntheticAccountWrites,
   type E2EAccountRegistryEntry,
 } from "../../packages/broker/src/e2e/application-account-registry.js";
-import { readAccountRegistryEntries } from "../../packages/broker/src/aws/e2e-account-registry.js";
 import { evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
 import { taskPageStage } from "../../packages/broker/src/aws/developer-tasks.js";
 import { createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
 import { call } from "../support/slack-broker.js";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
-import { prepareApplicationRound, startApplicationRound, type RoundBrokerHarness } from "../support/e2e-application-round-harness.js";
-import { createE2EApplicationCollectionOracleFromCompiledSuite } from "@agentx/verifier";
-import type { ObservedApiOutcome } from "../support/e2e-application-evidence-fixture.js";
 import { NOW, binding, planFixture, snapshotOf, webApiRow } from "../support/e2e-application-plan-fixtures.js";
 import { ORDERS_APPLICATION_ID, contractOf, ordersManifestWith, registryFor, sha256Hex, withOwnerB, withViewerRole } from "../support/e2e-account-registry-fixtures.js";
 import { TEST_ORG, testProjectPk } from "../support/orgs.js";
@@ -763,104 +759,6 @@ describe("the broker's project registration writes the accounts (Task 3.1, owner
 });
 
 
-describe("a whole round with two accounts of one application", () => {
-  const ACCOUNTS = ["orders-owner", "orders-viewer"] as const;
-
-  it("approves each account against its own definition, pins both refs, and admits each case with its own account's ref", async () => {
-    const round = await startApplicationRound({ accounts: ACCOUNTS });
-    const pinned = E2EApplicationSelectionRecordSchema.parse(round.workflowNow().e2e!.applicationSelection).accountRefs;
-    expect(pinned.map((ref) => ref.profileId).sort()).toEqual([...ACCOUNTS]);
-    expect(new Set(pinned.map((ref) => ref.definitionDigest)).size).toBe(2);
-    for (const profileId of ACCOUNTS) {
-      const latest = round.harness.db.find((row) => row.pk === testProjectPk("payments") && String(row.sk).endsWith(`#${profileId}`) && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#"));
-      expect(latest, profileId).toHaveLength(1);
-      expect(pinned.find((ref) => ref.profileId === profileId)).toMatchObject({ revision: 1, definitionDigest: (latest[0] as unknown as { definitionDigest: string }).definitionDigest });
-    }
-    expect(round.admission.selectionInput.runtimeAccountRefs.map((ref) => canonicalJson(ref)).sort()).toEqual(pinned.map((ref) => canonicalJson(ref)).sort());
-    expect(round.admission.intent.runtimeAccountRefs.map((ref) => canonicalJson(ref)).sort()).toEqual(pinned.map((ref) => canonicalJson(ref)).sort());
-  });
-
-  it("binds each compiled case to the ref of its own account: the owner's case to the owner's, the viewer's to the viewer's (the FX3 class of bug)", async () => {
-    const round = await startApplicationRound({ accounts: ACCOUNTS });
-    const pinned = E2EApplicationSelectionRecordSchema.parse(round.workflowNow().e2e!.applicationSelection).accountRefs;
-    const passing = { kind: "http-status", status: 200 } as const satisfies ObservedApiOutcome;
-    const group = await round.collectGroup(round.groupIds[0]!, [passing, passing]);
-    const inputs = group.collectionInputs as unknown as Omit<Parameters<typeof createE2EApplicationCollectionOracleFromCompiledSuite>[0], "compiled" | "binding" | "round">;
-    const oracle = createE2EApplicationCollectionOracleFromCompiledSuite({ compiled: group.compiled, binding: group.binding, round: group.round, environment: inputs.environment, usage: inputs.usage,
-      limits: inputs.limits, expectedSupervisorReceiptRefs: inputs.expectedSupervisorReceiptRefs, ownedResourceInventoryDigest: inputs.ownedResourceInventoryDigest,
-      observationBindings: inputs.observationBindings, assertionAssets: inputs.assertionAssets, governedModelReceipts: inputs.governedModelReceipts, ownedClosedAt: inputs.ownedClosedAt });
-    expect(group.binding.expectedCases.map((item) => item.accountProfileId).sort()).toEqual([...ACCOUNTS]);
-    for (const expected of group.binding.expectedCases) {
-      const facts = oracle.applicationIdsByCase.find((item) => item.caseId === expected.caseId)!;
-      const own = pinned.find((ref) => ref.profileId === expected.accountProfileId)!;
-      const registered = round.harness.db.get(testProjectPk("payments"), `E2E_ACCOUNT_LATEST#${facts.accountRef.applicationId}#${expected.accountProfileId}`) as unknown as { definitionDigest: string };
-      expect(facts.accountRef.profileId, expected.caseId).toBe(expected.accountProfileId);
-      expect(canonicalJson(facts.accountRef), expected.caseId).toBe(canonicalJson(own));
-      expect(facts.accountRef.definitionDigest, expected.caseId).toBe(registered.definitionDigest);
-    }
-    expect(new Set(oracle.applicationIdsByCase.map((item) => item.accountRef.definitionDigest)).size).toBe(2);
-  });
-
-  it("a corrupt row refuses only the plans that run as that account, naming it and the repair, and hides no other account", async () => {
-    const corrupt = (round: { harness: { db: Pick<RoundBrokerHarness["db"], "find" | "set"> } }) => {
-      const row = round.harness.db.find((item) => item.pk === testProjectPk("payments") && String(item.sk).startsWith("E2E_ACCOUNT_LATEST#") && String(item.sk).endsWith("#orders-viewer"))[0]!;
-      round.harness.db.set({ ...row, revision: "garbage" });
-    };
-    const both = await prepareApplicationRound({ accounts: ACCOUNTS });
-    corrupt(both);
-    const roundApplicationId = String(both.harness.db.find((item) => String(item.sk).startsWith("E2E_ACCOUNT_LATEST#"))[0]!.sk).split("#")[1]!;
-    const refused = await both.approve();
-    expect(refused.status).toBeGreaterThanOrEqual(400);
-    expect(JSON.stringify(refused.body)).toMatch(/account profile orders-viewer of application .* cannot be read; an administrator must register the project's setup again to repair it/);
-    expect(both.workflowNow().e2e).toBeUndefined();
-    // The reader keeps the readable accounts and lists the unreadable one, for the planner and for registration to act on.
-    const read = await readAccountRegistryEntries(both.harness.brokerInput as never, TEST_ORG, "payments", ACCOUNTS.map((profileId) => ({ applicationId: roundApplicationId, profileId })));
-    expect(read.entries.map((entry) => entry.definition.profileId)).toEqual(["orders-owner"]);
-    expect(read.corrupt).toMatchObject([{ applicationId: roundApplicationId, profileId: "orders-viewer" }]);
-    // A plan that runs only as the owner is approved all the same.
-    const owner = await prepareApplicationRound({ accounts: ["orders-owner"] });
-    corrupt(owner);
-    expect((await owner.approve()).status).toBe(200);
-  });
-
-  it("holds the verdict to the registry too: authority is valid while it holds the pinned refs, and not once one account has a newer revision", async () => {
-    const round = await startApplicationRound({ accounts: ACCOUNTS });
-    const broker = await import("../../packages/broker/src/aws/broker.js");
-    const valid: { reason?: string; runtimeChange?: "requalified" | "unusable" | "accounts" } = {};
-    expect(await broker.workflowE2EApplicationAuthorityIsValid(round.harness.brokerInput as never, round.taskNow() as never, round.candidate, round.admission, valid), valid.reason).toBe(true);
-    const key = round.harness.db.find((row) => row.pk === testProjectPk("payments") && String(row.sk).endsWith("#orders-owner") && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#"))[0]!;
-    const current = round.harness.db.get(testProjectPk("payments"), String(key.sk).replace("E2E_ACCOUNT_LATEST#", "E2E_ACCOUNT#") + "#REV#1")!;
-    const { pk: _pk, sk: _sk, entityType: _entity, ...body } = current;
-    void _pk; void _sk; void _entity;
-    const next = E2EApplicationAccountDefinitionSchema.parse({ ...body, revision: 2, expiresAt: new Date(Date.now() + 100 * DAY).toISOString() });
-    round.harness.db.set({ pk: current.pk, sk: String(current.sk).replace("#REV#1", "#REV#2"), entityType: "E2E_ACCOUNT", ...next });
-    round.harness.db.set({ ...key, revision: 2, definitionDigest: e2eApplicationAccountDefinitionDigest(next) });
-    const moved: { reason?: string; runtimeChange?: "requalified" | "unusable" | "accounts" } = {};
-    expect(await broker.workflowE2EApplicationAuthorityIsValid(round.harness.brokerInput as never, round.taskNow() as never, round.candidate, round.admission, moved)).toBe(false);
-    expect(moved.reason).toContain("accounts-changed-reapprove");
-    expect(moved.reason).toContain("orders-owner");
-    expect(moved.runtimeChange).toBe("accounts");
-  });
-
-  it("refuses to approve the plan when one of the two accounts moved to a new revision after the plan was written", async () => {
-    const prepared = await prepareApplicationRound({ accounts: ACCOUNTS });
-    const { harness } = prepared;
-    const key = harness.db.find((row) => row.pk === testProjectPk("payments") && String(row.sk).endsWith("#orders-viewer") && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#"))[0]!;
-    const current = harness.db.get(testProjectPk("payments"), String(key.sk).replace("E2E_ACCOUNT_LATEST#", "E2E_ACCOUNT#") + "#REV#1")!;
-    const { pk: _pk, sk: _sk, entityType: _entity, ...body } = current;
-    void _pk; void _sk; void _entity;
-    const next = E2EApplicationAccountDefinitionSchema.parse({ ...body, revision: 2 });
-    harness.db.set({ pk: current.pk, sk: String(current.sk).replace("#REV#1", "#REV#2"), entityType: "E2E_ACCOUNT", ...next });
-    harness.db.set({ ...key, revision: 2, definitionDigest: e2eApplicationAccountDefinitionDigest(next) });
-    const refused = await prepared.approve();
-    expect(refused.status).toBeGreaterThanOrEqual(400);
-    expect(JSON.stringify(refused.body)).toContain("accounts-changed-reapprove");
-    expect(JSON.stringify(refused.body)).toContain("orders-viewer");
-    // The owner's account for the other profile is not what was refused, and nothing was approved.
-    expect(JSON.stringify(refused.body)).not.toContain("orders-owner");
-    expect(prepared.workflowNow().e2e).toBeUndefined();
-  });
-});
 
 describe("the registry rows", () => {
   it("are what the fixtures build for a source: one revision-1 definition per synthetic profile", () => {

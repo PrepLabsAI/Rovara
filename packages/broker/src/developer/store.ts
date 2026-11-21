@@ -364,18 +364,6 @@ export class DeveloperSignInStore {
     return stored;
   }
 
-  /** A merged Slack sign-in remembers only its own workspace; never rewrite either person's profile or email index. */
-  async rememberMergedSlackWorkspace(developerId: string, mergedInto: string, team: { id: string; name?: string }): Promise<void> {
-    await this.input.documentClient.send(new UpdateCommand({
-      TableName: this.input.tableName,
-      Key: { pk: `DEVELOPER#${developerId}`, sk: META },
-      UpdateExpression: `SET slackTeamId = :team${team.name === undefined ? " REMOVE slackTeamName" : ", slackTeamName = :name"}`,
-      // Do not recreate a removed identity or overwrite an unlink, move or revocation racing this callback.
-      ConditionExpression: "attribute_exists(pk) AND mergedInto = :mergedInto AND revoked = :false",
-      ExpressionAttributeValues: { ":team": team.id, ":mergedInto": mergedInto, ":false": false, ...(team.name === undefined ? {} : { ":name": team.name }) },
-    }));
-  }
-
   async getDeveloper(developerId: string): Promise<DeveloperRecord | undefined> {
     const item = await this.get<DeveloperRecord>(`DEVELOPER#${developerId}`);
     return item === undefined ? undefined : strip(item);

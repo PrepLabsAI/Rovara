@@ -175,54 +175,34 @@ export function repositoryUsesInstallation(repository: unknown, installation: { 
  * latest revision is in this company are kept (the same check the project page makes), so no other company's name is ever returned. One total read budget; past it, or past
  * PROJECT_SCAN_MAX entries, or on any unreadable row, it throws (the route refuses the disconnect).
  */
-export class ProjectJoinLimit extends Error {}
-
 export async function projectsUsingInstallation(deps: { documentClient: { send(command: unknown): Promise<unknown> }; tableName: string; now: () => number }, companyId: string,
-  installation: { installationId: number; accountLogin: string; ownerElsewhere?: boolean }, sharedBudget?: ReturnType<typeof boundedCompanyReads>): Promise<string[]> {
-  const budget = sharedBudget ?? boundedCompanyReads(deps.documentClient, deps.now);
+  installation: { installationId: number; accountLogin: string; ownerElsewhere?: boolean }): Promise<string[]> {
+  const budget = boundedCompanyReads(deps.documentClient, deps.now);
   // DEC 254zzz80: a named company's projects live only in its own partition: its own catalog, and each project's latest revision there (company-layout.ts checks the partition).
   const named = namedCompany(companyId);
   const names: string[] = [];
-  const continuations = new Set<string>();
   let startKey: Record<string, unknown> | undefined;
   do {
     const page = await budget.client.send(new QueryCommand({ TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
       ExpressionAttributeValues: { ":pk": named === undefined ? PROJECT_CATALOG_PK : orgProjectCatalogPk(named), ":prefix": "PROJECT#" }, ConsistentRead: true, Limit: CATALOG_PAGE,
       ...(startKey === undefined ? {} : { ExclusiveStartKey: startKey }) })) as { Items?: Array<{ sk?: unknown }>; LastEvaluatedKey?: Record<string, unknown> };
-    if (sharedBudget !== undefined && (!Array.isArray(page.Items) || page.Items.length > CATALOG_PAGE)) throw new Error("invalid project page");
     for (const item of page.Items ?? []) {
       const name = typeof item.sk === "string" && item.sk.startsWith("PROJECT#") ? AgentXNameSchema.safeParse(item.sk.slice("PROJECT#".length)) : undefined;
       if (name?.success !== true) throw agentXError("RUNTIME_UNAVAILABLE", "projects unavailable");
       names.push(name.data);
     }
-    if (names.length > PROJECT_SCAN_MAX) throw new ProjectJoinLimit();
-    const previousKey = startKey;
+    if (names.length > PROJECT_SCAN_MAX) throw agentXError("RUNTIME_UNAVAILABLE", "projects unavailable");
     startKey = page.LastEvaluatedKey;
-    if (sharedBudget !== undefined && startKey !== undefined) {
-      if (startKey === null || typeof startKey !== "object" || Array.isArray(startKey) || Object.keys(startKey).length === 0
-        || typeof startKey.pk !== "string" || typeof startKey.sk !== "string"
-        || startKey.pk !== (named === undefined ? PROJECT_CATALOG_PK : orgProjectCatalogPk(named))
-        || Object.keys(startKey).length !== 2 || !startKey.sk.startsWith("PROJECT#")
-        || !AgentXNameSchema.safeParse(startKey.sk.slice("PROJECT#".length)).success
-        || (previousKey !== undefined && startKey.sk <= String(previousKey.sk))) throw new Error("invalid project continuation");
-      const cursor = JSON.stringify([startKey.pk, startKey.sk]);
-      if (continuations.has(cursor)) throw new Error("repeated project continuation");
-      continuations.add(cursor);
-    }
   } while (startKey !== undefined);
-  if (sharedBudget !== undefined && new Set(names).size !== names.length) throw new Error("duplicate project");
   const using: string[] = [];
   for (let index = 0; index < names.length; index += READS_AT_ONCE) {
     const batch = names.slice(index, index + READS_AT_ONCE);
-    const settled = await Promise.allSettled(batch.map(async (name) => {
+    const latest = await Promise.all(batch.map(async (name) => {
       if (named !== undefined) return namedCompanyLatestRevisionRow(budget.client, deps.tableName, named, name);
       const response = await budget.client.send(new QueryCommand({ TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
         ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":rev": "REV#" }, ConsistentRead: true, ScanIndexForward: false, Limit: 1 })) as { Items?: unknown[] };
       return response.Items?.[0];
     }));
-    const failed = settled.find((result) => result.status === "rejected");
-    if (failed?.status === "rejected") throw failed.reason;
-    const latest = settled.map(result => result.status === "fulfilled" ? result.value : undefined);
     batch.forEach((name, offset) => {
       const row = latest[offset];
       // A named company's catalog entry with no usable revision (unreadable, or drift naming another company) counts as using it, as an unreadable legacy revision does: fail closed.

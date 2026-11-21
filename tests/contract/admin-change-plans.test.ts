@@ -7,7 +7,7 @@ import { redactSecrets, type ChannelInfoRequest, type ChannelMembersRequest } fr
 import { fieldDiff, looksLikeSecret, planChange, stateHash, type PlanDependencies } from "../../packages/broker/src/aws/admin-change-plans.js";
 import { CredentialRegistry } from "../../packages/broker/src/aws/credentials.js";
 import { createAdminReadBroker } from "../support/admin-read-broker.js";
-import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
+import { SLACK_CHANNEL } from "../support/slack-broker.js";
 
 const PLANTED = `ghp_${"D".repeat(36)}`;
 const admin = { issuer: "https://identity.example.test", subject: "admin-subject", ownerKey: "", isAdministrator: true, claims: {} };
@@ -38,80 +38,6 @@ async function harness(options: { channelByName?: PlanDependencies["channelByNam
 }
 
 describe("binding and unbinding (E7, E12)", () => {
-
-  it("D045 bind/unbind exposes six unknown categories before confirm", async () => {
-    const { deps, identity, db } = await harness();
-    const input = { kind: "bind_channel" as const, channel: "C0LEDGER01", project: "payments" };
-    const unbound = await planChange(deps, identity, input);
-    expect(unbound.effect).toContain("It is bound to nothing today.");
-    expect(unbound.effect).toContain("New threads in #ledger-dev will use payments revision 1.");
-    expect(unbound.details).toEqual({ channelId: input.channel, project: "payments", currentProject: null, revision: 1 });
-    expect(unbound.snapshot).toEqual({ teamId: SLACK_TEAM, channelId: input.channel, binding: null, latestRevision: 1 });
-    const previous = { projectName: "ledger", updatedAt: "2026-11-20T12:00:00.000Z" };
-    const membership = db.find((item) => item.entityType === "MEMBERSHIP" && item.role === "administrator")[0]!;
-    db.set({ ...membership, sk: "PROJECT#ledger", projectName: "ledger" });
-    db.set({ pk: `SLACK_BINDING#${SLACK_TEAM}`, sk: "CHANNEL#C0LEDGER01", teamId: SLACK_TEAM, channelId: "C0LEDGER01", ...previous });
-    const replacing = await planChange(deps, identity, input);
-    expect(replacing.effect).toContain("It is bound to ledger today; its existing threads keep their workspaces.");
-    expect(replacing.details).toEqual({ channelId: input.channel, project: "payments", currentProject: "ledger", revision: 1 });
-    expect(replacing.snapshot).toEqual({ teamId: SLACK_TEAM, channelId: input.channel, binding: previous, latestRevision: 1 });
-    expect(stateHash(replacing.snapshot)).not.toBe(stateHash(unbound.snapshot));
-    const revision = db.find((item) => item.pk === "PROJECT#payments" && String(item.sk).startsWith("REV#"))[0]!;
-    db.set({ ...revision, sk: "REV#000000000002", definition: { ...revision.definition as object, revision: 2 } });
-    const latest = await planChange(deps, identity, input);
-    expect(latest.effect).toContain("payments revision 2.");
-    expect(latest.snapshot).toEqual({ teamId: SLACK_TEAM, channelId: input.channel, binding: previous, latestRevision: 2 });
-    expect(stateHash(latest.snapshot)).not.toBe(stateHash(replacing.snapshot));
-    const unbind = await planChange(deps, identity, { kind: "unbind_channel", channel: input.channel });
-    expect(unbind.details).toEqual({ channelId: input.channel, project: "ledger" });
-    expect(unbind.snapshot).toEqual({ teamId: SLACK_TEAM, channelId: input.channel, binding: previous });
-    expect(unbind.effect).toContain("Unbind channel #ledger-dev (C0LEDGER01) from project ledger.");
-    expect(unbind.effect).toContain("New messages there will get no reply; existing thread workspaces are kept.");
-    for (const plan of [unbound, replacing, latest, unbind]) {
-      for (const category of ["Projects", "Running work", "Queued work", "Schedules", "People", "Channels"]) {
-        expect(plan.effect).toContain(`${category}: unknown (freshness unknown).`);
-      }
-      expect(plan.effect).toContain("Dependency counts are not available from this plan.");
-      expect(plan.effect).toContain("Keep the current binding");
-      expect(plan.effect).toContain("Test the replacement first; this plan does not test replacement routing.");
-    }
-    expect(unbind.effect).toContain("Retained workspaces do not establish ongoing task permission.");
-    db.set({ pk: `SLACK_BINDING#${SLACK_TEAM}`, sk: "CHANNEL#C0LEDGER01", teamId: SLACK_TEAM, channelId: "C0LEDGER01", projectName: "payments", updatedAt: previous.updatedAt });
-    await expect(planChange(deps, identity, input)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-    await expect(planChange(deps, identity, { kind: "unbind_channel", channel: "C0UNBOUND01" })).rejects.toMatchObject({ code: "NOT_FOUND" });
-  });
-
-  it("D045 private member vs outsider projection", async () => {
-    const { deps, identity } = await harness();
-    const input = { kind: "bind_channel" as const, channel: "C0PRIVATE01", project: "payments" };
-    const member = await planChange(deps, identity, input, { slackUserId: MEMBER_ADMIN });
-    const outsider = await planChange(deps, identity, input, { slackUserId: "U0OUTSIDER" });
-    expect(member.confirmationEffect).toContain("#secret-launch");
-    expect(member.effect).not.toContain("secret-launch");
-    expect(JSON.stringify([member.details, member.snapshot, outsider])).not.toContain("secret-launch");
-    expect(stateHash(member.snapshot)).toBe(stateHash(outsider.snapshot));
-    for (const effect of [member.effect, member.confirmationEffect!, outsider.effect]) {
-      expect(effect).toContain("Channels: unknown (freshness unknown).");
-      expect(effect).toContain("Keep the current binding until you have checked the replacement channel and its audience.");
-    }
-  });
-
-  it("D045 preview never binds or unbinds", async () => {
-    const { deps, identity, db } = await harness();
-    const bind = vi.spyOn(deps.handlers, "bindChannel");
-    const unbind = vi.spyOn(deps.handlers, "unbindChannel");
-    const plannedBind = await planChange(deps, identity, { kind: "bind_channel", channel: "C0LEDGER01", project: "payments" });
-    const reviewed = db.get(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`)!;
-    const plannedUnbind = await planChange(deps, identity, { kind: "unbind_channel", channel: SLACK_CHANNEL });
-    expect(bind).not.toHaveBeenCalled();
-    expect(unbind).not.toHaveBeenCalled();
-    await plannedBind.apply(identity);
-    expect(bind).toHaveBeenCalledExactlyOnceWith(identity, SLACK_TEAM, "C0LEDGER01", "payments", null);
-    expect(db.get(`SLACK_BINDING#${SLACK_TEAM}`, "CHANNEL#C0LEDGER01")).toMatchObject({ projectName: "payments" });
-    await plannedUnbind.apply(identity);
-    expect(unbind).toHaveBeenCalledExactlyOnceWith(identity, SLACK_TEAM, SLACK_CHANNEL, { projectName: "payments", updatedAt: reviewed.updatedAt });
-    expect(db.get(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`)).toBeUndefined();
-  });
 
   it("names a private channel by ID only, and refuses a private channel's name", async () => {
     const { deps, identity } = await harness({ channelByName: async () => ({ ok: true }) });

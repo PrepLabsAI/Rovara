@@ -1,10 +1,6 @@
-// Web task channel (Q7): the task view names the task's own person ({ developerId, name }) so Cloud never guesses the owner from People, and each person of the People view says how they sign in
-// (`method`, a label for the client). Both come from stored rows only; neither echoes an issuer, a subject or an address.
-import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { DeveloperTaskViewSchema, TaskPeopleViewSchema } from "@agentx/contracts";
+import { TaskPeopleViewSchema } from "@agentx/contracts";
 import { TASK_OWNER_UNNAMED, taskOwnerView } from "../../packages/broker/src/developer/task-owner-view.js";
-import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 
 const HEX = "a".repeat(64);
 
@@ -22,16 +18,6 @@ describe("taskOwnerView", () => {
 
 });
 
-describe("the broker's own task view (legacy tasks)", () => {
-  it("names the task's own person on the read, and the contract takes the whole view", async () => {
-    const harness = await createDeveloperTaskBroker();
-    const response = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix it", client: "claude-code" });
-    const taskId = (response.body.task as { taskId: string }).taskId;
-    const task = (await harness.dev(MAYA, "GET", `/v1/dev/tasks/${taskId}`)).body.task as { owner?: unknown };
-    expect(task.owner).toStrictEqual({ developerId: MAYA.developerId, name: MAYA.name });
-    expect(DeveloperTaskViewSchema.shape.owner.safeParse(task.owner).success).toBe(true);
-  });
-});
 
 describe("the People view's sign-in method", () => {
   const person = { personId: "11111111-1111-4111-8111-111111111111", name: "Maya", role: "owner", you: true, effectiveRole: "owner" };

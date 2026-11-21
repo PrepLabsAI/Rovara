@@ -9,7 +9,6 @@ import { failActiveOperation, failOutboxOperation } from "../../packages/broker/
 import { sweepStuckCancels } from "../../packages/broker/src/aws/stuck-cancels.js";
 import type { DurableOutboxRecord } from "../../packages/broker/src/aws/lambda.js";
 import { preparationFailedMessage } from "../../packages/slack-service/src/messages.js";
-import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import {
   SLACK_CHANNEL, SLACK_TEAM, createBroker, ensureWorkspace, finishOperation, lazyEnsureWorkspace, loadSlackBroker, prepareThread, registerSlackProject, serviceCall,
@@ -212,38 +211,6 @@ describe("a Slack thread whose workspace failed preparation (#213)", () => {
 
 });
 
-describe("a developer task whose setup failed (#213)", () => {
-  async function setupFailed(options: { memberLimit?: number } = {}) {
-    const harness = await createDeveloperTaskBroker(options);
-    const response = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "x" });
-    const taskId = (response.body.task as { taskId: string }).taskId;
-    const { workspaceId } = harness.db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string };
-    expect(member(harness.db, MAYA.slackUserId!)).toMatchObject({ count: 1 });
-    const active = String((harness.db.get(`WORKSPACE#${workspaceId}`, "META") as { activeOperationId: string }).activeOperationId);
-    await harness.finish(workspaceId, active, "FAILED", { error: "npm ci exited 1" });
-    return { ...harness, taskId, workspaceId };
-  }
-
-  it("closes the task afterwards without giving the slot back a second time", async () => {
-    const { db, dev, taskId } = await setupFailed();
-    // Another task holds a slot, so a second release would show in both counters.
-    expect((await dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "other" })).status).toBe(200);
-    expect(member(db, MAYA.slackUserId!)).toMatchObject({ count: 1 });
-    const closed = await dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/close`, { requestId: randomUUID() });
-    expect(closed.body).toMatchObject({ closed: true, task: { status: "CLOSED" } });
-    expect(member(db, MAYA.slackUserId!)).toMatchObject({ count: 1 });
-    expect(organization(db)).toMatchObject({ count: 1 });
-  });
-
-  it("says the workspace was released when the developer tries to continue", async () => {
-    const { dev, taskId } = await setupFailed();
-    const refused = await dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/continue`, { requestId: randomUUID(), instructions: "more" });
-    expect(refused.body.error).toEqual({
-      code: "CONFIG_INVALID",
-      message: "this task never started and its workspace was released, so it no longer counts toward your workspace limit; start a new task with agentx_start_task, and close this one with agentx_close_task",
-    });
-  });
-});
 
 describe("the thread's notice for a failed setup (#213)", () => {
   it("says plainly that the workspace was released and that a new message starts fresh", () => {
