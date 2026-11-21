@@ -20,7 +20,7 @@
     "packages/broker/src/aws/attention-email-sender.ts": 4,
     "packages/broker/src/aws/attention-email.ts": 1,
     "packages/broker/src/aws/broker-environment.ts": 3,
-    "packages/broker/src/aws/broker.ts": 3143,
+    "packages/broker/src/aws/broker.ts": 3106,
     "packages/broker/src/aws/cancellation.ts": 3,
     "packages/broker/src/aws/channel-conversation-state.ts": 11,
     "packages/broker/src/aws/channel-events.ts": 16,
@@ -1196,7 +1196,7 @@
     "scripts/release-ci-proof.ts": 7,
     "scripts/release-production.ts": 12,
     "scripts/release/build.ts": 4,
-    "scripts/release/verify.ts": 12,
+    "scripts/release/verify.ts": 5,
     "scripts/report-suspect-project-admins.ts": 39,
     "scripts/test-coverage-map.ts": 77,
     "scripts/test-deploy-check.ts": 40,
@@ -1204,7 +1204,6 @@
     "scripts/test-deploy.ts": 258,
     "scripts/test-model-canary.ts": 33,
     "scripts/test-qualify-runtime.ts": 29,
-    "scripts/test-services-mirror.ts": 15,
-    "scripts/typecheck-baseline.ts": 1
+    "scripts/test-services-mirror.ts": 15
   }
 }
