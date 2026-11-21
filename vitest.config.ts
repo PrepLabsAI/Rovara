@@ -13,10 +13,10 @@ export default defineConfig({
     sequence: { sequencer: DurationSequencer },
     // Loading the same modules again for every test file is about half of the suite's time (@agentx/contracts alone is 468 modules). The files that mock modules
     // must keep a fresh module graph each ("fresh-modules"); every other file ("shared-modules") can share one per worker once the files leave no state behind
-    // (tests/support/module-state.ts puts it back after each file). Both projects still give every file fresh modules: sharing is switched on separately.
+    // (tests/support/process-state.ts and module-state.ts put it back after each file).
     projects: [
       { extends: true, test: { name: "fresh-modules", include: moduleMockingFiles, isolate: true } },
-      { extends: true, test: { name: "shared-modules", include, exclude: [...exclude, ...moduleMockingFiles], isolate: true } },
+      { extends: true, test: { name: "shared-modules", include, exclude: [...exclude, ...moduleMockingFiles], isolate: false, setupFiles: ["tests/support/process-state.ts", "tests/support/module-state.ts"] } },
     ],
   },
 });

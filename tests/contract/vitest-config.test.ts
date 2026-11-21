@@ -70,7 +70,7 @@ describe("the test runner's configuration", () => {
     type Project = { test?: { name?: string; include?: string[]; exclude?: string[]; isolate?: boolean } };
     const projects = (config.test?.projects ?? []) as Project[];
     expect(projects.map((project) => project.test?.name)).toEqual(["fresh-modules", "shared-modules"]);
-    for (const project of projects) expect(project.test?.isolate, project.test?.name).toBe(true);
+    for (const project of projects) expect(project.test?.isolate, project.test?.name).toBe(project.test?.name === "fresh-modules");
     const [fresh, shared] = projects as [Project, Project];
     expect(fresh.test?.include).toEqual(moduleMockingFiles);
     expect(shared.test?.exclude).toEqual(expect.arrayContaining(moduleMockingFiles));

@@ -55,6 +55,11 @@ export const postDeployFiles = [
 // other helpers), need a fresh module graph: with shared modules an earlier file has already loaded the real module, so the mock would not take effect, and a
 // mock a file sets up would stay for the files after it. They run in the "fresh-modules" project (vitest.config.ts); every other file runs in "shared-modules",
 // where one worker loads each module once for all its files. Found from the files' own source, so a new file is placed without a list to edit.
+// The files that time work against itself (tests/support/scaling.ts: N against 8N) also keep a fresh worker: a heap that holds every module the worker has
+// loaded makes garbage collection pauses longer, and a pause in the 8N run reads as work that grew faster than linear.
+const TIMING_HELPER = "tests/support/scaling.ts";
+// A file can also ask for one itself, with this comment line, when what it tests is how modules load or it reads state no other rule here finds.
+const ASKS_FOR_FRESH_MODULES = /^\/\/ vitest: fresh-modules\b/mu;
 const MOCKS_MODULES = /\bvi\.(?:mock|doMock|unmock|importMock|resetModules)\(/;
 const LOCAL_IMPORT = /\bfrom\s+["'](\.{1,2}\/[^"']+)["']|\bimport\s*\(\s*["'](\.{1,2}\/[^"']+)["']\s*\)/g;
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -91,7 +96,7 @@ function moduleMockingTestFiles(): string[] {
     }
   }
   return ["tests", "packages"].flatMap((directory) => filesUnder(directory, (name) => name.endsWith(".test.ts")))
-    .filter((file) => MOCKS_MODULES.test(sourceOf(file)) || localImports(file).some((path) => mocking.has(path)))
+    .filter((file) => MOCKS_MODULES.test(sourceOf(file)) || ASKS_FOR_FRESH_MODULES.test(sourceOf(file)) || localImports(file).some((path) => mocking.has(path) || path === TIMING_HELPER))
     .sort();
 }
 export const moduleMockingFiles = moduleMockingTestFiles();
