@@ -753,51 +753,25 @@ async function runTask(
   // The project's Rovara skills for this step (digest-checked, execution lines removed; plan and build only), offered through `read_skill` after the step's own and the meta repo's.
   const rovaraSkills = rovaraSkillFiles(invocation.payload.rovaraSkills, payloadMode);
   const knowledgePropose = createKnowledgePropose({ mode: payloadMode, emit: (proposal) => { void emit("progress", { [KNOWLEDGE_PROPOSALS_FIELD]: [proposal] }).catch(() => undefined); } });
-  let session: PiSessionHandle;
-  if (registered) {
-    session = await openRegisteredWorkspacePiSession(
-      {
-        rootPath: dependencies.rootPath,
-        model: dependencies.model,
-        workflowMode: piMode,
-        conversationId,
-        sessionFile: registered.sessionFile,
-        onDiagnostic,
-        extensionFactories: [toolLoopGuardExtension(loopGuard), ...(planning || reviewing || understanding ? [] : [verification])],
-        ...ruleBases,
-        ...(agentShell === undefined ? {} : { bashOperations: agentShell }),
-        ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
-        ...(fileTools !== undefined ? { fileTools } : localShell ? { localFileTools: true } : {}),
-        ...stepSession,
-        ...(sourceSession === undefined ? {} : { contextTools: sourceSession.contextTools, contextNote: sourceSession.contextNote, ...(sourceSession.contextMcp === undefined ? {} : { contextMcp: sourceSession.contextMcp }) }),
-        ...(answerChannel === undefined ? {} : { answerTools: [answerChannel.tool] }),
-        ...(knowledgeStep === undefined ? {} : { knowledgeStep }),
-        ...(knowledgePropose === undefined ? {} : { proposeTool: knowledgePropose.tool }),
-        ...(rovaraSkills.length === 0 ? {} : { rovaraSkills }),
-        compaction,
-      },
-      dependencies.piAdapter,
-    );
-  } else {
-    session = await createWorkspacePiSession(
-      {
-        rootPath: dependencies.rootPath, model: dependencies.model, workflowMode: piMode, conversationId, onDiagnostic,
-        extensionFactories: [toolLoopGuardExtension(loopGuard), ...(planning || reviewing || understanding ? [] : [verification])],
-        ...ruleBases,
-        ...(agentShell === undefined ? {} : { bashOperations: agentShell }),
-        ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
-        ...(fileTools !== undefined ? { fileTools } : localShell ? { localFileTools: true } : {}),
-        ...stepSession,
-        ...(sourceSession === undefined ? {} : { contextTools: sourceSession.contextTools, contextNote: sourceSession.contextNote, ...(sourceSession.contextMcp === undefined ? {} : { contextMcp: sourceSession.contextMcp }) }),
-        ...(answerChannel === undefined ? {} : { answerTools: [answerChannel.tool] }),
-        ...(knowledgeStep === undefined ? {} : { knowledgeStep }),
-        ...(knowledgePropose === undefined ? {} : { proposeTool: knowledgePropose.tool }),
-        ...(rovaraSkills.length === 0 ? {} : { rovaraSkills }),
-        compaction,
-      },
-      dependencies.piAdapter,
-    );
-  }
+  // The session's options are the same whether the conversation is new or reopened; a reopened one also names its session file.
+  const sessionOptions = {
+    rootPath: dependencies.rootPath, model: dependencies.model, workflowMode: piMode, conversationId, onDiagnostic,
+    extensionFactories: [toolLoopGuardExtension(loopGuard), ...(planning || reviewing || understanding ? [] : [verification])],
+    ...ruleBases,
+    ...(agentShell === undefined ? {} : { bashOperations: agentShell }),
+    ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
+    ...(fileTools !== undefined ? { fileTools } : localShell ? { localFileTools: true } : {}),
+    ...stepSession,
+    ...(sourceSession === undefined ? {} : { contextTools: sourceSession.contextTools, contextNote: sourceSession.contextNote, ...(sourceSession.contextMcp === undefined ? {} : { contextMcp: sourceSession.contextMcp }) }),
+    ...(answerChannel === undefined ? {} : { answerTools: [answerChannel.tool] }),
+    ...(knowledgeStep === undefined ? {} : { knowledgeStep }),
+    ...(knowledgePropose === undefined ? {} : { proposeTool: knowledgePropose.tool }),
+    ...(rovaraSkills.length === 0 ? {} : { rovaraSkills }),
+    compaction,
+  };
+  const session: PiSessionHandle = registered
+    ? await openRegisteredWorkspacePiSession({ ...sessionOptions, sessionFile: registered.sessionFile }, dependencies.piAdapter)
+    : await createWorkspacePiSession(sessionOptions, dependencies.piAdapter);
   try {
     // Written before the prompt, so a crash mid-turn orphans an empty session rather than the transcript.
     if (registered) await conversations.recordTurn(conversationId, dependencies.model);
