@@ -66,7 +66,9 @@ describe("review fixes: model route, causes and cost", () => {
     for (const text of hostile) {
       const started = Date.now();
       run(text);
-      expect(Date.now() - started, text.slice(0, 30)).toBeLessThan(400);
+      // #1297: 2 s, not 400 ms. The read is linear (16 KB of the slowest shape takes about 80 ms locally) and a shared CI runner took 405 ms; catastrophic
+      // backtracking on 16 KB takes far longer than 2 s, so the guard still catches it.
+      expect(Date.now() - started, text.slice(0, 30)).toBeLessThan(2_000);
     }
   });
 

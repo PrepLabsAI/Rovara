@@ -7,13 +7,13 @@ const AFFECTED: PlanOutputs = { mode: "affected", docs_only: "false", tests: "ch
 const AFFECTED_LINUX: PlanOutputs = { ...AFFECTED, linux: "true" };
 const DOCS: PlanOutputs = { mode: "affected", docs_only: "true", tests: "none", shards: "[1]", lint: "none", linux: "false", release: "false" };
 
-const fullRan = { plan: "success", quick: "success", build: "success", test: "success", "linux-runtime": "success", "ci-mode": "success", "release-check": "success" };
-const affectedRan = { plan: "success", quick: "success", build: "success", test: "success", "linux-runtime": "skipped", "ci-mode": "skipped", "release-check": "skipped" };
-const docsRan = { plan: "success", quick: "skipped", build: "skipped", test: "skipped", "linux-runtime": "skipped", "ci-mode": "skipped", "release-check": "skipped" };
+const fullRan = { plan: "success", quick: "success", typecheck: "success", build: "success", test: "success", "linux-runtime": "success", "ci-mode": "success", "release-check": "success" };
+const affectedRan = { plan: "success", quick: "success", typecheck: "success", build: "success", test: "success", "linux-runtime": "skipped", "ci-mode": "skipped", "release-check": "skipped" };
+const docsRan = { plan: "success", quick: "skipped", typecheck: "skipped", build: "skipped", test: "skipped", "linux-runtime": "skipped", "ci-mode": "skipped", "release-check": "skipped" };
 
 describe("the gate behind the local check: what each job must have done, from the plan", () => {
   it("passes a full run only when every job succeeded, ci-mode (full) included", () => {
-    expect(gateVerdict({ plan: FULL, results: fullRan })).toEqual({ ok: true, reason: "FULL run; 6 jobs succeeded" });
+    expect(gateVerdict({ plan: FULL, results: fullRan })).toEqual({ ok: true, reason: "FULL run; 7 jobs succeeded" });
     for (const job of GATED_JOBS) {
       for (const result of ["failure", "cancelled", "skipped"]) {
         const verdict = gateVerdict({ plan: FULL, results: { ...fullRan, [job]: result } });
@@ -26,12 +26,12 @@ describe("the gate behind the local check: what each job must have done, from th
   });
 
   it("passes an affected run when the jobs the plan skipped by design were skipped and the rest succeeded", () => {
-    expect(gateVerdict({ plan: AFFECTED, results: affectedRan })).toEqual({ ok: true, reason: "affected run; 3 jobs succeeded, 3 skipped by design (linux-runtime, ci-mode, release-check)" });
+    expect(gateVerdict({ plan: AFFECTED, results: affectedRan })).toEqual({ ok: true, reason: "affected run; 4 jobs succeeded, 3 skipped by design (linux-runtime, ci-mode, release-check)" });
     expect(gateVerdict({ plan: AFFECTED_LINUX, results: { ...affectedRan, "linux-runtime": "success" } }).ok).toBe(true);
   });
 
   it("fails an affected run when a job the plan needed was skipped, missing or failed (the heart of it: skipped by design is a pass, skipped by accident is not)", () => {
-    for (const job of ["quick", "build", "test"]) {
+    for (const job of ["quick", "typecheck", "build", "test"]) {
       expect(gateVerdict({ plan: AFFECTED, results: { ...affectedRan, [job]: "skipped" } }).reason, job).toBe(`${job} was skipped, but the plan needs it to succeed`);
       expect(gateVerdict({ plan: AFFECTED, results: { ...affectedRan, [job]: "failure" } }).ok, job).toBe(false);
       const without = Object.fromEntries(Object.entries(affectedRan).filter(([name]) => name !== job));
@@ -48,7 +48,7 @@ describe("the gate behind the local check: what each job must have done, from th
   });
 
   it("passes a Markdown-only change only when every heavy job was skipped", () => {
-    expect(gateVerdict({ plan: DOCS, results: docsRan })).toEqual({ ok: true, reason: "Markdown-only change; 0 jobs succeeded, 6 skipped by design (quick, build, test, linux-runtime, ci-mode, release-check)" });
+    expect(gateVerdict({ plan: DOCS, results: docsRan })).toEqual({ ok: true, reason: "Markdown-only change; 0 jobs succeeded, 7 skipped by design (quick, typecheck, build, test, linux-runtime, ci-mode, release-check)" });
     expect(gateVerdict({ plan: DOCS, results: { ...docsRan, test: "success" } }).reason).toBe("test was success, but the plan skipped it");
     expect(gateVerdict({ plan: DOCS, results: { ...docsRan, quick: "failure" } }).ok).toBe(false);
   });
@@ -84,7 +84,7 @@ describe("the gate behind the local check: what each job must have done, from th
   // #1185: a FULL run (a Batch or Sync mainline pull request whose change does not reach the Linux runtime area) may skip linux-runtime by design.
   it("accepts a full run that skips the Linux runtime check by design, and holds it to that skip", () => {
     const fullNoLinux = { ...FULL, linux: "false" };
-    expect(gateVerdict({ plan: fullNoLinux, results: { ...fullRan, "linux-runtime": "skipped" } })).toEqual({ ok: true, reason: "FULL run; 5 jobs succeeded, 1 skipped by design (linux-runtime)" });
+    expect(gateVerdict({ plan: fullNoLinux, results: { ...fullRan, "linux-runtime": "skipped" } })).toEqual({ ok: true, reason: "FULL run; 6 jobs succeeded, 1 skipped by design (linux-runtime)" });
     expect(gateVerdict({ plan: fullNoLinux, results: fullRan }).ok).toBe(false);
     expect(gateVerdict({ plan: FULL, results: { ...fullRan, "linux-runtime": "skipped" } }).ok).toBe(false);
   });
