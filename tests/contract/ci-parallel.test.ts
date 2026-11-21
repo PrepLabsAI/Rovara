@@ -244,10 +244,9 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     const job = (await workflow()).jobs["linux-runtime"] as Job & { steps: { name?: string; run?: string; env?: Record<string, string> }[] };
     const generic = job.steps.find((step) => (step.run ?? "").startsWith("npx vitest run tests/linux"))!;
     // Vitest 5.0.3 drops CLI --exclude under test.projects, so the shared step must name the single-project Linux config or every exclusion below is ignored.
-    expect(generic.run).toMatch(/ --config vitest\.linux\.config\.ts$/u);
-    for (const excluded of ["e2e-docker25-dns", "e2e-model-channel", "e2e-agent", "e2e-agent-probes", "e2e-midstep-carriers", "device-evidence-emulator", "worker-sandbox-egress"]) {
-      expect(generic.run).toContain(`--exclude tests/linux/${excluded}.test.ts`);
-    }
+    // Exactly these seven files run in steps of their own; one more exclusion would silently drop a Linux test from CI, so the whole command is pinned.
+    const excluded = ["e2e-docker25-dns", "e2e-model-channel", "e2e-agent", "e2e-agent-probes", "e2e-midstep-carriers", "device-evidence-emulator", "worker-sandbox-egress"];
+    expect(generic.run).toBe(`npx vitest run tests/linux ${excluded.map((name) => `--exclude tests/linux/${name}.test.ts`).join(" ")} --config vitest.linux.config.ts`);
     expect(generic.run).toContain("--exclude tests/linux/e2e-docker25-dns.test.ts");
     // L4-NETG: the sandbox-egress boot stage restarts Docker and walls docker0, so it never runs beside another Linux test file: out of the generic step, in a step of its own that comes after every other Docker step of the job.
     expect(generic.run).toContain("--exclude tests/linux/worker-sandbox-egress.test.ts");
