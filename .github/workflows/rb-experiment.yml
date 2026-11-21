@@ -1,0 +1,41 @@
+# TEMPORARY experiment: build Rovara through Rovara Build (draft PR only, not for merge).
+# The route job asks Rovara Build where to run; the checks job runs there:
+#   plain PR -> your machines (GitHub-hosted if none online), `urgent` -> GitHub-hosted,
+#   `rb-codebuild` -> CodeBuild (a temporary experiment rule).
+name: rovara-build experiment
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+concurrency:
+  group: rb-experiment-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  route:
+    uses: ./.github/workflows/rb-route.yml
+    permissions:
+      id-token: write
+      contents: read
+    with:
+      endpoint: ${{ vars.ROVARA_BUILD_URL }}
+
+  checks:
+    needs: route
+    runs-on: ${{ fromJSON(needs.route.outputs.runner) }}
+    timeout-minutes: 30
+    steps:
+      - name: Where am I?
+        run: |
+          echo "Runner:    $RUNNER_NAME ($RUNNER_OS/$RUNNER_ARCH)"
+          echo "CodeBuild: ${CODEBUILD_BUILD_ID:-not CodeBuild}"
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+      - run: npm ci
+      - run: npm run typecheck:all

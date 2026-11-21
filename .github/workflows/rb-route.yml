@@ -1,0 +1,83 @@
+# Rovara Build route job (design §3.3, §5). Call it from a workflow:
+#
+#   jobs:
+#     route:
+#       uses: PrepLabsAI/Rovara-Build/.github/workflows/route.yml@v1
+#       permissions: { id-token: write, contents: read }
+#       with:
+#         endpoint: ${{ vars.ROVARA_BUILD_URL }}
+#     build:
+#       needs: route
+#       runs-on: ${{ fromJSON(needs.route.outputs.runner) }}
+#
+# If the control plane can't be reached, or there is no OIDC token (fork PRs), the build falls back
+# to `fallback-label`, so Rovara Build never blocks a build.
+name: Rovara Build route
+
+on:
+  workflow_call:
+    inputs:
+      endpoint:
+        description: The install's API URL (the ApiUrl stack output), usually vars.ROVARA_BUILD_URL
+        type: string
+        required: true
+      needs:
+        description: 'What the job needs from its machine, as JSON, e.g. {"os":"linux"}'
+        type: string
+        default: "{}"
+      fallback-label:
+        description: Runner label used when Rovara Build can't decide
+        type: string
+        default: ubuntu-latest
+    outputs:
+      runner:
+        description: JSON string for runs-on, e.g. "rb-…" or "ubuntu-latest"; use fromJSON()
+        value: ${{ jobs.route.outputs.runner }}
+
+jobs:
+  route:
+    name: route
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      runner: ${{ steps.route.outputs.runner }}
+    steps:
+      - id: route
+        shell: bash
+        env:
+          ENDPOINT: ${{ inputs.endpoint }}
+          NEEDS: ${{ inputs.needs }}
+          FALLBACK: ${{ inputs.fallback-label }}
+        run: |
+          set -euo pipefail
+          endpoint="${ENDPOINT%/}"
+
+          fallback() {
+            echo "::warning title=Rovara Build::$1 Building on ${FALLBACK}."
+            echo "runner=$(jq -cn --arg l "$FALLBACK" '$l')" >> "$GITHUB_OUTPUT"
+            printf '### Rovara Build routing\n\n%s Building on `%s`.\n' "$1" "$FALLBACK" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
+
+          [ -n "$endpoint" ] || fallback "No endpoint was given (set the ROVARA_BUILD_URL variable)."
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            fallback "No OIDC token is available (fork PRs never get one; otherwise grant id-token: write)."
+          fi
+          echo "$NEEDS" | jq -e 'type == "object"' >/dev/null 2>&1 || fallback "The needs input is not a JSON object."
+
+          token=$(curl -fsS --max-time 10 -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${endpoint}" | jq -r '.value') || fallback "Could not get an OIDC token."
+
+          body=$(jq -cn --argjson needs "$NEEDS" 'if $needs == {} then {} else {needs: $needs} end')
+          status=0
+          response=$(curl -sS --max-time 20 --retry 2 --retry-connrefused -o /tmp/rb-route.json -w '%{http_code}' \
+            -X POST "${endpoint}/route" -H "Authorization: Bearer ${token}" -H 'content-type: application/json' \
+            -d "$body") || status=$?
+          [ "$status" -eq 0 ] || fallback "The Rovara Build control plane could not be reached."
+          if [ "$response" != "200" ]; then
+            fallback "The control plane answered ${response}: $(jq -r '.error // "no details"' /tmp/rb-route.json 2>/dev/null || echo 'no details')."
+          fi
+
+          jq -r '.line' /tmp/rb-route.json
+          echo "runner=$(jq -c '.runner' /tmp/rb-route.json)" >> "$GITHUB_OUTPUT"
+          jq -r '.summary' /tmp/rb-route.json >> "$GITHUB_STEP_SUMMARY"
