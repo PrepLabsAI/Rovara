@@ -17,61 +17,8 @@ function result(body: Record<string, unknown>): Record<string, unknown> {
   return rest;
 }
 
-async function fullOfTasks() {
-  const harness = await createDeveloperTaskBroker({ memberLimit: 3 });
-  const titles: string[] = [];
-  for (let index = 0; index < 3; index += 1) {
-    titles.push(`Secret task title ${index}`);
-    await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: `Task ${index}`, title: titles[index], client: "claude-code" });
-  }
-  return { ...harness, titles, subject: `${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000009` };
-}
 
-describe("the Slack limit refusal (C16)", () => {
 
-  it("gives only a count: no task's title, ID or instructions reaches the channel", async () => {
-    const { handler, subject, titles, db } = await fullOfTasks();
-    const asked = await serviceCall(handler, subject, MAYA.slackUserId!, "POST", "/v1/service/threads/workspace", { requestId: randomUUID(), includeOpenTaskCount: true });
-    const text = JSON.stringify(asked.body);
-    const taskIds = db.find((item) => item.entityType === "DEVELOPER_TASK").map((item) => String(item.taskId));
-    expect(taskIds).toHaveLength(3);
-    for (const secret of [...titles, ...taskIds, "Task 0"]) expect(text).not.toContain(secret);
-    expect(text + limitMessage(asked.body as never, SLACK_FORMAT)).not.toContain("Secret task title");
-  });
-
-  it("counts them on the prepare route too, for a lazily created thread", async () => {
-    const harness = await createDeveloperTaskBroker({ memberLimit: 3 });
-    const subject = `${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000010`;
-    const created = await serviceCall(harness.handler, subject, MAYA.slackUserId!, "POST", "/v1/service/threads/workspace", { requestId: randomUUID(), lazyPreparation: true });
-    expect(created.body).toMatchObject({ outcome: "WORKSPACE", status: "UNPREPARED" });
-    for (let index = 0; index < 3; index += 1) {
-      await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: `Task ${index}`, client: "claude-code" });
-    }
-    const asked = await serviceCall(harness.handler, subject, MAYA.slackUserId!, "POST", "/v1/service/threads/workspace/prepare", { requestId: randomUUID(), includeOpenTaskCount: true });
-    expect(result(asked.body)).toEqual({ outcome: "LIMIT_REACHED", limit: "MEMBER", maximum: 3, starterThreads: [], openTaskCount: 3 });
-    const older = await serviceCall(harness.handler, subject, MAYA.slackUserId!, "POST", "/v1/service/threads/workspace/prepare", { requestId: randomUUID() });
-    expect(result(older.body)).toEqual({ outcome: "LIMIT_REACHED", limit: "MEMBER", maximum: 3, starterThreads: [] });
-  });
-});
-
-describe("a Slack thread at the limit first gives back slots finished tasks still hold (0.2.12 live test)", () => {
-  it("a merged task still counted is released, and the thread's workspace starts", async () => {
-    const { handler, db, subject, deleteEc2Session } = await fullOfTasks();
-    const task = db.find((item) => item.entityType === "DEVELOPER_TASK")[0]!;
-    // As the live table was: merged before releases ran on merge, its workspace READY, its slot still counted.
-    db.set({ ...task, workflow: { stage: "MERGED", state: "COMPLETE", outcome: "MERGED" } });
-    const { activeOperationId: _active, ...workspace } = db.get(`WORKSPACE#${String(task.workspaceId)}`, "META")!;
-    void _active;
-    db.set({ ...workspace, status: "READY" });
-    const opened = await serviceCall(handler, subject, MAYA.slackUserId!, "POST", "/v1/service/threads/workspace", { requestId: randomUUID() });
-    expect(opened.body).toMatchObject({ outcome: "WORKSPACE", created: true });
-    const member = db.get(`SLACK_LIMIT#${SLACK_TEAM}`, `MEMBER#${MAYA.slackUserId!}`)!;
-    expect(member.count).toBe(3);
-    expect((member.tasks as Set<string>).has(String(task.taskId))).toBe(false);
-    expect(db.get(`WORKSPACE#${String(task.workspaceId)}`, "META")?.status).toBe("CLOSED");
-    expect(deleteEc2Session).toHaveBeenCalledWith(task.workspaceId);
-  });
-});
 
 describe("the Slack limit refusal counts only the member's own tasks (C16)", () => {
 

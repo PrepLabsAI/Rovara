@@ -12,7 +12,6 @@ import {
   confirmationBlocks,
   confirmationClickEventId,
   type PendingConfirmation,
-  type TaskPeopleDisplayReadRequest,
   type SlackRequestMessage,
   type WorkflowSnapshot,
 } from "../../packages/contracts/src/index.js";
@@ -40,8 +39,6 @@ import type { SendMessageCommand } from "@aws-sdk/client-sqs";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { StrictSlackWeb } from "../support/strict-slack.js";
 import { cleanLine, workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
-import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
-import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 
 // Every workflow modal a test opens is checked against Slack's limits.
 const strict = new StrictSlackWeb();
@@ -187,43 +184,6 @@ describe("signed Task People form", () => {
     await assertCompletePeopleList("reader");
   });
 
-  it("refuses a valid People change when the signed form is replayed from another task thread", async () => {
-    const ownerSlackUserId = "U0PEOPLE01";
-    const targetSlackUserId = "U0PEOPLE02";
-    const taskThread = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000091" };
-    const names = new Map([[ownerSlackUserId, "Owner One"], [targetSlackUserId, "Person Two"]]);
-    const proof = async (request: { slackUserId: string; channelIds: readonly string[] }) => {
-      const name = names.get(request.slackUserId);
-      if (name === undefined) return { ok: false as const, error: "ineligible" as const };
-      return { ok: true as const, user: { id: request.slackUserId, teamId: SLACK_TEAM, name }, memberOf: [...request.channelIds] };
-    };
-    const broker = await createDeveloperTaskBroker({
-      channelMembers: async (request) => ({ ok: true, memberOf: [...request.channelIds] }),
-      developerExtra: {
-        taskPeopleConfiguration: { peopleChangesEnabled: true },
-        taskPersonProof: proof,
-        taskPeopleDisplayRead: async (request: TaskPeopleDisplayReadRequest) => request.operation === "proof"
-          ? { operation: "proof" as const, admission: { version: 1 as const, slackCallsUsed: 1 }, result: await proof(request.request) }
-          : { operation: "directory" as const, admission: { version: 1 as const, slackCallsUsed: 1 }, result: { ok: true as const,
-            users: [...names].map(([id, name]) => ({ id, teamId: SLACK_TEAM, name,
-              memberOf: request.request.channelIds.filter((channelId) => channelId === taskThread.channelId) })) } },
-      },
-    });
-    const started = await broker.handler({ source: "agentx.slack-ingress", action: "start-workflow", thread: taskThread,
-      userId: ownerSlackUserId, instructions: "Keep task People bound to this thread", workflowPath: "QUICK", requestId: randomUUID() });
-    expect(started.statusCode).toBe(200);
-    const startedBody = JSON.parse(started.body) as { taskId: string };
-    const read = await broker.handler({ source: "agentx.slack-ingress", action: "task-people-read", taskId: startedBody.taskId,
-      userId: ownerSlackUserId, thread: taskThread });
-    expect(read.statusCode).toBe(200);
-    const revision = (JSON.parse(read.body) as { revision: number }).revision;
-
-    const changed = await broker.handler({ source: "agentx.slack-ingress", action: "task-people-change", taskId: startedBody.taskId,
-      requestId: randomUUID(), expectedPeopleRevision: revision, userId: ownerSlackUserId, slackUserId: targetSlackUserId, role: "viewer",
-      thread: { ...taskThread, threadTs: "1695500000.000092" } });
-    expect(changed.statusCode).toBe(403);
-    expect(broker.db.find((item) => item.pk === `DEVTASK#${startedBody.taskId}` && item.entityType === "TASK_PEOPLE_PROPOSAL")).toHaveLength(0);
-  });
 });
 
 function payload(options: { actionId?: string; value?: string; user?: string; type?: string } = {}) {

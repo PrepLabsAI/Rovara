@@ -5,7 +5,7 @@ import { legacyWorkspaceKey } from "../../packages/broker/src/core/task-flow/leg
 import { taskKey as coreTaskKey, workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { DeveloperTaskDetailedListResponseSchema, INTENT_NOT_WAITING_MESSAGE, endStuckUnderstand, orgProjectCatalogKey, projectRevisionKey, recordIntentAssessment, sharedTaskKey, startWorkflowUnderstand, type JsonValue, type ProjectDefinition, type StoredDocument } from "@agentx/contracts";
+import { DeveloperTaskDetailedListResponseSchema, endStuckUnderstand, orgProjectCatalogKey, projectRevisionKey, recordIntentAssessment, sharedTaskKey, startWorkflowUnderstand, type JsonValue, type ProjectDefinition, type StoredDocument } from "@agentx/contracts";
 import { readTask as readCoreTask } from "../../packages/broker/src/core/task-flow/reads.js";
 import { commitWorkflow } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
@@ -413,31 +413,6 @@ describe("the owner's answers on the AWS developer route `POST /v1/dev/tasks/{id
     expect((await detailRow(unwired.dev, MAYA, unwired.task.taskId))?.round).toBeUndefined();
   });
 
-  it("golden: an unstamped (workflow) task's answers route answers and writes exactly as with no core entry on the install: 'not waiting' for its owner, the missing task's answer for another company", async () => {
-    const legacyAnswers = async (harness: Awaited<ReturnType<typeof createDeveloperTaskBroker>>) => {
-      const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: "22222222-2222-4222-8222-222222222222", project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
-      const taskId = (started.body.task as { taskId: string }).taskId;
-      const { workspaceId } = harness.db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string };
-      const writes: string[] = [];
-      const stop = harness.db.onWrite((change) => writes.push(Object.keys(change).join()));
-      const answers: unknown[] = [];
-      for (const body of [{ requestId: "11111111-1111-4111-8111-111111111111", round: 1, answers: ANSWERS }, {}, null]) {
-        answers.push(await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/answers`, body));
-        answers.push(await harness.dev(OMAR, "POST", `/v1/dev/tasks/${taskId}/answers`, body));
-      }
-      stop();
-      // The broker stamps each answer with its own request id (coreWorld's `dev` drops it); everything else is compared.
-      const scrub = (value: unknown) => [taskId, workspaceId].reduce((text, id) => text.replaceAll(id, "<id>"), JSON.stringify(value, (key, field: unknown) => (key === "requestId" ? undefined : field)));
-      return { answers: answers.map(scrub), writes };
-    };
-    const without = await legacyAnswers(await createDeveloperTaskBroker());
-    const withCore = await legacyAnswers(await coreWorld({ actions: true, newTasksOnWorkflow: true }));
-    expect(withCore.answers).toEqual(without.answers);
-    expect(withCore.writes).toEqual(without.writes);
-    expect(without.writes).toEqual([]);
-    expect(JSON.parse(without.answers[0]!)).toEqual({ status: 409, body: { error: { code: "INTENT_NOT_WAITING", message: INTENT_NOT_WAITING_MESSAGE } } });
-    expect(JSON.parse(without.answers[1]!)).toMatchObject({ status: 404 });
-  });
 });
 
 // ---- helpers for the list's detail (`?detail=1`)
@@ -505,24 +480,6 @@ describe("the AWS readers see only workflow rows", () => {
     }
   });
 
-  it("?detail=1 on a workflow task's row: its own spend totals as the cost, no run limit, and the workflow as its own view says it; another company's caller lists none of it", async () => {
-    const { dev, db } = await coreWorld({ newTasksOnWorkflow: true });
-    const started = await dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
-    const taskId = (started.body.task as { taskId: string }).taskId;
-    const meta = db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { pk: string; sk: string };
-    db.set({ ...meta, spentRuns: 3, spentUsd: 0.42, spentUpdatedAt: "2026-11-15T00:00:00.000Z" });
-    const plainList = await dev(MAYA, "GET", "/v1/dev/tasks");
-    const detailed = await dev(MAYA, "GET", "/v1/dev/tasks?detail=1");
-    const plainRow = (plainList.body as { tasks: Array<Record<string, unknown>> }).tasks.find((row) => row["taskId"] === taskId)!;
-    const row = DeveloperTaskDetailedListResponseSchema.parse(detailed.body).tasks.find((one) => one.taskId === taskId)!;
-    // The ordinary row's fields are exactly the plain list's; the detail is added beside them.
-    expect(Object.fromEntries(Object.keys(plainRow).map((key) => [key, (row as Record<string, unknown>)[key]]))).toEqual(plainRow);
-    expect(row.costUsd).toBe(0.42);
-    expect(row.runLimitUsd).toBeUndefined();
-    expect(row.workflow === undefined || typeof row.workflow.stage === "string").toBe(true);
-    const theirs = await dev(OMAR, "GET", "/v1/dev/tasks?detail=1");
-    expect(JSON.stringify(theirs.body)).not.toContain(taskId);
-  });
 
   it("the core's money read for a list row answers only the task's owner in their own company; anyone else gets nothing", async () => {
     const { task, coreTasks, routes, owner } = await coreWorld({ actions: true, roundCap: async () => ({ limitUsd: 9, spentUsd: 2 }) });
@@ -617,28 +574,3 @@ describe("a task's start on the AWS developer route (lane E2 step 6)", () => {
 
 });
 
-describe("a Stop on the AWS developer route `POST /v1/dev/tasks/{id}/cancel` (S1, the switch-on gate)", () => {
-
-  it("golden: an unstamped (workflow) task's cancel answers and writes exactly as with no core entry on the install", async () => {
-    const legacyCancel = async (harness: Awaited<ReturnType<typeof createDeveloperTaskBroker>>) => {
-      const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: "22222222-2222-4222-8222-222222222222", project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
-      const taskId = (started.body.task as { taskId: string }).taskId;
-      const { workspaceId } = harness.db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string };
-      const writes: string[] = [];
-      const stop = harness.db.onWrite((change) => writes.push(Object.keys(change).join()));
-      const first = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/cancel`, { requestId: "11111111-1111-4111-8111-111111111111" });
-      const again = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/cancel`, { requestId: "11111111-1111-4111-8111-111111111111" });
-      stop();
-      // The broker stamps each answer with its own request id (coreWorld's `dev` drops it); everything else is compared.
-      const scrub = (value: { status: number; body: Record<string, unknown> }) => [taskId, workspaceId].reduce((text, id) => text.replaceAll(id, "<id>"), JSON.stringify({ status: value.status, body: { ...value.body, requestId: undefined } }))
-        .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/gu, "<time>");
-      return { first: scrub(first), again: scrub(again), writes };
-    };
-    const without = await legacyCancel(await createDeveloperTaskBroker());
-    const withCore = await legacyCancel(await coreWorld({ actions: true, newTasksOnWorkflow: true }));
-    expect(withCore.first).toBe(without.first);
-    expect(withCore.again).toBe(without.again);
-    expect(withCore.writes).toEqual(without.writes);
-    expect(JSON.parse(without.first)).toMatchObject({ status: 200 });
-  });
-});

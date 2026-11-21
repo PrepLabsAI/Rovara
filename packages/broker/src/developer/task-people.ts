@@ -870,31 +870,3 @@ export async function taskOwnershipHandOverSteps(
   preflight([{ Put: { TableName: deps.tableName, Item: { ...peopleKey(task.taskId), ...next } } }, ...items]);
   return { items, steps: items.length };
 }
-
-/** Get-only authority for a stable, already initialized People list. Never reconciles. */
-export async function resolveTaskPeopleReadAccess(
-  deps: { get(key: { pk: string; sk: string }): Promise<unknown>; checkTaskPerson: CheckTaskPerson },
-  task: DeveloperTaskRecord,
-  developerId: string,
-): Promise<{ role: TaskRole; people: TaskPeople; proofs: TaskPersonCheck[] }> {
-  const raw = await deps.get(peopleKey(task.taskId));
-  const people = parsePeople(raw);
-  if (people === undefined || !isRecord(raw) || raw.pk !== taskPk(task.taskId)) return unavailable();
-  const owners = people.people.filter(person => person.role === "owner");
-  if (people.orphaned) return denied();
-  if (owners.length === 0) return unavailable();
-  const proofs: TaskPersonCheck[] = [];
-  for (const owner of owners) {
-    const proof = await checkedFresh(deps, task, owner.developerId);
-    proofs.push(proof);
-    if (taskPersonKindOf(proof.identity) !== "web") return unavailable();
-    if (!proof.eligible || !taskPersonPresent(proof)) return unavailable();
-  }
-  const proof = await checkedFresh(deps, task, developerId);
-  if (taskPersonKindOf(proof.identity) !== "web") return unavailable();
-  const explicit = people.people.find(person => person.developerId === developerId);
-  const role = effectiveRoleFromProof(task, explicit, proof);
-  if (role === null || !taskPersonPresent(proof)) return denied();
-  if (!isDeepStrictEqual(raw, await deps.get(peopleKey(task.taskId)))) return unavailable();
-  return { role, people, proofs: [...proofs, proof] };
-}

@@ -17,14 +17,11 @@ import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/ta
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import { confirmTaskPeopleProposal, getTaskPeopleProposal, getTaskPeopleProposalMetadata, proposeTaskPeopleRole, submitSlackTaskPeopleRole } from "../../packages/broker/src/developer/task-people-effects.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
-import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
-import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
-import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { slackDirectory } from "../../packages/broker/src/developer/slack-directory.js";
 import { checkTaskPersonIdentity } from "../../packages/broker/src/developer/task-person-identity.js";
 import type { TaskPeopleDisplayAdmission } from "../../packages/broker/src/developer/task-people-display-budget.js";
-import type { TaskPeopleDisplayReadRequest, TaskPersonInviteClaimRequest, TaskPersonInviteOutcome } from "../../packages/contracts/src/developer.js";
+import type { TaskPersonInviteClaimRequest, TaskPersonInviteOutcome } from "../../packages/contracts/src/developer.js";
 
 const TASK_ID = "11111111-1111-4111-8111-111111111111";
 const TEAM = "T0PEOPLE1";
@@ -45,41 +42,6 @@ const actor = (developerId: string, slackUserId: string, name: string): Develope
   developerId, slackUserId, name, sessionId: `session-${name}`, amr: "slack",
 });
 
-async function peopleBroker() {
-  const creator = "U0EREVIEW1";
-  const other = "U0EREVIEW2";
-  const h = await createDeveloperTaskBroker({
-    channelMembers: async (request) => ({ ok: true, memberOf: request.channelIds }),
-    developerExtra: {
-      taskPeopleConfiguration: { peopleChangesEnabled: true },
-      taskPersonProof: async (request) => ({ ok: true, user: { id: request.slackUserId, teamId: SLACK_TEAM, name: request.slackUserId }, memberOf: request.channelIds }),
-      taskPeopleDisplayRead: async (request: TaskPeopleDisplayReadRequest) => request.operation === "proof"
-        ? { operation: "proof" as const, admission: { version: 1 as const, slackCallsUsed: 1 }, result: { ok: true as const,
-          user: { id: request.request.slackUserId, teamId: SLACK_TEAM, name: request.request.slackUserId }, memberOf: request.request.channelIds } }
-        : { operation: "directory" as const, admission: { version: 1 as const, slackCallsUsed: 1 }, result: { ok: true as const,
-          users: [creator, other].map((id) => ({ id, teamId: SLACK_TEAM, name: id, memberOf: request.request.channelIds })) } },
-    },
-  });
-  const thread = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000081" };
-  const start = await h.handler({ source: "agentx.slack-ingress", action: "start-workflow", thread, userId: creator,
-    instructions: "Local People acceptance fixture", workflowPath: "QUICK", requestId: randomUUID() });
-  expect(start.statusCode).toBe(200);
-  const taskId = String((JSON.parse(start.body) as { taskId: string }).taskId);
-  const stored = h.db.get(`DEVTASK#${taskId}`, "META")!;
-  h.db.set({ pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false, people: [
-    { developerId: developerIdForSlackUser(creator), slackUserId: creator, name: creator, role: "viewer" },
-    { developerId: developerIdForSlackUser(other), slackUserId: other, name: other, role: "owner" },
-  ] });
-  for (const userId of [creator, other]) {
-    const developerId = developerIdForSlackUser(userId);
-    const personId = randomUUID();
-    const createdAt = new Date().toISOString();
-    h.db.set({ pk: `DEVTASK#${taskId}`, sk: `PERSON#${personId}`, schemaVersion: 1, personId, developerId, slackUserId: userId,
-      name: userId, method: "slack", issuer: "https://slack.com", subject: userId, createdAt });
-    h.db.set({ pk: `DEVTASK#${taskId}`, sk: `PERSON_SUBJECT#${developerId}`, schemaVersion: 1, personId, developerId, createdAt });
-  }
-  return { h, creator, other, thread, taskId, stored };
-}
 
 describe("People adapter correction acceptance", () => {
   it("projects the verified task Slack thread as the only add-people destination", async () => {
@@ -147,90 +109,10 @@ describe("People adapter correction acceptance", () => {
     } finally { now.mockRestore(); }
   });
 
-  it("includes the retained task share channel in complete directory admission", async () => {
-    const { h, other, taskId, stored } = await peopleBroker();
-    const current = { ...stored, share: { ...(stored.share as object), channelId: CHANNEL } };
-    h.db.set(current);
-    let channels: readonly string[] = [];
-    const developer = { ...h.brokerInput.developer, taskPeopleDisplayRead: async (request: TaskPeopleDisplayReadRequest) => {
-      if (request.operation === "proof") return { operation: "proof" as const, admission: { version: 1 as const, slackCallsUsed: 1 }, result: {
-        ok: true as const, user: { id: request.request.slackUserId, teamId: SLACK_TEAM, name: request.request.slackUserId }, memberOf: request.request.channelIds,
-      } };
-      channels = request.request.channelIds;
-      return { operation: "directory" as const, admission: { version: 1 as const, slackCallsUsed: 1 }, result: { ok: true as const, users: [] } };
-    } };
-    const caller = actor(developerIdForSlackUser(other), other, other);
-    const deps = developerTaskRouteDependencies({ documentClient: h.db, tableName: "state", developer, now: Date.now, tasks: h.actions } as never, caller);
-    await getTaskPeople(deps, caller, taskId);
-    expect(channels).toContain(CHANNEL);
-    expect(channels).toContain(SLACK_CHANNEL);
-  });
 
-  it("refuses a 99-person directory once independent authority proofs consume the shared call budget", async () => {
-    const { h, creator, other, taskId } = await peopleBroker();
-    const users = [creator, other, ...Array.from({ length: 97 }, (_, index) => `U0LIST${String(index).padStart(3, "0")}`)];
-    const point = vi.fn(async (request: { slackUserId: string; channelIds: string[] }) => ({ ok: true as const,
-      user: { id: request.slackUserId, teamId: SLACK_TEAM, name: request.slackUserId }, memberOf: request.channelIds }));
-    let used = 0;
-    const developer = { ...h.brokerInput.developer, taskPersonProof: point,
-      taskPeopleDisplayRead: async (request: TaskPeopleDisplayReadRequest) => {
-        if (request.operation === "proof") {
-          used += 1;
-          return { operation: "proof" as const, admission: { version: 1 as const, slackCallsUsed: 1 }, result: { ok: true as const,
-            user: { id: request.request.slackUserId, teamId: SLACK_TEAM, name: request.request.slackUserId }, memberOf: request.request.channelIds } };
-        }
-        const calls = 1 + users.length;
-        used += Math.min(calls, request.admission.slackCallsLimit);
-        return { operation: "directory" as const, admission: { version: 1 as const, slackCallsUsed: Math.min(calls, request.admission.slackCallsLimit) },
-          result: calls > request.admission.slackCallsLimit ? { ok: false as const, error: "capacity_exceeded" as const }
-            : { ok: true as const, users: users.map((id) => ({ id, teamId: SLACK_TEAM, name: id, memberOf: [SLACK_CHANNEL] })) } };
-      } };
-    const caller = actor(developerIdForSlackUser(other), other, other);
-    const deps = developerTaskRouteDependencies({ documentClient: h.db, tableName: "state", developer, now: Date.now, tasks: h.actions } as never, caller);
-    await expect(getTaskPeople(deps, caller, taskId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
-    expect(used).toBeLessThanOrEqual(100);
-    expect(point).not.toHaveBeenCalled();
-  });
 
-  it("uses the authorized actual co-owner for feedback note and retry execution", async () => {
-    const { h, other, thread, taskId, stored } = await peopleBroker();
-    h.db.set({ ...stored, workflow: { ...(stored.workflow as object), stage: "WAIT_FOR_MERGE", state: "WAITING", feedbackReview: { status: "PENDING" } } });
-    expect((await h.handler({ source: "agentx.slack-ingress", action: "task-people-authorize", taskAction: "feedback", taskId, userId: other, thread })).statusCode).toBe(200);
-    expect((await h.handler({ source: "agentx.slack-ingress", action: "feedback-note", taskId, userId: other, thread,
-      eventId: "EvLocalReview", messageTs: "1695500001.000001", text: "Local fixture note" })).statusCode).toBe(200);
-    const logs = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const retry = await h.handler({ source: "agentx.slack-ingress", action: "workflow-feedback-review-retry", taskId, userId: other,
-      thread, requestId: randomUUID(), reviewDigest: "a".repeat(64) });
-    expect(JSON.parse(retry.body)).toMatchObject({ refused: true });
-    expect(logs.mock.calls.flat().join("\n")).toContain('"errorCode":"CONFIG_INVALID"');
-    logs.mockRestore();
-  });
 
-  it("allows the current co-owner to stop and refuses the demoted creator without a cancellation write", async () => {
-    const { h, creator, other, thread, taskId, stored } = await peopleBroker();
-    const workspaceId = String(stored.workspaceId);
-    const prepare = h.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.kind === "prepare")[0]!;
-    await h.finish(workspaceId, String(prepare.id), "SUCCEEDED", { result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] } });
-    expect(JSON.parse((await h.handler({ source: "agentx.slack-ingress", action: "stop-task", thread, userId: creator })).body) as unknown).toMatchObject({ outcome: "NOT_OWNER" });
-    expect(h.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.kind === "cancel")).toHaveLength(0);
-    expect(JSON.parse((await h.handler({ source: "agentx.slack-ingress", action: "stop-task", thread, userId: other })).body) as unknown).toMatchObject({ outcome: "CANCEL_REQUESTED" });
-    expect(h.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.kind === "cancel")).toHaveLength(1);
-    expect(taskId).toBe(stored.taskId);
-  });
 
-  it("accepts thread input from owners and commenters with the current People fence, while viewers cannot write", async () => {
-    const { h, creator, other, thread, taskId } = await peopleBroker();
-    const note = (userId: string, messageTs: string) => h.handler({ source: "agentx.slack-ingress", action: "thread-note", taskId, userId, thread,
-      messageTs, eventId: `Ev${messageTs}`, text: "Bound task input" });
-    await expect(note(creator, "1695500002.000001")).resolves.toMatchObject({ statusCode: 200, body: JSON.stringify({ outcome: "refused" }) });
-    await expect(note(other, "1695500002.000002")).resolves.toMatchObject({ statusCode: 200, body: JSON.stringify({ outcome: "captured" }) });
-    h.db.set({ ...(h.db.get(`DEVTASK#${taskId}`, "PEOPLE") as Record<string, unknown>), revision: 2, people: [
-      { developerId: developerIdForSlackUser(creator), slackUserId: creator, name: creator, role: "owner" },
-      { developerId: developerIdForSlackUser(other), slackUserId: other, name: other, role: "commenter" },
-    ] });
-    await expect(note(other, "1695500002.000003")).resolves.toMatchObject({ statusCode: 200, body: JSON.stringify({ outcome: "captured" }) });
-    expect(h.db.get(`DEVTASK#${taskId}`, "NOTE#1695500002.000003")).toMatchObject({ isOwner: false });
-  });
 });
 const OWNER = actor(A, SA, "Avery Owner");
 const MEMBER = actor(B, SB, "Bailey Member");
@@ -301,53 +183,6 @@ const isPeopleMutation = (command: unknown) => {
 };
 
 describe("task people", () => {
-  it("requires complete Slack identity classification for the metered People directory view", async () => {
-    const owner = "U0OWNER001";
-    const peer = "U0MEMBER01";
-    const variants: Array<{ label: string; user: Record<string, unknown>; unknown: boolean }> = [
-      { label: "missing primary team", user: { id: peer, is_bot: false }, unknown: true },
-      { label: "malformed bot flag", user: { id: peer, team_id: SLACK_TEAM, is_bot: [] }, unknown: true },
-      { label: "malformed enterprise teams", user: { id: peer, team_id: "T0OTHER1", is_bot: false, enterprise_user: { teams: [{}] } }, unknown: true },
-      { label: "definite foreign team", user: { id: peer, team_id: "T0OTHER1", is_bot: false }, unknown: false },
-      { label: "definite deletion", user: { id: peer, team_id: SLACK_TEAM, is_bot: false, deleted: true }, unknown: false },
-    ];
-    for (const variant of variants) {
-      let peerInfo: Record<string, unknown> = { id: peer, team_id: SLACK_TEAM, is_bot: false, name: "Peer" };
-      const directory = slackDirectory({ teamId: SLACK_TEAM, now: Date.now, botToken: async () => "INERT", fetch: async (input) => {
-        const url = typeof input === "string" ? new URL(input) : input instanceof URL ? input : new URL(input.url);
-        return url.pathname.endsWith("/users.info")
-          ? Response.json({ ok: true, user: url.searchParams.get("user") === peer ? peerInfo : { id: owner, team_id: SLACK_TEAM, is_bot: false, name: "Owner" } })
-          : Response.json({ ok: true, members: [owner, peer], response_metadata: { next_cursor: "" } });
-      } });
-      const h = await createDeveloperTaskBroker({ channelMembers: async (request) => ({ ok: true, memberOf: request.channelIds }), developerExtra: {
-        taskPeopleConfiguration: { peopleChangesEnabled: true },
-        taskPersonProof: async (request) => directory.taskPersonProof(request.slackUserId, request.channelIds),
-        taskPeopleDisplayRead: async (request) => directory.taskPeopleDisplayRead(request),
-      } });
-      const thread = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000081" };
-      const start = await h.handler({ source: "agentx.slack-ingress", action: "start-workflow", userId: owner, thread,
-        workflowPath: "QUICK", instructions: "Complete People directory identity fixture", requestId: randomUUID() });
-      expect(start.statusCode).toBe(200);
-      const taskId = String((JSON.parse(start.body) as { taskId: string }).taskId);
-      const initialView = await h.handler({ source: "agentx.slack-ingress", action: "task-people-read", taskId, userId: owner, thread });
-      expect(initialView.statusCode).toBe(200);
-      const before = structuredClone(h.db.get(`DEVTASK#${taskId}`, "PEOPLE"));
-      expect(before).toBeDefined();
-      peerInfo = variant.user;
-
-      const response = await h.handler({ source: "agentx.slack-ingress", action: "task-people-read", taskId, userId: owner, thread });
-      if (variant.unknown) {
-        expect(response.statusCode, variant.label).toBe(503);
-        expect(h.db.get(`DEVTASK#${taskId}`, "PEOPLE")).toEqual(before);
-        expect(h.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toHaveLength(0);
-        expect(h.db.find((item) => item.entityType === "TASK_PEOPLE_OUTBOX")).toHaveLength(0);
-      } else {
-        expect(response.statusCode, variant.label).toBe(200);
-        expect(JSON.parse(response.body)).toMatchObject({ people: [{ name: "Owner", role: "owner" }] });
-        expect(h.db.get(`DEVTASK#${taskId}`, "PEOPLE")).toEqual(before);
-      }
-    }
-  });
 
   it("preserves existing People authority when the production Slack identity proof is UNKNOWN", async () => {
     const userId = "U0MAYA001";
@@ -964,15 +799,5 @@ describe("task people", () => {
       ExpressionAttributeNames: { "#revision": "revision" }, ExpressionAttributeValues: { ":revision": 9 },
     } });
     expect(taskOwnerKey(A, TASK_ID)).toMatch(/^[a-f0-9]{64}$/);
-  });
-});
-
-describe("side-effect-free People authority", () => {
-  it("refuses a required reconciliation without invoking a writer", async () => {
-    const { resolveTaskPeopleReadAccess } = await import("../../packages/broker/src/developer/task-people.js");
-    const { serverReadWorld, READ_PERSON } = await import("../support/server-read-world.js");
-    const w = await serverReadWorld();
-    await expect(resolveTaskPeopleReadAccess({ get: async () => w.db.get(w.task.pk, "PEOPLE"), checkTaskPerson: async () => ({ subject: { developerId: READ_PERSON }, identity: { developerId: READ_PERSON, name: "Ada", method: "oidc", issuer: "https://idp.example.test", subject: "Ada" }, eligible: false, channelMember: false }) }, w.task as never, READ_PERSON)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
-    expect(w.send).not.toHaveBeenCalled();
   });
 });

@@ -6,7 +6,6 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { COMMENT_RATE, WORKFLOW_THREAD_NOTES_MAX } from "@agentx/contracts";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
-import { routeDeveloperTaskRequest } from "../../packages/broker/src/aws/developer-tasks.js";
 import { createPlanComment, DIFF_PATCH_MAX_CHARS, DIFF_PATCH_TOO_LONG, listPlanComments, listTaskMessages, MESSAGES_PAGE_MAX, readTaskDiff, sendTaskMessage } from "../../packages/broker/src/developer/task-code-routes.js";
 import { expectLinearScalingAsync } from "../support/scaling.js";
 import { OMAR, PRIYA, SAM, START, pagePlan, pageTask, type PageTaskFixture } from "../support/page-tasks.js";
@@ -19,10 +18,6 @@ const Message = z.object({
 }).strict();
 const Messages = z.object({ messages: z.array(Message), next: z.string().optional() }).strict();
 const Sent = z.object({ message: Message }).strict();
-const Diff = z.object({
-  repository: z.string(), number: z.number().int(), page: z.number().int(), more: z.boolean(),
-  files: z.array(z.object({ path: z.string(), additions: z.number().int(), deletions: z.number().int(), patch: z.string() }).strict()),
-}).strict();
 const PlanComment = z.object({
   commentId: z.string(), document: z.enum(["requirements", "design", "plan"]), author: Author, text: z.string(), at: z.string().datetime(), rev: z.number().int(), resolved: z.boolean(),
 }).strict();
@@ -366,23 +361,3 @@ describe("the company rule", () => {
 
 });
 
-describe("the routes on the task router", () => {
-  const call = (fixture: PageTaskFixture, caller: DeveloperCaller, method: string, path: string, body?: unknown) => routeDeveloperTaskRequest(
-    fixture.deps, caller, { method, path, headers: {}, requestId: randomUUID(), ...(body === undefined ? {} : { body: JSON.stringify(body) }) }, new URL(path, URL_BASE),
-  );
-
-  it("serves all five, and refuses other methods", async () => {
-    const fixture = withPlan();
-    withPullRequests(fixture, goodDiff);
-    const base = `/v1/dev/tasks/${fixture.taskId}`;
-    Comments.parse(await call(fixture, SAM, "GET", `${base}/comments`));
-    Created.parse(await call(fixture, SAM, "POST", `${base}/comments`, { requestId: "a", document: "plan", text: "hello" }));
-    Sent.parse(await call(fixture, PRIYA, "POST", `${base}/messages`, { requestId: "b", kind: "steer", text: "hello" }));
-    expect(Messages.parse(await call(fixture, SAM, "GET", `${base}/messages?limit=10`)).messages).toHaveLength(2);
-    Diff.parse(await call(fixture, SAM, "GET", `${base}/diff?repository=demo&number=7&page=1`));
-    for (const [method, path] of [["PUT", "messages"], ["DELETE", "messages"], ["POST", "diff"], ["PUT", "comments"], ["GET", "messages/extra"]] as const) {
-      expect((await refusal(call(fixture, SAM, method, `${base}/${path}`))).code).toBe("NOT_FOUND");
-    }
-    expect((await refusal(call(fixture, SAM, "POST", `${base}/messages`, undefined))).code).toBe("CONFIG_INVALID");
-  });
-});

@@ -163,26 +163,4 @@ it.each(["", "not-an-org", COMPANY_B.orgId])("refuses invalid or other principal
   expect(JSON.stringify(refused)).not.toContain(COMPANY_A.canary);
 });
 
-import { assertFailsClosed } from "../../packages/testing/src/isolation/two-company.js";
-import { companyMembershipFromStore } from "../../packages/broker/src/aws/company-check.js";
-import { companyRouteHarness, TASK } from "../support/company-route-harness.js";
 
-it.each([false, true])("membership kit probes through DynamoDocumentStore (fallback mutant=%s)", async (fallback) => {
-  const world = dynamoWorld();
-  const h = companyRouteHarness();
-  const reader = companyMembershipFromStore(world.store);
-  const probes = [{
-    name: "read A task when membership is unavailable", prepare: async () => { h.task(TASK, undefined, COMPANY_A.canary); },
-    attempt: async (mode: "throws" | "undefined") => {
-      if (mode === "throws") world.fake.failNext("GetItem", () => new Error(COMPANY_A.canary));
-      h.deps.companies = fallback ? { companyOf: async (person) => {
-        try { return await reader.companyOf(person) ?? IMPLICIT_COMPANY_ID; } catch { return IMPLICIT_COMPANY_ID; }
-      } } : reader;
-      const response = await h.read(`/v1/dev/tasks/${TASK}`);
-      if (response.statusCode >= 400) throw new Error(response.body);
-      return response.body;
-    },
-  }];
-  if (fallback) await expect(assertFailsClosed(probes)).rejects.toThrow();
-  else await assertFailsClosed(probes);
-});

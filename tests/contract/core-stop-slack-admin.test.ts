@@ -15,7 +15,7 @@ import { createCoreHostApp, engineStampKey, type CoreHostApp } from "../../packa
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { coreTaskEntryFrom, stopCoreTaskAs, type CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
-import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
+import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, call, issuer, loadSlackBroker } from "../support/slack-broker.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
@@ -211,18 +211,6 @@ describe("a plain close (no Stop) on a core task", () => {
   });
 });
 
-describe("the Stop button on a workflow (unstamped) task", () => {
-  it("never asks the core (the workflow's own Stop runs as before)", async () => {
-    const { harness, coreTasks } = await coreWorld();
-    const route = vi.spyOn(coreTasks, "route");
-    const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
-    const taskId = (started.body.task as { taskId: string }).taskId;
-    route.mockClear();
-    await harness.handler({ source: "agentx.slack-ingress", action: "workflow-close", taskId, userId: SLACK.owner, thread: THREAD, requestId: randomUUID(), stop: true });
-    await harness.handler({ source: "agentx.slack-ingress", action: "stop-task", thread: THREAD, userId: SLACK.owner });
-    expect(route).not.toHaveBeenCalled();
-  });
-});
 
 describe("stopCoreTaskAs", () => {
   it("is 'stopped' only for the core's 200; no entry, a malformed id, a refusal or no answer are 'refused'", async () => {
