@@ -1,5 +1,5 @@
 // Spec 048 FR-038 and SC-002: a sign-in a child process asks for is on the page, not only in the log.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { realCommandRunner } from "../../packages/cli/src/deploy/commands.js";
 import { awsSignInCard } from "../../packages/cli/src/init/ui/cards.js";
 import { childActionWatcher, type ChildAction } from "../../packages/cli/src/init/ui/child-actions.js";
@@ -31,10 +31,10 @@ describe("the child action watcher", () => {
     const seen: ChildAction[] = [];
     const watcher = childActionWatcher((action) => seen.push(action));
     const runner = realCommandRunner({ write: (text: string) => { watcher.feed(text); } });
-    const script = `process.stderr.write(${JSON.stringify(DEVICE)}); setTimeout(() => {}, 200);`;
+    const script = `process.stderr.write(${JSON.stringify(DEVICE)}); setTimeout(() => {}, 3000);`;
     const running = runner.run(process.execPath, ["-e", script], { cwd: process.cwd(), display: "aws sso login" });
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 150));
-    expect(seen.at(-1)?.code).toBe("WXYZ-ABCD");
+    // Seen while the child still runs (it stays 3 s): polled, not a fixed wait, so a busy machine's slow child start does not fail it.
+    await vi.waitFor(() => { expect(seen.at(-1)?.code).toBe("WXYZ-ABCD"); }, { timeout: 2_500, interval: 20 });
     await running;
   });
 });

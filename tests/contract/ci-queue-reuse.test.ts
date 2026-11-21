@@ -73,6 +73,9 @@ describe("the merge queue's reuse of a pull request's pass (findQueueReuse)", ()
 
   it("reads the pull request from the queue's branch name only", () => {
     expect(queuePullRequest(HEAD_REF)).toBe(42);
+    // #1295: code/next has a merge queue too.
+    expect(queuePullRequest(`refs/heads/gh-readonly-queue/code/next/pr-42-${PR_HEAD}`)).toBe(42);
+    expect(queuePullRequest(`refs/heads/gh-readonly-queue/code/other/pr-42-${PR_HEAD}`)).toBeUndefined();
     expect(queuePullRequest(`refs/heads/gh-readonly-queue/mainline/pr-0-${PR_HEAD}`)).toBeUndefined();
     expect(queuePullRequest(`gh-readonly-queue/mainline/pr-42-${PR_HEAD}`)).toBeUndefined();
   });

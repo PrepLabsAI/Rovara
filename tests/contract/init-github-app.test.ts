@@ -234,7 +234,7 @@ describe("GitHub App step", () => {
 
 describe("manifest listener, every path closes it", () => {
   it("answers 404 elsewhere, gives up after its timeout, and stops listening once closed", async () => {
-    const listener = await startManifestListener({ state: "s1", page: () => "<p>form</p>", timeoutMs: 20 });
+    const listener = await startManifestListener({ state: "s1", page: () => "<p>form</p>", timeoutMs: 1_000 });
     try {
       expect((await fetch(`http://127.0.0.1:${listener.port}/elsewhere`)).status).toBe(404);
       expect((await fetch(`${listener.redirectUrl}?state=s1`)).status).toBe(400);

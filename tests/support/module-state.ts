@@ -1,33 +1,22 @@
-// For the shared-module test files (vitest.config.ts, project "shared-modules") once they share modules (isolate: false, with this file as their setup file):
-// they then run one after another in one worker without fresh modules, so state a module or
-// the process keeps outlives the file that changed it. This setup file runs before every such test file. When the file ends it puts back what a fresh worker
-// would give the next one: the environment variables and working directory as the file found them, real timers, no stubbed global or environment variable,
-// no spy left on a shared module, the process-wide switches as they were, and empty merge-action slots (packages/broker/src/local/app/app.ts installs the
-// CI fix and branch sync deciders once per process; a fresh module graph has none). A file therefore leaves the process as it found it.
-import { afterAll, beforeAll, vi } from "vitest";
+// The second setup file of the shared-module test files (vitest.config.ts, project "shared-modules"; tests/support/process-state.ts runs first). These files run one after another in one worker on one module graph, so state a module keeps outlives the file that changed it. When a file ends this
+// puts the process-wide switches back as the file found them, empties the merge-action slots a local app filled (packages/broker/src/local/app/app.ts installs
+// the CI fix and branch sync deciders once per process; a fresh module graph has none), and turns the driving-test assumption off again. The switches are noted
+// once the file's imports have loaded: a shared helper that sets one when it is first loaded (tests/unit/lessons/lesson-helpers.ts turns the lessons switch on)
+// runs only once per worker, so its setting must stay for the files after it.
+import { afterAll, beforeAll } from "vitest";
 import { uninstallBranchSyncDeciders } from "../../packages/broker/src/core/branch-sync/branch-sync.js";
 import { uninstallCiFixDecider } from "../../packages/broker/src/core/ci-fix/ci-fix.js";
 import { currentAutoApplyGate, currentLearnedLessonsGate, setAutoApplyGate, setLearnedLessonsGate } from "../../packages/broker/src/lessons/policy.js";
 import { currentLessonsUsedReader, setLessonsUsedReader } from "../../packages/broker/src/lessons/used-in-pr.js";
+import { assumeDrivingTestsPassed } from "./fake-dynamodb.js";
 
-let foundEnvironment: Record<string, string | undefined> = {};
-let foundDirectory = process.cwd();
 let found: { lessonsGate: () => boolean; autoApplyGate: () => boolean; lessonsUsedReader: ReturnType<typeof currentLessonsUsedReader> } | undefined;
 
 beforeAll(() => {
-  foundEnvironment = { ...process.env };
-  foundDirectory = process.cwd();
   found = { lessonsGate: currentLearnedLessonsGate(), autoApplyGate: currentAutoApplyGate(), lessonsUsedReader: currentLessonsUsedReader() };
 });
 
 afterAll(() => {
-  vi.useRealTimers();
-  vi.unstubAllGlobals();
-  vi.unstubAllEnvs();
-  vi.restoreAllMocks();
-  for (const name of Object.keys(process.env)) if (!(name in foundEnvironment)) delete process.env[name];
-  for (const [name, value] of Object.entries(foundEnvironment)) if (value !== undefined && process.env[name] !== value) process.env[name] = value;
-  if (process.cwd() !== foundDirectory) process.chdir(foundDirectory);
   if (found !== undefined) {
     setLearnedLessonsGate(found.lessonsGate);
     setAutoApplyGate(found.autoApplyGate);
@@ -35,4 +24,6 @@ afterAll(() => {
   }
   uninstallCiFixDecider();
   uninstallBranchSyncDeciders();
+  // fake-dynamodb.ts: a file that reads every route digest as having passed its driving test turns it on for itself only.
+  assumeDrivingTestsPassed(false);
 });

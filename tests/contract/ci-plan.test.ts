@@ -239,6 +239,9 @@ describe("where the test shards run (testRunner)", () => {
     expect(testRunner({ event: "merge_group", baseRef: "mainline", sameRepo: false, labels: [URGENT_LABEL] })).toBe("codebuild");
     expect(testRunner({ event: "merge_group", baseRef: "mainline", sameRepo: false, labels: ["docs"] })).toBe("github");
   });
+  it("never sends code/next's merge-queue run to CodeBuild (#1295)", () => {
+    expect(testRunner({ event: "merge_group", baseRef: "refs/heads/code/next", sameRepo: false, labels: [URGENT_LABEL] })).toBe("github");
+  });
 });
 
 describe("a merge-queue run reads its pull request's labels (chooseTestRunner, githubIssueLabels)", () => {

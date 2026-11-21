@@ -1,6 +1,7 @@
 // Slack tasks exist only where task threads can be read (SHARED_TASKS, named environments). The legacy deployment
 // wires the broker too (for stop), and before this every top-level mention there took the task path and was refused
 // with the task-threads-off notice; its mentions are the chat agent's, as they were before Slack tasks.
+// vitest: fresh-modules (after other files in a shared worker it found the legacy chat's startWorkflow still wired; the state that carries over is not found yet.)
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { awsSlackRouterDependencies, type SlackRouterTransport } from "../../packages/broker/src/aws/slack-ingress.js";
 
