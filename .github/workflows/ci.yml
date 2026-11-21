@@ -173,6 +173,11 @@ jobs:
           if [ "$CI_EVENT" = merge_group ]; then git fetch --no-tags --depth=1 origin "$BASE_SHA"; DIFF_BASE="$BASE_SHA"; fi
           git diff --name-only "$DIFF_BASE" HEAD > "$RUNNER_TEMP/changed.txt"
           node scripts/lint-shards.ts --files "$RUNNER_TEMP/changed.txt"
+      # #1294: no file may get more complex than tests/complexity-baseline.json allows (scripts/complexity.ts check). It only parses (no type-checked
+      # program), so it reads the whole repository in a few seconds. The ranking of what to refactor is on demand: npm run complexity:report.
+      - name: "checks: complexity ratchet"
+        timeout-minutes: 5
+        run: node scripts/complexity.ts check
 
   # The release check, beside `quick` instead of after it: the packages built, the stacks synthesized, and two release builds that must be identical and
   # verify. It runs when the release area changed (always in a FULL run).
