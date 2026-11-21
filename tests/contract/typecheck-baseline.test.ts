@@ -380,7 +380,7 @@ describe("wiring", () => {
 
   it("runs the typecheck and the ratchet in CI right after the install (typecheck:all is the typecheck, then the ratchet), behind the plan's Markdown-only skip", async () => {
     const workflow = YAML.parse(await readFile(".github/workflows/ci.yml", "utf8")) as Workflow;
-    const quick = workflow.jobs.quick!;
+    const quick = workflow.jobs.typecheck!;
     const scripts = (JSON.parse(await readFile("package.json", "utf8")) as { scripts: Record<string, string> }).scripts;
     expect(scripts["typecheck:all"]).toBe(`${scripts.typecheck!} && node scripts/typecheck-baseline.ts check`);
     const install = quick.steps.findIndex((step) => step.run === "npm ci");
