@@ -3,7 +3,7 @@
 // coreEngine.modelGatewayUrl` / `coreEngine.agentModel`, and kept across upgrades. Before this they could only be set by a template overlay, which every `agentx upgrade` dropped,
 // so the core then refused work. The synthesized templates are checked in core-engine-infrastructure.test.ts ("the model gateway settings").
 import { describe, expect, it } from "vitest";
-import { BROKER_SETTINGS, BROKER_SETTING_VALUE, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PATTERN, CORE_ANSWERS_MODEL_VARIABLE, CORE_LEARNING_MODEL_MAX_LENGTH, CORE_LEARNING_MODEL_PATTERN, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_AGENT_MODEL_VARIABLE, CORE_ENGINE_VARIABLE, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_MODEL_GATEWAY_URL_VARIABLE, CORE_OFFERED_MODELS_ADMIN_PATH, isCoreAgentModelId } from "@agentx/contracts";
+import { BROKER_SETTINGS, BROKER_SETTING_VALUE, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PATTERN, CORE_ANSWERS_MODEL_VARIABLE, CORE_LEARNING_MODEL_MAX_LENGTH, CORE_LEARNING_MODEL_PATTERN, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_MODEL_GATEWAY_URL_VARIABLE, CORE_OFFERED_MODELS_ADMIN_PATH, isCoreAgentModelId } from "@agentx/contracts";
 import { hydrateBrokerEnvironment, hydrateBrokerSettings } from "../../packages/broker/src/aws/broker-environment.js";
 import { gatewayModelKeysModules, readGatewayModelAccess } from "../../packages/broker/src/core-host/gateway-model-access.js";
 import { runConfigGet, runConfigList, runConfigSet } from "../../packages/cli/src/config/commands.js";
@@ -33,7 +33,6 @@ describe("the broker reads the packed settings back", () => {
   it("has the packed codes: gw (a host, read as its https origin) and am", () => {
     expect(BROKER_SETTINGS.coreModelGateway).toEqual({ code: "gw", variable: CORE_MODEL_GATEWAY_URL_VARIABLE, httpsOrigin: true });
     expect(BROKER_SETTINGS.coreAgentModel).toEqual({ code: "am", variable: CORE_AGENT_MODEL_VARIABLE });
-    expect(BROKER_SETTINGS.coreEngine).toEqual({ code: "sw", variable: CORE_ENGINE_VARIABLE });
   });
 
   const named = (settings: string) => ({ AGENTX_SETTINGS: settings, AGENTX_NAMES: "", AGENTX_ENV: ENV, AGENTX_ACCOUNT_ID: "123456789012", AWS_REGION: "us-west-2" }) as Record<string, string | undefined>;

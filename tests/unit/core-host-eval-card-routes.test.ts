@@ -28,7 +28,7 @@ const definition = (name: string): ProjectDefinition => ({
   repositories: [{ name: "web", url: "https://github.com/acme/web.git", path: "repo/web", defaultBranch: "main", credentialRef: "host-app" }],
 });
 const appOver = (world: FakeWorld): CoreHostApp => createCoreHostApp({
-  env: { ROVARA_CORE_ENGINE: "on" }, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
+  modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
   runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: HONEST_CI }),
 });
 async function register(world: FakeWorld, companyId: string, name: string): Promise<void> {

@@ -29,7 +29,7 @@ async function setup(roles: Record<string, "view" | "manage"> = {}, withAnswers 
   }
   const services = () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } });
   const app = createCoreHostApp({
-    env: { ROVARA_CORE_ENGINE: "on" }, modules: fake.modules, context: () => fake.context(), nowMs: () => fake.clock.now,
+    modules: fake.modules, context: () => fake.context(), nowMs: () => fake.clock.now,
     runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(fake.clock.now), log: () => undefined, services, ciReporting: { honest: true as const, ciMode: () => "their_ci_fix" as const } }),
   });
   const calls: string[] = [];
@@ -80,7 +80,7 @@ describe("the in-process Slack answer", () => {
 
   it("an answer that is not set up carries no button and no attached context", async () => {
     const w = await setup({ "alpha/dev-ada": "view" });
-    const bare = createCoreDevRoutes({ app: createCoreHostApp({ env: { ROVARA_CORE_ENGINE: "on" }, modules: w.fake.modules, context: () => w.fake.context(), nowMs: () => w.fake.clock.now,
+    const bare = createCoreDevRoutes({ app: createCoreHostApp({ modules: w.fake.modules, context: () => w.fake.context(), nowMs: () => w.fake.clock.now,
       runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(w.fake.clock.now), log: () => undefined, services: () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } }), ciReporting: { honest: true as const, ciMode: () => "their_ci_fix" as const } }) }),
       companyOf: async () => undefined,
       wiring: () => ({ ...WIRED, answers: { standing: async () => ({ access: "view" as const }), repositories: async () => ({ handles: handles([]), names: ["web"] }) } }) });

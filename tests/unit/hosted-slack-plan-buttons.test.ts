@@ -127,7 +127,7 @@ async function world(options: { kind?: Kind; post?: boolean; withChat?: boolean 
     await fake.store.put({ item: { ...orgProjectCatalogKey(companyId, PROJECT.name), entityType: "PROJECT_CATALOG", latestRevision: PROJECT.revision } });
   }
   const app = createCoreHostApp({
-    env: { ROVARA_CORE_ENGINE: "on" }, modules: fake.modules, context: () => fake.context(), nowMs: () => fake.clock.now,
+    modules: fake.modules, context: () => fake.context(), nowMs: () => fake.clock.now,
     runtime: (_registry, companyId) => ({
       callbackSigningKey: Buffer.alloc(32, 7), access: hostedTaskAccess({ companyId, membershipOf: people.membershipOf, projectGrant: async () => true }),
       repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(fake.clock.now), log: () => undefined,

@@ -90,7 +90,7 @@ describe("the hosted broker's core root and how we work", () => {
     const t = tables([member("dev-a", A), member("dev-b", B), grant("dev-a", "payments"), grant("dev-b", "payments"), grant("dev-b", "b-only"), grant("dev-a", "b-only"),
       saved(A, "payments", A_RULES), saved(B, "payments", { ...DEFAULT_CODE_SETTINGS, allowSelfApproval: false, mergeMethod: "squash", codeReviewers: ["only-b-reviewer"], revision: 1 })]);
     const root = createBrokerCoreRoot({
-      env: { ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all" },
+      env: {},
       documentClient: t.client, stateTableName: STATE, signInTableName: SIGN_IN, callbackSigningKey: secret.toString(), repositoryGrantKey: secret,
       codeModules: () => ({}) as never, repositoryCredential: async () => { throw new Error("unused"); }, origin: () => "https://api.example", log: () => undefined,
       now: () => new Date(world.clock.now), ciReporting: { honest: true, ciMode: async () => "sandbox_only" as const },

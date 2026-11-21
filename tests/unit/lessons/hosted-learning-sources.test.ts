@@ -11,7 +11,7 @@ import { orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, t
 import { createOwnerTaskAccess } from "../../../packages/broker/src/core/task-flow/access.js";
 import { taskKey } from "../../../packages/broker/src/core/task-flow/keys.js";
 import { localOwnerPrincipal } from "../../../packages/broker/src/ports/policy-defaults.js";
-import { buildCoreRegistry, createCoreRuntime, readCoreEngineFlags, type CoreRuntime } from "../../../packages/broker/src/core-host/index.js";
+import { CORE_ENGINE_ON, buildCoreRegistry, createCoreRuntime, type CoreRuntime } from "../../../packages/broker/src/core-host/index.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, CORE_LESSONS_VARIABLE, type CoreLessons } from "../../../packages/broker/src/core-host/lessons.js";
 import type { HostedLessonPeople } from "../../../packages/broker/src/lessons/hosted-people.js";
 import { setLearnedLessonsGate } from "../../../packages/broker/src/lessons/policy.js";
@@ -43,7 +43,7 @@ async function hostedWorld(): Promise<{ fake: FakeWorld; runtime: CoreRuntime; l
   await fake.store.put({ item: { ...projectRevisionKey(A, PROJECT.name, PROJECT.revision), entityType: "PROJECT", definition: JSON.parse(JSON.stringify(PROJECT)) as JsonValue } });
   await fake.store.put({ item: { ...orgProjectCatalogKey(A, PROJECT.name), entityType: "PROJECT_CATALOG", latestRevision: PROJECT.revision } });
   const runtime = createCoreRuntime({
-    registry, companyId: A, flags: readCoreEngineFlags({ ROVARA_CORE_ENGINE: "on" }), callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
+    registry, companyId: A, flags: CORE_ENGINE_ON, callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
     repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(fake.clock.now), log: () => undefined,
   });
   const hosts = new Map<string, CoreLessons>();

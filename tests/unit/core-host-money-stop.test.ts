@@ -26,7 +26,7 @@ const A = COMPANY_A_ID as OrgId;
 const B = COMPANY_B_ID as OrgId;
 const DAY = "2026-11-15";
 const NOW = new Date(`${DAY}T10:00:00.000Z`);
-const SETTINGS: HostedAdmissionSettings = { allowedCompanies: "all", taskCapMicros: 5_000_000, companyDayCapMicros: 25_000_000 };
+const SETTINGS: HostedAdmissionSettings = { taskCapMicros: 5_000_000, companyDayCapMicros: 25_000_000 };
 
 /** A meter that charges exactly `input` tokens' count in micros (USD), or no price for model `unpriced`. */
 const exactMeter = {
@@ -109,9 +109,8 @@ describe("the admission's gate before each model run (run.start)", () => {
     expect(await full.admission.admit({ companyId: A, idempotencyKey: "r", action: RUN_START_ACTION, subject: { type: "task", id: unheld } })).toEqual({ allowed: false, code: "company_day_cap", message: COMPANY_DAY_CAP_REACHED });
     // No task named: refused, never let through.
     expect(await w.admission.admit({ companyId: A, idempotencyKey: "r2", action: RUN_START_ACTION })).toEqual({ allowed: false, code: "spend_unknown", message: SPEND_UNKNOWN });
-    // A company off the list: refused before anything is read.
-    const listed = createHostedAdmission({ settings: { ...SETTINGS, allowedCompanies: [A] }, store: w.store, ledger: w.ledger, now: () => NOW, runStopWired: true });
-    expect((await listed.admit({ companyId: B, idempotencyKey: "r3", action: RUN_START_ACTION, subject: { type: "task", id: task } })).allowed).toBe(false);
+    // The laptop's implicit company: refused before anything is read (a deployed company has its own id).
+    expect((await w.admission.admit({ companyId: IMPLICIT_COMPANY_ID, idempotencyKey: "r3", action: RUN_START_ACTION, subject: { type: "task", id: task } })).allowed).toBe(false);
   });
 });
 
@@ -129,7 +128,7 @@ describe("unattended work waits for the per-run stop", () => {
     expect((await wired.admit(run)).allowed).toBe(true);
     // The registry's module follows the root's word.
     for (const runStopWired of [undefined, true] as const) {
-      const modules = hostedSecurityModules({ env: { ROVARA_CORE_ALLOWED_COMPANIES: "all" }, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined }, ...(runStopWired === undefined ? {} : { runStopWired }) });
+      const modules = hostedSecurityModules({ env: {}, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined }, ...(runStopWired === undefined ? {} : { runStopWired }) });
       const registry = await buildCoreRegistry({ modules: [coreAdapter({ point: "storage", name: "memory", owner: "test", create: () => new MemoryDocumentStore() }), ...modules], context: { installCompanyId: IMPLICIT_COMPANY_ID, now: () => NOW, env: {}, clients: {}, log: () => undefined }, areas: [] });
       expect(registry.require("admission").enforcesCost).toBe(runStopWired === true);
     }
@@ -216,7 +215,7 @@ describe("the run is stopped as its usage is booked (the broker root's wiring an
 
   async function root(companyId: OrgId) {
     const store = new MemoryDocumentStore();
-    const modules = hostedSecurityModules({ env: { ROVARA_CORE_ALLOWED_COMPANIES: "all" }, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined }, runStopWired: true });
+    const modules = hostedSecurityModules({ env: {}, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined }, runStopWired: true });
     const registry = await buildCoreRegistry({
       modules: [coreAdapter({ point: "storage", name: "memory", owner: "test", create: () => store }), coreAdapter({ point: "metering", name: "exact", owner: "test", create: () => exactMeter }), ...modules.filter((module) => module.point !== "metering")],
       context: { installCompanyId: IMPLICIT_COMPANY_ID, now: () => NOW, env: {}, clients: {}, log: () => undefined }, areas: [],

@@ -46,42 +46,14 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "on",
       ],
     },
-    "CoreEngineJobsCoreEngineIsOnCBF38D40": {
+    "CoreEngineJobsCoreSystemRunsIsOn9F1B8C46": {
       "Fn::Not": [
         {
           "Fn::Equals": [
             {
-              "Ref": "CoreEngine",
+              "Ref": "CoreSystemRuns",
             },
             "off",
-          ],
-        },
-      ],
-    },
-    "CoreEngineJobsCoreSystemRunsIsOn9F1B8C46": {
-      "Fn::And": [
-        {
-          "Fn::Not": [
-            {
-              "Fn::Equals": [
-                {
-                  "Ref": "CoreEngine",
-                },
-                "off",
-              ],
-            },
-          ],
-        },
-        {
-          "Fn::Not": [
-            {
-              "Fn::Equals": [
-                {
-                  "Ref": "CoreSystemRuns",
-                },
-                "off",
-              ],
-            },
           ],
         },
       ],
@@ -421,13 +393,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Description": "Core engine per-company agent model choice (setup's AI and spending model picker): off (the default; every company runs the agent model) or on",
       "Type": "String",
     },
-    "CoreAllowedCompanies": {
-      "AllowedPattern": "^(none|all|org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$",
-      "Default": "none",
-      "Description": "Core engine admission: none (safe default), all, or up to two company ids",
-      "MaxLength": 64,
-      "Type": "String",
-    },
     "CoreAnswersModel": {
       "AllowedPattern": "^(claude-[a-z0-9][a-z0-9.-]{0,31})?$",
       "Default": "",
@@ -463,13 +428,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Default": "25",
       "Description": "Core engine per-company UTC-day cap in whole USD, from 1 to 1000",
       "MaxLength": 4,
-      "Type": "String",
-    },
-    "CoreEngine": {
-      "AllowedPattern": "^(off|on|drain|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$",
-      "Default": "off",
-      "Description": "off: every new task runs the spec 056 workflow (the default); on: new tasks of every company start on the core engine; on:<company id>[:<company id>]: only those companies' new tasks do; drain: no new task starts on the core and its running tasks finish there",
-      "MaxLength": 64,
       "Type": "String",
     },
     "CoreLearningModel": {
@@ -960,10 +918,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                   {
                     "Ref": "CoreAnswersModel",
                   },
-                  ",ac=",
-                  {
-                    "Ref": "CoreAllowedCompanies",
-                  },
                   ",ae=",
                   {
                     "Ref": "CoreAttentionEmail",
@@ -1051,10 +1005,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                   ",sv=",
                   {
                     "Ref": "SavedEnvironments",
-                  },
-                  ",sw=",
-                  {
-                    "Ref": "CoreEngine",
                   },
                   ",sy=",
                   {
@@ -4364,7 +4314,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "AWS::CloudWatch::Alarm",
     },
     "CoreEngineJobsDispatcherCorePolicy1A9E3DBB": {
-      "Condition": "CoreEngineJobsCoreEngineIsOnCBF38D40",
       "Properties": {
         "PolicyDocument": {
           "Statement": [
@@ -4402,13 +4351,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       ],
       "Properties": {
         "BatchSize": 1,
-        "Enabled": {
-          "Fn::If": [
-            "CoreEngineJobsCoreEngineIsOnCBF38D40",
-            true,
-            false,
-          ],
-        },
+        "Enabled": true,
         "EventSourceArn": {
           "Fn::GetAtt": [
             "CoreEngineJobsQueue9C998495",
@@ -4491,13 +4434,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
           "Ref": "CoreEngineJobsScheduleGroupABAD63AF",
         },
         "ScheduleExpression": "rate(15 minutes)",
-        "State": {
-          "Fn::If": [
-            "CoreEngineJobsCoreEngineIsOnCBF38D40",
-            "ENABLED",
-            "DISABLED",
-          ],
-        },
+        "State": "ENABLED",
         "Target": {
           "Arn": {
             "Fn::GetAtt": [
@@ -4530,13 +4467,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
           "Ref": "CoreEngineJobsScheduleGroupABAD63AF",
         },
         "ScheduleExpression": "rate(1 minute)",
-        "State": {
-          "Fn::If": [
-            "CoreEngineJobsCoreEngineIsOnCBF38D40",
-            "ENABLED",
-            "DISABLED",
-          ],
-        },
+        "State": "ENABLED",
         "Target": {
           "Arn": {
             "Fn::GetAtt": [
@@ -4569,13 +4500,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
           "Ref": "CoreEngineJobsScheduleGroupABAD63AF",
         },
         "ScheduleExpression": "rate(1 minute)",
-        "State": {
-          "Fn::If": [
-            "CoreEngineJobsCoreEngineIsOnCBF38D40",
-            "ENABLED",
-            "DISABLED",
-          ],
-        },
+        "State": "ENABLED",
         "Target": {
           "Arn": {
             "Fn::GetAtt": [
@@ -4608,13 +4533,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
           "Ref": "CoreEngineJobsScheduleGroupABAD63AF",
         },
         "ScheduleExpression": "rate(1 minute)",
-        "State": {
-          "Fn::If": [
-            "CoreEngineJobsCoreEngineIsOnCBF38D40",
-            "ENABLED",
-            "DISABLED",
-          ],
-        },
+        "State": "ENABLED",
         "Target": {
           "Arn": {
             "Fn::GetAtt": [
@@ -4647,13 +4566,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
           "Ref": "CoreEngineJobsScheduleGroupABAD63AF",
         },
         "ScheduleExpression": "rate(5 minutes)",
-        "State": {
-          "Fn::If": [
-            "CoreEngineJobsCoreEngineIsOnCBF38D40",
-            "ENABLED",
-            "DISABLED",
-          ],
-        },
+        "State": "ENABLED",
         "Target": {
           "Arn": {
             "Fn::GetAtt": [
@@ -4686,13 +4599,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
           "Ref": "CoreEngineJobsScheduleGroupABAD63AF",
         },
         "ScheduleExpression": "rate(1 minute)",
-        "State": {
-          "Fn::If": [
-            "CoreEngineJobsCoreEngineIsOnCBF38D40",
-            "ENABLED",
-            "DISABLED",
-          ],
-        },
+        "State": "ENABLED",
         "Target": {
           "Arn": {
             "Fn::GetAtt": [
@@ -4725,13 +4632,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
           "Ref": "CoreEngineJobsScheduleGroupABAD63AF",
         },
         "ScheduleExpression": "rate(5 minutes)",
-        "State": {
-          "Fn::If": [
-            "CoreEngineJobsCoreEngineIsOnCBF38D40",
-            "ENABLED",
-            "DISABLED",
-          ],
-        },
+        "State": "ENABLED",
         "Target": {
           "Arn": {
             "Fn::GetAtt": [
@@ -4764,13 +4665,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
           "Ref": "CoreEngineJobsScheduleGroupABAD63AF",
         },
         "ScheduleExpression": "rate(1 minute)",
-        "State": {
-          "Fn::If": [
-            "CoreEngineJobsCoreEngineIsOnCBF38D40",
-            "ENABLED",
-            "DISABLED",
-          ],
-        },
+        "State": "ENABLED",
         "Target": {
           "Arn": {
             "Fn::GetAtt": [
@@ -4803,13 +4698,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
           "Ref": "CoreEngineJobsScheduleGroupABAD63AF",
         },
         "ScheduleExpression": "rate(15 minutes)",
-        "State": {
-          "Fn::If": [
-            "CoreEngineJobsCoreEngineIsOnCBF38D40",
-            "ENABLED",
-            "DISABLED",
-          ],
-        },
+        "State": "ENABLED",
         "Target": {
           "Arn": {
             "Fn::GetAtt": [
@@ -4842,13 +4731,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
           "Ref": "CoreEngineJobsScheduleGroupABAD63AF",
         },
         "ScheduleExpression": "rate(1 minute)",
-        "State": {
-          "Fn::If": [
-            "CoreEngineJobsCoreEngineIsOnCBF38D40",
-            "ENABLED",
-            "DISABLED",
-          ],
-        },
+        "State": "ENABLED",
         "Target": {
           "Arn": {
             "Fn::GetAtt": [
@@ -4881,13 +4764,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
           "Ref": "CoreEngineJobsScheduleGroupABAD63AF",
         },
         "ScheduleExpression": "rate(5 minutes)",
-        "State": {
-          "Fn::If": [
-            "CoreEngineJobsCoreEngineIsOnCBF38D40",
-            "ENABLED",
-            "DISABLED",
-          ],
-        },
+        "State": "ENABLED",
         "Target": {
           "Arn": {
             "Fn::GetAtt": [
@@ -7071,11 +6948,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               "Fn::Join": [
                 "",
                 [
-                  "ac=",
-                  {
-                    "Ref": "CoreAllowedCompanies",
-                  },
-                  ",am=",
+                  "am=",
                   {
                     "Ref": "CoreAgentModel",
                   },
@@ -7117,13 +6990,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             "ARTIFACT_BUCKET_NAME": {
               "Ref": "Artifacts82DD59A1",
             },
-            "CALLBACK_SIGNING_KEY_SECRET_ID": {
-              "Fn::If": [
-                "CoreEngineJobsCoreEngineIsOnCBF38D40",
-                "agentx/production/callback-key",
-                "",
-              ],
-            },
+            "CALLBACK_SIGNING_KEY_SECRET_ID": "agentx/production/callback-key",
             "CORE_DISPATCH_DEAD_LETTER_URL": {
               "Ref": "CoreEngineJobsDeadLetterQueue4163BB61",
             },
@@ -7174,9 +7041,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             },
             "PROVISIONER_ARN": {
               "Ref": "SessionsProvisioner9C44055B",
-            },
-            "ROVARA_CORE_ENGINE": {
-              "Ref": "CoreEngine",
             },
             "ROVARA_POLICY_HOOK": {
               "Ref": "CorePolicyHook",

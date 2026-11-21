@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { orgProjectCatalogKey, projectRevisionKey, teamRecordPk, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { buildCoreRegistry, createCoreRuntime, readCoreEngineFlags } from "../../packages/broker/src/core-host/index.js";
+import { CORE_ENGINE_ON, buildCoreRegistry, createCoreRuntime } from "../../packages/broker/src/core-host/index.js";
 import { createCoreLessons, type CoreLessons } from "../../packages/broker/src/core-host/lessons.js";
 import { attachCoreTeamRecord, erasePersonTeamRecord, hostedEraseLearning } from "../../packages/broker/src/core-host/team-record.js";
 import type { HostedLessonPeople } from "../../packages/broker/src/lessons/hosted-people.js";
@@ -33,7 +33,7 @@ async function setup(world: FakeWorld) {
     await world.store.put({ item: { ...projectRevisionKey(companyId, PROJECT.name, PROJECT.revision), entityType: "PROJECT", definition: JSON.parse(JSON.stringify(PROJECT)) as JsonValue } });
     await world.store.put({ item: { ...orgProjectCatalogKey(companyId, PROJECT.name), entityType: "PROJECT_CATALOG", latestRevision: PROJECT.revision } });
     const runtime = createCoreRuntime({
-      registry, companyId, flags: readCoreEngineFlags({ ROVARA_CORE_ENGINE: "on" }), callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
+      registry, companyId, flags: CORE_ENGINE_ON, callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
       repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined,
     });
     const lessons = createCoreLessons({ flow: runtime.flow, registry, companyId, lessonsSwitch: { mode: "on" }, people: everyoneIsMember, hostFor: async () => undefined, now: () => world.clock.now })!;

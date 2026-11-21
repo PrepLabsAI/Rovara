@@ -19,7 +19,7 @@ const TASK = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
 const TASK_2 = "11111111-2222-4333-8444-555555555555";
 const DAY = "2026-11-15";
 const NOW = new Date(`${DAY}T10:00:00.000Z`);
-const SETTINGS: HostedAdmissionSettings = { allowedCompanies: "all", taskCapMicros: 5_000_000, companyDayCapMicros: 25_000_000 };
+const SETTINGS: HostedAdmissionSettings = { taskCapMicros: 5_000_000, companyDayCapMicros: 25_000_000 };
 
 /** A meter that charges exactly `input` tokens' count in micros (USD), or no price for model `unpriced`. */
 const exactMeter = {
@@ -53,7 +53,7 @@ const reservationOf = (staged: { decision: { allowed: boolean; reservationId?: s
 const dollar = (n: number): AdmissionRequest => ({ companyId: ORG, idempotencyKey: "k", action: "model.call", estimate: { cost: { micros: n * 1_000_000, currency: "USD" } } });
 
 runAdmissionConformance("hosted admission (held day cap, lane L8)", {
-  create: async () => setup({ allowedCompanies: [ORG], taskCapMicros: 5_000_000, companyDayCapMicros: 5_000_000 }).admission,
+  create: async () => setup({ taskCapMicros: 5_000_000, companyDayCapMicros: 5_000_000 }).admission,
   admissible: dollar(1),
   refused: { ...dollar(6), idempotencyKey: "too-much" },
   enforcesCost: true,

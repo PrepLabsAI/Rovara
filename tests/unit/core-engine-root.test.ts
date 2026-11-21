@@ -51,69 +51,34 @@ function rootInputs(env: NodeJS.ProcessEnv, client: { send(command: unknown): Pr
   };
 }
 
-it("binds the saved image adapter on the hosted root for cleanup even while off, without assuming a role at boot", async () => {
+it("binds the saved image adapter on the hosted root for cleanup, without assuming a role at boot", async () => {
   const modules = vi.spyOn(codeModulesModule, "codeAdapterModules").mockImplementation(() => createFakeWorld().modules.filter(m => !["metering", "admission", "identity", "approvers", "audit-sink"].includes(m.point)));
   const assume = vi.fn();
   const account = "111122223333";
   const bindings = { AGENTX_ENV: "test", AWS_REGION: "us-west-2", ROVARA_SAVED_ENV_PUSH_ROLE_ARN: `arn:aws:iam::${account}:role/agentx/test/agentx-test-img-push`, ROVARA_SAVED_ENV_PULL_ROLE_ARN: `arn:aws:iam::${account}:role/agentx/test/agentx-test-img-pull`, ROVARA_SAVED_ENV_MANAGE_ROLE_ARN: `arn:aws:iam::${account}:role/agentx/test/agentx-test-img-manage`, ROVARA_SAVED_ENV_REPO_PREFIX: "rovara-env/test" };
   try {
     for (const enabled of [undefined, "0", "1"]) {
-      const env = { ...bindings, ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ...(enabled === undefined ? {} : { ROVARA_SAVED_ENVIRONMENTS: enabled }) };
+      const env = { ...bindings, ...(enabled === undefined ? {} : { ROVARA_SAVED_ENVIRONMENTS: enabled }) };
       const root = createBrokerCoreRoot(rootInputs(env, fakeTables().client, { codeModules: () => ({} as CodeModuleDeps), savedEnvSessions: { assume, listCompanyRepositories: async () => [] } }));
       const registry = await root.app.registry();
       expect(registry.names("image-registry")).toEqual(["ecr"]);
       expect(registry.require("image-registry").capabilities.workerPush).toBe(enabled === "1");
     }
-    const real = createBrokerCoreRoot(rootInputs({ ...bindings, ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_SAVED_ENVIRONMENTS: "1" }, fakeTables().client, { codeModules: () => ({} as CodeModuleDeps) }));
+    const real = createBrokerCoreRoot(rootInputs({ ...bindings, ROVARA_SAVED_ENVIRONMENTS: "1" }, fakeTables().client, { codeModules: () => ({} as CodeModuleDeps) }));
     expect((await real.app.registry()).names("image-registry")).toEqual(["ecr"]);
-    const unwired = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_SAVED_ENVIRONMENTS: "1" }, fakeTables().client, { codeModules: () => ({} as CodeModuleDeps) }));
+    const unwired = createBrokerCoreRoot(rootInputs({ ROVARA_SAVED_ENVIRONMENTS: "1" }, fakeTables().client, { codeModules: () => ({} as CodeModuleDeps) }));
     await expect(unwired.app.registry()).rejects.toThrow("saved environments are not set up on this install");
     expect(assume).not.toHaveBeenCalled();
   } finally { modules.mockRestore(); }
 });
 
-describe("the broker's core root, switch off (the default)", () => {
-  it("reads no core setting while off and not draining (CORE_ENGINE_BROKER_WIRED), and reads them when on or draining", async () => {
-    const watched = ["ROVARA_CORE_ALLOWED_COMPANIES", "ROVARA_CORE_TASK_CAP_USD", "ROVARA_CORE_COMPANY_DAY_CAP_USD", "ROVARA_CORE_LESSONS", "ROVARA_CORE_AGENT_MODEL_CHOICE"];
-    const reads = (base: NodeJS.ProcessEnv) => {
-      const seen = new Set<string>();
-      const env = new Proxy({ ...base }, { get: (target, key) => { if (typeof key === "string" && watched.includes(key)) seen.add(key); return target[key as string]; } });
-      createBrokerCoreRoot(rootInputs(env, fakeTables().client, { codeModules: () => brokerCoreModuleDeps({}) }));
-      return [...seen].sort();
-    };
-    for (const env of [{}, { ROVARA_CORE_ENGINE: "off" }, { ROVARA_CORE_ENGINE: "typo" }]) expect(reads({ ...env, ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_LESSONS: "on" }), JSON.stringify(env)).toEqual([]);
-    expect(reads({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG })).toEqual(expect.arrayContaining(["ROVARA_CORE_ALLOWED_COMPANIES", "ROVARA_CORE_LESSONS"]));
-    expect(reads({ ROVARA_CORE_ENGINE: "drain", ROVARA_CORE_ALLOWED_COMPANIES: ORG })).toEqual(expect.arrayContaining(["ROVARA_CORE_ALLOWED_COMPANIES", "ROVARA_CORE_LESSONS"]));
-    expect(reads({ ROVARA_CORE_ENGINE: "drain", ROVARA_CORE_AGENT_MODEL_CHOICE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG })).toContain("ROVARA_CORE_AGENT_MODEL_CHOICE");
-  });
-
-  it("builds nothing, reads nothing and gives the developer routes no core entry", async () => {
-    const tables = fakeTables();
-    const codeModules = vi.fn(() => brokerCoreModuleDeps({}));
-    for (const env of [{}, { ROVARA_CORE_ENGINE: "off" }, { ROVARA_CORE_ENGINE: "typo" }]) {
-      const root = createBrokerCoreRoot(rootInputs(env, tables.client, { codeModules }));
-      expect(root.coreTasks).toBeUndefined();
-      expect(root.coreApp).toBeUndefined();
-      expect(root.app.serving).toBe(false);
-      expect(await root.callback({ method: "POST", path: `/v1/internal/workspaces/${"a".repeat(8)}-aaaa-4aaa-8aaa-${"a".repeat(12)}/operations/${"b".repeat(8)}-bbbb-4bbb-8bbb-${"b".repeat(12)}/result`, headers: {} })).toBeUndefined();
-      expect(await root.handleEvent({ source: "agentx.core-job", job: "dispatch-sweep" })).toEqual({ skipped: "off" });
-      expect(await root.handleEvent({ Records: [{ eventSource: "aws:dynamodb", eventName: "INSERT", dynamodb: { NewImage: { pk: { S: `ORG#${ORG}#OUTBOX` }, outboxState: { S: "pending" } } } }] })).toEqual({ batchItemFailures: [] });
-      expect(await root.handleEvent({ source: "something-else" })).toBeUndefined();
-    }
-    expect(tables.reads).toEqual([]);
-    expect(codeModules).not.toHaveBeenCalled();
-  });
-});
-
-describe("the broker's core root, switch on", () => {
+describe("the broker's core root", () => {
   it("loads with malformed core settings and refuses core routes and jobs in fixed words", async () => {
     const cases = [
-      [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "none" }, "none"],
-      [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_TASK_CAP_USD: "1001" }, "1001"],
-      [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_COMPANY_DAY_CAP_USD: "1001" }, "1001"],
-      [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_LESSONS: "on:secret-value" }, "secret-value"],
-      [{ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_POLICY_HOOK: "secret-value" }, "secret-value"],
-      [{ ROVARA_CORE_ENGINE: "on" }, "ROVARA_CORE_ALLOWED_COMPANIES"],
+      [{ ROVARA_CORE_TASK_CAP_USD: "1001" }, "1001"],
+      [{ ROVARA_CORE_COMPANY_DAY_CAP_USD: "1001" }, "1001"],
+      [{ ROVARA_CORE_LESSONS: "on:secret-value" }, "secret-value"],
+      [{ ROVARA_POLICY_HOOK: "secret-value" }, "secret-value"],
     ] as const;
     for (const [env, privateValue] of cases) {
       const tables = fakeTables([member("dev-a", ORG, "owner")]);
@@ -132,25 +97,21 @@ describe("the broker's core root, switch on", () => {
     }
   });
 
-  it("blocks only members covered by the core switch when settings are unreadable", async () => {
+  it("blocks every member when settings are unreadable, and leaves a person with no membership to the old broker", async () => {
     const request = (method: string, path: string) => ({ method, path, headers: {}, ...(method === "POST" ? { body: "{}" } : {}) });
     const caller = (developerId: string) => ({ developerId, sessionId: "s", name: "Ada" });
     const tables = fakeTables([member("covered", ORG), member("uncovered", OTHER)]);
-    const root = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: `on:${ORG}`, ROVARA_CORE_ALLOWED_COMPANIES: "none" }, tables.client));
+    const root = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_TASK_CAP_USD: "1001" }, tables.client));
     for (const methodPath of [["POST", "/v1/dev/tasks"], ["GET", "/v1/dev/tasks/task-a"]] as const) {
       const [method, path] = methodPath;
       const blocked = await root.coreTasks?.route(request(method, path), caller("covered"));
       expect(blocked?.statusCode).toBe(503);
       expect(blocked?.body).toBe(JSON.stringify({ error: { code: "CORE_SWITCH_BLOCKED", message: "The core engine settings are not readable." } }));
-      expect(await root.coreTasks?.route(request(method, path), caller("uncovered"))).toBeUndefined();
+      expect((await root.coreTasks?.route(request(method, path), caller("uncovered")))?.statusCode).toBe(503);
       expect(await root.coreTasks?.route(request(method, path), caller("no-membership"))).toBeUndefined();
     }
 
-    const onRoot = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "none" }, tables.client));
-    const onAnswer = await onRoot.coreTasks?.route(request("POST", "/v1/dev/tasks"), caller("uncovered"));
-    expect(onAnswer?.statusCode).toBe(503);
-
-    const unreadableMembership = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: `on:${ORG}`, ROVARA_CORE_ALLOWED_COMPANIES: "none" }, { send: async () => { throw new Error("dynamo down"); } }));
+    const unreadableMembership = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_TASK_CAP_USD: "1001" }, { send: async () => { throw new Error("dynamo down"); } }));
     const failedRead = await unreadableMembership.coreTasks?.route(request("POST", "/v1/dev/tasks"), caller("covered"));
     expect(failedRead?.statusCode).toBe(503);
     expect(failedRead?.body).toBe(JSON.stringify({ error: { code: "CORE_SWITCH_BLOCKED", message: "The core engine settings are not readable." } }));
@@ -159,7 +120,7 @@ describe("the broker's core root, switch on", () => {
   it("maps the signed-in developer to the core's principal from MEMBERSHIP, carrying the verified step-up and the client", async () => {
     const tables = fakeTables([member("dev-a", ORG, "admin")]);
     const seen: unknown[] = [];
-    const root = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG }, tables.client));
+    const root = createBrokerCoreRoot(rootInputs({}, tables.client));
     const answer = await root.coreTasks!.route({ method: "GET", path: "/v1/app/script-tokens", headers: {} }, { developerId: "dev-b", sessionId: "s", name: "Bo" });
     // dev-b has no membership: the core's sign-in refusal.
     expect(answer?.statusCode).toBe(401);
@@ -171,7 +132,7 @@ describe("the broker's core root, switch on", () => {
   it("gives the HTTP API its /v1/app entry (lane L12): a non-member is asked to sign in again, and a core that cannot be built answers fixed words, never the registry's", async () => {
     const tables = fakeTables([member("dev-a", ORG, "owner")]);
     const lines: Array<Record<string, unknown>> = [];
-    const root = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG }, tables.client, { log: (entry) => lines.push(entry) }));
+    const root = createBrokerCoreRoot(rootInputs({}, tables.client, { log: (entry) => lines.push(entry) }));
     expect(root.coreApp).toBeDefined();
     expect((await root.coreApp!.route({ method: "GET", path: "/v1/app/script-tokens", headers: {} }, { developerId: "dev-b", sessionId: "s", name: "Bo" }))?.statusCode).toBe(401);
     for (const request of [{ method: "GET", path: "/v1/app/script-tokens", headers: {} }, { method: "POST", path: "/v1/app/people/dev-c/erase", headers: {}, body: "{}" }]) {
@@ -204,25 +165,20 @@ describe("the broker's core root, switch on", () => {
     await expect(personStandingFromDynamo(tables.client, undefined)(ORG, "dev-a")).rejects.toThrow();
   });
 
-  it("gives the developer API its core entries only while the switch serves; off, the configuration is the very same object", () => {
+  it("gives the developer API its core entries", () => {
     const config = { issuer: "https://api.example" };
-    const off = createBrokerCoreRoot(rootInputs({}, fakeTables().client));
-    expect(withCoreRoutes(config, off)).toBe(config);
-    const on = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG }, fakeTables().client));
+    const on = createBrokerCoreRoot(rootInputs({}, fakeTables().client));
     const served = withCoreRoutes(config, on) as typeof config & { projectArchiveTakesEffect?: (companyId: string) => boolean };
     expect(served).toEqual({ issuer: "https://api.example", coreTasks: on.coreTasks, coreApp: on.coreApp, projectArchiveTakesEffect: on.projectArchiveTakesEffect });
-    // Guided onboarding PR 16: an archive takes effect only for a company whose new tasks the switch sends to the core.
+    // Guided onboarding PR 16: an archive takes effect for a company whose new tasks start on the core (every company since #1275).
     expect(served.projectArchiveTakesEffect?.(ORG)).toBe(true);
-    const forOne = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: `on:${ORG}`, ROVARA_CORE_ALLOWED_COMPANIES: ORG }, fakeTables().client));
-    expect(forOne.projectArchiveTakesEffect?.(ORG)).toBe(true);
-    expect(forOne.projectArchiveTakesEffect?.(OTHER)).toBe(false);
-    expect(off.projectArchiveTakesEffect).toBeUndefined();
+    expect(served.projectArchiveTakesEffect?.(OTHER)).toBe(true);
     expect(withCoreRoutes(config, { coreTasks: on.coreTasks, coreApp: undefined })).toEqual({ issuer: "https://api.example", coreTasks: on.coreTasks });
     expect(config).toEqual({ issuer: "https://api.example" });
   });
 
   it("refuses a start, rather than falling back, when membership cannot be read", async () => {
-    const root = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG }, { send: async () => { throw new Error("dynamo down"); } }));
+    const root = createBrokerCoreRoot(rootInputs({}, { send: async () => { throw new Error("dynamo down"); } }));
     const answer = await root.coreTasks!.route({ method: "POST", path: "/v1/dev/tasks", headers: {}, body: "{}" }, { developerId: "dev-a", sessionId: "s", name: "Ada" });
     expect(answer?.statusCode).toBe(401);
     expect(answer?.body).not.toContain("dynamo");
@@ -319,7 +275,7 @@ describe("the lessons API for the developer routes (lane LM8)", () => {
 
   it("is built with the lessons switch on and the people given; a person with no membership is asked to sign in again", async () => {
     const tables = fakeTables();
-    const root = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_LESSONS: "on" }, tables.client, { lessonsPeople: people }));
+    const root = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_LESSONS: "on" }, tables.client, { lessonsPeople: people }));
     expect(root.lessons).toBeDefined();
     await expect(root.lessons!.answer({ method: "GET", path: "/v1/dev/projects/payments/lessons", query: new URLSearchParams() }, { personId: "dev-nobody" })).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
   });
@@ -327,7 +283,7 @@ describe("the lessons API for the developer routes (lane LM8)", () => {
   it("one pilot list serves the weekly summary's sender and its settings API: a host may give it, else the lessons switch names it (L4-WK)", () => {
     const tables = fakeTables();
     const pilot = vi.fn((companyId: string) => companyId === ORG);
-    const env = { ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_LESSONS: "on" };
+    const env = { ROVARA_CORE_LESSONS: "on" };
     expect(createBrokerCoreRoot(rootInputs(env, tables.client, { lessonsPeople: people, lessonsDigestPilot: pilot })).lessons).toBeDefined();
     expect(createBrokerCoreRoot(rootInputs({ ...env, ROVARA_CORE_LESSONS: `on:${ORG}` }, tables.client, { lessonsPeople: people })).lessons).toBeDefined();
     expect(tables.reads).toEqual([]);
@@ -381,7 +337,7 @@ it("composes the broker adapters lazily and preserves the L1c builder object inc
 it("shares one resolved hosted-hook setting with the developer API and never falls back when that setting is invalid", () => {
   let reads = 0;
   const settings = { address: "https://hook.example/answer", jwks: "https://hook.example/keys", thumbprints: ["A".repeat(43)] };
-  const env: NodeJS.ProcessEnv = { ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG };
+  const env: NodeJS.ProcessEnv = {};
   Object.defineProperty(env, "ROVARA_POLICY_HOOK", { get() { reads++; return JSON.stringify(settings); } });
   const root = createBrokerCoreRoot(rootInputs(env, fakeTables().client));
   const config = withCoreRoutes({}, root) as { policyHook: NonNullable<typeof root.policyHook> };
@@ -389,7 +345,7 @@ it("shares one resolved hosted-hook setting with the developer API and never fal
   expect(config.policyHook.settings).toEqual(settings);
   expect(reads).toBe(1);
   expect(() => config.policyHook.install).toThrow("the policy hook install is unavailable");
-  const invalid = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_POLICY_HOOK: "invalid" }, fakeTables().client));
+  const invalid = createBrokerCoreRoot(rootInputs({ ROVARA_POLICY_HOOK: "invalid" }, fakeTables().client));
   const refused = withCoreRoutes({}, invalid) as { policyHook: NonNullable<typeof invalid.policyHook> };
   expect(refused.policyHook).toBeDefined();
   expect(() => refused.policyHook.settings).toThrow("the policy hook settings are not readable");

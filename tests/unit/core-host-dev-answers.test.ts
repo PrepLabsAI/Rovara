@@ -55,7 +55,7 @@ function hostedRule(world: FakeWorld, people: { coOwners: Set<string>; readers: 
 
 function appWith(world: FakeWorld, access: TaskFlowDeps["access"]): CoreHostApp {
   return createCoreHostApp({
-    env: { ROVARA_CORE_ENGINE: "on" }, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
+    modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
     runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access, repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: HONEST_CI, flowOptions: { understandFirst: true } }),
   });
 }
@@ -238,7 +238,7 @@ describe("POST /v1/app/sessions/{id}/answers needs the owner's level", () => {
     const world = createFakeWorld();
     await registerProject(world, FAKE_COMPANY);
     const app = createCoreHostApp({
-      env: { ROVARA_CORE_ENGINE: "on" }, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
+      modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
       runtime: () => ({
         callbackSigningKey: Buffer.alloc(32, 7), access: hostedRule(world, { coOwners: new Set(), readers: new Set() }), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }),
         now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: HONEST_CI, flowOptions: { understandFirst: true, startExtras: createSessionStartExtras(FAKE_COMPANY) },

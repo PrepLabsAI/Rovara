@@ -61,8 +61,6 @@ export function coreDispatchMessage(body: string): CoreDispatchMessage | undefin
 }
 
 export interface CoreDispatchHostDependencies {
-  /** The switch. Read once per batch; off (the default everywhere today) means the host takes nothing. */
-  enabled: () => boolean;
   /** The company a workspace belongs to, from its record (strongly consistent); undefined when there is none. */
   companyOfWorkspace: (workspaceId: string) => Promise<OrgId | undefined>;
   /** The core's dependencies for one company, with `queues` serving this batch's dispatch queue. Its `machines` must be that company's adapter. */
@@ -195,9 +193,8 @@ export function createCoreDispatchHost(dependencies: CoreDispatchHostDependencie
   const queueName = dependencies.dispatchQueue ?? "task-dispatch";
   const log = dependencies.log ?? ((entry: Record<string, unknown>) => { process.stderr.write(`${JSON.stringify({ component: "dispatcher", ...entry })}\n`); });
   return {
-    /** The records of a batch that are the core's, when the switch is on. Today's path must skip exactly these. */
+    /** The records of a batch that are the core's. Today's path must skip exactly these. */
     take(records: readonly CoreDispatchRecord[]): Set<string> {
-      if (!dependencies.enabled()) return new Set();
       return new Set(records.filter((record) => coreDispatchMessage(record.body) !== undefined).map((record) => record.messageId));
     },
 

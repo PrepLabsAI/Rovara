@@ -7,7 +7,7 @@ import { createFakeWorld } from "../support/core-host-fakes.js";
 
 const A: OrgId = "org_aaaaaaaaaaaaaaaaaaaa", B: OrgId = "org_bbbbbbbbbbbbbbbbbbbb";
 const TASK = "33333333-3333-4333-8333-333333333333";
-const settings = (taskCapMicros: number): HostedAdmissionSettings => ({ allowedCompanies: "all", taskCapMicros, companyDayCapMicros: 25_000_000 });
+const settings = (taskCapMicros: number): HostedAdmissionSettings => ({ taskCapMicros, companyDayCapMicros: 25_000_000 });
 
 async function seeded(project = "demo") {
   const w = createFakeWorld();

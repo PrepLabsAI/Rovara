@@ -7,7 +7,7 @@ import { KNOWLEDGE_CONTEXT_FEATURE, LEARNED_CONTEXT_FEATURE, companyScoped, proj
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { digestWeekOf, writeDigestSetting } from "../../packages/broker/src/lessons/digest-notice.js";
-import { buildCoreRegistry, createCoreRuntime, CORE_ENGINE_OFF, readCoreEngineFlags, type CoreRuntime } from "../../packages/broker/src/core-host/index.js";
+import { CORE_ENGINE_ON, buildCoreRegistry, createCoreRuntime, type CoreRuntime } from "../../packages/broker/src/core-host/index.js";
 import { createCoreLessons, erasePersonLessons, readCoreLessonsSwitch, setCoreLessonsGate, CORE_LESSONS_VARIABLE, type CoreLessons } from "../../packages/broker/src/core-host/lessons.js";
 import { createHostedLessonParts, OtherCompanyError, type HostedLessonPeople } from "../../packages/broker/src/lessons/hosted-people.js";
 import { learnedLessonsSwitchOn, setLearnedLessonsGate } from "../../packages/broker/src/lessons/policy.js";
@@ -72,7 +72,7 @@ async function companyWorld(world: FakeWorld, env: NodeJS.ProcessEnv, people: Ho
   for (const companyId of [A, B]) {
     await registerProject(world, companyId);
     const runtime = createCoreRuntime({
-      registry, companyId, flags: readCoreEngineFlags({ ROVARA_CORE_ENGINE: "on" }), callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
+      registry, companyId, flags: CORE_ENGINE_ON, callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
       repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined,
     });
     const lessons = createCoreLessons({
@@ -124,8 +124,6 @@ describe("the switch", () => {
     }
     expect(learnedLessonsSwitchOn()).toBe(false);
     expect(model.calls).toEqual([]);
-    // The core engine's own switch being off changes nothing here either.
-    expect(CORE_ENGINE_OFF.combined.mode).toBe("off");
   });
 });
 
@@ -352,7 +350,7 @@ describe("what a finished task teaches, per person", () => {
     const registry = await buildCoreRegistry({ modules: world.modules, context: world.context(), areas: ["flow", "build", "merge"] });
     await registerProject(world, A);
     const runtime = createCoreRuntime({
-      registry, companyId: A, flags: readCoreEngineFlags({ ROVARA_CORE_ENGINE: "on" }), callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
+      registry, companyId: A, flags: CORE_ENGINE_ON, callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
       repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined,
     });
     const principal = localOwnerPrincipal({ companyId: A });
@@ -391,7 +389,7 @@ describe("a findings answer's send-back, per person", () => {
     const registry = await buildCoreRegistry({ modules: world.modules, context: world.context(), areas: ["flow", "build", "merge"] });
     await registerProject(world, A);
     const runtime = createCoreRuntime({
-      registry, companyId: A, flags: readCoreEngineFlags({ ROVARA_CORE_ENGINE: "on" }), callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
+      registry, companyId: A, flags: CORE_ENGINE_ON, callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
       repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined,
     });
     const { task } = await runtime.flow.start({ principal: localOwnerPrincipal({ companyId: A }), client: "test", origin: "app" as const }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
