@@ -735,6 +735,7 @@
     "packages/contracts/src/e2e-native-recipes.ts": 134,
     "packages/contracts/src/e2e-node.ts": 58,
     "packages/contracts/src/e2e-openapi-fixture.ts": 187,
+    "packages/contracts/src/e2e-portable-source.ts": 7,
     "packages/contracts/src/e2e-runtime-capabilities.ts": 6,
     "packages/contracts/src/e2e-runtime-registration.ts": 8,
     "packages/contracts/src/e2e-safe-data.ts": 14,
