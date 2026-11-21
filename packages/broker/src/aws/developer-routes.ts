@@ -1084,6 +1084,21 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
   const refused = () => agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
   const parsed = AccessCheckRequestSchema.safeParse(jsonBody(request));
   if (!parsed.success) throw agentXError("CONFIG_INVALID", "the access check takes an optional developerId (64 hex characters) and nothing else");
+  // Share live identity records only within this request: authentication, the bounded merge walk and the Slack hint
+  // reuse the same reads. A direct identity -> person adds one read; the next request always reads afresh.
+  const client = deps.documentClient;
+  const signInTable = deps.developer.signInTableName;
+  const people = new Map<string, Promise<unknown>>();
+  deps = { ...deps, documentClient: { send(command: unknown): Promise<unknown> {
+    if (!(command instanceof GetCommand) || command.input.TableName !== signInTable || command.input.ConsistentRead !== true
+      || command.input.Key?.sk !== META || typeof command.input.Key.pk !== "string" || !command.input.Key.pk.startsWith("DEVELOPER#")) return client.send(command);
+    const id = command.input.Key.pk;
+    const prior = people.get(id);
+    if (prior !== undefined) return prior;
+    const read = client.send(command);
+    people.set(id, read);
+    return read;
+  } } };
   const authorization = request.headers.authorization;
   const basic = basicClientCredentials(authorization);
   const nowSeconds = Math.floor(deps.now() / 1000);
@@ -1106,6 +1121,14 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
     // DEC 253z: the person's own token is the one form that may answer for a person with no company yet (the web app's "create your company").
     const authenticated = await authenticateClientToken(deps, authorization, nowSeconds, { companyless: true });
     ({ developerId, administrator, signedInId } = authenticated);
+    // As at redeem/refresh: only the session's server-side identity may keep this person's seat. Any unreadable,
+    // revoked, unlinked or moved hop ends access, before reading grants or applying the host's access rules.
+    if (signedInId !== undefined) {
+      try {
+        const walk = await mergeSurvivor((id) => getSignIn(deps, `DEVELOPER#${id}`), signedInId);
+        if (walk.survivorId !== developerId) throw refused();
+      } catch { throw refused(); }
+    }
     clientId = authenticated.client.clientId;
     companyId = authenticated.companyId;
     companyless = authenticated.companyless === true;
