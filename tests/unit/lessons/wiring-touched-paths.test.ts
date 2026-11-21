@@ -6,7 +6,7 @@ import { orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, t
 import { createOwnerTaskAccess } from "../../../packages/broker/src/core/task-flow/access.js";
 import { taskKey } from "../../../packages/broker/src/core/task-flow/keys.js";
 import { localOwnerPrincipal } from "../../../packages/broker/src/ports/policy-defaults.js";
-import { buildCoreRegistry, createCoreRuntime, readCoreEngineFlags, type CoreRuntime } from "../../../packages/broker/src/core-host/index.js";
+import { CORE_ENGINE_ON, buildCoreRegistry, createCoreRuntime, type CoreRuntime } from "../../../packages/broker/src/core-host/index.js";
 import type { HostedLessonPeople } from "../../../packages/broker/src/lessons/hosted-people.js";
 import { setLearnedLessonsGate } from "../../../packages/broker/src/lessons/policy.js";
 import { lessonAreaOverlap, lessonCreditShares } from "../../../packages/broker/src/lessons/credit.js";
@@ -46,7 +46,7 @@ async function hostedWorld(companyOfTask: string = A): Promise<{ fake: FakeWorld
   await fake.store.put({ item: { ...projectRevisionKey(A, DEFINITION.name, 1), entityType: "PROJECT", definition: JSON.parse(JSON.stringify(DEFINITION)) as JsonValue } });
   await fake.store.put({ item: { ...orgProjectCatalogKey(A, DEFINITION.name), entityType: "PROJECT_CATALOG", latestRevision: 1 } });
   const runtime = createCoreRuntime({
-    registry, companyId: A, flags: readCoreEngineFlags({ ROVARA_CORE_ENGINE: "on" }), callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
+    registry, companyId: A, flags: CORE_ENGINE_ON, callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
     repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(fake.clock.now), log: () => undefined,
   });
   const { task } = await runtime.flow.start({ principal: localOwnerPrincipal({ companyId: A }), client: "test", origin: "app" as const }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });

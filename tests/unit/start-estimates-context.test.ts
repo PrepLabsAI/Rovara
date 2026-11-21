@@ -7,7 +7,7 @@ it("reads admission caps and model choices without publishing state, invoking AI
  const world = createFakeWorld(), now = () => new Date("2026-11-18T12:00:00.000Z");
  await world.store.put({ item: { ...companyDayKey(FAKE_COMPANY, "2026-11-18"), loadMicros: 4_000_000, reservedMicros: 3_000_000, usdMicros: 1_000_000, uncountedEntries: 0 } });
  const put = vi.spyOn(world.store, "put"), transact = vi.spyOn(world.store, "transact");
- const context = await hostedPreviewContext({ store: world.store, companyId: FAKE_COMPANY, project: "web", now, settings: { allowedCompanies: "all", taskCapMicros: 3_000_000, companyDayCapMicros: 5_000_000 }, projectTaskCap: async () => 2_000_000, defaultRoute: async () => ({ alias: "claude-sonnet-4-6", api: "anthropic-messages", catalog: "anthropic" }) });
+ const context = await hostedPreviewContext({ store: world.store, companyId: FAKE_COMPANY, project: "web", now, settings: { taskCapMicros: 3_000_000, companyDayCapMicros: 5_000_000 }, projectTaskCap: async () => 2_000_000, defaultRoute: async () => ({ alias: "claude-sonnet-4-6", api: "anthropic-messages", catalog: "anthropic" }) });
  const quote = await startEstimates({ store: world.store }, { orgId: FAKE_COMPANY, project: "web", request: { quoteVersion: 2 }, asOf: now().toISOString(), context });
  expect(quote.options[0].firstBindingLimit).toMatchObject({ state: "available", value: { scope: "engine_day", availableMicros: 1_000_000, blocked: true, reason: "held", requiredMicros: { state: "available", value: 2_000_000 } } });
  expect(quote.options[1].initialHoldMicros).toEqual({ state: "available", value: 2_000_000 });
@@ -18,7 +18,7 @@ it("reads admission caps and model choices without publishing state, invoking AI
 it("keeps unreadable project/day limits partial and never invents an initial hold", async () => {
  const world = createFakeWorld(), now = () => new Date("2026-11-18T12:00:00.000Z");
  await world.store.put({ item: { ...companyDayKey(FAKE_COMPANY, "2026-11-18"), loadMicros: 1, uncountedEntries: 1 } });
- const context = await hostedPreviewContext({ store: world.store, companyId: FAKE_COMPANY, project: "web", now, settings: { allowedCompanies: "all", taskCapMicros: 3_000_000, companyDayCapMicros: 5_000_000 }, projectTaskCap: async () => { throw new Error("unreadable"); }, defaultRoute: async () => undefined });
+ const context = await hostedPreviewContext({ store: world.store, companyId: FAKE_COMPANY, project: "web", now, settings: { taskCapMicros: 3_000_000, companyDayCapMicros: 5_000_000 }, projectTaskCap: async () => { throw new Error("unreadable"); }, defaultRoute: async () => undefined });
  const quote = await startEstimates({ store: world.store }, { orgId: FAKE_COMPANY, project: "web", request: { quoteVersion: 2 }, asOf: now().toISOString(), context });
  expect(quote.options[0].initialHoldMicros.state).toBe("unavailable");
  expect(quote.options[0].limitCoverage).toBe("partial");

@@ -19,7 +19,7 @@ const SECRET = "SECRET-sk-live-zzz org_leak000000000000000";
 
 function appOver(world: FakeWorld, env: NodeJS.ProcessEnv, ciReporting: unknown, extra: { services?: (flow: TaskFlow, wiring: CoreServiceWiring) => Partial<Record<CoreServiceName, CoreService>>; servedCompanies?: () => Promise<readonly string[]> } = {}): CoreHostApp {
   return createCoreHostApp({
-    env, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
+    modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
     ...(extra.servedCompanies === undefined ? {} : { servedCompanies: extra.servedCompanies }),
     runtime: () => ({
       callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
@@ -48,11 +48,11 @@ describe("the switch blockers list", () => {
 });
 
 describe("a dispatch-only root", () => {
-  const ON = { ROVARA_CORE_ENGINE: "on" } as NodeJS.ProcessEnv;
+  const ON = {} as NodeJS.ProcessEnv;
   it("is not asked for honest CI (it runs no merge tracking), while an ordinary root with the merge area on is refused", async () => {
     const world = createFakeWorld();
     const dispatchOnly = createCoreHostApp({
-      env: ON, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now, dispatchOnly: true, servedCompanies: async () => [],
+      modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now, dispatchOnly: true, servedCompanies: async () => [],
       runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined }),
     });
     expect((await dispatchOnly.runtimeFor(FAKE_COMPANY)).companyId).toBe(FAKE_COMPANY);
@@ -95,7 +95,7 @@ describe("checkedCiReporting: validated at run time, not only by the type", () =
 
 describe("the root refuses a company's runtime while a blocker stands", () => {
   it("merge on and no CI reporting wired: refused with the blocker's id and fixed words", async () => {
-    const app = appOver(createFakeWorld(), { ROVARA_CORE_ENGINE: "on" }, undefined);
+    const app = appOver(createFakeWorld(), {}, undefined);
     const error = await rejectionOf(app.runtimeFor(FAKE_COMPANY)) as CoreSwitchBlockedError;
     expect(error).toBeInstanceOf(CoreSwitchBlockedError);
     expect(error.name).toBe("CoreSwitchBlockedError");
@@ -105,14 +105,14 @@ describe("the root refuses a company's runtime while a blocker stands", () => {
   });
 
   it.each([["honest false", { honest: false, ciMode: () => "sandbox_only" }], ["honest as text", { honest: "true", ciMode: () => "sandbox_only" }], ["ciMode not a function", { honest: true, ciMode: SECRET }]])("refused when the wiring is %s, and the error names nothing it was given", async (_name, given) => {
-    const error = await rejectionOf(appOver(createFakeWorld(), { ROVARA_CORE_ENGINE: `on:${FAKE_COMPANY}` }, given).runtimeFor(FAKE_COMPANY));
+    const error = await rejectionOf(appOver(createFakeWorld(), {}, given).runtimeFor(FAKE_COMPANY));
     expect(error).toBeInstanceOf(CoreSwitchBlockedError);
     expect(error.message).not.toContain("SECRET");
   });
 
   it("without a valid reader, the services still never get 'no reader' (merge tracking's default mode): they get one that always refuses", async () => {
     const seen: Array<((task: typeof TASK) => Promise<unknown>) | undefined> = [];
-    const app = appOver(createFakeWorld(), { ROVARA_CORE_ENGINE: "on" }, { honest: false, ciMode: () => "sandbox_only" }, {
+    const app = appOver(createFakeWorld(), {}, { honest: false, ciMode: () => "sandbox_only" }, {
       services: (_flow, wiring) => { seen.push(wiring.ciMode); return ALL_SERVICES(); },
     });
     await expect(app.runtimeFor(FAKE_COMPANY)).rejects.toBeInstanceOf(CoreSwitchBlockedError);

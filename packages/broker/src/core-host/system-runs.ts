@@ -23,10 +23,9 @@ import { parseCoreSwitch, switchCovers, type CoreSwitch } from "./flags.js";
 
 export { SYSTEM_RUNS_VARIABLE };
 
-/** The flag from a function's environment. `drain` has no meaning here and reads as off. Fail closed: anything that is not exactly a switch value is off, with a problem that never echoes it. */
+/** The flag from a function's environment. Fail closed: anything that is not exactly a switch value is off, with a problem that never echoes it. */
 export function readSystemRunsSwitch(env: NodeJS.ProcessEnv = process.env): { value: CoreSwitch; problem?: string } {
   const parsed = parseCoreSwitch(env[SYSTEM_RUNS_VARIABLE]);
-  if (parsed.drain === true) return { value: { mode: "off" }, problem: "not off, on or on:<company ids> (the engine's wind-down value has no meaning for system runs)" };
   return parsed.problem === undefined ? { value: parsed.value } : { value: parsed.value, problem: parsed.problem };
 }
 

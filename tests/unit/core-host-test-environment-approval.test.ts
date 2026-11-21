@@ -106,7 +106,7 @@ async function world(options: { approval?: boolean } = {}) {
   const clock = fake.clock;
   const now = () => new Date(clock.now);
   const app: CoreHostApp = createCoreHostApp({
-    env: { ROVARA_CORE_ENGINE: "on" }, modules: fake.modules, context: () => fake.context(), nowMs: () => clock.now,
+    modules: fake.modules, context: () => fake.context(), nowMs: () => clock.now,
     runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now, log: () => undefined, services: SERVICES, ciReporting: HONEST_CI }),
   });
   const people = new Map<string, Person>();

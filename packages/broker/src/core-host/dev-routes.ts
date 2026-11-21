@@ -3,14 +3,14 @@ import { parsePreviewRequestV2, restrictPreviewV2 } from "@agentx/contracts";
 import { startEstimates, type PreviewContext } from "../core/cost/start-estimates.js";
 import { readTaskMoney } from "../core/cost/task-money.js";
 import type { TaskMoneyV1 } from "@agentx/contracts";
-// Engine host (lane E2): the core's own handlers, mountable on the deployed developer API behind the switch (`ROVARA_CORE_ENGINE`, default off).
+// Engine host (lane E2): the core's own handlers, mounted on the deployed developer API (every new task of a member company starts on the core: #1275).
 //
 // The controller decided that, once the host is deployed, these answers come from the core itself, not from adapters on the old broker:
 //   - sessions (`/v1/app/sessions...`): a session's read (the task view with its evidence), the understanding answers (`POST .../answers`), stop, retry, follow;
 //   - a task's read (`GET /v1/dev/tasks/<id>`), whose view carries the evidence kept for its checked code;
 //   - a task's proof index (`GET /v1/dev/tasks/<id>/evidence`, Cloud's Proof tab): the task read's own rule, then the items the proof page shows for the current code and its failing tests (at most ten);
-//   - a task's START (`POST /v1/dev/tasks`), only for a member whose company the switch sends NEW tasks to the core (`engineForNewTask`). Anyone else, and a person with no member company,
-//     gets `undefined`: the old broker starts the task exactly as before (lane E2 step 6). A membership read that fails refuses (the sign-in refusal), never falls back;
+//   - a task's START (`POST /v1/dev/tasks`), for a member of a company (`engineForNewTask`, always the core). A person with no member company
+//     gets `undefined`: the old broker starts the task exactly as before (lane E2 step 6; until the spec 056 workflow is removed, #1274). A membership read that fails refuses (the sign-in refusal), never falls back;
 //   - decision cards (`/v1/app/decisions`): the list, through the deployment's sources (each checks the caller's live authority). Acting on a card (approve, reject, request changes,
 //     evidence-opened) needs the signed-in person's live authority, checked by the performer (DEC 254zzz73: there is no step-up);
 //   - the owner's moves on a task already running (DECISIONS 198): `POST /v1/dev/tasks/<id>/workflow/send-back`, `.../workflow/review-findings` and `.../continue`, with the
@@ -38,7 +38,6 @@ import type { TaskMoneyV1 } from "@agentx/contracts";
 //   - A path this module does not own is `undefined` too; `/v1/local/*` (the laptop's page routes) is never served.
 //   - The caller's company comes from MEMBERSHIP (`companyOf`, R4's reader), never from a header, a query, a body or a token claim. A reader that throws or answers nothing refuses the
 //     call with the sign-in refusal; there is no fallback to the install's company.
-//   - A company the switch does not send to the core, and that holds no core task, is the old broker's (`undefined`).
 //   - A handler the deployment has not wired answers a fixed "not on the core yet" (never a laptop default: the session levels, decision authority and the playbook's code host are the
 //     deployment's).
 import { AgentXError, ON_THE_WEBSITE_MESSAGE, OrgRoleSchema, type DeveloperSignInMethod, SavedEnvPanelSchema, agentXError, orgProjectCatalogKey, type AnswerResponse, type AuditSink, type DocumentStore, type ObjectStorage, type OrgId, type OrgRole, type Principal } from "@agentx/contracts";
@@ -400,18 +399,18 @@ export interface CoreDevRoutes {
   route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined>;
   /**
    * Lead 4 J2: the smart Just answer for a Slack thread, in process (the thread is one every participant reads, so its memory is shared; the HTTP route never says so). `undefined`: the core does not serve
-   * answers for this company (switch off, or no answers wiring). Throws the answer service's own refusals (`NOT_FOUND` for no role or no project, `TOO_MANY_REQUESTS`, `RUNTIME_UNAVAILABLE`).
+   * answers for this company (no answers wiring). Throws the answer service's own refusals (`NOT_FOUND` for no role or no project, `TOO_MANY_REQUESTS`, `RUNTIME_UNAVAILABLE`).
    */
   answerForSlackThread(input: SlackThreadAnswerInput): Promise<SlackThreadAnswer | undefined>;
   /**
    * Core task web routes (Cloud #188 item 5): what one of the caller's own core tasks has cost and the limit it is held to, for the task list's detail (`GET /v1/dev/tasks?detail=1`), in process. The company is the caller's
-   * live membership's, the task must be one this caller may act on (the owner moves' rule), and the money is the owner round's own read (`taskActions.roundCap`). `undefined` for anything else (switch off, no member
+   * live membership's, the task must be one this caller may act on (the owner moves' rule), and the money is the owner round's own read (`taskActions.roundCap`). `undefined` for anything else (no member
    * company, another company's task, not theirs, no money wiring, a read that fails): the row then carries no money, never a guess.
    */
   taskMoney(caller: DeployedCaller, taskId: string): Promise<{ costUsd?: number; runLimitUsd: number; money?: TaskMoneyV1 } | undefined>;
   /**
    * Understand's round on the task list (`GET /v1/dev/tasks?detail=1`, `round`), in process: whether the core's own task read (`GET /v1/dev/tasks/{id}`: the owner, a co-owner, or a reader of its People list) would show this
-   * caller the task. The company is the caller's live membership's; the task must be one of that company's. `false` for anything else (switch off, no member company, another company's task, a script token, a malformed or
+   * caller the task. The company is the caller's live membership's; the task must be one of that company's. `false` for anything else (no member company, another company's task, a script token, a malformed or
    * missing id, a read that fails): the row then carries no round. Nothing is returned from the task here, so the list builds the round from the task record it already read.
    */
   taskReadable(caller: DeployedCaller, taskId: string): Promise<boolean>;
@@ -441,14 +440,8 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
 
   return {
     async answerForSlackThread(input) {
-      if (!options.app.serving || !ORG_ID.test(input.companyId)) return undefined;
-      let target: Mounted;
-      try {
-        target = await mount(input.companyId);
-      } catch (error) {
-        if (error instanceof Error && error.name === "CoreEngineOffError") return undefined;
-        throw error;
-      }
+      if (!ORG_ID.test(input.companyId)) return undefined;
+      const target = await mount(input.companyId);
       // Mounted by the company asked for; a runtime of another company would never be asked.
       if (target.runtime.companyId !== input.companyId || target.wiring.answers === undefined) return undefined;
       const service = hostedAnswerService({ companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.answers, now: () => nowOf(target), log: options.log });
@@ -462,7 +455,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
       return { answer, ...(context === undefined ? {} : { attach: context.text }) };
     },
     async taskMoney(caller, taskId) {
-      if (!options.app.serving || !TASK_ID.test(taskId)) return undefined;
+      if (!TASK_ID.test(taskId)) return undefined;
       try {
         const membership = await options.companyOf(caller);
         if (membership === undefined || membership === null || typeof membership.companyId !== "string" || !ORG_ID.test(membership.companyId) || caller.scriptToken !== undefined) return undefined;
@@ -483,7 +476,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
       }
     },
     async taskReadable(caller, taskId) {
-      if (!options.app.serving || !TASK_ID.test(taskId)) return false;
+      if (!TASK_ID.test(taskId)) return false;
       try {
         const membership = await options.companyOf(caller);
         if (membership === undefined || membership === null || typeof membership.companyId !== "string" || !ORG_ID.test(membership.companyId) || caller.scriptToken !== undefined) return false;
@@ -497,8 +490,6 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
       }
     },
     async route(request, caller) {
-      // Off: nothing is read and nothing answers here.
-      if (!options.app.serving) return undefined;
       const path = request.path.split("?")[0] ?? request.path;
       if (!owns(path, request.method, request.path.split("?")[1] ?? "")) return undefined;
       const starting = path === TASK_START && request.method === "POST";
@@ -519,7 +510,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
       const companyId = membership.companyId;
       // The principal the identity point vouched for must be of the member company (checked before anything is built for it); the task flow checks it again on every task read.
       if (caller.principal.companyId !== companyId) return unauthenticated();
-      // A start goes to the core only where the switch sends this company's NEW tasks there; anywhere else the old broker starts it (nothing is read or built here).
+      // A start goes to the core where the setting sends this company's NEW tasks there (every member company since #1275).
       if (starting && options.app.engineForNewTask(companyId) !== "core") return undefined;
       // Answering the agent is never a script token's either, and reads like a missing task for the same reason.
       if (caller.scriptToken !== undefined && TASK_ANSWERS.test(path)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
@@ -527,14 +518,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
       // An owner's move on a task is never a script token's, and its answer must not tell a token which task ids exist: it reads like a missing task (the boundary's own answer).
       if (caller.scriptToken !== undefined && (TASK_ACTION.test(path) || TASK_CANCEL.test(path) || TASK_PAGE_FINDINGS.test(path) || isHostedMergePath(path, request.method) || coreTaskRuleOf(path, request.method) !== undefined)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
       if (caller.scriptToken !== undefined && !TASK_READ.test(path) && scriptTokenRoute(request.method, path)?.permission !== "wiki") return errorAnswer(agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS));
-      let target: Mounted;
-      try {
-        target = await mount(companyId);
-      } catch (error) {
-        // A company the switch does not send to the core and that holds no core task stays on the old broker.
-        if (error instanceof Error && error.name === "CoreEngineOffError") return undefined;
-        throw error;
-      }
+      const target: Mounted = await mount(companyId);
       const taskCaller: TaskCaller = { principal: caller.principal, ...(caller.client === undefined ? {} : { client: caller.client }) };
       try {
         if (INBOX_PATH.test(path)) return await inboxAnswer(target.inbox, request, taskCaller); if (SESSIONS.test(path)) {

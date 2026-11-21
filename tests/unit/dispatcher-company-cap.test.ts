@@ -24,7 +24,7 @@ const NOW = new Date(`${DAY}T10:00:00.000Z`);
 const KEY_ARN = "arn:aws:kms:us-west-2:111122223333:key/00000000-0000-4000-8000-000000000001";
 const JWKS = "https://rules.example/keys";
 // The failure case of the row: the install's task cap and the project's own limit are both above the company's limit.
-const SETTINGS: HostedAdmissionSettings = { allowedCompanies: "all", taskCapMicros: 25_000_000, companyDayCapMicros: 100_000_000 };
+const SETTINGS: HostedAdmissionSettings = { taskCapMicros: 25_000_000, companyDayCapMicros: 100_000_000 };
 const hookKey = makeKey("hook");
 const installKey = makeKey("install");
 const HOOK = JSON.stringify({ address: ADDRESS, jwks: JWKS, thumbprints: [policyHookKeyThumbprint(hookKey.jwk)] });

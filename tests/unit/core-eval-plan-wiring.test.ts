@@ -83,7 +83,7 @@ async function world() {
   }));
   const key = makeKey("t".repeat(16));
   const root = createBrokerCoreRoot({
-    env: { ROVARA_CORE_ENGINE: `on:${A}:${B}`, ROVARA_CORE_ALLOWED_COMPANIES: `${A}:${B}`, ROVARA_CORE_MODEL_GATEWAY_URL: GATEWAY, ROVARA_CORE_AGENT_MODEL: "claude-sonnet-4-6" },
+    env: { ROVARA_CORE_MODEL_GATEWAY_URL: GATEWAY, ROVARA_CORE_AGENT_MODEL: "claude-sonnet-4-6" },
     documentClient: client, stateTableName: "state", signInTableName: "signin", callbackSigningKey: SIGNING, repositoryGrantKey: Buffer.alloc(32, 1),
     repositoryCredential: async () => ({ token: "fake" }), codeModules: () => ({}) as never,
     taskTokens: () => ({ signer: taskKeySigner(signerOf(key)), issuer: "https://api.example/v1/auth" }),
@@ -96,7 +96,6 @@ async function world() {
     await w.store.put({ item: { ...orgProjectCatalogKey(companyId, PROJECT), latestRevision: 1 } });
   }
   const dispatch = createCoreDispatchHost({
-    enabled: () => root.app.serving,
     companyOfWorkspace: workspaceCompanyReader(client, "state"),
     depsFor: async (companyId, queues) => {
       const flow = (await root.app.runtimeFor(companyId)).flow;

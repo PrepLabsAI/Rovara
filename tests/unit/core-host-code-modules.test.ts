@@ -73,7 +73,7 @@ describe("Code's AWS adapter modules", () => {
   it("run the core over the real DynamoDB and SQS adapters: a Quick task starts, carries its core stamp, and is read back through the wire-level table", async () => {
     const aws = awsWorld();
     const app = createCoreHostApp({
-      env: { ROVARA_CORE_ENGINE: `on:${FAKE_COMPANY}` }, modules: () => modulesWithOwed(aws), context,
+      modules: () => modulesWithOwed(aws), context,
       runtime: () => ({
         callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }),
         now: () => new Date("2026-11-15T10:00:00.000Z"), log: () => undefined,

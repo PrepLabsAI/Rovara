@@ -411,7 +411,7 @@ export class DeveloperSignIn extends Construct {
     // 0.5.18 staging stack already holds ANY /v1/app/{proxy+} under that ID. A new ID made CloudFormation create a second route
     // with the same key before its cleanup deleted the old one, and the update failed with 409 AlreadyExists.
     // Pinned by tests/unit/collision-check.test.ts; check new previews with scripts/collision-check.ts.
-    // #1148: the legacy install (production) too: the web app's project page and Inbox call /v1/app/*; the broker serves it only while CoreEngine is not off.
+    // #1148: the legacy install (production) too: the web app's project page and Inbox call /v1/app/*, which the broker's core serves.
     const coreAppRoute = tasks !== undefined ? new apigwv2.CfnRoute(this, "AppRoute", {
       apiId: props.api.ref, routeKey: CORE_APP_ROUTE_KEY, target: `integrations/${props.brokerIntegration.ref}`, authorizationType: "NONE",
     }) : undefined;

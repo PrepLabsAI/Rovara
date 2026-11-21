@@ -2,7 +2,9 @@
 
 Release owner: 9d. This document is a procedure, not evidence that staging passed. No account identifiers, credentials, private keys or tokens belong in its evidence. Keep provider keys in the existing company connection UI and token material out of logs.
 
-**HOLD:** do not enable the core switch until every step below is done. `CORE_ENGINE_BROKER_WIRED` is now true (L6, #791): the CLI accepts `on`, `on:<company>` and `drain` for `coreEngine.switch`, and with the switch `off` (not draining) the broker reads no core setting and builds nothing (tested). The release still needs the rebuilt worker image and the staging routing proof (step 8). The two-company contract and the stored-choice tests pass on #791.
+**Superseded (#1275, 2026-11-20):** the core engine switch (`CoreEngine`, `CoreAllowedCompanies`, `coreEngine.switch`) no longer exists. Every new task of a member company starts on the core engine; this procedure is kept for its history only.
+
+**HOLD (historical):** do not enable the core switch until every step below is done. `CORE_ENGINE_BROKER_WIRED` is now true (L6, #791): the CLI accepts `on`, `on:<company>` and `drain` for `coreEngine.switch`, and with the switch `off` (not draining) the broker reads no core setting and builds nothing (tested). The release still needs the rebuilt worker image and the staging routing proof (step 8). The two-company contract and the stored-choice tests pass on #791.
 
 ## Operator setup and review helpers
 

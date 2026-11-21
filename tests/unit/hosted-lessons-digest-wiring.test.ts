@@ -1,6 +1,6 @@
 // Lead 4 L4-JA56 (B5 + B6): on a deployed install the weekly lessons summary reaches the chat, and a company the lessons flag names has its scheduled jobs before its first core task. The root, registry, runtime, lessons and the
 // digest are real; only the deployment's adapters (the fake world) and the company's chat seam (`ChatThreads`, a fake with one adapter per company) are stand-ins.
-//   B5  `ROVARA_CORE_ENGINE=on` lists the install's own company and the companies holding an in-use mark. A company that `ROVARA_CORE_LESSONS=on:<id>` or `ROVARA_CORE_SYSTEM_RUNS=on:<id>` names (and no other) is listed too.
+//   B5  the core lists the install's own company and the companies holding an in-use mark. A company that `ROVARA_CORE_LESSONS=on:<id>` or `ROVARA_CORE_SYSTEM_RUNS=on:<id>` names (and no other) is listed too.
 //   B6  the summary asks the company's own chat seam for the adapter (the registry the notices read), not the raw core registry (which has no `channel` point on a deployed install). A summary that was not delivered is not marked done.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
@@ -64,7 +64,7 @@ async function setup(options: { lessons?: string; systemRuns?: string; chat?: bo
   };
   const logs: Array<Record<string, unknown>> = [];
   const root = createBrokerCoreRoot({
-    env: { ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all", ...(options.lessons === undefined ? {} : { ROVARA_CORE_LESSONS: options.lessons }), ...(options.systemRuns === undefined ? {} : { ROVARA_CORE_SYSTEM_RUNS: options.systemRuns }) },
+    env: { ...(options.lessons === undefined ? {} : { ROVARA_CORE_LESSONS: options.lessons }), ...(options.systemRuns === undefined ? {} : { ROVARA_CORE_SYSTEM_RUNS: options.systemRuns }) },
     documentClient: client, stateTableName: "state", signInTableName: "signin", callbackSigningKey: secret.toString(), repositoryGrantKey: secret,
     codeModules: () => ({}) as never, repositoryCredential: async () => { throw new Error("unused"); }, origin: () => "https://api.example", log: (entry) => { logs.push(entry); },
     now: () => new Date(world.clock.now), ciReporting: { honest: true, ciMode: async () => "sandbox_only" as const },
@@ -123,19 +123,6 @@ describe("B5: a company a lessons or system-runs flag names has its scheduled jo
     expect(listed).toEqual(expect.arrayContaining([A, B]));
   });
 
-  it("a flag cannot widen the engine: with the engine on for only company A, a company B the lessons flag names is not run", async () => {
-    const world = createFakeWorld();
-    adapters.modules = world.modules;
-    const client = { async send() { throw new Error("unused"); } };
-    const root = createBrokerCoreRoot({
-      env: { ROVARA_CORE_ENGINE: `on:${A}`, ROVARA_CORE_LESSONS: `on:${A}:${B}` }, documentClient: client, stateTableName: "state", signInTableName: "signin", callbackSigningKey: secret.toString(), repositoryGrantKey: secret,
-      codeModules: () => ({}) as never, repositoryCredential: async () => { throw new Error("unused"); }, origin: () => "https://api.example", log: () => undefined, now: () => new Date(world.clock.now),
-      ciReporting: { honest: true, ciMode: async () => "sandbox_only" as const }, services: () => Object.fromEntries(["merge-tracking", "session-sweep", "notify-deliver", "admission-hold-sweep"].map((name) => [name, { pass: async () => ({}) }])),
-      lessonsPeople: () => people(),
-    });
-    const result = (await root.app.handleScheduledJob({ source: "agentx.core-job", job: "dispatch-sweep" })) as { companies: Array<{ companyId: string }> };
-    expect(result.companies.map((entry) => entry.companyId)).toEqual([A]);
-  });
 });
 
 describe("B6: the weekly lessons summary is delivered through the company's own chat seam", () => {
