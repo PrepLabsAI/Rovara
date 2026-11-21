@@ -59,25 +59,20 @@ it("verify/mark writes only after exact comparison, explicit mark and apply", as
   expect(w.db.get(key.pk, key.sk)).toBeUndefined();
   expect(await w.run("undo-run", { dryRun: false })).toMatchObject({ ok: false });
 });
-it("undo preview counts deletes and enforces the same 99-delete boundary as apply", async () => {
-  for (const count of [99, 100]) {
+it("undo preview and apply reserve one retirement per project inside the 100-item transaction boundary", async () => {
+  for (const count of [33, 34]) {
     const w = world();
-    for (let i = 0; i < Math.floor(count / 2); i++) {
+    for (let i = 0; i < count; i++) {
       const name = `p${String(i).padStart(3, "0")}`; w.seed(name, A); await w.apply(A, [name]);
     }
-    if (count % 2 === 1) {
-      const name = "tail";
-      w.db.set({ ...orgProjectCatalogKey(A, name), entityType: "PROJECT_CATALOG", companyId: A, name, latestRevision: 1, backfillRunId: "run-a" });
-    }
-    // Two tagged deletes per full project; the optional catalog-only row reaches an odd boundary.
+    // Each project needs two content deletes and a retained META write, plus the one flag check.
     w.send.mockClear();
-    const preview = await w.run("undo-run");
-    expect(preview).toMatchObject({ ok: count <= 99, ...(count <= 99 ? { deleteCount: count } : { error: "unavailable" }), written: 0 });
+    expect(await w.run("undo-run")).toMatchObject({ ok: count === 33, ...(count === 33 ? { deleteCount: count * 2 } : { error: "unavailable" }), written: 0 });
     expect(w.send.mock.calls.every(([c]) => c.constructor.name !== "TransactWriteCommand")).toBe(true);
-    const applied = await w.run("undo-run", { dryRun: false });
-    expect(applied).toMatchObject({ ok: count <= 99, ...(count <= 99 ? { deleteCount: count } : { error: "unavailable" }) });
+    expect(await w.run("undo-run", { dryRun: false })).toMatchObject({ ok: count === 33, ...(count === 33 ? { deleteCount: count * 2 } : { error: "unavailable" }) });
   }
 });
+
 it("verify refuses extra, foreign and missing core history; undo deletes only the run's rows", async () => {
   const w = world(); w.seed("web", A); w.seed("foreign", B); await w.apply();
   await w.apply(B, ["foreign"], { runId: "run-b" });

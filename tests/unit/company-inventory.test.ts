@@ -219,7 +219,7 @@ it("pins S3 migration text and every catalog constructor caller, including all w
   // Counts pin every constructor call, not just files. Adding a writer (including to a current reader) requires review here.
   const expected: Record<string, number[]> = {
     "packages/broker/src/aws/broker.ts": [5, 3], // registration + repair dual-write corePlan in the legacy transaction; other calls read/check. DEC 254zzz80 (R2-F1 lane 1): a named company's registration reads and moves its OWN catalog pointer (snapshot read, the registration transaction's fenced Update, the duplicate path's fenced forward-only repair)
-    "packages/broker/src/aws/core-project-backfill.ts": [0, 1], // fenced L4 planner, appended atomically by registration/repair
+    "packages/broker/src/aws/core-project-backfill.ts": [0, 2], // fenced L4 planner, appended atomically by registration/repair
     "packages/broker/src/aws/admin-name-collision.ts": [1, 1], // DEC 254zzz6 D2: read-only: the legacy catalog row's company and the caller's own named company's catalog row (a name-only admin route's collision refusal); no write
     "packages/broker/src/aws/company-layout.ts": [0, 1], // DEC 254zzz80: the named company's catalog pointer read (latest revision in the core's order); no write
     "packages/broker/src/aws/company-project-names.ts": [0, 3], // L2-1: own-company name check reads + one ConditionCheck in the registration transaction; no catalog write
@@ -232,10 +232,11 @@ it("pins S3 migration text and every catalog constructor caller, including all w
     "packages/broker/src/core-host/lessons.ts": [0, 1],
     "packages/broker/src/core/e2e/local-authority.ts": [0, 1],
     "packages/broker/src/core/setup-agent/apply.ts": [0, 2], // core-only approval: condition + fenced latestRevision update
+    "packages/broker/src/core/project-incarnation.ts": [0, 1], // retention reads the existing catalogue witness; no catalogue writer
     "packages/broker/src/core/task-flow/project-source.ts": [0, 1],
     "packages/broker/src/local/app/lessons-repos.ts": [0, 1],
     "packages/broker/src/local/app/lessons.ts": [0, 1],
-    "packages/broker/src/local/app/projects.ts": [0, 2], // local-only company writer + read (no AWS legacy transaction)
+    "packages/broker/src/local/app/projects.ts": [0, 3], // local-only company writer + read (no AWS legacy transaction)
   };
   const found: Record<string, number[]> = {};
   for (const input of companySources().filter(s => s.path.startsWith("packages/broker/src/"))) {

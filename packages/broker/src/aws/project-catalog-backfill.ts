@@ -3,9 +3,12 @@ import { GetCommand, QueryCommand, TransactWriteCommand, type TransactWriteComma
 import { z } from "zod";
 import {
   AgentXNameSchema, IMPLICIT_COMPANY_ID, OrgIdSchema, PROJECT_CATALOG_PK, StoredProjectDefinitionSchema, canonicalJson,
-  orgProjectCatalogKey, orgProjectCatalogPk, orgSettingsKey, projectRevisionKey,
+  orgProjectCatalogKey, orgProjectCatalogPk, orgSettingsKey, projectMetaKey, projectRevisionKey,
 } from "@agentx/contracts";
+import { projectIncarnationTombstone, requireProjectIncarnation } from "../core/project-incarnation.js";
+import { coreProjectSnapshotFence } from "./core-project-backfill.js";
 import type { CoreBackfillDependencies } from "./core-project-backfill.js";
+import { projectKey } from "./project-records.js";
 import { ownPartitionRow, recordInCompany } from "./company-check.js";
 
 type Row = Record<string, unknown>;
@@ -182,13 +185,31 @@ async function undo(deps: Deps, companyId: string, runId: string, dryRun: boolea
       const rev = revision.parse(def?.revision);
       writes.push({ Delete: { TableName: deps.tableName, Key: projectRevisionKey(companyId, name, rev), ...fence(copy) } });
     }
-    if (row["backfillRunId"] === runId) writes.push({ Delete: { TableName: deps.tableName, Key: orgProjectCatalogKey(companyId, name), ...fence(row) } });
+    if (row["backfillRunId"] === runId) {
+      const key = projectMetaKey(companyId, name), meta = await get(deps, key);
+      if (companyId === IMPLICIT_COMPANY_ID) {
+        // Undoing only a mirror: prove the authoritative legacy revision for EVERY removed copy at commit.
+        for (const copy of tagged) {
+          const sourceKey = projectKey(name, revision.parse((copy["definition"] as { revision?: unknown } | undefined)?.revision)), source = await get(deps, sourceKey);
+          const content = (value: Row) => Object.fromEntries(Object.entries(value).filter(([field]) => !["pk", "sk", "companyId", "backfillRunId"].includes(field)));
+          if (source === undefined || !recordInCompany(source, companyId) || canonicalJson(content(source)) !== canonicalJson(content(copy))) throw fail();
+          writes.push({ ConditionCheck: { TableName: deps.tableName, Key: sourceKey, ...coreProjectSnapshotFence(source) } });
+        }
+        requireProjectIncarnation(companyId, name, meta);
+        if (meta?.["status"] === "deleted") throw fail();
+        writes.push({ ConditionCheck: { TableName: deps.tableName, Key: key, ...coreProjectSnapshotFence(meta) } });
+      } else {
+        writes.push({ Put: { TableName: deps.tableName, Item: projectIncarnationTombstone(companyId, name, meta, row), ...coreProjectSnapshotFence(meta) } });
+      }
+    }
+    if (row["backfillRunId"] === runId && companyId !== IMPLICIT_COMPANY_ID) writes.push({ Delete: { TableName: deps.tableName, Key: orgProjectCatalogKey(companyId, name), ...fence(row) } });
   }
   if (writes.length > 99) throw fail();
   if (!dryRun && writes.length > 0) await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
     { ConditionCheck: { TableName: deps.tableName, Key: flagKey, ...fence(undefined) } }, ...writes,
   ] }));
-  return { ok: true, written: dryRun ? 0 : writes.length, deleteCount: writes.length };
+  const deleteCount = writes.filter(write => write.Delete !== undefined).length;
+  return { ok: true, written: dryRun ? 0 : deleteCount, deleteCount };
 }
 /** Input is runtime-checked; customer identifiers appear only in operator reports, never public route errors. */
 export async function catalogBackfill(dependencies: CoreBackfillDependencies, value: unknown): Promise<CatalogBackfillReport> {

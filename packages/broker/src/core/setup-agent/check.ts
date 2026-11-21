@@ -1,3 +1,4 @@
+import { projectIncarnationUpdate } from "../project-incarnation.js";
 import { workspaceKeys } from "../task-flow/workspace-location.js";
 // A project's setup check: the owner asks for the project's setup commands and then its test commands to run on a fresh workspace at a revision of the project. No model runs and no budget is asked.
 //
@@ -168,6 +169,7 @@ export async function startProjectSetupCheck(deps: TaskFlowDeps, input: { projec
   if (latest.archived === true) throw agentXError("PROJECT_ARCHIVED", `project \`${input.project}\` is archived; unarchive it to start new work`);
   const metaKey = projectMetaKey(deps.companyId, input.project);
   const meta = await deps.store.get(metaKey);
+  const identityCondition = projectIncarnationUpdate(deps.companyId, input.project, meta);
   const seen = meta?.["setupCheck"] as SetupCheckMark | undefined;
   const requestKey: DocumentKey = { pk: metaKey.pk, sk: `SETUP_CHECK_REQUEST#${input.system === true ? "system#" : ""}${input.requestId}` };
   const replay = await deps.store.get(requestKey);
@@ -184,8 +186,8 @@ export async function startProjectSetupCheck(deps: TaskFlowDeps, input: { projec
     ...started.items,
     { kind: "put", item: { ...requestKey, entityType: "SETUP_CHECK_REQUEST", by: input.startedBy, workspaceId: started.workspaceId, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor((deps.now?.().getTime() ?? Date.now()) / 1000) + 86_400 }, condition: when.absent() },
     seen === undefined
-      ? { kind: "update", key: metaKey, ops: [change.set("setupCheck", { ...started.mark })], condition: when.notExists("setupCheck") }
-      : { kind: "update", key: metaKey, ops: [change.set("setupCheck", { ...started.mark })], condition: when.eq(["setupCheck", "workspaceId"], seen.workspaceId) },
+      ? { kind: "update", key: metaKey, ops: [change.set("setupCheck", { ...started.mark })], condition: when.and(identityCondition, when.notExists("setupCheck")) }
+      : { kind: "update", key: metaKey, ops: [change.set("setupCheck", { ...started.mark })], condition: when.and(identityCondition, when.eq(["setupCheck", "workspaceId"], seen.workspaceId)) },
   ]);
   if (!result.applied) throw agentXError("WORKSPACE_BUSY", "The project's setup check changed just now; try again with the same request id.");
   await relayCheck(deps, started);

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { IN_HOUSE_TOOL_COUNT, ProjectDefinitionSchema, TOOL_LIMIT, TOOL_WARNING_THRESHOLD } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, projectMetaKey, IN_HOUSE_TOOL_COUNT, ProjectDefinitionSchema, TOOL_LIMIT, TOOL_WARNING_THRESHOLD } from "@agentx/contracts";
 import { TARGET_CONFLICT_REASON } from "@agentx/gateway";
 import { describe, expect, it, vi } from "vitest";
 import { resolveConnectors, type ResolvedConnector } from "../../packages/broker/src/aws/connector-types.js";
@@ -399,8 +399,9 @@ function register(handler: AdminHandler, overrides: Overrides, options: { prefli
   });
 }
 
-/** The revision and membership a registration made before the static checks existed would have stored. */
+/** A pre-static-check revision after the required incarnation migration (also a complete concurrent registration). */
 function seedRegisteredRevision(db: FakeDynamoDb, overrides: Overrides): void {
+  db.set({ ...projectMetaKey(IMPLICIT_COMPANY_ID, "payments"), entityType: "PROJECT_META", companyId: IMPLICIT_COMPANY_ID, project: "payments", incarnationRevision: 1, status: "active" });
   const ownerKey = createHash("sha256").update(adminIssuer).update("\0").update("admin-subject").digest("hex");
   db.set({
     pk: "PROJECT#payments", sk: "REV#000000000001", entityType: "PROJECT",

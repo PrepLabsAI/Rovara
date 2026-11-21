@@ -69,6 +69,7 @@ export async function namedCompanyLatestRevisionRow(client: Client, tableName: s
     row !== undefined && row.pk === pk && ownPartitionRow(row, company) && ProjectDefinitionSchema.safeParse(row.definition).success
     && typeof (row.definition as { revision?: unknown }).revision === "number" ? row : undefined;
   const get = async (key: Key) => (await client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> } | undefined)?.Item;
+  if ((await get(projectMetaKey(company, project)))?.status === "deleted") return undefined;
   const catalogKey = orgProjectCatalogKey(company, project);
   const catalog = await get(catalogKey);
   const pointer = catalog?.latestRevision;
@@ -92,7 +93,7 @@ export async function namedCompanyProjectArchived(client: Client, tableName: str
   const key = projectMetaKey(company, project);
   const row = (await client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> } | undefined)?.Item;
   if (row === undefined) return false;
-  return row.status === "archived" || !ownPartitionRow(row, company);
+  return row.status === "archived" || row.status === "deleted" || !ownPartitionRow(row, company);
 }
 
 /**
@@ -106,5 +107,13 @@ export async function latestRevisionRowFor(client: Client, tableName: string, co
     TableName: tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
     ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
   })) as { Items?: Array<Record<string, unknown>> } | undefined;
-  return response?.Items?.[0];
+  const row = response?.Items?.[0];
+  if (row !== undefined) {
+    const identityCompany = OrgIdSchema.safeParse(row["companyId"] ?? companyId ?? IMPLICIT_COMPANY_ID);
+    if (identityCompany.success) {
+      const meta = (await client.send(new GetCommand({ TableName: tableName, Key: projectMetaKey(identityCompany.data, project), ConsistentRead: true })) as { Item?: Record<string, unknown> } | undefined)?.Item;
+      if (meta?.["status"] === "deleted") return undefined;
+    }
+  }
+  return row;
 }

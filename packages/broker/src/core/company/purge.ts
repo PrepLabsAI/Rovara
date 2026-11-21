@@ -26,7 +26,8 @@
 //
 // Reports are counts. Log lines and errors name no company content, person, task or key.
 import { randomUUID } from "node:crypto";
-import { AgentXError, OrgIdSchema, agentXError, when, change, type AuditSink, type DocumentKey, type DocumentStore, type QueryPage, type StoredDocument, type TransactItem } from "@agentx/contracts";
+import { AgentXError, OrgIdSchema, IMPLICIT_COMPANY_ID, agentXError, projectMetaKey, when, change, type AuditSink, type DocumentKey, type DocumentStore, type QueryPage, type StoredDocument, type TransactItem } from "@agentx/contracts";
+import { retireProjectIncarnation, projectMetaSnapshot } from "../project-incarnation.js";
 import { evidencePrefixesOf } from "../proof/evidence-erase.js";
 import { workspaceKey } from "../task-flow/keys.js";
 
@@ -358,6 +359,7 @@ type Verdict =
   | { act: "keep" }
   | { act: "conflicting" }
   | { act: "delete"; kind: string }
+  | { act: "retire-project"; project: string; meta: boolean; kind: string }
   | { act: "tombstone" }
   | { act: "prove"; what: "task" | "ws"; id: string; kind: string }
   | { act: "ref"; refs: string[]; kind: string };
@@ -394,6 +396,15 @@ function verdictOf(item: StoredDocument, companyId: string): Verdict {
   if (typeof pk !== "string" || typeof sk !== "string") return { act: "keep" };
   if (pk.startsWith(PURGE_OWNED)) return { act: "keep" };
   const fields = companyFieldsOf(item, companyId);
+  // Identity is permanent. Retire it before any canonical content row can disappear.
+  const projectPrefix = `ORG#${companyId}#PROJECT#`;
+  const canonicalProject = pk.startsWith(projectPrefix) ? pk.slice(projectPrefix.length)
+    : pk === `ORG#${companyId}#PROJECT_CATALOG` && sk.startsWith("PROJECT#") ? sk.slice("PROJECT#".length)
+      : (fields === "this" || (companyId === IMPLICIT_COMPANY_ID && fields === "none")) && pk.startsWith("PROJECT#") ? pk.slice("PROJECT#".length) : undefined;
+  if (canonicalProject !== undefined && /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(canonicalProject)) {
+    if (fields === "other" || fields === "conflicting") return { act: "conflicting" };
+    return { act: "retire-project", project: canonicalProject, meta: sk === "META", kind: kindOf(pk, companyId) };
+  }
   // The company's own partitions.
   if (pk === `ORG#${companyId}`) return sk === "META" ? { act: "keep" } : { act: "delete", kind: "company" };
   if (pk === `ORG#${companyId}#AUDIT`) {
@@ -512,6 +523,7 @@ export async function dryRunCompanyPurge(deps: Pick<CompanyPurgeDeps, "store" | 
       const verdict = verdictOf(item, companyId);
       switch (verdict.act) {
         case "delete": add(verdict.kind); break;
+        case "retire-project": add(verdict.kind); break;
         case "tombstone": report.tombstones += 1; break;
         case "conflicting": report.conflicting += 1; break;
         case "prove": {
@@ -715,6 +727,20 @@ async function actOnPage(run: Run, items: readonly StoredDocument[]): Promise<vo
   for (const item of items) {
     const verdict = verdictOf(item, run.companyId);
     switch (verdict.act) {
+      case "retire-project": {
+        if (await retireProjectIncarnation(run.deps.store, run.companyId, verdict.project)) { run.row.counts.tombstoned += 1; run.row.acted = true; }
+        if (!verdict.meta) {
+          const key = projectMetaKey(run.companyId, verdict.project), meta = await run.deps.store.get(key);
+          if (meta?.["status"] !== "deleted") { run.row.acted = true; break; }
+          const removed = await run.deps.store.transact([
+            { kind: "check", key, condition: projectMetaSnapshot(meta) },
+            { kind: "delete", key: { pk: item.pk, sk: item.sk }, condition: projectMetaSnapshot(item) },
+          ]);
+          if (removed.applied) { run.row.counts.deleted += 1; run.row.acted = true; }
+          else run.row.acted = true; // A concurrent writer requires another bounded pass.
+        }
+        break;
+      }
       case "delete":
         await run.deps.store.delete({ key: { pk: item.pk, sk: item.sk } });
         run.row.counts.deleted += 1;

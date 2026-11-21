@@ -11,10 +11,11 @@ import { backfillCorePage, checkCorePeople } from "./core-project-backfill.js";
 import { operatorRegion } from "./legacy-install-move.js";
 
 export function parseCoreBackfillArguments(args: string[]) {
-  const values = new Map<string, string>(); let dryRun = true, peopleCheck = false, action: "discover" | "verify" | "unmark" | "undo-run" | undefined, mark = false;
+  const values = new Map<string, string>(); let dryRun = true, peopleCheck = false, mode: "migrate-incarnations" | undefined, action: "discover" | "verify" | "unmark" | "undo-run" | undefined, mark = false;
   const refused = () => new Error("core backfill arguments refused");
   for (let index = 0; index < args.length; index++) {
     const flag = args[index]!;
+    if (flag === "--migrate-incarnations") { if (mode !== undefined) throw refused(); mode = "migrate-incarnations"; continue; }
     if (flag === "--mark") { if (mark) throw refused(); mark = true; continue; }
     if (["--discover", "--verify", "--unmark", "--undo-run"].includes(flag)) {
       if (action !== undefined) throw refused();
@@ -33,8 +34,8 @@ export function parseCoreBackfillArguments(args: string[]) {
     values.set(flag, value);
   }
   const tableName = values.get("--state-table"), signInTableName = values.get("--signin-table"), file = values.get("--input");
-  if (!tableName || !signInTableName || !file || !/^[A-Za-z0-9_.-]{3,255}$/.test(tableName) || !/^[A-Za-z0-9_.-]{3,255}$/.test(signInTableName) || (peopleCheck && (!dryRun || action !== undefined || mark)) || (mark && action !== "verify") || (action === "discover" && !dryRun) || (values.has("--run-id") && !/^[A-Za-z0-9_-]{1,100}$/.test(values.get("--run-id")!))) throw refused();
-  return { tableName, signInTableName, file, dryRun, peopleCheck, continuation: values.get("--continuation"), action, mark, runId: values.get("--run-id") };
+  if ((mode !== undefined && (peopleCheck || action !== undefined || mark)) || !tableName || !signInTableName || !file || !/^[A-Za-z0-9_.-]{3,255}$/.test(tableName) || !/^[A-Za-z0-9_.-]{3,255}$/.test(signInTableName) || (peopleCheck && (!dryRun || action !== undefined || mark)) || (mark && action !== "verify") || (action === "discover" && !dryRun) || (values.has("--run-id") && !/^[A-Za-z0-9_-]{1,100}$/.test(values.get("--run-id")!))) throw refused();
+  return { tableName, signInTableName, file, dryRun, peopleCheck, mode, continuation: values.get("--continuation"), action, mark, runId: values.get("--run-id") };
 }
 export async function readCoreMappingFile(path: string): Promise<Record<string, unknown>> {
   let file: Awaited<ReturnType<typeof open>> | undefined;
@@ -62,7 +63,7 @@ async function main() {
   try {
     const result = args.action !== undefined ? await catalogBackfill(deps, { ...mapping, action: args.action, mark: args.mark, dryRun: args.dryRun,
       ...(args.runId === undefined ? {} : { runId: args.runId }), ...(args.continuation === undefined ? {} : { continuation: args.continuation }) }) : args.peopleCheck ? await checkCorePeople(deps, mapping)
-      : await backfillCorePage(deps, { ...mapping, dryRun: args.dryRun, ...(args.runId === undefined ? {} : { runId: args.runId }), ...(args.continuation === undefined ? {} : { continuation: args.continuation }) });
+      : await backfillCorePage(deps, { ...mapping, ...(args.mode === undefined ? {} : { mode: args.mode }), dryRun: args.dryRun, ...(args.runId === undefined ? {} : { runId: args.runId }), ...(args.continuation === undefined ? {} : { continuation: args.continuation }) });
     if (args.action === "discover" && "mappings" in result && result.ok) {
       for (const [index, input] of (result.mappings ?? []).entries()) {
         const output = await open(join(dirname(args.file), `catalog-${input.companyId}-${createHash("sha256").update(`${args.tableName}/${args.continuation ?? "start"}`).digest("hex").slice(0, 16)}-${index}.json`), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
