@@ -390,6 +390,50 @@ function gitOutput(...args: string[]): string | undefined {
   try { return execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 60_000 }).trim(); } catch { return undefined; }
 }
 
+/**
+ * #1278: where a run's test shards run. CodeBuild (faster, paid) only for a pull request into mainline from this repository that carries the `urgent` label,
+ * or a merge-queue run whose pull request carries it; every other run uses GitHub's free runners. The labels are the ones the run starts with: adding
+ * the label starts a run (the `labeled` event) on CodeBuild, removing it sends later runs back. A fork never gets CodeBuild (`sameRepo`), and a
+ * merge-queue run whose labels cannot be read uses GitHub's runners.
+ */
+export const URGENT_LABEL = "urgent";
+export type TestRunner = "codebuild" | "github";
+export function testRunner(input: { event: string; baseRef: string; sameRepo: boolean; labels: readonly string[] }): TestRunner {
+  const urgent = input.labels.includes(URGENT_LABEL);
+  if (input.event === "pull_request") return urgent && input.sameRepo && input.baseRef.replace(/^refs\/heads\//u, "") === "mainline" ? "codebuild" : "github";
+  if (input.event === "merge_group") return urgent ? "codebuild" : "github";
+  return "github";
+}
+/** #1278: the labels of a merge-queue run's pull request, or undefined when they cannot be read (the run then uses GitHub's runners). */
+export function githubIssueLabels(repository: string, token: string, fetchFn: typeof fetch = fetch): (pullRequest: number) => Promise<string[] | undefined> {
+  return async (pullRequest) => {
+    try {
+      const answer = await fetchFn(`https://api.github.com/repos/${repository}/issues/${String(pullRequest)}/labels?per_page=100`, {
+        headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" },
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!answer.ok) return undefined;
+      const body: unknown = await answer.json();
+      if (!Array.isArray(body)) return undefined;
+      return body.map((label: unknown) => (label !== null && typeof label === "object" ? (label as { name?: unknown }).name : undefined)).filter((name): name is string => typeof name === "string");
+    } catch {
+      return undefined;
+    }
+  };
+}
+/** #1278: the runner for this run, with the labels a merge-queue run reads from its pull request. */
+export async function chooseTestRunner(input: { event: string; baseRef: string; sameRepo: boolean; labels: readonly string[]; queueHeadRef: string; queueLabels: (pullRequest: number) => Promise<string[] | undefined> }): Promise<{ runner: TestRunner; reason: string }> {
+  if (input.event === "merge_group") {
+    const pullRequest = queuePullRequest(input.queueHeadRef);
+    const labels = pullRequest === undefined ? undefined : await input.queueLabels(pullRequest).catch(() => undefined);
+    if (labels === undefined) return { runner: "github", reason: "the merge queue's pull request or its labels could not be read" };
+    const runner = testRunner({ ...input, labels });
+    return { runner, reason: `the merge queue's pull request #${String(pullRequest)} ${runner === "codebuild" ? "is" : "is not"} labelled ${URGENT_LABEL}` };
+  }
+  const runner = testRunner(input);
+  return { runner, reason: runner === "codebuild" ? `a pull request into mainline labelled ${URGENT_LABEL}` : `not an ${URGENT_LABEL} pull request into mainline from this repository` };
+}
+
 function githubStatuses(repository: string, token: string): (sha: string) => Promise<readonly QueueStatus[] | undefined> {
   return async (sha) => {
     try {
@@ -442,6 +486,12 @@ if (process.argv[1]?.endsWith("ci-plan.ts")) {
   })();
   // #1262: a merge-queue run of byte-identical code stands on the pull request's own pass.
   const token = process.env.GH_TOKEN ?? "", repository = process.env.CI_REPOSITORY ?? "";
+  // #1278: CodeBuild only for an urgent pull request into mainline (or its merge-queue run); written before any early exit, so every plan names its runner.
+  const baseRefPlain = (process.env.CI_BASE_REF ?? "").replace(/^refs\/heads\//u, "");
+  const chosen = await chooseTestRunner({ event, baseRef: baseRefPlain, sameRepo: process.env.CI_SAME_REPO === "true", labels, queueHeadRef: process.env.CI_QUEUE_HEAD_REF ?? "",
+    queueLabels: token === "" || repository === "" ? async () => undefined : githubIssueLabels(repository, token) });
+  console.log(`Test runner: ${chosen.runner} (${chosen.reason}).`);
+  if (process.env.GITHUB_OUTPUT !== undefined) appendFileSync(process.env.GITHUB_OUTPUT, `runner=${chosen.runner}\n`);
   if (event === "merge_group") {
     const reuse = token === "" || repository === "" ? { reused: false as const, reason: "no GitHub token for this run" }
       : await findQueueReuse({ repository, headRef: process.env.CI_QUEUE_HEAD_REF ?? "", baseSha: process.env.BASE_SHA ?? "", git: gitOutput, statuses: githubStatuses(repository, token) }).catch((): QueueReuse => ({ reused: false, reason: "the reuse check failed" }));

@@ -845,20 +845,21 @@ export class ControlPlaneStack extends Stack {
     });
     // Worker capabilities authenticate these exact reads in the broker, before company discovery.
     // Keep ContextToolsListRoute: the recorded 0.5.18 template already used this ID for the catalog GET.
-    if (naming.env !== undefined) {
-      new apigwv2.CfnRoute(this, "ContextToolsListRoute", {
-        apiId: api.ref,
-        routeKey: "GET /v1/internal/context-tools",
-        target: `integrations/${integration.ref}`,
-        authorizationType: "NONE",
-      });
-      new apigwv2.CfnRoute(this, "DesignReviewPacketRoute", {
-        apiId: api.ref,
-        routeKey: "GET /v1/internal/design-review/packet",
-        target: `integrations/${integration.ref}`,
-        authorizationType: "NONE",
-      });
-    }
+    // Created for the legacy install (no environment) too: without them a worker's GET falls through to the
+    // JWT-authorized ANY /{proxy+} route and gets 401, which blocks every core-engine task at UNDERSTAND.
+    // Same IDs and keys for every install, so named environments are unchanged.
+    new apigwv2.CfnRoute(this, "ContextToolsListRoute", {
+      apiId: api.ref,
+      routeKey: "GET /v1/internal/context-tools",
+      target: `integrations/${integration.ref}`,
+      authorizationType: "NONE",
+    });
+    new apigwv2.CfnRoute(this, "DesignReviewPacketRoute", {
+      apiId: api.ref,
+      routeKey: "GET /v1/internal/design-review/packet",
+      target: `integrations/${integration.ref}`,
+      authorizationType: "NONE",
+    });
     // The setup worker authenticates this one source read with its short-lived project-setup
     // capability, which the broker verifies. Keep the API Gateway exception limited to this GET;
     // the generic internal callback route remains POST-only.

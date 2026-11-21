@@ -3995,6 +3995,27 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       },
       "Type": "AWS::CloudWatch::Alarm",
     },
+    "ContextToolsListRoute": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "GET /v1/internal/context-tools",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "BrokerIntegration",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
     "CoreEngineJobsAttentionEmailSenderBrokerInvokesD5D91205": {
       "Condition": "CoreEngineJobsAttentionEmailAttentionEmailIsOn114D3B79",
       "Properties": {
@@ -5082,6 +5103,27 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "StageName": "$default",
       },
       "Type": "AWS::ApiGatewayV2::Stage",
+    },
+    "DesignReviewPacketRoute": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "GET /v1/internal/design-review/packet",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "BrokerIntegration",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
     },
     "DeveloperSignInAppRouteBAD38FAA": {
       "Properties": {

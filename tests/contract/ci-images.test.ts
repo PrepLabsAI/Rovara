@@ -330,11 +330,11 @@ describe("the workflows", () => {
     expect(job.steps.some((step) => (step.uses ?? "").startsWith("aws-actions/"))).toBe(false);
   });
 
-  it("is read-only by default; only plan and local (commit statuses, #1262), linux-runtime (packages: read) and live-aws (OIDC) widen it, each in its own permissions", () => {
+  it("is read-only by default; only plan (commit statuses, #1262, and a merge-queue run's pull request labels, #1278) and local (commit statuses), linux-runtime (packages: read) and live-aws (OIDC) widen it, each in its own permissions", () => {
     expect(ci.permissions).toEqual({ contents: "read" });
     const widened = Object.entries(ci.jobs).filter(([, job]) => job.permissions !== undefined).map(([name, job]) => [name, job.permissions]);
     expect(widened).toEqual([
-      ["plan", { contents: "read", statuses: "read" }],
+      ["plan", { contents: "read", statuses: "read", issues: "read", "pull-requests": "read" }],
       ["linux-runtime", { contents: "read", packages: "read" }],
       ["local", { contents: "read", statuses: "write" }],
       ["live-aws", { "id-token": "write", contents: "read" }],

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   AFFECTED_SHARDS, FULL_SHARDS, MAX_EXTRA_TESTS, affectedPackages, fullReason, isChangeEvent, linuxRuns, planCi, planOutputs, relatedTests, type PackageInfo, type PlanInput,
+  URGENT_LABEL, chooseTestRunner, githubIssueLabels, testRunner,
 } from "../../scripts/ci-plan.js";
 
 // Paths here are made up on purpose: a real path named in a test would make that file run full CI.
@@ -216,5 +217,66 @@ describe("the merge queue's run (merge_group)", () => {
   });
   it("skips everything but the plan for a Markdown-only group", () => {
     expect(planCi(queued({ changed: ["docs/sample/guide.md"] }))).toMatchObject({ docsOnly: true, tests: "none", lint: "none", release: false });
+  });
+});
+
+// #1278: CodeBuild (faster, paid) only for an urgent pull request into mainline from this repository, or its merge-queue run; GitHub's free runners otherwise.
+describe("where the test shards run (testRunner)", () => {
+  const pr = { event: "pull_request", baseRef: "mainline", sameRepo: true, labels: [URGENT_LABEL] };
+  it("runs an urgent same-repository pull request into mainline on CodeBuild", () => {
+    expect(URGENT_LABEL).toBe("urgent");
+    expect(testRunner(pr)).toBe("codebuild");
+    expect(testRunner({ ...pr, baseRef: "refs/heads/mainline" })).toBe("codebuild");
+  });
+  it("runs everything else on GitHub's runners: no label, a fork, another base, a push, the nightly run and a manual run", () => {
+    expect(testRunner({ ...pr, labels: [] })).toBe("github");
+    expect(testRunner({ ...pr, labels: ["full-ci", "Urgent"] })).toBe("github");
+    expect(testRunner({ ...pr, sameRepo: false })).toBe("github");
+    expect(testRunner({ ...pr, baseRef: "code/next" })).toBe("github");
+    for (const event of ["push", "schedule", "workflow_dispatch"]) expect(testRunner({ ...pr, event }), event).toBe("github");
+  });
+  it("follows the queued pull request's label in a merge-queue run", () => {
+    expect(testRunner({ event: "merge_group", baseRef: "mainline", sameRepo: false, labels: [URGENT_LABEL] })).toBe("codebuild");
+    expect(testRunner({ event: "merge_group", baseRef: "mainline", sameRepo: false, labels: ["docs"] })).toBe("github");
+  });
+});
+
+describe("a merge-queue run reads its pull request's labels (chooseTestRunner, githubIssueLabels)", () => {
+  const headRef = `refs/heads/gh-readonly-queue/mainline/pr-1278-${"a".repeat(40)}`;
+  const queue = { event: "merge_group", baseRef: "mainline", sameRepo: false, labels: [] as string[], queueHeadRef: headRef };
+  it("asks GitHub for the pull request's labels with the run's token, and runs an urgent one on CodeBuild", async () => {
+    const asked: Array<{ url: string; auth: string }> = [];
+    const fake = (async (url: string, init: RequestInit = {}) => {
+      asked.push({ url, auth: (init.headers as Record<string, string>).authorization ?? "" });
+      return new Response(JSON.stringify([{ name: "urgent" }, { name: "docs" }]), { status: 200 });
+    }) as typeof fetch;
+    const chosen = await chooseTestRunner({ ...queue, queueLabels: githubIssueLabels("o/r", "tok", fake) });
+    expect(chosen.runner).toBe("codebuild");
+    expect(chosen.reason).toContain("#1278");
+    expect(asked).toEqual([{ url: "https://api.github.com/repos/o/r/issues/1278/labels?per_page=100", auth: "Bearer tok" }]);
+  });
+  it("runs a queued pull request without the label on GitHub's runners", async () => {
+    const fake = (async () => new Response(JSON.stringify([{ name: "docs" }]), { status: 200 })) as unknown as typeof fetch;
+    expect((await chooseTestRunner({ ...queue, queueLabels: githubIssueLabels("o/r", "tok", fake) })).runner).toBe("github");
+  });
+  it("uses GitHub's runners whenever the labels can't be read: an error status, a network failure, an answer that doesn't read, or a branch that isn't the queue's", async () => {
+    const answers = [
+      (async () => new Response("no", { status: 403 })) as unknown as typeof fetch,
+      (async () => { throw new Error("offline"); }) as unknown as typeof fetch,
+      (async () => new Response(JSON.stringify({ name: "urgent" }), { status: 200 })) as unknown as typeof fetch,
+    ];
+    for (const fake of answers) expect((await chooseTestRunner({ ...queue, queueLabels: githubIssueLabels("o/r", "tok", fake) })).runner).toBe("github");
+    let calls = 0;
+    const counting = async () => { calls += 1; return ["urgent"]; };
+    expect((await chooseTestRunner({ ...queue, queueHeadRef: "refs/heads/feature", queueLabels: counting })).runner).toBe("github");
+    expect(calls).toBe(0);
+    expect((await chooseTestRunner({ ...queue, queueLabels: async () => { throw new Error("boom"); } })).runner).toBe("github");
+  });
+  it("decides a pull request run from its own labels, never asking GitHub", async () => {
+    let calls = 0;
+    const counting = async () => { calls += 1; return ["urgent"]; };
+    expect((await chooseTestRunner({ event: "pull_request", baseRef: "mainline", sameRepo: true, labels: ["urgent"], queueHeadRef: "", queueLabels: counting })).runner).toBe("codebuild");
+    expect((await chooseTestRunner({ event: "pull_request", baseRef: "mainline", sameRepo: true, labels: [], queueHeadRef: "", queueLabels: counting })).runner).toBe("github");
+    expect(calls).toBe(0);
   });
 });

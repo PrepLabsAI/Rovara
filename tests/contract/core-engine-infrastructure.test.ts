@@ -612,9 +612,15 @@ describe("L1a broker environment derivation", () => {
     // #1148: re-pinned for the core engine in the legacy template (CoreEngine off by default).
     // SIGNIN-STATE-TABLE: re-pinned for ONE change: the sign-in function's STATE_TABLE_NAME is the plain Ref to State instead of an Fn::If on SlackCompanyModeOn to "" (rule D: with the
     // old Fn::If put back, the old pin db40b76d... held; the legacy-templates snapshot diff is that one hunk).
-    // #1275: re-pinned for removing the core engine switch (the CoreEngine and CoreAllowedCompanies parameters, their packed sw/ac pieces and the dispatcher's ROVARA_CORE_ENGINE, the
-    // CoreEngineIsOn condition: schedules ENABLED, the dispatcher's core mapping enabled, its core policy and callback key unconditional). The legacy-templates snapshot diff is exactly that.
-    expect(digest(legacy.toJSON())).toBe("33220db5faf6815c6effbb6c57c7b495eb26d73fe7fdf6b21bb10433718659d4");
+    // LEGACY-WORKER-CAPABILITY-ROUTES: the legacy template gains the ContextToolsListRoute and DesignReviewPacketRoute resources (named environments already had them).
+    // #1275: and loses the core engine switch (the CoreEngine and CoreAllowedCompanies parameters, their packed sw/ac pieces and the dispatcher's ROVARA_CORE_ENGINE, the CoreEngineIsOn
+    // condition: schedules ENABLED, the dispatcher's core mapping enabled, its core policy and callback key unconditional).
+    // Rule D proof: with exactly the two routes taken out, the switch removal's own pin 33220db5... holds (before the routes: f15083c4..., before the switch removal).
+    const withoutCapabilityRoutes = structuredClone(legacy.toJSON()) as Json;
+    delete withoutCapabilityRoutes.Resources.ContextToolsListRoute;
+    delete withoutCapabilityRoutes.Resources.DesignReviewPacketRoute;
+    expect(digest(withoutCapabilityRoutes), "legacy with the two capability routes taken out").toBe("33220db5faf6815c6effbb6c57c7b495eb26d73fe7fdf6b21bb10433718659d4");
+    expect(digest(legacy.toJSON())).toBe("512fbc833e978fd35b1ccd570e0833ccda983f1a4a000b75afa5ac7992529d62");
   });
 });
 import { createHash } from "node:crypto";
