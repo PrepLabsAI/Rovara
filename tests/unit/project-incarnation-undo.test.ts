@@ -15,10 +15,11 @@ async function world(companyId = company) {
 }
 it("undo retires a named company's canonical identity; re-import is a new incarnation", async () => {
   const h = await world();
+  h.db.set({ ...h.db.get(h.key.pk, h.key.sk)!, incarnationRevision: 7 });
   expect(await h.undo()).toMatchObject({ ok: true, deleteCount: 2 });
-  expect(h.db.get(h.key.pk, h.key.sk)).toMatchObject({ status: "deleted", incarnationRevision: 1 });
+  expect(h.db.get(h.key.pk, h.key.sk)).toMatchObject({ status: "deleted", incarnationRevision: 7 });
   expect(await backfillCorePage(h.deps, h.input)).toMatchObject({ written: 1, failed: 0 });
-  expect(h.db.get(h.key.pk, h.key.sk)).toMatchObject({ status: "active", incarnationRevision: 2 });
+  expect(h.db.get(h.key.pk, h.key.sk)).toMatchObject({ status: "active", incarnationRevision: 8 });
 });
 it("undo of an implicit company's mirror proves the same live legacy identity and retains its generation", async () => {
   const h = await world(IMPLICIT_COMPANY_ID);

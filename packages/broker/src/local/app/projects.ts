@@ -6,7 +6,7 @@ import {
 } from "@agentx/contracts";
 import { isPlainRepositoryUrl } from "../github-access.js";
 import { createStoreProjectSource } from "../../core/task-flow/project-source.js";
-import { planProjectIncarnation, projectMetaSnapshot, projectIncarnationRegistration } from "../../core/project-incarnation.js";
+import { planLocalProjectIncarnation, projectMetaSnapshot, projectIncarnationRegistration } from "../../core/project-incarnation.js";
 import { waitingSetupApply } from "../../core/setup-agent/apply.js";
 
 export async function registerProject(store: DocumentStore, companyId: OrgId, value: unknown): Promise<{ project: string; revision: number; duplicate: boolean }> {
@@ -28,11 +28,11 @@ export async function registerProject(store: DocumentStore, companyId: OrgId, va
       source.latest(name), store.get(projectMetaKey(companyId, name)), store.get(orgProjectCatalogKey(companyId, name)),
       store.query({ pk: projectPk(companyId, name), sk: { op: "beginsWith", prefix: "REV#" }, limit: 1 }),
     ]);
-    const identity = planProjectIncarnation(companyId, name, meta, catalog !== undefined || history.items.length > 0);
     const revision = (latest?.definition.revision ?? 0) + 1;
     // The registered revision is compared without its revision number, so sending the same file twice is not a new revision.
     const same = (definition: ProjectDefinition): boolean => canonicalJson({ ...definition, revision: 0 }) === canonicalJson({ ...parsed.data, revision: 0 });
     if (latest !== undefined && same(latest.definition)) return { project: parsed.data.name, revision: latest.definition.revision, duplicate: true };
+    const identity = planLocalProjectIncarnation(companyId, name, meta, catalog, catalog !== undefined || history.items.length > 0);
     const definition: ProjectDefinition = { ...parsed.data, revision };
     const written = await store.transact([
       { kind: "put", item: { ...projectRevisionKey(companyId, definition.name, revision), entityType: "PROJECT", definition: JSON.parse(JSON.stringify(definition)) as JsonValue }, condition: when.absent() },

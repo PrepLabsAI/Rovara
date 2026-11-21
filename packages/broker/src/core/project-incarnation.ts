@@ -30,6 +30,17 @@ export function planProjectIncarnation(companyId: string, project: string, row: 
   if (hasContent || revision === Number.MAX_SAFE_INTEGER) throw refused();
   return { ...key, entityType: "PROJECT_META", companyId, project, incarnationRevision: revision + 1, status: "active" };
 }
+/** Local SQLite registration alone may initialize a known pre-rollout META with an unstamped catalogue.
+ * The caller must commit the identity, catalogue snapshot and new revision in the same transaction.
+ * Hosted registration continues to require operator-verified migration through planProjectIncarnation.
+ */
+export function planLocalProjectIncarnation(companyId: string, project: string, row: StoredDocument | undefined, catalog: StoredDocument | undefined, hasContent: boolean): StoredDocument {
+  if (row !== undefined && row["incarnationRevision"] === undefined && catalog !== undefined && catalog["incarnationRevision"] === undefined
+    && uninitializedProjectMeta(companyId, project, row)) {
+    return { ...row, entityType: "PROJECT_META", companyId, project, incarnationRevision: 1, status: row["status"] ?? "active" };
+  }
+  return planProjectIncarnation(companyId, project, row, hasContent);
+}
 /** Snapshot CAS also fences absent identity fields during the one-time migration. */
 export function projectMetaSnapshot(row: StoredDocument | undefined): Condition {
   if (row === undefined) return when.absent();
@@ -37,7 +48,7 @@ export function projectMetaSnapshot(row: StoredDocument | undefined): Condition 
   return when.and(...[...fields].map(field => row[field] === undefined ? when.notExists(field) : when.eq([field], row[field])));
 }
 
-/** Only erasure may retire a pre-rollout identity; it never makes missing identity live. */
+/** Erasure may retire a pre-rollout identity; it never makes missing identity live. */
 export function projectIncarnationTombstone(companyId: string, project: string, previous: Row | undefined, catalog: Row | undefined): StoredDocument {
   let revision: number;
   if (previous?.["incarnationRevision"] !== undefined) revision = requireProjectIncarnation(companyId, project, previous);
@@ -84,7 +95,7 @@ export function projectIncarnationUpdate(companyId: string, project: string, row
 
 /** Registration preserves a live META instead of replacing its lifecycle/setup fields. */
 export function projectIncarnationRegistration(companyId: string, project: string, previous: StoredDocument | undefined, identity: StoredDocument): TransactItem {
-  return previous !== undefined && previous["status"] !== "deleted"
+  return previous !== undefined && previous["status"] !== "deleted" && previous["incarnationRevision"] === identity["incarnationRevision"]
     ? { kind: "check", key: projectMetaKey(companyId, project), condition: projectMetaSnapshot(previous) }
     : { kind: "put", item: identity, condition: projectMetaSnapshot(previous) };
 }
