@@ -615,7 +615,7 @@ describe("D045 operator impact review", () => {
     expect((await broker.admin("POST", `/v1/admin/changes/${id}/apply`, { admin: false, body: { method: "elicitation" } })).status).toBe(403);
     const channelId = kind === "bind_channel" ? "C0LEDGER01" : SLACK_CHANNEL;
     const key = { pk: `SLACK_BINDING#${SLACK_TEAM}`, sk: `CHANNEL#${channelId}` };
-    broker.db.set({ ...broker.db.get(key.pk, key.sk), ...key, projectName: "payments", updatedAt: "2026-11-20T12:34:00.000Z" });
+    broker.db.set({ ...broker.db.get(key.pk, key.sk), ...key, teamId: SLACK_TEAM, channelId, projectName: "payments", updatedAt: "2026-11-20T12:34:00.000Z" });
     expect((await broker.apply(id)).body.error).toMatchObject({ code: "CHANGE_STALE" });
     expect(writes()).toBe(0);
     if (kind === "bind_channel") broker.db.delete(key.pk, key.sk);

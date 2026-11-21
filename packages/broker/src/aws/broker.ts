@@ -817,6 +817,7 @@ function adminCompanyReader(dependencies: AwsBrokerDependencies): CompanyMembers
 function adminChangeHandlers(dependencies: AwsBrokerDependencies): AdminChangeHandlers {
   return {
     requireAdministrator: (identity, project) => requireAdministrator(dependencies, identity, project),
+    readChannelBinding: (teamId, channelId) => getSlackBinding(dependencies, teamId, channelId),
     bindChannel: async (identity, teamId, channelId, project, reviewed) => putSlackBinding(dependencies, identity, teamId, channelId, { projectName: project }, reviewed),
     unbindChannel: async (identity, teamId, channelId, reviewed) => deleteSlackBinding(dependencies, identity, teamId, channelId, reviewed),
     checkRevision: async (identity, definitionValue, runtimeBindingValue, options) => {
