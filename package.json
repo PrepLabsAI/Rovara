@@ -11,7 +11,7 @@
     "infra"
   ],
   "scripts": {
-    "build": "tsc -b",
+    "build": "node scripts/build-parallel.ts",
     "clean": "tsc -b --clean",
     "lint": "node scripts/lint-shards.ts",
     "agentx": "node packages/cli/dist/bin.js",
@@ -26,7 +26,7 @@
     "acceptance:p0-native-journey": "P0_NATIVE_PROFILE=all sh scripts/acceptance/p0-native-journey.sh",
     "test:boot-script": "AGENTX_BOOT_SCRIPT_DOCKER=1 vitest run tests/live/ec2-boot-script.test.ts",
     "typecheck": "tsc -b --pretty false",
-    "typecheck:all": "tsc -b --pretty false && node scripts/typecheck-shards.ts",
+    "typecheck:all": "node scripts/build-parallel.ts --pretty false && node scripts/typecheck-shards.ts",
     "complexity:report": "node scripts/complexity.ts report",
     "complexity:check": "node scripts/complexity.ts check",
     "complexity:update": "node scripts/complexity.ts update",
