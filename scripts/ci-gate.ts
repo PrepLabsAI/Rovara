@@ -9,7 +9,7 @@ export interface GateVerdict { ok: boolean; reason: string }
 export type PlanOutputs = Readonly<Record<string, string | undefined>>;
 
 /** The jobs `local` judges besides `plan`, in the order they are reported. */
-export const GATED_JOBS = ["quick", "build", "test", "linux-runtime", "ci-mode", "release-check"] as const;
+export const GATED_JOBS = ["quick", "typecheck", "build", "test", "linux-runtime", "ci-mode", "release-check"] as const;
 
 /** The shard list of a run that executes the whole suite (scripts/ci-plan.ts FULL_SHARDS). */
 export const FULL_SHARD_LIST = "[1,2,3,4,5,6,7,8]";
@@ -44,9 +44,12 @@ export function expectedResults(plan: PlanOutputs, event?: string): { expected: 
   // The whole suite is eight shards: a plan that says so but lists fewer would run only part of it.
   if (tests === "all" && plan.shards !== FULL_SHARD_LIST) return { problem: `the plan runs the whole suite but its shard list is ${JSON.stringify(plan.shards)}, not ${FULL_SHARD_LIST}` };
   if (docsOnly === "true" && (mode !== "affected" || tests !== "none")) return { problem: "the plan says Markdown-only but still runs tests" };
+  // `quick` and `typecheck` run together: both skip only a Markdown-only change.
+  const checks = docsOnly === "true" ? "skipped" : "success";
   return {
     expected: {
-      quick: docsOnly === "true" ? "skipped" : "success",
+      quick: checks,
+      typecheck: checks,
       build: tests === "none" ? "skipped" : "success",
       test: tests === "none" ? "skipped" : "success",
       "linux-runtime": linux === "true" ? "success" : "skipped",

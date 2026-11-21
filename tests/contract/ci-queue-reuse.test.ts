@@ -82,7 +82,7 @@ describe("the merge queue's reuse of a pull request's pass (findQueueReuse)", ()
 });
 
 describe("the gate behind local, for a merge-queue reuse", () => {
-  const skippedAll = { plan: "success", quick: "skipped", build: "skipped", test: "skipped", "linux-runtime": "skipped", "ci-mode": "skipped", "release-check": "skipped" };
+  const skippedAll = { plan: "success", quick: "skipped", typecheck: "skipped", build: "skipped", test: "skipped", "linux-runtime": "skipped", "ci-mode": "skipped", "release-check": "skipped" };
   const plan = queueReuseOutputs(RUN);
 
   it("passes a merge-queue run whose plan reused a named run and every job was skipped", () => {
