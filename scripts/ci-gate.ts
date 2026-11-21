@@ -44,10 +44,12 @@ export function expectedResults(plan: PlanOutputs, event?: string): { expected: 
   // The whole suite is eight shards: a plan that says so but lists fewer would run only part of it.
   if (tests === "all" && plan.shards !== FULL_SHARD_LIST) return { problem: `the plan runs the whole suite but its shard list is ${JSON.stringify(plan.shards)}, not ${FULL_SHARD_LIST}` };
   if (docsOnly === "true" && (mode !== "affected" || tests !== "none")) return { problem: "the plan says Markdown-only but still runs tests" };
+  // `quick` and `typecheck` run together: both skip only a Markdown-only change.
+  const checks = docsOnly === "true" ? "skipped" : "success";
   return {
     expected: {
-      quick: docsOnly === "true" ? "skipped" : "success",
-      typecheck: docsOnly === "true" ? "skipped" : "success",
+      quick: checks,
+      typecheck: checks,
       build: tests === "none" ? "skipped" : "success",
       test: tests === "none" ? "skipped" : "success",
       "linux-runtime": linux === "true" ? "success" : "skipped",
