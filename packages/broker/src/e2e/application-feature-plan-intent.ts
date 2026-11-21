@@ -7,8 +7,9 @@ import {
 } from "@agentx/contracts";
 import { deriveE2EApplicationApprovalBinding } from "./application-plan-binding.js";
 import { deriveE2EFeatureApprovedMockSelections, deriveE2EFeaturePortableApprovalBinding } from "./feature-plan-intent.js";
-import { projectE2EApplicationPortableSelection, selectE2EApplicationExecutionPlan, type E2EApplicationPlanSelectionInput,
+import { type E2EApplicationPlanSelectionInput,
   type E2EApplicationPortableProjection } from "@agentx/contracts";
+import { projectE2EApplicationPortableSelection, selectE2EApplicationExecutionPlan } from "@agentx/contracts/e2e-execution-plan";
 import { admitE2EFeatureVerifier, E2E_FEATURE_PROCESS_RESPONSE_SCOPE, type E2EFeatureVerifierRecord } from "../aws/e2e-feature-verifier-catalog.js";
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");

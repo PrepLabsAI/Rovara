@@ -8,7 +8,8 @@ import { createE2EOpenApiFixtureDescriptor, validateE2EOpenApiFixtureResponse } 
 import { E2EPortableApprovalBindingSchema, e2EDefaultSyntheticAccountDefinition, e2ePortableOperationDescriptorDigest, e2ePortableRegistrationKey, e2eSourceInterfaceAssertion, resolveE2EPortableRegistration, type E2EPortableApprovalBinding } from "./e2e-portable.js";
 import { E2E_CANDIDATE_ADAPTER_IDENTITY } from "./e2e-portable.js";
 import { e2eCaseIdFromIdentity, e2eUpstreamTestIdFromIdentity } from "./e2e-case-identity.js";
-import { e2eTargetSourceIdentity, inspectE2EPortableSource, inspectE2ERepository, type PortableOperation } from "./e2e-catalog.js";
+import { e2eTargetSourceIdentity, inspectE2ERepository, type PortableOperation } from "./e2e-catalog.js";
+import { inspectE2EPortableSource } from "./e2e-portable-source.js";
 
 export const PORTABLE_E2E_TEST_PATH = ".agentx/e2e/generated-contract.test.ts";
 type MockableComponent = { componentId: string; requestedTargetId: string; kind: "api"; sourceRefs: Array<{ path: string; sha256: string }>; fixture?: unknown; fixtureProfile?: "openapi-auto-witness/v1" };

@@ -4,8 +4,9 @@ import { canonicalJson, createCandidateManifest,
   e2eApplicationMetadataSourceRefs, e2ePolicyDigest,
   e2eAppBuildManifestDigest, e2eRuntimeCapabilityDigest, e2eScenarioBundleDigest,
   E2EApplicationLaunchTargetSchema, E2EApplicationPlanIntentSchema, E2ERoundSchema, E2ERunBindingSchema, E2ERegisteredRuntimeSchema,
-  E2ERuntimeCapabilityDescriptorSchema, projectE2EApplicationPortableSelection, proposeE2ESetup,
-  selectE2EApplicationExecutionPlan, type E2EPolicy, type E2EScenario, type E2ESourceSnapshot } from "../../packages/contracts/src/index.js";
+  E2ERuntimeCapabilityDescriptorSchema, proposeE2ESetup,
+  type E2EPolicy, type E2EScenario, type E2ESourceSnapshot } from "../../packages/contracts/src/index.js";
+import { projectE2EApplicationPortableSelection, selectE2EApplicationExecutionPlan } from "../../packages/contracts/src/e2e-execution-plan-entry.js";
 import { inspectE2ERepository } from "../../packages/broker/src/e2e/discovery.js";
 import { deriveE2EApplicationApprovalBinding } from "../../packages/broker/src/e2e/application-plan-binding.js";
 import { deriveE2EFeaturePortableApprovalBinding } from "../../packages/broker/src/e2e/feature-plan-intent.js";

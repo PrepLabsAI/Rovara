@@ -4,9 +4,10 @@ import { join, resolve } from "node:path";
 import {
   E2EPolicySchema, E2ERoundSchema, E2ERunBindingSchema, E2EScenarioBundleSchema,
   ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
-  canonicalJson, e2eScenarioBundleDigest, isE2EApplicationAdmissionSchemaVersion, selectE2EExecutionPlan, verifyE2ESourceSnapshot,
+  canonicalJson, e2eScenarioBundleDigest, isE2EApplicationAdmissionSchemaVersion, verifyE2ESourceSnapshot,
   type E2ESourceSnapshot, type E2EWorkflowAdmissionRef, type WorkerInvocation,
 } from "@agentx/contracts";
+import { selectE2EExecutionPlan } from "@agentx/contracts/e2e-execution-plan";
 import { executeWorkflowE2EApplicationChecks, type WorkflowE2EApplicationRuntime, type WorkflowE2EModelChannelDependencies } from "./workflow-e2e-application-checks.js";
 import { collectE2EActualCliRun, compileE2EScenarios, e2ePrivateTransferMaxBytes, e2eSnapshotSourceDigest, observeInstalledRuntimeManifestForHost, runE2EActualCli } from "@agentx/verifier";
 
