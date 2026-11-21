@@ -13292,6 +13292,195 @@ async function loadWorkflowCandidateSourceExport(
   return parsed;
 }
 
+type WorkflowTaskRecord = DeveloperTaskRecord & { workflow: WorkflowSnapshot };
+
+/** A publish's terminal result (#1343): the draft pull request it opened, checked against the candidate, and the dispatch of the next one. */
+async function completedPublishItems(dependencies: AwsBrokerDependencies, task: WorkflowTaskRecord, terminalStatus: OperationStatus, now: string, result: unknown): Promise<TransactItems> {
+  if (terminalStatus !== "SUCCEEDED" || task.workflow.stage !== "PULL_REQUEST" || task.workflow.state !== "READY" || task.workflow.candidate === undefined) return [];
+  const published = PullRequestResultSchema.safeParse(result);
+  if (!published.success) throw agentXError("CONFIG_INVALID", "workflow pull request result is invalid");
+  const project = await readTaskLegacyProject(await taskLegacyScope(dependencies, task), () => requireProject(dependencies, task.project, task.startingRevision));
+  const repository = project.definition.repositories.find((entry) => entry.name === published.data.repository);
+  if (repository === undefined) throw agentXError("CONFIG_INVALID", "published pull request repository is not part of the task's registered project revision");
+  const repositoryFullName = githubRepositoryFullName(repository.url);
+  if (!pullRequestMatchesRepository(published.data.url, repositoryFullName, published.data.number)) {
+    throw agentXError("CONFIG_INVALID", "published pull request URL does not match the task's registered repository");
+  }
+  const publishedRecord = await requirePullRequest(dependencies, task.workspaceId, published.data.repository, published.data.number);
+  if (publishedRecord.url !== published.data.url || publishedRecord.expectedHeadCommit !== published.data.commit) {
+    throw agentXError("STALE_FENCE", "published pull request head does not match the broker-verified publication");
+  }
+  const candidateRepository = task.workflow.candidate.repositories.find(entry => entry.repositoryId === published.data.repository);
+  const getFeedback = dependencies.githubPullRequests.getPullRequestFeedback;
+  if (candidateRepository === undefined || getFeedback === undefined) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "cannot verify the published pull request against the checked candidate");
+  }
+  const publishedFeedback = await getFeedback.call(dependencies.githubPullRequests, repository.url, published.data.number);
+  if (publishedFeedback.pullRequest.number !== published.data.number
+    || publishedFeedback.pullRequest.url !== published.data.url
+    || publishedFeedback.pullRequest.state !== "open"
+    || publishedFeedback.pullRequest.headCommit !== publishedRecord.expectedHeadCommit
+    || publishedFeedback.pullRequest.headTreeSha !== candidateRepository.treeSha) {
+    throw agentXError("STALE_FENCE", "published pull request does not contain the exact checked candidate tree");
+  }
+  const indexKey = githubWorkflowPullRequestKey(repositoryFullName, published.data.number);
+  const existingIndex = await getItem<GithubWorkflowPullRequestRecord>(dependencies, indexKey);
+  const indexRecord: GithubWorkflowPullRequestRecord = {
+    ...indexKey,
+    entityType: "GITHUB_WORKFLOW_PR",
+    repositoryFullName,
+    repositoryId: published.data.repository,
+    number: published.data.number,
+    url: published.data.url,
+    taskId: task.taskId,
+    workspaceId: task.workspaceId,
+    candidateDigest: task.workflow.candidate.digest,
+    createdAt: now,
+  };
+  if (existingIndex !== undefined && (existingIndex.taskId !== indexRecord.taskId
+    || existingIndex.candidateDigest !== indexRecord.candidateDigest
+    || existingIndex.url !== indexRecord.url)) {
+    throw agentXError("CONFIG_INVALID", "this pull request is already linked to another task or candidate");
+  }
+  const next = registerWorkflowPullRequest(task.workflow, {
+    repositoryId: published.data.repository,
+    number: published.data.number,
+    url: published.data.url,
+    headSha: publishedRecord.expectedHeadCommit,
+    headTreeSha: publishedFeedback.pullRequest.headTreeSha,
+    candidateDigest: task.workflow.candidate.digest,
+    required: true,
+  }, now);
+  return [{ Update: {
+    TableName: dependencies.tableName,
+    Key: taskKey(task.taskId),
+    UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+    ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :ready AND attribute_not_exists(closedAt)",
+    ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
+    ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": task.workflow.revision, ":stage": "PULL_REQUEST", ":ready": "READY" },
+  } }, ...(existingIndex === undefined ? [{ Put: {
+    TableName: dependencies.tableName,
+    Item: indexRecord,
+    ConditionExpression: "attribute_not_exists(pk)",
+  } }] : []),
+  // More repositories to go: the next draft pull request is due, as the first one was after the reviews.
+  ...(next.stage === "PULL_REQUEST" && next.state === "READY" && next.candidate !== undefined
+    ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, "PUBLISH", next.candidate.digest, now)] : []),
+  ...((task.workflow.pullRequests ?? []).length === 0 ? [mergeRecoveryItem(dependencies.tableName, task.taskId, now)] : [])];
+}
+
+/** A REVIEW run's terminal result (#1343): the next workflow, and the E2E authority checks that commit with it. */
+async function reviewRunOutcome(dependencies: AwsBrokerDependencies, operation: OperationRecord, task: WorkflowTaskRecord, terminalStatus: OperationStatus, now: string, result: unknown, terminalError: string | undefined): Promise<{ next: WorkflowSnapshot; e2eAuthorityChecks: Array<Record<string, unknown>> }> {
+  let next: WorkflowSnapshot;
+  let e2eAuthorityChecks: Array<Record<string, unknown>> = [];
+  if (terminalStatus !== "SUCCEEDED") {
+    // A review that stopped because its base rule files could not be verified says so; any other stop keeps the generic reason.
+    next = blockWorkflow(task.workflow, terminalError?.includes(WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE) === true ? WORKFLOW_BLOCK_REASONS.ruleFilesUnverified
+      : workflowRunEndedReason("REVIEW", terminalStatus), now);
+  } else {
+    const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
+    const repositories = Array.isArray(reported.workflowCandidateRepositories) ? reported.workflowCandidateRepositories : [];
+    const reviews = reported.workflowReviews;
+    let reviewFailure = "independent candidate review was invalid, incomplete, or stale";
+    try {
+      if (!Array.isArray(reviews)) throw new Error("review result has an invalid report collection");
+      const candidate = createCandidateManifest(repositories as CandidateRepository[]);
+      if (task.workflow.stage !== "REVIEW" || task.workflow.candidate?.digest !== candidate.digest) {
+        throw new Error("review result is stale, incomplete, or came from another operation");
+      }
+      if (task.workflow.e2e?.required === true) {
+        const currentRoundId = task.workflow.e2e.currentRoundId;
+        const checksOperations = (await queryAllItems(dependencies, `WORKSPACE#${task.workspaceId}`, "OPERATION#"))
+          .filter((item) => item.entityType === "OPERATION" && item.kind === "task" && item.workflowMode === "CHECKS")
+          .map((item) => item as unknown as OperationRecord)
+          .filter((item) => item.workflowE2EAdmission?.candidateDigest === candidate.digest
+            && item.workflowE2EAdmission.roundId === currentRoundId && item.workflowE2EEvidenceRef !== undefined)
+          .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+        const checksOperation = checksOperations[0];
+        const e2eDiagnostic: WorkflowE2EVerificationDiagnostic = {};
+        if (checksOperation === undefined || await verifyWorkflowE2EEvidence(dependencies, checksOperation, task, candidate, undefined, e2eDiagnostic) !== "PASS") {
+          throw new Error("current E2E evidence is not independently qualified for review");
+        }
+        e2eAuthorityChecks = e2eDiagnostic.authorityChecks ?? [];
+        if (e2eAuthorityChecks.length === 0) throw new Error("current E2E authority snapshot could not be fenced at review persistence");
+      }
+      // Validate every report's complete contract and provenance before deciding that a role is missing.
+      for (const review of reviews) {
+        if (review === null || typeof review !== "object" || (review as Record<string, unknown>).operationId !== operation.id) {
+          throw new Error("review result is stale, incomplete, or came from another operation");
+        }
+        submitWorkflowReview(task.workflow, review, now);
+      }
+      // Exactly one code review and one security review: two of one kind would leave the stage waiting for the other.
+      const roles = reviews.map((review) => (review as Record<string, unknown>).role).sort();
+      if (roles.length !== 2 || roles[0] !== "CRITIC" || roles[1] !== "SECURITY") {
+        reviewFailure = WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE;
+        throw new Error("review result does not hold one code review and one security review");
+      }
+      next = task.workflow;
+      for (const review of reviews) next = submitWorkflowReview(next, review, now);
+    } catch {
+      next = blockWorkflow(task.workflow, reviewFailure, now);
+    }
+  }
+  return { next, e2eAuthorityChecks };
+}
+
+/** A FEEDBACK_REVIEW run's terminal result (#1343): the next workflow, or undefined when the run no longer matches the task's current feedback review. */
+async function feedbackReviewRunOutcome(dependencies: AwsBrokerDependencies, operation: OperationRecord, task: WorkflowTaskRecord, terminalStatus: OperationStatus, now: string, result: unknown): Promise<WorkflowSnapshot | undefined> {
+  let next: WorkflowSnapshot;
+  const binding = operation.workflowFeedbackReview;
+  const current = task.workflow;
+  if (binding === undefined || current.stage !== "WAIT_FOR_MERGE" || current.state !== "RUNNING"
+    || current.revision !== binding.workflowRevision || current.taskId !== binding.taskId
+    || current.candidate?.digest !== binding.candidateDigest || current.feedbackReview?.status !== "COLLECTING") return undefined;
+  if (terminalStatus !== "SUCCEEDED") {
+    next = blockWorkflow(current, WORKFLOW_BLOCK_REASONS.feedbackReviewFailed, now);
+  } else {
+    try {
+      const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
+      const feedbackResult = reported.workflowFeedbackReviewResult;
+      if (feedbackResult === null || typeof feedbackResult !== "object" || Array.isArray(feedbackResult)) throw new Error("feedback review result is missing");
+      const resultRecord = feedbackResult as Record<string, unknown>;
+      if (resultRecord.taskId !== binding.taskId || resultRecord.workflowRevision !== binding.workflowRevision
+        || resultRecord.candidateDigest !== binding.candidateDigest || typeof resultRecord.outputDigest !== "string"
+        || typeof resultRecord.artifactName !== "string" || typeof resultRecord.status !== "string") throw new Error("feedback review result does not match its operation binding");
+      const artifacts = (await queryAllItems(dependencies, "WORKSPACE#" + operation.workspaceId, "ARTIFACT#"))
+        .filter(item => item.operationId === operation.id && item.name === resultRecord.artifactName);
+      if (artifacts.length !== 1 || typeof artifacts[0]?.objectKey !== "string") throw new Error("critic report artifact is missing or ambiguous");
+      const object = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: String(artifacts[0].objectKey) }));
+      const reportBytes = object.Body ? Buffer.from(await object.Body.transformToByteArray()) : Buffer.alloc(0);
+      if (reportBytes.byteLength > 1_000_000 || createHash("sha256").update(reportBytes).digest("hex") !== resultRecord.outputDigest) throw new Error("critic report bytes failed digest validation");
+      const report = WorkflowFeedbackReviewReportSchema.parse(JSON.parse(reportBytes.toString("utf8")));
+      const inputs = await readFeedbackBundlesForCritic(dependencies, operation, binding);
+      // The critic's input as this broker builds it; a run an earlier release started (no notes marker) may also have been
+      // given every note, or none (deploy skew), and only such a run.
+      const requirementsDigests = operation.feedbackNotesScoped === true ? inputs.acceptedRequirementsDigests.slice(0, 1) : inputs.acceptedRequirementsDigests;
+      const refs = current.feedbackReview.bundleRefs.map(ref => WorkflowFeedbackBundleRefSchema.parse(ref));
+      if (operation.workflowMode !== "FEEDBACK_REVIEW" || report.operationMode !== operation.workflowMode
+        || report.operationId !== operation.id || report.taskId !== current.taskId
+        || report.workflowRevision !== binding.workflowRevision || report.qualification !== "AI_GENERATED_ADVISORY"
+        || !requirementsDigests.includes(report.taskRequirementsDigest) || report.status !== resultRecord.status
+        || refs.length !== report.bundleDigests.length || !refs.every(ref => report.bundleDigests.includes(ref.sha256))
+        || refs.length !== report.candidateBindings.length || refs.some(ref => !report.candidateBindings.some(candidate =>
+          candidate.repositoryId === ref.repositoryId && candidate.number === ref.number && candidate.headSha === ref.headSha
+            && candidate.candidateDigest === ref.candidateDigest && candidate.commentSetDigest === ref.commentSetDigest && candidate.bundleDigest === ref.sha256))) {
+        throw new Error("critic report provenance does not match the exact collected inputs");
+      }
+      const { findings, ...metadata } = report;
+      void findings;
+      const reviewRef = WorkflowFeedbackReviewRefSchema.parse({ ...metadata, sha256: resultRecord.outputDigest, objectKey: String(artifacts[0].objectKey) });
+      next = completeWorkflowFeedbackReview(current, {
+        expectedRevision: binding.workflowRevision, taskId: binding.taskId, candidateDigest: binding.candidateDigest,
+        operationId: operation.id, bundleRefs: refs, reviewRef,
+      }, now);
+    } catch {
+      next = blockWorkflow(current, WORKFLOW_BLOCK_REASONS.feedbackReviewFailed, now);
+    }
+  }
+  return next;
+}
+
 async function completedWorkflowItems(
   dependencies: AwsBrokerDependencies,
   operation: OperationRecord,
@@ -13326,79 +13515,7 @@ async function completedWorkflowItems(
       ...(preparedBase.success ? { ExpressionAttributeValues: { ":base": preparedBase.data } } : {}),
     } }];
   }
-  if (operation.kind === "publish") {
-    if (terminalStatus !== "SUCCEEDED" || task.workflow.stage !== "PULL_REQUEST" || task.workflow.state !== "READY" || task.workflow.candidate === undefined) return [];
-    const published = PullRequestResultSchema.safeParse(result);
-    if (!published.success) throw agentXError("CONFIG_INVALID", "workflow pull request result is invalid");
-    const project = await readTaskLegacyProject(await taskLegacyScope(dependencies, task), () => requireProject(dependencies, task.project, task.startingRevision));
-    const repository = project.definition.repositories.find((entry) => entry.name === published.data.repository);
-    if (repository === undefined) throw agentXError("CONFIG_INVALID", "published pull request repository is not part of the task's registered project revision");
-    const repositoryFullName = githubRepositoryFullName(repository.url);
-    if (!pullRequestMatchesRepository(published.data.url, repositoryFullName, published.data.number)) {
-      throw agentXError("CONFIG_INVALID", "published pull request URL does not match the task's registered repository");
-    }
-    const publishedRecord = await requirePullRequest(dependencies, task.workspaceId, published.data.repository, published.data.number);
-    if (publishedRecord.url !== published.data.url || publishedRecord.expectedHeadCommit !== published.data.commit) {
-      throw agentXError("STALE_FENCE", "published pull request head does not match the broker-verified publication");
-    }
-    const candidateRepository = task.workflow.candidate.repositories.find(entry => entry.repositoryId === published.data.repository);
-    const getFeedback = dependencies.githubPullRequests.getPullRequestFeedback;
-    if (candidateRepository === undefined || getFeedback === undefined) {
-      throw agentXError("RUNTIME_UNAVAILABLE", "cannot verify the published pull request against the checked candidate");
-    }
-    const publishedFeedback = await getFeedback.call(dependencies.githubPullRequests, repository.url, published.data.number);
-    if (publishedFeedback.pullRequest.number !== published.data.number
-      || publishedFeedback.pullRequest.url !== published.data.url
-      || publishedFeedback.pullRequest.state !== "open"
-      || publishedFeedback.pullRequest.headCommit !== publishedRecord.expectedHeadCommit
-      || publishedFeedback.pullRequest.headTreeSha !== candidateRepository.treeSha) {
-      throw agentXError("STALE_FENCE", "published pull request does not contain the exact checked candidate tree");
-    }
-    const indexKey = githubWorkflowPullRequestKey(repositoryFullName, published.data.number);
-    const existingIndex = await getItem<GithubWorkflowPullRequestRecord>(dependencies, indexKey);
-    const indexRecord: GithubWorkflowPullRequestRecord = {
-      ...indexKey,
-      entityType: "GITHUB_WORKFLOW_PR",
-      repositoryFullName,
-      repositoryId: published.data.repository,
-      number: published.data.number,
-      url: published.data.url,
-      taskId: task.taskId,
-      workspaceId: task.workspaceId,
-      candidateDigest: task.workflow.candidate.digest,
-      createdAt: now,
-    };
-    if (existingIndex !== undefined && (existingIndex.taskId !== indexRecord.taskId
-      || existingIndex.candidateDigest !== indexRecord.candidateDigest
-      || existingIndex.url !== indexRecord.url)) {
-      throw agentXError("CONFIG_INVALID", "this pull request is already linked to another task or candidate");
-    }
-    const next = registerWorkflowPullRequest(task.workflow, {
-      repositoryId: published.data.repository,
-      number: published.data.number,
-      url: published.data.url,
-      headSha: publishedRecord.expectedHeadCommit,
-      headTreeSha: publishedFeedback.pullRequest.headTreeSha,
-      candidateDigest: task.workflow.candidate.digest,
-      required: true,
-    }, now);
-    return [{ Update: {
-      TableName: dependencies.tableName,
-      Key: taskKey(task.taskId),
-      UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
-      ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :ready AND attribute_not_exists(closedAt)",
-      ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
-      ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": task.workflow.revision, ":stage": "PULL_REQUEST", ":ready": "READY" },
-    } }, ...(existingIndex === undefined ? [{ Put: {
-      TableName: dependencies.tableName,
-      Item: indexRecord,
-      ConditionExpression: "attribute_not_exists(pk)",
-    } }] : []),
-    // More repositories to go: the next draft pull request is due, as the first one was after the reviews.
-    ...(next.stage === "PULL_REQUEST" && next.state === "READY" && next.candidate !== undefined
-      ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, "PUBLISH", next.candidate.digest, now)] : []),
-    ...((task.workflow.pullRequests ?? []).length === 0 ? [mergeRecoveryItem(dependencies.tableName, task.taskId, now)] : [])];
-  }
+  if (operation.kind === "publish") return completedPublishItems(dependencies, task as WorkflowTaskRecord, terminalStatus, now, result);
   if (operation.kind === "maintain") return completedPullRequestUpdateItems(dependencies, operation, task as DeveloperTaskRecord & { workflow: WorkflowSnapshot }, terminalStatus, now, result, terminalError);
   if (operation.kind !== "task" || operation.workflowMode === undefined || task.workflow.state !== "RUNNING") return [];
   // M1.3 Task 3.7b: the candidate's completion refuses a baseline round (the unchanged code, for information only), whatever state the workflow is in. Its result moves nothing here:
@@ -13666,106 +13783,11 @@ async function completedWorkflowItems(
       }
     }
   } else if (operation.workflowMode === "REVIEW") {
-    if (terminalStatus !== "SUCCEEDED") {
-      // A review that stopped because its base rule files could not be verified says so; any other stop keeps the generic reason.
-      next = blockWorkflow(task.workflow, terminalError?.includes(WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE) === true ? WORKFLOW_BLOCK_REASONS.ruleFilesUnverified
-        : workflowRunEndedReason("REVIEW", terminalStatus), now);
-    } else {
-      const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
-      const repositories = Array.isArray(reported.workflowCandidateRepositories) ? reported.workflowCandidateRepositories : [];
-      const reviews = reported.workflowReviews;
-      let reviewFailure = "independent candidate review was invalid, incomplete, or stale";
-      try {
-        if (!Array.isArray(reviews)) throw new Error("review result has an invalid report collection");
-        const candidate = createCandidateManifest(repositories as CandidateRepository[]);
-        if (task.workflow.stage !== "REVIEW" || task.workflow.candidate?.digest !== candidate.digest) {
-          throw new Error("review result is stale, incomplete, or came from another operation");
-        }
-        if (task.workflow.e2e?.required === true) {
-          const currentRoundId = task.workflow.e2e.currentRoundId;
-          const checksOperations = (await queryAllItems(dependencies, `WORKSPACE#${task.workspaceId}`, "OPERATION#"))
-            .filter((item) => item.entityType === "OPERATION" && item.kind === "task" && item.workflowMode === "CHECKS")
-            .map((item) => item as unknown as OperationRecord)
-            .filter((item) => item.workflowE2EAdmission?.candidateDigest === candidate.digest
-              && item.workflowE2EAdmission.roundId === currentRoundId && item.workflowE2EEvidenceRef !== undefined)
-            .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
-          const checksOperation = checksOperations[0];
-          const e2eDiagnostic: WorkflowE2EVerificationDiagnostic = {};
-          if (checksOperation === undefined || await verifyWorkflowE2EEvidence(dependencies, checksOperation, task, candidate, undefined, e2eDiagnostic) !== "PASS") {
-            throw new Error("current E2E evidence is not independently qualified for review");
-          }
-          e2eAuthorityChecks = e2eDiagnostic.authorityChecks ?? [];
-          if (e2eAuthorityChecks.length === 0) throw new Error("current E2E authority snapshot could not be fenced at review persistence");
-        }
-        // Validate every report's complete contract and provenance before deciding that a role is missing.
-        for (const review of reviews) {
-          if (review === null || typeof review !== "object" || (review as Record<string, unknown>).operationId !== operation.id) {
-            throw new Error("review result is stale, incomplete, or came from another operation");
-          }
-          submitWorkflowReview(task.workflow, review, now);
-        }
-        // Exactly one code review and one security review: two of one kind would leave the stage waiting for the other.
-        const roles = reviews.map((review) => (review as Record<string, unknown>).role).sort();
-        if (roles.length !== 2 || roles[0] !== "CRITIC" || roles[1] !== "SECURITY") {
-          reviewFailure = WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE;
-          throw new Error("review result does not hold one code review and one security review");
-        }
-        next = task.workflow;
-        for (const review of reviews) next = submitWorkflowReview(next, review, now);
-      } catch {
-        next = blockWorkflow(task.workflow, reviewFailure, now);
-      }
-    }
+    ({ next, e2eAuthorityChecks } = await reviewRunOutcome(dependencies, operation, task as WorkflowTaskRecord, terminalStatus, now, result, terminalError));
   } else if (operation.workflowMode === "FEEDBACK_REVIEW") {
-    const binding = operation.workflowFeedbackReview;
-    const current = task.workflow;
-    if (binding === undefined || current.stage !== "WAIT_FOR_MERGE" || current.state !== "RUNNING"
-      || current.revision !== binding.workflowRevision || current.taskId !== binding.taskId
-      || current.candidate?.digest !== binding.candidateDigest || current.feedbackReview?.status !== "COLLECTING") return [];
-    if (terminalStatus !== "SUCCEEDED") {
-      next = blockWorkflow(current, WORKFLOW_BLOCK_REASONS.feedbackReviewFailed, now);
-    } else {
-      try {
-        const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
-        const feedbackResult = reported.workflowFeedbackReviewResult;
-        if (feedbackResult === null || typeof feedbackResult !== "object" || Array.isArray(feedbackResult)) throw new Error("feedback review result is missing");
-        const resultRecord = feedbackResult as Record<string, unknown>;
-        if (resultRecord.taskId !== binding.taskId || resultRecord.workflowRevision !== binding.workflowRevision
-          || resultRecord.candidateDigest !== binding.candidateDigest || typeof resultRecord.outputDigest !== "string"
-          || typeof resultRecord.artifactName !== "string" || typeof resultRecord.status !== "string") throw new Error("feedback review result does not match its operation binding");
-        const artifacts = (await queryAllItems(dependencies, "WORKSPACE#" + operation.workspaceId, "ARTIFACT#"))
-          .filter(item => item.operationId === operation.id && item.name === resultRecord.artifactName);
-        if (artifacts.length !== 1 || typeof artifacts[0]?.objectKey !== "string") throw new Error("critic report artifact is missing or ambiguous");
-        const object = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: String(artifacts[0].objectKey) }));
-        const reportBytes = object.Body ? Buffer.from(await object.Body.transformToByteArray()) : Buffer.alloc(0);
-        if (reportBytes.byteLength > 1_000_000 || createHash("sha256").update(reportBytes).digest("hex") !== resultRecord.outputDigest) throw new Error("critic report bytes failed digest validation");
-        const report = WorkflowFeedbackReviewReportSchema.parse(JSON.parse(reportBytes.toString("utf8")));
-        const inputs = await readFeedbackBundlesForCritic(dependencies, operation, binding);
-        // The critic's input as this broker builds it; a run an earlier release started (no notes marker) may also have been
-        // given every note, or none (deploy skew), and only such a run.
-        const requirementsDigests = operation.feedbackNotesScoped === true ? inputs.acceptedRequirementsDigests.slice(0, 1) : inputs.acceptedRequirementsDigests;
-        const refs = current.feedbackReview.bundleRefs.map(ref => WorkflowFeedbackBundleRefSchema.parse(ref));
-        if (operation.workflowMode !== "FEEDBACK_REVIEW" || report.operationMode !== operation.workflowMode
-          || report.operationId !== operation.id || report.taskId !== current.taskId
-          || report.workflowRevision !== binding.workflowRevision || report.qualification !== "AI_GENERATED_ADVISORY"
-          || !requirementsDigests.includes(report.taskRequirementsDigest) || report.status !== resultRecord.status
-          || refs.length !== report.bundleDigests.length || !refs.every(ref => report.bundleDigests.includes(ref.sha256))
-          || refs.length !== report.candidateBindings.length || refs.some(ref => !report.candidateBindings.some(candidate =>
-            candidate.repositoryId === ref.repositoryId && candidate.number === ref.number && candidate.headSha === ref.headSha
-              && candidate.candidateDigest === ref.candidateDigest && candidate.commentSetDigest === ref.commentSetDigest && candidate.bundleDigest === ref.sha256))) {
-          throw new Error("critic report provenance does not match the exact collected inputs");
-        }
-        const { findings, ...metadata } = report;
-        void findings;
-        const reviewRef = WorkflowFeedbackReviewRefSchema.parse({ ...metadata, sha256: resultRecord.outputDigest, objectKey: String(artifacts[0].objectKey) });
-        next = completeWorkflowFeedbackReview(current, {
-          expectedRevision: binding.workflowRevision, taskId: binding.taskId, candidateDigest: binding.candidateDigest,
-          operationId: operation.id, bundleRefs: refs, reviewRef,
-        }, now);
-      } catch {
-        next = blockWorkflow(current, WORKFLOW_BLOCK_REASONS.feedbackReviewFailed, now);
-      }
-    }
+    const reviewed = await feedbackReviewRunOutcome(dependencies, operation, task as WorkflowTaskRecord, terminalStatus, now, result);
+    if (reviewed === undefined) return [];
+    next = reviewed;
   } else if (task.workflow.stage !== "PLAN") {
     return [];
   } else if (terminalStatus === "SUCCEEDED") {
