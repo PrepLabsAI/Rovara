@@ -7,21 +7,21 @@ import { removePackedPieces } from "./broker-environment-template.js";
 type Resource = { Type: string; Properties: Record<string, unknown> };
 
 /**
- * Migration plan v3.2 lane E2 adds the core engine's switch to a named control plane: the off-by-default CoreEngine parameter, its reference on the broker, and the CoreEngineJobs construct
- * (queue, dead letters, their queue policies, an alarm, a schedule group, the scheduler's role and one schedule per job, behind the CoreEngineIsOn condition). tests/contract/core-engine-infrastructure.test.ts
+ * Migration plan v3.2 lane E2 adds the core engine to a named control plane: its settings parameters, their references on the broker, and the CoreEngineJobs construct
+ * (queue, dead letters, their queue policies, an alarm, a schedule group, the scheduler's role and one schedule per job; no switch since #1275). tests/contract/core-engine-infrastructure.test.ts
  * checks each in full; here their kinds and count are checked, then they are taken out, so the rest of the template must still match the snapshot (nothing else moved, the broker role included).
  */
 export function withoutCoreEngine(template: unknown): unknown {
   const synthesized = template as { Parameters: Record<string, unknown>; Conditions: Record<string, unknown>; Resources: Record<string, Resource> };
-  expect(synthesized.Parameters.CoreEngine).toMatchObject({ Type: "String", Default: "off" });
+  expect(synthesized.Parameters).not.toHaveProperty("CoreEngine");
   // Web task channel C8 (option b): the attention email's three parameters (default off), its condition and its template rule (checked in core-engine-infrastructure).
   expect(synthesized.Parameters.CoreAttentionEmail).toMatchObject({ Type: "String", Default: "off", AllowedValues: ["off", "on"] });
   // Live switches check 2026-11-18 (DEC 254n(1)): the per-company agent model choice, off by default, the broker's packed `mx` only (asserted below).
   expect(synthesized.Parameters.CoreAgentModelChoice).toMatchObject({ Type: "String", Default: "off", AllowedValues: ["off", "on"] });
-  for (const name of ["CoreEngine", "CoreAllowedCompanies", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons", "CoreSystemRuns", "CoreModelGatewayHost", "CoreAgentModel", "CoreAnswersModel", "CoreLearningModel", "CoreAttentionEmail", "CoreAttentionEmailHost", "CoreAttentionEmailSender", "CoreAgentModelChoice"]) delete synthesized.Parameters[name];
+  for (const name of ["CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons", "CoreSystemRuns", "CoreModelGatewayHost", "CoreAgentModel", "CoreAnswersModel", "CoreLearningModel", "CoreAttentionEmail", "CoreAttentionEmailHost", "CoreAttentionEmailSender", "CoreAgentModelChoice"]) delete synthesized.Parameters[name];
   const conditions = Object.keys(synthesized.Conditions).filter((id) => id.startsWith("CoreEngineJobs"));
-  expect(conditions.map((id) => id.replace(/[0-9A-F]{8}$/u, "")).sort()).toEqual(["CoreEngineJobsAttentionEmailAttentionEmailIsOn", "CoreEngineJobsCoreEngineIsOn", "CoreEngineJobsCoreSystemRunsIsOn"]);
-  // (L4-P1: the upkeep night's own condition is the system-runs flag AND the switch.)
+  expect(conditions.map((id) => id.replace(/[0-9A-F]{8}$/u, "")).sort()).toEqual(["CoreEngineJobsAttentionEmailAttentionEmailIsOn", "CoreEngineJobsCoreSystemRunsIsOn"]);
+  // (L4-P1: the upkeep night's own condition is the system-runs flag.)
   for (const id of conditions) delete synthesized.Conditions[id];
   // Only the attention email's rule is taken out (an app's stack keeps CDK's own CheckBootstrapVersion).
   const rules = (template as { Rules?: Record<string, unknown> }).Rules ?? {};
@@ -35,7 +35,7 @@ export function withoutCoreEngine(template: unknown): unknown {
     "AWS::SQS::Queue", "AWS::SQS::Queue", "AWS::SQS::QueuePolicy", "AWS::SQS::QueuePolicy",
     // L4-SQS (journey audit B3c): the lessons reflection queue and its dead letters, and their two queue policies (checked in tests/contract/core-lessons-reflect-queue.test.ts).
     "AWS::SQS::Queue", "AWS::SQS::Queue", "AWS::SQS::QueuePolicy", "AWS::SQS::QueuePolicy",
-    // R2 step 4: the dispatcher's core queue mapping and its policy under the condition.
+    // R2 step 4: the dispatcher's core queue mapping and its policy.
     "AWS::Lambda::EventSourceMapping", "AWS::IAM::Policy",
     // Web task channel C8 (option b): the attention email's sender function, its log group, role, policy and the broker's invoke permission, all under AttentionEmailIsOn.
     "AWS::Lambda::Function", "AWS::Logs::LogGroup", "AWS::IAM::Role", "AWS::IAM::Policy", "AWS::Lambda::Permission",
@@ -45,13 +45,12 @@ export function withoutCoreEngine(template: unknown): unknown {
   const dispatchers = Object.entries(synthesized.Resources).filter(([id, resource]) => /^Dispatcher[0-9A-F]{8}$/u.test(id) && resource.Type === "AWS::Lambda::Function");
   expect(dispatchers).toHaveLength(1);
   const dispatcherVariables = (dispatchers[0]![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
-  for (const name of ["CORE_DISPATCH_QUEUE_ARN", "CORE_DISPATCH_QUEUE_URL", "CORE_DISPATCH_DEAD_LETTER_URL", "ROVARA_CORE_ENGINE", "CALLBACK_SIGNING_KEY_SECRET_ID", "EC2_WORKER_SUBNETS", "EC2_WORKER_LAUNCH_TEMPLATE_ID"]) {
+  for (const name of ["CORE_DISPATCH_QUEUE_ARN", "CORE_DISPATCH_QUEUE_URL", "CORE_DISPATCH_DEAD_LETTER_URL", "CALLBACK_SIGNING_KEY_SECRET_ID", "EC2_WORKER_SUBNETS", "EC2_WORKER_LAUNCH_TEMPLATE_ID"]) {
     expect(dispatcherVariables, name).toHaveProperty(name);
     delete dispatcherVariables[name];
   }
-  removePackedPieces(dispatcherVariables, "AGENTX_SETTINGS", ["ac", "am", "cd", "cl", "ct", "gw"]);
+  removePackedPieces(dispatcherVariables, "AGENTX_SETTINGS", ["am", "cd", "cl", "ct", "gw"]);
   delete dispatcherVariables.ROVARA_POLICY_HOOK;
-  delete dispatcherVariables.ROVARA_CORE_ALLOWED_COMPANIES;
   const dispatcherPolicy = Object.entries(synthesized.Resources).find(([id, resource]) => id.startsWith("DispatcherServiceRoleDefaultPolicy") && resource.Type === "AWS::IAM::Policy")!;
   const statements = (dispatcherPolicy[1].Properties.PolicyDocument as { Statement: Array<{ Sid?: string }> }).Statement;
   expect(statements.filter((statement) => statement.Sid === "ConsumeCoreDispatchQueue")).toHaveLength(1);
@@ -102,15 +101,14 @@ export function withoutCoreEngine(template: unknown): unknown {
   const brokers = Object.entries(synthesized.Resources).filter(([id, resource]) => id.startsWith("Broker") && resource.Type === "AWS::Lambda::Function");
   expect(brokers).toHaveLength(1);
   const variables = (brokers[0]![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
-  // Core switch-on blocker (2026-11-17): the switch and the gateway settings are packed in the broker's settings.
+  // Core switch-on blocker (2026-11-17): the gateway settings are packed in the broker's settings.
   const settingsJoin = JSON.stringify(variables.AGENTX_SETTINGS);
-  for (const [code, parameter] of [["sw", "CoreEngine"], ["gw", "CoreModelGatewayHost"], ["am", "CoreAgentModel"], ["aa", "CoreAnswersModel"], ["lm", "CoreLearningModel"], ["mx", "CoreAgentModelChoice"]] as const) expect(settingsJoin, code).toMatch(new RegExp(`${code}=",\\{"Ref":"${parameter}"\\}`, "u"));
+  for (const [code, parameter] of [["gw", "CoreModelGatewayHost"], ["am", "CoreAgentModel"], ["aa", "CoreAnswersModel"], ["lm", "CoreLearningModel"], ["mx", "CoreAgentModelChoice"]] as const) expect(settingsJoin, code).toMatch(new RegExp(`${code}=",\\{"Ref":"${parameter}"\\}`, "u"));
   // Web task channel C8 (option b): the attention email switch, packed (the web app's host is the sender function's alone).
   expect(settingsJoin).toMatch(/ae=",\{"Ref":"CoreAttentionEmail"\}/u);
   expect(settingsJoin).not.toContain("CoreAttentionEmailHost");
-  removePackedPieces(variables, "AGENTX_SETTINGS", ["aa", "ac", "ae", "am", "cd", "cl", "ct", "gw", "lm", "mx", "sw", "sy"]);
+  removePackedPieces(variables, "AGENTX_SETTINGS", ["aa", "ae", "am", "cd", "cl", "ct", "gw", "lm", "mx", "sy"]);
   delete variables.ROVARA_POLICY_HOOK;
-  delete variables.ROVARA_CORE_ALLOWED_COMPANIES;
 
   return template;
 }

@@ -27,7 +27,7 @@ async function setup(lessonsSlack: Parameters<typeof createBrokerCoreRoot>[0]["l
     throw new Error("unexpected");
   } };
   const root = createBrokerCoreRoot({
-    env: { ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all", ROVARA_CORE_LESSONS: "on" },
+    env: { ROVARA_CORE_LESSONS: "on" },
     documentClient: client, stateTableName: "state", signInTableName: "signin", callbackSigningKey: secret.toString(), repositoryGrantKey: secret,
     codeModules: () => ({}) as never, repositoryCredential: async () => { throw new Error("unused"); }, origin: () => "https://api.example", log: () => undefined,
     now: () => new Date(world.clock.now), ciReporting: { honest: true, ciMode: async () => "sandbox_only" as const },

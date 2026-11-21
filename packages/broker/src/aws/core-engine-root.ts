@@ -10,10 +10,7 @@ import { hostedPreviewContext } from "../core-host/start-estimates.js";
 import { recordClosedRunUsage } from "../core/cost/run-usage.js";
 // Engine host (migration plan v3.2 lane E2, step 6): the core engine's composition root on the deployed BROKER. The dispatcher's half is aws/worker-machines/dispatcher-core.ts.
 //
-// One object per function container, built at module load. It reads the switch (ROVARA_CORE_ENGINE) once through the core host app (core-host/app.ts): while the switch is OFF (the default)
-// it builds nothing, reads nothing and answers nothing, so the broker behaves exactly as before. `coreTasks` is then undefined, and the developer routes never reach the core.
-//
-// While the switch serves, it wires:
+// One object per function container, built at module load, over the core host app (core-host/app.ts). The core engine has no switch (#1275). It wires:
 //   - the registry: Code's AWS modules (core-host/code-modules.ts), the step 5 security modules (core-host/hosted-modules.ts) and whatever else the deployment adds, with the policy hook
 //     put in front of admission and approvers last before the seal (hosted wiring (c)): ROVARA_POLICY_HOOK holds the install's hook settings; absent, nothing changes; settings without the
 //     install's question key refuse the registry.
@@ -170,7 +167,7 @@ import { RepositoryGrantService } from "../repository-access.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { ownerOfWorkspace } from "./engine-boundary.js";
 import { workspaceCompanyReader } from "./worker-machines/workspace-company.js";
-import { CORE_ENGINE_VARIABLE, digestPilotOf, parseCoreSwitch, switchCovers } from "../core-host/flags.js";
+import { digestPilotOf, switchCovers } from "../core-host/flags.js";
 
 import { handleCoreContextTools } from "../core-host/context-tools.js";
 import { createTaskLogHooks } from "../core/task-log/hooks.js";
@@ -690,14 +687,12 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   let settingsBlocked = false;
   let hookSettings: HostedPolicyHookSettings | undefined;
   let hookProblem = false;
-  if (parseCoreSwitch(env[CORE_ENGINE_VARIABLE]).value.mode !== "off") {
-    try {
-      const admission = readHostedAdmissionSettings(env);
-      if ("problem" in admission || readCoreLessonsSwitch(env).problem !== undefined) settingsBlocked = true;
-      try { hookSettings = policyHookSettingsFromEnvironment(env); } catch { hookProblem = true; throw new Error("the policy hook settings are not readable"); }
-    } catch {
-      settingsBlocked = true;
-    }
+  try {
+    const admission = readHostedAdmissionSettings(env);
+    if ("problem" in admission || readCoreLessonsSwitch(env).problem !== undefined) settingsBlocked = true;
+    try { hookSettings = policyHookSettingsFromEnvironment(env); } catch { hookProblem = true; throw new Error("the policy hook settings are not readable"); }
+  } catch {
+    settingsBlocked = true;
   }
   if (settingsBlocked) log({ event: "core_engine.settings_blocked" });
   const now = inputs.now ?? (() => new Date());
@@ -721,10 +716,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const identity: HostedIdentityOptions = { membershipOf, displayNameOf };
   // HW5b: where the deployment serves ONE chat that can name a person (`ChatThreads.personOf`), a press in it may approve a low or medium risk plan (`hosted-approvers.ts` `chat`).
   const chatApproval = hostedChatApproval(inputs.chatThreads, { membershipOf, projectGrantRole }, inputs.callbackSigningKey === undefined ? undefined : approvalProofKeyOf(inputs.callbackSigningKey));
-  const coreSwitch = parseCoreSwitch(env[CORE_ENGINE_VARIABLE]);
-  const coreActive = coreSwitch.value.mode !== "off" || coreSwitch.drain === true; 
   // Web task channel C8 (option b): the attention email, OFF unless ROVARA_ATTENTION_EMAIL is `on` (attention-email.ts). One attempt per invoke: a send whose answer was lost is never sent again.
-  const attention = coreActive ? attentionEmailFromEnvironment({ env, lambda: () => new LambdaClient({ maxAttempts: 1 }), documentClient: inputs.documentClient, signInTableName: inputs.signInTableName, callbackSigningKey: inputs.callbackSigningKey, now: () => now().getTime(), membershipOf, log }) : undefined;
+  const attention = attentionEmailFromEnvironment({ env, lambda: () => new LambdaClient({ maxAttempts: 1 }), documentClient: inputs.documentClient, signInTableName: inputs.signInTableName, callbackSigningKey: inputs.callbackSigningKey, now: () => now().getTime(), membershipOf, log });
   // L2b: read when first needed (a serving switch only); a broken setting throws in fixed words and refuses the runtime.
   const modelGateway = () => coreModelGatewayWiring(env, inputs.taskTokens);
   // L4-AG: the hosted answers model for each company (one gateway adapter for the deployment, made when first needed, never for an install without the gateway).
@@ -733,27 +726,25 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const answersModel = () => (answersModelFor ??= hostedAnswersModel(env, inputs.taskTokens));
   // DEC 243c: with the gateway's offered-models reader, the company's per-step model rule chooses each step's model from that list (one rule per company, kept for its page's routes).
   // One reader for every company: the deployment's own (the gateway's route, signed with the task key) unless the root was given one.
-  const previewRates = coreActive ? previewRateReaderFromEnvironment(env, inputs.taskTokens) : undefined;
-  const modelChoices = createCompanyModelChoices({ reader: coreActive && env[CORE_AGENT_MODEL_CHOICE_VARIABLE] === "on" ? inputs.offeredModels ?? offeredModelsReaderFromEnvironment(env, inputs.taskTokens) : undefined, now: () => now().getTime() });
+  const previewRates = previewRateReaderFromEnvironment(env, inputs.taskTokens);
+  const modelChoices = createCompanyModelChoices({ reader: env[CORE_AGENT_MODEL_CHOICE_VARIABLE] === "on" ? inputs.offeredModels ?? offeredModelsReaderFromEnvironment(env, inputs.taskTokens) : undefined, now: () => now().getTime() });
   // DEC 254n (1): the company's own engine model (when it set one) replaces the install's for its tasks; its start is refused unless the gateway offers it THAT company now. The list is read
   // through the same reader as the model choice where the root was given one, else the gateway's own route signed with the task key (only the gateway's origin is needed).
-  const engineOffered: EngineModelOfferedReader | undefined = !coreActive ? undefined
-    : inputs.offeredModels !== undefined ? (companyId) => inputs.offeredModels!.offered(companyId) : adminOfferedModelsFromEnvironment(env, inputs.taskTokens ?? (() => undefined));
+  const engineOffered: EngineModelOfferedReader | undefined = inputs.offeredModels !== undefined ? (companyId) => inputs.offeredModels!.offered(companyId) : adminOfferedModelsFromEnvironment(env, inputs.taskTokens ?? (() => undefined));
   const modelFlowOptions = (registry: AdapterRegistry, companyId: OrgId): Partial<RegistryTaskFlowOptions> => {
     const gateway = modelGateway()!.flowOptions;
     const store = registry.require("storage");
     const modelAccess = companyEngineModelRoute({ store, companyId, install: gateway.modelAccess });
     return { ...modelChoices.flowOptionsFor(registry, companyId, { ...gateway, modelAccess }), startModelCheck: companyEngineModelStartCheck({ store, companyId, offered: engineOffered }) };
   };
-  // Switch off (and not draining): the core settings are never read, so an install without the core reads exactly what it read before (CORE_ENGINE_BROKER_WIRED).
-  const lessonsSwitch: ReturnType<typeof readCoreLessonsSwitch> = coreActive ? readCoreLessonsSwitch(env) : { value: { mode: "off" } };
+  const lessonsSwitch: ReturnType<typeof readCoreLessonsSwitch> = readCoreLessonsSwitch(env);
   // The weekly lessons summary's pilot list, resolved ONCE so the sender (createCoreLessons) and the settings API (createLessonsApi) can never disagree about which companies default to on.
   const lessonsDigestPilot = digestPilotOf({ lessonsSwitch: lessonsSwitch.value, ...(inputs.lessonsDigestPilot === undefined ? {} : { digestPilot: inputs.lessonsDigestPilot }) });
   // The caps the per-run stop reads (the admission module refuses to build without them, so the registry is refused then too).
-  const readSettings = coreActive ? readHostedAdmissionSettings(env) : undefined;
-  const admissionSettings = readSettings !== undefined && "settings" in readSettings ? readSettings.settings : undefined;
+  const readSettings = readHostedAdmissionSettings(env);
+  const admissionSettings = "settings" in readSettings ? readSettings.settings : undefined;
   // L4-P1 (owner DEC 254zzl): the per-company flag of system-started runs, default off. A value that cannot be read is off (reported once).
-  const systemRunsFlag: ReturnType<typeof readSystemRunsSwitch> = coreActive ? readSystemRunsSwitch(env) : { value: { mode: "off" } };
+  const systemRunsFlag: ReturnType<typeof readSystemRunsSwitch> = readSystemRunsSwitch(env);
   // L4-P2: what one company's system runs need beyond the flag: the effective gate (ceiling AND consent), the admins' recipients and live "administers" read, and the pause hooks (the notice of a paused night).
   // Stateless, so the services builder and the worker callback each build their own over the same stores.
   const upkeepPartsFor = (registry: AdapterRegistry, companyId: OrgId) => {
@@ -817,8 +808,6 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const taskOwner = hostedTaskOwner({ membershipOf, projectGrant, people: taskPeople });
 
   const app = createCoreHostApp({
-    env,
-    log,
     // B5: a company the lessons switch or the system-runs flag names has its scheduled jobs before its first core task writes an in-use mark.
     alsoNamedBy: [lessonsSwitch.value, systemRunsFlag.value],
     modules: () => [...codeAdapterModules(inputs.codeModules({ storage: async () => (await app.registry()).require("storage") })), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey, runStopWired: runStopWiredFrom(env), projectTaskCap, taskOwner, ...(chatApproval === undefined ? {} : { chat: chatApproval }) }), ...gatewayModelKeysModules(env), ...(attention === undefined ? [] : [attentionEmailModule(attention.sender)]), ...evalReservationModules(env, inputs.taskTokens), ...companyInstructionsModules(env, inputs.taskTokens), ...savedEnvImageModules(env, inputs.savedEnvSessions ?? savedEnvRoleSessionsFromEnvironment(env)), ...(inputs.extraModules?.() ?? [])],
@@ -1016,7 +1005,6 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   let knowledge: KnowledgeApi | undefined;
   let adminNotice: BrokerCoreRoot["adminNotice"];
   if (settingsBlocked) {
-    const blockedSwitch = parseCoreSwitch(env[CORE_ENGINE_VARIABLE]).value;
     coreTasks = {
       route: async (_request, caller) => {
         let membership: CompanyMembership | undefined;
@@ -1025,11 +1013,11 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         } catch {
           return callbackAnswer(503, "CORE_SWITCH_BLOCKED", CORE_SETTINGS_REFUSAL_WORDS);
         }
-        if (membership === undefined || !switchCovers(blockedSwitch, membership.companyId)) return undefined;
+        if (membership === undefined) return undefined;
         return callbackAnswer(503, "CORE_SWITCH_BLOCKED", CORE_SETTINGS_REFUSAL_WORDS);
       },
     };
-  } else if (app.serving) {
+  } else {
     // The library's install-wide learning gate follows the lessons switch.
     setCoreLessonsGate(env);
     const companyOf = async (caller: DeployedCaller): Promise<CompanyMembership | undefined> => membershipOf(caller.principal.personId);
@@ -1268,7 +1256,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
 
   // L2-4: the tracker intake, from each company's own runtime (only a company whose new tasks start on the core).
   const linearIntake = inputs.linearIntake;
-  const intake = settingsBlocked || !app.serving || linearIntake === undefined ? undefined : createHostedIntake({
+  const intake = settingsBlocked || linearIntake === undefined ? undefined : createHostedIntake({
     connections: linearIntake.connections, fenceKey: intakeFenceKeyOf(inputs.callbackSigningKey), now: () => now().getTime(), log,
     companyFor: async (companyId) => {
       if (app.engineForNewTask(companyId) !== "core") return undefined;
@@ -1325,13 +1313,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       stopWorkspaceForAdmin: async (workspaceId, administrator, authorize) => {
         const companyId = await companyOfWorkspace(workspaceId);
         if (companyId === undefined) throw agentXError("NOT_FOUND", WORKSPACE_NOT_FOUND);
-        let flow: TaskFlowDeps;
-        try {
-          flow = (await app.runtimeFor(companyId)).flow.deps;
-        } catch (error) {
-          if (error instanceof Error && error.name === "CoreEngineOffError") throw agentXError("NOT_FOUND", WORKSPACE_NOT_FOUND);
-          throw error;
-        }
+        const flow: TaskFlowDeps = (await app.runtimeFor(companyId)).flow.deps;
         // Q2: the administrator's company is their live membership in the sign-in table (the reader every core caller is judged by); the core binds the grant to the task's company with it.
         return await stopWorkspaceAsAdministrator(flow, workspaceId, { id: administrator.id, companyOf: async () => (await membershipOf(administrator.id))?.companyId }, authorize);
       },
@@ -1424,10 +1406,10 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const standingOf = personStandingFromDynamo(inputs.documentClient, inputs.signInTableName);
 
   async function personErase(request: BrokerRequest, caller: PersonEraseCaller): Promise<BrokerResponse | undefined> {
-    if (!app.serving || !(request.path.split("?")[0] ?? "").startsWith("/v1/app/people/")) return undefined;
+    if (!(request.path.split("?")[0] ?? "").startsWith("/v1/app/people/")) return undefined;
     const registry = await app.registry();
     return await createPersonEraseRoute({
-      app, log, standing: standingOf,
+      log, standing: standingOf,
       companyOf: async (who) => await membershipOf(who.principal.personId),
       eraseDeps: (companyId) => eraseDepsOver(registry, companyId),
     }).route(request, caller);
@@ -1441,14 +1423,14 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     knowledge,
     adminNotice,
     // The person's own switch: company from live membership, rows in the company's partition of the registry's store. Only where the core serves (no company's data is read otherwise).
-    ...(settingsBlocked || !app.serving ? {} : { lessonsSlackSwitch: createLessonsSlackSwitchApi({
+    ...(settingsBlocked ? {} : { lessonsSlackSwitch: createLessonsSlackSwitchApi({
       companyOf: async (caller) => await membershipOf(caller.personId),
       store: async () => (await app.registry()).require("storage"),
       now: () => now().getTime(),
     }) }),
     // L4-JA7: the two "knowledge stays in Rovara" switches (company; project). The rows are the ones the knowledge reads and the wiki tools gate read (`DocumentLocalToolsSettings` over the registry's storage); the company comes only from
     // live membership, the project's role from the broker's own grant (administrator: maintainer), and the project must be in that company's own catalog. It does not need the lessons switch.
-    ...(settingsBlocked || !app.serving ? {} : { knowledgeSwitch: createKnowledgeSwitchApi({
+    ...(settingsBlocked ? {} : { knowledgeSwitch: createKnowledgeSwitchApi({
       companyOf: async (caller) => await membershipOf(caller.personId),
       store: async () => (await app.registry()).require("storage"),
       audit: async () => (await app.registry()).require("audit-sink"),
@@ -1471,7 +1453,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       },
     } }),
     async personErase(request, caller) {
-      if (settingsBlocked && app.serving && (request.path.split("?")[0] ?? "").startsWith("/v1/app/people/")) return callbackAnswer(503, "CORE_SWITCH_BLOCKED", CORE_SETTINGS_REFUSAL_WORDS);
+      if (settingsBlocked && (request.path.split("?")[0] ?? "").startsWith("/v1/app/people/")) return callbackAnswer(503, "CORE_SWITCH_BLOCKED", CORE_SETTINGS_REFUSAL_WORDS);
       return await personErase(request, caller);
     },
     async resumePersonErases(companyId, budgetMs) {

@@ -63,7 +63,7 @@ async function setup(env: Record<string, string> = { ROVARA_CORE_LESSONS: "on" }
     throw new Error("unexpected write");
   } };
   const root = createBrokerCoreRoot({
-    env: { ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all", ...env },
+    env: { ...env },
     documentClient: client, stateTableName: "state", signInTableName: "signin", callbackSigningKey: secret.toString(), repositoryGrantKey: secret,
     codeModules: () => ({}) as never, repositoryCredential: async () => { throw new Error("unused"); }, origin: () => "https://api.example", log: () => undefined,
     now: () => new Date(world.clock.now), ciReporting: { honest: true, ciMode: async () => "sandbox_only" as const },

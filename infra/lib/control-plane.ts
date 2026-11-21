@@ -1115,9 +1115,7 @@ export class ControlPlaneStack extends Stack {
       // Spec 025 phase 25c: sharing, named environments only (D14).
       const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, coreBroker: broker, controlPlaneUrl: api.attrApiEndpoint, state, artifactBucket: artifacts, slackSecret, taskPeopleChangesEnabled: taskParameters.taskPeopleChangesEnabled, notifyOperator });
       if (companySignIn !== undefined) companySignIn.addTo(notifier.function);
-      // Migration plan v3.2 lane E2: the core engine's switch (stack parameter CoreEngine, default off), its dispatch queue and its scheduled jobs (core-engine.ts).
-      // Named environments only: the legacy (production) template has none of it, and this block now also runs for the legacy deployment.
-      // #1148: the legacy install (production) too, under "production", with CoreEngine off by default.
+      // Migration plan v3.2 lane E2: the core engine's dispatch queue and its scheduled jobs (core-engine.ts), for every install (#1148: the legacy install too, under "production").
       new CoreEngine(this, "CoreEngineJobs", { naming, env: naming.env ?? "production", broker, dispatcher, notifyOperator });
       // Lane T6 (DEFERRED T6-SECRETS-IAM-20261114-v2): the role the broker will assume for one company's secrets; nothing assumes it yet. #1129: the legacy deployment
       // (production) too, its secrets under agentx/production/.
@@ -1418,7 +1416,7 @@ export class ControlPlaneStack extends Stack {
     sessions.connectDispatcher(dispatcher);
     sessions.connectBroker(broker);
     if (naming.env !== undefined) broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["states:StartExecution"], resources: [sessions.deleter.stateMachineArn, swebenchStateMachineArn] }));
-    // Lane E2 step 4: the dispatcher is the core dispatch queue's consumer (#1148: in the legacy install too, ENABLED only while CoreEngine is not off).
+    // Lane E2 step 4: the dispatcher is the core dispatch queue's consumer (#1148: in the legacy install too).
     const coreEngine = this.node.tryFindChild("CoreEngineJobs");
     if (coreEngine instanceof CoreEngine) {
       coreEngine.connectDispatcher(dispatcher, {

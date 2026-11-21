@@ -51,10 +51,9 @@ import { digestPilotOf, parseCoreSwitch, switchCovers, type CoreSwitch } from ".
 
 export const CORE_LESSONS_VARIABLE = "ROVARA_CORE_LESSONS";
 
-/** The lessons switch from a function's environment. `drain` has no meaning for lessons and reads as off. Fail closed: anything that is not exactly a switch value is off, with a problem that never echoes it. */
+/** The lessons switch from a function's environment. Fail closed: anything that is not exactly a switch value is off, with a problem that never echoes it. */
 export function readCoreLessonsSwitch(env: NodeJS.ProcessEnv = process.env): { value: CoreSwitch; problem?: string } {
   const parsed = parseCoreSwitch(env[CORE_LESSONS_VARIABLE]);
-  if (parsed.drain === true) return { value: { mode: "off" }, problem: "not off, on or on:<company ids> (the engine's wind-down value has no meaning for lessons)" };
   return parsed.problem === undefined ? { value: parsed.value } : { value: parsed.value, problem: parsed.problem };
 }
 

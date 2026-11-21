@@ -1,14 +1,14 @@
 // Engine host (migration plan v3.2 lane E2, step 4): the dispatcher's half of the core engine.
 //
-// The dispatcher Lambda reads two queues: the spec 056 DispatchQueue (today's path, unchanged) and, in named environments, the core's dispatch queue through an event source mapping of its own
-// that is ENABLED only while the switch is not off (infra/lib/core-engine.ts `connectDispatcher`). `withCoreDispatch` splits a batch by the queue each record came from:
-//   - a record of the core queue never reaches today's dispatch code. While the switch serves (on, on:<ids>, drain) it goes to the core's dispatch host (core-dispatch-host.ts); while the
-//     switch is off, or the host cannot be built, it is reported as a batch item failure, so it comes back and waits (never deleted, never today's path);
+// The dispatcher Lambda reads two queues: the spec 056 DispatchQueue (the old workflow's tasks, until it is removed: #1274) and the core's dispatch queue through an event source mapping of its
+// own (infra/lib/core-engine.ts `connectDispatcher`). `withCoreDispatch` splits a batch by the queue each record came from:
+//   - a record of the core queue never reaches today's dispatch code. It goes to the core's dispatch host (core-dispatch-host.ts); when the host cannot be built, it is reported as a batch
+//     item failure, so it comes back and waits (never deleted, never today's path);
 //   - every other record goes to today's handler exactly as before.
 // Where the core queue is not configured (the legacy template: no CORE_DISPATCH_QUEUE_ARN), the router is not installed at all: the handler is today's handler, the same function.
 //
-// `createDispatcherCoreHost` builds the core on the dispatcher (the deployed composition root, core-host/app.ts) from the dispatcher's own clients, ONLY when the first core batch arrives
-// while the switch serves: an off dispatcher builds nothing. What the dispatcher does not have is not faked; each refuses in fixed words:
+// `createDispatcherCoreHost` builds the core on the dispatcher (the deployed composition root, core-host/app.ts) from the dispatcher's own clients, ONLY when the first core batch arrives.
+// What the dispatcher does not have is not faked; each refuses in fixed words:
 //   - the people points: a dispatch decides nothing for a person, so the task access rule refuses every question (the dispatch consumer never asks it);
 //   - a repository: the dispatcher holds no GitHub App, so its code host and check runner refuse every call, and its repository grants are issue-only (the broker exchanges them);
 //   - secrets: the dispatcher reads none, so its secrets client refuses every call;
@@ -16,7 +16,7 @@
 //     then every company's runtime is refused (DISPATCHER_FLOW_NOT_DECLARED) and its records come back.
 // A core workspace's worker is placed on the install's own workers (EC2_WORKER_SUBNETS, EC2_WORKER_LAUNCH_TEMPLATE_ID), never on a binding a company writes.
 // The registry still needs the security-list points (admission, metering, identity, approvers, audit-sink) and model keys, which no Code module fills yet: until they land the registry
-// refuses by name and every core record comes back (the intended fail-closed state; the named switch is wired through CORE_ENGINE_BROKER_WIRED).
+// refuses by name and every core record comes back (the intended fail-closed state).
 import { createHmac } from "node:crypto";
 import {
   CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, IMPLICIT_COMPANY_ID, agentXError, type AdapterRegistry, type DocumentStore, type OrgId, type QueueService,
@@ -27,7 +27,7 @@ import type { GitHubActionsProvider } from "../../plugins/check-runner/github-ac
 import { createCoreHostApp, type CoreHostApp } from "../../core-host/app.js";
 import { CORE_DISPATCH_QUEUE, codeAdapterModules, type CodeModuleDeps } from "../../core-host/code-modules.js";
 import { createCompanyArtifactReader } from "../../core-host/company-artifact-reader.js";
-import { coreEngineServes, readCoreEngineFlags, switchCovers } from "../../core-host/flags.js";
+import { switchCovers } from "../../core-host/flags.js";
 import { readCoreLessonsSwitch } from "../../core-host/lessons.js";
 import type { CoreAdapterModule } from "../../core-host/registry.js";
 import type { SessionManager } from "../sessions.js";
@@ -65,8 +65,6 @@ type DispatcherHandler<E, C> = (event: E, context?: C) => Promise<BatchAnswer>;
 export interface CoreDispatchRouting {
   /** The core dispatch queue's ARN (CORE_DISPATCH_QUEUE_ARN). Absent or empty: no router, today's handler alone. */
   coreQueueArn: string | undefined;
-  /** The switch, read per batch: true while it serves (on, on:<ids>, drain). */
-  serves: () => boolean;
   /** The core's dispatch host, built on first use. A rejection leaves the batch's core records to come back. */
   host: () => Promise<CoreDispatchHost>;
   log?: (entry: Record<string, unknown>) => void;
@@ -93,10 +91,6 @@ export function withCoreDispatch<R extends DispatcherRecord, E extends Dispatche
 /** The core queue's records: the ones the core did not acknowledge come back. */
 async function serveCore(records: readonly DispatcherRecord[], routing: CoreDispatchRouting, log: (entry: Record<string, unknown>) => void): Promise<string[]> {
   const all = records.map((record) => record.messageId);
-  if (!routing.serves()) {
-    log({ event: "dispatch.core_off", records: records.length });
-    return all;
-  }
   let host: CoreDispatchHost;
   try {
     host = await routing.host();
@@ -293,10 +287,8 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
   };
   const grantKey = repositoryGrantKeyOf(callbackSigningKey);
   const app = createCoreHostApp({
-    env,
     modules: () => [...codeAdapterModules(deps), ...(inputs.extraModules ?? [])],
     context: () => ({ installCompanyId: IMPLICIT_COMPANY_ID, now, env, clients: {}, log: inputs.log }),
-    log: inputs.log,
     // The dispatcher runs no scheduled job and relays no outbox (the broker does): its runtimes are built for the dispatch consumer alone.
     dispatchOnly: true,
     ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
@@ -341,8 +333,6 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
     },
   });
   const host = createCoreDispatchHost({
-    // Read per batch: `on` and `drain` take the core's records (a draining core still dispatches its running tasks' steps); `off` takes nothing.
-    enabled: () => coreEngineServes(readCoreEngineFlags(env)),
     companyOfWorkspace,
     depsFor: async (companyId: OrgId, queues) => {
       const deps = dispatcherFlowDeps((await app.runtimeFor(companyId)).flow.deps, queues);

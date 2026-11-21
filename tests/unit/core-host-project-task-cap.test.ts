@@ -21,7 +21,7 @@ const A = COMPANY_A_ID as OrgId;
 const B = COMPANY_B_ID as OrgId;
 const DAY = "2026-11-17";
 const NOW = new Date(`${DAY}T10:00:00.000Z`);
-const SETTINGS: HostedAdmissionSettings = { allowedCompanies: "all", taskCapMicros: 5_000_000, companyDayCapMicros: 25_000_000 };
+const SETTINGS: HostedAdmissionSettings = { taskCapMicros: 5_000_000, companyDayCapMicros: 25_000_000 };
 const exactMeter = {
   async price() { return null; },
   async record(e: MeterEntry) { return { cost: { micros: e.usage.tokens.input, currency: "USD" }, source: "price-table" as const }; },

@@ -24,9 +24,9 @@ const PROJECT: ProjectDefinition = {
 };
 const SERVICES = () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } });
 
-function appOver(world: FakeWorld, env: NodeJS.ProcessEnv): CoreHostApp {
+function appOver(world: FakeWorld): CoreHostApp {
   return createCoreHostApp({
-    env, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
+    modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
     runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: HONEST_CI }),
   });
 }
@@ -43,11 +43,11 @@ const callerOf = (companyId: string): DeployedCaller => ({ principal: localOwner
 const cliOf = (caller: DeployedCaller): DeployedCaller => { const { webApp: _web, ...rest } = caller; void _web; return { ...rest, client: "cli" }; };
 const WIRED: CoreDevWiring = { origin: () => "https://api.example", scriptTokens: { enabled: () => true } };
 
-async function world2(env: NodeJS.ProcessEnv = { ROVARA_CORE_ENGINE: "on" }) {
+async function world2() {
   const world = createFakeWorld();
   await registerProject(world, FAKE_COMPANY);
   await registerProject(world, OTHER);
-  const app = appOver(world, env);
+  const app = appOver(world);
   const member = new Map<string, CompanyMembership>();
   const companyOf = vi.fn(async (caller: DeployedCaller) => member.get(caller.principal.personId + caller.principal.companyId));
   const remember = (companyId: string, role: CompanyMembership["role"] = "owner", personId?: string) => {
@@ -60,17 +60,6 @@ async function world2(env: NodeJS.ProcessEnv = { ROVARA_CORE_ENGINE: "on" }) {
 }
 
 describe("the core's handlers on the deployed API", () => {
-  it("off (the default) answers nothing and reads nothing, for every path it would own", async () => {
-    const { world, companyOf } = await world2();
-    const off = createCoreDevRoutes({ app: appOver(world, {}), companyOf, wiring: () => WIRED });
-    const spy = vi.spyOn(world.store, "get");
-    for (const request of [get("/v1/app/sessions"), get(`/v1/dev/tasks/${randomUUID()}`), get("/v1/app/decisions"), get("/v1/app/projects/payments/how-we-work"), get("/v1/app/script-tokens"), post("/v1/app/script-tokens"), post("/v1/dev/tasks", { requestId: randomUUID() }), get("/v1/app/projects/payments/setup-agent"), post("/v1/app/projects/payments/setup-agent", { requestId: randomUUID() }), post("/v1/app/projects/payments/setup-agent/stop", { requestId: randomUUID() })]) {
-      expect(await off.route(request, callerOf(FAKE_COMPANY)), request.path).toBeUndefined();
-    }
-    expect(companyOf).not.toHaveBeenCalled();
-    expect(spy).not.toHaveBeenCalled();
-    expect(world.created).toEqual([]);
-  });
 
   it("leaves every path it does not own to the old broker, and never serves the laptop's page routes", async () => {
     const { app, companyOf, remember } = await world2();
@@ -100,12 +89,6 @@ describe("the core's handlers on the deployed API", () => {
     expect(built).not.toHaveBeenCalled();
   });
 
-  it("leaves a company the switch does not send to the core, and that holds no core task, on the old broker", async () => {
-    const { app, companyOf, remember } = await world2({ ROVARA_CORE_ENGINE: `on:${FAKE_COMPANY}` });
-    const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
-    expect(await routes.route(get("/v1/app/script-tokens"), remember(OTHER))).toBeUndefined();
-    expect((await routes.route(get("/v1/app/script-tokens"), remember(FAKE_COMPANY)))?.statusCode).toBe(200);
-  });
 
   it("reads a task through the core; another company's task answers exactly like a missing one", async () => {
     const { app, companyOf, remember } = await world2();
@@ -463,7 +446,7 @@ describe("the owner's moves on a core task (send back, review findings, continue
   });
   function appWith(world: FakeWorld, access: TaskFlowDeps["access"]): CoreHostApp {
     return createCoreHostApp({
-      env: { ROVARA_CORE_ENGINE: "on" }, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
+      modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
       runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access, repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: HONEST_CI }),
     });
   }
@@ -582,29 +565,12 @@ describe("a task's start on the deployed API (lane E2 step 6)", () => {
     expect(await routes.route(get("/v1/dev/tasks"), own)).toBeUndefined();
   });
 
-  it("leaves the start to the old broker, reading nothing of the core, for a company the switch does not cover, in drain, and for a person with no member company", async () => {
-    for (const env of [{ ROVARA_CORE_ENGINE: `on:${OTHER}` }, { ROVARA_CORE_ENGINE: "drain" }]) {
-      const { world, app, companyOf, remember } = await world2(env);
-      const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
-      const spy = vi.spyOn(world.store, "get");
-      expect(await routes.route(post("/v1/dev/tasks", startBody()), remember(FAKE_COMPANY)), env.ROVARA_CORE_ENGINE).toBeUndefined();
-      expect(spy).not.toHaveBeenCalled();
-    }
+  it("leaves the start to the old broker for a person with no member company", async () => {
     const { app, companyOf } = await world2();
     const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
     expect(await routes.route(post("/v1/dev/tasks", startBody()), callerOf(FAKE_COMPANY))).toBeUndefined();
   });
 
-  it("leaves the start to the old broker for a drained company that still holds core tasks (its runtime is served, its new tasks are not)", async () => {
-    const { world, app, companyOf, remember } = await world2();
-    const own = remember(FAKE_COMPANY);
-    expect((await createCoreDevRoutes({ app, companyOf, wiring: () => WIRED }).route(post("/v1/dev/tasks", startBody()), own))?.statusCode).toBe(200);
-    const drained = appOver(world, { ROVARA_CORE_ENGINE: "drain" });
-    // The drained root still serves the company (it holds a core task)...
-    await expect(drained.runtimeFor(FAKE_COMPANY)).resolves.toBeDefined();
-    // ...but a new start is the old broker's.
-    expect(await createCoreDevRoutes({ app: drained, companyOf, wiring: () => WIRED }).route(post("/v1/dev/tasks", startBody()), own)).toBeUndefined();
-  });
 
   it("refuses with the sign-in words, never falling back, when membership cannot be read or names another company than the principal's", async () => {
     const { app, remember } = await world2();

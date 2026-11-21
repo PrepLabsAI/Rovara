@@ -42,7 +42,7 @@ vi.mock("../../packages/broker/src/aws/broker-environment.js", async (importOrig
 /** Every variable the broker's code reads that a named environment's control plane does not pass as such. */
 function builtNames(): Set<string> {
   const names = new Set<string>();
-  for (const spec of [...Object.values(BROKER_NAMES), ...Object.values(BROKER_SETTINGS)]) if (spec.variable !== "ROVARA_CORE_ALLOWED_COMPANIES") names.add(spec.variable);
+  for (const spec of [...Object.values(BROKER_NAMES), ...Object.values(BROKER_SETTINGS)]) names.add(spec.variable);
   for (const derived of DERIVED_BROKER_VARIABLES) names.add(derived.variable);
   return names;
 }

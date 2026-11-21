@@ -15,7 +15,7 @@
  * The infrastructure (infra/lib/broker-names.ts) and the broker both take these tables, so a name added to one cannot be missing from the other.
  * tests/contract/lambda-environment-size.test.ts holds the broker under its ceiling with the longest names: a value that can be derived is derived, not added as a variable.
  */
-import { ATTENTION_EMAIL_FUNCTION_VARIABLE, coreAttentionEmailFunctionName, coreDispatchDeadLetterName, coreDispatchQueueName, coreLessonsReflectDeadLetterName, coreLessonsReflectQueueName, CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, CORE_AGENT_MODEL_CHOICE_VARIABLE, CORE_AGENT_MODEL_VARIABLE, CORE_ANSWERS_MODEL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_LEARNING_MODEL_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE } from "./core-engine-infra.js";
+import { ATTENTION_EMAIL_FUNCTION_VARIABLE, coreAttentionEmailFunctionName, coreDispatchDeadLetterName, coreDispatchQueueName, coreLessonsReflectDeadLetterName, coreLessonsReflectQueueName, CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, CORE_AGENT_MODEL_CHOICE_VARIABLE, CORE_AGENT_MODEL_VARIABLE, CORE_ANSWERS_MODEL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_LEARNING_MODEL_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE } from "./core-engine-infra.js";
 import {
   environmentAlarmPrefix,
   environmentChannelAdapterSecretPrefix,
@@ -189,15 +189,13 @@ export const BROKER_SETTINGS = {
   signInGithub: { code: "gh", variable: "DEVELOPER_SIGNIN_GITHUB" },
   githubSince: { code: "gs", variable: "DEVELOPER_GITHUB_SINCE" },
   mcpConfirmElicitation: { code: "mc", variable: "MCP_CONFIRM_ELICITATION" },
-  coreAllowedCompanies: { code: "ac", variable: "ROVARA_CORE_ALLOWED_COMPANIES" },
   coreTaskCap: { code: "ct", variable: "ROVARA_CORE_TASK_CAP_USD" },
   coreCompanyDayCap: { code: "cd", variable: "ROVARA_CORE_COMPANY_DAY_CAP_USD" },
   coreLessons: { code: "cl", variable: "ROVARA_CORE_LESSONS" },
   // L4-P1 (owner DEC 254zzl): the per-company flag of system-started runs (the stack parameter CoreSystemRuns, default off).
   coreSystemRuns: { code: "sy", variable: "ROVARA_CORE_SYSTEM_RUNS" },
-  // Core switch-on blocker (2026-11-17): the switch, and the model gateway's host and agent model (the stack parameters CoreEngine, CoreModelGatewayHost and CoreAgentModel), packed
+  // Core switch-on blocker (2026-11-17): the model gateway's host and agent model (the stack parameters CoreModelGatewayHost and CoreAgentModel), packed
   // to make room for the gateway settings in the broker's 4 KB.
-  coreEngine: { code: "sw", variable: CORE_ENGINE_VARIABLE },
   /** DEC 254o (b), L2-2: Slack company mode for workspaces other than SLACK_TEAM_ID (stack parameter SlackCompanyWorkspaces; the broker also needs COMPANY_SIGNIN=enabled). */
   slackCompanyWorkspaces: { code: "cw", variable: "SLACK_COMPANY_WORKSPACES", switchFlag: true },
   coreModelGateway: { code: "gw", variable: CORE_MODEL_GATEWAY_URL_VARIABLE, httpsOrigin: true },
