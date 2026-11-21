@@ -12,42 +12,8 @@ type Harness = Awaited<ReturnType<typeof createSingleAnswerPlanBroker>>;
 
 const workspaceOf = (harness: Harness, taskId: string) => (harness.db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string }).workspaceId;
 const activeOf = (harness: Harness, workspaceId: string) => String((harness.db.get(`WORKSPACE#${workspaceId}`, "META") as { activeOperationId: string }).activeOperationId);
-const say = (text: string) => ({ type: "progress", payload: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } } });
 
 describe("hand off a task from an AI tool and move on (US1)", () => {
-  it("lists projects, starts, reads, continues and opens a PR, with every action audited", async () => {
-    const harness = await createSingleAnswerPlanBroker();
-    const { tool, expectNoTokenLeaked } = await signedInClient(harness, MAYA);
-
-    expect((await tool("agentx_list_projects")).value).toMatchObject({ projects: [{ name: "payments", tasks_enabled: true }] });
-
-    const started = await tool("agentx_start_task", { project: "payments", instructions: "Fix the flaky retry test in payments-api" });
-    expect(started.value).toMatchObject({ status: "STARTING", client: "Claude Code" });
-    const taskId = String(started.value.task_id);
-    const workspaceId = workspaceOf(harness, taskId);
-
-    await harness.finish(workspaceId, activeOf(harness, workspaceId), "SUCCEEDED");
-    const operation = activeOf(harness, workspaceId);
-    const outbox = harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === operation)[0];
-    expect((outbox?.invocation as { payload: { prompt: string } }).payload.prompt).toBe("Fix the flaky retry test in payments-api");
-    await harness.events(workspaceId, operation, [say("Fixed the retry test; 212 tests pass.")]);
-    await harness.finish(workspaceId, operation, "SUCCEEDED");
-    expect((await tool("agentx_get_task", { task_id: taskId })).value).toMatchObject({ status: "SUCCEEDED", summary: "Fixed the retry test; 212 tests pass." });
-
-    expect((await tool("agentx_continue_task", { task_id: taskId, instructions: "Add a test for the timeout path." })).value).toMatchObject({ status: "RUNNING" });
-    await harness.finish(workspaceId, activeOf(harness, workspaceId), "SUCCEEDED");
-
-    const pr = await tool("agentx_open_pull_request", { task_id: taskId, title: "Fix the flaky retry test" });
-    expect(pr.value).toMatchObject({ operation_status: "ACCEPTED", task: { task_id: taskId } });
-    expect(pr.value).not.toHaveProperty("timed_out");
-    const publication = harness.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${String(pr.value.operation_id)}`) as { publication: { body: string; draft: boolean } };
-    expect(publication.publication).toMatchObject({ draft: true, body: "Requested by `Maya Chen` via AgentX, started from Claude Code" });
-
-    const turns = harness.db.find((item) => item.pk === `TASK#${taskId}`).map((item) => `${String(item.action)}:${String(item.phase)}`).sort();
-    expect(turns).toEqual(["continue:accepted", "continue:completed", "pull_request:accepted", "start:accepted", "start:completed"]);
-    expect((await tool("agentx_list_tasks")).value).toMatchObject({ tasks: [{ task_id: taskId }] });
-    expectNoTokenLeaked();
-  });
 
   it("tells another developer the task was not found (US1 scenario 6)", async () => {
     const harness = await createSingleAnswerPlanBroker();

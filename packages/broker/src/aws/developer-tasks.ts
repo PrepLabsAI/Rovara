@@ -1,10 +1,10 @@
+import { devRouteOf } from "./dev-route-scopes.js";
 import { withoutDesignReviewMoney } from "../core/task-flow/money-view.js";
-import { proofIndexOf, type ProofIndexResponse } from "../local/app/proof-index.js";
-import { rowInCompany } from "../developer/company-rows.js";
-import type { SlackWorkspaceScope } from "@agentx/contracts";
+import type { SlackWorkspaceScope ,
+  TaskPeopleAddRequestSchema, TaskPeopleRoleRequestSchema,
+  TaskPeopleTakeOwnershipRequestSchema} from "@agentx/contracts";
 import { routeTaskMerge, type TaskMergeWiring } from "./task-merge.js";
 import { CompanyReadItemLimit, readTaskLegacyProject, recordInCompany } from "./company-check.js";
-import { namedCompany } from "./company-layout.js";
 // Spec 025 FR-016 to FR-021: the developer task routes. Every task has its own workspace, reached
 // through the existing handlers (DeveloperTaskActions) with the task's owner key. Nothing here
 // reads the deployment mode (FR-024).
@@ -16,13 +16,10 @@ import { DocumentAuditSink } from "@agentx/local-adapters";
 import { confirmPlanFeature } from "../core/report/confirm-plan-feature.js";
 import { createFeatureStore, type FeatureStoreDeps } from "../core/report/feature-store.js";
 import { mayReplaceTaskFeature, planFeatureChoices, planFeatureLine, readPlanFeature } from "../core/report/plan-feature.js";
-import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { DeleteCommand, GetCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  CHANNEL_PRIVACY_NOT_SET_UP,
   PLAN_WHY_REQUEST_MAX_CHARS,
-  PRIVATE_CHANNEL_NOT_A_MEMBER,
   AdminShareModeRequestSchema,
-  CanvasCloseoutRetryRequestSchema,
   AgentXError,
   workflowReviewsSawPartialDiff,
   workflowReviewRoles,
@@ -34,38 +31,24 @@ import {
   type WorkflowPullRequestUpdateCause,
   CHANNEL_TURNS_MAX,
   ContinueDeveloperTaskRequestSchema,
-  DEVELOPER_EVENTS_DEFAULT,
-  DEVELOPER_EVENTS_MAX,
   DEVELOPER_TASK_LIST_DEFAULT,
   DEVELOPER_TASK_LIST_MAX,
   DEVELOPER_TASK_SUMMARY_MAX,
-  DeveloperPullRequestRequestSchema,
-  DeveloperTaskActionRequestSchema,
-  DeveloperTaskCloseRequestSchema,
   DeveloperTaskStatusSchema,
-  CandidateManifestSchema,
   createCandidateManifest,
   WorkflowDependencyResultSchema,
   projectCatalogKey,
-  type ProjectDefinition,
-  PullRequestResultSchema,
-  ShareDeveloperTaskRequestSchema,
-  SlackChannelIdSchema,
   SlackMessageTimestampSchema,
   SlackThreadSchema,
   SlackUserIdSchema,
-  StartDeveloperTaskRequestSchema,
   WorkspaceClosePreflightResultSchema,
-  agentXError, IMPLICIT_COMPANY_ID, INTENT_NOT_WAITING_MESSAGE, TASK_FEATURE_NEEDS_MAINTAINER, type PlanFeature,
-  cleanClientName,
+  agentXError, IMPLICIT_COMPANY_ID, TASK_FEATURE_NEEDS_MAINTAINER, type PlanFeature,
   developerTaskPolicy,
   diffStat,
   lastAssistantResponse,
   redactText,
   sharedTaskKey,
-  taskTitle,
   type DeveloperCloseResponse,
-  type DeveloperPullRequestResponse,
   type DeveloperTaskListItem,
   DeveloperTaskListDetailSchema,
   type DeveloperTaskListDetail,
@@ -75,7 +58,6 @@ import {
   type DeveloperTaskStatus,
   type DeveloperTaskView,
   type Operation,
-  type StartDeveloperTaskRequest,
   type WorkspaceInstance,
   type WorkflowSnapshot,
   WorkflowSnapshotSchema,
@@ -113,18 +95,13 @@ import {
   WorkflowFeedbackBundleSchema,
   WorkflowFeedbackReviewReportSchema,
   WorkflowTransitionError,
-  createWorkflowSnapshot,
   decideWorkflow,
   decideWorkflowFeedbackFindings,
   applyWorkflowFeedbackCheckChanges,
   workflowFeedbackCheckChanges,
   retryWorkflowFeedbackReview,
-  WorkflowPublishRetryRequestSchema,
-  WorkflowFeedbackFindingsDecisionRequestSchema,
-  WorkflowFeedbackReviewRetryRequestSchema,
   WORKFLOW_PLAN_MAX_BYTES,
   WORKFLOW_BLOCK_REASONS,
-  WORKFLOW_PATH_REQUIRED,
   WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX,
   WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX,
   WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX,
@@ -153,8 +130,6 @@ import {
   workflowRequestId,
   workflowPublicationRetryable,
   workflowKeepPullRequestsOffered,
-  keepWorkflowPullRequests,
-  WORKFLOW_KEEP_PULL_REQUESTS_NOTE,
   returnWorkflowToImplementation,
   returnWorkflowToImplementationAutomatically,
   workflowAutomaticRetryDecision,
@@ -175,8 +150,6 @@ import {
   type E2EWorkflowAdmissionRef,
   workflowDependencyAttemptTerminalProgress,
   WorkflowResolveFindingsInputSchema,
-  TaskPeopleAddRequestSchema, TaskPeopleRoleRequestSchema,
-  TaskPeopleTakeOwnershipRequestSchema,
   type TaskPersonInviteClaimRequest,
   type TaskPersonInviteOutcome,
   blockingFindings,
@@ -186,10 +159,10 @@ import {
   workflowFindingProblem, GENERAL_FAKE_MADE_NOTE,
   type DeveloperSignInMethod,
 } from "@agentx/contracts";
-import { z } from "zod";
-import { channelLabel, decideMode, decideShare, type BoundChannel, type ShareDecision } from "../developer/share.js";
+import type { z } from "zod";
+import { channelLabel, decideMode, type BoundChannel } from "../developer/share.js";
 import { PULL_REQUEST_PARTIAL_REVIEW_LINE, PULL_REQUEST_STATUS_END, PULL_REQUEST_STATUS_START } from "../developer/pull-request-feedback-section.js";
-import { chargeConflict, chargeItems, developerCharge, limitReached, readWorkspaceLimits, releaseConflict, releaseItems, type ChargeConflict, type WorkspaceLimits } from "../developer/limits.js";
+import { releaseConflict, releaseItems } from "../developer/limits.js";
 import {
   aiToolTurn,
   byCreated,
@@ -201,34 +174,28 @@ import {
   recentTaskEvents,
   sharedSubject,
   shareView,
-  SLACK_CLIENT_NAME,
-  SLACK_WORKFLOW_SESSION_ID,
   TASK_OWNER_LABEL,
-  startIdempotencyKey,
   taskIndexKey,
   taskKey,
   taskOwnerKey,
   taskOwnerLabel,
   taskPointerKey,
-  taskShare,
   taskSpent,
   type DeveloperTaskIndexRecord,
   type DeveloperTaskPointerRecord,
   type DeveloperTaskRecord,
   type TaskShare,
   type TurnParty,
-  type WorkspaceCharge,
 } from "../developer/task-records.js"; import { PAGE_CHANGES_DEFAULT_REASON } from "../developer/gate-default-reasons.js";
 import { recoverStrandedPlanning, stoppedStepReason, strandedPlanningRun } from "./workflow-cancel-reconcile.js";
-import { GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, WORKFLOW_DISPATCH_PK, hashJson, isConditional, planDocumentKindName, previousPlanDocumentBlock, workflowDispatchItem, type WorkflowDispatchRecord } from "./broker-shared.js";
+import { WORKFLOW_DISPATCH_PK, hashJson, isConditional, planDocumentKindName, previousPlanDocumentBlock, workflowDispatchItem, type WorkflowDispatchRecord } from "./broker-shared.js";
 import { planEvidencePointerKey, type PlanEvidencePointer } from "../developer/plan-evidence-jobs.js";
 import { loadPlanEvidence, loadWorkflowDocument, shortenMarkdown, type LoadedDocument } from "../developer/plan-artifacts.js";
 import type { DeveloperTaskActions, TransactItems } from "./developer-task-actions.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import { requireWebPageForSecurityAccept } from "./security-accept.js";
-import { grantTaskReader, listTaskReaders, readsAsReader, revokeTaskReader, type TaskReaderPerson } from "./task-readers.js";
+import { type TaskReaderPerson } from "./task-readers.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
-import { setupWatchKey } from "./stuck-setup.js";
 import { operationKey } from "./cancellation.js";
 import { resumeTaskDispatch } from "./task-dispatch-access.js";
 import { feedbackReviewNoticeId } from "../developer/notifications.js";
@@ -236,11 +203,9 @@ import { feedbackNoticeToDecisionMeasure, feedbackRecommendationMeasure } from "
 import { documentSummaryLines, isFeedbackReviewFailure, workflowDocumentName } from "../developer/workflow-messages.js";
 import type { TaskDocumentKind, TaskDocumentView, TaskFreshness } from "./task-web.js";
 import type { PageCommentInput, PageDecisionInput, PageRetryInput, PageSuggestionInput, TaskPageState } from "./task-web-api.js";
-import { readTaskPlanDocument, type TaskPlanDocumentView } from "./task-plan-document.js";
 import { pageCommentViews, type CommentViewContext, type PageCommentView } from "./plan-page/comments.js";
 import { loadPlanSelfCheck } from "../developer/plan-self-check.js";
 import type { PlanAnchor } from "./plan-page/render-plan.js";
-import { createPlanComment, listPlanComments, listTaskMessages, readTaskDiff, sendTaskMessage } from "../developer/task-code-routes.js";
 import { can, pageAccess, resolveTaskAccess, type TaskAccess, type TaskAction } from "../developer/task-access.js";
 import { getTaskPeoplePresentation, resolveTaskDispatchPeople, taskAccessFence } from "../developer/task-people.js";
 import { getTaskPeople as readTaskPeople, getTaskPeopleCapabilities as readTaskPeopleCapabilities, type TaskPersonCheck } from "../developer/task-people.js";
@@ -339,68 +304,7 @@ export interface DeveloperTaskRouteDependencies extends Pick<TaskPeopleEffectsDe
   registeredRepositoryIdentity?(url: string): Promise<{ repositoryId: number; fullName: string } | undefined>;
 }
 
-const E2EPublicationSubjectSchema = z.object({
-  projectName: z.string().min(1).max(100), projectRevision: z.number().int().positive(), repositoryId: z.number().int().positive(),
-  commitSha: z.string().regex(/^[a-f0-9]{40}$/), treeSha: z.string().regex(/^[a-f0-9]{40}$/), baseCommitSha: z.string().regex(/^[a-f0-9]{40}$/),
-}).strict();
-const E2EPublicationJoinRequestSchema = z.object({
-  taskRef: z.string().uuid(), subject: E2EPublicationSubjectSchema, sourceBindingRef: z.string().regex(/^cli-source:v1:[a-f0-9]{64}$/),
-}).strict();
 
-async function e2ePublicationContext(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, pathTaskId: string, input: unknown) {
-  const request = E2EPublicationJoinRequestSchema.safeParse(input);
-  if (!request.success || request.data.taskRef !== pathTaskId) {
-    return { schemaVersion: 1, status: "UNKNOWN", reasonCode: "invalid_or_mismatched_task_selector", checkedAt: iso(deps) };
-  }
-  const task = await loadOwnedTask(deps, caller, pathTaskId);
-  const { subject } = request.data;
-  const unknown = (reasonCode: string) => ({ schemaVersion: 1, status: "UNKNOWN", subject, reasonCode, checkedAt: iso(deps) });
-  if (task.workflow?.e2e?.required !== true || task.workflow.candidate === undefined || task.workflow.e2e.currentRoundId === undefined
-    || subject.projectName !== task.project || subject.projectRevision !== task.startingRevision) return unknown("current_task_scope_unavailable");
-  const candidate = CandidateManifestSchema.safeParse(task.workflow.candidate);
-  if (!candidate.success) return unknown("current_candidate_unavailable");
-  const project = await readTaskLegacyProject(task, () => deps.actions.projectRevision(task.project, task.startingRevision));
-  if (project === undefined || project.definition.revision !== subject.projectRevision) return unknown("registered_project_revision_unavailable");
-  const candidateRepositories = candidate.data.repositories.filter((item) => item.commitSha === subject.commitSha && item.treeSha === subject.treeSha);
-  if (candidateRepositories.length !== 1) return unknown("candidate_commit_tree_or_base_mismatch");
-  const candidateRepository = candidateRepositories[0]!;
-  const candidateBase = candidateRepository.baseCommitSha
-    ?? task.workflow.reviewBase?.find((item) => item.repositoryId === candidateRepository.repositoryId)?.baseCommitSha;
-  if (candidateBase !== subject.baseCommitSha) return unknown("candidate_commit_tree_or_base_mismatch");
-  const registeredRepository = project.definition.repositories.find((item) => item.name === candidateRepository.repositoryId);
-  if (registeredRepository === undefined || deps.registeredRepositoryIdentity === undefined) return unknown("registered_repository_identity_unavailable");
-  const identity = await deps.registeredRepositoryIdentity(registeredRepository.url);
-  if (identity === undefined || identity.repositoryId !== subject.repositoryId) return unknown("registered_repository_id_mismatch");
-  const url = new URL(registeredRepository.url);
-  const pathParts = url.pathname.split("/").filter(Boolean);
-  if (url.protocol !== "https:" || url.hostname.toLowerCase() !== "github.com" || pathParts.length !== 2) return unknown("registered_repository_url_unsupported");
-  const registeredFullName = `${pathParts[0]}/${pathParts[1]!.replace(/\.git$/u, "")}`;
-  if (identity.fullName.toLowerCase() !== registeredFullName.toLowerCase()) return unknown("registered_repository_full_name_mismatch");
-  const operations = await deps.actions.operations(task.workspaceId);
-  const publicationChecks = await deps.workflowE2EPublicationChecks?.({ task, operations });
-  const presentation = await deps.workflowE2EPresentation?.({ task, operations, actor: "owner" });
-  if (publicationChecks === undefined || publicationChecks.length === 0 || presentation?.shared.e2e.status !== "PASS") {
-    return unknown("current_e2e_evidence_unavailable");
-  }
-  const progress = task.workflow.e2e;
-  const qualified = progress.qualifiedRound;
-  if (qualified === undefined || qualified.roundId !== progress.currentRoundId || qualified.candidateDigest !== candidate.data.digest
-    || qualified.groupRunIds.length === 0 || canonicalJson(qualified.groupRunIds) !== canonicalJson(progress.currentGroupRunIds)) {
-    return unknown("current_e2e_round_unavailable");
-  }
-  const evidenceSetDigest = createHash("sha256").update(canonicalJson({
-    domain: "agentx-e2e-publication-context/v1", taskId: task.taskId, candidateDigest: candidate.data.digest,
-    roundId: qualified.roundId, admissionSha256: qualified.admissionSha256,
-    evidenceSha256: qualified.evidenceSha256, groupRunIds: qualified.groupRunIds,
-  })).digest("hex");
-  const planDigest = progress.executionPlanDigest;
-  if (planDigest === undefined || qualified.contractDigest !== progress.contractDigest
-    || qualified.policyDigest !== progress.policyDigest || qualified.executionPlanDigest !== planDigest
-    ) return unknown("current_e2e_plan_unavailable");
-  return { schemaVersion: 1, status: "READY", subject, candidateDigest: candidate.data.digest,
-    contractDigest: progress.contractDigest, policyDigest: progress.policyDigest,
-    planDigest, roundId: qualified.roundId, evidenceSetDigest, checkedAt: iso(deps) };
-}
 
 function taskPeopleEffectsDependencies(deps: DeveloperTaskRouteDependencies) {
   if (deps.issuer === undefined || deps.issuer === "") throw agentXError("RUNTIME_UNAVAILABLE", "Task People confirmation is unavailable in this deployment");
@@ -446,15 +350,6 @@ function parse<T>(schema: z.ZodType<T>, body: unknown, deps: Pick<DeveloperTaskR
   throw agentXError("CONFIG_INVALID", `${field}: ${issue?.message ?? "invalid"}`);
 }
 
-function taskWorkflowCheckPolicy(project: ProjectDefinition): WorkflowCheckPolicy {
-  const label = (command: { executable: string; args: string[] }) => `${command.executable} ${command.args.join(" ")}`.trim().slice(0, 80);
-  const required = project.readiness.map((command, index) => ({ id: `required-${index + 1}`, label: label(command), command }));
-  const optional = developerTaskPolicy(project).optionalWorkflowChecks ?? [];
-  if (required.length + optional.length > 64) throw agentXError("CONFIG_INVALID", "project workflow checks exceed the supported limit of 64");
-  const ids = new Set(required.map((check) => check.id));
-  if (optional.some((check) => ids.has(check.id))) throw agentXError("CONFIG_INVALID", "optional workflow check IDs cannot reuse required check IDs");
-  return { required, optional, selectedOptionalIds: [], proposed: [] };
-}
 
 function body(request: AdaptedHttpRequest): unknown {
   if (request.body === undefined || request.body === "") return {};
@@ -479,13 +374,6 @@ function turnTable(deps: Pick<DeveloperTaskRouteDependencies, "actions">): strin
   return table;
 }
 
-/** One EMF line for the RecordingFailures alarm, which already sums TurnRecordWriteFailed. */
-function turnRecordFailed(deps: DeveloperTaskRouteDependencies, error: unknown) {
-  console.log(JSON.stringify({
-    _aws: { Timestamp: deps.now(), CloudWatchMetrics: [{ Namespace: process.env.AGENTX_METRICS_NAMESPACE || "AgentX", Dimensions: [[]], Metrics: [{ Name: "TurnRecordWriteFailed", Unit: "Count" }] }] },
-    component: "broker", event: "developer.turn_record_failed", error: error instanceof Error ? error.name : "unknown", TurnRecordWriteFailed: 1,
-  }));
-}
 
 function partyOf(caller: DeveloperCaller, taskId: string, client: string): TurnParty {
   return {
@@ -503,15 +391,6 @@ function partyOfTaskActor(task: DeveloperTaskRecord, caller: DeveloperCaller): T
   };
 }
 
-/**
- * FR-030's title, redacted before taskTitle cuts it: the title is stored in the task and index
- * rows, shown in views and listed in WORKSPACE_LIMIT messages, so a secret on the instructions'
- * first line must not reach any of them. Redacting first means the cut cannot leave half a token
- * the redactor would miss; taskTitle's cut counts code points, so it never splits an emoji.
- */
-function redactedTitle(request: StartDeveloperTaskRequest): string {
-  return taskTitle(redactText(request.instructions), request.title === undefined ? undefined : redactText(request.title));
-}
 
 /** The most characters of the owner's request a task keeps, and the most one thread reply may add to a plan's "why". */
 const REQUEST_TEXT_MAX_CHARS = PLAN_WHY_REQUEST_MAX_CHARS;
@@ -570,23 +449,6 @@ export async function planWhyEntries(
   ];
 }
 
-/**
- * R12: the refused start's audit record, its own PutItem under the task ID the start would have
- * used (no workspace exists, so there is no action transaction to join; ruling F15). A failed
- * write is counted and logged, and never hides the refusal.
- */
-async function refuse(deps: DeveloperTaskRouteDependencies, turns: string, party: TurnParty, request: StartDeveloperTaskRequest, receivedAt: string, error: AgentXError): Promise<never> {
-  try {
-    const record = aiToolTurn({
-      party, turnId: randomUUID(), action: "start", phase: "refused", outcome: "refused", receivedAt, finishedAt: iso(deps),
-      request: request.instructions, response: error.message, errorCode: error.code,
-    });
-    await deps.documentClient.send(new PutCommand({ TableName: turns, Item: record, ConditionExpression: "attribute_not_exists(pk)" }));
-  } catch (writeError) {
-    turnRecordFailed(deps, writeError);
-  }
-  throw error;
-}
 
 /** The developer's own task, or TASK_NOT_FOUND for anyone else and for a malformed ID (FR-036). */
 export async function loadOwnedTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<DeveloperTaskRecord> {
@@ -600,33 +462,7 @@ export async function loadOwnedTask(deps: DeveloperTaskRouteDependencies, caller
   return task;
 }
 
-/**
- * Spec 067: the task for a read, and who reads it: its owner, or a reader it is shared with who is still a member of its project.
- * Anyone else gets the owner check's own TASK_NOT_FOUND, so a shared task reads like any other task that isn't theirs.
- */
-async function loadReadableTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<{ task: DeveloperTaskRecord; actor: "owner" | "viewer" }> {
-  try {
-    return { task: await loadOwnedTask(deps, caller, taskId), actor: "owner" };
-  } catch (error) {
-    if (!TASK_ID.test(taskId) || !(error instanceof AgentXError) || error.code !== "TASK_NOT_FOUND") throw error;
-    const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
-    if (task !== undefined && recordInCompany(task, deps.companyId) && await ownerOfExistingTask(deps, taskId) === "workflow" && await readsAsReader(deps, task, caller.developerId)) return { task, actor: "viewer" };
-    throw error;
-  }
-}
 
-/** Spec 067: the task's owner shares it, unshares it and lists who reads it. A reader is told only the owner may; anyone else reads not found. */
-async function routeTaskReaders(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, taskId: string, developerId: string | undefined): Promise<unknown> {
-  const { task, actor } = await loadReadableTask(deps, caller, taskId);
-  if (actor !== "owner") throw agentXError("FORBIDDEN", "only the task's owner can share it");
-  if (developerId === undefined) {
-    if (request.method === "GET") return listTaskReaders(deps, task);
-    throw agentXError("NOT_FOUND", "route not found");
-  }
-  if (request.method === "PUT") return grantTaskReader(deps, task, caller.developerId, developerId, body(request));
-  if (request.method === "DELETE") return revokeTaskReader(deps, task, caller.developerId, developerId);
-  throw agentXError("NOT_FOUND", "route not found");
-}
 
 interface AuthorizedTask extends TaskAccess {
   actorId: string;
@@ -657,19 +493,6 @@ async function authorizeTaskActor(
   return access;
 }
 
-/** Current read+role admission for legacy actions that must retain their truthful terminal refusal. */
-async function authorizeLegacyTaskAction(
-  deps: DeveloperTaskRouteDependencies,
-  caller: DeveloperCaller,
-  taskId: string,
-  action: TaskAction,
-): Promise<AuthorizedTask> {
-  const access = await authorizeTaskActor(deps, caller, taskId, action);
-  if (access.task.closedAt !== undefined || access.task.workflow?.stage === "CLOSED" || access.task.workflow?.stage === "MERGED") {
-    throw agentXError("CONFIG_INVALID", CLOSED_TASK);
-  }
-  return access;
-}
 
 async function systemTaskAccess(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord): Promise<TaskAccess | undefined> {
   const access = await resolveTaskDispatchPeople(deps, task);
@@ -1421,254 +1244,13 @@ export async function taskView(
   };
 }
 
-async function openTasksText(deps: DeveloperTaskRouteDependencies, developerId: string): Promise<string> {
-  const response = await deps.documentClient.send(new QueryCommand({
-    TableName: deps.tableName,
-    KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
-    ExpressionAttributeValues: { ":pk": `DEVELOPER#${developerId}`, ":prefix": "TASK#" },
-    ScanIndexForward: false,
-    Limit: 50,
-    ConsistentRead: true,
-  })) as { Items?: DeveloperTaskIndexRecord[] };
-  const open = (response.Items ?? []).filter((row) => row.status !== "CLOSED").slice(0, 10);
-  return open.length === 0 ? "" : ` Your open AI-tool tasks: ${open.map((row) => `${row.taskId} (${row.title})`).join("; ")}.`;
-}
 
-async function limitError(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, full: "member" | "organization", limits: WorkspaceLimits): Promise<AgentXError> {
-  const open = await openTasksText(deps, caller.developerId);
-  return full === "member"
-    ? agentXError("WORKSPACE_LIMIT", `you have reached the limit of ${limits.member} open workspaces per person, counting Slack threads and AI-tool tasks; close a task with agentx_close_task.${open}`)
-    : agentXError("WORKSPACE_LIMIT", `this AgentX has reached its limit of ${limits.organization} open workspaces; close a task with agentx_close_task, or ask an admin.${open}`);
-}
 
-/**
- * Which counter refused the start's transaction (chargeConflict), or undefined when the charge
- * items were not what failed. The charge items are the transaction's first two, the positions
- * chargeConflict reads.
- */
-async function chargeFailure(deps: DeveloperTaskRouteDependencies, charge: WorkspaceCharge, taskId: string, error: unknown): Promise<ChargeConflict | undefined> {
-  try {
-    return await chargeConflict(deps.documentClient, deps.tableName, charge, taskId, error);
-  } catch (unmodeled) {
-    if (unmodeled === error) return undefined;
-    throw unmodeled;
-  }
-}
 
-type ProjectAccess = Awaited<ReturnType<DeveloperTaskRouteDependencies["checkAccess"]>>;
 
-/**
- * C3: where and how a task is shared, or undefined for a private one. Names are read only when a
- * share needs them, and shown only to a caller with a Slack link, as GET /v1/dev/projects does
- * (R10). Q10: privacy is read for every share, since a private channel needs its sharer's membership.
- */
-async function shareFor(
-  deps: DeveloperTaskRouteDependencies,
-  caller: DeveloperCaller,
-  project: string,
-  access: ProjectAccess,
-  wanted: { shareToChannel: boolean; shareMode?: "view" | "continue" | undefined; channel?: string | undefined },
-): Promise<ShareDecision | undefined> {
-  if (!wanted.shareToChannel && access.policy.share !== "required") return undefined;
-  const workspace = await deps.workspaceForProject?.(project);
-  const linked = caller.slackUserId !== undefined;
-  const looked: BoundChannel[] = deps.boundChannels === undefined
-    ? access.channelIds.map((channelId) => ({ channelId }))
-    : workspace === undefined ? await deps.boundChannels(access.channelIds) : await deps.boundChannels(access.channelIds, workspace);
-  // R10: a caller with no Slack link keeps each channel's privacy, never its name.
-  const bound: BoundChannel[] = linked ? looked : looked.map(({ channelId, isPrivate }) => (isPrivate === undefined ? { channelId } : { channelId, isPrivate }));
-  let decision: ShareDecision | undefined;
-  try {
-    decision = decideShare({
-      project, policy: access.policy, bound, shareToChannel: wanted.shareToChannel,
-      ...(wanted.shareMode === undefined ? {} : { shareMode: wanted.shareMode }),
-      ...(wanted.channel === undefined ? {} : { channel: wanted.channel }),
-    });
-  } catch (error) {
-    // A channel named by name when Slack did not name every bound channel: the name may be right,
-    // so say the names could not be read rather than blame it, and give the IDs to use (IDs only, R10).
-    const byName = wanted.channel !== undefined && !SlackChannelIdSchema.safeParse(wanted.channel).success;
-    if (linked && deps.boundChannels !== undefined && byName && error instanceof AgentXError && error.code === "CHANNEL_REQUIRED" && bound.some((channel) => channel.name === undefined)) {
-      throw agentXError("CHANNEL_REQUIRED", `AgentX could not read the channel names from Slack; name the channel by its ID: ${bound.map((channel) => channel.channelId).sort().join(", ")}`);
-    }
-    throw error;
-  }
-  if (decision !== undefined) await confirmMayShareInto(deps, caller, bound.find((channel) => channel.channelId === decision.channelId) ?? { channelId: decision.channelId }, workspace);
-  return decision;
-}
 
-const NOT_A_MEMBER = PRIVATE_CHANNEL_NOT_A_MEMBER;
-const PRIVACY_UNKNOWN = "Slack could not be reached to check whether that channel is private; try again shortly";
-const PRIVACY_NOT_SET_UP = CHANNEL_PRIVACY_NOT_SET_UP;
 
-/**
- * Q10 (owner answer, 2026-09-29): a private channel takes a share only from one of its members. A
- * public channel needs nothing. A channel whose privacy is unknown (Slack did not answer, or no
- * channel-info lookup is configured) is treated as private unless the caller is a member, and a
- * failed membership lookup refuses: nothing here lets a share through on doubt.
- */
-async function confirmMayShareInto(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, channel: BoundChannel, workspace?: SlackWorkspaceScope): Promise<void> {
-  if (channel.isPrivate === false) return;
-  const refusal = () => channel.isPrivate === true
-    ? agentXError("CHANNEL_REQUIRED", NOT_A_MEMBER)
-    : agentXError("SLACK_UNAVAILABLE", deps.boundChannels === undefined ? PRIVACY_NOT_SET_UP : PRIVACY_UNKNOWN);
-  // A caller with no Slack link cannot be confirmed as a member.
-  if (caller.slackUserId === undefined || deps.channelMember === undefined) throw refusal();
-  if (!(workspace === undefined ? await deps.channelMember(caller.slackUserId, channel.channelId) : await deps.channelMember(caller.slackUserId, channel.channelId, workspace))) throw refusal();
-}
 
-async function startTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, value: unknown): Promise<{ task: DeveloperTaskView }> {
-  const request = parse(StartDeveloperTaskRequestSchema, value, deps, "start");
-  // The contracts now accept shapes this broker has no path for (a workflow request with no Quick or Full choice, where Understand would choose it; a named agent;
-  // an agent input). Before the contracts were ported, the request schema refused each; this keeps those refusals (same error code, same words for the first).
-  if (request.workflow === true && request.workflowPath === undefined) throw agentXError("CONFIG_INVALID", WORKFLOW_PATH_REQUIRED);
-  if (request.agent !== undefined) throw agentXError("CONFIG_INVALID", "agent: Unrecognized key");
-  if (request.input !== undefined) throw agentXError("CONFIG_INVALID", "input: Unrecognized key");
-  const turns = turnTable(deps);
-  // Only the Slack workflow's own caller can say "slack": an AI tool that sends that name is still an AI tool.
-  const client = caller.sessionId === SLACK_WORKFLOW_SESSION_ID && request.client?.trim().toLowerCase() === "slack" ? SLACK_CLIENT_NAME : cleanClientName(request.client);
-  const payloadHash = hashJson({
-    project: request.project, instructions: request.instructions, title: request.title ?? null,
-    shareToChannel: request.shareToChannel ?? null, shareMode: request.shareMode ?? null, channel: request.channel ?? null,
-    ...(request.workflow === true ? { workflow: true, ...(request.workflowPath === undefined ? {} : { workflowPath: request.workflowPath }) } : {}),
-  });
-  const idempotencyKey = startIdempotencyKey(caller.developerId, request.requestId);
-  // loadOwnedTask is the ownership check before taskView's reads. Access is not checked again: a
-  // retry returns the first task whatever changed since (R8), as every read of a task does (R11).
-  const returning = async (previous: { taskId: string; payloadHash: string }) => {
-    if (previous.payloadHash !== payloadHash) throw agentXError("IDEMPOTENCY_CONFLICT", "this request_id was already used for another task; use a new request_id");
-    const task = await loadOwnedTask(deps, caller, previous.taskId);
-    return { task: await taskView(deps, task, { events: DEVELOPER_EVENTS_DEFAULT, details: false }) };
-  };
-  // R8: a retried call returns the first task, whatever changed since.
-  const previous = await get<{ taskId: string; payloadHash: string }>(deps, idempotencyKey);
-  if (previous !== undefined) return returning(previous);
-
-  const taskId = randomUUID();
-  const receivedAt = iso(deps);
-  const party = partyOf(caller, taskId, client);
-  const refused = (error: AgentXError) => refuse(deps, turns, party, request, receivedAt, error);
-  // FR-018's project checks come before any DeveloperTaskActions call.
-  let access: Awaited<ReturnType<DeveloperTaskRouteDependencies["checkAccess"]>>;
-  try {
-    access = await deps.checkAccess(request.project);
-  } catch (error) {
-    if (error instanceof AgentXError) return refused(error);
-    throw error;
-  }
-  // FR-031, C4: decided here, in R8's place for sharing; a refusal is audited and writes nothing else.
-  let decision: ShareDecision | undefined;
-  try {
-    decision = await shareFor(deps, caller, request.project, access, { shareToChannel: request.shareToChannel === true, shareMode: request.shareMode, channel: request.channel });
-  } catch (error) {
-    if (error instanceof AgentXError) return refused(error);
-    throw error;
-  }
-  let share: TaskShare | undefined;
-  if (decision !== undefined) {
-    const teamId = (await deps.workspaceForProject?.(request.project))?.teamId ?? deps.slackTeamId;
-    // Bindings exist only under a team ID, so this cannot happen; refuse rather than write a half share.
-    if (teamId === undefined) return refused(agentXError("CHANNEL_REQUIRED", "this AgentX has no Slack workspace set, so tasks cannot be shared"));
-    share = {
-      ...taskShare(decision, teamId, receivedAt),
-      ...(deps.initialSlackThread !== undefined && deps.initialSlackThread.teamId === teamId
-        && deps.initialSlackThread.channelId === decision.channelId ? { threadTs: deps.initialSlackThread.threadTs } : {}),
-    };
-  }
-  const project = await deps.actions.latestProject(request.project);
-  if (project === undefined) return refused(agentXError("PROJECT_NOT_FOUND", `project \`${request.project}\` doesn't exist in this AgentX`));
-  // DEC 254zzz98 (re-review H): this start runs on the project's LEGACY revision (`PROJECT#<name>`, read by name). A NAMED company's caller (its access was checked in its own
-  // partition) may start only on a legacy row that is its own company's (pre-R2-F1 data, stamped); a legacy row of that name that is the built-in company's or another company's
-  // is never theirs (names are not unique between the layouts): not found, exactly as a missing project. The built-in company and no company mode: unchanged.
-  if (namedCompany(access.companyId) !== undefined && !recordInCompany(project, access.companyId)) {
-    return refused(agentXError("PROJECT_NOT_FOUND", `project \`${request.project}\` doesn't exist in this AgentX`));
-  }
-  // The policy checked must be the policy started: a revision registered between the two reads
-  // could have turned tasks off or required sharing. Nothing was decided, so nothing is recorded.
-  if (project.definition.revision !== access.revision) {
-    log(deps, { event: "developer.task_start_revision_changed", checked: access.revision, latest: project.definition.revision });
-    throw agentXError("WORKSPACE_BUSY", "the project changed while starting; try again with the same request_id");
-  }
-  const limits = await readWorkspaceLimits(deps.documentClient, deps.tableName, deps.actions.limitDefaults);
-  const charge = developerCharge({ teamId: deps.slackTeamId, slackUserId: caller.slackUserId, developerId: caller.developerId });
-  let full = await limitReached(deps.documentClient, deps.tableName, charge, limits);
-  // Slots finished tasks kept (merged before releases ran on merge) are given back, then the limit is read once more.
-  if (full !== undefined && await releaseFinishedTasksOf(deps, charge.member) > 0) full = await limitReached(deps.documentClient, deps.tableName, charge, limits);
-  if (full !== undefined) return refused(await limitError(deps, caller, full, limits));
-
-  const identity = developerTaskIdentity({ taskId, developerId: caller.developerId, provider: caller.amr, developerName: caller.name, client,
-    ...(access.companyId === undefined ? {} : { companyId: access.companyId }) });
-  const preparation = await deps.actions.preparation(identity, project, request.requestId);
-  const workspaceId = preparation.workspace.id;
-  const conversationId = randomUUID();
-  const revision = project.definition.revision;
-  const title = redactedTitle(request);
-  const task: DeveloperTaskRecord = {
-    ...taskKey(taskId), entityType: "DEVELOPER_TASK", taskId, developerId: caller.developerId, provider: caller.amr, developerName: caller.name,
-    ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }),
-    client, ...(access.companyId === undefined ? {} : { companyId: access.companyId }), project: request.project, title, workspaceId, ownerKey: identity.ownerKey, conversationId, startingRevision: revision,
-    // A workflow task quotes the request in each plan's "why"; every start (Slack and AI tool) comes through here.
-    ...(request.workflow === true ? { requestText: storedRequestText(request.instructions) } : {}),
-    charge, shared: share !== undefined, ...(share === undefined ? {} : { share, shareVersion: 1 }),
-    createdAt: receivedAt, updatedAt: receivedAt,
-    ...(request.workflow === true ? { workflow: createWorkflowSnapshot({ taskId, ownerId: identity.ownerKey, now: receivedAt, path: request.workflowPath ?? "QUICK", checkPolicy: taskWorkflowCheckPolicy(project.definition) }) } : {}),
-  };
-  const index: DeveloperTaskIndexRecord = {
-    ...taskIndexKey(caller.developerId, receivedAt, taskId), entityType: "DEVELOPER_TASK_INDEX", taskId, project: request.project, title, client,
-    status: "STARTING", shared: share !== undefined, startingRevision: revision, workspaceId, createdAt: receivedAt, updatedAt: receivedAt,
-  };
-  const pointer: DeveloperTaskPointerRecord = {
-    ...taskPointerKey(workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId, developerId: caller.developerId,
-    requester: { kind: "developer", developerId: caller.developerId, provider: caller.amr },
-    // FR-019: the instructions exactly as the tool sent them; only the audit record is redacted.
-    conversationId, firstRequestId: randomUUID(), pendingPrompt: request.instructions,
-    ...(request.workflow === true ? { pendingWorkflowMode: "PLAN" as const } : {}),
-  };
-  const turn = aiToolTurn({
-    party: { ...party, workspaceId, settingsRevision: revision }, turnId: randomUUID(), action: "start", phase: "accepted", outcome: "accepted",
-    receivedAt, finishedAt: iso(deps), request: request.instructions, response: `Task ${taskId} is STARTING on ${request.project} revision ${revision}.`,
-  });
-  const items: TransactItems = [
-    // First, at positions 0 and 1: chargeConflict reads the cancellation reasons by position.
-    ...chargeItems(deps.tableName, charge, limits, taskId),
-    ...preparation.items,
-    putNew(deps.tableName, { ...task }),
-    ...(share?.threadTs === undefined ? [] : [putNew(deps.tableName, {
-      ...sharedTaskKey({ teamId: share.teamId, channelId: share.channelId, threadTs: share.threadTs }),
-      entityType: "SHARED_TASK", taskId, workspaceId, ownerKey: task.ownerKey, developerId: task.developerId,
-      developerName: task.developerName, project: task.project, mode: share.mode, sharedAt: share.sharedAt,
-      // Only a Slack-started task (startSlackWorkflow sets initialSlackThread) is driven from its thread.
-      ...(deps.initialSlackThread !== undefined && request.workflow === true ? { workflowThread: true } : {}),
-    })]),
-    putNew(deps.tableName, { ...index }),
-    putNew(deps.tableName, { ...pointer }),
-    // FR-055, C17: the stuck-setup sweep's watch on this prepare, keyed by the prepare's creation
-    // (the task's start, Q5). Only developer-task starts write one (Q4); the sweep removes it.
-    putNew(deps.tableName, {
-      ...setupWatchKey(preparation.workspace.createdAt, workspaceId), entityType: "SETUP_WATCH",
-      workspaceId, operationId: preparation.operationId, taskId, createdAt: preparation.workspace.createdAt,
-    }),
-    putNew(deps.tableName, { pk: `WORKSPACE#${workspaceId}`, sk: `CONVERSATION#${conversationId}`, entityType: "CONVERSATION", id: conversationId, workspaceId, createdAt: receivedAt, updatedAt: receivedAt }),
-    putNew(deps.tableName, { ...idempotencyKey, entityType: "IDEMPOTENCY", taskId, payloadHash }),
-    // R12: the accepted record commits with the start or not at all (ruling F15).
-    putNew(turns, turn),
-  ];
-  try {
-    await deps.actions.transact(items);
-  } catch (error) {
-    if (!isConditional(error)) throw error;
-    const conflict = await chargeFailure(deps, charge, taskId, error);
-    // This task's own charge is there: the transaction committed and only its answer was lost.
-    if (conflict === "already_charged") return returning({ taskId, payloadHash });
-    // The same request, sent again, committed first.
-    const concurrent = await get<{ taskId: string; payloadHash: string }>(deps, idempotencyKey);
-    if (concurrent !== undefined) return returning(concurrent);
-    // A counter filled between the check and the transaction.
-    if (conflict !== undefined) return refused(await limitError(deps, caller, conflict, limits));
-    throw agentXError("WORKSPACE_BUSY", "AgentX could not start the task just now; try again with the same request_id");
-  }
-  return { task: await taskView(deps, task, { events: 0, details: false }) };
-}
 
 /**
  * R4: the index row keeps the last status the API saw, so the task list and WORKSPACE_LIMIT's
@@ -1698,32 +1280,7 @@ const whole = (value: string | null, fallback: number, min: number, max: number,
   return parsed;
 };
 
-async function readTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, url: URL): Promise<{ task: DeveloperTaskView }> {
-  // R8, R11: the owner always reads their own task; access is not checked again.
-  const events = whole(url.searchParams.get("events"), DEVELOPER_EVENTS_DEFAULT, 0, DEVELOPER_EVENTS_MAX, "events");
-  const readable = await loadReadableTask(deps, caller, taskId);
-  // Spec 067: a reader's read writes nothing (no close completion, no index update) and sees the task page's viewer view.
-  if (readable.actor === "viewer") return { task: await taskView(deps, readable.task, { events, details: true, actor: "viewer" }) };
-  let task = readable.task;
-  let loaded: WorkspaceReads | undefined = await workspaceReads(deps, task);
-  // R15: a safe close whose completion did not land is finished by the next read. The view reuses
-  // the reads unless the close landed and changed them.
-  if (await resumeClose(deps, task, loaded)) {
-    task = await loadOwnedTask(deps, caller, taskId);
-    loaded = undefined;
-  }
-  const view = await taskView(deps, task, { events, details: true, ...(loaded === undefined ? {} : { loaded }) });
-  await syncIndex(deps, task, view.status, view.updatedAt);
-  return { task: view };
-}
 
-/** PLANFULLDOC: one stored version of the task's plan, whole; only the task's owner reads it (as `get_task`). */
-async function getTaskPlan(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, url: URL): Promise<{ plan: TaskPlanDocumentView }> {
-  const task = await loadOwnedTask(deps, caller, taskId);
-  const version = url.searchParams.get("version");
-  return { plan: await readTaskPlanDocument(task, (objectKey, maxBytes) => deps.actions.readArtifact(objectKey, maxBytes),
-    { document: url.searchParams.get("document"), ...(version === null ? {} : { version: whole(version, 1, 1, 999, "version") }) }) };
-}
 
 const TASK_INDEX_SK = /^TASK#\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z#[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const CURSOR_MAX = 256;
@@ -1861,10 +1418,6 @@ async function listTasks(deps: DeveloperTaskRouteDependencies, caller: Developer
   return { tasks };
 }
 
-async function taskEvents(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, url: URL): Promise<{ events: DeveloperTaskView["events"] }> {
-  const { task, actor } = await loadReadableTask(deps, caller, taskId);
-  return { events: (await taskView(deps, task, { events: whole(url.searchParams.get("limit"), DEVELOPER_EVENTS_DEFAULT, 1, DEVELOPER_EVENTS_MAX, "limit"), details: false, actor })).events };
-}
 
 const CLOSED_TASK = "this task is closed; start a new one with agentx_start_task";
 // #213: a failed setup gives its slot back at once; the close only tidies the task away.
@@ -1926,33 +1479,6 @@ function busy(error: unknown, taskId: string): never {
   throw error;
 }
 
-async function continueTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
-  const request = parse(ContinueDeveloperTaskRequestSchema, value, deps, "continue");
-  const access = await authorizeLegacyTaskAction(deps, caller, taskId, "control");
-  const { task } = access;
-  if (task.workflow !== undefined) throw agentXError("WORKSPACE_BUSY", GATED_TASK_TURN_REFUSAL);
-  const turns = turnTable(deps);
-  await actionableWorkspace(deps, task);
-  const receivedAt = iso(deps);
-  try {
-    // acceptTask answers a repeated requestId with its first operation and writes nothing, and
-    // refuses a second running turn (TASK_BUSY) before anything is written.
-    await deps.actions.acceptTask(developerTaskIdentity(task), task.workspaceId, { requestId: request.requestId, conversationId: task.conversationId, prompt: request.instructions }, (operation) => [
-      // R12: the accepted record commits with the operation or not at all.
-      putNew(turns, aiToolTurn({
-        party: partyOfTaskActor(task, caller), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
-        request: request.instructions, response: `Continuing task ${taskId} as operation ${operation.id}.`, operationId: operation.id,
-      })),
-      accessFence(deps, access),
-    ], { sharedTask: task.shared === true });
-  } catch (error) {
-    if (isConditional(error)) await authorizeTaskAction(deps, caller, taskId, "control");
-    return busyOrClosing(deps, task, error);
-  }
-  const view = await taskView(deps, task, { events: 0, details: false });
-  await syncIndex(deps, task, view.status, view.updatedAt);
-  return { task: view };
-}
 
 /**
  * The task a caller may decide, through the one access rule (resolveTaskAccess and the role table). Anyone whose role may
@@ -3102,88 +2628,7 @@ async function startAcceptedPublication(deps: DeveloperTaskRouteDependencies, ta
   }
 }
 
-/** Re-drive only the task's current terminal revision and, when present, its exact manifest candidate. */
-async function retryTaskCanvasCloseout(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ status: "retry_requested"; workflowRevision: number; manifestDigest?: string }> {
-  const request = parse(CanvasCloseoutRetryRequestSchema, value, deps, "canvas-closeout-retry");
-  const access = await authorizeTaskActor(deps, caller, taskId, "retry");
-  const { task } = access;
-  const closeout = task.workflow?.canvasCloseout;
-  const attempt = task.workflow?.canvasCloseoutAttempt;
-  const workflowRevision = task.workflow?.revision;
-  if (task.workflow === undefined || workflowRevision !== request.workflowRevision) {
-    throw agentXError("IDEMPOTENCY_CONFLICT", "the requested closeout workflow revision is no longer current");
-  }
-  const terminal = (task.workflow.stage === "MERGED" && task.workflow.state === "COMPLETE" && task.workflow.outcome === "MERGED")
-    // The CLOSED stage ends complete whatever its outcome (in practice REJECTED: the owner rejected the plan).
-    || (task.workflow.stage === "CLOSED" && task.workflow.state === "COMPLETE")
-    || (task.closedAt !== undefined && task.workflow.stage !== "MERGED");
-  if (!terminal) throw agentXError("CONFIG_INVALID", "Canvas closeout can only be retried for a terminal task");
-  if (closeout !== undefined) {
-    if (closeout.status !== "ARCHIVE_PENDING" || request.manifestDigest !== closeout.manifestDigest) {
-      throw agentXError("IDEMPOTENCY_CONFLICT", "the requested closeout manifest is not the task's current pending snapshot");
-    }
-  } else if (attempt === undefined || attempt.workflowRevision !== request.workflowRevision
-    || (attempt.candidateManifestDigest === undefined ? request.manifestDigest !== undefined : request.manifestDigest !== attempt.candidateManifestDigest)) {
-    throw agentXError("IDEMPOTENCY_CONFLICT", "the requested closeout preparation attempt is no longer current");
-  }
-  const existing = task.canvasCloseoutRetry;
-  if (existing?.requestId === request.requestId && (existing.manifestDigest !== request.manifestDigest || existing.workflowRevision !== workflowRevision)) {
-    throw agentXError("IDEMPOTENCY_CONFLICT", "this request_id was already used for a different closeout snapshot");
-  }
-  const retry = { requestId: request.requestId, workflowRevision, ...(request.manifestDigest === undefined ? {} : { manifestDigest: request.manifestDigest }),
-    actorId: access.actorId, requestedAt: iso(deps), dispatchAttempt: (existing?.dispatchAttempt ?? 0) + 1 };
-  try {
-    await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [{ Update: {
-      TableName: deps.tableName, Key: taskKey(taskId), UpdateExpression: "SET canvasCloseoutRetry = :retry",
-      ConditionExpression: `workflow.revision = :revision AND ${task.canvasCloseoutVersion === undefined ? "attribute_not_exists(canvasCloseoutVersion)" : "canvasCloseoutVersion = :version"}`,
-      ExpressionAttributeValues: { ":retry": retry, ":revision": workflowRevision,
-        ...(task.canvasCloseoutVersion === undefined ? {} : { ":version": task.canvasCloseoutVersion }) },
-    } }, accessFence(deps, access)] }));
-    return { status: "retry_requested", workflowRevision, ...(request.manifestDigest === undefined ? {} : { manifestDigest: request.manifestDigest }) };
-  } catch (error) {
-    if (!isConditional(error)) throw error;
-    const fresh = (await authorizeTaskActor(deps, caller, taskId, "retry")).task;
-    if (fresh.canvasCloseoutRetry?.requestId === request.requestId && fresh.canvasCloseoutRetry.workflowRevision === workflowRevision
-      && fresh.canvasCloseoutRetry.manifestDigest === request.manifestDigest
-      && fresh.canvasCloseoutRetry.dispatchAttempt >= retry.dispatchAttempt) {
-      return { status: "retry_requested", workflowRevision, ...(request.manifestDigest === undefined ? {} : { manifestDigest: request.manifestDigest }) };
-    }
-    throw agentXError("WORKSPACE_BUSY", "the task closeout changed while requesting its retry; refresh the task and try again");
-  }
-}
 
-async function startTaskWorkflowReview(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
-  const request = parse(ContinueDeveloperTaskRequestSchema, value, deps, "workflow-review");
-  const access = await authorizeTaskAction(deps, caller, taskId, "retry");
-  const resumed = await resumeParkedTaskDispatch(deps, caller, access, request);
-  if (resumed !== undefined) return resumed;
-  const { task } = access;
-  const workflow = task.workflow;
-  // Task 16: a blocked review may be retried on the same checked code whatever stopped it, findings included.
-  const retrying = workflow?.stage === "REVIEW" && workflow.state === "BLOCKED";
-  if (workflow === undefined || workflow.stage !== "REVIEW" || !(workflow.state === "WAITING" || retrying)
-    || workflow.candidate === undefined || workflow.verification?.candidateDigest !== workflow.candidate.digest
-    || workflow.verification.results.some((result) => result.status !== "PASS")) {
-    throw agentXError("CONFIG_INVALID", "review can start or retry only when the exact candidate's checks passed and the review is waiting or blocked");
-  }
-  if (retrying && (request.expectedRevision !== workflow.revision || request.candidateDigest !== workflow.candidate.digest)) {
-    throw agentXError("IDEMPOTENCY_CONFLICT", "the review retry is stale; refresh the task and use its current candidate and revision");
-  }
-  if (!retrying && request.expectedRevision !== undefined && request.expectedRevision !== workflow.revision) {
-    throw agentXError("IDEMPOTENCY_CONFLICT", "the review request is stale; refresh the task and try again");
-  }
-  await actionableWorkspace(deps, task);
-  try {
-    await queueWorkflowReview(deps, task, { ...workflow, candidate: workflow.candidate }, request.requestId, request.instructions, access, caller);
-  } catch (error) {
-    if (isConditional(error)) await authorizeTaskAction(deps, caller, taskId, "retry");
-    return busyOrClosing(deps, task, error);
-  }
-  const fresh = (await authorizeTaskAction(deps, caller, taskId, "retry")).task;
-  const view = await taskView(deps, fresh, { events: 0, details: false });
-  await syncIndex(deps, fresh, view.status, view.updatedAt);
-  return { task: view };
-}
 
 /** The note an automatic review start carries, fixed per candidate so a retried dispatch sends the same request. */
 const AUTOMATIC_REVIEW_NOTE = "Started automatically after the selected checks passed.";
@@ -4893,81 +4338,7 @@ async function startTaskWorkflowPullRequestUpdate(
   return accepted.duplicate ? "DUPLICATE" : "STARTED";
 }
 
-/** The owner asks AgentX to open the draft pull request again: after a failed publication, or after AgentX gave up. */
-async function retryTaskWorkflowPublication(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
-  const request = parse(WorkflowPublishRetryRequestSchema, value, deps, "workflow-publish-retry");
-  const access = await authorizeTaskAction(deps, caller, taskId, "publish");
-  const resumed = await resumeParkedTaskDispatch(deps, caller, access, request);
-  if (resumed !== undefined) return resumed;
-  const { task } = access;
-  const workflow = task.workflow;
-  if (workflow === undefined || workflow.candidate === undefined || !workflowPublicationRetryable(workflow)) {
-    throw agentXError("CONFIG_INVALID", "AgentX can retry opening the pull request only after the checks and reviews passed and before it is open");
-  }
-  if (request.expectedRevision !== workflow.revision) {
-    throw agentXError("IDEMPOTENCY_CONFLICT", "this retry is out of date; refresh the task and try again");
-  }
-  await actionableWorkspace(deps, task);
-  let outcome: Awaited<ReturnType<typeof startTaskWorkflowPublicationFromSystem>>;
-  try {
-    outcome = await startTaskWorkflowPublicationFromSystem(deps, taskId, { workflowRevision: workflow.revision, candidateDigest: workflow.candidate.digest },
-      { ownerRetry: true, ownerAccess: access, ownerActor: caller, ...(deps.issuer === undefined ? {} : { taskPageUrl: taskPageUrl(deps.issuer, taskId) }) });
-  } catch (error) {
-    if (isConditional(error)) await authorizeTaskAction(deps, caller, taskId, "publish");
-    return busyOrClosing(deps, task, error);
-  }
-  if (outcome === "STALE") throw agentXError("IDEMPOTENCY_CONFLICT", "this retry is out of date; refresh the task and try again");
-  const fresh = (await authorizeTaskAction(deps, caller, taskId, "publish")).task;
-  const view = await taskView(deps, fresh, { events: 0, details: false });
-  await syncIndex(deps, fresh, view.status, view.updatedAt);
-  return { task: view };
-}
 
-/**
- * The owner keeps the pull requests as they are after an approved fix changed nothing: the task waits for the merge again,
- * and the feedback the fix was for is recorded as dismissed. Owner only, at the exact revision; nothing runs.
- */
-async function keepTaskWorkflowPullRequests(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
-  const request = parse(WorkflowPublishRetryRequestSchema, value, deps, "workflow-keep-pull-requests");
-  const access = await authorizeTaskAction(deps, caller, taskId, "decide");
-  const { task } = access;
-  const workflow = task.workflow;
-  if (workflow === undefined) throw agentXError("NOT_FOUND", "this task does not have a workflow record");
-  // A repeated request answers as the first, but only when that request was this same Keep at this revision.
-  const prior = workflow.feedbackDecisions?.find((decision) => decision.requestId === request.requestId)
-    ?? (workflow.decisions.some((decision) => decision.requestId === request.requestId) ? { decision: "OTHER" as const } : undefined);
-  if (prior !== undefined) {
-    if (!("ownerNote" in prior) || prior.decision !== "DISMISS" || prior.ownerNote !== WORKFLOW_KEEP_PULL_REQUESTS_NOTE || prior.workflowRevision !== request.expectedRevision) {
-      throw agentXError("IDEMPOTENCY_CONFLICT", "this request ID was already used for another decision on this task; use a new one");
-    }
-    return { task: await taskView(deps, task, { events: 0, details: false }) };
-  }
-  if (request.expectedRevision !== workflow.revision) throw agentXError("IDEMPOTENCY_CONFLICT", "this request is out of date; refresh the task and try again");
-  const now = iso(deps);
-  let next: WorkflowSnapshot;
-  try {
-    next = keepWorkflowPullRequests(workflow, { requestId: request.requestId, actorId: access.actorId, now }, access.authority);
-  } catch (error) {
-    if (error instanceof WorkflowTransitionError) throw agentXError("CONFIG_INVALID", error.message);
-    throw error;
-  }
-  try {
-    await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [{ Update: { TableName: deps.tableName, Key: taskKey(taskId),
-      UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
-      ConditionExpression: "workflow.revision = :revision AND attribute_not_exists(closedAt)",
-      ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": workflow.revision } } }, accessFence(deps, access)] }));
-  } catch (error) {
-    if (isConditional(error)) {
-      await authorizeTaskAction(deps, caller, taskId, "decide");
-      throw agentXError("IDEMPOTENCY_CONFLICT", "this request is out of date; refresh the task and try again");
-    }
-    throw error;
-  }
-  const fresh = (await authorizeTaskAction(deps, caller, taskId, "decide")).task;
-  const view = await taskView(deps, fresh, { events: 0, details: false });
-  await syncIndex(deps, fresh, view.status, view.updatedAt);
-  return { task: view };
-}
 
 /**
  * The base commit the worker reads the task's code against: the workflow's pinned base, or before the first pin
@@ -5560,153 +4931,8 @@ async function withCurrentThreadNotes<T>(
   }
 }
 
-/** The payload a cancel's idempotency item holds: a continue or PR with the same requestId conflicts. */
-const CANCEL_PAYLOAD_HASH = hashJson({ action: "cancel" });
 
-async function cancelTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
-  const request = parse(DeveloperTaskActionRequestSchema, value, deps, "cancel");
-  const access = await authorizeLegacyTaskAction(deps, caller, taskId, "control");
-  const { task } = access;
-  // Final review M2: a closed task is refused as continue refuses it, before anything is written,
-  // so a repeat after the close answers "this task is closed" like any new call.
-  if (task.closedAt !== undefined) throw agentXError("CONFIG_INVALID", CLOSED_TASK);
-  const turns = turnTable(deps);
-  const receivedAt = iso(deps);
-  // Ruling F14: the same key the task's other actions use, so one requestId names one action.
-  const idempotencyKey = { pk: `IDEMPOTENCY#${task.ownerKey}#${task.workspaceId}`, sk: `REQUEST#${request.requestId}` };
-  const repeated = async (): Promise<boolean> => {
-    const previous = await get<{ payloadHash: string }>(deps, idempotencyKey);
-    if (previous === undefined) return false;
-    if (previous.payloadHash !== CANCEL_PAYLOAD_HASH) throw agentXError("IDEMPOTENCY_CONFLICT", "this request_id was already used for another action on this task; use a new request_id");
-    return true;
-  };
-  const current = async () => ({ task: await taskView(deps, task, { events: 0, details: false }) });
-  // A repeated cancel answers with the task as it is now and writes nothing.
-  if (await repeated()) return current();
-  const marker = putNew(deps.tableName, { ...idempotencyKey, entityType: "IDEMPOTENCY", action: "cancel", payloadHash: CANCEL_PAYLOAD_HASH });
-  const record = (response: string, operationId?: string) => putNew(turns, aiToolTurn({
-    party: partyOfTaskActor(task, caller), turnId: randomUUID(), action: "cancel", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
-    request: "cancel", response, ...(operationId === undefined ? {} : { operationId }),
-  }));
-  let handled = false;
-  const pointer = await get<DeveloperTaskPointerRecord>(deps, taskPointerKey(task.workspaceId));
-  if (pointer?.pendingPrompt !== undefined) {
-    // R16, P45: before the instructions run, removing them is the whole cancel. Only the pointer
-    // changes; the workspace and the prepare are left to finish, and then queue nothing.
-    try {
-      await deps.actions.transact([
-        { Update: {
-          TableName: deps.tableName, Key: taskPointerKey(task.workspaceId),
-          UpdateExpression: "SET cancelledAt = :now REMOVE pendingPrompt, pendingWorkflowMode", ConditionExpression: "attribute_exists(pendingPrompt)",
-          ExpressionAttributeValues: { ":now": receivedAt },
-        } },
-        marker,
-        record("Cancelled before the instructions ran."),
-        accessFence(deps, access),
-      ]);
-      handled = true;
-    } catch (error) {
-      if (!isConditional(error)) throw error;
-      await authorizeTaskAction(deps, caller, taskId, "control");
-      // The same cancel, sent again, committed first.
-      if (await repeated()) return current();
-      // The prepare's result queued the instructions meanwhile: cancel the running task instead.
-    }
-  }
-  if (!handled) {
-    const workspace = await deps.actions.workspace(task.workspaceId);
-    if (workspace.status === "CLOSED") throw agentXError("CONFIG_INVALID", CLOSED_TASK);
-    let outcome: "CANCEL_REQUESTED" | "NOTHING_RUNNING";
-    let stoppedRevision: boolean;
-    try {
-      const cancelled = (await deps.actions.cancelRunning(developerTaskIdentity(task), workspace, (operation) => [
-        record("Asked the worker to stop.", operation.id),
-        marker,
-        accessFence(deps, access),
-      ]));
-      outcome = cancelled.outcome;
-      stoppedRevision = cancelled.outcome === "NOTHING_RUNNING" && cancelled.stopped === "PLAN_REVISION";
-    } catch (error) {
-      if (isConditional(error)) await authorizeTaskAction(deps, caller, taskId, "control");
-      // The same cancel, sent again, committed first (its marker failed this transaction).
-      if (error instanceof AgentXError && error.code === "WORKSPACE_BUSY" && await repeated()) return current();
-      // The task moved on while the cancel was written: the code stays, the words name the tool.
-      if (error instanceof AgentXError && (error.code === "WORKSPACE_BUSY" || error.code === "STALE_FENCE")) {
-        throw agentXError(error.code, "the task changed while cancelling; try agentx_cancel_task again");
-      }
-      throw error;
-    }
-    if (outcome === "NOTHING_RUNNING") {
-      // R12's one exception (ruling F15): nothing ran, so there is no action transaction for the
-      // record to join. It is written with the cancel's idempotency item in its own transaction.
-      // A failed write is counted and logged, and never hides the answer.
-      try {
-        await deps.actions.transact([marker, record(stoppedRevision ? "Stopped the automatic second planning run before it started." : "Nothing was running."), accessFence(deps, access)]);
-      } catch (error) {
-        if (isConditional(error)) await authorizeTaskAction(deps, caller, taskId, "control");
-        if (!isConditional(error)) turnRecordFailed(deps, error);
-      }
-    }
-  }
-  const view = await taskView(deps, task, { events: 0, details: false });
-  await syncIndex(deps, task, view.status, view.updatedAt);
-  return { task: view };
-}
 
-/**
- * R22. A repeated requestId returns the same operation, except once the task is closed: the closed
- * check comes first, so a repeat after the close answers "this task is closed" like any new call.
- */
-async function openPullRequest(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<DeveloperPullRequestResponse> {
-  const request = parse(DeveloperPullRequestRequestSchema, value, deps, "pull-request");
-  const access = await authorizeLegacyTaskAction(deps, caller, taskId, "publish");
-  const { task } = access;
-  // Task 12: the workflow opens its own draft of the checked code; MCP and Slack follow it, nobody opens another.
-  if (task.workflow !== undefined) throw agentXError("CONFIG_INVALID", GATED_TASK_PULL_REQUEST_REFUSAL);
-  const turns = turnTable(deps);
-  const workspace = await actionableWorkspace(deps, task);
-  let repository = request.repository;
-  if (repository === undefined) {
-    // The revision the workspace was prepared from, which the publication pushes from: a
-    // repository a newer revision added is not in this workspace.
-    const pinned = await readTaskLegacyProject(task, () => deps.actions.projectRevision(workspace.projectName, workspace.projectRevision));
-    if (pinned === undefined) throw agentXError("CONFIG_INVALID", "this task's project revision is no longer registered; ask an admin");
-    const repositories = pinned.definition.repositories.map((entry) => entry.name);
-    if (repositories.length > 1) throw agentXError("CONFIG_INVALID", `this project has several repositories; name one of: ${repositories.join(", ")}`);
-    if (repositories.length === 0) throw agentXError("CONFIG_INVALID", `project \`${task.project}\` has no repositories; ask an admin`);
-    repository = repositories[0]!;
-  }
-  const receivedAt = iso(deps);
-  let accepted: Awaited<ReturnType<DeveloperTaskActions["acceptPullRequest"]>>;
-  try {
-    // R22: answers at once. A repeated requestId returns the same operation and writes nothing.
-    accepted = await deps.actions.acceptPullRequest(developerTaskIdentity(task), task.workspaceId, {
-      requestId: request.requestId, repository, title: request.title, draft: request.draft,
-      ...(request.body === undefined ? {} : { body: request.body }),
-    }, (operation) => [
-      putNew(turns, aiToolTurn({
-        party: partyOfTaskActor(task, caller), turnId: randomUUID(), action: "pull_request", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
-        request: `${request.title}\n\n${request.body ?? ""}`, response: `Opening a pull request on ${repository} as operation ${operation.id}.`, operationId: operation.id,
-      })),
-      accessFence(deps, access),
-    ]);
-  } catch (error) {
-    if (isConditional(error)) await authorizeTaskAction(deps, caller, taskId, "publish");
-    return busyOrClosing(deps, task, error);
-  }
-  const published = PullRequestResultSchema.safeParse(accepted.operation.result);
-  const pullRequest = accepted.operation.status === "SUCCEEDED" && published.success
-    ? { repository: published.data.repository, number: published.data.number, url: published.data.url, state: "open" as const }
-    : undefined;
-  const view = await taskView(deps, task, { events: 0, details: true });
-  await syncIndex(deps, task, view.status, view.updatedAt);
-  return {
-    task: view,
-    operationId: accepted.operation.id,
-    operationStatus: accepted.operation.status,
-    ...(pullRequest === undefined ? {} : { pullRequest }),
-  };
-}
 
 /** A share changed meanwhile (by the notifier or either share route) retries the close; 4 attempts, then the last conflict is rethrown. */
 const CLOSE_ATTEMPTS = 4;
@@ -6116,121 +5342,10 @@ function safeClose({ workspace, operations }: WorkspaceReads): Operation | undef
     && (preflight.data.safeToClose || operation.discardUnpublished === true) ? operation : undefined;
 }
 
-const CLOSE_CHECKING = "AgentX is checking the task's workspace for unpublished work before closing it; check back with agentx_get_task";
-const CLOSE_REFUSED = "not closed: some work is not published; push it or open a pull request with agentx_open_pull_request, then close the task again";
-const CLOSE_COMPUTE_PENDING = "the workspace has no unpublished work, but its compute is not removed yet; try agentx_close_task again shortly";
-const CLOSE_DISCARD_PENDING = "AgentX recorded your request to discard unpublished work, but could not finish releasing the workspace; try agentx_close_task again shortly";
-const CLOSE_CHECK_FAILED = "the check for unpublished work did not finish; try agentx_close_task again with a new request_id";
-const CLOSE_STILL_OPEN = "the task is still open; try agentx_close_task again with a new request_id";
-const COMPUTE_STOPPING = "the task's compute is still stopping; try agentx_close_task again shortly";
-const CLOSE_FAILED = "AgentX could not close this task just now; try agentx_close_task again, and ask an admin if it keeps failing";
 
-/** Why a close did not close the task (it always says, so the AI tool can tell the developer). */
-function notClosedMessage(reads: WorkspaceReads, operation: Operation | undefined, unpublished: DeveloperCloseResponse["unpublished"]): string {
-  if (operation?.discardUnpublished === true && unpublished !== undefined) return CLOSE_DISCARD_PENDING;
-  if (unpublished !== undefined) return CLOSE_REFUSED;
-  if (safeClose(reads) !== undefined) return CLOSE_COMPUTE_PENDING;
-  if (reads.workspace.status === "CLOSING" || operation?.status === "ACCEPTED" || operation?.status === "RUNNING") return CLOSE_CHECKING;
-  if (operation !== undefined && operation.status !== "SUCCEEDED") return CLOSE_CHECK_FAILED;
-  return CLOSE_STILL_OPEN;
-}
 
-/** A setup-failed task's close (ruling F15: its accepted record commits with the close). */
-async function closeNeverStarted(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, record: TransactItems[number], receivedAt: string, access?: AuthorizedTask): Promise<void> {
-  try {
-    await finishTaskClose(deps, task, undefined, [record, ...(access === undefined ? [] : [accessFence(deps, access)])], receivedAt);
-  } catch (error) {
-    // The compute refuses while it is starting or stopping: its own words, not busy()'s.
-    if (error instanceof AgentXError && error.code === "WORKSPACE_BUSY") throw agentXError("TASK_BUSY", COMPUTE_STOPPING);
-    if (!isConditional(error)) throw error;
-    log(deps, { event: "developer.task_close_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
-    throw agentXError("WORKSPACE_BUSY", CLOSE_FAILED);
-  }
-}
 
-/**
- * FR-016, R15, R22, owner decisions 5 and 6. Answers at once: usually `closing: true` while the
- * worker checks for unpublished work, which the AI tool then follows with agentx_get_task. There
- * is no force: unpublished work refuses the close, listing each repository and why.
- *
- * Idempotent: the same requestId reports its preflight's outcome and writes nothing. A fresh
- * requestId while a close is in flight, or after the task closed, answers with that close and
- * writes no new record: nothing new was accepted (the close already has its accepted record).
- */
-/** How long a close waits for a stopped grounding round to free the workspace, and how often it looks. */
-const GROUNDING_STOP_WAIT_MS = 12_000;
-const GROUNDING_STOP_POLL_MS = 400;
 
-async function closeTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<DeveloperCloseResponse> {
-  const request = parse(DeveloperTaskCloseRequestSchema, value, deps, "close");
-  let access = await authorizeTaskActor(deps, caller, taskId, "close");
-  let task = access.task;
-  const turns = turnTable(deps);
-  const receivedAt = iso(deps);
-  const record = (response: string, operationId?: string) => putNew(turns, aiToolTurn({
-    party: partyOfTaskActor(task, caller), turnId: randomUUID(), action: "close", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
-    request: "close", response, ...(operationId === undefined ? {} : { operationId }),
-  }));
-  let unpublished: DeveloperCloseResponse["unpublished"];
-  let operation: Operation | undefined;
-  if (task.closedAt === undefined) {
-    let workspace = await deps.actions.workspace(task.workspaceId);
-    if (workspace.status === "PREPARATION_FAILED") {
-      // A task whose setup failed has nothing to check: it closes now and frees its slot.
-      await closeNeverStarted(deps, task, record("Closed; the task's workspace never started."), receivedAt, access);
-    } else if (workspace.status === "PREPARING") {
-      throw agentXError("TASK_BUSY", `task ${taskId} is still starting; cancel it with agentx_cancel_task, then close it once it has stopped`);
-    } else if (workspace.status !== "CLOSED") {
-      // T7c: a plan held back for its check on the current app is not asked about again: the hold is marked abandoned (its one finish then clears it quietly) and the round is stopped,
-      // so the workspace is free for the close.
-      if (task.planGrounding !== undefined && task.workflow?.stage === "PLAN" && task.workflow.state === "RUNNING") {
-        try {
-          await deps.actions.transact([{ Update: { TableName: deps.tableName, Key: taskKey(taskId), UpdateExpression: "SET planGroundingAbandoned = :held",
-            ConditionExpression: "planGrounding.artifactSha256 = :held", ExpressionAttributeValues: { ":held": task.planGrounding.artifactSha256 } } }]);
-        } catch (error) {
-          if (!isConditional(error)) throw error;
-        }
-        if (workspace.activeOperationId) {
-          await deps.actions.cancelRunning(developerTaskIdentity(task), workspace, () => []).catch(() => undefined);
-          // The stopped round frees the workspace within seconds; the close waits for it (bounded) instead of answering busy.
-          for (let waited = 0; waited < GROUNDING_STOP_WAIT_MS; waited += GROUNDING_STOP_POLL_MS) {
-            if ((await deps.actions.workspace(task.workspaceId)).activeOperationId === undefined) break;
-            await new Promise((resolve) => setTimeout(resolve, GROUNDING_STOP_POLL_MS));
-          }
-          workspace = await deps.actions.workspace(task.workspaceId);
-        }
-      }
-      let started: Awaited<ReturnType<DeveloperTaskActions["startClose"]>>;
-      try {
-        // startClose answers a close in flight, and a repeated requestId, with the existing close
-        // operation and writes nothing; otherwise the record commits with the preflight (R12).
-        started = await deps.actions.startClose(developerTaskIdentity(task), workspace, request.requestId, (operation) => [
-          record("Checking the workspace for unpublished work before closing.", operation.id),
-          accessFence(deps, access),
-        ], request.discard_unpublished === true);
-      } catch (error) {
-        if (isConditional(error)) await authorizeTaskActor(deps, caller, taskId, "close");
-        busy(error, taskId);
-      }
-      operation = (await deps.actions.operations(task.workspaceId)).find((entry) => entry.id === started.operationId);
-      if (operation?.status === "SUCCEEDED") unpublished = unpublishedOf(operation.result);
-    }
-    await resumeClose(deps, task);
-    access = await authorizeTaskActor(deps, caller, taskId, "close");
-    task = access.task;
-  }
-  const reads = await workspaceReads(deps, task);
-  if (operation === undefined && reads.workspace.closeOperationId !== undefined) {
-    operation = reads.operations.find((entry) => entry.id === reads.workspace.closeOperationId);
-  }
-  const view = await taskView(deps, task, { events: 0, details: false, loaded: reads });
-  await syncIndex(deps, task, view.status, view.updatedAt);
-  const closePreflight = operation?.kind === "close" ? WorkspaceClosePreflightResultSchema.safeParse(operation.result) : undefined;
-  const discardedUnpublished = request.discard_unpublished === true && operation?.discardUnpublished === true
-    && closePreflight?.success === true && !closePreflight.data.safeToClose;
-  if (view.status === "CLOSED") return { task: view, closed: true, ...(discardedUnpublished ? { discardedUnpublished: true } : {}) };
-  return { task: view, closed: false, ...(unpublished === undefined ? {} : { unpublished }), message: notClosedMessage(reads, operation, unpublished) };
-}
 
 /** A path segment, decoded; a malformed escape is kept as is and then fails the task ID check. */
 function safeDecode(segment: string): string {
@@ -6246,33 +5361,6 @@ const SHARE_ATTEMPTS = 3;
 /** A share's channel as a message names it: `#name` when its name was stored (public only), else its ID (R10). */
 const shareLabel = (share: TaskShare) => channelLabel({ channelId: share.channelId, ...(share.channelName === undefined ? {} : { name: share.channelName, isPrivate: false }) });
 
-/** C5: the share the request asks for, from the task's current one, or "unchanged". */
-async function nextShare(
-  deps: DeveloperTaskRouteDependencies,
-  caller: DeveloperCaller,
-  task: DeveloperTaskRecord,
-  request: { shareMode?: "view" | "continue" | undefined; channel?: string | undefined },
-  now: string,
-): Promise<TaskShare | "unchanged"> {
-  const project = await readTaskLegacyProject(task, () => deps.actions.latestProject(task.project));
-  if (project === undefined) throw agentXError("CONFIG_INVALID", "this task's project is no longer registered; ask an admin");
-  const policy = developerTaskPolicy(project.definition);
-  if (task.share === undefined) {
-    // R11: sharing an existing task does not recheck project access; it uses the latest policy.
-    const decision = await shareFor(deps, caller, task.project, { revision: project.definition.revision, policy, access: "granted", channelIds: await deps.projectChannelIds(task.project) }, { shareToChannel: true, shareMode: request.shareMode, channel: request.channel });
-    const teamId = (await deps.workspaceForProject?.(task.project))?.teamId ?? deps.slackTeamId;
-    if (decision === undefined || teamId === undefined) throw agentXError("CHANNEL_REQUIRED", "this AgentX has no Slack workspace set, so tasks cannot be shared");
-    return taskShare(decision, teamId, now);
-  }
-  const current = task.share;
-  if (request.channel !== undefined) {
-    const named = request.channel.replace(/^#/, "").toLowerCase();
-    if (request.channel !== current.channelId && current.channelName?.toLowerCase() !== named) {
-      throw agentXError("CONFIG_INVALID", `this task is already shared in ${shareLabel(current)}; its channel cannot change`);
-    }
-  }
-  return withMode(current, decideMode(policy, request.shareMode ?? current.mode));
-}
 
 /** The share with a new mode, or "unchanged". Built field by field, so a stale modeReason is dropped. */
 function withMode(current: TaskShare, mode: { mode: "view" | "continue"; modeReason?: "continue_not_allowed" }): TaskShare | "unchanged" {
@@ -6338,56 +5426,6 @@ function shareItems(
 const shareIdempotencyKey = (task: DeveloperTaskRecord, requestId: string) => ({ pk: `IDEMPOTENCY#${task.ownerKey}#${task.workspaceId}`, sk: `REQUEST#${requestId}` });
 const REUSED_REQUEST = "this request_id was already used for another action on this task; use a new request_id";
 
-/**
- * C5. Answers at once; the notifier posts the start message or the mode change (C6). Only the
- * task's developer may call this route; an AgentX admin switches the mode through adminShareMode
- * (C25). Every write of `share` replaces the map, conditioned on shareVersion, so a notifier write
- * between this read and this write is read again, never lost (C1).
- */
-async function shareTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
-  const request = parse(ShareDeveloperTaskRequestSchema, value, deps, "share");
-  let access = await authorizeLegacyTaskAction(deps, caller, taskId, "control");
-  let task = access.task;
-  const turns = turnTable(deps);
-  const idempotencyKey = shareIdempotencyKey(task, request.requestId);
-  const payloadHash = hashJson({ action: "share", shareMode: request.shareMode ?? null, channel: request.channel ?? null });
-  const answer = async () => {
-    const view = await taskView(deps, task, { events: 0, details: false });
-    await syncIndex(deps, task, view.status, view.updatedAt);
-    return { task: view };
-  };
-  const previous = await get<{ payloadHash: string }>(deps, idempotencyKey);
-  if (previous !== undefined) {
-    if (previous.payloadHash !== payloadHash) throw agentXError("IDEMPOTENCY_CONFLICT", REUSED_REQUEST);
-    return answer();
-  }
-  for (let attempt = 0; attempt < SHARE_ATTEMPTS; attempt += 1) {
-    if (task.closedAt !== undefined) throw agentXError("CONFIG_INVALID", CLOSED_TASK);
-    const receivedAt = iso(deps);
-    const share = await nextShare(deps, caller, task, request, receivedAt);
-    if (share === "unchanged") return answer();
-    const items = [...shareItems(deps, turns, task, share, {
-      idempotencyKey, payloadHash, receivedAt,
-      request: `share ${request.shareMode ?? "default mode"}${request.channel === undefined ? "" : ` in ${request.channel}`}`,
-      actor: caller,
-    }), accessFence(deps, access)];
-    try {
-      await deps.actions.transact(items);
-      access = await authorizeTaskAction(deps, caller, taskId, "control");
-      task = access.task;
-      return answer();
-    } catch (error) {
-      if (!isConditional(error)) throw error;
-      // The same share, sent again, committed first.
-      const concurrent = await get<{ payloadHash: string }>(deps, idempotencyKey);
-      if (concurrent !== undefined) return shareTask(deps, caller, taskId, value);
-      // The notifier (or a close) changed the task meanwhile: decide again from a fresh read.
-      access = await authorizeTaskAction(deps, caller, taskId, "control");
-      task = access.task;
-    }
-  }
-  throw agentXError("WORKSPACE_BUSY", "the task changed while sharing; try agentx_share_task again");
-}
 
 /**
  * C25 (owner answer to Q2, 2026-09-29): an AgentX admin switches a shared task between view only and
@@ -6436,25 +5474,7 @@ export async function adminShareMode(deps: ShareModeDependencies, admin: ShareAd
   throw agentXError("WORKSPACE_BUSY", "the task changed while switching its mode; try again");
 }
 
-/**
- * An AI tool's decision on the pending PR feedback proposal: the same owner-only transition, GitHub refresh and fences as
- * the Slack buttons and the feedback page, then the task as it now stands.
- */
-async function decideTaskWorkflowFeedback(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, input: unknown): Promise<{ task: DeveloperTaskView }> {
-  const parsed = WorkflowFeedbackFindingsDecisionRequestSchema.safeParse(input);
-  if (!parsed.success) throw agentXError("CONFIG_INVALID", parsed.error.issues[0]?.message ?? "the PR feedback decision is invalid");
-  await submitWorkflowFeedbackDecision(deps, caller, taskId, parsed.data);
-  return readTask(deps, caller, taskId, new URL(`/v1/dev/tasks/${encodeURIComponent(taskId)}`, "https://agentx.invalid"));
-}
 
-/** An AI tool's Retry review of a PR feedback review that could not finish: the same transition as the Slack button. */
-async function retryTaskWorkflowFeedback(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, input: unknown): Promise<{ task: DeveloperTaskView; started: boolean }> {
-  const parsed = WorkflowFeedbackReviewRetryRequestSchema.safeParse(input);
-  if (!parsed.success) throw agentXError("CONFIG_INVALID", "name the review to retry by its review digest");
-  const retried = await retryTaskWorkflowFeedbackReview(deps, caller, taskId, parsed.data);
-  const read = await readTask(deps, caller, taskId, new URL(`/v1/dev/tasks/${encodeURIComponent(taskId)}`, "https://agentx.invalid"));
-  return { ...read, started: retried.started };
-}
 
 /** Every developer task route answers 200 with its body; errors are AgentXErrors. */
 const TASK_PATH_PREFIX = "/v1/dev/tasks/";
@@ -6480,32 +5500,28 @@ async function answerAsMissing(deps: DeveloperTaskRouteDependencies, caller: Dev
   }
 }
 
-/**
- * S3: answers to Understand's questions are a core task's (the core host serves them on this path, by the engine boundary). A workflow task never asks any, so one the caller may read
- * answers "not waiting" in fixed words, and nothing is read from the body or written; anyone else reads the missing task's answer, as on every task route.
- */
-async function answerWorkflowTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<never> {
-  await loadReadableTask(deps, caller, taskId);
-  throw agentXError("INTENT_NOT_WAITING", INTENT_NOT_WAITING_MESSAGE);
-}
+
 
 /**
- * Cloud's Proof tab (`GET /v1/dev/tasks/{id}/evidence`): the task read's own rule (`loadReadableTask`: the owner, or a reader it is shared with; anyone else, another company's task and a core task read
- * as missing; the company rule of the sibling task routes as well), then the proof index of what the workflow recorded for its current code. This engine keeps no evidence pack, so there are no failing-test causes here (proof-index.ts).
+ * The routes of one task, as the router names them (named-scopes.test.ts and the company inventory read these patterns). A stamped core task's route is the core's (engine-boundary.ts);
+ * a task the retired spec 056 workflow started reads as missing; any other path under /v1/dev/tasks/<id> is no route.
  */
-async function taskProofIndex(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<ProofIndexResponse> {
-  const { task } = await loadReadableTask(deps, caller, taskId);
-  // The sibling task routes' company rule too (task-code-routes.ts): a row naming another company by `orgId` reads as missing, in the owner check's own words.
-  if (!rowInCompany(task as unknown as Record<string, unknown>, deps.companyId)) throw agentXError("TASK_NOT_FOUND", `no task ${task.taskId} of yours`);
-  return proofIndexOf(task.taskId, task.workflow, undefined);
-}
+const TASK_ROUTE_PATTERNS: readonly RegExp[] = [
+  /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|people\/candidates|people\/add|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry|plan|messages|diff|comments|merge|answers|evidence))?$/,
+  /^\/v1\/dev\/tasks\/([^/]+)\/e2e-publication-context$/,
+  /^\/v1\/dev\/tasks\/([^/]+)\/people\/requests\/([^/]+)$/,
+  /^\/v1\/dev\/tasks\/([^/]+)\/readers(?:\/([^/]+))?$/,
+];
+
+/** A task start the core does not take (#1275: the spec 056 workflow no longer starts tasks). Fixed words. */
+export const NO_COMPANY_START_WORDS = "Starting a task needs a company on this install: ask your administrator to add you.";
 
 export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (request.method === "POST" && url.pathname === "/v1/dev/tasks") {
-    // Lane E2 step 6: where the switch sends the caller's company to the core, the core starts the task; anywhere else (and with no core entry, the default) the start below, unchanged.
+    // Every new task starts on the core (#1275). The spec 056 workflow is retired: a caller the core does not start for (no member company, or no core on this install) is refused.
     const core = await startOnCore(deps.coreTasks, request, caller);
     if (core !== undefined) return core.value;
-    return startTask(deps, caller, body(request));
+    throw agentXError("FORBIDDEN", NO_COMPANY_START_WORDS);
   }
   if (request.method === "GET" && url.pathname === "/v1/dev/tasks") {
     // Web task channel C5: exactly `?involved=1` lists the tasks the caller was added to, through the core (every task re-checked there). Any other query is the ordinary list, unchanged.
@@ -6519,65 +5535,16 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   const entry = entryPath === undefined || entryPath === "" ? null : [url.pathname, entrySlash < 0 ? entryPath : entryPath.slice(0, entrySlash), entrySlash < 0 ? "" : entryPath.slice(entrySlash)] as const;
   const operation = entry === null ? undefined : taskEntryOperation(entry[2]);
   if (entry !== null && operation !== undefined) {
+    // A method the route table has no row for is not a route here either (developer-routes.ts refuses it before sign-in; this keeps the router's own answer the same).
+    if (!TASK_ROUTE_PATTERNS.some((pattern) => pattern.test(url.pathname)) || devRouteOf(request.method, url.pathname) === undefined) throw agentXError("NOT_FOUND", "route not found");
     const entryTaskId = safeDecode(entry[1]);
     if (await ownerOfTaskId(deps, entryTaskId, TASK_ENTRY_AREAS[operation]) === "core") return serveCoreTask(deps.coreTasks, request, caller, entryTaskId, () => answerAsMissing(deps, caller, request, url, entryTaskId, entry[2]));
+    // A task the retired spec 056 workflow started has no reader any more: it answers exactly like a missing task.
+    return answerAsMissing(deps, caller, request, url, entryTaskId, entry[2]);
   }
-  const publicationContextRoute = /^\/v1\/dev\/tasks\/([^/]+)\/e2e-publication-context$/.exec(url.pathname);
-  if (publicationContextRoute !== null && request.method === "POST") {
-    return e2ePublicationContext(deps, caller, safeDecode(publicationContextRoute[1]!), body(request));
-  }
-  const proposalRoute = /^\/v1\/dev\/tasks\/([^/]+)\/people\/requests\/([^/]+)$/.exec(url.pathname);
-  if (proposalRoute !== null && request.method === "GET") {
-    const taskId = safeDecode(proposalRoute[1]!);
-    const requestId = safeDecode(proposalRoute[2]!);
-    return { change: await getTaskPeopleProposal(deps, caller, taskId, requestId) };
-  }
-  const readersRoute = /^\/v1\/dev\/tasks\/([^/]+)\/readers(?:\/([^/]+))?$/.exec(url.pathname);
-  if (readersRoute !== null) return routeTaskReaders(deps, caller, request, safeDecode(readersRoute[1]!), readersRoute[2] === undefined ? undefined : safeDecode(readersRoute[2]));
-  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|people\/candidates|people\/add|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry|plan|messages|diff|comments|merge|answers|evidence))?$/.exec(url.pathname);
+  const route = /^\/v1\/dev\/tasks\/([^/]+)\/merge$/.exec(url.pathname);
   const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
-  if (taskId !== undefined && request.method === "GET" && route?.[2] === undefined) return readTask(deps, caller, taskId, url);
-  if (taskId !== undefined && request.method === "GET" && route?.[2] === "events") return taskEvents(deps, caller, taskId, url);
-  if (taskId !== undefined && request.method === "POST" && route?.[2] === "answers") return answerWorkflowTask(deps, caller, taskId);
-  if (taskId !== undefined && request.method === "GET" && route?.[2] === "plan") return getTaskPlan(deps, caller, taskId, url);
-  if (taskId !== undefined && request.method === "GET" && route?.[2] === "evidence") return taskProofIndex(deps, caller, taskId);
-  if (taskId !== undefined && request.method === "GET" && route?.[2] === "messages") return listTaskMessages(deps, caller, taskId, url);
-  if (taskId !== undefined && request.method === "POST" && route?.[2] === "messages") return sendTaskMessage(deps, caller, taskId, body(request));
-  if (taskId !== undefined && request.method === "GET" && route?.[2] === "diff") return readTaskDiff(deps, caller, taskId, url);
-  if (taskId !== undefined && request.method === "GET" && route?.[2] === "comments") return listPlanComments(deps, caller, taskId);
-  if (taskId !== undefined && request.method === "POST" && route?.[2] === "comments") return createPlanComment(deps, caller, taskId, body(request));
-  if (taskId !== undefined && request.method === "GET" && route?.[2] === "people") return { view: await getTaskPeople(deps, caller, taskId) };
-  if (taskId !== undefined && request.method === "POST" && route?.[2] === "people/role") {
-    const input = parse(TaskPeopleRoleRequestSchema, body(request), deps, "people/role");
-    return { change: await proposeTaskPeopleRole(taskPeopleEffectsDependencies(deps), caller, taskId, input) };
-  }
-  // C4 (plan 4.2 "Add a person from the web"): owner only; the candidates are proved live, and an add goes through the same propose -> confirm step.
-  if (taskId !== undefined && request.method === "GET" && route?.[2] === "people/candidates") return { candidates: await getTaskPeopleCandidates(taskPeopleEffectsDependencies(deps), caller, taskId) };
-  if (taskId !== undefined && request.method === "POST" && route?.[2] === "people/add") {
-    const input = parse(TaskPeopleAddRequestSchema, body(request), deps, "people/add");
-    return { change: await addTaskWebPerson(taskPeopleEffectsDependencies(deps), caller, taskId, input) };
-  }
-  if (taskId !== undefined && request.method === "POST" && route?.[2] === "people/take-ownership") {
-    const input = parse(TaskPeopleTakeOwnershipRequestSchema, body(request), deps, "people/take-ownership");
-    return { change: await proposeTaskOwnership(taskPeopleEffectsDependencies(deps), caller, taskId, input) };
-  }
-  if (taskId !== undefined && request.method === "POST" && route?.[2] === "continue") return continueTask(deps, caller, taskId, body(request));
-  if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/decision") return decideTaskWorkflow(deps, caller, taskId, body(request));
-  if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/retry") return retryTaskWorkflow(deps, caller, taskId, body(request));
-  if (taskId !== undefined && request.method === "POST" && route?.[2] === "canvas-closeout/retry") return retryTaskCanvasCloseout(deps, caller, taskId, body(request));
-  if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/review") return startTaskWorkflowReview(deps, caller, taskId, body(request));
-  if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/publish-retry") return retryTaskWorkflowPublication(deps, caller, taskId, body(request));
-  if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/keep-pull-requests") return keepTaskWorkflowPullRequests(deps, caller, taskId, body(request));
-  if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/send-back") return sendTaskWorkflowBackToCoding(deps, caller, taskId, body(request));
-  if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/review-findings") return resolveTaskWorkflowFindings(deps, caller, taskId, body(request));
-  if (taskId !== undefined && request.method === "GET" && route?.[2] === "workflow/feedback") return { review: await getWorkflowFeedbackReview(deps, caller, taskId) };
-  if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/feedback-decision") return decideTaskWorkflowFeedback(deps, caller, taskId, body(request));
-  if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/feedback-retry") return retryTaskWorkflowFeedback(deps, caller, taskId, body(request));
-  if (taskId !== undefined && request.method === "POST" && route?.[2] === "cancel") return cancelTask(deps, caller, taskId, body(request));
-  if (taskId !== undefined && request.method === "POST" && route?.[2] === "close") return closeTask(deps, caller, taskId, body(request));
-  if (taskId !== undefined && request.method === "POST" && route?.[2] === "pull-requests") return openPullRequest(deps, caller, taskId, body(request));
-  if (taskId !== undefined && request.method === "POST" && route?.[2] === "share") return shareTask(deps, caller, taskId, body(request));
-  if (taskId !== undefined && request.method === "POST" && route?.[2] === "merge") {
+  if (taskId !== undefined && request.method === "POST" && route !== null) {
     // Lane W: every merge rule is the merge core's (task-merge.ts); this only refuses earlier.
     return routeTaskMerge({ wiring: deps.taskMerge, companyId: deps.companyId ?? IMPLICIT_COMPANY_ID, taskId, personId: caller.developerId, body: body(request), now: deps.now() });
   }

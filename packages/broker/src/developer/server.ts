@@ -654,9 +654,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     let developerId = signedInId;
     outcome.developerId = developerId;
     let existing = await store.getDeveloper(developerId);
-    const signedInRecord = existing;
     // DEC 254b: with Code's company layer on, a sign-in an operator merged into another (`mergedInto`) is seated as its survivor: the session, the
-    // membership and every check are the survivor's. Only the signed-in Slack identity's workspace metadata may be refreshed. The walk is #820's: at most 8 hops, no
+    // membership and every check are the survivor's, and neither record is rewritten by this sign-in. The walk is #820's: at most 8 hops, no
     // loops, and a revoked or unreadable record anywhere refuses.
     let merged = false;
     if (deps.company !== undefined && existing !== undefined && (existing as { mergedInto?: unknown }).mergedInto !== undefined) {
@@ -751,11 +750,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     }
     // DEC 254w: a Slack user the person connected stays their Slack link whatever this sign-in's method or lookup says.
     if (existing?.linkedSlackUserId !== undefined) slackUserId = existing.linkedSlackUserId;
-    // A merged sign-in updates only its own verified Slack workspace, keeping the survivor and all profile/index fields intact.
-    if (merged && method === "slack" && identity.slackTeam !== undefined && signedInRecord?.mergedInto !== undefined) {
-      // The workspace hint is a convenience, never a gate: a throttled or racing write must not fail the sign-in.
-      try { await store.rememberMergedSlackWorkspace(signedInId, signedInRecord.mergedInto, identity.slackTeam); } catch { /* ignored: hint only */ }
-    }
+    // A merged sign-in rewrites neither its own record nor the survivor's.
     if (!merged) await store.upsertDeveloper({
       developerId, provider: method, issuer: identity.issuer, subject: identity.subject, displayName: identity.displayName,
       ...(identity.email === undefined ? {} : { email: identity.email }),
