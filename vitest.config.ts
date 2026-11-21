@@ -2,7 +2,6 @@ import { configDefaults, defineConfig } from "vitest/config";
 import { DurationSequencer } from "./tests/support/duration-sequencer.js";
 import { moduleMockingFiles, nativeP0Files, nightlyOnlyFiles, postDeployFiles, sharedModuleGroups, sharedVitestSettings } from "./tests/support/vitest-shared-config.js";
 
-const include = ["tests/**/*.test.ts", "packages/**/*.test.ts"];
 const exclude = [...configDefaults.exclude, ...nativeP0Files, ...postDeployFiles, ...(process.env.ROVARA_NIGHTLY_TESTS === "1" ? [] : nightlyOnlyFiles)];
 
 export default defineConfig({
