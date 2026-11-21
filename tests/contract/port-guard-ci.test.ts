@@ -12,7 +12,8 @@ describe("CI runs on code/next and checks the port there (docs/porting.md), and 
   it("keeps the pull request and manual triggers as they were and adds a push to code/next only", async () => {
     const { on } = await workflow();
     // #1185 added the nightly run (the device emulator check); its cron is pinned in ci-parallel.test.ts.
-    expect(Object.keys(on).sort()).toEqual(["pull_request", "push", "schedule", "workflow_dispatch"]);
+    // #1259: and the merge queue on mainline (port-guard itself never runs there: see its `if`).
+    expect(Object.keys(on).sort()).toEqual(["merge_group", "pull_request", "push", "schedule", "workflow_dispatch"]);
     expect(on.pull_request).toEqual({ types: ["opened", "synchronize", "reopened", "ready_for_review", "labeled"] });
     expect(on.push).toEqual({ branches: ["code/next"] });
   });

@@ -13,14 +13,23 @@ export const GATED_JOBS = ["quick", "build", "test", "linux-runtime", "ci-mode",
 
 /** The shard list of a run that executes the whole suite (scripts/ci-plan.ts FULL_SHARDS). */
 export const FULL_SHARD_LIST = "[1,2,3,4,5,6,7,8]";
-const MODES = ["full", "affected"];
+const MODES = ["full", "affected", "reuse"];
+/** #1262: the run a merge-queue reuse stands on (scripts/ci-plan.ts findQueueReuse). */
+const REUSED_RUN = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/actions\/runs\/[0-9]+$/u;
 const SCOPES = ["all", "changed", "none"];
 const BOOLEANS = ["true", "false"];
 
 /** What each job's result must be, from the plan: "success" when the plan needs the job, "skipped" when it skipped the job by design. Or a reason the plan itself is not trusted. */
-export function expectedResults(plan: PlanOutputs): { expected: Record<string, "success" | "skipped"> } | { problem: string } {
+export function expectedResults(plan: PlanOutputs, event?: string): { expected: Record<string, "success" | "skipped"> } | { problem: string } {
   const { mode, docs_only: docsOnly, tests, lint, linux, release } = plan;
-  if (mode === undefined || !MODES.includes(mode)) return { problem: `the plan's mode is ${JSON.stringify(mode)}, not full or affected` };
+  if (mode === undefined || !MODES.includes(mode)) return { problem: `the plan's mode is ${JSON.stringify(mode)}, not full, affected or reuse` };
+  // #1262: a merge-queue run of byte-identical code stands on the pull request's own pass: nothing but the plan and this gate runs, and the plan names that run.
+  if (mode === "reuse") {
+    if (event !== "merge_group") return { problem: `the plan says reuse, but only a merge-queue run may reuse (this is ${JSON.stringify(event ?? "")})` };
+    if (!(tests === "none" && lint === "none" && linux === "false" && release === "false" && docsOnly === "false")) return { problem: `the plan says reuse but still runs part of the suite (tests ${tests}, lint ${lint}, linux ${linux}, release ${release}, docs_only ${docsOnly})` };
+    if (plan.reuse_run === undefined || !REUSED_RUN.test(plan.reuse_run)) return { problem: `the plan says reuse but names no run (${JSON.stringify(plan.reuse_run)})` };
+    return { expected: Object.fromEntries(GATED_JOBS.map((job) => [job, "skipped" as const])) };
+  }
   if (tests === undefined || !SCOPES.includes(tests)) return { problem: `the plan's tests is ${JSON.stringify(tests)}, not all, changed or none` };
   if (lint === undefined || !SCOPES.includes(lint)) return { problem: `the plan's lint is ${JSON.stringify(lint)}, not all, changed or none` };
   for (const [name, value] of [["docs_only", docsOnly], ["linux", linux], ["release", release]] as const) {
@@ -48,10 +57,10 @@ export function expectedResults(plan: PlanOutputs): { expected: Record<string, "
 }
 
 /** `results` maps each job the gate waited for to its result: success, failure, cancelled or skipped. */
-export function gateVerdict(input: { plan: PlanOutputs; results: Readonly<Record<string, string>> }): GateVerdict {
+export function gateVerdict(input: { plan: PlanOutputs; results: Readonly<Record<string, string>>; event?: string }): GateVerdict {
   const { plan, results } = input;
   if (results.plan !== "success") return { ok: false, reason: `plan was ${results.plan ?? "missing"}, not success` };
-  const decided = expectedResults(plan);
+  const decided = expectedResults(plan, input.event);
   if ("problem" in decided) return { ok: false, reason: decided.problem };
   for (const job of GATED_JOBS) {
     const result = results[job];
@@ -64,14 +73,14 @@ export function gateVerdict(input: { plan: PlanOutputs; results: Readonly<Record
   }
   const ran = GATED_JOBS.filter((job) => decided.expected[job] === "success");
   const skipped = GATED_JOBS.filter((job) => decided.expected[job] === "skipped");
-  const mode = plan.mode === "full" ? "FULL run" : plan.docs_only === "true" ? "Markdown-only change" : "affected run";
+  const mode = plan.mode === "full" ? "FULL run" : plan.mode === "reuse" ? `reuse of ${plan.reuse_run ?? "?"}'s pass (byte-identical code)` : plan.docs_only === "true" ? "Markdown-only change" : "affected run";
   return { ok: true, reason: `${mode}; ${ran.length} jobs succeeded${skipped.length > 0 ? `, ${skipped.length} skipped by design (${skipped.join(", ")})` : ""}` };
 }
 
 interface Need { result?: unknown; outputs?: Record<string, unknown> }
 
 /** The verdict for the JSON of GitHub's `needs` context (`toJSON(needs)`). */
-export function needsVerdict(needsJson: string): GateVerdict {
+export function needsVerdict(needsJson: string, event?: string): GateVerdict {
   let needs: unknown;
   try {
     needs = JSON.parse(needsJson);
@@ -83,12 +92,12 @@ export function needsVerdict(needsJson: string): GateVerdict {
   const results = Object.fromEntries(entries.map(([job, need]) => [job, String(need?.result)]));
   const outputs = (needs as Record<string, Need>).plan?.outputs ?? {};
   const plan = Object.fromEntries(Object.entries(outputs).map(([key, value]) => [key, typeof value === "string" ? value : undefined]));
-  return gateVerdict({ plan, results });
+  return gateVerdict({ plan, results, ...(event === undefined ? {} : { event }) });
 }
 
 // Usage: NEEDS='<toJSON(needs)>' node scripts/ci-gate.ts
 if (process.argv[1]?.endsWith("ci-gate.ts")) {
-  const verdict = needsVerdict(process.env.NEEDS ?? "");
+  const verdict = needsVerdict(process.env.NEEDS ?? "", process.env.CI_EVENT ?? "");
   console.log(verdict.ok ? `CI passed: ${verdict.reason}.` : `CI did not pass: ${verdict.reason}.`);
   process.exitCode = verdict.ok ? 0 : 1;
 }

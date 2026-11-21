@@ -55,6 +55,25 @@ describe("the release's CI proof", () => {
     expect((await ciProof({ repository: "o/r", commit: "d".repeat(40), git: gitOf(solo, {}), checkRuns: async () => [run()] })).proven).toBe(false);
   });
 
+  // #1259: the merge queue merges a pull request onto the latest mainline in a commit of its own, runs CI on that commit, and fast-forwards mainline to it.
+  // The pull request's head (its second parent) has other code when it was behind, so the proof stands on the queue commit's own gate run.
+  it("is proven for a merge-queue commit by its own gate run, when the pull request's head was behind mainline", async () => {
+    const trees = { [MERGE]: TREE, [BASE]: OTHER_TREE, [HEAD]: OTHER_TREE };
+    const asked: string[] = [];
+    const proof = await ciProof({ repository: "o/r", commit: "HEAD", git: gitOf(trees, { [MERGE]: [BASE, HEAD] }), checkRuns: async (sha) => { asked.push(sha); return sha === MERGE ? [run()] : []; } });
+    expect(proof).toMatchObject({ proven: true, candidate: MERGE });
+    expect(asked).toEqual([MERGE]);
+  });
+
+  // #1262: a merge-queue run of byte-identical code reuses the pull request's pass, so its own gate (local) passes without the suite running again. The release
+  // stands on that gate run like any other, and a gate check from anything but GitHub Actions still doesn't count.
+  it("is proven for a merge-queue commit whose own gate passed by reusing the pull request's run, and never by a gate check from another app", async () => {
+    const trees = { [MERGE]: TREE, [BASE]: OTHER_TREE, [HEAD]: OTHER_TREE };
+    const git = gitOf(trees, { [MERGE]: [BASE, HEAD] });
+    expect(await ciProof({ repository: "o/r", commit: "HEAD", git, checkRuns: async (sha) => (sha === MERGE ? [run({ id: 77 })] : []) })).toMatchObject({ proven: true, candidate: MERGE });
+    expect((await ciProof({ repository: "o/r", commit: "HEAD", git, checkRuns: async (sha) => (sha === MERGE ? [run({ app: { slug: "someone-else" } })] : []) })).proven).toBe(false);
+  });
+
   it("takes the newest GitHub Actions run as the gate's result", () => {
     expect(latestGateRun([run({ id: 3, conclusion: "failure" }), run({ id: 7 }), run({ id: 9, app: { slug: "other" } })])?.id).toBe(7);
   });

@@ -388,7 +388,8 @@ describe("wiring", () => {
     expect(ratchet).toBe(install + 1);
     expect(quick.steps.some((step) => step.run === "npm run typecheck")).toBe(false);
     // Behind the plan's Markdown-only skip (the job's own condition), and never skipped otherwise: the typecheck stays full in every mode.
-    expect(quick.if).toBe("needs.plan.outputs.docs_only != 'true'");
+    // #1262: a merge-queue reuse (byte-identical code the pull request's own run passed) skips it too.
+    expect(quick.if).toBe("needs.plan.outputs.docs_only != 'true' && needs.plan.outputs.mode != 'reuse'");
     expect(quick.steps[ratchet]!.if).toBeUndefined();
   });
 
