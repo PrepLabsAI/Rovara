@@ -493,72 +493,16 @@ async function runTask(
   }
 
   if (invocation.payload.workflowMode === "FEEDBACK_REVIEW") {
-    const binding = invocation.payload.workflowFeedbackReview!;
-    if (dependencies.feedbackBundleReader === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the worker cannot read the task's approved feedback bundles");
-    const root = canonicalRoot;
-    const stop = new AbortController();
-    // An unconfirmed stop anywhere in the task ends the checks: nothing runs on, and the run's ending reads nothing (workspace-safety.ts).
-    currentWorkspaceSafety()?.onUnsafe(() => stop.abort());
-    const unregister = dependencies.cancellationController?.register(invocation.operationId, { abort: async () => stop.abort() });
-    const events = new EventBatcher(dependencies.eventSink);
-    try {
-      await events.append("progress", { message: "AgentX is reviewing the latest feedback on the linked pull requests." });
-      if (fileToolsNote !== undefined) await events.append("progress", { message: fileToolsNote });
-      const collected = await dependencies.feedbackBundleReader(binding);
-      // Publication moved HEAD to a new commit with the reviewed tree, so the code is identified by that tree (and the
-      // pinned base stays an ancestor), not by the commit the candidate digest was made from. Only repositories that
-      // have a pull request bundle are checked, and only those are readable by the critic.
-      const bundledIds = new Set(collected.bundles.map(({ ref }) => ref.repositoryId));
-      const repositoryInputs = candidateInputs(manifest, root, invocation.payload.workflowBase, candidateSweep).filter(input => bundledIds.has(input.repositoryId));
-      const candidateRepositories = repositoryInputs.length === 0 ? [] : await readCandidateRepositories(repositoryInputs);
-      const unchanged = collected.bundles.every(({ ref }) => {
-        const identity = candidateRepositories.find(repository => repository.repositoryId === ref.repositoryId);
-        return identity !== undefined && ref.headTreeSha !== undefined && identity.treeSha === ref.headTreeSha
-          && ref.candidateDigest === binding.candidateDigest;
-      });
-      if (!unchanged) throw agentXError("OPERATION_INTERRUPTED", "the candidate changed before PR feedback review");
-      const execution = await runWorkflowFeedbackReview({
-        operationId: invocation.operationId, taskId: binding.taskId, workflowRevision: binding.workflowRevision,
-        taskRequirements: collected.taskRequirements, candidateDigest: binding.candidateDigest,
-        rootPath: dependencies.rootPath, model: dependencies.model, candidate: candidateRepositories,
-        repositories: repositoryInputs, bundles: collected.bundles, artifactSink: dependencies.artifactSink,
-        ruleFileBaseCommits: invocation.payload.workflowBase ?? [],
-        ...(collected.taskChecks === undefined ? {} : { taskChecks: collected.taskChecks }),
-        ...(feedbackTimeoutMs === undefined ? {} : { timeoutMs: feedbackTimeoutMs }),
-        ...(dependencies.structuredAnswers === undefined ? {} : { structuredAnswers: dependencies.structuredAnswers }),
-        ...(agentStep?.promptSection === undefined ? {} : { promptSection: agentStep.promptSection }),
-        ...(standingInstructions === undefined ? {} : { standingInstructions }),
-        ...(agentStep?.tools === undefined ? {} : { tools: agentStep.tools }),
-        ...(stepSkills === undefined ? {} : { skills: stepSkills }),
-        ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }), signal: stop.signal,
-        ...(fileTools === undefined ? {} : { fileTools }),
-        onProgress: message => { void events.append("progress", { message }).catch(() => undefined); },
-      });
-      const workflowFeedbackReviewResult = {
-        taskId: binding.taskId, workflowRevision: binding.workflowRevision, candidateDigest: binding.candidateDigest,
-        outputDigest: execution.outputDigest, artifactName: execution.artifactName, status: execution.report.status,
-      };
-      await events.append("result", { status: "SUCCEEDED", workflowMode: "FEEDBACK_REVIEW", workflowFeedbackReviewResult });
-      await events.flush();
-      return { conversationId: invocation.payload.conversationId, reopened: false, workflowMode: "FEEDBACK_REVIEW", workflowFeedbackReviewResult };
-    } catch (error) {
-      await events.append("error", { message: redactText(error instanceof Error ? error.message : "feedback review failed") }).catch(() => undefined);
-      await events.flush().catch(() => undefined);
-      throw error;
-    } finally {
-      unregister?.();
-    }
+    return runFeedbackReviewStage({
+      invocation, dependencies, canonicalRoot, manifest, candidateSweep, fileTools, fileToolsNote, feedbackTimeoutMs, agentStep, standingInstructions, stepSkills,
+    });
   }
 
   // NH-1 (the broker sends `nightlyRun` only while `nh` is on, and only to a worker that lists "task.nightlyRun.v1"): the nightly run is the Prove sequence over the approved environment, with its own module; the checks below do not apply to it.
   if (invocation.payload.nightlyRun !== undefined) {
     return runNightlyInvocation(invocation, {
       rootPath: canonicalRoot, eventSink: dependencies.eventSink, cancellationController: dependencies.cancellationController, nightlyResult: dependencies.nightlyResult,
-      runners: scopeChecks(withModelHelperRound(replyCollector.wrap(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot })), dependencies.checkRunners ?? createCheckRunners({
-        rootPath: canonicalRoot,
-        ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
-        ...(bashOperations === undefined ? {} : { bashOperations }), ...(sandbox === undefined ? {} : { sandbox }), ...(localShell ? { local: true } : {}),
-      }))),
+      runners: scopeChecks(withModelHelperRound(replyCollector.wrap(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot })), projectCheckRunners(dependencies, { canonicalRoot, devcontainer, devcontainerCli, bashOperations, sandbox, localShell }))),
     }, manifest);
   }
   // Spec 051 Ruling L: the check history as it was before the agent ran. The agent can write to .agentx, so every
@@ -1969,9 +1913,12 @@ async function runTask(
   }
 }
 
+/** #1303: a parsed task invocation, as runTask has it after the kind check. */
+type TaskRunInvocation = Extract<WorkerInvocation, { kind: "task" }>;
+
 /** #1303: what runTask has set up by the time a CHECKS run starts; runChecksStage only reads it. */
 interface ChecksStageContext {
-  invocation: Extract<WorkerInvocation, { kind: "task" }>;
+  invocation: TaskRunInvocation;
   dependencies: TaskInvocationDependencies;
   manifest: PreparationManifest;
   canonicalRoot: string;
@@ -2050,13 +1997,7 @@ async function runChecksStage(stage: ChecksStageContext): Promise<TaskInvocation
       onResult: (result) => { if (candidateFakeFactsTaken) return; for (const line of result.lines) void events.append("progress", { message: line }).catch(() => undefined); },
     }));
     if (invocation.payload.generalFakes !== undefined && fakesPlan === undefined) await events.append("progress", { message: GENERAL_FAKES_LOCAL_ONLY_SENTENCE });
-    const runners = scopeChecks(withModelHelperRound(replyCollector.wrap(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot })), withGeneralFakesRound(fakesPlan, withTestServices(testServices, dependencies.checkRunners ?? createCheckRunners({
-      rootPath: canonicalRoot,
-      ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
-      ...(bashOperations === undefined ? {} : { bashOperations }),
-      ...(sandbox === undefined ? {} : { sandbox }),
-      ...(localShell ? { local: true } : {}),
-    })))));
+    const runners = scopeChecks(withModelHelperRound(replyCollector.wrap(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot })), withGeneralFakesRound(fakesPlan, withTestServices(testServices, projectCheckRunners(dependencies, { canonicalRoot, devcontainer, devcontainerCli, bashOperations, sandbox, localShell })))));
     const roundBudgetMs = dependencies.checkBudgetMs?.() ?? testEnv?.budgetMs ?? CHECK_ROUND_BUDGET_MS;
     const roundStarted = Date.now();
     const round = await runChecks(plan, runners, { budgetMs: roundBudgetMs, signal: stop.signal });
@@ -2209,6 +2150,99 @@ async function runChecksStage(stage: ChecksStageContext): Promise<TaskInvocation
     await events.append("error", { message: redactText(error instanceof Error ? error.message : "verification retry failed") }).catch(() => undefined);
     await events.flush().catch(() => undefined);
     if (dependencies.cancellationController?.isCancelled(invocation.operationId)) throw new WorkerOperationCancelledError(invocation.operationId);
+    throw error;
+  } finally {
+    unregister?.();
+  }
+}
+
+/** #1303: the project's check runners for a CHECKS or nightly run: the injected ones (tests), or the dev container's, the task sandbox's or the explicit local shell's. */
+function projectCheckRunners(
+  dependencies: TaskInvocationDependencies,
+  shell: Pick<ChecksStageContext, "canonicalRoot" | "devcontainer" | "devcontainerCli" | "bashOperations" | "sandbox" | "localShell">,
+): CheckRunners {
+  const { canonicalRoot, devcontainer, devcontainerCli, bashOperations, sandbox, localShell } = shell;
+  return dependencies.checkRunners ?? createCheckRunners({
+    rootPath: canonicalRoot,
+    ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
+    ...(bashOperations === undefined ? {} : { bashOperations }),
+    ...(sandbox === undefined ? {} : { sandbox }),
+    ...(localShell ? { local: true } : {}),
+  });
+}
+
+/** #1303: what runTask has set up by the time a FEEDBACK_REVIEW run starts; runFeedbackReviewStage only reads it. */
+interface FeedbackReviewStageContext {
+  invocation: TaskRunInvocation;
+  dependencies: TaskInvocationDependencies;
+  canonicalRoot: string;
+  manifest: PreparationManifest;
+  candidateSweep: ((directory: string) => Promise<void>) | undefined;
+  fileTools: FileOpsTarget | undefined;
+  fileToolsNote: string | undefined;
+  feedbackTimeoutMs: number | undefined;
+  agentStep: Extract<NonNullable<TaskRunInvocation["payload"]["agentStep"]>, { kind: "coding" }> | undefined;
+  standingInstructions: string | undefined;
+  stepSkills: AgentSkillFile[] | undefined;
+}
+
+/**
+ * The PR feedback review (FEEDBACK_REVIEW, #1303: moved out of runTask unchanged). It reads the task's approved feedback bundles, refuses a candidate that changed since,
+ * and runs the review on the repositories that have a pull request bundle.
+ */
+async function runFeedbackReviewStage(stage: FeedbackReviewStageContext): Promise<TaskInvocationResult> {
+  const { invocation, dependencies, canonicalRoot, manifest, candidateSweep, fileTools, fileToolsNote, feedbackTimeoutMs, agentStep, standingInstructions, stepSkills } = stage;
+  const binding = invocation.payload.workflowFeedbackReview!;
+  if (dependencies.feedbackBundleReader === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the worker cannot read the task's approved feedback bundles");
+  const root = canonicalRoot;
+  const stop = new AbortController();
+  // An unconfirmed stop anywhere in the task ends the checks: nothing runs on, and the run's ending reads nothing (workspace-safety.ts).
+  currentWorkspaceSafety()?.onUnsafe(() => stop.abort());
+  const unregister = dependencies.cancellationController?.register(invocation.operationId, { abort: async () => stop.abort() });
+  const events = new EventBatcher(dependencies.eventSink);
+  try {
+    await events.append("progress", { message: "AgentX is reviewing the latest feedback on the linked pull requests." });
+    if (fileToolsNote !== undefined) await events.append("progress", { message: fileToolsNote });
+    const collected = await dependencies.feedbackBundleReader(binding);
+    // Publication moved HEAD to a new commit with the reviewed tree, so the code is identified by that tree (and the
+    // pinned base stays an ancestor), not by the commit the candidate digest was made from. Only repositories that
+    // have a pull request bundle are checked, and only those are readable by the critic.
+    const bundledIds = new Set(collected.bundles.map(({ ref }) => ref.repositoryId));
+    const repositoryInputs = candidateInputs(manifest, root, invocation.payload.workflowBase, candidateSweep).filter(input => bundledIds.has(input.repositoryId));
+    const candidateRepositories = repositoryInputs.length === 0 ? [] : await readCandidateRepositories(repositoryInputs);
+    const unchanged = collected.bundles.every(({ ref }) => {
+      const identity = candidateRepositories.find(repository => repository.repositoryId === ref.repositoryId);
+      return identity !== undefined && ref.headTreeSha !== undefined && identity.treeSha === ref.headTreeSha
+        && ref.candidateDigest === binding.candidateDigest;
+    });
+    if (!unchanged) throw agentXError("OPERATION_INTERRUPTED", "the candidate changed before PR feedback review");
+    const execution = await runWorkflowFeedbackReview({
+      operationId: invocation.operationId, taskId: binding.taskId, workflowRevision: binding.workflowRevision,
+      taskRequirements: collected.taskRequirements, candidateDigest: binding.candidateDigest,
+      rootPath: dependencies.rootPath, model: dependencies.model, candidate: candidateRepositories,
+      repositories: repositoryInputs, bundles: collected.bundles, artifactSink: dependencies.artifactSink,
+      ruleFileBaseCommits: invocation.payload.workflowBase ?? [],
+      ...(collected.taskChecks === undefined ? {} : { taskChecks: collected.taskChecks }),
+      ...(feedbackTimeoutMs === undefined ? {} : { timeoutMs: feedbackTimeoutMs }),
+      ...(dependencies.structuredAnswers === undefined ? {} : { structuredAnswers: dependencies.structuredAnswers }),
+      ...(agentStep?.promptSection === undefined ? {} : { promptSection: agentStep.promptSection }),
+      ...(standingInstructions === undefined ? {} : { standingInstructions }),
+      ...(agentStep?.tools === undefined ? {} : { tools: agentStep.tools }),
+      ...(stepSkills === undefined ? {} : { skills: stepSkills }),
+      ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }), signal: stop.signal,
+      ...(fileTools === undefined ? {} : { fileTools }),
+      onProgress: message => { void events.append("progress", { message }).catch(() => undefined); },
+    });
+    const workflowFeedbackReviewResult = {
+      taskId: binding.taskId, workflowRevision: binding.workflowRevision, candidateDigest: binding.candidateDigest,
+      outputDigest: execution.outputDigest, artifactName: execution.artifactName, status: execution.report.status,
+    };
+    await events.append("result", { status: "SUCCEEDED", workflowMode: "FEEDBACK_REVIEW", workflowFeedbackReviewResult });
+    await events.flush();
+    return { conversationId: invocation.payload.conversationId, reopened: false, workflowMode: "FEEDBACK_REVIEW", workflowFeedbackReviewResult };
+  } catch (error) {
+    await events.append("error", { message: redactText(error instanceof Error ? error.message : "feedback review failed") }).catch(() => undefined);
+    await events.flush().catch(() => undefined);
     throw error;
   } finally {
     unregister?.();
