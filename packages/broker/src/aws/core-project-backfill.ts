@@ -74,6 +74,19 @@ function matchingRevision(row: Row, source: Row, company: string) {
   const content = (value: Row) => Object.fromEntries(Object.entries(value).filter(([key]) => !["pk", "sk", "companyId", "backfillRunId"].includes(key)));
   return row["entityType"] === "PROJECT" && owned(row, company) && equal(content(row), content(source));
 }
+/** Before catalog verification, an unattributed registration still retains its canonical identity. */
+async function planUnattributedProjectIdentity(deps: State, source: Row): Promise<Awaited<ReturnType<typeof planCoreProjectWrites>> | undefined> {
+  const flag = await get(deps, orgSettingsKey(IMPLICIT_COMPANY_ID, "PROJECT_CATALOG_INDEX"));
+  if (flag === undefined) {
+    const definition = sourceDefinition(source);
+    const legacy = await deps.documentClient.send(new QueryCommand({ TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)", ExpressionAttributeValues: { ":pk": projectKey(definition.name, 1).pk, ":rev": "REV#" }, ConsistentRead: true, Limit: 1 })) as { Items?: Row[] };
+    const identity = await planCanonicalProjectIdentity(deps, IMPLICIT_COMPANY_ID, definition.name, (legacy.Items?.length ?? 0) > 0);
+    return { status: "unknown_company", writes: identity.writes, incarnationRevision: identity.revision };
+  }
+  if (!z.object({ verifiedAt: z.iso.datetime(), count: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), runId: z.string().min(1).max(100) }).safeParse(flag).success) throw conflict();
+  return undefined;
+}
+
 /** The broker appends these writes to its legacy transaction. Backfill supplies the explicit operator company.
  * Forward writes follow D1 when the legacy source has no explicit company. */
 export async function planCoreProjectWrites(deps: State, value: unknown, mappedCompany?: string, backfillRunId?: string): Promise<{ status: "ready" | "existing" | "unknown_company"; writes: Write[]; incarnationRevision: number }> {
@@ -83,14 +96,8 @@ export async function planCoreProjectWrites(deps: State, value: unknown, mappedC
   // company's catalog has been verified. Operator backfill supplies a mapping
   // and continues to use D1 attribution without consulting this rollout flag.
   if (mappedCompany === undefined && source["companyId"] === undefined) {
-    const flag = await get(deps, orgSettingsKey(IMPLICIT_COMPANY_ID, "PROJECT_CATALOG_INDEX"));
-    if (flag === undefined) {
-      const definition = sourceDefinition(source);
-      const legacy = await deps.documentClient.send(new QueryCommand({ TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)", ExpressionAttributeValues: { ":pk": projectKey(definition.name, 1).pk, ":rev": "REV#" }, ConsistentRead: true, Limit: 1 })) as { Items?: Row[] };
-      const identity = await planCanonicalProjectIdentity(deps, IMPLICIT_COMPANY_ID, definition.name, (legacy.Items?.length ?? 0) > 0);
-      return { status: "unknown_company", writes: identity.writes, incarnationRevision: identity.revision };
-    }
-    if (!z.object({ verifiedAt: z.iso.datetime(), count: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), runId: z.string().min(1).max(100) }).safeParse(flag).success) throw conflict();
+    const identity = await planUnattributedProjectIdentity(deps, source);
+    if (identity !== undefined) return identity;
   }
   // D1: legacy projects without an explicit company belong to the implicit company.
   const companyValue = mappedCompany === undefined ? source["companyId"] ?? IMPLICIT_COMPANY_ID : mappedCompany;
@@ -184,13 +191,24 @@ function bounded(deps: CoreBackfillDependencies) {
     return response;
   } } };
 }
+/** Migration accepts only the complete verified project inventory, never other import phases. */
+function validateIncarnationMigration(request: z.infer<typeof requestSchema>): void {
+  const { mode, inventory, runId } = request;
+  if (mode === undefined ? inventory !== undefined : runId === undefined || inventory === undefined || inventory.length !== request.projectNames.length
+    || new Set(inventory.map(row => row.project)).size !== inventory.length || inventory.some(row => !request.projectNames.includes(row.project))
+    || request.bindings.length > 0 || request.people.length > 0 || request.grants.length > 0) throw unavailable();
+}
+
+/** Revision pagination belongs only to the legacy project-import phase. */
+function validateBackfillCursor(cursor: Cursor, digest: string, mode: "migrate-incarnations" | undefined): void {
+  if (cursor.digest !== digest || (cursor.after !== undefined && (cursor.phase !== 0 || mode !== undefined))) throw unavailable();
+}
+
 function parseRequest(value: unknown, deps: CoreBackfillDependencies) {
   if (Buffer.byteLength(JSON.stringify(value) ?? "") > 65_536) throw unavailable();
   const request = requestSchema.parse(value);
   const { dryRun, limit, continuation, runId, mode, inventory, ...rawMapping } = request;
-  if (mode === undefined ? inventory !== undefined : runId === undefined || inventory === undefined || inventory.length !== request.projectNames.length
-    || new Set(inventory.map(row => row.project)).size !== inventory.length || inventory.some(row => !request.projectNames.includes(row.project))
-    || request.bindings.length > 0 || request.people.length > 0 || request.grants.length > 0) throw unavailable();
+  validateIncarnationMigration(request);
   const mapping = mappingSchema.parse(rawMapping);
   const digest = createHash("sha256").update(canonicalJson({ mapping, ...(mode === undefined ? {} : { mode, inventory }), dryRun, ...(runId === undefined ? {} : { runId }), tableName: deps.tableName, signInTableName: deps.signInTableName })).digest("hex");
   let cursor: Cursor = { version: 1, digest, phase: 0, index: 0 };
@@ -199,7 +217,7 @@ function parseRequest(value: unknown, deps: CoreBackfillDependencies) {
     const bytes = Buffer.from(continuation, "base64url");
     if (bytes.toString("base64url") !== continuation) throw unavailable();
     cursor = cursorSchema.parse(JSON.parse(bytes.toString("utf8")));
-    if (cursor.digest !== digest || (cursor.after !== undefined && (cursor.phase !== 0 || mode !== undefined))) throw unavailable();
+    validateBackfillCursor(cursor, digest, mode);
     const lengths = [mapping.projectNames.length, mapping.bindings.length, mapping.people.length, mapping.grants.length];
     if (cursor.index >= lengths[cursor.phase]!) throw unavailable();
   }
@@ -280,6 +298,10 @@ async function processGrant(deps: CoreBackfillDependencies, mapping: Mapping, in
   if (!dryRun && ((await get(deps, key))?.["role"] !== g.role || (await get(deps, reverseKey))?.["role"] !== g.role)) throw unavailable();
   return true;
 }
+function isIncarnationMigrationPhase(phase: number, mode: "migrate-incarnations" | undefined): boolean {
+  return phase === 0 && mode === "migrate-incarnations";
+}
+
 export async function backfillCorePage(dependencies: CoreBackfillDependencies, value: unknown): Promise<CoreBackfillReport> {
   const result = report();
   let request: ReturnType<typeof parseRequest>;
@@ -295,7 +317,7 @@ export async function backfillCorePage(dependencies: CoreBackfillDependencies, v
     result.scanned++;
     try {
       let written = false;
-      if (cursor.phase === 0 && request.mode === "migrate-incarnations") {
+      if (isIncarnationMigrationPhase(cursor.phase, request.mode)) {
         written = await migrateIncarnation(deps, mapping.companyId, request.inventory!.find(row => row.project === mapping.projectNames[cursor.index])!, dryRun);
       } else if (cursor.phase === 0) {
         const name = mapping.projectNames[cursor.index]!;

@@ -6,7 +6,7 @@ import {
 } from "@agentx/contracts";
 import { isPlainRepositoryUrl } from "../github-access.js";
 import { createStoreProjectSource } from "../../core/task-flow/project-source.js";
-import { planProjectIncarnation, projectMetaSnapshot } from "../../core/project-incarnation.js";
+import { planProjectIncarnation, projectMetaSnapshot, projectIncarnationRegistration } from "../../core/project-incarnation.js";
 import { waitingSetupApply } from "../../core/setup-agent/apply.js";
 
 export async function registerProject(store: DocumentStore, companyId: OrgId, value: unknown): Promise<{ project: string; revision: number; duplicate: boolean }> {
@@ -37,9 +37,7 @@ export async function registerProject(store: DocumentStore, companyId: OrgId, va
     const written = await store.transact([
       { kind: "put", item: { ...projectRevisionKey(companyId, definition.name, revision), entityType: "PROJECT", definition: JSON.parse(JSON.stringify(definition)) as JsonValue }, condition: when.absent() },
       { kind: "put", item: { ...orgProjectCatalogKey(companyId, definition.name), entityType: "PROJECT_CATALOG", latestRevision: revision, incarnationRevision: identity["incarnationRevision"]! }, condition: projectMetaSnapshot(catalog) },
-      meta !== undefined && meta["status"] !== "deleted"
-        ? { kind: "check", key: projectMetaKey(companyId, name), condition: projectMetaSnapshot(meta) }
-        : { kind: "put", item: identity, condition: projectMetaSnapshot(meta) },
+      projectIncarnationRegistration(companyId, name, meta, identity),
     ]);
     if (written.applied) return { project: definition.name, revision, duplicate: false };
   }

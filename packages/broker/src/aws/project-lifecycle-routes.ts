@@ -89,6 +89,19 @@ const conditionFailed = (error: unknown): boolean => {
   return name === "ConditionalCheckFailedException" || name === "TransactionCanceledException";
 };
 
+/** Pre-rollout rows remain readable; initialized identities must validate exactly. */
+function readLifecycleIncarnation(companyId: string, project: string, parsed: Record<string, unknown>, row: unknown): { incarnationRevision?: number } {
+  if (parsed["incarnationRevision"] === undefined) return {};
+  try { return { incarnationRevision: requireProjectIncarnation(companyId, project, row as Record<string, unknown>) }; }
+  catch { throw agentXError("RUNTIME_UNAVAILABLE", LIFECYCLE_UNREADABLE); }
+}
+
+function lifecycleIncarnationFence(current: Current) {
+  return current.incarnationRevision === undefined
+    ? { condition: "attribute_not_exists(incarnationRevision)", values: {} }
+    : { condition: "incarnationRevision = :incarnation AND companyId = :company AND #project = :project AND entityType = :entity", values: { ":incarnation": current.incarnationRevision } };
+}
+
 /** Who the caller is to this project, and the project's lifecycle state, read now. Refuses with the uniform "project not found" for anyone who may not see it. */
 async function readCurrent(ctx: ProjectLifecycleContext, personId: string, rawProject: string): Promise<Current> {
   const membership = await ctx.membershipOf(personId);
@@ -120,12 +133,7 @@ async function readCurrent(ctx: ProjectLifecycleContext, personId: string, rawPr
   const meta = await ctx.documentClient.send(new GetCommand({ TableName: ctx.tableName, Key: projectMetaKey(company.data, project), ConsistentRead: true })) as { Item?: unknown };
   const parsed = meta.Item === undefined ? { success: true as const, data: {} as z.infer<typeof MetaRow> } : MetaRow.safeParse(meta.Item);
   if (!parsed.success) throw agentXError("RUNTIME_UNAVAILABLE", LIFECYCLE_UNREADABLE);
-  let incarnationRevision: number | undefined;
-  if (parsed.data["incarnationRevision"] !== undefined) {
-    try { incarnationRevision = requireProjectIncarnation(company.data, project, meta.Item as Record<string, unknown>); }
-    catch { throw agentXError("RUNTIME_UNAVAILABLE", LIFECYCLE_UNREADABLE); }
-  }
-  return { ...(incarnationRevision === undefined ? {} : { incarnationRevision }), companyId: company.data, project, status: parsed.data.status ?? "active", lifecycleRevision: parsed.data.lifecycleRevision ?? 0, projectRevision: revision, access, basis };
+  return { ...readLifecycleIncarnation(company.data, project, parsed.data, meta.Item), companyId: company.data, project, status: parsed.data.status ?? "active", lifecycleRevision: parsed.data.lifecycleRevision ?? 0, projectRevision: revision, access, basis };
 }
 
 async function channelsOf(ctx: ProjectLifecycleContext, current: Current): Promise<number> {
@@ -199,6 +207,7 @@ async function change(ctx: ProjectLifecycleContext, personId: string, current: C
   const condition = body.expectedRevision === 0
     ? `attribute_not_exists(lifecycleRevision) AND ${from === "active" ? "(attribute_not_exists(#status) OR #status = :from)" : "#status = :from"}`
     : "lifecycleRevision = :expected AND #status = :from";
+  const incarnation = lifecycleIncarnationFence(current);
   try {
     await ctx.documentClient.send(new TransactWriteCommand({ TransactItems: [
       // The project revision the preview named is still the latest: no newer revision row landed in between.
@@ -206,11 +215,11 @@ async function change(ctx: ProjectLifecycleContext, personId: string, current: C
       { Update: {
         TableName: ctx.tableName, Key: metaKey,
         UpdateExpression: "SET entityType = :entity, companyId = :company, #project = :project, #status = :to, lifecycleRevision = :next, lifecycleChangedAt = :at, lifecycleChangedBy = :person",
-        ConditionExpression: `(${condition}) AND ${current.incarnationRevision === undefined ? "attribute_not_exists(incarnationRevision)" : "incarnationRevision = :incarnation AND companyId = :company AND #project = :project AND entityType = :entity"}`,
+        ConditionExpression: `(${condition}) AND ${incarnation.condition}`,
         ExpressionAttributeNames: { "#status": "status", "#project": "project" },
         ExpressionAttributeValues: { ":entity": "PROJECT_META", ":company": current.companyId, ":project": current.project, ":to": to, ":next": next, ":at": at, ":person": personId, ":from": from,
           ...(body.expectedRevision === 0 ? {} : { ":expected": body.expectedRevision }),
-          ...(current.incarnationRevision === undefined ? {} : { ":incarnation": current.incarnationRevision }) },
+          ...incarnation.values },
       } },
       { Put: { TableName: ctx.tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
         ...requestKey, entityType: "PROJECT_LIFECYCLE_REQUEST", companyId: current.companyId, project: current.project, action, personId, receipt, at,

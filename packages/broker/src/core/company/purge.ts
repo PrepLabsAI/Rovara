@@ -391,11 +391,7 @@ function companyFieldsOf(item: StoredDocument, companyId: string): "this" | "oth
   return mine === 0 ? "other" : "conflicting";
 }
 
-function verdictOf(item: StoredDocument, companyId: string): Verdict {
-  const { pk, sk } = item;
-  if (typeof pk !== "string" || typeof sk !== "string") return { act: "keep" };
-  if (pk.startsWith(PURGE_OWNED)) return { act: "keep" };
-  const fields = companyFieldsOf(item, companyId);
+function projectRetirementVerdict(pk: string, sk: string, companyId: string, fields: ReturnType<typeof companyFieldsOf>): Verdict | undefined {
   // Identity is permanent. Retire it before any canonical content row can disappear.
   const projectPrefix = `ORG#${companyId}#PROJECT#`;
   const canonicalProject = pk.startsWith(projectPrefix) ? pk.slice(projectPrefix.length)
@@ -405,6 +401,20 @@ function verdictOf(item: StoredDocument, companyId: string): Verdict {
     if (fields === "other" || fields === "conflicting") return { act: "conflicting" };
     return { act: "retire-project", project: canonicalProject, meta: sk === "META", kind: kindOf(pk, companyId) };
   }
+  return undefined;
+}
+
+function verdictOf(item: StoredDocument, companyId: string): Verdict {
+  const { pk, sk } = item;
+  if (typeof pk !== "string" || typeof sk !== "string") return { act: "keep" };
+  if (pk.startsWith(PURGE_OWNED)) return { act: "keep" };
+  const fields = companyFieldsOf(item, companyId);
+  return projectRetirementVerdict(pk, sk, companyId, fields) ?? contentVerdict(item, companyId, fields);
+}
+
+/** Classify content only after permanent project identities have been handled. */
+function contentVerdict(item: StoredDocument, companyId: string, fields: ReturnType<typeof companyFieldsOf>): Verdict {
+  const { pk, sk } = item;
   // The company's own partitions.
   if (pk === `ORG#${companyId}`) return sk === "META" ? { act: "keep" } : { act: "delete", kind: "company" };
   if (pk === `ORG#${companyId}#AUDIT`) {
@@ -721,6 +731,21 @@ async function tombstone(run: Run, row: StoredDocument): Promise<void> {
   if (written.applied) { run.row.counts.tombstoned += 1; run.row.acted = true; }
 }
 
+/** Retire first, then delete content only while that same tombstone still holds. */
+async function retireProjectRow(run: Run, item: StoredDocument, verdict: Extract<Verdict, { act: "retire-project" }>): Promise<void> {
+  if (await retireProjectIncarnation(run.deps.store, run.companyId, verdict.project)) { run.row.counts.tombstoned += 1; run.row.acted = true; }
+  if (!verdict.meta) {
+    const key = projectMetaKey(run.companyId, verdict.project), meta = await run.deps.store.get(key);
+    if (meta?.["status"] !== "deleted") { run.row.acted = true; return; }
+    const removed = await run.deps.store.transact([
+      { kind: "check", key, condition: projectMetaSnapshot(meta) },
+      { kind: "delete", key: { pk: item.pk, sk: item.sk }, condition: projectMetaSnapshot(item) },
+    ]);
+    if (removed.applied) { run.row.counts.deleted += 1; run.row.acted = true; }
+    else run.row.acted = true; // A concurrent writer requires another bounded pass.
+  }
+}
+
 /** One page of the pass: acts on each row it reads. */
 async function actOnPage(run: Run, items: readonly StoredDocument[]): Promise<void> {
   const refs: Array<{ item: StoredDocument; refs: string[] }> = [];
@@ -728,17 +753,7 @@ async function actOnPage(run: Run, items: readonly StoredDocument[]): Promise<vo
     const verdict = verdictOf(item, run.companyId);
     switch (verdict.act) {
       case "retire-project": {
-        if (await retireProjectIncarnation(run.deps.store, run.companyId, verdict.project)) { run.row.counts.tombstoned += 1; run.row.acted = true; }
-        if (!verdict.meta) {
-          const key = projectMetaKey(run.companyId, verdict.project), meta = await run.deps.store.get(key);
-          if (meta?.["status"] !== "deleted") { run.row.acted = true; break; }
-          const removed = await run.deps.store.transact([
-            { kind: "check", key, condition: projectMetaSnapshot(meta) },
-            { kind: "delete", key: { pk: item.pk, sk: item.sk }, condition: projectMetaSnapshot(item) },
-          ]);
-          if (removed.applied) { run.row.counts.deleted += 1; run.row.acted = true; }
-          else run.row.acted = true; // A concurrent writer requires another bounded pass.
-        }
+        await retireProjectRow(run, item, verdict);
         break;
       }
       case "delete":

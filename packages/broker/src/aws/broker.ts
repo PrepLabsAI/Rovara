@@ -2502,17 +2502,9 @@ async function registerProject(
     // Judged against the project as it is on this attempt: an administrator who raced a first registration and lost finds the project there on the next one.
     const authority = await judgeAuthority(snapshot.newestRevision);
     const accounts = await planAccounts();
-    let nativeIdentity: Awaited<ReturnType<typeof planCanonicalProjectIdentity>> | undefined;
     let corePlan: Awaited<ReturnType<typeof planCoreProjectWrites>>;
     try {
-      // A named company's record IS its own-partition row (no legacy source to copy from).
-      nativeIdentity = ownCompany === undefined ? undefined : await planCanonicalProjectIdentity({ tableName: dependencies.tableName, documentClient: companyBudget.client }, ownCompany, definition.name, snapshot.newestRevision > 0 || snapshot.catalog !== undefined);
-      corePlan = nativeIdentity !== undefined ? { status: "ready", writes: nativeIdentity.writes, incarnationRevision: nativeIdentity.revision } : await planCoreProjectWrites({ tableName: dependencies.tableName, documentClient: companyBudget.client }, record);
-      if (corePlan.status === "unknown_company") brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
-      if (snapshot.newest !== undefined) {
-        if (ownCompany === undefined) corePlan.writes = guardCoreProjectSource(dependencies, snapshot.newest, corePlan.writes);
-        else corePlan.writes.push({ ConditionCheck: { TableName: dependencies.tableName, Key: revisionKeyFor(ownCompany, definition.name, snapshot.newestRevision), ...coreProjectSnapshotFence(snapshot.newest) } });
-      }
+      corePlan = await planRegistrationCoreWrites({ tableName: dependencies.tableName, documentClient: companyBudget.client }, ownCompany, record, snapshot);
     }
     catch { throw agentXError("PROJECT_REVISION_MISMATCH", await coreCopyRefusalWords({ tableName: dependencies.tableName, documentClient: companyBudget.client }, record.companyId, definition.name)); }
 
@@ -2586,6 +2578,24 @@ async function registerProject(
     }
   }
   throw agentXError("PROJECT_REVISION_MISMATCH", "project revision registration exceeded its bounded catalog retries");
+}
+
+/** The identity and source fences join the registration transaction, in their original order. */
+async function planRegistrationCoreWrites(
+  deps: Parameters<typeof planCanonicalProjectIdentity>[0],
+  company: OrgId | undefined,
+  record: RegisteredProjectRecord,
+  snapshot: Awaited<ReturnType<typeof readNamedCompanyCatalogSnapshot>>,
+): ReturnType<typeof planCoreProjectWrites> {
+  // A named company's record IS its own-partition row (no legacy source to copy from).
+  const identity = company === undefined ? undefined : await planCanonicalProjectIdentity(deps, company, record.definition.name, snapshot.newestRevision > 0 || snapshot.catalog !== undefined);
+  const plan = identity !== undefined ? { status: "ready" as const, writes: identity.writes, incarnationRevision: identity.revision } : await planCoreProjectWrites(deps, record);
+  if (plan.status === "unknown_company") brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
+  if (snapshot.newest !== undefined) {
+    if (company === undefined) plan.writes = guardCoreProjectSource(deps, snapshot.newest, plan.writes);
+    else plan.writes.push({ ConditionCheck: { TableName: deps.tableName, Key: revisionKeyFor(company, record.definition.name, snapshot.newestRevision), ...coreProjectSnapshotFence(snapshot.newest) } });
+  }
+  return plan;
 }
 
 async function readProjectCatalogSnapshot(dependencies: AwsBrokerDependencies, projectName: string, task?: { companyId?: unknown }): Promise<{ catalog: { entityType?: string; name?: string; latestRevision?: number } | undefined; newestRevision: number; newest?: RegisteredProjectRecord }> {

@@ -1,5 +1,5 @@
 // Permanent identity on the existing canonical project META. Never expire or erase it.
-import { agentXError, canonicalJson, orgProjectCatalogKey, projectMetaKey, when, type Condition, type DocumentStore, type StoredDocument } from "@agentx/contracts";
+import { agentXError, canonicalJson, orgProjectCatalogKey, projectMetaKey, when, type Condition, type DocumentStore, type StoredDocument, type TransactItem } from "@agentx/contracts";
 
 type Row = Record<string, unknown>;
 export const validIncarnation = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value > 0;
@@ -75,4 +75,11 @@ export function projectIncarnationUpdate(companyId: string, project: string, row
   if (row?.["incarnationRevision"] !== undefined) requireProjectIncarnation(companyId, project, row);
   if (row?.["status"] === "deleted") throw refused();
   return projectMetaSnapshot(row);
+}
+
+/** Registration preserves a live META instead of replacing its lifecycle/setup fields. */
+export function projectIncarnationRegistration(companyId: string, project: string, previous: StoredDocument | undefined, identity: StoredDocument): TransactItem {
+  return previous !== undefined && previous["status"] !== "deleted"
+    ? { kind: "check", key: projectMetaKey(companyId, project), condition: projectMetaSnapshot(previous) }
+    : { kind: "put", item: identity, condition: projectMetaSnapshot(previous) };
 }
