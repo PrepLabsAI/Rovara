@@ -2,6 +2,9 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { ENVIRONMENT_PLACEHOLDER, renderTemplate, type ReleaseManifest } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { OPERATOR_PARAMETERS, SECRET_PARAMETERS, installOrder, privateImageUri, stackParameters, upgradeOrder, type DeployPart, type InstallAnswers } from "../../packages/cli/src/deploy/parameters.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
 
 const d = (c: string) => c.repeat(64);
 let templates: Map<string, { Parameters?: Record<string, { Default?: unknown; NoEcho?: boolean }>; Outputs?: Record<string, unknown> }>;

@@ -2,12 +2,16 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { CONTEXT_ENV, CONTEXT_OVERFLOW_LOCATION_ENV } from "aws-cdk-lib/cx-api";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ENVIRONMENT_PLACEHOLDER, EnvironmentNameSchema, renderTemplate } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
+import { BUNDLING_STACKS_KEY } from "../support/skip-bundling.js";
 
-function templates(env: string): Map<string, string> {
-  const assembly = buildAgentXApp({ agentxEnv: env, agentxSynthesizer: "legacy" }).synth();
+/** Disables esbuild Lambda bundling for tests that only inspect CDK context/outdir or non-asset template text. */
+const NO_BUNDLING = { [BUNDLING_STACKS_KEY]: [] };
+
+function templates(env: string, outdir?: string): Map<string, string> {
+  const assembly = buildAgentXApp({ agentxEnv: env, agentxSynthesizer: "legacy", ...(outdir === undefined ? {} : { outdir }) }).synth();
   const byPart = new Map<string, string>();
   for (const stack of assembly.stacks) {
     const part = stack.stackName.replace(`agentx-${env}-`, "");
@@ -46,15 +50,21 @@ function withContextOverflowFile(value: Record<string, unknown>, run: () => void
 }
 
 describe("templates for any environment", () => {
-  // Synthesizing the whole app bundles four Lambdas with esbuild per synth (slow). The placeholder
-  // app is identical across every test in this file, so it is synthesized once here and reused,
-  // instead of once per test/case as the brief's inline snippet would (this changes nothing about
-  // what each test asserts).
+  // Synthesizing the whole app bundles every Lambda with esbuild per synth (slow). Sharing one
+  // outdir lets CDK's AssetStaging.assetCache reuse the real bundles across the placeholder,
+  // staging, and dev-2 synths whenever bundling options match (and still re-bundle and fail if a
+  // bundling option ever depends on the environment).
   let placeholderTemplates: Map<string, string>;
+  let sharedOutdir: string;
 
   beforeAll(() => {
-    placeholderTemplates = templates(ENVIRONMENT_PLACEHOLDER);
+    sharedOutdir = mkdtempSync(join(tmpdir(), "agentx-template-rendering-"));
+    placeholderTemplates = templates(ENVIRONMENT_PLACEHOLDER, sharedOutdir);
   }, 300_000);
+
+  afterAll(() => {
+    rmSync(sharedOutdir, { recursive: true, force: true });
+  });
 
   it("uses a placeholder that is a valid name and that no real environment can take", () => {
     expect(ENVIRONMENT_PLACEHOLDER).toBe("qqenv-placeholderqq");
@@ -71,7 +81,7 @@ describe("templates for any environment", () => {
   }, 300_000);
 
   it.each(["staging", "dev-2"])("renders to exactly what CDK synthesizes for %s", (env) => {
-    const direct = templates(env);
+    const direct = templates(env, sharedOutdir);
     expect([...placeholderTemplates.keys()].sort()).toEqual([...direct.keys()].sort());
     for (const [part, text] of placeholderTemplates) {
       expect(renderTemplate(text, env), part).toBe(direct.get(part));
@@ -114,7 +124,7 @@ describe("templates for any environment", () => {
  */
 describe("agentxSynthesizer from CDK_CONTEXT_JSON (how the cdk CLI actually passes -c flags)", () => {
   it("synthesizes bootstrap-free templates from agentxEnv/agentxSynthesizer alone", () => {
-    withCdkContextJson({ agentxEnv: "staging", agentxSynthesizer: "legacy" }, () => {
+    withCdkContextJson({ agentxEnv: "staging", agentxSynthesizer: "legacy", ...NO_BUNDLING }, () => {
       const assembly = buildAgentXApp().synth();
       const text = assembly.stacks.map((stack) => JSON.stringify(stack.template)).join("\n");
       expect(text).not.toContain("cdk-hnb659fds");
@@ -159,7 +169,7 @@ describe("agentxSynthesizer from CDK_CONTEXT_JSON (how the cdk CLI actually pass
 
 describe("context-overflow temp file (App's own readContextFromTempFile, layered like App.loadContext)", () => {
   it("is read the same way App reads it, and feeds the pre-App guard clauses", () => {
-    withContextOverflowFile({ agentxSynthesizer: "legacy", agentxEnv: "overflow-env" }, () => {
+    withContextOverflowFile({ agentxSynthesizer: "legacy", agentxEnv: "overflow-env", ...NO_BUNDLING }, () => {
       const app = buildAgentXApp();
       expect(app.node.tryGetContext("agentxEnv")).toBe("overflow-env");
     });
@@ -167,7 +177,7 @@ describe("context-overflow temp file (App's own readContextFromTempFile, layered
 
   it("wins over CDK_CONTEXT_JSON for a key both set, matching App.loadContext's own layering ({...environment, ...tempFile})", () => {
     withCdkContextJson({ agentxSynthesizer: "bogus" }, () => {
-      withContextOverflowFile({ agentxSynthesizer: "legacy", agentxEnv: "staging" }, () => {
+      withContextOverflowFile({ agentxSynthesizer: "legacy", agentxEnv: "staging", ...NO_BUNDLING }, () => {
         // If CDK_CONTEXT_JSON still won, this would throw naming "bogus" instead.
         expect(() => buildAgentXApp()).not.toThrow();
       });
@@ -181,7 +191,7 @@ describe("context-overflow temp file (App's own readContextFromTempFile, layered
     const original = process.env[CONTEXT_OVERFLOW_LOCATION_ENV];
     try {
       process.env[CONTEXT_OVERFLOW_LOCATION_ENV] = file;
-      expect(() => buildAgentXApp({ agentxEnv: "staging", agentxSynthesizer: "legacy" })).toThrow(
+      expect(() => buildAgentXApp({ agentxEnv: "staging", agentxSynthesizer: "legacy", ...NO_BUNDLING })).toThrow(
         new RegExp(CONTEXT_OVERFLOW_LOCATION_ENV),
       );
     } finally {
@@ -195,7 +205,7 @@ describe("context-overflow temp file (App's own readContextFromTempFile, layered
     const original = process.env[CONTEXT_OVERFLOW_LOCATION_ENV];
     try {
       process.env[CONTEXT_OVERFLOW_LOCATION_ENV] = "";
-      expect(() => buildAgentXApp({ agentxEnv: "staging", agentxSynthesizer: "legacy" })).not.toThrow();
+      expect(() => buildAgentXApp({ agentxEnv: "staging", agentxSynthesizer: "legacy", ...NO_BUNDLING })).not.toThrow();
     } finally {
       if (original === undefined) delete process.env[CONTEXT_OVERFLOW_LOCATION_ENV];
       else process.env[CONTEXT_OVERFLOW_LOCATION_ENV] = original;
@@ -205,24 +215,22 @@ describe("context-overflow temp file (App's own readContextFromTempFile, layered
 
 describe("outdir context (buildAgentXApp forwards it to `new App({ outdir })`)", () => {
   it("defaults to a fresh temporary directory when no outdir context is given, unchanged from before", () => {
-    const first = buildAgentXApp({ agentxSynthesizer: "legacy", agentxEnv: "staging" });
-    const second = buildAgentXApp({ agentxSynthesizer: "legacy", agentxEnv: "staging" });
+    const first = buildAgentXApp({ agentxSynthesizer: "legacy", agentxEnv: "staging", ...NO_BUNDLING });
+    const second = buildAgentXApp({ agentxSynthesizer: "legacy", agentxEnv: "staging", ...NO_BUNDLING });
     expect(first.outdir).toMatch(/cdk\.out/);
     expect(second.outdir).toMatch(/cdk\.out/);
     // Two apps built with no outdir context each get their own ephemeral directory: proof this is
     // still App's own default, not something buildAgentXApp now pins by accident.
     expect(first.outdir).not.toBe(second.outdir);
-    // Two named-environment syntheses bundle every Lambda twice; under full-suite load that passes 10 s.
   }, 120_000);
 
   it("honors an explicit outdir context key", () => {
     const outdir = mkdtempSync(join(tmpdir(), "agentx-outdir-context-"));
     try {
-      const app = buildAgentXApp({ agentxSynthesizer: "legacy", agentxEnv: "staging", outdir });
+      const app = buildAgentXApp({ agentxSynthesizer: "legacy", agentxEnv: "staging", outdir, ...NO_BUNDLING });
       expect(app.outdir).toBe(outdir);
     } finally {
       rmSync(outdir, { recursive: true, force: true });
     }
-    // A named-environment synthesis bundles every Lambda; under parallel load that can pass 10 s.
   }, 120_000);
 });

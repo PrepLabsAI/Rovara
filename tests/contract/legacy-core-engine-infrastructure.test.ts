@@ -1,5 +1,8 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
 
 // #1148: production (the legacy template) has Code's core engine as a named environment does, switched OFF by default: the CoreEngine switch, the core dispatch and lessons
 // queues under production's fixed names, the job schedules (disabled while the switch is off), the dispatcher's core consumer (disabled while off), the /v1/app/* route the web

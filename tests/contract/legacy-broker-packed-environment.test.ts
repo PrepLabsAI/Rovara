@@ -2,6 +2,9 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { hydrateBrokerEnvironment } from "../../packages/broker/src/aws/broker-environment.js";
 import { loadBrokerNamesParameter } from "../../packages/broker/src/aws/broker-names-parameter.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
 
 // #1149: production's (the legacy template's) broker packs its environment as a named environment does, with NO change to what the broker runs with. This synthesizes the legacy
 // control plane, fills every CloudFormation value in with a stand-in physical name, runs the broker's own boot (the names parameter read, then hydrateBrokerEnvironment) and pins

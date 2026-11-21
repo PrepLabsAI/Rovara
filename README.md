@@ -475,7 +475,7 @@ the `agentx` CLI.
 npm ci
 npm run build          # Build every package
 npm run typecheck      # Type-check the packages
-npm run typecheck:all  # Also tests/ and scripts/, against tests/typecheck-baseline.json
+npm run typecheck:all  # Also tests/ and scripts/ in parallel incremental shards
 npm run lint           # ESLint
 npm test               # Vitest (no Docker or AWS needed)
 npm run infra:synth    # Synthesize the CDK app
