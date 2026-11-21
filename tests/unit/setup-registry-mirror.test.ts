@@ -2,7 +2,7 @@
 // refused"). The mirror writes the exact revision, only for the company that owns the old rows, only while the old registry is where the setup was made from, and nothing on a rejection. While a proposal waits, the
 // refusal says so.
 import { describe, expect, it } from "vitest";
-import { orgProjectCatalogKey, projectCatalogKey, projectRevisionKey, type JsonValue } from "@agentx/contracts";
+import { orgProjectCatalogKey, projectCatalogKey, projectMetaKey, projectRevisionKey, type JsonValue } from "@agentx/contracts";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { planCoreProjectWrites } from "../../packages/broker/src/aws/core-project-backfill.js";
 import { coreCopyRefusalWords, CORE_COPY_REFUSED } from "../../packages/broker/src/aws/core-copy-refusal.js";
@@ -23,12 +23,14 @@ describe("L4-SF (c): the old registry follows an approved setup", () => {
   it("lets the next operator registration through planCoreProjectWrites (revision 3), where without the mirror it is refused as a conflict", async () => {
     for (const mirror of [true, false]) {
       const { world, person, call } = await setupWorld({ legacy: [["payments", FAKE_COMPANY]], mirror });
+      // The next registration is post-migration; transport the retained identity with the revision/catalogue snapshot.
+      await world.store.put({ item: { ...projectMetaKey(FAKE_COMPANY, "payments"), entityType: "PROJECT_META", companyId: FAKE_COMPANY, project: "payments", incarnationRevision: 1, status: "active" } });
       const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", LOW);
       const maintainer = person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" });
       expect((await call(post(`${RUN}/decide`, decideBody(digest)), maintainer)).status).toBe(200);
       // The same rows, in the old broker's own table fake, and the registration the old broker would now plan: revision 3 of the project.
       const db = new FakeDynamoDb();
-      const keys = [projectKey("payments", 1), projectKey("payments", 2), projectCatalogKey("payments"), projectRevisionKey(FAKE_COMPANY, "payments", 1), projectRevisionKey(FAKE_COMPANY, "payments", 2), orgProjectCatalogKey(FAKE_COMPANY, "payments")];
+      const keys = [projectMetaKey(FAKE_COMPANY, "payments"), projectKey("payments", 1), projectKey("payments", 2), projectCatalogKey("payments"), projectRevisionKey(FAKE_COMPANY, "payments", 1), projectRevisionKey(FAKE_COMPANY, "payments", 2), orgProjectCatalogKey(FAKE_COMPANY, "payments")];
       for (const key of keys) { const row = await world.store.get(key); if (row !== undefined) db.set(row); }
       const deps = { tableName: "state", documentClient: { send: (c: unknown) => db.send(c as never) } };
       const record = { ...projectKey("payments", 3), entityType: "PROJECT", companyId: FAKE_COMPANY, definition: asJson(projectDefinition("payments", 3)), runtimeBinding: { deploymentMode: "ec2-ebs" }, registeredBy: "owner-key-1", registeredAt: "2026-11-17T00:00:00.000Z" };

@@ -1,7 +1,7 @@
 // Guided onboarding L2-1 (DEC 254o a): per-company project names. Two companies can each have a project named X; no name check, refusal, bulk outcome
 // or read reveals whether another company has a name. The Rovara administrator's create keeps today's global names (id == name), byte-identical.
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { AGENTX_NAME_PATTERN, orgProjectCatalogKey, orgProjectNameClaimKey, type ClientRepositoriesResponse } from "@agentx/contracts";
+import { AGENTX_NAME_PATTERN, orgProjectCatalogKey, orgProjectNameClaimKey, projectMetaKey, type ClientRepositoriesResponse } from "@agentx/contracts";
 import { GithubInstallationBindings } from "../../packages/broker/src/aws/github-credentials.js";
 import { companyNameClaimWrites, companyNameTaken, companyProjectId, companyProjectIdByName, companyProjectNaming, PROJECT_ID_ATTEMPTS } from "../../packages/broker/src/aws/company-project-names.js";
 import { ClientProjectRefused } from "../../packages/broker/src/aws/client-project-create.js";
@@ -274,6 +274,7 @@ describe("R2-F1 review: a named company's registration in its own partition", ()
     expect(h.db.get(`ORG#${A}#PROJECT#web`, rev(2))).toMatchObject({ companyId: A, definition: { revision: 2 } });
     expect((await register(h, 2)).duplicate).toBe(true);
     expect(catalog(h)).toBe(2);
+    expect(h.db.get(orgProjectCatalogKey(A, "web").pk, "PROJECT#web")).toMatchObject({ incarnationRevision: 1 });
     expect(h.db.find((item) => item.pk === "PROJECT#web" || item.pk === "PROJECT_CATALOG")).toEqual([]);
   });
 
@@ -297,11 +298,14 @@ describe("R2-F1 review: a named company's registration in its own partition", ()
     h.db.set({ pk: `ORG#${A}#PROJECT#web`, sk: rev(3), entityType: "PROJECT", candidate: true, companyId: A, definition: definition(3), runtimeBinding: BINDING });
     expect((await register(h, 3)).duplicate).toBe(true);
     expect(catalog(h)).toBe(2);
-    // A behind pointer with a plain stored row: the repeat repairs it forward.
-    h.db.set({ ...h.db.get(orgProjectCatalogKey(A, "web").pk, orgProjectCatalogKey(A, "web").sk)!, latestRevision: 1 });
+    // A missing pointer is repaired with the retained generation, so a later lost META still refuses.
+    h.db.delete(orgProjectCatalogKey(A, "web").pk, orgProjectCatalogKey(A, "web").sk);
     h.db.delete(`ORG#${A}#PROJECT#web`, rev(3));
     expect((await register(h, 2)).duplicate).toBe(true);
     expect(catalog(h)).toBe(2);
+    expect(h.db.get(orgProjectCatalogKey(A, "web").pk, "PROJECT#web")).toMatchObject({ incarnationRevision: 1 });
+    h.db.delete(projectMetaKey(A, "web").pk, "META");
+    await expect(register(h, 2)).rejects.toMatchObject({ code: "PROJECT_REVISION_MISMATCH" });
   });
 
   it("L1: a newest own row with no readable definition is refused in fixed words, never a 500", async () => {

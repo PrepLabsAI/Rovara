@@ -128,6 +128,8 @@ describe("the health route's grants (A13)", () => {
     const allowed = new Set([
       "packages/contracts/src/admin.ts", "packages/broker/src/aws/activity-index.ts", "packages/broker/src/aws/admin-reads.ts", "infra/lib/control-plane.ts",
       "packages/broker/src/aws/developer-task-notifier.ts", "packages/broker/src/aws/broker.ts",
+      // Permanent project identity NEVER expires: these guards refuse/fence an expiry field rather than writing a TTL.
+      "packages/broker/src/core/project-incarnation.ts", "packages/broker/src/aws/core-project-backfill.ts",
       // The workflow dispatch row's one definition, shared by the broker and the developer task routes.
       "packages/broker/src/aws/broker-shared.ts",
       "packages/contracts/src/admin-changes.ts", "packages/broker/src/aws/admin-changes.ts",

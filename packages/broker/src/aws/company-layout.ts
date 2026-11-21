@@ -9,9 +9,10 @@
 // The company always comes from the caller's LIVE membership (or, for a stored record, the company the record itself names), never from a request.
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  IMPLICIT_COMPANY_ID, OrgIdSchema, PROJECT_REVISION_SK_PREFIX, ProjectDefinitionSchema, memberGrantsPk, orgProjectCatalogKey, orgScoped, projectMetaKey, projectPk, projectRevisionKey, type OrgId,
+  IMPLICIT_COMPANY_ID, OrgIdSchema, memberGrantsPk, orgScoped, projectMetaKey, projectPk, projectRevisionKey, type OrgId,
 } from "@agentx/contracts";
 import { ownPartitionRow } from "./company-check.js";
+import { readNamedCompanyRevisionRow } from "./company-revision-row.js";
 
 type Client = { send(command: unknown): Promise<unknown> };
 type Key = { pk: string; sk: string };
@@ -64,23 +65,9 @@ export function projectMemberRowKeyFor(companyId: string | undefined, project: s
  * not parse as a project, or that names another company, is absent.
  */
 export async function namedCompanyLatestRevisionRow(client: Client, tableName: string, company: OrgId, project: string): Promise<Record<string, unknown> | undefined> {
-  const pk = projectPk(company, project);
-  const usable = (row: Record<string, unknown> | undefined) =>
-    row !== undefined && row.pk === pk && ownPartitionRow(row, company) && ProjectDefinitionSchema.safeParse(row.definition).success
-    && typeof (row.definition as { revision?: unknown }).revision === "number" ? row : undefined;
-  const get = async (key: Key) => (await client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> } | undefined)?.Item;
-  const catalogKey = orgProjectCatalogKey(company, project);
-  const catalog = await get(catalogKey);
-  const pointer = catalog?.latestRevision;
-  if (catalog !== undefined && catalog.pk === catalogKey.pk && catalog.sk === catalogKey.sk && typeof pointer === "number" && Number.isSafeInteger(pointer) && pointer > 0) {
-    const named = usable(await get(projectRevisionKey(company, project, pointer)));
-    if (named !== undefined) return named;
-  }
-  const response = await client.send(new QueryCommand({
-    TableName: tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
-    ExpressionAttributeValues: { ":pk": pk, ":rev": PROJECT_REVISION_SK_PREFIX }, ScanIndexForward: false, Limit: 20, ConsistentRead: true,
-  })) as { Items?: Array<Record<string, unknown>> } | undefined;
-  return usable((response?.Items ?? []).find((item) => item.candidate !== true));
+  const meta = (await client.send(new GetCommand({ TableName: tableName, Key: projectMetaKey(company, project), ConsistentRead: true })) as { Item?: Record<string, unknown> } | undefined)?.Item;
+  if (meta?.status === "deleted") return undefined;
+  return readNamedCompanyRevisionRow(client, tableName, company, project);
 }
 
 /**
@@ -92,7 +79,7 @@ export async function namedCompanyProjectArchived(client: Client, tableName: str
   const key = projectMetaKey(company, project);
   const row = (await client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> } | undefined)?.Item;
   if (row === undefined) return false;
-  return row.status === "archived" || !ownPartitionRow(row, company);
+  return row.status === "archived" || row.status === "deleted" || !ownPartitionRow(row, company);
 }
 
 /**
@@ -106,5 +93,13 @@ export async function latestRevisionRowFor(client: Client, tableName: string, co
     TableName: tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
     ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
   })) as { Items?: Array<Record<string, unknown>> } | undefined;
-  return response?.Items?.[0];
+  const row = response?.Items?.[0];
+  if (row !== undefined) {
+    const identityCompany = OrgIdSchema.safeParse(row["companyId"] ?? companyId ?? IMPLICIT_COMPANY_ID);
+    if (identityCompany.success) {
+      const meta = (await client.send(new GetCommand({ TableName: tableName, Key: projectMetaKey(identityCompany.data, project), ConsistentRead: true })) as { Item?: Record<string, unknown> } | undefined)?.Item;
+      if (meta?.["status"] === "deleted") return undefined;
+    }
+  }
+  return row;
 }
