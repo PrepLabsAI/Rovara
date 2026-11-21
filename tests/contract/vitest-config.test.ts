@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import config from "../../vitest.config.js";
 import nativeP0Config from "../../vitest.native-p0.config.js";
 import nightlyConfig from "../../vitest.nightly.config.js";
-import { moduleMockingFiles, nativeP0Files, nightlyOnlyFiles, postDeployFiles } from "../support/vitest-shared-config.js";
+import { moduleMockingFiles, nativeP0Files, nightlyOnlyFiles, postDeployFiles, sharedGroupNames, sharedModuleGroups } from "../support/vitest-shared-config.js";
 
 describe("the test runner's configuration", () => {
   it("gives every test, CDK synths included, 60 seconds", () => {
@@ -66,17 +66,26 @@ describe("the test runner's configuration", () => {
     expect(nightlyConfig.test?.include).toEqual(expect.arrayContaining(postDeployFiles));
   });
 
-  it("puts the files that mock modules, themselves or through a helper under tests/, in their own project; both projects still give every file fresh modules", () => {
+  it("puts the files that mock modules, themselves or through a helper under tests/, in a fresh-modules project and every other file in one shared group", () => {
     type Project = { test?: { name?: string; include?: string[]; exclude?: string[]; isolate?: boolean } };
     const projects = (config.test?.projects ?? []) as Project[];
-    expect(projects.map((project) => project.test?.name)).toEqual(["fresh-modules", "shared-modules"]);
+    expect(projects.map((project) => project.test?.name)).toEqual(["fresh-modules", ...sharedGroupNames]);
     for (const project of projects) expect(project.test?.isolate, project.test?.name).toBe(project.test?.name === "fresh-modules");
-    const [fresh, shared] = projects as [Project, Project];
+    const [fresh, ...shared] = projects as [Project, ...Project[]];
     expect(fresh.test?.include).toEqual(moduleMockingFiles);
-    expect(shared.test?.exclude).toEqual(expect.arrayContaining(moduleMockingFiles));
     // A file that calls vi.mock itself, and one that mocks only through tests/support/core-context-world.ts.
     expect(moduleMockingFiles).toContain("tests/contract/core-admin-stop-company.test.ts");
     expect(moduleMockingFiles).toContain("tests/integration/core-context-routes.test.ts");
     expect(moduleMockingFiles).not.toContain("tests/unit/core-sqs-reflect-wiring.test.ts");
+    // Every test file lands in exactly one project, and each shared group is the list sharedModuleGroups gives it.
+    const testFiles = ["tests", "packages"].flatMap((directory) => readdirSync(directory, { recursive: true, encoding: "utf8" })
+      .filter((path) => path.endsWith(".test.ts") && !path.split("/").some((part) => part === "node_modules" || part === "dist" || part.startsWith(".")))
+      .map((path) => `${directory}/${path}`));
+    const placed = projects.flatMap((project) => project.test?.include ?? []);
+    expect([...placed].sort()).toEqual([...testFiles].sort());
+    for (const project of shared) expect(project.test?.include).toEqual(sharedModuleGroups[project.test!.name as (typeof sharedGroupNames)[number]]);
+    // A group is picked by the package a file loads; the broker's files split further by area.
+    expect(sharedModuleGroups["broker-core"]).toContain("tests/unit/core-sqs-reflect-wiring.test.ts");
+    expect(sharedModuleGroups.worker).toContain("tests/unit/worker-execution-target.test.ts");
   });
 });
