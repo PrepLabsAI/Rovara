@@ -1,4 +1,4 @@
-import "./mutation-spot-offline.js";
+import { useLoopbackOnlyGuard } from "./mutation-spot-offline.js";
 import { readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { lstat, mkdir, open, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
@@ -8,6 +8,8 @@ import { isolatedGitEnvironment } from "../../packages/worker/src/git.js";
 import { runMutationSpotCheck, type MutationSpotOptions } from "../../packages/worker/src/verification/mutation-spot-check.js";
 import { createMutationCopy } from "../../packages/worker/src/verification/mutation-restore.js";
 import { fixture, report } from "./mutation-spot-support.js";
+
+useLoopbackOnlyGuard();
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
