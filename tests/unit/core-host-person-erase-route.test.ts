@@ -25,7 +25,6 @@ function setup(overrides: Partial<PersonEraseRouteOptions> & { serving?: boolean
     eraseWiki: async () => undefined,
   });
   const options: PersonEraseRouteOptions = {
-    app: { serving: overrides.serving ?? true },
     companyOf: async () => { reads.push("membership"); return { companyId: overrides.company ?? A, role: overrides.role ?? "admin" }; },
     standing: async () => "former",
     eraseDeps: (companyId) => { reads.push(`deps:${companyId}`); return deps(); },
@@ -43,11 +42,6 @@ const answer = async (s: Setup, request = post(), who = caller()) => {
 };
 
 describe("person erase route", () => {
-  it("off: answers nothing and reads nothing", async () => {
-    const s = setup({ serving: false });
-    expect(await answer(s)).toBeUndefined();
-    expect(s.reads).toEqual([]);
-  });
 
   it("is not its path or not POST: answers nothing", async () => {
     const s = setup();

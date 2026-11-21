@@ -198,7 +198,7 @@ describe("review round 1 (Lows)", () => {
 
 describe("registration", () => {
   const context = { installCompanyId: "org_install000000000000", now: () => new Date(NOW), env: {}, clients: {}, log: () => undefined };
-  const env = { ROVARA_CORE_ALLOWED_COMPANIES: A };
+  const env = {};
   const people = { membershipOf: async (personId: string) => MEMBERS[personId], displayNameOf: async (personId: string) => (personId in MEMBERS ? personId : undefined) };
 
   it("hands the deployment's task-owner rule the company, the live person, the stored task and the company's own store (C6)", async () => {

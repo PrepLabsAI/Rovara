@@ -2806,7 +2806,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
       h.runtime.app.flow.deps.taskSpendUsd = createCompanyTaskSpend({ store, companyId: IMPLICIT_COMPANY_ID });
       // L4-TA6: the hosted live cap (or another the test names) instead of the laptop's own, and an install's own automatic-fixing cap.
       // Without one named, the hosted install's $15 task cap (the figure these L4-TSU tests were written against), not the laptop's own run limit this harness wires.
-      h.runtime.app.flow.deps.taskCapUsd = (options.cap ?? ((inner) => hostedTaskCapUsd({ store: inner, companyId: IMPLICIT_COMPANY_ID, settings: { allowedCompanies: "all", taskCapMicros: 15_000_000, companyDayCapMicros: 25_000_000 } })))(store);
+      h.runtime.app.flow.deps.taskCapUsd = (options.cap ?? ((inner) => hostedTaskCapUsd({ store: inner, companyId: IMPLICIT_COMPANY_ID, settings: { taskCapMicros: 15_000_000, companyDayCapMicros: 25_000_000 } })))(store);
       if (options.autofix !== undefined) h.runtime.app.flow.deps.autofix = options.autofix;
       const { taskId, workspaceId, review } = await toReview(h);
       await seed(taskId, (companyId, task, micros, over = {}) => store.put({ item: { pk: costPartition(companyId, task), sk: "TOTAL", entityType: "COST_TOTAL", companyId, taskId: task, currency: "USD", micros, entries: 2, unpricedEntries: 0, ...over } }));
@@ -2877,7 +2877,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
 
     // L4-TA6b (owner DEC 254zzz89): the round is estimated at min($3, what is left under the live cap); it is tried while at least $0.25 is left and asked about below that.
     describe("the round is fitted to the room under the live cap (L4-TA6b)", () => {
-      const cap = (taskCapMicros: number) => (store: Parameters<typeof hostedTaskCapUsd>[0]["store"]) => hostedTaskCapUsd({ store, companyId: IMPLICIT_COMPANY_ID, settings: { allowedCompanies: "all", taskCapMicros, companyDayCapMicros: 25_000_000 } });
+      const cap = (taskCapMicros: number) => (store: Parameters<typeof hostedTaskCapUsd>[0]["store"]) => hostedTaskCapUsd({ store, companyId: IMPLICIT_COMPANY_ID, settings: { taskCapMicros, companyDayCapMicros: 25_000_000 } });
       const at = (micros: number) => async (taskId: string, put: Put) => { await put(IMPLICIT_COMPANY_ID, taskId, micros); };
 
       it("a $1 cap with nothing spent gets one bounded round (it used to ask at once: $3 never fit $1)", async () => {
@@ -2920,7 +2920,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     // L4-TA6: automatic fixing is held to the task's LIVE cap (what Admission and the run stop enforce), never to its own $15 default.
     describe("held to the task's live cap (L4-TA6)", () => {
       const hostedCap = (taskCapMicros: number, over: { companyId?: string; projectTaskCap?: (companyId: string, project: string) => Promise<number | undefined> } = {}) =>
-        (store: Parameters<typeof hostedTaskCapUsd>[0]["store"]) => hostedTaskCapUsd({ store, companyId: over.companyId ?? IMPLICIT_COMPANY_ID, settings: { allowedCompanies: "all", taskCapMicros, companyDayCapMicros: 25_000_000 }, projectTaskCap: over.projectTaskCap });
+        (store: Parameters<typeof hostedTaskCapUsd>[0]["store"]) => hostedTaskCapUsd({ store, companyId: over.companyId ?? IMPLICIT_COMPANY_ID, settings: { taskCapMicros, companyDayCapMicros: 25_000_000 }, projectTaskCap: over.projectTaskCap });
       const at = (micros: number) => async (taskId: string, put: Put) => { await put(IMPLICIT_COMPANY_ID, taskId, micros); };
 
       it("a $1 task cap with $0.90 spent sends nothing back and asks the owner with the spending-limit reason, though the $15 default would still have room", async () => {

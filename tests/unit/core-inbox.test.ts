@@ -286,10 +286,10 @@ describe("POST /v1/app/inbox/read", () => {
 describe("on the core host", () => {
   const SERVICES = () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } });
   const wired = (members: SessionMembers): CoreDevWiring => ({ origin: () => "https://api.example", members });
-  async function host(env: NodeJS.ProcessEnv = { ROVARA_CORE_ENGINE: "on" }) {
+  async function host() {
     const fake = createFakeWorld();
     const app = createCoreHostApp({
-      env, modules: fake.modules, context: () => fake.context(), nowMs: () => fake.clock.now,
+      modules: fake.modules, context: () => fake.context(), nowMs: () => fake.clock.now,
       runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(fake.clock.now), log: () => undefined, services: SERVICES, ciReporting: { honest: true as const, ciMode: () => "their_ci_fix" as const } }),
     });
     const member = new Map<string, CompanyMembership>();
@@ -325,15 +325,10 @@ describe("on the core host", () => {
     expect(appRouteOf("DELETE", "/v1/app/inbox")).toBeUndefined();
   });
 
-  it("is served by the core only: off answers nothing, an unwired host says 'not on the core yet', and a script token never reaches it", async () => {
+  it("is served by the core only: an unwired host says 'not on the core yet', and a script token never reaches it", async () => {
     const h = await host();
     const m = membersOf();
     const caller = h.callerOf(FAKE_COMPANY);
-    const spy = vi.spyOn(h.fake.store, "get");
-    const off = createCoreDevRoutes({ app: (await host({})).app, companyOf: h.companyOf, wiring: () => wired(m.members) });
-    expect(await off.route(get("/v1/app/inbox"), caller)).toBeUndefined();
-    expect(await off.route(post("/v1/app/inbox/read", { requestId: randomUUID(), ids: [] }), caller)).toBeUndefined();
-    expect(spy).not.toHaveBeenCalled();
     const unwired = createCoreDevRoutes({ app: h.app, companyOf: h.companyOf, wiring: () => ({ origin: () => "https://api.example" }) });
     const nope = await unwired.route(get("/v1/app/inbox"), caller);
     expect(nope?.statusCode).toBe(404);

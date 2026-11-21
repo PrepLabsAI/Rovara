@@ -31,7 +31,7 @@ const caps = new CallbackCapabilities(secret);
 const path = "/v1/internal/context-tools";
 afterEach(() => { vi.useRealTimers(); adapters.searchReply = undefined; adapters.searchFails = false; vi.restoreAllMocks(); });
 
-async function setup(options: { off?: boolean; teamOff?: boolean; teamCompany?: OrgId } = {}) {
+async function setup(options: { teamOff?: boolean; teamCompany?: OrgId } = {}) {
   const world = createFakeWorld();
   adapters.modules = world.modules;
   const reads: string[] = [];
@@ -52,7 +52,7 @@ async function setup(options: { off?: boolean; teamOff?: boolean; teamCompany?: 
     return { Item: await world.store.get(Key as { pk: string; sk: string }) };
   } };
   const root = createBrokerCoreRoot({
-    env: { ROVARA_CORE_ENGINE: options.off ? "off" : "on", ROVARA_CORE_ALLOWED_COMPANIES: "all", ...(!options.teamOff ? { ROVARA_CORE_LESSONS: options.teamCompany === undefined ? "on" : `on:${options.teamCompany}` } : {}) },
+    env: { ...(!options.teamOff ? { ROVARA_CORE_LESSONS: options.teamCompany === undefined ? "on" : `on:${options.teamCompany}` } : {}) },
     documentClient: client, stateTableName: "state", signInTableName: "signin", callbackSigningKey: secret.toString(), repositoryGrantKey: secret,
     codeModules: () => ({}) as never, repositoryCredential: async () => { throw new Error("unused"); }, origin: () => "https://api.example", log: () => undefined,
     now: () => new Date(world.clock.now), ciReporting: { honest: true, ciMode: async () => "sandbox_only" as const },
@@ -133,11 +133,6 @@ describe("core Team context", () => {
     expect(query).not.toHaveBeenCalled();
   });
 
-  it("keeps the off root byte-identical and reading nothing for all context paths", async () => {
-    const { root, a, reads } = await setup({ off: true });
-    for (const p of [path, `${path}/call`, "/v1/internal/mcp"]) expect(await root.callback({ ...a.request(), path: p })).toBeUndefined();
-    expect(reads).toEqual([]);
-  });
 });
 
 

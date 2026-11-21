@@ -15930,7 +15930,7 @@ function buildBrokerHandler(callbackSigningKey: string) {
     repositoryGrantSigningKey,
     (credentialRef, repositoryUrl, access) => githubCredentials.resolve(credentialRef, repositoryUrl, access),
   );
-  // Lane E2 step 6: the core engine's root. With ROVARA_CORE_ENGINE off (the default) it builds nothing and the developer routes get no core entry, so the broker is as before.
+  // Lane E2 step 6: the core engine's root. Every new task of a member company starts on it (#1275).
   const coreRoot = createBrokerCoreRoot({
     env: process.env,
     documentClient,

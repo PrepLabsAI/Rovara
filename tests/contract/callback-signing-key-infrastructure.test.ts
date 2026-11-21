@@ -72,7 +72,7 @@ describe.each([["named (staging)", named, "agentx/staging/callback-key", READERS
     expect(principals).toEqual(readers.map((prefix) => roleIdOf(template, prefix)).sort());
   });
 
-  it("is granted to no role by any identity policy, with a wildcard or otherwise (the dispatcher's conditional read aside)", () => {
+  it("is granted to no role by any identity policy, with a wildcard or otherwise (the dispatcher's core read aside)", () => {
     for (const [policyId, resource] of Object.entries(template.Resources).filter(([, entry]) => entry.Type === "AWS::IAM::Policy")) {
       for (const statement of (resource.Properties.PolicyDocument as { Statement: Statement[] }).Statement) {
         const actions = [statement.Action].flat();
@@ -86,20 +86,18 @@ describe.each([["named (staging)", named, "agentx/staging/callback-key", READERS
 describe("the named environment's dispatcher", () => {
   const [secretId] = secretOf(named, "agentx/staging/callback-key");
   const [, dispatcher] = functions(named).find(([id]) => /^Dispatcher[0-9A-F]{8}$/u.test(id))!;
-  const variable = variablesOf(dispatcher).CALLBACK_SIGNING_KEY_SECRET_ID as { "Fn::If": [string, string, string] };
 
-  it("gets the secret's name only while the core switch is not off", () => {
-    expect(variable["Fn::If"][1]).toBe("agentx/staging/callback-key");
-    expect(variable["Fn::If"][2]).toBe("");
+  it("gets the secret's name (the core engine has no switch, #1275)", () => {
+    expect(variablesOf(dispatcher).CALLBACK_SIGNING_KEY_SECRET_ID).toBe("agentx/staging/callback-key");
     expect(variablesOf(dispatcher)).not.toHaveProperty("CALLBACK_SIGNING_KEY");
   });
 
-  it("may read exactly that secret, in the policy that exists only under that condition, and nowhere else on its role", () => {
+  it("may read exactly that secret, in one policy with no condition, and nowhere else on its role", () => {
     const dispatcherRole = (dispatcher.Properties.Role as { "Fn::GetAtt": string[] })["Fn::GetAtt"][0]!;
     const holders = Object.entries(named.Resources).filter(([, resource]) => resource.Type === "AWS::IAM::Policy" && JSON.stringify(resource.Properties.Roles).includes(`"${dispatcherRole}"`)
       && JSON.stringify(resource.Properties.PolicyDocument).includes(secretId));
     expect(holders).toHaveLength(1);
-    expect(holders[0]![1].Condition).toBe(variable["Fn::If"][0]);
+    expect(holders[0]![1].Condition).toBeUndefined();
     const reads = (holders[0]![1].Properties.PolicyDocument as { Statement: Statement[] }).Statement.filter((statement) => [statement.Action].flat().includes("secretsmanager:GetSecretValue"));
     expect(reads).toEqual([{ Sid: "ReadCallbackSigningKey", Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: { Ref: secretId } }]);
   });

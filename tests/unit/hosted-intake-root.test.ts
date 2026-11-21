@@ -39,19 +39,18 @@ const extrasInput = (withTicket: boolean) => ({ taskId: "11111111-1111-4111-8111
 
 describe("the core root's hosted intake", () => {
 
-  it("gives intake only to a company whose new tasks start on the core; another company's runtime is never built for it", async () => {
-    const { root: built } = root({ ROVARA_CORE_ENGINE: `on:${A}`, ROVARA_CORE_ALLOWED_COMPANIES: "all" });
+  it("gives intake to each company from its own runtime (every company's new tasks start on the core, #1275)", async () => {
+    const { root: built } = root({});
     const runtimeFor = vi.spyOn(built.app, "runtimeFor");
-    expect(await built.intake!.intakeFor(B)).toBeUndefined();
-    expect(runtimeFor).not.toHaveBeenCalled();
-    expect(await built.intake!.waiting(B, "payments")).toEqual({ items: [], sources: [] });
     expect(await built.intake!.intakeFor(A)).toBeDefined();
     expect(runtimeFor.mock.calls.map(([companyId]) => companyId)).toEqual([A]);
+    expect(await built.intake!.intakeFor(B)).toBeDefined();
+    expect(runtimeFor.mock.calls.map(([companyId]) => companyId)).toEqual([A, B]);
   });
 
   it("every person's start writes its session in its own transaction (web, Slack, API, intake); a ticket start adds its binding; a system owner's start gets nothing", async () => {
     for (const linear of [true, false]) {
-      const { root: built } = root({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all" }, { linear });
+      const { root: built } = root({}, { linear });
       const extras = (await built.app.runtimeFor(A)).flow.deps.startExtras!;
       for (const client of ["web", "slack", "cli", "mcp", "tracker"]) {
         const plain = extras({ ...extrasInput(false), client });
@@ -78,10 +77,10 @@ describe("the core root's hosted intake", () => {
 
   it("registers the ticket write-back on the company's milestones, only where Linear is wired", async () => {
     const handler = { name: "ticket_updates", on: async () => undefined };
-    const { root: built } = root({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all", ROVARA_CORE_LESSONS: "on" });
+    const { root: built } = root({ ROVARA_CORE_LESSONS: "on" });
     const milestones = (await built.app.runtimeFor(A)).flow.deps.milestones as unknown as { register(h: typeof handler): () => void };
     expect(() => milestones.register(handler)).toThrow("already registered");
-    const { root: unwired } = root({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all", ROVARA_CORE_LESSONS: "on" }, { linear: false });
+    const { root: unwired } = root({ ROVARA_CORE_LESSONS: "on" }, { linear: false });
     const plain = (await unwired.app.runtimeFor(A)).flow.deps.milestones as unknown as { register(h: typeof handler): () => void };
     expect(() => plain.register(handler)).not.toThrow();
   });

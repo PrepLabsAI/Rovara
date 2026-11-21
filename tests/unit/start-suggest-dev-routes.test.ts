@@ -22,7 +22,7 @@ describe("the suggest route through the deployed API's guards", () => {
     }
     const services = () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } });
     const app = createCoreHostApp({
-      env: { ROVARA_CORE_ENGINE: "on" }, modules: fake.modules, context: () => fake.context(), nowMs: () => fake.clock.now,
+      modules: fake.modules, context: () => fake.context(), nowMs: () => fake.clock.now,
       runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(fake.clock.now), log: () => undefined, services, ciReporting: { honest: true as const, ciMode: () => "their_ci_fix" as const } }),
     });
     const member = new Map<string, CompanyMembership>();

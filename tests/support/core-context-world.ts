@@ -52,7 +52,7 @@ interface CoreContextWorld {
   b: CoreContextRun;
 }
 
-export async function coreContextWorld(options: { off?: boolean; teamOff?: boolean; teamCompany?: OrgId; models?: boolean; backend?: { store: DocumentStore; clock: { now: number }; signingKey: Buffer; companyId: OrgId; developerId: string } } = {}): Promise<CoreContextWorld> {
+export async function coreContextWorld(options: { teamOff?: boolean; teamCompany?: OrgId; models?: boolean; backend?: { store: DocumentStore; clock: { now: number }; signingKey: Buffer; companyId: OrgId; developerId: string } } = {}): Promise<CoreContextWorld> {
   const fake = createFakeWorld();
   const world = { ...fake, store: options.backend?.store ?? fake.store, clock: options.backend?.clock ?? fake.clock };
   const modules = world.modules.map(module => module.point === "storage" ? { ...module, create: () => world.store } : module);
@@ -82,7 +82,7 @@ export async function coreContextWorld(options: { off?: boolean; teamOff?: boole
   } };
   const signer = options.models ? signingWorld().signer : undefined;
   const root = createBrokerCoreRoot({
-    env: { ROVARA_CORE_ENGINE: options.off ? "off" : "on", ROVARA_CORE_ALLOWED_COMPANIES: "all", ...(options.models ? { ROVARA_CORE_MODEL_GATEWAY_URL: "https://gateway.example", ROVARA_CORE_AGENT_MODEL: "claude-sonnet-4-6", ROVARA_DESIGN_REVIEW: "1" } : {}), ...(!options.teamOff ? { ROVARA_CORE_LESSONS: options.teamCompany === undefined ? "on" : `on:${options.teamCompany}` } : {}) },
+    env: { ...(options.models ? { ROVARA_CORE_MODEL_GATEWAY_URL: "https://gateway.example", ROVARA_CORE_AGENT_MODEL: "claude-sonnet-4-6", ROVARA_DESIGN_REVIEW: "1" } : {}), ...(!options.teamOff ? { ROVARA_CORE_LESSONS: options.teamCompany === undefined ? "on" : `on:${options.teamCompany}` } : {}) },
     ...(options.models ? {
       taskTokens: () => ({ signer: signer!, issuer: "https://api.example/v1/auth" }),
       offeredModels: { offered: async (companyId: string) => ({ version: 1, models: [{ model: "claude-sonnet-4-6" }], reviewerAccess: { companyId, companyLimitUsd: 5, models: [{ model: "claude-sonnet-4-6", provider: "anthropic" }] } }) },

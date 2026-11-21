@@ -44,7 +44,7 @@ async function registerProject(world: FakeWorld, companyId: string): Promise<voi
 
 function appOver(world: FakeWorld): CoreHostApp {
   return createCoreHostApp({
-    env: { ROVARA_CORE_ENGINE: "on" }, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
+    modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
     // The company's rule as a deployment wires it: only the person the task runs for acts on it or reads it through the core's own rule (People are the old rules' here).
     runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: { ...createOwnerTaskAccess(), canAct: async (principal, task) => principal.personId === task.developerId, canRead: async (principal, task) => principal.personId === task.developerId }, repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: HONEST_CI }),
   });

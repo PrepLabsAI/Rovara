@@ -44,7 +44,7 @@ async function setup(options: { lessons?: string } = {}) {
   const flows = new Map<string, TaskFlow>();
   const jobs = new Map<string, ReturnType<typeof createHostedBrokerCoreServices>>();
   const root = createBrokerCoreRoot({
-    env: { ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all", ...(options.lessons === undefined ? {} : { ROVARA_CORE_LESSONS: options.lessons }) },
+    env: { ...(options.lessons === undefined ? {} : { ROVARA_CORE_LESSONS: options.lessons }) },
     documentClient: client, stateTableName: "state", signInTableName: "signin", callbackSigningKey: secret.toString(), repositoryGrantKey: secret,
     codeModules: () => ({}) as never, repositoryCredential: async () => { throw new Error("unused"); }, origin: () => "https://api.example", log: () => undefined,
     now: () => new Date(world.clock.now), ciReporting: { honest: true, ciMode: async () => "sandbox_only" as const },

@@ -22,7 +22,6 @@ import { guardTaskDispatch, isTaskDispatchGuardRetryError } from "./task-dispatc
 import { createTaskAuthorityAdmission } from "./task-authority-admission.js";
 import { createTaskPersonRuntime, ownCompanyAuthorityRows, taskPersonLatestRevisionQuery, taskPersonNamedLatestRevision, taskPersonRevisionFromResponse, withTaskPersonMembershipRead, type TaskPersonDeveloperRecordProjection, type TaskPersonRuntimePorts } from "./task-person-runtime.js";
 import { taskPersonProofThroughLambda } from "./task-person-proof-transport.js";
-import { coreEngineServes, readCoreEngineFlags } from "../core-host/flags.js";
 import type { CoreDispatchHost } from "./worker-machines/core-dispatch-host.js";
 import { coreDispatchQueueArn, createDispatcherCoreHost, dispatcherStopInstance, hostedDispatcherFlow, withCoreDispatch } from "./worker-machines/dispatcher-core.js"; import { loadCallbackSigningKey } from "./callback-signing-key.js"; import { createDispatcherLessonsPeople } from "./worker-machines/dispatcher-people.js"; // one line: no line of dispatcher.ts moves (the company inventory pins its sites by line)
 import { createHostedMoneyStop, gatewayModelKeysModules, hostedSecurityModules, hostedTaskCapUsd, readHostedAdmissionSettings, runStopWiredFrom } from "../core-host/hosted-modules.js"; import { dispatcherProjectTaskCap } from "./engine-policy-hook.js";
@@ -770,12 +769,11 @@ const workflowHandler = createDispatcherHandler({
 
 /**
  * Engine host step 4: the core dispatch queue's records are served by the core (worker-machines/dispatcher-core.ts), never by today's handler. Where the core queue is not configured
- * (the legacy template) this is today's handler itself. The core is built on the first core batch while the switch serves; an off dispatcher builds nothing.
+ * (the legacy template) this is today's handler itself. The core is built on the first core batch.
  */
 let coreDispatch: Promise<CoreDispatchHost> | undefined;
 export const handler = withCoreDispatch(workflowHandler, {
   coreQueueArn: coreDispatchQueueArn(process.env),
-  serves: () => coreEngineServes(readCoreEngineFlags(process.env)),
   host: () => {
     coreDispatch ??= loadCallbackSigningKey(process.env).then((callbackSigningKey) => {
       const sqs = new SQSClient(awsClientConfiguration);

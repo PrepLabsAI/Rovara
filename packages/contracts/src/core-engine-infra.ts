@@ -1,10 +1,7 @@
 /**
- * Engine host (migration plan v3.2 lane E2): the deployment half of the core engine switch, as plain data for the CDK app (infra/lib/core-engine.ts), the CLI and the broker. The app cannot read the
+ * Engine host (migration plan v3.2 lane E2): the deployment half of the core engine, as plain data for the CDK app (infra/lib/core-engine.ts), the CLI and the broker. The app cannot read the
  * broker's job table (packages/broker/src/core-host/jobs.ts), so the schedules are listed here and tests/contract/core-engine-infrastructure.test.ts holds the two equal.
  */
-
-/** The broker's switch variable (core-host/flags.ts reads it). The stack parameter `CoreEngine` sets it. */
-export const CORE_ENGINE_VARIABLE = "ROVARA_CORE_ENGINE";
 
 /** The `source` of the event a core job schedule sends to the broker (CORE_SCHEDULE_SOURCE in core-host/jobs.ts). */
 export const CORE_JOB_EVENT_SOURCE = "agentx.core-job";
@@ -34,20 +31,6 @@ export const CORE_JOB_SCHEDULES: readonly CoreJobSchedule[] = [
   // L4-P1 (owner DEC 254zzl): the upkeep night, hourly (core-host/jobs.ts). ENABLED only while the `CoreSystemRuns` flag is not off (infra/lib/core-engine.ts): merging this changes nothing until an operator turns it on.
   { job: "upkeep-night", rate: "rate(1 hour)" },
 ];
-
-/**
- * What the `CoreEngine` parameter may be: `off`, `on` (every company), `on:<company id>[:<company id>]` or `drain` (no new task on the core, its running tasks served to the end), the shape the
- * broker's parseCoreSwitch reads (core-host/flags.ts). A company id is `org_` and twenty lowercase letters or digits; at most two here. The pattern admits no comma, equals sign, slash or space.
- */
-export const CORE_ENGINE_PARAMETER_PATTERN = "^(off|on|drain|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$";
-export const CORE_ENGINE_PARAMETER_MAX_LENGTH = 64;
-export const CORE_ENGINE_DEFAULT = "off";
-/**
- * Whether the broker runs the core engine. True since L6: the broker wiring has landed and, with the switch off (and not draining), the broker builds nothing and reads no core
- * setting. While false the CLI refused every value but `off`. Turning the engine on still takes the explicit switch AND an allowed-companies list (default `none` refuses every company;
- * CORE-SWITCHON-MONEY-CAP-GUARD: the founders' company only until #737/#743 are proven on staging). The stack parameter already takes every value, so this needs no template change.
- */
-export const CORE_ENGINE_BROKER_WIRED = true;
 
 /**
  * Core switch-on blocker (2026-11-17): where the core engine's model calls go on an AWS install, as stack parameters of their own, so `agentx upgrade` keeps them like the other core

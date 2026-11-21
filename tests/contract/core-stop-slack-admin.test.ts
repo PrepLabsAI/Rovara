@@ -65,7 +65,7 @@ async function coreWorld(options: { adminStop?: boolean; adminCompanies?: Map<st
   await registerProject(world, FAKE_COMPANY);
   await registerProject(world, OTHER);
   const app: CoreHostApp = createCoreHostApp({
-    env: { ROVARA_CORE_ENGINE: "on" }, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
+    modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
     runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: ownerRule(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: HONEST_CI }),
   });
   const owner = localOwnerPrincipal({ companyId: FAKE_COMPANY });
