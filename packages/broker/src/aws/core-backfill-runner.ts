@@ -1,4 +1,4 @@
-// Operator entrypoint: one bounded page, default preview. Run only through the staging operator guard.
+// Operator entrypoint: one bounded page, default preview. Run only through the operator guard, in staging (us-west-2) or production (us-east-1, #1300).
 import { createHash } from "node:crypto";
 import { open } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -8,6 +8,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, type GetCommand } from "@aws-sdk/lib-dynamodb";
 import { catalogBackfill } from "./project-catalog-backfill.js";
 import { backfillCorePage, checkCorePeople } from "./core-project-backfill.js";
+import { LEGACY_MOVE_REGIONS } from "./legacy-install-move.js";
 
 export function parseCoreBackfillArguments(args: string[]) {
   const values = new Map<string, string>(); let dryRun = true, peopleCheck = false, action: "discover" | "verify" | "unmark" | "undo-run" | undefined, mark = false;
@@ -52,11 +53,12 @@ export async function readCoreMappingFile(path: string): Promise<Record<string, 
 }
 async function main() {
   const args = parseCoreBackfillArguments(process.argv.slice(2));
-  if (process.env["AWS_REGION"] !== "us-west-2") throw new Error("core backfill region refused");
+  const region = process.env["AWS_REGION"] ?? "";
+  if (!LEGACY_MOVE_REGIONS.includes(region)) throw new Error("core backfill region refused");
   const signal = AbortSignal.timeout(5000);
   const mapping = await readCoreMappingFile(args.file);
   signal.throwIfAborted();
-  const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region: "us-west-2", maxAttempts: 1 }));
+  const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region, maxAttempts: 1 }));
   const deps = { tableName: args.tableName, signInTableName: args.signInTableName, documentClient: { send: (command: unknown) => client.send(command as GetCommand, { abortSignal: signal }) } };
   try {
     const result = args.action !== undefined ? await catalogBackfill(deps, { ...mapping, action: args.action, mark: args.mark, dryRun: args.dryRun,

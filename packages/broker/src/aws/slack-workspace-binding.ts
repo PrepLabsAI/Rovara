@@ -236,3 +236,31 @@ export async function backfillSlackWorkspaceIndex(deps: SlackBindingDependencies
       ...(page.LastEvaluatedKey === undefined ? {} : { cursor: page.LastEvaluatedKey }) };
   } catch { throw new SlackWorkspaceRefused(); }
 }
+
+/**
+ * #1300: an operator move of a Slack workspace's binding between the built-in company and one named company (aws/legacy-install-move.ts). One side is always the built-in company,
+ * so a workspace can never move from one named company to another. A preview by default: the plan names the rows it would write and writes nothing. Applied, one conditional
+ * transaction moves the binding (only while it still holds exactly what was read) and its company views; anything else refuses in fixed words.
+ */
+export interface WorkspaceMove { teamId: string; from: string; to: string; by: string; apply?: boolean }
+export interface WorkspaceMovePlan { teamId: string; from: string; to: string; applied: boolean; writes: string[] }
+export async function moveSlackWorkspace(deps: SlackBindingDependencies, move: WorkspaceMove): Promise<WorkspaceMovePlan> {
+  const { teamId, from, to, by } = move;
+  if (!slackWorkspaceTeam(teamId) || !OrgIdSchema.safeParse(from).success || !OrgIdSchema.safeParse(to).success || from === to
+    || (from !== IMPLICIT_COMPANY_ID && to !== IMPLICIT_COMPANY_ID) || !operator.safeParse(by).success) throw new SlackWorkspaceRefused();
+  const read = async (key: { pk: string; sk: string }) => (await deps.client.send(new GetCommand({ TableName: deps.tableName, Key: key, ConsistentRead: true })) as { Item?: unknown }).Item;
+  const marker = await read(markerKey);
+  if (marker === undefined || !markerRow.safeParse(marker).success) throw new SlackWorkspaceRefused();
+  const found = parseBinding(await read(teamKey(teamId)));
+  if (found.teamId !== teamId || found.companyId !== from) throw new SlackWorkspaceRefused();
+  const moved: BindingRow = { ...found, companyId: to, boundAt: new Date((deps.now ?? Date.now)()).toISOString(), boundBy: by };
+  const writes = [`${teamKey(teamId).pk} ${from} -> ${to}`, `delete ${companyWorkspaceKey(from, teamId).pk}`, `put ${companyWorkspaceKey(to, teamId).pk}`];
+  if (move.apply !== true) return { teamId, from, to, applied: false, writes };
+  await deps.client.send(new TransactWriteCommand({ TransactItems: [
+    { Put: { TableName: deps.tableName, Item: moved, ConditionExpression: "entityType = :kind AND teamId = :team AND companyId = :company AND boundAt = :at AND boundBy = :by",
+      ExpressionAttributeValues: { ":kind": "SLACK_WORKSPACE_BINDING", ":team": found.teamId, ":company": found.companyId, ":at": found.boundAt, ":by": found.boundBy } } },
+    { Delete: { TableName: deps.tableName, Key: companyWorkspaceKey(from, teamId) } },
+    { Put: { TableName: deps.tableName, Item: companyWorkspaceView(moved) } },
+  ] }));
+  return { teamId, from, to, applied: true, writes };
+}

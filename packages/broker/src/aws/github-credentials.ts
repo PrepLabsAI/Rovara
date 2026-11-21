@@ -595,3 +595,32 @@ export async function filterInstallationsFor(companyId: string, listed: ClientRe
     budget.check(); return visible;
   } catch { throw githubBindingRefusal(); }
 }
+
+/**
+ * #1300: an operator move of a GitHub App installation's binding between the built-in company and one named company (aws/legacy-install-move.ts). One side is always the built-in
+ * company, so an installation can never move from one named company to another. A preview by default: the plan names the rows it would write and writes nothing. Applied, one
+ * conditional transaction moves the binding (only while it still holds exactly what was read) and the company list rows; anything else refuses in fixed words.
+ */
+export interface InstallationMove { installationId: number; from: string; to: string; by: string; apply?: boolean }
+export interface InstallationMovePlan { installationId: number; accountLogin: string; from: string; to: string; applied: boolean; writes: string[] }
+export async function moveGithubInstallation(deps: { client: { send(command: unknown): Promise<unknown> }; tableName: string; now?: () => number }, move: InstallationMove): Promise<InstallationMovePlan> {
+  const { installationId, from, to } = move;
+  if (!installationIdSchema.safeParse(installationId).success || !OrgIdSchema.safeParse(from).success || !OrgIdSchema.safeParse(to).success || from === to
+    || (from !== IMPLICIT_COMPANY_ID && to !== IMPLICIT_COMPANY_ID) || !bindingText.safeParse(move.by).success) throw githubBindingRefusal();
+  const response = await deps.client.send(new GetCommand({ TableName: deps.tableName, Key: bindingKey(installationId), ConsistentRead: true })) as { Item?: Record<string, unknown> };
+  const parsed = bindingSchema.safeParse(response.Item);
+  if (!parsed.success || parsed.data.installationId !== installationId || parsed.data.companyId !== from) throw githubBindingRefusal();
+  const found = response.Item!;
+  const boundAt = new Date((deps.now ?? Date.now)()).toISOString();
+  const moved = { ...found, companyId: to, boundAt, boundBy: move.by };
+  const writes = [`${bindingKey(installationId).pk} ${from} -> ${to}`, `delete ${companyInstallationKey(from, installationId).pk}`, `put ${companyInstallationKey(to, installationId).pk}`];
+  const plan = { installationId, accountLogin: parsed.data.accountLogin, from, to, writes };
+  if (move.apply !== true) return { ...plan, applied: false };
+  await deps.client.send(new TransactWriteCommand({ TransactItems: [
+    { Put: { TableName: deps.tableName, Item: moved, ConditionExpression: "entityType = :kind AND installationId = :id AND companyId = :company AND boundAt = :at AND boundBy = :by",
+      ExpressionAttributeValues: { ":kind": "GITHUB_INSTALLATION_BINDING", ":id": installationId, ":company": from, ":at": parsed.data.boundAt, ":by": parsed.data.boundBy } } },
+    { Delete: { TableName: deps.tableName, Key: companyInstallationKey(from, installationId) } },
+    { Put: { TableName: deps.tableName, Item: companyInstallationRow(to, { installationId, accountLogin: parsed.data.accountLogin, boundAt, boundBy: move.by }) } },
+  ] }));
+  return { ...plan, applied: true };
+}
