@@ -1082,7 +1082,7 @@
     "packages/worker/src/registry-guard.ts": 10,
     "packages/worker/src/repo-aws-endpoints.ts": 1,
     "packages/worker/src/repository-context.ts": 25,
-    "packages/worker/src/run-task.ts": 598,
+    "packages/worker/src/run-task.ts": 561,
     "packages/worker/src/sandbox-file-ops.ts": 119,
     "packages/worker/src/sandbox-file-tools.ts": 12,
     "packages/worker/src/saved-env/build.ts": 62,
