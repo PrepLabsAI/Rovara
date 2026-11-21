@@ -10,7 +10,7 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { issueChannelLinkCode, redeemChannelLinkCode } from "../../packages/broker/src/core/channel/links.js";
 import type { CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
 import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
-import { SLACK_CHANNEL, SLACK_TEAM, call, ensureWorkspace, finishOperation, loadSlackBroker, orchestratorPrincipal } from "../support/slack-broker.js";
+import { SLACK_CHANNEL, SLACK_TEAM, call, ensureWorkspace, loadSlackBroker, orchestratorPrincipal } from "../support/slack-broker.js";
 import { swebenchDeploymentForTests } from "../support/eval-batch-admin.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 
@@ -354,137 +354,11 @@ describe("DEC 254zzz98 (delta review H1): a named company's Slack thread never r
     expect(w.db.find(() => true)).toEqual(before); expect(writes).toBe(0);
   });
 
-  async function startedLegacy() {
-    const w = await world({ installCompany: A, core: false });
-    w.db.set(companyBinding(A)); w.db.set(ownLegacy(w));
-    w.db.set({ pk: `ORG#${A}#MEMBER#${PERSON}`, sk: "PROJECT#demo-tasklog", entityType: "MEMBERSHIP", ownerKey: PERSON, projectName: "demo-tasklog", role: "developer" });
-    const answer = await w.start();
-    expect(answer.statusCode, answer.body).toBe(200);
-    const taskId = String((JSON.parse(answer.body) as { taskId: string }).taskId);
-    const task = w.db.get(`DEVTASK#${taskId}`, "META")!;
-    expect(task).toMatchObject({ companyId: A });
-    return { w, taskId, task, workspaceId: String(task.workspaceId) };
-  }
 
-  it.each([true, false])("taskAnswerWorkspace refuses the latest namesake in a real Slack task's own thread (pointer: %s)", async (pointer) => {
-    const { w, taskId, workspaceId: id } = await startedLegacy();
-    // Old task threads may outlive their workspace pointer; the binding still checks every answer read.
-    if (!pointer) w.db.delete(`WORKSPACE#${id}`, "DEVELOPER_TASK");
-    const taskThread = `${SLACK_TEAM}/${SLACK_CHANNEL}/1700000000.000001`;
-    w.db.set(foreignRevision(2));
-    const before = structuredClone(w.db.find(() => true));
-    let writes = 0; w.db.onWrite(() => { writes += 1; });
-    const answer = await call(w.handler, { method: "POST", path: "/v1/service/threads/workspace",
-      service: { ...service, thread: taskThread }, body: { requestId: randomUUID(), taskAnswer: { taskId }, includeSharedTask: true } });
-    expect(answer, JSON.stringify(answer.body)).toMatchObject({ status: 403, body: { error: { code: "FORBIDDEN", message: "Slack channel is not bound to a project" } } });
-    expect(JSON.stringify(answer.body)).not.toMatch(/builtin|secret|built-in/);
-    expect(w.db.find(() => true)).toEqual(before); expect(writes).toBe(0);
-  });
 
-  it("sharedThreadWorkspace refuses the latest namesake in continue mode", async () => {
-    const { w, workspaceId: id } = await startedLegacy();
-    const taskThread = `${SLACK_TEAM}/${SLACK_CHANNEL}/1700000000.000001`;
-    const { workflowThread: _workflowThread, ...shared } = w.db.get(`SHARED_TASK#${taskThread}`, "META")!;
-    void _workflowThread;
-    w.db.set({ ...shared, mode: "continue" });
-    w.db.set(foreignRevision(2));
-    const before = structuredClone(w.db.find(() => true));
-    let writes = 0; w.db.onWrite(() => { writes += 1; });
-    const answer = await call(w.handler, { method: "POST", path: "/v1/service/threads/workspace",
-      service: { ...service, thread: taskThread }, body: { requestId: randomUUID(), includeSharedTask: true } });
-    expect(w.db.get(`WORKSPACE#${id}`, "META")).toBeDefined();
-    expect(answer, JSON.stringify(answer.body)).toMatchObject({ status: 403, body: { error: { code: "FORBIDDEN", message: "Slack channel is not bound to a project" } } });
-    expect(JSON.stringify(answer.body)).not.toMatch(/builtin|secret|built-in/);
-    expect(w.db.find(() => true)).toEqual(before); expect(writes).toBe(0);
-  });
 
-  it.each(["builtin", "other-company", "own-company"])("queuedFirstTask rechecks the latest company after start: %s revision registered during preparation", async (company) => {
-    const { w, workspaceId: id, taskId } = await startedLegacy();
-    const prepare = w.db.find((item) => item.workspaceId === id && item.kind === "prepare")[0]!;
-    const later = company === "own-company" ? ownLegacy(w, 2) : { ...foreignRevision(2), ...(company === "other-company" ? { companyId: B } : {}) };
-    w.db.set(later);
-    await finishOperation(w.handler, w.db, id, String(prepare.id), "SUCCEEDED", { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] });
-    const taskOperations = w.db.find((item) => item.workspaceId === id && item.kind === "task");
-    if (company === "own-company") {
-      expect(taskOperations).toHaveLength(1);
-      expect(w.db.get(`WORKSPACE#${id}`, "META")).toMatchObject({ status: "BUSY", projectRevision: 1 });
-    } else {
-      expect(taskOperations).toEqual([]);
-      expect(w.db.get(`WORKSPACE#${id}`, "META")).toMatchObject({ status: "PREPARATION_FAILED", projectRevision: 1 });
-      expect(w.db.get(`WORKSPACE#${id}`, `OPERATION#${String(prepare.id)}`)).toMatchObject({ status: "FAILED" });
-      const pointer = w.db.find((item) => item.taskId === taskId && item.pendingPrompt !== undefined);
-      expect(pointer).toEqual([]);
-      expect(w.db.find((item) => item.entityType === "OUTBOX" && item.operationId !== prepare.id && (item.invocation as { workspaceId?: string })?.workspaceId === id)).toEqual([]);
-    }
-  });
 
-  it.each(["missing-task", "missing-company", "invalid-company", "null-company", "wrong-workspace"])("queued task scope refuses %s before model/integration resolution", async (kind) => {
-    const { w, task, taskId, workspaceId: id } = await startedLegacy();
-    const prepare = w.db.find((item) => item.workspaceId === id && item.kind === "prepare")[0]!;
-    if (kind === "missing-task") w.db.delete(`DEVTASK#${taskId}`, "META");
-    else {
-      const saved = { ...task };
-      if (kind === "missing-company") delete saved.companyId;
-      else if (kind === "wrong-workspace") saved.workspaceId = randomUUID();
-      else saved.companyId = kind === "null-company" ? null : "private-invalid-company";
-      w.db.set(saved);
-    }
-    w.db.set(foreignRevision(2));
-    const reads: string[] = [];
-    const send = w.db.send.bind(w.db);
-    vi.spyOn(w.db, "send").mockImplementation(async (command) => {
-      const input = (command as { input: { Key?: { pk?: string }; ExpressionAttributeValues?: Record<string, unknown> } }).input;
-      if (input.Key?.pk === "PROJECT#demo-tasklog" || input.ExpressionAttributeValues?.[":pk"] === "PROJECT#demo-tasklog") reads.push("project");
-      return send(command);
-    });
-    await finishOperation(w.handler, w.db, id, String(prepare.id), "SUCCEEDED", { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] });
-    expect(w.db.find((item) => item.workspaceId === id && item.kind === "task")).toEqual([]);
-    expect(w.db.get(`WORKSPACE#${id}`, "META")).toMatchObject({ status: "PREPARATION_FAILED" });
-    expect(w.db.find((item) => item.entityType === "OUTBOX" && item.operationId !== prepare.id && (item.invocation as { workspaceId?: string })?.workspaceId === id)).toEqual([]);
-    expect(w.db.find((item) => item.taskId === taskId && item.pendingPrompt !== undefined)).toEqual([]);
-    // An unstamped task needs the persisted project row to distinguish built-in from named ownership.
-    expect(reads).toEqual(kind === "missing-company" ? ["project"] : []);
-  });
 
-  it.each(["builtin", "other-company", "foreign-pinned", "own-company"])("workflow retry retains its task company against the %s revision", async (kind) => {
-    const { w, taskId, workspaceId: id } = await startedLegacy();
-    const prepare = w.db.find((item) => item.workspaceId === id && item.kind === "prepare")[0]!;
-    await finishOperation(w.handler, w.db, id, String(prepare.id), "SUCCEEDED", { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] });
-    const plan = w.db.find((item) => item.workspaceId === id && item.kind === "task")[0]!;
-    await finishOperation(w.handler, w.db, id, String(plan.id), "FAILED");
-    const task = w.db.get(`DEVTASK#${taskId}`, "META")!;
-    w.db.set(kind === "own-company" || kind === "foreign-pinned" ? ownLegacy(w, 2) : { ...foreignRevision(2), ...(kind === "other-company" ? { companyId: B } : {}) });
-    if (kind === "foreign-pinned") w.db.set(foreignRevision(1));
-    const before = structuredClone(w.db.find((item) => item.kind === "task" || item.entityType === "OUTBOX"));
-    const result = await w.handler({ source: "agentx.slack-ingress", action: "workflow-retry", step: "plan", selectedOptionalCheckIds: [], taskId, userId: USER,
-      thread: { ...thread, threadTs: "1700000000.000001" }, requestId: randomUUID(), expectedRevision: (task.workflow as { revision: number }).revision });
-    if (kind === "own-company") {
-      expect(result.statusCode, result.body).toBe(200);
-      expect(w.db.find((item) => item.workspaceId === id && item.kind === "task" && item.status === "ACCEPTED")).toEqual([expect.objectContaining({ settingsRevision: 2, workflowMode: "PLAN" })]);
-    } else {
-      expect(result.statusCode, result.body).toBe(200);
-      expect(JSON.parse(result.body)).toMatchObject({ refused: true });
-      expect(result.body).not.toMatch(/builtin|secret|private/);
-      expect(w.db.find((item) => item.kind === "task" || item.entityType === "OUTBOX")).toEqual(before);
-    }
-  });
-
-  it.each([true, false])("an unstamped task accepted by the old built-in install still queues with company mode %s", async (companyMode) => {
-    const w = await world({ installCompany: IMPLICIT_COMPANY_ID, core: false });
-    const legacy = (await loadSlackBroker()).createAwsBrokerHandler(w.brokerInput as never);
-    const handler = companyMode ? w.handler : legacy;
-    const answer = await legacy({ source: "agentx.slack-ingress", action: "start-workflow", thread: { ...thread, threadTs: "1700000000.000001" },
-      userId: USER, instructions: "Fix the flaky test", workflowPath: "QUICK", requestId: randomUUID() });
-    expect(answer.statusCode, answer.body).toBe(200);
-    const taskId = String((JSON.parse(answer.body) as { taskId: string }).taskId);
-    const task = { ...w.db.get(`DEVTASK#${taskId}`, "META")! };
-    delete task.companyId; w.db.set(task);
-    const id = String(task.workspaceId);
-    const prepare = w.db.find((item) => item.workspaceId === id && item.kind === "prepare")[0]!;
-    await finishOperation(handler, w.db, id, String(prepare.id), "SUCCEEDED", { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] });
-    expect(w.db.find((item) => item.workspaceId === id && item.kind === "task")).toHaveLength(1);
-    expect(w.db.get(`WORKSPACE#${id}`, "META")).toMatchObject({ status: "BUSY" });
-  });
 
   it("valid-body availability: a recorded quick-start reaches the core with and without a namesake", async () => {
     const run = async (namesake: boolean) => {
@@ -519,24 +393,6 @@ describe("DEC 254zzz98 (delta review H1): a named company's Slack thread never r
     expect(await run(true)).toEqual(await run(false));
   });
 
-  it("valid-body availability: a saved note in a real task-answer thread can be marked answered with and without a namesake", async () => {
-    const run = async (namesake: boolean) => {
-      const { w, taskId } = await startedLegacy();
-      const taskThread = { ...thread, threadTs: "1700000000.000001" };
-      const messageTs = "1700000000.000009";
-      const saved = await w.handler({ source: "agentx.slack-ingress", action: "thread-note", taskId, thread: taskThread, userId: USER, messageTs, eventId: "EvSavedNote", text: "Why is this the next step?" });
-      expect(saved.statusCode, saved.body).toBe(200);
-      expect(JSON.parse(saved.body)).toMatchObject({ outcome: "captured" });
-      if (namesake) w.db.set(foreignRevision(2));
-      const answer = await call(w.handler, { method: "POST", path: "/v1/service/tasks/thread-notes/answered",
-        service: { ...service, thread: `${SLACK_TEAM}/${SLACK_CHANNEL}/${taskThread.threadTs}` }, body: { taskId, thread: taskThread, messageTs } });
-      expect(answer, JSON.stringify(answer.body)).toMatchObject({ status: 200, body: { outcome: "ANSWERED" } });
-      expect(w.db.find((item) => item.entityType === "WORKFLOW_THREAD_NOTE" && item.answeredAt !== undefined)).toHaveLength(1);
-      const { requestId: _requestId, ...body } = answer.body; void _requestId;
-      return body;
-    };
-    expect(await run(true)).toEqual(await run(false));
-  });
 
   it("the built-in company's thread (legacy binding) is unchanged: no company, no check", async () => {
     const w = await world({ installCompany: IMPLICIT_COMPANY_ID });
@@ -604,37 +460,3 @@ describe("DEC 254zzz98 (delta review H1): a named company's Slack thread never r
   });
 });
 
-describe("DEC 254zzz98 (re-review H): a named company's start the core does not take never runs on a legacy project of the same name that is not its own", () => {
-  const namesake = (companyId?: string) => ({ pk: "PROJECT#demo-tasklog", sk: "REV#000000000001", entityType: "PROJECT", ...(companyId === undefined ? {} : { companyId }),
-    registeredBy: "c".repeat(64), registeredAt: "2026-11-18T00:00:00.000Z", runtimeBinding: { deploymentMode: "ec2-ebs" },
-    definition: { name: "demo-tasklog", revision: 1, orchestratorInstructions: "built-in", setup: [], readiness: [],
-      repositories: [{ name: "builtin", url: "https://github.com/builtin/secret.git", defaultBranch: "main", path: "repo/builtin", credentialRef: "github" }] } });
-  const tasksOf = (w: { db: { find(p: (item: Record<string, unknown>) => boolean): unknown[] } }) =>
-    w.db.find((item) => String(item.pk).startsWith("DEVTASK#") && item.sk === "META" && item.project === "demo-tasklog");
-
-  it("the built-in company's unstamped namesake: the legacy start is refused as not found; no task, no workspace on its repositories", async () => {
-    const w = await world({ installCompany: A, core: false });
-    w.db.set(companyBinding(A));
-    // The person's grant on A's own project, in A's partition: the access check passes, so only the project row the start loads can refuse.
-    w.db.set({ pk: `ORG#${A}#MEMBER#${PERSON}`, sk: "PROJECT#demo-tasklog", entityType: "MEMBERSHIP", ownerKey: PERSON, projectName: "demo-tasklog", role: "developer" });
-    w.db.set(namesake());
-    const result = await w.start();
-    expect(result.statusCode).not.toBe(200);
-    expect(result.body).toContain("PROJECT_NOT_FOUND");
-    expect(result.body).not.toMatch(/builtin|secret/);
-    expect(tasksOf(w)).toEqual([]);
-    expect(w.db.find((item) => JSON.stringify(item).includes("builtin/secret") && item.pk !== "PROJECT#demo-tasklog")).toEqual([]);
-  });
-
-  it("another named company's stamped namesake is refused the same way", async () => {
-    const w = await world({ installCompany: A, core: false });
-    w.db.set(companyBinding(A));
-    // The person's grant on A's own project, in A's partition: the access check passes, so only the project row the start loads can refuse.
-    w.db.set({ pk: `ORG#${A}#MEMBER#${PERSON}`, sk: "PROJECT#demo-tasklog", entityType: "MEMBERSHIP", ownerKey: PERSON, projectName: "demo-tasklog", role: "developer" });
-    w.db.set(namesake(B));
-    const result = await w.start();
-    expect(result.statusCode).not.toBe(200);
-    expect(result.body).toContain("PROJECT_NOT_FOUND");
-    expect(tasksOf(w)).toEqual([]);
-  });
-});

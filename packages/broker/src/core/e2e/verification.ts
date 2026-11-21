@@ -5,11 +5,11 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 // are still the ones the round was admitted under is the `E2EAuthority` seam's answer; Code's default fails closed, so no round passes where nothing can say.
 import { createHash } from "node:crypto";
 import {
-  E2EPolicySchema, E2EScenarioBundleSchema, e2eScenarioBundleDigest, e2ePlanHasCompleteRequiredCriteria, E2ERunBindingSchema, E2ERoundSchema, selectE2EExecutionPlan,
-  verifyE2ESourceSnapshot, canonicalJson, E2EWorkflowGroupEvidenceRefSchema, isE2EApplicationAdmissionSchemaVersion, ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
+  E2EPolicySchema, E2EScenarioBundleSchema, e2eScenarioBundleDigest, e2ePlanHasCompleteRequiredCriteria, E2ERunBindingSchema, E2ERoundSchema,   verifyE2ESourceSnapshot, canonicalJson, E2EWorkflowGroupEvidenceRefSchema, isE2EApplicationAdmissionSchemaVersion, ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
   cutEvidenceReason,
   type ObjectStorage, type OperationStatus, type E2ESourceSnapshot, type E2EWorkflowAdmissionRef, type E2EApplicationExecutionAdmission,
 } from "@agentx/contracts";
+import { selectE2EExecutionPlan } from "@agentx/contracts/e2e-execution-plan";
 import { compileE2EScenarios, collectE2EActualCliRun, qualifyE2ECollection, e2eSnapshotSourceDigest, parseE2EFirstPartyCapture, e2ePrivateTransferMaxBytes, decodeE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { groundingPlanDigest } from "../../e2e/application-admission.js";
 import { applicationEvidenceLimits, modelRouteForAdmission, verifyApplicationE2EEvidence, type ApplicationEvidenceVerification } from "../../e2e/application-evidence.js";

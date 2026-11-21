@@ -2,7 +2,7 @@
 // role in a project is `maintainer`, `contributor` or `viewer`; an org owner or admin is a maintainer of every project in their org.
 import { z } from "zod";
 import { SlackChannelIdSchema, SlackTeamIdSchema } from "./browser-ids.js";
-import { isPublicSuffix } from "./public-suffix.js";
+import { isPublicSuffix } from "./public-suffix-matcher.js";
 import { ErrorRefSchema } from "./live-interaction.js";
 
 export const ProjectRoleSchema = z.enum(["maintainer", "contributor", "viewer"]);

@@ -1,6 +1,5 @@
 import "./broker-environment-init.js"; import { companyMembershipFromDynamo, resolveAdminCompany, resolveCompany } from "./company-check.js"; // ENV-ROOM: the init first (broker-environment-init.ts; kept first by tests/contract/broker-environment-first.test.ts)
 import { coreContextWorkerRouteOf } from "./dev-route-scopes.js";
-import { isServerReadRequest } from "./developer-routes.js";
 import { createHostedBrokerCoreServices } from "./core-job-services.js"; import { codeSettingsReader, companyCodeSettingsReader } from "./project-code-settings.js"; import { hostedPolicySource } from "./core-policy-source.js";
 import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js"; import { coreCopyRefusalWords } from "./core-copy-refusal.js";
 import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
@@ -55,8 +54,7 @@ import {
   E2ERoundSchema,
   buildE2ESharedView,
   CandidateManifestSchema,
-  selectE2EExecutionPlan,
-  inspectE2ERepository, inspectE2ERepositoryBeforeContractApiTargets,
+    inspectE2ERepository, inspectE2ERepositoryBeforeContractApiTargets,
   proposeE2ESetup,
   WEB_API_RUNTIME_PROFILE_ID,
   verifyE2ESourceSnapshot,
@@ -275,6 +273,7 @@ import {
   workflowPublicationContextDigest,
   cutEvidenceReason, EVAL_PLAN_DELIVERY_ACTION,
 } from "@agentx/contracts";
+import { selectE2EExecutionPlan } from "@agentx/contracts/e2e-execution-plan";
 import { compileE2EScenarios, collectE2EActualCliRun, qualifyE2ECollection, e2eSnapshotSourceDigest, parseE2EFirstPartyCapture, e2ePrivateTransferMaxBytes, decodeE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { renderE2EMcpProjection, renderE2EPageHtml, renderE2EScenarioRowsHtml, renderE2EScenarioSlackBlocks, renderE2ESlackBlocks, renderE2ENotifierSlackBlocks } from "../e2e-presentation.js";
 import type { DisplayArtifact } from "../e2e/application-display.js";
@@ -292,7 +291,7 @@ import type { AuthenticatedIdentity } from "../auth.js";
 import { adminReader, queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
 import { outcomeMetric } from "./admin-change-audit.js";
 import { pressAdminChange, routeAdminChange, type AdminChangeDependencies } from "./admin-changes.js";
-import type { AdminChangeHandlers, PlanDependencies, ReviewedChannelBinding } from "./admin-change-plans.js";
+import type { AdminChangeHandlers, PlanDependencies } from "./admin-change-plans.js";
 import { ZodError, z } from "zod";
 import { healthProbes } from "./health-probes.js";
 import { recordPrepareFailureEvent } from "./operation-events.js";
@@ -818,9 +817,8 @@ function adminCompanyReader(dependencies: AwsBrokerDependencies): CompanyMembers
 function adminChangeHandlers(dependencies: AwsBrokerDependencies): AdminChangeHandlers {
   return {
     requireAdministrator: (identity, project) => requireAdministrator(dependencies, identity, project),
-    readChannelBinding: (teamId, channelId) => getSlackBinding(dependencies, teamId, channelId),
-    bindChannel: async (identity, teamId, channelId, project, reviewed) => putSlackBinding(dependencies, identity, teamId, channelId, { projectName: project }, reviewed),
-    unbindChannel: async (identity, teamId, channelId, reviewed) => deleteSlackBinding(dependencies, identity, teamId, channelId, reviewed),
+    bindChannel: async (identity, teamId, channelId, project) => putSlackBinding(dependencies, identity, teamId, channelId, { projectName: project }),
+    unbindChannel: async (identity, teamId, channelId) => deleteSlackBinding(dependencies, identity, teamId, channelId),
     checkRevision: async (identity, definitionValue, runtimeBindingValue, options) => {
       if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
       let definition: ProjectDefinition;
@@ -1719,19 +1717,11 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
       if (url.pathname.startsWith("/v1/dev/")) {
         if (!dependencies.developer && dependencies.linking) return json(await routeLinkingRequest(linkingRouteDependencies(dependencies, dependencies.linking), request, url), request.requestId);
         if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
-        const selectedRead = isServerReadRequest(request.method, url.pathname);
-        try {
-          const value = await routeDeveloperRequest({ serverReadSender: { send: (command, options) => dependencies.documentClient.send(command as never, options) }, ...(dependencies.developer.companies === undefined ? {} : { companies: dependencies.developer.companies }), ...(core?.lessons === undefined ? {} : { lessons: core.lessons }), ...(core?.lessonsSlackSwitch === undefined ? {} : { lessonsSlackSwitch: core.lessonsSlackSwitch }), ...(core?.knowledgeSwitch === undefined ? {} : { knowledgeSwitch: core.knowledgeSwitch }), ...(core?.knowledge === undefined ? {} : { knowledge: core.knowledge }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
+        return json(await routeDeveloperRequest({ ...(dependencies.developer.companies === undefined ? {} : { companies: dependencies.developer.companies }), ...(core?.lessons === undefined ? {} : { lessons: core.lessons }), ...(core?.lessonsSlackSwitch === undefined ? {} : { lessonsSlackSwitch: core.lessonsSlackSwitch }), ...(core?.knowledgeSwitch === undefined ? {} : { knowledgeSwitch: core.knowledgeSwitch }), ...(core?.knowledge === undefined ? {} : { knowledge: core.knowledge }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
           ...channelLinkRouteDependencies(dependencies),
           ...clientProjectRouteDependencies(dependencies),
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
-          ...workflowApplicationRouteDependencies(dependencies) }, request, url);
-          return selectedRead ? serverReadJson(value) : json(value, request.requestId);
-        } catch (error) {
-          if (!selectedRead) throw error;
-          if (error instanceof AgentXError) return serverReadJson({ error: { code: error.code, message: stripCode(error.message, error.code) } }, error.statusCode);
-          return serverReadJson({ error: { code: "RUNTIME_UNAVAILABLE", message: request.method === "GET" ? "Start status is unavailable." : "GitHub disconnect preview is unavailable." } }, 503);
-        }
+          ...workflowApplicationRouteDependencies(dependencies) }, request, url), request.requestId);
       }
 
       const identity = identityFromJwtClaims(request.jwtClaims, {
@@ -3410,27 +3400,12 @@ function displayName(value: string | undefined): string | undefined {
   } catch { return undefined; }
 }
 
-/** DP-E1-R2: reject reread drift and fence the final write, including reviewed absence.
- * Only the internal confirmation path supplies this value; direct binding routes keep their contract.
- */
-function reviewedBindingCondition(reviewed: ReviewedChannelBinding | undefined, current: SlackChannelBinding | undefined) {
-  if (reviewed === undefined) return {};
-  if (reviewed === null ? current !== undefined : current?.projectName !== reviewed.projectName || current.updatedAt !== reviewed.updatedAt) {
-    throw agentXError("CHANGE_STALE", "The channel binding changed after review; ask for the change again to review its current binding.");
-  }
-  return reviewed === null
-    ? { ConditionExpression: "attribute_not_exists(pk)" }
-    : { ConditionExpression: "projectName = :reviewedProject AND updatedAt = :reviewedAt",
-      ExpressionAttributeValues: { ":reviewedProject": reviewed.projectName, ":reviewedAt": reviewed.updatedAt } };
-}
-
 async function putSlackBinding(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
   teamIdValue: string,
   channelIdValue: string,
   value: unknown,
-  reviewed?: ReviewedChannelBinding,
 ): Promise<{ binding: SlackChannelBinding; latestRevision: number }> {
   const input = object(value, "Slack channel binding");
   // Older CLIs still send projectRevision; the binding follows the project's latest revision instead.
@@ -3450,18 +3425,11 @@ async function putSlackBinding(
   if (existing && existing.projectName !== binding.projectName) {
     await requireAdministrator(dependencies, identity, existing.projectName);
   }
-  const condition = reviewedBindingCondition(reviewed, existing);
   const latest = await requireLatestProject(dependencies, binding.projectName);
-  try {
-    await dependencies.documentClient.send(new PutCommand({
-      TableName: dependencies.tableName,
-      Item: { ...slackChannelBindingKeyFor(named, binding.teamId, binding.channelId), ...channelBindingAttributes(channelBindingFromSlack(binding)), updatedBy: identity.ownerKey },
-      ...condition,
-    }));
-  } catch (error) {
-    if (reviewed === undefined || !isConditional(error)) throw error;
-    throw agentXError("CHANGE_STALE", "The channel binding changed after review; ask for the change again to review its current binding.");
-  }
+  await dependencies.documentClient.send(new PutCommand({
+    TableName: dependencies.tableName,
+    Item: { ...slackChannelBindingKeyFor(named, binding.teamId, binding.channelId), ...channelBindingAttributes(channelBindingFromSlack(binding)), updatedBy: identity.ownerKey },
+  }));
   return { binding, latestRevision: latest.definition.revision };
 }
 
@@ -3470,25 +3438,17 @@ async function deleteSlackBinding(
   identity: AuthenticatedIdentity,
   teamIdValue: string,
   channelIdValue: string,
-  reviewed?: ReviewedChannelBinding,
 ): Promise<{ deleted: true; binding: SlackChannelBinding }> {
   const teamId = SlackTeamIdSchema.parse(decodeURIComponent(teamIdValue));
   const channelId = SlackChannelIdSchema.parse(decodeURIComponent(channelIdValue));
   const binding = await getSlackBinding(dependencies, teamId, channelId);
-  const condition = reviewedBindingCondition(reviewed, binding);
   if (!binding) throw agentXError("NOT_FOUND", "Slack channel binding not found");
   await requireAdministrator(dependencies, identity, binding.projectName);
   // DEC 254zzz80 (R2-F1): the row the read found: a NAMED company's own (its binding carries companyId), else the legacy one.
-  try {
-    await dependencies.documentClient.send(new DeleteCommand({
-      TableName: dependencies.tableName,
-      Key: slackChannelBindingKeyFor((binding as { companyId?: string }).companyId, teamId, channelId),
-      ...condition,
-    }));
-  } catch (error) {
-    if (reviewed === undefined || !isConditional(error)) throw error;
-    throw agentXError("CHANGE_STALE", "The channel binding changed after review; ask for the change again to review its current binding.");
-  }
+  await dependencies.documentClient.send(new DeleteCommand({
+    TableName: dependencies.tableName,
+    Key: slackChannelBindingKeyFor((binding as { companyId?: string }).companyId, teamId, channelId),
+  }));
   return { deleted: true, binding };
 }
 
@@ -15935,7 +15895,7 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
     // D17: kept for the Lambda's lifetime; an unknown kid refetches at most once a minute.
     verifyAccessToken: developerTokenVerifier({
       issuer,
-      keys: developerKeysThroughLambda((payload, options) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }), options)),
+      keys: developerKeysThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
       now: Date.now,
     }),
   }), inviteTaskPerson);
@@ -16247,9 +16207,4 @@ function withClientGithubBindings(dependencies: AwsBrokerDependencies): AwsBroke
   const companies = dependencies.companies ?? (dependencies.developer ?? dependencies.linking)?.companies;
   if (bindings === undefined || dependencies.githubBindings !== undefined || companies === undefined) return dependencies;
   return { ...dependencies, githubBindings: bindings, companies };
-}
-
-/** The two dedicated read contracts have no transport request ID in their domain body. */
-function serverReadJson(value: unknown, statusCode = 200) {
-  return { statusCode, headers: { "content-type": "application/json", "cache-control": "private, no-store" }, body: JSON.stringify(value) };
 }

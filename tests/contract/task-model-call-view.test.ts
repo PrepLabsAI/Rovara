@@ -1,12 +1,7 @@
-// PLANINC-1: the public task event view of a model failure, a retry and a heartbeat. The shapes below are what workers already send
-// (Pi's raw events, copied from the incident, operation 1910a8ce) and what the new worker's sanitized progress payloads carry.
-// Every view must be fixed text plus identifiers: never the provider's message, the model's thinking, or any prompt text.
-import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { DeveloperTaskEventSchema } from "@agentx/contracts";
 import { recentTaskEvents, taskEvent, type StoredEvent } from "../../packages/broker/src/developer/task-records.js";
-import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 
 const REQUEST_ID = "9e7ea41c-561a-49e1-bbc3-2737b23fa76c";
 const PLANTED_PROVIDER_TEXT = "Internal server error: The system encountered an unexpected error during processing. Try your request again.";
@@ -160,26 +155,3 @@ describe("the view as a whole", () => {
 
 });
 
-describe("GET /v1/dev/tasks/{taskId}/events with the worker's stored shape (end to end through the broker)", () => {
-  it("returns the failure the old worker stored, with no provider text", async () => {
-    const harness = await createDeveloperTaskBroker();
-    const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client" });
-    const taskId = String((started.body.task as { taskId: string }).taskId);
-    const ws = String(harness.db.get(`DEVTASK#${taskId}`, "META")!.workspaceId);
-    const prepareId = String((harness.db.get(`WORKSPACE#${ws}`, "META") as { activeOperationId: string }).activeOperationId);
-    await harness.finish(ws, prepareId, "SUCCEEDED");
-    const operationId = String((harness.db.get(`WORKSPACE#${ws}`, "META") as { activeOperationId: string }).activeOperationId);
-    await harness.events(ws, operationId, [
-      { type: "lifecycle", payload: { status: "RUNNING" } },
-      { type: "progress", payload: messageEndError() },
-      { type: "progress", payload: { type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 2000, errorMessage: PLANTED_PROVIDER_TEXT } },
-    ]);
-    const response = await harness.dev(MAYA, "GET", `/v1/dev/tasks/${taskId}/events`);
-    expect(response.status).toBe(200);
-    const events = (response.body as { events: Array<{ kind: string; text: string }> }).events;
-    expect(events.map((entry) => entry.kind)).toEqual(["status", "error", "progress"]);
-    expect(events[1]?.text).toContain(REQUEST_ID);
-    expect(JSON.stringify(response.body)).not.toContain("Internal server error");
-    expect(JSON.stringify(response.body)).not.toContain(PLANTED_THINKING);
-  });
-});

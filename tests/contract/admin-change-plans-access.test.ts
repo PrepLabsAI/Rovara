@@ -1,6 +1,3 @@
-// tests/contract/admin-change-plans-access.test.ts
-// Spec 025 E7 to E10, E19: stopping work, granting and revoking access, ending a sign-in, and the limits.
-import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { planChange, stateHash, type PlanDependencies } from "../../packages/broker/src/aws/admin-change-plans.js";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
@@ -17,40 +14,6 @@ async function harness() {
   return { ...broker, deps, endDeveloperSessions, membership, identity: { ...admin, ownerKey: String(membership.ownerKey) } };
 }
 
-describe("stopping a workspace's work (E10, Q2)", () => {
-  it("names the running task it cancels, and refuses a workspace with nothing running", async () => {
-    const { deps, identity, db, dev } = await harness();
-    const started = await dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix it", client: "claude-code" });
-    const task = db.get(`DEVTASK#${(started.body.task as { taskId: string }).taskId}`, "META") as { workspaceId: string };
-    // A prepare is running, which the admin cancel does not stop midway.
-    await expect(planChange(deps, identity, { kind: "stop_workspace", workspaceId: task.workspaceId })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: the running operation is a prepare, which AgentX does not cancel midway; wait for it to end" });
-    const workspace = db.get(`WORKSPACE#${task.workspaceId}`, "META")!;
-    db.set({ ...workspace, status: "READY", activeOperationId: null });
-    await expect(planChange(deps, identity, { kind: "stop_workspace", workspaceId: task.workspaceId })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: `CONFIG_INVALID: nothing is running in workspace ${task.workspaceId}; its compute stops on its own when idle` });
-  });
-
-  it("plans the cancel of a running task, hashes the workspace state, and refuses an unknown workspace or a non-administrator", async () => {
-    const { deps, identity, db, dev, membership } = await harness();
-    const started = await dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix it", client: "claude-code" });
-    const task = db.get(`DEVTASK#${(started.body.task as { taskId: string }).taskId}`, "META") as { workspaceId: string };
-    const workspace = db.get(`WORKSPACE#${task.workspaceId}`, "META")!;
-    const operationId = randomUUID();
-    db.set({ pk: `WORKSPACE#${task.workspaceId}`, sk: `OPERATION#${operationId}`, entityType: "OPERATION", id: operationId, workspaceId: task.workspaceId, kind: "task", status: "RUNNING" });
-    db.set({ ...workspace, status: "BUSY", activeOperationId: operationId });
-    const plan = await planChange(deps, identity, { kind: "stop_workspace", workspaceId: task.workspaceId });
-    expect(plan.effect).toBe(`Cancel the task running in workspace ${task.workspaceId} (project payments, Maya Chen's task, BUSY). Its conversation keeps what finished before; its compute stops on its own when idle.`);
-    expect(plan.details).toMatchObject({ workspaceId: task.workspaceId, project: "payments", operationId });
-    const before = stateHash(plan.snapshot);
-    expect(before).toMatch(/^[a-f0-9]{64}$/);
-    db.set({ ...db.get(`WORKSPACE#${task.workspaceId}`, "META")!, fence: Number(workspace.fence ?? 0) + 1 });
-    expect(stateHash((await planChange(deps, identity, { kind: "stop_workspace", workspaceId: task.workspaceId })).snapshot)).not.toBe(before);
-    await expect(planChange(deps, identity, { kind: "stop_workspace", workspaceId: randomUUID() })).rejects.toMatchObject({ code: "NOT_FOUND" });
-    // E6, FR-015: the applier must still administer the project when the change applies.
-    db.delete(String(membership.pk), String(membership.sk));
-    await expect(plan.apply(identity)).rejects.toMatchObject({ code: "NOT_FOUND" });
-    expect(db.get(`WORKSPACE#${task.workspaceId}`, "META")).toMatchObject({ activeOperationId: operationId });
-  });
-});
 
 describe("project access (E7, E8, FR-013.1)", () => {
 

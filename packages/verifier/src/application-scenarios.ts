@@ -6,8 +6,7 @@ import { E2EApplicationApprovalBindingSchema, E2EApplicationBuildSourceManifestS
   E2EApplicationPreparedGroupFactsSchema, E2EAppArtifactRefSchema, E2EAppBuildManifestSchema,
   E2EApplicationPlanIntentSchema, E2EExecutionPlanSchema, E2ERuntimeCapabilityDescriptorSchema, E2EScenarioBundleSchema,
   E2ERegisteredRuntimeSchema, canonicalJson, copyBoundedE2EJsonData, copyBoundedE2ESourceBytes,
-  e2eAppBuildManifestDigest, e2eEffectiveRoundLimits, e2eEffectiveRoundLimitsBeforeRun1, e2ePolicyDigest, e2eRuntimeBindingKey, e2eRuntimeBindingOf, e2eScenarioBundleDigest, selectE2EApplicationExecutionPlan,
-  projectE2EApplicationPortableSelection, validateE2EAppBuildBinding, verifyE2ESourceSnapshot, E2EApplicationPortableProjectionSchema,
+  e2eAppBuildManifestDigest, e2eEffectiveRoundLimits, e2eEffectiveRoundLimitsBeforeRun1, e2ePolicyDigest, e2eRuntimeBindingKey, e2eRuntimeBindingOf, e2eScenarioBundleDigest,   validateE2EAppBuildBinding, verifyE2ESourceSnapshot, E2EApplicationPortableProjectionSchema,
   E2EApplicationExecutionAdmissionSchema, E2EApplicationGroupAdmissionSchema, E2ERoundSchema, E2ERunBindingSchema, E2EAgentTraceFileSchema, E2E_AGENT_TRACE_FILE_MAX_BYTES,
   type CandidateManifest, type E2EApplicationApprovalBinding, type E2EApplicationBuildSourceManifest,
   type E2EApplicationBuildSourceRef, type E2EApplicationCliHostDescriptor, type E2EApplicationCompilationContext,
@@ -16,6 +15,7 @@ import { E2EApplicationApprovalBindingSchema, E2EApplicationBuildSourceManifestS
   type E2EApplicationPortableProjection, type E2EApplicationGroupAdmission, type E2ERound, type E2ERunBinding,
   type E2EApplicationExecutionAdmission,
   type E2ERegisteredRuntime, type E2EScenario, type E2EScenarioBundle, type E2ESourceSnapshot, type E2EPolicy } from "@agentx/contracts";
+import { selectE2EApplicationExecutionPlan, projectE2EApplicationPortableSelection } from "@agentx/contracts/e2e-execution-plan";
 import { compileE2EScenarios } from "./scenarios.js";
 
 export type { E2EApplicationCompilationContext };
