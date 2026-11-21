@@ -3,6 +3,7 @@
 // Off, consumers keep their legacy exports exactly (each export checks for undefined and builds today's handler).
 // The token is read by the consumer's own role (agentx/<env>/slack-workspaces/<company>/<team>, 18a's grants), always through the team's binding; the install's team stays
 // on the legacy path in every consumer (slack-company-split.ts), so its token, notices and checks are today's.
+import { installTeamOnLegacyPath } from "./slack-company-split.js";
 import { GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
 import { QueryCommand } from "@aws-sdk/lib-dynamodb";
 import type { DocumentStore } from "@agentx/contracts";
@@ -18,8 +19,10 @@ const ENVIRONMENT = /^[a-z][a-z0-9-]{0,31}$/u;
 const PROJECT_NAME_MAX = 200;
 
 export interface SlackCompanyWiring {
-  /** The install's own team: always the legacy path. */
+  /** The install's own team: the legacy path while its workspace binding names the built-in company (`installOnLegacy`). */
   legacyTeamId: string;
+  /** #1300: whether the install's team is on the legacy path now (installTeamOnLegacyPath): false once an operator moved its binding to a named company. */
+  installOnLegacy: () => Promise<boolean>;
   workspaces: SlackWorkspaceAccess & Pick<SlackWorkspaceTokens, "tokenForCompany">;
   companies?: CompanyMembershipReader;
   /** Drop this process's cached token for a removed workspace (#836's verified removal). */
@@ -91,6 +94,7 @@ export function slackCompanyDependenciesFromEnvironment(env: NodeJS.ProcessEnv, 
   try { origin = clients.linkOrigin === undefined ? undefined : new URL(clients.linkOrigin).origin; } catch { origin = undefined; }
   return {
     legacyTeamId,
+    installOnLegacy: installTeamOnLegacyPath((team) => bindings.companyOf(team), legacyTeamId),
     forget: (teamId) => tokens.forget?.(teamId),
     ...(signInTable === "" ? {} : { companies: companyMembershipFromDynamo(clients.documentClient, signInTable) }),
     workspaces: {

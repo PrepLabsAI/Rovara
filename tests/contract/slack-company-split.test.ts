@@ -5,7 +5,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { slackTokens } from "../../packages/testing/src/channel/slack-world.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { companyThenInstallLinkCodes, installAdapterLinkCodes, slackCompanyServes, slackRequestTeam, withoutSlackCompanyMode } from "../../packages/broker/src/aws/slack-company-split.js";
+import { companyThenInstallLinkCodes, installAdapterLinkCodes, installTeamOnLegacyPath, slackCompanyServes, slackRequestTeam, splitBySlackIngressTeam, splitBySlackTeam, withoutSlackCompanyMode } from "../../packages/broker/src/aws/slack-company-split.js";
 import { issueLinkCode } from "../../packages/broker/src/aws/channel-links.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
@@ -213,4 +213,46 @@ describe("the broker's split (golden)", () => {
   });
 
   it("keeps randomUUID untouched (sanity for the id scrub)", () => { expect(randomUUID()).toMatch(/^[0-9a-f-]{36}$/u); });
+});
+
+describe("#1300: the install's team follows its workspace binding", () => {
+  const INSTALL = "T0INSTALL0", NAMED = "org_aaaaaaaaaaaaaaaaaaaa";
+  it("is on the legacy path only while its binding names the built-in company; read once a minute; unreadable is not the legacy path", async () => {
+    let at = 0; let company: string | undefined = IMPLICIT_COMPANY_ID; let fail = false;
+    const companyOf = vi.fn(async () => { if (fail) throw new Error("table down"); return company; });
+    const onLegacy = installTeamOnLegacyPath(companyOf, INSTALL, () => at);
+    expect(await onLegacy()).toBe(true);
+    company = NAMED;
+    expect(await onLegacy()).toBe(true);
+    expect(companyOf).toHaveBeenCalledTimes(1);
+    at = 60_000;
+    expect(await onLegacy()).toBe(false);
+    fail = true; at = 120_000;
+    expect(await onLegacy()).toBe(false);
+    // A failed read is not kept: the next request reads again.
+    fail = false; company = IMPLICIT_COMPANY_ID;
+    expect(await onLegacy()).toBe(true);
+    expect(companyOf).toHaveBeenCalledTimes(4);
+    expect(companyOf).toHaveBeenCalledWith(INSTALL);
+  });
+
+  it("the broker's split: the install's team takes the company handler once moved; no team at all stays legacy; absent, today's split", async () => {
+    const legacy = vi.fn(async () => "legacy"), company = vi.fn(async () => "company");
+    const install = { thread: { teamId: INSTALL } }, other = { thread: { teamId: "T0OTHER000" } }, none = { source: "x" };
+    const moved = splitBySlackTeam(legacy, company, INSTALL, async () => false);
+    expect([await moved(install), await moved(other), await moved(none)]).toEqual(["company", "company", "legacy"]);
+    const kept = splitBySlackTeam(legacy, company, INSTALL, async () => true);
+    expect([await kept(install), await kept(other), await kept(none)]).toEqual(["legacy", "company", "legacy"]);
+    const today = splitBySlackTeam(legacy, company, INSTALL);
+    expect([await today(install), await today(other)]).toEqual(["legacy", "company"]);
+  });
+
+  it("the Slack Lambda's split: the same rule", async () => {
+    const legacy = vi.fn(async () => "legacy"), company = vi.fn(async () => "company");
+    const install = { teamId: INSTALL }, none = {};
+    const moved = splitBySlackIngressTeam(legacy, company, INSTALL, async () => false);
+    expect([await moved(install), await moved(none)]).toEqual(["company", "legacy"]);
+    const kept = splitBySlackIngressTeam(legacy, company, INSTALL, async () => true);
+    expect([await kept(install), await kept(none)]).toEqual(["legacy", "legacy"]);
+  });
 });
