@@ -6,7 +6,7 @@ import {
   ADMIN_CHANGE_EFFECT_MAX, AgentXNameSchema, CredentialRegistrationSchema, SlackChannelIdSchema, WorkspaceInstanceSchema, agentXError, developerTaskPolicy,
   redactSecrets, redactText, workspaceRecordFields,
   type AdminChangeInput, type AdminChangeKind, type ChannelByNameRequest, type ConfirmationMethod, type ChannelByNameResponse, type ProjectDefinition,
-  SLACK_CHANNEL, channelBindingKey, channelBindingPartition, channelBindingSortPrefix,
+  SLACK_CHANNEL, channelBindingPartition, channelBindingSortPrefix,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { chatGptSettingsOf, readChatGptSettingsRecord, writeChatGptSettings } from "../chatgpt/settings.js";
@@ -27,6 +27,8 @@ export type ReviewedChannelBinding = { projectName: string; updatedAt: string } 
 
 export interface AdminChangeHandlers {
   requireAdministrator(identity: AuthenticatedIdentity, project: string): Promise<void>;
+  /** The same company-aware binding read used by bind/unbind execution. */
+  readChannelBinding(teamId: string, channelId: string): Promise<Exclude<ReviewedChannelBinding, null> | undefined>;
   bindChannel(identity: AuthenticatedIdentity, teamId: string, channelId: string, project: string, reviewed?: ReviewedChannelBinding): Promise<Record<string, unknown>>;
   unbindChannel(identity: AuthenticatedIdentity, teamId: string, channelId: string, reviewed?: ReviewedChannelBinding): Promise<Record<string, unknown>>;
   /**
@@ -169,7 +171,7 @@ const teamOf = (deps: PlanDependencies): string => {
   return deps.reads.slackTeamId;
 };
 const bindingOf = async (deps: PlanDependencies, teamId: string, channelId: string) => {
-  const item = await getStateItem(deps.reads, channelBindingKey({ channel: SLACK_CHANNEL, tenant: teamId, space: channelId }));
+  const item = await deps.handlers.readChannelBinding(teamId, channelId);
   return typeof item?.projectName === "string" ? { projectName: item.projectName, updatedAt: typeof item.updatedAt === "string" ? item.updatedAt : "" } : undefined;
 };
 /** "#name" for a named channel, the ID otherwise. */

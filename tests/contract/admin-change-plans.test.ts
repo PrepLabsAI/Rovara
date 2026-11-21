@@ -50,7 +50,7 @@ describe("binding and unbinding (E7, E12)", () => {
     const previous = { projectName: "ledger", updatedAt: "2026-11-20T12:00:00.000Z" };
     const membership = db.find((item) => item.entityType === "MEMBERSHIP" && item.role === "administrator")[0]!;
     db.set({ ...membership, sk: "PROJECT#ledger", projectName: "ledger" });
-    db.set({ pk: `SLACK_BINDING#${SLACK_TEAM}`, sk: "CHANNEL#C0LEDGER01", ...previous });
+    db.set({ pk: `SLACK_BINDING#${SLACK_TEAM}`, sk: "CHANNEL#C0LEDGER01", teamId: SLACK_TEAM, channelId: "C0LEDGER01", ...previous });
     const replacing = await planChange(deps, identity, input);
     expect(replacing.effect).toContain("It is bound to ledger today; its existing threads keep their workspaces.");
     expect(replacing.details).toEqual({ channelId: input.channel, project: "payments", currentProject: "ledger", revision: 1 });
@@ -76,7 +76,7 @@ describe("binding and unbinding (E7, E12)", () => {
       expect(plan.effect).toContain("Test the replacement first; this plan does not test replacement routing.");
     }
     expect(unbind.effect).toContain("Retained workspaces do not establish ongoing task permission.");
-    db.set({ pk: `SLACK_BINDING#${SLACK_TEAM}`, sk: "CHANNEL#C0LEDGER01", projectName: "payments", updatedAt: previous.updatedAt });
+    db.set({ pk: `SLACK_BINDING#${SLACK_TEAM}`, sk: "CHANNEL#C0LEDGER01", teamId: SLACK_TEAM, channelId: "C0LEDGER01", projectName: "payments", updatedAt: previous.updatedAt });
     await expect(planChange(deps, identity, input)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     await expect(planChange(deps, identity, { kind: "unbind_channel", channel: "C0UNBOUND01" })).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
