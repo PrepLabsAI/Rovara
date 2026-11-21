@@ -59,6 +59,8 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
       ["checks: npm run typecheck:all", undefined, 15, "npm run typecheck:all"],
       ["checks: npm run lint", "needs.plan.outputs.lint == 'all'", 15, "npm run lint"],
       ["checks: lint the changed files", "needs.plan.outputs.lint == 'changed'", 15, expect.stringContaining('node scripts/lint-shards.ts --files "$RUNNER_TEMP/changed.txt"')],
+      // #1294: the complexity ratchet, on every run that has checks (it parses only, a few seconds).
+      ["checks: complexity ratchet", undefined, 5, "node scripts/complexity.ts check"],
     ]);
     // typecheck:all runs tsc -b itself, so a separate `npm run typecheck` step only repeated it; the release check is its own job (below).
     expect(quick.steps.some((step) => step.run === "npm run typecheck")).toBe(false);
