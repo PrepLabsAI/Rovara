@@ -9,7 +9,7 @@ export interface GateVerdict { ok: boolean; reason: string }
 export type PlanOutputs = Readonly<Record<string, string | undefined>>;
 
 /** The jobs `local` judges besides `plan`, in the order they are reported. */
-export const GATED_JOBS = ["quick", "build", "test", "linux-runtime", "ci-mode", "release-check"] as const;
+export const GATED_JOBS = ["quick", "typecheck", "build", "test", "linux-runtime", "ci-mode", "release-check"] as const;
 
 /** The shard list of a run that executes the whole suite (scripts/ci-plan.ts FULL_SHARDS). */
 export const FULL_SHARD_LIST = "[1,2,3,4,5,6,7,8]";
@@ -47,6 +47,7 @@ export function expectedResults(plan: PlanOutputs, event?: string): { expected: 
   return {
     expected: {
       quick: docsOnly === "true" ? "skipped" : "success",
+      typecheck: docsOnly === "true" ? "skipped" : "success",
       build: tests === "none" ? "skipped" : "success",
       test: tests === "none" ? "skipped" : "success",
       "linux-runtime": linux === "true" ? "success" : "skipped",
