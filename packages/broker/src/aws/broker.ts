@@ -1250,6 +1250,86 @@ async function routeSetupApproval(dependencies: AwsBrokerDependencies, request: 
   return json({ proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, decision: approvalInput.decision, duplicate: false }, request.requestId);
 }
 
+// The hosted Slack orchestrator's /v1/service/* routes (#1315): it authenticates with its IAM role and acts only as a Slack thread owner.
+async function routeServiceRequest(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, request: BrokerHttpRequest, url: URL): Promise<ReturnType<typeof json>> {
+  const serviceUrl = new URL(`/v1${url.pathname.slice("/v1/service".length)}${url.search}`, "https://agentx.invalid");
+  // Spec 052 Task 6: the batch watcher's list is the whole Slack service's, not one thread's.
+  if (request.method === "GET" && serviceUrl.pathname === "/v1/evals/batches/active") {
+    requireSlackServiceRole(dependencies, request);
+    if (dependencies.swebench === undefined) return json({ batches: [], dropped: [] }, request.requestId);
+    return json(await listWatchedBatches(swebenchDependencies(dependencies), async (teamId, channelId) => (await getSlackBinding(dependencies, teamId, channelId))?.projectName), request.requestId);
+  }
+  const identity = await slackServiceIdentity(dependencies, request);
+  if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace") {
+    return json(await ensureThreadWorkspace(dependencies, identity, parseBody(request.body)), request.requestId);
+  }
+  if (request.method === "POST" && serviceUrl.pathname === "/v1/tasks/thread-notes/answered") {
+    return json(await markThreadNoteAnswered(dependencies, identity, parseBody(request.body)), request.requestId);
+  }
+  // Decision 134: a clear small change starts Quick on its own, after the broker's own check of the text.
+  if (request.method === "POST" && serviceUrl.pathname === "/v1/workflows/quick-start") {
+    return json(await startQuickFromIntake(dependencies, tasks, identity, parseBody(request.body)), request.requestId);
+  }
+  // DEC 254zzz79 (3): how this thread's chat and routing model calls are made (the company's AI through the gateway, never Rovara-paid; slack-model-access.ts).
+  if (request.method === "POST" && serviceUrl.pathname === SLACK_MODEL_ACCESS_SERVICE_PATH) {
+    const bindings = createSlackWorkspaceBindings({ client: dependencies.documentClient, tableName: dependencies.tableName, legacyTeamId: dependencies.slackWorkspaceLegacyTeamId });
+    return json(await askSlackModelAccessForIdentity({
+      companyMode: dependencies.workspaces !== undefined || (dependencies as SlackCompanyDependencies).slackInstallTeamOnly !== undefined, companyOf: (team) => bindings.companyOf(team),
+      env: dependencies.slackModelAccess?.env ?? {}, taskTokens: dependencies.slackModelAccess?.taskTokens,
+    }, identity), request.requestId);
+  }
+  // Lead 4 J2: the smart Just answer for a Slack thread (slack-answers.ts). Who may ask and which project is decided there from the verified thread and member, never from the body.
+  if (request.method === "POST" && serviceUrl.pathname === SLACK_ANSWER_SERVICE_PATH) {
+    const view = identity.slack === undefined ? dependencies : await namedInstallTeamView(dependencies, identity.slack.thread.teamId);
+    return json(await askSlackAnswerForIdentity({ company: view, core: view.developer?.coreApp }, identity, parseBody(request.body)), request.requestId);
+  }
+  if (request.method === "POST" && serviceUrl.pathname === "/v1/tasks/comments/answered") {
+    return json(await markCommentAnswered(dependencies, identity, parseBody(request.body)), request.requestId);
+  }
+  if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace/prepare") {
+    return json(await prepareThreadWorkspace(dependencies, identity, parseBody(request.body)), request.requestId);
+  }
+  if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace/close") {
+    return json(await startThreadWorkspaceClose(dependencies, identity, parseBody(request.body)), request.requestId, 202);
+  }
+  if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace/close/complete") {
+    return json(await completeThreadWorkspaceClose(dependencies, identity, parseBody(request.body)), request.requestId);
+  }
+  if (request.method === "GET" && serviceUrl.pathname === "/v1/project/models") {
+    return json(await getProjectModels(dependencies, identity), request.requestId);
+  }
+  if (request.method === "PUT" && serviceUrl.pathname === "/v1/project/model") {
+    return json(await putProjectModel(dependencies, identity, parseBody(request.body)), request.requestId);
+  }
+  if (request.method === "POST" && serviceUrl.pathname === "/v1/evals/swebench") {
+    return json(await startSwebenchRun(swebenchDependencies(dependencies), swebenchSlackContext(dependencies, identity), parseBody(request.body)), request.requestId);
+  }
+  // Spec 052 FR-002 and Task 6: the Slack batch form, and the watcher's thread and posts for one batch.
+  if (request.method === "POST" && serviceUrl.pathname === "/v1/evals/batches") {
+    return json(await startSlackBatch(swebenchDependencies(dependencies), swebenchSlackContext(dependencies, identity), parseBody(request.body)), request.requestId);
+  }
+  const watchedBatch = /^\/v1\/evals\/batches\/([0-9a-f-]{36})\/(thread|watch|drop)$/.exec(serviceUrl.pathname);
+  if (request.method === "POST" && watchedBatch?.[1] && watchedBatch[2]) {
+    const slack = identity.slack;
+    if (!slack) throw agentXError("FORBIDDEN", "Slack thread context is required");
+    const scope = { thread: slack.thread, projectName: slack.binding.projectName };
+    const swebench = swebenchDependencies(dependencies);
+    const body = parseBody(request.body);
+    const answer = watchedBatch[2] === "thread" ? await recordWatchedBatchThread(swebench, scope, watchedBatch[1], body)
+      : watchedBatch[2] === "drop" ? await dropWatchedBatch(swebench, scope, watchedBatch[1], body)
+      : await updateWatchedBatch(swebench, scope, watchedBatch[1], body);
+    return json(answer, request.requestId);
+  }
+  const evalRun = /^\/v1\/evals\/swebench\/([0-9a-f-]{36})$/.exec(serviceUrl.pathname);
+  if (request.method === "GET" && evalRun?.[1]) {
+    const thread = identity.slack?.thread;
+    if (!thread) throw agentXError("FORBIDDEN", "Slack thread context is required");
+    return json({ run: await getSwebenchRunForThread(swebenchDependencies(dependencies), thread, evalRun[1]) }, request.requestId);
+  }
+  return await observeConnectorRoute(request.method, serviceUrl.pathname, () => routeWorkspaceRequest(dependencies, request, serviceUrl, identity));
+}
+
+
 function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBrokerDependencies) {
   // Spec 025: the broker actions the developer task routes call, built once per handler.
   const tasks = developerTaskActions(dependencies);
@@ -1628,83 +1708,7 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
       }
 
       // The hosted Slack orchestrator authenticates with its IAM role and acts only as a Slack thread owner.
-      if (url.pathname.startsWith("/v1/service/")) {
-        const serviceUrl = new URL(`/v1${url.pathname.slice("/v1/service".length)}${url.search}`, "https://agentx.invalid");
-        // Spec 052 Task 6: the batch watcher's list is the whole Slack service's, not one thread's.
-        if (request.method === "GET" && serviceUrl.pathname === "/v1/evals/batches/active") {
-          requireSlackServiceRole(dependencies, request);
-          if (dependencies.swebench === undefined) return json({ batches: [], dropped: [] }, request.requestId);
-          return json(await listWatchedBatches(swebenchDependencies(dependencies), async (teamId, channelId) => (await getSlackBinding(dependencies, teamId, channelId))?.projectName), request.requestId);
-        }
-        const identity = await slackServiceIdentity(dependencies, request);
-        if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace") {
-          return json(await ensureThreadWorkspace(dependencies, identity, parseBody(request.body)), request.requestId);
-        }
-        if (request.method === "POST" && serviceUrl.pathname === "/v1/tasks/thread-notes/answered") {
-          return json(await markThreadNoteAnswered(dependencies, identity, parseBody(request.body)), request.requestId);
-        }
-        // Decision 134: a clear small change starts Quick on its own, after the broker's own check of the text.
-        if (request.method === "POST" && serviceUrl.pathname === "/v1/workflows/quick-start") {
-          return json(await startQuickFromIntake(dependencies, tasks, identity, parseBody(request.body)), request.requestId);
-        }
-        // DEC 254zzz79 (3): how this thread's chat and routing model calls are made (the company's AI through the gateway, never Rovara-paid; slack-model-access.ts).
-        if (request.method === "POST" && serviceUrl.pathname === SLACK_MODEL_ACCESS_SERVICE_PATH) {
-          const bindings = createSlackWorkspaceBindings({ client: dependencies.documentClient, tableName: dependencies.tableName, legacyTeamId: dependencies.slackWorkspaceLegacyTeamId });
-          return json(await askSlackModelAccessForIdentity({
-            companyMode: dependencies.workspaces !== undefined || (dependencies as SlackCompanyDependencies).slackInstallTeamOnly !== undefined, companyOf: (team) => bindings.companyOf(team),
-            env: dependencies.slackModelAccess?.env ?? {}, taskTokens: dependencies.slackModelAccess?.taskTokens,
-          }, identity), request.requestId);
-        }
-        // Lead 4 J2: the smart Just answer for a Slack thread (slack-answers.ts). Who may ask and which project is decided there from the verified thread and member, never from the body.
-        if (request.method === "POST" && serviceUrl.pathname === SLACK_ANSWER_SERVICE_PATH) {
-          const view = identity.slack === undefined ? dependencies : await namedInstallTeamView(dependencies, identity.slack.thread.teamId);
-          return json(await askSlackAnswerForIdentity({ company: view, core: view.developer?.coreApp }, identity, parseBody(request.body)), request.requestId);
-        }
-        if (request.method === "POST" && serviceUrl.pathname === "/v1/tasks/comments/answered") {
-          return json(await markCommentAnswered(dependencies, identity, parseBody(request.body)), request.requestId);
-        }
-        if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace/prepare") {
-          return json(await prepareThreadWorkspace(dependencies, identity, parseBody(request.body)), request.requestId);
-        }
-        if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace/close") {
-          return json(await startThreadWorkspaceClose(dependencies, identity, parseBody(request.body)), request.requestId, 202);
-        }
-        if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace/close/complete") {
-          return json(await completeThreadWorkspaceClose(dependencies, identity, parseBody(request.body)), request.requestId);
-        }
-        if (request.method === "GET" && serviceUrl.pathname === "/v1/project/models") {
-          return json(await getProjectModels(dependencies, identity), request.requestId);
-        }
-        if (request.method === "PUT" && serviceUrl.pathname === "/v1/project/model") {
-          return json(await putProjectModel(dependencies, identity, parseBody(request.body)), request.requestId);
-        }
-        if (request.method === "POST" && serviceUrl.pathname === "/v1/evals/swebench") {
-          return json(await startSwebenchRun(swebenchDependencies(dependencies), swebenchSlackContext(dependencies, identity), parseBody(request.body)), request.requestId);
-        }
-        // Spec 052 FR-002 and Task 6: the Slack batch form, and the watcher's thread and posts for one batch.
-        if (request.method === "POST" && serviceUrl.pathname === "/v1/evals/batches") {
-          return json(await startSlackBatch(swebenchDependencies(dependencies), swebenchSlackContext(dependencies, identity), parseBody(request.body)), request.requestId);
-        }
-        const watchedBatch = /^\/v1\/evals\/batches\/([0-9a-f-]{36})\/(thread|watch|drop)$/.exec(serviceUrl.pathname);
-        if (request.method === "POST" && watchedBatch?.[1] && watchedBatch[2]) {
-          const slack = identity.slack;
-          if (!slack) throw agentXError("FORBIDDEN", "Slack thread context is required");
-          const scope = { thread: slack.thread, projectName: slack.binding.projectName };
-          const swebench = swebenchDependencies(dependencies);
-          const body = parseBody(request.body);
-          const answer = watchedBatch[2] === "thread" ? await recordWatchedBatchThread(swebench, scope, watchedBatch[1], body)
-            : watchedBatch[2] === "drop" ? await dropWatchedBatch(swebench, scope, watchedBatch[1], body)
-            : await updateWatchedBatch(swebench, scope, watchedBatch[1], body);
-          return json(answer, request.requestId);
-        }
-        const evalRun = /^\/v1\/evals\/swebench\/([0-9a-f-]{36})$/.exec(serviceUrl.pathname);
-        if (request.method === "GET" && evalRun?.[1]) {
-          const thread = identity.slack?.thread;
-          if (!thread) throw agentXError("FORBIDDEN", "Slack thread context is required");
-          return json({ run: await getSwebenchRunForThread(swebenchDependencies(dependencies), thread, evalRun[1]) }, request.requestId);
-        }
-        return await observeConnectorRoute(request.method, serviceUrl.pathname, () => routeWorkspaceRequest(dependencies, request, serviceUrl, identity));
-      }
+      if (url.pathname.startsWith("/v1/service/")) return await routeServiceRequest(dependencies, tasks, request, url);
 
       // Lane L12: the core's own /v1/app/* routes, only while the core switch serves (the developer configuration then has `coreApp`). Off, a request on the core's route is refused
       // before anything is read, and one that reached the broker another way goes on exactly as before.
