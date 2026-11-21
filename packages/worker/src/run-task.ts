@@ -753,51 +753,25 @@ async function runTask(
   // The project's Rovara skills for this step (digest-checked, execution lines removed; plan and build only), offered through `read_skill` after the step's own and the meta repo's.
   const rovaraSkills = rovaraSkillFiles(invocation.payload.rovaraSkills, payloadMode);
   const knowledgePropose = createKnowledgePropose({ mode: payloadMode, emit: (proposal) => { void emit("progress", { [KNOWLEDGE_PROPOSALS_FIELD]: [proposal] }).catch(() => undefined); } });
-  let session: PiSessionHandle;
-  if (registered) {
-    session = await openRegisteredWorkspacePiSession(
-      {
-        rootPath: dependencies.rootPath,
-        model: dependencies.model,
-        workflowMode: piMode,
-        conversationId,
-        sessionFile: registered.sessionFile,
-        onDiagnostic,
-        extensionFactories: [toolLoopGuardExtension(loopGuard), ...(planning || reviewing || understanding ? [] : [verification])],
-        ...ruleBases,
-        ...(agentShell === undefined ? {} : { bashOperations: agentShell }),
-        ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
-        ...(fileTools !== undefined ? { fileTools } : localShell ? { localFileTools: true } : {}),
-        ...stepSession,
-        ...(sourceSession === undefined ? {} : { contextTools: sourceSession.contextTools, contextNote: sourceSession.contextNote, ...(sourceSession.contextMcp === undefined ? {} : { contextMcp: sourceSession.contextMcp }) }),
-        ...(answerChannel === undefined ? {} : { answerTools: [answerChannel.tool] }),
-        ...(knowledgeStep === undefined ? {} : { knowledgeStep }),
-        ...(knowledgePropose === undefined ? {} : { proposeTool: knowledgePropose.tool }),
-        ...(rovaraSkills.length === 0 ? {} : { rovaraSkills }),
-        compaction,
-      },
-      dependencies.piAdapter,
-    );
-  } else {
-    session = await createWorkspacePiSession(
-      {
-        rootPath: dependencies.rootPath, model: dependencies.model, workflowMode: piMode, conversationId, onDiagnostic,
-        extensionFactories: [toolLoopGuardExtension(loopGuard), ...(planning || reviewing || understanding ? [] : [verification])],
-        ...ruleBases,
-        ...(agentShell === undefined ? {} : { bashOperations: agentShell }),
-        ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
-        ...(fileTools !== undefined ? { fileTools } : localShell ? { localFileTools: true } : {}),
-        ...stepSession,
-        ...(sourceSession === undefined ? {} : { contextTools: sourceSession.contextTools, contextNote: sourceSession.contextNote, ...(sourceSession.contextMcp === undefined ? {} : { contextMcp: sourceSession.contextMcp }) }),
-        ...(answerChannel === undefined ? {} : { answerTools: [answerChannel.tool] }),
-        ...(knowledgeStep === undefined ? {} : { knowledgeStep }),
-        ...(knowledgePropose === undefined ? {} : { proposeTool: knowledgePropose.tool }),
-        ...(rovaraSkills.length === 0 ? {} : { rovaraSkills }),
-        compaction,
-      },
-      dependencies.piAdapter,
-    );
-  }
+  // The session's options are the same whether the conversation is new or reopened; a reopened one also names its session file.
+  const sessionOptions = {
+    rootPath: dependencies.rootPath, model: dependencies.model, workflowMode: piMode, conversationId, onDiagnostic,
+    extensionFactories: [toolLoopGuardExtension(loopGuard), ...(planning || reviewing || understanding ? [] : [verification])],
+    ...ruleBases,
+    ...(agentShell === undefined ? {} : { bashOperations: agentShell }),
+    ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
+    ...(fileTools !== undefined ? { fileTools } : localShell ? { localFileTools: true } : {}),
+    ...stepSession,
+    ...(sourceSession === undefined ? {} : { contextTools: sourceSession.contextTools, contextNote: sourceSession.contextNote, ...(sourceSession.contextMcp === undefined ? {} : { contextMcp: sourceSession.contextMcp }) }),
+    ...(answerChannel === undefined ? {} : { answerTools: [answerChannel.tool] }),
+    ...(knowledgeStep === undefined ? {} : { knowledgeStep }),
+    ...(knowledgePropose === undefined ? {} : { proposeTool: knowledgePropose.tool }),
+    ...(rovaraSkills.length === 0 ? {} : { rovaraSkills }),
+    compaction,
+  };
+  const session: PiSessionHandle = registered
+    ? await openRegisteredWorkspacePiSession({ ...sessionOptions, sessionFile: registered.sessionFile }, dependencies.piAdapter)
+    : await createWorkspacePiSession(sessionOptions, dependencies.piAdapter);
   try {
     // Written before the prompt, so a crash mid-turn orphans an empty session rather than the transcript.
     if (registered) await conversations.recordTurn(conversationId, dependencies.model);
@@ -1536,102 +1510,12 @@ async function runTask(
       } else {
       assertWorkspaceSafe();
       diffAttempted = true;
-      const { changed: dirty } = await publishWorkspaceDiff(dependencies.rootPath, artifactSink);
-      await publishEvidence();
-      await publishChecks();
-      // With a before state, "changed" means this turn changed the tree (a revert counts); without
-      // one, or when the after state cannot be read, a non-empty diff counts as a change.
-      let changed = dirty;
-      if (before !== undefined) {
-        try {
-          changed = await workspaceFingerprint(dependencies.rootPath) !== before;
-        } catch {
-          await emit("progress", {
-            message: "AgentX could not record the workspace state after this task; it judged the task by the final diff only.",
-          });
-        }
-      }
-      const noChange = fileChanges.noChangeFailure(changed);
-      if (noChange !== undefined && !completedRetainedPrefix) throw noChange;
-      const warning = fileChanges.emptyDiffWarning(changed);
-      if (warning !== undefined) await emit("progress", { message: warning });
-      // The use report as the step ends: which files it changed now overlap which units' areas (the broker keeps the last one per operation).
-      if (knowledgeStep !== undefined) await emit("progress", { [KNOWLEDGE_USE_REPORT_FIELD]: knowledgeStep.useReport() }).catch(() => undefined);
-      outcome = "SUCCEEDED";
-      const checks = compactCheckReport(finalChecks());
-      const workflowRepositories = candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase, candidateSweep);
-      const workflowCandidateRepositories = invocation.payload.workflowMode === "IMPLEMENT"
-        ? await readCandidateRepositories(workflowRepositories)
-        : undefined;
-      let workflowCandidateSourceExport: CommittedCandidateSourceExport | undefined;
-      if (workflowCandidateRepositories !== undefined) {
-        try {
-          workflowCandidateSourceExport = await readCommittedCandidateSourceExport(workflowRepositories, workflowCandidateRepositories);
-        } catch {
-          // The ordinary candidate identity may include an uncommitted index tree. That is valid for
-          // existing workflow checks, but it cannot be promoted to a committed source export.
-          // The broker keeps required E2E verification UNKNOWN when this first-party export is absent.
-        }
-      }
-      // A coding run that left the code as the task started has nothing to check or publish: the owner is told so.
-      if (workflowCandidateRepositories !== undefined && await candidateUnchangedSinceBase(workflowRepositories, workflowCandidateRepositories)) {
-        // The run's findings go with the refusal (redacted and bounded here, before they leave the worker): the commands the agent ran, what they printed and its own conclusion, so a request that
-        // needed no change (a question, a check) is answered. The broker shows them; nothing else about the refusal changes.
-        throw Object.assign(agentXError("CONFIG_INVALID", WORKFLOW_NO_CODE_CHANGE_MESSAGE), { noChangeFindings: findings.build() });
-      }
-      // The application build source is computed from the exact committed export, through the safe git path, and only for a run that changed the code
-      // (one that left it as it was is refused above). It never decides the export: a candidate the build source cannot hold still exports, and the
-      // reason travels so application dispatch can refuse with it.
-      let workflowCandidateBuildSource: CandidateBuildSourceExport | undefined;
-      if (workflowCandidateSourceExport !== undefined) {
-        const exportedRepository = workflowCandidateSourceExport.repositories[0];
-        workflowCandidateBuildSource = await exportCandidateBuildSourceInScratch({ signal: verificationStop.signal, candidate: workflowCandidateSourceExport.candidate,
-          repositoryRoot: workflowRepositories.find((repository) => repository.repositoryId === exportedRepository?.repositoryId)?.directory ?? "" });
-      }
-      // The unchanged code, for the baseline round of an approved application plan (owner decision D2), only when the broker asked for it. It never decides the export: a base that cannot
-      // be exported is reported with its reason, and only the operation's own cancellation throws.
-      let workflowBaselineSource: BaselineSourceExport | undefined;
-      if (invocation.payload.workflowE2EBaselineSource === true && workflowCandidateSourceExport !== undefined) {
-        workflowBaselineSource = await exportBaselineSource({ signal: verificationStop.signal, repositories: workflowRepositories });
-      }
-      if (workflowDependencies !== undefined) {
-        if (workflowCandidateRepositories === undefined) throw agentXError("OPERATION_INTERRUPTED", "the final work breakdown candidate could not be recorded");
-        const terminalByItem = new Map((workflowDependencies.resumeProgress ?? []).map((progress) => [progress.itemId, progress] as const));
-        for (const progress of workflowDependencyProgressEvents) {
-          if (progress.state !== "STARTED") terminalByItem.set(progress.itemId, progress);
-        }
-        const itemResults = taskGraphOrder(workflowDependencies.graph).map((itemId) => terminalByItem.get(itemId)).filter((item): item is WorkItemProgressV1 => item !== undefined);
-        workflowDependenciesResult = WorkflowDependencyResultSchema.parse({
-          schemaVersion: 1,
-          taskId: workflowDependencies.graph.taskId,
-          graphDigest: workflowDependencies.approval.graphDigest,
-          runId: workflowDependencies.approval.runId,
-          operationId: invocation.operationId,
-          workflowRevision: workflowDependencies.approval.workflowRevision,
-          status: "SUCCEEDED",
-          items: itemResults,
-          candidateDigest: createCandidateManifest(workflowCandidateRepositories).digest,
-          at: new Date().toISOString(),
-        });
-      }
-      await emit("result", {
-        status: "SUCCEEDED",
-        conversationId,
-        sessionFile: "agent-sessions/[server-generated]",
-        checks,
-        ...(workflowCandidateRepositories === undefined ? {} : { workflowCandidateRepositories }),
-        ...(workflowDependenciesResult === undefined ? {} : { workflowDependenciesResult }),
-        ...(workflowCandidateRepositories === undefined || reportedChecksCandidate === undefined ? {} : { workflowCheckCandidateRepositories: reportedChecksCandidate }),
+      taskResult = await finishImplement({
+        readReportedChecksCandidate: () => reportedChecksCandidate, invocation, dependencies, canonicalRoot, manifest, emit, artifactSink, publishEvidence, publishChecks,
+        verificationStop, conversationId, registered, candidateSweep, before, fileChanges, completedRetainedPrefix, knowledgeStep, finalChecks, findings, workflowDependencies,
+        workflowDependencyProgressEvents,
       });
-      taskResult = {
-        conversationId, reopened: registered !== undefined, checks,
-        ...(workflowCandidateRepositories === undefined ? {} : { workflowCandidateRepositories }),
-        ...(workflowCandidateSourceExport === undefined ? {} : { workflowCandidateSourceExport }),
-        ...(workflowCandidateBuildSource === undefined ? {} : { workflowCandidateBuildSource }),
-        ...(workflowBaselineSource === undefined ? {} : { workflowBaselineSource }),
-        ...(workflowDependenciesResult === undefined ? {} : { workflowDependenciesResult }),
-        ...(workflowCandidateRepositories === undefined || reportedChecksCandidate === undefined ? {} : { workflowCheckCandidateRepositories: reportedChecksCandidate }),
-      };
+      outcome = "SUCCEEDED";
       }
     } catch (error) {
       workspaceUnsafe = isWorkspaceUnsafe(error) || currentWorkspaceSafety()?.unsafe === true;
@@ -2321,6 +2205,132 @@ async function finishReview(stage: FinishReviewContext): Promise<TaskInvocationR
     ...(secondReview === undefined ? {} : { workflowSecondReview: secondReview }),
   });
   return { conversationId, reopened: registered !== undefined, workflowMode: "REVIEW", workflowCandidateRepositories: beforeReview.repositories, workflowReviews: reports, ...(secondReview === undefined ? {} : { workflowSecondReview: secondReview }), ...(specReviewResult === undefined ? {} : { specReview: specReviewResult }) };
+}
+
+/** #1303: what the IMPLEMENT ending reads from the run around it. The checks' candidate can still change while checks run: `readReportedChecksCandidate`, never a copy. */
+interface FinishImplementContext extends FinishContext {
+  readReportedChecksCandidate: () => CandidateRepository[] | undefined;
+  publishChecks: () => Promise<void>;
+  candidateSweep: ((directory: string) => Promise<void>) | undefined;
+  before: string | undefined;
+  fileChanges: FileChangeAttempts;
+  completedRetainedPrefix: boolean;
+  knowledgeStep: ReturnType<typeof createKnowledgeStep>;
+  finalChecks: () => CheckReport;
+  findings: RunFindings;
+  workflowDependencies: TaskRunInvocation["payload"]["workflowDependencies"];
+  workflowDependencyProgressEvents: readonly WorkItemProgressV1[];
+}
+
+/**
+ * The end of a coding run (IMPLEMENT and the other modes that change code, #1303: moved out of runTask unchanged). It publishes the diff, the evidence and the
+ * checks, refuses a run that changed nothing, records the candidate and its exports, and closes the approved work breakdown. runTask has already marked the diff
+ * as attempted (its error path must not publish it twice) and records the outcome after this returns: an error here is still the run's failure.
+ */
+async function finishImplement(stage: FinishImplementContext): Promise<TaskInvocationResult> {
+  const {
+    readReportedChecksCandidate, invocation, dependencies, canonicalRoot, manifest, emit, artifactSink, publishEvidence, publishChecks, verificationStop, conversationId,
+    registered, candidateSweep, before, fileChanges, completedRetainedPrefix, knowledgeStep, finalChecks, findings, workflowDependencies, workflowDependencyProgressEvents,
+  } = stage;
+  // Only this ending's value: runTask's error path builds its own (UNKNOWN) one.
+  let workflowDependenciesResult: WorkflowDependencyResult | undefined;
+  const { changed: dirty } = await publishWorkspaceDiff(dependencies.rootPath, artifactSink);
+  await publishEvidence();
+  await publishChecks();
+  // With a before state, "changed" means this turn changed the tree (a revert counts); without
+  // one, or when the after state cannot be read, a non-empty diff counts as a change.
+  let changed = dirty;
+  if (before !== undefined) {
+    try {
+      changed = await workspaceFingerprint(dependencies.rootPath) !== before;
+    } catch {
+      await emit("progress", {
+        message: "AgentX could not record the workspace state after this task; it judged the task by the final diff only.",
+      });
+    }
+  }
+  const noChange = fileChanges.noChangeFailure(changed);
+  if (noChange !== undefined && !completedRetainedPrefix) throw noChange;
+  const warning = fileChanges.emptyDiffWarning(changed);
+  if (warning !== undefined) await emit("progress", { message: warning });
+  // The use report as the step ends: which files it changed now overlap which units' areas (the broker keeps the last one per operation).
+  if (knowledgeStep !== undefined) await emit("progress", { [KNOWLEDGE_USE_REPORT_FIELD]: knowledgeStep.useReport() }).catch(() => undefined);
+  const checks = compactCheckReport(finalChecks());
+  const workflowRepositories = candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase, candidateSweep);
+  const workflowCandidateRepositories = invocation.payload.workflowMode === "IMPLEMENT"
+    ? await readCandidateRepositories(workflowRepositories)
+    : undefined;
+  let workflowCandidateSourceExport: CommittedCandidateSourceExport | undefined;
+  if (workflowCandidateRepositories !== undefined) {
+    try {
+      workflowCandidateSourceExport = await readCommittedCandidateSourceExport(workflowRepositories, workflowCandidateRepositories);
+    } catch {
+      // The ordinary candidate identity may include an uncommitted index tree. That is valid for
+      // existing workflow checks, but it cannot be promoted to a committed source export.
+      // The broker keeps required E2E verification UNKNOWN when this first-party export is absent.
+    }
+  }
+  // A coding run that left the code as the task started has nothing to check or publish: the owner is told so.
+  if (workflowCandidateRepositories !== undefined && await candidateUnchangedSinceBase(workflowRepositories, workflowCandidateRepositories)) {
+    // The run's findings go with the refusal (redacted and bounded here, before they leave the worker): the commands the agent ran, what they printed and its own conclusion, so a request that
+    // needed no change (a question, a check) is answered. The broker shows them; nothing else about the refusal changes.
+    throw Object.assign(agentXError("CONFIG_INVALID", WORKFLOW_NO_CODE_CHANGE_MESSAGE), { noChangeFindings: findings.build() });
+  }
+  // The application build source is computed from the exact committed export, through the safe git path, and only for a run that changed the code
+  // (one that left it as it was is refused above). It never decides the export: a candidate the build source cannot hold still exports, and the
+  // reason travels so application dispatch can refuse with it.
+  let workflowCandidateBuildSource: CandidateBuildSourceExport | undefined;
+  if (workflowCandidateSourceExport !== undefined) {
+    const exportedRepository = workflowCandidateSourceExport.repositories[0];
+    workflowCandidateBuildSource = await exportCandidateBuildSourceInScratch({ signal: verificationStop.signal, candidate: workflowCandidateSourceExport.candidate,
+      repositoryRoot: workflowRepositories.find((repository) => repository.repositoryId === exportedRepository?.repositoryId)?.directory ?? "" });
+  }
+  // The unchanged code, for the baseline round of an approved application plan (owner decision D2), only when the broker asked for it. It never decides the export: a base that cannot
+  // be exported is reported with its reason, and only the operation's own cancellation throws.
+  let workflowBaselineSource: BaselineSourceExport | undefined;
+  if (invocation.payload.workflowE2EBaselineSource === true && workflowCandidateSourceExport !== undefined) {
+    workflowBaselineSource = await exportBaselineSource({ signal: verificationStop.signal, repositories: workflowRepositories });
+  }
+  if (workflowDependencies !== undefined) {
+    if (workflowCandidateRepositories === undefined) throw agentXError("OPERATION_INTERRUPTED", "the final work breakdown candidate could not be recorded");
+    const terminalByItem = new Map((workflowDependencies.resumeProgress ?? []).map((progress) => [progress.itemId, progress] as const));
+    for (const progress of workflowDependencyProgressEvents) {
+      if (progress.state !== "STARTED") terminalByItem.set(progress.itemId, progress);
+    }
+    const itemResults = taskGraphOrder(workflowDependencies.graph).map((itemId) => terminalByItem.get(itemId)).filter((item): item is WorkItemProgressV1 => item !== undefined);
+    workflowDependenciesResult = WorkflowDependencyResultSchema.parse({
+      schemaVersion: 1,
+      taskId: workflowDependencies.graph.taskId,
+      graphDigest: workflowDependencies.approval.graphDigest,
+      runId: workflowDependencies.approval.runId,
+      operationId: invocation.operationId,
+      workflowRevision: workflowDependencies.approval.workflowRevision,
+      status: "SUCCEEDED",
+      items: itemResults,
+      candidateDigest: createCandidateManifest(workflowCandidateRepositories).digest,
+      at: new Date().toISOString(),
+    });
+  }
+  const checksCandidateAtResult = readReportedChecksCandidate();
+  await emit("result", {
+    status: "SUCCEEDED",
+    conversationId,
+    sessionFile: "agent-sessions/[server-generated]",
+    checks,
+    ...(workflowCandidateRepositories === undefined ? {} : { workflowCandidateRepositories }),
+    ...(workflowDependenciesResult === undefined ? {} : { workflowDependenciesResult }),
+    ...(workflowCandidateRepositories === undefined || checksCandidateAtResult === undefined ? {} : { workflowCheckCandidateRepositories: checksCandidateAtResult }),
+  });
+  const checksCandidateAtReturn = readReportedChecksCandidate();
+  return {
+    conversationId, reopened: registered !== undefined, checks,
+    ...(workflowCandidateRepositories === undefined ? {} : { workflowCandidateRepositories }),
+    ...(workflowCandidateSourceExport === undefined ? {} : { workflowCandidateSourceExport }),
+    ...(workflowCandidateBuildSource === undefined ? {} : { workflowCandidateBuildSource }),
+    ...(workflowBaselineSource === undefined ? {} : { workflowBaselineSource }),
+    ...(workflowDependenciesResult === undefined ? {} : { workflowDependenciesResult }),
+    ...(workflowCandidateRepositories === undefined || checksCandidateAtReturn === undefined ? {} : { workflowCheckCandidateRepositories: checksCandidateAtReturn }),
+  };
 }
 
 const FILE_CHANGE_TOOLS: ReadonlySet<string> = new Set(["edit", "write"]);

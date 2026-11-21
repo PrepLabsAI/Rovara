@@ -165,9 +165,13 @@ export function slackCompanyActionSurface(deps: SlackCompanyDependencies, next: 
 }
 
 /** DEC 254y(3), L2-2 PR 18e: two press surfaces: the install's team (the presser's, and the conversation's where there is one) keeps today's; anything else goes to the company surface. */
-export function splitChannelActionSurfaceByTenant(legacy: ChannelActionSurface, company: ChannelActionSurface | undefined, legacyTeamId: string): ChannelActionSurface {
+export function splitChannelActionSurfaceByTenant(legacy: ChannelActionSurface, company: ChannelActionSurface | undefined, legacyTeamId: string, installOnLegacy?: () => Promise<boolean>): ChannelActionSurface {
   if (company === undefined) return legacy;
-  return (action, context) => (channelItemOnInstallTeam(action, legacyTeamId, false) ? legacy : company)(action, context);
+  // #1300: the install's team keeps today's surface only while it is on the legacy path.
+  return async (action, context) => {
+    if (!channelItemOnInstallTeam(action, legacyTeamId, false)) return await company(action, context);
+    return await (installOnLegacy === undefined || await installOnLegacy() ? legacy : company)(action, context);
+  };
 }
 
 export function createAwsSlackChannelPresses(company: SlackCompanyDependencies = {}): ChannelActionSurface {

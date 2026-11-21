@@ -115,10 +115,16 @@ export function channelItemOnInstallTeam(item: unknown, legacyTeamId: string, co
   return tenant(conversation) === legacyTeamId;
 }
 
-/** Two surfaces for channel `slack`: the install's team keeps today's; any other tenant, or one that cannot be read, goes to the company surface. No company surface: today's, as it is. */
-export function splitChannelSurfaceByTenant(legacy: ChannelSurface, company: ChannelSurface | undefined, legacyTeamId: string): ChannelSurface {
+/**
+ * Two surfaces for channel `slack`: the install's team keeps today's while it is on the legacy path (`installOnLegacy`, #1300; absent, always); any other tenant, or one that
+ * cannot be read, goes to the company surface. No company surface: today's, as it is.
+ */
+export function splitChannelSurfaceByTenant(legacy: ChannelSurface, company: ChannelSurface | undefined, legacyTeamId: string, installOnLegacy?: () => Promise<boolean>): ChannelSurface {
   if (company === undefined) return legacy;
-  return (message, context) => (channelItemOnInstallTeam(message, legacyTeamId, true) ? legacy : company)(message, context);
+  return async (message, context) => {
+    if (!channelItemOnInstallTeam(message, legacyTeamId, true)) return await company(message, context);
+    return await (installOnLegacy === undefined || await installOnLegacy() ? legacy : company)(message, context);
+  };
 }
 
 /** The AWS surface: the Slack adapter's commands, Slack's threads table, the broker, and the channel request queue. */
