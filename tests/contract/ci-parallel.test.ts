@@ -244,8 +244,6 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
       "Agent steps (scripted route)",
       "Agent qualification probes (scripted route)",
       "Mid-step values never reach the model (scripted route)",
-      "Native browser journey",
-      "Native M1.3 journeys",
       "Native M1.4 journeys",
       "Sandbox egress gateway (boot stage on real Docker)",
     ]);

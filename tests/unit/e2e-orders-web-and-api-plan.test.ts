@@ -13,7 +13,7 @@ import { NOW, PROFILE, approvedSetup, binding, snapshotOf, webApiRow } from "../
 import { registryFor } from "../support/e2e-account-registry-fixtures.js";
 import { planOwnerWebAndApi } from "../support/e2e-web-and-api-plan.js";
 
-// The web-and-api journey (tests/e2e/m1-3-journeys.test.ts) needs Docker; its plan does not. This runs everything the journey does before a container starts: the orders-web fixture's
+// The web-and-api journey (the native M1.3 Docker journey, retired with the spec 056 engine in 8f1be0a80) needed Docker; its plan does not. This runs everything the journey did before a container starts: the orders-web fixture's
 // repository as the project's setup approval reads it, the planning context the planner is shown, the plan the journey writes, its approval, and the admission dispatch builds,
 // validated by the worker's own validator. A scenario the descriptor of its kind cannot run, or a target the contract does not give, fails here and not on the CI runner.
 afterEach(disposeRealCandidates);

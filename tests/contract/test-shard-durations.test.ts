@@ -38,7 +38,7 @@ describe("the duration-balanced test shards", () => {
   it("find the test files the root vitest config runs", () => {
     expect(files.length).toBeGreaterThan(500);
     expect(files).toContain("tests/contract/test-shard-durations.test.ts");
-    expect(files).not.toContain("tests/e2e/m1-web-journey.test.ts");
+    expect(files).not.toContain("tests/e2e/m1-4-journeys.test.ts");
   });
 
   it("give every test file to exactly one of the eight shards", () => {

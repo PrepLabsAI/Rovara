@@ -16,8 +16,8 @@ import { E2E_OWNER_SENTENCES, type ModelSentenceContext } from "./owner-sentence
  * cannot scan for them. What keeps a bare password out of an observed value is the chain upstream of the broker, in two layers. First the executor itself: it refuses to record
  * verdict-input evidence (an observation, a download) that carries one of the run's account credentials (`record` in verifier/src/executor/case-ledger.ts, with the redactor of
  * Task 3.6), so the case has no value to show. Then the Docker host's own scan of the run output against the run's credentials (every spelling it knows, `snapshotExecutorOutput`),
- * which holds back the operator evidence (captures, log heads) that carries one before the worker packs it. `credential-echo` in tests/e2e/m1-3-journeys.test.ts runs the chain end
- * to end, and checks that a credential reached it and was withheld, so a round that fails for another reason does not pass for a proof.
+ * which holds back the operator evidence (captures, log heads) that carries one before the worker packs it. `credential-echo` in the native M1.3 journeys (retired in 8f1be0a80) ran the chain end
+ * to end, and checked that a credential reached it and was withheld, so a round that fails for another reason does not pass for a proof.
  */
 
 const CONTROL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu;

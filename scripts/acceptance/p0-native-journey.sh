@@ -50,11 +50,11 @@ if [ "$native_profile" = all ]; then
   journey='profile:all'
 fi
 case "$journey" in
-  profile:all|tests/e2e/project-setup-terminal-authority-fix1.test.ts|tests/e2e/p0-native-journey.test.ts|tests/e2e/p0-native-journey-5b.test.ts|tests/e2e/runtime-installation-qualification.native.test.ts|tests/unit/e2e-feature-plan-intent.test.ts|tests/unit/e2e-execution-plan.test.ts|tests/unit/e2e-review-fix3.test.ts|tests/contract/e2e-feature-verifier-catalog.test.ts|tests/contract/task-workflow-invocation.test.ts|tests/contract/task-workflow-contracts.test.ts|tests/contract/admin-read-projects.test.ts|tests/contract/admin-actions.test.ts|tests/contract/workflow-e2e-notifier-projection.test.ts|tests/contract/workflow-e2e-cancellation.test.ts|tests/contract/loop-candidate-untracked.test.ts|tests/contract/verifier-image-closure.test.ts) ;;
+  profile:all|tests/e2e/project-setup-terminal-authority-fix1.test.ts|tests/e2e/p0-native-journey.test.ts|tests/e2e/runtime-installation-qualification.native.test.ts|tests/unit/e2e-feature-plan-intent.test.ts|tests/unit/e2e-execution-plan.test.ts|tests/unit/e2e-review-fix3.test.ts|tests/contract/e2e-feature-verifier-catalog.test.ts|tests/contract/task-workflow-invocation.test.ts|tests/contract/task-workflow-contracts.test.ts|tests/contract/admin-read-projects.test.ts|tests/contract/admin-actions.test.ts|tests/contract/workflow-e2e-notifier-projection.test.ts|tests/contract/workflow-e2e-cancellation.test.ts|tests/contract/loop-candidate-untracked.test.ts|tests/contract/verifier-image-closure.test.ts) ;;
   *) unavailable 'journey test path is outside the fixed P0 acceptance allowlist' ;;
 esac
 case "$journey" in
-  profile:all|tests/e2e/project-setup-terminal-authority-fix1.test.ts|tests/e2e/p0-native-journey.test.ts|tests/e2e/p0-native-journey-5b.test.ts|tests/e2e/runtime-installation-qualification.native.test.ts)
+  profile:all|tests/e2e/project-setup-terminal-authority-fix1.test.ts|tests/e2e/p0-native-journey.test.ts|tests/e2e/runtime-installation-qualification.native.test.ts)
     if [ "$journey" = 'tests/e2e/runtime-installation-qualification.native.test.ts' ]; then
       evidence=${P0_RUNTIME_INSTALL_EVIDENCE_DIR:-}
       [ -n "$evidence" ] || unavailable 'pre-create P0_RUNTIME_INSTALL_EVIDENCE_DIR as a separate fresh private root'
@@ -92,7 +92,7 @@ if ! "$node22" node_modules/typescript/bin/tsc -b --force --pretty false; then
   printf 'FAIL: own-source TypeScript emit did not complete\n' >&2
   exit 1
 fi
-if [ "$journey" = profile:all ] || [ "$journey" = 'tests/e2e/project-setup-terminal-authority-fix1.test.ts' ] || [ "$journey" = 'tests/e2e/p0-native-journey.test.ts' ] || [ "$journey" = 'tests/e2e/p0-native-journey-5b.test.ts' ] || [ "$journey" = 'tests/e2e/runtime-installation-qualification.native.test.ts' ]; then
+if [ "$journey" = profile:all ] || [ "$journey" = 'tests/e2e/project-setup-terminal-authority-fix1.test.ts' ] || [ "$journey" = 'tests/e2e/p0-native-journey.test.ts' ] || [ "$journey" = 'tests/e2e/runtime-installation-qualification.native.test.ts' ]; then
   P0_NATIVE_LAUNCHER_RECEIPT="$evidence_real.launcher-preflight.json" \
     "$node22" --input-type=module -e '
       import { createHash } from "node:crypto";
@@ -129,7 +129,7 @@ case "$journey" in
   profile:all)
     exec "$node22" node_modules/vitest/vitest.mjs run --config vitest.native-p0.config.ts --reporter=dot
     ;;
-  tests/e2e/project-setup-terminal-authority-fix1.test.ts|tests/e2e/p0-native-journey.test.ts|tests/e2e/p0-native-journey-5b.test.ts|tests/e2e/runtime-installation-qualification.native.test.ts)
+  tests/e2e/project-setup-terminal-authority-fix1.test.ts|tests/e2e/p0-native-journey.test.ts|tests/e2e/runtime-installation-qualification.native.test.ts)
     exec "$node22" node_modules/vitest/vitest.mjs run --config vitest.native-p0.config.ts "$journey" --reporter=dot
     ;;
 esac
