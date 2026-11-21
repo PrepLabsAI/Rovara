@@ -1,0 +1,90 @@
+# TEMPORARY timing experiment (draft PR #1328, not for merge): Rovara's FULL CI on mainline's code
+# as ONE job on the owner's Mac. Setup and build happen once; then the whole test suite (13 vitest
+# workers), the checks (lint, complexity, typecheck) and the release check run side by side.
+name: rovara-build mac one job
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: rb-mac-one-job-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Same mainline commit as the 12-job run.
+  MAINLINE_SHA: 2fc193e6fbff389bb9a16e4605fb2f5841b48946
+
+jobs:
+  route:
+    uses: ./.github/workflows/rb-route.yml
+    permissions:
+      id-token: write
+      contents: read
+    with:
+      endpoint: ${{ vars.ROVARA_BUILD_URL }}
+
+  full:
+    needs: route
+    runs-on: ${{ fromJSON(needs.route.outputs.runner) }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with: { ref: "${{ env.MAINLINE_SHA }}", fetch-depth: 2 }
+      - uses: actions/setup-node@v5
+        with: { node-version-file: .node-version }  # no Actions cache: ~/.npm is already on the Mac
+      - run: npm ci
+      - run: npm run build
+      - name: Install gitleaks 8.30.1 (macOS arm64, checksum pinned)
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_darwin_arm64.tar.gz
+          echo "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5  $RUNNER_TEMP/gitleaks.tar.gz" | shasum -a 256 --check -
+          mkdir "$RUNNER_TEMP/gitleaks-bin"
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/gitleaks-bin" gitleaks
+          echo "$RUNNER_TEMP/gitleaks-bin" >> "$GITHUB_PATH"
+
+      - name: Tests, checks and release check, side by side
+        run: |
+          set -u
+          logs="$RUNNER_TEMP/parts"; mkdir -p "$logs"
+          # Each part runs in the background, records its own start, end and exit code.
+          part() {
+            local name=$1; shift
+            ( start=$(date +%s); ( "$@" ) > "$logs/$name.log" 2>&1; code=$?
+              echo "$name $start $(date +%s) $code" > "$logs/$name.done" ) &
+          }
+          checks() { npm run lint && node scripts/complexity.ts check; c=$?; npm run typecheck:all || c=1; return $c; }
+          release() {
+            # A separate copy, because these rewrite build output the tests read.
+            local copy="$RUNNER_TEMP/release-tree"
+            git worktree add --detach "$copy" HEAD >/dev/null && cd "$copy" && npm ci --no-audit --no-fund && npm run build && npm run infra:synth \
+              && npm run release:build -- --version 0.0.0-ci --out "$RUNNER_TEMP/release-a" \
+              && npm run release:build -- --version 0.0.0-ci --out "$RUNNER_TEMP/release-b" \
+              && diff "$RUNNER_TEMP/release-a/release.json" "$RUNNER_TEMP/release-b/release.json" \
+              && npm run release:verify -- "$RUNNER_TEMP/release-a"
+          }
+          t0=$(date +%s)
+          part tests npm test -- --maxWorkers=13
+          part checks checks
+          part release release
+          wait
+          t1=$(date +%s)
+
+          fail=0
+          {
+            echo "### One job on the Mac: parallel phase"
+            echo
+            echo "| Part | Minutes | Result |"
+            echo "|---|---|---|"
+            for n in tests checks release; do
+              read -r _ s e c < "$logs/$n.done"
+              [ "$c" = 0 ] && r=pass || { r="fail ($c)"; fail=1; }
+              echo "| $n | $(awk "BEGIN{printf \"%.1f\", ($e-$s)/60}") | $r |"
+            done
+            echo "| **all three (wall)** | **$(awk "BEGIN{printf \"%.1f\", ($t1-$t0)/60}")** | |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          for n in tests checks release; do echo "::group::$n log"; tail -n 150 "$logs/$n.log"; echo "::endgroup::"; done
+          exit $fail
