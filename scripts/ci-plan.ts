@@ -1,7 +1,7 @@
 // CI's plan (DEC 242). One small job runs this first and every other job reads its answers, so a pull request spends runner time only on what its change can
 // affect, while a FULL run (everything, as before) stays available and is the one a merge needs.
 //
-// FULL mode: a push to code/next, a manual run, a pull request labelled `full-ci`, or one whose title starts with "Batch " or "Sync mainline". It runs every job
+// FULL mode: a manual run (#1295: code/next has a merge queue, so no push runs CI), a pull request labelled `full-ci`, or one whose title starts with "Batch " or "Sync mainline". It runs every job
 // in full: all test shards, the whole lint (a "Batch " or "Sync mainline" pull request lints only its changed files, as any pull request does; see fullLint) and the release check (the device emulator check only on a push or a "Batch " pull request; see DEVICE_PATTERNS). The `ci-mode (full)` check exists only then.
 // AFFECTED mode (a pull request, the default): the typecheck stays full; the tests are the ones the change can reach (vitest --changed plus the tests that name a
 // changed file or one of the packages it touches), in 2 shards; lint covers the lint shards that hold changed files; the Linux runtime, device emulator and release checks run only
@@ -259,7 +259,7 @@ export function fullLint(input: Pick<PlanInput, "event" | "labels" | "changed">)
   return changedLint(input.changed);
 }
 
-const changeReason = (event: string): string => (event === "merge_group" ? "the merge queue's run of a pull request on the latest mainline" : "a pull request");
+const changeReason = (event: string): string => (event === "merge_group" ? "the merge queue's run of a pull request on the latest base branch" : "a pull request");
 
 export function planCi(input: PlanInput): Plan {
   const deviceRequired = input.changed.some((file) => anyMatch(file, DEVICE_PATTERNS));
@@ -392,7 +392,7 @@ function gitOutput(...args: string[]): string | undefined {
 
 /**
  * #1278: where a run's test shards run. CodeBuild (faster, paid) only for a pull request into mainline from this repository that carries the `urgent` label,
- * or a merge-queue run whose pull request carries it; every other run uses GitHub's free runners. The labels are the ones the run starts with: adding
+ * or mainline's merge-queue run whose pull request carries it (#1295: never code/next's); every other run uses GitHub's free runners. The labels are the ones the run starts with: adding
  * the label starts a run (the `labeled` event) on CodeBuild, removing it sends later runs back. A fork never gets CodeBuild (`sameRepo`), and a
  * merge-queue run whose labels cannot be read uses GitHub's runners.
  */
@@ -400,8 +400,9 @@ export const URGENT_LABEL = "urgent";
 export type TestRunner = "codebuild" | "github";
 export function testRunner(input: { event: string; baseRef: string; sameRepo: boolean; labels: readonly string[] }): TestRunner {
   const urgent = input.labels.includes(URGENT_LABEL);
-  if (input.event === "pull_request") return urgent && input.sameRepo && input.baseRef.replace(/^refs\/heads\//u, "") === "mainline" ? "codebuild" : "github";
-  if (input.event === "merge_group") return urgent ? "codebuild" : "github";
+  const mainline = input.baseRef.replace(/^refs\/heads\//u, "") === "mainline";
+  if (input.event === "pull_request") return urgent && input.sameRepo && mainline ? "codebuild" : "github";
+  if (input.event === "merge_group") return urgent && mainline ? "codebuild" : "github";
   return "github";
 }
 /** #1278: the labels of a merge-queue run's pull request, or undefined when they cannot be read (the run then uses GitHub's runners). */

@@ -2,9 +2,8 @@ name: CI
 
 # Pull requests and manual runs, to save Actions minutes. A merge to mainline does not run CI
 # again: its pull request's run already tested the change. A draft pull request runs nothing until it
-# is marked ready for review. One branch also runs on push: `code/next`, where the controller lands the
-# Rovara Code port lanes (docs/porting.md); a pull request into it runs like any other, and both also
-# run the port guard (the `port-guard` job below).
+# is marked ready for review. code/next, where the controller lands the Rovara Code port lanes (docs/porting.md), works the same way since #1295:
+# it has a merge queue like mainline, so no push to it runs CI; its pull requests and its queue runs also run the port guard (the `port-guard` job below).
 on:
   workflow_dispatch:
     inputs:
@@ -15,9 +14,7 @@ on:
   pull_request:
     # `labeled` so that adding the `full-ci` label starts a FULL run. Any other label starts an ordinary run too (a skipped run would leave a skipped `local` that reads as a pass).
     types: [opened, synchronize, reopened, ready_for_review, labeled]
-  push:
-    branches: [code/next]
-  # #1259: the merge queue on mainline runs CI on each pull request merged onto the latest mainline; the queue merges only when `local` passes there, and the
+  # #1259, #1295: the merge queues on mainline and code/next run CI on each pull request merged onto the latest base; the queue merges only when `local` passes there, and the
   # commit it fast-forwards mainline to carries that run, so the release's CI proof (scripts/release-ci-proof.ts) finds it.
   merge_group:
     types: [checks_requested]
@@ -35,13 +32,13 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Two modes (DEC 242; scripts/ci-plan.ts decides, in the `plan` job, and every other job reads its answer).
-# FULL: a push to code/next, a manual run, a pull request labelled `full-ci` or titled "Batch ..." or "Sync mainline ...". Everything runs: the typecheck and the whole lint
+# FULL: a manual run, a pull request labelled `full-ci` or titled "Batch ..." or "Sync mainline ...". Everything runs: the typecheck and the whole lint
 #   in `quick`, the release check, all 8 `test (n/8)` shards, and the check `ci-mode (full)`, which exists only in this mode: a merge needs it.
 # AFFECTED (a pull request, the default): the typecheck stays full; the tests are the ones the change can reach, in 2 shards (the whole suite when something shared changes);
 #   lint covers the changed files; the release check runs only when its area changes; a Markdown-only change that no test reads runs nothing but `plan`.
 # REUSE (#1262, merge-queue runs only): when the queue's commit is byte-for-byte a pull request's merge commit that the pull request's own run passed (the gate marks it
 #   with the commit status `ci/local`), only `plan` and `local` run, and `local` names the reused run. Anything the plan cannot prove plans as above.
-# `linux-runtime` (#1185) runs in either mode only when its area changes, on each push to code/next (once per batch), nightly (the schedule, which runs it and the
+# `linux-runtime` (#1185) runs in either mode only when its area changes, nightly (the schedule, which runs it and the
 #   typecheck only), or on request: the `linux-ci` or `full-ci` label, or a manual run's `linux` input.
 # The job called `local` waits for every job and is the one check a pull request needs (scripts/ci-gate.ts). It knows from `plan` which jobs must have run, so a job
 # skipped by design counts as a pass but a job that should have run and did not fails it. `port-guard` is a check of its own. A draft skips every job.
@@ -600,16 +597,16 @@ jobs:
         if: failure() && needs.plan.outputs.device_required != 'true'
         run: echo "::warning title=device-runtime is quarantined (non-blocking)::the emulator test failed, but this change touches no device files, so the run is not failed by it (DEC 254zn). Root cause is tracked in DEFERRED-CHECKS."
 
-  # The Rovara Code port (docs/porting.md): nothing Cloud-only, no private name and no secret may reach code/next. The guard runs on a push to
-  # code/next and on a pull request into it (not a draft), over everything code/next holds that mainline does not; mainline's own pull requests
+  # The Rovara Code port (docs/porting.md): nothing Cloud-only, no private name and no secret may reach code/next. The guard runs in code/next's
+  # merge-queue run (#1295) and on a pull request into it (not a draft), over everything code/next holds that mainline does not; mainline's own pull requests
   # do not run it. It needs no secret and no `npm ci`: Node runs the script directly. The gitleaks release is pinned by version and checksum.
   # On a pull request the guard that runs is the base branch's copy, so the pull request cannot weaken the check that judges it; a second run
   # of that copy over the pull request's own commits, without --allow-guard-edits, turns red on any edit to the guard, its tests, the
-  # `port:guard` script or this file, which the controller must then review by hand. On a push the run is after the fact (the content is already
-  # on code/next), so it detects and does not prevent; the controller's own run before the merge is the preventive one. It is a check of its own,
+  # `port:guard` script or this file, which the controller must then review by hand. In the queue run it is informational (the queue waits only for
+  # `local`); the controller's own run before the merge is the preventive one. It is a check of its own,
   # not part of the `local` gate (a skipped job would fail that gate on mainline's pull requests).
   port-guard:
-    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.base_ref == 'code/next' && github.event.pull_request.draft != true)
+    if: (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/code/next') || (github.event_name == 'pull_request' && github.base_ref == 'code/next' && github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

@@ -324,14 +324,13 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     }
   });
 
-  it("runs on pull requests and by hand, on a push to code/next only and never on a push to mainline, and skips a draft until it is ready", async () => {
+  it("runs on pull requests, merge-queue runs and by hand, never on a push (#1295: code/next has a merge queue too), and skips a draft until it is ready", async () => {
     const parsed = await workflow();
     expect(parsed.on).toEqual({
       // #1185: a manual run may ask for the Linux runtime check; the nightly schedule runs it on mainline.
       workflow_dispatch: { inputs: { linux: { description: "Also run the Linux runtime check (#1185)", type: "boolean", default: false } } },
       pull_request: { types: ["opened", "synchronize", "reopened", "ready_for_review", "labeled"] },
-      push: { branches: ["code/next"] },
-      // #1259: the merge queue on mainline.
+      // #1259, #1295: the merge queues on mainline and code/next.
       merge_group: { types: ["checks_requested"] },
       schedule: [{ cron: "0 6 * * *" }],
     });
@@ -450,9 +449,9 @@ describe("the merge queue's run (merge_group)", () => {
     expect(lint.run).toContain('if [ "$CI_EVENT" = merge_group ]; then git fetch --no-tags --depth=1 origin "$BASE_SHA"; DIFF_BASE="$BASE_SHA"; fi');
     expect(lint.run).toContain('git diff --name-only "$DIFF_BASE" HEAD > "$RUNNER_TEMP/changed.txt"');
   });
-  it("never runs the port guard (it checks what code/next holds beyond mainline) and never cancels a queued run", async () => {
+  it("runs the port guard only in code/next's queue (it checks what code/next holds beyond mainline, #1295) and never cancels a queued run", async () => {
     const parsed = await workflow();
-    expect(parsed.jobs["port-guard"]!.if).not.toContain("merge_group");
+    expect(parsed.jobs["port-guard"]!.if).toContain("github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/code/next'");
     expect((parsed as unknown as { concurrency: { "cancel-in-progress": string } }).concurrency["cancel-in-progress"]).toBe("${{ github.event_name == 'pull_request' }}");
   });
 });
