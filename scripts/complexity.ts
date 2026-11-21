@@ -8,7 +8,7 @@
 // The top level of a module is scored as one more entry, `(top level)`.
 //
 // `report` (on demand, not in CI) ranks files by excess x churn: the code that is both hard to read and changed often, where a refactor pays off most.
-// `check` (CI) is a ratchet like scripts/typecheck-baseline.ts. A file's excess is the sum, over its functions, of the score above THRESHOLD. A file whose excess
+// `check` (CI) is a ratchet. A file's excess is the sum, over its functions, of the score above THRESHOLD. A file whose excess
 // goes up, or a new file with any, fails. A lower excess passes with a reminder to run `update`, which only ever lowers tests/complexity-baseline.json.
 // A renamed file keeps its excess under its new path: move its entry in the baseline by hand.
 // Node runs this file directly. It loads TypeScript, a dev dependency, only to parse: there's no type-checked program, so it reads the whole repository in seconds.
