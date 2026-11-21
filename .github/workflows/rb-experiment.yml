@@ -28,6 +28,9 @@ jobs:
     needs: route
     runs-on: ${{ fromJSON(needs.route.outputs.runner) }}
     timeout-minutes: 30
+    env:
+      # CodeBuild's MEDIUM machine (7 GB) gives Node a ~2 GB heap by default; tsc -b needs more.
+      NODE_OPTIONS: --max-old-space-size=5120
     steps:
       - name: Where am I?
         run: |
