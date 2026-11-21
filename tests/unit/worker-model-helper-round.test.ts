@@ -117,10 +117,12 @@ describe("run files", () => {
 });
 
 describe("the hook in run-task.ts", () => {
-  it("wraps all three createCheckRunners call sites, and an absent dependency leaves the runners untouched", async () => {
+  it("wraps all three check-runner call sites, and an absent dependency leaves the runners untouched", async () => {
     const { readFileSync: read } = await import("node:fs");
     const source = read(join(__dirname, "../../packages/worker/src/run-task.ts"), "utf8");
-    expect(source.match(/createCheckRunners\(/gu)).toHaveLength(3);
+    // #1303: the CHECKS and nightly runs build theirs through projectCheckRunners (which holds the second createCheckRunners); the coding path calls it directly.
+    expect(source.match(/createCheckRunners\(/gu)).toHaveLength(2);
+    expect(source.match(/projectCheckRunners\(dependencies, /gu)).toHaveLength(2);
     expect(source.match(/withModelHelperRound\(replyCollector\.wrap\(modelHelperPlanFor\(dependencies\.modelHelperRound, \{ rootPath: canonicalRoot \}\)\), /gu)).toHaveLength(3);
     const { modelHelperPlanFor } = await import("../../packages/worker/src/model-helper-round.js");
     expect(modelHelperPlanFor(undefined, { rootPath: "/x" })).toBeUndefined();

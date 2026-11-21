@@ -493,72 +493,16 @@ async function runTask(
   }
 
   if (invocation.payload.workflowMode === "FEEDBACK_REVIEW") {
-    const binding = invocation.payload.workflowFeedbackReview!;
-    if (dependencies.feedbackBundleReader === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the worker cannot read the task's approved feedback bundles");
-    const root = canonicalRoot;
-    const stop = new AbortController();
-    // An unconfirmed stop anywhere in the task ends the checks: nothing runs on, and the run's ending reads nothing (workspace-safety.ts).
-    currentWorkspaceSafety()?.onUnsafe(() => stop.abort());
-    const unregister = dependencies.cancellationController?.register(invocation.operationId, { abort: async () => stop.abort() });
-    const events = new EventBatcher(dependencies.eventSink);
-    try {
-      await events.append("progress", { message: "AgentX is reviewing the latest feedback on the linked pull requests." });
-      if (fileToolsNote !== undefined) await events.append("progress", { message: fileToolsNote });
-      const collected = await dependencies.feedbackBundleReader(binding);
-      // Publication moved HEAD to a new commit with the reviewed tree, so the code is identified by that tree (and the
-      // pinned base stays an ancestor), not by the commit the candidate digest was made from. Only repositories that
-      // have a pull request bundle are checked, and only those are readable by the critic.
-      const bundledIds = new Set(collected.bundles.map(({ ref }) => ref.repositoryId));
-      const repositoryInputs = candidateInputs(manifest, root, invocation.payload.workflowBase, candidateSweep).filter(input => bundledIds.has(input.repositoryId));
-      const candidateRepositories = repositoryInputs.length === 0 ? [] : await readCandidateRepositories(repositoryInputs);
-      const unchanged = collected.bundles.every(({ ref }) => {
-        const identity = candidateRepositories.find(repository => repository.repositoryId === ref.repositoryId);
-        return identity !== undefined && ref.headTreeSha !== undefined && identity.treeSha === ref.headTreeSha
-          && ref.candidateDigest === binding.candidateDigest;
-      });
-      if (!unchanged) throw agentXError("OPERATION_INTERRUPTED", "the candidate changed before PR feedback review");
-      const execution = await runWorkflowFeedbackReview({
-        operationId: invocation.operationId, taskId: binding.taskId, workflowRevision: binding.workflowRevision,
-        taskRequirements: collected.taskRequirements, candidateDigest: binding.candidateDigest,
-        rootPath: dependencies.rootPath, model: dependencies.model, candidate: candidateRepositories,
-        repositories: repositoryInputs, bundles: collected.bundles, artifactSink: dependencies.artifactSink,
-        ruleFileBaseCommits: invocation.payload.workflowBase ?? [],
-        ...(collected.taskChecks === undefined ? {} : { taskChecks: collected.taskChecks }),
-        ...(feedbackTimeoutMs === undefined ? {} : { timeoutMs: feedbackTimeoutMs }),
-        ...(dependencies.structuredAnswers === undefined ? {} : { structuredAnswers: dependencies.structuredAnswers }),
-        ...(agentStep?.promptSection === undefined ? {} : { promptSection: agentStep.promptSection }),
-        ...(standingInstructions === undefined ? {} : { standingInstructions }),
-        ...(agentStep?.tools === undefined ? {} : { tools: agentStep.tools }),
-        ...(stepSkills === undefined ? {} : { skills: stepSkills }),
-        ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }), signal: stop.signal,
-        ...(fileTools === undefined ? {} : { fileTools }),
-        onProgress: message => { void events.append("progress", { message }).catch(() => undefined); },
-      });
-      const workflowFeedbackReviewResult = {
-        taskId: binding.taskId, workflowRevision: binding.workflowRevision, candidateDigest: binding.candidateDigest,
-        outputDigest: execution.outputDigest, artifactName: execution.artifactName, status: execution.report.status,
-      };
-      await events.append("result", { status: "SUCCEEDED", workflowMode: "FEEDBACK_REVIEW", workflowFeedbackReviewResult });
-      await events.flush();
-      return { conversationId: invocation.payload.conversationId, reopened: false, workflowMode: "FEEDBACK_REVIEW", workflowFeedbackReviewResult };
-    } catch (error) {
-      await events.append("error", { message: redactText(error instanceof Error ? error.message : "feedback review failed") }).catch(() => undefined);
-      await events.flush().catch(() => undefined);
-      throw error;
-    } finally {
-      unregister?.();
-    }
+    return runFeedbackReviewStage({
+      invocation, dependencies, canonicalRoot, manifest, candidateSweep, fileTools, fileToolsNote, feedbackTimeoutMs, agentStep, standingInstructions, stepSkills,
+    });
   }
 
   // NH-1 (the broker sends `nightlyRun` only while `nh` is on, and only to a worker that lists "task.nightlyRun.v1"): the nightly run is the Prove sequence over the approved environment, with its own module; the checks below do not apply to it.
   if (invocation.payload.nightlyRun !== undefined) {
     return runNightlyInvocation(invocation, {
       rootPath: canonicalRoot, eventSink: dependencies.eventSink, cancellationController: dependencies.cancellationController, nightlyResult: dependencies.nightlyResult,
-      runners: scopeChecks(withModelHelperRound(replyCollector.wrap(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot })), dependencies.checkRunners ?? createCheckRunners({
-        rootPath: canonicalRoot,
-        ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
-        ...(bashOperations === undefined ? {} : { bashOperations }), ...(sandbox === undefined ? {} : { sandbox }), ...(localShell ? { local: true } : {}),
-      }))),
+      runners: scopeChecks(withModelHelperRound(replyCollector.wrap(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot })), projectCheckRunners(dependencies, { canonicalRoot, devcontainer, devcontainerCli, bashOperations, sandbox, localShell }))),
     }, manifest);
   }
   // Spec 051 Ruling L: the check history as it was before the agent ran. The agent can write to .agentx, so every
@@ -568,220 +512,10 @@ async function runTask(
   // A verification retry has no model and no coding tools. It snapshots the candidate, runs only
   // the owner-selected project checks, then snapshots again so the broker can reject a changed tree.
   if (invocation.payload.workflowMode === "CHECKS") {
-    if (invocation.payload.workflowE2EAdmission !== undefined && (dependencies.workflowE2EAdmissionReader === undefined
-      || dependencies.workflowE2EEvidenceSink === undefined || dependencies.workflowE2EEvidenceRoot === undefined)) {
-      throw agentXError("RUNTIME_UNAVAILABLE", "the admitted E2E CHECKS runtime or evidence directory is unavailable");
-    }
-    const readiness = invocation.payload.readiness ?? [];
-    const NO_PROJECT_CHECK = "verification retry requires at least one selected project check";
-    // A run with nothing to check at all is never valid. A round whose admission is an application admission (browser or API scenarios) is valid with no project
-    // check; which kind it is is only known once the admission is read, which the broker allows after the operation is durably RUNNING (below).
-    if (readiness.length === 0 && invocation.payload.workflowE2EAdmission === undefined) throw agentXError("CONFIG_INVALID", NO_PROJECT_CHECK);
-    const events = new EventBatcher(dependencies.eventSink);
-    const repositories = candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase, candidateSweep);
-    const candidateBefore = await readCandidateRepositories(repositories);
-    const recorder = new CommandRecorder({ fingerprint: (signal) => recorderFingerprint(repositories.map((repository) => ({ name: repository.repositoryId, directory: repository.directory })), signal) });
-    // Test environment (wire-testenv): the approved environment's plan narrows its test checks and sets the round's budget. Absent unless the broker sent it; a plan that does not fit the commands is ignored.
-    const testEnv = invocation.payload.testEnvironment === undefined ? undefined : await applyTestEnvironmentPlan({ readiness, plan: invocation.payload.testEnvironment, repositories, candidateBefore, now: new Date() });
-    const plan = planChecks(testEnv?.readiness ?? readiness, recorder, checkHistory);
-    const stop = new AbortController();
-    const unregister = dependencies.cancellationController?.register(invocation.operationId, { abort: async () => stop.abort() });
-    // TE-C1: when the plan carries baseline candidates (an asked-for field), the nearest one that is an ancestor of the task's base commit is found NOW, before any check runs, in the isolated git environment (it reads
-    // objects only: what the agent or a check leaves in `.git` cannot change it). One repository only (the nightly is single-repository); otherwise, or with no answer, the engine keeps today's behaviour.
-    const baselineCandidates = invocation.payload.testEnvironment?.baselineCandidates;
-    const baselineClaim = baselineCandidates === undefined || repositories.length !== 1 ? undefined
-      : await findBaselineAncestor({ directory: repositories[0]!.directory, baseCommit: repositories[0]!.baseCommitSha, candidates: baselineCandidates, signal: stop.signal });
-    // TE-MR2b: with two or more repositories, one claim per repository, all or none (the engine then builds ONE combined baseline, or none).
-    const baselineClaims = baselineCandidates === undefined || invocation.payload.testEnvironment?.repositoryBaselines !== true || repositories.length < 2 ? undefined
-      : await findBaselineAncestors({ repositories: repositories.map((repository) => ({ repositoryId: repository.repositoryId, directory: repository.directory, baseCommitSha: repository.baseCommitSha })), candidates: baselineCandidates, signal: stop.signal });
-    try {
-      await events.append("lifecycle", { status: "RUNNING", conversationId: invocation.payload.conversationId, conversation: { started: true, reopened: true } });
-      // The broker authorizes the private admission read only after the operation is durably
-      // RUNNING. Flush this transition before the first protected CHECKS callback.
-      await events.flush();
-      if (readiness.length === 0 && !(await workflowE2EAdmissionIsApplication({ reference: invocation.payload.workflowE2EAdmission!,
-        readAdmission: (offset) => dependencies.workflowE2EAdmissionReader!(invocation.payload.workflowE2EAdmission!, offset) }))) {
-        throw agentXError("CONFIG_INVALID", NO_PROJECT_CHECK);
-      }
-      await events.append("progress", { message: invocation.payload.workflowE2EAdmission?.purpose === "baseline"
-        ? "AgentX is running the approved browser and API checks once on the code as the task started, for information only. It has no code-editing tools and decides nothing about the change."
-        : invocation.payload.workflowE2EAdmission?.purpose === "replay"
-        ? "AgentX is replaying a verified AI-navigated check from its recording, with no model, for an operator's audit. It has no code-editing tools and decides nothing about the change."
-        : invocation.payload.workflowE2EAdmission?.purpose === "grounding"
-        ? "AgentX is checking the plan's unchanged-behaviour checks against the current app. It has no code-editing tools and decides nothing about the change."
-        : "AgentX is running the selected project checks against the current code. This retry has no code-editing tools." });
-      // General fakes (DEC 234): only when the broker sent the payload (the project setting is on); slice 1 serves them on the local shell only, and says so otherwise.
-      const fakesCollector = generalFakesFactsCollector();
-      let candidateFakeFactsTaken = false;
-      const fakesPlan = fakesCollector.wrap(generalFakesPlanFor(invocation.payload.generalFakes, {
-        localShell, rootPath: canonicalRoot, repositoryPaths: manifest.repositories.map((repository) => resolve(canonicalRoot, repository.path)), ...(hostedFakes === undefined ? {} : { hosted: hostedFakes }),
-        // Only the candidate round's line is posted; later rounds (the original code's) still add their facts.
-        onResult: (result) => { if (candidateFakeFactsTaken) return; for (const line of result.lines) void events.append("progress", { message: line }).catch(() => undefined); },
-      }));
-      if (invocation.payload.generalFakes !== undefined && fakesPlan === undefined) await events.append("progress", { message: GENERAL_FAKES_LOCAL_ONLY_SENTENCE });
-      const runners = scopeChecks(withModelHelperRound(replyCollector.wrap(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot })), withGeneralFakesRound(fakesPlan, withTestServices(testServices, dependencies.checkRunners ?? createCheckRunners({
-        rootPath: canonicalRoot,
-        ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
-        ...(bashOperations === undefined ? {} : { bashOperations }),
-        ...(sandbox === undefined ? {} : { sandbox }),
-        ...(localShell ? { local: true } : {}),
-      })))));
-      const roundBudgetMs = dependencies.checkBudgetMs?.() ?? testEnv?.budgetMs ?? CHECK_ROUND_BUDGET_MS;
-      const roundStarted = Date.now();
-      const round = await runChecks(plan, runners, { budgetMs: roundBudgetMs, signal: stop.signal });
-      // TE-C6: with the plan's `flakyRerun` and the evidence asked for, the failing tests of a test check that passed before are rerun once (inside what is left of the round's budget) so the evidence can name the ones that passed. The
-      // checks' entries are not changed. The rerun puts the checks' report files back, so the evidence below reads the round's own reports.
-      const flaky = invocation.payload.testEnvironment?.flakyRerun === true && !round.stopped && !stop.signal.aborted
-        ? await rerunFlaky({ rootPath: canonicalRoot, commands: readiness, checks: invocation.payload.testEnvironment.checks, entries: round.entries, runners, roundStartedAtMs: roundStarted, budgetMs: Math.max(0, roundBudgetMs - (Date.now() - roundStarted)), signal: stop.signal })
-        : undefined;
-      const candidateReplyFacts = replyCollector.take();
-      const candidateFakeFacts = fakesCollector.take();
-      candidateFakeFactsTaken = true;
-      assertWorkspaceSafe();
-      for (const message of repositoryChecks.notes()) await events.append("progress", { message });
-      const roundSpentMs = Date.now() - roundStarted;
-      const status = round.stopped ? "not_verified" : reportStatus(round.entries);
-      const checks: CheckReport = {
-        status,
-        ...(status === "not_verified" ? { notVerifiedReason: round.stopped || round.entries.length > 0 ? "stopped" : "no_checks" } : {}),
-        source: plan.source,
-        preambleVersion: AGENTX_PREAMBLE_VERSION,
-        preambleSha256: agentxPreambleSha256(),
-        checks: round.entries,
-        extraTry: "not_needed",
-        agentClaim: "none",
-      };
-      try {
-        const restored = await restoreCheckHistory(canonicalRoot, checkHistory, plan.source === "project" && plan.readiness !== undefined
-          ? { plan: { source: plan.source, readiness: plan.readiness }, entries: round.entries } : undefined);
-        if (restored.outcome === "removed") await events.append("progress", { message: "AgentX could not save these check results for the next task and removed the untrusted check-history file." });
-      } catch {
-        await events.append("progress", { message: "AgentX could not safely update the workspace check history." });
-      }
-      let candidateAfter = await readCandidateRepositories(repositories);
-      await dependencies.artifactSink({ name: "checks.json", mediaType: "application/json", content: checksArtifactContent(checks) });
-      // TE-C6: what the broker may excuse as flaky (only checks whose every failing test passed on the rerun). Informational for the worker: a failed save leaves the failure standing.
-      const flakyFile = flakyRerunFileOf(flaky);
-      if (flakyFile !== undefined) await dependencies.artifactSink({ name: flakyFile.name, mediaType: "application/json", content: flakyFile.content }).catch(() => undefined);
-      const compact = compactCheckReport(checks);
-      let workflowE2EEvidence: Awaited<ReturnType<typeof executeWorkflowE2EChecks>> | undefined;
-      if (invocation.payload.workflowE2EAdmission !== undefined) {
-        workflowE2EEvidence = await executeWorkflowE2EChecks({
-          invocation,
-          readAdmission: (offset) => dependencies.workflowE2EAdmissionReader!(invocation.payload.workflowE2EAdmission!, offset),
-          saveEvidence: dependencies.workflowE2EEvidenceSink!,
-          sourceRoot: dependencies.workflowE2ERuntimeRoot ?? process.cwd(),
-          evidenceRoot: dependencies.workflowE2EEvidenceRoot!,
-          candidateRepositoryRoot: (repositoryId) => repositories.find((repository) => repository.repositoryId === repositoryId)?.directory,
-          ...(dependencies.workflowE2EApplicationRuntime === undefined ? {} : { application: dependencies.workflowE2EApplicationRuntime }),
-          ...(dependencies.workflowE2EModelBudget === undefined ? {} : { modelBudget: dependencies.workflowE2EModelBudget }),
-          signal: stop.signal,
-          ...(dependencies.workflowE2EOnOwnedContainerRunning === undefined ? {} : { onOwnedContainerRunning: dependencies.workflowE2EOnOwnedContainerRunning }),
-        });
-      }
-      // Proof and evidence (wire-proof): the checks' own test reports are read before TESTPROOF runs the original code. Only when the broker asked (its proof switch is on); informational.
-      // The baseline run of a scanner on the original code (P4) takes time from the same budget the test proof below has.
-      const evidenceStarted = Date.now();
-      if (invocation.payload.evidenceCapture === true && !stop.signal.aborted) {
-        // Test services: the rounds' usage record rides in the raw file (the broker labels it; nothing of it was reaching the evidence). Read before the services stop.
-        const servicesRecord = await testServices?.usageRecord().catch(() => undefined);
-        const edgesStarted = Date.now();
-        const repositoryEdges = await repositoryChecks.evidence({ kind: runners.kind, signal: stop.signal, budgetMs: roundBudgetMs - roundSpentMs });
-        const edgesSpentMs = Date.now() - edgesStarted;
-        await saveEvidenceRaw({ repositoryEdges, sink: dependencies.artifactSink, rootPath: canonicalRoot, plan, entries: round.entries, repositories, candidateBefore, roundStartedAtMs: roundStarted, selection: testEnv?.selection, ...(servicesRecord === undefined ? {} : { testServices: servicesRecord }), coveragePaths: invocation.payload.testEnvironment?.checks.map((check) => check.coveragePath), ...(flaky === undefined || flaky.size === 0 ? {} : { flaky }), ...(baselineClaim === undefined ? {} : { baselineClaim }), ...(baselineClaims === undefined ? {} : { baselineClaims }),
-          baseline: { runners, signal: stop.signal, budgetMs: roundBudgetMs - roundSpentMs - edgesSpentMs, ...(dependencies.testProofOriginalCode === undefined ? {} : { originalCode: dependencies.testProofOriginalCode }) } });
-        // TE-H1 browser evidence (DEC 241): before and after screenshots of the changed pages, only when the broker asked (its recipe, its feature). The app starts in the task sandbox and Chromium in the executor image; informational.
-        if (invocation.payload.browserEvidence !== undefined && !stop.signal.aborted) {
-          await saveBrowserEvidence({
-            recipe: invocation.payload.browserEvidence, repositories, candidateTrees: new Map(candidateBefore.map((entry) => [entry.repositoryId, entry.treeSha])), rootPath: canonicalRoot, runners, sandboxName: sandbox?.name,
-            originalCode: dependencies.testProofOriginalCode ?? gitOriginalCode, docker: dependencies.docker ?? fileToolsDocker, executorImage: dependencies.browserEvidenceExecutorImage ?? process.env["EXECUTOR_IMAGE"], signal: stop.signal,
-            budgetMs: roundBudgetMs - (Date.now() - roundStarted), sink: dependencies.browserEvidenceSink, signIn: dependencies.browserEvidenceSignIn, progress: (message) => events.append("progress", { message }),
-            ...(dependencies.collectBrowserEvidence === undefined ? {} : { collect: dependencies.collectBrowserEvidence }),
-          });
-        }
-      }
-      const evidenceSpentMs = Date.now() - evidenceStarted;
-      // TESTPROOF: informational only. It changes no check result and no artifact above; only a failure to put the agent's files back stops the task.
-      // It runs after the browser and API checks, so their evidence never sees the build output of a run on the original code. Known limitation: files the
-      // original code's run left that git ignores (build output, caches) are not removed and can remain for the stages after this one.
-      if (status === "verified" && plan.source === "project" && !stop.signal.aborted) {
-        const testProof = await runTestProofStep({ plan, round: round.entries, runners, repositories, candidateBefore, rootPath: canonicalRoot, signal: stop.signal,
-          budgetMs: roundBudgetMs - roundSpentMs - evidenceSpentMs, events, originalCode: dependencies.testProofOriginalCode });
-        // Read only when the proof ran, and deliberately fail-closed: a read failure here fails the task rather than reporting a candidate nobody confirmed.
-        // The after-snapshot is read after the proof run too: whatever it left behind in the candidate is then seen by the broker as drift.
-        const afterProof = await readCandidateRepositories(repositories);
-        if (createCandidateManifest(afterProof).digest !== createCandidateManifest(candidateAfter).digest) candidateAfter = afterProof;
-        // General fakes: the original code's run used the fakes too. A fake answer there can make a new test fail on the old code, so its facts join the candidate's (never proof either way).
-        if (testProof !== undefined) await saveTestProof(dependencies.artifactSink, testProof, events, candidateReplyFacts, mergeGeneralFakeFacts(candidateFakeFacts, fakesCollector.take()));
-      }
-      // AI final-check slot: eval owns its grant/hold and artifact. Later AI steps use independent capabilities here.
-      if (invocation.payload.evalRequest !== undefined) {
-        const remaining = roundBudgetMs - (Date.now() - roundStarted);
-        if (remaining <= 0) stop.abort();
-        const deadline = setTimeout(() => stop.abort(), Math.max(0, remaining));
-        let evalArtifact: Awaited<ReturnType<typeof runFinalCheckEval>>;
-        // DEC 253n(2): the fresh check sandbox's own folder for this eval (checkouts, env files, report copies), removed when the eval is over.
-        let evalScratch: string | undefined;
-        try {
-          // One plan read serves both the eval and the changed-prompt classifier, so they share one base commit.
-          const ports = dependencies.evalFinalCheck;
-          let planning: ReturnType<EvalFinalCheckPorts["plan"]> | undefined;
-          const plan = ports === undefined ? undefined : () => (planning ??= (async () => ports.plan())());
-          const evaluate = () => runFinalCheckEval(invocation.payload.evalRequest, ports === undefined || plan === undefined ? ports : Object.create(ports, { plan: { value: plan } }) as EvalFinalCheckPorts, {
-            status, candidateDigest: createCandidateManifest(candidateBefore).digest, signal: stop.signal,
-          });
-          // DEC 253n(2): the fresh check sandbox's scratch folder and round for the pinned candidate.
-          const pinned = async <T>(run: () => Promise<T>): Promise<T> => {
-            evalScratch = await mkdtemp(join(tmpdir(), "rve-"));
-            const round = { workingSandbox: sandbox?.name ?? null, roundBudgetMs: Math.max(1, roundBudgetMs - (Date.now() - roundStarted)), scratchDir: evalScratch };
-            return await withEvalPinnedCandidate(repositories, candidateBefore, stop.signal, run, round);
-          };
-          // Only a fresh check round reads the plan; a working round refuses first, so the classifier has nothing to classify.
-          const fresh = ports?.roundKind === "check_sealed" || ports?.roundKind === "check_unsealed";
-          // DEC 253j(1): the trusted plan's per-task hashes come from this same pinned candidate. The pin wraps the classifier too,
-          // because the one shared plan read (made first by the classifier) must happen inside it.
-          const running = (ports === undefined || status !== "verified" ? evaluate()
-            : pinned(() => !fresh || stop.signal.aborted ? evaluate()
-              : withEvalChangedPromptClassifier(repositories, candidateBefore, stop.signal, plan, evaluate, promptLocationsOf(invocation.payload.evalPromptLocations))))
-            .then(value => { evalArtifact = value; return value; });
-          await untilAborted(running, stop.signal, ABORT_JOIN_MS, runners.kind ?? "local");
-        } catch (error) {
-          if (isWorkspaceUnsafe(error) || !stop.signal.aborted) throw error;
-        } finally {
-          clearTimeout(deadline);
-          if (evalScratch !== undefined) await rm(evalScratch, { recursive: true, force: true }).catch(() => undefined);
-        }
-        assertWorkspaceSafe();
-        const afterEval = await readCandidateRepositories(repositories);
-        if (createCandidateManifest(afterEval).digest !== createCandidateManifest(candidateAfter).digest) candidateAfter = afterEval;
-        if (evalArtifact !== undefined) {
-          const result = evalResultFromArtifact(evalArtifact);
-          await events.append("progress", { message: result.outcome === "not_run" ? "Eval: Not run." : result.label === "Worse on eval" ? "Eval: Worse on eval." : result.label === "Improved on eval" ? "Eval: Improved on eval." : "Eval: No regression measured (eval)." });
-          try { await dependencies.artifactSink({ name: EVAL_ROUND_ARTIFACT, mediaType: "application/json", content: JSON.stringify(evalArtifact) }); }
-          catch { await events.append("progress", { message: "Eval result could not be saved." }); }
-        }
-      }
-      await events.append("result", {
-        status: "SUCCEEDED", conversationId: invocation.payload.conversationId, workflowMode: "CHECKS", checks: compact,
-        workflowCandidateRepositories: candidateBefore,
-        workflowCheckCandidateRepositories: candidateAfter,
-        ...(workflowE2EEvidence === undefined ? {} : { workflowE2EEvidenceRef: workflowE2EEvidence.evidenceRef }),
-      });
-      await events.flush();
-      return {
-        conversationId: invocation.payload.conversationId, reopened: true, workflowMode: "CHECKS", checks: compact,
-        workflowCandidateRepositories: candidateBefore,
-        workflowCheckCandidateRepositories: candidateAfter,
-        ...(workflowE2EEvidence === undefined ? {} : { workflowE2EEvidenceRef: workflowE2EEvidence.evidenceRef }),
-      };
-    } catch (error) {
-      await events.append("error", { message: redactText(error instanceof Error ? error.message : "verification retry failed") }).catch(() => undefined);
-      await events.flush().catch(() => undefined);
-      if (dependencies.cancellationController?.isCancelled(invocation.operationId)) throw new WorkerOperationCancelledError(invocation.operationId);
-      throw error;
-    } finally {
-      unregister?.();
-    }
+    return runChecksStage({
+      invocation, dependencies, manifest, canonicalRoot, candidateSweep, checkHistory, localShell, hostedFakes, scopeChecks, replyCollector, testServices,
+      devcontainer, devcontainerCli, bashOperations, sandbox, repositoryChecks, fileToolsDocker,
+    });
   }
 
   const conversationId = invocation.payload.conversationId;
@@ -2176,6 +1910,342 @@ async function runTask(
     unsubscribe();
     unregisterCancellation?.();
     session.dispose();
+  }
+}
+
+/** #1303: a parsed task invocation, as runTask has it after the kind check. */
+type TaskRunInvocation = Extract<WorkerInvocation, { kind: "task" }>;
+
+/** #1303: what runTask has set up by the time a CHECKS run starts; runChecksStage only reads it. */
+interface ChecksStageContext {
+  invocation: TaskRunInvocation;
+  dependencies: TaskInvocationDependencies;
+  manifest: PreparationManifest;
+  canonicalRoot: string;
+  candidateSweep: ((directory: string) => Promise<void>) | undefined;
+  checkHistory: Awaited<ReturnType<typeof readCheckHistory>>;
+  localShell: boolean;
+  hostedFakes: ReturnType<typeof hostedFakesLauncherFor>;
+  scopeChecks: (runners: CheckRunners) => CheckRunners;
+  replyCollector: ReturnType<typeof modelHelperReplyCollector>;
+  testServices: Awaited<ReturnType<typeof startTaskTestServices>>;
+  devcontainer: ReturnType<typeof preparedDevcontainerTarget> | undefined;
+  devcontainerCli: DevcontainerCli | undefined;
+  bashOperations: BashOperations | undefined;
+  sandbox: TaskSandbox | undefined;
+  repositoryChecks: ReturnType<typeof createRepositoryCheckSupplier>;
+  fileToolsDocker: NonNullable<TaskInvocationDependencies["docker"]>;
+}
+
+/**
+ * A verification retry (CHECKS, #1303: moved out of runTask unchanged). It has no model and no coding tools: it snapshots the candidate, runs only the owner-selected
+ * project checks (then the evidence, the test proof and the eval the broker asked for), and snapshots again so the broker can reject a changed tree.
+ */
+async function runChecksStage(stage: ChecksStageContext): Promise<TaskInvocationResult> {
+  const {
+    invocation, dependencies, manifest, canonicalRoot, candidateSweep, checkHistory, localShell, hostedFakes, scopeChecks, replyCollector, testServices,
+    devcontainer, devcontainerCli, bashOperations, sandbox, repositoryChecks, fileToolsDocker,
+  } = stage;
+  if (invocation.payload.workflowE2EAdmission !== undefined && (dependencies.workflowE2EAdmissionReader === undefined
+    || dependencies.workflowE2EEvidenceSink === undefined || dependencies.workflowE2EEvidenceRoot === undefined)) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "the admitted E2E CHECKS runtime or evidence directory is unavailable");
+  }
+  const readiness = invocation.payload.readiness ?? [];
+  const NO_PROJECT_CHECK = "verification retry requires at least one selected project check";
+  // A run with nothing to check at all is never valid. A round whose admission is an application admission (browser or API scenarios) is valid with no project
+  // check; which kind it is is only known once the admission is read, which the broker allows after the operation is durably RUNNING (below).
+  if (readiness.length === 0 && invocation.payload.workflowE2EAdmission === undefined) throw agentXError("CONFIG_INVALID", NO_PROJECT_CHECK);
+  const events = new EventBatcher(dependencies.eventSink);
+  const repositories = candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase, candidateSweep);
+  const candidateBefore = await readCandidateRepositories(repositories);
+  const recorder = new CommandRecorder({ fingerprint: (signal) => recorderFingerprint(repositories.map((repository) => ({ name: repository.repositoryId, directory: repository.directory })), signal) });
+  // Test environment (wire-testenv): the approved environment's plan narrows its test checks and sets the round's budget. Absent unless the broker sent it; a plan that does not fit the commands is ignored.
+  const testEnv = invocation.payload.testEnvironment === undefined ? undefined : await applyTestEnvironmentPlan({ readiness, plan: invocation.payload.testEnvironment, repositories, candidateBefore, now: new Date() });
+  const plan = planChecks(testEnv?.readiness ?? readiness, recorder, checkHistory);
+  const stop = new AbortController();
+  const unregister = dependencies.cancellationController?.register(invocation.operationId, { abort: async () => stop.abort() });
+  // TE-C1: when the plan carries baseline candidates (an asked-for field), the nearest one that is an ancestor of the task's base commit is found NOW, before any check runs, in the isolated git environment (it reads
+  // objects only: what the agent or a check leaves in `.git` cannot change it). One repository only (the nightly is single-repository); otherwise, or with no answer, the engine keeps today's behaviour.
+  const baselineCandidates = invocation.payload.testEnvironment?.baselineCandidates;
+  const baselineClaim = baselineCandidates === undefined || repositories.length !== 1 ? undefined
+    : await findBaselineAncestor({ directory: repositories[0]!.directory, baseCommit: repositories[0]!.baseCommitSha, candidates: baselineCandidates, signal: stop.signal });
+  // TE-MR2b: with two or more repositories, one claim per repository, all or none (the engine then builds ONE combined baseline, or none).
+  const baselineClaims = baselineCandidates === undefined || invocation.payload.testEnvironment?.repositoryBaselines !== true || repositories.length < 2 ? undefined
+    : await findBaselineAncestors({ repositories: repositories.map((repository) => ({ repositoryId: repository.repositoryId, directory: repository.directory, baseCommitSha: repository.baseCommitSha })), candidates: baselineCandidates, signal: stop.signal });
+  try {
+    await events.append("lifecycle", { status: "RUNNING", conversationId: invocation.payload.conversationId, conversation: { started: true, reopened: true } });
+    // The broker authorizes the private admission read only after the operation is durably
+    // RUNNING. Flush this transition before the first protected CHECKS callback.
+    await events.flush();
+    if (readiness.length === 0 && !(await workflowE2EAdmissionIsApplication({ reference: invocation.payload.workflowE2EAdmission!,
+      readAdmission: (offset) => dependencies.workflowE2EAdmissionReader!(invocation.payload.workflowE2EAdmission!, offset) }))) {
+      throw agentXError("CONFIG_INVALID", NO_PROJECT_CHECK);
+    }
+    await events.append("progress", { message: invocation.payload.workflowE2EAdmission?.purpose === "baseline"
+      ? "AgentX is running the approved browser and API checks once on the code as the task started, for information only. It has no code-editing tools and decides nothing about the change."
+      : invocation.payload.workflowE2EAdmission?.purpose === "replay"
+      ? "AgentX is replaying a verified AI-navigated check from its recording, with no model, for an operator's audit. It has no code-editing tools and decides nothing about the change."
+      : invocation.payload.workflowE2EAdmission?.purpose === "grounding"
+      ? "AgentX is checking the plan's unchanged-behaviour checks against the current app. It has no code-editing tools and decides nothing about the change."
+      : "AgentX is running the selected project checks against the current code. This retry has no code-editing tools." });
+    // General fakes (DEC 234): only when the broker sent the payload (the project setting is on); slice 1 serves them on the local shell only, and says so otherwise.
+    const fakesCollector = generalFakesFactsCollector();
+    let candidateFakeFactsTaken = false;
+    const fakesPlan = fakesCollector.wrap(generalFakesPlanFor(invocation.payload.generalFakes, {
+      localShell, rootPath: canonicalRoot, repositoryPaths: manifest.repositories.map((repository) => resolve(canonicalRoot, repository.path)), ...(hostedFakes === undefined ? {} : { hosted: hostedFakes }),
+      // Only the candidate round's line is posted; later rounds (the original code's) still add their facts.
+      onResult: (result) => { if (candidateFakeFactsTaken) return; for (const line of result.lines) void events.append("progress", { message: line }).catch(() => undefined); },
+    }));
+    if (invocation.payload.generalFakes !== undefined && fakesPlan === undefined) await events.append("progress", { message: GENERAL_FAKES_LOCAL_ONLY_SENTENCE });
+    const runners = scopeChecks(withModelHelperRound(replyCollector.wrap(modelHelperPlanFor(dependencies.modelHelperRound, { rootPath: canonicalRoot })), withGeneralFakesRound(fakesPlan, withTestServices(testServices, projectCheckRunners(dependencies, { canonicalRoot, devcontainer, devcontainerCli, bashOperations, sandbox, localShell })))));
+    const roundBudgetMs = dependencies.checkBudgetMs?.() ?? testEnv?.budgetMs ?? CHECK_ROUND_BUDGET_MS;
+    const roundStarted = Date.now();
+    const round = await runChecks(plan, runners, { budgetMs: roundBudgetMs, signal: stop.signal });
+    // TE-C6: with the plan's `flakyRerun` and the evidence asked for, the failing tests of a test check that passed before are rerun once (inside what is left of the round's budget) so the evidence can name the ones that passed. The
+    // checks' entries are not changed. The rerun puts the checks' report files back, so the evidence below reads the round's own reports.
+    const flaky = invocation.payload.testEnvironment?.flakyRerun === true && !round.stopped && !stop.signal.aborted
+      ? await rerunFlaky({ rootPath: canonicalRoot, commands: readiness, checks: invocation.payload.testEnvironment.checks, entries: round.entries, runners, roundStartedAtMs: roundStarted, budgetMs: Math.max(0, roundBudgetMs - (Date.now() - roundStarted)), signal: stop.signal })
+      : undefined;
+    const candidateReplyFacts = replyCollector.take();
+    const candidateFakeFacts = fakesCollector.take();
+    candidateFakeFactsTaken = true;
+    assertWorkspaceSafe();
+    for (const message of repositoryChecks.notes()) await events.append("progress", { message });
+    const roundSpentMs = Date.now() - roundStarted;
+    const status = round.stopped ? "not_verified" : reportStatus(round.entries);
+    const checks: CheckReport = {
+      status,
+      ...(status === "not_verified" ? { notVerifiedReason: round.stopped || round.entries.length > 0 ? "stopped" : "no_checks" } : {}),
+      source: plan.source,
+      preambleVersion: AGENTX_PREAMBLE_VERSION,
+      preambleSha256: agentxPreambleSha256(),
+      checks: round.entries,
+      extraTry: "not_needed",
+      agentClaim: "none",
+    };
+    try {
+      const restored = await restoreCheckHistory(canonicalRoot, checkHistory, plan.source === "project" && plan.readiness !== undefined
+        ? { plan: { source: plan.source, readiness: plan.readiness }, entries: round.entries } : undefined);
+      if (restored.outcome === "removed") await events.append("progress", { message: "AgentX could not save these check results for the next task and removed the untrusted check-history file." });
+    } catch {
+      await events.append("progress", { message: "AgentX could not safely update the workspace check history." });
+    }
+    let candidateAfter = await readCandidateRepositories(repositories);
+    await dependencies.artifactSink({ name: "checks.json", mediaType: "application/json", content: checksArtifactContent(checks) });
+    // TE-C6: what the broker may excuse as flaky (only checks whose every failing test passed on the rerun). Informational for the worker: a failed save leaves the failure standing.
+    const flakyFile = flakyRerunFileOf(flaky);
+    if (flakyFile !== undefined) await dependencies.artifactSink({ name: flakyFile.name, mediaType: "application/json", content: flakyFile.content }).catch(() => undefined);
+    const compact = compactCheckReport(checks);
+    let workflowE2EEvidence: Awaited<ReturnType<typeof executeWorkflowE2EChecks>> | undefined;
+    if (invocation.payload.workflowE2EAdmission !== undefined) {
+      workflowE2EEvidence = await executeWorkflowE2EChecks({
+        invocation,
+        readAdmission: (offset) => dependencies.workflowE2EAdmissionReader!(invocation.payload.workflowE2EAdmission!, offset),
+        saveEvidence: dependencies.workflowE2EEvidenceSink!,
+        sourceRoot: dependencies.workflowE2ERuntimeRoot ?? process.cwd(),
+        evidenceRoot: dependencies.workflowE2EEvidenceRoot!,
+        candidateRepositoryRoot: (repositoryId) => repositories.find((repository) => repository.repositoryId === repositoryId)?.directory,
+        ...(dependencies.workflowE2EApplicationRuntime === undefined ? {} : { application: dependencies.workflowE2EApplicationRuntime }),
+        ...(dependencies.workflowE2EModelBudget === undefined ? {} : { modelBudget: dependencies.workflowE2EModelBudget }),
+        signal: stop.signal,
+        ...(dependencies.workflowE2EOnOwnedContainerRunning === undefined ? {} : { onOwnedContainerRunning: dependencies.workflowE2EOnOwnedContainerRunning }),
+      });
+    }
+    // Proof and evidence (wire-proof): the checks' own test reports are read before TESTPROOF runs the original code. Only when the broker asked (its proof switch is on); informational.
+    // The baseline run of a scanner on the original code (P4) takes time from the same budget the test proof below has.
+    const evidenceStarted = Date.now();
+    if (invocation.payload.evidenceCapture === true && !stop.signal.aborted) {
+      // Test services: the rounds' usage record rides in the raw file (the broker labels it; nothing of it was reaching the evidence). Read before the services stop.
+      const servicesRecord = await testServices?.usageRecord().catch(() => undefined);
+      const edgesStarted = Date.now();
+      const repositoryEdges = await repositoryChecks.evidence({ kind: runners.kind, signal: stop.signal, budgetMs: roundBudgetMs - roundSpentMs });
+      const edgesSpentMs = Date.now() - edgesStarted;
+      await saveEvidenceRaw({ repositoryEdges, sink: dependencies.artifactSink, rootPath: canonicalRoot, plan, entries: round.entries, repositories, candidateBefore, roundStartedAtMs: roundStarted, selection: testEnv?.selection, ...(servicesRecord === undefined ? {} : { testServices: servicesRecord }), coveragePaths: invocation.payload.testEnvironment?.checks.map((check) => check.coveragePath), ...(flaky === undefined || flaky.size === 0 ? {} : { flaky }), ...(baselineClaim === undefined ? {} : { baselineClaim }), ...(baselineClaims === undefined ? {} : { baselineClaims }),
+        baseline: { runners, signal: stop.signal, budgetMs: roundBudgetMs - roundSpentMs - edgesSpentMs, ...(dependencies.testProofOriginalCode === undefined ? {} : { originalCode: dependencies.testProofOriginalCode }) } });
+      // TE-H1 browser evidence (DEC 241): before and after screenshots of the changed pages, only when the broker asked (its recipe, its feature). The app starts in the task sandbox and Chromium in the executor image; informational.
+      if (invocation.payload.browserEvidence !== undefined && !stop.signal.aborted) {
+        await saveBrowserEvidence({
+          recipe: invocation.payload.browserEvidence, repositories, candidateTrees: new Map(candidateBefore.map((entry) => [entry.repositoryId, entry.treeSha])), rootPath: canonicalRoot, runners, sandboxName: sandbox?.name,
+          originalCode: dependencies.testProofOriginalCode ?? gitOriginalCode, docker: dependencies.docker ?? fileToolsDocker, executorImage: dependencies.browserEvidenceExecutorImage ?? process.env["EXECUTOR_IMAGE"], signal: stop.signal,
+          budgetMs: roundBudgetMs - (Date.now() - roundStarted), sink: dependencies.browserEvidenceSink, signIn: dependencies.browserEvidenceSignIn, progress: (message) => events.append("progress", { message }),
+          ...(dependencies.collectBrowserEvidence === undefined ? {} : { collect: dependencies.collectBrowserEvidence }),
+        });
+      }
+    }
+    const evidenceSpentMs = Date.now() - evidenceStarted;
+    // TESTPROOF: informational only. It changes no check result and no artifact above; only a failure to put the agent's files back stops the task.
+    // It runs after the browser and API checks, so their evidence never sees the build output of a run on the original code. Known limitation: files the
+    // original code's run left that git ignores (build output, caches) are not removed and can remain for the stages after this one.
+    if (status === "verified" && plan.source === "project" && !stop.signal.aborted) {
+      const testProof = await runTestProofStep({ plan, round: round.entries, runners, repositories, candidateBefore, rootPath: canonicalRoot, signal: stop.signal,
+        budgetMs: roundBudgetMs - roundSpentMs - evidenceSpentMs, events, originalCode: dependencies.testProofOriginalCode });
+      // Read only when the proof ran, and deliberately fail-closed: a read failure here fails the task rather than reporting a candidate nobody confirmed.
+      // The after-snapshot is read after the proof run too: whatever it left behind in the candidate is then seen by the broker as drift.
+      const afterProof = await readCandidateRepositories(repositories);
+      if (createCandidateManifest(afterProof).digest !== createCandidateManifest(candidateAfter).digest) candidateAfter = afterProof;
+      // General fakes: the original code's run used the fakes too. A fake answer there can make a new test fail on the old code, so its facts join the candidate's (never proof either way).
+      if (testProof !== undefined) await saveTestProof(dependencies.artifactSink, testProof, events, candidateReplyFacts, mergeGeneralFakeFacts(candidateFakeFacts, fakesCollector.take()));
+    }
+    // AI final-check slot: eval owns its grant/hold and artifact. Later AI steps use independent capabilities here.
+    if (invocation.payload.evalRequest !== undefined) {
+      const remaining = roundBudgetMs - (Date.now() - roundStarted);
+      if (remaining <= 0) stop.abort();
+      const deadline = setTimeout(() => stop.abort(), Math.max(0, remaining));
+      let evalArtifact: Awaited<ReturnType<typeof runFinalCheckEval>>;
+      // DEC 253n(2): the fresh check sandbox's own folder for this eval (checkouts, env files, report copies), removed when the eval is over.
+      let evalScratch: string | undefined;
+      try {
+        // One plan read serves both the eval and the changed-prompt classifier, so they share one base commit.
+        const ports = dependencies.evalFinalCheck;
+        let planning: ReturnType<EvalFinalCheckPorts["plan"]> | undefined;
+        const plan = ports === undefined ? undefined : () => (planning ??= (async () => ports.plan())());
+        const evaluate = () => runFinalCheckEval(invocation.payload.evalRequest, ports === undefined || plan === undefined ? ports : Object.create(ports, { plan: { value: plan } }) as EvalFinalCheckPorts, {
+          status, candidateDigest: createCandidateManifest(candidateBefore).digest, signal: stop.signal,
+        });
+        // DEC 253n(2): the fresh check sandbox's scratch folder and round for the pinned candidate.
+        const pinned = async <T>(run: () => Promise<T>): Promise<T> => {
+          evalScratch = await mkdtemp(join(tmpdir(), "rve-"));
+          const round = { workingSandbox: sandbox?.name ?? null, roundBudgetMs: Math.max(1, roundBudgetMs - (Date.now() - roundStarted)), scratchDir: evalScratch };
+          return await withEvalPinnedCandidate(repositories, candidateBefore, stop.signal, run, round);
+        };
+        // Only a fresh check round reads the plan; a working round refuses first, so the classifier has nothing to classify.
+        const fresh = ports?.roundKind === "check_sealed" || ports?.roundKind === "check_unsealed";
+        // DEC 253j(1): the trusted plan's per-task hashes come from this same pinned candidate. The pin wraps the classifier too,
+        // because the one shared plan read (made first by the classifier) must happen inside it.
+        const running = (ports === undefined || status !== "verified" ? evaluate()
+          : pinned(() => !fresh || stop.signal.aborted ? evaluate()
+            : withEvalChangedPromptClassifier(repositories, candidateBefore, stop.signal, plan, evaluate, promptLocationsOf(invocation.payload.evalPromptLocations))))
+          .then(value => { evalArtifact = value; return value; });
+        await untilAborted(running, stop.signal, ABORT_JOIN_MS, runners.kind ?? "local");
+      } catch (error) {
+        if (isWorkspaceUnsafe(error) || !stop.signal.aborted) throw error;
+      } finally {
+        clearTimeout(deadline);
+        if (evalScratch !== undefined) await rm(evalScratch, { recursive: true, force: true }).catch(() => undefined);
+      }
+      assertWorkspaceSafe();
+      const afterEval = await readCandidateRepositories(repositories);
+      if (createCandidateManifest(afterEval).digest !== createCandidateManifest(candidateAfter).digest) candidateAfter = afterEval;
+      if (evalArtifact !== undefined) {
+        const result = evalResultFromArtifact(evalArtifact);
+        await events.append("progress", { message: result.outcome === "not_run" ? "Eval: Not run." : result.label === "Worse on eval" ? "Eval: Worse on eval." : result.label === "Improved on eval" ? "Eval: Improved on eval." : "Eval: No regression measured (eval)." });
+        try { await dependencies.artifactSink({ name: EVAL_ROUND_ARTIFACT, mediaType: "application/json", content: JSON.stringify(evalArtifact) }); }
+        catch { await events.append("progress", { message: "Eval result could not be saved." }); }
+      }
+    }
+    await events.append("result", {
+      status: "SUCCEEDED", conversationId: invocation.payload.conversationId, workflowMode: "CHECKS", checks: compact,
+      workflowCandidateRepositories: candidateBefore,
+      workflowCheckCandidateRepositories: candidateAfter,
+      ...(workflowE2EEvidence === undefined ? {} : { workflowE2EEvidenceRef: workflowE2EEvidence.evidenceRef }),
+    });
+    await events.flush();
+    return {
+      conversationId: invocation.payload.conversationId, reopened: true, workflowMode: "CHECKS", checks: compact,
+      workflowCandidateRepositories: candidateBefore,
+      workflowCheckCandidateRepositories: candidateAfter,
+      ...(workflowE2EEvidence === undefined ? {} : { workflowE2EEvidenceRef: workflowE2EEvidence.evidenceRef }),
+    };
+  } catch (error) {
+    await events.append("error", { message: redactText(error instanceof Error ? error.message : "verification retry failed") }).catch(() => undefined);
+    await events.flush().catch(() => undefined);
+    if (dependencies.cancellationController?.isCancelled(invocation.operationId)) throw new WorkerOperationCancelledError(invocation.operationId);
+    throw error;
+  } finally {
+    unregister?.();
+  }
+}
+
+/** #1303: the project's check runners for a CHECKS or nightly run: the injected ones (tests), or the dev container's, the task sandbox's or the explicit local shell's. */
+function projectCheckRunners(
+  dependencies: TaskInvocationDependencies,
+  shell: Pick<ChecksStageContext, "canonicalRoot" | "devcontainer" | "devcontainerCli" | "bashOperations" | "sandbox" | "localShell">,
+): CheckRunners {
+  const { canonicalRoot, devcontainer, devcontainerCli, bashOperations, sandbox, localShell } = shell;
+  return dependencies.checkRunners ?? createCheckRunners({
+    rootPath: canonicalRoot,
+    ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
+    ...(bashOperations === undefined ? {} : { bashOperations }),
+    ...(sandbox === undefined ? {} : { sandbox }),
+    ...(localShell ? { local: true } : {}),
+  });
+}
+
+/** #1303: what runTask has set up by the time a FEEDBACK_REVIEW run starts; runFeedbackReviewStage only reads it. */
+interface FeedbackReviewStageContext {
+  invocation: TaskRunInvocation;
+  dependencies: TaskInvocationDependencies;
+  canonicalRoot: string;
+  manifest: PreparationManifest;
+  candidateSweep: ((directory: string) => Promise<void>) | undefined;
+  fileTools: FileOpsTarget | undefined;
+  fileToolsNote: string | undefined;
+  feedbackTimeoutMs: number | undefined;
+  agentStep: Extract<NonNullable<TaskRunInvocation["payload"]["agentStep"]>, { kind: "coding" }> | undefined;
+  standingInstructions: string | undefined;
+  stepSkills: AgentSkillFile[] | undefined;
+}
+
+/**
+ * The PR feedback review (FEEDBACK_REVIEW, #1303: moved out of runTask unchanged). It reads the task's approved feedback bundles, refuses a candidate that changed since,
+ * and runs the review on the repositories that have a pull request bundle.
+ */
+async function runFeedbackReviewStage(stage: FeedbackReviewStageContext): Promise<TaskInvocationResult> {
+  const { invocation, dependencies, canonicalRoot, manifest, candidateSweep, fileTools, fileToolsNote, feedbackTimeoutMs, agentStep, standingInstructions, stepSkills } = stage;
+  const binding = invocation.payload.workflowFeedbackReview!;
+  if (dependencies.feedbackBundleReader === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the worker cannot read the task's approved feedback bundles");
+  const root = canonicalRoot;
+  const stop = new AbortController();
+  // An unconfirmed stop anywhere in the task ends the checks: nothing runs on, and the run's ending reads nothing (workspace-safety.ts).
+  currentWorkspaceSafety()?.onUnsafe(() => stop.abort());
+  const unregister = dependencies.cancellationController?.register(invocation.operationId, { abort: async () => stop.abort() });
+  const events = new EventBatcher(dependencies.eventSink);
+  try {
+    await events.append("progress", { message: "AgentX is reviewing the latest feedback on the linked pull requests." });
+    if (fileToolsNote !== undefined) await events.append("progress", { message: fileToolsNote });
+    const collected = await dependencies.feedbackBundleReader(binding);
+    // Publication moved HEAD to a new commit with the reviewed tree, so the code is identified by that tree (and the
+    // pinned base stays an ancestor), not by the commit the candidate digest was made from. Only repositories that
+    // have a pull request bundle are checked, and only those are readable by the critic.
+    const bundledIds = new Set(collected.bundles.map(({ ref }) => ref.repositoryId));
+    const repositoryInputs = candidateInputs(manifest, root, invocation.payload.workflowBase, candidateSweep).filter(input => bundledIds.has(input.repositoryId));
+    const candidateRepositories = repositoryInputs.length === 0 ? [] : await readCandidateRepositories(repositoryInputs);
+    const unchanged = collected.bundles.every(({ ref }) => {
+      const identity = candidateRepositories.find(repository => repository.repositoryId === ref.repositoryId);
+      return identity !== undefined && ref.headTreeSha !== undefined && identity.treeSha === ref.headTreeSha
+        && ref.candidateDigest === binding.candidateDigest;
+    });
+    if (!unchanged) throw agentXError("OPERATION_INTERRUPTED", "the candidate changed before PR feedback review");
+    const execution = await runWorkflowFeedbackReview({
+      operationId: invocation.operationId, taskId: binding.taskId, workflowRevision: binding.workflowRevision,
+      taskRequirements: collected.taskRequirements, candidateDigest: binding.candidateDigest,
+      rootPath: dependencies.rootPath, model: dependencies.model, candidate: candidateRepositories,
+      repositories: repositoryInputs, bundles: collected.bundles, artifactSink: dependencies.artifactSink,
+      ruleFileBaseCommits: invocation.payload.workflowBase ?? [],
+      ...(collected.taskChecks === undefined ? {} : { taskChecks: collected.taskChecks }),
+      ...(feedbackTimeoutMs === undefined ? {} : { timeoutMs: feedbackTimeoutMs }),
+      ...(dependencies.structuredAnswers === undefined ? {} : { structuredAnswers: dependencies.structuredAnswers }),
+      ...(agentStep?.promptSection === undefined ? {} : { promptSection: agentStep.promptSection }),
+      ...(standingInstructions === undefined ? {} : { standingInstructions }),
+      ...(agentStep?.tools === undefined ? {} : { tools: agentStep.tools }),
+      ...(stepSkills === undefined ? {} : { skills: stepSkills }),
+      ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }), signal: stop.signal,
+      ...(fileTools === undefined ? {} : { fileTools }),
+      onProgress: message => { void events.append("progress", { message }).catch(() => undefined); },
+    });
+    const workflowFeedbackReviewResult = {
+      taskId: binding.taskId, workflowRevision: binding.workflowRevision, candidateDigest: binding.candidateDigest,
+      outputDigest: execution.outputDigest, artifactName: execution.artifactName, status: execution.report.status,
+    };
+    await events.append("result", { status: "SUCCEEDED", workflowMode: "FEEDBACK_REVIEW", workflowFeedbackReviewResult });
+    await events.flush();
+    return { conversationId: invocation.payload.conversationId, reopened: false, workflowMode: "FEEDBACK_REVIEW", workflowFeedbackReviewResult };
+  } catch (error) {
+    await events.append("error", { message: redactText(error instanceof Error ? error.message : "feedback review failed") }).catch(() => undefined);
+    await events.flush().catch(() => undefined);
+    throw error;
+  } finally {
+    unregister?.();
   }
 }
 
