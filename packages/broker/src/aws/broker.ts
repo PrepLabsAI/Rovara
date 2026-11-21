@@ -1,7 +1,7 @@
 import "./broker-environment-init.js"; import { companyMembershipFromDynamo, resolveAdminCompany, resolveCompany } from "./company-check.js"; // ENV-ROOM: the init first (broker-environment-init.ts; kept first by tests/contract/broker-environment-first.test.ts)
 import { coreContextWorkerRouteOf } from "./dev-route-scopes.js";
 import { createHostedBrokerCoreServices } from "./core-job-services.js"; import { codeSettingsReader, companyCodeSettingsReader } from "./project-code-settings.js"; import { hostedPolicySource } from "./core-policy-source.js";
-import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js"; import { coreCopyRefusalWords } from "./core-copy-refusal.js";
+import { guardCoreProjectSource, planCoreProjectWrites, planCanonicalProjectIdentity, coreProjectSnapshotFence } from "./core-project-backfill.js"; import { coreCopyRefusalWords } from "./core-copy-refusal.js";
 import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
 import { createSlackLinkCodes, createSlackPersonResolver, slackBindingCompany, slackCompanyPerson, slackCompanyProject, type SlackCompanyDependencies, type SlackWorkspaceAccess } from "./slack-person.js";
 import { latestRevisionRowFor } from "./company-layout.js";
@@ -2504,10 +2504,7 @@ async function registerProject(
     const accounts = await planAccounts();
     let corePlan: Awaited<ReturnType<typeof planCoreProjectWrites>>;
     try {
-      // A named company's record IS its own-partition row (no legacy source to copy from).
-      corePlan = ownCompany !== undefined ? { status: "existing", writes: [] } : await planCoreProjectWrites({ tableName: dependencies.tableName, documentClient: companyBudget.client }, record);
-      if (corePlan.status === "unknown_company") brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
-      if (snapshot.newest !== undefined) corePlan.writes = guardCoreProjectSource(dependencies, snapshot.newest, corePlan.writes);
+      corePlan = await planRegistrationCoreWrites({ tableName: dependencies.tableName, documentClient: companyBudget.client }, ownCompany, record, snapshot);
     }
     catch { throw agentXError("PROJECT_REVISION_MISMATCH", await coreCopyRefusalWords({ tableName: dependencies.tableName, documentClient: companyBudget.client }, record.companyId, definition.name)); }
 
@@ -2533,13 +2530,14 @@ async function registerProject(
         TableName: dependencies.tableName,
         Key: ownCompany !== undefined ? orgProjectCatalogKey(ownCompany, definition.name) : projectCatalogKey(definition.name),
         UpdateExpression: ownCompany !== undefined
-          ? "SET entityType = :entity, #name = :name, companyId = :company, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)"
-          : "SET entityType = :entity, #name = :name, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
+          ? "SET entityType = :entity, #name = :name, companyId = :company, incarnationRevision = :incarnation, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)"
+          : "SET entityType = :entity, #name = :name, incarnationRevision = :incarnation, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
         ConditionExpression: snapshot.catalog === undefined ? "attribute_not_exists(pk)"
           : snapshot.catalog.latestRevision === undefined ? "attribute_not_exists(latestRevision)"
             : "latestRevision = :observed AND latestRevision < :revision",
         ExpressionAttributeNames: { "#name": "name" },
         ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": definition.name, ":revision": latestRevision, ":now": now,
+          ":incarnation": corePlan.incarnationRevision,
           ...(ownCompany === undefined ? {} : { ":company": ownCompany }),
           ...(snapshot.catalog?.latestRevision === undefined ? {} : { ":observed": snapshot.catalog.latestRevision }) },
       } }] : []),
@@ -2580,6 +2578,24 @@ async function registerProject(
     }
   }
   throw agentXError("PROJECT_REVISION_MISMATCH", "project revision registration exceeded its bounded catalog retries");
+}
+
+/** The identity and source fences join the registration transaction, in their original order. */
+async function planRegistrationCoreWrites(
+  deps: Parameters<typeof planCanonicalProjectIdentity>[0],
+  company: OrgId | undefined,
+  record: RegisteredProjectRecord,
+  snapshot: Awaited<ReturnType<typeof readNamedCompanyCatalogSnapshot>>,
+): ReturnType<typeof planCoreProjectWrites> {
+  // A named company's record IS its own-partition row (no legacy source to copy from).
+  const identity = company === undefined ? undefined : await planCanonicalProjectIdentity(deps, company, record.definition.name, snapshot.newestRevision > 0 || snapshot.catalog !== undefined);
+  const plan = identity !== undefined ? { status: "ready" as const, writes: identity.writes, incarnationRevision: identity.revision } : await planCoreProjectWrites(deps, record);
+  if (plan.status === "unknown_company") brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
+  if (snapshot.newest !== undefined) {
+    if (company === undefined) plan.writes = guardCoreProjectSource(deps, snapshot.newest, plan.writes);
+    else plan.writes.push({ ConditionCheck: { TableName: deps.tableName, Key: revisionKeyFor(company, record.definition.name, snapshot.newestRevision), ...coreProjectSnapshotFence(snapshot.newest) } });
+  }
+  return plan;
 }
 
 async function readProjectCatalogSnapshot(dependencies: AwsBrokerDependencies, projectName: string, task?: { companyId?: unknown }): Promise<{ catalog: { entityType?: string; name?: string; latestRevision?: number } | undefined; newestRevision: number; newest?: RegisteredProjectRecord }> {
@@ -2652,16 +2668,19 @@ async function repairNamedCompanyCatalogPointer(dependencies: AwsBrokerDependenc
   const stored = await getItem<Record<string, unknown>>(dependencies, revisionKeyFor(company, projectName, revision));
   if (stored === undefined || stored.candidate === true) return;
   const snapshot = await readNamedCompanyCatalogSnapshot(dependencies, company, projectName, { waitingCandidate: "allow" });
+  let identity: Awaited<ReturnType<typeof planCanonicalProjectIdentity>>;
+  try { identity = await planCanonicalProjectIdentity(dependencies, company, projectName, true); }
+  catch { throw agentXError("PROJECT_REVISION_MISMATCH", "project identity is unavailable; verified operator migration is required"); }
   if ((snapshot.catalog?.latestRevision ?? 0) >= revision) return;
   try {
-    await dependencies.documentClient.send(new UpdateCommand({
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [...identity.writes, { Update: {
       TableName: dependencies.tableName, Key: orgProjectCatalogKey(company, projectName),
-      UpdateExpression: "SET entityType = :entity, #name = :name, companyId = :company, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
+      UpdateExpression: "SET entityType = :entity, #name = :name, companyId = :company, incarnationRevision = :incarnation, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
       ConditionExpression: snapshot.catalog === undefined ? "attribute_not_exists(pk)" : snapshot.catalog.latestRevision === undefined ? "attribute_not_exists(latestRevision)" : "latestRevision = :observed",
       ExpressionAttributeNames: { "#name": "name" },
-      ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": projectName, ":company": company, ":revision": revision, ":now": new Date().toISOString(),
+      ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": projectName, ":company": company, ":incarnation": identity.revision, ":revision": revision, ":now": new Date().toISOString(),
         ...(snapshot.catalog?.latestRevision === undefined ? {} : { ":observed": snapshot.catalog.latestRevision }) },
-    }));
+    } }] }));
   } catch (error) {
     if (!isConditional(error)) throw error;
     throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog pointer changed without revision history advancing");

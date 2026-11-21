@@ -2,7 +2,9 @@ import { readdirSync, readFileSync } from "node:fs";
 import { Socket } from "node:net";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { allowLoopbackOnly } from "./mutation-spot-offline.js";
+import { allowLoopbackOnly, useLoopbackOnlyGuard } from "./mutation-spot-offline.js";
+
+useLoopbackOnlyGuard();
 
 it("has no production callers outside the new modules and barrel", () => {
   const allowed = new Set(["packages/contracts/src/mutation-spot.ts", "packages/contracts/src/index.ts", "packages/worker/src/verification/mutation-spot-check.ts", "packages/worker/src/verification/mutation-restore.ts"]);

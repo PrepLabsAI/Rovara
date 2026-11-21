@@ -1,8 +1,10 @@
-import "./mutation-spot-offline.js";
+import { useLoopbackOnlyGuard } from "./mutation-spot-offline.js";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { MeasuresFileEntrySchema } from "../../packages/contracts/src/measures-file.js";
 import { MUTATION_SPOT_LIMITS, mutationMeasureEntry, mutationSentence, planMutants, type MutationSpotResult } from "../../packages/contracts/src/mutation-spot.js";
+
+useLoopbackOnlyGuard();
 
 const all = (path: string) => [{ path, hunks: [[1, 100_000] as const] }];
 const plan = (text: string, path = "src/value.ts") => planMutants([{ path, text }], all(path), "a".repeat(40));

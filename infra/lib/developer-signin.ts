@@ -486,6 +486,16 @@ export class DeveloperSignIn extends Construct {
     if (company !== undefined) new iam.Policy(this, "BrokerCompanyImportReads", {
       roles: [broker.role!],
       statements: [
+        // DEC 254zzz284: atomic caller/target membership fences. Use this existing broker
+        // inline policy to preserve the DefaultPolicy's reserved headroom; no new policy resource.
+        new iam.PolicyStatement({
+          actions: ["dynamodb:ConditionCheckItem"],
+          resources: [table.tableArn],
+          conditions: {
+            "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["COMPANY_MEMBER#*"] },
+            Null: { "dynamodb:LeadingKeys": "false" },
+          },
+        }),
         new iam.PolicyStatement({
           actions: ["dynamodb:GetItem"],
           resources: [table.tableArn],

@@ -11,6 +11,9 @@ import { isolatedGitEnvironment } from "../../packages/worker/src/git.js";
 import { runIsolatedGit } from "../../packages/worker/src/isolated-repository.js";
 import { createCheckRunners } from "../../packages/worker/src/verification/checks.js";
 import { processAlive } from "../support/process-liveness.js";
+import { useLoopbackOnlyGuard } from "./mutation-spot-offline.js";
+
+useLoopbackOnlyGuard();
 
 const original = "export const value = true;\n";
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");

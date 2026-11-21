@@ -23,7 +23,8 @@ import { taskOwnerKey } from "../developer/task-records.js";
 import { META, type DeveloperRecord } from "../developer/store.js";
 import type { TaskAuthorityAdmission } from "./task-authority-admission.js";
 import { membershipKey, ownPartitionRow, recordInCompany, strictLiveMembership } from "./company-check.js";
-import { namedCompany, namedCompanyLatestRevisionRow, revisionPkFor } from "./company-layout.js";
+import { namedCompany, revisionPkFor } from "./company-layout.js";
+import { readNamedCompanyRevisionRow } from "./company-revision-row.js";
 
 export const TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES = [
   "pk", "sk", "developerId", "provider", "issuer", "subject", "slackUserId", "revoked", "displayName",
@@ -111,7 +112,7 @@ export async function taskPersonNamedLatestRevision(
     admission.assertOpen();
     return answer;
   } };
-  const row = await namedCompanyLatestRevisionRow(admitted, stateTableName, company, project);
+  const row = await readNamedCompanyRevisionRow(admitted, stateTableName, company, project);
   return taskPersonRevisionFromResponse({ Items: row === undefined ? [] : [row] });
 }
 

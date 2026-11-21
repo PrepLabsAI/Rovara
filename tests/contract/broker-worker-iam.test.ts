@@ -6,6 +6,7 @@ import { environmentNaming } from "../../infra/lib/naming.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
 import { withoutCompanyImportReads } from "../support/company-import-reads-template.js";
+import { withoutBrokerMemberConditionCheck } from "../support/broker-member-condition-check-template.js";
 
 skipLambdaBundling();
 
@@ -13,7 +14,9 @@ skipLambdaBundling();
 it("keeps the broker IAM statement tuples byte-identical to the base", () => {
   // ENV-ROOM 2's IAM changes (the names parameter's ARN, two merged statements, two inert actions dropped) are checked exactly and taken out first: they are pinned in
   // broker-names-parameter-infrastructure.test.ts and the broker IAM headroom tests, and these bytes stay the base's.
-  const template = withoutBrokerNamesParameter(withoutCompanyImportReads(Template.fromStack(new ControlPlaneStack(new App(), "L1cControlPlane", { naming: environmentNaming("staging") })).toJSON())) as {
+  // SIGNIN-MEMBER-CONDITIONCHECK, DEC 254zzz282 B014-A: assert the exact broker-only member statement and remove it before the existing policy normalizers,
+  // preserving every historical IAM tuple byte in the snapshot.
+  const template = withoutBrokerNamesParameter(withoutCompanyImportReads(withoutBrokerMemberConditionCheck(Template.fromStack(new ControlPlaneStack(new App(), "L1cControlPlane", { naming: environmentNaming("staging") })).toJSON()))) as {
     Resources: Record<string, { Type: string; Properties: Record<string, unknown> }>;
   };
   // DEC 254zzz32/35: Slack company mode's conditional broker policy (the company token family and the install's Slack secret, read-only) is asserted in full by

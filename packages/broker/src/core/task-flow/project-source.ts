@@ -13,7 +13,7 @@ import {
 import type { ProjectRevision, ProjectSource } from "./deps.js";
 
 function revisionOf(document: StoredDocument | undefined, meta: StoredDocument | undefined): ProjectRevision | undefined {
-  if (document === undefined) return undefined;
+  if (document === undefined || meta?.status === "deleted") return undefined;
   const parsed = ProjectDefinitionSchema.safeParse(document.definition);
   return parsed.success ? { definition: parsed.data, ...(meta?.status === "archived" ? { archived: true } : {}) } : undefined;
 }

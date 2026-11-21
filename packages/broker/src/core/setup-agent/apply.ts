@@ -10,6 +10,7 @@
 //   - an item whose citation FAILED the re-read is left out, and so is any command that fetches and runs code or holds a secret-shaped value (`refusedCommand`);
 //   - only setup and test commands are applied here: a repository, a dev container, a source, an intake trigger, a website and a secret are shown with the proposal and left to the owner's own settings (a website is the
 //     host ask's).
+import { projectIncarnationUpdate } from "../project-incarnation.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
@@ -436,12 +437,14 @@ export function createSetupProposalSubject(options: { flow: Pick<TaskFlowDeps, "
         // L4-DR (DEC 254z c): what the setup was approved against, saved in the approval's own transaction (the files that decide whether it still works, by id, and the websites it allows). Read from the code host
         // BEFORE the transaction; one that cannot be read whole saves none, and the next re-check saves the baseline instead. It never makes the approval wait on, or fail for, the host.
         const snapshot = await snapshotOfApproved(flow, row, at);
+        const meta = await flow.store.get(projectMetaKey(orgId, row.project));
+        const identityCondition = projectIncarnationUpdate(orgId, row.project, meta);
         return {
           ops: [change.set("state", "approved"), change.set("decidedAt", at), change.set("decidedBy", approver.personId)],
           extra: [
             // The project moves to the candidate only if it is still at the revision the owner looked at.
             { kind: "update", key: orgProjectCatalogKey(orgId, row.project), ops: [change.set("latestRevision", row.candidateRevision)], condition: when.eq("latestRevision", row.baseRevision) },
-            { kind: "update", key: projectMetaKey(orgId, row.project), ops: [change.set("setupCheck", { ...row.check })], condition: when.present() },
+            { kind: "update", key: projectMetaKey(orgId, row.project), ops: [change.set("setupCheck", { ...row.check })], condition: when.and(when.present(), identityCondition) },
             ...mirrored,
             ...(snapshot === undefined ? [] : [snapshotItem(orgId, row.project, snapshot)]),
           ],

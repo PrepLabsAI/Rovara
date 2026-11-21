@@ -68,6 +68,8 @@ export const lifecyclePartition = (companyId: string, project: string): string =
 export const lifecycleRequestKey = (companyId: string, project: string, requestId: string) => ({ pk: lifecyclePartition(companyId, project), sk: `REQUEST#${requestId}` });
 export const lifecycleAuditPrefix = "AUDIT#";
 
+import { requireProjectIncarnation } from "../core/project-incarnation.js";
+
 const MetaRow = z.object({
   status: z.enum(["active", "archived"]).optional(),
   lifecycleRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER - 1).optional(),
@@ -75,7 +77,7 @@ const MetaRow = z.object({
 const ProjectName = z.string().regex(AGENTX_NAME_PATTERN);
 const ReceiptRow = z.object({ entityType: z.literal("PROJECT_LIFECYCLE_REQUEST"), action: z.enum(["archive", "restore"]), personId: z.string(), receipt: z.record(z.string(), z.unknown()) }).passthrough();
 
-interface Current { companyId: OrgId; project: string; status: "active" | "archived"; lifecycleRevision: number; projectRevision: number; access: "manage" | "view"; basis: Basis | undefined }
+interface Current { companyId: OrgId; project: string; status: "active" | "archived"; lifecycleRevision: number; projectRevision: number; access: "manage" | "view"; basis: Basis | undefined; incarnationRevision?: number }
 
 function jsonOf(body: string | undefined): unknown {
   if (body === undefined || body === "") return undefined;
@@ -86,6 +88,19 @@ const conditionFailed = (error: unknown): boolean => {
   const name = (error as { name?: unknown } | undefined)?.name;
   return name === "ConditionalCheckFailedException" || name === "TransactionCanceledException";
 };
+
+/** Pre-rollout rows remain readable; initialized identities must validate exactly. */
+function readLifecycleIncarnation(companyId: string, project: string, parsed: Record<string, unknown>, row: unknown): { incarnationRevision?: number } {
+  if (parsed["incarnationRevision"] === undefined) return {};
+  try { return { incarnationRevision: requireProjectIncarnation(companyId, project, row as Record<string, unknown>) }; }
+  catch { throw agentXError("RUNTIME_UNAVAILABLE", LIFECYCLE_UNREADABLE); }
+}
+
+function lifecycleIncarnationFence(current: Current) {
+  return current.incarnationRevision === undefined
+    ? { condition: "attribute_not_exists(incarnationRevision)", values: {} }
+    : { condition: "incarnationRevision = :incarnation AND companyId = :company AND #project = :project AND entityType = :entity", values: { ":incarnation": current.incarnationRevision } };
+}
 
 /** Who the caller is to this project, and the project's lifecycle state, read now. Refuses with the uniform "project not found" for anyone who may not see it. */
 async function readCurrent(ctx: ProjectLifecycleContext, personId: string, rawProject: string): Promise<Current> {
@@ -118,7 +133,7 @@ async function readCurrent(ctx: ProjectLifecycleContext, personId: string, rawPr
   const meta = await ctx.documentClient.send(new GetCommand({ TableName: ctx.tableName, Key: projectMetaKey(company.data, project), ConsistentRead: true })) as { Item?: unknown };
   const parsed = meta.Item === undefined ? { success: true as const, data: {} as z.infer<typeof MetaRow> } : MetaRow.safeParse(meta.Item);
   if (!parsed.success) throw agentXError("RUNTIME_UNAVAILABLE", LIFECYCLE_UNREADABLE);
-  return { companyId: company.data, project, status: parsed.data.status ?? "active", lifecycleRevision: parsed.data.lifecycleRevision ?? 0, projectRevision: revision, access, basis };
+  return { ...readLifecycleIncarnation(company.data, project, parsed.data, meta.Item), companyId: company.data, project, status: parsed.data.status ?? "active", lifecycleRevision: parsed.data.lifecycleRevision ?? 0, projectRevision: revision, access, basis };
 }
 
 async function channelsOf(ctx: ProjectLifecycleContext, current: Current): Promise<number> {
@@ -131,7 +146,7 @@ async function channelsOf(ctx: ProjectLifecycleContext, current: Current): Promi
 
 async function archivePreview(ctx: ProjectLifecycleContext, current: Current): Promise<ReviewedProjectArchivePreview> {
   return {
-    orgId: current.companyId, project: current.project, status: current.status, expectedRevision: current.lifecycleRevision, expectedProjectRevision: current.projectRevision,
+    orgId: current.companyId, project: current.project, status: current.status, expectedRevision: current.lifecycleRevision, expectedProjectRevision: current.projectRevision, ...(current.incarnationRevision === undefined ? {} : { expectedProjectIncarnation: current.incarnationRevision }),
     checkedAt: new Date(ctx.now()).toISOString(), access: { actions: current.access === "manage" && current.status === "active" && ctx.archiveTakesEffect(current.companyId) ? ["archive"] : [] },
     impact: { stopsNewWork: true, stopsRunningTasksAtNextStep: true, linkedSlackChannels: await channelsOf(ctx, current), slackChannelsStayLinked: true, deletesNothing: true },
   };
@@ -139,7 +154,7 @@ async function archivePreview(ctx: ProjectLifecycleContext, current: Current): P
 
 async function restorePreview(ctx: ProjectLifecycleContext, current: Current): Promise<ReviewedProjectRestorePreview> {
   return {
-    orgId: current.companyId, project: current.project, status: current.status, expectedRevision: current.lifecycleRevision, expectedProjectRevision: current.projectRevision,
+    orgId: current.companyId, project: current.project, status: current.status, expectedRevision: current.lifecycleRevision, expectedProjectRevision: current.projectRevision, ...(current.incarnationRevision === undefined ? {} : { expectedProjectIncarnation: current.incarnationRevision }),
     checkedAt: new Date(ctx.now()).toISOString(), prerequisites: "not_required", access: { actions: current.access === "manage" && current.status === "archived" ? ["restore"] : [] },
     impact: { allowsNewWork: true, linkedSlackChannels: await channelsOf(ctx, current) },
   };
@@ -192,6 +207,7 @@ async function change(ctx: ProjectLifecycleContext, personId: string, current: C
   const condition = body.expectedRevision === 0
     ? `attribute_not_exists(lifecycleRevision) AND ${from === "active" ? "(attribute_not_exists(#status) OR #status = :from)" : "#status = :from"}`
     : "lifecycleRevision = :expected AND #status = :from";
+  const incarnation = lifecycleIncarnationFence(current);
   try {
     await ctx.documentClient.send(new TransactWriteCommand({ TransactItems: [
       // The project revision the preview named is still the latest: no newer revision row landed in between.
@@ -199,10 +215,11 @@ async function change(ctx: ProjectLifecycleContext, personId: string, current: C
       { Update: {
         TableName: ctx.tableName, Key: metaKey,
         UpdateExpression: "SET entityType = :entity, companyId = :company, #project = :project, #status = :to, lifecycleRevision = :next, lifecycleChangedAt = :at, lifecycleChangedBy = :person",
-        ConditionExpression: condition,
+        ConditionExpression: `(${condition}) AND ${incarnation.condition}`,
         ExpressionAttributeNames: { "#status": "status", "#project": "project" },
         ExpressionAttributeValues: { ":entity": "PROJECT_META", ":company": current.companyId, ":project": current.project, ":to": to, ":next": next, ":at": at, ":person": personId, ":from": from,
-          ...(body.expectedRevision === 0 ? {} : { ":expected": body.expectedRevision }) },
+          ...(body.expectedRevision === 0 ? {} : { ":expected": body.expectedRevision }),
+          ...incarnation.values },
       } },
       { Put: { TableName: ctx.tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
         ...requestKey, entityType: "PROJECT_LIFECYCLE_REQUEST", companyId: current.companyId, project: current.project, action, personId, receipt, at,

@@ -27,6 +27,7 @@ import { configKey } from "../../packages/cli/src/config/keys.js";
 import { OPERATOR_PARAMETERS } from "../../packages/cli/src/deploy/parameters.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
+import { withoutBrokerMemberConditionCheck } from "../support/broker-member-condition-check-template.js";
 
 skipLambdaBundling();
 
@@ -615,12 +616,16 @@ describe("L1a broker environment derivation", () => {
     // LEGACY-WORKER-CAPABILITY-ROUTES: the legacy template gains the ContextToolsListRoute and DesignReviewPacketRoute resources (named environments already had them).
     // #1275: and loses the core engine switch (the CoreEngine and CoreAllowedCompanies parameters, their packed sw/ac pieces and the dispatcher's ROVARA_CORE_ENGINE, the CoreEngineIsOn
     // condition: schedules ENABLED, the dispatcher's core mapping enabled, its core policy and callback key unconditional).
+    // SIGNIN-MEMBER-CONDITIONCHECK, DEC 254zzz282 B014-A: only the broker's exact member check moves the current pin. Without it the
+    // template is byte-for-byte the #1275 pin 512fbc83..., and both historical pins still hold.
+    const beforeMemberCheck = withoutBrokerMemberConditionCheck(legacy.toJSON());
+    expect(digest(beforeMemberCheck), "legacy without the broker member check").toBe("512fbc833e978fd35b1ccd570e0833ccda983f1a4a000b75afa5ac7992529d62");
     // Rule D proof: with exactly the two routes taken out, the switch removal's own pin 33220db5... holds (before the routes: f15083c4..., before the switch removal).
-    const withoutCapabilityRoutes = structuredClone(legacy.toJSON()) as Json;
+    const withoutCapabilityRoutes = structuredClone(beforeMemberCheck) as Json;
     delete withoutCapabilityRoutes.Resources.ContextToolsListRoute;
     delete withoutCapabilityRoutes.Resources.DesignReviewPacketRoute;
     expect(digest(withoutCapabilityRoutes), "legacy with the two capability routes taken out").toBe("33220db5faf6815c6effbb6c57c7b495eb26d73fe7fdf6b21bb10433718659d4");
-    expect(digest(legacy.toJSON())).toBe("512fbc833e978fd35b1ccd570e0833ccda983f1a4a000b75afa5ac7992529d62");
+    expect(digest(legacy.toJSON())).toBe("8f8df2aeed3082d74b0fee456be77fb5e562b86eb2c047b79f3585aa439ec150");
   });
 });
 import { createHash } from "node:crypto";

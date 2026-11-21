@@ -8,10 +8,9 @@
 // when files in their area change (the device emulator check: only device code, DEC 254zn); a Markdown-only change that no test reads runs nothing but the plan. Anything shared (vitest config, package.json, the lockfile,
 // tests/support, the workflow) falls back to the whole test suite, and the lint settings to the whole lint.
 //
-// The Linux runtime check (#1185) is the slowest job (~26 min) and runs in neither mode by default: it runs when its area changes (LINUX_PATTERNS), once per batch
-// (each push to code/next), every night (the scheduled run, which runs it and nothing else heavy), and on request (the `linux-ci` or `full-ci` label, or a manual
-// run's `linux` input). A FULL pull request ("Batch ...", "Sync mainline ...") whose change does not reach its area does not run it: that tree is checked on
-// code/next's push or that night.
+// The Linux runtime check (#1185) is the slowest job (~26 min) and, since #1192 (owner decision 2026-11-19), runs ONLY on request: a manual run with the `linux`
+// input (workflow_dispatch). It does not run on a pull request, a push, a label (`linux-ci`, `full-ci`), the merge queue or the nightly run, whatever the change
+// reaches (LINUX_PATTERNS); the production release runs it instead.
 //
 // Node runs this file directly, before `npm ci`, so it imports only Node's own modules and uses only erasable syntax. (The docs-only rule that lived in
 // scripts/ci-docs-only.ts is here now.)
@@ -449,8 +448,8 @@ export function relatedTests(
 }
 
 /**
- * #1185: whether the Linux runtime check runs: once per batch and every night (LINUX_EVENTS), on request (the `linux-ci` or `full-ci` label, a manual run's
- * input), and when the change reaches its area (LINUX_PATTERNS), including a pull request whose changed-file list is empty (unknown, so it runs).
+ * #1185, #1192: whether the Linux runtime check runs: only on a manual run (workflow_dispatch) that asks for it with the `linux` input. No pull request, push,
+ * label, merge-queue or nightly run starts it, whatever the change reaches (LINUX_PATTERNS).
  */
 export function linuxRuns(input: Pick<PlanInput, "event" | "forceLinux">): boolean {
   // #1192 (owner decision 2026-11-19): the Linux runtime check no longer runs in CI, for mainline or code/next: not on a pull request, a push, a label or the

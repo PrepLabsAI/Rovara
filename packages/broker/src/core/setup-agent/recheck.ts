@@ -17,6 +17,7 @@
 //   unclear        a stalled check, an unreadable result: never blocks.
 //   broken         a setup step failed (twice: one retry for a machine fault): ONLY THIS BLOCKS. The project's own setup state becomes "failed" (so new starts are refused by today's rule), the project gets one admin
 //                  card, and a task waiting at Build is paused with fixed words. A fix is a NEW setup candidate: a person approves it (never automatic); approving it moves the project to a new revision, which ends the pause.
+import { projectIncarnationUpdate } from "../project-incarnation.js";
 import { createHash } from "node:crypto";
 import {
   canonicalJson, change, compareSetupSnapshot, projectMetaKey, systemOwnerIdOf, when,
@@ -337,7 +338,7 @@ async function markProjectBroken(deps: TaskFlowDeps, project: string, row: Reche
     if (typeof seen?.revision === "number" && seen.revision > row.check.revision) return;
     if ((await deps.projects.latest(project))?.definition.revision !== row.setupRevision) return;
     if (typeof seen?.workspaceId === "string" && !(Date.parse(String(seen.startedAt)) < Date.parse(row.check.startedAt))) return;
-    await deps.store.update({ key, ops: [change.set("setupCheck", { ...row.check })], condition: seen?.workspaceId === undefined ? when.notExists("setupCheck") : when.eq(["setupCheck", "workspaceId"], seen.workspaceId) });
+    await deps.store.update({ key, ops: [change.set("setupCheck", { ...row.check })], condition: when.and(projectIncarnationUpdate(deps.companyId, project, meta), seen?.workspaceId === undefined ? when.notExists("setupCheck") : when.eq(["setupCheck", "workspaceId"], seen.workspaceId)) });
   } catch (error) {
     log(deps, { event: "setup_drift.mark_failed", error: errorName(error) });
   }

@@ -431,7 +431,6 @@
     "tests/contract/install-docs.test.ts": 0.005,
     "tests/contract/installer-stack.test.ts": 3.142,
     "tests/contract/item-paths.test.ts": 0.006,
-    "tests/contract/journey-baseline-accounting.test.ts": 0.005,
     "tests/contract/knowledge-hosted-routes.test.ts": 1.268,
     "tests/contract/knowledge-resolver-sources.test.ts": 2.113,
     "tests/contract/lambda-dynamodb-key-grants.test.ts": 0.037,
