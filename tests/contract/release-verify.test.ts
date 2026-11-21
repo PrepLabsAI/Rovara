@@ -99,6 +99,27 @@ describe("release verification", () => {
     const problems = result.ok ? [] : result.problems;
     expect(problems.some((p) => p.includes(dropped.file) && p.includes("not present in this release"))).toBe(true);
   }, 300_000);
+
+  it("names a package whose release.json entry differs from a rebuild's even when its checksum matches (#1336)", async () => {
+    const { dir, manifest } = await copyOfRelease();
+    reuseBuild = true;
+    const pkg = manifest.packages[0]!;
+    const edited = { ...manifest, packages: manifest.packages.map((p) => (p === pkg ? { ...p, keyParameter: `${p.keyParameter}X` } : p)) };
+    await writeFile(join(dir, "release.json"), `${JSON.stringify(edited, null, 2)}\n`, "utf8");
+    const result = await verifyRelease({ dir });
+    expect(result.ok).toBe(false);
+    const problems = result.ok ? [] : result.problems;
+    expect(problems.some((p) => p.includes(pkg.file) && p.includes("parameter names"))).toBe(true);
+  }, 300_000);
+
+  it("names enterprise packages the rebuild does not produce (#1336)", async () => {
+    const { dir, manifest } = await copyOfRelease();
+    reuseBuild = true;
+    await writeFile(join(dir, "release.json"), `${JSON.stringify({ ...manifest, enterprisePackages: [manifest.packages[0]!] }, null, 2)}\n`, "utf8");
+    const result = await verifyRelease({ dir });
+    expect(result.ok).toBe(false);
+    expect(result.ok ? [] : result.problems).toContain("release.json: its enterprise packages do not match a rebuild from current source");
+  }, 300_000);
 });
 
 describe("verifyRelease: release.json problems", () => {
@@ -153,7 +174,8 @@ describe("CI workflow reproducibility check", () => {
 
     const reproStep = steps[reproIndex]!;
     expect(reproStep.run).toContain("$RUNNER_TEMP/release-a");
-    expect(reproStep.run).toContain("$RUNNER_TEMP/release-b");
-    expect(reproStep.run).toMatch(/diff\s+"?\$RUNNER_TEMP\/release-a\/release\.json"?\s+"?\$RUNNER_TEMP\/release-b\/release\.json"?/);
+    // #1336: one build; release:verify's own rebuild is the second, and it compares all of release.json but the images.
+    expect(reproStep.run).not.toContain("release-b");
+    expect(reproStep.run!.match(/release:build/g)).toHaveLength(1);
   });
 });
