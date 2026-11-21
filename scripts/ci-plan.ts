@@ -16,8 +16,8 @@
 // Node runs this file directly, before `npm ci`, so it imports only Node's own modules and uses only erasable syntax. (The docs-only rule that lived in
 // scripts/ci-docs-only.ts is here now.)
 import { execFileSync } from "node:child_process";
-import { appendFileSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { join, posix } from "node:path";
 
 export interface DocsOnlyResult { docsOnly: boolean; reason: string }
 
@@ -72,6 +72,25 @@ export interface Plan {
 
 export interface PackageInfo { dir: string; name: string; dependencies: readonly string[] }
 
+export interface PackageExportPattern {
+  prefix: string;
+  suffix: string;
+  targetPrefix: string;
+  targetSuffix: string;
+}
+
+export interface PackageExports {
+  exact: ReadonlyMap<string, string>;
+  wildcards: readonly PackageExportPattern[];
+}
+
+/** File-level runtime reverse-import graph used by `relatedTests` to avoid package-wide over-selection. */
+export interface SourceGraph {
+  reverseImports: ReadonlyMap<string, ReadonlySet<string>>;
+  nonTestSources: ReadonlyMap<string, string>;
+  knownFiles: ReadonlySet<string>;
+}
+
 export interface PlanInput {
   event: string;
   labels: readonly string[];
@@ -81,6 +100,8 @@ export interface PlanInput {
   /** Every test file's source, by repository path. */
   testSources: ReadonlyMap<string, string>;
   packages: readonly PackageInfo[];
+  /** Optional file-level runtime import graph; when present, `relatedTests` traverses imports instead of matching whole package names. */
+  sourceGraph?: SourceGraph;
   /** A manual run asked for the Linux runtime check (workflow_dispatch input `linux`). */
   forceLinux?: boolean;
   /** #1189: the pull request's base branch (github.base_ref), or the merge queue's (merge_group.base_ref, without `refs/heads/`); empty or absent otherwise. */
@@ -216,11 +237,205 @@ export function affectedPackages(changed: readonly string[], packages: readonly 
   return packages.filter((pkg) => touched.has(pkg.name));
 }
 
+const FROM_IMPORT_RE = /(?:^|[\s;{}])(?:import|export)\s+(?!type\b)(\*(?:\s+as\s+\w+)?|\{[^}]*\}|\w+(?:\s*,\s*(?:\{[^}]*\}|\*\s+as\s+\w+))?)\s+from\s+["']([^"'\n]+)["']/gu;
+const SIDE_EFFECT_IMPORT_RE = /(?:^|[\s;{}])import\s+["']([^"'\n]+)["']/gu;
+const CALL_SPEC_RE = /\b(?:import|require(?:\.resolve)?|vi\.(?:mock|doMock|importActual|importMock))\s*\(\s*["']([^"'\n]+)["']/gu;
+const RELATIVE_URL_RE = /\bnew\s+URL\s*\(\s*["'](\.[^"'\n]+)["']\s*,\s*import\.meta\.url\s*\)/gu;
+
+function isTypeOnlyNamedClause(clause: string): boolean {
+  const trimmed = clause.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return false;
+  const items = trimmed.slice(1, -1).split(",").map((part) => part.trim()).filter((part) => part !== "");
+  return items.length > 0 && items.every((item) => item.startsWith("type "));
+}
+
+/** Runtime (non-type-only) module specifiers and relative asset URLs referenced by a TypeScript source file. */
+export function runtimeImportSpecifiers(source: string): string[] {
+  const found = new Set<string>();
+  for (const match of source.matchAll(FROM_IMPORT_RE)) {
+    if (!isTypeOnlyNamedClause(match[1]!)) found.add(match[2]!);
+  }
+  for (const pattern of [SIDE_EFFECT_IMPORT_RE, CALL_SPEC_RE, RELATIVE_URL_RE]) {
+    for (const match of source.matchAll(pattern)) found.add(match[1]!);
+  }
+  return [...found];
+}
+
+function distTargetToSrc(pkgDir: string, target: unknown): string | undefined {
+  const raw = typeof target === "string"
+    ? target
+    : target !== null && typeof target === "object"
+      ? (target as { default?: unknown; import?: unknown }).default ?? (target as { import?: unknown }).import
+      : undefined;
+  if (typeof raw !== "string") return undefined;
+  const normalized = posix.normalize(raw).replace(/^\.\//u, "");
+  return posix.join(pkgDir, normalized.replace(/^dist\//u, "src/").replace(/\.[cm]?js$/u, ".ts"));
+}
+
+function recordPackageExport(
+  pkgName: string,
+  pkgDir: string,
+  subpath: string,
+  target: unknown,
+  exact: Map<string, string>,
+  wildcards: PackageExportPattern[],
+): void {
+  const src = distTargetToSrc(pkgDir, target);
+  if (src === undefined) return;
+  const spec = subpath === "." ? pkgName : `${pkgName}/${subpath.replace(/^\.\//u, "")}`;
+  const starSpec = spec.indexOf("*");
+  const starSrc = src.indexOf("*");
+  if (starSpec !== -1 && starSrc !== -1) {
+    wildcards.push({
+      prefix: spec.slice(0, starSpec),
+      suffix: spec.slice(starSpec + 1),
+      targetPrefix: src.slice(0, starSrc),
+      targetSuffix: src.slice(starSrc + 1),
+    });
+    return;
+  }
+  exact.set(spec, src);
+}
+
+/** Maps workspace package specifiers (including subpath and wildcard exports) to their `src/*.ts` entrypoints. */
+export function packageExportMap(root: string, packages: readonly PackageInfo[]): PackageExports {
+  interface Manifest { exports?: unknown; main?: unknown }
+  const exact = new Map<string, string>();
+  const wildcards: PackageExportPattern[] = [];
+  for (const pkg of packages) {
+    const manifest = JSON.parse(readFileSync(join(root, pkg.dir, "package.json"), "utf8")) as Manifest;
+    if (typeof manifest.exports === "string") {
+      recordPackageExport(pkg.name, pkg.dir, ".", manifest.exports, exact, wildcards);
+    } else if (manifest.exports !== null && typeof manifest.exports === "object") {
+      for (const [subpath, target] of Object.entries(manifest.exports as Record<string, unknown>)) {
+        recordPackageExport(pkg.name, pkg.dir, subpath, target, exact, wildcards);
+      }
+    } else if (typeof manifest.main === "string") {
+      recordPackageExport(pkg.name, pkg.dir, ".", manifest.main, exact, wildcards);
+    }
+    if (!exact.has(pkg.name) && existsSync(join(root, pkg.dir, "src", "index.ts"))) {
+      exact.set(pkg.name, `${pkg.dir}/src/index.ts`);
+    }
+  }
+  return { exact, wildcards };
+}
+
+function matchWildcardExport(specifier: string, wildcards: readonly PackageExportPattern[]): string | undefined {
+  for (const entry of wildcards) {
+    if (specifier.startsWith(entry.prefix) && specifier.endsWith(entry.suffix) && specifier.length >= entry.prefix.length + entry.suffix.length) {
+      const middle = specifier.slice(entry.prefix.length, specifier.length - entry.suffix.length);
+      return `${entry.targetPrefix}${middle}${entry.targetSuffix}`;
+    }
+  }
+  return undefined;
+}
+
+/** Resolves a runtime import specifier from `fromFile` to a repository-relative target file, or undefined for external modules. */
+export function resolveImportTarget(
+  fromFile: string,
+  specifier: string,
+  knownFiles: ReadonlySet<string>,
+  pkgExports: PackageExports,
+): string | undefined {
+  if (specifier.startsWith("node:")) return undefined;
+  if (specifier.startsWith(".")) {
+    const base = posix.normalize(posix.join(posix.dirname(fromFile), specifier));
+    const candidates = [base.replace(/\.[cm]?js$/u, ".ts"), base.replace(/\.[cm]?js$/u, ".tsx"), `${base}.ts`, `${base}/index.ts`, base];
+    return candidates.find((candidate) => knownFiles.has(candidate));
+  }
+  const mapped = pkgExports.exact.get(specifier) ?? matchWildcardExport(specifier, pkgExports.wildcards);
+  return mapped !== undefined && knownFiles.has(mapped) ? mapped : undefined;
+}
+
+/** Builds a reverse runtime-import graph from an in-memory map of repository files. */
+export function buildSourceGraphFromFiles(
+  files: ReadonlyMap<string, string>,
+  pkgExports: PackageExports,
+  extraKnown: readonly string[] = [],
+): SourceGraph {
+  const knownFiles = new Set<string>([...files.keys(), ...extraKnown]);
+  const reverseImports = new Map<string, Set<string>>();
+  const nonTestSources = new Map<string, string>();
+  for (const [file, source] of files) {
+    if (!file.endsWith(".test.ts")) nonTestSources.set(file, source);
+    for (const specifier of runtimeImportSpecifiers(source)) {
+      const target = resolveImportTarget(file, specifier, knownFiles, pkgExports);
+      if (target === undefined) continue;
+      let importers = reverseImports.get(target);
+      if (importers === undefined) {
+        importers = new Set<string>();
+        reverseImports.set(target, importers);
+      }
+      importers.add(file);
+    }
+  }
+  return { reverseImports, nonTestSources, knownFiles };
+}
+
+function collectTsFiles(root: string, dir: string, into: Map<string, string>): void {
+  const fullDir = join(root, dir);
+  if (!existsSync(fullDir)) return;
+  for (const entry of readdirSync(fullDir, { withFileTypes: true })) {
+    if (entry.name === "node_modules" || entry.name === "dist") continue;
+    const rel = `${dir}/${entry.name}`;
+    if (entry.isDirectory()) collectTsFiles(root, rel, into);
+    else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".d.ts")) into.set(rel, readFileSync(join(root, rel), "utf8"));
+  }
+}
+
+/** Walks workspace TypeScript sources and tests to build the runtime reverse-import graph (takes ~200 ms, no npm dependencies). */
+export function buildSourceGraph(root: string, packages: readonly PackageInfo[], extraKnown: readonly string[] = []): SourceGraph {
+  const files = new Map<string, string>();
+  for (const dir of ["packages", "infra", "scripts", "tests"]) collectTsFiles(root, dir, files);
+  for (const top of ["vitest.config.ts", "vitest.coverage-map.config.ts"]) {
+    if (existsSync(join(root, top))) files.set(top, readFileSync(join(root, top), "utf8"));
+  }
+  return buildSourceGraphFromFiles(files, packageExportMap(root, packages), extraKnown);
+}
+
+function seedAssetReaders(changed: readonly string[], nonTestSources: ReadonlyMap<string, string>, reached: Set<string>, queue: string[]): void {
+  const nonTsChanged = changed.filter((file) => !file.endsWith(".ts"));
+  if (nonTsChanged.length === 0) return;
+  for (const [sourceFile, source] of nonTestSources) {
+    if (!reached.has(sourceFile) && nonTsChanged.some((asset) => source.includes(asset))) {
+      reached.add(sourceFile);
+      queue.push(sourceFile);
+    }
+  }
+}
+
+function graphRelatedTests(changed: readonly string[], testSources: ReadonlyMap<string, string>, graph: SourceGraph): string[] {
+  const reached = new Set<string>(changed);
+  const queue = [...changed];
+  seedAssetReaders(changed, graph.nonTestSources, reached, queue);
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    for (const importer of graph.reverseImports.get(current) ?? []) {
+      if (!reached.has(importer)) {
+        reached.add(importer);
+        queue.push(importer);
+      }
+    }
+  }
+  const found = new Set<string>();
+  for (const file of reached) if (testSources.has(file)) found.add(file);
+  for (const [testPath, source] of testSources) {
+    if (!found.has(testPath) && changed.some((file) => source.includes(file))) found.add(testPath);
+  }
+  return [...found].sort();
+}
+
 /**
- * The test files that name a changed file or one of the affected packages. Vitest's --changed follows imports, but a package's tests import its built output,
- * not its source, and many contract tests read a file's text without importing it; both are caught here by the path or the package name in the test's source.
+ * The test files a change can reach. When `sourceGraph` is supplied (CI runs), traverses the file-level runtime reverse-import graph through
+ * package exports plus exact-path text matches for contract tests that read files as text. Without `sourceGraph`, falls back to package-name matching.
  */
-export function relatedTests(changed: readonly string[], packages: readonly PackageInfo[], testSources: ReadonlyMap<string, string>): string[] {
+export function relatedTests(
+  changed: readonly string[],
+  packages: readonly PackageInfo[],
+  testSources: ReadonlyMap<string, string>,
+  sourceGraph?: SourceGraph,
+): string[] {
+  if (sourceGraph !== undefined) return graphRelatedTests(changed, testSources, sourceGraph);
   const needles = new Set<string>(changed);
   for (const pkg of affectedPackages(changed, packages)) {
     needles.add(pkg.name);
@@ -280,7 +495,7 @@ export function planCi(input: PlanInput): Plan {
     return { mode: "affected", modeReason: changeReason(input.event), docsOnly: true, tests: "none", testsReason: docs.reason, shards: 1, lint: "none", linux: false, device: false, deviceRequired: false, release: false, extraTests: [] };
   }
   const shared = changed.find((file) => anyMatch(file, SHARED_TEST_PATTERNS));
-  const extraTests = shared === undefined && changed.length > 0 ? relatedTests(changed, input.packages, input.testSources) : [];
+  const extraTests = shared === undefined && changed.length > 0 ? relatedTests(changed, input.packages, input.testSources, input.sourceGraph) : [];
   const tooMany = extraTests.length > MAX_EXTRA_TESTS;
   const tests: Scope = changed.length === 0 || shared !== undefined || tooMany ? "all" : "changed";
   const testsReason = changed.length === 0
@@ -506,7 +721,18 @@ if (process.argv[1]?.endsWith("ci-plan.ts")) {
     console.log(`No reuse: ${reuse.reason}.`);
   }
   const changed = readFileSync(listed, "utf8").split("\n").map((line) => line.trim()).filter((line) => line !== "");
-  const plan = planCi({ event, labels, title: process.env.CI_TITLE ?? "", changed, testSources: new Map([...testFiles("tests"), ...testFiles("packages")]), packages: readPackages("."), forceLinux: process.env.CI_FORCE_LINUX === "true" , baseRef: (process.env.CI_BASE_REF ?? "").replace(/^refs\/heads\//u, "") });
+  const packages = readPackages(".");
+  const plan = planCi({
+    event,
+    labels,
+    title: process.env.CI_TITLE ?? "",
+    changed,
+    testSources: new Map([...testFiles("tests"), ...testFiles("packages")]),
+    packages,
+    sourceGraph: buildSourceGraph(".", packages, changed),
+    forceLinux: process.env.CI_FORCE_LINUX === "true",
+    baseRef: baseRefPlain,
+  });
   console.log(`CI mode: ${plan.mode} (${plan.modeReason}).`);
   console.log(plan.docsOnly
     ? `Markdown-only change: ${plan.testsReason}; nothing but this plan runs.`

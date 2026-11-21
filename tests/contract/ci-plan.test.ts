@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  AFFECTED_SHARDS, FULL_SHARDS, MAX_EXTRA_TESTS, affectedPackages, fullReason, isChangeEvent, linuxRuns, planCi, planOutputs, relatedTests, type PackageInfo, type PlanInput,
+  AFFECTED_SHARDS, FULL_SHARDS, MAX_EXTRA_TESTS, affectedPackages, buildSourceGraph, buildSourceGraphFromFiles, fullReason, isChangeEvent, linuxRuns, planCi, planOutputs, readPackages, relatedTests, runtimeImportSpecifiers, type PackageInfo, type PlanInput,
   URGENT_LABEL, chooseTestRunner, githubIssueLabels, testRunner,
 } from "../../scripts/ci-plan.js";
 
@@ -281,5 +281,78 @@ describe("a merge-queue run reads its pull request's labels (chooseTestRunner, g
     expect((await chooseTestRunner({ event: "pull_request", baseRef: "mainline", sameRepo: true, labels: ["urgent"], queueHeadRef: "", queueLabels: counting })).runner).toBe("codebuild");
     expect((await chooseTestRunner({ event: "pull_request", baseRef: "mainline", sameRepo: true, labels: [], queueHeadRef: "", queueLabels: counting })).runner).toBe("github");
     expect(calls).toBe(0);
+  });
+});
+
+describe("file-level runtime reverse-import graph (buildSourceGraphFromFiles, runtimeImportSpecifiers)", () => {
+  it("extracts runtime imports, re-exports, dynamic imports, mocks, and relative asset URLs while skipping type-only imports", () => {
+    const source = [
+      'import type { OnlyType } from "./ignored-a.js";',
+      'import { type InlineType, type SecondType } from "./ignored-b.js";',
+      'import { value, type MixedType } from "./kept-value.js";',
+      'export { reexported } from "./reexport.js";',
+      'export * from "./barrel.js";',
+      'export type { ExportedType } from "./ignored-c.js";',
+      'import "./side-effect.js";',
+      'const lazy = await import("./dynamic.js");',
+      'vi.mock("./mocked.js");',
+      'const asset = new URL("./template.html", import.meta.url);',
+    ].join("\n");
+    expect(runtimeImportSpecifiers(source).sort()).toEqual([
+      "./barrel.js",
+      "./dynamic.js",
+      "./kept-value.js",
+      "./mocked.js",
+      "./reexport.js",
+      "./side-effect.js",
+      "./template.html",
+    ]);
+  });
+
+  it("traces only tests transitively importing a changed file through relative and package exports, skipping unrelated tests in the same package", () => {
+    const files = new Map<string, string>([
+      ["packages/core-a/src/used.ts", "export const a = 1;"],
+      ["packages/core-a/src/unused.ts", "export const b = 2;"],
+      ["packages/core-a/src/index.ts", 'export { a } from "./used.js";'],
+      ["packages/mid-b/src/worker.ts", 'import { a } from "@sample/core-a";\nexport const run = () => a;'],
+      ["packages/mid-b/src/other.ts", 'import type { SomeType } from "../../core-a/src/unused.js";\nexport const x = 1;'],
+      ["packages/mid-b/src/asset-reader.ts", 'readFileSync("packages/mid-b/assets/boot.sh", "utf8");'],
+      ["tests/unit/uses-used.test.ts", 'import { run } from "../../packages/mid-b/src/worker.js";'],
+      ["tests/unit/uses-other.test.ts", 'import { x } from "../../packages/mid-b/src/other.js";'],
+      ["tests/unit/uses-unused-directly.test.ts", 'import { b } from "../../packages/core-a/src/unused.js";'],
+      ["tests/unit/uses-asset.test.ts", 'import "../../packages/mid-b/src/asset-reader.js";'],
+      ["tests/contract/reads-text.test.ts", 'readFileSync("packages/core-a/src/unused.ts", "utf8");'],
+    ]);
+    const pkgExports = {
+      exact: new Map<string, string>([["@sample/core-a", "packages/core-a/src/index.ts"]]),
+      wildcards: [],
+    };
+    const testMap = new Map([...files].filter(([path]) => path.endsWith(".test.ts")));
+    const graph = buildSourceGraphFromFiles(files, pkgExports, ["packages/mid-b/assets/boot.sh"]);
+
+    // Changing `used.ts` reaches `index.ts` -> `@sample/core-a` -> `worker.ts` -> `uses-used.test.ts`, NOT `uses-other.test.ts`.
+    expect(relatedTests(["packages/core-a/src/used.ts"], packages, testMap, graph)).toEqual(["tests/unit/uses-used.test.ts"]);
+    // Changing `unused.ts` reaches direct importer + text-reading contract test, and ignores the `import type` edge from `other.ts`.
+    expect(relatedTests(["packages/core-a/src/unused.ts"], packages, testMap, graph)).toEqual([
+      "tests/contract/reads-text.test.ts",
+      "tests/unit/uses-unused-directly.test.ts",
+    ]);
+    // Changing a non-TS asset reaches tests that transitively import a source file referencing that asset path.
+    expect(relatedTests(["packages/mid-b/assets/boot.sh"], packages, testMap, graph)).toEqual(["tests/unit/uses-asset.test.ts"]);
+  });
+
+  it("keeps focused edits in the real repository (such as packages/worker/src/run-task.ts) in affected mode under MAX_EXTRA_TESTS", () => {
+    const realPackages = readPackages(".");
+    const changed = ["packages/worker/src/run-task.ts"];
+    const graph = buildSourceGraph(".", realPackages, changed);
+    const realTests = new Map<string, string>();
+    for (const file of graph.knownFiles) {
+      if (file.endsWith(".test.ts")) realTests.set(file, "");
+    }
+    const plan = planCi({ event: "pull_request", labels: [], title: "Worker refactor", changed, testSources: realTests, packages: realPackages, sourceGraph: graph });
+    expect(plan.tests).toBe("changed");
+    expect(plan.shards).toBe(AFFECTED_SHARDS);
+    expect(plan.extraTests.length).toBeGreaterThan(0);
+    expect(plan.extraTests.length).toBeLessThanOrEqual(MAX_EXTRA_TESTS);
   });
 });

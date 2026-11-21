@@ -1184,7 +1184,7 @@
     "scripts/backfill-task-spend.ts": 20,
     "scripts/ci-gate.ts": 24,
     "scripts/ci-images.ts": 30,
-    "scripts/ci-plan.ts": 34,
+    "scripts/ci-plan.ts": 33,
     "scripts/collision-check.ts": 69,
     "scripts/e2e-replay-round.ts": 14,
     "scripts/ec2-preflight.ts": 48,
