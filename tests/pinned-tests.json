@@ -44,7 +44,7 @@
     },
     {
       "path": "tests/contract/core-app-routes.test.ts",
-      "minimumTests": 14,
+      "minimumTests": 16,
       "reason": "Dedicated read routes retain approved methods, scopes and dispatch registration.",
       "decision": "DEC 254zzz333",
       "restoreTarget": 16
@@ -58,14 +58,14 @@
     },
     {
       "path": "tests/contract/developer-token-verifier.test.ts",
-      "minimumTests": 9,
+      "minimumTests": 10,
       "reason": "Cold key reads preserve cancellation/accounting and caching.",
       "decision": "DEC 254zzz333",
       "restoreTarget": 10
     },
     {
       "path": "tests/contract/task-people.test.ts",
-      "minimumTests": 35,
+      "minimumTests": 36,
       "reason": "Read-only People authority refuses reconciliation without calling a writer. RESTORE-8F1BE0A80 item 3 restores our one removed case (35 to 36); the other removed old-engine cases are outside this lane.",
       "decision": "DEC 254zzz333",
       "restoreTarget": 36
@@ -176,9 +176,7 @@
       "decision": "DEC 254zzz333",
       "restoringLane": "RESTORE-8F1BE0A80 item 2",
       "deletedBy": "8f1be0a80"
-    }
-  ],
-  "pendingRestore": [
+    },
     {
       "path": "tests/unit/connection-impact.test.ts",
       "minimumTests": 15,
@@ -203,5 +201,6 @@
       "restoringLane": "RESTORE-8F1BE0A80 item 3",
       "deletedBy": "8f1be0a80"
     }
-  ]
+  ],
+  "pendingRestore": []
 }
