@@ -458,3 +458,8 @@ describe("dedicated server-read route registration", () => {
     expect(impact.status).toBe(200); expect(impact.body).not.toHaveProperty("requestId");
   });
 });
+
+it("task Ask history is a full-access GET route, distinct from asking", () => {
+  expect(appRouteOf("GET", "/v1/app/projects/alpha/tasks/11111111-1111-4111-8111-111111111111/answers")).toMatchObject({ requires: "full" });
+  expect(appRouteOf("POST", "/v1/app/projects/alpha/tasks/11111111-1111-4111-8111-111111111111/answers")).toBeUndefined();
+});

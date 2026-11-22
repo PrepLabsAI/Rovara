@@ -797,7 +797,12 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
         if (isAnswersPath(path, request.method)) {
           // Lead 4 J1: the member company's own store and code; the caller's live standing on the project is read inside (any project role asks).
           if (target.wiring.answers === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return await routeHostedAnswers({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.answers, now: () => nowOf(target), log: options.log });
+          return await routeHostedAnswers({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.answers, now: () => nowOf(target), log: options.log,
+            tasks: { artifacts: target.runtime.flow.deps.artifacts, read: async (_personId, taskId) => loadReadableTask(target.runtime.flow.deps, taskCaller, taskId).catch(async (error: unknown) => {
+              if (!(error instanceof AgentXError) || error.code !== "TASK_NOT_FOUND") throw error;
+              return sharedReaderTask(target, companyId, caller, taskId);
+            }) },
+          });
         }
         if (isAgentDirectoryPath(path, request.method)) {
           // Lead 4 L4-MF3: the company-wide agent directory. The live role from membership (read for this request) decides inside: only a company owner or administrator reads it.

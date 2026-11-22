@@ -207,7 +207,7 @@ describe("the answer route through the deployed API's guards", () => {
     const companyOf = vi.fn(async (caller: DeployedCaller) => member.get(caller.principal.personId + caller.principal.companyId));
     const caller = { principal: localOwnerPrincipal({ companyId: FAKE_COMPANY }), client: "cli" } as DeployedCaller;
     member.set(caller.principal.personId + FAKE_COMPANY, { companyId: FAKE_COMPANY, role: "owner" });
-    return { app, companyOf, caller };
+    return { app, companyOf, caller, fake };
   }
   const post = (path: string, body: unknown = {}) => ({ method: "POST", path, headers: {}, body: JSON.stringify(body) });
 
@@ -231,4 +231,44 @@ describe("the answer route through the deployed API's guards", () => {
     expect(await routes.route({ method: "GET", path: PATH, headers: {}, body: "" }, caller)).toBeUndefined();
     void tool;
   });
+});
+
+
+it("mounted Answers and history use task-page read authority and recheck it", async () => {
+  const fake = createFakeWorld();
+  const readable = { value: true, failed: false, shared: false };
+  const person = localOwnerPrincipal({ companyId: FAKE_COMPANY });
+  const app = createCoreHostApp({ modules: fake.modules, context: () => fake.context(), nowMs: () => fake.clock.now,
+    runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: { ...createOwnerTaskAccess(), canRead: async () => { if (readable.failed) throw new Error("unavailable authority"); return readable.value; } }, repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(fake.clock.now), log: () => undefined,
+      services: () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } }), ciReporting: { honest: true as const, ciMode: () => "their_ci_fix" as const } }),
+  });
+  const taskId = "11111111-1111-4111-8111-111111111111";
+  await fake.store.put({ item: { pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", taskId, companyId: FAKE_COMPANY, project: "alpha", title: "Private task", requestText: "PRIVATE-TASK-REQUEST", developerId: "somebody-else" } });
+  const model = scriptedModel([answer([{ text: "The task is starting.", cites: [{ kind: "task_state", quote: "No document has been written yet." }] }])]);
+  const routes = createCoreDevRoutes({ app, companyOf: async () => ({ companyId: FAKE_COMPANY, role: "owner" }), wiring: () => ({ origin: () => "https://api.example", scriptTokens: { enabled: () => true }, taskRules: { route: async () => ({ statusCode: 404, headers: {}, body: "" }), readsAsReader: async () => readable.shared }, answers: { standing: async () => ({ access: "view" }), repositories: async () => ({ handles: handles(FAKE_COMPANY), names: ["web"] }), model: () => model } }) });
+  const caller = { principal: person, client: "cli" } as DeployedCaller;
+  const post = () => routes.route({ method: "POST", path: PATH, headers: {}, body: JSON.stringify(ask({ taskId })) }, caller);
+  const get = () => routes.route({ method: "GET", path: `/v1/app/projects/alpha/tasks/${taskId}/answers`, headers: {}, body: "" }, caller);
+  expect((JSON.parse((await post())!.body) as Record<string, unknown>)["outcome"]).toBe("answered");
+  expect((JSON.parse((await get())!.body) as Record<string, unknown>)["entries"]).toHaveLength(1);
+  readable.value = false;
+  expect((JSON.parse((await post())!.body) as Record<string, unknown>)["outcome"]).toBe("not_found");
+  expect(model.turns.at(-1)!.transcript).not.toContain("PRIVATE-TASK-REQUEST");
+  expect(JSON.parse((await get())!.body)).toEqual({ entries: [], more: false });
+  readable.shared = true;
+  expect((JSON.parse((await post())!.body) as Record<string, unknown>)["outcome"]).toBe("answered");
+  readable.failed = true;
+  expect((JSON.parse((await post())!.body) as Record<string, unknown>)["outcome"]).toBe("not_found");
+  expect(model.turns.at(-1)!.transcript).not.toContain("PRIVATE-TASK-REQUEST");
+});
+
+it("the history handler recognizes only its documented GET path", async () => {
+  const path = "/v1/app/projects/alpha/tasks/11111111-1111-4111-8111-111111111111/answers";
+  expect(isAnswersPath(path, "GET")).toBe(true);
+  expect(isAnswersPath(path, "POST")).toBe(false);
+  const wiring: HostedAnswersWiring = { standing: async () => ({ access: "view" }), repositories: async () => ({ handles: [], names: [] }) };
+  const call = async (method: string, actualPath = path) => routeHostedAnswers({ request: { method, path: actualPath, headers: {}, body: "" }, path: actualPath, personId: "ada", companyId: A, store: new MemoryDocumentStore(), wiring, now: () => T0 });
+  expect((await call("GET")).statusCode).toBe(200);
+  for (const method of ["POST", "PUT", "DELETE"]) expect((await call(method)).statusCode).toBe(404);
+  expect((await call("GET", PATH)).statusCode).toBe(404);
 });

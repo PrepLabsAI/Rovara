@@ -10,6 +10,7 @@ import type { TaskCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { createAnswerCodeSource, type AnswerRepositoryHandle } from "../../core/answers/code-source.js";
 import type { AnswerModel } from "../../core/answers/ports.js";
 import { createAnswerService, type AnswerServiceDeps } from "../../core/answers/service.js";
+import { loadReadableTask } from "../../core/task-flow/reads.js";
 import { developerIdOf } from "../../core/sessions/create.js";
 import { createWikiStore } from "../../core/wiki/store.js";
 import { codeHostForRecord } from "../../plugins/routing.js";
@@ -18,6 +19,7 @@ import { createLocalAnswerModel } from "../answer-model.js";
 import type { ModelPrices } from "../../core/cost/price-table.js";
 
 const ROUTE = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9_.-]{0,127})\/answers$/u;
+const HISTORY = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9_.-]{0,127})\/tasks\/([0-9a-f-]{36})\/answers$/u;
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify(value) });
 
 export interface LocalProjectAnswersOptions {
@@ -39,7 +41,8 @@ export function createLocalProjectAnswers(options: LocalProjectAnswersOptions): 
   const isOwner = (caller: TaskCaller): boolean => caller.scriptToken === undefined && caller.principal.roles.includes("owner");
   return {
     async routes(request, caller) {
-      const match = request.method === "POST" ? ROUTE.exec(request.path.split("?")[0] ?? request.path) : null;
+      const path = request.path.split("?")[0] ?? request.path;
+      const match = request.method === "POST" ? ROUTE.exec(path) : request.method === "GET" ? HISTORY.exec(path) : null;
       if (match === null) return undefined;
       try {
         // A script token, or anyone who is not this install's owner, reads the same as a project that is not there.
@@ -49,6 +52,7 @@ export function createLocalProjectAnswers(options: LocalProjectAnswersOptions): 
         const service = createAnswerService({
           companyId, store: options.store, wiki: createWikiStore({ store: options.store, companyId, now: options.now }), now: options.now, log: options.log, model: options.model, briefing: options.briefing,
           access: { mayAsk: async () => isOwner(caller) },
+          tasks: { read: async (_personId, taskId) => loadReadableTask(options.flow, caller, taskId), artifacts: options.flow.artifacts },
           async code(name) {
             const latest = await options.flow.projects.latest(name);
             if (latest === undefined) return undefined;
@@ -65,7 +69,7 @@ export function createLocalProjectAnswers(options: LocalProjectAnswersOptions): 
             return createAnswerCodeSource(handles, latest.definition.repositories.map((repository) => repository.name));
           },
         });
-        return json(200, await service.ask({ personId: developerIdOf(caller.principal), project, body }));
+        return json(200, match[2] === undefined ? await service.ask({ personId: developerIdOf(caller.principal), project, body }) : await service.history({ personId: developerIdOf(caller.principal), project, taskId: match[2] }));
       } catch (error) {
         if (error instanceof AgentXError) return json(error.statusCode, { error: { code: error.code, message: error.message.slice(error.code.length + 2) } });
         return json(503, { error: { code: "RUNTIME_UNAVAILABLE", message: ANSWER_WORDS.unavailable } });

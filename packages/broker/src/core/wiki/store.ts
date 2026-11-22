@@ -400,7 +400,12 @@ export function createWikiStore(options: WikiStoreOptions): WikiStore {
     return { ...row.answer, createdAt: row.createdAt, expiresAt: row.expiresAt, ...(row.notRight === true ? { notRight: true } : {}) };
   }
 
-  async function listAnswers(project: string, scanMax: number): Promise<{ records: WikiAnswerRecord[]; more: boolean }> {
+  function answerInScope(row: z.infer<typeof AnswerRow>, scope: { taskId: string; askedBy: string } | undefined, nowMs: number): boolean {
+    if (row.expiresAt * 1000 <= nowMs) return false;
+    return scope === undefined ? row.answer.taskId === undefined : row.answer.taskId === scope.taskId && row.answer.askedBy === scope.askedBy;
+  }
+
+  async function listAnswers(project: string, scanMax: number, scope?: { taskId: string; askedBy: string }): Promise<{ records: WikiAnswerRecord[]; more: boolean }> {
     const name = projectOf(project);
     const most = parsed(z.number().int().min(1).max(1_000), scanMax);
     const records: WikiAnswerRecord[] = [];
@@ -412,7 +417,7 @@ export function createWikiStore(options: WikiStoreOptions): WikiStore {
       for (const item of page.items) {
         const row = readRow(AnswerRow, item, name)!;
         // An expired row (not yet swept) is gone and does not count toward the bound.
-        if (row.expiresAt * 1000 <= now()) continue;
+        if (!answerInScope(row, scope, now())) continue;
         if (seen >= most) { more = true; break; }
         seen += 1;
         records.push({ ...row.answer, createdAt: row.createdAt, expiresAt: row.expiresAt, ...(row.notRight === true ? { notRight: true } : {}) });

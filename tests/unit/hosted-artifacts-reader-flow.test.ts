@@ -231,6 +231,7 @@ describe("every other reader of the flow's artifacts, with the hosted reader", (
 
 /** Every source file under core/ (and the proof reader's neighbours) that reads the flow's `artifacts`, and how it behaves on a hosted root. A new reader fails this test until it is classified here and in briefs/lead4/L4-ART-SCOPE.md. */
 const READERS: Record<string, string> = {
+  "core/answers/task-context.ts": "ON: authorized task Answers reads its latest document through the company-bound flow reader, additionally held to the task owner/workspace prefix; answer-task-frame.test.ts pins scope and digest",
   "core/build-step/autofix.ts": "ON: the plan's dry-run results refine an unclear check fault (autofix is on by default on hosted; counts bound it)",
   "core/build-step/changed-files.ts": "ON: the approved plan's mocks flag unplanned mock sources in the PR risk; reportedChangedFiles is the laptop page's (no hosted caller)",
   "core/build-step/plan-input.ts": "ON: the coding step's and reviewers' approved plan (today hosted refuses WORKSPACE_NOT_READY / shows no plan)",
@@ -283,6 +284,6 @@ describe("the readers of the flow's artifacts are a known set", () => {
       .filter((path) => /\b(?:flow|deps\.flow|flow\.deps)\.artifacts\b|\bdeps\.artifacts\b/u.test(readFileSync(join(root, path), "utf8"))).sort();
     // The core root forwards its company-bound reader to comment target validation.
     // core-task-web-routes-root.test.ts proves the real factory; document prefix/digest checks are retained.
-    expect(outside).toEqual(["aws/core-engine-root.ts", "local/app/page-data.ts"]);
+    expect(outside).toEqual(["aws/core-engine-root.ts", "core-host/dev-routes.ts", "local/app/page-data.ts", "local/app/project-answers.ts"]);
   });
 });

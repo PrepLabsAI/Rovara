@@ -366,6 +366,7 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/app/projects/{project}/code/suggest", requires: "full" },
   // Lead 4 J1: the smart Just answer (core-host/answer-routes.ts): full access only, then any live role on the project. It spends on the company's own key through the gateway's answers purpose.
   { method: "POST", path: "/v1/app/projects/{project}/answers", requires: "full" },
+  { method: "GET", path: "/v1/app/projects/{project}/tasks/{taskId}/answers", requires: "full" },
   // Lead 4 J5: answers feed the wiki. "Not right" is the asker's own press (core-host/answer-routes.ts); the gap list is read from the answer records, maintainers only (core-host/wiki-corrections-routes.ts). Additive.
   { method: "POST", path: "/v1/app/projects/{project}/answers/{answerId}/not-right", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/wiki/gaps", requires: "full" },
