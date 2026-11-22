@@ -921,10 +921,27 @@ describe("port-guard hardening (review of lane L0)", () => {
     expect(lane.guard({ allowGuardEdits: true })).toEqual([]);
   });
 
+  it("requires controller review for every pinned registry, validator and contract guard edit", () => {
+    const protectedPaths = [
+      "tests/pinned-tests.json",
+      "tests/support/pinned-tests.ts",
+      "tests/contract/pinned-tests-boundary.test.ts",
+      "tests/contract/pinned-tests-guard.test.ts",
+      "tests/contract/pinned-tests-future.test.ts",
+    ];
+    for (const path of protectedPaths) lane.write(path, path.endsWith(".json") ? "{}\n" : "export {};\n");
+    lane.commit();
+    expect(lane.guard().filter((finding) => finding.rule === "guard-files").map((finding) => finding.file).sort()).toEqual([...protectedPaths].sort());
+    expect(lane.guard({ allowGuardEdits: true })).toEqual([]);
+  });
+
   it("does not flag the neighbours of those files (other scripts and test support files)", () => {
     lane.write("scripts/ci-planner-notes.ts", "export {};\n");
     lane.write("scripts/lint-shards.ts", "export {};\n");
     lane.write("tests/support/sample-helper.ts", "export {};\n");
+    lane.write("tests/pinned-tests-notes.json", "{}\n");
+    lane.write("tests/support/pinned-tests-helper.ts", "export {};\n");
+    lane.write("tests/contract/pinned-testing.test.ts", "export {};\n");
     lane.write("tests/.timings/vitest-durations.json", "{}\n");
     lane.commit();
     expect(lane.guard().filter((f) => f.rule === "guard-files")).toEqual([]);

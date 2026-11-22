@@ -1,6 +1,6 @@
 import ts from "typescript";
 
-type Pin = { path: string; minimumTests: number; reason: string; decision: string; "replaced-by"?: string };
+type Pin = { path: string; minimumTests: number; reason: string; decision: string; "replaced-by"?: string; restoreTarget?: number };
 type PendingRestore = Pin & { restoringLane: string; deletedBy: string };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -14,7 +14,8 @@ function testPath(value: unknown): value is string {
 function isPin(value: unknown): value is Pin {
   return record(value) && testPath(value.path) && Number.isSafeInteger(value.minimumTests) && Number(value.minimumTests) >= 1 &&
     typeof value.reason === "string" && value.reason.trim() !== "" && typeof value.decision === "string" && value.decision.trim() !== "" &&
-    (value["replaced-by"] === undefined || (testPath(value["replaced-by"]) && value["replaced-by"] !== value.path));
+    (value["replaced-by"] === undefined || (testPath(value["replaced-by"]) && value["replaced-by"] !== value.path)) &&
+    (value.restoreTarget === undefined || (Number.isSafeInteger(value.restoreTarget) && Number(value.restoreTarget) >= 1));
 }
 
 function isPendingRestore(value: unknown): value is PendingRestore {
@@ -48,6 +49,25 @@ export function validatePinnedHistory(current: unknown, prior: unknown): string[
     const next = byPath.get(pin.path) ?? pendingByPath.get(pin.path);
     if (!next) findings.push(`${pin.path}: pending restore removed; retain it until promoted to active`);
     else if (next.minimumTests < pin.minimumTests) findings.push(`${pin.path}: minimum lowered from ${pin.minimumTests} to ${next.minimumTests}`);
+  }
+  return findings;
+}
+
+/** Read-only git adapter shared by the boundary and shallow-checkout regression tests. */
+export function validatePinnedGitHistory(current: unknown, git: (args: string[]) => string): string[] {
+  const findings: string[] = [];
+  // HEAD catches uncommitted edits; HEAD^1 is CI's merge base, including depth-2 checkouts.
+  // Other available parents and the cached target also protect local lanes, without fetching.
+  for (const ref of ["HEAD", "HEAD^1", "HEAD^2", "origin/code/next"]) {
+    try { git(["rev-parse", "--verify", ref]); }
+    catch (error) {
+      if (ref !== "HEAD" && (error as { status?: number }).status === 128) continue;
+      throw error;
+    }
+    // A valid ref without a registry is first installation, not permission to discard a row.
+    if (git(["ls-tree", "--name-only", ref, "--", "tests/pinned-tests.json"]).trim() === "") continue;
+    const prior: unknown = JSON.parse(git(["show", `${ref}:tests/pinned-tests.json`]));
+    findings.push(...validatePinnedHistory(current, prior).map((finding) => `${ref}: ${finding}`));
   }
   return findings;
 }
@@ -126,6 +146,9 @@ export function validatePinnedTests(registry: unknown, readSource: (path: string
     }
     const count = countRunnableTests(source, target);
     if (count < pin.minimumTests) findings.push(`${target}: ${count} runnable declarations, minimum ${pin.minimumTests}`);
+    if (pin.restoreTarget !== undefined && count >= pin.restoreTarget && pin.minimumTests < pin.restoreTarget) {
+      findings.push(`${target}: restored to ${count} runnable declarations; raise minimumTests to at least ${pin.restoreTarget}`);
+    }
   }
   const pending = pendingRestores(registry);
   if (!pending) findings.push("Invalid pending restore list");

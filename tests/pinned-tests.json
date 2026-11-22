@@ -5,35 +5,40 @@
       "path": "tests/contract/admin-actions.test.ts",
       "minimumTests": 9,
       "reason": "Reviewed conditional grant transaction remains atomic.",
-      "decision": "DEC 254zzz333"
+      "decision": "DEC 254zzz333",
+      "restoreTarget": 11
     },
     {
       "path": "tests/contract/company-layout-grants.test.ts",
       "minimumTests": 10,
       "reason": "Independent company-scoped forward grants and reverse member rows.",
-      "decision": "DEC 254zzz333"
+      "decision": "DEC 254zzz333",
+      "restoreTarget": 11
     },
     {
       "path": "tests/contract/admin-change-plans.test.ts",
       "minimumTests": 9,
       "reason": "Keep destructive-action impact warnings and private projections before confirmation. Base floor 9; RESTORE-8F1BE0A80 item 2 must restore the reviewed floor 12 trimmed by 8f1be0a80.",
-      "decision": "DEC 254zzz333"
+      "decision": "DEC 254zzz333",
+      "restoreTarget": 12
     },
     {
       "path": "tests/contract/admin-change-routes.test.ts",
       "minimumTests": 38,
       "reason": "Preview writes nothing; stale review and lost authority refuse apply. Base floor 38; RESTORE-8F1BE0A80 item 2 must restore the reviewed floor 43 trimmed by 8f1be0a80.",
-      "decision": "DEC 254zzz333"
+      "decision": "DEC 254zzz333",
+      "restoreTarget": 43
     },
     {
       "path": "tests/contract/signin-workspace-hint.test.ts",
       "minimumTests": 9,
       "reason": "Only verified signed-in identity supplies workspace metadata; revoked access is refused. Base floor 9; RESTORE-8F1BE0A80 item 1 must restore the reviewed floor 15 trimmed by 8f1be0a80.",
-      "decision": "DEC 254zzz333"
+      "decision": "DEC 254zzz333",
+      "restoreTarget": 15
     },
     {
       "path": "tests/contract/company-slack-any-workspace.test.ts",
-      "minimumTests": 5,
+      "minimumTests": 6,
       "reason": "Merged sign-in persists only its verified workspace metadata.",
       "decision": "DEC 254zzz333"
     },
@@ -41,25 +46,29 @@
       "path": "tests/contract/core-app-routes.test.ts",
       "minimumTests": 14,
       "reason": "Dedicated read routes retain approved methods, scopes and dispatch registration.",
-      "decision": "DEC 254zzz333"
+      "decision": "DEC 254zzz333",
+      "restoreTarget": 16
     },
     {
       "path": "tests/unit/core-host-dev-routes.test.ts",
       "minimumTests": 57,
       "reason": "Production route dispatch retains dedicated server-read registrations.",
-      "decision": "DEC 254zzz333"
+      "decision": "DEC 254zzz333",
+      "restoreTarget": 59
     },
     {
       "path": "tests/contract/developer-token-verifier.test.ts",
       "minimumTests": 9,
       "reason": "Cold key reads preserve cancellation/accounting and caching.",
-      "decision": "DEC 254zzz333"
+      "decision": "DEC 254zzz333",
+      "restoreTarget": 10
     },
     {
       "path": "tests/contract/task-people.test.ts",
       "minimumTests": 35,
-      "reason": "Read-only People authority refuses reconciliation without calling a writer.",
-      "decision": "DEC 254zzz333"
+      "reason": "Read-only People authority refuses reconciliation without calling a writer. RESTORE-8F1BE0A80 item 3 restores our one removed case (35 to 36); the other removed old-engine cases are outside this lane.",
+      "decision": "DEC 254zzz333",
+      "restoreTarget": 36
     },
     {
       "path": "tests/contract/knowledge-hosted-routes.test.ts",
@@ -89,7 +98,8 @@
       "path": "tests/contract/vitest-config.test.ts",
       "minimumTests": 5,
       "reason": "Dedicated runner profiles retain isolation and exclusions.",
-      "decision": "DEC 254zzz333"
+      "decision": "DEC 254zzz333",
+      "restoreTarget": 6
     },
     {
       "path": "tests/contract/aws-engine-boundary.test.ts",
@@ -135,7 +145,7 @@
     },
     {
       "path": "tests/contract/pinned-tests-guard.test.ts",
-      "minimumTests": 20,
+      "minimumTests": 28,
       "reason": "Always-run regression ratchet; preserve its runnable declarations.",
       "decision": "DEC 254zzz333"
     },

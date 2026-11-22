@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { countRunnableTests, validatePinnedHistory, validatePinnedTests } from "../support/pinned-tests.js";
+import { readFileSync } from "node:fs";
+import { countRunnableTests, validatePinnedGitHistory, validatePinnedHistory, validatePinnedTests } from "../support/pinned-tests.js";
 
 const header = 'import { it, test, describe } from "vitest";\n';
 const body = header + 'it("kept", () => { expect(true).toBe(true); });';
@@ -11,6 +12,85 @@ const withPending = (entries: unknown[] = [pending]) => ({ ...registry(), pendin
 const validate = (entries: unknown, files: Record<string, string> = { [path]: body }) => validatePinnedTests(entries, (file) => files[file]);
 
 describe("pinned test guard", () => {
+  it("checks the first merge parent when HEAD has already deleted both a file and its row", () => {
+    const current = registry([{ ...pin, path: "tests/contract/other.test.ts" }]);
+    // A depth-2 merge checkout: HEAD has the PR's registry; only HEAD^1 retains the deleted pin.
+    const git = (args: string[]): string => {
+      const ref = args[0] === "show" ? args[1]!.split(":")[0] : args[2];
+      if (ref !== "HEAD" && ref !== "HEAD^1") throw Object.assign(new Error("shallow ref"), { status: 128 });
+      if (args[0] === "ls-tree") return "tests/pinned-tests.json\n";
+      if (args[0] === "show") return JSON.stringify(ref === "HEAD^1" ? registry() : current);
+      return ref;
+    };
+    expect(validatePinnedGitHistory(current, git)).toEqual([`HEAD^1: ${path}: historical pin removed; retain it with replaced-by when moving`]);
+  });
+
+  it("permits first installation at a valid base without a registry", () => {
+    expect(validatePinnedGitHistory(registry(), (args) => {
+      if (args[0] === "show") throw new Error("must not read an absent registry");
+      return args[0] === "ls-tree" ? "" : "valid ref";
+    })).toEqual([]);
+  });
+
+  it("propagates missing git, an unreadable HEAD, ref errors and history read errors", () => {
+    for (const failure of [{ code: "ENOENT" }, { status: 128 }, { status: 1 }]) {
+      const error = Object.assign(new Error("git failed"), failure);
+      expect(() => validatePinnedGitHistory(registry(), () => { throw error; })).toThrow(error);
+    }
+    for (const command of ["rev-parse", "ls-tree", "show"]) {
+      const error = Object.assign(new Error("optional history read failed"), { status: command === "rev-parse" ? 1 : 128 });
+      expect(() => validatePinnedGitHistory(registry(), (args) => {
+        if (args[0] === command && (args[2] === "HEAD^1" || args[1] === "HEAD^1:tests/pinned-tests.json")) throw error;
+        return args[0] === "show" ? JSON.stringify(registry()) : "exists";
+      })).toThrow(error);
+    }
+  });
+
+  it("rejects malformed registry JSON at a valid historical ref", () => {
+    expect(() => validatePinnedGitHistory(registry(), (args) => args[0] === "show" ? "{" : "exists")).toThrow(SyntaxError);
+  });
+
+  it("records the reviewed restore targets for all ten trimmed files", () => {
+    const actual = JSON.parse(readFileSync(new URL("../pinned-tests.json", import.meta.url), "utf8")) as { tests: (typeof pin & { restoreTarget?: number })[] };
+    expect(Object.fromEntries(actual.tests.filter((entry) => entry.restoreTarget !== undefined).map((entry) => [entry.path, entry.restoreTarget]))).toEqual({
+      "tests/contract/admin-actions.test.ts": 11,
+      "tests/contract/company-layout-grants.test.ts": 11,
+      "tests/contract/core-app-routes.test.ts": 16,
+      "tests/unit/core-host-dev-routes.test.ts": 59,
+      "tests/contract/developer-token-verifier.test.ts": 10,
+      "tests/contract/vitest-config.test.ts": 6,
+      "tests/contract/task-people.test.ts": 36,
+      "tests/contract/admin-change-plans.test.ts": 12,
+      "tests/contract/admin-change-routes.test.ts": 43,
+      "tests/contract/signin-workspace-hint.test.ts": 15,
+    });
+  });
+
+  it("pins all six company workspace declarations in the real registry", () => {
+    const actual = JSON.parse(readFileSync(new URL("../pinned-tests.json", import.meta.url), "utf8")) as { tests: (typeof pin)[] };
+    const workspace = actual.tests.find((entry) => entry.path === "tests/contract/company-slack-any-workspace.test.ts");
+    expect(workspace?.minimumTests).toBe(6);
+    expect(validate(registry([workspace]), { [workspace!.path]: header + Array.from({ length: 5 }, () => body).join("\n") })).toEqual([`${workspace!.path}: 5 runnable declarations, minimum 6`]);
+  });
+
+  it("reminds restoration to raise the floor at or above the target, including replacements", () => {
+    const targetPin = { ...pin, restoreTarget: 2 };
+    expect(validate(registry([targetPin]))).toEqual([]);
+    for (const count of [2, 3]) {
+      expect(validate(registry([targetPin]), { [path]: header + body.repeat(count) })).toEqual([`${path}: restored to ${count} runnable declarations; raise minimumTests to at least 2`]);
+    }
+    expect(validate(registry([{ ...targetPin, minimumTests: 2 }]), { [path]: header + body.repeat(2) })).toEqual([]);
+    expect(validate(registry([{ ...targetPin, minimumTests: 3 }]), { [path]: header + body.repeat(3) })).toEqual([]);
+    const replacement = "tests/contract/replacement.test.ts";
+    expect(validate(registry([{ ...targetPin, "replaced-by": replacement }]), { [replacement]: header + body.repeat(2) })).toEqual([`${replacement}: restored to 2 runnable declarations; raise minimumTests to at least 2`]);
+  });
+
+  it("rejects malformed restore targets", () => {
+    for (const restoreTarget of [0, -1, 1.5, "2", null]) {
+      expect(validate(registry([{ ...pin, restoreTarget }])).length).toBeGreaterThan(0);
+    }
+  });
+
   it("counts runnable declarations, including aliases, namespace imports and each, without expanding rows", () => {
     expect(countRunnableTests(header + `
       import { it as check } from "vitest";

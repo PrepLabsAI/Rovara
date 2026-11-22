@@ -1093,6 +1093,10 @@ const GUARD_FILES = [
   /^scripts\/boundary-allowlist\.json$/i,
   /^scripts\/port-guard-accepted\.json$/i,
   /^tests\/[^/]+\/port-guard[^/]*$/i,
+  // The registry and its validators judge the PR's own tree; changes need controller review.
+  /^tests\/pinned-tests\.json$/i,
+  /^tests\/support\/pinned-tests\.ts$/i,
+  /^tests\/contract\/pinned-tests-[^/]*$/i,
   /^\.github\/workflows\/ci\.yml$/i,
   // What decides what a CI run covers and whether it passed (DEC 242): the plan, the gate, and what makes a "full" run the whole suite (the test configuration, the list
   // of native-only files it leaves out, and the shard split). On a pull request CI runs the base branch's plan and gate, but the test configuration and the shard split
