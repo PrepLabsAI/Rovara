@@ -1,5 +1,6 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { runAgentCase } from "../support/agent-executor-run.js";
 import { runReplayCase } from "../support/agent-replay-run.js";
@@ -25,6 +26,7 @@ vi.mock("../support/executor-run-lock.js", async (original) => {
 });
 
 class AdmissionProbe extends Error {
+  readonly slotHeld = existsSync(join(state.directory, "executor.lock"));
   constructor(readonly fixture: WebApiProbePlan) { super("stop before starting the fixture app"); }
 }
 
@@ -60,6 +62,8 @@ describe("agent fixtures admit only after acquiring the executor slot", () => {
       expect(fixture.plan.admission.round.admittedAt).toBe("2026-11-22T03:02:00.000Z");
       expect(fixture.plan.deadlineAt).toBeGreaterThan(Date.now());
       if (kind === "replay") expect(fixture.plan.deadlineAt).toBe(Date.now() + 60_000);
+      // Acquiring and releasing before the run preserves admission timing but loses exclusion.
+      expect(error).toHaveProperty("slotHeld", true);
     } finally {
       release();
       await blocker;
