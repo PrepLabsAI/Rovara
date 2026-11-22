@@ -1,0 +1,206 @@
+{
+  "version": 1,
+  "tests": [
+    {
+      "path": "tests/contract/admin-actions.test.ts",
+      "minimumTests": 9,
+      "reason": "Reviewed conditional grant transaction remains atomic.",
+      "decision": "DEC 254zzz333",
+      "restoreTarget": 11
+    },
+    {
+      "path": "tests/contract/company-layout-grants.test.ts",
+      "minimumTests": 10,
+      "reason": "Independent company-scoped forward grants and reverse member rows.",
+      "decision": "DEC 254zzz333",
+      "restoreTarget": 11
+    },
+    {
+      "path": "tests/contract/admin-change-plans.test.ts",
+      "minimumTests": 12,
+      "reason": "Keep destructive-action impact warnings and private projections before confirmation. Base floor 9; RESTORE-8F1BE0A80 item 2 must restore the reviewed floor 12 trimmed by 8f1be0a80.",
+      "decision": "DEC 254zzz333",
+      "restoreTarget": 12
+    },
+    {
+      "path": "tests/contract/admin-change-routes.test.ts",
+      "minimumTests": 43,
+      "reason": "Preview writes nothing; stale review and lost authority refuse apply. Base floor 38; RESTORE-8F1BE0A80 item 2 must restore the reviewed floor 43 trimmed by 8f1be0a80.",
+      "decision": "DEC 254zzz333",
+      "restoreTarget": 43
+    },
+    {
+      "path": "tests/contract/signin-workspace-hint.test.ts",
+      "minimumTests": 15,
+      "reason": "Only verified signed-in identity supplies workspace metadata; revoked access is refused. Base floor 9; RESTORE-8F1BE0A80 item 1 must restore the reviewed floor 15 trimmed by 8f1be0a80.",
+      "decision": "DEC 254zzz333",
+      "restoreTarget": 15
+    },
+    {
+      "path": "tests/contract/company-slack-any-workspace.test.ts",
+      "minimumTests": 6,
+      "reason": "Merged sign-in persists only its verified workspace metadata.",
+      "decision": "DEC 254zzz333"
+    },
+    {
+      "path": "tests/contract/core-app-routes.test.ts",
+      "minimumTests": 16,
+      "reason": "Dedicated read routes retain approved methods, scopes and dispatch registration.",
+      "decision": "DEC 254zzz333",
+      "restoreTarget": 16
+    },
+    {
+      "path": "tests/unit/core-host-dev-routes.test.ts",
+      "minimumTests": 66,
+      "reason": "Production route dispatch retains dedicated server-read registrations.",
+      "decision": "DEC 254zzz333",
+      "restoreTarget": 59
+    },
+    {
+      "path": "tests/contract/developer-token-verifier.test.ts",
+      "minimumTests": 10,
+      "reason": "Cold key reads preserve cancellation/accounting and caching.",
+      "decision": "DEC 254zzz333",
+      "restoreTarget": 10
+    },
+    {
+      "path": "tests/contract/task-people.test.ts",
+      "minimumTests": 36,
+      "reason": "Read-only People authority refuses reconciliation without calling a writer. RESTORE-8F1BE0A80 item 3 restores our one removed case (35 to 36); the other removed old-engine cases are outside this lane.",
+      "decision": "DEC 254zzz333",
+      "restoreTarget": 36
+    },
+    {
+      "path": "tests/contract/knowledge-hosted-routes.test.ts",
+      "minimumTests": 7,
+      "reason": "Server-read registration keeps route-table policy intact.",
+      "decision": "DEC 254zzz333"
+    },
+    {
+      "path": "tests/contract/ci-parallel.test.ts",
+      "minimumTests": 25,
+      "reason": "Shared Linux checks retain isolation and exclusions.",
+      "decision": "DEC 254zzz333"
+    },
+    {
+      "path": "tests/contract/project-setup-status-routes.test.ts",
+      "minimumTests": 95,
+      "reason": "Server-read registration stays excluded from generic task dispatch.",
+      "decision": "DEC 254zzz333"
+    },
+    {
+      "path": "tests/contract/named-scopes.test.ts",
+      "minimumTests": 9,
+      "reason": "Dedicated read registrations keep reviewed token scopes.",
+      "decision": "DEC 254zzz333"
+    },
+    {
+      "path": "tests/contract/vitest-config.test.ts",
+      "minimumTests": 5,
+      "reason": "Dedicated runner profiles retain isolation and exclusions.",
+      "decision": "DEC 254zzz333",
+      "restoreTarget": 6
+    },
+    {
+      "path": "tests/contract/aws-engine-boundary.test.ts",
+      "minimumTests": 26,
+      "reason": "Always-run regression ratchet; preserve its runnable declarations.",
+      "decision": "DEC 254zzz333"
+    },
+    {
+      "path": "tests/contract/company-member-boundary.test.ts",
+      "minimumTests": 10,
+      "reason": "Always-run regression ratchet; preserve its runnable declarations.",
+      "decision": "DEC 254zzz333"
+    },
+    {
+      "path": "tests/contract/orchestrator-boundary.test.ts",
+      "minimumTests": 11,
+      "reason": "Always-run regression ratchet; preserve its runnable declarations.",
+      "decision": "DEC 254zzz333"
+    },
+    {
+      "path": "tests/contract/permissions-boundary.test.ts",
+      "minimumTests": 5,
+      "reason": "Always-run regression ratchet; preserve its runnable declarations.",
+      "decision": "DEC 254zzz333"
+    },
+    {
+      "path": "tests/contract/pinned-tests-boundary.test.ts",
+      "minimumTests": 1,
+      "reason": "Always-run regression ratchet; preserve its runnable declarations.",
+      "decision": "DEC 254zzz333"
+    },
+    {
+      "path": "tests/contract/slack-boundary.test.ts",
+      "minimumTests": 4,
+      "reason": "Always-run regression ratchet; preserve its runnable declarations.",
+      "decision": "DEC 254zzz333"
+    },
+    {
+      "path": "tests/contract/worker-e2e-import-boundary.test.ts",
+      "minimumTests": 3,
+      "reason": "Always-run regression ratchet; preserve its runnable declarations.",
+      "decision": "DEC 254zzz333"
+    },
+    {
+      "path": "tests/contract/pinned-tests-guard.test.ts",
+      "minimumTests": 28,
+      "reason": "Always-run regression ratchet; preserve its runnable declarations.",
+      "decision": "DEC 254zzz333"
+    },
+    {
+      "path": "tests/unit/company-inventory.test.ts",
+      "minimumTests": 28,
+      "reason": "Always-run regression ratchet; preserve its runnable declarations.",
+      "decision": "DEC 254zzz333"
+    },
+    {
+      "path": "tests/unit/company-log-sites.test.ts",
+      "minimumTests": 11,
+      "reason": "Always-run regression ratchet; preserve its runnable declarations.",
+      "decision": "DEC 254zzz333"
+    },
+    {
+      "path": "tests/contract/access-recheck-merged-signin.test.ts",
+      "minimumTests": 11,
+      "reason": "Rewalk live merged identities on every access check; fail closed on drift or read fault.",
+      "decision": "DEC 254zzz333",
+      "restoringLane": "RESTORE-8F1BE0A80 item 1",
+      "deletedBy": "8f1be0a80"
+    },
+    {
+      "path": "tests/contract/admin-change-binding-fences.test.ts",
+      "minimumTests": 5,
+      "reason": "Refuse stale reviewed channel bindings, generation changes and cross-company swaps.",
+      "decision": "DEC 254zzz333",
+      "restoringLane": "RESTORE-8F1BE0A80 item 2",
+      "deletedBy": "8f1be0a80"
+    },
+    {
+      "path": "tests/unit/connection-impact.test.ts",
+      "minimumTests": 15,
+      "reason": "Bounded, side-effect-free disconnect preview under live owner authority.",
+      "decision": "DEC 254zzz333",
+      "restoringLane": "RESTORE-8F1BE0A80 item 3",
+      "deletedBy": "8f1be0a80"
+    },
+    {
+      "path": "tests/unit/server-read-context.test.ts",
+      "minimumTests": 10,
+      "reason": "Single cancellable read budget with counted SDK results and deadline abort.",
+      "decision": "DEC 254zzz333",
+      "restoringLane": "RESTORE-8F1BE0A80 item 3",
+      "deletedBy": "8f1be0a80"
+    },
+    {
+      "path": "tests/unit/task-start-request-read.test.ts",
+      "minimumTests": 15,
+      "reason": "Recover accepted starts only under live authority without People reconciliation.",
+      "decision": "DEC 254zzz333",
+      "restoringLane": "RESTORE-8F1BE0A80 item 3",
+      "deletedBy": "8f1be0a80"
+    }
+  ],
+  "pendingRestore": []
+}

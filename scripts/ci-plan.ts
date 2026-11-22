@@ -65,7 +65,7 @@ export interface Plan {
    */
   deviceRequired: boolean;
   release: boolean;
-  /** Test files to run in addition to vitest's own --changed selection (they name a changed file or a changed package); only when tests is "changed". */
+  /** Tests added to vitest's --changed selection: related tests and the pinned-test boundary; only when tests is "changed". */
   extraTests: string[];
 }
 
@@ -517,7 +517,8 @@ export function planCi(input: PlanInput): Plan {
     device: deviceRequired || deviceFull || changed.length === 0,
     deviceRequired,
     release: changed.length === 0 || changed.some((file) => anyMatch(file, RELEASE_PATTERNS)),
-    extraTests: tests === "changed" ? extraTests : [],
+    // Deletions, trims and restores need the registry check even without a direct import edge.
+    extraTests: tests === "changed" ? [...new Set([...extraTests, "tests/contract/pinned-tests-boundary.test.ts"])].sort() : [],
   };
 }
 

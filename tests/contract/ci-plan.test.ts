@@ -19,6 +19,7 @@ const testSources = new Map<string, string>([
   ["tests/unit/plain.test.ts", "expect(1).toBe(1);"],
 ]);
 const input = (overrides: Partial<PlanInput>): PlanInput => ({ event: "pull_request", labels: [], title: "Sample change", changed: ["packages/other-d/src/x.ts"], testSources, packages, ...overrides });
+const pinnedBoundary = "tests/contract/pinned-tests-boundary.test.ts";
 
 describe("which runs are FULL", () => {
   it("is every run that is not a pull request: a push to code/next and a manual run (the emulator check runs in a push, not in a manual run: DEC 254zn)", () => {
@@ -60,17 +61,33 @@ describe("which runs are FULL", () => {
 });
 
 describe("the affected plan of an ordinary pull request", () => {
+  it.each(["pull_request", "merge_group"])("always selects the pinned boundary for delete-only, trim-only and restore-only changes in %s", (event) => {
+    for (const [change, path, source] of [
+      ["delete", "tests/contract/admin-actions.test.ts", undefined],
+      ["trim", "tests/contract/company-layout-grants.test.ts", 'it("remaining", () => expect(true).toBe(true));'],
+      ["restore", "tests/contract/access-recheck-merged-signin.test.ts", 'it("restored", () => expect(true).toBe(true));'],
+    ] as const) {
+      // The deleted file is absent; neither the boundary source nor imports name any changed path.
+      const sources = new Map([[pinnedBoundary, 'readFileSync("tests/pinned-tests.json")']]);
+      if (source !== undefined) sources.set(path, source);
+      const plan = planCi(input({ event, changed: [path], testSources: sources, sourceGraph: buildSourceGraphFromFiles(sources, { exact: new Map(), wildcards: [] }) }));
+      expect(plan, change).toMatchObject({ mode: "affected", tests: "changed", docsOnly: false });
+      expect(plan.extraTests, change).toContain(pinnedBoundary);
+      expect(plan.extraTests.filter((test) => test === pinnedBoundary), change).toHaveLength(1);
+    }
+  });
+
   it("runs the tests the change can reach, in 2 shards, with lint on the changed files only", () => {
     const plan = planCi(input({ changed: ["packages/other-d/src/x.ts"] }));
     expect(plan).toMatchObject({ mode: "affected", tests: "changed", shards: AFFECTED_SHARDS, lint: "changed", linux: false, release: false, docsOnly: false });
   });
 
   it("adds the tests that name the changed file, or a package the change reaches (a package's tests import its built output, not its source)", () => {
-    expect(planCi(input({ changed: ["scripts/sample-tool.ts"] })).extraTests).toEqual(["tests/contract/reads-script.test.ts"]);
+    expect(planCi(input({ changed: ["scripts/sample-tool.ts"] })).extraTests).toEqual([pinnedBoundary, "tests/contract/reads-script.test.ts"]);
     // core-a is imported by mid-b, which leaf-c imports: a change to core-a reaches the tests of all three
-    expect(planCi(input({ changed: ["packages/core-a/src/x.ts"] })).extraTests).toEqual(["tests/unit/uses-a.test.ts", "tests/unit/uses-c.test.ts"]);
-    expect(planCi(input({ changed: ["packages/leaf-c/src/x.ts"] })).extraTests).toEqual(["tests/unit/uses-c.test.ts"]);
-    expect(planCi(input({ changed: ["packages/other-d/src/x.ts"] })).extraTests).toEqual(["tests/unit/uses-d.test.ts"]);
+    expect(planCi(input({ changed: ["packages/core-a/src/x.ts"] })).extraTests).toEqual([pinnedBoundary, "tests/unit/uses-a.test.ts", "tests/unit/uses-c.test.ts"]);
+    expect(planCi(input({ changed: ["packages/leaf-c/src/x.ts"] })).extraTests).toEqual([pinnedBoundary, "tests/unit/uses-c.test.ts"]);
+    expect(planCi(input({ changed: ["packages/other-d/src/x.ts"] })).extraTests).toEqual([pinnedBoundary, "tests/unit/uses-d.test.ts"]);
   });
 
   it("finds the packages a change reaches through their dependencies, however deep", () => {
@@ -154,7 +171,7 @@ describe("the affected plan of an ordinary pull request", () => {
     const read = planCi(input({ changed: ["docs/sample/read.md"], testSources: new Map([["tests/unit/reads-doc.test.ts", 'readFile("docs/sample/read.md")']]) }));
     expect(read.docsOnly).toBe(false);
     expect(read.tests).toBe("changed");
-    expect(read.extraTests).toEqual(["tests/unit/reads-doc.test.ts"]);
+    expect(read.extraTests).toEqual([pinnedBoundary, "tests/unit/reads-doc.test.ts"]);
   });
 });
 
