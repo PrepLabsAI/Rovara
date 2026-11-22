@@ -285,6 +285,8 @@ export const SessionMessageSchema = z
       .object({ state: z.enum(["queued", "delivered", "not_delivered"]), at: InstantSchema, reason: lineText(DELIVERY_REASON_MAX_CHARS).optional() })
       .strict()
       .optional(),
+    /** Reader-first: independent of the original receipt. Unknown observations are absent; Applied needs separately approved evidence. Producers omit this until reader rollout. */
+    deliveryObservation: z.object({ state: z.enum(["checking", "outside_plan"]) }).strict().optional().catch(undefined),
     /** Task 10b, comments only: the part of the session the comment is pinned to. A reply holds its thread's anchor (without the excerpt). A reader who can't see the part reads only `{ target }` (`anchorState: "gone"`). */
     anchor: z.union([SessionAnchorSchema, SessionGoneAnchorSchema]).optional(),
     /** Task 10b, on a read only (never stored): what the part is now, for the reader. */
@@ -293,6 +295,7 @@ export const SessionMessageSchema = z
     threadId: SessionMessageIdSchema.optional(),
   })
   .strict()
+  .refine((message) => message.kind === "steer" || message.deliveryObservation === undefined, { message: "only a message to the agent has a delivery observation", path: ["deliveryObservation"] })
   .refine((message) => message.kind === "comment" || (message.anchor === undefined && message.anchorState === undefined && message.threadId === undefined), { message: "only a comment can be pinned or threaded", path: ["kind"] });
 
 /**

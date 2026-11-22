@@ -40,7 +40,9 @@ export function routeOfTask(session: Pick<AgentSessionRecord, "sessionId">, task
 }
 
 const isoOf = (ms: number): string => new Date(ms).toISOString();
-const HOUSEKEEPING = new Set(["pk", "sk", "entityType", "orgId", INDEX_EXPIRY_ATTRIBUTE]);
+// Reader rollout boundary: keep persisted observations off the wire for deployed strict clients.
+// The later producer batch may project deliveryObservation only after those readers have rolled out.
+const HOUSEKEEPING = new Set(["pk", "sk", "entityType", "orgId", INDEX_EXPIRY_ATTRIBUTE, "deliveryObservation"]);
 
 export const messageKey = (session: { orgId: OrgId; sessionId: string }, messageId: string) => agentSessionKey(session.orgId, session.sessionId, `MESSAGE#${messageId}`);
 
@@ -218,7 +220,7 @@ export async function markSteerNeedsReapproval(deps: SteerDeps, orgId: OrgId, se
     if (message?.kind !== "steer" || message.delivery?.state !== "delivered" || message.delivery.reason !== undefined) return false;
     const at = isoOf((deps.now ?? (() => new Date()))().getTime());
     const marked: TransactItem = {
-      kind: "update", key: messageKey(session, messageId), ops: [change.set("delivery", { state: "delivered", at: message.delivery.at, reason: LIVE_STEER_REAPPROVAL_REASON })],
+      kind: "update", key: messageKey(session, messageId), ops: [change.set("delivery", { state: "delivered", at: message.delivery.at, reason: LIVE_STEER_REAPPROVAL_REASON }), change.set("deliveryObservation", { state: "outside_plan" })],
       condition: when.and(when.present(), when.eq(["delivery", "state"], "delivered"), when.notExists(["delivery", "reason"])),
     };
     const event = sessionEventItem(session, { eventId: sessionEventId("steer_needs_reapproval", messageId), at, type: "status", actor: { kind: "agent" }, source: message.source === "linear" ? "linear" : "app", messageId, text: needsApprovalText(session, message.author.name) });
@@ -245,7 +247,7 @@ export async function markSteerRevised(deps: SteerDeps, orgId: OrgId, sessionId:
     if (message?.kind !== "steer" || message.delivery?.state !== "delivered" || message.delivery.reason !== LIVE_STEER_REAPPROVAL_REASON) return false;
     const at = isoOf((deps.now ?? (() => new Date()))().getTime());
     const marked: TransactItem = {
-      kind: "update", key: messageKey(session, messageId), ops: [change.set("delivery", { state: "delivered", at: message.delivery.at, reason: LIVE_STEER_REVISED_REASON })],
+      kind: "update", key: messageKey(session, messageId), ops: [change.set("delivery", { state: "delivered", at: message.delivery.at, reason: LIVE_STEER_REVISED_REASON }), change.set("deliveryObservation", { state: "outside_plan" })],
       condition: when.and(when.present(), when.eq(["delivery", "state"], "delivered"), when.eq(["delivery", "reason"], LIVE_STEER_REAPPROVAL_REASON)),
     };
     const event = sessionEventItem(session, {
@@ -263,9 +265,25 @@ export async function markSteerRevised(deps: SteerDeps, orgId: OrgId, sessionId:
 }
 
 /** A steer message of this session, as stored, or `undefined` when it is not one (another session's, a comment, gone). Read for the owner's "Revise the plan" press, which hands its text to the planner and nowhere else: the caller never logs it. */
-export async function readSteerMessage(store: Pick<DocumentStore, "get">, orgId: OrgId, sessionId: SessionId, messageId: string): Promise<SessionMessage | undefined> {
-  const message = messageOf(await store.get(messageKey({ orgId, sessionId }, messageId)), { orgId, sessionId });
-  return message?.kind === "steer" ? message : undefined;
+export async function readSteerMessage(store: Pick<DocumentStore, "get" | "update">, orgId: OrgId, sessionId: SessionId, messageId: string): Promise<SessionMessage | undefined> {
+  const session = { orgId, sessionId };
+  const key = messageKey(session, messageId);
+  const message = messageOf(await store.get(key), session);
+  if (message?.kind !== "steer" || message.deletedAt !== undefined) return undefined;
+  // A known re-approval/revision is stronger evidence than a lookup. Never replace it with Checking.
+  if (message.delivery?.reason !== undefined) return message;
+  const started = await store.update({ key, ops: [change.set("deliveryObservation", { state: "checking" })], condition: when.and(
+    when.present(), when.eq("orgId", orgId), when.eq("sessionId", sessionId), when.eq("kind", "steer"), when.eq("rev", message.rev),
+    when.notExists("deletedAt"), when.notExists("deliveryObservation"), when.notExists(["delivery", "reason"]),
+  ) });
+  try {
+    // Only a read of this exact stored message; no tell, retry, note creation or worker invocation.
+    const current = messageOf(await store.get(key), session);
+    return current?.kind === "steer" && current.deletedAt === undefined ? current : undefined;
+  } finally {
+    // Only this lookup's mark is removed: a concurrent re-approval keeps its Outside plan evidence.
+    if (started.applied) await store.update({ key, ops: [change.remove("deliveryObservation")], condition: when.eq(["deliveryObservation", "state"], "checking") });
+  }
 }
 
 /**
