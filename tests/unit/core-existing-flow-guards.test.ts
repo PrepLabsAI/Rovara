@@ -11,6 +11,21 @@ import { COMPANY } from "../support/task-flow-harness.js";
 import { blockedReview, operationsOf, seed, seedPlain, taskOf, TASK_ID, WORKSPACE_ID } from "../support/task-actions-world.js";
 
 describe("existing close and revision fences", () => {
+  it("a legacy-closed task without a Close claim resolves its planning row STALE", async () => {
+    const { h } = await seed({ workflow: blockedReview({ stage: "PLAN", state: "READY", definitionVersion: "1.0.0", blockReason: undefined }),
+      task: { closedAt: "2026-11-11T00:00:00.000Z" }, workspace: { status: "CLOSING", fence: 2 } });
+    const before = await taskOf(h);
+    expect(before.closeOperationId).toBeUndefined();
+    expect(before.closedAt).toBeDefined();
+    const key = dispatchRowKey(COMPANY, TASK_ID, 6);
+    await h.store.put({ item: dispatchRowItem(h.deps, TASK_ID, 6, "PLAN", new Date(h.clock.now).toISOString()).item });
+    expect(await runDispatchRow(h.deps, { taskId: TASK_ID, workflowRevision: 6, kind: "PLAN" })).toBe("STALE");
+    expect(await h.store.get(key)).toBeUndefined();
+    expect(await operationsOf(h)).toHaveLength(0);
+    expect(await taskOf(h)).toEqual(before);
+    expect(h.grants).toHaveLength(0);
+  });
+
   it("a Close-claimed planning row is resolved STALE while the workspace is CLOSING", async () => {
     const { h } = await seed({ workflow: blockedReview({ stage: "PLAN", state: "READY", definitionVersion: "1.0.0", blockReason: undefined }),
       task: { closeOperationId: "accepted-close" }, workspace: { status: "CLOSING", activeOperationId: "accepted-close", fence: 2 } });
@@ -32,6 +47,17 @@ describe("existing close and revision fences", () => {
     if (revision !== 6) expect((await taskOf(h)).workflow).toEqual(before);
     else expect((await taskOf(h)).workflow).toMatchObject({ state: "BLOCKED", blockReason: ROVARA_AI_PAUSED_MESSAGE });
     expect(await operationsOf(h)).toHaveLength(1);
+  });
+
+  it("a FAILED run with an unrelated error keeps its normal failure reason instead of AI pause", async () => {
+    const { h } = await seedPlain({ first: "FAILED" });
+    const operation = (await operationsOf(h))[0]!;
+    await h.store.update({ key: taskKey(TASK_ID), ops: [change.set("workflow", toDocument(blockedReview({ stage: "PLAN", state: "RUNNING", blockReason: undefined })))] });
+    const error = "MODEL_NOT_ALLOWED: The selected model is unavailable.";
+    await onOperationEnded(h.deps, { ...operation, workflowMode: "PLAN", workflowRevision: 6 }, { status: "FAILED", error });
+    expect((await taskOf(h)).workflow).toMatchObject({ state: "BLOCKED", blockReason: `Rovara stopped while planning: ${error}` });
+    expect(await operationsOf(h)).toHaveLength(1);
+    expect(h.grants).toHaveLength(0);
   });
 
   it("a QUEUED run retained by Close is dropped without becoming INTERRUPTED", async () => {

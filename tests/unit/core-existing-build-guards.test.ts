@@ -50,6 +50,28 @@ describe("existing manual build authority", () => {
     expect(h.grants).toHaveLength(0);
   });
 
+  it("a manual publication for a legacy-closed task without a Close claim creates no PR", async () => {
+    const { h, caller } = await seed({ workflow: null });
+    await h.registerProject({ ...definition, repositories: definition.repositories.map(repository => ({ ...repository, host: { kind: "fake" } })) });
+    const operation = await startManualPublication(h.deps, caller, TASK_ID, { requestId: REQUEST_A, title: "Add retry", draft: true });
+    const location = await workspaceKeys(h.deps, operation.workspaceId);
+    await h.store.put({ item: { ...location.taskPointerKey(), taskId: TASK_ID } });
+    const publication = operation.publication!;
+    const model = new FakeHostModel({ url: publication.repositoryUrl, id: "42", fullName: "example/demo" });
+    const commit = model.commit(publication.headBranch, { "retry.ts": "retry" });
+    const registry = createAdapterRegistry();
+    registry.register("code-host", "fake", new FakeCodeHost(model), { isDefault: true });
+    h.deps.codeHosts = registry;
+    await h.store.update({ key: taskKey(TASK_ID), ops: [change.set("closedAt", "2026-11-11T00:00:00.000Z")] });
+    const before = await taskOf(h);
+    expect(before.closeOperationId).toBeUndefined();
+    expect(before.closedAt).toBeDefined();
+    await expect(openPullRequest(h.deps, operation, { repository: publication.repository, repositoryUrl: publication.repositoryUrl,
+      headBranch: publication.headBranch, baseBranch: publication.baseBranch, title: publication.title, body: publication.body, commit })).rejects.toMatchObject({ code: "STALE_FENCE" });
+    expect(model.changeRequests).toHaveLength(0);
+    expect(await taskOf(h)).toEqual(before);
+  });
+
   it.each([false, true])("manual publication refuses a foreign company before creating a PR (foreign=%s)", async foreign => {
     const { h, caller } = await seed({ workflow: null });
     await h.registerProject({ ...definition, repositories: definition.repositories.map(repository => ({ ...repository, host: { kind: "fake" } })) });
