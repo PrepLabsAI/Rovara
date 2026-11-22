@@ -176,7 +176,7 @@ describe("the task list's readable check for a core task (Understand's round on 
 
 describe("Cloud #188 item 3: the old task routes on a core task reach the deployment's rules only for the caller's own company's task", () => {
   const RULES: Array<[string, string]> = [["GET", "people"], ["GET", "people/candidates"], ["POST", "people/add"], ["POST", "people/role"], ["POST", "people/take-ownership"], ["GET", "people/requests/r1"],
-    ["GET", "readers"], ["PUT", `readers/${"c".repeat(64)}`], ["DELETE", `readers/${"c".repeat(64)}`], ["GET", "events"], ["GET", "comments"]];
+    ["GET", "readers"], ["PUT", `readers/${"c".repeat(64)}`], ["DELETE", `readers/${"c".repeat(64)}`], ["GET", "events"], ["GET", "comments"], ["POST", "comments"]];
 
   it("hands the owner's request, the task as read from their company and their company's store to the rules; another company's caller, a script token and a missing task never reach them", async () => {
     const route = vi.fn(async () => ({ statusCode: 200, headers: { "content-type": "application/json" }, body: "{\"ok\":true}" }));

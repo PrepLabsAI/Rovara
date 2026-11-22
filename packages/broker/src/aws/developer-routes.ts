@@ -1974,6 +1974,16 @@ async function listWorkspaces(deps: DeveloperRouteDependencies, caller: Develope
   return { ...listing, workspaces };
 }
 
+function isTaskCommentPost(request: AdaptedHttpRequest, url: URL): boolean {
+  return request.method === "POST" && /^\/v1\/dev\/tasks\/[^/]+\/comments$/.test(url.pathname);
+}
+
+/** Review comment calls use live membership, just like the core developer routes. */
+async function commentPageRouteDependencies(deps: DeveloperRouteDependencies, caller: DeveloperCaller): Promise<DeveloperTaskRouteDependencies> {
+  const companyId = await resolveCompany(deps.companies ?? deps.developer.companies, caller.developerId);
+  return { ...developerTaskRouteDependencies(deps, caller), ...(companyId === undefined ? {} : { companyId }) };
+}
+
 export function developerTaskRouteDependencies(
   deps: DeveloperRouteDependencies,
   caller: DeveloperCaller,
@@ -2561,12 +2571,12 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
         api: createTaskWebApi({
           origin: deps.developer.issuer,
           authenticateSession,
-          taskState: (caller, taskId) => getTaskPageState(routeDeps(caller), caller, taskId),
-          listComments: (caller, taskId) => listPageComments(routeDeps(caller), caller, taskId),
-          createComment: (caller, taskId, input) => createPageComment(routeDeps(caller), caller, taskId, input),
-          editComment: (caller, taskId, input) => editPageComment(routeDeps(caller), caller, taskId, input),
-          deleteComment: (caller, taskId, input) => deletePageComment(routeDeps(caller), caller, taskId, input),
-          setSuggestion: (caller, taskId, input) => setPageSuggestion(routeDeps(caller), caller, taskId, input),
+          taskState: async (caller, taskId) => getTaskPageState(await commentPageRouteDependencies(deps, caller), caller, taskId),
+          listComments: async (caller, taskId) => listPageComments(await commentPageRouteDependencies(deps, caller), caller, taskId),
+          createComment: async (caller, taskId, input) => createPageComment(await commentPageRouteDependencies(deps, caller), caller, taskId, input),
+          editComment: async (caller, taskId, input) => editPageComment(await commentPageRouteDependencies(deps, caller), caller, taskId, input),
+          deleteComment: async (caller, taskId, input) => deletePageComment(await commentPageRouteDependencies(deps, caller), caller, taskId, input),
+          setSuggestion: async (caller, taskId, input) => setPageSuggestion(await commentPageRouteDependencies(deps, caller), caller, taskId, input),
           decide: (caller, taskId, input) => decideOnPage(routeDeps(caller), caller, taskId, input),
           retryApplicationRound: (caller, taskId, input) => retryApplicationRoundOnPage(routeDeps(caller), caller, taskId, input),
           featureChoices: (caller, taskId) => pageFeatureChoices(routeDeps(caller), caller, taskId),
@@ -2649,6 +2659,7 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
     const scope = checked && deps.companies !== undefined ? boundedCompanyReads(deps.documentClient) : undefined;
     // Lane W: a merge press is company-checked too (membership, never a claim).
     const merging = request.method === "POST" && /^\/v1\/dev\/tasks\/[^/]+\/merge$/.test(url.pathname);
+    const commenting = isTaskCommentPost(request, url);
     // Reuse this route's live membership for money visibility; never read it again per task.
     let membership: Awaited<ReturnType<NonNullable<CompanyMembershipReader["membershipOf"]>>>;
     const companies = deps.companies;
@@ -2658,7 +2669,7 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
         return membership?.companyId;
       },
     };
-    const companyId = checked || merging ? await resolveCompany(checkedCompanies, caller.developerId) : undefined;
+    const companyId = checked || merging || commenting ? await resolveCompany(checkedCompanies, caller.developerId) : undefined;
     const taskDeps = developerTaskRouteDependencies(scope === undefined ? deps : { ...deps, documentClient: scope.client }, caller);
     if ((checked || merging) && companies !== undefined) {
       taskDeps.taskMoneyVisible = async (task) => recordInCompany(task, companyId)

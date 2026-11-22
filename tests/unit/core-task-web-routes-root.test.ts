@@ -9,6 +9,8 @@ import { agentXError, orgProjectCatalogKey, projectRevisionKey, type JsonValue, 
 import { createBrokerCoreRoot, type BrokerCoreRootInputs } from "../../packages/broker/src/aws/core-engine-root.js";
 import type { DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
 import { HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/hosted-modules.js";
+import { toDocument } from "../../packages/broker/src/core/task-flow/records.js";
+import { pagePlan, pageTask } from "../support/page-tasks.js";
 import { createFakeWorld, FAKE_COMPANY } from "../support/core-host-fakes.js";
 
 const adapters = vi.hoisted(() => ({ modules: [] as unknown[] }));
@@ -59,6 +61,26 @@ async function coreTask(built: ReturnType<typeof root>["root"]): Promise<string>
 }
 
 describe("the core root wires the core task web routes", () => {
+  it("core comment POST reads the current artifact through the real company's runtime reader", async () => {
+    const h = pageTask();
+    const source = h.addVersion("plan", pagePlan());
+    h.deps.actions.readArtifact = async () => { throw new Error("the old task factory has no artifact reader"); };
+    const { root: built, world } = root(() => h.deps);
+    const taskId = await coreTask(built);
+    const key = { pk: `DEVTASK#${taskId}`, sk: "META" };
+    const task = (await world.store.get(key))!;
+    if (typeof task["ownerKey"] !== "string" || typeof task["workspaceId"] !== "string") throw new Error("task identity missing");
+    const artifact = { ...source, objectKey: `private/${task["ownerKey"]}/${task["workspaceId"]}/plan-v1.json` };
+    const current = { ...task, workflow: { ...h.workflow(), taskId, ownerId: task["ownerKey"], artifacts: [artifact] } };
+    await world.store.put({ item: toDocument(current) });
+    h.db.set(current);
+    await (await built.app.registry()).require("object-storage").put(artifact.objectKey, Buffer.from(h.objects.get(source.objectKey)!), { contentType: "application/json", metadata: {}, retention: "evidence-std" });
+    const response = await built.coreTasks!.route({ method: "POST", path: `/v1/dev/tasks/${taskId}/comments`, headers: {}, body: JSON.stringify({ requestId: "root-reader", document: "plan", text: "Above", anchor: "claim:2.1" }) }, { developerId: MAYA, sessionId: "s", name: "Maya" });
+    expect(response?.statusCode).toBe(200);
+    expect(JSON.parse(response!.body)).toMatchObject({ comment: { text: "Above", author: { developerId: MAYA } } });
+    expect(h.db.find((item) => item["entityType"] === "TASK_COMMENT")).toHaveLength(1);
+  });
+
   it("item 1: a web start by a member writes the task's session in its own start", async () => {
     const { root: built } = root();
     const extras = (await built.app.runtimeFor(A)).flow.deps.startExtras!;

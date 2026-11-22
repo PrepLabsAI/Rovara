@@ -420,3 +420,12 @@ describe("core parity dev-route scopes", () => {
     expect(contextDevRouteOf(method, `/v1/dev/tasks/11111111-1111-4111-8111-111111111111/${rest}`)?.requires).toBe(requires);
   });
 });
+
+// The retained plan-comment POST must stay admitted by the production scope registry.
+it("core plan comments use the existing developer tasks:act scope", async () => {
+  const { devRouteOf } = await import("../../packages/broker/src/aws/dev-route-scopes.js");
+  const path = "/v1/dev/tasks/11111111-1111-4111-8111-111111111111/comments";
+  expect(devRouteOf("POST", path)).toMatchObject({ requires: "tasks:act" });
+  expect(devRouteOf("GET", path)).toMatchObject({ requires: "tasks:read" });
+  expect(devRouteOf("DELETE", path)).toBeUndefined();
+});

@@ -50,6 +50,7 @@ import { buildOperation, assertPromptFits } from "./accept.js";
 import type { TaskFlowDeps } from "./deps.js";
 import { dispatchRowItem, dueDispatchRows, rescheduleRowItem, resolveRowItem } from "./dispatch-rows.js"; import { questionEntriesOf } from "../task-log/entries.js"; import { taskLogItems } from "../task-log/store.js";
 import { dispatchRowKey, taskKey } from "./keys.js";
+import { commentsForPlanningStep } from "../plan/comments.js";
 import { structuredPlanContextOf } from "../plan/context.js";
 import { planUnreadablePrompt } from "../plan/process.js";
 import { readTask } from "./reads.js";
@@ -163,6 +164,9 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
   const withSources = operationKind === "task" && input.workflowMode !== undefined && deps.contextSources !== undefined && isContextSourceStage(input.workflowMode)
     && input.designReview === undefined
     && await deps.contextSources.stageHasSources({ project: task.project }, input.workflowMode);
+  const comments = await commentsForPlanningStep(deps, input);
+  const prompt = `${input.prompt}${comments.suffix}`;
+  assertPromptFits(prompt);
   const now = iso(deps);
   const fed = input.notes === undefined ? undefined : notesFedUpdate(input.notes);
   const workflowRevision = input.workflow?.next.revision ?? task.workflow?.revision;
@@ -183,7 +187,7 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
       kind: operationKind, projectRevision: workspace.projectRevision,
       payload: operationKind !== "task"
         ? { ...input.payload }
-        : { conversationId: input.conversationId ?? task.conversationId, prompt: input.prompt, ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }), ...input.payload, ...(withSources ? { contextSources: true } : {}) },
+        : { conversationId: input.conversationId ?? task.conversationId, prompt, ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }), ...input.payload, ...(withSources ? { contextSources: true } : {}) },
       ...(input.requires === undefined && !withSources ? {} : { requires: [...(input.requires ?? []), ...(withSources ? ["task.contextSources.v1"] : [])] }),
       ...(input.extraActions === undefined && !withSources ? {} : { extraActions: [...(input.extraActions ?? []), ...(withSources ? ["context-tools"] : [])] }),
     },
@@ -199,6 +203,7 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
     },
     holdWorkspaceItem(workspace, built.operation.id, now),
     ...built.items,
+    ...comments.items,
     ...(permitted.items ?? []),
     ...(input.extra ?? []),
   ];
@@ -210,10 +215,25 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
     await deps.outbox.relay({ companyId: deps.companyId, ids: [built.operation.id] }).catch((error: unknown) => log(deps, { event: "task_flow.relay_failed", error: error instanceof Error ? error.name : "unknown" }));
     return { result: "STARTED", operation: built.operation };
   }
-  // Why it did not apply: the same request committed first, the workspace is taken, or the task moved on.
+  return stepRefusal(deps, input, comments.changed);
+}
+
+/** A comment conflict must keep an automatic planning row retryable while its workflow is still current. */
+async function commentConflict(deps: TaskFlowDeps, input: StepInput, changed: (() => Promise<boolean>) | undefined): Promise<boolean> {
+  if (changed === undefined || !await changed()) return false;
+  const fresh = await readTask(deps, input.task.taskId);
+  return fresh !== undefined && fresh.closedAt === undefined && fresh.workflow !== undefined && fresh.workflow.revision === input.workflow?.current.revision;
+}
+
+/** Classify a rejected transaction without losing a still-current planning dispatch. No operation was committed. */
+async function stepRefusal(deps: TaskFlowDeps, input: StepInput, commentsChanged: (() => Promise<boolean>) | undefined): Promise<{ result: StepStart }> {
+  const { workspace } = input;
+  const location = await workspaceKeys(deps, workspace.id);
+  // The same request committed first, the workspace is taken, the comments changed, or the task moved on.
   if (await deps.store.get(location.operationRequestKey(workspace.ownerKey, input.requestId)) !== undefined) return { result: "DUPLICATE" };
   const fresh = await readWorkspace(deps, workspace.id);
   if (fresh !== undefined && (fresh.status !== "READY" || fresh.activeOperationId !== null || fresh.fence !== workspace.fence) && fresh.status !== "CLOSED" && fresh.status !== "PREPARATION_FAILED") return { result: "WAITING" };
+  if (fresh?.status === "READY" && await commentConflict(deps, input, commentsChanged)) return { result: "WAITING" };
   return { result: "STALE" };
 }
 
