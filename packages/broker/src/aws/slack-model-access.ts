@@ -7,12 +7,13 @@
 //  - in company mode the COMPANY is the Slack workspace's own binding, read live (`companyOf`), never a person's, a header's or the body's; a workspace with no binding, one that only has the install team's
 //    implicit company, and an unreadable binding are `unavailable` (no Rovara-paid fallback). The install team counts when it is bound to a company (DEC 254zzz79 (1));
 //  - the project is the one the thread's channel is bound to (read live by the Slack identity);
-//  - the token is minted per call for exactly that company and project (the answers step: the company's own connected AI source, the company's answers month and the one combined company cap count the call;
-//    nothing is Rovara-paid), and the company's gateway refuses, in its own fixed words, a company with no AI connected or no room left.
+//  - the token is minted per call for exactly that company and project (the answers step: the company's selected AI source, with a fresh signed RunPrice, the company's answers month and the one combined company cap count the call;
+//    only the configured gateway exempt list is free), and the company's gateway refuses, in its own fixed words, an unsupported source/model or a company with no room left.
 // A conversation that is not a Slack thread, no gateway settings, no task-token signer, or any fault is `unavailable`. Nothing the caller sent, and nothing a fault said, is echoed.
 import { IMPLICIT_COMPANY_ID, OrgIdSchema, type SlackChannelBinding, type SlackModelAccessResult, type SlackThread } from "@agentx/contracts";
 import type { TokenSigner } from "../developer/tokens.js";
 import { hostedAnswersModelName, mintAnswersCallToken } from "../core-host/gateway-answers.js";
+import { runPriceReader } from "../core-host/run-price-http.js";
 import { readGatewayModelAccess } from "../core-host/gateway-model-access.js";
 
 /** The gateway's base for an Anthropic client on the answers route: the client adds `/v1/messages`. */
@@ -27,6 +28,7 @@ export interface SlackModelAccessWiring {
   env: NodeJS.ProcessEnv;
   /** The install's task-token signer and issuer, read when asked (a deployment whose signer arrives late is picked up then). Absent or undefined: `unavailable`. */
   taskTokens?: (() => { signer: TokenSigner; issuer: string } | undefined) | undefined;
+  fetch?: typeof fetch;
   now?: () => number;
   log?: ((entry: Record<string, unknown>) => void) | undefined;
 }
@@ -50,7 +52,7 @@ export async function askSlackModelAccessForIdentity(wiring: SlackModelAccessWir
     let tokens: { signer: TokenSigner; issuer: string } | undefined;
     try { tokens = wiring.taskTokens?.(); } catch { tokens = undefined; }
     if (tokens === undefined || typeof tokens.issuer !== "string" || tokens.issuer === "" || typeof tokens.signer?.sign !== "function" || typeof tokens.signer.publicJwk !== "function") return unavailable;
-    const token = await mintAnswersCallToken({ signer: tokens.signer, issuer: tokens.issuer, companyId: companyId, project: slack.binding.projectName, model, ...(wiring.now === undefined ? {} : { now: wiring.now }) });
+    const token = await mintAnswersCallToken({ signer: tokens.signer, issuer: tokens.issuer, companyId: companyId, project: slack.binding.projectName, model, runPrice: modelName => runPriceReader({ gatewayUrl: settings.gatewayUrl, ...tokens, ...(wiring.fetch === undefined ? {} : { fetch: wiring.fetch }), ...(wiring.now === undefined ? {} : { now: wiring.now }) })(companyId, modelName), ...(wiring.now === undefined ? {} : { now: wiring.now }) });
     // The gateway origin plus the answers prefix is the base an Anthropic client adds `/v1/messages` to.
     return { status: "gateway", baseUrl: `${settings.gatewayUrl}${SLACK_GATEWAY_BASE_SUFFIX}`, model, token };
   } catch (error) {

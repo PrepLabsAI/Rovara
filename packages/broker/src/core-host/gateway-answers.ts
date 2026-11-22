@@ -1,11 +1,11 @@
 // Lead 4 L4-AG (DEC 254z-amend2, option A): hosted answers speak to the model gateway's "answers" purpose (Cloud L4-E, docs/model-gateway-spend-limits.md "The contract for callers").
 //
-//   POST <gateway>/v1/answers/messages   an Anthropic Messages request (the company's OWN connected provider account; Rovara never pays), `x-api-key` the call's answers token.
+//   POST <gateway>/v1/answers/messages   an Anthropic Messages request (the company's selected AI source, billed by the gateway), `x-api-key` the call's answers token.
 //
 // THE TOKEN is minted exactly as a task token is (`mintTaskToken`: the install's KMS task key, purpose `task`, the install's sign-in issuer), fresh for EVERY call, with
 //   stp = "rovara-answers-call"   the answers step: the gateway accepts it on the answers paths only, and accepts nothing else there (the fixed 401 both ways)
 //   cid = the reservation's company   never a call's argument: `reserve` binds the company once, and `call` can only name a reservation
-//   pid = the project, pay = that project, tid = `answer:<answer id>`, mdl = [the one model], no `per` (no person pays), no `src`, a fresh ws/op (an answer has no workspace or operation)
+//   pid = the project, pay = that project, tid = `answer:<answer id>`, mdl = [the one model], no `per` (no person pays), no `src`, a fresh ws/op (an answer has no workspace or operation), runPrice = the current company/model/source-bound gateway quote
 //
 // WHO HOLDS THE MONEY. The gateway holds, calls and settles each call itself (the company's `answers_month` limit combined with the company's one monthly cap), so `reserve` here is only this adapter's own
 // bookkeeping (one open reservation per answer, bound to its company and project, bounded in number and age) and `settle` closes it. Usage comes from the reply (its `usage` block, and the gateway's own cost
@@ -15,11 +15,13 @@
 // `cost_too_high` (and any reason this code does not know) mean the month has no room ("paused"). A gateway without the answers purpose yet answers 404: "not set up", so a deployment that gets this code
 // before Cloud L4-E is live shows the fixed outcome and nothing else. A 401, 429, 5xx, a redirect, a bad body and any thrown error are "unavailable". Nothing the gateway or the model sent is echoed.
 import { randomUUID } from "node:crypto";
-import { AGENTX_NAME_PATTERN, CORE_ANSWERS_MODEL_VARIABLE, CORE_CLAUDE_AGENT_MODEL, CORE_MODEL_GATEWAY_URL_VARIABLE, OrgIdSchema, isCoreAnswersModelId, type OrgId } from "@agentx/contracts";
+import { AGENTX_NAME_PATTERN, CORE_ANSWERS_MODEL_VARIABLE, CORE_CLAUDE_AGENT_MODEL, CORE_MODEL_GATEWAY_URL_VARIABLE, OrgIdSchema, isCoreAnswersModelId, type OrgId, type RunPrice } from "@agentx/contracts";
 import type { TokenSigner } from "../developer/tokens.js";
 import { mintTaskToken, type TaskTokenDescriber } from "../core/model-gateway/token.js";
 import { AnswersGatewayError, createGatewayAnswerModel, type AnswersGateway, type AnswersGatewayRefusal } from "../core/answers/gateway-model.js";
 import type { AnswerModel } from "../core/answers/ports.js";
+import { gatewayCallUsd } from "./gateway-call-price.js";
+import { runPriceReader } from "./run-price-http.js";
 import { readGatewayModelAccess, readGatewayUrl } from "./gateway-model-access.js";
 
 /** The step an answers token names (TC-1 `stp`; the gateway's `ANSWERS_STEP`). */
@@ -50,14 +52,14 @@ const PAUSE_STATUSES: readonly number[] = [403, 422];
  * model, no person, a fresh workspace and operation. Used by the answers adapter for every call, and by the Slack chat's model access (DEC 254zzz79 (3): the same route, so the company's answers month and the
  * combined company cap count the call). The company is the caller's to bind and is checked here.
  */
-export async function mintAnswersCallToken(input: { signer: TokenSigner; issuer: string; companyId: OrgId; project: string; model: string; answerKey?: string; now?: () => number }): Promise<string> {
+export async function mintAnswersCallToken(input: { signer: TokenSigner; issuer: string; companyId: OrgId; project: string; model: string; runPrice: (model: string) => Promise<RunPrice | undefined>; answerKey?: string; now?: () => number }): Promise<string> {
   if (!OrgIdSchema.safeParse(input.companyId).success || !AGENTX_NAME_PATTERN.test(input.project) || !CORE_CLAUDE_AGENT_MODEL.test(input.model)) throw new Error("not a valid answers token request");
   const key = input.answerKey ?? `answer:a${randomUUID().replace(/-/gu, "").slice(0, 31)}`;
   if (!ANSWER_KEY.test(key)) throw new Error("not a valid answers token request");
   const describer: TaskTokenDescriber = {
     describe: async () => ({ companyId: input.companyId, project: input.project, payer: { kind: "project", project: input.project }, taskId: key, step: ANSWERS_STEP, models: [input.model] }),
   };
-  return (await mintTaskToken({ signer: input.signer, issuer: input.issuer, describer, ...(input.now === undefined ? {} : { now: input.now }) }, { workspaceId: randomUUID(), operationId: randomUUID(), fence: 0 })).token;
+  return (await mintTaskToken({ signer: input.signer, issuer: input.issuer, describer, runPrice: model => input.runPrice(model), ...(input.now === undefined ? {} : { now: input.now }) }, { workspaceId: randomUUID(), operationId: randomUUID(), fence: 0 })).token;
 }
 
 export interface HttpAnswersGatewayOptions {
@@ -69,6 +71,8 @@ export interface HttpAnswersGatewayOptions {
   signer: TokenSigner;
   /** The one Claude model every answers token names. */
   model: string;
+  /** Signed company/model price authority; omission can never mint an unsigned hosted token. */
+  runPrice(companyId: OrgId, model: string): Promise<RunPrice | undefined>;
   fetch?: typeof fetch;
   now?: () => number;
   timeoutMs?: number;
@@ -110,13 +114,20 @@ export function createHttpAnswersGateway(options: HttpAnswersGatewayOptions): An
   };
 
   /** The token of one call: a task token of the answers step, for exactly this reservation's company, project and answer. */
-  async function tokenFor(reservation: Open): Promise<string> {
-    return await mintAnswersCallToken({ signer: options.signer, issuer: options.issuer, companyId: reservation.companyId, project: reservation.project, model: options.model, answerKey: reservation.key, now });
+  async function tokenFor(reservation: Open, input: Parameters<AnswersGateway["call"]>[0]): Promise<string> {
+    let price: RunPrice | undefined;
+    try { price = await options.runPrice(reservation.companyId, options.model); } catch { throw refused("unavailable"); }
+    const bound = gatewayCallUsd(price, { system: input.system, user: input.transcript, maxOutputTokens: Math.min(input.maxOutputTokens, OUTPUT_TOKENS_MAX) });
+    if (bound === undefined || price === undefined || input.signal.aborted) throw refused("unavailable");
+    if (bound > input.remainingCents / 100) throw refused("over_budget");
+    try {
+      return await mintAnswersCallToken({ signer: options.signer, issuer: options.issuer, companyId: reservation.companyId, project: reservation.project, model: options.model, answerKey: reservation.key, runPrice: async () => price, now });
+    } catch { throw refused("unavailable"); }
   }
 
   return {
     async available({ companyId }) {
-      // Whether the company has a connected key is the gateway's to say, on the first call (a missing key is then the fixed "not set up" outcome); here only a well-formed company can ask.
+      // The gateway resolves the company source and enforces its caps on every call; here only a well-formed company can ask.
       return OrgIdSchema.safeParse(companyId).success;
     },
 
@@ -146,8 +157,7 @@ export function createHttpAnswersGateway(options: HttpAnswersGatewayOptions): An
       // The answer's own ceiling is spent: no token is made and nothing is sent.
       if (!Number.isFinite(input.remainingCents) || input.remainingCents <= 0) throw refused("over_budget");
       if (!Number.isSafeInteger(input.maxOutputTokens) || input.maxOutputTokens < 1 || typeof input.system !== "string" || typeof input.transcript !== "string" || input.signal.aborted) throw refused("unavailable");
-      let token: string;
-      try { token = await tokenFor(reservation); } catch { throw refused("unavailable"); }
+      const token = await tokenFor(reservation, input);
       const controller = new AbortController();
       const onAbort = (): void => controller.abort();
       input.signal.addEventListener("abort", onAbort, { once: true });
@@ -207,8 +217,7 @@ export function hostedAnswersModelName(env: NodeJS.ProcessEnv, agentModel: strin
 
 /**
  * The deployment's hosted answers model for each company, or undefined (the fixed "answers are not set up here yet" outcome): the model gateway is configured and checked
- * (ROVARA_CORE_MODEL_GATEWAY_URL with its agent model), the install can sign task tokens, and the model that answers (ROVARA_CORE_ANSWERS_MODEL, else the agent model; L4-AM) is a Claude model (the answers purpose runs on the company's own Anthropic account; a
- * Bedrock-only model id cannot be served there). A broken setting is not a failure here: the task flow's own wiring refuses loudly, and answers stay "not set up". One gateway serves every company
+ * (ROVARA_CORE_MODEL_GATEWAY_URL with its agent model), the install can sign task tokens, and the model that answers (ROVARA_CORE_ANSWERS_MODEL, else the agent model; L4-AM) is a Claude model (other model-id families are a follow-up to the current answers model setting). A broken setting is not a failure here: the task flow's own wiring refuses loudly, and answers stay "not set up". One gateway serves every company
  * (a reservation carries its company; the model returned for a company can open reservations for that company only).
  */
 export function hostedAnswersModel(env: NodeJS.ProcessEnv, taskTokens: (() => { signer: TokenSigner; issuer: string } | undefined) | undefined, fetchImpl?: typeof fetch): ((companyId: OrgId) => AnswerModel | undefined) | undefined {
@@ -219,6 +228,6 @@ export function hostedAnswersModel(env: NodeJS.ProcessEnv, taskTokens: (() => { 
   let tokens: { signer: TokenSigner; issuer: string } | undefined;
   try { tokens = taskTokens?.(); } catch { return undefined; }
   if (tokens === undefined || typeof tokens.issuer !== "string" || tokens.issuer === "" || typeof tokens.signer?.sign !== "function" || typeof tokens.signer.publicJwk !== "function") return undefined;
-  const gateway = createHttpAnswersGateway({ gatewayUrl: settings.gatewayUrl, issuer: tokens.issuer, signer: tokens.signer, model, ...(fetchImpl === undefined ? {} : { fetch: fetchImpl }) });
+  const gateway = createHttpAnswersGateway({ gatewayUrl: settings.gatewayUrl, issuer: tokens.issuer, signer: tokens.signer, model, runPrice: runPriceReader({ gatewayUrl: settings.gatewayUrl, ...tokens, ...(fetchImpl === undefined ? {} : { fetch: fetchImpl }) }), ...(fetchImpl === undefined ? {} : { fetch: fetchImpl }) });
   return (companyId) => (OrgIdSchema.safeParse(companyId).success ? createGatewayAnswerModel(gateway, companyId) : undefined);
 }
