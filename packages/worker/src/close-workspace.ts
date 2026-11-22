@@ -1,4 +1,5 @@
-import { readFile, realpath, stat } from "node:fs/promises";
+import { closeContentDigest, readCloseManifest } from "./close-content.js";
+import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
   WorkspaceClosePreflightResultSchema,
@@ -8,22 +9,13 @@ import {
   type WorkspaceCloseReason,
 } from "@agentx/contracts";
 import { runIsolatedGit } from "./isolated-repository.js";
-import type { PreparationManifest } from "./prepare.js";
 import { storedCommandOutput } from "./command-failure.js";
 
 const MAX_GIT_OUTPUT = 1_048_576;
 
 export async function inspectWorkspaceForClose(rootPathValue: string): Promise<WorkspaceClosePreflightResult> {
   const rootPath = await realpath(resolve(rootPathValue));
-  const manifest = JSON.parse(
-    await readFile(resolve(rootPath, ".agentx/preparation-manifest.json"), "utf8"),
-  ) as PreparationManifest;
-  if (manifest.schemaVersion !== 2 || !manifest.complete) {
-    throw agentXError("WORKSPACE_NOT_READY", "workspace preparation is incomplete");
-  }
-  if (manifest.repositories.length > 32) {
-    throw agentXError("CONFIG_INVALID", "workspace manifest contains too many repositories");
-  }
+  const manifest = await readCloseManifest(rootPath);
 
   const repositories: WorkspaceClosePreflightResult["repositories"] = [];
   for (const repository of manifest.repositories) {
@@ -35,7 +27,10 @@ export async function inspectWorkspaceForClose(rootPathValue: string): Promise<W
     const reasons: WorkspaceCloseReason[] = [];
     const status = await git(directory, ["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=dirty"]);
     const statusLines = status.split("\n").filter(Boolean);
-    if (statusLines.some((line) => !line.startsWith("??"))) reasons.push("worktree_changes");
+    // Porcelain hides these index flags and stashes leave the worktree clean.
+    const hiddenIndex = (await git(directory, ["ls-files", "-v", "-z"])).split("\0").some((entry) => /^[a-zS] /u.test(entry));
+    const localRefs = await hasLocalRefs(directory);
+    if (statusLines.some((line) => !line.startsWith("??")) || hiddenIndex || localRefs) reasons.push("worktree_changes");
     if (statusLines.some((line) => line.startsWith("??"))) reasons.push("untracked_files");
     if ((await git(directory, ["for-each-ref", "--format=%(refname)", "--contains", "HEAD", "refs/remotes"])).trim() === "") {
       reasons.push("unpushed_head");
@@ -45,7 +40,25 @@ export async function inspectWorkspaceForClose(rootPathValue: string): Promise<W
     }
     if (reasons.length > 0) repositories.push({ name: repository.name, reasons });
   }
-  return WorkspaceClosePreflightResultSchema.parse({ safeToClose: repositories.length === 0, repositories });
+  repositories.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  const contentDigest = await closeContentDigest(rootPath, manifest);
+  return WorkspaceClosePreflightResultSchema.parse({ safeToClose: repositories.length === 0, repositories, contentDigest });
+}
+
+/** A published tag needs both the same name and the same object, including annotated tag identity.
+ * Preparation saves remote tag refs separately. Missing evidence stays local; reachability alone cannot publish a tag.
+ */
+async function hasLocalRefs(directory: string): Promise<boolean> {
+  const remoteTags = "refs/rovara/remote-tags/origin/";
+  const refs = new Map((await git(directory, ["for-each-ref", "--format=%(refname)%00%(objectname)"])).split("\n").filter(Boolean).map((line) => {
+    const [name, object] = line.split("\0"); return [name!, object!] as const;
+  }));
+  for (const [ref, object] of refs) {
+    if (ref.startsWith("refs/heads/") || ref.startsWith("refs/remotes/") || ref.startsWith(remoteTags)) continue;
+    if (ref.startsWith("refs/tags/") && refs.get(remoteTags + ref.slice("refs/tags/".length)) === object) continue;
+    return true;
+  }
+  return false;
 }
 
 async function git(directory: string, args: readonly string[]): Promise<string> {

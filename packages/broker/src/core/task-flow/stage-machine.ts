@@ -193,7 +193,7 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
       kind: "update",
       key: taskKey(task.taskId),
       ops: [...(workflowWrite === undefined ? [] : workflowWrite.ops), change.set("updatedAt", now), ...(fed === undefined ? [] : fed.ops)],
-      condition: when.and(when.notExists("closedAt"), ...(input.workflow === undefined ? [] : [when.eq(["workflow", "revision"], input.workflow.current.revision), ...(workflowWrite?.guard ?? [])]), ...(fed === undefined ? [] : [fed.condition])),
+      condition: when.and(when.notExists("closedAt"), when.notExists("closeOperationId"), ...(input.workflow === undefined ? [] : [when.eq(["workflow", "revision"], input.workflow.current.revision), ...(workflowWrite?.guard ?? [])]), ...(fed === undefined ? [] : [fed.condition])),
     },
     holdWorkspaceItem(workspace, built.operation.id, now),
     ...built.items,
@@ -242,7 +242,7 @@ export async function commitWorkflow(deps: TaskFlowDeps, task: TaskRecord, next:
   const items: TransactItem[] = [
     {
       kind: "update", key: taskKey(task.taskId), ops: [...write.ops, ...taskOps, change.set("updatedAt", iso(deps))],
-      condition: when.and(when.notExists("closedAt"), ...(taskCondition === undefined ? [] : [taskCondition]), when.eq(["workflow", "revision"], current.revision), ...write.guard),
+      condition: when.and(when.notExists("closedAt"), when.notExists("closeOperationId"), ...(taskCondition === undefined ? [] : [taskCondition]), when.eq(["workflow", "revision"], current.revision), ...write.guard),
     },
     ...extra,
   ];
@@ -256,7 +256,7 @@ export async function commitWorkflow(deps: TaskFlowDeps, task: TaskRecord, next:
 export async function blockTaskWorkflow(deps: TaskFlowDeps, taskId: string, expectedRevision: number, reason: string): Promise<void> {
   const task = await readTask(deps, taskId);
   const workflow = task?.workflow;
-  if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.revision !== expectedRevision || workflow.state === "COMPLETE") return;
+  if (task === undefined || task.closeOperationId !== undefined || task.closedAt !== undefined || workflow === undefined || workflow.revision !== expectedRevision || workflow.state === "COMPLETE") return;
   try {
     await commitWorkflow(deps, task, blockWorkflow(workflow, reason, iso(deps)));
   } catch (error) {
@@ -320,7 +320,7 @@ export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRe
     await deps.store.transact([resolve()]);
     return "STALE";
   };
-  if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.revision !== row.workflowRevision) return stale();
+  if (task === undefined || task.closeOperationId !== undefined || task.closedAt !== undefined || workflow === undefined || workflow.revision !== row.workflowRevision) return stale();
   // Only the Understand step needs a 1.1.0 workflow: with Understand off (1.0.0) the owner's request for changes still plans again, from the request and their words (below).
   if (workflow.definitionVersion !== "1.1.0" && !(workflow.definitionVersion === "1.0.0" && (row.kind === "PLAN" || row.kind === "REPLAN"))) return stale();
   const workspace = await readWorkspace(deps, task.workspaceId);
@@ -492,7 +492,7 @@ export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationR
     return;
   }
   const task = await readTask(deps, pointer.taskId);
-  if (task === undefined || task.closedAt !== undefined) return;
+  if (task === undefined || task.closeOperationId !== undefined || task.closedAt !== undefined) return;
   const succeeded = ended.status === "SUCCEEDED";
 
   // A setup run's own operation, or its preparation failing, ends the run with what the broker reads of the worker's answer (idempotent: a repeat finds the result kept and changes nothing).

@@ -1,3 +1,4 @@
+import { publicationGateCallback } from "../core/build-step/publication-gates.js";
 import { locateWorkspace, workspaceKeys } from "../core/task-flow/workspace-location.js";
 // The callback endpoints a worker posts to (`/v1/internal/workspaces/<w>/operations/<o>/<action>`), for the three every job has: its events, its artifacts and
 // its terminal result. The capability the flow issued at delivery (HMAC, one workspace, one operation, one fence, a list of actions) is checked first; the ids in the address must be the
@@ -29,6 +30,7 @@ import { recordWorkItemProgress } from "../core/work-breakdown/progress.js";
 import type { StepOutcome } from "../core/task-flow/outcome.js";
 import { fromDocument, type OperationRecord, type TaskPointerRecord, type WorkspaceRecord } from "../core/task-flow/records.js";
 import { isTerminalStatus, recordOperationResult } from "../core/task-flow/results.js";
+import { acceptedCloseForRun } from "../core/task-flow/close-recovery-state.js";
 import { isSpendStopCode, requestSpendStop } from "../core/task-flow/money-stop.js";
 import { iso } from "../core/task-flow/support.js";
 import { parseKnowledgeCommit } from "../core/meta-repo/prepare-meta.js";
@@ -131,7 +133,8 @@ async function operationOf(deps: CallbackDeps, workspaceId: string, operationId:
 }
 
 /** The actions this install answers; any other the worker can make is "not available". */
-const SERVED_ACTIONS: ReadonlySet<string> = new Set(["events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "browser-evidence", "browser-evidence-sign-in", "pull-request", "pull-request-update", "setup-agent", "wiki-build", EVAL_PLAN_DELIVERY_ACTION, EVAL_HEALTH_RESULT_PATH]);
+const PUBLICATION_CALLBACKS = { codebuild: publicationGateCallback, "pull-request": openPullRequest };
+const SERVED_ACTIONS: ReadonlySet<string> = new Set(["codebuild", "events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "browser-evidence", "browser-evidence-sign-in", "pull-request", "pull-request-update", "setup-agent", "wiki-build", EVAL_PLAN_DELIVERY_ACTION, EVAL_HEALTH_RESULT_PATH]);
 export const TERMINAL_OUTPUT_REFUSAL = "terminal operations cannot publish more output";
 
 /**
@@ -210,6 +213,26 @@ async function bookTerminalUsage(deps: CallbackDeps, operation: OperationRecord,
   if (!parsed.some((event) => event.type === USAGE_EVENT)) return undefined;
   await deps.bookUsage(operation, parsed);
   return parsed.every((event) => event.type === USAGE_EVENT) ? { accepted: parsed.length } : undefined;
+}
+
+function resultStatus(body: Record<string, unknown>): "SUCCEEDED" | "FAILED" | "CANCELLED" {
+  const status = body["status"];
+  if (status !== "SUCCEEDED" && status !== "FAILED" && status !== "CANCELLED") throw agentXError("CONFIG_INVALID", "a result needs a status");
+  return status;
+}
+
+/** A close's original run retains only its own accounting capability. */
+async function closeAccountingCallback(deps: CallbackDeps, operation: OperationRecord, action: string, body: Record<string, unknown>) {
+  if (action === "events") {
+    const booked = await bookTerminalUsage(deps, operation, body);
+    if (booked !== undefined) return json(200, booked);
+  }
+  if (action === "result") {
+    const status = resultStatus(body);
+    const recorded = await recordOperationResult(deps.flow, { workspaceId: operation.workspaceId, operationId: operation.id, fence: operation.fence, status });
+    return json(200, { ok: true, duplicate: recorded.duplicate });
+  }
+  throw agentXError("CALLBACK_FORBIDDEN", TERMINAL_OUTPUT_REFUSAL);
 }
 
 async function recordEvents(deps: CallbackDeps, operation: OperationRecord, body: Record<string, unknown>): Promise<{ accepted: number }> {
@@ -302,6 +325,7 @@ async function exchangeCredential(deps: CallbackDeps, request: BrokerRequest, wo
   if (grant === undefined || grant === "") throw agentXError("FORBIDDEN", "a repository grant is required");
   const operation = await operationOf(deps, workspaceId, operationId);
   if (operation.status === "SUCCEEDED" || operation.status === "FAILED" || operation.status === "CANCELLED" || operation.status === "INTERRUPTED") throw agentXError("FORBIDDEN", "this operation has ended");
+  if (await acceptedCloseForRun(deps.flow, operation) !== undefined) throw agentXError("FORBIDDEN", "this operation is closing");
   const body = bodyOf(request);
   const { credentialRef, repositoryUrl, access } = body;
   if (typeof credentialRef !== "string" || typeof repositoryUrl !== "string" || (access !== "clone" && access !== "push")) throw agentXError("CONFIG_INVALID", "name the credential, the repository and the access");
@@ -347,6 +371,7 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       if (action === EVAL_HEALTH_RESULT_PATH && request.body !== undefined && Buffer.byteLength(request.body, "utf8") > EVAL_HEALTH_RESULT_MAX_BYTES) throw agentXError("CONFIG_INVALID", "the eval health result is too large");
       const operation = await operationOf(deps, workspaceId, operationId);
       if (operation.fence !== capability.fence) throw agentXError("STALE_FENCE", "callback no longer owns the workspace");
+      if (await acceptedCloseForRun(deps.flow, operation) !== undefined) return await closeAccountingCallback(deps, operation, action, bodyOf(request));
       if (action !== "result" && isTerminalStatus(operation.status)) {
         const booked = action === "events" ? await bookTerminalUsage(deps, operation, bodyOf(request)) : undefined;
         if (booked !== undefined) return json(200, booked);
@@ -413,7 +438,8 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
         if (job?.success !== true || typeof project !== "string" || project === "" || posted["requestId"] !== job.data.requestId || posted["claimId"] !== job.data.claimId) throw agentXError("CALLBACK_FORBIDDEN", "the eval health result is taken only from the run's own preparation");
         return json(200, await recordEvalHealthResult(deps.evalHealth!, project, posted));
       }
-      if (action === "pull-request") return json(200, await openPullRequest(deps.flow, operation, bodyOf(request)));
+      const publicationCallback = PUBLICATION_CALLBACKS[action as keyof typeof PUBLICATION_CALLBACKS];
+      if (publicationCallback !== undefined) return json(200, await publicationCallback(deps.flow, operation, bodyOf(request)));
       if (action === "pull-request-update") return json(200, await updatePullRequest(deps.flow, operation, bodyOf(request)));
       if (action === "setup-agent") {
         const run = deps.setupAgent!;
@@ -431,8 +457,7 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
         return json(200, recorded);
       }
       if (action === "artifacts") return json(200, await recordArtifact(deps, operation, body));
-      const status = body["status"];
-      if (status !== "SUCCEEDED" && status !== "FAILED" && status !== "CANCELLED") throw agentXError("CONFIG_INVALID", "a result needs a status");
+      const status = resultStatus(body);
       const error = typeof body["error"] === "string" ? body["error"] : undefined;
       // A coding run that left the code as it was reports what it found with its failure, so a failed coding run's result is handed over too (the build step reads only what it needs of it).
       const outcome = status === "SUCCEEDED" ? await readOutcome(deps, operation, body["result"])

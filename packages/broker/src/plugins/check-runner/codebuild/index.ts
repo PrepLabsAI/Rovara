@@ -58,6 +58,16 @@ export function codeBuildCheckRunner(options: CodeBuildRunnerOptions): CheckRunn
       return [await readRun(parsed)];
     },
 
+    async runFacts(target, _check, scope, budget) {
+      checkedScope(scope);
+      budget?.beforeRequest();
+      const parsed = CheckTargetSchema.parse(target);
+      if (parsed.kind !== "run" || parsed.run.runner !== CODEBUILD_RUNNER_KIND || parsed.project === undefined) throw agentXError("CONFIG_INVALID", "CodeBuild facts require a bound run");
+      requireRegistered(parsed.repository.url);
+      const result = await options.gateway.status({ gate: parsed.gate, projectName: parsed.project, commit: parsed.revision, buildId: parsed.run.id });
+      return { ...(result.resolvedSourceVersion === undefined ? {} : { resolvedRevision: result.resolvedSourceVersion }), ...(result.startedAt === undefined ? {} : { startedAt: result.startedAt }), ...(result.completedAt === undefined ? {} : { completedAt: result.completedAt }) };
+    },
+
     // CodeBuild logs are not read through this runner.
     async logTail(_target: CheckTarget, _check: Check, scope: HostScope): Promise<UntrustedText | undefined> {
       checkedScope(scope);

@@ -653,3 +653,118 @@ describe("the plan card's feature line (lead 4 PCF)", () => {
     expect(requirements.cards[0]!.planFeature).toBeUndefined();
   });
 });
+
+describe("the retired workflow decision wire shape on deployed core", () => {
+  it("decides through the real hosted proof and gate, replays, and rejects a stale digest", async () => {
+    const { app, deps, waitingTask, stored, world } = await setup();
+    const taskId = await waitingTask("dev-a");
+    const workflow = await stored(taskId);
+    const request = { requestId: randomUUID(), expectedRevision: workflow.revision, artifactDigest: workflow.artifacts.at(-1)!.sha256, decision: "APPROVE" as const, reason: "Ship it" };
+    const routes = createCoreDevRoutes({ app, companyOf: async () => ({ companyId: ORG, role: "member" }), wiring: () => ({ origin: () => "https://api.example", workflowDecision: deps.decideWorkflow }) });
+    const reply = await routes.route({ method: "POST", path: `/v1/dev/tasks/${taskId}/workflow/decision`, headers: {}, body: JSON.stringify(request) }, { principal: principalOf("dev-a"), client: "cli" });
+    expect(reply?.statusCode).toBe(200);
+    const audit = world.audit.find((event) => event.action === "decision.approved");
+    expect(audit?.actor).toEqual({ type: "person", id: "dev-a" });
+    expect(audit?.details?.["via"]).toBe("tool");
+    expect(JSON.parse(reply!.body)).toMatchObject({ task: { taskId, workflow: { stage: "IMPLEMENT" } } });
+    expect(await stored(taskId)).toMatchObject({ stage: "IMPLEMENT", decisions: [expect.objectContaining({ requestId: request.requestId, decision: "APPROVE" })] });
+    const after = await stored(taskId);
+    await deps.decideWorkflow(cardCaller("dev-a"), taskId, request);
+    expect(await stored(taskId)).toEqual(after);
+    await expect(deps.decideWorkflow(cardCaller("dev-a"), taskId, { ...request, requestId: randomUUID(), artifactDigest: "f".repeat(64) })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+  });
+
+  it("keeps live owner, membership, grant and company checks before issuing a proof", async () => {
+    const { deps, waitingTask, stored, point, grants, memberships } = await setup();
+    const taskId = await waitingTask("dev-a");
+    const workflow = await stored(taskId);
+    const request = { requestId: randomUUID(), expectedRevision: workflow.revision, artifactDigest: workflow.artifacts.at(-1)!.sha256, decision: "REQUEST_CHANGES" as const, reason: "Add tests" };
+    for (const caller of [cardCaller("dev-b"), cardCaller("dev-x", OTHER)]) await expect(deps.decideWorkflow(caller, taskId, request)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    grants.delete("dev-a|payments");
+    await expect(deps.decideWorkflow(cardCaller("dev-a"), taskId, request)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    grants.set("dev-a|payments", "developer");
+    memberships.delete("dev-a");
+    await expect(deps.decideWorkflow(cardCaller("dev-a"), taskId, request)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    expect(point.acts).toHaveLength(0);
+    expect(await stored(taskId)).toEqual(workflow);
+  });
+});
+
+
+describe("hosted tool approval owner ruling DEC 254zzz334", () => {
+  it.each(["approve", "reject"] as const)("keeps the strong-method refusal for %s", async (outcome) => {
+    const t = await setup({ permissive: true });
+    const taskId = await t.waitingTask("dev-a");
+    const before = await t.stored(taskId);
+    await t.world.store.put({ item: { ...await t.world.store.get(taskKey(taskId)), runEstimate: { highUsd: 1_000 } } as never });
+    vi.spyOn(t.registry.require("approvers"), "requirement").mockResolvedValue({ methods: [METHOD], minApprovers: 1, selfApprovalAllowed: true, strongMethods: ["code-host-comment"], rejectMethods: ["code-host-comment"] });
+    await expect(t.deps.decideWorkflow(cardCaller("dev-a"), taskId, { requestId: randomUUID(), expectedRevision: before.revision, artifactDigest: before.artifacts.at(-1)!.sha256, decision: outcome === "approve" ? "APPROVE" : "REJECT", reason: "Owner answer" })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    expect(await t.stored(taskId)).toEqual(before);
+    expect(t.world.audit.filter((event) => event.action.startsWith("decision."))).toEqual([]);
+  });
+
+  it.each(["spent", "unknown-spend", "unknown-cap", "unreadable"] as const)("enforces the task run limit on tool and page approvals: %s", async (state) => {
+    const t = await setup();
+    const taskId = await t.waitingTask("dev-a");
+    const before = await t.stored(taskId);
+    t.runtime.flow.deps.taskCapUsd = async () => state === "unknown-cap" ? undefined : 10;
+    t.runtime.flow.deps.taskSpendUsd = async () => { if (state === "unreadable") throw new Error("unreadable"); return state === "unknown-spend" ? undefined : 10; };
+    await expect(t.deps.decideWorkflow(cardCaller("dev-a"), taskId, { requestId: randomUUID(), expectedRevision: before.revision, artifactDigest: before.artifacts.at(-1)!.sha256, decision: "APPROVE", reason: "Ship it", acknowledgedRunLimitUsd: 100_000 })).rejects.toThrow(state === "spent" ? "used its run limit" : "cannot tell");
+    const items = await t.deps.sources.list(cardCaller("dev-a"));
+    const item = items.find((entry) => entry.taskId === taskId)!;
+    const card = projectDecisionCards(items).cards.find((entry) => entry.id === cardOf(taskId))!;
+    expect(await t.deps.performer.approve(cardCaller("dev-a"), { item, card, requestId: randomUUID() })).toMatchObject({ kind: "refused" });
+    expect(await t.stored(taskId)).toEqual(before);
+    expect(t.world.audit.filter((event) => event.action.startsWith("decision."))).toEqual([]);
+  });
+
+  it("approves below the task limit and replays after the limit is reached without another decision", async () => {
+    const t = await setup();
+    const taskId = await t.waitingTask("dev-a");
+    const before = await t.stored(taskId);
+    let spent = 9;
+    t.runtime.flow.deps.taskCapUsd = async () => 10;
+    t.runtime.flow.deps.taskSpendUsd = async () => spent;
+    const request = { requestId: randomUUID(), expectedRevision: before.revision, artifactDigest: before.artifacts.at(-1)!.sha256, decision: "APPROVE" as const, reason: "Ship it" };
+    await t.deps.decideWorkflow(cardCaller("dev-a"), taskId, request);
+    const after = await t.stored(taskId);
+    expect(after.stage).toBe("IMPLEMENT");
+    spent = 10;
+    await t.deps.decideWorkflow(cardCaller("dev-a"), taskId, request);
+    expect(await t.stored(taskId)).toEqual(after);
+    expect(t.world.audit.filter((event) => event.action === "decision.approved")).toHaveLength(1);
+  });
+});
+
+it("lets a hosted tool token with decisions:decide approve as its person, and refuses a token missing that scope", async () => {
+  const { MAYA, TOOL_CLIENT, clientBearer, createDeveloperTaskBroker } = await import("../support/developer-task-broker.js");
+  const { coreTaskEntryFrom } = await import("../../packages/broker/src/aws/engine-boundary.js");
+  const { engineStampKey } = await import("../../packages/broker/src/core-host/engine-stamp.js");
+  const t = await setup();
+  t.memberships.set(MAYA.developerId, { companyId: ORG, role: "member" });
+  t.grants.set(`${MAYA.developerId}|payments`, "developer");
+  const taskId = await t.waitingTask(MAYA.developerId);
+  const before = await t.stored(taskId);
+  const routes = createCoreDevRoutes({ app: t.app, companyOf: async (caller) => t.memberships.get(caller.principal.personId), wiring: () => ({ origin: () => "https://api.example", workflowDecision: t.deps.decideWorkflow }) });
+  const coreTasks = coreTaskEntryFrom(routes, async (caller) => ({ principal: principalOf(caller.developerId), client: caller.clientId }));
+  const broker = await createDeveloperTaskBroker({ register: false, developerExtra: { coreTasks } });
+  for (const key of [taskKey(taskId), engineStampKey(taskId)]) broker.db.set({ ...await t.world.store.get(key), ...key });
+  const request = { requestId: randomUUID(), expectedRevision: before.revision, artifactDigest: before.artifacts.at(-1)!.sha256, decision: "APPROVE", reason: "Ship it" };
+  const path = `/v1/dev/tasks/${taskId}/workflow/decision`;
+  const denied = await broker.client("tool", MAYA, "POST", path, request);
+  expect(denied.status).toBe(403);
+  expect(await t.stored(taskId)).toEqual(before);
+  expect(t.point.acts).toHaveLength(0);
+  broker.db.set({ ...broker.db.get("SIGNIN_CLIENTS", "CLIENT#tool-app")!, scopes: ["tasks:read", "tasks:act", "decisions:decide"] });
+  const response = await broker.handler({ version: "2.0", rawPath: path, rawQueryString: "", headers: { authorization: await clientBearer(MAYA, { ...TOOL_CLIENT, scope: "decisions:decide" }, `${TOOL_CLIENT.clientId}-${MAYA.sessionId}`) }, body: JSON.stringify(request), requestContext: { requestId: randomUUID(), http: { method: "POST" } } });
+  expect(response.statusCode).toBe(200);
+  expect(await t.stored(taskId)).toMatchObject({ stage: "IMPLEMENT", decisions: [expect.objectContaining({ actorId: taskOwnerKey(MAYA.developerId, taskId), decision: "APPROVE" })] });
+  const audit = t.world.audit.find((event) => event.action === "decision.approved");
+  expect(audit?.actor).toEqual({ type: "person", id: MAYA.developerId });
+  expect(audit?.details?.["via"]).toBe("tool");
+  const after = await t.stored(taskId);
+  const replay = await broker.handler({ version: "2.0", rawPath: path, rawQueryString: "", headers: { authorization: await clientBearer(MAYA, { ...TOOL_CLIENT, scope: "decisions:decide" }, `${TOOL_CLIENT.clientId}-${MAYA.sessionId}`) }, body: JSON.stringify(request), requestContext: { requestId: randomUUID(), http: { method: "POST" } } });
+  expect(replay.statusCode).toBe(200);
+  expect(await t.stored(taskId)).toEqual(after);
+  expect(t.world.audit.filter((event) => event.action === "decision.approved")).toHaveLength(1);
+});

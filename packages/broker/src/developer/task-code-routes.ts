@@ -347,19 +347,34 @@ export async function readTaskDiff(deps: RouteDeps, caller: DeveloperCaller, tas
   const { task } = await accessFor(deps, caller, taskId, "read");
   const opened = (await deps.actions.pullRequests(task.workspaceId)).find((pullRequest) => pullRequest.repository === query.data.repository && pullRequest.number === query.data.number);
   if (opened === undefined) throw agentXError("NOT_FOUND", "no such pull request on this task");
+  return readDiffPage(deps, query.data, opened);
+}
+
+/** The same diff for a core task: live read authority, then only a PR the workflow recorded. */
+export async function readCoreTaskDiff(deps: RouteDeps, caller: DeveloperCaller, task: TaskAccess["task"], url: URL): Promise<TaskDiffResponse> {
+  if (!rowInCompany(task as unknown as Record<string, unknown>, deps.companyId)) throw agentXError("TASK_NOT_FOUND", NOT_FOUND_TASK);
+  await resolveCoreTaskAccess(deps, caller, task, "read");
+  const query = DiffQuerySchema.safeParse({ repository: url.searchParams.get("repository") ?? undefined, number: whole(url.searchParams.get("number")), page: url.searchParams.has("page") ? whole(url.searchParams.get("page")) : 1 });
+  if (!query.success) throw agentXError("CONFIG_INVALID", "the diff request is invalid");
+  const opened = task.workflow?.pullRequests?.find((pr) => pr.repositoryId === query.data.repository && pr.number === query.data.number);
+  if (opened === undefined) throw agentXError("NOT_FOUND", "no such pull request on this task");
+  return readDiffPage(deps, query.data, opened);
+}
+
+async function readDiffPage(deps: RouteDeps, query: z.infer<typeof DiffQuerySchema>, opened: { url: string; number: number }): Promise<TaskDiffResponse> {
   const repositoryUrl = githubRepositoryUrl(opened.url, opened.number);
   if (repositoryUrl === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "this pull request's diff cannot be read");
   if (deps.readPullRequestDiff === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "pull request diffs are not available on this install");
   let read: DiffPageRead;
   try {
-    const parsed = DiffReadSchema.safeParse(await deps.readPullRequestDiff(repositoryUrl, opened.number, query.data.page));
+    const parsed = DiffReadSchema.safeParse(await deps.readPullRequestDiff(repositoryUrl, opened.number, query.page));
     if (!parsed.success) throw new Error("unreadable");
     read = { files: parsed.data.files.map((file) => ({ filename: file.filename, additions: file.additions, deletions: file.deletions, ...(file.patch === undefined ? {} : { patch: file.patch }) })), more: parsed.data.more };
   } catch {
     throw agentXError("RUNTIME_UNAVAILABLE", "this pull request's diff cannot be read");
   }
   return {
-    repository: query.data.repository, number: query.data.number, page: query.data.page, more: read.more,
+    repository: query.repository, number: query.number, page: query.page, more: read.more,
     files: read.files.map((file) => ({
       path: file.filename, additions: file.additions, deletions: file.deletions,
       patch: file.patch === undefined ? "" : file.patch.length > DIFF_PATCH_MAX_CHARS ? DIFF_PATCH_TOO_LONG : file.patch,

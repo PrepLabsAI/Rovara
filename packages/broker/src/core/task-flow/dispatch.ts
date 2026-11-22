@@ -1,4 +1,5 @@
 import { workspaceKeys } from "./workspace-location.js";
+import { acceptedCloseForRun, closeDeliveryReceipt, readAcceptedClose, retireCloseDelivery } from "./close-recovery-state.js";
 // Lane L6a, task flow core: dispatching operations to worker machines. The consumer of the dispatch queue: for each message it finds the
 // operation, makes sure the workspace's machine is running and ready, builds the worker's invocation (with a repository grant and a callback
 // capability issued now, not when the operation was accepted, so a delivery that waits for a machine never carries an expired one) and hands it to
@@ -51,6 +52,7 @@ import { chooseStepModel, heldStepModel, type OperationModelChoice, type StepMod
 const CAPABILITY_SECONDS = 32_400;
 /** A queued cancel is tried this many times on a machine that is not ready. */
 const CANCEL_DELIVERY_ATTEMPTS = 5;
+const CLOSE_DELIVERY_ATTEMPTS = 5;
 /** After this many deliveries of one message the operation is given up on: the machine never became usable. */
 export const DISPATCH_ATTEMPTS_MAX = 20;
 /** The reason a run is ended with when its machine never became usable (merge of "the start was tried until its budget ran out"). */
@@ -118,6 +120,34 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     await queue.deadLetter(message.receiptHandle, "operation_missing");
     return "dropped";
   }
+  // Broker-owned accepted close work stays retryable until every effect and receipt completes.
+  // Never route it through worker dispatch, which would interrupt a CLOSING workspace and acknowledge away recovery.
+  if (operation.closeAcceptance !== undefined) return resumeCloseDelivery(deps, queue, message, operation);
+  return handleWorkerDispatch(deps, queue, message, operation);
+}
+
+/** Each queue delivery is bounded; the pending durable outbox survives redrive and recreates it. */
+async function resumeCloseDelivery(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessage, operation: OperationRecord): Promise<Outcome> {
+  try { await deps.resumeAcceptedClose?.(operation); }
+  catch { return retryCloseDelivery(deps, queue, message, operation); }
+  const fresh = await readAcceptedClose(deps, operation.workspaceId, operation.id);
+  if (fresh?.closeAcceptance.phase !== "complete") return retryCloseDelivery(deps, queue, message, operation);
+  await queue.ack(message.receiptHandle);
+  await closeDeliveryReceipt(deps, fresh);
+  return "delivered";
+}
+
+async function retryCloseDelivery(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessage, operation: OperationRecord): Promise<Outcome> {
+  if (message.receiveCount >= CLOSE_DELIVERY_ATTEMPTS) {
+    await retireCloseDelivery(deps, operation);
+    await queue.deadLetter(message.receiptHandle, "accepted_close_pending");
+    return "dropped";
+  }
+  await queue.changeVisibility(message.receiptHandle, 30);
+  return "retried";
+}
+
+async function handleWorkerDispatch(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessage, operation: OperationRecord): Promise<Outcome> {
   // A queued cancel (money-stop.ts: a Stop, a close or a spend stop on a deployed install, whose broker never reaches a worker itself): handed to the worker that runs the operation, while it
   // is still being stopped. A machine not ready is tried again a few times; anything else drops the message (the broker's wait then ends the run, keeping its hold).
   const cancelId = queuedCancelOf(message.body);
@@ -134,6 +164,10 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     }
     await queue.ack(message.receiptHandle);
     return "delivered";
+  }
+  if (await acceptedCloseForRun(deps, operation) !== undefined) {
+    await queue.ack(message.receiptHandle);
+    return "dropped";
   }
   // Already ended, or a cancel is in flight: nothing to deliver.
   // A redelivered message for a job the worker already reports running is a repeat: the worker has it.

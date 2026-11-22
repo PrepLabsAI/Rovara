@@ -1,3 +1,9 @@
+import type { WorkflowDecisionRequest } from "@agentx/contracts";
+import { parityTaskRoute, routeParityTask } from "./parity-task-routes.js";
+import { PullRequestResultSchema } from "@agentx/contracts";
+import type { OperationRecord } from "../core/task-flow/records.js";
+import { startManualPublication } from "../core/task-flow/manual-publication.js";
+import { shareTask } from "../core/task-flow/share.js";
 import { taskOwnerView } from "../developer/task-owner-view.js";
 import { parsePreviewRequestV2, restrictPreviewV2 } from "@agentx/contracts";
 import { startEstimates, type PreviewContext } from "../core/cost/start-estimates.js";
@@ -101,7 +107,7 @@ const TASK_READ = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})$/u;
 /** A core task's proof index (Cloud's `tasks.evidence.list`): the task read's own rule, then what the proof page reads (proof-index.ts). */
 const TASK_EVIDENCE = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})\/evidence$/u;
 /** The owner's moves on a task already running (DECISIONS 198), on the old workflow routes' paths. */
-const TASK_ACTION = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})\/(workflow\/send-back|workflow\/review-findings|continue)$/u;
+const TASK_ACTION = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})\/(workflow\/send-back|workflow\/review-findings|workflow\/review|pull-requests|share|continue)$/u;
 /**
  * DEC 254zzz39 (6): the task owner's "Accept findings" on Rovara's web page (`{ requestId, expectedRevision, candidateDigest, resolutions }` in, as the workflow route; `{ task }` out). The one route that accepts a
  * SECURITY finding on a core task: only the web app's own sign-in client (`webApp`), only for the task's owner (or a People co-owner); the move is then made as the page's (`via: "page"`).
@@ -138,6 +144,8 @@ export const INVOLVED_UNAVAILABLE = "Your involved tasks could not be listed rig
 
 /** The deployed caller, as the broker's sign-in vouches for it. */
 export interface DeployedCaller {
+  /** Trusted linked Slack account, never supplied by the request. */
+  slackUserId?: string | undefined;
   principal: Principal;
   client?: string | undefined;
   /** Set by the broker's sign-in when the request carries a script token (never from a body). Such a caller reaches task reads and explicitly scoped wiki reads here. */
@@ -172,6 +180,8 @@ export interface CoreDevWiring {
   members?: SessionMembers;
   /** The decision cards' sources and performer (each checks the caller's live authority). */
   decisions?: DecisionRouteDependencies<DeployedDecisionCaller>;
+  /** The existing hosted approval gate, on the developer workflow-decision wire shape. */
+  workflowDecision?: (caller: DeployedDecisionCaller, taskId: string, request: WorkflowDecisionRequest) => Promise<void>;
   /**
    * The owner's moves on a task already running (send back, review findings, continue; DECISIONS 198). `roundCap` is the money cap each round is held to (the task's limit and what it has
    * spent; a throw, or an unreadable spend, refuses the round). It is required so the deployment says what it holds; `async () => undefined` holds none. Served only when the runtime's
@@ -299,8 +309,15 @@ function owns(path: string, method: string, query: string): boolean {
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
   if (isSetupRunPath(path, method) || isSetupCheckPath(path, method) || isWikiMapPath(path, method) || isReportPath(path, method)) return true;
   if (isKnownFailingPath(path, method) || isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method) || isEvalCheckPath(path, method) || isAgentDirectoryPath(path, method) || isSystemRunsPath(path, method) || isTicketUpdatesPath(path, method)) return true;
-  return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path);
+  return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path) || parityTaskRoute(path, method) !== undefined;
 }
+/** Neither decisions surface relies on sign-in time or methods (DEC 254zzz73). */
+function decisionCallerOf(caller: DeployedCaller, companyId: string): DeployedDecisionCaller {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- drop legacy sign-in claims
+  const { authTime: _ignored, methods: _alsoIgnored, ...principal } = caller.principal;
+  return { orgId: companyId, developerId: developerIdOf(caller.principal), principal, ...(caller.webApp === true ? { webApp: true } : {}) };
+}
+
 const unauthenticated = (): BrokerResponse => json(401, { error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
 
 /** A request body as JSON, whatever its shape (the caller's schema judges it); text that is not JSON is a fixed refusal. */
@@ -316,6 +333,17 @@ function bodyOf(request: BrokerRequest): Record<string, unknown> {
   try { value = JSON.parse(request.body); } catch { throw agentXError("CONFIG_INVALID", "the request body is not JSON"); }
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw agentXError("CONFIG_INVALID", "the request body must be an object");
   return value as Record<string, unknown>;
+}
+
+/** Dispatch a mounted session request after checking hosted close readiness. */
+async function sessionAnswer(target: Mounted, request: BrokerRequest, caller: TaskCaller, path: string): Promise<BrokerResponse> {
+  if (target.sessions === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+  // Readiness follows the production retention provider, never an install switch.
+  if (request.method === "POST" && path.endsWith("/close") && target.runtime.flow.deps.closeInspection === undefined) {
+    const body = bodyOf(request);
+    if (["expectedPreviewDigest", "discard_unpublished", "discardUnpublished"].some((field) => Object.hasOwn(body, field))) throw agentXError("RUNTIME_UNAVAILABLE", "Guarded close and discarding unpublished work are not available yet.");
+  }
+  return (await target.sessions(request, caller)) ?? errorAnswer(agentXError("NOT_FOUND", "route not found"));
 }
 
 
@@ -416,6 +444,25 @@ export interface CoreDevRoutes {
   taskReadable(caller: DeployedCaller, taskId: string): Promise<boolean>;
 }
 
+function taskCallerOf(caller: DeployedCaller): TaskCaller {
+  return { principal: caller.principal, ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }), ...(caller.client === undefined ? {} : { client: caller.client }) };
+}
+
+function publicationAnswer(operation: OperationRecord | undefined) {
+  if (operation === undefined) return {};
+  const result = operation.result as { outcome?: { result?: unknown } } | undefined;
+  const published = PullRequestResultSchema.safeParse(result?.outcome?.result ?? operation.result);
+  return { operationId: operation.id, operationStatus: operation.status, ...(operation.status === "SUCCEEDED" && published.success ? { pullRequest: { repository: published.data.repository, number: published.data.number, url: published.data.url, state: "open" } } : {}) };
+}
+
+async function performTaskAction(target: Mounted, caller: TaskCaller, taskId: string, action: string, body: unknown) {
+  if (action === "pull-requests") return startManualPublication(target.runtime.flow.deps, caller, taskId, body);
+  if (action === "share") { await shareTask(target.runtime.flow.deps, caller, taskId, body); return undefined; }
+  const handlers = { "workflow/send-back": target.actions!.sendBack, "workflow/review-findings": (who: TaskCaller, id: string, value: unknown) => target.actions!.resolveFindings(who, id, value, "api-token"), "workflow/review": target.actions!.review, continue: target.actions!.continue };
+  await handlers[action as keyof typeof handlers](caller, taskId, body);
+  return undefined;
+}
+
 export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoutes {
   const mounted = new Map<string, Promise<Mounted>>();
   const mount = (companyId: string): Promise<Mounted> => {
@@ -463,7 +510,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
         const target = await mount(membership.companyId);
         const roundCap = target.wiring.taskActions?.roundCap;
         if (roundCap === undefined) return undefined;
-        const taskCaller: TaskCaller = { principal: caller.principal, ...(caller.client === undefined ? {} : { client: caller.client }) };
+        const taskCaller = taskCallerOf(caller);
         const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, taskId);
         if (!maySeeTaskMoney(target, record, caller, membership)) return undefined;
         const cap = await roundCap(record);
@@ -481,7 +528,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
         const membership = await options.companyOf(caller);
         if (membership === undefined || membership === null || typeof membership.companyId !== "string" || !ORG_ID.test(membership.companyId) || caller.scriptToken !== undefined) return false;
         const target = await mount(membership.companyId);
-        const taskCaller: TaskCaller = { principal: caller.principal, ...(caller.client === undefined ? {} : { client: caller.client }) };
+        const taskCaller = taskCallerOf(caller);
         // The task read's own rule (the company, then the company's read access): the same refusal as a missing task for anyone it does not show the task to.
         await loadReadableTask(target.runtime.flow.deps, taskCaller, taskId);
         return true;
@@ -516,15 +563,13 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
       if (caller.scriptToken !== undefined && TASK_ANSWERS.test(path)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
       // A script token reaches task reads or the two scoped wiki reads; never sessions, decisions, playbooks or token management.
       // An owner's move on a task is never a script token's, and its answer must not tell a token which task ids exist: it reads like a missing task (the boundary's own answer).
-      if (caller.scriptToken !== undefined && (TASK_ACTION.test(path) || TASK_CANCEL.test(path) || TASK_PAGE_FINDINGS.test(path) || isHostedMergePath(path, request.method) || coreTaskRuleOf(path, request.method) !== undefined)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
+      if (caller.scriptToken !== undefined && (parityTaskRoute(path, request.method) !== undefined || TASK_ACTION.test(path) || TASK_CANCEL.test(path) || TASK_PAGE_FINDINGS.test(path) || isHostedMergePath(path, request.method) || coreTaskRuleOf(path, request.method) !== undefined)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
       if (caller.scriptToken !== undefined && !TASK_READ.test(path) && scriptTokenRoute(request.method, path)?.permission !== "wiki") return errorAnswer(agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS));
       const target: Mounted = await mount(companyId);
-      const taskCaller: TaskCaller = { principal: caller.principal, ...(caller.client === undefined ? {} : { client: caller.client }) };
+      const taskCaller = taskCallerOf(caller);
       try {
-        if (INBOX_PATH.test(path)) return await inboxAnswer(target.inbox, request, taskCaller); if (SESSIONS.test(path)) {
-          if (target.sessions === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return (await target.sessions(request, taskCaller)) ?? errorAnswer(agentXError("NOT_FOUND", "route not found"));
-        }
+        if (INBOX_PATH.test(path)) return await inboxAnswer(target.inbox, request, taskCaller);
+        if (SESSIONS.test(path)) return await sessionAnswer(target, request, taskCaller, path);
         if (path === TASK_START && request.method === "GET") {
           // The involved list: the caller's own rows in this company, each re-checked against the live task access (the core's task read rule). Another company's task is never listed.
           return json(200, await listInvolvedTasks(target.runtime.flow.deps, taskCaller, involvedListOptions(new URLSearchParams(request.path.split("?")[1] ?? ""))));
@@ -555,6 +600,12 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           const view = await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller, membership), maySeeTaskMoney(target, record, caller, membership));
           return json(200, { task: { ...view, ...(testing === undefined ? {} : { testing }) } });
         }
+        const parity = parityTaskRoute(path, request.method);
+        if (parity !== undefined) return await routeParityTask({
+          flow: target.runtime.flow, blobs: target.blobs, wiring: target.wiring, caller: taskCaller,
+          decisionCaller: decisionCallerOf(caller, companyId),
+          view: async (record) => developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller, membership), maySeeTaskMoney(target, record, caller, membership)),
+        }, parity, request);
         const evidence = TASK_EVIDENCE.exec(path);
         if (evidence !== null) {
           // Exactly the task read's rule (the flow's owned read: the company, then the company's access rule; another company's task, or none, answers the same "not found"), then the pack kept for
@@ -583,11 +634,9 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           // The body as JSON, judged by the move's own schema (its words name the field), as the old workflow routes do.
           const body = jsonBodyOf(request);
           // Each move re-checks who acts (owner or co-owner, else "no such task"), the revision they saw, and the round's money, and writes nothing on a refusal.
-          if (action[2] === "workflow/send-back") await target.actions.sendBack(taskCaller, taskId, body);
-          else if (action[2] === "workflow/review-findings") await target.actions.resolveFindings(taskCaller, taskId, body, "api-token");
-          else await target.actions.continue(taskCaller, taskId, body);
+          const publication = await performTaskAction(target, taskCaller, taskId, action[2]!, body);
           const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, taskId);
-          return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller, membership), maySeeTaskMoney(target, record, caller, membership)) });
+          return json(200, { ...publicationAnswer(publication), task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller, membership), maySeeTaskMoney(target, record, caller, membership)) });
         }
         const rule = coreTaskRuleOf(path, request.method);
         if (rule !== undefined) {
@@ -637,14 +686,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           if (target.wiring.decisions === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           const body = request.method === "GET" ? {} : bodyOf(request);
           const url = new URL(request.path, "http://core");
-          // The principal carries no sign-in time or methods: the performer decides on the person's live authority alone (DEC 254zzz73).
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop them
-          const { authTime: _ignored, methods: _alsoIgnored, ...person } = caller.principal;
-          const decisionCaller: DeployedDecisionCaller = {
-            orgId: companyId, developerId: developerIdOf(caller.principal),
-            principal: person,
-            ...(caller.webApp === true ? { webApp: true as const } : {}),
-          };
+          const decisionCaller = decisionCallerOf(caller, companyId);
           const reply = await routeDecisionCards(target.wiring.decisions, decisionCaller, { method: request.method, pathname: path, searchParams: url.searchParams, body });
           if (reply === undefined) throw agentXError("NOT_FOUND", "route not found");
           return json(reply.statusCode, reply.body);

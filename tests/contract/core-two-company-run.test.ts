@@ -323,7 +323,7 @@ it("wires hosted close cost, session bindings and after-merge independently for 
     const runtime = await h.root.app.runtimeFor(companyId);
     expect(runtime.services["after-merge"]).toMatchObject({ companyId });
     expect(await runtime.flow.deps.sessionBindings!.read(companyId, sessionId)).toMatchObject([{ kind: "linear_issue", issueId }]);
-    await runtime.flow.deps.onTaskClosed!({ taskId, project: "payments", workflow: { path: "FULL" } } as never, closedAt);
+    await runtime.flow.deps.onTaskClosed!({ taskId, companyId, project: "payments", workflow: { path: "FULL" } } as never, closedAt);
     expect(await h.w.store.get(runCostKey(companyId, "payments", ROVARA_CODE_AGENT_ID, "FULL", closedAt, taskId))).toMatchObject({ entityType: "RUN_COST", orgId: companyId, costUsd: 2.5 });
   }
   const a = await h.root.app.runtimeFor(A);

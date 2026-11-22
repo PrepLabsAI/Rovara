@@ -1,9 +1,10 @@
 // Spec 025 FR-026 to FR-029: registers the tools on an MCP server, checks the API version first,
 // and passes every result, every error and every progress message through redaction and a cap,
 // since all of it goes into the AI tool's model context.
-import { McpServer, type RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, type RegisteredTool, type ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { ElicitResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
 import { DEVELOPER_TASK_SUMMARY_MAX, redactSecrets, redactText } from "@agentx/contracts";
 import { ToolError } from "./errors.js";
 import { FIRST_LIST_WAIT_MS, NOT_OFFERED, ToolOffer, guardTransport, type AdminOffer, type AdminToolGroup } from "./offer.js";
@@ -85,7 +86,8 @@ export function createAgentXMcpServer(options: {
     ...(options.log === undefined ? {} : { log: (entry: Record<string, unknown>) => options.log?.(entry) }),
   });
   // Issue #218: an admin tool's result also says when the admin sign-in is about to expire.
-  const register = (tool: ToolDefinition, admin = false): RegisteredTool => server.registerTool(tool.name, { title: tool.title, description: tool.description, inputSchema: tool.inputSchema, outputSchema: tool.outputSchema }, async (input: Record<string, unknown>, extra) => {
+  // An obsolete guarded close must fail validation, never lose its fields and become plain Close.
+  const register = (tool: ToolDefinition, admin = false): RegisteredTool => server.registerTool(tool.name, { title: tool.title, description: tool.description, inputSchema: tool.name === "agentx_close_task" ? z.object(tool.inputSchema).strict() : tool.inputSchema, outputSchema: tool.outputSchema }, async (input: Record<string, unknown>, extra: Parameters<ToolCallback<z.ZodRawShape>>[1]) => {
     try {
       const client = server.server.getClientVersion();
       const context = options.context(client?.name, client?.version);

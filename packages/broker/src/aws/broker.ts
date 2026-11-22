@@ -15992,7 +15992,7 @@ function buildBrokerHandler(callbackSigningKey: string) {
     // Cloud #188 item 3: a core task's People, readers, events and plan comments use the old task routes' own dependencies for this person (built as the People proof above is), in their live company.
     taskRules: (person, companyId) => {
       if (signIn === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "task people are unavailable in this deployment");
-      return { ...developerTaskRouteDependencies({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), developer: signIn, now: Date.now },
+      return { ...developerTaskRouteDependencies({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), developer: signIn, now: Date.now, ...(slackCompany === undefined ? {} : { workspaces: slackCompany.workspaces, companies: slackCompany.companies }) },
         { developerId: person.developerId, sessionId: "core", name: person.name, amr: "oidc" }, undefined, null), companyId };
     },
     // Lane L1b: the core's code host is the same GitHub App, company-scoped (aws/core-code-host.ts): a company's own projects' repositories only, its installation binding at every mint.

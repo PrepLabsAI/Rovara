@@ -22,7 +22,7 @@ import type { DeveloperTaskRouteDependencies } from "./developer-tasks.js";
 import { grantTaskReader, listTaskReaders, readsAsReader, revokeTaskReader } from "./task-readers.js";
 import { getTaskPeople } from "../developer/task-people.js";
 import { addTaskWebPerson, getTaskPeopleCandidates, getTaskPeopleProposal, proposeTaskOwnership, proposeTaskPeopleRole } from "../developer/task-people-effects.js";
-import { listCorePlanComments } from "../developer/task-code-routes.js";
+import { listCorePlanComments, readCoreTaskDiff } from "../developer/task-code-routes.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
 import { readTaskLog } from "../core/task-log/store.js";
 import { coreTaskRuleOf } from "../core-host/task-rule-paths.js";
@@ -122,6 +122,12 @@ async function coreTimeline(store: Pick<DocumentStore, "query">, companyId: OrgI
 /**
  * The old routes, for a core task. `depsFor` builds, for this person, exactly the dependencies the developer routes build for their task routes (`developerTaskRouteDependencies`), with the caller's company.
  */
+async function documentRoute(rest: string, deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, task: DeveloperTaskRecord, url: URL): Promise<BrokerResponse | undefined> {
+  if (rest === "diff") return json(await readCoreTaskDiff(deps, caller, task, url));
+  if (rest === "comments") return json(await listCorePlanComments(deps, caller, task));
+  return undefined;
+}
+
 export function createCoreTaskRuleRoutes(depsFor: (person: { developerId: string; name: string }, companyId: OrgId) => DeveloperTaskRouteDependencies): CoreTaskRuleRoutes {
   return {
     async readsAsReader(input) {
@@ -147,7 +153,8 @@ export function createCoreTaskRuleRoutes(depsFor: (person: { developerId: string
       if (rest === "people/role") return json({ change: await proposeTaskPeopleRole(effects(deps), caller, taskId, parse(TaskPeopleRoleRequestSchema, bodyOf(input.request), log, "people/role")) });
       if (rest === "people/take-ownership") return json({ change: await proposeTaskOwnership(effects(deps), caller, taskId, parse(TaskPeopleTakeOwnershipRequestSchema, bodyOf(input.request), log, "people/take-ownership")) });
       if (rest.startsWith("people/requests/")) return json({ change: await getTaskPeopleProposal(effects(deps), caller, taskId, safeDecode(rest.slice("people/requests/".length))) });
-      if (rest === "comments") return json(await listCorePlanComments(deps, caller, task));
+      const document = await documentRoute(rest, deps, caller, task, url);
+      if (document !== undefined) return document;
       // Readers and the timeline: the task's own person, or (to read) a reader it is shared with who is still a project member; anyone else reads no such task, in the old owner check's words.
       const owner = task.developerId === caller.developerId;
       const reader = !owner && await readsAsReader(deps, task, caller.developerId);

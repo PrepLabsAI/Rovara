@@ -1,9 +1,10 @@
 // Lane L6a, task flow core: the task routes, as a pure function over the flow. The HTTP server that carries them (lane L4's `rovara up`)
 // authenticates the request through the identity adapter first and passes the principal in; nothing here reads a header or a cookie, so a request
 // body can never name who is acting.
-import { AgentXError, agentXError } from "@agentx/contracts";
+import { AgentXError, TaskCloseActionSchema, agentXError } from "@agentx/contracts";
 import type { TaskCaller } from "./deps.js";
 import type { TaskFlow } from "./flow.js";
+import { parseBody } from "./owner-round.js";
 import { involvedListOptions, listInvolvedTasks, wantsInvolved } from "./involved.js";
 
 export interface TaskRouteRequest {
@@ -48,12 +49,20 @@ export async function handleTaskRoute(flow: TaskFlow, request: TaskRouteRequest)
       if (wantsInvolved(query)) return { status: 200, body: await listInvolvedTasks(flow.deps, request.caller, involvedListOptions(query)) };
       return { status: 200, body: await flow.list(request.caller) };
     }
-    const match = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})(\/close)?$/.exec(path);
-    if (match !== null && request.method === "GET" && match[2] === undefined) return { status: 200, body: { task: await flow.get(request.caller, match[1]!) } };
-    if (match !== null && request.method === "POST" && match[2] === "/close") return { status: 200, body: { task: await flow.close(request.caller, match[1]!) } };
-    throw agentXError("NOT_FOUND", "route not found");
+    return await taskRoute(flow, request, path);
   } catch (error) {
     if (error instanceof AgentXError) return { status: error.statusCode, body: { error: { code: error.code, message: error.message.slice(error.code.length + 2) } } };
     throw error;
   }
+}
+
+async function taskRoute(flow: TaskFlow, request: TaskRouteRequest, path: string): Promise<TaskRouteResponse> {
+    const match = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})(\/close)?$/.exec(path);
+    if (match !== null && request.method === "GET" && match[2] === "/close") {
+      const action = parseBody(TaskCloseActionSchema, new URLSearchParams(request.path.split("?")[1] ?? "").get("action"));
+      return { status: 200, body: await flow.previewClose(request.caller, match[1]!, action) };
+    }
+    if (match !== null && request.method === "GET" && match[2] === undefined) return { status: 200, body: { task: await flow.get(request.caller, match[1]!) } };
+    if (match !== null && request.method === "POST" && match[2] === "/close") return { status: 200, body: { task: await flow.close(request.caller, match[1]!, jsonBody(request.body)) } };
+    throw agentXError("NOT_FOUND", "route not found");
 }

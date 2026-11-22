@@ -607,12 +607,24 @@ describe("agentx_open_pull_request and agentx_close_task return at once (R22, Ow
     expect(openPullRequest.mock.calls[0]?.[1]).toMatchObject({ requestId: "66666666-6666-4666-8666-666666666666" });
   });
 
-  it("passes discard authorization only when the task owner explicitly selects it", async () => {
-    const closeTask = vi.fn(async () => ({ task: view("CLOSED"), closed: true, discardedUnpublished: true }));
-    const result = await (await connect({ closeTask })).callTool({ name: "agentx_close_task", arguments: { task_id: TASK, discard_unpublished: true } });
-    expect(closeTask).toHaveBeenCalledWith(TASK, expect.any(String), true);
-    expect(result.structuredContent).toMatchObject({ closed: true });
-    expect(text(result)).toContain("unpublished workspace changes were discarded");
+  it("does not offer guarded close or discard, and never downgrades obsolete guarded arguments", async () => {
+    const closeTask = vi.fn(async () => ({ task: view("CLOSED"), closed: true }));
+    const mcp = await connect({ closeTask });
+    try {
+      const tool = (await mcp.listTools()).tools.find((entry) => entry.name === "agentx_close_task");
+      expect(tool).toBeDefined();
+      expect(Object.keys(tool!.inputSchema.properties ?? {}).sort()).toEqual(["request_id", "task_id"]);
+      expect(tool!.description).not.toMatch(/discard_unpublished|set .*discard|authorize.*discard/i);
+      for (const fields of [{ discard_unpublished: true }, { discard_unpublished: false }, { discardUnpublished: true }, { expectedPreviewDigest: "a".repeat(64) }]) {
+        const result = await mcp.callTool({ name: "agentx_close_task", arguments: { task_id: TASK, ...fields } });
+        expect(result.isError).toBe(true);
+      }
+      expect(closeTask).not.toHaveBeenCalled();
+      expect((await mcp.callTool({ name: "agentx_close_task", arguments: { task_id: TASK } })).isError).not.toBe(true);
+      expect(closeTask).toHaveBeenCalledWith(TASK, expect.any(String), false);
+    } finally {
+      await mcp.close();
+    }
   });
 
   it("uses AgentX's own words for a close that is not done, redacted", async () => {

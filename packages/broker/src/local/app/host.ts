@@ -7,6 +7,7 @@ import { noteKey, sessionNoteItems } from "../../core/sessions/notes.js";
 import { PLAIN_TASK_REASON, SESSION_ENDED_REASON, TASK_FULL_REASON, routeOfTask } from "../../core/sessions/steer.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { cancelTask } from "../../core/task-flow/cancel.js";
+import { prepareTaskCloseAcceptance } from "../../core/task-flow/close-acceptance.js";
 import { closeTask } from "../../core/task-flow/close.js";
 import { readTask } from "../../core/task-flow/reads.js";
 import { retryBlockedStep } from "./retry.js";
@@ -24,6 +25,10 @@ export function createSessionControlHost(deps: TaskFlowDeps, options: { expected
 
     async closeTask(taskId, _requestId, principal) {
       await closeTask(deps, { principal, client: "app" }, taskId);
+    },
+
+    async planCloseTask(taskId, input, principal, sessionId) {
+      return prepareTaskCloseAcceptance(deps, { principal, client: "app" }, taskId, input, sessionId);
     },
 
     async retryWorkflow(taskId) {

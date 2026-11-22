@@ -207,6 +207,8 @@ export async function stopCoreTaskAs(entry: CoreTaskEntry | undefined, caller: C
  * registered sign-in client whose token made the call (absent for the Rovara CLI).
  */
 export interface CoreEntryCaller {
+  /** Trusted linked Slack account, supplied by broker sign-in. */
+  slackUserId?: string | undefined;
   developerId: string;
   sessionId: string;
   name: string;
