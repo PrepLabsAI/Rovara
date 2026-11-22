@@ -4,9 +4,15 @@
 import type { PlanDocument, WorkflowArtifact } from "@agentx/contracts";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
 import { textReaderOf } from "../build-step/plan-input.js";
-import type { ArtifactReader } from "../task-flow/deps.js";
+import type { ArtifactReader, TaskFlowDeps } from "../task-flow/deps.js";
 
 export type LoadedPlanDocument = { kind: "structured"; plan: PlanDocument } | { kind: "unreadable" };
+
+/** The thread's document and closeout reads use the flow's access-checked reader, or the host's company-checked fallback when the flow has none. A refusal never falls back to a different reader. */
+export function workflowDocumentTextReader(deps: Pick<TaskFlowDeps, "artifacts">, fallback: ArtifactReader): (objectKey: string) => Promise<string | undefined> {
+  const read = textReaderOf(deps.artifacts ?? fallback);
+  return (objectKey) => read(objectKey, 1_572_864);
+}
 
 /** A structured artifact, read back and checked against its digest. A Markdown artifact is not a structured plan: ask only for artifacts whose `format` is "structured". */
 export async function loadPlanDocument(artifacts: ArtifactReader | undefined, artifact: WorkflowArtifact): Promise<LoadedPlanDocument> {

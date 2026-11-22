@@ -280,6 +280,26 @@ describe("the milestone lines", () => {
     expect(await threadFollows({ store: w.store })(OTHER, SESSION)).toBe(false);
   });
 
+  it.each(["orgId", "companyId"] as const)("xcompany C1: a foreign task's %s never reaches this company's thread or writes a notice", async (field) => {
+    const w = await world({ withGate: false, companyOf: () => ORG, isMember: () => true });
+    const key = workflowTaskKey(TASK);
+    const task = (await w.store.get(key))!;
+    const withoutOrg = { ...task };
+    delete withoutOrg["orgId"];
+    await w.store.put({ item: { ...withoutOrg, [field]: OTHER } });
+    const ownTask = "11111111-1111-4111-8111-111111111111";
+    await w.store.put({ item: { ...task, ...workflowTaskKey(ownTask) } });
+    const before = await w.store.scanPage({ limit: 100 });
+    for (const kind of ["plan_ready", "pr_ready", "merged"] as const) await w.handler.on(milestone(kind, { pullRequests: [PR] }));
+    expect(before.cursor).toBeUndefined();
+    expect(w.deliveries).toEqual([]);
+    expect(await w.store.scanPage({ limit: 100 })).toEqual(before);
+    // Same store, same reachable thread and same milestone: this company's task is served.
+    await w.handler.on(milestone("merged", { taskId: ownTask }));
+    expect(w.deliveries).toHaveLength(1);
+    expect(w.deliveries[0]?.type).toBe("done");
+  });
+
   it("nothing crosses companies: another company's thread, a failing company rule and a member who is not served get nothing", async () => {
     for (const options of [{ companyOf: () => OTHER }, { companyOf: () => undefined }, { companyOf: (): never => { throw new Error("down"); } }, { companyOf: () => ORG, isMember: () => false }, { companyOf: () => ORG, isMember: (): never => { throw new Error("down"); } }] as WorldOptions[]) {
       const w = await world({ ...options, withGate: false });

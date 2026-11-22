@@ -5,6 +5,7 @@ import { IMPLICIT_COMPANY_ID, codeMilestoneKey, queryAll, type CodeMilestone, ty
 import {
   CODE_MILESTONE_ATTEMPTS_MAX, CODE_MILESTONE_DUE_PK, codeMilestoneItems, codeMilestoneWrittenFor, createDocumentMilestones, type CodeMilestoneHandler, type DocumentMilestones,
 } from "../../packages/broker/src/core/milestones/milestones.js";
+import { PendingMilestoneDelivery } from "../../packages/broker/src/core/milestones/pending-delivery.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
 
@@ -128,4 +129,57 @@ describe("the sweep", () => {
     clock += 10 * 60_000;
     expect(await hook.deliverDue()).toMatchObject({ attempted: 0 });
   });
+});
+
+it.each(["pending", "Canvas closeout remains pending"])("review3: pending durable delivery keeps its row due beyond the ordinary failure limit (%s)", async (message) => {
+  let pending = true;
+  const heard = handler("cleanup", async () => { if (pending) throw new PendingMilestoneDelivery(message); });
+  await commit(codeMilestoneItems(milestone({ kind: "closed" }), 1));
+  for (let round = 0; round < CODE_MILESTONE_ATTEMPTS_MAX + 2; round++) {
+    clock += 600_000;
+    await hook.deliverDue();
+    expect((await stored())[0]?.["deliveredAt"]).toBeUndefined();
+    expect((await stored())[0]?.["dispatchDuePk"]).toBe(CODE_MILESTONE_DUE_PK);
+  }
+  expect(heard).toHaveLength(7);
+  pending = false;
+  clock += 600_000;
+  expect(await hook.deliverDue()).toMatchObject({ attempted: 1 });
+  expect((await stored())[0]?.["done_cleanup"]).toBe(true);
+  expect((await stored())[0]?.["dispatchDuePk"]).toBeUndefined();
+});
+
+
+it("review4: pending cleanup survives later exceptions without refunding another handler's failures", async () => {
+  let cleanupCalls = 0;
+  let cleanupComplete = false;
+  const cleanup: CodeMilestoneHandler = { name: "cleanup", on: async () => {
+    cleanupCalls++;
+    if (cleanupComplete) return;
+    if (cleanupCalls === 1) throw new PendingMilestoneDelivery("pending");
+    throw new Error("read unavailable");
+  } };
+  let ordinaryCalls = 0;
+  const ordinary: CodeMilestoneHandler = { name: "ordinary", on: async () => { ordinaryCalls++; throw new Error("send unavailable"); } };
+  hook.register(cleanup);
+  hook.register(ordinary);
+  await commit(codeMilestoneItems(milestone({ kind: "closed" }), 1));
+  await hook.deliver(taskId);
+  // Restart after learning that cleanup is owed: the state must be durable and handler-specific.
+  hook = createDocumentMilestones({ store, now: () => clock });
+  hook.register(cleanup);
+  hook.register(ordinary);
+  for (let round = 0; round < 6; round++) {
+    clock += 600_000;
+    expect(await hook.deliverDue()).toEqual({ attempted: 1 });
+    expect((await stored())[0]?.["deliveredAt"]).toBeUndefined();
+  }
+  expect(cleanupCalls).toBe(7);
+  expect(ordinaryCalls).toBe(5);
+  cleanupComplete = true;
+  clock += 600_000;
+  expect(await hook.deliverDue()).toEqual({ attempted: 1 });
+  expect((await stored())[0]?.["done_cleanup"]).toBe(true);
+  expect((await stored())[0]?.["deliveredAt"]).toBeDefined();
+  expect((await stored())[0]?.["dispatchDuePk"]).toBeUndefined();
 });
