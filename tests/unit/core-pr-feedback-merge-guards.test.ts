@@ -4,7 +4,8 @@ import { change, when } from "@agentx/contracts";
 import { acceptStep, blockTaskWorkflow, commitWorkflow, readWorkspace, runDispatchRow } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { readTask, workspaceOperations } from "../../packages/broker/src/core/task-flow/reads.js";
-import { startChecksRerun, startImplementation, startReview } from "../../packages/broker/src/core/build-step/start.js";
+import { startChecksRerun, startImplementation } from "../../packages/broker/src/core/build-step/start.js";
+import { createBuildSteps } from "../../packages/broker/src/core/build-step/index.js";
 import { decidePrFeedback } from "../../packages/broker/src/core/pr-feedback/decide.js";
 import { createHarness } from "../support/task-flow-harness.js";
 import { reviewedFeedbackWorld } from "../support/pr-feedback-world.js";
@@ -102,7 +103,7 @@ it("the next review receives the selected feedback context", async () => {
   const task = (await readTask(w.h.deps, w.task.taskId))!;
   task.workflow = { ...task.workflow!, stage: "REVIEW", state: "WAITING" };
   await w.h.store.put({ item: toDocument(task) });
-  expect(await startReview(w.h.deps, { taskId: task.taskId, workflowRevision: task.workflow.revision })).toBe("STARTED");
+  expect(await createBuildSteps().runRow(w.h.deps, { taskId: task.taskId, workflowRevision: task.workflow.revision, kind: "REVIEW" })).toBe("STARTED");
   const operation = (await workspaceOperations(w.h.deps, task.workspaceId)).find(op => op.workflowMode === "REVIEW")!;
   expect(JSON.stringify(operation.dispatch.payload["workflowReviewFeedback"])).toContain("Add a bounded retry.");
 });

@@ -53,6 +53,27 @@ describe("the shared gateway install stop in Code", () => {
     expect((await w.h.flow.dispatchOnce({ maxMessages: 10 })).delivered).toBe(0);
   });
 
+  it("an ordinary worker failure keeps its own reason instead of becoming an install pause", async () => {
+    const w = await taskWorld();
+    await toDesignPhase(w);
+    const job = await nextJob(w);
+    await finish(w, job.operation, undefined, "FAILED", "WORKER_DISCONNECTED");
+    const task = await taskOf(w);
+    expect(task.workflow.state).toBe("BLOCKED");
+    expect(task.workflow.blockReason).toContain("WORKER_DISCONNECTED");
+    expect(task.workflow.blockReason).not.toBe(PAUSED);
+  });
+
+  it("the exact install refusal also stops Understand with the exact reason", async () => {
+    const w = await taskWorld();
+    const prepare = await nextJob(w);
+    await finish(w, prepare.operation, { kind: "prepared", base: [{ repositoryId: "demo", baseCommitSha: "b".repeat(40) }] });
+    const understand = await nextJob(w);
+    expect(understand.operation.workflowMode).toBe("UNDERSTAND");
+    await finish(w, understand.operation, undefined, "FAILED", `MODEL_NOT_ALLOWED: ${PAUSED}`);
+    expect((await taskOf(w)).workflow).toMatchObject({ state: "BLOCKED", blockReason: PAUSED });
+  });
+
   it.each(["agent", "setup", "upkeep", "reviewer", "e2e_agent"])("%s keeps the exact refusal with zero usage and no retryable failure", async purpose => {
     let calls = 0;
     const runtime = await createConfiguredModelRuntime({ provider: "anthropic", modelId: MODEL }, {

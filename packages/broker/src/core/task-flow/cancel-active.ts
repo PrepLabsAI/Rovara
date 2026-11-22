@@ -8,13 +8,17 @@ import { blockStoppedStep } from "./stopped-step.js";
 import { readWorkspace } from "./stage-machine.js";
 import { workspaceKeys } from "./workspace-location.js";
 
-export async function finishCancellation(deps: TaskFlowDeps, taskId: string, workspace: WorkspaceRecord, operation: OperationRecord, reason: string): Promise<{ nothingRunning: boolean }> {
+export async function finishCancellation(deps: TaskFlowDeps, taskId: string, workspace: WorkspaceRecord, operation: OperationRecord, reason: string, expectedOperationId?: string): Promise<{ nothingRunning: boolean }> {
   const location = await workspaceKeys(deps, workspace.id);
   // A deployed install (money-stop.ts): the worker is asked to stop and send what it spent, and its end is waited for a bounded time, before the machine is stopped. A run whose end did not
   // come keeps its task's whole hold as spent, marked estimated. Without `moneyStop` this is "nothing_to_flush" and the Stop is as before.
   const flushed = await askWorkerToFlush(deps, workspace, operation);
   // The machine keeps its volume; the next step wakes it. A machine that is already gone is the same as one stopped.
   const current = await readWorkspace(deps, workspace.id);
+  if (expectedOperationId !== undefined && (current?.activeOperationId !== operation.id || current.fence !== operation.fence)) {
+    if (flushed === "not_flushed") await endUnflushed(deps, operation);
+    return { nothingRunning: false };
+  }
   if (workspace.machine !== undefined && current?.activeOperationId === operation.id && current.fence === operation.fence) await deps.machines.stop(workspace.machine.machineId).catch(() => undefined);
   if (flushed === "not_flushed") await endUnflushed(deps, operation);
   await recordOperationResult(deps, { workspaceId: workspace.id, operationId: operation.id, fence: operation.fence, status: "CANCELLED" });
@@ -25,6 +29,6 @@ export async function finishCancellation(deps: TaskFlowDeps, taskId: string, wor
     if (ended?.status === "SUCCEEDED" || ended?.status === "FAILED") return { nothingRunning: false };
   }
   // A workflow step that was stopped has nothing running: it waits for the owner's Retry.
-  await blockStoppedStep(deps, taskId, operation, reason);
+  if (expectedOperationId === undefined) await blockStoppedStep(deps, taskId, operation, reason);
   return { nothingRunning: false };
 }

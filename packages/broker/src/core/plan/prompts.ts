@@ -6,6 +6,8 @@ import { PLAN_PHASE_LIMITS, planChecksInstructions, planDocumentInstructions, pr
 import { ROVARA_CODE_PLAN_GUIDANCE, canonicalPlanJson, type PlanDocument, type PlanDocumentKind, type PlanOwnerAnswers, type WorkflowCheck } from "@agentx/contracts";
 import { ownerAnswersSentence } from "../../developer/owner-answers-text.js";
 
+import type { FeatureE2EPlanningContextResult } from "../../e2e/feature-plan-planning-context.js";
+
 const KIND_NAMES: Record<PlanDocumentKind, string> = { requirements: "requirements", design: "design", plan: "coding plan" };
 
 /** A structured document a planning run is told about: the earlier version of this document, or the approved document this one builds on. */
@@ -23,6 +25,8 @@ export interface StructuredPlanInput {
   path: "QUICK" | "FULL";
   /** Rovara Code version 2 (every Code task): the plan may say no code change is needed and a coding plan must name what changes, which files and how it is tested. */
   rovaraV2: boolean;
+  /** Source-backed context from the pinned project and prepared commit; only coding plans consume it. */
+  e2ePlanningContext?: FeatureE2EPlanningContextResult;
   /** Claim numbers the task's earlier documents dropped: they may not come back. */
   retired?: readonly string[] | undefined;
   /** Present for a task with a check policy: the repositories the checks run in and the checks that always run. */
@@ -33,6 +37,7 @@ export interface StructuredPlanInput {
 export function structuredPlanRules(input: StructuredPlanInput): string {
   const instructions = planDocumentInstructions({
     kind: input.kind, path: input.path, anchors: true, planQuality: true,
+    ...(input.kind !== "plan" || input.e2ePlanningContext === undefined ? {} : { e2ePlanningContext: input.e2ePlanningContext }),
     ...(input.rovaraV2 ? { noChangeOption: true, requiredParts: true, setupChanges: true } : {}),
     ...(input.retired === undefined || input.retired.length === 0 ? {} : { retired: input.retired }),
   });

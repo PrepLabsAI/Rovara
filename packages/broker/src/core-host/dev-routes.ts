@@ -102,6 +102,12 @@ import { isSystemRunsPath, routeHostedSystemRuns } from "./system-runs-routes.js
 import { isHostedMergePath, routeHostedMerge, type HostedMergeWiring } from "./hosted-merge-routes.js";
 import { isTicketUpdatesPath, routeHostedTicketUpdates, type HostedTicketUpdatesWiring } from "./ticket-updates-routes.js";
 
+async function applicationReadProjection(runtime: CoreRuntime, record: TaskRecord, personId: string) {
+  if (record.workflow === undefined) return {};
+  const e2e = await runtime.flow.deps.applicationE2E?.results.read({ ...record, workflow: record.workflow }, personId === record.developerId ? "owner" : "viewer");
+  return e2e === undefined ? {} : { e2ePresentation: e2e.presentation };
+}
+
 /** The paths this module owns. Anything else is the old broker's. */
 const SESSIONS = /^\/v1\/app\/sessions(?:\/|$)/u;
 const TASK_READ = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})$/u;
@@ -599,7 +605,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           await observeHostedBlockedTask(target.runtime.flow.deps, record, target.wiring.testEnvironment?.env);
           const testing = await hostedTestingView(target.runtime.flow.deps, target.blobs, record, target.wiring.testEnvironment?.env);
           const view = await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller, membership), maySeeTaskMoney(target, record, caller, membership));
-          return json(200, { task: { ...view, ...(testing === undefined ? {} : { testing }) } });
+          return json(200, { task: { ...view, ...(testing === undefined ? {} : { testing }), ...await applicationReadProjection(target.runtime, record, caller.principal.personId) } });
         }
         const parity = parityTaskRoute(path, request.method);
         if (parity !== undefined) return await routeParityTask({

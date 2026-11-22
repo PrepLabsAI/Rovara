@@ -12,6 +12,7 @@ import { evalRequestForChecks } from "../proof/eval-round-reader.js";
 import { readCiEvidence, ciFixPrompt, ciFixPromptWithoutOutput } from "../ci-fix/ci-fix.js";
 import { conflictFixPrompt } from "../branch-sync/branch-sync.js";
 import { withTestRule } from "../proof/verification-report.js";
+import { projectE2EBaselineWanted, readWorkflowE2EBaselineRecord, requestWorkflowE2EBaselineRound } from "../e2e/baseline.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { resolveRowItem } from "../task-flow/dispatch-rows.js";
 import { ownerRoundPlaceOf, readOwnerNote, readOwnerRoundPlace } from "../task-flow/owner-note.js";
@@ -153,6 +154,29 @@ async function implementationPrompt(deps: TaskFlowDeps, task: TaskRecord, workfl
 
 // ---- coding
 
+async function implementationGraph(deps: TaskFlowDeps, task: TaskRecord & { workflow: WorkflowSnapshot }, restart: boolean): Promise<{ invocation: WorkflowDependencyInvocation; note?: string } | undefined> {
+  const workflow = task.workflow;
+  if (workflow.workflowDependenciesOperationId === undefined) return firstGraphInvocation(deps, task);
+  // A retry resumes acknowledged checkpoints; a send-back runs the plan again over the workspace's code.
+  const resumed = await resumeGraphInvocation(deps, task);
+  if (resumed !== undefined) return { invocation: restart ? restartedGraphInvocation(resumed, workflow) : resumed };
+  return undefined;
+}
+
+async function requestImplementationBaseline(deps: TaskFlowDeps, task: TaskRecord & { workflow: WorkflowSnapshot }): Promise<boolean> {
+  const workflow = task.workflow;
+  let baselineSource = false;
+  if (workflow.e2e?.required === true && workflow.e2e.applicationSelection !== undefined) {
+    const project = await deps.projects.revision(task.project, task.startingRevision);
+    if (project !== undefined) {
+      const state = { store: deps.store, ...(deps.now === undefined ? {} : { now: deps.now }) };
+      await requestWorkflowE2EBaselineRound(state, task, { enabled: projectE2EBaselineWanted(project) });
+      baselineSource = (await readWorkflowE2EBaselineRecord(state, task))?.state === "REQUESTED";
+    }
+  }
+  return baselineSource;
+}
+
 function checksRerunPosition(workflow: WorkflowSnapshot, manual: { requestId: string } | undefined): boolean {
   return workflow.stage === "VERIFY" && workflow.state === "BLOCKED" || manual !== undefined && workflowPublicationRetryable(workflow) && (workflow.pullRequests?.length ?? 0) === 0;
 }
@@ -215,12 +239,7 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef, manua
   let graph: { invocation: WorkflowDependencyInvocation; note?: string } | undefined;
   if (workflow.workflowDependenciesApproval !== undefined && workflow.fixSource === undefined) {
     try {
-      if (workflow.workflowDependenciesOperationId === undefined) graph = await firstGraphInvocation(deps, task);
-      else {
-        // A run that goes on from an earlier one: a retry resumes from the checkpoints the history acknowledged; a send-back runs the whole plan again over the code the workspace holds.
-        const resumed = await resumeGraphInvocation(deps, task);
-        if (resumed !== undefined) graph = { invocation: found2.length > 0 || ownerRound ? restartedGraphInvocation(resumed, workflow) : resumed };
-      }
+      graph = await implementationGraph(deps, task, found2.length > 0 || ownerRound);
     } catch (error) {
       if (!(error instanceof AgentXError)) throw error;
       // A refusal is the plan's, not a hiccup of the machine: it blocks the task with its sentence instead of being tried until the row is given up on.
@@ -238,7 +257,9 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef, manua
   const operationId = graph === undefined ? undefined : newId(deps);
   // General fakes (slice 2): the coding run verifies with the same fakes a CHECKS round would, but only when it has checks to run.
   const generalFakes = readiness === undefined || readiness.length === 0 ? undefined : await generalFakesOf(deps, task, workflow);
+  const baselineSource = await requestImplementationBaseline(deps, task);
   const payload = jsonOf({
+    ...(baselineSource ? { workflowE2EBaselineSource: true } : {}),
     ...(readiness === undefined ? {} : { readiness }),
     ...(generalFakes === undefined ? {} : { generalFakes }),
     ...(testPlan === undefined ? {} : { testEnvironment: testPlan.plan }),
@@ -257,6 +278,7 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef, manua
       ...(graph === undefined ? [] : ["task.workflowDependencies"]),
       ...(testPlan === undefined ? [] : testPlan.requires),
       ...(generalFakes === undefined ? [] : [GENERAL_FAKES_FEATURE]),
+      ...(baselineSource ? ["task.workflowE2EBaselineSource"] : []),
     ],
     extraActions: ["candidate-export", "candidate-build-source", "baseline-source", ...(feedback === undefined ? [] : ["feedback-approval"])],
     ...(graph === undefined || operationId === undefined ? {} : { workflowDependencies: graph.invocation, operationId }),
@@ -305,6 +327,13 @@ export async function startChecksRerun(deps: TaskFlowDeps, row: RowRef, retry: {
   const { task, workspace } = found;
   const { workflow } = task;
   const policy = retry.policy ?? workflow.checkPolicy;
+  // Required rounds, including application-only plans, always return through server admission. An ordinary
+  // command rerun cannot replace the round, and UNKNOWN evidence never starts another paid round by itself.
+  if (workflow.e2e?.required === true) {
+    if (retry.automaticDecision !== undefined && workflow.e2e.failedRound === undefined) return "STALE";
+    if (deps.applicationE2E === undefined) return "STALE";
+    return deps.applicationE2E.rounds.retry(task, retry);
+  }
   if (policy === undefined) return settled(deps, row, "STALE");
   const selected = workflowSelectedChecks(policy);
   const receivedAt = iso(deps);

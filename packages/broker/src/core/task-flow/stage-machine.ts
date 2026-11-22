@@ -1,3 +1,5 @@
+import type { E2EWorkflowAdmissionRef } from "@agentx/contracts";
+import { combinedChecks } from "./transaction-checks.js";
 import { workspaceKeys, locateWorkspace } from "./workspace-location.js";
 // Lane L6a, task flow core: the stage machine's driver. The transitions themselves are the pure functions in `@agentx/contracts`
 // (`task-workflow-node.ts`: `startWorkflowUnderstand`, `recordIntentAssessment`, `submitWorkflowArtifact`, ...). This module is what Cloud's
@@ -46,7 +48,7 @@ import { isReapprovalStop, settleLiveSteerReapproval } from "../sessions/live-st
 import { clearLiveDeliveredSince } from "../sessions/steer.js";
 import { notesFedUpdate, stepNotes, type NotesForStep } from "../sessions/notes.js";
 import { textReaderOf } from "../build-step/plan-input.js";
-import { buildOperation, assertPromptFits } from "./accept.js";
+import { buildOperation, assertPromptFits, applicationAdmissionFields } from "./accept.js";
 import type { TaskFlowDeps } from "./deps.js";
 import { dispatchRowItem, dueDispatchRows, rescheduleRowItem, resolveRowItem } from "./dispatch-rows.js"; import { questionEntriesOf } from "../task-log/entries.js"; import { taskLogItems } from "../task-log/store.js";
 import { dispatchRowKey, taskKey } from "./keys.js";
@@ -130,6 +132,7 @@ export interface StepInput {
   conversationId?: string;
   /** An ordered coding run's binding (spec 059), kept on the operation record. Its payload copy is in `payload.workflowDependencies`. */
   workflowDependencies?: WorkflowDependencyInvocation;
+  workflowE2EAdmission?: E2EWorkflowAdmissionRef;
   /** A line for the operation's timeline (why parts run one after another, say), written with it as its first event. */
   firstEvent?: string;
   /** The people's messages this step was given (`acceptStepWithNotes` reads them): the task's mark moves past them in the step's own transaction, which holds only while the note count is the one read. */
@@ -179,6 +182,7 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
     ...(input.publication === undefined ? {} : { publication: input.publication }),
     ...(input.maintenance === undefined ? {} : { maintenance: input.maintenance }),
     ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }),
+    ...applicationAdmissionFields(input),
     ...(input.firstEvent === undefined ? {} : { firstEvent: input.firstEvent }),
     ...(input.secondReviewPlan === undefined ? {} : { secondReviewPlan: input.secondReviewPlan }),
     ...(input.designReview === undefined ? {} : { designReview: input.designReview }),
@@ -194,7 +198,7 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
     requester: { personId: task.developerId, provider: task.provider },
   });
   const workflowWrite = input.workflow === undefined ? undefined : workflowWriteOps(input.workflow.current, input.workflow.next, { ownsFlow: true });
-  const items: TransactItem[] = [
+  const items: TransactItem[] = combinedChecks([
     {
       kind: "update",
       key: taskKey(task.taskId),
@@ -206,7 +210,7 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
     ...comments.items,
     ...(permitted.items ?? []),
     ...(input.extra ?? []),
-  ];
+  ]);
   // The work events of the step's own transition (slice A4): extra items of the same transaction, left out when off or when they do not fit.
   if (input.workflow !== undefined) items.push(...flowWorkEventItems({ enabled: deps.workEvents, orgId: deps.companyId, project: task.project, before: input.workflow.current, after: input.workflow.next, room: TRANSACTION_ITEMS_MAX - items.length }));
   const applied = await deps.store.transact(items);
@@ -222,7 +226,7 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
 async function commentConflict(deps: TaskFlowDeps, input: StepInput, changed: (() => Promise<boolean>) | undefined): Promise<boolean> {
   if (changed === undefined || !await changed()) return false;
   const fresh = await readTask(deps, input.task.taskId);
-  return fresh !== undefined && fresh.closedAt === undefined && fresh.workflow !== undefined && fresh.workflow.revision === input.workflow?.current.revision;
+  return fresh !== undefined && fresh.closedAt === undefined && fresh.closeOperationId === undefined && fresh.workflow !== undefined && fresh.workflow.revision === input.workflow?.current.revision;
 }
 
 /** Classify a rejected transaction without losing a still-current planning dispatch. No operation was committed. */
@@ -261,13 +265,13 @@ export async function commitWorkflow(deps: TaskFlowDeps, task: TaskRecord, next:
   const current = task.workflow;
   if (current === undefined) return false;
   const write = workflowWriteOps(current, next, { ownsFlow: true });
-  const items: TransactItem[] = [
+  const items: TransactItem[] = combinedChecks([
     {
       kind: "update", key: taskKey(task.taskId), ops: [...write.ops, ...taskOps, change.set("updatedAt", iso(deps))],
       condition: when.and(when.notExists("closedAt"), when.notExists("closeOperationId"), ...(taskCondition === undefined ? [] : [taskCondition]), when.eq(["workflow", "revision"], current.revision), ...write.guard),
     },
     ...extra,
-  ];
+  ]);
   // The work events of this transition (slice A4): extra items of the same transaction, left out when off or when they do not fit.
   items.push(...flowWorkEventItems({ enabled: deps.workEvents, orgId: deps.companyId, project: task.project, before: current, after: next, room: TRANSACTION_ITEMS_MAX - items.length }));
   const result = await deps.store.transact(items);
@@ -416,7 +420,7 @@ export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRe
 }
 
 const STEP_NAMES: Record<DispatchRowRecord["kind"], string> = {
-  UNDERSTAND: "step that reads the request", PLAN: "planning step", REPLAN: "planning step", CRITIQUE: "plan check", CRITIC_REPLAN: "revision of the plan", IMPLEMENT: "coding step", REVIEW: "reviews", PUBLISH: "pull request", SYNC: "merge of the base branch", AUTOFIX: "automatic fix",
+  UNDERSTAND: "step that reads the request", PLAN: "planning step", REPLAN: "planning step", CRITIQUE: "plan check", CRITIC_REPLAN: "revision of the plan", IMPLEMENT: "coding step", CHECKS: "application checks", REVIEW: "reviews", PUBLISH: "pull request", SYNC: "merge of the base branch", AUTOFIX: "automatic fix",
 };
 
 async function blockDispatchFailure(deps: TaskFlowDeps, row: DispatchRowRecord, reason: string): Promise<void> {

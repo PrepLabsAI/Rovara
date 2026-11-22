@@ -1,4 +1,4 @@
-import { toDocument } from "../../packages/broker/src/core/task-flow/records.js";
+import { toDocument, type TaskRecord } from "../../packages/broker/src/core/task-flow/records.js";
 import { expect, it } from "vitest";
 import { change } from "@agentx/contracts";
 import { feedbackWorld, reviewedFeedbackWorld } from "../support/pr-feedback-world.js";
@@ -40,6 +40,29 @@ it.each(["another-kind", "missing-workspace"])("an exhausted row with %s has a r
   expect(await workspaceOperations(w.h.deps, task.workspaceId)).toHaveLength(0);
   expect((await readTask(w.h.deps, task.taskId))!.workflow!.feedbackReview!.status).toBe("COLLECTING");
   expect((await readTask(w.h.deps, task.taskId))!.workflow!.state).toBe("BLOCKED");
+});
+
+it("a settled queued review remains a handled sweep if later task reads are unavailable", async () => {
+  const { vi } = await import("vitest");
+  const { runDueDispatches } = await import("../../packages/broker/src/core/task-flow/stage-machine.js");
+  const w = await feedbackWorld();
+  await collectPrFeedback(w.deps, w.task, w.budget);
+  const task = (await readTask(w.h.deps, w.task.taskId))!;
+  const key = dispatchRowKey(w.h.deps.companyId, task.taskId, task.workflow!.revision);
+  await w.h.store.update({ key, ops: [change.set("attempts", 7)] });
+  w.h.deps.buildSteps = { runRow: async () => { throw new Error("critic could not start"); }, onEnded: async () => undefined };
+  const get = w.h.store.get.bind(w.h.store);
+  const read = vi.spyOn(w.h.store, "get").mockImplementation(async key => {
+    const row = await get(key);
+    if (key.pk === task.pk && key.sk === "META" && (row as unknown as TaskRecord | undefined)?.workflow?.feedbackReview?.status === "PENDING") throw new Error("task reader unavailable after settlement");
+    return row;
+  });
+  try {
+    expect(await runDueDispatches(w.h.deps)).toEqual({ started: 0, waiting: 0, stale: 0, failed: 0, blocked: 1 });
+  } finally { read.mockRestore(); }
+  expect((await readTask(w.h.deps, task.taskId))!.workflow).toMatchObject({ state: "WAITING", feedbackReview: { status: "PENDING", reviewRef: { status: "BLOCKED", provider: "broker-lifecycle" } } });
+  expect(await w.h.store.get(key)).toBeUndefined();
+  expect((await workspaceOperations(w.h.deps, task.workspaceId))[0]?.status).toBe("FAILED");
 });
 
 it.each(["foreign-company", "closed", "wrong-stage"])("queued failure refuses %s before immutable writes", async kind => {

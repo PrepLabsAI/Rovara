@@ -60,4 +60,3 @@ export function pageCommentsPrompt(comments: readonly PromptComment[], nonce: st
   }
   return { text: lines.join("\n"), shown };
 }
-

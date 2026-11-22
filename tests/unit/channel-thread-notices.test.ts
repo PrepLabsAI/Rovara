@@ -44,6 +44,7 @@ function waitingWorkflow(): WorkflowSnapshot {
 }
 
 interface WorldOptions {
+  e2e?: (taskId: string, taskPageUrl?: string) => Promise<unknown[] | undefined>;
   risk?: DecisionRisk;
   /** The approvers take a decision made in the chat (default yes). */
   chatApprovers?: boolean;
@@ -86,7 +87,7 @@ async function world(options: WorldOptions = {}) {
   await redeemChannelLinkCode(deps, STRANGER_ID, (await issueChannelLinkCode(deps, STRANGER_ACTOR)).code);
   await recordTaskThread(deps, { sessionId: SESSION, conversation: CONVERSATION, personId: OWNER_ID, actor: ACTOR });
   const handler = channelThreadHandler({
-    store, registry, now, ...(options.companyOf === undefined ? {} : { companyOf: options.companyOf }), ...(options.isMember === undefined ? {} : { isMember: options.isMember }),
+    store, registry, now, ...(options.e2e === undefined ? {} : { e2e: options.e2e }), ...(options.companyOf === undefined ? {} : { companyOf: options.companyOf }), ...(options.isMember === undefined ? {} : { isMember: options.isMember }),
     ...(options.milestones === undefined ? {} : { milestones: options.milestones }), ...(options.taskUrl === false ? {} : { taskUrl: () => PAGE }), footer: "Open it with `rovara open`.",
     ...(options.withGate === false ? {} : { plan: { gate } }),
   });
@@ -471,5 +472,53 @@ describe("the plan card's feature line in the chat", () => {
     expect(event!.data.text).not.toContain("canary");
     expect(event!.data.actions?.map((action) => action.decision)).toEqual(["APPROVE", "REQUEST_CHANGES"]);
     vi.restoreAllMocks();
+  });
+});
+
+
+describe("E2E thread projection", () => {
+  const PR = { repository: "acme/web", number: 17, url: "https://git.example.test/acme/web/pull/17" };
+  const e2e = async () => [{ type: "section", text: { type: "mrkdwn", text: "5 passed · 0 failed\nBaseline: 2 of 5 failed" } }];
+  it("includes the captured results once in the existing ready notice", async () => {
+    const w = await world({ withGate: false, e2e });
+    await w.handler.on(milestone("pr_ready", { pullRequests: [PR] }));
+    await w.handler.on(milestone("pr_ready", { pullRequests: [PR] }));
+    expect(w.deliveries).toHaveLength(1);
+    expect(JSON.stringify(w.deliveries)).toContain("5 passed");
+    expect(JSON.stringify(w.deliveries)).toContain("Baseline: 2 of 5 failed");
+  });
+  it("does not load private projections for a recipient whose live membership was removed", async () => {
+    let reads = 0;
+    const w = await world({ withGate: false, isMember: () => false, e2e: async () => { reads += 1; return e2e(); } });
+    await w.handler.on(milestone("pr_ready", { pullRequests: [PR] }));
+    expect(w.deliveries).toHaveLength(0);
+    expect(reads).toBe(0);
+  });
+  it("keeps a ready notice with long captured results within the chat's text limit", async () => {
+    const long = async () => [{ type: "section", text: { type: "mrkdwn", text: "r".repeat(5_900) } }];
+    const w = await world({ withGate: false, e2e: long });
+    await w.handler.on(milestone("pr_ready", { pullRequests: [PR] }));
+    expect(w.deliveries).toHaveLength(1);
+    const text = (w.deliveries[0] as { data: { text: string } }).data.text;
+    expect(text.startsWith("A pull request is ready for review")).toBe(true);
+    expect(text.length).toBe(FAKE_CHANNEL_CAPABILITIES.maxTextLength);
+  });
+  it("an unavailable results reader still sends the ordinary pull request card", async () => {
+    const w = await world({ withGate: false, e2e: async () => { throw new Error("results reader unavailable"); } });
+    await w.handler.on(milestone("pr_ready", { pullRequests: [PR] }));
+    expect(w.deliveries).toHaveLength(1);
+    expect(w.deliveries[0]).toMatchObject({ type: "pr", data: { url: PR.url, action: "opened" } });
+  });
+});
+
+describe("done while milestone lines are muted", () => {
+  it("still runs the thread closeout and posts no done line", async () => {
+    const w = await world({ withGate: false, milestones: false });
+    const closeout = vi.fn(async () => "closed out");
+    const handler = channelThreadHandler({ store: w.store, registry: { get: () => w.adapter } as never, now, milestones: false, closeout });
+    await handler.on(milestone("merged"));
+    expect(closeout).toHaveBeenCalledTimes(1);
+    expect(closeout).toHaveBeenCalledWith(TASK, expect.anything());
+    expect(w.deliveries).toEqual([]);
   });
 });

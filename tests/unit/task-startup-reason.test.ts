@@ -106,6 +106,21 @@ describe("single task producer and detail=1 parity", () => {
     expect((await f.list()).tasks[0]).not.toHaveProperty("startupReason");
   });
 
+  it.each(["RUNNING", "SUCCEEDED"] as const)("omits startup details for a core index row already %s", async status => {
+    const f = legacyFixture();
+    const pk = `DEVELOPER#${PRIYA.developerId}`, sk = `TASK#${at}#${f.taskId}`;
+    f.db.set({ ...f.db.get(pk, sk)!, status });
+    f.db.set({ ...engineStampKey(f.taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "all", stampedAt: at } });
+    const route = vi.fn(async () => ({ statusCode: 200, headers: {}, body: JSON.stringify({ task: { taskId: f.taskId, startupReason: "own-machine-starting" } }) }));
+    f.deps.coreTasks = { route };
+    const row = DeveloperTaskDetailedListResponseSchema.parse(await f.list()).tasks[0]!;
+    expect(row.status).toBe(status);
+    expect(row).not.toHaveProperty("startupReason");
+    expect(route).not.toHaveBeenCalled();
+    expect(f.workspaceRead).not.toHaveBeenCalled();
+    expect(f.operationRead).not.toHaveBeenCalled();
+  });
+
   it("never exposes another company's reason from a planted index row", async () => {
     const f = legacyFixture();
     f.deps.companyId = "org_startreason000000001";

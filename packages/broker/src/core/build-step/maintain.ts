@@ -1,3 +1,4 @@
+import { currentPublicationFence, publicationFenceBinding, assertCurrentPublicationFence, publicationTaskCheck, type PublicationFenceBinding } from "../e2e/publication-fence.js";
 import { workspaceKeys } from "../task-flow/workspace-location.js";
 // Lane L10, the build step: changes to a pull request Rovara already opened. Two moves, both a `maintain` operation on the task's own branch, onto the head the workflow recorded:
 //  - APPEND: the fix of a round (failing CI, a conflict) whose checks and reviews passed is pushed as exactly the reviewed tree on the task's pinned base (Cloud's
@@ -23,7 +24,7 @@ import { requireRepositoryKey } from "../merge/repository-key.js";
 import { prHeadItems } from "../merge/store.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { dispatchRowItem, resolveRowItem } from "../task-flow/dispatch-rows.js";
-import type { OperationRecord, TaskRecord } from "../task-flow/records.js";
+import type { MaintenanceExpectation, OperationRecord, TaskRecord } from "../task-flow/records.js";
 import { acceptStep, commitWorkflow, runDispatchRow, type StepStart } from "../task-flow/stage-machine.js";
 import { iso, log } from "../task-flow/support.js";
 import { announceTaskEnd, completedByMerge } from "../task-flow/task-end.js";
@@ -40,12 +41,22 @@ const objectOf = (value: unknown): Record<string, unknown> => {
 };
 
 
+function reviewedUpdate(workflow: WorkflowSnapshot, at: string): WorkflowSnapshot {
+  const started = startWorkflowPullRequestUpdate(workflow, at);
+  return workflow.definitionVersion === "1.1.0" ? riskFromFiles(started, undefined) : started;
+}
+function assertAppendRecorded(applied: boolean, action: MaintenanceExpectation["action"]): void {
+  if (!applied && action === "append") throw agentXError("STALE_FENCE", "publication authority moved before recording the update");
+}
+
 // ---- the push of an approved fix
 
 /** Pushes the fix whose checks and reviews passed to the pull request Rovara opened, one pull request at a time (the next is due when this one's result lands). */
 export async function startPullRequestUpdate(deps: TaskFlowDeps, row: RowRef, located: Pick<Located, "task" | "workspace">): Promise<StepStart> {
   const { task, workspace } = located;
   const workflow = task.workflow as WorkflowSnapshot & { candidate: NonNullable<WorkflowSnapshot["candidate"]> };
+  const fence = await currentPublicationFence(deps, { ...task, workflow });
+  if (fence === undefined) return settled(deps, row, "STALE");
   const pullRequest = nextWorkflowPullRequestUpdate(workflow);
   const repository = workflow.candidate.repositories.find((entry) => entry.repositoryId === pullRequest?.repositoryId);
   const baseCommitSha = workflow.reviewBase?.find((entry) => entry.repositoryId === repository?.repositoryId)?.baseCommitSha;
@@ -55,7 +66,7 @@ export async function startPullRequestUpdate(deps: TaskFlowDeps, row: RowRef, lo
     let held: WorkflowSnapshot | undefined;
     try { held = holdWorkflowCandidateOnPullRequests(workflow, iso(deps)); } catch (error) { if (!(error instanceof WorkflowTransitionError)) throw error; }
     if (held === undefined) return settled(deps, row, "STALE");
-    if (!await commitWorkflow(deps, task, held, [resolveRowItem(deps, task.taskId, row.workflowRevision)])) return settled(deps, row, "STALE");
+    if (!await commitWorkflow(deps, task, held, [resolveRowItem(deps, task.taskId, row.workflowRevision), ...fence.items])) return settled(deps, row, "STALE");
     return "STARTED";
   }
   if (workflow.state !== "READY") return settled(deps, row, "STALE");
@@ -75,12 +86,12 @@ export async function startPullRequestUpdate(deps: TaskFlowDeps, row: RowRef, lo
   const remote = await host.getChangeRequest({ repository: { url: definition.url }, id: String(pullRequest.number), url: pullRequest.url }, scopeOf(deps));
   if (remote.state !== "open" || remote.headRevision !== pullRequest.headSha) return block("HEAD_MOVED");
   const receivedAt = iso(deps);
-  const started = startWorkflowPullRequestUpdate(workflow, receivedAt);
   // The code on the pull request changes with this push, so its risk is judged again for the new code (the changed files are read from the code host after the push, so until then the level is high).
-  const judged = workflow.definitionVersion === "1.1.0" ? riskFromFiles(started, undefined) : started;
+  const judged = reviewedUpdate(workflow, receivedAt);
   const mergeBaseCommit = workflow.fixSource === "conflict" ? workflow.conflictBase : undefined;
+  const binding = publicationFenceBinding({ ...task, workflow }, fence, repository.repositoryId);
   const maintenance = {
-    action: "append" as const, repository: repository.repositoryId, pullRequestNumber: pullRequest.number, headBranch: record.headBranch, baseBranch: record.baseBranch, expectedHeadCommit: pullRequest.headSha,
+    ...binding, action: "append" as const, repository: repository.repositoryId, pullRequestNumber: pullRequest.number, headBranch: record.headBranch, baseBranch: record.baseBranch, expectedHeadCommit: pullRequest.headSha,
     workflowCandidate: { candidateDigest: workflow.candidate.digest, treeSha: repository.treeSha, baseCommitSha, ...(mergeBaseCommit === undefined ? {} : { mergeBaseCommit }) },
   };
   const accepted = await acceptStep(deps, {
@@ -92,7 +103,7 @@ export async function startPullRequestUpdate(deps: TaskFlowDeps, row: RowRef, lo
       ...(workflow.fixSource === undefined ? {} : { workflowFix: { source: workflow.fixSource } }), ...(mergeBaseCommit === undefined ? {} : { workflowMergeBase: mergeBaseCommit }),
     }),
     requires: ["task.workflowPullRequestUpdate", ...(workflow.fixSource === undefined ? [] : ["task.workflowFix"]), ...(mergeBaseCommit === undefined ? [] : ["maintain.workflowSync"])],
-    extra: [resolveRowItem(deps, task.taskId, row.workflowRevision)],
+    extra: [resolveRowItem(deps, task.taskId, row.workflowRevision), ...fence.items],
   });
   return settled(deps, row, accepted.result);
 }
@@ -140,6 +151,19 @@ export async function startBranchSync(deps: TaskFlowDeps, row: RowRef): Promise<
 
 // ---- the worker's update callback
 
+async function appendAuthority(deps: TaskFlowDeps, task: TaskRecord | undefined, expected: MaintenanceExpectation & PublicationFenceBinding, commit: string): Promise<readonly TransactItem[]> {
+  if (expected.action !== "append") return [];
+  const workflow = task?.workflow;
+  const candidate = workflow?.candidate;
+  const repository = candidate?.repositories.find((entry) => entry.repositoryId === expected.repository);
+  if (task === undefined || workflow === undefined || task.closedAt !== undefined || workflow.stage !== "PULL_REQUEST" || workflow.state !== "RUNNING"
+    || candidate?.digest !== expected.workflowCandidate?.candidateDigest || repository?.treeSha !== expected.workflowCandidate?.treeSha) throw agentXError("STALE_FENCE", "the update is no longer the current publication");
+  const authority = await assertCurrentPublicationFence(deps, { ...task, workflow }, expected, expected.repository, commit);
+  const items = [publicationTaskCheck({ ...task, workflow }), ...authority];
+  if (!(await deps.store.transact(items)).applied) throw agentXError("STALE_FENCE", "publication authority moved before recording the update");
+  return items;
+}
+
 /**
  * The worker pushed to the pull request's branch and says so. The callback is held to what the operation was started with (the pull request, the branch, the head it was for); the host must show the
  * pull request open, from the recorded branch, at the pushed commit (or, while the host's own head lags a push, with its branch already at the commit). Then the record learns the new head.
@@ -157,11 +181,12 @@ export async function updatePullRequest(deps: TaskFlowDeps, operation: Operation
   if (input["previousCommit"] !== expected.expectedHeadCommit) throw agentXError("STALE_FENCE", "pull request update used a stale expected head");
   if (typeof input["commit"] !== "string" || !/^[a-f0-9]{40,64}$/u.test(input["commit"])) throw agentXError("CONFIG_INVALID", "updated pull request commit is invalid");
   const commit = input["commit"];
+  const task = await taskOfOperation(deps, operation);
+  await appendAuthority(deps, task, expected, commit);
   const record = await pullRequestRecordOf(deps, operation.workspaceId, expected.repository, expected.pullRequestNumber);
   if (record === undefined) throw agentXError("NOT_FOUND", "the pull request is not known");
   if (record.expectedHeadCommit === commit) return { url: record.url, state: "open", reconciled: true };
   if (record.expectedHeadCommit !== expected.expectedHeadCommit) throw agentXError("STALE_FENCE", "pull request record changed before callback reconciliation");
-  const task = await taskOfOperation(deps, operation);
   const project = task === undefined ? undefined : await deps.projects.revision(task.project, task.startingRevision);
   const definition = project?.definition.repositories.find((entry) => entry.name === expected.repository);
   if (definition === undefined) throw agentXError("CONFIG_INVALID", "the pull request's repository is not part of the task's registered project revision");
@@ -185,10 +210,13 @@ export async function updatePullRequest(deps: TaskFlowDeps, operation: Operation
     : expected.workflowCandidate?.mergeBaseCommit === undefined ? [expected.expectedHeadCommit] : [expected.expectedHeadCommit, expected.workflowCandidate.mergeBaseCommit];
   if (JSON.stringify(parents) !== JSON.stringify(wanted)) throw agentXError("STALE_FENCE", "the pushed commit is not built on the head and base this operation was asked for");
   if (expected.action === "append" && await host.tree(repositoryRef, commit, scopeOf(deps)) !== expected.workflowCandidate?.treeSha) throw agentXError("STALE_FENCE", "the pushed tree is not the reviewed tree");
-  const written = await deps.store.update({
+  const update: TransactItem = { kind: "update",
     key: pullRequestRecordKey((await workspaceKeys(deps, operation.workspaceId)).workspaceKey, expected.repository, expected.pullRequestNumber),
     ops: [change.set("expectedHeadCommit", commit), change.set("state", remote.state), change.set("updatedAt", iso(deps))], condition: when.eq("expectedHeadCommit", expected.expectedHeadCommit),
-  });
+  };
+  const finalAuthority = await appendAuthority(deps, task, expected, commit);
+  const written = await deps.store.transact([update, ...finalAuthority]);
+  assertAppendRecorded(written.applied, expected.action);
   return { url: remote.ref.url, state: remote.state, reconciled: !written.applied };
 }
 
@@ -313,7 +341,9 @@ async function recordAppended(deps: TaskFlowDeps, task: TaskRecord, workflow: Wo
   const next = binding.mergeBaseCommit !== undefined && state !== "merged"
     ? recordWorkflowBranchSync(updated, { repositoryId: pullRequest.repositoryId, number: pullRequest.number, headSha: head, headTreeSha: binding.treeSha, baseCommitSha: binding.mergeBaseCommit, now })
     : updated;
+  const authority = await assertCurrentPublicationFence(deps, { ...task, workflow }, maintenance, maintenance.repository, head);
   const items: TransactItem[] = [
+    ...authority,
     ...(await rekeyItems(deps, host, definition.url, task, workflow, next)),
     ...(record !== undefined && record.expectedHeadCommit !== head
       ? [{ kind: "update" as const, key: pullRequestRecordKey((await workspaceKeys(deps, task.workspaceId)).workspaceKey, maintenance.repository, maintenance.pullRequestNumber), ops: [change.set("expectedHeadCommit", head), change.set("state", state), change.set("updatedAt", now)], condition: when.eq("expectedHeadCommit", maintenance.expectedHeadCommit) }] : []),

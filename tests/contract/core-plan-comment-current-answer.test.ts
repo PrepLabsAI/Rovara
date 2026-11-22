@@ -49,7 +49,37 @@ describe("a core comment answer uses the current document's comment set", () => 
     const comment = await h.post("REMOVE_OTHER_COMMENT");
     expect(await h.context()).toContain("REMOVE_OTHER_COMMENT");
     await deletePageComment(h.deps, PRIYA, h.taskId, { commentId: comment.comment.id, rev: 1 });
-    expect(await h.context()).not.toContain("REMOVE_OTHER_COMMENT");
+    const context = await h.context();
+    expect(context).not.toContain("REMOVE_OTHER_COMMENT");
+    expect(context?.match(/<page_comment /gu)).toHaveLength(1);
+  });
+
+  it.each(["agent", "other document", "future version"] as const)("excludes %s text from current human comments", async (kind) => {
+    const h = await question();
+    const comment = await h.post("EXCLUDED_CURRENT_COMMENT");
+    const row = h.db.get(`DEVTASK#${h.taskId}`, `COMMENT#${comment.comment.id}`)!;
+    h.db.set({ ...row, ...(kind === "agent" ? { author: { kind: "agentx", source: "answer" } } : kind === "other document" ? { document: "design" } : { version: 99 }) });
+    expect(await h.context()).not.toContain("EXCLUDED_CURRENT_COMMENT");
+  });
+
+  it.each(["deleted", "agent", "missing"] as const)("a %s queued question has no answer context", async (kind) => {
+    const h = await question();
+    const pk = `DEVTASK#${h.taskId}`, sk = `COMMENT#${h.asked.comment.id}`;
+    if (kind === "missing") h.db.delete(pk, sk);
+    else h.db.set({ ...h.db.get(pk, sk)!, ...(kind === "agent" ? { author: { kind: "agentx", source: "answer" } } : { text: "", deletedAt: "2026-11-22T12:00:00.000Z" }) });
+    expect(await h.context()).toBeUndefined();
+  });
+
+  it("the version ceiling comes from the question's document, even when another document has newer versions", async () => {
+    const h = await question();
+    const comment = await h.post("FUTURE_PLAN_COMMENT");
+    const row = h.db.get(`DEVTASK#${h.taskId}`, `COMMENT#${comment.comment.id}`)!;
+    h.db.set({ ...row, version: 2 });
+    h.addVersion("design", pagePlan());
+    h.addVersion("design", pagePlan());
+    const context = await h.context();
+    expect(context).toContain("Which placement now?");
+    expect(context).not.toContain("FUTURE_PLAN_COMMENT");
   });
 
   it("an edited queued question cannot be answered from its obsolete queue text", async () => {

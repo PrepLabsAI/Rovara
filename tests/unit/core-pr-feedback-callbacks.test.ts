@@ -90,6 +90,22 @@ it("terminal usage alone is booked once and returned before any output handling"
   expect(book).toHaveBeenCalledOnce();
 });
 
+it.each(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"] as const)("a terminal %s critic cannot save another artifact", async status => {
+  const { vi } = await import("vitest");
+  const w = await world();
+  await w.h.store.update({ key: w.operation, ops: [change.set("status", status)] });
+  const put = vi.spyOn(w.registry.require("object-storage"), "put").mockClear();
+  const transact = vi.spyOn(w.h.store, "transact").mockClear();
+  const token = new CallbackCapabilities(Buffer.from(w.h.deps.callbackSigningKey)).issue({ workspaceId: w.operation.workspaceId,
+    operationId: w.operation.id, fence: w.operation.fence, actions: ["artifacts"], expiresInSeconds: 100 });
+  const response = await w.handler({ ...w.request, path: w.request.path.replace("feedback-bundles", "artifacts"), headers: { [CAPABILITY_HEADER]: token },
+    body: JSON.stringify({ name: "terminal-output.txt", mediaType: "text/plain", content: "must not be stored" }) });
+  expect(response.statusCode).toBe(409);
+  expect(JSON.parse(response.body) as unknown).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+  expect(transact).not.toHaveBeenCalled();
+  expect(put).not.toHaveBeenCalled();
+});
+
 it("non-review publication output retains its existing published result kind", async () => {
   const { readOutcome } = await import("../../packages/broker/src/services/callbacks.js");
   const w = await world();

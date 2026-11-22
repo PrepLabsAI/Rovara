@@ -1,3 +1,4 @@
+import { resolveTaskReadAccess } from "../developer/task-access.js";
 import type { TransactItem } from "@agentx/contracts";
 import { devRouteOf } from "./dev-route-scopes.js";
 import { withoutDesignReviewMoney } from "../core/task-flow/money-view.js";
@@ -1130,6 +1131,10 @@ function unpublishedOf(result: unknown): DeveloperCloseResponse["unpublished"] {
 
 /** The workspace and its operations, read once and shared by a route's steps. */
 interface WorkspaceReads { workspace: WorkspaceInstance; operations: Operation[] }
+async function applicationResultOperations(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord): Promise<WorkspaceReads["operations"]> {
+  return await ownerOfExistingTask(deps, task.taskId) === "core" ? [] : (await workspaceReads(deps, task)).operations;
+}
+
 async function workspaceReads(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord): Promise<WorkspaceReads> {
   const [workspace, operations] = await Promise.all([deps.actions.workspace(task.workspaceId), deps.actions.operations(task.workspaceId)]);
   return { workspace, operations };
@@ -3278,7 +3283,7 @@ export async function getTaskPageState(deps: DeveloperTaskRouteDependencies, cal
   const { access, capabilities } = await coherentPageAccess(deps, caller, taskId, resolvePageCommentAccess);
   const { task } = access;
   const taskViewRecord = task.workflow?.e2e?.required === true
-    ? await taskView(deps, task, { events: 0, details: true, actor: "viewer" })
+    ? { e2ePresentation: await deps.workflowE2EPresentation?.({ task, operations: [], actor: "viewer" }) }
     : undefined;
   const workflow = task.workflow;
   const documents = TASK_PAGE_DOCUMENTS.flatMap(({ type, anchor }) => {
@@ -3514,11 +3519,11 @@ export async function setPageFeature(deps: DeveloperTaskRouteDependencies, calle
 
 /** Where the task stands now, for the open task page's "moved on" check: the same access rule as the page, two values only. */
 export async function getTaskFreshness(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskFreshness> {
-  const { task } = await resolveTaskAccess(deps, caller, taskId);
+  const { task } = await resolveTaskReadAccess(deps, caller, taskId);
   return { revision: task.workflow?.revision ?? 0, stage: taskPageStep(task.workflow, task.closedAt !== undefined) };
 }
 
-async function coherentPageAccess(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, resolveAccess: (deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string) => Promise<TaskAccess> = resolveTaskAccess): Promise<{
+async function coherentPageAccess(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, resolveAccess: (deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string) => Promise<TaskAccess> = resolveTaskReadAccess): Promise<{
   access: TaskAccess;
   capabilities: { peopleRevision?: number; canManagePeople: boolean; canTakeOwnership: boolean };
 }> {
@@ -3761,7 +3766,7 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
   // M1.3 Task 3.7: the rows of the task's browser and API round, from the broker's own verification of its stored evidence. A round that cannot be read never hides the page.
   let e2eResults: E2EScenarioResults | undefined;
   if (task.workflow?.e2e?.required === true && deps.workflowE2EScenarioResults !== undefined) {
-    try { e2eResults = await deps.workflowE2EScenarioResults({ task, operations: (await workspaceReads(deps, task)).operations, actor: owner ? "owner" : "viewer" }); }
+    try { e2eResults = await deps.workflowE2EScenarioResults({ task, operations: await applicationResultOperations(deps, task), actor: owner ? "owner" : "viewer" }); }
     catch (error) { log(deps, { event: "developer.task_e2e_results_unavailable", taskId, errorName: error instanceof Error ? error.name : "unknown" }); }
   }
   // AUTOFIX: what Rovara did by itself and, while the step is blocked, why it asks (the stored ask, read as data).

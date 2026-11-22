@@ -208,16 +208,20 @@ describe("accepted close recovery", () => {
     for (let boundary = 1; boundary <= boundaries; boundary++) await once(boundary);
     console.log(`P4 ${flushed ? "flushed" : "estimated"}: ${boundaries} crash boundaries, exact amount parity`);
   });
-  it("takes original-fence callbacks for accounting only, without events, model, workflow or follower effects", async () => {
+  it.each(["SUCCEEDED", "FAILED", "CANCELLED"] as const)("takes original-fence %s callbacks for accounting only, without events, model, workflow or follower effects", async status => {
     const w = await fixture({ money: true }); w.h.deps.resumeAcceptedClose = async () => {};
     await w.h.flow.close(w.h.owner, w.task.taskId, w.input);
     let follower = 0;
-    const handler = createCallbackHandler({ flow: w.h.deps, blobs: {} as never, grants: { async exchange() { throw new Error("unused"); } }, bookUsage: (op, events) => w.booking.bookOperationEvents(op, events), async onEvents() { follower++; } });
+    const exchange = vi.fn(async () => ({ token: "fixture" }));
+    const handler = createCallbackHandler({ flow: w.h.deps, blobs: {} as never, grants: { exchange }, bookUsage: (op, events) => w.booking.bookOperationEvents(op, events), async onEvents() { follower++; } });
     const token = new CallbackCapabilities(Buffer.from(w.h.deps.callbackSigningKey)).issue({ workspaceId: w.task.workspaceId, operationId: w.run.id, fence: w.run.fence, actions: ["events", "result", "artifacts"], expiresInSeconds: 600 });
     const post = (action: string, body: unknown) => handler({ method: "POST", path: `/v1/internal/workspaces/${w.task.workspaceId}/operations/${w.run.id}/${action}`, headers: { [CAPABILITY_HEADER]: token }, body: JSON.stringify(body) });
     expect((await post("events", { events: w.usage })).statusCode).toBe(200);
     expect((await post("events", { events: [{ type: "progress", timestamp: "2026-11-09T10:00:00Z", payload: {} }] })).statusCode).toBe(409);
-    expect((await post("result", { status: "SUCCEEDED", result: { artifactId: "must-not-read" } })).statusCode).toBe(200);
+    expect((await post("result", { status: "RUNNING" })).statusCode).toBe(400);
+    expect((await handler({ method: "POST", path: `/v1/internal/workspaces/${w.task.workspaceId}/operations/${w.run.id}/repository-credentials`, headers: { "x-agentx-repository-grant": "fixture-grant" }, body: JSON.stringify({ credentialRef: "host-app", repositoryUrl: "https://example.com/repo", access: "clone" }) })).statusCode).toBe(403);
+    expect(exchange).not.toHaveBeenCalled();
+    expect((await post("result", { status, result: { artifactId: "must-not-read" } })).statusCode).toBe(200);
     expect((await w.h.store.get(w.wk))!.status).toBe("CLOSING"); expect(follower).toBe(0);
     expect((await w.h.store.get(w.runKey))!.eventSequence).toBe(0);
     expect((await w.ledger.taskCost(w.h.deps.companyId, w.task.taskId)).micros).toBe(1_000_000);

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
-import { orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type Principal, type ProjectDefinition } from "@agentx/contracts";
-import { createBrokerCoreRoot, type BrokerCoreRootInputs } from "../../packages/broker/src/aws/core-engine-root.js";
+import { agentXError, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type Principal, type ProjectDefinition } from "@agentx/contracts";
+import { createBrokerCoreRoot, hostedTaskAccess, type BrokerCoreRootInputs } from "../../packages/broker/src/aws/core-engine-root.js";
 import type { DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
 import { prepareTaskPeopleStart } from "../../packages/broker/src/developer/task-people-start.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
@@ -19,6 +19,31 @@ const B = "org_corehost00000000000b" as OrgId;
 const MAYA = ownerKeyForSubject("https://signin.example.test", "maya");
 const OMAR = "e".repeat(64);
 const secret = Buffer.alloc(32, 7);
+
+describe("hosted task access proof outcomes", () => {
+  const principal: Principal = { companyId: A, personId: MAYA, displayName: "Maya", roles: ["member"], provider: HOSTED_IDENTITY_PROVIDER };
+  const task = { taskId: crypto.randomUUID(), developerId: MAYA, project: "payments" };
+
+  for (const method of ["canRead", "canAct"] as const) {
+    it(`${method} hides a denied live proof`, async () => {
+      const projectGrant = vi.fn(async () => true);
+      const access = hostedTaskAccess({ companyId: A, projectGrant, membershipOf: async () => { throw agentXError("TASK_ACCESS_DENIED", "proof denied"); } });
+      await expect(access[method]!(principal, task)).resolves.toBe(false);
+      expect(projectGrant).not.toHaveBeenCalled();
+    });
+
+    it(`${method} preserves an unexpected proof-service error`, async () => {
+      const error = agentXError("RUNTIME_UNAVAILABLE", "proof reader unavailable");
+      const access = hostedTaskAccess({ companyId: A, projectGrant: async () => true, membershipOf: async () => { throw error; } });
+      await expect(access[method]!(principal, task)).rejects.toBe(error);
+    });
+
+    it(`${method} accepts a current company member's own task`, async () => {
+      const access = hostedTaskAccess({ companyId: A, projectGrant: async () => true, membershipOf: async () => ({ companyId: A, role: "member" }) });
+      await expect(access[method]!(principal, task)).resolves.toBe(true);
+    });
+  }
+});
 
 function root(taskRules?: BrokerCoreRootInputs["taskRules"]) {
   const world = createFakeWorld();

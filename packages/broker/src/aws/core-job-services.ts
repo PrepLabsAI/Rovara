@@ -1,3 +1,4 @@
+import { readTask } from "../core/task-flow/reads.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 // Deployed job composition. No provider or policy store lives here.
 import { OrgIdSchema, POLICY_ORIGINS, policyDataObject, createDefaultPolicySource, DEFAULT_CODE_SETTINGS, type OrgId, type AdapterRegistry, type PolicySource, type DocumentStore, type StoredDocument } from "@agentx/contracts";
@@ -114,7 +115,14 @@ type JobServices = Record<"merge-tracking" | "session-sweep" | "notify-deliver",
  * pull request description carries none either), and the old `/review/<task>/task` page is for the first workflow's tasks only. The company's own code host writes it (aws/core-code-host.ts keeps the company rules).
  */
 export function createHostedBrokerCoreServices(options: Omit<BrokerCoreServicesOptions, "summaryCheck">): JobServices {
-  return createBrokerCoreServices({ ...options, summaryCheck: rovaraCheckSource() });
+  const { flow, companyId } = options;
+  const notification: BrokerCoreServicesOptions["notification"] & Pick<NoticeServiceOptions, "e2e"> = { ...options.notification,
+    e2e: async (session) => {
+      if (session.subject.kind !== "task") return undefined;
+      const task = await readTask(flow.deps, session.subject.taskId);
+      return task?.companyId !== companyId || task.workflow === undefined ? undefined : flow.deps.applicationE2E?.results.notice({ ...task, workflow: task.workflow });
+    } };
+  return createBrokerCoreServices({ ...options, summaryCheck: rovaraCheckSource(), notification });
 }
 
 /** Built once for one company's runtime. Each pass binds all internal store work to ONE allowance. */

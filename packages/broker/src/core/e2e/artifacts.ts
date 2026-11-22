@@ -75,17 +75,26 @@ async function readPrivateObject(store: WorkflowE2EArtifactStore, key: string, m
  * The scenario results a task's stored display carries, read the way the notifier reads it: only the display of the task's current round, held to its content address.
  * Undefined when the task has no such display, or it is one a reader cannot use.
  */
-export async function loadStoredScenarioResults(store: WorkflowE2EArtifactStore, task: Pick<DeveloperTaskRecord, "ownerKey" | "workspaceId" | "workflow">): Promise<E2EScenarioResults | undefined> {
+export async function loadStoredWorkflowDisplay(store: WorkflowE2EArtifactStore, task: Pick<DeveloperTaskRecord, "ownerKey" | "workspaceId" | "workflow" | "closedAt">) {
   const progress = task.workflow?.e2e;
   const candidateDigest = task.workflow?.candidate?.digest;
   const ref = progress?.displayRef;
-  if (candidateDigest === undefined || progress?.currentRoundId === undefined || ref === undefined) return undefined;
-  // After a send-back the code is being changed: the display is of the code that was sent back, and neither its rows nor its screenshots are shown as the task's current ones.
-  if (task.workflow?.stage === "IMPLEMENT") return undefined;
+  if (progress?.required !== true || candidateDigest === undefined || progress.currentRoundId === undefined || ref === undefined || task.workflow?.stage === "IMPLEMENT") return undefined;
+  const recorded = progress.qualifiedRound ?? progress.failedRound;
+  if (task.closedAt !== undefined && recorded === undefined) return undefined;
   const loaded = await readWorkflowE2ENotifierProjection({ ref, ownerKey: task.ownerKey, workspaceId: task.workspaceId,
-    current: { candidateDigest, roundId: progress.currentRoundId, groupRunIds: progress.currentGroupRunIds, admissionSha256: ref.admissionSha256, evidenceSha256: ref.evidenceSha256 },
-    readPrivateObject: (key, maxBytes) => (/^private\/[^/]+\/[^/]+\/workflow-e2e-display\/[a-f0-9]{64}\.json$/u.test(key) ? readPrivateObject(store, key, maxBytes) : Promise.resolve(undefined)) });
-  return loaded?.scenarioResults;
+    current: { candidateDigest, roundId: progress.currentRoundId, groupRunIds: progress.currentGroupRunIds,
+      admissionSha256: recorded?.admissionSha256 ?? ref.admissionSha256, evidenceSha256: recorded?.evidenceSha256 ?? ref.evidenceSha256 },
+    readPrivateObject: (key, maxBytes) => readPrivateObject(store, key, maxBytes) });
+  if (task.closedAt !== undefined && (loaded === undefined || recorded?.candidateDigest !== candidateDigest || recorded.roundId !== progress.currentRoundId
+    || JSON.stringify(recorded.groupRunIds) !== JSON.stringify(progress.currentGroupRunIds)
+    || !(Date.parse(loaded.capturedAt) <= Date.parse(task.closedAt))
+    || loaded.view.e2e.status !== (progress.qualifiedRound === undefined ? "FAILED" : "PASS"))) return undefined;
+  return loaded;
+}
+
+export async function loadStoredScenarioResults(store: WorkflowE2EArtifactStore, task: Pick<DeveloperTaskRecord, "ownerKey" | "workspaceId" | "workflow" | "closedAt">): Promise<E2EScenarioResults | undefined> {
+  return (await loadStoredWorkflowDisplay(store, task))?.scenarioResults;
 }
 
 /**
@@ -93,7 +102,7 @@ export async function loadStoredScenarioResults(store: WorkflowE2EArtifactStore,
  * undefined: a digest that no row names is not served, however it came to be in the task's storage. The baseline round's own record is read as soon as it is recorded, before any
  * display names its rows, so its rows are passed in `extra`.
  */
-export async function loadWorkflowE2EArtifact(store: WorkflowE2EArtifactStore, task: Pick<DeveloperTaskRecord, "ownerKey" | "workspaceId" | "workflow">, sha256: string,
+export async function loadWorkflowE2EArtifact(store: WorkflowE2EArtifactStore, task: Pick<DeveloperTaskRecord, "ownerKey" | "workspaceId" | "workflow" | "closedAt">, sha256: string,
   extra: { baseline?: E2EDisplayBaseline } = {}): Promise<{ contentType: "image/jpeg"; bytes: Uint8Array } | undefined> {
   if (!/^[a-f0-9]{64}$/u.test(sha256)) return undefined;
   const results = await loadStoredScenarioResults(store, task);

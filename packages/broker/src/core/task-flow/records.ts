@@ -153,6 +153,9 @@ export interface OperationRecord extends Operation {
 
 /** What a push to an open pull request was started with. */
 export interface MaintenanceExpectation {
+  publicationMode?: "CHECKED_TREE" | "COMMITTED_HEAD";
+  expectedCommitSha?: string;
+  admittedE2EAuthorityDigest?: string;
   action: "append" | "sync";
   repository: string;
   pullRequestNumber: number;
@@ -168,6 +171,9 @@ export interface MaintenanceExpectation {
 
 /** What a publication was started with: the callback of the worker is refused unless it names exactly this (Cloud's `operation.publication`). */
 export interface PublicationExpectation {
+  publicationMode?: "CHECKED_TREE" | "COMMITTED_HEAD";
+  expectedCommitSha?: string;
+  admittedE2EAuthorityDigest?: string;
   repository: string;
   repositoryUrl: string;
   headBranch: string;
@@ -185,7 +191,7 @@ export interface PublicationExpectation {
 }
 
 /** `WORKFLOW_DISPATCH` rows: the intent to start the next workflow step with no one asking, written in the transaction that made it due. */
-export type DispatchKind = "UNDERSTAND" | "PLAN" | "REPLAN" | "CRITIQUE" | "CRITIC_REPLAN" | "IMPLEMENT" | "REVIEW" | "PUBLISH" | "SYNC" | "AUTOFIX";
+export type DispatchKind = "UNDERSTAND" | "PLAN" | "REPLAN" | "CRITIQUE" | "CRITIC_REPLAN" | "IMPLEMENT" | "CHECKS" | "REVIEW" | "PUBLISH" | "SYNC" | "AUTOFIX";
 /** The kinds the stage machine's own runner starts (Cloud's `startTaskWorkflowUnderstandFromSystem` and `startTaskWorkflowPlanFromSystem`). */
 export const READING_DISPATCH_KINDS: readonly DispatchKind[] = ["UNDERSTAND", "PLAN", "REPLAN"];
 

@@ -42,7 +42,7 @@ export interface TaskAccess {
 const TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export type AccessDependencies = Pick<DeveloperTaskRouteDependencies,
-  "documentClient" | "tableName" | "checkAccess" | "channelMember" | "slackTeamId" | "log" | "now" | "taskPeopleConfiguration" | "checkTaskPerson" | "workspaceForTask">;
+  "documentClient" | "tableName" | "checkAccess" | "channelMember" | "slackTeamId" | "log" | "now" | "taskPeopleConfiguration" | "checkTaskPerson" | "workspaceForTask" | "coreTasks">;
 
 const log = (deps: Pick<DeveloperTaskRouteDependencies, "log">, entry: Record<string, unknown>) =>
   (deps.log ?? ((line) => console.log(JSON.stringify({ component: "broker", ...line }))))(entry);
@@ -63,6 +63,17 @@ export async function resolveTaskAccess(deps: AccessDependencies, caller: Develo
   // Lane E2: a task the core owns is never acted on through the workflow's access (engine-boundary.ts); it reads exactly like a missing one.
   if (await ownerOfExistingTask(deps, taskId) === "core") throw notFound();
   return await taskAccessOfRecord(deps, caller, task, action, taskId);
+}
+
+/** Existing review-page reads use the core's own authenticated GET before reusing the page's role projection. Writes keep resolveTaskAccess's engine boundary. */
+export async function resolveTaskReadAccess(deps: AccessDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskAccess> {
+  if (!TASK_ID.test(taskId)) throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
+  if (await ownerOfExistingTask(deps, taskId) !== "core") return resolveTaskAccess(deps, caller, taskId, "read");
+  const answer = await deps.coreTasks?.route({ method: "GET", path: `/v1/dev/tasks/${taskId}`, headers: {} }, caller);
+  if (answer?.statusCode !== 200) throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
+  const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: taskKey(taskId), ConsistentRead: true })) as { Item?: DeveloperTaskRecord };
+  if (response.Item === undefined) throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
+  return resolveCoreTaskAccess(deps, caller, response.Item, "read");
 }
 
 /**

@@ -27,7 +27,7 @@ import ts from "typescript";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { expectLinearScaling } from "./../support/scaling.js";
-const MAX_FILES = 1600, MAX_BYTES = 20 * 1024 * 1024, MAX_MS = 30_000; // files: 1200 -> 1600 when the batch of 2026-11-16 put 1205 sources under the roots
+const MAX_FILES = 1610, MAX_BYTES = 20 * 1024 * 1024, MAX_MS = 30_000; // Train 5 + application rounds contain 1610 sources; byte/time bounds and fail-closed scanning stay fixed.
 const roots = ["packages/broker/src", "packages/aws-adapters/src", "packages/local-adapters/src"];
 function scan(sources: readonly { path: string; source: string }[], clock = () => performance.now(), began = clock()): Record<string, number> {
   let bytes = 0;

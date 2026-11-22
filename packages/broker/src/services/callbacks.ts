@@ -1,3 +1,4 @@
+import { assertCurrentPublicationFence, publicationTaskCheck } from "../core/e2e/publication-fence.js";
 import { feedbackCallback } from "../core/pr-feedback/callbacks.js";
 import { publicationGateCallback } from "../core/build-step/publication-gates.js";
 import { locateWorkspace, workspaceKeys } from "../core/task-flow/workspace-location.js";
@@ -326,6 +327,20 @@ export async function readOutcome(deps: CallbackDeps, operation: OperationRecord
   return { kind: "ended" };
 }
 
+async function assertPushAuthority(deps: CallbackDeps, operation: OperationRecord, access: "clone" | "push"): Promise<void> {
+  if (access !== "push" || (operation.publication === undefined && operation.maintenance === undefined)) return;
+  {
+    const pointer = fromDocument<TaskPointerRecord>(await deps.flow.store.get((await workspaceKeys(deps.flow, operation.workspaceId)).taskPointerKey()));
+    const task = pointer === undefined ? undefined : await readTask(deps.flow, pointer.taskId);
+    const expected = operation.publication ?? operation.maintenance!;
+    if (task === undefined || task.companyId !== deps.flow.companyId || task.workspaceId !== operation.workspaceId
+      || (task.workflow === undefined && (operation.publication === undefined || operation.publication.candidateDigest !== undefined))
+      || (operation.publication !== undefined && operation.publication.candidateDigest === undefined && task.workflow !== undefined)) throw agentXError("STALE_FENCE", "the publication task is unavailable");
+    const items = task.workflow === undefined ? [] : await assertCurrentPublicationFence(deps.flow, { ...task, workflow: task.workflow }, expected, expected.repository);
+    if (!(await deps.flow.store.transact([...items, publicationTaskCheck(task)])).applied) throw agentXError("STALE_FENCE", "publication authority changed before credential release");
+  }
+}
+
 /**
  * A clone or push credential for the repositories this operation's grant names. The grant is the proof (signed, short-lived, one workspace and operation); the operation must still be live,
  * so a grant kept after the job ended gets nothing.
@@ -339,6 +354,7 @@ async function exchangeCredential(deps: CallbackDeps, request: BrokerRequest, wo
   const body = bodyOf(request);
   const { credentialRef, repositoryUrl, access } = body;
   if (typeof credentialRef !== "string" || typeof repositoryUrl !== "string" || (access !== "clone" && access !== "push")) throw agentXError("CONFIG_INVALID", "name the credential, the repository and the access");
+  await assertPushAuthority(deps, operation, access);
   return deps.grants.exchange(grant, { workspaceId, operationId, credentialRef, repositoryUrl, access });
 }
 
