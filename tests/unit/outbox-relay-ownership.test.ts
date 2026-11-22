@@ -228,7 +228,8 @@ describe("outbox row ownership", () => {
     const pending = h.outbox.relay({ companyId }); await entered.wait;
     await h.store.update({ key, ops: [change.set("relayOwner", "successor")] });
     const before = await h.store.get(key);
-    finish.release(); await pending;
+    finish.release();
+    expect(await pending).toEqual({ delivered: 0, failed: 0, dead: 0 });
     expect(await h.store.get(key)).toEqual(before);
   });
 
@@ -239,7 +240,8 @@ describe("outbox row ownership", () => {
     const pending = h.outbox.relay({ companyId }); await entered.wait;
     await h.store.update({ key, ops: [change.set("status", "DEAD")] });
     const before = await h.store.get(key);
-    finish.release(); await pending;
+    finish.release();
+    expect(await pending).toEqual({ delivered: 0, failed: 0, dead: 0 });
     expect(await h.store.get(key)).toEqual(before);
   });
 

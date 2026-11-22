@@ -2,6 +2,7 @@ import { change, when, type TransactItem } from "@agentx/contracts";
 import type { TaskFlowDeps } from "./deps.js";
 import type { OperationRecord } from "./records.js";
 import { prepareWatchKey } from "./prepare-watch.js";
+import { releaseAdmission } from "./admission.js";
 import { releaseItems } from "./limits.js";
 import { chargeMarkerKey, taskKey } from "./keys.js";
 import { readTask } from "./reads.js";
@@ -23,4 +24,14 @@ export async function preparationResultItems(deps: TaskFlowDeps, operation: Oper
     items.push({ kind: "update", key: taskKey(task.taskId), ops: [change.set("releasedAt", iso(deps))], condition: when.eq("workspaceId", operation.workspaceId) });
   }
   return items;
+}
+
+/** Failed setup never used its task-start allowance; give it back through the same seam as close. */
+export async function releasePreparationAdmission(deps: TaskFlowDeps, operation: OperationRecord): Promise<void> {
+  if (operation.kind !== "prepare" || operation.status === "SUCCEEDED") return;
+  const pointer = await deps.store.get((await workspaceKeys(deps, operation.workspaceId)).taskPointerKey());
+  if (typeof pointer?.["taskId"] !== "string") return;
+  const task = await readTask(deps, pointer["taskId"]);
+  if (task?.companyId !== deps.companyId || task.workspaceId !== operation.workspaceId) return;
+  await releaseAdmission(deps, task.admissionReservationId);
 }

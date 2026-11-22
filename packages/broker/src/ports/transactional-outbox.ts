@@ -125,6 +125,7 @@ export function createTransactionalOutbox(dependencies: TransactionalOutboxDepen
         } catch (error) {
           // Error names identify the failed boundary without logging payloads, URLs or raw provider messages.
           console.warn(JSON.stringify({ event: "outbox.relay_failed", companyId: options.companyId, outboxId: item.id, queue: item.queue,
+            attempt: nextRelayAttempt(item), retryable: (error as { retryable?: unknown } | null)?.retryable !== false,
             operation: handedOver ? "mark_queued" : "enqueue", error: error instanceof Error ? error.name : "unknown",
             ...(error instanceof Error && error.cause instanceof Error ? { cause: error.cause.name } : {}),
           }));
@@ -135,16 +136,12 @@ export function createTransactionalOutbox(dependencies: TransactionalOutboxDepen
           }
           const attempts = nextRelayAttempt(item);
           const dead = exhaustedRelay(closeResume, attempts, maxAttempts);
-          try {
-            await store.update({
-              key,
-              ops: [...releaseOwner, change.set("attempts", attempts), ...(dead ? [change.set("status", "DEAD"), change.set(store.ttlAttribute ?? "expiresAt", Math.floor(now().getTime() / 1_000) + retainSeconds), ...leaveIndex] : [])],
-              condition: owned,
-            });
-          } catch {
-            // The failure is reported below; the count is retried by the next run.
-          }
-          if (dead) report.dead += 1;
+          const recorded = await recordRelayFailure(store, {
+            key,
+            ops: [...releaseOwner, change.set("attempts", attempts), ...(dead ? [change.set("status", "DEAD"), change.set(store.ttlAttribute ?? "expiresAt", Math.floor(now().getTime() / 1_000) + retainSeconds), ...leaveIndex] : [])],
+            condition: owned,
+          });
+          if (dead && recorded) report.dead += 1;
           else report.failed += 1;
         }
       }
@@ -158,6 +155,12 @@ function exhaustedRelay(closeResume: boolean, attempts: number, maxAttempts: num
 function queuedReceipt(closeResume: boolean, ttlAttribute: string | undefined, at: Date, retainSeconds: number, leaveIndex: ReturnType<typeof change.remove>[]) {
   const queuedAt = change.set("queuedAt", at.toISOString());
   return closeResume ? [queuedAt, change.set(OUTBOX_PENDING_INDEX.sortAttribute!, at.toISOString())] : [change.set("status", "QUEUED"), queuedAt, change.set(ttlAttribute ?? "expiresAt", Math.floor(at.getTime() / 1000) + retainSeconds), ...leaveIndex];
+}
+
+/** Only a committed, owner-fenced write is a DEAD transition. Store failures leave the lease to expire. */
+async function recordRelayFailure(store: TransactionalOutboxDependencies["store"], request: Parameters<DocumentStore["update"]>[0]): Promise<boolean> {
+  try { return (await store.update(request)).applied; }
+  catch { return false; }
 }
 
 /** Validate before claiming or logging any row identity. Corrupt ownership stays pending. */
