@@ -52,7 +52,8 @@ it("the real hosted source on the root: a project's stored choice is its merge t
 
 it("wires plan evidence for the company even when no lessons service is configured", () => {
   createBrokerCoreRoot(inputs({ services: () => ({}) }));
-  const flow = { deps: { companyId: A, store: { get: async () => undefined }, admission: {} } } as never;
+  // The real flow always has sweepRunsOnce (parity-watchdogs wraps it for the idle-Slack sweep); the fake carries a no-op one.
+  const flow = { deps: { companyId: A, store: { get: async () => undefined }, admission: {} }, sweepRunsOnce: async () => ({ failed: 0 }) } as never;
   runtimeOptions().services!(flow, { ciMode: async () => "sandbox_only" });
   expect((flow as { deps: { afterPlanStored?: unknown } }).deps.afterPlanStored).toBeTypeOf("function");
 });
