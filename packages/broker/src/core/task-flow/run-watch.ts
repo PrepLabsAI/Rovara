@@ -9,8 +9,9 @@ import { AgentXError, change, when, type MachineState } from "@agentx/contracts"
 import type { TaskFlowDeps } from "./deps.js";
 import { isTerminalStatus, readOperation, recordOperationResult } from "./results.js";
 import { runWatchPartition, runWatchKey, type RunWatchRecord } from "./run-watch-rows.js";
+import { fromDocument, type OperationRecord } from "./records.js";
+import { acceptedCloseForRun } from "./close-recovery-state.js";
 import { sweepPreparations } from "./prepare-watch.js";
-import { fromDocument } from "./records.js";
 import { iso, log } from "./support.js";
 import { endUnflushed, spendStopOverdue, spendStopReason, type SpendStopCode } from "./money-stop.js";
 
@@ -61,10 +62,12 @@ export async function sweepLostRuns(deps: TaskFlowDeps, options: { limit?: numbe
 async function settleRow(deps: TaskFlowDeps, row: RunWatchRecord, graceMs: number): Promise<"interrupted" | "waiting" | "cleared"> {
   const operation = await readOperation(deps, row.workspaceId, row.operationId);
   // Nothing to watch any more: the operation ended (a result, a cancel, a close), is gone, or was handed to another machine or another hold of the workspace. The row goes, and no other operation is read.
-  if (operation === undefined || operation.companyId !== deps.companyId || isTerminalStatus(operation.status) || operation.fence !== row.fence || operation.machineId !== row.machineId) {
+  if (!matchingWatchedRun(operation, row, deps.companyId)) {
     await deps.store.delete({ key: runWatchKey(deps.companyId, row.workspaceId, row.operationId) });
     return "cleared";
   }
+  // The accepted close exclusively owns this run's deadline and monetary decision.
+  if (await acceptedCloseForRun(deps, operation) !== undefined) return "waiting";
   // A run stopped at its spending limit whose worker never ended it (money-stop.ts): past the flush wait, its machine is stopped, its usage is taken as lost (the task's whole hold is kept,
   // marked estimated), and its end is recorded CANCELLED, which blocks the step with the reason.
   if (spendStopOverdue(deps, operation)) {
@@ -104,4 +107,8 @@ async function settleRow(deps: TaskFlowDeps, row: RunWatchRecord, graceMs: numbe
   await deps.store.delete({ key });
   // It ended some other way between the read and the write (a result got in first): the row goes, and the sweep ended nothing.
   return after.status === "INTERRUPTED" && after.error === RUN_LOST_MESSAGE ? "interrupted" : "cleared";
+}
+
+function matchingWatchedRun(operation: OperationRecord | undefined, row: RunWatchRecord, companyId: string): operation is OperationRecord {
+  return operation !== undefined && operation.companyId === companyId && !isTerminalStatus(operation.status) && operation.fence === row.fence && operation.machineId === row.machineId;
 }

@@ -4,8 +4,8 @@
 import { planApprovalSkipped } from "../task-flow/stage-selection.js";
 import { createHash } from "node:crypto";
 import {
-  AgentXError, BROWSER_EVIDENCE_FEATURE, BROWSER_EVIDENCE_VIDEO_FEATURE, EVAL_PLAN_DELIVERY_ACTION, EVIDENCE_CAPTURE_FEATURE, GENERAL_FAKES_FEATURE, WORKFLOW_BLOCK_REASONS, promptLocationsOf, abandonWorkflowFix, blockWorkflow, isBaseMergedRetry, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
-  WORKFLOW_PLAN_MAX_BYTES, ownerPlanInstructions, type GeneralFakesPayload, type JsonValue, type ProjectCommand, type ProjectDefinition, type PromptLocation, type WorkflowApprovedPlan, type WorkflowDependencyInvocation, type WorkflowReviewChecks, type WorkflowSnapshot,
+  AgentXError, BROWSER_EVIDENCE_FEATURE, BROWSER_EVIDENCE_VIDEO_FEATURE, EVAL_PLAN_DELIVERY_ACTION, EVIDENCE_CAPTURE_FEATURE, GENERAL_FAKES_FEATURE, WORKFLOW_BLOCK_REASONS, promptLocationsOf, abandonWorkflowFix, blockWorkflow, isBaseMergedRetry, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition, workflowPublicationRetryable,
+  WORKFLOW_PLAN_MAX_BYTES, ownerPlanInstructions, type GeneralFakesPayload, type JsonValue, type ProjectCommand, type ProjectDefinition, type PromptLocation, type WorkflowApprovedPlan, type WorkflowDependencyInvocation, type WorkflowReviewChecks, type WorkflowSnapshot, type TransactItem,
 } from "@agentx/contracts";
 import { evalRequestForChecks } from "../proof/eval-round-reader.js";
 import { readCiEvidence, ciFixPrompt, ciFixPromptWithoutOutput } from "../ci-fix/ci-fix.js";
@@ -126,12 +126,27 @@ async function personPushedMeanwhile(deps: TaskFlowDeps, task: TaskRecord, workf
 
 // ---- coding
 
+function checksRerunPosition(workflow: WorkflowSnapshot, manual: { requestId: string } | undefined): boolean {
+  return workflow.stage === "VERIFY" && workflow.state === "BLOCKED" || manual !== undefined && workflowPublicationRetryable(workflow) && (workflow.pullRequests?.length ?? 0) === 0;
+}
+function manualRequestId(manual: { requestId: string } | undefined, prefix: string, taskId: string, revision: number, digest?: string): string {
+  return manual?.requestId ?? workflowRequestId(prefix, taskId, revision, ...(digest === undefined ? [] : [digest]));
+}
+function withOwnerInstructions(prompt: string, manual: { instructions: string } | undefined): string {
+  return manual === undefined ? prompt : `${prompt}\n\nOwner note: ${manual.instructions}`;
+}
+function implementationStart(taskId: string, workflow: WorkflowSnapshot, now: string, manual: { requestId: string } | undefined): { requestId: string; next: WorkflowSnapshot } {
+  const { blockReason: _reason, ...rest } = workflow;
+  void _reason;
+  return { requestId: manual?.requestId ?? workflowRequestId("agentx-implement", taskId, workflow.revision), next: { ...rest, revision: workflow.revision + 1, state: "RUNNING", updatedAt: now } };
+}
+
 /**
  * Starts a coding run for the task, with no one asking: the first run after the plan is approved, a send-back to coding (the owner's or Rovara's own), or a fix round for failing CI or a
  * conflict. A repeat of the row is the same run.
  */
-export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Promise<StepStart> {
-  const found = await locate(deps, row, (workflow) => workflow.stage === "IMPLEMENT" && workflow.state === "READY");
+export async function startImplementation(deps: TaskFlowDeps, row: RowRef, manual?: { requestId: string; instructions: string }): Promise<StepStart> {
+  const found = await locate(deps, row, (workflow) => workflow.stage === "IMPLEMENT" && (workflow.state === "READY" || manual !== undefined && workflow.state === "BLOCKED"));
   if (found === "stale") return settled(deps, row, "STALE");
   if (found === "waiting") return "WAITING";
   const { task, workspace } = found;
@@ -157,8 +172,7 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
     return settled(deps, row, "STALE");
   }
   const receivedAt = iso(deps);
-  const requestId = workflowRequestId("agentx-implement", task.taskId, workflow.revision);
-  const next: WorkflowSnapshot = { ...workflow, revision: workflow.revision + 1, state: "RUNNING", updatedAt: receivedAt };
+  const { requestId, next } = implementationStart(task.taskId, workflow, receivedAt, manual);
   const found2 = sendBackProblems(workflow);
   // A round the owner started (a send-back or findings decision just made) always carries the owner's words, even when no check or review problem was recorded (a change ready to
   // publish, coding that stopped): the coder is never handed only the plan or a CI/conflict fix prompt while the owner's instructions sit unread.
@@ -182,6 +196,7 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
       ? implementPrompt(plan, approved)
       : sendBackPrompt({ problems: sendBackProblemsPromptSection(found2, promptTagId(task, requestId)), plan, constraints: ownerConstraintsSection(workflow, plan), ownerNote: await lastOwnerWords(deps, task, workflow), approved });
   }
+  prompt = withOwnerInstructions(prompt, manual);
   const startFrom = fixStartHead(workflow);
   const readiness = selectedCheckCommands(workflow).readiness;
   // Ordered work (spec 059): a plan the owner approved with a work breakdown is coded as that breakdown, never as plain coding. A fix round (CI, a conflict, feedback) carries none (the worker protocol forbids it): it
@@ -271,20 +286,20 @@ async function lastOwnerWords(deps: TaskFlowDeps, task: TaskRecord, workflow: Wo
  * Runs the selected checks again on the code the workspace holds (a CHECKS run), from a VERIFY that blocked: Rovara's own one automatic retry for a hiccup of the check runner, or the
  * owner's Retry. The decisions that allow it are the caller's; this is the move.
  */
-export async function startChecksRerun(deps: TaskFlowDeps, row: RowRef, retry: { requestId: string; actorId: string; automaticDecision?: WorkflowSnapshot["decisions"][number] | undefined }): Promise<StepStart> {
-  const found = await locate(deps, row, (workflow) => workflow.stage === "VERIFY" && workflow.state === "BLOCKED");
+export async function startChecksRerun(deps: TaskFlowDeps, row: RowRef, retry: { requestId: string; actorId: string; policy?: WorkflowSnapshot["checkPolicy"]; manual?: { requestId: string; instructions: string }; automaticDecision?: WorkflowSnapshot["decisions"][number] | undefined }): Promise<StepStart> {
+  const found = await locate(deps, row, (workflow) => checksRerunPosition(workflow, retry.manual));
   if (found === "stale") return settled(deps, row, "STALE");
   if (found === "waiting") return "WAITING";
   const { task, workspace } = found;
   const { workflow } = task;
-  const policy = workflow.checkPolicy;
+  const policy = retry.policy ?? workflow.checkPolicy;
   if (policy === undefined) return settled(deps, row, "STALE");
   const selected = workflowSelectedChecks(policy);
   const receivedAt = iso(deps);
   const { blockReason: _blockReason, ...unblocked } = workflow;
   void _blockReason;
   const next: WorkflowSnapshot = {
-    ...unblocked, revision: workflow.revision + 1, stage: "VERIFY", state: "RUNNING", ...workflowVerificationPosition(workflow),
+    ...unblocked, revision: workflow.revision + 1, stage: "VERIFY", state: "RUNNING", checkPolicy: policy, ...workflowVerificationPosition(workflow),
     verificationRetries: [...(workflow.verificationRetries ?? []), { requestId: uuidFrom(retry.requestId), actorId: retry.actorId, selectedOptionalCheckIds: [...policy.selectedOptionalIds], selectedProposedCheckIds: policy.selectedProposedIds ?? policy.proposed.map((check) => check.id), at: receivedAt }],
     ...(retry.automaticDecision === undefined ? {} : { decisions: [...workflow.decisions, retry.automaticDecision] }),
     updatedAt: receivedAt,
@@ -306,7 +321,7 @@ export async function startChecksRerun(deps: TaskFlowDeps, row: RowRef, retry: {
   const browserRecipe = capture ? await deps.browserEvidence?.recipe(task).catch(() => undefined) : undefined;
   const payload = jsonOf({ ...(evalRequest === undefined ? {} : { evalRequest }), ...(evalPromptLocations === undefined ? {} : { evalPromptLocations }), ...(readiness.length === 0 ? {} : { readiness }), ...(testPlan === undefined ? {} : { testEnvironment: testPlan.plan }), ...(capture ? { evidenceCapture: true } : {}), ...(generalFakes === undefined ? {} : { generalFakes }), ...(browserRecipe === undefined ? {} : { browserEvidence: browserRecipe }), ...baseOf(task, workflow) });
   const accepted = await acceptStep(deps, {
-    task, workspace, requestId: workflowRequestId("agentx-checks", task.taskId, workflow.revision), prompt: "Run the task's selected checks again on the current code. Do not edit files.", workflowMode: "CHECKS",
+    task, workspace, requestId: manualRequestId(retry.manual, "agentx-checks", task.taskId, workflow.revision), prompt: withOwnerInstructions("Run the task's selected checks again on the current code. Do not edit files.", retry.manual), workflowMode: "CHECKS",
     workflow: { current: workflow, next }, extra: [resolveRowItem(deps, task.taskId, row.workflowRevision)], payload,
     requires: ["task.workflowMode", ...(readiness.length === 0 ? [] : ["task.readiness"]), ...(payload["workflowBase"] === undefined ? [] : ["task.workflowBase"]), ...(capture ? [EVIDENCE_CAPTURE_FEATURE] : []), ...(browserRecipe === undefined ? [] : [BROWSER_EVIDENCE_FEATURE, ...(browserRecipe.video === undefined ? [] : [BROWSER_EVIDENCE_VIDEO_FEATURE])]), ...(testPlan === undefined ? [] : testPlan.requires), ...(generalFakes === undefined ? [] : [GENERAL_FAKES_FEATURE])],
     // A run the broker asked for an eval may ask for its trusted eval plan (DEC 253c `eval-plan`); no other run's capability names it.
@@ -366,7 +381,15 @@ function reviewChecksOf(workflow: WorkflowSnapshot): WorkflowReviewChecks | unde
  * Starts the read-only code and security reviews of exactly the candidate whose selected checks passed, with no one asking. STALE unless the task is open and still waiting for review at
  * the row's revision with that candidate's passing checks (or blocked, for a retry). A repeat is the first one's duplicate.
  */
-export async function startReview(deps: TaskFlowDeps, row: RowRef, options: { retry?: boolean; automaticDecision?: WorkflowSnapshot["decisions"][number] | undefined } = {}): Promise<StepStart> {
+type ReviewStartOptions = { retry?: boolean; automaticDecision?: WorkflowSnapshot["decisions"][number] | undefined; manual?: { requestId: string; note: string; extra: readonly TransactItem[] } };
+function reviewRequest(task: TaskRecord, workflow: WorkflowSnapshot, options: ReviewStartOptions) {
+  return {
+    requestId: options.manual?.requestId ?? workflowRequestId("agentx-auto-review", task.taskId, workflow.revision, workflow.candidate!.digest),
+    note: options.manual?.note ?? (workflow.verification?.reviewOnly === true ? AUTOMATIC_REVIEW_ONLY_NOTE : AUTOMATIC_REVIEW_NOTE),
+    extra: options.manual?.extra ?? [],
+  };
+}
+export async function startReview(deps: TaskFlowDeps, row: RowRef, options: ReviewStartOptions = {}): Promise<StepStart> {
   const found = await locate(deps, row, (workflow) => workflow.stage === "REVIEW" && (workflow.state === "WAITING" || (options.retry === true && workflow.state === "BLOCKED")));
   if (found === "stale") return settled(deps, row, "STALE");
   if (found === "waiting") return "WAITING";
@@ -397,7 +420,8 @@ export async function startReview(deps: TaskFlowDeps, row: RowRef, options: { re
   const checks = reviewChecksOf(workflow);
   // Second review: does this review carry a second reviewer? It runs INSIDE this operation, so there is no second step, hold or row; with the feature off, or the mode `off`, this is nothing.
   const second = deps.secondReview === undefined ? {} : await deps.secondReview.prepare({ task, reviewers: roles });
-  const note = verification.reviewOnly === true ? AUTOMATIC_REVIEW_ONLY_NOTE : AUTOMATIC_REVIEW_NOTE;
+  const request = reviewRequest(task, workflow, options);
+  const note = request.note;
   const payload = jsonOf({
     workflowReviewNote: note, ...baseOf(task, workflow),
     ...(checks === undefined ? {} : { workflowReviewChecks: checks }),
@@ -407,8 +431,8 @@ export async function startReview(deps: TaskFlowDeps, row: RowRef, options: { re
     ...(second.field === undefined ? {} : { workflowSecondReviewer: jsonOf(second.field) }),
   });
   const accepted = await acceptStep(deps, {
-    task, workspace, requestId: workflowRequestId("agentx-auto-review", task.taskId, workflow.revision, candidate.digest), prompt: reviewPrompt({ candidateDigest: candidate.digest, roles }), workflowMode: "REVIEW",
-    workflow: { current: workflow, next }, extra: [resolveRowItem(deps, task.taskId, row.workflowRevision)], payload, ...(second.record === undefined ? {} : { secondReviewPlan: second.record }), ...(second.firstEvent === undefined ? {} : { firstEvent: second.firstEvent }),
+    task, workspace, requestId: request.requestId, prompt: reviewPrompt({ candidateDigest: candidate.digest, roles }), workflowMode: "REVIEW",
+    workflow: { current: workflow, next }, extra: [resolveRowItem(deps, task.taskId, row.workflowRevision), ...request.extra], payload, ...(second.record === undefined ? {} : { secondReviewPlan: second.record }), ...(second.firstEvent === undefined ? {} : { firstEvent: second.firstEvent }),
     requires: ["task.workflowMode", "task.workflowReview", ...(checks === undefined ? [] : ["task.workflowReviewChecks"]), ...(plan === undefined ? [] : ["task.workflowReviewPlan"]), ...(payload["workflowReviewRisk"] === undefined ? [] : ["task.workflowReviewRisk"]), ...(roles.length === 2 ? [] : ["task.workflowReviewers"])],
   }).catch(async (error: unknown) => {
     // A start that threw carries no operation: the allowance held for its second review goes back before the error goes on.

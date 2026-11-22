@@ -1,3 +1,6 @@
+import { createStoreProjectSource } from "../core/task-flow/project-source.js";
+import { developerTaskPolicy } from "@agentx/contracts";
+import { prepareCoreShare } from "./core-task-sharing.js";
 import { runPriceReader } from "../core-host/run-price-http.js";
 import { accessRetryRoute } from "./core-access-retry.js";
 import { sweepCoreIdleSlack } from "./core-idle-slack.js";
@@ -603,7 +606,7 @@ export function deployedCallerFromMembership(membershipOf: (personId: string) =>
     const membership = await membershipOf(caller.developerId);
     if (membership === undefined) return undefined;
     const principal: Principal = { companyId: membership.companyId, personId: caller.developerId, displayName: caller.name, roles: [membership.role], provider: HOSTED_IDENTITY_PROVIDER };
-    return { principal, ...(caller.clientId === undefined ? {} : { client: caller.clientId }), ...(caller.amr === undefined ? {} : { amr: caller.amr }), ...(caller.webApp === true ? { webApp: true as const } : {}) };
+    return { principal, ...(caller.clientId === undefined ? {} : { client: caller.clientId }), ...(caller.amr === undefined ? {} : { amr: caller.amr }), ...(caller.webApp === true ? { webApp: true as const } : {}), ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }) };
   };
 }
 
@@ -841,7 +844,13 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       // The per-run stop and the usage flush on Stop and close (core-money-stop): a stopped run whose usage did not arrive keeps its task's whole hold, marked estimated.
       // L2b: every core step on the gateway's agent model (the token's description reads the same route).
       // Configured without the task-token signer: refused here, so no task starts. The money stop is wired in every case.
-      flowOptions: { captureStartComparison: async ({ project, inputText }) => {
+      flowOptions: { ...(inputs.taskRules === undefined ? {} : { taskSharing: { prepare: async (caller, project, wanted) => {
+        const latest = await createStoreProjectSource(registry.require("storage"), companyId).latest(project);
+        if (latest === undefined) throw agentXError("CONFIG_INVALID", "this task's project is no longer registered; ask an admin");
+        if (!wanted.shareToChannel && developerTaskPolicy(latest.definition).share !== "required") return undefined;
+        const person = { developerId: caller.principal.personId, name: caller.principal.displayName };
+        return prepareCoreShare(inputs.taskRules!(person, companyId), { ...person, sessionId: "core", amr: "oidc", ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }) }, project, developerTaskPolicy(latest.definition), wanted);
+      } } }), captureStartComparison: async ({ project, inputText }) => {
         const store = registry.require("storage");
         const context = await hostedPreviewContext({ store, companyId, project, now, rateQuote: previewRates, workflowVersion: inputs.understandFirst === false ? "1.0.0" : "1.1.0", settings: admissionSettings, projectTaskCap, defaultRoute: async () => { const gateway = modelGateway(); return gateway === undefined ? undefined : companyEngineModelRoute({ store, companyId, offered: engineOffered, install: gateway.flowOptions.modelAccess }).route(); } });
         return startEstimates({ store }, { orgId: companyId, project, request: { quoteVersion: 2, ...(inputText.length <= 4000 ? { inputText } : {}) }, asOf: now().toISOString(), context });
@@ -868,7 +877,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         });
         log({ component: "cost", event: "cost.run_recorded", outcome });
         try { await recordClosedRunUsage({ store }, task, closedAt); }
-        catch (error) { log({ component: "cost", event: "cost.run_usage_not_recorded", error: error instanceof Error ? error.name : "unknown" }); }
+        catch (error) { log({ component: "cost", event: "cost.run_usage_not_recorded", error: error instanceof Error ? error.name : "unknown" }); throw error; }
       },
       // L6a: a task started from Linear keeps the session binding available to merge tracking, within this company's store partition.
       sessionBindings: { read: (_orgId, sessionId) => sessionBindingsOf(registry.require("storage"), companyId, sessionId) },

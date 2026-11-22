@@ -167,11 +167,31 @@ export async function closeHold(store: DocumentStore, reservationId: unknown, ho
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const hold = holdOf(await store.get(holdKey(companyId, id)), companyId, id);
     if (hold === undefined || hold.state !== "open") return;
+    const planned = closeHoldItems(hold, how, now);
+    const committed = await store.transact(planned.items);
+    if (committed.applied) return;
+  }
+  throw new Error("the spend hold could not be closed");
+}
+
+/** Internal close composition: hold amounts and closure join the accepted operation's durable decision. */
+export async function planHoldClose(store: DocumentStore, reservationId: unknown, how: CloseHow, now: () => Date): Promise<{ items: TransactItem[]; remaining: number }> {
+  const companyId = companyOfReservation(reservationId);
+  if (companyId === undefined) return { items: [], remaining: 0 };
+  const id = reservationId as string;
+  const row = await store.get(holdKey(companyId, id));
+  const hold = holdOf(row, companyId, id);
+  if (hold === undefined || hold.state !== "open") return { remaining: 0, items: [{ kind: "check", key: holdKey(companyId, id), condition: row === undefined ? when.absent() : when.eq("state", row["state"]!) }] };
+  return closeHoldItems(hold, how, now);
+}
+
+function closeHoldItems(hold: Hold, how: CloseHow, now: () => Date): { items: TransactItem[]; remaining: number } {
+  const companyId = hold.companyId, id = hold.reservationId;
     const remaining = hold.heldMicros - hold.drawnMicros;
     // An estimate is only ever the whole of what the hold still holds (the actual is unknown).
     const estimated = how.kind === "settle" && how.actualMicros === undefined ? how.estimated : undefined;
     const kept = how.kind === "release" ? 0 : how.actualMicros === undefined ? remaining : Math.max(0, how.actualMicros - hold.drawnMicros);
-    const committed = await store.transact([
+    const items: TransactItem[] = [
       {
         kind: "update", key: holdKey(companyId, id),
         ops: [
@@ -189,10 +209,8 @@ export async function closeHold(store: DocumentStore, reservationId: unknown, ho
         ],
         condition: when.present(),
       },
-    ]);
-    if (committed.applied) return;
-  }
-  throw new Error("the spend hold could not be closed");
+    ];
+  return { items, remaining };
 }
 
 // ---- drawing a hold down (the ledger's side)

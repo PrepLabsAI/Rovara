@@ -106,6 +106,18 @@ async function setup(roles: ReviewerRole[], withMerge = true, tier?: DesignRevie
 
 describe("runDesignReview: fresh sessions", () => {
 
+  it("ends the entire round on the install pause instead of hiding it as an unusable model", async () => {
+    const paused = "Rovara's AI is paused on this install. Your work is safe; try again later or use your own AI source.";
+    const { binding, deliveries } = await setup(["critic"]);
+    // Use the same error the session's failedTurn returns, rather than provider text.
+    const actual = failedTurn({ stopReason: "error", errorMessage: paused })!;
+    const { ports, opened } = fakePorts({ answers: { "slot-critic": [actual] } }, deliveries);
+    await expect(runDesignReview(binding, ports)).rejects.toMatchObject({ code: "MODEL_NOT_ALLOWED", message: `MODEL_NOT_ALLOWED: ${paused}` });
+    expect(opened).toHaveLength(1);
+    expect(opened[0]!.prompts).toHaveLength(1);
+    expect(opened[0]!.disposed).toBe(true);
+  });
+
   it("refuses to send anything when the packet it fetched does not hash to the digest the broker built", async () => {
     const { binding, deliveries } = await setup(["critic", "codebase"]);
     const delivery = deliveries.get("slot-critic") as { documents: Array<{ text: string }> };

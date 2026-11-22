@@ -651,6 +651,29 @@ async function reviewWith(fixture: Awaited<ReturnType<typeof feedbackReviewFixtu
 }
 
 describe("AI-generated PR feedback advisory", () => {
+  it("ends feedback review on the install pause without a format retry or an advisory report", async () => {
+    const fixture = await feedbackReviewFixture();
+    const paused = "Rovara's AI is paused on this install. Your work is safe; try again later or use your own AI source.";
+    let calls = 0;
+    let artifacts = 0;
+    const base = feedbackReviewerAdapter("");
+    const piAdapter: PiSessionAdapter = { async create(input) {
+      const session = await base.create(input);
+      let listener: ((event: unknown) => void) | undefined;
+      return { ...session,
+        async prompt() { calls++; listener?.({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: paused, content: [] } }); },
+        subscribe(callback) { listener = callback; return () => { listener = undefined; }; },
+      };
+    } };
+    await expect(runWorkflowFeedbackReview({ ruleFileBaseCommits: [], operationId: randomUUID(), taskId: fixture.taskId, workflowRevision: 7,
+      taskRequirements: "Handle empty input.", candidateDigest: fixture.bundle.candidateDigest, rootPath: fixture.rootPath, model: FAUX_MODEL,
+      candidate: fixture.candidate, repositories: fixture.repositories, bundles: [{ ref: fixture.bundleRef, bytes: fixture.bytes }], piAdapter,
+      artifactSink: async () => { artifacts++; },
+    })).rejects.toMatchObject({ code: "MODEL_NOT_ALLOWED", message: `MODEL_NOT_ALLOWED: ${paused}` });
+    expect(calls).toBe(1);
+    expect(artifacts).toBe(0);
+  });
+
   it("reviews every supplied bundle comment on the exact candidate in a read-only session and persists a digested report", async () => {
     const fixture = await feedbackReviewFixture();
     const finding = {

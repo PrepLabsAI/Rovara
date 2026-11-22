@@ -9,6 +9,7 @@
 //  - `unavailable`  anything else (no gateway or signing key here, a workspace that names no company, a thread with no Slack identity): the Slack service says the fixed words below and makes NO model call.
 // There is no Rovara-paid fallback: a company workspace is never answered on `install`.
 import { z } from "zod";
+import { ROVARA_AI_PAUSED_MESSAGE } from "./model-sources.js";
 
 /** The route as the Slack service calls it (the control plane client adds its own `/v1/service` rewrite). */
 export const SLACK_MODEL_ACCESS_SERVICE_PATH = "/v1/model-access";
@@ -35,6 +36,7 @@ export type SlackModelAccessResult = z.infer<typeof SlackModelAccessResultSchema
 
 /** What the Slack service says in the thread, in fixed words, when the company's AI cannot serve the call. Nothing the gateway or a model sent is echoed. */
 export const SLACK_MODEL_WORDS = {
+  installPaused: ROVARA_AI_PAUSED_MESSAGE,
   /** No gateway here, or a workspace that is not a company's. */
   notSetUp: "Rovara's AI isn't set up for this workspace yet. Ask a company admin to check the setup in Rovara.",
   /** The company has no connected AI source (or the one it has was refused). */

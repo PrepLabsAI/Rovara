@@ -46,6 +46,8 @@ export type CheckStartRequest = z.infer<typeof CheckStartRequestSchema>;
  * never a plain pass, and says nothing when the attempt is not known), and the run it belongs to (where its reports are). Every field is present only when the runner read it.
  */
 export const CheckRunFactsSchema = z.object({
+  /** Provider-reported source revision; absent when it cannot be verified. */
+  resolvedRevision: RevisionSchema.optional(),
   startedAt: ISO_TIME.optional(),
   completedAt: ISO_TIME.optional(),
   attempt: z.number().int().min(1).max(1_000).optional(),

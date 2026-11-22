@@ -157,6 +157,7 @@ export const WorkspaceCloseReasonSchema = z.enum([
 
 export const WorkspaceClosePreflightResultSchema = z
   .object({
+    contentDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
     safeToClose: z.boolean(),
     repositories: z
       .array(
@@ -174,6 +175,7 @@ export const WorkspaceClosePreflightResultSchema = z
     if (result.safeToClose !== (result.repositories.length === 0)) {
       context.addIssue({ code: "custom", message: "safeToClose must match whether repository findings are empty" });
     }
+    if (new Set(result.repositories.map((r) => r.name)).size !== result.repositories.length) context.addIssue({ code: "custom", path: ["repositories"], message: "repository identities must be unique" });
     for (const [index, repository] of result.repositories.entries()) {
       if (new Set(repository.reasons).size !== repository.reasons.length) {
         context.addIssue({ code: "custom", path: ["repositories", index, "reasons"], message: "reasons must be unique" });

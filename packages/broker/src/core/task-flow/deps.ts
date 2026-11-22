@@ -1,7 +1,9 @@
+import type { CloseInspectionProvider } from "./close-inspection.js";
 import type { PreviewV2 } from "@agentx/contracts";
 import type { AgentXError, ScriptTokenPermission, WorkOrigin } from "@agentx/contracts";
 // Lane L6a, task flow core: what the flow is built on. Every dependency is a W0 port or a small seam named here; nothing names DynamoDB, SQS,
 // EC2, a chat tool or a code host (decision 51).
+import type { TaskSharing } from "./share.js";
 import type { MoneyStop } from "./money-stop.js";
 import type { TierReviewCall, TierReviewMeter } from "../build-step/tier-review-calls.js";
 import type { TaskTestEnvironment } from "../test-env/seam.js";
@@ -50,6 +52,8 @@ import type { LessonsUsedSection } from "../proof/pull-request-body.js";
 
 /** Who is acting, as the identity adapter vouched for them. `client` is the surface's own name for itself (an AI tool, the CLI). */
 export interface TaskCaller {
+  /** Trusted linked Slack account from the host sign-in; never a body field. */
+  slackUserId?: string | undefined;
   /** Server start surface. Set by the route/adapter, never copied from request data. */
   origin?: WorkOrigin;
   principal: Principal;
@@ -219,6 +223,11 @@ export interface DesignReviewSteps {
 }
 
 export interface TaskFlowDeps {
+  /** Retained close preparation; absent/unproven means preview unavailable. */
+  closeInspection?: CloseInspectionProvider;
+  /** Approved accepted-close continuation, invoked only after commit or immutable replay. P4 supplies its durable effects. */
+  resumeAcceptedClose?: (operation: OperationRecord) => Promise<void>;
+  taskSharing?: TaskSharing;
   /** Advisory snapshot captured by the host; never supplied as browser authority. */
   captureStartComparison?: (input: { project: string; inputText: string }) => Promise<PreviewV2>;
   /** Code's one company (`IMPLICIT_COMPANY_ID`); every port call carries it. */

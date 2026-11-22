@@ -97,6 +97,20 @@ describe("workflow reviewer output", () => {
       expect(new Set(sessionInputs.map(({ conversationId }) => conversationId)).size).toBe(2);
       expect(usage).toEqual([{ role: "CRITIC", outcome: "SUCCEEDED" }, { role: "SECURITY", outcome: "SUCCEEDED" }]);
 
+      const paused = "Rovara's AI is paused on this install. Your work is safe; try again later or use your own AI source.";
+      let pausedCalls = 0;
+      const pausedAdapter: PiSessionAdapter = { async create(input) {
+        const session = await adapter.create(input);
+        let listener: ((event: unknown) => void) | undefined;
+        return { ...session,
+          async prompt() { pausedCalls++; listener?.({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: paused, content: [] } }); },
+          subscribe(callback) { listener = callback; return () => { listener = undefined; }; },
+        };
+      } };
+      await expect(runWorkflowReviews({ ruleFileBaseCommits: [], operationId: randomUUID(), rootPath, model: { provider: "test", modelId: "review-v1" }, candidate, repositories, piAdapter: pausedAdapter }))
+        .rejects.toMatchObject({ code: "MODEL_NOT_ALLOWED", message: `MODEL_NOT_ALLOWED: ${paused}` });
+      expect(pausedCalls).toBe(1);
+
       const missingResponses = await runWorkflowReviews({ ruleFileBaseCommits: [],
         operationId: "11111111-1111-4111-8111-111111111111", rootPath,
         model: { provider: "test", modelId: "review-v1" }, candidate, repositories,

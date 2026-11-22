@@ -95,6 +95,8 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/tasks/{taskId}/continue", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/cancel", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/close", requires: "tasks:act" },
+  { method: "GET", path: "/v1/dev/tasks/{taskId}/close", requires: "tasks:read" },
+  // CORE-PARITY: manual publication, workflow review and share below are mounted by core-host/dev-routes.
   { method: "POST", path: "/v1/dev/tasks/{taskId}/pull-requests", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/people/role", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/people/take-ownership", requires: "tasks:act" },
@@ -282,6 +284,7 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/app/sessions/{sessionId}/answers", requires: "tasks:act" },
   { method: "POST", path: "/v1/app/sessions/{sessionId}/revise-plan", requires: "tasks:act" },
   { method: "POST", path: "/v1/app/sessions/{sessionId}/close", requires: "tasks:act" },
+  { method: "GET", path: "/v1/app/sessions/{sessionId}/close", requires: "tasks:read" },
   // Decision cards: the list and every act on a card (the performer checks the person's live authority).
   { method: "GET", path: "/v1/app/decisions", requires: "decisions:decide" },
   { method: "POST", path: "/v1/app/decisions/{kind}/{subject}/approve", requires: "decisions:decide" },

@@ -202,8 +202,16 @@ describe("POST /v1/dev/tasks/{id}/cancel on a core task", () => {
   it("a stop that failed after its claim is finished by a repeat of the same request id (the claimed step is still the active one)", async () => {
     const { cancel, owner, world, operationStatus } = await running();
     const body = { requestId: randomUUID() };
-    const update = world.store.update.bind(world.store);
-    vi.spyOn(world.store, "update").mockImplementationOnce(async () => { throw new Error("store unavailable"); }).mockImplementation(update);
+    const transact = world.store.transact.bind(world.store);
+    // Fail the required cancel write, after the request claim; convenience index writes are best effort.
+    const cancelWrite = vi.spyOn(world.store, "transact");
+    cancelWrite.mockImplementation(async (items) => {
+      if (items.some((item) => item.kind === "update" && item.ops.some((op) => op.op === "set" && op.path[0] === "status" && op.value === "CANCEL_REQUESTED"))) {
+        cancelWrite.mockImplementation(transact);
+        throw new Error("store unavailable");
+      }
+      return transact(items);
+    });
     await expect(cancel(owner, body)).rejects.toThrow("store unavailable");
     expect(await operationStatus()).not.toBe("CANCELLED");
     const again = await cancel(owner, body);

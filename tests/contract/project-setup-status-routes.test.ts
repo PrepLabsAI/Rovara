@@ -1259,9 +1259,12 @@ describe("what did not change", () => {
     expect(rows.filter((row) => row === inviteResend)).toEqual([inviteResend]);
     const preview = "POST /v1/dev/projects/{project}/start-estimates tasks:read";
     expect(rows.filter((row) => row.includes("/start-estimates "))).toEqual([preview]);
+    // D-CORE: the approved read-only close preview is additive; all older hashes stay pinned.
+    const closePreview = "GET /v1/dev/tasks/{taskId}/close tasks:read";
+    expect(rows.filter((row) => row === closePreview)).toEqual([closePreview]);
     const withPreview = rows.filter((row) => !added.some((path) => row === `${path} full`) && row !== inviteResend);
-    const existing = withPreview.filter((row) => row !== preview);
-    expect(existing).toHaveLength(DEV_ROUTES.length - 6);
+    const existing = withPreview.filter((row) => row !== preview && row !== closePreview);
+    expect(existing).toHaveLength(DEV_ROUTES.length - 7);
     // A digest of every other row, in order: any change to an existing route fails here and must be reviewed.
     expect(createHash("sha256").update(existing.join("\n")).digest("hex")).toBe(EXISTING_ROUTES_DIGEST);
     // L4-JA7 (rule D): the pin above moved only by the four hosted knowledge-switch rows; with exactly those removed the digest is the one the table had before.
