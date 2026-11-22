@@ -66,6 +66,9 @@ export interface ThreadNoticeDeps {
   setupUrl?: ((project: string) => string | undefined) | undefined;
   /** The decision gate, for the plan card: its risk, revision and digest come from the same load a decision is made on. Absent: no card, and a plain line says the plan is ready. */
   plan?: { gate: Pick<DecisionGate, "requirement"> } | undefined;
+  /** Hosted document details, prepared inside the card's durable send claim. */
+  document?: ((taskId: string, workflow: WorkflowSnapshot, thread: TaskThread) => Promise<{ url?: string; summary?: string[] }>) | undefined;
+  closeout?: ((taskId: string, thread: TaskThread) => Promise<string | undefined>) | undefined;
   log?: Log | undefined;
 }
 
@@ -180,6 +183,11 @@ export function threadSender(deps: Pick<ThreadNoticeDeps, "store" | "registry" |
   return { reach, send };
 }
 
+// Cleanup and a request for a person still run when milestone lines are muted.
+function handlesMoment(moment: Moment, cards: boolean, milestones: boolean): boolean {
+  return moment === "setup_paused" || moment === "done" || (moment === "plan_ready" ? cards || milestones : milestones);
+}
+
 export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandler {
   const log: Log = deps.log ?? (() => undefined);
   const milestonesOn = (): boolean => (typeof deps.milestones === "function" ? deps.milestones() : deps.milestones !== false);
@@ -195,7 +203,7 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
       const moment = MOMENT_OF[milestone.kind];
       if (moment === undefined) return;
       const cards = deps.plan !== undefined;
-      if (moment === "setup_paused") { /* a notice that someone must act, not a milestone line: the switch does not turn it off */ } else if (moment === "plan_ready" ? !cards && !milestonesOn() : !milestonesOn()) return;
+      if (!handlesMoment(moment, cards, milestonesOn())) return;
       const { orgId, taskId } = milestone;
       const task = await deps.store.get(taskKey(taskId));
       const taskOrg = task?.["orgId"] ?? task?.["companyId"];
@@ -249,9 +257,12 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
           ? (asks ? (taskUrl === undefined ? undefined : `Details: ${taskUrl}`) : `To ask for changes, open the task page.${taskUrl !== undefined ? ` ${taskUrl}` : deps.footer !== undefined ? `\n${deps.footer}` : ""}`)
           : (taskUrl === undefined ? deps.footer : undefined);
         await send(orgId, sessionId, key, async () => {
+          const document = await deps.document?.(taskId, workflow as WorkflowSnapshot, thread);
+          const detail = [document?.summary?.join("\n"), document?.url].filter(Boolean).join("\n");
+          const cardWords = `${extra === undefined ? words : `${words}\n${extra}`}${detail === "" ? "" : `\n${detail}`}`;
           const posted = await postApprovalCard({ store: deps.store, orgId, now: deps.now, companyOf: deps.companyOf }, {
             channel: conversation.channel, adapter, conversation, kind: "plan_approval", subject: { type: WORKFLOW_DOCUMENT_KIND, id: taskId }, revision: found.revision, artifactDigest: found.artifactDigest, risk, signInOnly: !chatTakes,
-            text: extra === undefined ? words : `${words}\n${extra}`,
+            text: cardWords,
             ...(taskUrl === undefined ? {} : { taskUrl }),
             actions: chatTakes ? [{ decision: "APPROVE", label: "Approve" }, ...(asks ? [{ decision: "REQUEST_CHANGES" as const, label: "Request changes" }] : [])] : [],
           });
@@ -278,7 +289,15 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
 
       // done: merged or closed, one line. A task is done once.
       const merged = milestone.kind === "merged";
-      await send(orgId, sessionId, "done", () => tell({ ...base("done"), type: "done", data: { text: merged ? `"${title}" is merged.` : `"${title}" was closed without a merge.`, outcome: merged ? "succeeded" : "cancelled" } }));
+      const tellDone = async (closeout: string | undefined): Promise<void> => {
+        if (milestonesOn()) await send(orgId, sessionId, "done", () => tell({ ...base("done"), type: "done", data: { text: closeout ?? (merged ? `"${title}" is merged.` : `"${title}" was closed without a merge.`), outcome: merged ? "succeeded" : "cancelled" } }));
+      };
+      await Promise.resolve().then(() => deps.closeout?.(taskId, thread)).then(tellDone, async (error: unknown) => {
+        // The final post has its own durable claim. Preserve the cleanup failure
+        // even if posting also fails, so pending deletion always stays due.
+        await tellDone(undefined).catch(() => undefined);
+        throw error;
+      });
     },
   };
 }

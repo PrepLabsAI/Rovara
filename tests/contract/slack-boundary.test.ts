@@ -74,7 +74,10 @@ describe("the Slack boundary (spec 062 SC-004)", () => {
   });
 
   it("keeps Slack types and Slack modules out of the conversation core", () => {
-    const violations = CORE.flatMap((file) => slackUses(file).map((use) => `${file}: ${use}`));
+    const files = [...CORE, "packages/broker/src/core/channel/workflow-notices.ts",
+      "packages/broker/src/core-host/thread-documents.ts", "packages/broker/src/core-host/thread-notification.ts",
+      "packages/broker/src/core-host/chat-threads.ts"];
+    const violations = files.flatMap((file) => slackUses(file).map((use) => `${file}: ${use}`));
     expect(violations).toEqual([]);
   });
 

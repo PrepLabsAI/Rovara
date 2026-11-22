@@ -19,6 +19,7 @@ import type { CodeSettingsReader, HumanEditSink } from "../core/merge/seams.js";
 import type { SummaryCheckSource } from "../core/merge/summary-check.js";
 import type { RepositoryResolver } from "../core/merge/host-port.js";
 import type { SessionChangeHook, SummaryDependencies } from "../core/sessions/summary.js";
+import { settleSteerDeliveriesFor } from "../core/sessions/steer.js";
 import { threadFollows } from "../core/channel/thread-notices.js";
 import { ticketMomentsOnChange } from "../core/ticket-updates/moments.js";
 import type { AttentionDeliveryDependencies } from "../core/notify/attention.js";
@@ -101,6 +102,7 @@ export interface BrokerCoreServicesOptions {
   notification?: Pick<AttentionDeliveryDependencies, "companyOf" | "access" | "address" | "link" | "thread" | "emailLinks" | "upkeep" | "adminNotice" | "planCarded" | "setupPausedTold" | "doneToldInThread"> & Pick<NoticeServiceOptions, "remember"> & { registry?: AttentionDeliveryDependencies["registry"] | undefined };
   /** HW5: write the chat thread's moments (the plan waits for review, the task was closed) when a session that follows a thread changes, on the company's milestones. Needs `flow.deps.milestones` (lessons built); else none. */
   threadMoments?: boolean;
+  threadRefresh?: (orgId: OrgId, sessionId: string, store: DocumentStore) => Promise<void>;
   now?: () => Date;
   log?: (entry: Record<string, unknown>) => void;
 }
@@ -154,7 +156,11 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
       // registered). A company with no milestones (no lessons) writes none. A ticket's own moments are not written here (`ticketBindings: false`): only a thread's.
       const moments: readonly SessionChangeHook[] = options.threadMoments === true && deps.milestones !== undefined
         ? [ticketMomentsOnChange({ store, milestones: deps.milestones, now, follows: threadFollows({ store }), ticketBindings: false, companyId, log: () => log() })] : [];
-      const sessions = createSessionService({ store, ...summary, notices: noticesFor(store), onChange: moments, now: clock, log });
+      const afterRefresh: SummaryDependencies["afterRefresh"] = async (orgId, sessionId) => {
+        await settleSteerDeliveriesFor({ store, now: clock, log }, orgId, sessionId);
+        await options.threadRefresh?.(orgId, sessionId, store);
+      };
+      const sessions = createSessionService({ store, ...summary, afterRefresh, notices: noticesFor(store), onChange: moments, now: clock, log });
       return { ...await sessions.sweep({ companyId, scan: sessionScan, maxItems: 100, budgetMs: Math.max(0, deadlineMs - now()) }) };
     }),
     "notify-deliver": pass(async (store, deadlineMs) => {

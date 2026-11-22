@@ -6,7 +6,7 @@
 // The other core services (merge tracking, the session sweep, notices) are joined on a laptop by the local root (`local/app/app.ts`), which carries laptop rules (fixed code settings, a sole
 // owner). A deployed install needs the same joins with its own settings and people; each is a `CoreService` the deployment supplies, and `serviceGaps` names the ones missing so the switch cannot
 // be turned on for an area whose service is not wired (an area that is off is not asked: its missing service costs only its own jobs).
-import { agentXError, type AdapterRegistry, type OrgId } from "@agentx/contracts";
+import { agentXError, type AdapterRegistry, type DocumentStore, type OrgId } from "@agentx/contracts";
 import { RepositoryGrantService } from "../repository-access.js";
 import { createStoreProjectSource } from "../core/task-flow/project-source.js";
 import { createTaskFlowFromRegistry, type RegistryTaskFlowOptions, type TaskFlow } from "../core/task-flow/flow.js";
@@ -58,6 +58,7 @@ export interface CoreServiceWiring {
   humanEdit?: HumanEditSink | undefined;
   /** HW5: write the chat thread's moments (the plan waits for review, the task was closed) when a session that follows a thread changes. Needs the company's milestones; absent: none are written. */
   threadMoments?: boolean | undefined;
+  threadRefresh?: ((orgId: OrgId, sessionId: string, store: DocumentStore) => Promise<void>) | undefined;
 }
 
 export interface CoreRuntimeOptions {

@@ -2,7 +2,7 @@
 // Neutral: no chat tool's name is here. The deployment builds one from its chat tool's own company-scoped seam (a team that belongs to a company, that company's bot token); the core only asks two things of it:
 //   companyOf     which company a chat tenant belongs to (undefined: nobody's here). A thread in another company's tenant is never recorded and never sent to.
 //   registryFor   the chat adapters of ONE company, as the thread notices read them (`registry.get("channel", name)`). An adapter made for company A can only reach company A's tenants.
-import type { ActorRef, ChannelAdapter, OrgId } from "@agentx/contracts";
+import type { ActorRef, ChannelAdapter, OrgId, RichMessage } from "@agentx/contracts";
 import type { ChannelCompanyOf } from "../core/channel/company.js";
 
 export interface ChatThreads {
@@ -15,4 +15,11 @@ export interface ChatThreads {
   personOf?(companyId: OrgId, actor: ActorRef): Promise<{ personId: string; via: "link" | "signin" } | undefined>;
   /** HW5: the names of the chats this seam serves (what `registry.names("channel")` says), so the notice service sees them as the company's chats. */
   channels: readonly string[];
+  /** The chat service translates its existing message builder output at the adapter boundary. */
+  messageOf?(message: { text: string; blocks: unknown[] }): RichMessage | undefined;
+  /** The chat service classifies its own transport failures; an unanswered create must never be repeated. */
+  documentFailure?(error: unknown): { mayHaveLanded: boolean; unavailable: boolean; category?: string };
+  /** Internal hosted seam: persist an exact Canvas ID before Slack shares it, as the retired notifier did. */
+  createPlanCanvas?(companyId: OrgId, tenant: string, input: { channel: string; taskId: string; title: string; version: number; markdown: string }, onCreated: (canvasId: string) => Promise<void>): Promise<{ canvasId: string; permalink: string }>;
+
 }

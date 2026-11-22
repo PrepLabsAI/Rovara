@@ -1,6 +1,6 @@
 // Ported from Cloud's `rovara-code/milestones.ts`: the milestone hook. A milestone ("questions", "plan_ready", "pr_ready", "merged", ...) is one item in the task's partition, written in
 // the same transaction as the change that caused it (`items`), together with a line on the task's session. After the commit, `deliver` tells every handler registered with `register` (a chat or tracker adapter, the
-// outbound-events sender); a handler that was not told, or threw, is told again by the sweep (`deliverDue`), at most `CODE_MILESTONE_ATTEMPTS_MAX` times. A handler can be told twice (the process can stop between the handler
+// outbound-events sender); a handler that was not told, or threw, is told again by the sweep (`deliverDue`), at most `CODE_MILESTONE_ATTEMPTS_MAX` failures (pending durable cleanup stays due). A handler can be told twice (the process can stop between the handler
 // returning and the record being written), so it must be safe to hear a milestone again.
 //
 // On the document store port (decision 51): a handler's claim on a milestone is one conditional update (a lease and an attempt counted together), and the sweep reads the due-time index. The stored form is Cloud's:
@@ -10,9 +10,10 @@ import {
   type CodeMilestone, type DocumentStore, type StoredDocument, type TransactItem, type UpdateOp,
 } from "@agentx/contracts";
 import { sessionEventItem } from "../sessions/store.js";
+import { PendingMilestoneDelivery } from "./pending-delivery.js";
 import type { CodeMilestones } from "../merge/seams.js";
 
-/** How many times one handler is told one milestone before the install gives up on it. */
+/** Ordinary failures before giving up on a handler; durable pending cleanup does not consume this budget. */
 export const CODE_MILESTONE_ATTEMPTS_MAX = 5;
 /** The sweep's partition in the due-time index, apart from the dispatch rows' and the plan evidence rows'. */
 export const CODE_MILESTONE_DUE_PK = "CODE_MILESTONE";
@@ -110,6 +111,19 @@ export function createDocumentMilestones(options: DocumentMilestonesOptions): Do
   const update = async (item: StoredDocument, input: { ops: readonly UpdateOp[]; condition: ReturnType<typeof when.and> }): Promise<boolean> =>
     (await store.update({ key: { pk: item.pk, sk: item.sk }, ops: input.ops, condition: input.condition })).applied;
 
+  async function releaseFailure(item: StoredDocument, lease: string, tries: string, pending: string, used: number, error: unknown): Promise<number> {
+    const ops: UpdateOp[] = [change.remove(lease)];
+    if (error instanceof PendingMilestoneDelivery || item[pending] === true) {
+      // A verified pending side effect still needs dispatch after ordinary
+      // delivery errors have exhausted their budget. Remember it on the same
+      // handler row so later read exceptions and process restarts cannot drop it.
+      ops.push(change.set(pending, true), change.add(tries, -1));
+      used -= 1;
+    }
+    await update(item, { ops, condition: when.present() });
+    return used;
+  }
+
   /**
    * Tells the registered handlers each milestone of the task they have not yet heard. A handler takes a claim on the milestone first (a lease and an attempt counted in one conditional write), so two deliveries that meet
    * tell it once; a handler that threw is told again by the next delivery, until it has had `CODE_MILESTONE_ATTEMPTS_MAX` attempts. A milestone every handler has heard or been given up on leaves the sweep's index. Never
@@ -131,7 +145,7 @@ export function createDocumentMilestones(options: DocumentMilestonesOptions): Do
       let settled = true;
       let attempts = 0;
       for (const handler of registered) {
-        const [tries, done, lease] = [`tries_${handler.name}`, `done_${handler.name}`, `lease_${handler.name}`];
+        const [tries, done, lease, pending] = [`tries_${handler.name}`, `done_${handler.name}`, `lease_${handler.name}`, `pending_${handler.name}`];
         let used = typeof item[tries] === "number" ? item[tries] : 0;
         if (item[done] !== true && used < CODE_MILESTONE_ATTEMPTS_MAX) {
           const at = now();
@@ -146,11 +160,11 @@ export function createDocumentMilestones(options: DocumentMilestonesOptions): Do
           used += 1;
           try {
             await handler.on(milestone);
-            await update(item, { ops: [change.set(done, true), change.remove(lease)], condition: when.present() });
+            await update(item, { ops: [change.set(done, true), change.remove(lease), change.remove(pending)], condition: when.present() });
             continue;
           } catch (error) {
             log("code_milestone.handler_failed", { taskId, kind: milestone.kind, handler: handler.name, attempt: used, error: error instanceof Error ? error.name : "unknown" });
-            await update(item, { ops: [change.remove(lease)], condition: when.present() });
+            used = await releaseFailure(item, lease, tries, pending, used, error);
           }
         }
         if (item[done] !== true && used < CODE_MILESTONE_ATTEMPTS_MAX) {

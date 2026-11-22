@@ -4,7 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
-  SLACK_CHANNEL, createWorkflowSnapshot, orgProjectCatalogKey, projectRevisionKey, submitWorkflowArtifact,
+  SLACK_CHANNEL, WorkflowSnapshotSchema, createWorkflowSnapshot, orgProjectCatalogKey, projectRevisionKey, submitWorkflowArtifact,
   type ActorRef, type AdapterRegistry, type ConversationRef, type JsonValue, type OrgId, type OrgRole, type Principal, type ProjectDefinition, type StoredDocument, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { createCoreHostApp } from "../../packages/broker/src/core-host/index.js";
@@ -49,6 +49,8 @@ const principalOf = (personId: string, companyId: string = ORG): Principal => ({
 
 /** Slack's web API as a fake: who the bot is (the workspace the token belongs to) and every post, with its token, text and blocks. */
 function fakeSlack() {
+  let deletionConfirmed = true;
+  let postingFails = false;
   const posts: Array<{ token: string; channel: string; thread_ts?: string; text: string; blocks?: Array<Record<string, unknown>> }> = [];
   const tokenTeams: Record<string, string> = { [TOKEN_A]: TEAM_A, [TOKEN_B]: TEAM_B };
   const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
@@ -56,13 +58,18 @@ function fakeSlack() {
     const token = String((init?.headers as Record<string, string>)["authorization"]).replace("Bearer ", "");
     const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as Record<string, unknown>;
     if (method === "auth.test") return new Response(JSON.stringify({ ok: true, team_id: tokenTeams[token] ?? "T0UNKNOWN00", user_id: "U0BOT000000" }), { status: 200 });
+    if (method === "canvases.create") return Response.json({ ok: true, canvas_id: "F0123456789" });
+    if (method === "canvases.access.set") return Response.json({ ok: true });
+    if (method === "canvases.delete") return Response.json(deletionConfirmed ? { ok: true } : { ok: false, error: "canvas_not_found" });
+    if (method.startsWith("files.info")) return Response.json({ ok: true, file: { permalink: "https://example.slack.com/docs/F0123456789" } });
     if (method === "chat.postMessage") {
+      if (postingFails) throw new Error("post unavailable");
       posts.push({ token, channel: String(body["channel"]), ...(typeof body["thread_ts"] === "string" ? { thread_ts: body["thread_ts"] } : {}), text: String(body["text"]), ...(Array.isArray(body["blocks"]) ? { blocks: body["blocks"] as Array<Record<string, unknown>> } : {}) });
       return new Response(JSON.stringify({ ok: true, ts: "1700000001.000200" }), { status: 200 });
     }
     return new Response(JSON.stringify({ ok: false, error: "unsupported" }), { status: 200 });
   }) as unknown as typeof fetch;
-  return { posts, fetchImpl };
+  return { posts, fetchImpl, failPosts: (fails: boolean) => { postingFails = fails; }, confirmDeletion: (confirmed: boolean) => { deletionConfirmed = confirmed; } };
 }
 const workspaces = (map: Record<string, { company: OrgId; token?: string }>) => ({
   requireCompany: async (team: string): Promise<string> => { const found = map[team]; if (found === undefined) throw new Error("no such workspace"); return found.company; },
@@ -72,7 +79,7 @@ const buttonsOf = (post: { blocks?: Array<Record<string, unknown>> } | undefined
   (post?.blocks ?? []).flatMap((block) => (block["type"] === "actions" ? (block["elements"] as Array<Record<string, unknown>>) : []));
 
 /** The company's world: the REAL hosted approvers over live memberships, a core runtime, a task waiting on a plan, and the hosted Slack seam over a fake web API. */
-async function world(options: { teams?: Record<string, { company: OrgId; token?: string }>; origin?: string | undefined; member?: boolean; session?: boolean } = {}) {
+async function world(options: { teams?: Record<string, { company: OrgId; token?: string }>; origin?: string | undefined; member?: boolean; session?: boolean; planText?: string } = {}) {
   const fake = createFakeWorld({ without: ["approvers", "identity"] });
   const memberships = new Map<string, { companyId: OrgId; role: OrgRole }>([["dev-a", { companyId: ORG, role: "member" }], ["dev-x", { companyId: OTHER, role: "owner" }]]);
   const people: DeployedPeople = { membershipOf: async (personId) => memberships.get(personId), projectGrantRole: async () => "developer" };
@@ -105,7 +112,7 @@ async function world(options: { teams?: Record<string, { company: OrgId; token?:
   const stored = (await fake.store.get(taskKey(task.taskId)))!;
   const ownerKey = stored["ownerKey"] as string;
   const objectKey = `private/${ownerKey}/${stored["workspaceId"] as string}/plan-v1.md`;
-  const text = "# Plan\n\nChange src/health.ts to answer 200.\n";
+  const text = options.planText ?? "# Plan\n\nChange src/health.ts to answer 200.\n";
   await registry.require("object-storage").put(objectKey, new TextEncoder().encode(text), { contentType: "text/markdown", metadata: {}, retention: "evidence-std" });
   const initial = createWorkflowSnapshot({ taskId: task.taskId, ownerId: ownerKey, now: "2026-11-15T09:59:00.000Z", definitionVersion: "1.1.0" });
   const workflow = submitWorkflowArtifact(initial, {
@@ -160,13 +167,14 @@ describe("the plan card on a hosted Slack thread", () => {
     expect(await cardIds(tokenless)).toEqual([]);
   });
 
-  it("with no https origin there is no link and no button (never a broker path, an http address or a made-up host)", async () => {
+  it("with no https origin there is only Slack's verified Canvas link and no decision button", async () => {
     for (const origin of [undefined, "", "http://app.example", "https://user:pw@app.example"]) {
       const w = await world({ origin });
       await w.handler.on(w.milestone("plan_ready"));
       expect(w.slack.posts).toHaveLength(1);
       expect(buttonsOf(w.slack.posts[0])).toEqual([]);
-      expect(w.slack.posts[0]!.text).not.toMatch(/https?:/u);
+      expect(w.slack.posts[0]!.text).toContain("https://example.slack.com/docs/F0123456789");
+      expect(w.slack.posts[0]!.text).not.toContain("app.example");
     }
   });
 
@@ -317,3 +325,153 @@ describe("the wiring (guards on the source, beside the behaviour above)", () => 
   });
 });
 
+
+it("the hosted plan card uses the persisted Canvas, and its terminal milestone closes it out", async () => {
+  const w = await world();
+  await w.handler.on(w.milestone("plan_ready"));
+  expect(w.slack.posts[0]?.text).toContain("https://example.slack.com/docs/F0123456789");
+  expect((await w.stepWorkflow()).canvasLineage?.[0]).toMatchObject({ state: "CREATED", canvasId: "F0123456789" });
+  const stored = (await w.store.get(taskKey(w.task.taskId)))!;
+  await w.store.put({ item: { ...stored, closedAt: new Date(w.fake.clock.now).toISOString() } });
+  await w.handler.on({ kind: "closed", orgId: ORG, taskId: w.task.taskId, at: new Date(w.fake.clock.now).toISOString(), text: "closed" });
+  expect((await w.stepWorkflow()).canvasCloseout?.status).toBe("COMPLETE");
+});
+
+
+it.each([false, true])("review3: pending Canvas cleanup posts once and stays due until the real dispatcher confirms deletion (post unavailable: %s)", async (postUnavailable) => {
+  const w = await world();
+  await w.handler.on(w.milestone("plan_ready"));
+  const stored = (await w.store.get(taskKey(w.task.taskId)))!;
+  await w.store.put({ item: { ...stored, closedAt: new Date(w.fake.clock.now).toISOString() } });
+  w.slack.confirmDeletion(false);
+  w.slack.failPosts(postUnavailable);
+  const pendingPosts = postUnavailable ? 1 : 2;
+  const closed = { kind: "closed" as const, orgId: ORG, taskId: w.task.taskId, at: new Date(w.fake.clock.now).toISOString(), text: "closed" };
+  const milestones = createDocumentMilestones({ store: w.store, now: () => w.fake.clock.now });
+  milestones.register(w.handler);
+  await w.store.transact(milestones.items(closed, 1));
+  const row = async () => (await w.store.query({ pk: `DEVTASK#${w.task.taskId}`, sk: { op: "beginsWith", prefix: "CODE_MILESTONE#closed#" } })).items[0]!;
+  await milestones.deliver(w.task.taskId);
+  expect(w.slack.posts).toHaveLength(pendingPosts);
+  if (!postUnavailable) expect(w.slack.posts[1]?.text).toContain("closed");
+  expect((await w.stepWorkflow()).canvasCloseout).toMatchObject({ status: "ARCHIVE_PENDING", canvases: [{ status: "UNKNOWN", attempts: 1 }] });
+  expect(await row()).toMatchObject({ dispatchDuePk: "CODE_MILESTONE", tries_channel_thread: 0 });
+  expect((await row())["done_channel_thread"]).toBeUndefined();
+  expect((await row())["deliveredAt"]).toBeUndefined();
+  // Pending destructive cleanup must outlive ordinary delivery's five-error limit.
+  for (let attempt = 0; attempt < 6; attempt++) {
+    w.fake.clock.now += 600_000;
+    expect(await milestones.deliverDue()).toMatchObject({ attempted: 1 });
+    expect((await row())["done_channel_thread"]).toBeUndefined();
+    expect((await row())["deliveredAt"]).toBeUndefined();
+    expect((await row())["dispatchDuePk"]).toBe("CODE_MILESTONE");
+    expect(w.slack.posts).toHaveLength(pendingPosts);
+  }
+  // No legacy task.share exists; this must recover through the persisted core dispatcher.
+  expect(stored["share"]).toBeUndefined();
+  w.slack.confirmDeletion(true);
+  w.slack.failPosts(false);
+  w.fake.clock.now += 120_000;
+  expect(await milestones.deliverDue()).toMatchObject({ attempted: 1 });
+  await milestones.deliver(w.task.taskId);
+  expect(await row()).toMatchObject({ done_channel_thread: true, deliveredAt: new Date(w.fake.clock.now).toISOString() });
+  expect((await row())["dispatchDuePk"]).toBeUndefined();
+  expect((await row())["dispatchDueSk"]).toBeUndefined();
+  expect((await w.stepWorkflow()).canvasCloseout).toMatchObject({ status: "COMPLETE", canvases: [{ status: "DELETED", attempts: 8 }] });
+  expect(w.slack.posts).toHaveLength(2);
+});
+
+/** Persist the same terminal milestone production sweeps, without legacy task.share. */
+async function pendingCloseoutWorld() {
+  const w = await world();
+  await w.handler.on(w.milestone("plan_ready"));
+  const stored = (await w.store.get(taskKey(w.task.taskId)))!;
+  await w.store.put({ item: { ...stored, closedAt: new Date(w.fake.clock.now).toISOString() } });
+  w.slack.confirmDeletion(false);
+  const dispatcher = () => {
+    const milestones = createDocumentMilestones({ store: w.store, now: () => w.fake.clock.now });
+    milestones.register(w.handler);
+    return milestones;
+  };
+  const milestones = dispatcher();
+  await w.store.transact(milestones.items({ kind: "closed", orgId: ORG, taskId: w.task.taskId, at: new Date(w.fake.clock.now).toISOString(), text: "closed" }, 1));
+  await milestones.deliver(w.task.taskId);
+  const row = async () => (await w.store.query({ pk: `DEVTASK#${w.task.taskId}`, sk: { op: "beginsWith", prefix: "CODE_MILESTONE#closed#" } })).items[0]!;
+  expect((await w.stepWorkflow()).canvasCloseout?.status).toBe("ARCHIVE_PENDING");
+  expect((await row())["deliveredAt"]).toBeUndefined();
+  expect(w.slack.posts).toHaveLength(2);
+  return { ...w, dispatcher, row };
+}
+
+it.each([
+  [1, "thread handler task"], [2, "hosted closeout task"], [3, "closeout load"],
+  [4, "attempt checkpoint"], [5, "outcome checkpoint"],
+] as const)("review4: pending cleanup survives five exceptions at read %s (%s)", async (readPosition, readLabel) => {
+  const w = await pendingCloseoutWorld();
+  // Reconstruct the dispatcher so retryability cannot depend on process memory.
+  const milestones = w.dispatcher();
+  const get = w.store.get.bind(w.store);
+  let taskReads = 0;
+  let failedReads = 0;
+  w.store.get = async (key) => {
+    if (key.pk === taskKey(w.task.taskId).pk && key.sk === taskKey(w.task.taskId).sk && ++taskReads === readPosition) {
+      failedReads++;
+      throw new Error("temporary task read failure");
+    }
+    return get(key);
+  };
+  try {
+    for (let retry = 0; retry < 5; retry++) {
+      taskReads = 0;
+      w.fake.clock.now += 600_000;
+      expect(await milestones.deliverDue()).toEqual({ attempted: 1 });
+      expect((await w.row())["deliveredAt"]).toBeUndefined();
+      expect((await w.row())["dispatchDuePk"]).toBe("CODE_MILESTONE");
+    }
+  } finally { w.store.get = get; }
+  expect(failedReads, readLabel).toBe(5);
+  w.slack.confirmDeletion(true);
+  w.fake.clock.now += 600_000;
+  expect(await w.dispatcher().deliverDue()).toEqual({ attempted: 1 });
+  expect((await w.stepWorkflow()).canvasCloseout?.status).toBe("COMPLETE");
+  expect(await w.row()).toMatchObject({ done_channel_thread: true, deliveredAt: new Date(w.fake.clock.now).toISOString() });
+  expect((await w.row())["dispatchDuePk"]).toBeUndefined();
+  expect(w.slack.posts).toHaveLength(2);
+});
+
+it.each([999, 1000])("review4: pending cleanup keeps the workflow valid at %s Canvas attempts and still completes", async (attempts) => {
+  const w = await pendingCloseoutWorld();
+  const task = (await w.store.get(taskKey(w.task.taskId)))!;
+  const workflow = await w.stepWorkflow();
+  const seeded = { ...workflow, canvasCloseout: { ...workflow.canvasCloseout!, canvases: workflow.canvasCloseout!.canvases.map((canvas) => ({ ...canvas, attempts })) } };
+  expect(WorkflowSnapshotSchema.safeParse(seeded).success).toBe(true);
+  await w.store.put({ item: { ...task, workflow: JSON.parse(JSON.stringify(seeded)) as JsonValue } });
+  w.fake.clock.now += 600_000;
+  expect(await w.dispatcher().deliverDue()).toEqual({ attempted: 1 });
+  const pending = await w.stepWorkflow();
+  expect(pending.canvasCloseout).toMatchObject({ status: "ARCHIVE_PENDING", canvases: [{ attempts: 1000, status: "UNKNOWN" }] });
+  expect(WorkflowSnapshotSchema.safeParse(pending).success).toBe(true);
+  expect((await w.row())["deliveredAt"]).toBeUndefined();
+  w.slack.confirmDeletion(true);
+  w.fake.clock.now += 600_000;
+  expect(await w.dispatcher().deliverDue()).toEqual({ attempted: 1 });
+  const completed = await w.stepWorkflow();
+  expect(completed.canvasCloseout).toMatchObject({ status: "COMPLETE", canvases: [{ attempts: 1000, status: "DELETED" }] });
+  expect(WorkflowSnapshotSchema.safeParse(completed).success).toBe(true);
+  expect((await w.row())["deliveredAt"]).toBeDefined();
+  expect(w.slack.posts).toHaveLength(2);
+});
+
+it.each([
+  ["reviewer's large plan", "# Plan\n\n" + "A normal plan line.\n".repeat(2000)],
+  ["UTF-8 bytes above the limit", "# Plan\n\n" + "界".repeat(11000)],
+])("review2: %s retains its approval card through the task-page fallback", async (_label, planText) => {
+  const w = await world({ planText });
+  let error: unknown;
+  try { await w.handler.on(w.milestone("plan_ready")); } catch (caught) { error = caught; }
+  expect({ error, posts: w.slack.posts.length }).toEqual({ error: undefined, posts: 1 });
+  expect(w.slack.posts[0]?.text).toContain(`${ORIGIN}/app/sessions/${w.sessionId}`);
+  expect(w.slack.posts[0]?.text).not.toContain("slack.com/docs");
+  expect(await cardIds(w)).toHaveLength(1);
+  expect((await w.stepWorkflow()).canvasLineage).toBeUndefined();
+});
