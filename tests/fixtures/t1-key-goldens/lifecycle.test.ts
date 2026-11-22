@@ -126,10 +126,20 @@ describe("T1 unmodified-base lifecycle goldens", () => {
         const watch = (key: DocumentKey) => key.pk.endsWith("#SETUP_WATCH");
         snapshot.rows = snapshot.rows.filter((row) => !watch(row));
         snapshot.keys = snapshot.keys.filter((key) => !watch(key));
+        // startupReason is asserted on the untouched captures below; exclude only this exact addition from the base comparison.
+        snapshot.taskViewJson = snapshot.taskViewJson.replace('"startupReason":"own-machine-starting",', "");
         for (const row of [...snapshot.keys, ...snapshot.rows]) row.pk = strip(row.pk);
         snapshot.keys.sort((a: DocumentKey, b: DocumentKey) => a.pk.localeCompare(b.pk) || a.sk.localeCompare(b.sk));
         snapshot.rows.sort((a: DocumentKey, b: DocumentKey) => a.pk.localeCompare(b.pk) || a.sk.localeCompare(b.sk));
         snapshot.workspaceOperationsJson = JSON.stringify((JSON.parse(snapshot.workspaceOperationsJson) as DocumentKey[]).map((row: DocumentKey) => ({ ...row, pk: strip(row.pk) })));
+      }
+      for (const snapshot of snapshots) {
+        const view = JSON.parse(snapshot.taskViewJson) as TaskView;
+        if (view.status === "STARTING") {
+          expect(view.startupReason, `startupReason at ${snapshot.phase}`).toBe("own-machine-starting");
+        } else {
+          expect(view, `startupReason absent at ${snapshot.phase}`).not.toHaveProperty("startupReason");
+        }
       }
       expect(`${JSON.stringify(normalizeT1Golden(normalized), null, 2)}\n`).toBe(`${JSON.stringify(base, null, 2)}\n`);
       // The prepare watch lives only until the prepare's result: at most one row before it, none from the result onward (incl. close).

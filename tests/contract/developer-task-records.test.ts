@@ -10,6 +10,38 @@ const PLANTED = "xoxb-1111111111-planted-secret";
 
 describe("task status (R4, FR-025)", () => {
 
+  it.each(["ACCEPTED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"])("keeps a PLAN_CRITIQUE %s advisory to the last task result", (status) => {
+    const plan = { ...op("task", "SUCCEEDED", "t1"), workflowMode: "PLAN" };
+    const critique = { ...op("task", status, "t2", "plan check failed"), workflowMode: "PLAN_CRITIQUE" };
+    expect(deriveTaskStatus({ workspaceStatus: "READY", operations: [critique, plan] })).toEqual({ status: "SUCCEEDED", closing: false, current: plan });
+  });
+
+  it.each(["ACCEPTED", "RUNNING", "SUCCEEDED", "FAILED"])("uses the build's %s status after an advisory failure", (status) => {
+    const build = { ...op("task", status, "t3"), workflowMode: "IMPLEMENT" };
+    const derived = deriveTaskStatus({ workspaceStatus: "READY", operations: [build, { ...op("task", "FAILED", "t2"), workflowMode: "PLAN_CRITIQUE" }] });
+    expect(derived.status).toBe(status === "ACCEPTED" ? "RUNNING" : status);
+    expect(derived.current).toEqual(build);
+  });
+
+  it.each([undefined, "IMPLEMENT", "PLAN", "REVIEW", "PLAN_CRITIQUE_UNKNOWN"])("keeps a real failure with mode %s, regardless of free text", (workflowMode) => {
+    const failed = { ...op("task", "FAILED", "t2", "advisory PLAN_CRITIQUE plan check failed"), workflowMode };
+    expect(deriveTaskStatus({ workspaceStatus: "READY", operations: [op("task", "SUCCEEDED", "t1"), failed] })).toMatchObject({ status: "FAILED", current: failed, failure: { category: "task_failed" } });
+  });
+
+  it.each(["ACCEPTED", "SUCCEEDED", "FAILED"])("keeps publish %s status and failure category unchanged", (status) => {
+    const publish = op("publish", status, "t2", "push rejected");
+    const derived = deriveTaskStatus({ workspaceStatus: "READY", operations: [publish, op("task", "SUCCEEDED", "t1"), { ...op("task", "FAILED", "t3"), workflowMode: "PLAN_CRITIQUE" }] });
+    expect(derived.status).toBe(status === "ACCEPTED" ? "RUNNING" : status);
+    expect(derived.current).toEqual(publish);
+    expect(derived.failure?.category).toBe(status === "FAILED" ? "publication_failed" : undefined);
+  });
+
+  it("keeps an advisory-only task starting and preserves close precedence", () => {
+    const operations = [{ ...op("task", "FAILED", "t1"), workflowMode: "PLAN_CRITIQUE" }];
+    expect(deriveTaskStatus({ workspaceStatus: "READY", operations })).toEqual({ status: "STARTING", closing: false });
+    expect(deriveTaskStatus({ workspaceStatus: "CLOSED", operations })).toEqual({ status: "CLOSED", closing: false });
+  });
+
   it("keeps compute lost during setup worker_unavailable, and says to start a new task, not to retry (#154)", () => {
     const derived = deriveTaskStatus({
       workspaceStatus: "PREPARATION_FAILED", pointer: {},

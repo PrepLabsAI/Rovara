@@ -35,6 +35,7 @@ import {
   DEVELOPER_TASK_LIST_MAX,
   DEVELOPER_TASK_SUMMARY_MAX,
   DeveloperTaskStatusSchema,
+  DeveloperTaskViewSchema,
   createCandidateManifest,
   WorkflowDependencyResultSchema,
   projectCatalogKey,
@@ -159,7 +160,7 @@ import {
   workflowFindingProblem, GENERAL_FAKE_MADE_NOTE,
   type DeveloperSignInMethod,
 } from "@agentx/contracts";
-import type { z } from "zod";
+import { z } from "zod";
 import { channelLabel, decideMode, type BoundChannel } from "../developer/share.js";
 import { PULL_REQUEST_PARTIAL_REVIEW_LINE, PULL_REQUEST_STATUS_END, PULL_REQUEST_STATUS_START } from "../developer/pull-request-feedback-section.js";
 import { releaseConflict, releaseItems } from "../developer/limits.js";
@@ -167,6 +168,7 @@ import {
   aiToolTurn,
   byCreated,
   deriveTaskStatus,
+  taskStartupView,
   developerTaskIdentity,
   isE2EPlanCorrectionBlockReason,
   inertName,
@@ -1144,7 +1146,7 @@ export async function taskView(
     closedAt: task.closedAt,
     workspaceStatus: workspace.status,
     pointer,
-    operations: operations.map((operation) => ({ id: operation.id, kind: operation.kind, status: operation.status, error: operation.error, createdAt: operation.createdAt, updatedAt: operation.updatedAt, fence: operation.fence })),
+    operations: operations.map((operation) => ({ id: operation.id, kind: operation.kind, status: operation.status, workflowMode: operation.workflowMode, error: operation.error, createdAt: operation.createdAt, updatedAt: operation.updatedAt, fence: operation.fence })),
   });
   const workflowWaitingForE2ECompute = task.workflow?.stage === "VERIFY" && task.workflow.state === "WAITING"
     && task.workflow.e2e?.required === true && task.workflow.e2e.currentRoundId === undefined;
@@ -1226,6 +1228,7 @@ export async function taskView(
     title: task.title,
     project: task.project,
     status: derived.status,
+    ...taskStartupView(derived, workspace, operations),
     ...(workflow === undefined ? {} : { workflow: withoutDesignReviewMoney(workflow, revealMoney) }),
     ...(e2ePresentation === undefined ? {} : { e2ePresentation }),
     ...(derived.failure === undefined ? {} : { failure: derived.failure }),
@@ -1311,12 +1314,24 @@ function decodeCursor(value: string | null): string | undefined {
   return fields.sk;
 }
 
+async function listStartupView(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, task: DeveloperTaskRecord, engine: "core" | "workflow", workflowStartup: Pick<DeveloperTaskView, "startupReason">, listedStatus: DeveloperTaskStatus): Promise<Pick<DeveloperTaskView, "startupReason">> {
+  if (listedStatus !== "STARTING") return {};
+  if (engine !== "core") return workflowStartup;
+  // Ask the owning engine as this caller; never read a core workspace through workflow actions.
+  const answer = await deps.coreTasks?.route({ method: "GET", path: `/v1/dev/tasks/${task.taskId}`, headers: {} }, caller);
+  if (answer?.statusCode !== 200) return {};
+  const parsed = z.object({ task: DeveloperTaskViewSchema.pick({ startupReason: true }).extend({ taskId: z.literal(task.taskId) }) }).parse(JSON.parse(answer.body));
+  const { taskId: _taskId, ...startup } = parsed.task;
+  void _taskId;
+  return startup;
+}
+
 /**
  * Core task web routes (Cloud #188 item 5): a listed row's detail (`?detail=1`), from the task record the list already read: the workflow's stage, state, revision, path and block reason (the workflow
  * task's own view when the list worked it out, which reads a stranded planning run as blocked, as the task read does), the pull requests the workflow recorded, what it has cost and its limit, the workflow's outcome and, for a core task, Understand's current round (its questions and whether each is answered). A workflow
  * task's cost is its own spend totals; a core task's cost and limit are the core's (its owner round's money read), asked as this caller. A part that is not known is left out.
  */
-async function listRowDetail(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, task: DeveloperTaskRecord, engine: "core" | "workflow", viewWorkflow: DeveloperTaskView["workflow"] | undefined): Promise<DeveloperTaskListDetail> {
+async function listRowDetail(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, task: DeveloperTaskRecord, engine: "core" | "workflow", viewWorkflow: DeveloperTaskView["workflow"] | undefined, startup: Pick<DeveloperTaskView, "startupReason">, listedStatus: DeveloperTaskStatus): Promise<DeveloperTaskListDetail> {
   const workflow = viewWorkflow ?? task.workflow;
   const pulls = (task.workflow?.pullRequests ?? []).slice(0, 32).map((pull) => ({ repository: pull.repositoryId, number: pull.number, url: pull.url, state: pull.state }));
   const money = engine === "core" ? await deps.coreTasks?.taskMoney?.(caller, task.taskId).catch(() => undefined) : undefined;
@@ -1326,6 +1341,7 @@ async function listRowDetail(deps: DeveloperTaskRouteDependencies, caller: Devel
   const asked = engine === "core" ? understandRoundOf(workflow) : undefined;
   const round = asked !== undefined && (await deps.coreTasks?.taskReadable?.(caller, task.taskId).catch(() => false)) === true ? asked : undefined;
   const detail: DeveloperTaskListDetail = {
+    ...await listStartupView(deps, caller, task, engine, startup, listedStatus).catch(() => ({})),
     ...(workflow === undefined ? {} : { workflow: { stage: workflow.stage, state: workflow.state, revision: workflow.revision, path: workflow.path, ...(workflow.blockReason === undefined ? {} : { blockReason: workflow.blockReason }) } }),
     ...(pulls.length === 0 ? {} : { pullRequests: pulls }),
     ...(spent === undefined ? {} : { costUsd: spent }),
@@ -1375,6 +1391,7 @@ async function listTasks(deps: DeveloperTaskRouteDependencies, caller: Developer
         const task = row.status !== "CLOSED" || deps.companyId !== undefined ? await get<DeveloperTaskRecord>(deps, taskKey(row.taskId)) : undefined;
         const visible = deps.companyId === undefined || (task !== undefined && task.developerId === caller.developerId && recordInCompany(task, deps.companyId));
         let viewWorkflow: DeveloperTaskView["workflow"] | undefined;
+        let startup: Pick<DeveloperTaskView, "startupReason"> = {};
         let engine: "core" | "workflow" | undefined;
         if ((row.status !== "CLOSED" || deps.companyId !== undefined) && visible) {
           // Lane E2: a core task's row is listed as its index row says; the workflow never works out (or rewrites) its status.
@@ -1387,6 +1404,7 @@ async function listTasks(deps: DeveloperTaskRouteDependencies, caller: Developer
             };
             const view = await taskView(deps, task, { events: 0, details: false, ...(loaded === undefined ? {} : { loaded }) });
             viewWorkflow = view.workflow;
+            startup = DeveloperTaskViewSchema.pick({ startupReason: true }).parse(view);
             current = view.status;
             if (deps.companyId !== undefined) updatedAt = view.updatedAt;
             if (current !== row.status) {
@@ -1401,7 +1419,7 @@ async function listTasks(deps: DeveloperTaskRouteDependencies, caller: Developer
         const matches = visible && data !== undefined && (project === null || data.project === project) && (status === undefined || !status.success || current === status.data);
         if (matches && data !== undefined) {
           // The detail only from the task record itself (the caller's own, in their company), never from an index row alone.
-          const detail = detailed && task !== undefined && task.developerId === caller.developerId && visible ? await listRowDetail(deps, caller, task, engine ?? await ownerOfExistingTask(deps, row.taskId), viewWorkflow) : {};
+          const detail = detailed && task !== undefined && task.developerId === caller.developerId && visible ? await listRowDetail(deps, caller, task, engine ?? await ownerOfExistingTask(deps, row.taskId), viewWorkflow, startup, current) : {};
           tasks.push({ taskId: data.taskId, title: data.title, project: data.project, status: current, shared: data.shared, createdAt: data.createdAt, updatedAt, ...detail });
           if (tasks.length >= limit) return more ? { tasks, nextCursor: encodeCursor(row.sk) } : { tasks };
         }

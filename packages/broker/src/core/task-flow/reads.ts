@@ -1,7 +1,7 @@
 import { locateWorkspace, type WorkspaceLocation } from "./workspace-location.js";
 // Lane L6a, task flow core: reading a task. A task of someone else reads as "not found" (no leak).
-import { PullRequestSummarySchema, AgentXError, IMPLICIT_COMPANY_ID, OrgIdSchema, agentXError, type DeveloperTaskFailure, type DeveloperTaskStatus, type StoredDocument, type WorkflowSnapshot } from "@agentx/contracts";
-import { deriveTaskStatus, taskIndexKey, type DeveloperTaskIndexRecord } from "../../developer/task-records.js";
+import { PullRequestSummarySchema, AgentXError, IMPLICIT_COMPANY_ID, OrgIdSchema, agentXError, type DeveloperTaskFailure, type DeveloperTaskView, type DeveloperTaskStatus, type StoredDocument, type WorkflowSnapshot } from "@agentx/contracts";
+import { taskStartupView, deriveTaskStatus, taskIndexKey, type DeveloperTaskIndexRecord } from "../../developer/task-records.js";
 import { taskOwnerView, type TaskOwnerView } from "../../developer/task-owner-view.js";
 import { taskNotFound } from "./access.js";
 import type { TaskCaller, TaskFlowDeps } from "./deps.js";
@@ -18,6 +18,7 @@ export interface TaskView {
   project: string;
   title: string;
   status: DeveloperTaskStatus;
+  startupReason?: DeveloperTaskView["startupReason"];
   closing: boolean;
   workspaceId: string;
   startingRevision: number;
@@ -125,6 +126,7 @@ export async function taskViewOf(deps: TaskFlowDeps, task: TaskRecord): Promise<
     project: task.project,
     title: task.title,
     status: derived.status,
+    ...taskStartupView(derived, workspace, operations),
     closing: derived.closing,
     workspaceId: task.workspaceId,
     startingRevision: task.startingRevision,
