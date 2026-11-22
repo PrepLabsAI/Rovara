@@ -22,7 +22,8 @@ import type { DeveloperTaskRouteDependencies } from "./developer-tasks.js";
 import { grantTaskReader, listTaskReaders, readsAsReader, revokeTaskReader } from "./task-readers.js";
 import { getTaskPeople } from "../developer/task-people.js";
 import { addTaskWebPerson, getTaskPeopleCandidates, getTaskPeopleProposal, proposeTaskOwnership, proposeTaskPeopleRole } from "../developer/task-people-effects.js";
-import { listCorePlanComments, readCoreTaskDiff } from "../developer/task-code-routes.js";
+import { createCorePlanComment, listCorePlanComments, readCoreTaskDiff } from "../developer/task-code-routes.js";
+import type { ArtifactReader } from "../core/task-flow/deps.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
 import { readTaskLog } from "../core/task-log/store.js";
 import { coreTaskRuleOf } from "../core-host/task-rule-paths.js";
@@ -119,21 +120,35 @@ async function coreTimeline(store: Pick<DocumentStore, "query">, companyId: OrgI
   return events.slice(-limit);
 }
 
+/** Comment targets are verified with the core's company-scoped artifact reader. */
+function ruleDependencies(deps: DeveloperTaskRouteDependencies, artifacts: ArtifactReader | undefined): DeveloperTaskRouteDependencies {
+  if (artifacts === undefined) return deps;
+  return { ...deps, actions: { ...deps.actions, readArtifact: async (key, maxBytes) => {
+    const bytes = await artifacts.get(key, maxBytes);
+    if (bytes === undefined) throw Object.assign(new Error("artifact not found"), { name: "NoSuchKey" });
+    return Buffer.from(bytes).toString("utf8");
+  } } };
+}
+
+async function coreComments(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, task: DeveloperTaskRecord, request: Parameters<CoreTaskRuleRoutes["route"]>[0]["request"]) {
+  return request.method === "POST" ? createCorePlanComment(deps, caller, task, bodyOf(request)) : listCorePlanComments(deps, caller, task);
+}
+
 /**
  * The old routes, for a core task. `depsFor` builds, for this person, exactly the dependencies the developer routes build for their task routes (`developerTaskRouteDependencies`), with the caller's company.
  */
-async function documentRoute(rest: string, deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, task: DeveloperTaskRecord, url: URL): Promise<BrokerResponse | undefined> {
+async function documentRoute(rest: string, deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, task: DeveloperTaskRecord, url: URL, request: CoreTaskRuleRouteInput["request"]): Promise<BrokerResponse | undefined> {
   if (rest === "diff") return json(await readCoreTaskDiff(deps, caller, task, url));
-  if (rest === "comments") return json(await listCorePlanComments(deps, caller, task));
+  if (rest === "comments") return json(await coreComments(deps, caller, task, request));
   return undefined;
 }
 
-export function createCoreTaskRuleRoutes(depsFor: (person: { developerId: string; name: string }, companyId: OrgId) => DeveloperTaskRouteDependencies): CoreTaskRuleRoutes {
+export function createCoreTaskRuleRoutes(depsFor: (person: { developerId: string; name: string }, companyId: OrgId) => DeveloperTaskRouteDependencies, artifacts?: ArtifactReader): CoreTaskRuleRoutes {
   return {
     async readsAsReader(input) {
       const task = input.task as unknown as DeveloperTaskRecord;
       if (input.task["companyId"] !== input.companyId || typeof task.taskId !== "string") return false;
-      const deps: DeveloperTaskRouteDependencies = { ...depsFor(input.person, input.companyId), companyId: input.companyId };
+      const deps: DeveloperTaskRouteDependencies = { ...ruleDependencies(depsFor(input.person, input.companyId), artifacts), companyId: input.companyId };
       return await readsAsReader(deps, task, input.person.developerId);
     },
     async route(input) {
@@ -143,7 +158,7 @@ export function createCoreTaskRuleRoutes(depsFor: (person: { developerId: string
       const task = input.task as unknown as DeveloperTaskRecord;
       // The core read the task from this company; it is checked once more here, so nothing below can act on another company's task.
       if (task.taskId !== taskId || input.task["companyId"] !== input.companyId) throw agentXError("TASK_NOT_FOUND", `no task ${taskId} of yours`);
-      const deps: DeveloperTaskRouteDependencies = { ...depsFor(input.person, input.companyId), companyId: input.companyId };
+      const deps: DeveloperTaskRouteDependencies = { ...ruleDependencies(depsFor(input.person, input.companyId), artifacts), companyId: input.companyId };
       const log = (entry: Record<string, unknown>): void => { deps.log?.(entry); };
       const caller: DeveloperCaller = { developerId: input.person.developerId, sessionId: "core", amr: "oidc", name: input.person.name };
       const url = new URL(input.request.path, "https://agentx.invalid");
@@ -153,7 +168,7 @@ export function createCoreTaskRuleRoutes(depsFor: (person: { developerId: string
       if (rest === "people/role") return json({ change: await proposeTaskPeopleRole(effects(deps), caller, taskId, parse(TaskPeopleRoleRequestSchema, bodyOf(input.request), log, "people/role")) });
       if (rest === "people/take-ownership") return json({ change: await proposeTaskOwnership(effects(deps), caller, taskId, parse(TaskPeopleTakeOwnershipRequestSchema, bodyOf(input.request), log, "people/take-ownership")) });
       if (rest.startsWith("people/requests/")) return json({ change: await getTaskPeopleProposal(effects(deps), caller, taskId, safeDecode(rest.slice("people/requests/".length))) });
-      const document = await documentRoute(rest, deps, caller, task, url);
+      const document = await documentRoute(rest, deps, caller, task, url, input.request);
       if (document !== undefined) return document;
       // Readers and the timeline: the task's own person, or (to read) a reader it is shared with who is still a project member; anyone else reads no such task, in the old owner check's words.
       const owner = task.developerId === caller.developerId;

@@ -5,6 +5,8 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { ON_THE_WEBSITE_MESSAGE, WorkflowSnapshotSchema, agentXError, orgProjectCatalogKey, projectRevisionKey, change, type CodeBuildCheckResult, type AuditSink, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
+import { taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { blockedReview, code, parserId, plain } from "../support/task-actions-world.js";
 import { FakeCodeHost, FakeHostModel } from "@agentx/broker/fakes";
 import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
 import { codeBuildCheckRunner } from "../../packages/broker/src/plugins/check-runner/codebuild/index.js";
@@ -12,8 +14,6 @@ import { publicationGateCallback } from "../../packages/broker/src/core/build-st
 import { openPullRequest } from "../../packages/broker/src/core/build-step/publish.js";
 import { workspaceKeys } from "../../packages/broker/src/core/task-flow/workspace-location.js";
 import { workspaceOperations } from "../../packages/broker/src/core/task-flow/reads.js";
-import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { blockedReview, plain } from "../support/task-actions-world.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createScriptToken, readScriptToken } from "../../packages/broker/src/core/script-tokens/index.js";
@@ -568,7 +568,7 @@ describe("the owner's moves on a core task (send back, review findings, continue
     const digest = "a".repeat(64);
     const findings = await routes.route(post(`/v1/dev/tasks/${taskId}/workflow/review-findings`, { requestId: randomUUID(), expectedRevision: revision, candidateDigest: digest, resolutions: [{ findingId: digest, action: "ACCEPT", note: "Fine." }] }), own);
     expect(findings?.statusCode).toBe(409);
-    expect(errorOf(findings)).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect(errorOf(findings)).toMatchObject({ code: "CHANGE_STALE" });
     const more = await routes.route(post(`/v1/dev/tasks/${taskId}/continue`, { requestId: randomUUID(), instructions: "Also add a test." }), own);
     expect(errorOf(more)?.message).toContain("approval steps");
     // A body that is not one JSON object is refused before anything is read.
@@ -585,6 +585,111 @@ describe("the owner's moves on a core task (send back, review findings, continue
     const again = await routes.route(post(`/v1/dev/tasks/${taskId}/workflow/send-back`, body), own);
     expect(again?.statusCode).toBe(200);
     expect(JSON.parse(again!.body)).toMatchObject({ task: { taskId, workflow: { stage: "IMPLEMENT" } } });
+  });
+
+  it.each(["workflow/review-findings", "page-findings"])("still accepts the documented findings input on %s and replays it without another write", async (action) => {
+    const { world, routes, own, taskId } = await started();
+    const revision = await blockReview(world, taskId);
+    const body = {
+      requestId: randomUUID(), expectedRevision: revision, candidateDigest: code.digest,
+      resolutions: [{ findingId: parserId, action: "FIX", note: "Keep the footer line." }],
+    };
+    const path = action === "page-findings" ? `/v1/app/tasks/${taskId}/review-findings` : `/v1/dev/tasks/${taskId}/${action}`;
+    const response = await routes.route(post(path, body), own);
+    expect(response?.statusCode).toBe(200);
+    expect(JSON.parse(response!.body)).toMatchObject({ task: { taskId, workflow: { stage: "IMPLEMENT" } } });
+    const committed = await world.store.get(taskKey(taskId));
+    expect(committed).toMatchObject({ workflow: { decisions: [expect.objectContaining({ requestId: body.requestId })] } });
+    const transact = vi.spyOn(world.store, "transact");
+    try {
+      const replay = await routes.route(post(path, body), own);
+      expect(replay?.statusCode).toBe(200);
+      expect(JSON.parse(replay!.body)).toEqual(JSON.parse(response!.body));
+      expect(await world.store.get(taskKey(taskId))).toEqual(committed);
+      expect(transact).not.toHaveBeenCalled();
+    } finally {
+      transact.mockRestore();
+    }
+  });
+
+  it.each(["workflow/send-back", "workflow/review-findings", "page-findings"])("returns an applied refresh answer after %s commits and the owned-task reload fails, also on replay", async (action) => {
+    let reads = 0;
+    let failReload = true;
+    const access = ownerRule();
+    const world = await started({ ...access, canAct: async (principal, task) => {
+      reads += 1;
+      if (failReload && reads === 3) throw agentXError("IDEMPOTENCY_CONFLICT", "People changed; refresh the task and try again");
+      return access.canAct(principal, task);
+    } });
+    const { routes, own, taskId } = world;
+    const revision = await blockReview(world.world, taskId);
+    const body = action === "workflow/send-back" ? sendBackBody(revision) : {
+      requestId: randomUUID(), expectedRevision: revision, candidateDigest: code.digest,
+      resolutions: [{ findingId: parserId, action: "FIX", note: "Keep the footer line." }],
+    };
+    const path = action === "page-findings" ? `/v1/app/tasks/${taskId}/review-findings` : `/v1/dev/tasks/${taskId}/${action}`;
+    const applied = await routes.route(post(path, body), own);
+    expect(applied?.statusCode).toBe(409);
+    expect(JSON.parse(applied!.body)).toEqual({ error: { code: "COMMITTED_REFRESH_NEEDED", message: "The change was applied. Refresh to read the current task before acting again." } });
+    const committed = await world.world.store.get(taskKey(taskId));
+    const workspaceId = committed?.["workspaceId"];
+    if (typeof workspaceId !== "string") throw new Error("committed task has no workspace");
+    const workspace = workspaceKey(FAKE_COMPANY, workspaceId);
+    const operations = await world.world.store.query({ pk: workspace.pk });
+    expect(committed).toMatchObject({ workflow: { decisions: [expect.objectContaining({ requestId: body.requestId })] } });
+    reads = 0;
+    const replay = await routes.route(post(path, body), own);
+    expect(replay?.statusCode).toBe(409);
+    expect(JSON.parse(replay!.body)).toEqual(JSON.parse(applied!.body));
+    expect(await world.world.store.get(taskKey(taskId))).toEqual(committed);
+    expect(await world.world.store.query({ pk: workspace.pk })).toEqual(operations);
+    failReload = false;
+    expect((await routes.route(get(`/v1/dev/tasks/${taskId}`), own))?.statusCode).toBe(200);
+  });
+
+  it.each([
+    ["workflow/send-back", 1], ["workflow/send-back", 2],
+    ["workflow/review-findings", 1], ["workflow/review-findings", 2],
+    ["page-findings", 1], ["page-findings", 2],
+  ] as const)("keeps a People conflict on %s at owner read %s as a refusal with no applied claim or write", async (action, failAt) => {
+    let fail = false;
+    let reads = 0;
+    const access = ownerRule();
+    const { world, routes, own, taskId } = await started({ ...access, canAct: async (principal, task) => {
+      if (fail && ++reads === failAt) throw agentXError("IDEMPOTENCY_CONFLICT", "People changed; refresh the task and try again");
+      return access.canAct(principal, task);
+    } });
+    const revision = await blockReview(world, taskId);
+    const before = await world.store.get(taskKey(taskId));
+    const transact = vi.spyOn(world.store, "transact");
+    const body = action === "workflow/send-back" ? sendBackBody(revision) : {
+      requestId: randomUUID(), expectedRevision: revision, candidateDigest: code.digest,
+      resolutions: [{ findingId: parserId, action: "FIX", note: "Keep the footer line." }],
+    };
+    const path = action === "page-findings" ? `/v1/app/tasks/${taskId}/review-findings` : `/v1/dev/tasks/${taskId}/${action}`;
+    fail = true;
+    const refused = await routes.route(post(path, body), own);
+    expect(reads).toBe(failAt);
+    expect(refused?.statusCode).toBe(409);
+    expect(errorOf(refused)?.code).toBe("IDEMPOTENCY_CONFLICT");
+    expect(await world.store.get(taskKey(taskId))).toEqual(before);
+    expect(transact).not.toHaveBeenCalled();
+  });
+
+  it.each(["workflow/review-findings", "page-findings"])("keeps a stale revision on %s as CHANGE_STALE with no applied claim or write", async (action) => {
+    const { world, routes, own, taskId } = await started();
+    const revision = await blockReview(world, taskId);
+    const before = await world.store.get(taskKey(taskId));
+    const transact = vi.spyOn(world.store, "transact");
+    const path = action === "page-findings" ? `/v1/app/tasks/${taskId}/review-findings` : `/v1/dev/tasks/${taskId}/${action}`;
+    const refused = await routes.route(post(path, {
+      requestId: randomUUID(), expectedRevision: revision - 1, candidateDigest: code.digest,
+      resolutions: [{ findingId: parserId, action: "FIX", note: "Keep the footer line." }],
+    }), own);
+    expect(refused?.statusCode).toBe(409);
+    expect(errorOf(refused)?.code).toBe("CHANGE_STALE");
+    expect(await world.store.get(taskKey(taskId))).toEqual(before);
+    expect(transact).not.toHaveBeenCalled();
   });
 
   it("holds the round to the deployment's money cap: a task over its cap, or whose spend cannot be told, starts no coding and writes nothing", async () => {
@@ -1305,4 +1410,32 @@ it("routes manual open-PR to its owner and opens nothing until exact SUCCEEDED b
   await world.store.update({ key, ops: [change.set("evidence.status", "SUCCEEDED")] });
   expect(await openPullRequest(deps, operation!, callback)).toMatchObject({ number: 1, draft: true });
   expect(model.changeRequests).toHaveLength(1);
+});
+
+// The retained plan-comment POST must stay admitted by the production scope registry.
+it("core plan comments use the existing developer tasks:act scope", async () => {
+  const { devRouteOf } = await import("../../packages/broker/src/aws/dev-route-scopes.js");
+  const path = "/v1/dev/tasks/11111111-1111-4111-8111-111111111111/comments";
+  expect(devRouteOf("POST", path)).toMatchObject({ requires: "tasks:act" });
+  expect(devRouteOf("GET", path)).toMatchObject({ requires: "tasks:read" });
+  expect(devRouteOf("DELETE", path)).toBeUndefined();
+});
+
+// The server-read routes belong to the outer DEV dispatcher, with no APP aliases.
+describe("dedicated server-read route registration", () => {
+  it("registers only the approved methods/scopes and no script-token APP alias", async () => {
+    const { devRouteOf, appRouteOf } = await import("../../packages/broker/src/aws/dev-route-scopes.js");
+    expect(devRouteOf("GET", "/v1/dev/tasks/start-requests/original")).toMatchObject({ requires: "tasks:read" });
+    expect(devRouteOf("POST", "/v1/dev/company/connections/impact")).toMatchObject({ requires: "full" });
+    expect(devRouteOf("DELETE", "/v1/dev/company/connections/impact")).toBeUndefined();
+    expect(appRouteOf("GET", "/v1/app/task-start-requests/original")).toBeUndefined();
+    expect(appRouteOf("POST", "/v1/app/github/disconnect-preview")).toBeUndefined();
+  });
+  it("reaches the outer broker and preserves the original operation ID", async () => {
+    const { serverReadWorld } = await import("../support/server-read-world.js");
+    const w = await serverReadWorld();
+    const r = await w.start(); expect(r.status).toBe(200); expect(r.body.requestId).toBe(w.requestId);
+    w.addInstallation(); const impact = await w.impact();
+    expect(impact.status).toBe(200); expect(impact.body).not.toHaveProperty("requestId");
+  });
 });

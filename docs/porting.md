@@ -96,3 +96,17 @@ Never write a name, even in pieces, in a test, a comment or this page: tests use
 - No AWS account ids, internal hostnames, ARNs with real account numbers or staging URLs. The guard knows the staging id, ARN and ECR
   account ids, `account`/`accountId` fields and API Gateway hosts; the rest is for the reviewer.
 - Changing the allowlists in the guard (for example another contracts file Code keeps) changes the Cloud line and needs both owners.
+
+# Hosted owner move, refresh needed
+
+Hosted core task send-back and review-findings responses distinguish a refused move from a confirmed move whose current view cannot be read. This covers the developer workflow routes and the website review-findings route. The shared hosted owner-action wrapper also protects a successful continue response read.
+
+After the move commits (or the same request is recognized as already committed), a failed task projection returns HTTP 409:
+
+```json
+{"error":{"code":"COMMITTED_REFRESH_NEEDED","message":"The change was applied. Refresh to read the current task before acting again."}}
+```
+
+Treat this as applied, hold the pending action, and re-read the task before another action. Never interpret it as a final refusal or blindly resend. A lost network response or an uncertain transaction is still an unknown outcome; this code requires proof of a commit. Access checks still run and a failed check exposes no task data.
+
+A different payload under a used request ID still returns 409 IDEMPOTENCY_CONFLICT before applying that invocation. A stale revision or failed conditional move in the core send-back and findings actions returns 409 CHANGE_STALE. Existing unrelated error contracts are unchanged. Older clients still receive the same 409 status and may keep an unrecognized code on their unknown-outcome path.

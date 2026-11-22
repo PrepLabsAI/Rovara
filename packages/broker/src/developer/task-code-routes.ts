@@ -32,7 +32,7 @@ export interface TaskMessageView { messageId: string; kind: "comment" | "steer";
 export interface TaskMessagesResponse { messages: TaskMessageView[]; next?: string }
 export interface TaskMessageSendResponse { message: TaskMessageView }
 export interface TaskDiffResponse { repository: string; number: number; page: number; files: Array<{ path: string; additions: number; deletions: number; patch: string }>; more: boolean }
-export interface PlanCommentView { commentId: string; document: CommentDocument; author: { developerId: string; name: string }; text: string; at: string; rev: number; resolved: boolean }
+export interface PlanCommentView { commentId: string; document: CommentDocument; author: { developerId: string; name: string }; text: string; at: string; rev: number; resolved: boolean; anchor?: string; replyTo?: string }
 export interface PlanCommentsResponse { comments: PlanCommentView[] }
 export interface PlanCommentCreateResponse { comment: PlanCommentView }
 
@@ -110,7 +110,11 @@ function shownName(name: string): string {
 
 function planCommentView(comment: TaskComment): PlanCommentView {
   // `resolved`: the comment was sent with a decision, so the planner has handled it and it can no longer change.
-  return { commentId: comment.commentId, document: comment.document, author: authorOf(comment), text: redactText(comment.text), at: comment.createdAt, rev: comment.rev, resolved: comment.lockedBy !== undefined };
+  const anchor = anchorOfTarget(comment.target);
+  return {
+    commentId: comment.commentId, document: comment.document, author: authorOf(comment), text: redactText(comment.text), at: comment.createdAt, rev: comment.rev, resolved: comment.lockedBy !== undefined,
+    ...(anchor === undefined ? {} : { anchor }), ...(comment.parentId === undefined ? {} : { replyTo: comment.parentId }),
+  };
 }
 
 const liveComments = (comments: readonly TaskComment[]): TaskComment[] => comments.filter((comment) => comment.deletedAt === undefined);
@@ -129,6 +133,15 @@ export async function listCorePlanComments(deps: RouteDeps, caller: DeveloperCal
   if (!rowInCompany(task as unknown as Record<string, unknown>, deps.companyId)) throw agentXError("TASK_NOT_FOUND", NOT_FOUND_TASK);
   const access = await resolveCoreTaskAccess(deps, caller, task, "read");
   return { comments: liveComments(await listTaskComments(deps, access.task.taskId)).map(planCommentView) };
+}
+
+/** The existing comment POST for a task already read by the core in the caller's company. */
+export async function createCorePlanComment(deps: RouteDeps, caller: DeveloperCaller, task: TaskAccess["task"], value: unknown): Promise<PlanCommentCreateResponse> {
+  if (!rowInCompany(task as unknown as Record<string, unknown>, deps.companyId)) throw agentXError("TASK_NOT_FOUND", NOT_FOUND_TASK);
+  const actor: PageActor = { ...await resolveCoreTaskAccess(deps, caller, task, "comment"), caller };
+  const input = parseInput(CreateCommentSchema, value, "comment");
+  const comment = await postComment(deps, actor, { requestId: input.requestId, document: input.document, text: input.text, ...(input.anchor === undefined ? {} : { anchor: input.anchor }), ...(input.replyTo === undefined ? {} : { parentId: input.replyTo }) });
+  return { comment: planCommentView(comment) };
 }
 
 function latestVersionOf(task: TaskAccess["task"], document: CommentDocument): number {

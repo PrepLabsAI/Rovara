@@ -801,3 +801,14 @@ describe("task people", () => {
     expect(taskOwnerKey(A, TASK_ID)).toMatch(/^[a-f0-9]{64}$/);
   });
 });
+
+
+describe("side-effect-free People authority", () => {
+  it("refuses a required reconciliation without invoking a writer", async () => {
+    const { resolveTaskPeopleReadAccess } = await import("../../packages/broker/src/developer/task-people.js");
+    const { serverReadWorld, READ_PERSON } = await import("../support/server-read-world.js");
+    const w = await serverReadWorld();
+    await expect(resolveTaskPeopleReadAccess({ get: async () => w.db.get(w.task.pk, "PEOPLE"), checkTaskPerson: async () => ({ subject: { developerId: READ_PERSON }, identity: { developerId: READ_PERSON, name: "Ada", method: "oidc", issuer: "https://idp.example.test", subject: "Ada" }, eligible: false, channelMember: false }) }, w.task as never, READ_PERSON)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    expect(w.send).not.toHaveBeenCalled();
+  });
+});

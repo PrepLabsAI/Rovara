@@ -1,3 +1,4 @@
+import { committedResponse } from "../core/task-flow/committed-response.js";
 import type { WorkflowDecisionRequest } from "@agentx/contracts";
 import { parityTaskRoute, routeParityTask } from "./parity-task-routes.js";
 import { PullRequestResultSchema } from "@agentx/contracts";
@@ -635,8 +636,10 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           const body = jsonBodyOf(request);
           // Each move re-checks who acts (owner or co-owner, else "no such task"), the revision they saw, and the round's money, and writes nothing on a refusal.
           const publication = await performTaskAction(target, taskCaller, taskId, action[2]!, body);
-          const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, taskId);
-          return json(200, { ...publicationAnswer(publication), task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller, membership), maySeeTaskMoney(target, record, caller, membership)) });
+          return await committedResponse(async () => {
+            const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, taskId);
+            return json(200, { ...publicationAnswer(publication), task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller, membership), maySeeTaskMoney(target, record, caller, membership)) });
+          });
         }
         const rule = coreTaskRuleOf(path, request.method);
         if (rule !== undefined) {
@@ -662,8 +665,10 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           const body = jsonBodyOf(request);
           // The move re-checks the owner, the revision and digest they saw, and the round's money, then the security-accept rule (the web app's client, `via: "page"`); a refusal writes nothing.
           await target.actions.resolveFindings({ ...taskCaller, webApp: true }, taskId, body, "page");
-          const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, taskId);
-          return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller, membership), maySeeTaskMoney(target, record, caller, membership)) });
+          return await committedResponse(async () => {
+            const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, taskId);
+            return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller, membership), maySeeTaskMoney(target, record, caller, membership)) });
+          });
         }
         if (isHostedMergePath(path, request.method)) {
           // DEC 254zzz94: the Merge button (hosted-merge-routes.ts holds every rule: the website only for a press, who may merge, Rovara's checks and GitHub's mergeable state, one merge at a time, audit).

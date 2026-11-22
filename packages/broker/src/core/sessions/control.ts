@@ -15,7 +15,7 @@ import {
 } from "@agentx/contracts";
 import { createSessionAccess, requireLevelOf, type SessionAccess, type SessionMembers } from "./access.js";
 import { developerIdOf } from "./create.js";
-import { answerMessage, queuedSteersItem } from "./steer.js";
+import { answerMessage, messageOf as storedMessageOf, queuedSteersItem } from "./steer.js";
 import { closeHasDigest, parseCloseIntent, type CloseIntent } from "../task-flow/close-acceptance.js";
 import { closeFacts, mergeCloseConditions } from "../task-flow/close-conditions.js";
 import { toDocument } from "../task-flow/records.js";
@@ -281,8 +281,9 @@ export function createSessionControl(deps: ControlDependencies) {
       const key = agentSessionKey(session.orgId, session.sessionId, `MESSAGE#${messageId}`);
       const prior = await deps.store.get(key);
       if (prior !== undefined) {
-        const stored = SessionMessageSchema.safeParse(Object.fromEntries(Object.entries(prior).filter(([name]) => !["pk", "sk", "entityType", "orgId", INDEX_EXPIRY_ATTRIBUTE].includes(name))));
-        if (stored.success) return { status: "done", session, repeated: true, message: stored.data };
+        // The same read projection as delivery answers: persisted observations stay off the wire until reader rollout.
+        const stored = storedMessageOf(prior, session);
+        if (stored !== undefined) return { status: "done", session, repeated: true, message: stored };
         return refuse("request_id_reused", "That request ID was already used for something else.");
       }
       if (isEnded(session)) return refuse("ended", SESSION_ENDED_MESSAGE);

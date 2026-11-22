@@ -158,9 +158,11 @@ describe("the knowledge routes at the developer router", () => {
     // D-CORE: the approved read-only close preview is additive; all older hashes stay pinned.
     const closePreview = "GET /v1/dev/tasks/{taskId}/close tasks:read";
     expect(all.filter((row) => row === closePreview)).toEqual([closePreview]);
-    const withPreview = all.filter((row) => !added.includes(row) && row !== inviteResend);
+    const serverReads = ["GET /v1/dev/tasks/start-requests/{requestId} tasks:read", "POST /v1/dev/company/connections/impact full"];
+    expect(all.filter(row => serverReads.includes(row))).toEqual(serverReads);
+    const withPreview = all.filter((row) => !added.includes(row) && row !== inviteResend && !serverReads.includes(row));
     const others = withPreview.filter((row) => row !== preview && row !== closePreview);
-    expect(others).toHaveLength(DEV_ROUTES.length - 6);
+    expect(others).toHaveLength(DEV_ROUTES.length - 8);
     expect(createHash("sha256").update(others.join("\n")).digest("hex")).toBe(OTHER_ROWS_DIGEST);
     // L4-JA7 (rule D): the pin above moved only by the four hosted knowledge-switch rows; with exactly those removed the digest is the one the table had before.
     const switchRows = others.filter((row) => row.includes("/lessons/local-tools "));

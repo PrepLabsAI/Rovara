@@ -253,10 +253,12 @@ describe("the readers of the flow's artifacts are a known set", () => {
     expect(files).toEqual(Object.keys(READERS).sort());
   });
 
-  it("no file outside core/ reads the flow's artifacts except the laptop page's (a hosted consumer would need classifying)", () => {
+  it("only the classified laptop page and core-root comment adapter read the flow reader outside core/", () => {
     const root = join(process.cwd(), "packages/broker/src");
     const outside = sourcesUnder(root).map((path) => relative(root, path)).filter((path) => !path.startsWith("core/"))
       .filter((path) => /\b(?:flow|deps\.flow|flow\.deps)\.artifacts\b|\bdeps\.artifacts\b/u.test(readFileSync(join(root, path), "utf8"))).sort();
-    expect(outside).toEqual(["local/app/page-data.ts"]);
+    // The core root forwards its company-bound reader to comment target validation.
+    // core-task-web-routes-root.test.ts proves the real factory; document prefix/digest checks are retained.
+    expect(outside).toEqual(["aws/core-engine-root.ts", "local/app/page-data.ts"]);
   });
 });

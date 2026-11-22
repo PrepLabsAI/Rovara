@@ -9,7 +9,7 @@ export function coreTaskRuleOf(path: string, method: string): { taskId: string; 
   const match = RULE_PATH.exec(path);
   if (match === null) return undefined;
   const taskId = match[1]!, rest = match[2]!;
-  const served = rest === "people" || rest === "people/candidates" || rest === "events" || rest === "comments" || rest === "diff" || rest === "readers" || rest.startsWith("people/requests/") ? method === "GET"
+  const served = rest === "comments" ? method === "GET" || method === "POST" : rest === "people" || rest === "people/candidates" || rest === "events" || rest === "diff" || rest === "readers" || rest.startsWith("people/requests/") ? method === "GET"
     : rest === "people/add" || rest === "people/role" || rest === "people/take-ownership" ? method === "POST"
       : method === "PUT" || method === "DELETE";
   return served ? { taskId, rest } : undefined;

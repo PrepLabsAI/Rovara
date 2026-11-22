@@ -1,5 +1,5 @@
 // Task actions (owner decision 198): the owner's moves on a task already running that Code did not have, as one service over the task flow's deps. The laptop's routes (`local/app/routes.ts`) and Cloud's call the
-// same functions, so a task of the shared engine can offer them. Each answers the task's view, or throws the refusal (an `AgentXError`) before anything is written.
+// same functions, so a task of the shared engine can offer them. Each answers the task's view. Refusals precede writes; a confirmed send-back/findings move whose view fails answers COMMITTED_REFRESH_NEEDED.
 import { reviewTaskOnRequest } from "./manual-review.js";
 import { continueTask } from "./continue.js";
 import type { TaskCaller, TaskFlowDeps } from "./deps.js";

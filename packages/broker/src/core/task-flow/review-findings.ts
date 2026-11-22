@@ -1,3 +1,4 @@
+import { committedResponse, ownerMoveConflict } from "./committed-response.js";
 // Task actions (owner decision 198), review findings: the owner answers each blocking review finding, "accept" it with a reason (the change goes ahead despite it, and the reason goes in the pull request) or "fix" it
 // (optional instructions); only the findings to fix go back to coding. Cloud's `resolveTaskWorkflowFindings`, over the ports. Today Code has no way for the owner to decide a finding.
 //
@@ -46,14 +47,14 @@ export async function resolveReviewFindings(deps: TaskFlowDeps, options: TaskAct
   const prior = workflow.decisions.find((decision) => decision.requestId === request.requestId);
   if (prior !== undefined) {
     if (prior.source !== "FINDINGS" || prior.workflowRevision !== request.expectedRevision || !sameAnswers(workflow, request, prior.reason)) throw agentXError("IDEMPOTENCY_CONFLICT", REQUEST_ID_USED);
-    return taskViewOf(deps, task);
+    return committedResponse(() => taskViewOf(deps, task));
   }
   // Accepting a security finding is the web page's (DEC 236h): refused before anything else is read or written.
   const now = iso(deps);
   requirePageForSecurityAccept(caller, via, workflow, request);
   // A person's move never skips an approval of more spend.
   if (waitingForSpend(workflow)) throw agentXError("CONFIG_INVALID", WAITING_FOR_SPEND);
-  if (request.expectedRevision !== workflow.revision || workflow.candidate?.digest !== request.candidateDigest) throw agentXError("IDEMPOTENCY_CONFLICT", FINDINGS_OUT_OF_DATE);
+  if (request.expectedRevision !== workflow.revision || workflow.candidate?.digest !== request.candidateDigest) throw agentXError("CHANGE_STALE", FINDINGS_OUT_OF_DATE);
   let next: WorkflowSnapshot;
   try {
     next = resolveWorkflowReviewFindings(workflow, request, { actorId: acting.actorId }, { now }, acting.authority);
@@ -87,8 +88,8 @@ export async function resolveReviewFindings(deps: TaskFlowDeps, options: TaskAct
   if (!committed) {
     const fresh = await readTask(deps, task.taskId);
     const again = fresh?.workflow?.decisions.find((decision) => decision.requestId === request.requestId);
-    if (fresh?.workflow !== undefined && again?.source === "FINDINGS" && again.workflowRevision === request.expectedRevision && sameAnswers(fresh.workflow, request, again.reason)) return taskViewOf(deps, fresh);
-    throw agentXError("IDEMPOTENCY_CONFLICT", FINDINGS_OUT_OF_DATE);
+    if (fresh?.workflow !== undefined && again?.source === "FINDINGS" && again.workflowRevision === request.expectedRevision && sameAnswers(fresh.workflow, request, again.reason)) return committedResponse(() => taskViewOf(deps, fresh));
+    throw ownerMoveConflict(again !== undefined, FINDINGS_OUT_OF_DATE);
   }
   // A fix sends the task back to coding: the lessons seam is told once, by the call that committed (an answer that only accepts findings is an approval and tells nothing). Best effort, bounded (`lessons-tell.ts`).
   if (fixes > 0) await tellLessons(deps, task.taskId);
@@ -96,7 +97,7 @@ export async function resolveReviewFindings(deps: TaskFlowDeps, options: TaskAct
     await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind: due })
       .catch((error: unknown) => log(deps, { event: "task_actions.findings_start_deferred", taskId: task.taskId, kind: due, error: error instanceof Error ? error.name : "unknown" }));
   }
-  return taskViewOf(deps, (await readTask(deps, task.taskId)) ?? task);
+  return committedResponse(async () => taskViewOf(deps, (await readTask(deps, task.taskId)) ?? task));
 }
 
 /**

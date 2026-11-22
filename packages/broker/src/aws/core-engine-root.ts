@@ -1095,7 +1095,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           ...(modelChoices.choiceFor(runtime.companyId) === undefined ? {} : { modelChoice: modelChoices.choiceFor(runtime.companyId)! }),
           taskActions: { roundCap: async (task) => hostedRoundCap(registry, runtime.companyId, now, admissionSettings, projectTaskCap, task) },
           // Cloud #188 item 3: a core task's People, readers, events and plan comments, with the old task routes' own rules.
-          ...(inputs.taskRules === undefined ? {} : { taskRules: createCoreTaskRuleRoutes(inputs.taskRules) }),
+          ...(inputs.taskRules === undefined ? {} : { taskRules: createCoreTaskRuleRoutes(inputs.taskRules, runtime.flow.deps.artifacts) }),
           canReadProject: (personId, project) => projectGrant(personId, project),
           // DEC 254zzz94: the Merge button, over the root's own grant reader, the project's pinned repositories on the registry's code host, and the project's merge method (Code's default: squash).
           merge: {
