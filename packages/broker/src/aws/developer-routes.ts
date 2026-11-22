@@ -687,6 +687,32 @@ async function getSignIn<T>(deps: DeveloperRouteDependencies, pk: string): Promi
   return response.Item;
 }
 
+/** The stored sign-in identity must still seat the person this session was issued to. */
+async function requireSessionSurvivor(deps: DeveloperRouteDependencies, session: SessionRecord, refused: () => Error): Promise<void> {
+  if (session.signedInId === undefined) return;
+  try {
+    const walk = await mergeSurvivor((id) => getSignIn(deps, `DEVELOPER#${id}`), session.signedInId);
+    if (walk.survivorId !== session.developerId) throw refused();
+  } catch { throw refused(); }
+}
+
+/** Reuse consistent sign-in identity reads within one verifier/request, never across requests. */
+function withSignInReads(deps: DeveloperRouteDependencies): DeveloperRouteDependencies {
+  const client = deps.documentClient;
+  const signInTable = deps.developer.signInTableName;
+  const people = new Map<string, Promise<unknown>>();
+  return { ...deps, documentClient: { send(command: unknown): Promise<unknown> {
+    if (!(command instanceof GetCommand) || command.input.TableName !== signInTable || command.input.ConsistentRead !== true
+      || command.input.Key?.sk !== META || typeof command.input.Key.pk !== "string" || !command.input.Key.pk.startsWith("DEVELOPER#")) return client.send(command);
+    const id = command.input.Key.pk;
+    const prior = people.get(id);
+    if (prior !== undefined) return prior;
+    const read = client.send(command);
+    people.set(id, read);
+    return read;
+  } } };
+}
+
 /** Company policy is selected only from live membership and the stored session (OIDC, and since DEC 254e Slack too).
  * Fixed-size reads share one budget and the host's existing SDK timeout; no cache or token company.
  * Undefined: the session is held to the install's own method (the built-in company, a shared-method session of a company with no issuer, or a
@@ -745,6 +771,7 @@ export async function authenticateDeveloper(deps: DeveloperRouteDependencies, cl
 }
 
 async function authenticateSession(deps: DeveloperRouteDependencies, token: { developerId: string; sessionId: string; amr: DeveloperSignInMethod }, storedSession?: SessionRecord, checkInstallEnabled = false): Promise<DeveloperCaller> {
+  deps = withSignInReads(deps);
   const session = storedSession ?? await getSignIn<SessionRecord>(deps, `SESSION#${token.sessionId}`);
   if (session === undefined || session.developerId !== token.developerId || session.revokedAt !== undefined || session.endsAt <= Math.floor(deps.now() / 1000)) {
     throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
@@ -752,6 +779,8 @@ async function authenticateSession(deps: DeveloperRouteDependencies, token: { de
   // Spec 063 FR-003: a registered client's session never acts on Rovara, whatever token names it.
   if (session.clientId !== undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   if (session.amr !== token.amr) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  // Only the server-side signed-in identity may keep the person this session was issued to.
+  await requireSessionSurvivor(deps, session, () => agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN));
   const companyDeveloper = await companyOidcSession(deps, session);
   if (checkInstallEnabled && deps.companies !== undefined && token.amr === "oidc" && companyDeveloper === undefined && !deps.developer.methods.oidc) {
     throw agentXError("AUTH_REQUIRED", "Company sign-in is turned off in this environment; sign in another way with agentx login <url>");
@@ -1084,6 +1113,8 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
   const refused = () => agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
   const parsed = AccessCheckRequestSchema.safeParse(jsonBody(request));
   if (!parsed.success) throw agentXError("CONFIG_INVALID", "the access check takes an optional developerId (64 hex characters) and nothing else");
+  // Authentication and the Slack hint share this request's live identity reads.
+  deps = withSignInReads(deps);
   const authorization = request.headers.authorization;
   const basic = basicClientCredentials(authorization);
   const nowSeconds = Math.floor(deps.now() / 1000);
@@ -1092,6 +1123,7 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
   let clientId: string;
   let companyId: string | undefined;
   let sessionFacts: AccessCheckContext["session"];
+  let signedInId: string | undefined;
   let companyless = false;
   let joinedByInvite = false;
   if (basic !== undefined) {
@@ -1104,7 +1136,7 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
     if (parsed.data.developerId !== undefined) throw refused();
     // DEC 253z: the person's own token is the one form that may answer for a person with no company yet (the web app's "create your company").
     const authenticated = await authenticateClientToken(deps, authorization, nowSeconds, { companyless: true });
-    ({ developerId, administrator } = authenticated);
+    ({ developerId, administrator, signedInId } = authenticated);
     clientId = authenticated.client.clientId;
     companyId = authenticated.companyId;
     companyless = authenticated.companyless === true;
@@ -1136,7 +1168,7 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
   scope?.check();
   if (access === undefined) throw refused();
   // L4-SIGNIN: a Slack session of the person's own token also names its workspace (a convenience for the browser; best effort: unreadable is left out).
-  const slackTeamId = basic === undefined && sessionFacts?.amr === "slack" ? await slackWorkspaceOf(deps, developerId) : undefined;
+  const slackTeamId = basic === undefined && sessionFacts?.amr === "slack" ? await slackWorkspaceOf(deps, developerId, signedInId) : undefined;
   const answer: AccessCheckResponse = { developerId, displayName: access.displayName, nameChosen: access.nameChosen, administrator, projects: access.projects, notices: access.notices, ...company, ...(slackTeamId === undefined ? {} : { slackTeamId }) };
   const context: AccessCheckContext = { clientId, via: basic === undefined ? "token" : "client_secret", developerId, ...(sessionFacts === undefined ? {} : { session: sessionFacts }), now: deps.now() };
   const ruled = await applyAccessRules(deps.developer.accessRules, context, answer);
@@ -1148,8 +1180,14 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
 }
 
 /** L4-SIGNIN: the Slack workspace id on the person's own stored profile, only when it is a workspace id. Any failure is no workspace: it is a convenience, never a gate. */
-async function slackWorkspaceOf(deps: DeveloperRouteDependencies, developerId: string): Promise<string | undefined> {
+async function slackWorkspaceOf(deps: DeveloperRouteDependencies, developerId: string, signedInId?: string): Promise<string | undefined> {
   try {
+    if (signedInId !== undefined) {
+      const walk = await mergeSurvivor((id) => getSignIn(deps, `DEVELOPER#${id}`), signedInId);
+      // The identity recorded by this session must still belong to its person; never use another person's workspace or fall back to the survivor's.
+      if (walk.survivorId !== developerId) return undefined;
+      return slackWorkspaceHint(walk.signedIn.slackTeamId);
+    }
     return slackWorkspaceHint((await getSignIn<Pick<DeveloperRecord, "slackTeamId">>(deps, `DEVELOPER#${developerId}`))?.slackTeamId);
   } catch {
     return undefined;
@@ -1301,11 +1339,17 @@ async function companylessSession(deps: DeveloperRouteDependencies, client: Sign
   } catch { return false; }
 }
 
+/** Only the token scopes still allowed by the registration, or all scopes for a full-access client. */
+function clientTokenScopes(client: SignInClientRecord, scope: unknown): ClientScope[] {
+  return client.fullAccess === true ? [...CLIENT_SCOPES] : scopesOf(scope).filter((entry) => client.scopes?.includes(entry) === true);
+}
+
 /**
  * Spec 063 FR-004, spec 065 FR-003: a registered sign-in client's token, for a live session of its own. The unverified azp
  * only picks which client's audience the token must then verify against. Every refusal is the same 401.
  */
-async function authenticateClientToken(deps: DeveloperRouteDependencies, authorization: string | undefined, nowSeconds: number, options: { companyless?: true } = {}): Promise<{ client: SignInClientRecord; companyId?: string; companyless?: true; developerId: string; administrator: boolean; scopes: ClientScope[]; sessionId: string; amr: DeveloperSignInMethod; startedAt: string; joinedByInvite?: true }> {
+async function authenticateClientToken(deps: DeveloperRouteDependencies, authorization: string | undefined, nowSeconds: number, options: { companyless?: true } = {}): Promise<{ signedInId?: string; client: SignInClientRecord; companyId?: string; companyless?: true; developerId: string; administrator: boolean; scopes: ClientScope[]; sessionId: string; amr: DeveloperSignInMethod; startedAt: string; joinedByInvite?: true }> {
+  deps = withSignInReads(deps);
   const refused = () => agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
   let azp: unknown;
   try {
@@ -1329,6 +1373,8 @@ async function authenticateClientToken(deps: DeveloperRouteDependencies, authori
     const session = await getSignIn<SessionRecord>(deps, `SESSION#${claims.sid}`);
     if (session === undefined || session.clientId !== client.clientId || session.developerId !== claims.sub || session.amr !== amr
       || session.revokedAt !== undefined || session.endsAt <= nowSeconds || Date.parse(session.startedAt) < Date.parse(client.createdAt)) throw refused();
+    // As at redeem/refresh: any revoked, unreadable, unlinked or moved hop ends this session's access.
+    await requireSessionSurvivor(deps, session, refused);
     let companyId: string | undefined;
     let companyless = false;
     try { companyId = await clientCompany(deps, client, session.developerId); }
@@ -1343,9 +1389,9 @@ async function authenticateClientToken(deps: DeveloperRouteDependencies, authori
     if (endedByAdmin(session.startedAt, developer?.sessionsEndedAt)) throw refused();
     // Spec 065 FR-002: only the scopes on the token that the registration still allows. Spec 066: a client with full
     // access has the person's rights, so every scope.
-    const scopes = client.fullAccess === true ? [...CLIENT_SCOPES] : scopesOf(claims.scope).filter((scope) => client.scopes?.includes(scope) === true);
+    const scopes = clientTokenScopes(client, claims.scope);
     return {
-      client, ...(companyId === undefined ? {} : { companyId }), ...(companyless ? { companyless: true as const } : {}), developerId: session.developerId, sessionId: claims.sid, amr,
+      client, ...(session.signedInId === undefined ? {} : { signedInId: session.signedInId }), ...(companyId === undefined ? {} : { companyId }), ...(companyless ? { companyless: true as const } : {}), developerId: session.developerId, sessionId: claims.sid, amr,
       administrator: amr === "oidc" && session.administrator === true && !companyless, scopes, startedAt: session.startedAt,
       // DEC 254b (f): what the sign-in server recorded on THIS session at mint, for the company the session is bound to (checked against live membership above).
       ...(session.joinedByInvite === true && !companyless && companyId !== undefined && (session.companyId ?? IMPLICIT_COMPANY_ID) === companyId ? { joinedByInvite: true as const } : {}),

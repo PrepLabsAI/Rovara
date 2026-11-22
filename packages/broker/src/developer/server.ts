@@ -65,10 +65,10 @@ import {
 import { adaptHttpApiEvent, ownerKeyForSubject, type HttpApiV2Event } from "../aws/lambda.js";
 import { SESSION_MAX_AGE_SECONDS } from "../aws/web-session.js";
 import { mergeSurvivor } from "../aws/install-company.js";
-import { ProviderNotConfiguredError, ProviderUnavailableError, slackWorkspaceHint, type ProviderResult, type SignInProvider } from "./providers.js";
+import { ProviderNotConfiguredError, ProviderUnavailableError, slackWorkspaceHint, type ProviderIdentity, type ProviderResult, type SignInProvider } from "./providers.js";
 import type { SlackDirectory } from "./slack-directory.js";
 import { createSignInLinks } from "./sign-in-links.js";
-import { endedByAdmin, startedBeforeMethodOn, type AuthRequestRecord, type CodeGrant, type DeveloperSignInStore, type SessionRecord } from "./store.js";
+import { endedByAdmin, startedBeforeMethodOn, type AuthRequestRecord, type CodeGrant, type DeveloperRecord, type DeveloperSignInStore, type SessionRecord } from "./store.js";
 import { issueAccessToken, pkceChallengeMatches, type TokenSigner, type PublicSigningJwk, type SigningKeyPurpose } from "./tokens.js";
 import type { CompanySignInStore } from "./company-membership.js";
 import type { CompanyInviteStore } from "./company-invites.js";
@@ -622,6 +622,13 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     return response;
   }
 
+  /** A merged Slack sign-in refreshes only its own workspace hint; a failed hint never gates sign-in. */
+  async function rememberMergedWorkspace(merged: boolean, method: DeveloperSignInMethod, identity: ProviderIdentity, signedInId: string, signedInRecord: DeveloperRecord | undefined): Promise<void> {
+    if (merged && method === "slack" && identity.slackTeam !== undefined && signedInRecord?.mergedInto !== undefined) {
+      try { await store.rememberMergedSlackWorkspace(signedInId, signedInRecord.mergedInto, identity.slackTeam); } catch { /* ignored: hint only */ }
+    }
+  }
+
   async function runSignIn(method: DeveloperSignInMethod, request: AuthRequestRecord, code: string | null, outcome: SignInOutcome): Promise<HttpResult> {
     const client = (params: Record<string, string>) => toClient(request.clientRedirectUri, { ...params, state: request.clientState });
     if (request.browserReturnTo !== undefined && !REVIEW_RETURN_TO.test(request.browserReturnTo)) return page(400, "Invalid review link", ["Open the review from Slack and sign in again."]);
@@ -663,8 +670,9 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     let developerId = signedInId;
     outcome.developerId = developerId;
     let existing = await store.getDeveloper(developerId);
+    const signedInRecord = existing;
     // DEC 254b: with Code's company layer on, a sign-in an operator merged into another (`mergedInto`) is seated as its survivor: the session, the
-    // membership and every check are the survivor's, and neither record is rewritten by this sign-in. The walk is #820's: at most 8 hops, no
+    // membership and every check are the survivor's. Only the signed-in Slack identity's workspace metadata may be refreshed. The walk is #820's: at most 8 hops, no
     // loops, and a revoked or unreadable record anywhere refuses.
     let merged = false;
     if (deps.company !== undefined && existing !== undefined && (existing as { mergedInto?: unknown }).mergedInto !== undefined) {
@@ -759,7 +767,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     }
     // DEC 254w: a Slack user the person connected stays their Slack link whatever this sign-in's method or lookup says.
     if (existing?.linkedSlackUserId !== undefined) slackUserId = existing.linkedSlackUserId;
-    // A merged sign-in rewrites neither its own record nor the survivor's.
+    // A merged sign-in updates only its own verified Slack workspace, keeping the survivor and all profile/index fields intact.
+    await rememberMergedWorkspace(merged, method, identity, signedInId, signedInRecord);
     if (!merged) await store.upsertDeveloper({
       developerId, provider: method, issuer: identity.issuer, subject: identity.subject, displayName: identity.displayName,
       ...(identity.email === undefined ? {} : { email: identity.email }),
