@@ -201,24 +201,27 @@ async function feedbackApprovalCurrent(deps: TaskFlowDeps, operation: OperationR
   } catch { return false; }
 }
 
+/** A queued cancel handed to the worker that runs the operation (moved unchanged out of handleWorkerDispatch, train 5, complexity ratchet). */
+async function deliverQueuedCancel(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessage, operation: OperationRecord, cancelId: string): Promise<Outcome> {
+  const workspace = operation.status === "CANCEL_REQUESTED" && operation.machineId !== undefined ? await readWorkspace(deps, operation.workspaceId) : undefined;
+  if (workspace === undefined || operation.machineId === undefined) { await queue.ack(message.receiptHandle); return "dropped"; }
+  try {
+    await deps.machines.deliver(operation.machineId, cancelInvocation(deps, workspace, operation, cancelId));
+  } catch (error) {
+    if (error instanceof MachineError && error.retryable && message.receiveCount < CANCEL_DELIVERY_ATTEMPTS) { await queue.changeVisibility(message.receiptHandle, 1); return "retried"; }
+    log(deps, { event: "task_flow.cancel_not_delivered", error: error instanceof MachineError ? error.code : error instanceof Error ? error.name : "unknown" });
+    await queue.ack(message.receiptHandle);
+    return "failed";
+  }
+  await queue.ack(message.receiptHandle);
+  return "delivered";
+}
+
 async function handleWorkerDispatch(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessage, operation: OperationRecord, delivery: DeliveryLog): Promise<Outcome> {
   // A queued cancel (money-stop.ts: a Stop, a close or a spend stop on a deployed install, whose broker never reaches a worker itself): handed to the worker that runs the operation, while it
   // is still being stopped. A machine not ready is tried again a few times; anything else drops the message (the broker's wait then ends the run, keeping its hold).
   const cancelId = queuedCancelOf(message.body);
-  if (cancelId !== undefined) {
-    const workspace = operation.status === "CANCEL_REQUESTED" && operation.machineId !== undefined ? await readWorkspace(deps, operation.workspaceId) : undefined;
-    if (workspace === undefined || operation.machineId === undefined) { await queue.ack(message.receiptHandle); return "dropped"; }
-    try {
-      await deps.machines.deliver(operation.machineId, cancelInvocation(deps, workspace, operation, cancelId));
-    } catch (error) {
-      if (error instanceof MachineError && error.retryable && message.receiveCount < CANCEL_DELIVERY_ATTEMPTS) { await queue.changeVisibility(message.receiptHandle, 1); return "retried"; }
-      log(deps, { event: "task_flow.cancel_not_delivered", error: error instanceof MachineError ? error.code : error instanceof Error ? error.name : "unknown" });
-      await queue.ack(message.receiptHandle);
-      return "failed";
-    }
-    await queue.ack(message.receiptHandle);
-    return "delivered";
-  }
+  if (cancelId !== undefined) return deliverQueuedCancel(deps, queue, message, operation, cancelId);
   const receiveCount = message.receiveCount;
   if (await acceptedCloseForRun(deps, operation) !== undefined) {
     await queue.ack(message.receiptHandle);
