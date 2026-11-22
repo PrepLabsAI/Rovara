@@ -645,7 +645,8 @@ async function cloneRepository(
   assertCredentialFreeRemote(repository.url);
   await runGitWithCredential({
     directory: destination,
-    args: ["clone", "--no-checkout", "--branch", repository.defaultBranch, "--", repository.url, destination],
+    // Keep the remote's tag NAME and object separately from mutable local tags. No extra network call.
+    args: ["clone", "--no-checkout", "--branch", repository.defaultBranch, "--config", "remote.origin.fetch=+refs/tags/*:refs/rovara/remote-tags/origin/*", "--", repository.url, destination],
     credential,
     timeout: 300_000,
     maxBuffer: MAX_COMMAND_OUTPUT_BYTES,

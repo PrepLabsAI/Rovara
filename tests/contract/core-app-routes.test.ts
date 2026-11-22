@@ -45,7 +45,7 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/sessions", "tasks:read"], ["GET", "/v1/app/sessions/s1", "tasks:read"],
     ["POST", "/v1/app/sessions/s1/follow", "tasks:read"], ["DELETE", "/v1/app/sessions/s1/follow", "tasks:read"], ["POST", "/v1/app/sessions/s1/unfollow", "tasks:read"], ["POST", "/v1/app/sessions/s1/presence", "tasks:read"],
     ["POST", "/v1/app/sessions/s1/stop", "tasks:act"], ["POST", "/v1/app/sessions/s1/retry", "tasks:act"], ["POST", "/v1/app/sessions/s1/messages", "tasks:act"],
-    ["POST", "/v1/app/sessions/s1/answers", "tasks:act"], ["POST", "/v1/app/sessions/s1/revise-plan", "tasks:act"], ["POST", "/v1/app/sessions/s1/close", "tasks:act"],
+    ["POST", "/v1/app/sessions/s1/answers", "tasks:act"], ["POST", "/v1/app/sessions/s1/revise-plan", "tasks:act"], ["POST", "/v1/app/sessions/s1/close", "tasks:act"], ["GET", "/v1/app/sessions/s1/close", "tasks:read"],
     ["GET", "/v1/app/decisions", "decisions:decide"], ["POST", "/v1/app/decisions/plan/t1/approve", "decisions:decide"], ["POST", "/v1/app/decisions/plan/t1/reject", "decisions:decide"],
     ["POST", "/v1/app/decisions/plan/t1/request-changes", "decisions:decide"], ["POST", "/v1/app/decisions/plan/t1/evidence-opened", "decisions:decide"],
     ["GET", "/v1/app/projects/payments/how-we-work", "full"], ["GET", "/v1/app/projects/payments/playbook", "full"],
@@ -402,4 +402,21 @@ it("inventories the four exact context worker routes without person authority", 
     expect(contextAppRouteOf(row.method, row.path)).toBeUndefined();
     expect(contextDevRouteOf(row.method, row.path)).toBeUndefined();
   }
+});
+
+// CORE-PARITY: these existing MCP routes must remain admitted by the production scope table.
+describe("core parity dev-route scopes", () => {
+  it.each([
+    ["POST", "workflow/decision", "decisions:decide"],
+    ["POST", "workflow/retry", "tasks:act"],
+    ["POST", "workflow/review", "tasks:act"],
+    ["POST", "workflow/publish-retry", "tasks:act"],
+    ["POST", "close", "tasks:act"],
+    ["POST", "pull-requests", "tasks:act"],
+    ["POST", "share", "tasks:share"],
+    ["GET", "plan", "tasks:read"],
+    ["GET", "diff", "tasks:read"],
+  ])("keeps %s %s scoped to %s", (method, rest, requires) => {
+    expect(contextDevRouteOf(method, `/v1/dev/tasks/11111111-1111-4111-8111-111111111111/${rest}`)?.requires).toBe(requires);
+  });
 });

@@ -15,11 +15,13 @@ import { taskOwnerView } from "../developer/task-owner-view.js";
 //
 // Rules: every read is the company's (the runtime's company, never a claim); a caller of another company, a non-member and a malformed caller get nothing; one listing reads a bounded number of tasks.
 import {
-  OrgRoleSchema,
+  OrgRoleSchema, agentXError, decideWorkflow as transitionWorkflowDecision, WorkflowTransitionError,
+  type WorkflowDecisionRequest,
   type AdapterRegistry, type OrgId, type OrgRole, type Principal, type WorkflowArtifact, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { SETUP_CHANGE_CARD_WORDS, WorkflowSnapshotSchema, setupChangeLines } from "@agentx/contracts";
-import { createDecisionService, type DecisionService } from "../services/decisions.js";
+import { createDecisionService, type DecisionService, type DecisionServiceOptions } from "../services/decisions.js";
+import { auditViaCaller } from "../core/audit-read/index.js";
 import { hostedKnownFailing } from "./known-failing.js";
 import { createDecisionGate } from "../core/decisions/approval-gate.js";
 import { CARD_REFUSAL_OF_GATE } from "../core/decisions/performer.js";
@@ -29,7 +31,7 @@ import type { DecisionItem } from "../core/decisions/project.js";
 import { planFactsOf } from "../core/decisions/plan-risk.js";
 import type { DecisionPerformer, DecisionRouteDependencies, DecisionSources, PerformInput, PerformOutcome } from "../core/decisions/routes.js";
 import { documentDecisionStore } from "../core/decisions/store.js";
-import { currentDocumentType } from "../core/decisions/workflow-subject.js";
+import { WORKFLOW_DOCUMENT_KIND, currentDocumentType } from "../core/decisions/workflow-subject.js";
 import { taskOpenPath } from "../core/decisions/open-path.js";
 import { readPlanFeature } from "../core/report/plan-feature.js";
 import { designApproveItem, designCardFactsOf } from "../core/design-review/card-source.js";
@@ -219,7 +221,7 @@ export const INVOLVED_TASKS_MAX = 100;
 const TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 
 /** The card routes' dependencies for one company on the deployed core. */
-export function deployedDecisionCards(options: DeployedDecisionCardsOptions): DecisionRouteDependencies<DeployedDecisionCaller> {
+export function deployedDecisionCards(options: DeployedDecisionCardsOptions): DecisionRouteDependencies<DeployedDecisionCaller> & { decideWorkflow: NonNullable<CoreDevWiring["workflowDecision"]> } {
   const { runtime, registry, people, proofs } = options;
   const companyId = runtime.companyId;
   const deps = runtime.flow.deps;
@@ -250,7 +252,7 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
     : (await ownerActingOf(principal, { taskId: task.taskId, developerId: task.developerId, project: task.project, ownerKey: task.workflow?.ownerId ?? task.ownerKey })) !== undefined);
 
   // The approval gate over the company's approvers point (with the policy hook's wrapper the registry was sealed with). The task's own person is the only decider of its documents.
-  const decisions = createDecisionService({
+  const decisionOptions: DecisionServiceOptions = {
     flow: deps, blobs, store: deps.store, approvers: registry.require("approvers"), audit: deps.audit, companyId, identity: registry.require("identity"),
     now: () => new Date(nowMs()),
     workflowSubject: {
@@ -264,7 +266,10 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
         },
       }),
     },
-  });
+  };
+  const decisions = createDecisionService(decisionOptions);
+  // The dev workflow route is a tool surface; keep the same gate and person, with the caller recorded in its atomic audit.
+  const toolDecisions = createDecisionService({ ...decisionOptions, audit: auditViaCaller(deps.audit, "tool") });
   const handler = workflowDocumentHandler<ProvingCaller>(decisions.gate);
   const knownFailing = hostedKnownFailing({ flow: deps, blobs, people, ...(options.env === undefined ? {} : { env: options.env }) });
   const kfGate = createDecisionGate({ store: deps.store, audit: deps.audit, approvers: registry.require("approvers"), subjects: [knownFailing.subject], now: () => new Date(nowMs()) });
@@ -373,6 +378,47 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
     async locks() { return {}; },
   };
 
+  // The gate's proofs contain a fresh nonce. A dev-route retry has no proof to retain, so validate the already-recorded decision with the engine's historical transition after checking live authority again.
+  const replayWorkflow = async (task: TaskRecord, principal: Principal, request: WorkflowDecisionRequest): Promise<boolean> => {
+    const workflow = task.workflow;
+    const prior = workflow?.decisions.find((entry) => entry.requestId === request.requestId);
+    if (workflow === undefined || prior === undefined) return false;
+    const acting = deps.access.ownerActing === undefined ? { actorId: taskOwnerKey(principal.personId, task.taskId) } : await ownerActingOf(principal, { ...task, ownerKey: workflow.ownerId });
+    if (acting === undefined) throw agentXError("TASK_NOT_FOUND", `no task ${task.taskId} of yours`);
+    const artifact = workflow.artifacts.find((entry) => entry.sha256 === request.artifactDigest);
+    const loaded = artifact === undefined ? undefined : await loadWorkflowDocument(textReaderOf(blobs), artifact, {}).catch(() => undefined);
+    const planDecisions = loaded?.format === "structured" ? loaded.plan.decisions.map((entry) => ({ id: entry.id, optionIds: entry.options.map((option) => option.id), recommended: entry.recommended })) : undefined;
+    try {
+      transitionWorkflowDecision(workflow, { ...request, workBreakdownDigest: request.workBreakdownDigest ?? prior.workBreakdownDigest }, { actorId: acting.actorId, role: "TASK_OWNER" }, { now: new Date(nowMs()).toISOString(), allowedSkipStages: [], ...(acting.authority === undefined ? {} : { authority: acting.authority }), ...(planDecisions === undefined ? {} : { decisions: planDecisions }) });
+    } catch (error) {
+      if (error instanceof WorkflowTransitionError) throw agentXError("IDEMPOTENCY_CONFLICT", error.message);
+      throw error;
+    }
+    return true;
+  };
+
+  // The retired dev route's body goes to the same subject and gate as the cards; no token or body can choose an approver.
+  const decideWorkflow = async (caller: DeployedDecisionCaller, taskId: string, request: WorkflowDecisionRequest): Promise<void> => {
+    const task = await ownTask(caller.principal, taskId);
+    const personId = personOfCaller(companyId, caller);
+    if (task === undefined || personId === undefined) throw agentXError("TASK_NOT_FOUND", `no task ${taskId} of yours`);
+    if (await replayWorkflow(task, caller.principal, request)) return;
+    const artifact = task.workflow?.artifacts.find((entry) => entry.sha256 === request.artifactDigest);
+    if (artifact === undefined || !["plan", "requirements", "design"].includes(artifact.type)) throw agentXError("IDEMPOTENCY_CONFLICT", "this decision is out of date; refresh the task and try again");
+    if (request.decision === "SKIP") throw agentXError("CONFIG_INVALID", "this workflow stage cannot be skipped");
+    const outcome = request.decision === "APPROVE" ? "approve" : request.decision === "REJECT" ? "reject" : "request_changes";
+    const kind = artifact.type;
+    const card = { cardId: `approve_${kind}:${taskId}`, contentVersion: artifact.sha256 };
+    const credential = await proofs.issue({ companyId, personId, requestId: request.requestId, kind, taskId, revision: request.expectedRevision, artifactDigest: request.artifactDigest!, outcome, card });
+    if (credential.method !== proofs.method || typeof credential.token !== "string" || credential.token === "") throw agentXError("FORBIDDEN", "That person cannot decide this.");
+    const { requestId, expectedRevision, artifactDigest, decision: _decision, reason, ...details } = request;
+    void _decision;
+    const result = await toolDecisions.gate.decide({ companyId, kind: WORKFLOW_DOCUMENT_KIND, subjectId: taskId, requestId, outcome, seen: { revision: expectedRevision, artifactDigest: artifactDigest! }, credentials: [credential], reason, details, card });
+    if (result.status !== "refused") return;
+    if (["stale", "not_waiting", "request_id_reused", "proof_already_used"].includes(result.reason)) throw agentXError("IDEMPOTENCY_CONFLICT", "this decision is out of date; refresh the task and try again");
+    throw agentXError("CONFIG_INVALID", result.detail);
+  };
+
   /** One act: the person's live authority again, then the point's proof, then the gate (through the workflow decision). Anything that does not hold is refused; nothing is decided. */
   const act = (outcome: DecisionOutcome, run: NonNullable<KindHandler<ProvingCaller>["reject"]>) => async (caller: DeployedDecisionCaller, input: PerformInput & { reason?: string }): Promise<PerformOutcome> => {
     const personId = personOfCaller(companyId, caller);
@@ -414,7 +460,7 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
   const performer: DecisionPerformer<DeployedDecisionCaller> = createDecisionPerformer<DeployedDecisionCaller>({ ...Object.fromEntries(WORKFLOW_DOCUMENT_CARD_KINDS.map((kind) => [kind, deployedHandler])), fix_setup: { approve: kfAct("approve"), reject: kfAct("reject") } });
 
   return {
-    sources, performer, store: documentDecisionStore({ store: deps.store, now: nowMs }), now: nowMs,
+    decideWorkflow, sources, performer, store: documentDecisionStore({ store: deps.store, now: nowMs }), now: nowMs,
     // As in Code: a high-risk document is approved on its card (the gate asks the point for the strong proof itself), with its evidence opened first.
     highOnCard: new Set<string>(WORKFLOW_DOCUMENT_CARD_KINDS), evidenceFirstOnHigh: new Set<string>(WORKFLOW_DOCUMENT_CARD_KINDS),
   };
@@ -452,11 +498,12 @@ export interface DeployedDevWiringInputs {
 }
 
 /** Lane L11's part of one company's `CoreDevWiring`: the session levels always, the decision cards with the point's proof issuer, how we work with a code host and the settings. */
-export function deployedDevWiringParts(inputs: DeployedDevWiringInputs): Pick<CoreDevWiring, "members" | "decisions" | "playbook"> {
+export function deployedDevWiringParts(inputs: DeployedDevWiringInputs): Pick<CoreDevWiring, "members" | "decisions" | "workflowDecision" | "playbook"> {
   const playbook = deployedPlaybook({ runtime: inputs.runtime, registry: inputs.registry, codeSettings: inputs.codeSettings });
+  const decisions = inputs.decisionProofs === undefined ? undefined : deployedDecisionCards({ runtime: inputs.runtime, registry: inputs.registry, people: inputs.people, proofs: inputs.decisionProofs, ...(inputs.env === undefined ? {} : { env: inputs.env }), involvedTaskIds: (caller) => involvedTaskIds(inputs.runtime.flow.deps, caller.principal), ...(inputs.log === undefined ? {} : { log: inputs.log }) });
   return {
     members: deployedSessionMembers(inputs.runtime.companyId, inputs.people),
-    ...(inputs.decisionProofs === undefined ? {} : { decisions: deployedDecisionCards({ runtime: inputs.runtime, registry: inputs.registry, people: inputs.people, proofs: inputs.decisionProofs, ...(inputs.env === undefined ? {} : { env: inputs.env }), involvedTaskIds: (caller) => involvedTaskIds(inputs.runtime.flow.deps, caller.principal), ...(inputs.log === undefined ? {} : { log: inputs.log }) }) }),
+    ...(decisions === undefined ? {} : { decisions, workflowDecision: decisions.decideWorkflow }),
     ...(playbook === undefined ? {} : { playbook }),
   };
 }

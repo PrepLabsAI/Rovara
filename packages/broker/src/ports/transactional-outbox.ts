@@ -33,6 +33,12 @@ const text = (value: unknown): string => {
 const outboxKey = (companyId: string, id: string) => ({ pk: companyScoped(companyId, `OUTBOX#${id}`), sk: "OUTBOX" });
 const pendingPartition = (companyId: string) => `PENDING#${companyId}`;
 
+/** Approved internal broker resume payload: the timed relay remains its backstop even after queue redrive/expiry. */
+function durableCloseResume(item: StoredDocument): boolean {
+  const body = item["body"] as Record<string, unknown> | null | undefined;
+  return body?.["v"] === 1 && body["resumeClose"] === true && body["companyId"] === item["companyId"] && body["operationId"] === item["id"];
+}
+
 export function createTransactionalOutbox(dependencies: TransactionalOutboxDependencies): TransactionalOutbox {
   const { store, queues } = dependencies;
   const now = dependencies.now ?? (() => new Date());
@@ -81,6 +87,7 @@ export function createTransactionalOutbox(dependencies: TransactionalOutboxDepen
         pending = (await store.queryIndex({ index: OUTBOX_PENDING_INDEX.name, partition: pendingPartition(options.companyId), limit: Math.min(limit, 1_000) })).items;
       }
       for (const item of pending.slice(0, limit)) {
+        const closeResume = durableCloseResume(item);
         const key = { pk: item.pk, sk: item.sk };
         if (companyOfChange({ key, after: item, kind: "insert", cause: "write", sequence: "" }) !== options.companyId) { report.failed += 1; continue; }
         let handedOver = false;
@@ -97,7 +104,7 @@ export function createTransactionalOutbox(dependencies: TransactionalOutboxDepen
           handedOver = true;
           const marked = await store.update({
             key,
-            ops: [change.set("status", "QUEUED"), change.set("queuedAt", now().toISOString()), change.set(store.ttlAttribute ?? "expiresAt", Math.floor(now().getTime() / 1_000) + retainSeconds), ...leaveIndex],
+            ops: queuedReceipt(closeResume, store.ttlAttribute, now(), retainSeconds, leaveIndex),
             condition: when.eq("status", "PENDING"),
           });
           // Another relay may have marked it first: then the copy this call sent was a duplicate the queue or the consumer drops.
@@ -114,7 +121,7 @@ export function createTransactionalOutbox(dependencies: TransactionalOutboxDepen
             continue;
           }
           const attempts = (typeof item.attempts === "number" ? item.attempts : 0) + 1;
-          const dead = attempts >= maxAttempts;
+          const dead = exhaustedRelay(closeResume, attempts, maxAttempts);
           try {
             await store.update({
               key,
@@ -131,4 +138,10 @@ export function createTransactionalOutbox(dependencies: TransactionalOutboxDepen
       return report;
     },
   };
+}
+
+function exhaustedRelay(closeResume: boolean, attempts: number, maxAttempts: number): boolean { return !closeResume && attempts >= maxAttempts; }
+function queuedReceipt(closeResume: boolean, ttlAttribute: string | undefined, at: Date, retainSeconds: number, leaveIndex: ReturnType<typeof change.remove>[]) {
+  const queuedAt = change.set("queuedAt", at.toISOString());
+  return closeResume ? [queuedAt, change.set(OUTBOX_PENDING_INDEX.sortAttribute!, at.toISOString())] : [change.set("status", "QUEUED"), queuedAt, change.set(ttlAttribute ?? "expiresAt", Math.floor(at.getTime() / 1000) + retainSeconds), ...leaveIndex];
 }

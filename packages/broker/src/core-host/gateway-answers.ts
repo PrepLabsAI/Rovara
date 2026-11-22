@@ -15,7 +15,7 @@
 // `cost_too_high` (and any reason this code does not know) mean the month has no room ("paused"). A gateway without the answers purpose yet answers 404: "not set up", so a deployment that gets this code
 // before Cloud L4-E is live shows the fixed outcome and nothing else. A 401, 429, 5xx, a redirect, a bad body and any thrown error are "unavailable". Nothing the gateway or the model sent is echoed.
 import { randomUUID } from "node:crypto";
-import { AGENTX_NAME_PATTERN, CORE_ANSWERS_MODEL_VARIABLE, CORE_CLAUDE_AGENT_MODEL, CORE_MODEL_GATEWAY_URL_VARIABLE, OrgIdSchema, isCoreAnswersModelId, type OrgId, type RunPrice } from "@agentx/contracts";
+import { AGENTX_NAME_PATTERN, CORE_ANSWERS_MODEL_VARIABLE, CORE_CLAUDE_AGENT_MODEL, CORE_MODEL_GATEWAY_URL_VARIABLE, OrgIdSchema, ROVARA_AI_PAUSED_MESSAGE, agentXError, isRovaraAiPaused, isCoreAnswersModelId, type OrgId, type RunPrice } from "@agentx/contracts";
 import type { TokenSigner } from "../developer/tokens.js";
 import { mintTaskToken, type TaskTokenDescriber } from "../core/model-gateway/token.js";
 import { AnswersGatewayError, createGatewayAnswerModel, type AnswersGateway, type AnswersGatewayRefusal } from "../core/answers/gateway-model.js";
@@ -179,6 +179,7 @@ export function createHttpAnswersGateway(options: HttpAnswersGatewayOptions): An
       let got: { response: Response; text: string };
       try { got = await Promise.race([exchange(), deadline]); } catch { throw refused("unavailable"); } finally { clearTimeout(timer); input.signal.removeEventListener("abort", onAbort); }
       const { response, text } = got;
+      if (isRovaraAiPaused(response.status, text)) throw agentXError("MODEL_NOT_ALLOWED", ROVARA_AI_PAUSED_MESSAGE);
       const body = parse(text) as { error?: { type?: unknown }; content?: unknown; model?: unknown; usage?: { input_tokens?: unknown; output_tokens?: unknown } } | undefined;
       if (!response.ok) {
         const type = body?.error?.type;

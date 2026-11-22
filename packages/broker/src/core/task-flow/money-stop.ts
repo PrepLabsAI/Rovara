@@ -12,7 +12,7 @@
 //
 // Absent `moneyStop` (the laptop, and any install that does not wire it), Stop, close and dispatch are exactly as before.
 import { createHash } from "node:crypto";
-import { AGENTX_PROTOCOL_VERSION, budgetExhaustedWords, change, when, type WorkerInvocation } from "@agentx/contracts";
+import { AGENTX_PROTOCOL_VERSION, budgetExhaustedWords, change, when, type WorkerInvocation, type TransactItem } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../callbacks.js";
 import type { TaskFlowDeps } from "./deps.js";
 import { workspaceKeys } from "./workspace-location.js";
@@ -41,6 +41,10 @@ export const SPEND_UNKNOWN_STOP_REASON = "Stopped: this task's spending could no
 export const spendStopReason = (code: SpendStopCode): string => (code === "spend_unknown" ? SPEND_UNKNOWN_STOP_REASON : budgetExhaustedWords(code === "company_day_cap" ? "company_day" : "task"));
 
 export interface MoneyStop {
+  /** Accepted-close accounting: stage the immutable amount AND hold closure in the close's receipt transaction. */
+  planUnflushed?: (reservationId: string | undefined, mark: { operationId: string; taskId: string }) => Promise<{ plan: UnflushedPlan; items: readonly TransactItem[] }>;
+  /** Replay-safe booking from that persisted decision; never recompute room/rates after a crash. */
+  applyUnflushed?: (plan: UnflushedPlan, mark: { operationId: string; taskId: string }) => Promise<void>;
   /** How long a Stop waits for the worker's end. Default `USAGE_FLUSH_WAIT_MS`. */
   flushWaitMs?: number;
   /** How often the wait reads the operation. */
@@ -50,6 +54,8 @@ export interface MoneyStop {
   /** Keeps the task's whole start hold as spent, marked estimated for `operationId` (the hosted admission's holds). A hold already closed keeps what it kept. */
   keepWholeHold(reservationId: string | undefined, mark: { operationId: string; taskId: string }): Promise<void>;
 }
+
+export interface UnflushedPlan { schemaVersion: 1; at: string; restMicros: number; covered: boolean }
 
 const ENDED: ReadonlySet<string> = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
 const elapsedSince = (deps: Pick<TaskFlowDeps, "now">, started: number): number => (deps.now?.() ?? new Date()).getTime() - started;

@@ -8,6 +8,30 @@ import { ChatGptModelIdSchema } from "./chatgpt.js";
 import { ModelIdentifierSchema } from "./models.js";
 import { canonicalModelName, legacyAliasModelName, type ModelIdentifier } from "./models-node.js";
 import type { OrgId } from "./company-scope.js";
+import { AgentXError } from "./errors.js";
+
+/** The operator's install stop, enforced by the gateway before spending (DEC 254zzz327–328). */
+export const ROVARA_AI_PAUSED_MESSAGE = "Rovara's AI is paused on this install. Your work is safe; try again later or use your own AI source.";
+
+/** Match only the approved gateway refusal; never copy arbitrary gateway/provider text. */
+export function isRovaraAiPaused(status: number, body: unknown): boolean {
+  if (status !== 403) return false;
+  let parsed = body;
+  if (typeof parsed === "string") {
+    try { parsed = JSON.parse(parsed) as unknown; } catch { return false; }
+  }
+  const error = parsed !== null && typeof parsed === "object" ? (parsed as { error?: unknown }).error : undefined;
+  return error !== null && typeof error === "object" && (error as { message?: unknown }).message === ROVARA_AI_PAUSED_MESSAGE;
+}
+
+/** Existing MODEL_NOT_ALLOWED remains terminal through adapters that normally sanitize faults. */
+export function isRovaraAiPauseError(error: unknown): error is AgentXError {
+  return error instanceof AgentXError && error.code === "MODEL_NOT_ALLOWED" && error.message === `MODEL_NOT_ALLOWED: ${ROVARA_AI_PAUSED_MESSAGE}`;
+}
+
+export function rethrowRovaraAiPause(error: unknown): void {
+  if (isRovaraAiPauseError(error)) throw error;
+}
 
 export const ModelSourceKindSchema = z.enum(["rovara", "personal-chatgpt", "anthropic", "openai", "openrouter", "bedrock", "endpoint"]);
 export type ModelSourceKind = z.infer<typeof ModelSourceKindSchema>;

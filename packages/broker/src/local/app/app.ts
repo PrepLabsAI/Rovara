@@ -488,7 +488,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       });
       log({ component: "cost", event: "cost.run_recorded", outcome });
       try { await recordClosedRunUsage({ store }, task, closedAt); }
-      catch (error) { log({ component: "cost", event: "cost.run_usage_not_recorded", error: error instanceof Error ? error.name : "unknown" }); }
+      catch (error) { log({ component: "cost", event: "cost.run_usage_not_recorded", error: error instanceof Error ? error.name : "unknown" }); throw error; }
     },
     // Every step runs on the install's one model, so the plan check says the model that wrote the plan checked it.
     installModel: async () => { const choice = await chosen(); return choice === undefined ? undefined : { provider: choice.provider, modelId: choice.model }; },

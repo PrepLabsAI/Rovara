@@ -6,7 +6,7 @@
 //  - The gateway's own refusals are read from the response (a pause header on a 403/422, or any other failure status) and kept as one of the fixed `ModelRefusal` kinds, never the gateway's or a
 //    model's words. The Slack service says its fixed words for that kind when the turn fails; this module never sends them.
 //  - A token that cannot be had, or a runtime that cannot be made, throws; nothing is sent.
-import { GATEWAY_PAUSE_HEADER, modelRefusalFor, type ModelRefusal } from "@agentx/contracts";
+import { GATEWAY_PAUSE_HEADER, isRovaraAiPaused, modelRefusalFor, type ModelRefusal } from "@agentx/contracts";
 import { ROUTE_PROVIDER, createModelRuntimeWithFallback } from "@agentx/model-runtime";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
@@ -35,7 +35,7 @@ export async function createCompanyGatewayRuntime(input: {
     const response = await send(url.toString(), init);
     if (!response.ok && refusal === undefined) {
       // The gateway's pause (no connected account, no room): its fixed header on a 403 or 422. Anything else that failed is "unavailable".
-      refusal = (response.status === 403 || response.status === 422) && response.headers.get(GATEWAY_PAUSE_HEADER) !== null
+      refusal = isRovaraAiPaused(response.status, (await response.clone().text().catch(() => "")).slice(0, 65_536)) ? "installPaused" : (response.status === 403 || response.status === 422) && response.headers.get(GATEWAY_PAUSE_HEADER) !== null
         ? modelRefusalFor(response.headers.get(GATEWAY_PAUSE_HEADER) ?? undefined)
         : "unavailable";
     }

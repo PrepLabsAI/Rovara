@@ -1,6 +1,6 @@
 import { locateWorkspace, type WorkspaceLocation } from "./workspace-location.js";
 // Lane L6a, task flow core: reading a task. A task of someone else reads as "not found" (no leak).
-import { AgentXError, IMPLICIT_COMPANY_ID, OrgIdSchema, agentXError, type DeveloperTaskFailure, type DeveloperTaskStatus, type StoredDocument, type WorkflowSnapshot } from "@agentx/contracts";
+import { PullRequestSummarySchema, AgentXError, IMPLICIT_COMPANY_ID, OrgIdSchema, agentXError, type DeveloperTaskFailure, type DeveloperTaskStatus, type StoredDocument, type WorkflowSnapshot } from "@agentx/contracts";
 import { deriveTaskStatus, taskIndexKey, type DeveloperTaskIndexRecord } from "../../developer/task-records.js";
 import { taskOwnerView, type TaskOwnerView } from "../../developer/task-owner-view.js";
 import { taskNotFound } from "./access.js";
@@ -26,6 +26,7 @@ export interface TaskView {
   closedAt?: string;
   workflow?: { definitionVersion: string; path: string; stage: string; state: string; revision: number; blockReason?: string };
   failure?: DeveloperTaskFailure;
+  pullRequests?: Array<{ repository: string; number: number; url: string; state: "open" | "closed" | "merged" }>;
   operations: Array<{ id: string; kind: string; status: string; workflowMode?: string }>;
   /** L4-DR (DEC 254z c): the one quiet line when Rovara re-checked the project's setup for this task ("Setup re-checked after dependency files changed: still works."). Absent when there was no drift. */
   setupRecheck?: string;
@@ -95,6 +96,7 @@ export async function taskViewOf(deps: TaskFlowDeps, task: TaskRecord): Promise<
     deps.store.get(location.taskPointerKey()).then((item) => fromDocument<TaskPointerRecord>(item)),
     operationsAt(deps, location),
   ]);
+  const pullRequests = await publicationSummaries(deps, location);
   const storedAssignment = taskFeatureOf(await deps.store.get(reportTaskFeatureKey(deps.companyId, task.taskId)), deps.companyId);
   const assignment = storedAssignment?.project === task.project ? storedAssignment : undefined;
   const resolved = new Map<string, NonNullable<ReturnType<typeof featureOf>>>();
@@ -118,6 +120,7 @@ export async function taskViewOf(deps: TaskFlowDeps, task: TaskRecord): Promise<
   const setupRecheck = await setupRecheckLineOf(deps, task.project, task.taskId);
   return {
     taskId: task.taskId,
+    ...pullRequests,
     ...(owner === undefined ? {} : { owner }),
     project: task.project,
     title: task.title,
@@ -169,4 +172,12 @@ export async function listTasks(deps: TaskFlowDeps, caller: TaskCaller, options:
     if (tasks.length === limit || cursor === undefined) break;
   }
   return { tasks, ...(cursor === undefined ? {} : { cursor }) };
+}
+
+async function publicationSummaries(deps: TaskFlowDeps, location: WorkspaceLocation | undefined): Promise<Pick<TaskView, "pullRequests">> {
+  if (location === undefined) return {};
+  const page = await deps.store.query({ pk: location.workspaceKey.pk, sk: { op: "beginsWith", prefix: "PULL_REQUEST#" }, limit: 32 });
+  const rows = page.items.map(row => ({ repository: row["repository"], number: row["number"], url: row["url"], state: row["state"] }));
+  const parsed = PullRequestSummarySchema.array().max(32).safeParse(rows);
+  return parsed.success && parsed.data !== undefined && parsed.data.length > 0 ? { pullRequests: parsed.data } : {};
 }

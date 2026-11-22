@@ -14,6 +14,7 @@ import { learnModelNotEnabled } from "../model-selection/learn-not-enabled.js";
 import { iso } from "./support.js";
 import { isSpendStopCode, spendStopReason } from "./money-stop.js";
 import { blockStoppedStep } from "./stopped-step.js";
+import { acceptedCloseForRun } from "./close-recovery-state.js";
 
 const TERMINAL: ReadonlySet<string> = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
 export const isTerminalStatus = (status: string): boolean => TERMINAL.has(status);
@@ -83,6 +84,11 @@ export async function recordOperationResult(deps: TaskFlowDeps, result: Operatio
   }
   const ended = await readOperation(deps, operation.workspaceId, operation.id);
   if (ended === undefined || !isTerminalStatus(ended.status)) throw agentXError("WORKSPACE_BUSY", "could not record the result just now; send it again");
+  if (await acceptedCloseForRun(deps, ended) !== undefined) return { duplicate };
+  return finishRecordedResult(deps, ended, duplicate);
+}
+
+async function finishRecordedResult(deps: TaskFlowDeps, ended: OperationRecord, duplicate: boolean): Promise<{ duplicate: boolean }> {
   // The model proxy frees the operation's tokens and spend record now, not at its next refused call (a repeat of the result does it again, harmlessly).
   try { deps.onOperationEnded?.(ended.id); } catch { /* a proxy's bookkeeping never fails a result */ }
   await deps.secondReview?.operationEnded(ended);

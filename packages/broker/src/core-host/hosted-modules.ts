@@ -30,7 +30,7 @@ import {
   type TransactItem,
 } from "@agentx/contracts";
 import { companyDayKey, createCostLedger, costPartition, utcDayOf, type CostLedger } from "../core/cost/ledger.js";
-import { CALL_HOLD_SECONDS, TASK_HOLD_SECONDS, closeHold, createLedgerHolds, dayRoomCondition, companyOfReservation, holdItems, holdStateOf, openHoldRoom, readDayLoad, reservationIdOf, sweepExpiredHolds } from "../core/cost/holds.js";
+import { CALL_HOLD_SECONDS, TASK_HOLD_SECONDS, closeHold, createLedgerHolds, dayRoomCondition, companyOfReservation, holdItems, holdStateOf, openHoldRoom, planHoldClose, readDayLoad, reservationIdOf, sweepExpiredHolds } from "../core/cost/holds.js";
 import { RUN_START_ACTION, type MoneyStop, type SpendStopCode } from "../core/task-flow/money-stop.js";
 import { readTask, workspaceOperations } from "../core/task-flow/reads.js";
 import { DEFAULT_PLANNING_LIMIT_USD } from "../core/cost/limits.js";
@@ -348,6 +348,19 @@ export function createHostedMoneyStop(deps: { store: DocumentStore; companyId: s
   });
   return {
     ...timing,
+    async planUnflushed(reservationId, mark) {
+      const covered = (await deps.store.query({ pk: costPartition(deps.companyId, mark.taskId), sk: { op: "beginsWith", prefix: `ENTRY#usage-charge:${mark.operationId}:` }, limit: 1 })).items.length > 0;
+      const ours = companyOfReservation(reservationId) === deps.companyId;
+      const hold = await planHoldClose(deps.store, ours ? reservationId : undefined, covered ? { kind: "release" } : { kind: "settle", actualMicros: undefined, estimated: { operationId: mark.operationId } }, deps.now);
+      return { items: hold.items, plan: { schemaVersion: 1, at: deps.now().toISOString(), covered, restMicros: covered ? 0 : Math.max(0, unflushedEstimateMicros(deps.settings) - hold.remaining) } };
+    },
+    async applyUnflushed(plan, mark) {
+      await estimates.recordUsage({
+        companyId: deps.companyId, entryId: unflushedEntryId(mark.operationId), at: plan.at, taskId: mark.taskId,
+        usage: { provider: UNFLUSHED_ESTIMATE_PROVIDER, modelId: plan.covered ? "unavailable" : "estimate", tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+        ...(plan.covered ? {} : { reportedCost: { micros: plan.restMicros, currency: "USD" } }),
+      }, { status: plan.covered ? "awaiting_usage" : "estimated" });
+    },
     async keepWholeHold(reservationId, mark) {
       // What the run's unreported spend is kept at: never less than the fixed estimate. The hold's room is kept first (the whole hold, as spent); what the room does not cover is booked
       // as the estimate entry. A hold its checkpoints nearly used up thus never keeps only its last cents for a call that was still going.

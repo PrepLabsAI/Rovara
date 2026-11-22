@@ -10,6 +10,7 @@ import {
   WorkflowFeedbackReviewReportSchema,
   WorkflowFeedbackTaskChecksSchema,
   WorkflowReviewReportSchema,
+  ROVARA_AI_PAUSED_MESSAGE, agentXError, isRovaraAiPauseError, rethrowRovaraAiPause, type AgentXError,
   createCandidateManifest,
   feedbackReplacementCheckProblem,
   redactText,
@@ -51,6 +52,16 @@ import { reviewAnswerSpec, specWalkAnswerSpec } from "../structured-answer-specs
 import type { SessionCompactionOptions } from "../compaction.js";
 
 export { isTestPath };
+
+function installPauseFromReviewMessage(message: unknown, previous: AgentXError | undefined): AgentXError | undefined {
+  const record = message as { role?: unknown; stopReason?: unknown; errorMessage?: unknown } | undefined;
+  if (record?.role === "assistant" && record.stopReason === "error" && record.errorMessage === ROVARA_AI_PAUSED_MESSAGE) return agentXError("MODEL_NOT_ALLOWED", ROVARA_AI_PAUSED_MESSAGE);
+  return previous;
+}
+
+function reviewFatalError(error: unknown, paused?: AgentXError): Error | undefined {
+  return paused ?? (error instanceof Error && (isRuleFilesUnverified(error) || isRovaraAiPauseError(error)) ? error : undefined);
+}
 
 const FEEDBACK_REVIEW_OUTPUT_MAX_BYTES = 2_000_000;
 const FEEDBACK_BUNDLE_MAX_BYTES = 5_000_000;
@@ -209,10 +220,12 @@ export async function runWorkflowFeedbackReview(input: {
       provider = actualModel.provider;
       version = actualModel.modelId;
       let response: string | undefined;
+      let installPause: AgentXError | undefined;
       unsubscribe = session.subscribe((event: unknown) => {
         const record = event as { type?: unknown; payload?: { type?: unknown }; message?: unknown };
         if (record.type === "message_end" || record.payload?.type === "message_end") {
           response = assistantText(record.message ?? (event as { message?: unknown }).message);
+          installPause = installPauseFromReviewMessage(record.message, installPause);
         }
       });
       // Each prompt (the first and the one follow-up) has its own time limit, so a slow first answer cannot use up the
@@ -229,6 +242,7 @@ export async function runWorkflowFeedbackReview(input: {
         });
         try {
           const result = await Promise.race([session!.prompt(prompt).then(() => "COMPLETED" as const), stopped]);
+          rethrowRovaraAiPause(installPause);
           if (result !== "COMPLETED") {
             try { void session!.abort().catch(() => undefined); } catch { /* status below remains authoritative */ }
           }
@@ -271,7 +285,8 @@ export async function runWorkflowFeedbackReview(input: {
     }
   } catch (error) {
     // A base whose rule files cannot be verified ends the run; it is never reported as a review that could not start.
-    if (isRuleFilesUnverified(error)) throw error;
+    const fatal = reviewFatalError(error);
+    if (fatal !== undefined) throw fatal;
     status = input.signal?.aborted ? "INTERRUPTED" : "BLOCKED";
     findings = [];
     blockReason = input.signal?.aborted ? "review was cancelled" : "review could not verify the exact candidate";
@@ -823,7 +838,8 @@ export async function runWorkflowReviews(input: {
           ...(onUsage === undefined ? {} : { onUsage: (usage) => onUsage({ ...usage, secondReviewTry: number }) }) });
       } catch (error) {
         // A base whose rule files cannot be verified ends the whole run, as for the first review.
-        if (isRuleFilesUnverified(error)) return { result: { tries: tries.length }, fatal: error };
+        const fatal = reviewFatalError(error);
+        if (fatal !== undefined) return { result: { tries: tries.length }, fatal };
         report = undefined;
       }
       tries.push({ model: ref, outcome: secondReviewTryOutcome(report) });
@@ -848,6 +864,7 @@ export async function runWorkflowReviews(input: {
     let statusOverride: "INTERRUPTED" | undefined = interrupted ? "INTERRUPTED" : undefined;
     // The reviewer's last model call, when it failed: a fixed sentence from the model-call monitor's note (never the provider's text), cleared when a later call answers.
     let modelFailure: string | undefined;
+    let installPause: AgentXError | undefined;
     try {
       if (statusOverride !== undefined) throw new Error("review interrupted");
       input.onProgress?.(`AgentX is running the ${role === "CRITIC" ? "code" : "security"} review on this candidate.`);
@@ -895,6 +912,7 @@ export async function runWorkflowReviews(input: {
         input.onWikiEvent?.(event);
         const record = event as { type?: unknown; payload?: { type?: unknown; message?: unknown }; message?: unknown };
         const message = record.message ?? record.payload?.message;
+        installPause = installPauseFromReviewMessage(message, installPause);
         if ((record.type === "message_end" || record.payload?.type === "message_end") && (message as { role?: unknown } | undefined)?.role === "assistant") {
           finalAssistantSeen = true;
           finalAssistantStopReason = typeof (message as { stopReason?: unknown }).stopReason === "string" ? (message as { stopReason: string }).stopReason : undefined;
@@ -1011,7 +1029,8 @@ export async function runWorkflowReviews(input: {
       usageOutcome = "SUCCEEDED";
     } catch (error) {
       // A base whose rule files cannot be verified ends the run; it is never reported as a review that could not start.
-      if (isRuleFilesUnverified(error)) { secondStop.abort(); input.signal?.removeEventListener("abort", linkStop); throw error; }
+      const fatal = reviewFatalError(error, installPause);
+      if (fatal !== undefined) { secondStop.abort(); input.signal?.removeEventListener("abort", linkStop); throw fatal; }
       const message = error instanceof Error ? error.message : "";
       const failureReason = interrupted || message.includes("interrupted") ? "INTERRUPTED"
         : message.includes("timed out") ? "TIMEOUT"

@@ -10,12 +10,15 @@
 // (`queued`, `delivered`, `not_delivered`), and its text is in no log line and no event.
 import { createHash } from "node:crypto";
 import {
-  INDEX_EXPIRY_ATTRIBUTE, SESSION_ENDED_MESSAGE, SESSION_MESSAGE_MAX_CHARS, SessionMessageSchema, agentSessionKey, cleanSessionName, redactText, sessionEventId, when,
+  DocumentStoreError, agentXError, INDEX_EXPIRY_ATTRIBUTE, SESSION_ENDED_MESSAGE, SESSION_MESSAGE_MAX_CHARS, SessionMessageSchema, agentSessionKey, cleanSessionName, redactText, sessionEventId, when,
   type AgentSessionRecord, type AuditSink, type DocumentStore, type IdentityProvider, type OrgId, type PresentedCredential, type Principal, type SessionEvent, type SessionId, type SessionMessage, type TransactItem,
 } from "@agentx/contracts";
 import { createSessionAccess, requireLevelOf, type SessionAccess, type SessionMembers } from "./access.js";
 import { developerIdOf } from "./create.js";
 import { answerMessage, queuedSteersItem } from "./steer.js";
+import { closeHasDigest, parseCloseIntent, type CloseIntent } from "../task-flow/close-acceptance.js";
+import { closeFacts, mergeCloseConditions } from "../task-flow/close-conditions.js";
+import { toDocument } from "../task-flow/records.js";
 import { SessionStore, jsonOf, sessionEventItem } from "./store.js";
 
 /** What the task flow does for a session's task. Each is called only after this module checked the person. Without a host, the action answers `unavailable` and writes nothing. */
@@ -24,6 +27,8 @@ export interface SessionControlHost {
   cancelTask(taskId: string, requestId: string): Promise<{ nothingRunning: boolean; message?: string } | void>;
   /** Closes the task (the task flow's own close, as the person who asked), idempotent by `requestId`. */
   closeTask?(taskId: string, requestId: string, principal: Principal): Promise<void>;
+  /** Pure accepted-close plan, including the session receipt/event/audit. Control commits it before resume. */
+  planCloseTask?(taskId: string, input: CloseIntent, principal: Principal, sessionId: SessionId): Promise<SessionClosePlan>;
   /** The task's own workflow retry, at the task's revision now; idempotent by `requestId`. Throws when the workflow is not blocked. */
   retryWorkflow(taskId: string, requestId: string): Promise<void>;
   /**
@@ -39,6 +44,14 @@ export interface SessionControlHost {
   planMessage?(taskId: string, message: MessageToDeliver): Promise<MessagePlan>;
   // REQUIREMENT on the host (the hosted product's STEER_RATE and note cap are not in this module): it limits how often one person may message a session in an hour and how many notes a task keeps, and answers
   // `not_delivered` with a reason when a limit is hit. A live message can mean paid model work.
+}
+
+export interface SessionClosePlan {
+  items: readonly TransactItem[];
+  repeated: boolean;
+  /** Verifies an immutable accepted winner after a conditional conflict, or throws CHANGE_STALE. */
+  onConflict(): Promise<void>;
+  resume(): Promise<void>;
 }
 
 /** What a host is told of a message to deliver: the text is already cleaned, redacted and cut. */
@@ -89,7 +102,7 @@ export const NOTHING_TO_RETRY = "There is nothing to retry: the task is not bloc
 export const FAILED_TASK_NEEDS_NEW_TASK = "This task failed and has ended. Start a new task.";
 
 /** What a stop, retry or message answered, kept under its request id on the session so a repeat answers it again and writes nothing. */
-interface ControlRequest { action: "stop" | "retry" | "tell" | "close"; by: string; at: string; messageId?: string; nothingRunning?: boolean; message?: string }
+interface ControlRequest { action: "stop" | "retry" | "tell" | "close"; by: string; at: string; messageId?: string; nothingRunning?: boolean; message?: string; intentHash?: string; operationId?: string }
 
 const requestKey = (session: { orgId: OrgId; sessionId: SessionId }, requestId: string) => agentSessionKey(session.orgId, session.sessionId, `REQUEST#${requestId}`);
 
@@ -98,7 +111,7 @@ function requestOf(document: Record<string, unknown> | undefined): ControlReques
   const { action, by, at } = document;
   if ((action !== "stop" && action !== "retry" && action !== "tell" && action !== "close") || typeof by !== "string" || typeof at !== "string") return undefined;
   return {
-    action, by, at, ...(typeof document["messageId"] === "string" ? { messageId: document["messageId"] } : {}),
+    action, by, at, ...(typeof document["intentHash"] === "string" ? { intentHash: document["intentHash"] } : {}), ...(typeof document["operationId"] === "string" ? { operationId: document["operationId"] } : {}), ...(typeof document["messageId"] === "string" ? { messageId: document["messageId"] } : {}),
     ...(document["nothingRunning"] === true ? { nothingRunning: true } : {}), ...(typeof document["message"] === "string" ? { message: document["message"] } : {}),
   };
 }
@@ -169,6 +182,16 @@ export function createSessionControl(deps: ControlDependencies) {
     return { applied: false, prior: requestOf(await deps.store.get(requestKey(session, requestId))) };
   }
 
+  async function guardedClose(session: AgentSessionRecord, principal: Principal, input: unknown, prior: ControlRequest | undefined): Promise<ControlResult> {
+    const intent = parseCloseIntent(input);
+    if (prior !== undefined && (prior.action !== "close" || prior.intentHash === undefined || prior.by !== developerIdOf(principal))) throw agentXError("IDEMPOTENCY_CONFLICT", "that request ID was used for a different close");
+    if (session.subject.kind !== "task" || deps.host?.planCloseTask === undefined) return refuse("unavailable", NOT_AVAILABLE);
+    const plan = await deps.host.planCloseTask(session.subject.taskId, intent, principal, session.sessionId);
+    const repeated = await commitClosePlan(deps.store, plan, session);
+    await plan.resume();
+    return { status: "done", session, repeated };
+  }
+
   const nameOf = (principal: Principal) => cleanSessionName(principal.displayName) ?? "Someone";
   const actorOf = (principal: Principal): SessionEvent["actor"] => ({ kind: "member", developerId: developerIdOf(principal), name: nameOf(principal) });
 
@@ -220,8 +243,8 @@ export function createSessionControl(deps: ControlDependencies) {
       return { status: "done", session, repeated: repeated !== undefined };
     },
 
-    /** Closes a session's task through the task flow's own close, after the same checks as a stop. The session ends with it; a closed session has nothing to close. Idempotent by `requestId`; the request, the event and the audit are one transaction. */
-    async close(actor: ControlActor, orgId: OrgId, sessionId: SessionId, input: { requestId: string }): Promise<ControlResult> {
+    /** Guarded close commits the host plan with its session receipt before resume. Without a digest, the existing close behavior is preserved. */
+    async close(actor: ControlActor, orgId: OrgId, sessionId: SessionId, input: { requestId: string; expectedPreviewDigest?: unknown; discard_unpublished?: boolean }): Promise<ControlResult> {
       if (!REQUEST_ID.test(input.requestId)) return refuse("invalid", "The request ID is not valid.");
       const principal = await principalOf(actor);
       if (principal === undefined) return refuse("not_found", "There is no such session.");
@@ -229,6 +252,8 @@ export function createSessionControl(deps: ControlDependencies) {
       if ("status" in found) return found;
       const { session } = found;
       const prior = requestOf(await deps.store.get(requestKey(session, input.requestId)));
+      if (closeHasDigest(input)) return guardedClose(session, principal, input, prior);
+      if (prior?.intentHash !== undefined) throw agentXError("IDEMPOTENCY_CONFLICT", "that request ID was used for a different close");
       if (prior !== undefined) return prior.action === "close" ? { status: "done", session, repeated: true } : refuse("request_id_reused", "That request ID was already used for something else.");
       if (isEnded(session)) return refuse("ended", SESSION_ENDED_MESSAGE);
       if (session.subject.kind !== "task" || deps.host?.closeTask === undefined) return refuse("unavailable", NOT_AVAILABLE);
@@ -311,3 +336,17 @@ function messageOf(error: unknown): string {
 }
 
 const sha = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
+
+/** A refused plan never reaches resume, projection refresh or a second session transaction. */
+async function commitClosePlan(store: DocumentStore, plan: SessionClosePlan, session: AgentSessionRecord): Promise<boolean> {
+  if (plan.repeated) return true;
+  let applied = false;
+  const items = mergeCloseConditions([...plan.items, {
+    kind: "check", key: agentSessionKey(session.orgId, session.sessionId, "META"),
+    condition: closeFacts(toDocument(session), ["orgId", "subject", "owner", "project", "endedAt"]),
+  }]);
+  try { applied = (await store.transact(items)).applied; }
+  catch (error) { if (!(error instanceof DocumentStoreError && error.code === "conflict")) throw error; }
+  if (!applied) await plan.onConflict();
+  return !applied;
+}

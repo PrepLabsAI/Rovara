@@ -1,3 +1,4 @@
+import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 // The deployed API's task messages, pull request diff and plan comments: `/v1/dev/tasks/{id}/messages`, `/diff` and `/comments`.
 // The response shapes are written out here by hand as strict schemas (they mirror the web app's contract, version 0), so a
 // drifting field fails a test. Every route: same access refusals as the other task routes, the company rule, runtime input checks.
@@ -6,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { COMMENT_RATE, WORKFLOW_THREAD_NOTES_MAX } from "@agentx/contracts";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
-import { createPlanComment, DIFF_PATCH_MAX_CHARS, DIFF_PATCH_TOO_LONG, listPlanComments, listTaskMessages, MESSAGES_PAGE_MAX, readTaskDiff, sendTaskMessage } from "../../packages/broker/src/developer/task-code-routes.js";
+import { createPlanComment, DIFF_PATCH_MAX_CHARS, DIFF_PATCH_TOO_LONG, listPlanComments, listTaskMessages, MESSAGES_PAGE_MAX, readCoreTaskDiff, readTaskDiff, sendTaskMessage } from "../../packages/broker/src/developer/task-code-routes.js";
 import { expectLinearScalingAsync } from "../support/scaling.js";
 import { OMAR, PRIYA, SAM, START, pagePlan, pageTask, type PageTaskFixture } from "../support/page-tasks.js";
 
@@ -361,3 +362,36 @@ describe("the company rule", () => {
 
 });
 
+
+describe("core task diff parity", () => {
+  it("refuses same-company non-readers before reading a diff, while owner and shared reader can read", async () => {
+    const fixture = withPlan();
+    const task = fixture.db.get(`DEVTASK#${fixture.taskId}`, "META") as unknown as DeveloperTaskRecord;
+    task.workflow = { ...task.workflow!, pullRequests: [{ repositoryId: PR.repository, number: PR.number, url: PR.url, state: "OPEN", candidateDigest: "a".repeat(64), required: true }] };
+    const read = vi.fn(goodDiff);
+    withPullRequests(fixture, read, []);
+    for (const stranger of [STRANGER, OMAR]) {
+      await expect(readCoreTaskDiff(fixture.deps, stranger, task, at(fixture, "/diff?repository=demo&number=7"))).rejects.toHaveProperty("code", expect.stringMatching(/^TASK_(NOT_FOUND|ACCESS_DENIED)$/u));
+    }
+    expect(read).not.toHaveBeenCalled();
+    for (const reader of [PRIYA, SAM]) {
+      await expect(readCoreTaskDiff(fixture.deps, reader, task, at(fixture, "/diff?repository=demo&number=7"))).resolves.toMatchObject({ repository: "demo", number: 7 });
+    }
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it("reads only the task's recorded workflow PR, never legacy workspace PR rows", async () => {
+    const fixture = withPlan();
+    const task = fixture.db.get(`DEVTASK#${fixture.taskId}`, "META") as unknown as DeveloperTaskRecord;
+    task.workflow = { ...task.workflow!, pullRequests: [{ repositoryId: PR.repository, number: PR.number, url: PR.url, state: "OPEN", candidateDigest: "a".repeat(64), required: true }] };
+    const read = vi.fn(goodDiff);
+    withPullRequests(fixture, read, []);
+    const result = await readCoreTaskDiff(fixture.deps, PRIYA, task, at(fixture, "/diff?repository=demo&number=7&page=2"));
+    expect(result).toMatchObject({ repository: "demo", number: 7, page: 2, more: true, files: [{ path: "src/a.ts", additions: 3, deletions: 1, patch: "@@ -1 +1,3 @@\n-a\n+b\n+c\n+d" }, { path: "logo.png", additions: 0, deletions: 0, patch: "" }] });
+    expect(read).toHaveBeenCalledWith("https://github.com/acme/demo", 7, 2);
+    read.mockClear();
+    await expect(readCoreTaskDiff(fixture.deps, PRIYA, task, at(fixture, "/diff?repository=demo&number=8"))).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(readCoreTaskDiff({ ...fixture.deps, companyId: OTHER }, PRIYA, task, at(fixture, "/diff?repository=demo&number=7"))).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    expect(read).not.toHaveBeenCalled();
+  });
+});

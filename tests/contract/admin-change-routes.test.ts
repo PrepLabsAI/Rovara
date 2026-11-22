@@ -2,8 +2,8 @@
 // Spec 025 FR-039 to FR-041, FR-051, FR-052, SC-005 and SC-011 at the routes: a change is planned,
 // stored and audited, and applies at most once, only after a valid confirmation.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AdminChangePendingRecordSchema, type ChannelInfoRequest, type ChannelMembersRequest } from "@agentx/contracts";
-import { adminChangeOutcomeMessage } from "../../packages/broker/src/developer/change-messages.js";
+import { AdminChangePendingRecordSchema, AdminChangeViewSchema, AgentXNameSchema, type ChannelInfoRequest, type ChannelMembersRequest } from "@agentx/contracts";
+import { adminChangeMessage, adminChangeOutcomeMessage } from "../../packages/broker/src/developer/change-messages.js";
 import { ADMIN_SLACK, TRACE, createAdminChangeBroker } from "../support/admin-change-broker.js";
 import { adminCall, createAdminBroker } from "../support/admin-broker.js";
 import { bindChannel } from "../support/developer-task-broker.js";
@@ -551,5 +551,183 @@ describe("the scoped re-review's fixes (phase 25e)", () => {
     expect(logged("admin_change.route_failed")).toEqual([expect.objectContaining({ traceId: TRACE, error: "InternalServerError" })]);
     expect(JSON.stringify([answer.body, lines])).not.toContain(PLANTED);
     expect(binding(broker.db)).toBeUndefined();
+  });
+});
+
+// D045 catches missing warnings at the real response/Slack boundary and writes before consent.
+describe("D045 operator impact review", () => {
+  const assertWarnings = (effect: string, kind: "bind_channel" | "unbind_channel") => {
+    for (const category of ["Projects", "Running work", "Queued work", "Schedules", "People", "Channels"]) {
+      expect(effect).toContain(`${category}: unknown (freshness unknown).`);
+    }
+    expect(effect).toContain("Dependency counts are not available from this plan.");
+    expect(effect).toContain(kind === "bind_channel"
+      ? "Keep the current binding until you have checked the replacement channel and its audience."
+      : "Keep the current binding while you review dependent work.");
+    expect(effect).toContain("Test the replacement first; this plan does not test replacement routing.");
+    if (kind === "unbind_channel") {
+      expect(effect).toContain("New messages there will get no reply; existing thread workspaces are kept.");
+      expect(effect).toContain("Retained workspaces do not establish ongoing task permission.");
+    }
+  };
+  const countBindingWrites = (broker: Awaited<ReturnType<typeof createAdminChangeBroker>>) => {
+    const send = broker.db.send;
+    let writes = 0;
+    broker.db.send = async (command) => {
+      if (!["GetCommand", "QueryCommand"].includes(command.constructor.name) && JSON.stringify(command.input).includes("SLACK_BINDING#")) writes += 1;
+      return send(command);
+    };
+    return () => writes;
+  };
+
+  it.each(["bind_channel", "unbind_channel"] as const)("D045 preview never binds or unbinds: %s", async (kind) => {
+    const broker = await createAdminChangeBroker();
+    const writes = countBindingWrites(broker);
+    const input = kind === "bind_channel" ? BIND : { kind, channel: SLACK_CHANNEL };
+    const proposed = await broker.propose(input, ["elicitation", "slack"]);
+    const id = changeId(proposed);
+    assertWarnings(AdminChangeViewSchema.parse(proposed.body.change).effect, kind);
+    assertWarnings(AdminChangeViewSchema.parse((await broker.get(id)).body.change).effect, kind);
+    await broker.list();
+    expect(writes()).toBe(0);
+    expect((await broker.decline(id)).body.change).toMatchObject({ status: "declined" });
+    const cancel = changeId(await broker.propose(input, ["slack"]));
+    await broker.slack(cancel);
+    expect(await broker.press(cancel, "cancel")).toMatchObject({ outcome: "declined" });
+    expect(writes()).toBe(0);
+    const confirmed = changeId(await broker.propose(input));
+    expect((await broker.apply(confirmed)).body.change).toMatchObject({ status: "applied" });
+    expect(writes()).toBe(1);
+    expect((await broker.apply(confirmed)).body.error).toMatchObject({ code: "CONFIRMATION_EXPIRED" });
+    expect(writes()).toBe(1);
+    expect(kind === "bind_channel" ? binding(broker.db)?.projectName : broker.db.get(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`)).toBe(kind === "bind_channel" ? "payments" : undefined);
+  });
+
+  it.each(["bind_channel", "unbind_channel"] as const)("D045 stale or lost authority refuses apply: %s", async (kind) => {
+    const broker = await createAdminChangeBroker();
+    const input = kind === "bind_channel" ? BIND : { kind, channel: SLACK_CHANNEL };
+    const id = changeId(await broker.propose(input, ["elicitation", "slack"]));
+    await broker.slack(id);
+    const writes = countBindingWrites(broker);
+    expect((await broker.apply(id, "elicitation", "another-admin")).body.error).toMatchObject({ code: "FORBIDDEN" });
+    expect(await broker.press(id, "confirm", ADMIN_SLACK, "T0OTHER001")).toMatchObject({ outcome: "refused" });
+    expect(await broker.press(id, "confirm", ADMIN_SLACK, null)).toMatchObject({ outcome: "refused" });
+    expect((await broker.admin("POST", `/v1/admin/changes/${id}/apply`, { admin: false, body: { method: "elicitation" } })).status).toBe(403);
+    const channelId = kind === "bind_channel" ? "C0LEDGER01" : SLACK_CHANNEL;
+    const key = { pk: `SLACK_BINDING#${SLACK_TEAM}`, sk: `CHANNEL#${channelId}` };
+    broker.db.set({ ...broker.db.get(key.pk, key.sk), ...key, teamId: SLACK_TEAM, channelId, projectName: "payments", updatedAt: "2026-11-20T12:34:00.000Z" });
+    expect((await broker.apply(id)).body.error).toMatchObject({ code: "CHANGE_STALE" });
+    expect(writes()).toBe(0);
+    if (kind === "bind_channel") broker.db.delete(key.pk, key.sk);
+    const lost = changeId(await broker.propose(input));
+    for (const member of broker.db.find((item) => item.entityType === "MEMBERSHIP" && item.role === "administrator")) broker.db.delete(String(member.pk), String(member.sk));
+    expect((await broker.apply(lost)).body.error).toMatchObject({ code: "CHANGE_STALE" });
+    expect(writes()).toBe(0);
+  });
+
+  it.each(["bind_channel", "unbind_channel"] as const)("D045 stale or lost authority refuses apply across company scope: %s", async (kind) => {
+    const broker = await createAdminChangeBroker();
+    const input = kind === "bind_channel" ? BIND : { kind, channel: SLACK_CHANNEL };
+    const id = changeId(await broker.propose(input));
+    const writes = countBindingWrites(broker);
+    const { createAwsBrokerHandler } = await import("../../packages/broker/src/aws/broker.js");
+    const company = `org_${"a".repeat(20)}`;
+    const otherCompany = `org_${"b".repeat(20)}`;
+    // The company's directory advertises the workspace, but its authoritative owner disagrees.
+    broker.db.set({ pk: `ORG#${company}#SLACK_WORKSPACES`, sk: `TEAM#${SLACK_TEAM}`,
+      entityType: "COMPANY_SLACK_WORKSPACE_VIEW", teamId: SLACK_TEAM, companyId: company,
+      boundAt: "2026-11-20T12:00:00.000Z", boundBy: "operator" });
+    const ownershipReads: string[] = [];
+    const handler = createAwsBrokerHandler({ ...broker.brokerInput, companies: { companyOf: async () => company },
+      workspaces: { requireCompany: async (team: string) => { ownershipReads.push(team); return otherCompany; } },
+    } as unknown as Parameters<typeof createAwsBrokerHandler>[0]);
+    const refused = await handler({ version: "2.0", rawPath: `/v1/admin/changes/${id}/apply`, rawQueryString: "",
+      headers: { "x-agentx-slack-thread": `${SLACK_TEAM}/${SLACK_CHANNEL}/1700000000.000001` }, body: JSON.stringify({ method: "elicitation" }),
+      requestContext: { requestId: id, http: { method: "POST" }, authorizer: { jwt: { claims: { iss: "https://identity.example.test", sub: "admin-subject", groups: ["admins"] } } } },
+    });
+    expect((JSON.parse(refused.body) as { error: { code: string; message: string } }).error).toEqual({
+      code: "RUNTIME_UNAVAILABLE", message: `change ${id} could not be checked against the current state just now; try again`,
+    });
+    expect(ownershipReads).toEqual([SLACK_TEAM]);
+    expect(broker.pending(id)).toMatchObject({ status: "pending" });
+    expect(writes()).toBe(0);
+  });
+
+  it.each([true, false])("D045 private member vs outsider projection: member=%s", async (member) => {
+    const name = "quiet-planning";
+    const broker = await createAdminChangeBroker({
+      channelInfo: async (request) => ({ ok: true, channels: request.channelIds.map((channelId) => ({ channelId, name, isPrivate: true })) }),
+      channelMembers: async (request) => ({ ok: true, memberOf: member && request.slackUserId === ADMIN_SLACK ? request.channelIds : [] }),
+    });
+    for (const kind of ["bind_channel", "unbind_channel"] as const) {
+      if (kind === "unbind_channel") await bindChannel(broker.handler, "C0PRIVATE01");
+      const proposed = await broker.propose(kind === "bind_channel" ? { kind, channel: "C0PRIVATE01", project: "payments" } : { kind, channel: "C0PRIVATE01" });
+      const id = changeId(proposed);
+      for (const response of [proposed, await broker.get(id)]) {
+        const view = AdminChangeViewSchema.parse(response.body.change);
+        expect(view.effect.includes(name)).toBe(member);
+        assertWarnings(view.effect, kind);
+      }
+      const pending = AdminChangePendingRecordSchema.parse(broker.pending(id));
+      const message = adminChangeMessage(pending, broker.clock.now());
+      expect(message.text.includes(name)).toBe(member);
+      const other = await broker.get(id, "another-admin");
+      const listed = await broker.list();
+      expect(other.status).toBe(200);
+      expect(listed.status).toBe(200);
+      expect(other.body.change).toMatchObject({ changeId: id, status: "pending" });
+      expect(JSON.stringify(listed.body)).toContain(id);
+      expect(broker.audit(id)).toMatchObject({ changeId: id, status: "pending" });
+      expect(JSON.stringify([other.body, listed.body, broker.audit(id), pending.effect, pending.details, pending.stateHash])).not.toContain(name);
+      await broker.decline(id);
+    }
+    const refused = await broker.propose({ kind: "bind_channel", channel: "C0PRIVATE01", project: "payments" });
+    expect(refused.body.error).toMatchObject({ code: "CONFIG_INVALID" });
+    expect(JSON.stringify([refused.body, broker.db.find((item) => item.entityType === "ADMIN_CHANGE_AUDIT")])).not.toContain(name);
+  });
+
+  it.each([{ isPrivate: true, hostile: false }, { isPrivate: false, hostile: false }, { isPrivate: true, hostile: true }, { isPrivate: false, hostile: true }])("D045 maximum names retain warnings in response and Slack blocks: $isPrivate/$hostile", async ({ isPrivate, hostile }) => {
+    // Slack names reach 80 characters; the project name reaches the schema's 63. '&' exercises escaping.
+    const channelName = `review-${"a-".repeat(36)}a`;
+    expect(channelName).toHaveLength(80);
+    const project = AgentXNameSchema.parse(`p${"roject-".repeat(10)}xy`.slice(0, 63));
+    const broker = await createAdminChangeBroker({
+      channelInfo: async (request) => ({ ok: true, channels: request.channelIds.map((channelId) => ({ channelId, name: hostile ? channelName.replaceAll("-", "&") : channelName, isPrivate })) }),
+      channelMembers: async (request) => ({ ok: true, memberOf: request.channelIds }),
+    });
+    const revision = broker.db.find((item) => item.pk === "PROJECT#payments" && String(item.sk).startsWith("REV#"))[0]!;
+    broker.db.set({ ...revision, pk: `PROJECT#${project}`, definition: { ...revision.definition as object, name: project } });
+    const membership = broker.db.find((item) => item.entityType === "MEMBERSHIP" && item.role === "administrator")[0]!;
+    broker.db.set({ ...membership, sk: `PROJECT#${project}`, projectName: project });
+    const previousProject = AgentXNameSchema.parse(`old-${"p".repeat(59)}`);
+    broker.db.set({ ...revision, pk: `PROJECT#${previousProject}`, definition: { ...revision.definition as object, name: previousProject } });
+    broker.db.set({ ...membership, sk: `PROJECT#${previousProject}`, projectName: previousProject });
+    await bindChannel(broker.handler, "C0PRIVATE01", previousProject);
+    await bindChannel(broker.handler, "C0LEDGER01", project);
+    for (const kind of ["bind_channel", "unbind_channel"] as const) {
+      const input = kind === "bind_channel" ? { kind, channel: "C0PRIVATE01", project } : { kind, channel: "C0LEDGER01" };
+      const proposed = await broker.propose(input);
+      const id = changeId(proposed);
+      for (const answer of [proposed, await broker.get(id)]) {
+        const view = AdminChangeViewSchema.parse(answer.body.change);
+        assertWarnings(view.effect, kind);
+        expect(view.effect.length).toBeLessThanOrEqual(4_000);
+      }
+      const message = adminChangeMessage(AdminChangePendingRecordSchema.parse(broker.pending(id)), broker.clock.now());
+      const blocks = message.blocks as Array<{ type: string; text?: { text: string } }>;
+      const actionIndex = blocks.findIndex((block) => block.type === "actions");
+      expect(actionIndex).toBeGreaterThan(0);
+      const beforeButtons = blocks.slice(0, actionIndex).map((block) => block.text?.text ?? "").join("\n");
+      assertWarnings(beforeButtons, kind);
+      expect(beforeButtons).toContain(hostile ? "&amp;" : channelName);
+      for (const block of blocks.filter((block) => block.type === "section")) expect(block.text!.text.length).toBeLessThanOrEqual(3_000);
+      // Full rebind warnings must not truncate the final re-review instruction on drift.
+      const channelId = kind === "bind_channel" ? "C0PRIVATE01" : "C0LEDGER01";
+      const pk = `SLACK_BINDING#${SLACK_TEAM}`, sk = `CHANNEL#${channelId}`;
+      broker.db.set({ ...broker.db.get(pk, sk), updatedAt: "2026-11-20T15:00:00.000Z" });
+      const stale = await broker.apply(id);
+      expect(stale.body.error).toMatchObject({ code: "CHANGE_STALE", message: expect.stringContaining("Ask for the change again if you still want it.") as unknown });
+      expect((stale.body.error as { message: string }).message.length).toBeLessThanOrEqual(1_000);
+    }
   });
 });

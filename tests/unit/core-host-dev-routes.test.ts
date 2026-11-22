@@ -3,8 +3,15 @@ import { CORE_CONTEXT_WORKER_ROUTES, coreContextWorkerRouteOf, appRouteOf as con
 // membership only and fails closed; another company's task reads exactly like a missing one; unwired parts say so in fixed words; a script token is never made through this API.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { ON_THE_WEBSITE_MESSAGE, WorkflowSnapshotSchema, agentXError, orgProjectCatalogKey, projectRevisionKey, type AuditSink, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
+import { ON_THE_WEBSITE_MESSAGE, WorkflowSnapshotSchema, agentXError, orgProjectCatalogKey, projectRevisionKey, change, type CodeBuildCheckResult, type AuditSink, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
+import { FakeCodeHost, FakeHostModel } from "@agentx/broker/fakes";
+import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
+import { codeBuildCheckRunner } from "../../packages/broker/src/plugins/check-runner/codebuild/index.js";
+import { publicationGateCallback } from "../../packages/broker/src/core/build-step/publication-gates.js";
+import { openPullRequest } from "../../packages/broker/src/core/build-step/publish.js";
+import { workspaceKeys } from "../../packages/broker/src/core/task-flow/workspace-location.js";
+import { workspaceOperations } from "../../packages/broker/src/core/task-flow/reads.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { blockedReview, plain } from "../support/task-actions-world.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
@@ -15,6 +22,7 @@ import { createCoreHostApp, engineStampKey, stampOf, type CoreHostApp } from "..
 import { INVOLVED_UNAVAILABLE, NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, SESSION_CAP_UNREADABLE, SIGN_IN_AGAIN, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { involvedRowKey, writeInvolvedRow } from "../../packages/broker/src/core/task-flow/involved.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
+import type { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 
 const HONEST_CI = { honest: true as const, ciMode: () => "their_ci_fix" as const };
 const OTHER = "org_corehost00000000000b";
@@ -457,7 +465,7 @@ describe("the owner's moves on a core task (send back, review findings, continue
     const own = remember(FAKE_COMPANY);
     const runtime = await app.runtimeFor(FAKE_COMPANY);
     const { task } = await runtime.flow.start({ principal: own.principal, client: "test", origin: "app" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
-    return { world, routes, own, remember, taskId: task.taskId, revision: task.workflow!.revision };
+    return { world, routes, own, remember, taskId: task.taskId, workspaceId: task.workspaceId, revision: task.workflow!.revision };
   }
   /** Puts the core task's workflow in a review the critic blocked, at the task's own id and owner. */
   async function blockReview(world: FakeWorld, taskId: string): Promise<number> {
@@ -468,6 +476,74 @@ describe("the owner's moves on a core task (send back, review findings, continue
   }
   const errorOf = (answer: { body: string } | undefined) => (JSON.parse(answer!.body) as { error?: { code: string; message: string } }).error;
   const sendBackBody = (expectedRevision?: number) => ({ requestId: randomUUID(), instructions: "Fix the review findings.", ...(expectedRevision === undefined ? {} : { expectedRevision }) });
+
+  it("ports retry actions and mounts only the owning publication and review handlers", async () => {
+    const { world, routes, own, taskId, revision } = await started();
+    const before = await world.store.get(taskKey(taskId));
+    for (const action of ["workflow/retry"]) {
+      const answer = await routes.route(post(`/v1/dev/tasks/${taskId}/${action}`, sendBackBody(revision)), own);
+      expect(answer?.statusCode, action).toBe(400);
+      expect(errorOf(answer)?.code).toBe("CONFIG_INVALID");
+    }
+    const publish = await routes.route(post(`/v1/dev/tasks/${taskId}/workflow/publish-retry`, { requestId: randomUUID(), expectedRevision: revision }), own);
+    expect(publish?.statusCode).toBe(400);
+    const manual = await routes.route(post(`/v1/dev/tasks/${taskId}/pull-requests`, { requestId: randomUUID(), title: "My change", draft: true }), own);
+    expect(manual?.statusCode).toBe(400);
+    expect(errorOf(manual)?.message).toBe("This task opens its own pull request after its checks and reviews pass.");
+    const review = await routes.route(post(`/v1/dev/tasks/${taskId}/workflow/review`, sendBackBody(revision)), own);
+    expect(review?.statusCode).toBe(400);
+    expect(errorOf(review)?.message).toContain("exact candidate's checks passed");
+    expect(await world.store.get(taskKey(taskId))).toEqual(before);
+  });
+
+  it.each(["workflow/review", "workflow/retry"])("uses the same review service for %s and replays through the other route", async (action) => {
+    const { world, routes, own, taskId, workspaceId } = await started();
+    const revision = await blockReview(world, taskId);
+    const record = (await world.store.get(taskKey(taskId)))!;
+    const workflow = record["workflow"] as unknown as WorkflowSnapshot;
+    const location = await workspaceKeys({ store: world.store, companyId: FAKE_COMPANY }, workspaceId);
+    await world.store.update({ key: location.workspaceKey, ops: [change.set("status", "READY"), change.set("activeOperationId", null)] });
+    const request = { ...sendBackBody(revision), candidateDigest: workflow.candidate!.digest };
+    const first = await routes.route(post(`/v1/dev/tasks/${taskId}/${action}`, request), own);
+    expect(first?.statusCode, first?.body).toBe(200);
+    const other = action === "workflow/review" ? "workflow/retry" : "workflow/review";
+    expect((await routes.route(post(`/v1/dev/tasks/${taskId}/${other}`, request), own))?.statusCode).toBe(200);
+    const operations = await workspaceOperations({ store: world.store, companyId: FAKE_COMPANY }, workspaceId);
+    const reviews = operations.filter((operation) => operation.workflowMode === "REVIEW");
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]).toMatchObject({ requestId: request.requestId, dispatch: { payload: { workflowReviewNote: request.instructions } } });
+  });
+
+  it("ports plan reads with the old document/version refusals", async () => {
+    const { routes, own, taskId } = await started();
+    const answer = await routes.route(get(`/v1/dev/tasks/${taskId}/plan`), own);
+    expect(answer?.statusCode).toBe(404);
+    expect(errorOf(answer)?.message).toBe("this task has no plan document yet");
+    const invalid = await routes.route(get(`/v1/dev/tasks/${taskId}/plan?version=1.5`), own);
+    expect(invalid?.statusCode).toBe(400);
+    expect(errorOf(invalid)?.message).toBe("version must be a whole number from 1 to 999");
+    expect(await routes.route(post(`/v1/dev/tasks/${taskId}/plan`), own)).toBeUndefined();
+  });
+
+  it("does not expose ported task routes to script tokens or another company, even with malformed JSON", async () => {
+    const { world, routes, own, remember, taskId } = await started();
+    const before = await world.store.get(taskKey(taskId));
+    for (const action of ["workflow/decision", "workflow/retry", "workflow/publish-retry", "close"]) {
+      for (const caller of [remember(OTHER), { ...own, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } }]) {
+        expect((await routes.route({ ...post(`/v1/dev/tasks/${taskId}/${action}`), body: "not json" }, caller))?.statusCode, action).toBe(404);
+      }
+    }
+    expect(await world.store.get(taskKey(taskId))).toEqual(before);
+  });
+
+  it("closes through the core flow and returns the MCP close wire shape", async () => {
+    const { routes, own, taskId } = await started();
+    const body = { requestId: randomUUID() };
+    const answer = await routes.route(post(`/v1/dev/tasks/${taskId}/close`, body), own);
+    expect(answer?.statusCode).toBe(200);
+    expect(JSON.parse(answer!.body)).toMatchObject({ closed: true, task: { taskId, status: "CLOSED" } });
+    expect(JSON.parse((await routes.route(post(`/v1/dev/tasks/${taskId}/close`, body), own))!.body)).toMatchObject({ closed: true, task: { taskId } });
+  });
 
   it("serves them only when the deployment wires the money cap AND the company's owner rule; otherwise they are not the core's here (the engine boundary then says so)", async () => {
     const unwired = await started(ownerRule(), null);
@@ -1107,4 +1183,126 @@ it("inventories the four exact context worker routes without person authority", 
     expect(contextAppRouteOf(row.method, row.path)).toBeUndefined();
     expect(contextDevRouteOf(row.method, row.path)).toBeUndefined();
   }
+});
+
+
+it("registers close preview reads at both deployed boundaries", () => {
+  expect(contextDevRouteOf("GET", "/v1/dev/tasks/t1/close")?.requires).toBe("tasks:read");
+  expect(contextAppRouteOf("GET", "/v1/app/sessions/s1/close")?.requires).toBe("tasks:read");
+});
+
+it("keeps guarded close unavailable without the hosted retention provider, with no effects", async () => {
+  const { world, app, companyOf, remember } = await world2();
+  const caller = remember(FAKE_COMPANY);
+  const runtime = await app.runtimeFor(FAKE_COMPANY);
+  const { task } = await runtime.flow.start({ principal: caller.principal, origin: "app" }, { requestId: randomUUID(), project: "payments", instructions: "Close safely" });
+  const { createTaskSessionItems, taskSessionId } = await import("../../packages/broker/src/core/sessions/create.js");
+  const sessionId = taskSessionId(task.taskId);
+  await world.store.transact(createTaskSessionItems({ orgId: FAKE_COMPANY, sessionId, taskId: task.taskId, project: task.project, agent: { agentId: "rovara-code", name: "Code", version: 1 }, title: task.title, owner: caller.principal, origin: "app", payer: { kind: "member", developerId: developerIdOf(caller.principal) }, now: task.createdAt }));
+  const members = { companyRole: async () => "owner" as const, projectGrant: () => "contributor" as const };
+  const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, members }) });
+  const path = `/v1/app/sessions/${sessionId}`;
+  expect(runtime.flow.deps.closeInspection).toBeUndefined();
+  const snapshot = async () => (await (world.store as MemoryDocumentStore).scanPage({ limit: 1000 })).items;
+  const before = await snapshot();
+  const transact = vi.spyOn(world.store, "transact"), update = vi.spyOn(world.store, "update"), put = vi.spyOn(world.store, "put");
+  const close = vi.spyOn(runtime.flow, "close"), relay = vi.spyOn(runtime.flow.deps.outbox, "relay"), terminate = vi.spyOn(runtime.flow.deps.machines, "terminate");
+  try {
+    const read = await routes.route(get(path), caller);
+    expect(read?.statusCode).toBe(200);
+    const offered = (JSON.parse(read!.body) as { session: { you: { actions: string[] } } }).session.you.actions;
+    expect(offered).toContain("close");
+    for (const action of ["discard", "discard_unpublished", "guarded_close"]) expect(offered).not.toContain(action);
+    for (const action of ["close", "discard"]) {
+      const preview = await routes.route(get(`${path}/close?action=${action}`), caller);
+      expect(preview?.statusCode).toBe(200);
+      expect(JSON.parse(preview!.body)).toEqual({ preview: null, unavailable: "inspection_required" });
+    }
+    for (const fields of [
+      { expectedPreviewDigest: "a".repeat(64) }, { expectedPreviewDigest: null },
+      { discard_unpublished: true }, { discard_unpublished: false }, { discardUnpublished: true },
+      { expectedPreviewDigest: "a".repeat(64), discard_unpublished: true },
+      { expectedPreviewDigest: "a".repeat(64), discardUnpublished: true },
+    ]) {
+      const refused = await routes.route(post(`${path}/close`, { requestId: randomUUID(), ...fields }), caller);
+      expect(refused?.statusCode).toBe(503);
+      const error = (JSON.parse(refused!.body) as { error: { code: string; message: string } }).error;
+      expect(error.code).toBe("RUNTIME_UNAVAILABLE");
+      expect(error.message).toContain("not available yet");
+    }
+    expect(await snapshot()).toEqual(before);
+    for (const effect of [transact, update, put, close, relay, terminate]) expect(effect).not.toHaveBeenCalled();
+    // The unchanged requestId-only close remains live on this same hosted route.
+    expect((await routes.route(post(`${path}/close`, { requestId: randomUUID() }), caller))?.statusCode).toBe(200);
+    expect(close).not.toHaveBeenCalled(); // Session control uses the core host directly.
+    expect(await world.store.get(taskKey(task.taskId))).toHaveProperty("closedAt");
+  } finally {
+    for (const effect of [transact, update, put, close, relay, terminate]) effect.mockRestore();
+  }
+});
+it("mounts share, manual open-PR and on-demand review with their existing developer wires", async () => {
+  const { world, companyOf, remember } = await world2();
+  const access = { ...createOwnerTaskAccess(), ownerActing: async (_principal: unknown, task: { ownerKey: string }) => ({ actorId: task.ownerKey }) };
+  const app = createCoreHostApp({ modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
+    runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access, repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: HONEST_CI }) });
+  const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, taskActions: { roundCap: async () => undefined } }) });
+  const owner = remember(FAKE_COMPANY);
+  const runtime = await app.runtimeFor(FAKE_COMPANY);
+  const { task } = await runtime.flow.start({ principal: owner.principal, origin: "app", client: "test" }, { requestId: randomUUID(), project: "payments", instructions: "Add retry", workflow: true, workflowPath: "QUICK" });
+  for (const action of ["share", "pull-requests", "workflow/review"]) {
+    expect(contextDevRouteOf("POST", `/v1/dev/tasks/${task.taskId}/${action}`)).toBeDefined();
+    const response = await routes.route(post(`/v1/dev/tasks/${task.taskId}/${action}`, {}), owner);
+    expect(response?.statusCode, action).toBe(400);
+    expect(JSON.parse(response!.body)).toMatchObject({ error: { code: "CONFIG_INVALID" } });
+    const foreign = await routes.route(post(`/v1/dev/tasks/${task.taskId}/${action}`, {}), remember(OTHER));
+    expect(foreign?.statusCode).toBe(404);
+    const scripted = await routes.route(post(`/v1/dev/tasks/${task.taskId}/${action}`, {}), { ...owner, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } });
+    expect(scripted?.statusCode).toBe(404);
+  }
+});
+
+
+it("routes manual open-PR to its owner and opens nothing until exact SUCCEEDED build evidence", async () => {
+  const { world, companyOf, remember } = await world2();
+  const access = { ...createOwnerTaskAccess(), ownerActing: async (_principal: unknown, task: { ownerKey: string }) => ({ actorId: task.ownerKey }) };
+  const app = createCoreHostApp({ modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
+    runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access, repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: HONEST_CI }) });
+  const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, taskActions: { roundCap: async () => undefined } }) });
+  const owner = remember(FAKE_COMPANY);
+  const runtime = await app.runtimeFor(FAKE_COMPANY);
+  const deps = runtime.flow.deps;
+  const projects = deps.projects;
+  deps.projects = { ...projects, revision: async (name, revision) => {
+    const found = await projects.revision(name, revision);
+    return found === undefined ? undefined : { ...found, definition: { ...found.definition, repositories: found.definition.repositories.map(repo => ({ ...repo, host: { kind: "fake" }, codeBuildGates: [{ name: "unit", projectName: "unit-project", timeoutMinutes: 10 }] })) } };
+  } };
+  const { task } = await runtime.flow.start({ principal: owner.principal, origin: "app", client: "test" }, { requestId: randomUUID(), project: "payments", instructions: "Add retry" });
+  const location = await workspaceKeys(deps, task.workspaceId);
+  await world.store.update({ key: location.workspaceKey, ops: [change.set("status", "READY"), change.set("activeOperationId", null)] });
+  const request = { requestId: randomUUID(), title: "Add retry", draft: true };
+  const response = await routes.route(post(`/v1/dev/tasks/${task.taskId}/pull-requests`, request), owner);
+  expect(response?.statusCode).toBe(200);
+  const [operation] = (await workspaceOperations(deps, task.workspaceId)).filter(entry => entry.kind === "publish");
+  expect(operation).toMatchObject({ requestId: request.requestId, dispatch: { extraActions: ["pull-request", "codebuild"] }, publication: { codeBuildGates: [{ name: "unit" }] } });
+  expect(JSON.parse(response!.body)).toMatchObject({ operationId: operation!.id });
+  const model = new FakeHostModel({ url: operation!.publication!.repositoryUrl, id: "42", fullName: "example/demo" });
+  const commit = model.commit(operation!.publication!.headBranch, { "retry.ts": "retry" });
+  const result: CodeBuildCheckResult = { gate: "unit", projectName: "unit-project", buildId: "unit-project:123", requestedSourceVersion: commit, resolvedSourceVersion: commit, status: "SUCCEEDED" };
+  const registry = createAdapterRegistry();
+  registry.register("code-host", "fake", new FakeCodeHost(model), { isDefault: true });
+  registry.register("check-runner", "codebuild", { kind: "codebuild", create: context => codeBuildCheckRunner({ ...context, gateway: { start: async () => result, status: async () => result } }) });
+  deps.codeHosts = registry;
+  const callback = { repository: "demo", repositoryUrl: operation!.publication!.repositoryUrl, headBranch: operation!.publication!.headBranch, baseBranch: "main", title: request.title, body: "", commit };
+  await expect(openPullRequest(deps, operation!, callback)).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
+  expect(model.changeRequests).toHaveLength(0);
+  await publicationGateCallback(deps, operation!, { action: "start", gate: "unit", projectName: "unit-project", repository: "demo", commit });
+  const key = { pk: location.workspaceKey.pk, sk: `CODEBUILD#${operation!.id}#unit` };
+  for (const status of ["FAILED", "IN_PROGRESS", "RUNNING", "UNKNOWN", "succeeded", ""]) {
+    await world.store.update({ key, ops: [change.set("evidence.status", status)] });
+    await expect(openPullRequest(deps, operation!, callback), status).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
+    expect(model.changeRequests).toHaveLength(0);
+  }
+  await world.store.update({ key, ops: [change.set("evidence.status", "SUCCEEDED")] });
+  expect(await openPullRequest(deps, operation!, callback)).toMatchObject({ number: 1, draft: true });
+  expect(model.changeRequests).toHaveLength(1);
 });

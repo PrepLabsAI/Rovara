@@ -1,3 +1,4 @@
+import { assertPublicationGates } from "./publication-gates.js";
 import { workspaceKeys } from "../task-flow/workspace-location.js";
 // Lane L10, the build step: opening the pull request of exactly the code whose checks and reviews passed. Cloud's `startTaskWorkflowPublicationFromSystem` (developer-tasks/publication.ts), the
 // pull request callback (`reconcilePullRequest`, aws/broker/pull-request-reconcile.ts) and the publish branch of `completedWorkflowItems`, on the code-host port.
@@ -181,6 +182,15 @@ const objectOf = (value: unknown): Record<string, unknown> => {
   return value as Record<string, unknown>;
 };
 
+function publicationIsCurrent(deps: TaskFlowDeps, operation: OperationRecord, task: TaskRecord | undefined): boolean {
+  if (task === undefined || task.closedAt !== undefined || task.companyId !== deps.companyId || task.workspaceId !== operation.workspaceId) return false;
+  const expected = operation.publication!;
+  if (expected.candidateDigest === undefined) return task.workflow === undefined;
+  const workflow = task.workflow;
+  return workflow !== undefined && workflow.stage === "PULL_REQUEST" && workflow.state === "READY" && workflow.candidate?.digest === expected.candidateDigest
+    && workflow.candidate?.repositories.find(entry => entry.repositoryId === expected.repository)?.treeSha === expected.expectedTreeSha;
+}
+
 /**
  * The worker pushed its branch and asks the broker to open the pull request. The request is held to what the publication was started with; the host says what the branch holds; the change
  * request is opened as a draft; its own head is read again. Throws CALLBACK_FORBIDDEN (and blocks the task) for code that is not the checked code.
@@ -199,40 +209,28 @@ export async function openPullRequest(deps: TaskFlowDeps, operation: OperationRe
   const commit = input["commit"];
   // Still the publication of the current candidate: a task that moved on (a send back, a close) gets no pull request from a late callback.
   const task = await taskOfOperation(deps, operation);
-  const workflow = task?.workflow;
-  const candidateRepository = workflow?.candidate?.repositories.find((entry) => entry.repositoryId === expected.repository);
-  if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.stage !== "PULL_REQUEST" || workflow.state !== "READY" || workflow.candidate?.digest !== expected.candidateDigest
-    || candidateRepository?.treeSha !== expected.expectedTreeSha) {
-    throw agentXError("STALE_FENCE", "this publication is no longer the task's current one");
-  }
+  if (!publicationIsCurrent(deps, operation, task) || task === undefined) throw agentXError("STALE_FENCE", "this publication is no longer the task's current one");
   const project = await deps.projects.revision(task.project, task.startingRevision);
   const definition = project?.definition.repositories.find((entry) => entry.name === expected.repository);
   if (definition === undefined || definition.url !== expected.repositoryUrl) throw agentXError("CONFIG_INVALID", "published pull request repository is not part of the task's registered project revision");
+  const access = await deps.access.checkStep(task);
+  if (!access.allowed) throw agentXError("CALLBACK_FORBIDDEN", access.message);
+  await assertPublicationGates(deps, operation, commit);
   const host = codeHostForRecord(deps.codeHosts, definition);
   const scope = scopeOf(deps);
   const repositoryRef = { url: expected.repositoryUrl };
   // GitHub, not the worker, says what the branch holds.
   const head = await host.branchHead(repositoryRef, expected.headBranch, scope);
-  if (head !== commit || await host.tree(repositoryRef, commit, scope) !== expected.expectedTreeSha || !await onPinnedBase(host, expected.repositoryUrl, commit, expected.expectedBaseCommit, deps)) {
+  if (head !== commit || (expected.expectedTreeSha !== undefined && await host.tree(repositoryRef, commit, scope) !== expected.expectedTreeSha) || !await onPinnedBase(host, expected.repositoryUrl, commit, expected.expectedBaseCommit, deps)) {
     await blockUncheckedPublication(deps, operation);
     throw agentXError("CALLBACK_FORBIDDEN", "the pushed commit is not the checked code");
   }
   // A workflow publication is always a draft: humans merge.
-  const reconciled = await host.reconcileChangeRequest({ repository: repositoryRef, sourceBranch: expected.headBranch, targetBranch: expected.baseBranch, title: expected.title, body: expected.body, draft: true }, scope);
+  const reconciled = await host.reconcileChangeRequest({ repository: repositoryRef, sourceBranch: expected.headBranch, targetBranch: expected.baseBranch, title: expected.title, body: expected.body, draft: expected.draft }, scope);
   const number = Number(reconciled.ref.id);
   const ref: ChangeRequestRef = { repository: repositoryRef, id: reconciled.ref.id, url: reconciled.ref.url };
   // The branch could move between the check and the open (a force-push): the opened change request's own head must still be the checked commit, or it is closed again and nothing is recorded.
-  let sound = false;
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
-    try {
-      const details = await host.getChangeRequest(ref, scope);
-      sound = details.headRevision === commit && await host.tree(repositoryRef, commit, scope) === expected.expectedTreeSha && await onPinnedBase(host, expected.repositoryUrl, commit, expected.expectedBaseCommit, deps);
-      // A read that succeeded is judged as it stands (as Cloud does): only a read that FAILED is read again, so a branch put back between reads cannot be waited for.
-      break;
-    } catch (error) {
-      log(deps, { event: "build_step.publication_head_unreadable", operationId: operation.id, attempt, error: error instanceof Error ? error.name : "unknown" });
-    }
-  }
+  const sound = await readPublicationHead(deps, operation, host, ref, commit, expected);
   if (!sound) {
     await host.updateChangeRequest(ref, { state: "closed" }, scope).catch((error: unknown) => log(deps, { event: "build_step.unchecked_pull_request_close_failed", operationId: operation.id, number, error: error instanceof Error ? error.name : "unknown" }));
     await blockUncheckedPublication(deps, operation);
@@ -253,7 +251,23 @@ export async function openPullRequest(deps: TaskFlowDeps, operation: OperationRe
   });
   const written = await deps.store.transact([{ kind: "put", item: toDocument(record) }, ...audit]);
   if (!written.applied) await deps.store.put({ item: toDocument(record) });
-  return { number, url: reconciled.ref.url, reconciled: reconciled.reconciled, draft: reconciled.draftRefused !== true };
+  return { number, url: reconciled.ref.url, reconciled: reconciled.reconciled, draft: expected.draft && reconciled.draftRefused !== true };
+}
+
+async function readPublicationHead(deps: TaskFlowDeps, operation: OperationRecord, host: CodeHost, ref: ChangeRequestRef, commit: string, expected: PublicationExpectation): Promise<boolean> {
+  const scope = scopeOf(deps);
+  let sound = false;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const details = await host.getChangeRequest(ref, scope);
+      sound = details.headRevision === commit && (expected.expectedTreeSha === undefined || await host.tree(ref.repository, commit, scope) === expected.expectedTreeSha) && await onPinnedBase(host, expected.repositoryUrl, commit, expected.expectedBaseCommit, deps);
+      // A read that succeeded is judged as it stands (as Cloud does): only a read that FAILED is read again, so a branch put back between reads cannot be waited for.
+      break;
+    } catch (error) {
+      log(deps, { event: "build_step.publication_head_unreadable", operationId: operation.id, attempt, error: error instanceof Error ? error.name : "unknown" });
+    }
+  }
+  return sound;
 }
 
 // ---- the end of a publication
@@ -266,7 +280,7 @@ export async function openPullRequest(deps: TaskFlowDeps, operation: OperationRe
 export async function recordPublished(deps: TaskFlowDeps, task: TaskRecord, operation: OperationRecord, ended: Ended): Promise<void> {
   const workflow = task.workflow;
   const expected = operation.publication;
-  if (workflow === undefined || expected === undefined || workflow.stage !== "PULL_REQUEST" || workflow.state !== "READY" || workflow.candidate?.digest !== expected.candidateDigest) return;
+  if (workflow === undefined || workflow.candidate === undefined || expected === undefined || workflow.stage !== "PULL_REQUEST" || workflow.state !== "READY" || workflow.candidate?.digest !== expected.candidateDigest) return;
   const now = iso(deps);
   if (ended.status !== "SUCCEEDED") {
     if (ended.status !== "CANCELLED") await commitWorkflow(deps, task, blockWorkflow(workflow, WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, now));

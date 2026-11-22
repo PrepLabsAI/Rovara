@@ -36,7 +36,7 @@ describe("starting a task", () => {
     await h.registerProject();
     await expect(h.flow.start(h.owner, { requestId: newRequestId(), project: "missing", instructions: "x" })).rejects.toMatchObject({ code: "PROJECT_NOT_FOUND" });
     await expect(h.flow.start(h.guest, { requestId: newRequestId(), project: "payments", instructions: "x" })).rejects.toMatchObject({ code: "FORBIDDEN" });
-    await expect(h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x", shareToChannel: true })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    await expect(h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x", shareToChannel: true })).rejects.toMatchObject({ code: "CHANNEL_REQUIRED" });
     await expect(h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x", workflow: true })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     expect((await h.flow.list(h.owner)).tasks).toEqual([]);
     expect(await h.store.get({ pk: "DEVELOPER_LIMIT#local-owner", sk: "MEMBER" })).toBeUndefined();

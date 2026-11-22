@@ -46,7 +46,10 @@ async function world(mode: "SETUP_AGENT" | "WIKI_BUILD", egress: "bridge" | "gat
   expect(environment.AGENTX_MODEL_PROXY_URL).toBeUndefined(); expect(environment.AGENTX_CONTROL_PLANE_URL).toBe("https://broker.example");
   for (const [name, value] of Object.entries(environment)) if (value !== undefined) vi.stubEnv(name, value);
   for (const name of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "AGENTX_MODEL_PROXY_URL"]) vi.stubEnv(name, "");
-  vi.stubEnv("AGENTX_WORKER_STATE_DIR", join(root, "state")); vi.stubEnv("AGENTX_RUNTIME", "ec2");
+  // The worker refuses a state directory inside the workspace (MOUNT_PATH = root here), so it lives in its own temp root.
+  // (It passed on macOS only because /var -> /private/var hid the nesting from the unresolved path comparison.)
+  const state = await mkdtemp(join(tmpdir(), "hosted-composed-state-")); roots.push(state);
+  vi.stubEnv("AGENTX_WORKER_STATE_DIR", state); vi.stubEnv("AGENTX_RUNTIME", "ec2");
   // The real launcher supplies this root-owned firewall fact; Docker is a fake here.
   vi.stubEnv("AGENTX_SETUP_ISOLATION", "ready");
   const directory = join(root, "repo/api"); await mkdir(directory, { recursive: true });

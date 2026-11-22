@@ -3,10 +3,12 @@
 // to the agent goes through the control host (L9-wire's `host.ts`), which keeps it as a note and gives it to a running step.
 import type { ObjectStorage } from "@agentx/contracts";
 import {
-  AgentXError, IntentAnswerRefusal, SESSION_ACTIONS, SessionIdSchema, WorkflowTransitionError, agentSessionKey, agentXError,
+  AgentXError, IntentAnswerRefusal, TaskCloseActionSchema, SESSION_ACTIONS, SessionIdSchema, WorkflowTransitionError, agentSessionKey, agentXError,
   type AgentSessionRecord, type OrgId, type SessionId,
 } from "@agentx/contracts";
 import { AGENT_SESSION_CONTRACT_VERSION } from "@agentx/contracts";
+import { closeHasDigest } from "../../core/task-flow/close-acceptance.js";
+import { parseBody } from "../../core/task-flow/owner-round.js";
 import type { ControlResult } from "../../core/sessions/control.js";
 import { createSessionAccess, requireLevelOf, type SessionAccess, type SessionMembers } from "../../core/sessions/access.js";
 import { developerIdOf } from "../../core/sessions/create.js";
@@ -180,6 +182,7 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
         return json(200, request.method === "POST" && action === "follow" ? await followSession(followerDeps, caller.principal, orgId, sessionId) : await unfollowSession(followerDeps, caller.principal, orgId, sessionId));
       }
       if (action === "presence" && request.method === "POST") return json(200, await recordPresence(followerDeps, caller.principal, orgId, sessionId));
+      if (action === "close" && request.method === "GET") return await previewClose(session, you, caller, request.path);
       if (request.method !== "POST") throw agentXError("NOT_FOUND", "route not found");
       const body = bodyOf(request);
       const requestId = typeof body["requestId"] === "string" ? body["requestId"] : "";
@@ -203,15 +206,7 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
         await answerQuestions(session, caller, body);
         return json(200, { session: await see((await sessions.get(orgId, sessionId)) ?? session) });
       }
-      if (action === "close") {
-        // Closes the session's task through the session control (the same checks as a stop, one transaction for the request, the event and the audit); the session ends with it, and the answer is the session as `GET` shows it.
-        // A repeat of the request is the same close. `discardUnpublished` is not taken: this install has no unpublished-work check to agree to.
-        if (typeof body["requestId"] !== "string" || Object.keys(body).some((name) => name !== "requestId")) throw agentXError("CONFIG_INVALID", "a close needs a request ID and takes nothing else (there is no unpublished work to discard on this install)");
-        const result = await control.close(caller.principal, orgId, sessionId, { requestId });
-        if (result.status === "refused") return refused(result);
-        await deps.refresh?.(orgId, sessionId).catch(() => undefined);
-        return json(200, { session: await see((await sessions.get(orgId, sessionId)) ?? result.session), closed: true });
-      }
+      if (action === "close") return await answerClose(session, caller, body);
       if (action === "revise-plan") {
         // The owner sends coding that stopped for their live message back to planning with that change; the revised plan still waits for their approval on the page (nothing is approved here).
         if (session.subject.kind !== "task") throw agentXError("NOT_FOUND", "There is no such session.");
@@ -230,6 +225,24 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
     }
   };
 
+  async function previewClose(session: AgentSessionRecord, you: SessionAccess, caller: TaskCaller, path: string): Promise<BrokerResponse> {
+    requireLevelOf(you, "edit", "close it");
+    if (session.subject.kind !== "task") throw agentXError("NOT_FOUND", "There is no such session.");
+    const action = parseBody(TaskCloseActionSchema, new URL(path, "http://local").searchParams.get("action"));
+    return json(200, await flow.previewClose(caller, session.subject.taskId, action));
+  }
+
+  async function answerClose(session: AgentSessionRecord, caller: TaskCaller, body: Record<string, unknown>): Promise<BrokerResponse> {
+    const input = closeInput(body);
+    const result = await control.close(caller.principal, deps.companyId, session.sessionId, input);
+    if (result.status === "refused") return refused(result);
+    const guarded = closeHasDigest(input);
+    if (!guarded) await deps.refresh?.(deps.companyId, session.sessionId).catch(() => undefined);
+    const after = (await sessions.get(deps.companyId, session.sessionId)) ?? result.session;
+    const task = guarded && session.subject.kind === "task" ? await readTask(flow.deps, session.subject.taskId) : undefined;
+    return json(200, { session: await view(after, await access.of(caller.principal, after), caller), closed: guarded ? task?.closedAt !== undefined : true });
+  }
+
   /** Answers to Understand's questions (needs `edit`, D5): the workflow takes them, and Understand runs again with them in the same commit. */
   async function answerQuestions(session: AgentSessionRecord, caller: TaskCaller, body: Record<string, unknown>): Promise<void> {
     const taskId = session.subject.kind === "task" ? session.subject.taskId : undefined;
@@ -238,4 +251,14 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
       taskId, round: typeof body["round"] === "number" ? body["round"] : -1, answers: body["answers"], by: { name: caller.principal.displayName }, source: caller.client === "mcp" || caller.client === "cli" ? caller.client : "app",
     });
   }
+}
+
+/** The bridge's existing camel-case flag is the same intent, never a replacement digest. */
+function closeInput(body: Record<string, unknown>): { requestId: string; expectedPreviewDigest?: unknown; discard_unpublished?: boolean } {
+  // DEC 304: the old session request still takes only requestId. Boolean forwarding accompanies displayed consent.
+  if (!closeHasDigest(body) && Object.keys(body).some((name) => name !== "requestId")) throw agentXError("CONFIG_INVALID", "a close needs a request ID and takes nothing else (there is no unpublished work to discard on this install)");
+  if (typeof body["requestId"] !== "string" || Object.keys(body).some((name) => !["requestId", "expectedPreviewDigest", "discard_unpublished", "discardUnpublished"].includes(name))) throw agentXError("CONFIG_INVALID", "a close needs a request ID and valid close fields");
+  const snake = body["discard_unpublished"], camel = body["discardUnpublished"];
+  if ((snake !== undefined && typeof snake !== "boolean") || (camel !== undefined && typeof camel !== "boolean") || (snake !== undefined && camel !== undefined && snake !== camel)) throw agentXError("CONFIG_INVALID", "discard unpublished must be one boolean");
+  return { requestId: body["requestId"], ...(Object.hasOwn(body, "expectedPreviewDigest") ? { expectedPreviewDigest: body["expectedPreviewDigest"] } : {}), ...(snake === undefined && camel === undefined ? {} : { discard_unpublished: (snake ?? camel) as boolean }) };
 }
