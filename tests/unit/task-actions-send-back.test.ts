@@ -42,8 +42,8 @@ describe("send back to coding", () => {
     const { h, caller } = await seed();
     const actions = createTaskActions(h.deps);
     const before = await stateOf(h);
-    await expect(actions.sendBack(caller, TASK_ID, body(5))).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
-    await expect(actions.sendBack(caller, TASK_ID, body(7))).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    await expect(actions.sendBack(caller, TASK_ID, body(5))).rejects.toMatchObject({ code: "CHANGE_STALE" });
+    await expect(actions.sendBack(caller, TASK_ID, body(7))).rejects.toMatchObject({ code: "CHANGE_STALE" });
     await expect(actions.sendBack(caller, TASK_ID, body(undefined))).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("current revision") as string });
     expect(await stateOf(h)).toEqual(before);
   });
@@ -135,7 +135,7 @@ describe("send back to coding", () => {
     const broken = await seed({ access: fence() });
     await broken.h.store.put({ item: { pk: "ACCESS_FENCE#payments", sk: "META", entityType: "ACCESS_FENCE" } });
     const before = await stateOf(broken.h);
-    await expect(createTaskActions(broken.h.deps).sendBack(broken.caller, TASK_ID, body(6))).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    await expect(createTaskActions(broken.h.deps).sendBack(broken.caller, TASK_ID, body(6))).rejects.toMatchObject({ code: "CHANGE_STALE" });
     // (The test sink counts an audit line when it is staged, committed or not; the store holds none.)
     expect(await stateOf(broken.h)).toEqual({ ...before, audit: expect.any(Number) as number });
     expect(await queryAll(broken.h.store, { pk: `AUDIT#${COMPANY}`, sk: { op: "beginsWith", prefix: "EVENT#" } })).toHaveLength(0);

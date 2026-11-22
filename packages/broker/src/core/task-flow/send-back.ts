@@ -1,3 +1,4 @@
+import { committedResponse, ownerMoveConflict } from "./committed-response.js";
 // Task actions (owner decision 198), send back: the task's owner sends blocked work (failed checks, review findings the change introduced, coding that stopped) or a change ready to publish back to coding with their
 // instructions. Cloud's `sendTaskWorkflowBackToCoding`, over the ports; today Code sends back only by itself (autofix).
 //
@@ -34,11 +35,11 @@ export async function sendBackToCoding(deps: TaskFlowDeps, options: TaskActionsO
   const prior = workflow.decisions.find((decision) => decision.requestId === request.requestId);
   if (prior !== undefined) {
     if (prior.source !== "SEND_BACK" || prior.reason !== words.slice(0, 500).trim()) throw agentXError("IDEMPOTENCY_CONFLICT", "this request ID was already used for another decision on this task; use a new one");
-    return taskViewOf(deps, task);
+    return committedResponse(() => taskViewOf(deps, task));
   }
   if (waitingForSpend(workflow)) throw agentXError("CONFIG_INVALID", WAITING_FOR_SPEND);
   if (request.expectedRevision === undefined) throw agentXError("CONFIG_INVALID", SEND_BACK_NEEDS_REVISION);
-  if (request.expectedRevision !== workflow.revision) throw agentXError("IDEMPOTENCY_CONFLICT", SEND_BACK_OUT_OF_DATE);
+  if (request.expectedRevision !== workflow.revision) throw agentXError("CHANGE_STALE", SEND_BACK_OUT_OF_DATE);
   if (!workflowSendBackOffered(workflow)) throw agentXError("CONFIG_INVALID", NO_SEND_BACK_FOR_NOW);
   const workspace = await readWorkspace(deps, task.workspaceId);
   if (workspace === undefined || workspace.status === "CLOSED") throw agentXError("CONFIG_INVALID", CLOSED_TASK);
@@ -63,8 +64,8 @@ export async function sendBackToCoding(deps: TaskFlowDeps, options: TaskActionsO
     // Lost a race: the same request already committed (answer it), or the task moved on (refuse).
     const fresh = await readTask(deps, task.taskId);
     const again = fresh?.workflow?.decisions.find((decision) => decision.requestId === request.requestId);
-    if (fresh !== undefined && again?.source === "SEND_BACK" && again.reason === words.slice(0, 500).trim()) return taskViewOf(deps, fresh);
-    throw agentXError("IDEMPOTENCY_CONFLICT", SEND_BACK_OUT_OF_DATE);
+    if (fresh !== undefined && again?.source === "SEND_BACK" && again.reason === words.slice(0, 500).trim()) return committedResponse(() => taskViewOf(deps, fresh));
+    throw ownerMoveConflict(again !== undefined, SEND_BACK_OUT_OF_DATE);
   }
   // Learn on send-back (lessons seam, filled by the lessons host): the person's correction can help the next task while this one is open. Told once, by the call that committed, with only the task's id; the lessons
   // host reads the task itself and checks the switch, the company and the mode. Best effort: a seam that fails or throws never fails or delays the send-back (a failure is one fixed log line, no cause).
@@ -72,5 +73,5 @@ export async function sendBackToCoding(deps: TaskFlowDeps, options: TaskActionsO
   // The coding run starts now; a start that fails leaves the row for the recovery sweep, and the send-back stands.
   await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: returned.revision, kind: "IMPLEMENT" })
     .catch((error: unknown) => log(deps, { event: "task_actions.send_back_start_deferred", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }));
-  return taskViewOf(deps, (await readTask(deps, task.taskId)) ?? task);
+  return committedResponse(async () => taskViewOf(deps, (await readTask(deps, task.taskId)) ?? task));
 }
