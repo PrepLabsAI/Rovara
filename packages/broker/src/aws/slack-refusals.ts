@@ -1,3 +1,4 @@
+import { NOT_ON_THE_CORE_YET } from "../core-host/dev-routes.js";
 import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED } from "./developer-tasks.js";
 import { PROJECT_RECORD_NEEDS_ADMIN } from "./broker-shared.js";
 import { SECURITY_ACCEPT_ON_THE_PAGE } from "./security-accept.js";
@@ -75,6 +76,7 @@ export function slackRefusalMessage(code: string, outOfDate: string, reason = ""
     case "TASK_BUSY": return "AgentX is still working on the previous step. Try again when it posts.";
     // DEC 236h: accepting a security finding is the web page's; Slack says so in the fixed words rather than "only the owner", since the presser is the owner.
     case "FORBIDDEN": return reason === SECURITY_ACCEPT_ON_THE_PAGE ? `${SECURITY_ACCEPT_ON_THE_PAGE}.` : "Only the task owner can do that.";
+    case "NOT_FOUND": return reason === NOT_ON_THE_CORE_YET ? "This action is not available on this install yet." : undefined;
     case "TASK_NOT_FOUND": return "This task can't be changed from Slack. Continue it where it was started, or start a new request.";
     default: return undefined;
   }

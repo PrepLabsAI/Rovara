@@ -1,3 +1,4 @@
+import { createPrFeedbackRoutes } from "../../packages/broker/src/core-host/pr-feedback-routes.js";
 import { randomUUID } from "node:crypto";
 import { expect, it, vi } from "vitest";
 import type { CodeHost } from "@agentx/contracts";
@@ -15,6 +16,7 @@ import { CAPABILITY_HEADER, createCallbackHandler } from "../../packages/broker/
 
 it("MT1: unread feedback permits merge observation but holds full reconciliation", async () => {
   const w = await feedbackWorld();
+  createPrFeedbackRoutes(w.h.deps, async () => ({}));
   w.read.mockRejectedValue(new Error("feedback unavailable"));
   const host = w.registry.get("code-host", "github") as CodeHost;
   const status = vi.spyOn(host, "changeRequestStatus");
@@ -32,6 +34,7 @@ it("MT1: unread feedback permits merge observation but holds full reconciliation
 
 it("MT2: unread feedback still observes a merged PR and removes its terminal recovery row", async () => {
   const w = await feedbackWorld();
+  createPrFeedbackRoutes(w.h.deps, async () => ({}));
   w.read.mockRejectedValue(new Error("feedback unavailable"));
   const host = w.registry.get("code-host", "github") as CodeHost;
   const readObservation = host.mergeObservation!.bind(host);

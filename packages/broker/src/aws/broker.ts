@@ -1,4 +1,5 @@
 import "./broker-environment-init.js"; import { companyMembershipFromDynamo, resolveAdminCompany, resolveCompany } from "./company-check.js"; // ENV-ROOM: the init first (broker-environment-init.ts; kept first by tests/contract/broker-environment-first.test.ts)
+import { coreKeepPullRequests } from "./slack-core-feedback.js";
 import { coreContextWorkerRouteOf } from "./dev-route-scopes.js";
 import { isServerReadRequest } from "./developer-routes.js";
 import { createHostedBrokerCoreServices } from "./core-job-services.js"; import { codeSettingsReader, companyCodeSettingsReader } from "./project-code-settings.js"; import { hostedPolicySource } from "./core-policy-source.js";
@@ -7115,6 +7116,12 @@ export function isSlackWorkflowKeepPullRequestsEvent(event: unknown): event is S
 
 /** Keep the pull request as it is, through the same route an AI tool uses. */
 async function keepSlackWorkflowPullRequests(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowKeepPullRequestsEvent) {
+  const core = await coreKeepPullRequests(dependencies, dependencies.developer?.coreTasks, event, async () => {
+    const thread = SlackThreadSchema.parse(event.thread);
+    if (!await slackWorkspaceEnabled(dependencies, thread)) throw agentXError("FORBIDDEN", "Slack workspace is not enabled for developer tasks");
+    return await companySlackCaller(dependencies, thread, SlackRequesterSchema.shape.userId.parse(event.userId));
+  });
+  if (core !== undefined) return core;
   const { taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "keep the pull request as it is");
   const routeDeps = slackWorkflowRouteDependencies(dependencies, tasks, developer, caller);
   const body = JSON.stringify({ requestId, expectedRevision: event.expectedRevision });
