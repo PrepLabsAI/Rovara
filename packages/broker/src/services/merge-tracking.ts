@@ -27,7 +27,7 @@ import { storeLinkedChangeRequests } from "../core/merge/linked.js";
 import { mergedMilestoneItems, mergedStateItems } from "../core/merge/merged.js";
 import { setupUpdateOfferItems } from "../core/setup-agent/plan-update.js";
 import { createDocumentMilestones, type DocumentMilestones } from "../core/milestones/milestones.js";
-import { reconcileTrackingTask, type MergeTrackingDependencies, type TrackingReconcileDependencies } from "../core/merge/merge-tracking.js";
+import { reconcileTrackingTask, rowBudget, type MergeTrackingDependencies, type TrackingReconcileDependencies } from "../core/merge/merge-tracking.js";
 import type { MergePeople } from "../core/merge/people.js";
 import { outOfOrderMilestoneItems } from "../core/merge/order-watch.js";
 import { registryRepositoryResolver } from "../core/merge/resolver.js";
@@ -443,6 +443,10 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     return ran;
   };
 
+  // Unread verification is a failed pass, even if reconciliation wrote. Preserve pauses and terminal results.
+  const verificationResult = (unverified: boolean, result: MergeRecoveryResult): MergeRecoveryResult =>
+    unverified && result.kind === "OBSERVED" ? { kind: "RETRY", retryAt: now() + pollMs, scope: "task" } : result;
+
   const runSweep = async (budgetMs: number): Promise<{ attempted: number }> => {
     if (!Number.isFinite(budgetMs) || budgetMs <= 0) return { attempted: 0 };
     const deadline = now() + Math.min(budgetMs, SWEEP_MAX_MS);
@@ -476,20 +480,25 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
         const versionBefore = await trackingVersions(row.taskId);
         let result: MergeRecoveryResult;
         let unverified = false;
+        // A row owns a bounded share; verification gets half, leaving the rest for reconciliation.
+        const requests = Math.floor(SWEEP_MAX_REQUESTS / rows.length);
+        const taskBudget = rowBudget(budget, requests);
+        const verifyBudget = rowBudget(taskBudget, Math.floor(requests / 2));
         try {
           // The changed files are read from the code host once for the code the pull requests hold (review H3): until then the risk is high. A host that cannot answer now is asked again soon.
           const task = await readTask(flow, row.taskId);
-          if (task !== undefined) unverified = (await verifyPublishedChanges(flow, task, budget.beforeRequest)) === "unavailable";
+          if (task !== undefined) unverified = (await verifyPublishedChanges(flow, task, verifyBudget.beforeRequest)) === "unavailable";
           // A task whose planning steps were skipped owes the lighter flow's checks on its current head. They take model calls, so they run in a pass of their own with an allowance of their own (`tierChecks`), never inside this sweep.
           if (task?.workflow !== undefined && skippedPlanning(task.workflow.flow)) await markTierDue(row.taskId);
-          result = await reconcileTrackingTask(deps, row.taskId, budget);
+          result = await reconcileTrackingTask(deps, row.taskId, taskBudget);
+          result = verificationResult(unverified, result);
         } catch (error) {
           const limitedUntil = hostRateLimitRetryAt(error);
           result = limitedUntil !== undefined ? { kind: "RETRY", retryAt: limitedUntil, scope: "github-global" } : { kind: "RETRY", retryAt: now() + pollMs, scope: "task" };
           if (limitedUntil === undefined) log({ component: "merge_tracking", event: "sweep.row_failed", taskId: row.taskId, error: error instanceof Error ? error.name : "unknown" });
         }
         // Did the pass change anything? Its tracking item's version moves whenever it wrote.
-        await settle(row, result, unverified || await trackingVersions(row.taskId) !== versionBefore);
+        await settle(row, result, await trackingVersions(row.taskId) !== versionBefore);
         if (result.kind === "RETRY" && result.scope === "github-global") break;
       }
     } finally {
