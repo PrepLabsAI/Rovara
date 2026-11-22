@@ -110,6 +110,7 @@ import type { RegistryTaskFlowOptions, TaskFlow } from "../core/task-flow/flow.j
 import { workspaceKeys } from "../core/task-flow/workspace-location.js";
 import { createCompanyArtifactReader } from "../core-host/company-artifact-reader.js";
 import { hostedKeepEvidence } from "../core-host/hosted-evidence.js";
+import { hostedPlanEvidence } from "../core-host/hosted-plan-evidence.js";
 import { sessionBindingsOf } from "../core/sessions/bindings.js";
 import { createLocalAfterMerge } from "../local/app/after-merge.js";
 import { hostedAutonomy, reviewerRoomUsd } from "../core-host/reviewer-authority.js";
@@ -877,6 +878,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       log,
       ciReporting: inputs.ciReporting === undefined ? policyCiReporting(policySource) : inputs.ciReporting,
       services: (flow, wiring) => {
+        flow.deps.afterPlanStored = hostedPlanEvidence(flow.deps, registry.require("object-storage"));
         flow.deps.secondReview = createHostedReviewers({ flow: flow.deps, registry, companyId, offered: engineOffered, taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task) }).secondReview;
         createHostedDesignReview({ flow: flow.deps, registry, companyId, offered: engineOffered,
           taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task),

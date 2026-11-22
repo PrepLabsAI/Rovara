@@ -49,3 +49,10 @@ it("the real hosted source on the root: a project's stored choice is its merge t
   expect(await runtime.ciReporting!.ciMode(task(A))).toBe("sandbox_only");
   await expect(runtime.ciReporting!.ciMode(task(B))).rejects.toThrow("the project's CI mode could not be read");
 });
+
+it("wires plan evidence for the company even when no lessons service is configured", () => {
+  createBrokerCoreRoot(inputs({ services: () => ({}) }));
+  const flow = { deps: { companyId: A, store: { get: async () => undefined }, admission: {} } } as never;
+  runtimeOptions().services!(flow, { ciMode: async () => "sandbox_only" });
+  expect((flow as { deps: { afterPlanStored?: unknown } }).deps.afterPlanStored).toBeTypeOf("function");
+});
