@@ -1,3 +1,7 @@
+import { readFeedbackReport } from "../core/pr-feedback/validate.js";
+import { installFeedbackDecider } from "../core/pr-feedback/merge-action.js";
+import { sendPrFeedbackReplies } from "../core/pr-feedback/replies.js";
+import { collectTrackedFeedback } from "../core/pr-feedback/service.js";
 // Merge tracking as a host-neutral service. Merge tracking asks the code host about the pull requests of tasks waiting for their merge and calls the core's `reconcileTrackingTask` for each (the status of the pull
 // request, the CI fix, the branch sync, ready for review) with the seams of the merge core filled. A host composes it over its own adapters:
 //
@@ -27,7 +31,7 @@ import { storeLinkedChangeRequests } from "../core/merge/linked.js";
 import { mergedMilestoneItems, mergedStateItems } from "../core/merge/merged.js";
 import { setupUpdateOfferItems } from "../core/setup-agent/plan-update.js";
 import { createDocumentMilestones, type DocumentMilestones } from "../core/milestones/milestones.js";
-import { reconcileTrackingTask, rowBudget, type MergeTrackingDependencies, type TrackingReconcileDependencies } from "../core/merge/merge-tracking.js";
+import { reconcileTrackingTask, registerMergeActionDecider, rowBudget, type MergeTrackingDependencies, type TrackingReconcileDependencies } from "../core/merge/merge-tracking.js";
 import type { MergePeople } from "../core/merge/people.js";
 import { outOfOrderMilestoneItems } from "../core/merge/order-watch.js";
 import { registryRepositoryResolver } from "../core/merge/resolver.js";
@@ -219,9 +223,18 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     return givenResolver(project, revision, repositoryId, companyId);
   };
 
+  installFeedbackDecider(registerMergeActionDecider);
   const verdictSource = createPullRequestVerdictSource(flow);
   const base: MergeTrackingDependencies = {
     store, now,
+    feedbackRoundCheck: async task => {
+      try {
+        const record = await readTask(flow, task.taskId);
+        if (record === undefined || record.companyId !== companyId) return false;
+        return (await readFeedbackReport(flow, record)).status === "COMPLETE";
+      } catch { return false; }
+    },
+    sendFeedbackReplies: sendPrFeedbackReplies,
     ...(options.ciMode === undefined ? {} : { ciMode: options.ciMode }),
     ...(options.ciEvidence === undefined ? {} : { ciEvidence: options.ciEvidence }),
     ...(options.reportParser === undefined ? {} : { reportParser: options.reportParser }),
@@ -490,7 +503,7 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
           if (task !== undefined) unverified = (await verifyPublishedChanges(flow, task, verifyBudget.beforeRequest)) === "unavailable";
           // A task whose planning steps were skipped owes the lighter flow's checks on its current head. They take model calls, so they run in a pass of their own with an allowance of their own (`tierChecks`), never inside this sweep.
           if (task?.workflow !== undefined && skippedPlanning(task.workflow.flow)) await markTierDue(row.taskId);
-          result = await reconcileTrackingTask(deps, row.taskId, taskBudget);
+          result = await reconcileWithFeedback(row.taskId, taskBudget);
           result = verificationResult(unverified, result);
         } catch (error) {
           const limitedUntil = hostRateLimitRetryAt(error);
@@ -505,6 +518,14 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
       stop();
     }
     return { attempted };
+  };
+
+  const reconcileWithFeedback = async (taskId: string, budget: ReadBudget): Promise<MergeRecoveryResult> => {
+    const task = await readTask(flow, taskId);
+    const feedback = task === undefined ? "unchanged" : await collectTrackedFeedback({ flow, registry, repository: resolver, now }, task, budget);
+    if (feedback !== "retry") return reconcileTrackingTask(deps, taskId, budget);
+    const observed = await observeMerge(taskId, budget);
+    return observed.kind === "TERMINAL" ? observed : { kind: "RETRY", retryAt: now() + pollMs, scope: "task" };
   };
 
   /** The versions of the task's tracking items and its workflow, as one string: it changes whenever a pass wrote something. */

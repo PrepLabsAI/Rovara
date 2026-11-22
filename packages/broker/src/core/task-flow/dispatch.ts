@@ -1,3 +1,4 @@
+import { validateFeedbackApproval } from "../pr-feedback/fix-context.js";
 import { workspaceKeys } from "./workspace-location.js";
 import { acceptedCloseForRun, closeDeliveryReceipt, readAcceptedClose, retireCloseDelivery } from "./close-recovery-state.js";
 // Lane L6a, task flow core: dispatching operations to worker machines. The consumer of the dispatch queue: for each message it finds the
@@ -192,6 +193,14 @@ async function retryCloseDelivery(deps: TaskFlowDeps, queue: Queue, message: Rec
   return "retried";
 }
 
+async function feedbackApprovalCurrent(deps: TaskFlowDeps, operation: OperationRecord): Promise<boolean> {
+  if (operation.workflowFeedbackApproval === undefined) return true;
+  try {
+    await validateFeedbackApproval(deps, operation, operation.workflowFeedbackApproval);
+    return true;
+  } catch { return false; }
+}
+
 async function handleWorkerDispatch(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessage, operation: OperationRecord, delivery: DeliveryLog): Promise<Outcome> {
   // A queued cancel (money-stop.ts: a Stop, a close or a spend stop on a deployed install, whose broker never reaches a worker itself): handed to the worker that runs the operation, while it
   // is still being stopped. A machine not ready is tried again a few times; anything else drops the message (the broker's wait then ends the run, keeping its hold).
@@ -239,6 +248,7 @@ async function handleWorkerDispatch(deps: TaskFlowDeps, queue: Queue, message: R
     await queue.ack(message.receiptHandle);
     return "dropped";
   }
+  if (!await feedbackApprovalCurrent(deps, operation)) return endAndAck("FAILED", "The feedback approval changed or could not be verified. Refresh the task before retrying.");
   // Standing instructions (the company's rules and the project's How we work): read now, before admission and before any machine is started, since a refusal needs no machine and a code host that is down must
   // not wake one on every try. The playbook is read at the commit the task pinned when it started. A refusal that waiting will not mend ends the step with its sentence; a read that may pass is tried again, and when
   // the tries run out the step ends with the true cause (the rules could not be read), never "the machine did not become ready".

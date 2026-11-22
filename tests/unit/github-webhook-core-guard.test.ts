@@ -1,5 +1,6 @@
+import type * as BrokerModule from "../../packages/broker/src/aws/broker.js";
 import { createHmac } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createCandidateManifest, createWorkflowSnapshot, IMPLICIT_COMPANY_ID, WorkflowSnapshotSchema, type WorkflowSnapshot } from "@agentx/contracts";
 import { authorizeLinkedGithubWebhook, handleGithubWebhook, reconcileTaskPullRequestFeedback, type ReconcileTaskPullRequestFeedbackInput } from "../../packages/broker/src/aws/github-webhooks.js";
 import { engineStampKey, stampItem, type Engine } from "../../packages/broker/src/core-host/engine-stamp.js";
@@ -110,4 +111,55 @@ describe("the legacy GitHub feedback engine boundary", () => {
     expect(f.current()).toEqual(before);
     expect(f.bundles).toHaveLength(0);
   });
+});
+
+
+it("flow ownership skips legacy feedback even when the top-level engine differs, with fixed aggregate log words", async () => {
+  const f = setup("workflow");
+  const stamp = f.db.get(engineStampKey(TASK).pk, engineStampKey(TASK).sk)!;
+  f.db.set({ ...stamp, coreEngine: { ...(stamp.coreEngine as object), areas: { flow: "core", build: "workflow", merge: "workflow" } } });
+  const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+  try {
+    expect(await f.authorize()).toBe(false);
+    expect(log.mock.calls).toEqual([[JSON.stringify({ component: "broker", event: "github_webhook.core_task_skipped" })]]);
+    expect(f.bundles).toEqual([]);
+  } finally { log.mockRestore(); }
+});
+
+it("a false reconciliation never releases or starts a critic for a core task", async () => {
+  const f = setup("core");
+  const { loadSlackBroker } = await import("../support/slack-broker.js");
+  const { processGithubWorkflowEvent, reconcileWorkflowMergeRecoveryTask } = await loadSlackBroker() as unknown as typeof BrokerModule;
+  const before = f.db.find(() => true);
+  const load = vi.spyOn(f.db, "send");
+  await processGithubWorkflowEvent({ documentClient: f.db, tableName: "state", githubPullRequests: { getPullRequestFeedback: vi.fn() } } as never,
+    { fullName: "example/demo", number: 7 } as never, DELIVERY);
+  expect(await reconcileWorkflowMergeRecoveryTask({ documentClient: f.db, tableName: "state" } as never, TASK, { beforeRequest: vi.fn(), signal: new AbortController().signal })).toMatchObject({ kind: "RETRY" });
+  expect(f.db.find(() => true)).toEqual(before);
+  // No task/workspace read after the engine refusal; in particular no release and no critic acceptance.
+  expect(load.mock.calls.filter(([command]) => ((command as { input?: { Key?: { pk?: string } } }).input?.Key?.pk ?? "").startsWith("DEVTASK#"))).toHaveLength(0);
+});
+
+it.each(["feedback", "merge"])("missing %s reader refuses before any legacy reconciliation", async kind => {
+  const f = setup("core");
+  const { loadSlackBroker } = await import("../support/slack-broker.js");
+  const { processGithubWorkflowEvent } = await loadSlackBroker() as unknown as typeof BrokerModule;
+  const send = vi.spyOn(f.db, "send");
+  await expect(processGithubWorkflowEvent({ documentClient: f.db, tableName: "state", githubPullRequests: {} } as never,
+    { fullName: "example/demo", number: 7 } as never, DELIVERY, kind === "feedback" ? undefined : {
+      observationMode: "merge", budget: { beforeRequest: vi.fn(), signal: new AbortController().signal }, release: "queue",
+    })).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+  expect(send).not.toHaveBeenCalled();
+});
+
+it.each(["invalid-url", "wrong-number"])("merge recovery defers a %s link without using it", async kind => {
+  const f = setup("workflow");
+  const workflow = f.current();
+  if (kind === "invalid-url") workflow.pullRequests![0]!.url = "https://example.com/unrelated";
+  else workflow.pullRequests![0]!.number = 8;
+  f.db.set({ ...f.db.get(taskKey(TASK).pk, taskKey(TASK).sk)!, workflow });
+  const { loadSlackBroker } = await import("../support/slack-broker.js");
+  const { reconcileWorkflowMergeRecoveryTask } = await loadSlackBroker() as unknown as typeof BrokerModule;
+  await expect(reconcileWorkflowMergeRecoveryTask({ documentClient: f.db, tableName: "state" } as never, TASK,
+    { beforeRequest: vi.fn(), signal: new AbortController().signal })).resolves.toMatchObject({ kind: "RETRY" });
 });

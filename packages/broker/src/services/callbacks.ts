@@ -1,3 +1,4 @@
+import { feedbackCallback } from "../core/pr-feedback/callbacks.js";
 import { publicationGateCallback } from "../core/build-step/publication-gates.js";
 import { locateWorkspace, workspaceKeys } from "../core/task-flow/workspace-location.js";
 // The callback endpoints a worker posts to (`/v1/internal/workspaces/<w>/operations/<o>/<action>`), for the three every job has: its events, its artifacts and
@@ -134,13 +135,18 @@ async function operationOf(deps: CallbackDeps, workspaceId: string, operationId:
 
 /** The actions this install answers; any other the worker can make is "not available". */
 const PUBLICATION_CALLBACKS = { codebuild: publicationGateCallback, "pull-request": openPullRequest };
-const SERVED_ACTIONS: ReadonlySet<string> = new Set(["codebuild", "events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "browser-evidence", "browser-evidence-sign-in", "pull-request", "pull-request-update", "setup-agent", "wiki-build", EVAL_PLAN_DELIVERY_ACTION, EVAL_HEALTH_RESULT_PATH]);
+const SERVED_ACTIONS: ReadonlySet<string> = new Set(["codebuild", "feedback-bundles", "feedback-approval", "events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "browser-evidence", "browser-evidence-sign-in", "pull-request", "pull-request-update", "setup-agent", "wiki-build", EVAL_PLAN_DELIVERY_ACTION, EVAL_HEALTH_RESULT_PATH]);
 export const TERMINAL_OUTPUT_REFUSAL = "terminal operations cannot publish more output";
 
 /**
  * A worker's artifact, kept once. The first save of a name by an operation fixes its bytes: the same bytes again are the same artifact (a retried post), other bytes are refused. So what
  * the workflow's digest names cannot be rewritten by a later post, even though the worker's capability is still good.
  */
+function artifactByteLimit(operation: OperationRecord, name: string): number {
+  if (operation.workflowMode === "FEEDBACK_REVIEW" && /^workflow-feedback-review-[a-f0-9]{64}\.json$/u.test(name)) return 1_000_000;
+  return name === DESIGN_REVIEW_ARTIFACT && operation.designReview !== undefined ? DESIGN_REVIEW_RESULT_MAX_BYTES : PLAN_MAX_BYTES;
+}
+
 async function recordArtifact(deps: CallbackDeps, operation: OperationRecord, body: Record<string, unknown>): Promise<{ artifactId: string }> {
   const { name, mediaType, content } = body;
   if (typeof name !== "string" || !ARTIFACT_NAME.test(name) || typeof mediaType !== "string" || mediaType.length > 120 || typeof content !== "string") {
@@ -148,7 +154,7 @@ async function recordArtifact(deps: CallbackDeps, operation: OperationRecord, bo
   }
   const bytes = new TextEncoder().encode(content);
   // A design review's result holds every reviewer's answer; it is bigger than a plan (the broker reads it back with the same bound, `DESIGN_REVIEW_RESULT_MAX_BYTES`).
-  if (bytes.byteLength > (name === DESIGN_REVIEW_ARTIFACT && operation.designReview !== undefined ? DESIGN_REVIEW_RESULT_MAX_BYTES : PLAN_MAX_BYTES)) throw agentXError("CONFIG_INVALID", "the artifact is too large");
+  if (bytes.byteLength > artifactByteLimit(operation, name)) throw agentXError("CONFIG_INVALID", "the artifact is too large");
   const id = randomUUID();
   const objectKey = artifactObjectKey(operation.workspaceId, operation.id, name);
   const sha256 = createHash("sha256").update(bytes).digest("hex");
@@ -271,6 +277,10 @@ async function readArtifactText(deps: CallbackDeps, operation: OperationRecord, 
  * What a finished job meant, read from what the worker saved and checked here, never taken from the worker's word. An unreadable answer is no outcome: the flow then blocks the step with
  * a plain reason and the owner can retry it.
  */
+function isReviewResult(operation: OperationRecord): boolean {
+  return operation.workflowMode === "REVIEW" || operation.workflowMode === "FEEDBACK_REVIEW";
+}
+
 export async function readOutcome(deps: CallbackDeps, operation: OperationRecord, result: unknown): Promise<StepOutcome | undefined> {
   if (operation.kind === "prepare") {
     const base = WorkflowReviewBaseSchema.safeParse((result as { preparedBase?: unknown } | undefined)?.preparedBase);
@@ -311,7 +321,7 @@ export async function readOutcome(deps: CallbackDeps, operation: OperationRecord
   }
   // The steps after the plan: what the worker reported is handed to the build step as it was reported; the build step reads it against its schemas and the task's own record.
   if (operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS") return { kind: "built", result: result ?? {} };
-  if (operation.workflowMode === "REVIEW") return { kind: "reviewed", result: result ?? {} };
+  if (isReviewResult(operation)) return { kind: "reviewed", result: result ?? {} };
   if (operation.kind === "publish" || operation.kind === "maintain") return { kind: "published", result: result ?? {} };
   return { kind: "ended" };
 }
@@ -333,6 +343,17 @@ async function exchangeCredential(deps: CallbackDeps, request: BrokerRequest, wo
 }
 
 const uploadStores = (deps: CallbackDeps): UploadStores => ({ store: deps.flow.store, objects: deps.blobs, ...(deps.flow.now === undefined ? {} : { now: deps.flow.now }), ...(deps.flow.newId === undefined ? {} : { newId: deps.flow.newId }) });
+
+async function terminalCallback(deps: CallbackDeps, operation: OperationRecord, action: string, request: BrokerRequest): Promise<BrokerResponse | undefined> {
+  if (action === "result" || !isTerminalStatus(operation.status)) return undefined;
+  const booked = action === "events" ? await bookTerminalUsage(deps, operation, bodyOf(request)) : undefined;
+  if (booked !== undefined) return json(200, booked);
+  throw agentXError("CALLBACK_FORBIDDEN", TERMINAL_OUTPUT_REFUSAL);
+}
+
+function isFeedbackAction(action: string): action is "feedback-bundles" | "feedback-approval" {
+  return action === "feedback-bundles" || action === "feedback-approval";
+}
 
 export function createCallbackHandler(deps: CallbackDeps): (request: BrokerRequest) => Promise<BrokerResponse> {
   const capabilities = new CallbackCapabilities(Buffer.from(deps.flow.callbackSigningKey));
@@ -372,11 +393,8 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       const operation = await operationOf(deps, workspaceId, operationId);
       if (operation.fence !== capability.fence) throw agentXError("STALE_FENCE", "callback no longer owns the workspace");
       if (await acceptedCloseForRun(deps.flow, operation) !== undefined) return await closeAccountingCallback(deps, operation, action, bodyOf(request));
-      if (action !== "result" && isTerminalStatus(operation.status)) {
-        const booked = action === "events" ? await bookTerminalUsage(deps, operation, bodyOf(request)) : undefined;
-        if (booked !== undefined) return json(200, booked);
-        throw agentXError("CALLBACK_FORBIDDEN", TERMINAL_OUTPUT_REFUSAL);
-      }
+      const terminal = await terminalCallback(deps, operation, action, request);
+      if (terminal !== undefined) return terminal;
       if (savedEnvWorkerRouteOf(request.method, bare) !== undefined && deps.savedEnv !== undefined) {
         const saved = deps.savedEnv;
         const common = { companyId: deps.flow.companyId, store: deps.flow.store, inspectGrant: saved.inspectGrant, log: () => undefined };
@@ -393,6 +411,7 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
         savedResult = "ok";
         return { ...json(200, answer), headers: { "content-type": "application/json", "cache-control": "no-store" } };
       }
+      if (isFeedbackAction(action)) return json(200, await feedbackCallback(deps.flow, operation, action, bodyOf(request)));
       if (isCodingRunUpload(action)) return json(200, await handleCodingRunUpload(action, uploadStores(deps), operation, bodyOf(request)));
       if (action === "e2e-admission" || action === "e2e-evidence") {
         if (deps.e2e === undefined) throw agentXError("NOT_FOUND", "this callback is not available on this install");

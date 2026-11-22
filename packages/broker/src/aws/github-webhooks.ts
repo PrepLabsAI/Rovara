@@ -6,7 +6,7 @@ import { githubWorkflowPullRequestKey, type GithubWorkflowPullRequestRecord } fr
 import { parseGitHubRepository, type GitHubPullRequestFeedback } from "../github-app.js";
 import { verifyGithubWebhookSignature } from "../plugins/code-host/github/signature.js";
 import { isConditional } from "./broker-shared.js";
-import { readTaskStamp, type EngineStateTable } from "./engine-boundary.js";
+import { entryOwner, readTaskStamp, type EngineStateTable } from "./engine-boundary.js";
 import { boundedCompanyReads, recordInCompany } from "./company-check.js";
 import { feedbackReopenedMeasure, type FeedbackReviewMeasure } from "../developer/feedback-review-measures.js";
 
@@ -121,7 +121,7 @@ export async function findLinkedGithubWorkflowPullRequest(input: {
 
 /** The legacy path never owns a core task. Stamp read/validation errors propagate before any feedback write. */
 async function legacyGithubWorkflowOwnsTask(table: EngineStateTable, taskId: string): Promise<boolean> {
-  if ((await readTaskStamp(table, taskId))?.engine !== "core") return true;
+  if (entryOwner(await readTaskStamp(table, taskId), "flow") !== "core") return true;
   // Aggregate only: no task, repository, company or comment content crosses into the log.
   console.log(JSON.stringify({ component: "broker", event: "github_webhook.core_task_skipped" }));
   return false;

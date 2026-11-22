@@ -13,6 +13,7 @@ import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
 import { readOperation } from "../../packages/broker/src/core/task-flow/results.js";
 import { createTaskSessionItems, taskSessionId } from "../../packages/broker/src/core/sessions/create.js";
 import { recordRunCost, runCostInputOf } from "../../packages/broker/src/core/cost/estimate.js";
+import type { OperationRecord } from "../../packages/broker/src/core/task-flow/records.js";
 
 export async function closeRecoveryHarness(options: { money?: boolean; session?: boolean; flushed?: boolean; flushWaitMs?: number; deferUsage?: boolean } = {}) {
   const h = createHarness({ audit: "recording", companyId: COMPANY_A_ID });
@@ -34,7 +35,7 @@ export async function closeRecoveryHarness(options: { money?: boolean; session?:
   const runId = randomUUID(), runKey = operationKey(h.deps.companyId, task.workspaceId, runId);
   await h.store.put({ item: { ...(await h.store.get(inspected))!, ...runKey, id: runId, kind: "task", status: options.flushed ? "CANCELLED" : "RUNNING", machineId: "retained-machine", fence: 0 } });
   await h.store.update({ key: wk, ops: [change.set("machine", { machineId: "retained-machine", machineKey: "original" })] });
-  const run = (await readOperation(h.deps, task.workspaceId, runId))!;
+  const run: OperationRecord = (await readOperation(h.deps, task.workspaceId, runId))!;
   const sessionId = taskSessionId(task.taskId);
   if (options.session) {
     await h.store.transact(createTaskSessionItems({ orgId: h.deps.companyId, sessionId, taskId: task.taskId, project: "payments", agent: { agentId: "rovara-code", name: "Code", version: 1 }, title: "recover close", owner: h.owner.principal, origin: "app", payer: { kind: "member", developerId: "a".repeat(64) }, now: task.createdAt }));
@@ -64,7 +65,7 @@ export async function closeRecoveryHarness(options: { money?: boolean; session?:
   const input = { requestId: randomUUID(), expectedPreviewDigest: preview.preview.digest };
   const restart = () => { delete h.deps.resumeAcceptedClose; h.flow = createTaskFlow(h.deps); };
   const pump = async () => { await h.flow.relayOnce(); h.clock.advance(31); await h.flow.dispatchOnce({ maxMessages: 10 }); };
-  const accepted = async () => {
+  const accepted = async (): Promise<OperationRecord | undefined> => {
     const row = (await h.store.get(tk))!;
     return readOperation(h.deps, task.workspaceId, textField(row, "closeOperationId"));
   };

@@ -2,6 +2,7 @@ import { createStoreProjectSource } from "../core/task-flow/project-source.js";
 import { developerTaskPolicy } from "@agentx/contracts";
 import { prepareCoreShare } from "./core-task-sharing.js";
 import { runPriceReader } from "../core-host/run-price-http.js";
+import { withFeedbackMergeReads } from "../core/pr-feedback/service.js";
 import { accessRetryRoute } from "./core-access-retry.js";
 import { sweepCoreIdleSlack } from "./core-idle-slack.js";
 import { isContextSourceStage } from "@agentx/contracts";
@@ -883,6 +884,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       sessionBindings: { read: (_orgId, sessionId) => sessionBindingsOf(registry.require("storage"), companyId, sessionId) },
       // L4-ART: the flow's reader of the documents workers and the engine saved (the approved plan, a diff, the eval rounds): the registry's object storage held to THIS company's own workspaces (an
       // outside key, another company's workspace or another owner's key reads as "not there"). Without it each reader of the flow gives its "no reader" answer (core/proof/eval-round-reader.ts: no eval request).
+      feedbackArtifacts: registry.require("object-storage"),
       artifacts: createCompanyArtifactReader({ blobs: registry.require("object-storage"), store: registry.require("storage"), companyId, refused: (reason) => log({ event: "core_engine.artifact_read_refused", companyId, reason }) }),
       // L4-HW3: a starting task copies the project's How we work and the company's rules onto its workspace (the broker has the code host and the company-instructions point; the dispatcher has neither and
       // builds every step's block from that copy).
@@ -1100,7 +1102,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           // DEC 254zzz94: the Merge button, over the root's own grant reader, the project's pinned repositories on the registry's code host, and the project's merge method (Code's default: squash).
           merge: {
             projectGrantRole: (personId, project, companyId) => projectGrantRole(personId, project, companyId),
-            merge: (audit) => hostedMergeDependencies({ runtime, registry, audit, settings: inputs.codeSettings, defaults: DEFAULT_CODE_SETTINGS, now: () => now().getTime(), policyHook: hookSettings !== undefined || hookProblem }),
+            merge: (audit) => withFeedbackMergeReads(hostedMergeDependencies({ runtime, registry, audit, settings: inputs.codeSettings, defaults: DEFAULT_CODE_SETTINGS, now: () => now().getTime(), policyHook: hookSettings !== undefined || hookProblem }), runtime.flow.deps, registry),
             afterMerge: (taskId) => wakeMergeTracking(runtime.flow.deps.store, taskId, now().getTime()),
           },
           // DEC 254z-amend3: the project's test environment state, with the install's switches (and the host's "not available here" marker, broker-environment-init.ts) and the owner starter list as the catalog.

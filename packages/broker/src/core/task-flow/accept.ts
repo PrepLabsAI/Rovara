@@ -49,6 +49,13 @@ export interface DispatchMessage {
 /** An operation's events are kept this long (the same as the callback's own events). */
 const FIRST_EVENT_KEEP_SECONDS = 14 * 86_400;
 
+function feedbackOperationBindings(dispatch: DispatchSpec): Pick<OperationRecord, "workflowFeedbackReview" | "workflowFeedbackApproval"> {
+  return {
+    ...(dispatch.payload["workflowFeedbackReview"] === undefined ? {} : { workflowFeedbackReview: dispatch.payload["workflowFeedbackReview"] as unknown as NonNullable<OperationRecord["workflowFeedbackReview"]> }),
+    ...(dispatch.payload["workflowFeedbackApproval"] === undefined ? {} : { workflowFeedbackApproval: dispatch.payload["workflowFeedbackApproval"] as unknown as NonNullable<OperationRecord["workflowFeedbackApproval"]> }),
+  };
+}
+
 export function buildOperation(deps: TaskFlowDeps, input: AcceptInput): { operation: OperationRecord; items: TransactItem[] } {
   const location = keysOfWorkspace(deps, input.workspace);
   const now = input.now ?? iso(deps);
@@ -72,6 +79,7 @@ export function buildOperation(deps: TaskFlowDeps, input: AcceptInput): { operat
     createdAt: now,
     updatedAt: now,
     dispatch: input.dispatch,
+    ...feedbackOperationBindings(input.dispatch),
     ...(input.workflowRevision === undefined ? {} : { workflowRevision: input.workflowRevision }),
     ...(input.requester === undefined ? {} : { requester: input.requester }),
     ...(input.publication === undefined ? {} : { publication: input.publication }),

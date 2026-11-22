@@ -11246,19 +11246,19 @@ async function refreshTaskFeedbackForOwnerDecision(dependencies: AwsBrokerDepend
 }
 
 /** Reconcile every PR webhook against GitHub; comments and delivery order never grant authority. */
+function requireGithubFeedbackReader(deps: AwsBrokerDependencies, mergeOnly: boolean): void {
+  const reader = mergeOnly ? deps.githubPullRequests.getPullRequestMergeObservation : deps.githubPullRequests.getPullRequestFeedback;
+  if (reader === undefined) throw agentXError("RUNTIME_UNAVAILABLE", mergeOnly ? "current GitHub merge observation is not configured" : "current GitHub feedback collection is not configured");
+}
+
 export async function processGithubWorkflowEvent(
   dependencies: AwsBrokerDependencies,
   event: ReceivedGithubWebhook["event"],
   deliveryId: string,
   options?: { observationMode: "merge"; budget: GithubMergeReadBudget; release: "queue" },
 ): Promise<void> {
-  const getFeedback = options === undefined
-    ? dependencies.githubPullRequests.getPullRequestFeedback
-    : dependencies.githubPullRequests.getPullRequestMergeObservation;
-  if (getFeedback === undefined) throw agentXError("RUNTIME_UNAVAILABLE", options === undefined
-    ? "current GitHub feedback collection is not configured"
-    : "current GitHub merge observation is not configured");
-  await reconcileTaskPullRequestFeedback({
+  requireGithubFeedbackReader(dependencies, options !== undefined);
+  const reconciled = await reconcileTaskPullRequestFeedback({
     documentClient: dependencies.documentClient, tableName: dependencies.tableName,
     repositoryFullName: event.fullName, number: event.number, deliveryId,
     ...(event.headSha === undefined ? {} : { expectedHeadSha: event.headSha }),
@@ -11349,6 +11349,7 @@ export async function processGithubWorkflowEvent(
     measure: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
     now: new Date().toISOString(),
   });
+  if (!reconciled) return;
   const linked = await getItem<GithubWorkflowPullRequestRecord>(dependencies, githubWorkflowPullRequestKey(event.fullName, event.number));
   // A merge that finished the task gives back its slot and workspace (again for a redelivery, which changes nothing).
   if (linked !== undefined && options?.release !== "queue") await releaseIfFinished(dependencies, linked.taskId);
@@ -11392,12 +11393,18 @@ async function mergeRecoveryReleaseConfirmed(dependencies: AwsBrokerDependencies
 }
 
 /** Reconciles one recovery row using one exact reverse-linked PR and the bounded merge-only GitHub reader. */
+function recoveryPullRequestUrl(pullRequest: { url: string; number: number }): RegExpExecArray | undefined {
+  const parsed = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)$/.exec(pullRequest.url);
+  return parsed === null || Number(parsed[2]) !== pullRequest.number ? undefined : parsed;
+}
+
 export async function reconcileWorkflowMergeRecoveryTask(
   dependencies: AwsBrokerDependencies,
   taskId: string,
   budget: GithubMergeReadBudget,
 ): Promise<MergeRecoveryResult> {
   const retry = (): MergeRecoveryResult => ({ kind: "RETRY", retryAt: Date.now() + MERGE_RECOVERY_RETRY_MS, scope: "task" });
+  if (await ownerOfTaskId(dependencies, taskId, "flow") === "core") return retry();
   const task = await stronglyRead<DeveloperTaskRecord>(dependencies, taskKey(taskId));
   if (task === undefined) return { kind: "MISSING" };
   if (task.closedAt !== undefined || task.releasedAt !== undefined) {
@@ -11406,8 +11413,8 @@ export async function reconcileWorkflowMergeRecoveryTask(
   const pullRequests = task.workflow?.pullRequests ?? [];
   let selected: { fullName: string; number: number } | undefined;
   for (const pullRequest of pullRequests) {
-    const parsed = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)$/.exec(pullRequest.url);
-    if (parsed === null || Number(parsed[2]) !== pullRequest.number) continue;
+    const parsed = recoveryPullRequestUrl(pullRequest);
+    if (parsed === undefined) continue;
     const linked = await stronglyRead<GithubWorkflowPullRequestRecord>(dependencies, githubWorkflowPullRequestKey(parsed[1]!, pullRequest.number));
     if (linked?.taskId === task.taskId && linked.workspaceId === task.workspaceId && linked.repositoryId === pullRequest.repositoryId
       && linked.number === pullRequest.number && linked.url === pullRequest.url && linked.candidateDigest === pullRequest.candidateDigest) {
