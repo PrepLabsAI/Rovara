@@ -1,3 +1,4 @@
+import type { DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
 // Batch b18 Low 2: core-two-company-run and core-admin-stop-company mock the company-instructions point empty. This is the ONE two-company contract run WITHOUT that mock:
 // the real root, the real company-rules adapter and a stubbed gateway fetch. Company A's start never reads company B's rules, and a wrong-company answer stops the start (fails closed).
 import { randomUUID } from "node:crypto";
@@ -44,6 +45,8 @@ async function world() {
   } };
   const key = makeKey("t".repeat(16));
   const root = createBrokerCoreRoot({
+    // This fixture isolates the existing root behavior; core-task-people-hosted/identity tests exercise creation's real identity proof.
+    taskRules: () => ({ taskPeopleStart: async () => [] }) as unknown as DeveloperTaskRouteDependencies,
     env: { ROVARA_CORE_MODEL_GATEWAY_URL: gateway, ROVARA_CORE_AGENT_MODEL: MODEL, ROVARA_CORE_LESSONS: "on" },
     documentClient: client, stateTableName: "state", signInTableName: "signin", callbackSigningKey: SIGNING, repositoryGrantKey: Buffer.alloc(32, 1),
     repositoryCredential: async () => ({ token: "fake" }), codeModules: () => ({}) as never,

@@ -1,3 +1,4 @@
+import { prepareTaskPeopleStart } from "../developer/task-people-start.js";
 import { companyMembershipFromDynamo } from "./company-check.js";
 import type { TaskPeopleDependencies } from "../developer/task-people.js";
 import { serverReadContext, type AbortableReadSender, type ServerKeyRead } from "./server-read-context.js";
@@ -118,7 +119,7 @@ import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access
 import { routeCompanyReads, type CompanyReadsConfiguration } from "../developer/company-reads.js";
 import { evaluateProjectAuthority, mayUseProject } from "../developer/task-project-access.js";
 import { renameTaskOwner } from "../developer/task-owner-name.js";
-import { taskCompanyId, checkTaskPersonIdentity, listTaskWebCandidates, registerTaskChannelPeople, registerTaskWebPerson, resolveTaskPickerPersonWithId, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../developer/task-person-identity.js";
+import { taskCompanyId, isHostedTaskProvider, checkTaskPersonIdentity, listTaskWebCandidates, registerTaskChannelPeople, registerTaskWebPerson, resolveTaskPickerPersonWithId, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../developer/task-person-identity.js";
 import { taskPeopleDisplayAdmission, type TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { decodeJwt } from "jose";
@@ -2092,7 +2093,8 @@ export function developerTaskRouteDependencies(
     }
   };
   const identityDependencies = async (task: DeveloperTaskRecord, admission?: TaskPeopleDisplayAdmission): Promise<TaskPersonIdentityDependencies> => {
-    const workspace = await taskWorkspace(task);
+    const workspace = isHostedTaskProvider(task.provider) && task.share === undefined
+      ? await workspaceForProject(task.project) : await taskWorkspace(task);
     const slackTeamId = workspace?.teamId ?? deps.developer.slackTeamId;
     const taskPersonProof = admission?.proof.bind(admission) ?? deps.developer.taskPersonProof;
     if (slackTeamId === undefined || taskPersonProof === undefined) throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
@@ -2156,6 +2158,7 @@ export function developerTaskRouteDependencies(
     ...(deps.registeredRepositoryIdentity === undefined ? {} : { registeredRepositoryIdentity: deps.registeredRepositoryIdentity }),
     ...(deps.developer.taskPeopleConfiguration === undefined ? {} : { taskPeopleConfiguration: deps.developer.taskPeopleConfiguration }),
     ...(deps.developer.workflowDependenciesEnabled === undefined ? {} : { workflowDependenciesEnabled: deps.developer.workflowDependenciesEnabled }),
+    taskPeopleStart: async task => prepareTaskPeopleStart(await identityDependenciesOrWebOnly(task), task),
     checkTaskPerson: async (task, developerId, admission) => checkTaskPersonIdentity(await identityDependenciesOrWebOnly(task, admission), task, developerId),
     // C4 (plan 4.2 "Add a person from the web"): the web proof's own reads, which need no Slack.
     registerTaskWebPerson: async (task, developerId) => registerTaskWebPerson(await identityDependenciesOrWebOnly(task), task, developerId),

@@ -240,6 +240,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
   }
   const task: TaskRecord = {
     ...taskKey(taskId), entityType: "DEVELOPER_TASK", companyId: deps.companyId, taskId, developerId, provider: principal.provider, developerName: principal.displayName,
+    ...trustedSlackLink(caller),
     ...(startComparison === undefined ? {} : { startComparison }),
     origin: origin.data, client, project: request.project, title, workspaceId, ownerKey, conversationId, startingRevision: revision, charge, shared: share !== undefined, ...(share === undefined ? {} : { share }),
     // A workflow task quotes the request in each plan's "why".
@@ -350,4 +351,8 @@ function limitError(full: "member" | "organization", limits: { member: number; o
 function shareStartError(error: unknown): AgentXError {
   if (error instanceof AgentXError) return error;
   throw error;
+}
+
+function trustedSlackLink(caller: TaskStartCaller): Pick<TaskRecord, "slackUserId"> {
+  return caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId };
 }

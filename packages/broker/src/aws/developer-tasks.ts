@@ -1,3 +1,4 @@
+import type { TransactItem } from "@agentx/contracts";
 import { devRouteOf } from "./dev-route-scopes.js";
 import { withoutDesignReviewMoney } from "../core/task-flow/money-view.js";
 import type { SlackWorkspaceScope ,
@@ -236,6 +237,8 @@ export interface DeveloperTaskRouteDependencies extends Pick<TaskPeopleEffectsDe
   /** Request-bound stored-owner/live-company-role check, shared by reads and action responses. */
   taskMoneyVisible?(task: DeveloperTaskRecord): Promise<boolean>;
   slackTeamId?: string;
+  /** Internal core-start proof and existing People row staging; never exposed as a route input. */
+  taskPeopleStart?: (task: DeveloperTaskRecord) => Promise<TransactItem[]>;
   /** C: absent is write-disabled; an existing PEOPLE sidecar remains authoritative either way. */
   taskPeopleConfiguration?: { peopleChangesEnabled: boolean };
   /** Spec 059: absent is the safe default; production factories intentionally leave graph starts disabled. */

@@ -1,3 +1,4 @@
+import type { DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
 // Q2 (web task channel, stacked on S2): the AWS root's administrator stop of a core task's workspace binds the install administrator's project grant to the TASK'S company. A grant row
 // (`MEMBER#<person>` / `PROJECT#<name>`) names a project by name only, and companies A and B both have a "payments" project here; the administrator's company is their live membership in
 // the sign-in table (`COMPANY_MEMBER#<person>`), the reader every core caller is judged by. Real broker root and core runtime over fake adapters; no network, no AWS.
@@ -53,6 +54,8 @@ async function world() {
     return { Item: await w.store.get(key) };
   } };
   const root = createBrokerCoreRoot({
+    // This fixture isolates the existing root behavior; core-task-people-hosted/identity tests exercise creation's real identity proof.
+    taskRules: () => ({ taskPeopleStart: async () => [] }) as unknown as DeveloperTaskRouteDependencies,
     env: { ROVARA_CORE_MODEL_GATEWAY_URL: "https://gateway.example", ROVARA_CORE_AGENT_MODEL: MODEL },
     documentClient: client, stateTableName: "state", signInTableName: "signin", callbackSigningKey: "k".repeat(32), repositoryGrantKey: Buffer.alloc(32, 1),
     repositoryCredential: async () => ({ token: "fake" }), codeModules: () => ({}) as never,

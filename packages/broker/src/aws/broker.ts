@@ -16025,7 +16025,7 @@ function buildBrokerHandler(callbackSigningKey: string) {
     repositoryCredential: (credentialRef, repositoryUrl, access) => githubCredentials.resolve(credentialRef, repositoryUrl, access),
     checkTaskPerson: async (task, developerId, admission) => {
       if (signIn === undefined) throw new Error("task person proof is unavailable");
-      const deps = developerTaskRouteDependencies({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), developer: signIn, now: Date.now },
+      const deps = developerTaskRouteDependencies({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), developer: signIn, now: Date.now, ...slackCompany },
         { developerId, sessionId: "core", name: "", amr: "oidc" }, undefined, null);
       return await deps.checkTaskPerson!(task, developerId, admission);
     },
