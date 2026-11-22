@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { companyScoped } from "@agentx/contracts";
+import { WORKER_POST_TIMEOUT_MS, companyScoped } from "@agentx/contracts";
 import type * as DispatcherCoreModule from "../../packages/broker/src/aws/worker-machines/dispatcher-core.js";
 import type { DispatcherCoreInputs } from "../../packages/broker/src/aws/worker-machines/dispatcher-core.js";
 import { readWorkspace } from "../../packages/broker/src/core/task-flow/stage-machine.js";
@@ -41,6 +41,16 @@ it("parks ownerless PEOPLE work through the deployed dispatcher's delivery wirin
   // An unrecognised record reaches the real lazy host builder without dispatching work.
   await handler({ Records: [{ messageId: "builder", receiptHandle: "builder", body: "{}", eventSourceARN: queueArn }] });
   expect(captured.inputs?.deliveryAccess).toBeTypeOf("function");
+  // Pin the actual hosted POST to the shared timing used by dispatch freshness.
+  // A fetch stub keeps this boundary proof offline; the real post builder runs.
+  const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 202 }));
+  const timeout = vi.spyOn(AbortSignal, "timeout");
+  try {
+    expect(await captured.inputs!.machines.post("http://127.0.0.1:8080/invocations", { authorization: "synthetic", body: "{}" })).toEqual({ status: 202, body: "{}" });
+    expect(timeout).toHaveBeenCalledExactlyOnceWith(WORKER_POST_TIMEOUT_MS);
+    expect(fetch.mock.calls[0]![1]!.signal).toBeInstanceOf(AbortSignal);
+  } finally { fetch.mockRestore(); timeout.mockRestore(); }
+
   const deliveryAccess = captured.inputs!.deliveryAccess!;
   for (const withPeople of [false, true]) {
     const h = createHarness({ companyId: COMPANY_A });

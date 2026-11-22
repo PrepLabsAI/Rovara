@@ -40,7 +40,7 @@ for (const backend of ["memory", "sqs"] as const) describe(`dispatch ownership o
     expect(await runDispatchOnce(h.deps)).toMatchObject({ received: 1, foreign: 1, dropped: 0, failed: 0 });
     expect(read).not.toHaveBeenCalled(); advance();
     const [still] = await queue.receive(); expect(still?.receiveCount).toBe(2); expect(still?.body).toEqual({ ...body, companyId });
-    expect(lines).toEqual([{ companyId: A, component: "task-flow", event: "task_flow.dispatch_foreign" }]);
+    expect(lines).toEqual([{ companyId: A, component: "task-flow", event: "task_flow.dispatch_foreign" }, { companyId: A, component: "task-flow", event: "task_flow.dispatch_delivery", operationId: null, attempt: null, stateAtReceipt: "unread", decision: "defer-foreign", messageId: still!.messageId, receiveCount: 1 }]);
   });
   it("refuses disagreeing attribute and body", async () => {
     const { h, queues } = world(); const read = vi.spyOn(h.store, "get");
@@ -83,10 +83,10 @@ it("outbox relay refuses a corrupt row whose key and company disagree", async ()
 it("a foreign visibility failure never logs the adapter's cause or foreign company", async () => {
   const h = createHarness(); const queue = await h.queues.queue("task-dispatch"); const lines: unknown[] = [];
   h.deps.log = (line) => { lines.push(line); };
-  await queue.enqueue({ body: { ...body, companyId: B } });
+  const sent = await queue.enqueue({ body: { ...body, companyId: B } });
   const error = new Error(`secret-${B}`); error.name = `secret-${B}`;
   vi.spyOn(queue, "changeVisibility").mockRejectedValue(error);
   h.deps.queues = { queue: async () => queue };
   expect(await runDispatchOnce(h.deps)).toMatchObject({ retried: 1, dropped: 0 });
-  expect(lines).toEqual([{ companyId: A, component: "task-flow", event: "task_flow.dispatch_fault", error: "dispatch_failed" }]);
+  expect(lines).toEqual([{ companyId: A, component: "task-flow", event: "task_flow.dispatch_fault", error: "dispatch_failed" }, { companyId: A, component: "task-flow", event: "task_flow.dispatch_delivery", operationId: null, attempt: null, stateAtReceipt: "unread", decision: "defer-foreign", messageId: sent.messageId, receiveCount: 1 }]);
 });

@@ -32,7 +32,7 @@ import {
   aws_sqs as sqs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import { E2E_ARTIFACT_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, OUTBOX_PENDING_INDEX, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX, TEST_SERVICES_SETTING_VARIABLE, TEST_SERVICE_IMAGES_SETTING_VARIABLE, EGRESS_ADDRESSES_PARAMETER_PATTERN, EGRESS_ADDRESSES_VARIABLE, NAT_EGRESS_ADDRESSES_OUTPUT, WORKER_SANDBOX_EGRESS_DEFAULT, WORKER_SANDBOX_EGRESS_SETTING_VARIABLE, WORKER_SANDBOX_EGRESS_VALUES } from "@agentx/contracts";
+import { CORE_DISPATCHER_TIMEOUT_SECONDS, CORE_BROKER_TIMEOUT_SECONDS, E2E_ARTIFACT_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, OUTBOX_PENDING_INDEX, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX, TEST_SERVICES_SETTING_VARIABLE, TEST_SERVICE_IMAGES_SETTING_VARIABLE, EGRESS_ADDRESSES_PARAMETER_PATTERN, EGRESS_ADDRESSES_VARIABLE, NAT_EGRESS_ADDRESSES_OUTPUT, WORKER_SANDBOX_EGRESS_DEFAULT, WORKER_SANDBOX_EGRESS_SETTING_VARIABLE, WORKER_SANDBOX_EGRESS_VALUES } from "@agentx/contracts";
 import { EgressAlarms } from "./egress-alarms.js";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { ChannelAdapters } from "./channel-adapters.js";
@@ -228,7 +228,7 @@ export class ControlPlaneStack extends Stack {
       GITHUB_APP_CREDENTIAL_REF: githubAppCredentialRef.valueAsString,
       GITHUB_APP_ID: githubAppId.valueAsString,
       GITHUB_APP_PRIVATE_KEY_SECRET_ARN: githubAppPrivateKeySecretArn.valueAsString,
-    });
+    }, Duration.seconds(CORE_BROKER_TIMEOUT_SECONDS));
     // Named environments: the broker's role and function keep the fixed names a named environment has always had (agentx-<env>-broker-role, agentx-<env>-broker), so an
     // install already running under them updates them in place instead of replacing them, and operator tools and other stacks that name them keep working. A resource with a
     // fixed name cannot be replaced by CloudFormation: a later change that needs a new role or function must change the name in the same release. The legacy template is unchanged.
@@ -386,7 +386,7 @@ export class ControlPlaneStack extends Stack {
         MAX_DISPATCH_ATTEMPTS: String(MAX_DISPATCH_ATTEMPTS),
         ARTIFACT_BUCKET_NAME: artifacts.bucketName,
       },
-      Duration.seconds(60),
+      Duration.seconds(CORE_DISPATCHER_TIMEOUT_SECONDS),
     );
     dispatchQueue.grantConsumeMessages(dispatcher);
     state.grantReadWriteData(dispatcher);

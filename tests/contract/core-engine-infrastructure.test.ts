@@ -13,7 +13,7 @@ import { App, Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import {
-  BOUNDARY_SERVICES, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_MODEL_GATEWAY_URL_VARIABLE, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, OUTBOX_PENDING_INDEX, CORE_DISPATCH_MAX_RECEIVES, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, HEALTH_ALARM_SUFFIXES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
+  CORE_DISPATCHER_TIMEOUT_SECONDS, CORE_DISPATCH_CLAIM_STALE_MS, WORKER_POST_TIMEOUT_MS, OUTBOX_RELAY_OWNERSHIP_MS, BOUNDARY_SERVICES, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_MODEL_GATEWAY_URL_VARIABLE, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, OUTBOX_PENDING_INDEX, CORE_DISPATCH_MAX_RECEIVES, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, HEALTH_ALARM_SUFFIXES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
   SERVICE_ROLE_SERVICES, coreAttentionEmailFunctionName, coreDispatchDeadLetterName, coreDispatchQueueName,
 } from "@agentx/contracts";
 import { CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PATTERN, CORE_ANSWERS_MODEL_VARIABLE, CORE_CLAUDE_AGENT_MODEL, CORE_LEARNING_MODEL_MAX_LENGTH, CORE_LEARNING_MODEL_PATTERN, CORE_LEARNING_MODEL_VARIABLE, isCoreLearningModelId } from "@agentx/contracts";
@@ -239,6 +239,16 @@ describe("the core dispatch queue", () => {
 
   it("is encrypted with SQS-managed keys, holds a message two minutes while a step starts, and keeps dead letters 14 days", () => {
     expect(queue[1].Properties).toMatchObject({ SqsManagedSseEnabled: true, VisibilityTimeout: 120 });
+    // Real synthesized values, not another copy of either infrastructure timeout.
+    expect(CORE_DISPATCH_CLAIM_STALE_MS).toBeGreaterThan(Number(queue[1].Properties.VisibilityTimeout) * 1_000 + WORKER_POST_TIMEOUT_MS);
+    for (const template of [named, legacy]) {
+      const broker = resources(template, "AWS::Lambda::Function").find(([id]) => /^Broker[0-9A-F]{8}$/u.test(id))![1];
+      expect(OUTBOX_RELAY_OWNERSHIP_MS).toBeGreaterThan(Number(broker.Properties.Timeout) * 1_000);
+      const dispatcher = resources(template, "AWS::Lambda::Function").find(([id]) => /^Dispatcher[0-9A-F]{8}$/u.test(id))![1];
+      expect(dispatcher.Properties.Timeout).toBe(CORE_DISPATCHER_TIMEOUT_SECONDS);
+      expect(CORE_DISPATCHER_TIMEOUT_SECONDS).toBe(60);
+      expect(CORE_DISPATCH_CLAIM_STALE_MS).toBeGreaterThan(Number(dispatcher.Properties.Timeout) * 1_000);
+    }
     expect(deadLetters[1].Properties).toMatchObject({ SqsManagedSseEnabled: true, MessageRetentionPeriod: 14 * 24 * 60 * 60 });
   });
 
