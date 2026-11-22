@@ -1522,6 +1522,9 @@ export class ControlPlaneStack extends Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(notifyOperator);
 
+    // This certifies the installed broker, including installs awaiting their first gateway.
+    // Gateway admission is checked separately before configuration or worker activation.
+    new CfnOutput(this, "ModelRunPriceVersion", { value: "1", description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     new CfnOutput(this, "ApiEndpoint", { value: api.attrApiEndpoint });
     new CfnOutput(this, "StateTableName", { value: state.tableName });
     new CfnOutput(this, "ArtifactBucketName", { value: artifacts.bucketName });

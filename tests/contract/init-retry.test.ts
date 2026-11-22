@@ -1,3 +1,4 @@
+import {  } from "../support/install-gateway.js";
 // tests/contract/init-retry.test.ts
 // Q7: a check that fails on the page asks to be run again; without a page it fails exactly as it
 // always has, asking nothing.

@@ -8,6 +8,7 @@ import { runDesignReview, modelKeyIdOf, type DesignReviewOptions, type DesignRev
 import type { FileOpsTarget } from "./file-ops-exec.js";
 import type { ModelProxyOptions } from "@agentx/model-runtime";
 import { lazyModelProxy, modelAccessSource } from "./model-access.js";
+import { operationModelAccessOptions } from "./cx-c/operation-model-source.js";
 import { createWorkspacePiSession, type PiSessionAdapter, type WorkspaceModelConfiguration } from "./pi-session.js";
 import { assistantOutcome, failedTurn, type AssistantOutcome } from "./session-events.js";
 import { designReviewRuntime } from "./task-model.js";
@@ -39,13 +40,15 @@ export const DESIGN_REVIEW_NO_OPERATION_KEY = "design-review-operation-has-no-ke
  * only and refuses the operation's own (security S6). Its own session is still opened (its transcript and rule files) but never prompted, and opening a proxied session asks for its key at once, so
  * that session holds `DESIGN_REVIEW_NO_OPERATION_KEY` and never asks the broker. Each reviewer asks for its slot's key itself (`slotRuntimeFor`). Any other operation asks for its own key, as before.
  */
-export function operationModelProxy(input: { payload: { workflowMode?: string | undefined; designReview?: DesignReviewBinding | undefined; modelRoute?: InvocationModelRoute | undefined }; proxyUrl: string | undefined; controlPlaneUrl: string; capability: string; fetch?: typeof fetch }): ModelProxyOptions | undefined {
+export function operationModelProxy(input: { payload: { workflowMode?: string | undefined; designReview?: DesignReviewBinding | undefined; modelRoute?: InvocationModelRoute | undefined }; proxyUrl: string | undefined; controlPlaneUrl: string; capability: string; environment?: NodeJS.ProcessEnv; fetch?: typeof fetch }): ModelProxyOptions | undefined {
   if (!input.proxyUrl && input.payload.modelRoute === undefined) return undefined;
   if (designReviewBindingOf(input.payload) !== undefined) {
     const baseUrl = input.proxyUrl || input.controlPlaneUrl;
     return lazyModelProxy({ baseUrl, source: async () => ({ baseUrl, apiKey: DESIGN_REVIEW_NO_OPERATION_KEY, expiresAt: Number.MAX_SAFE_INTEGER }) });
   }
-  return lazyModelProxy({ baseUrl: input.proxyUrl || input.controlPlaneUrl, source: modelAccessSource({ ...(input.proxyUrl ? { fallbackBaseUrl: input.proxyUrl } : {}), controlPlaneUrl: input.controlPlaneUrl, capability: input.capability, ...(input.fetch === undefined ? {} : { fetch: input.fetch }) }) });
+  const local = input.environment?.AGENTX_ENVIRONMENT_KIND === "local" && input.environment.AGENTX_RUNTIME !== "ec2";
+  return { ...lazyModelProxy({ baseUrl: input.proxyUrl || input.controlPlaneUrl, source: modelAccessSource({ ...operationModelAccessOptions(input.payload, input.proxyUrl, local),
+    controlPlaneUrl: input.controlPlaneUrl, capability: input.capability, ...(local ? { allowLocalHttp: true } : {}), ...(input.fetch === undefined ? {} : { fetch: input.fetch }) }) }), ...(local ? { localCatalogPricing: true } : {}) };
 }
 
 /** The reviewer's packet from the broker's route, with the operation's capability. Bounded; anything but a JSON answer is an error (the reviewer then gives no result). */

@@ -244,6 +244,9 @@ export async function buildRelease(input: BuildReleaseInput): Promise<ReleaseMan
           agentxEnv: ENVIRONMENT_PLACEHOLDER,
           agentxSynthesizer: "legacy",
           agentxRegion: region,
+          // Include this source release's provider capability. The templates engine restores the
+          // historical template when the install has no gateway; it never certifies an old release.
+          CoreModelGatewayHost: "gateway.example",
           outdir: synthDir,
         }).synth(),
       );

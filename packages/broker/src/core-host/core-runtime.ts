@@ -139,15 +139,23 @@ export function createCoreRuntime(options: CoreRuntimeOptions): CoreRuntime {
     now: options.now,
     log: options.log,
     startExtras,
+    // Shared by flow.start and hosted setup/wiki starts over flow.deps. The
+    // signed-price check must finish before even the company's in-use write.
+    startModelCheck: async () => {
+      const refusal = await options.flowOptions?.startModelCheck?.();
+      if (refusal !== undefined) return refusal;
+      await ensureCoreInUse(store, companyId);
+      return undefined;
+    },
     // The work events of the cost report's wait split and send-backs (slice A4, `core/work-events/flow-events.ts`): on for every core runtime unless the deployment turns them off.
     workEvents: options.flowOptions?.workEvents !== false,
   });
-  // The company's in-use mark is written before its first core start (off the start's transaction), so the root's jobs always find every company that holds core tasks.
+  // The start's model check writes the in-use mark before its transaction, so
+  // the root's jobs find every company that holds core tasks.
   const flow: TaskFlow = {
     ...base,
     async start(caller, request) {
       if (engineForNewTask(options.flags, companyId) !== "core") throw agentXError("RUNTIME_UNAVAILABLE", CORE_START_REFUSED_WORDS);
-      await ensureCoreInUse(store, companyId);
       return await base.start(caller, request);
     },
   };

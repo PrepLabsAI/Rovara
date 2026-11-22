@@ -36,12 +36,14 @@ const endpointInput = { kind: "endpoint", label: "Gateway", baseUrl: "https://ll
 
 describe("launch gates", () => {
   it("keeps every company source kind off until its checklist passes", () => {
-    expect(SOURCE_KINDS_AT_LAUNCH).toEqual([]);
+    expect(SOURCE_KINDS_AT_LAUNCH).toEqual(["bedrock"]);
+    expect(sourceKindProblem("bedrock")).toBeUndefined();
+    expect(sourceKindProblem("openrouter")).toBe("openrouter sources aren't available yet");
     expect([...TRANSPORTS_AT_LAUNCH]).toEqual(["anthropic-messages", "openai-responses", "openai-completions"]);
     expect(ModelSourceKindSchema.options).toEqual(["rovara", "personal-chatgpt", "anthropic", "openai", "openrouter", "bedrock", "endpoint"]);
   });
 
-  it.each(["anthropic"] as const)("refuses a %s source with the exact text", (kind) => {
+  it.each(["anthropic", "openai", "openrouter", "endpoint"] as const)("refuses a %s source with the exact text", (kind) => {
     expect(sourceKindProblem(kind)).toBe(`${kind} sources aren't available yet`);
   });
 

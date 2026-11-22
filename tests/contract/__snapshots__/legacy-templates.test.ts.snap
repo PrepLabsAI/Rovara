@@ -168,6 +168,10 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         ],
       },
     },
+    "ModelRunPriceVersion": {
+      "Description": "Broker signs task run-price ceilings; deploy gateway before broker before workers",
+      "Value": "1",
+    },
     "OperatorAlertsTopicArn": {
       "Value": {
         "Ref": "OperatorAlertsA2431256",

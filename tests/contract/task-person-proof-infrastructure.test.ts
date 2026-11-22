@@ -25,6 +25,7 @@ import { withoutBrokerMemberConditionCheck } from "../support/broker-member-cond
 skipLambdaBundling();
 
 type TemplateJson = {
+  Outputs?: Record<string, unknown>;
   Parameters?: Record<string, Record<string, unknown>>;
   Conditions?: Record<string, unknown>;
   Resources?: Record<string, { Type: string; Condition?: string; Properties?: Record<string, unknown> }>;
@@ -330,10 +331,12 @@ describe("the named TEST proof-only installation gate", () => {
     expect(foreign.Parameters?.CoreTaskCapUsd, "foreign has the core engine").toBeDefined();
     // #1148: the legacy (production) template has the core engine too.
     expect(legacy.Parameters?.CoreTaskCapUsd, "legacy has the core engine").toBeDefined();
-    for (const { label, template: currentTemplate, withRoute, withoutRoute, beforeStepUpRemoval, beforeCapabilityRoutes } of digestCases) {
-      // SIGNIN-MEMBER-CONDITIONCHECK, DEC 254zzz282 B014-A: pin and remove only
-      // the new broker member statement; retain the creator fence and every historical digest.
-      const template = withoutBrokerMemberConditionCheck(currentTemplate);
+    for (const { label, template: installedTemplate, withRoute, withoutRoute, beforeStepUpRemoval, beforeCapabilityRoutes } of digestCases) {
+      // Assert and remove only the new broker member statement and first-gateway
+      // output; retain the creator fence and every historical parent/reversal pin.
+      const template = withoutBrokerMemberConditionCheck(installedTemplate);
+      expect(template.Outputs?.ModelRunPriceVersion, label).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
+      delete template.Outputs?.ModelRunPriceVersion;
       const creatorChecks = developerSignInConditionCheckEntries(template);
       {
         expect(creatorChecks, `${label} has exactly one broker creator identity fence`).toHaveLength(1);

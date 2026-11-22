@@ -120,9 +120,18 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
     throw error;
   };
 
-  // Access first, from the identity adapter's own answer; it is asked again at every step that spends.
+  // Access comes from the identity adapter's read-only answer; it is asked again at every step that spends.
+  // Refuse before readiness (and its in-use mark); the refusal audit records the access denial without revealing readiness.
   const verdict = await deps.access.checkStart(principal, request.project, run?.setupAgent !== undefined ? "setup_agent" : run?.wikiBuild !== undefined ? "wiki_build" : undefined, origin.data);
   if (!verdict.allowed) return refused(agentXError(verdict.code, verdict.message));
+
+  // Hosted signed-price readiness can throw here: no in-use mark, refusal
+  // audit, admission or task write may precede it. Ordinary model refusals
+  // still use the existing audited refusal path.
+  if (deps.startModelCheck !== undefined) {
+    const modelRefusal = await deps.startModelCheck();
+    if (modelRefusal !== undefined) return refused(modelRefusal);
+  }
   if (request.agent !== undefined || request.input !== undefined) return refused(agentXError("CONFIG_INVALID", "agents are not set up in this deployment"));
   if (request.shareToChannel === true || request.shareMode !== undefined || request.channel !== undefined) return refused(agentXError("CONFIG_INVALID", "sharing a task to a channel is not set up in this deployment"));
 
@@ -151,12 +160,6 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
 
   // An external check nothing in this release runs is refused here, with the clear sentence, before the budget, the limits and any machine (lane P2, review M2).
   if (unrunnableExternalCheck(project.definition.repositories) !== undefined) return refused(agentXError("CONFIG_INVALID", UNRUNNABLE_EXTERNAL_CHECK_MESSAGE));
-
-  // DEC 254n (1): a company whose own engine model the gateway does not offer it now (or whose list cannot be read) starts nothing: refused here, before the limits, the admission and any machine.
-  if (deps.startModelCheck !== undefined) {
-    const modelRefusal = await deps.startModelCheck();
-    if (modelRefusal !== undefined) return refused(modelRefusal);
-  }
 
   const understandFirst = asWorkflow && (deps.understandFirst ?? ROVARA_CODE_V2_FOR_NEW_ORGS);
   // A workflow with no Quick or Full path is Understand's to choose on version 1.1.0; anywhere else the explicit path is required.

@@ -24,6 +24,7 @@ import { documentOf } from "../../packages/broker/src/core/test-env/deps.js";
 import { testEnvLatestKey, testEnvRevisionKey } from "../../packages/broker/src/core/test-env/environment.js";
 import { createFakeWorld } from "../support/core-host-fakes.js";
 import { makeKey, signerOf } from "./policy-hook-fixture.js";
+import { signedRunPriceResponse } from "../support/signed-run-price-fetch.js";
 
 const adapters = vi.hoisted(() => ({ modules: [] as unknown[] }));
 vi.mock("../../packages/broker/src/core-host/code-modules.js", async (original) => ({ ...await original<object>(), codeAdapterModules: () => adapters.modules }));
@@ -75,6 +76,8 @@ async function world() {
   const gatewayRoles: { roles: string[] } = { roles: ["member"] };
   const authorityAsks: Array<{ company: string; project: string }> = [];
   vi.stubGlobal("fetch", vi.fn(async (url: string | URL, init?: RequestInit) => {
+    const price = signedRunPriceResponse(String(url), [A, B], ["claude-sonnet-4-6"], w.clock.now);
+    if (price !== undefined) return price;
     if (String(url) !== `${GATEWAY}${EVAL_AUTHORITY_PATH}`) throw new Error("unexpected fetch");
     const asked = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as { company: string; project: string; approver: { personId: string; provider: string } };
     authorityAsks.push({ company: asked.company, project: asked.project });

@@ -109,7 +109,7 @@ export const coreAgentModel = (key: string) => (value: string): string => {
   const trimmed = value.trim();
   if (CORE_GATEWAY_UNSET.has(trimmed)) return "";
   if (!isCoreAgentModelId(trimmed) || (isClaudeAgentModel(trimmed) && catalogModel({ provider: "anthropic", modelId: trimmed }) === undefined)) {
-    return refuse(key, `empty (none), an Anthropic model id this Rovara knows, such as claude-sonnet-4-6 (not a Bedrock us.anthropic. id), or the exact id of a model the model gateway offers, such as zai.glm-5 (lowercase letters, digits and . _ : - only, at most ${CORE_AGENT_MODEL_MAX_LENGTH} characters)`);
+    return refuse(key, `empty (none), an Anthropic model id this Rovara knows, such as claude-sonnet-4-6 (not a Bedrock us.anthropic. id), or the exact id of a model the model gateway offers, such as zai.glm-5 (lowercase letters, digits and . _ : - or an exact vendor/model ID, at most ${CORE_AGENT_MODEL_MAX_LENGTH} characters)`);
   }
   return trimmed;
 };

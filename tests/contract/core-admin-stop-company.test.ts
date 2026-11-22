@@ -2,7 +2,7 @@
 // (`MEMBER#<person>` / `PROJECT#<name>`) names a project by name only, and companies A and B both have a "payments" project here; the administrator's company is their live membership in
 // the sign-in table (`COMPANY_MEMBER#<person>`), the reader every core caller is judged by. Real broker root and core runtime over fake adapters; no network, no AWS.
 import { randomUUID } from "node:crypto";
-import { expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { orgProjectCatalogKey, projectRevisionKey, type OrgId, type StoredDocument } from "@agentx/contracts";
@@ -14,6 +14,9 @@ import { ADMIN_GRANT_MISSING } from "../../packages/broker/src/core/task-flow/st
 import { taskKeySigner } from "../../packages/broker/src/core-host/gateway-model-access.js";
 import { createFakeWorld } from "../support/core-host-fakes.js";
 import { makeKey, signerOf } from "../unit/policy-hook-fixture.js";
+import { signedRunPriceResponse } from "../support/signed-run-price-fetch.js";
+
+afterEach(() => { vi.unstubAllGlobals(); });
 
 const adapters = vi.hoisted(() => ({ modules: [] as unknown[] }));
 vi.mock("../../packages/broker/src/core-host/code-modules.js", async (original) => ({ ...await original<object>(), codeAdapterModules: () => adapters.modules }));
@@ -29,6 +32,7 @@ const project = { name: "payments", revision: 1, setup: [], readiness: [], orche
 async function world() {
   const w = createFakeWorld();
   w.clock.now = Date.now();
+  vi.stubGlobal("fetch", async (input: string | URL | Request) => signedRunPriceResponse(input, [A, B], [MODEL], w.clock.now) ?? Response.json({}, { status: 404 }));
   adapters.modules = w.modules.filter((module) => ["storage", "queue", "worker-machines", "object-storage", "code-host", "check-runner", "secrets"].includes(module.point));
   const members = new Map<string, { companyId: OrgId; role: string; revokedAt?: string }>([
     [ownerA, { companyId: A, role: "member" }], [ownerB, { companyId: B, role: "member" }], [adminA, { companyId: A, role: "member" }], [adminB, { companyId: B, role: "member" }],

@@ -1,3 +1,4 @@
+import { CoreEngineAnswersSchema } from "../deploy/core-engine-answers.js";
 // `agentx init`'s own state in SSM, beside the environment settings: the answers (never a secret)
 // and the progress (step outcomes, and the GitHub and Slack facts collected so far). Settings are
 // written only by deployEnvironment once the Slack stack exists; these two let a stopped init
@@ -56,6 +57,7 @@ export const InitAnswersSchema = z.object({
   releaseVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
   identity: IdentityAnswersSchema,
   models: ModelsAnswersSchema,
+  coreEngine: CoreEngineAnswersSchema.optional(),
   permissionsBoundaryArn: z.string().regex(/^arn:aws[a-z-]*:iam::\d{12}:policy\/.+$/).optional(),
   operatorPrincipalArn: z.string().regex(OPERATOR_PRINCIPAL_PATTERN).optional(),
   operatorExternalId: z.string().regex(OPERATOR_EXTERNAL_ID_PATTERN).optional(),

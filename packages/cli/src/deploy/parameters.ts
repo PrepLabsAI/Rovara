@@ -1,3 +1,4 @@
+import { coreEngineParameters, type CoreEngineAnswers } from "./core-engine-answers.js";
 // The install/upgrade deploy parameter model as pure functions: no AWS SDK calls, no CDK imports.
 // It turns the operator's answers, a release manifest, and the stack outputs collected so far into
 // the exact CloudFormation Parameters map for one environment stack. The caller (phase 15d's `agentx
@@ -20,6 +21,8 @@ export interface InstallAnswers {
   partition?: string;
   release: ReleaseManifest;
   models: ModelsAnswers;
+  /** Required for install; upgrades may keep the installed pair. */
+  coreEngine?: CoreEngineAnswers;
   identity:
     | { mode: "cognito" }
     | {
@@ -111,9 +114,9 @@ export function installOrder(identityMode: "cognito" | "oidc"): DeployPart[] {
   return withoutIdentityWhenOidc(order, identityMode);
 }
 
-/** Upgrade order: the worker settings deploy before the control plane, as the release pipeline does, so workers booted from then on (the tolerant side of the window) run the new image first. */
+/** Gateway first (preflight), then the price-serving broker, then worker activation. */
 export function upgradeOrder(identityMode: "cognito" | "oidc"): DeployPart[] {
-  const order: DeployPart[] = ["access", "foundation", "identity", "runtime", "control-plane", "slack"];
+  const order: DeployPart[] = ["access", "foundation", "identity", "control-plane", "runtime", "slack"];
   return withoutIdentityWhenOidc(order, identityMode);
 }
 
@@ -298,6 +301,16 @@ function adminParameters(identity: InstallAnswers["identity"]): Record<string, s
   return { AdminClaim: adminClaim, AdminValues: JSON.stringify(adminValues) };
 }
 
+function validateControlPlaneAnswers(answers: InstallAnswers): asserts answers is InstallAnswers & { github: InstallAnswers["github"] & { appId: string } } {
+  if (answers.callbackSigningKey.length < MIN_CALLBACK_SIGNING_KEY_LENGTH) {
+    // Never include the value: it is a secret.
+    throw new Error(`the callback signing key must be at least ${MIN_CALLBACK_SIGNING_KEY_LENGTH} characters`);
+  }
+  if (answers.github.appId === undefined) {
+    throw new Error("the answers name no GitHub App id (github.appId); an install needs one, and an upgrade keeps the deployed one");
+  }
+}
+
 /** Parameters for one stack. Throws a clear error naming the missing input or output. The release's
  * package parameters belong to its published templates only: a cdk deploy synthesizes from source and
  * uploads its own assets, and CloudFormation refuses a parameter its template does not declare, so
@@ -334,13 +347,7 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
       return answers.setupPageUrl === undefined ? base : { ...base, SetupPageUrl: answers.setupPageUrl };
 
     case "control-plane": {
-      if (answers.callbackSigningKey.length < MIN_CALLBACK_SIGNING_KEY_LENGTH) {
-        // Never include the value: it is a secret.
-        throw new Error(`the callback signing key must be at least ${MIN_CALLBACK_SIGNING_KEY_LENGTH} characters`);
-      }
-      if (answers.github.appId === undefined) {
-        throw new Error("the answers name no GitHub App id (github.appId); an install needs one, and an upgrade keeps the deployed one");
-      }
+      validateControlPlaneAnswers(answers);
       const oidc =
         answers.identity.mode === "cognito"
           ? { issuer: required(outputs, "identity", "Issuer", answers.env), audience: required(outputs, "identity", "Audience", answers.env) }
@@ -352,6 +359,7 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         OidcAudience: oidc.audience,
         ...adminParameters(answers.identity),
         CallbackSigningKey: answers.callbackSigningKey,
+        ...(answers.coreEngine === undefined ? {} : coreEngineParameters(answers.coreEngine)),
         GitHubAppId: answers.github.appId,
         GitHubAppPrivateKeySecretArn: answers.github.privateKeySecretArn,
         ...(answers.github.credentialRef === undefined ? {} : { GitHubAppCredentialRef: answers.github.credentialRef }),

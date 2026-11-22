@@ -12,7 +12,7 @@ describe("TC-1 claims", () => {
     expect(Reflect.get(taskContract, "TASK_KEY_PURPOSE_MEMBER")).toBe("rovara_purpose");
   });
   it("pins the shared bytes and module constants and field list", () => {
-    expect(createHash("sha256").update(bytes()).digest("hex")).toBe("2376aa1542f645db45d081fa0818e0b6952f8fe78e485df679e04a492096f6e1");
+    expect(createHash("sha256").update(bytes()).digest("hex")).toBe("3543671eb6c61e7a621b98320e43dd730e1ae5a58cceb4c3bc710e294cde3d97");
     expect(vector().constants).toEqual({ typ: TASK_TOKEN_TYP, aud: TASK_TOKEN_AUDIENCE, alg: TASK_TOKEN_ALGORITHM, lifetime: TASK_TOKEN_SECONDS, keyPurpose: taskContract.TASK_KEY_PURPOSE, keyPurposeMember: taskContract.TASK_KEY_PURPOSE_MEMBER });
     expect(vector().claims).toEqual(TASK_TOKEN_CLAIMS);
     expect(Object.keys(TaskTokenClaimsSchema.shape)).toEqual(vector().claims.map(f => f.name));
@@ -23,6 +23,14 @@ describe("TC-1 claims", () => {
     for (const field of vector().claims) {
       const copy: Record<string, unknown> = { ...claims }; delete copy[field.name];
       expect(parseTaskTokenClaims(copy) !== undefined, field.name).toBe(!field.required);
+    }
+  });
+  it("preserves the vector's signed price and binds it to the company and one model", () => {
+    const claims = vector().testVector.claims;
+    expect(claims.runPrice).toBeDefined();
+    expect(taskTokenClaimsFor(claims)).toEqual(claims);
+    for (const patch of [{ cid: "org_bbbbbbbbbbbbbbbbbbbb" }, { mdl: ["other-model"] }, { mdl: [...claims.mdl, "other-model"] }]) {
+      expect(parseTaskTokenClaims({ ...claims, ...patch })).toBeUndefined();
     }
   });
   it.each([
@@ -37,7 +45,8 @@ describe("TC-1 claims", () => {
     expect(taskTokenClaimsFor({ ...vector().testVector.claims, iat: 1800000000 })).toMatchObject({ aud: "rovara-model-gateway", nbf: 1799999970, exp: 1800000900 });
   });
   it("accepts the declared model-count and model-length maximum", () => {
-    expect(parseTaskTokenClaims({ ...vector().testVector.claims, mdl: Array(16).fill("a".repeat(128)) })).toBeDefined();
+    const claims = vector().testVector.claims; delete claims.runPrice;
+    expect(parseTaskTokenClaims({ ...claims, mdl: Array(16).fill("a".repeat(128)) })).toBeDefined();
   });
   it("bounds a large model array before schema traversal", () => {
     // The array is refused on its length: the cost does not grow with it (4,000, then 32,000 entries of 8 bytes: the 8N input stays at or under 256 KiB so it stays in CPU cache; the full 250,000 entries run once, un-timed, below).

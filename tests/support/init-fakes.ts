@@ -32,6 +32,7 @@ export function sampleAnswers(overrides: Partial<InitAnswers> = {}): InitAnswers
     region: "us-east-1",
     account: "123456789012",
     engine: "templates",
+    coreEngine: { modelGatewayUrl: "https://gateway.example", agentModel: "claude-sonnet-4-6" },
     releaseVersion: "1.2.3",
     identity: { mode: "cognito" },
     models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "us.anthropic.claude-haiku-4-5-20251001-v1:0", worker: "us.anthropic.claude-sonnet-4-6" },
@@ -95,7 +96,7 @@ export function settingsScript(input: {
   advanced?: Partial<Record<SettingsFieldName, string>>; flags?: InitFlags; env?: string; adminEmail?: string; fixed?: boolean;
 } = {}): ScriptedAnswer[] {
   const fields = settingsFields({ env: input.env ?? "staging", flags: input.flags ?? {}, fixed: input.fixed === true, budgetWhy: "", ...(input.adminEmail === undefined ? {} : { adminEmail: input.adminEmail }) });
-  const basic: Record<string, string> = { email: input.email ?? "ops@example.com", githubAccount: input.owner ?? "acme", installName: input.installName ?? "", appName: input.appName ?? "" };
+  const basic: Record<string, string> = { modelGatewayUrl: "https://gateway.example", agentModel: "claude-sonnet-4-6", email: input.email ?? "ops@example.com", githubAccount: input.owner ?? "acme", installName: input.installName ?? "", appName: input.appName ?? "" };
   const answers: ScriptedAnswer[] = fields.filter((field) => field.section !== "advanced").map((field) => basic[field.name] ?? "");
   const advanced = fields.filter((field) => field.section === "advanced");
   if (advanced.length === 0) return answers;
@@ -197,6 +198,7 @@ export function allStackOutputs(env = "staging"): Record<string, StackOutputs> {
       SlackOrchestratorTaskRoleArn: `arn:aws:iam::123456789012:role/agentx/${env}/slack-task`,
       SlackRequestQueueUrl: "https://sqs.us-east-1.amazonaws.com/123456789012/requests",
       SlackThreadsTableName: "threads", TurnRecordsTableName: "turns", SlackThreadSessionBucketName: "sessions",
+      ModelRunPriceVersion: "1",
       OperatorAlertsTopicArn: `arn:aws:sns:us-east-1:123456789012:agentx-${env}-alerts`,
     },
     [name("runtime")]: {},
@@ -231,7 +233,7 @@ export function fakeRelease(version = "1.2.3"): LoadedRelease {
     schemaVersion: 1, version, gitCommit: "a".repeat(40), environmentPlaceholder: "qqenv-placeholderqq", templates: [], packages: [],
     images: { worker: `public.ecr.aws/agentx/agentx-worker@sha256:${"b".repeat(64)}`, slack: `public.ecr.aws/agentx/agentx-slack@sha256:${"c".repeat(64)}` },
   };
-  return { manifest, dir: "/nonexistent", regions: () => ["us-east-1"], template: () => { throw new Error("not used"); }, packagePath: () => { throw new Error("not used"); } };
+  return { manifest, dir: "/nonexistent", regions: () => ["us-east-1"], template: () => JSON.stringify({ Parameters: { CoreModelGatewayHost: {}, CoreAgentModel: {} }, Outputs: { ModelRunPriceVersion: { Value: "1" } } }), packagePath: () => { throw new Error("not used"); } };
 }
 
 export function progressHandle(initial: InstallProgress = emptyProgress("staging", T0)): ProgressHandle & { value(): InstallProgress } {

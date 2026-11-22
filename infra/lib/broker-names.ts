@@ -4,75 +4,17 @@
 // its broker's environment the same way, under LEGACY_BROKER_ENV, with a layout marker so it derives only values identical to its own; a role's ARN and a value that would derive
 // differently stay whole.
 import { createHash } from "node:crypto";
-import { Aws, CfnParameter, Fn, Lazy, Stack, Token } from "aws-cdk-lib";
+import { Aws, Fn, Lazy, Stack, Token } from "aws-cdk-lib";
 import { aws_ssm as ssm, type aws_lambda as lambda } from "aws-cdk-lib";
 import {
   BROKER_ACCOUNT_VARIABLE, BROKER_NAMES, BROKER_NAMES_PARAMETER_VARIABLE, BROKER_NAMES_REVISION_VARIABLE, BROKER_SETTINGS, BROKER_SETTINGS_VARIABLE, BROKER_SETTING_VALUE,
   DERIVED_BROKER_VARIABLES, LEGACY_INSTALL_LAYOUT, brokerNamesParameterName, encodeBrokerNamesParameterPrefix, type BrokerNameKey, type BrokerSettingKey,
 } from "@agentx/contracts";
+import { refuseUnconstrainedParameters } from "./cx-c/packed-parameter-guard.js";
 import type { AgentXNaming } from "./naming.js";
 
 /** A literal name: what the broker accepts as a name (broker-environment.ts), so a literal with a separator is refused when it is added. */
 const LITERAL_NAME = /^[A-Za-z0-9._-]{1,255}$/u;
-/** What must never reach the list joined without escaping: it ends a pair, starts a value, or escapes (the pairs are `code=value,code=value`). */
-const SEPARATORS = ['"', "\\", ",", "=", "{", "}", "/", " ", "\n"];
-
-/** True where the pattern has a construct that takes any character (`.`, `\S`, `\W`, `\D`, a negated class), outside a character class where `.` is literal. */
-function patternIsOpen(pattern: string): boolean {
-  let inClass = false;
-  for (let index = 0; index < pattern.length; index++) {
-    const char = pattern[index]!;
-    if (char === "\\") {
-      if ("SWD".includes(pattern[index + 1] ?? "")) return true;
-      index++;
-    } else if (inClass) {
-      if (char === "]") inClass = false;
-    } else if (char === "[") {
-      inClass = true;
-      if (pattern[index + 1] === "^") return true;
-    } else if (char === ".") return true;
-  }
-  return false;
-}
-
-/** Whether an AllowedPattern lets a separator through: no open construct, and no probe built from the pattern's own leading literal plus a separator matches. A guard, not a proof. */
-function patternAdmitsSeparator(pattern: string): boolean {
-  if (patternIsOpen(pattern)) return true;
-  let accepts: RegExp;
-  try { accepts = new RegExp(pattern, "u"); } catch { return true; }
-  const prefix = /^\^?((?:[A-Za-z0-9_:-]|\\\.)*)/u.exec(pattern)?.[1]?.replace(/\\\./gu, ".") ?? "";
-  const bases = ["", "a", "0", "T0", "E0", prefix, `${prefix}0`, `${prefix}a`];
-  return bases.some((base) => SEPARATORS.some((separator) => [`${base}${separator}`, `${base}${separator}0`, `${base}0${separator}0`, `${base}a${separator}b`].some((probe) => accepts.test(probe))));
-}
-
-/**
- * Packing needs a value that cannot carry a separator. A literal is checked at once (by the caller). A token is checked when the variable is built, at synthesis: every Ref to a
- * parameter in it must be a Number, or have AllowedValues without a separator, or an AllowedPattern that admits none. Other tokens (a resource's name or id) are CloudFormation's
- * own generated values.
- */
-function refuseUnconstrainedParameters(scope: Stack, what: string, key: string, value: string): void {
-  const parameters = new Map<string, CfnParameter>();
-  for (const child of scope.node.findAll()) if (child instanceof CfnParameter) parameters.set(String(scope.resolve(child.logicalId)), child);
-  const walk = (node: unknown): void => {
-    if (Array.isArray(node)) { node.forEach(walk); return; }
-    if (node === null || typeof node !== "object") return;
-    const record = node as Record<string, unknown>;
-    const ref = record.Ref;
-    const parameter = typeof ref === "string" ? parameters.get(ref) : undefined;
-    if (parameter !== undefined) {
-      if (parameter.type === "Number") return;
-      const unsafe = (reason: string): never => { throw new Error(`${what} ${key} comes from the parameter ${String(ref)}, which ${reason}; it is joined into the broker's variable unescaped, so the parameter needs an AllowedPattern or AllowedValues that keeps out quotes, commas, equals signs, braces, slashes and spaces`); };
-      if (parameter.allowedValues !== undefined) {
-        if (parameter.allowedValues.some((allowed) => SEPARATORS.some((separator) => allowed.includes(separator)))) unsafe("allows a value with a separator");
-      } else if (parameter.allowedPattern === undefined) unsafe("has no AllowedPattern or AllowedValues");
-      else if (patternAdmitsSeparator(parameter.allowedPattern)) unsafe(`has an AllowedPattern (${parameter.allowedPattern}) that admits a separator`);
-      return;
-    }
-    Object.values(record).forEach(walk);
-  };
-  walk(scope.resolve(value));
-}
-
 /** One packed variable: pieces added by the constructs that own them, joined in code order at synthesis (after every construct has added its own). */
 class PackedList<K extends string> {
   private readonly values = new Map<K, string>();

@@ -1,3 +1,4 @@
+import { CoreEngineAnswersSchema } from "./core-engine-answers.js";
 // Wires the deploy engines (templates-engine.ts, cdk-engine.ts), the deploy orchestrator
 // (deploy-environment.ts) and the export bundle (export-bundle.ts) together for `agentx deploy` and
 // `agentx init --export`. Everything that would otherwise touch AWS is overridable through
@@ -106,6 +107,7 @@ const deployAnswersSchema = (mode: "install" | "upgrade") => z
     account: z.string().regex(ACCOUNT_PATTERN, "account must be a 12-digit AWS account id"),
     partition: z.string().min(1).optional(),
     models: ModelsAnswersSchema,
+    coreEngine: mode === "install" ? CoreEngineAnswersSchema : CoreEngineAnswersSchema.optional(),
     identity: IdentityAnswersSchema,
     github: githubAnswersSchema(mode),
     permissionsBoundaryArn: z.string().min(1).optional(),
@@ -165,6 +167,7 @@ function toDeployAnswers(parsed: z.infer<typeof UpgradeDeployAnswersSchema>): De
     account: parsed.account,
     ...(parsed.partition === undefined ? {} : { partition: parsed.partition }),
     models: parsed.models,
+    ...(parsed.coreEngine === undefined ? {} : { coreEngine: parsed.coreEngine }),
     identity: deployIdentityAnswers(parsed.identity),
     github: {
       ...(parsed.github.account === undefined ? {} : { account: parsed.github.account }),
@@ -409,6 +412,11 @@ export function cloudFormationParametersReader(client: CloudFormationClient): (s
   return async (stackName) => (await reader.describe(stackName))?.parameters;
 }
 
+/** Share the deployed-parameter source between the orchestrator and concrete engine. */
+function deployedParametersReader(deps: DeployCliDependencies, region: string): (stackName: string) => Promise<Record<string, string> | undefined> {
+  return deps.stackParameters ?? cloudFormationParametersReader(new CloudFormationClient({ region }));
+}
+
 // ---- reading a stack's outputs directly, for the cdk engine's StackDeployer.outputs -------------
 
 function isStackAbsentError(error: unknown): boolean {
@@ -613,7 +621,7 @@ async function deployCommand(options: DeployCommandOptions, deps: DeployCliDepen
       secrets: prepared.secrets,
       holder: prepared.holder,
       ...(parts === undefined ? {} : { parts }),
-      deployedParameters: deps.stackParameters ?? cloudFormationParametersReader(new CloudFormationClient({ region: answers.region })),
+      deployedParameters: deployedParametersReader(deps, answers.region),
       ...(prepared.declaredParameters === undefined ? {} : { declaredParameters: prepared.declaredParameters }),
       onEvent,
       ...(confirm === undefined ? {} : { confirm }),
@@ -707,7 +715,8 @@ export async function prepareDeployment(input: {
     await buildSource({ runner, source });
     // Issue 152: one synth of the built source, with the deploy's own app and context, says which
     // parameters each stack declares; the release's templates may not exist (a source-built agentx).
-    declaredParameters = await synthDeclaredParameters({ runner, source, env: input.env, region, identityMode: input.identityMode });
+    const synthesized = await synthDeclaredParameters({ runner, source, env: input.env, region, identityMode: input.identityMode });
+    declaredParameters = synthesized;
     cdkOutputsDir = await mkdtemp(join(tmpdir(), "agentx-cdk-outputs-"));
     deployer = cdkDeployer({
       runner,
@@ -716,6 +725,8 @@ export async function prepareDeployment(input: {
       region,
       identityMode: input.identityMode,
       outputsDir: cdkOutputsDir,
+      brokerTemplate: synthesized.brokerTemplate,
+      deployedParameters: deployedParametersReader(deps, region),
       outputs: deps.stackOutputs ?? cloudFormationOutputsReader(new CloudFormationClient({ region })),
     });
   } else {
@@ -740,6 +751,7 @@ export async function prepareDeployment(input: {
 // ---- agentx init --export ------------------------------------------------------------------------
 
 export interface InitExportOptions {
+  modelGatewayUrl?: string; agentModel?: string;
   env: string;
   dir: string;
   region: string;
@@ -809,6 +821,20 @@ export async function runInitExport(options: InitExportOptions, deps: DeployCliD
   }
 }
 
+function exportModelAnswers(options: InitExportOptions): DeployAnswers["models"] {
+  return ModelsAnswersSchema.parse({
+    orchestrator: options.orchestratorModel, classifier: options.classifierModel, worker: options.workerModel,
+    ...(options.orchestratorProvider || options.classifierProvider || options.workerProvider ? { providers: {
+      ...(options.orchestratorProvider ? { orchestrator: options.orchestratorProvider } : {}),
+      ...(options.classifierProvider ? { classifier: options.classifierProvider } : {}),
+      ...(options.workerProvider ? { worker: options.workerProvider } : {}),
+    } } : {}),
+    ...(options.openrouterSecretArn ? { openRouter: { secretArn: options.openrouterSecretArn, ...(options.openrouterProviders ? { providers: options.openrouterProviders.split(",") } : {}) } } : {}),
+    ...(options.anthropicSecretArn ? { anthropic: { secretArn: options.anthropicSecretArn } } : {}),
+    ...(options.openaiSecretArn ? { openai: { secretArn: options.openaiSecretArn } } : {}),
+  });
+}
+
 async function initExport(options: InitExportOptions, deps: DeployCliDependencies): Promise<InitExportResult> {
   if (!REGION_PATTERN.test(options.region)) {
     throw agentXError("CONFIG_INVALID", `--region ${options.region} must look like us-east-1`);
@@ -838,16 +864,8 @@ async function initExport(options: InitExportOptions, deps: DeployCliDependencie
     env: options.env,
     region: options.region,
     account,
-    models: ModelsAnswersSchema.parse({ orchestrator: options.orchestratorModel, classifier: options.classifierModel, worker: options.workerModel,
-      ...(options.orchestratorProvider || options.classifierProvider || options.workerProvider ? { providers: {
-        ...(options.orchestratorProvider ? { orchestrator: options.orchestratorProvider } : {}),
-        ...(options.classifierProvider ? { classifier: options.classifierProvider } : {}),
-        ...(options.workerProvider ? { worker: options.workerProvider } : {}),
-      } } : {}),
-      ...(options.openrouterSecretArn ? { openRouter: { secretArn: options.openrouterSecretArn, ...(options.openrouterProviders ? { providers: options.openrouterProviders.split(",") } : {}) } } : {}),
-      ...(options.anthropicSecretArn ? { anthropic: { secretArn: options.anthropicSecretArn } } : {}),
-      ...(options.openaiSecretArn ? { openai: { secretArn: options.openaiSecretArn } } : {}),
-    }),
+    models: exportModelAnswers(options),
+    coreEngine: CoreEngineAnswersSchema.parse({ modelGatewayUrl: options.modelGatewayUrl ?? "", agentModel: options.agentModel ?? "" }),
     identity: identityAnswers,
     // The export bundle always replaces this with `{{github:...}}` markers (markerAnswers in
     // export-bundle.ts); the GitHub App is not set up until the operator configures it, phase 15d.

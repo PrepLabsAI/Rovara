@@ -56,3 +56,31 @@ it.each(["http://127.0.0.1:8888", "http://localhost:8888", "http://[::1]:8888"])
   const source = modelAccessSource({ controlPlaneUrl: "https://broker.example", capability: "fake", fetch: async () => Response.json({ baseUrl, apiKey: "loopback-key", expiresAt: Date.now() + 120_000 }) });
   expect((await source()).baseUrl).toBe(baseUrl);
 });
+
+it("refreshes bound prices and URL/key as one answer; a higher tariff refuses before another provider call", async () => {
+  const { runPriceFor } = await import("../support/hosted-run-price.js");
+  let now = Date.now(), reads = 0;
+  const first = runPriceFor(route.alias, now);
+  const source = modelAccessSource({ controlPlaneUrl: "https://broker.example", capability: "fixture", requiredPriceModel: route.alias, now: () => now,
+    fetch: async () => { reads++; return Response.json({ baseUrl: `https://gateway-${reads}.example`, apiKey: `key-${reads}`, expiresAt: now + 120_000,
+      runPrice: { ...first, expiresAt: now + 300_000, ...(reads > 2 ? { outputUsdPerMillion: first.outputUsdPerMillion + 1 } : {}) } }); } });
+  expect((await source()).runPrice).toEqual(first);
+  now += 60_000;
+  const [a, b] = await Promise.all([source(), source()]);
+  expect(a).toEqual(b); expect(a).toMatchObject({ baseUrl: "https://gateway-2.example", apiKey: "key-2", runPrice: { model: route.alias, snapshotVersion: 7 } });
+  expect(reads).toBe(2);
+  now += 60_000;
+  await expect(source()).rejects.toThrow("model's price");
+});
+
+it.each(["sourceId", "connectionRevision", "catalogModel"] as const)("pauses access renewal when the admitted %s changes at the same rates", async field => {
+  const { runPriceFor } = await import("../support/hosted-run-price.js");
+  let now = Date.now(), reads = 0;
+  const price = runPriceFor(route.alias, now);
+  const source = modelAccessSource({ controlPlaneUrl: "https://broker.example", capability: "fixture", requiredPriceModel: route.alias, now: () => now,
+    fetch: async () => Response.json({ baseUrl: "https://gateway.example", apiKey: "fixture-key", expiresAt: now + 120_000,
+      runPrice: { ...price, expiresAt: now + 300_000, ...(reads++ === 0 ? {} : { [field]: "changed" }) } }) });
+  expect((await source()).runPrice).toEqual(price);
+  now += 60_000;
+  await expect(source()).rejects.toThrow("model's price");
+});

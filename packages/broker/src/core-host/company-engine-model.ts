@@ -47,11 +47,18 @@ export async function readCompanyEngineModel(store: EngineModelRowReader, compan
  * The flow's `modelAccess` for one company: its own model on the gateway's agent route when it set one, else the install's route (the same answer, byte for byte). A setting that cannot
  * be read throws (the step is not dispatched on a guess).
  */
-export function companyEngineModelRoute(input: { store: EngineModelRowReader; companyId: OrgId; install: { route(): Promise<InvocationModelRoute | undefined> } }): { route(): Promise<InvocationModelRoute | undefined> } {
+export function companyEngineModelRoute(input: { store: EngineModelRowReader; companyId: OrgId; install: { route(): Promise<InvocationModelRoute | undefined> }; offered?: EngineModelOfferedReader | undefined }): { route(): Promise<InvocationModelRoute | undefined> } {
   return {
     async route() {
       const own = await readCompanyEngineModel(input.store, input.companyId);
-      return own === undefined ? await input.install.route() : gatewayRouteOf(own);
+      const route = own === undefined ? await input.install.route() : gatewayRouteOf(own);
+      if (route === undefined || !route.alias.includes("/")) return route;
+      try {
+        const list = OfferedAgentModelsSchema.parse(await input.offered?.(input.companyId));
+        const entry = list.models.find(entry => entry.model === route.alias);
+        if (entry?.identity !== undefined) return gatewayRouteOf(route.alias, entry);
+      } catch { /* An unreadable or changed source authorizes nothing. */ }
+      throw new CompanyEngineModelUnreadable();
     },
   };
 }

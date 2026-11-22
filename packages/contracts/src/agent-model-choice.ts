@@ -6,12 +6,13 @@
 // No gateway API publishes this yet: Code defines the shape here and reads it through the `OfferedModelsReader` port (docs/architecture/agent-model-choice.md
 // says what Cloud's side must answer).
 import { z } from "zod";
+import { GatewayModelIdentitySchema } from "./gateway-model-identity.js";
 import { ModelSelectionStateSchema } from "./app-model-selection.js";
 import { OrgIdSchema } from "./company-scope.js";
 import type { ModelIdentifier } from "./models-node.js";
 
-/** A model name as the gateway serves it: a Claude engine name or a Bedrock id. No path, space, quote or control character. */
-export const AGENT_MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+/** A gateway model name: legacy Claude/Bedrock names or an exact OpenRouter vendor/model ID. No URL, spaces or separators. */
+export const AGENT_MODEL_NAME = /^(?:[A-Za-z0-9][A-Za-z0-9._:-]{0,127}|[a-z0-9][a-z0-9._-]{0,62}\/[a-z0-9][a-z0-9._-]{0,62})$/u;
 /** The most models one company's list may hold. */
 export const OFFERED_AGENT_MODELS_MAX = 64;
 
@@ -24,7 +25,9 @@ const UsdPerMillion = z.number().finite().min(0).max(OFFERED_PRICE_USD_MAX);
  * and the broker never stores it (stored-agent-model-choice.ts keeps the names only).
  */
 export const OfferedModelPriceSchema = z.object({ inputUsdPerMillion: UsdPerMillion, outputUsdPerMillion: UsdPerMillion }).strict();
-export const OfferedAgentModelSchema = z.object({ model: z.string().regex(AGENT_MODEL_NAME), price: OfferedModelPriceSchema.optional() }).strict();
+export const OfferedAgentModelSchema = z.object({ model: z.string().regex(AGENT_MODEL_NAME), price: OfferedModelPriceSchema.optional(), identity: GatewayModelIdentitySchema.optional() }).strict().superRefine((entry, context) => {
+  if (entry.model.includes("/") ? entry.identity === undefined || entry.identity.modelId !== entry.model : entry.identity !== undefined) context.addIssue({ code: "custom", path: ["identity"], message: "a routed model requires its exact connected identity" });
+});
 export type OfferedAgentModel = z.infer<typeof OfferedAgentModelSchema>;
 
 /** What the gateway offers one company's agents. Never empty (a gateway that offers none answers a refusal instead), and a model is listed once. */
@@ -43,18 +46,18 @@ export const OfferedAgentModelsSchema = z.object({
 });
 export type OfferedAgentModels = z.infer<typeof OfferedAgentModelsSchema>;
 
-/** A Claude model is named by its engine name (Anthropic's own); every other model is a Bedrock id. */
+/** Claude uses its engine name; slash IDs are OpenRouter; the remaining legacy names are Bedrock IDs. */
 export const isClaudeAgentModel = (name: string): boolean => name.startsWith("claude-");
 
 /** The model identity Code's model catalog and per-step rule know a gateway name by. */
 export function agentModelIdentity(name: string): ModelIdentifier {
-  return isClaudeAgentModel(name) ? { provider: "anthropic", modelId: name } : { provider: "amazon-bedrock", modelId: name };
+  return name.includes("/") ? { provider: "openrouter", modelId: name } : isClaudeAgentModel(name) ? { provider: "anthropic", modelId: name } : { provider: "amazon-bedrock", modelId: name };
 }
 
 /** The gateway name of a model identity, or undefined when the identity is not one the gateway names (another provider, or a name that is not valid). */
 export function agentModelName(model: ModelIdentifier): string | undefined {
   if (!AGENT_MODEL_NAME.test(model.modelId)) return undefined;
-  // The two providers are told apart by the name alone, so one name is one model: a Claude name under Bedrock (or a Bedrock id under Anthropic, or any other provider's model) is not on the list.
+  // The providers are told apart by the name alone, so one name is one model: a Claude name under Bedrock (or a Bedrock id under Anthropic, or any other provider's model) is not on the list.
   return agentModelIdentity(model.modelId).provider === model.provider ? model.modelId : undefined;
 }
 

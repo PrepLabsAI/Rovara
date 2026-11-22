@@ -66,7 +66,7 @@ interface AssemblyArtifact {
 }
 
 /** What a part's stack is in the assembly: its declared parameters, or why it cannot be read. */
-type StackEntry = { declared: ReadonlySet<string> } | { problem: string };
+type StackEntry = { declared: ReadonlySet<string>; template: string } | { problem: string };
 
 /**
  * Runs `cdk synth` once in `source` (built already: prepareDeployment runs buildSource first) into a
@@ -79,7 +79,7 @@ type StackEntry = { declared: ReadonlySet<string> } | { problem: string };
  * stack the deploy targets, is refused when it is asked for, so a part this run does not deploy
  * (identity with your own OIDC provider) never fails it.
  */
-export async function synthDeclaredParameters(input: { runner: CommandRunner; source: string; env: string; region: string; identityMode: "cognito" | "oidc" }): Promise<(part: DeployPart) => ReadonlySet<string>> {
+export async function synthDeclaredParameters(input: { runner: CommandRunner; source: string; env: string; region: string; identityMode: "cognito" | "oidc" }): Promise<((part: DeployPart) => ReadonlySet<string>) & { brokerTemplate: () => string }> {
   const { source } = input;
   const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-synth-"));
   const entries = new Map<DeployPart, StackEntry>();
@@ -113,21 +113,24 @@ export async function synthDeclaredParameters(input: { runner: CommandRunner; so
       const file = resolve(dir, artifact.properties.templateFile);
       if (!file.startsWith(resolve(dir) + sep)) throw agentXError("CONFIG_INVALID", `cdk synth of ${source} names a template outside its output directory for ${id}`);
       let template: { Parameters?: unknown };
+      let text: string;
       try {
-        template = JSON.parse(await readFile(file, "utf8")) as { Parameters?: unknown };
+        text = await readFile(file, "utf8");
+        template = JSON.parse(text) as { Parameters?: unknown };
       } catch (error) {
         throw agentXError("CONFIG_INVALID", `cdk synth of ${source} wrote an unreadable template for ${id} (${errorMessage(error)})`);
       }
       const parameters = template.Parameters !== null && typeof template.Parameters === "object" ? Object.keys(template.Parameters) : [];
-      entries.set(part, { declared: new Set(parameters) });
+      entries.set(part, { declared: new Set(parameters), template: text });
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
-  return (part) => {
+  const entryFor = (part: DeployPart) => {
     const entry = entries.get(part);
     if (entry === undefined) throw agentXError("CONFIG_INVALID", `cdk synth of ${source} has no stack for ${part}`);
     if ("problem" in entry) throw agentXError("CONFIG_INVALID", entry.problem);
-    return entry.declared;
+    return entry;
   };
+  return Object.assign((part: DeployPart) => entryFor(part).declared, { brokerTemplate: () => entryFor("control-plane").template });
 }

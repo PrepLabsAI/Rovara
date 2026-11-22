@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { installGatewayFixture, readyCoreEngine, brokerTemplate } from "../support/install-gateway.js";
+import { describe, expect, it, vi } from "vitest";
 import { environmentStackName, type ReleaseManifest } from "@agentx/contracts";
 import { deployEnvironment, type DeployAnswers, type DeployEnvironmentInput } from "../../packages/cli/src/deploy/deploy-environment.js";
 import { type DeployRequest, type StackDeployer, type StackOutputs } from "../../packages/cli/src/deploy/deployer.js";
@@ -9,6 +10,8 @@ import { lockParameterName } from "../../packages/cli/src/environments/lock.js";
 import { readEnvironmentSettings, settingsParameterName, writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 import { stagingSettings } from "../support/environment-fixtures.js";
+
+installGatewayFixture();
 
 const ENV = "staging";
 const HOLDER = "arn:aws:iam::123456789012:user/alice";
@@ -39,7 +42,7 @@ function fakeDeployer(scripted: Record<string, StackOutputs>): { deployer: Stack
 }
 
 /** A deployed environment that reports no parameters: nothing for an upgrade to keep. */
-const nothingDeployed = async (): Promise<Record<string, string> | undefined> => undefined;
+const nothingDeployed = async (): Promise<Record<string, string> | undefined> => ({ CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6" });
 
 function memorySecrets(initial: Record<string, string> = {}): SecretValueStore & { creates: Array<{ name: string; value: string }> } {
   const values = new Map(Object.entries(initial));
@@ -74,9 +77,7 @@ function fakeRelease(): LoadedRelease {
     manifest,
     dir: "/nonexistent",
     regions: () => ["us-east-1"],
-    template: () => {
-      throw new Error("test setup: template() is not expected to be called by the orchestrator");
-    },
+    template: brokerTemplate,
     packagePath: () => {
       throw new Error("test setup: packagePath() is not expected to be called by the orchestrator");
     },
@@ -97,13 +98,14 @@ function fakeReleaseWithControlPlaneParameters(parameterNames: readonly string[]
       if (part !== "control-plane" || requestedRegion !== region) {
         throw new Error(`test setup: template(${part}, ${requestedRegion}) is not expected to be called`);
       }
-      return JSON.stringify({ Parameters: Object.fromEntries(parameterNames.map((name) => [name, { Type: "String" }])) });
+      return JSON.stringify({ Parameters: Object.fromEntries(parameterNames.map((name) => [name, { Type: "String" }])), Outputs: { ModelRunPriceVersion: { Value: "1" } } });
     },
   };
 }
 
 const baseAnswers = (): DeployAnswers => ({
   env: ENV,
+  coreEngine: readyCoreEngine,
   region: "us-east-1",
   account: "123456789012",
   models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "us.anthropic.claude-haiku-4-5-20251001-v1:0", worker: "us.anthropic.claude-sonnet-4-6" },
@@ -135,6 +137,7 @@ function scriptedOutputs(): Record<string, StackOutputs> {
       ClientId: "client123",
     },
     [stackName("control-plane")]: {
+      ModelRunPriceVersion: "1",
       ApiEndpoint: "https://abc.execute-api.us-east-1.amazonaws.com",
       SlackOrchestratorTaskRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-control-plane-SlackTask",
       SlackRequestQueueUrl: "https://sqs.us-east-1.amazonaws.com/123456789012/q.fifo",
@@ -192,6 +195,29 @@ describe("deploy environment", () => {
       },
       updatedAt: "2026-09-26T00:00:00.000Z",
     });
+  });
+
+  it("upgrades in upgrade order and reads outputs of parts it does not deploy", async () => {
+    const store = new MemoryParameterStore();
+    const secrets = memorySecrets();
+    const install = fakeDeployer(scriptedOutputs());
+    await deployEnvironment({ mode: "install", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: install.deployer, store, secrets, holder: HOLDER });
+
+    const upgrade = fakeDeployer(scriptedOutputs());
+    const result = await deployEnvironment({
+      mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: upgrade.deployer, store, secrets, holder: HOLDER, deployedParameters: nothingDeployed,
+      parts: ["control-plane", "runtime"],
+    });
+
+    // Price-serving control plane precedes worker activation on upgrades too.
+    expect(upgrade.requests.map((request) => request.part)).toEqual(["control-plane", "runtime"]);
+    const controlPlaneRequest = upgrade.requests.find((request) => request.part === "control-plane")!;
+    expect(controlPlaneRequest.parameters.PrivateSubnetIds).toBe(scriptedOutputs()[stackName("foundation")]!.PrivateSubnetIds);
+    // access, foundation, identity and slack are not deployed this run: their outputs come from the existing stacks.
+    expect(upgrade.outputCalls).toEqual(expect.arrayContaining([stackName("access"), stackName("foundation"), stackName("identity"), stackName("slack")]));
+    expect(result.outputs.access).toEqual(scriptedOutputs()[stackName("access")]);
+    expect(result.outputs.foundation).toEqual(scriptedOutputs()[stackName("foundation")]);
+    expect(result.settingsWritten).toBe(true);
   });
 
   it("refuses a different engine than the environment was installed with, before deploying anything, taking the lock or creating a key", async () => {
@@ -496,4 +522,41 @@ describe("a settings write drops the old monolith's legacy keys and says so (swi
     expect(rewritten).not.toHaveProperty("cloud");
     expect(rewritten).not.toHaveProperty("cloudSignIn");
   });
+});
+
+
+it("checks runtime-only upgrades with the installed broker and model settings", async () => {
+  const store = new MemoryParameterStore(), secrets = memorySecrets();
+  const installed = fakeDeployer(scriptedOutputs());
+  await deployEnvironment({ mode: "install", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: installed.deployer, store, secrets, holder: HOLDER });
+  const upgrade = fakeDeployer(scriptedOutputs());
+  await expect(deployEnvironment({ mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: upgrade.deployer, store, secrets, holder: HOLDER,
+    parts: ["runtime"], deployedParameters: async () => ({ CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6" }) })).resolves.toMatchObject({ settingsWritten: true });
+  expect(upgrade.requests.map(({ part }) => part)).toEqual(["runtime"]);
+});
+it("refuses unchanged gateway settings on runtime-only upgrades before writes", async () => {
+  const store = new MemoryParameterStore(); await writeEnvironmentSettings(store, stagingSettings);
+  const secrets = memorySecrets(), upgrade = fakeDeployer(scriptedOutputs());
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ ok: true })));
+  await expect(deployEnvironment({ mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeRelease(),
+    deployer: upgrade.deployer, store, secrets, holder: HOLDER, parts: ["runtime"],
+    deployedParameters: async () => ({ CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6" }),
+  })).rejects.toThrow("gateway must serve run prices");
+  expect(upgrade.requests).toEqual([]); expect(secrets.creates).toEqual([]);
+});
+
+it("stops before the signing key or any stack deploy when the deployed control-plane parameters cannot be read", async () => {
+  const store = new MemoryParameterStore();
+  await writeEnvironmentSettings(store, stagingSettings);
+  const secrets = memorySecrets();
+  const upgrade = fakeDeployer(scriptedOutputs());
+  const readError = new Error("DescribeStacks throttled");
+
+  await expect(deployEnvironment({ mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeRelease(),
+    deployer: upgrade.deployer, store, secrets, holder: HOLDER,
+    deployedParameters: async () => { throw readError; },
+  })).rejects.toBe(readError);
+
+  expect(upgrade.requests).toEqual([]);
+  expect(secrets.creates).toEqual([]);
 });

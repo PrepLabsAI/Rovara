@@ -218,3 +218,33 @@ it.each(["current", "old member", "old no identity"] as const)("real task-start 
   if (origin === undefined) expect(claims).not.toHaveProperty("src");
   else expect(claims).toMatchObject({ src: origin });
 });
+
+describe("company/model-bound run price on existing access response", () => {
+  it("uses the verified operation's model and never query/body model claims", async () => {
+    const w = await world();
+    const op = (await w.h.store.get(operationKey(T1_COMPANY, v.ws, v.op)))!;
+    await w.h.store.put({ item: { ...op, workflowMode: "SETUP_AGENT" } });
+    const { runPriceFor } = await import("../support/hosted-run-price.js");
+    const price = runPriceFor(v.mdl[0]!, w.h.clock.now);
+    const read = vi.fn(async () => price);
+    w.deps.modelGateway!.runPrice = read;
+    const response = await w.call(undefined, "/v1/internal/model-access?model=forged");
+    const body = JSON.parse(response.body) as { apiKey: string; runPrice: unknown };
+    expect(body).toMatchObject({ runPrice: price });
+    expect(w.w.reference(body.apiKey, Math.floor(w.h.clock.now / 1000))).toMatchObject({ runPrice: price });
+    expect(read).toHaveBeenCalledWith(v.mdl[0]);
+  });
+  it.each(["foreign", "wrong-model", "invalid", "missing"])("does not forward %s price authority", async (bad) => {
+    const w = await world();
+    const op = (await w.h.store.get(operationKey(T1_COMPANY, v.ws, v.op)))!;
+    await w.h.store.put({ item: { ...op, workflowMode: "WIKI_BUILD" } });
+    const { runPriceFor } = await import("../support/hosted-run-price.js");
+    const price = runPriceFor(v.mdl[0]!, w.h.clock.now);
+    w.deps.modelGateway!.runPrice = async () => bad === "missing" ? undefined : { ...price, ...(bad === "foreign" ? { companyId: "org_bbbbbbbbbbbbbbbbbbbb" } : bad === "wrong-model" ? { model: "forged" } : { inputUsdPerMillion: NaN }) };
+    const response = await w.call();
+    expect(response.statusCode).toBe(503);
+    expect(w.w.signs()).toBe(0);
+    expect(JSON.parse(response.body)).not.toHaveProperty("runPrice");
+    expect(w.logs).toContainEqual({ event: "hosted_run_price_unavailable", operationId: v.op });
+  });
+});

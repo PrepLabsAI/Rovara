@@ -377,8 +377,8 @@ export interface TaskFlowDeps {
    */
   evalGatewayUrl?: string;
   /**
-   * DEC 254n (1): the company's engine model check, asked once before a task starts (after the access and project checks, before the limits, the admission and any write). An answer is the
-   * refusal (fixed words) and the start writes nothing but its refusal audit; undefined lets the start go on. Absent: no check, exactly as before.
+   * The company's engine model check, asked once before any refusal audit, admission or task write. Hosted starts also check signed-price readiness here, before marking the company in use.
+   * A thrown readiness fault writes nothing; a returned refusal uses the existing refusal audit. Undefined lets the start go on. Absent: no check, exactly as before.
    */
   startModelCheck?: () => Promise<AgentXError | undefined>;
   /**

@@ -56,7 +56,7 @@ describe("the contract the gateway publishes", () => {
     expect(agentModelName({ provider: "amazon-bedrock", modelId: "claude-opus-5-5" })).toBeUndefined();
     expect(agentModelName({ provider: "anthropic", modelId: "qwen.qwen3-coder-480b-a35b-v1:0" })).toBeUndefined();
     expect(agentModelName({ provider: "openai", modelId: "gpt-5" })).toBeUndefined();
-    expect(agentModelName({ provider: "openrouter", modelId: "anthropic/claude-opus-5-5" })).toBeUndefined();
+    expect(agentModelName({ provider: "openrouter", modelId: "anthropic/claude-opus-5-5" })).toBe("anthropic/claude-opus-5-5");
     expect(agentModelName({ provider: "anthropic", modelId: "claude opus" })).toBeUndefined();
   });
 });

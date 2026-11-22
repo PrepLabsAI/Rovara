@@ -1,3 +1,4 @@
+import { installGatewayFixture } from "../support/install-gateway.js";
 // tests/contract/init-ui-copy-lint.test.ts
 // Spec 048 FR-081 and SC-011: the copy-lint rules. Each rule is proven by a seeded example that
 // must fail it, and good copy must pass every rule. Task 17 runs the rules over the whole journey.
@@ -8,6 +9,8 @@ import { COPY_RULES, lintCopy, quotedStrings, stateEntries } from "../support/co
 import { FINISH, FIRST_RUN, FIRST_RUN_BUDGET_USD, harness, SIGNIN, SLACK } from "../support/init-ui-harness.js";
 import { fakeAlerts } from "../support/setup-fakes.js";
 import { fakeWizardOperator } from "../support/wizard-browser.js";
+
+installGatewayFixture();
 
 const SEEDED: Record<string, string> = {
   "phase-or-spec-number": "To remove it later, follow the teardown guide (agentx destroy arrives in phase 15e).",

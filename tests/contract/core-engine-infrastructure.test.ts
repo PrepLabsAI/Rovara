@@ -64,7 +64,7 @@ function packedSettings(variables: Record<string, unknown>): Map<string, unknown
 describe("the model gateway settings (stack parameters CoreModelGatewayHost and CoreAgentModel)", () => {
   it("are declared empty by default, with the contracts' pattern and length", () => {
     expect(json.Parameters.CoreModelGatewayHost).toMatchObject({ Default: "", AllowedPattern: CORE_MODEL_GATEWAY_HOST_PATTERN, MaxLength: CORE_MODEL_GATEWAY_HOST_MAX_LENGTH });
-    expect(json.Parameters.CoreAgentModel).toMatchObject({ Default: "", AllowedPattern: CORE_AGENT_MODEL_PATTERN, MaxLength: CORE_AGENT_MODEL_MAX_LENGTH });
+    expect(json.Parameters.CoreAgentModel).toMatchObject({ Default: "", AllowedPattern: "^([a-z0-9][a-z0-9._:-]{0,63})?$", MaxLength: 64 });
   });
 
   it("are packed for BOTH the broker and the dispatcher (gw, am), never as variables of their own", () => {
@@ -95,6 +95,19 @@ describe("the model gateway settings (stack parameters CoreModelGatewayHost and 
     const legacyBroker = Object.entries(legacyJson.Resources).find(([id, resource]) => /^Broker[0-9A-F]{8}$/u.test(id) && resource.Type === "AWS::Lambda::Function")!;
     expect(unpackedBrokerVariables((legacyBroker[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables, legacyJson as never).CHANNEL_ADAPTER_SECRET_PREFIX).toBe("agentx/production/");
   });
+});
+
+it("advertises current broker capability even before a gateway, without changing unconfigured model constraints", () => {
+  for (const template of [named.toJSON(), inApp, legacy.toJSON()]) {
+    expect((template as { Outputs: Record<string, unknown> }).Outputs.ModelRunPriceVersion).toMatchObject({ Value: "1" });
+  }
+  for (const context of [{ CoreModelGatewayHost: "gateway.example" }, { agentxEnv: "staging", CoreModelGatewayHost: "gateway.example" }]) {
+    const stack = buildAgentXApp(context).node.children.find((child): child is Stack => Stack.isStack(child) && child.node.id === "AgentXControlPlane")!;
+    const template = Template.fromStack(stack).toJSON() as Json & { Outputs: Record<string, unknown> };
+    expect(template.Parameters.CoreAgentModel).toMatchObject({ Default: "", AllowedPattern: CORE_AGENT_MODEL_PATTERN, MaxLength: CORE_AGENT_MODEL_MAX_LENGTH });
+    expect(template.Outputs.ModelRunPriceVersion).toMatchObject({ Value: "1" });
+    expect(new RegExp(template.Parameters.CoreAgentModel!.AllowedPattern!, "u").test("openai/gpt-5-mini")).toBe(true);
+  }
 });
 
 // L4-AM (DEC 254zzn(2)): the hosted answers model, a stack parameter of its own, for the BROKER only.
@@ -599,7 +612,7 @@ describe("L1a broker environment derivation", () => {
   });
 
   // DEC 254za: re-pinned for the callback signing key's secret (the legacy template carries it too).
-  it("keeps the entire legacy template byte-identical (apart from normalized bundled asset hashes)", () => {
+  it("keeps the legacy template byte-identical apart from the exact broker capability output, member check and normalized asset hashes", () => {
     // Machine size stack (#877 + #887 + DEC 254zr): re-pinned. Measured against code/next a38f1ab0d, the legacy template differs in exactly three places: (1) the provisioner's RunInstances
     // condition gains StringEquals ec2:InstanceType (ten types); (2) ResolveWorkerAmi's Resource becomes the arm64 parameter plus the public x86_64 AL2023 parameter; (3) the provisioner state
     // machine's definition (new states SizeChosen, the *Sized and X86 launches, SizedLaunchFailed, SizeUnavailable; Start, LaunchConfiguration, RunInstance*, RecordInstance carry the size).
@@ -616,16 +629,21 @@ describe("L1a broker environment derivation", () => {
     // LEGACY-WORKER-CAPABILITY-ROUTES: the legacy template gains the ContextToolsListRoute and DesignReviewPacketRoute resources (named environments already had them).
     // #1275: and loses the core engine switch (the CoreEngine and CoreAllowedCompanies parameters, their packed sw/ac pieces and the dispatcher's ROVARA_CORE_ENGINE, the CoreEngineIsOn
     // condition: schedules ENABLED, the dispatcher's core mapping enabled, its core policy and callback key unconditional).
-    // SIGNIN-MEMBER-CONDITIONCHECK, DEC 254zzz282 B014-A: only the broker's exact member check moves the current pin. Without it the
-    // template is byte-for-byte the #1275 pin 512fbc83..., and both historical pins still hold.
-    const beforeMemberCheck = withoutBrokerMemberConditionCheck(legacy.toJSON());
-    expect(digest(beforeMemberCheck), "legacy without the broker member check").toBe("512fbc833e978fd35b1ccd570e0833ccda983f1a4a000b75afa5ac7992529d62");
-    // Rule D proof: with exactly the two routes taken out, the switch removal's own pin 33220db5... holds (before the routes: f15083c4..., before the switch removal).
-    const withoutCapabilityRoutes = structuredClone(beforeMemberCheck) as Json;
+    // The merged template adds both the exact first-gateway output and the narrow
+    // SIGNIN-MEMBER-CONDITIONCHECK statement (DEC 254zzz282 B014-A). Assert each
+    // addition before removing it; all historical pins still cover every other byte.
+    const beforeFirstGateway = structuredClone(legacy.toJSON()) as Json & { Outputs: Record<string, unknown> };
+    expect(beforeFirstGateway.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
+    delete beforeFirstGateway.Outputs.ModelRunPriceVersion;
+    expect(digest(beforeFirstGateway), "legacy without the first-gateway output retains the upstream member-check pin").toBe("8f8df2aeed3082d74b0fee456be77fb5e562b86eb2c047b79f3585aa439ec150");
+    const beforeMemberCheck = withoutBrokerMemberConditionCheck(beforeFirstGateway);
+    expect(digest(beforeMemberCheck), "legacy without the first-gateway output and broker member check").toBe("512fbc833e978fd35b1ccd570e0833ccda983f1a4a000b75afa5ac7992529d62");
+    // Rule D proof: removing exactly the two capability routes retains the switch-removal pin.
+    const withoutCapabilityRoutes = structuredClone(beforeMemberCheck);
     delete withoutCapabilityRoutes.Resources.ContextToolsListRoute;
     delete withoutCapabilityRoutes.Resources.DesignReviewPacketRoute;
     expect(digest(withoutCapabilityRoutes), "legacy with the two capability routes taken out").toBe("33220db5faf6815c6effbb6c57c7b495eb26d73fe7fdf6b21bb10433718659d4");
-    expect(digest(legacy.toJSON())).toBe("8f8df2aeed3082d74b0fee456be77fb5e562b86eb2c047b79f3585aa439ec150");
+    expect(digest(legacy.toJSON())).toBe("99c852b0d794c4b0d27ec6b804839c1c3592fa8eeacaaa55dbbedb90153d4665");
   });
 });
 import { createHash } from "node:crypto";

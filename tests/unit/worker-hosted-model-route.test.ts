@@ -1,19 +1,19 @@
-// HOTFIX 0.5.33 (DEC 254zzz207): a hosted (EC2) worker has no AGENTX_MODEL_PROXY_URL (boot.sh never sets it; it is laptop-only). It gets its model from the invocation's own `modelRoute`, which it calls through
-// the control plane's model-access route, and the broker meters that spend on its ledger. So the setup run and the wiki build (which both refused with "no model proxy" in 11 ms) accept EITHER the env var
-// OR `payload.modelRoute`, and still REFUSE with neither. Both are checked before any container, network or callback.
+import { runPriceFor } from "../support/hosted-run-price.js";
+// Hosted setup/wiki require the selected proxy adapter as well as the trusted route.
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { SETUP_AGENT_LIMITS_DEFAULT, SETUP_RUN_REFUSED_MESSAGES, agentXError } from "../../packages/contracts/src/index.js";
+import { SETUP_AGENT_LIMITS_DEFAULT, SETUP_RUN_REFUSED_MESSAGES, agentXError, type InvocationModelRoute } from "../../packages/contracts/src/index.js";
 import { createModelPrices } from "../../packages/broker/src/core/cost/price-table.js";
 import { createHostedMetering } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { readGatewayModelAccess } from "../../packages/broker/src/core-host/gateway-model-access.js";
 import { listPricesPerMillion } from "../../packages/model-runtime/src/catalog.js";
 import { routeUsageIdentity } from "../../packages/model-runtime/src/index.js";
 import { modelSpendIsMetered, setupModelPrice } from "../../packages/worker/src/setup-agent-price.js";
+import { resolveTaskSessionModel } from "../../packages/worker/src/task-model.js";
 import { runSetupAgentInvocation } from "../../packages/worker/src/setup-agent-invocation.js";
 import { runWikiBuildInvocation } from "../../packages/worker/src/wiki-build-invocation.js";
 import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
@@ -34,9 +34,9 @@ const REFUSED_PROXY = agentXError("RUNTIME_UNAVAILABLE", SETUP_RUN_REFUSED_MESSA
 const WIKI_REFUSED_PROXY = "this install has no model proxy";
 
 describe("modelSpendIsMetered", () => {
-  it("is true for the env proxy or a model route, false for neither (and for an empty proxy)", () => {
+  it("preserves the laptop gate and refuses a route without actual-session evidence", () => {
     expect(modelSpendIsMetered({ ...PROXY }, {})).toBe(true);
-    expect(modelSpendIsMetered({}, { modelRoute: ROUTE })).toBe(true);
+    expect(modelSpendIsMetered({}, { modelRoute: ROUTE })).toBe(false);
     expect(modelSpendIsMetered({}, {})).toBe(false);
     expect(modelSpendIsMetered({ AGENTX_MODEL_PROXY_URL: "" }, {})).toBe(false);
   });
@@ -61,14 +61,15 @@ describe("hosted setup run (no env proxy, a model route)", () => {
     const calls: string[][] = [];
     const docker: DockerCli = { run: (args) => { calls.push([...args]); return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" }); } };
     const invocation = { operationId: OP, projectRevision: 1, payload: { conversationId: "c", setupAgent: { limits: SETUP_AGENT_LIMITS_DEFAULT, commits: [{ repository: "web", commit }] }, ...payload } } as never;
+    const session = payload.modelRoute === undefined ? {} : await resolveTaskSessionModel({ modelRoute: payload.modelRoute as InvocationModelRoute }, undefined, environment, undefined, { baseUrl: "https://broker.test", apiKey: "test-key", runPrice: async () => (payload.modelRoute as InvocationModelRoute).alias === "unlisted" ? undefined : runPriceFor((payload.modelRoute as InvocationModelRoute).alias) });
     let message = "";
-    try { await runSetupAgentInvocation(invocation, { rootPath: root, model, eventSink: async () => undefined, setupAgent: async () => ({}), docker, environment }, { repositories: [{ name: "web", path: "repo/web", resolvedCommit: commit, defaultBranch: "main", resolvedAt: "", completedAt: "" }] }, root); } catch (error) { message = (error as Error).message; }
+    try { await runSetupAgentInvocation(invocation, { ...session, rootPath: root, model, eventSink: async () => undefined, setupAgent: async () => ({}), docker, environment }, { repositories: [{ name: "web", path: "repo/web", resolvedCommit: commit, defaultBranch: "main", resolvedAt: "", completedAt: "" }] }, root); } catch (error) { message = (error as Error).message; }
     return { message, calls };
   }
 
   it("proceeds past the money check with a model route and no env var: the next refusal is the price, not the proxy", async () => {
     const unpriced = await attempt({ ...IMAGE }, { modelRoute: UNKNOWN_ROUTE }, { provider: "rovara-route", modelId: "unlisted" });
-    expect(unpriced.message).toBe(agentXError("RUNTIME_UNAVAILABLE", SETUP_RUN_REFUSED_MESSAGES.noModelPrice).message);
+    expect(unpriced.message).toContain("does not know this model's price");
     // With a priced model it goes on to build the run (it reaches Docker); it is never refused for the proxy.
     const priced = await attempt({ ...IMAGE }, { modelRoute: ROUTE });
     expect(priced.message).not.toBe(REFUSED_PROXY);
@@ -93,9 +94,10 @@ describe("hosted wiki build (no env proxy, a model route)", () => {
     const root = await temp();
     const callbacks: unknown[] = [];
     const invocation = { operationId: OP, projectRevision: 1, payload: { conversationId: "c", wikiBuild: { limits: { pages: 1, budgetCents: 100, wallClockMin: 1, pageReserveCents: 10 }, pins: [{ repo: "api", commit: "a".repeat(40) }] }, ...payload } } as never;
+    const session = payload.modelRoute === undefined ? {} : await resolveTaskSessionModel({ modelRoute: payload.modelRoute as InvocationModelRoute }, undefined, environment, undefined, { baseUrl: "https://broker.test", apiKey: "test-key", runPrice: async () => (payload.modelRoute as InvocationModelRoute).alias === "unlisted" ? undefined : runPriceFor((payload.modelRoute as InvocationModelRoute).alias) });
     let message = "";
     try {
-      await runWikiBuildInvocation(invocation, { rootPath: root, model, eventSink: async () => undefined, taskShell: { kind: "local" }, environment,
+      await runWikiBuildInvocation(invocation, { ...session, rootPath: root, model, eventSink: async () => undefined, taskShell: { kind: "local" }, environment,
         wikiBuild: async (body) => { callbacks.push(body); throw new Error("callback-reached"); } }, { repositories: [{ name: "api", path: "repo/api", resolvedCommit: "a".repeat(40) }] } as never, root);
     } catch (error) { message = (error as Error).message; }
     return { message, callbacks };

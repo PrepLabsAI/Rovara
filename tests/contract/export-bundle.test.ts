@@ -1,3 +1,4 @@
+import { readyCoreEngine } from "../support/install-gateway.js";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
@@ -108,6 +109,7 @@ function cognitoAnswers(overrides: Partial<DeployAnswers> = {}): DeployAnswers &
     env: ENV,
     region: REGION,
     account: ACCOUNT,
+    coreEngine: readyCoreEngine,
     models: { orchestrator: "orchestrator-model", classifier: "classifier-model", worker: "worker-model" },
     identity: { mode: "cognito" },
     github: {
@@ -166,6 +168,7 @@ describe("writeExportBundle", () => {
 
     const expected = [
       "README.md",
+      "check-readiness.mjs",
       "deploy-access.sh",
       "init-answers.json",
       "packages/SHA256SUMS",
@@ -280,7 +283,7 @@ describe("writeExportBundle", () => {
     const saved = JSON.parse(text) as unknown;
     expect(saved).toEqual({
       schemaVersion: 1, env: "staging", region: "us-east-1", account: "123456789012", engine: "templates",
-      releaseVersion: release.manifest.version, identity: { mode: "cognito" }, models: answers.models,
+      releaseVersion: release.manifest.version, identity: { mode: "cognito" }, models: answers.models, coreEngine: answers.coreEngine,
     });
     expect(await readBundleAnswers(dir)).toEqual(saved);
     // Answers only: never the GitHub App's key reference, the callback signing key or its marker,
@@ -301,7 +304,7 @@ describe("writeExportBundle", () => {
     });
     await writeExportBundle({ dir, answers, release: fakeRelease() });
     expect(await readBundleAnswers(dir)).toMatchObject({
-      identity: answers.identity, models: answers.models,
+      identity: answers.identity, models: answers.models, coreEngine: answers.coreEngine,
       permissionsBoundaryArn: "arn:aws:iam::123456789012:policy/team-boundary",
       operatorPrincipalArn: "arn:aws:iam::123456789012:role/platform-operator",
     });

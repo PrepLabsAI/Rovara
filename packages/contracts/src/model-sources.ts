@@ -21,7 +21,7 @@ export type CustomSourceKind = (typeof CUSTOM_SOURCE_KINDS)[number];
  * ["anthropic", "openai", "openrouter"], each added by a one-line change only after its real-key checklist
  * passes in the combined final round. `bedrock` waits for Task 37 Step 10 and `endpoint` is not at launch.
  */
-export const SOURCE_KINDS_AT_LAUNCH: readonly CustomSourceKind[] = [];
+export const SOURCE_KINDS_AT_LAUNCH: readonly CustomSourceKind[] = ["bedrock"]; // owner launch decision 2026-11-20 (DEC 254zzz241): Bedrock own-account on; OpenRouter stays off (M2)
 
 /** The wire formats the model proxy serves (docs/learnings/model-sources-spike.md, question 4). */
 export const TRANSPORTS_AT_LAUNCH = ["anthropic-messages", "openai-responses", "openai-completions"] as const;

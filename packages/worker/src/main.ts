@@ -197,7 +197,7 @@ const state = createWorkerServerState(
         // the worker holds no provider secret. The key is asked for lazily, at the first request that needs the proxy (a ChatGPT
         // plan's own requests never do), so a task on a plan is not held up by a proxy it may never call.
         // DR-KEY-1: a design-review operation's own session (never prompted) never asks for a key; its reviewers ask by slot.
-        const proxy = operationModelProxy({ payload: invocation.payload, proxyUrl: process.env.AGENTX_MODEL_PROXY_URL, controlPlaneUrl, capability: invocation.callbackCapability });
+        const proxy = operationModelProxy({ environment: process.env, payload: invocation.payload, proxyUrl: process.env.AGENTX_MODEL_PROXY_URL, controlPlaneUrl, capability: invocation.callbackCapability });
         const session = await resolveTaskSessionModel(invocation.payload,
           invocation.payload.chatgpt === undefined ? undefined : chatGptTokenSource(chatGptToken), process.env, chatGptFallback, proxy, taskFallbackAuthorizer(invocation.payload,authorizeModelFallback));
         const missingKeyAuthority=taskMissingKeyAuthorizer(invocation.payload,authorizeModelFallback,proxy,process.env);
@@ -214,6 +214,7 @@ const state = createWorkerServerState(
         return runTaskInvocation(invocation, {
           rootPath,
           model: session.model,
+          meteredProxy: session.meteredProxy,
           ...(evalFinalCheck === undefined ? {} : { evalFinalCheck }),
           // SR-1: the second reviewer's models, each with its own session (and proxy route).
           ...(invocation.payload.workflowSecondReviewer === undefined ? {} : { secondReviewer: { candidates: secondReviewerRuntimes(invocation.payload, proxy, process.env, (slot) => lazyModelProxy({ baseUrl: process.env.AGENTX_MODEL_PROXY_URL || controlPlaneUrl, source: modelAccessSource({ controlPlaneUrl, capability: invocation.callbackCapability, slot }) })) ?? [], ...(invocation.payload.workflowSecondReviewer.context === undefined ? {} : { context: invocation.payload.workflowSecondReviewer.context }) } }),

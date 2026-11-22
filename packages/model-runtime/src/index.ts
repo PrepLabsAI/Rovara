@@ -17,7 +17,7 @@ export * from "./e2e-environment-guard.js";
 export * from "./e2e-route-derive.js";
 export { classifyProviderFailure, isNetworkCode, signalPattern, BEDROCK_SIGNAL_PATTERN, KEYED_SIGNAL_PATTERN, MODEL_NOT_ENABLED_SIGNAL, MODEL_NOT_OFFERED_SIGNAL } from "./provider-failure.js";
 export type { ProviderFailureFacts } from "./provider-failure.js";
-import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, agentXError, isClaudeAgentModel, isKeyedModelProvider, type InvocationModelRoute, type KeyedModelProvider, type ModelIdentifier, type ThinkingLevel } from "@agentx/contracts";
+import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, agentXError, isClaudeAgentModel, isKeyedModelProvider, type RunPrice, type InvocationModelRoute, type KeyedModelProvider, type ModelIdentifier, type ThinkingLevel } from "@agentx/contracts";
 import { InMemoryCredentialStore, createAssistantMessageEventStream, type Api, type Model, type SimpleStreamOptions, type TranscriptContext, type AssistantMessage, type AssistantMessageEventStream, type OpenAICompletionsCompat } from "@earendil-works/pi-ai";
 import { streamSimple as openAICompletionsStream } from "@earendil-works/pi-ai/api/openai-completions";
 import { streamSimple as anthropicMessagesStream } from "@earendil-works/pi-ai/api/anthropic-messages";
@@ -55,6 +55,10 @@ export interface ModelRuntimeOptions {
 }
 
 export interface ModelProxyOptions {
+  /** The same model-access answer used for this proxy's URL/key; internal worker preflight only. */
+  runPrice?: () => Promise<RunPrice | undefined>;
+  /** Set only by the local worker launcher path, never task payloads. */
+  localCatalogPricing?: boolean;
   /** The proxy's origin, without a path: Pi adds /v1/messages. */
   baseUrl: string;
   apiKey: string | (() => Promise<string>);
@@ -83,7 +87,7 @@ export function routedThinkingLevel<L extends string>(route: InvocationModelRout
  * usage records know), or `rovara-route` and the catalog name for a model the installed catalogs do not know.
  */
 export function routeUsageIdentity(route: InvocationModelRoute): ModelIdentifier {
-  return catalogModelByName(route.catalog)?.identity ?? { provider: ROUTE_PROVIDER, modelId: route.catalog };
+  return route.identity === undefined ? catalogModelByName(route.catalog)?.identity ?? { provider: ROUTE_PROVIDER, modelId: route.catalog } : { provider: route.identity.provider, modelId: route.identity.modelId };
 }
 
 /** Why a ChatGPT task stopped using its plan (#342). */
@@ -292,7 +296,7 @@ const UNLISTED_ROUTED_MODEL = { reasoning: false, input: ["text"] as ("text" | "
  * record names the catalog entry, so a price list and the spend reports see the model and not the company's alias.
  */
 async function createRoutedModelRuntime(selected: ModelIdentifier & { thinkingLevel?: string }, options: ModelRuntimeOptions, proxy: ModelProxyOptions, route: InvocationModelRoute): Promise<ModelRuntime> {
-  const catalog = catalogModelByName(route.catalog)?.model;
+  const catalog = route.identity === undefined ? catalogModelByName(route.catalog)?.model : catalogModel(route.identity);
   const runtime = await ModelRuntime.create({ refreshOnCreate: false, modelsPath: null, credentials: new InMemoryCredentialStore() });
   const requestKey = typeof proxy.apiKey === "function" ? () => (proxy.apiKey as () => Promise<string>).call(proxy) : undefined;
   const initialKey = requestKey === undefined ? proxy.apiKey as string : await requestKey().catch((error: unknown) => {

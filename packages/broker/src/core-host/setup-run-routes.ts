@@ -407,7 +407,7 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
         async start(request) {
           // The core's start, with the setup run's own access rule (DEC 254n 3) in place of the task rule, read live again inside the start; and the audit record in its transaction.
           const rerun = (await flow.store.get(setupAgentKey(companyId, request.project))) !== undefined;
-          await ensureCoreInUse(flow.store, companyId);
+          // The shared startModelCheck writes the in-use mark only after readiness passes.
           const setupDeps: TaskFlowDeps = {
             ...flow,
             access: {

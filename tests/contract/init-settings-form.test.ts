@@ -55,8 +55,8 @@ describe("the settings form's own checks", () => {
 
   it("Change answers starts the form from the kept settings", async () => {
     // Enter on each of the four takes the kept value; no to the Advanced settings.
-    const prompter = scriptedPrompter(["", "", "", "", false]);
-    const kept = { email: "kept@example.com", githubAccount: "kept-org", installName: "kept" };
+    const prompter = scriptedPrompter(["", "", "", "", "", "", false]);
+    const kept = { modelGatewayUrl: "https://gateway.example", agentModel: "claude-sonnet-4-6", email: "kept@example.com", githubAccount: "kept-org", installName: "kept" };
     const { answers, settings } = await collectInitAnswers({ ...base, env: "staging", flags: {}, prompter, kept, ownerType: async () => "user" });
     expect(answers).toMatchObject({ env: "kept", adminEmail: "kept@example.com", github: { account: "kept-org", accountType: "user" } });
     expect(settings).toMatchObject(kept);
