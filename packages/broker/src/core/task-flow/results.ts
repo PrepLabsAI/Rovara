@@ -3,6 +3,7 @@ import { workspaceKeys, locateWorkspace } from "./workspace-location.js";
 // and read what the worker sent (Cloud's `terminal-result.ts`, whose artifact reading is not ported: it hands the flow a `StepOutcome`).
 import { agentXError, change, when, type TransactItem } from "@agentx/contracts";
 import type { TaskFlowDeps } from "./deps.js";
+import { preparationResultItems } from "./prepare-result.js";
 import { taskIndexKey } from "./keys.js";
 import { runWatchKey } from "./run-watch-rows.js";
 import type { OperationResult, StepOutcome } from "./outcome.js";
@@ -71,6 +72,7 @@ export async function recordOperationResult(deps: TaskFlowDeps, result: Operatio
         condition: when.and(when.eq("activeOperationId", operation.id), when.eq("fence", operation.fence)),
       });
     }
+    items.push(...await preparationResultItems(deps, operation, status));
     const applied = await deps.store.transact(items);
     if (applied.applied) break;
     // Lost a race: read again. The operation may have been ended by another path.

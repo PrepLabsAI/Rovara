@@ -43,6 +43,7 @@ import { SqsIamFence } from "../support/ports/sqs-iam-fence.js";
 import { createSqsQueueServiceFromSettings } from "../../packages/aws-adapters/src/index.js";
 import { ChangeMessageVisibilityCommand } from "@aws-sdk/client-sqs";
 import { CORE_DISPATCHER_QUEUE_ACTIONS } from "../../infra/lib/core-engine.js";
+import { createHarness, newRequestId } from "../support/task-flow-harness.js";
 import { FakeS3 } from "../support/ports/aws-fakes.js";
 
 const CORE_QUEUE_ARN = "arn:aws:sqs:us-west-2:111122223333:agentx-staging-core-dispatch";
@@ -238,6 +239,20 @@ describe("the core on the dispatcher", () => {
       advance: (milliseconds: number) => { clock += milliseconds; }, log,
     };
   };
+
+  // M3: an omitted hosted guard must retry, before allocating worker authority.
+  it("never delivers when the hosted delivery authority is unwired", async () => {
+    const made = inputs(env());
+    const owed = new Set(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
+    const built = createDispatcherCoreHost({ ...made.inputs, flow: { standingInstructions: null, modelAccess: null, learned: null }, extraModules: createFakeWorld().modules.filter((module) => owed.has(module.point)) });
+    const runtime = await built.app.runtimeFor(COMPANY_A);
+    const h = createHarness({ companyId: COMPANY_A, machines: { startingChecks: 0 }, extra: () => ({ deliveryAccess: runtime.flow.deps.deliveryAccess! }) });
+    await h.registerProject();
+    const { task } = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "Rename a setting" });
+    expect(await h.flow.dispatchOnce()).toMatchObject({ received: 1, delivered: 0, retried: 1 });
+    expect(h.grants).toEqual([]);
+    expect(await h.store.get(workspaceKey(COMPANY_A, task.workspaceId))).not.toHaveProperty("machine");
+  });
 
   it("refuses merge tracking on a dispatch-only runtime with a fixed typed error", async () => {
     const world = createFakeWorld();

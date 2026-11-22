@@ -29,6 +29,7 @@ import {
   type TransactItem,
 } from "@agentx/contracts";
 import { taskOwnerKey } from "../../developer/task-records.js";
+import { prepareWatchItem } from "./prepare-watch.js";
 import { buildOperation } from "./accept.js";
 import { recordAudit, releaseAdmission, stageAdmission, stageAudit } from "./admission.js";
 import { taskWorkflowCheckPolicy } from "./check-policy.js";
@@ -275,6 +276,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
     { kind: "put", item: toDocument(workspace), condition: when.absent() },
     { kind: "put", item: { ...legacyWorkspaceKey(workspaceId), entityType: "WORKSPACE_COMPANY_POINTER", workspaceId, companyId: workspace.companyId }, condition: when.absent() },
     ...prepare.items,
+    prepareWatchItem(deps.companyId, receivedAt, workspaceId, prepareOperationId, taskId),
     { kind: "put", item: toDocument(taskItem), condition: when.absent() },
     { kind: "put", item: { ...taskIndexKey(developerId, receivedAt, taskId), entityType: "DEVELOPER_TASK_INDEX", taskId, orgId: deps.companyId, project: request.project, title, client, status: "STARTING", shared: false, startingRevision: revision, workspaceId, createdAt: receivedAt, updatedAt: receivedAt }, condition: when.absent() },
     { kind: "put", item: toDocument(pointer), condition: when.absent() },

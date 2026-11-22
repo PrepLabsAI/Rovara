@@ -1,12 +1,12 @@
 import { GetCommand, QueryCommand, TransactWriteCommand, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
-import { agentXError, orgOfProjectPk } from "@agentx/contracts";
+import { agentXError, companyScoped, OUTBOX_PENDING_INDEX, orgOfProjectPk } from "@agentx/contracts";
 import { grantsPkFor, namedCompany, revisionPkFor } from "./company-layout.js";
 import { slackChannelBindingKeyMatches } from "./slack-company-layout.js";
 import { taskCompanyId } from "../developer/task-person-identity.js";
 import type { DurableOutboxRecord } from "./lambda.js";
 import { taskOpen } from "../developer/task-access.js";
 import { resolveTaskDispatchPeople, type CheckTaskPerson } from "../developer/task-people.js";
-import { taskKey, taskOwnerKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord } from "../developer/task-records.js";
+import { taskKey, taskOwnerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord } from "../developer/task-records.js";
 import { mayUseProject, type ProjectAuthorityWitness } from "../developer/task-project-access.js";
 import type { TaskAuthorityAdmission } from "./task-authority-admission.js";
 
@@ -15,6 +15,8 @@ type TransactItem = NonNullable<TransactWriteCommandInput["TransactItems"]>[numb
 export interface TaskDispatchAccessDependencies {
   documentClient: { send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<unknown> };
   tableName: string;
+  /** Core uses the same records and proof policy with company workspace/outbox keys and a message body rather than a stored invocation. */
+  core?: { companyId: string; workspacePk: string; ttlAttribute?: string | undefined };
   checkTaskPerson?: CheckTaskPerson;
   /** One admission shared by every read, owner, and optimistic retry for this guard. */
   admission?: TaskAuthorityAdmission;
@@ -24,7 +26,9 @@ export interface TaskDispatchAccessDependencies {
   stateAuthorityWitnessForOwnerActor?: (task: DeveloperTaskRecord, ownerActorId: string) => Promise<(ProjectAuthorityWitness & { taskId: string; developerId: string; project: string }) | undefined>;
 }
 
-export type TaskDispatchGuard = (record: DurableOutboxRecord) => Promise<"ALLOWED" | "PARKED">;
+export type TaskDispatchCandidate = Pick<DurableOutboxRecord, "id" | "operationId" | "workspaceId"> & { invocation: Pick<DurableOutboxRecord["invocation"], "kind" | "fence"> };
+
+export type TaskDispatchGuard = (record: TaskDispatchCandidate) => Promise<"ALLOWED" | "PARKED">;
 
 class TaskDispatchGuardRetryError extends Error {
   readonly code?: string;
@@ -44,13 +48,22 @@ export function isTaskDispatchGuardRetryError(error: unknown): boolean {
 
 type PauseReason = "OWNERLESS" | "PROOF_UNAVAILABLE";
 
-const outboxKey = (outboxId: string) => ({ pk: `OUTBOX#${outboxId}`, sk: "OUTBOX" });
+const outboxKey = (deps: TaskDispatchAccessDependencies, outboxId: string) => ({ pk: deps.core === undefined ? `OUTBOX#${outboxId}` : companyScoped(deps.core.companyId, `OUTBOX#${outboxId}`), sk: "OUTBOX" });
+const workspacePk = (deps: TaskDispatchAccessDependencies, id: string) => deps.core?.workspacePk ?? `WORKSPACE#${id}`;
+const pointerKey = (deps: TaskDispatchAccessDependencies, id: string) => ({ pk: workspacePk(deps, id), sk: "DEVELOPER_TASK" });
+const outboxMatch = (deps: TaskDispatchAccessDependencies) => deps.core === undefined ? "operationId = :operationId AND workspaceId = :workspaceId" : "body.operationId = :operationId AND body.workspaceId = :workspaceId AND companyId = :companyId";
+const companyValues = (deps: TaskDispatchAccessDependencies) => deps.core === undefined ? {} : { ":companyId": deps.core.companyId };
 const pauseKey = (outboxId: string) => ({ pk: `OUTBOX#${outboxId}`, sk: "TASK_ACCESS_PAUSE" });
 const taskPauseKey = (taskId: string, outboxId: string) => ({ pk: `DEVTASK#${taskId}`, sk: `TASK_ACCESS_PAUSE#${outboxId}` });
 
 async function get<T>(deps: TaskDispatchAccessDependencies, key: { pk: string; sk: string }): Promise<T | undefined> {
   const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: key, ConsistentRead: true })) as { Item?: T };
-  return response.Item;
+  const row = response.Item as Record<string, unknown> | undefined;
+  if (deps.core === undefined || key.sk !== "OUTBOX" || row === undefined) return response.Item;
+  const body = row["body"] as { companyId?: unknown; operationId?: unknown; workspaceId?: unknown } | undefined;
+  if (row["companyId"] !== deps.core.companyId || body?.companyId !== deps.core.companyId || typeof body.operationId !== "string" || typeof body.workspaceId !== "string") throw agentXError("RUNTIME_UNAVAILABLE", "task dispatch state could not be verified");
+  const operation = await get<{ fence: number; kind: string }>(deps, { pk: workspacePk(deps, body.workspaceId), sk: `OPERATION#${body.operationId}` });
+  return { ...row, operationId: body.operationId, workspaceId: body.workspaceId, invocation: { fence: operation?.fence, kind: operation?.kind } } as T;
 }
 
 function conditional(error: unknown): boolean {
@@ -59,13 +72,13 @@ function conditional(error: unknown): boolean {
 
 async function park(
   deps: TaskDispatchAccessDependencies,
-  record: DurableOutboxRecord,
+  record: TaskDispatchCandidate,
   pointer: DeveloperTaskPointerRecord,
   task: DeveloperTaskRecord,
   peopleRevision: number,
   reason: PauseReason,
 ): Promise<void> {
-  const createdAt = new Date().toISOString();
+  const createdAt = new Date().toISOString(); const expiryNames = outboxExpiryNames(deps);
   const pause = {
     entityType: "TASK_ACCESS_PAUSE", schemaVersion: 1, taskId: task.taskId, outboxId: record.id,
     operationId: record.operationId, workspaceId: record.workspaceId, peopleRevision, reason, createdAt,
@@ -73,13 +86,13 @@ async function park(
   } as const;
   const items: TransactItem[] = [
     { Update: {
-      TableName: deps.tableName, Key: outboxKey(record.id), UpdateExpression: "SET #status = :waiting, taskAccessPausedAt = :now",
-      ConditionExpression: "operationId = :operationId AND workspaceId = :workspaceId AND (#status = :queued OR #status = :pending)",
-      ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: { ":waiting": "WAITING_FOR_TASK_ACCESS", ":queued": "QUEUED", ":pending": "PENDING", ":operationId": record.operationId, ":workspaceId": record.workspaceId, ":now": createdAt },
+      TableName: deps.tableName, Key: outboxKey(deps, record.id), UpdateExpression: `SET #status = :waiting, taskAccessPausedAt = :now${deps.core === undefined ? "" : " REMOVE " + [...Object.keys(expiryNames), OUTBOX_PENDING_INDEX.partitionAttribute, OUTBOX_PENDING_INDEX.sortAttribute].join(", ")}`,
+      ConditionExpression: `${outboxMatch(deps)} AND (#status = :queued OR #status = :pending)`,
+      ExpressionAttributeNames: { "#status": "status", ...expiryNames },
+      ExpressionAttributeValues: { ...companyValues(deps), ":waiting": "WAITING_FOR_TASK_ACCESS", ":queued": "QUEUED", ":pending": "PENDING", ":operationId": record.operationId, ":workspaceId": record.workspaceId, ":now": createdAt },
     } },
     { ConditionCheck: {
-      TableName: deps.tableName, Key: taskPointerKey(record.workspaceId),
+      TableName: deps.tableName, Key: pointerKey(deps, record.workspaceId),
       ConditionExpression: "taskId = :taskId", ExpressionAttributeValues: { ":taskId": task.taskId },
     } },
     { ConditionCheck: {
@@ -91,12 +104,12 @@ async function park(
       ConditionExpression: "#revision = :revision", ExpressionAttributeNames: { "#revision": "revision" }, ExpressionAttributeValues: { ":revision": peopleRevision },
     } },
     { ConditionCheck: {
-      TableName: deps.tableName, Key: { pk: `WORKSPACE#${record.workspaceId}`, sk: `OPERATION#${record.operationId}` },
+      TableName: deps.tableName, Key: { pk: workspacePk(deps, record.workspaceId), sk: `OPERATION#${record.operationId}` },
       ConditionExpression: "fence = :fence AND (#status = :accepted OR #status = :dispatching)", ExpressionAttributeNames: { "#status": "status" },
       ExpressionAttributeValues: { ":fence": record.invocation.fence, ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING" },
     } },
     { ConditionCheck: {
-      TableName: deps.tableName, Key: { pk: `WORKSPACE#${record.workspaceId}`, sk: "META" },
+      TableName: deps.tableName, Key: { pk: workspacePk(deps, record.workspaceId), sk: "META" },
       ConditionExpression: "fence = :fence AND activeOperationId = :operationId",
       ExpressionAttributeValues: { ":fence": record.invocation.fence, ":operationId": record.operationId },
     } },
@@ -107,7 +120,7 @@ async function park(
     await deps.documentClient.send(new TransactWriteCommand({ TransactItems: items }));
   } catch (error) {
     if (!conditional(error)) throw error;
-    const stored = await get<{ status?: string; operationId?: string }>(deps, outboxKey(record.id));
+    const stored = await get<{ status?: string; operationId?: string }>(deps, outboxKey(deps, record.id));
     const prior = await get<{ operationId?: string }>(deps, pauseKey(record.id));
     if (stored?.status === "WAITING_FOR_TASK_ACCESS" && stored.operationId === record.operationId && prior?.operationId === record.operationId) return;
     throw error;
@@ -117,7 +130,7 @@ async function park(
 
 async function allowedStillCurrent(
   deps: TaskDispatchAccessDependencies,
-  record: DurableOutboxRecord,
+  record: TaskDispatchCandidate,
   pointer: DeveloperTaskPointerRecord,
   task: DeveloperTaskRecord,
   peopleRevision: number | undefined,
@@ -135,13 +148,13 @@ async function allowedStillCurrent(
     ? { ConditionExpression: "attribute_not_exists(pk)" }
     : { ConditionExpression: "#revision = :revision", ExpressionAttributeNames: { "#revision": "revision" }, ExpressionAttributeValues: { ":revision": peopleRevision } };
   const checks: TransactItem[] = [
-      { ConditionCheck: { TableName: deps.tableName, Key: taskPointerKey(record.workspaceId), ConditionExpression: "taskId = :taskId", ExpressionAttributeValues: { ":taskId": pointer.taskId } } },
+      { ConditionCheck: { TableName: deps.tableName, Key: pointerKey(deps, record.workspaceId), ConditionExpression: "taskId = :taskId", ExpressionAttributeValues: { ":taskId": pointer.taskId } } },
       { ConditionCheck: { TableName: deps.tableName, Key: taskKey(task.taskId), ...taskCondition } },
       { ConditionCheck: { TableName: deps.tableName, Key: { pk: `DEVTASK#${task.taskId}`, sk: "PEOPLE" }, ...peopleCondition } },
-      { ConditionCheck: { TableName: deps.tableName, Key: { pk: `WORKSPACE#${record.workspaceId}`, sk: `OPERATION#${record.operationId}` },
+      { ConditionCheck: { TableName: deps.tableName, Key: { pk: workspacePk(deps, record.workspaceId), sk: `OPERATION#${record.operationId}` },
         ConditionExpression: "fence = :fence AND (#status = :accepted OR #status = :dispatching)", ExpressionAttributeNames: { "#status": "status" },
         ExpressionAttributeValues: { ":fence": record.invocation.fence, ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING" } } },
-      { ConditionCheck: { TableName: deps.tableName, Key: { pk: `WORKSPACE#${record.workspaceId}`, sk: "META" },
+      { ConditionCheck: { TableName: deps.tableName, Key: { pk: workspacePk(deps, record.workspaceId), sk: "META" },
         ConditionExpression: "fence = :fence AND activeOperationId = :operationId", ExpressionAttributeValues: { ":fence": record.invocation.fence, ":operationId": record.operationId } } },
   ];
   if (authorityWitness !== undefined) {
@@ -205,7 +218,7 @@ async function allowedStillCurrent(
  * PEOPLE work is allowed only with a freshly qualified effective owner; every other result is
  * durably parked while preserving the original operation, invocation and charge.
  */
-async function guardTaskDispatchCore(deps: TaskDispatchAccessDependencies, record: DurableOutboxRecord): Promise<"ALLOWED" | "PARKED"> {
+async function guardTaskDispatchCore(deps: TaskDispatchAccessDependencies, record: TaskDispatchCandidate): Promise<"ALLOWED" | "PARKED"> {
   // Terminal cleanup is independent of owner availability. It must be able to release compute,
   // workspace slots and charge after the last owner departs.
   if (record.invocation.kind === "close" || record.invocation.kind === "cancel") return "ALLOWED";
@@ -229,10 +242,10 @@ async function guardTaskDispatchCore(deps: TaskDispatchAccessDependencies, recor
     },
   };
   deps.admission?.assertOpen();
-  const stored = await get<{ status?: string }>(guardDeps, outboxKey(record.id));
+  const stored = await get<{ status?: string }>(guardDeps, outboxKey(deps, record.id));
   if (stored?.status === "WAITING_FOR_TASK_ACCESS") return "PARKED";
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const pointer = await get<DeveloperTaskPointerRecord>(guardDeps, taskPointerKey(record.workspaceId));
+    const pointer = await get<DeveloperTaskPointerRecord>(guardDeps, pointerKey(deps, record.workspaceId));
     if (pointer === undefined) {
       deps.admission?.assertOpen();
       return "ALLOWED";
@@ -243,6 +256,7 @@ async function guardTaskDispatchCore(deps: TaskDispatchAccessDependencies, recor
     if (task === undefined || task.workspaceId !== record.workspaceId) {
       throw agentXError("RUNTIME_UNAVAILABLE", "task dispatch state could not be verified");
     }
+    assertCoreCompany(deps, task);
     if (!taskOpen(task) || task.workflow?.state === "COMPLETE") {
       throw agentXError("RUNTIME_UNAVAILABLE", "task dispatch is no longer open");
     }
@@ -280,7 +294,7 @@ async function guardTaskDispatchCore(deps: TaskDispatchAccessDependencies, recor
 }
 
 /** Marks only an incomplete core authority decision so the dispatcher retries the same durable operation. */
-export async function guardTaskDispatch(deps: TaskDispatchAccessDependencies, record: DurableOutboxRecord): Promise<"ALLOWED" | "PARKED"> {
+export async function guardTaskDispatch(deps: TaskDispatchAccessDependencies, record: TaskDispatchCandidate): Promise<"ALLOWED" | "PARKED"> {
   try {
     return await guardTaskDispatchCore(deps, record);
   } catch (error) {
@@ -311,6 +325,7 @@ export async function resumeTaskDispatch(
   deps: TaskDispatchAccessDependencies & { now(): number },
   input: { task: DeveloperTaskRecord; peopleRevision: number; actorId: string; requestId: string; payloadHash: string; reauthorize?(): Promise<void> },
 ): Promise<boolean> {
+  assertCoreCompany(deps, input.task);
   const auditKey = { pk: `DEVTASK#${input.task.taskId}`, sk: `TASK_ACCESS_RETRY#${input.requestId}` };
   const priorAudit = await get<{ actorId?: string; operationId?: string; payloadHash?: string }>(deps, auditKey);
   if (priorAudit !== undefined) {
@@ -324,7 +339,7 @@ export async function resumeTaskDispatch(
     TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :pause)",
     ExpressionAttributeValues: { ":pk": `DEVTASK#${input.task.taskId}`, ":pause": "TASK_ACCESS_PAUSE#" }, ConsistentRead: true,
   })) as { Items?: PausedTaskDispatch[] };
-  const workspace = await get<{ activeOperationId?: string }>(deps, { pk: `WORKSPACE#${input.task.workspaceId}`, sk: "META" });
+  const workspace = await get<{ activeOperationId?: string }>(deps, { pk: workspacePk(deps, input.task.workspaceId), sk: "META" });
   const pauses = (response.Items ?? []).filter((pause) => pause.taskId === input.task.taskId && pause.workspaceId === input.task.workspaceId
     && pause.operationId === workspace?.activeOperationId);
   if (pauses.length === 0) return false;
@@ -332,17 +347,11 @@ export async function resumeTaskDispatch(
   const workflow = input.task.workflow;
   if (pause === undefined || pause.peopleRevision > input.peopleRevision || workflow === undefined
     || pause.workflowRevision !== workflow.revision || pause.workflowStage !== workflow.stage || pause.workflowState !== workflow.state) return false;
-  const outbox = await get<DurableOutboxRecord>(deps, outboxKey(pause.outboxId));
+  const outbox = await get<DurableOutboxRecord>(deps, outboxKey(deps, pause.outboxId));
   if (outbox?.status !== "WAITING_FOR_TASK_ACCESS" || outbox.operationId !== pause.operationId || outbox.workspaceId !== pause.workspaceId) return false;
   const at = new Date(deps.now()).toISOString();
   const items: TransactItem[] = [
-    { Update: {
-      TableName: deps.tableName, Key: outboxKey(pause.outboxId), UpdateExpression: "SET #status = :pending REMOVE taskAccessPausedAt",
-      ConditionExpression: "#status = :waiting AND operationId = :operationId AND workspaceId = :workspaceId",
-      ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: {
-        ":pending": "PENDING", ":waiting": "WAITING_FOR_TASK_ACCESS", ":operationId": pause.operationId, ":workspaceId": pause.workspaceId,
-      },
-    } },
+    resumeOutboxItem(deps, pause, at),
     { ConditionCheck: {
       TableName: deps.tableName, Key: taskKey(input.task.taskId),
       ConditionExpression: "workflow.#revision = :workflowRevision AND workflow.#stage = :workflowStage AND workflow.#state = :workflowState AND attribute_not_exists(closedAt)",
@@ -355,12 +364,12 @@ export async function resumeTaskDispatch(
       ConditionExpression: "#revision = :revision", ExpressionAttributeNames: { "#revision": "revision" }, ExpressionAttributeValues: { ":revision": input.peopleRevision },
     } },
     { ConditionCheck: {
-      TableName: deps.tableName, Key: { pk: `WORKSPACE#${pause.workspaceId}`, sk: `OPERATION#${pause.operationId}` },
+      TableName: deps.tableName, Key: { pk: workspacePk(deps, pause.workspaceId), sk: `OPERATION#${pause.operationId}` },
       ConditionExpression: "fence = :fence AND (#status = :accepted OR #status = :dispatching)", ExpressionAttributeNames: { "#status": "status" },
       ExpressionAttributeValues: { ":fence": outbox.invocation.fence, ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING" },
     } },
     { ConditionCheck: {
-      TableName: deps.tableName, Key: { pk: `WORKSPACE#${pause.workspaceId}`, sk: "META" },
+      TableName: deps.tableName, Key: { pk: workspacePk(deps, pause.workspaceId), sk: "META" },
       ConditionExpression: "fence = :fence AND activeOperationId = :operationId",
       ExpressionAttributeValues: { ":fence": outbox.invocation.fence, ":operationId": pause.operationId },
     } },
@@ -375,11 +384,32 @@ export async function resumeTaskDispatch(
   } catch (error) {
     if (!conditional(error)) throw error;
     const audit = await get<{ actorId?: string; operationId?: string; payloadHash?: string }>(deps, auditKey);
-    const current = await get<{ status?: string; operationId?: string }>(deps, outboxKey(pause.outboxId));
+    const current = await get<{ status?: string; operationId?: string }>(deps, outboxKey(deps, pause.outboxId));
     if (audit?.actorId === input.actorId && audit.operationId === pause.operationId && audit.payloadHash === input.payloadHash && current?.status === "PENDING") {
       await input.reauthorize?.();
       return true;
     }
     throw error;
   }
+}
+
+
+function assertCoreCompany(deps: TaskDispatchAccessDependencies, task: DeveloperTaskRecord): void {
+  if (deps.core !== undefined && task.companyId !== deps.core.companyId) throw agentXError("RUNTIME_UNAVAILABLE", "task dispatch company does not match");
+}
+
+function resumeOutboxItem(deps: TaskDispatchAccessDependencies, pause: PausedTaskDispatch, at: string): TransactItem {
+  return { Update: {
+      TableName: deps.tableName, Key: outboxKey(deps, pause.outboxId), UpdateExpression: `SET #status = :pending${deps.core === undefined ? "" : `, ${OUTBOX_PENDING_INDEX.partitionAttribute} = :pendingPk, ${OUTBOX_PENDING_INDEX.sortAttribute} = :at, attempts = :zero`} REMOVE taskAccessPausedAt`,
+      ConditionExpression: `#status = :waiting AND ${outboxMatch(deps)}`,
+      ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: {
+        ...companyValues(deps), ...(deps.core === undefined ? {} : { ":pendingPk": `PENDING#${deps.core.companyId}`, ":at": at, ":zero": 0 }), ":pending": "PENDING", ":waiting": "WAITING_FOR_TASK_ACCESS", ":operationId": pause.operationId, ":workspaceId": pause.workspaceId,
+      },
+    } };
+}
+
+// The relay writes the store's configured expiry; a paused delivery must outlive it.
+function outboxExpiryNames(deps: TaskDispatchAccessDependencies): Record<string, string> {
+  if (deps.core === undefined) return {};
+  return Object.fromEntries([...new Set(["expiresAt", deps.core.ttlAttribute ?? "expiresAt"])].map((attribute, index) => [`#expiry${index}`, attribute]));
 }

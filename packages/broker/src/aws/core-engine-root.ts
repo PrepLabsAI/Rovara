@@ -1,4 +1,6 @@
 import { runPriceReader } from "../core-host/run-price-http.js";
+import { accessRetryRoute } from "./core-access-retry.js";
+import { sweepCoreIdleSlack } from "./core-idle-slack.js";
 import { isContextSourceStage } from "@agentx/contracts";
 import { createHostedDesignReview } from "../core-host/hosted-design-review.js";
 import { DESIGN_REVIEW_PACKET_PATH, storedBindingOf } from "../core/design-review/packet-route.js";
@@ -894,6 +896,20 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       ciReporting: inputs.ciReporting === undefined ? policyCiReporting(policySource) : inputs.ciReporting,
       services: (flow, wiring) => {
         flow.deps.afterPlanStored = hostedPlanEvidence(flow.deps, registry.require("object-storage"));
+        const runWatch = flow.sweepRunsOnce.bind(flow);
+        const idleScan = { cursor: undefined as string | undefined };
+        flow.sweepRunsOnce = async (options) => {
+          const report = await runWatch(options);
+          const idle = await sweepCoreIdleSlack({ flow: flow.deps, documentClient: inputs.documentClient, threadsTableName: env.SLACK_THREADS_TABLE_NAME,
+            scan: idleScan, companyOf: async (where) => inputs.chatThreads?.companyOf(where),
+            postNote: async (conversation, text, operationId) => {
+              const adapter = inputs.chatThreads?.adapterFor(companyId, conversation.channel);
+              if (adapter === undefined) throw new Error("thread transport unavailable");
+              await adapter.deliver({ version: 1, id: `idle-cancel-${operationId}`, channel: conversation.channel, conversation, createdAt: now().toISOString(), type: "progress", data: { text } });
+            } });
+          report.failed += idle.failed;
+          return report;
+        };
         flow.deps.secondReview = createHostedReviewers({ flow: flow.deps, registry, companyId, offered: engineOffered, taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task) }).secondReview;
         createHostedDesignReview({ flow: flow.deps, registry, companyId, offered: engineOffered,
           taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task),
@@ -1318,7 +1334,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   if (coreTasks !== undefined && !settingsBlocked) {
     const entry = coreTasks;
     coreTasks = {
-      route: (request, caller) => entry.route(request, caller),
+      route: accessRetryRoute(entry, { caller: deployedCallerFromMembership(membershipOf), flowFor: async (companyId) => (await app.runtimeFor(companyId)).flow.deps }),
       // L4-U5d: the chat thread's own methods are the entry's (this wrapper once dropped them, so a hosted start never remembered its thread and a later message had nowhere to go).
       ...(entry.recordThread === undefined ? {} : { recordThread: (caller: CoreEntryCaller, input: Parameters<NonNullable<CoreTaskEntry["recordThread"]>>[1]) => entry.recordThread!(caller, input) }),
       ...(entry.threadInput === undefined ? {} : { threadInput: (caller: CoreEntryCaller, input: Parameters<NonNullable<CoreTaskEntry["threadInput"]>>[1]) => entry.threadInput!(caller, input) }),

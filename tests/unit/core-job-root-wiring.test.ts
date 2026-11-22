@@ -21,7 +21,7 @@ it("passes the runtime's checked CI reader into the company service builder", ()
   createBrokerCoreRoot(inputs({ services }));
   const runtime = runtimeOptions();
   // Batch 14: the root puts the company's SystemRuns gate on the flow (#949/#959), so the flow carries a store to read the consent row from.
-  const flow = { deps: { companyId: A, store: { get: async () => undefined }, admission: {} } } as never;
+  const flow = { sweepRunsOnce: async () => ({ watched: 0, interrupted: 0, waiting: 0, cleared: 0, failed: 0 }), deps: { companyId: A, store: { get: async () => undefined }, admission: {} } } as never;
   const ciMode = vi.fn(async () => "their_ci_watch" as const);
   runtime.services!(flow, { ciMode });
   // Batch 14: the wiring also carries the upkeep notice's live read (#959) next to the CI reader; L4-U5 adds the setup notice's live read beside it.

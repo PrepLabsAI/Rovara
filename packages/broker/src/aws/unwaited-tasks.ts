@@ -134,7 +134,7 @@ async function candidate(
 }
 
 /** Why the activeTurn counts as a waiter for this task, or undefined when it does not. */
-function waiterOf(activeTurn: unknown, operationId: string, idle: number, now: Date): string | undefined {
+export function waiterOf(activeTurn: unknown, operationId: string, idle: number, now: Date): string | undefined {
   if (activeTurn === undefined || activeTurn === null) return undefined;
   if (typeof activeTurn !== "object") return "waiter-unreadable";
   const turn = activeTurn as { operationId?: unknown; seenAt?: unknown };

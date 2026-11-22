@@ -9,6 +9,7 @@ import { AgentXError, change, when, type MachineState } from "@agentx/contracts"
 import type { TaskFlowDeps } from "./deps.js";
 import { isTerminalStatus, readOperation, recordOperationResult } from "./results.js";
 import { runWatchPartition, runWatchKey, type RunWatchRecord } from "./run-watch-rows.js";
+import { sweepPreparations } from "./prepare-watch.js";
 import { fromDocument } from "./records.js";
 import { iso, log } from "./support.js";
 import { endUnflushed, spendStopOverdue, spendStopReason, type SpendStopCode } from "./money-stop.js";
@@ -38,6 +39,7 @@ export interface LostRunReport {
 
 /** One pass. Safe to run from a timer and from two processes: every write is fenced on what was read. */
 export async function sweepLostRuns(deps: TaskFlowDeps, options: { limit?: number; graceSeconds?: number } = {}): Promise<LostRunReport> {
+  await sweepPreparations(deps, options);
   const report: LostRunReport = { watched: 0, interrupted: 0, waiting: 0, cleared: 0, failed: 0 };
   const graceMs = (options.graceSeconds ?? deps.runLostGraceSeconds ?? RUN_LOST_GRACE_SECONDS) * 1_000;
   const page = await deps.store.query({ pk: runWatchPartition(deps.companyId), limit: options.limit ?? 50 });
