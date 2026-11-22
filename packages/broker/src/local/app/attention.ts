@@ -40,6 +40,20 @@ export interface TaskAttention {
   display?: TaskStatus;
 }
 
+/** Active work takes precedence over the pull request's previous readiness. */
+function activeMergeStep(workflow: WorkflowSnapshot, items: readonly MergeTrackingItem[]): string | undefined {
+  const sync = workflow.branchSync;
+  if (sync !== undefined) {
+    const base = items.find((item) => item.repositoryId === sync.repositoryId && item.number === sync.number)?.baseBranch;
+    return `Updating the branch with ${line(base ?? "its base", 80)}`;
+  }
+  if (workflow.fixSource === "ci") {
+    const checks = (workflow.fixProblems ?? []).slice(0, 3).map((name) => line(name, 60)).join(", ") || "a check";
+    return `Fixing failing checks, round ${String(workflowFixRounds(workflow).ci)} of ${String(CI_FIX_ROUNDS_MAX)}: ${checks}`;
+  }
+  return workflow.fixSource === "conflict" ? "Resolving a conflict" : undefined;
+}
+
 /** What the owner sees and answers, and the words the sessions use, for one task. */
 export async function attentionOf(deps: Pick<TaskFlowDeps, "store" | "companyId" | "mergeOrderLines" | "ciWaitLines">, task: TaskRecord, options: { ciMode?: ProjectCiMode } = {}): Promise<TaskAttention> {
   const workflow = task.workflow;
@@ -112,7 +126,8 @@ export async function attentionOf(deps: Pick<TaskFlowDeps, "store" | "companyId"
         display = { state: "ready_to_merge", next: "Review the pull request and merge it on the code host." };
       }
     } else if (workflow.state !== "BLOCKED") {
-      step = workflow.fixSource === "ci" ? "Fixing failing checks" : workflow.fixSource === "conflict" ? "Resolving a conflict" : undefined;
+      step = activeMergeStep(workflow, items);
+      if (workflow.branchSync !== undefined) display = { state: "building", next: "Checks and reviews follow the branch update." };
     }
     if (lines.length > 0) view.merge = { lines };
   }
