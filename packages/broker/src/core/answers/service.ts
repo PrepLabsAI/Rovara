@@ -14,7 +14,7 @@
 import { randomBytes } from "node:crypto";
 import type { AgentXError} from "@agentx/contracts";
 import {
-  ANSWER_COST_CEILING_CENTS, ANSWER_LIMITS, ANSWER_WORDS, AnswerRequestSchema, AnswerResponseSchema, WikiPersonIdSchema, WikiProjectSchema, agentXError, answerIdFor,
+  ANSWER_COST_CEILING_CENTS, ANSWER_LIMITS, ANSWER_WORDS, AnswerRequestSchema, AnswerResponseSchema, WikiPersonIdSchema, WikiProjectSchema, agentXError, answerIdFor, isRovaraAiPauseError, rethrowRovaraAiPause,
   type AnswerAction, type AnswerOutcome, type AnswerResponse, type DocumentStore, type OrgId, type WikiAnswerRecord, type WikiStore,
 } from "@agentx/contracts";
 import { checkCitations, type CitationRef } from "../citations/citation-check.js";
@@ -208,6 +208,7 @@ export function createAnswerService(deps: AnswerServiceDeps) {
         session = await deps.model.open({ companyId: deps.companyId, project, personId, answerId, ceilingCents });
       } catch (error) {
         await rate.give(personId);
+        rethrowRovaraAiPause(error);
         if (error instanceof AnswerModelRefused) {
           if (error.reason === "not_set_up") return AnswerResponseSchema.parse({ threadId, outcome: "not_set_up", text: "", honesty: ANSWER_WORDS.notSetUp, unconfirmed: [], sources: [], wikiPages: [] });
           if (error.reason === "unavailable") failed("model_unavailable");
@@ -231,6 +232,7 @@ export function createAnswerService(deps: AnswerServiceDeps) {
         try {
           reply = await session.complete({ system: ANSWER_SYSTEM_RULES, transcript, maxOutputTokens: ANSWER_LIMITS.outputTokens, signal, remainingCents: ceilingCents - (spentCents ?? 0) });
         } catch (error) {
+          await rethrowPausedAnswer(error, turn, () => rate.give(personId));
           if (error instanceof AnswerModelRefused && (error.reason === "over_budget" || (error.reason === "paused" && turn > 0))) { ranOut = true; break; }
           // The hosted gateway holds the money call by call, so its refusals (no key connected, the month's limit) come on the first turn: nothing was asked of the model, so the place is given back.
           if (turn === 0 && error instanceof AnswerModelRefused && (error.reason === "not_set_up" || error.reason === "paused")) {
@@ -331,3 +333,10 @@ export function createAnswerService(deps: AnswerServiceDeps) {
 }
 
 export type AnswerService = ReturnType<typeof createAnswerService>;
+
+/** A first-call install refusal did no model work, so it returns the person's place just like the other gateway pauses. */
+async function rethrowPausedAnswer(error: unknown, turn: number, giveBack: () => Promise<void>): Promise<void> {
+  if (!isRovaraAiPauseError(error)) return;
+  if (turn === 0) await giveBack();
+  throw error;
+}

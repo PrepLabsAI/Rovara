@@ -11,6 +11,7 @@ import {
   AgentXError,
   agentXError,
   ROVARA_CODE_AGENT_ID,
+  ROVARA_AI_PAUSED_MESSAGE,
   WORKFLOW_BLOCK_REASONS,
   WorkflowSnapshotSchema,
   WorkflowTransitionError,
@@ -53,6 +54,7 @@ import { structuredPlanContextOf } from "../plan/context.js";
 import { planUnreadablePrompt } from "../plan/process.js";
 import { readTask } from "./reads.js";
 import { fromDocument, READING_DISPATCH_KINDS, toDocument, type DispatchRowRecord, type DispatchSpec, type MaintenanceExpectation, type OperationRecord, type PublicationExpectation, type TaskPointerRecord, type TaskRecord, type WorkspaceRecord } from "./records.js";
+import { blockStoppedStep } from "./stopped-step.js";
 import type { SecondReviewOperationPlan } from "../second-review/store.js";
 import { DEFAULT_PROMPTS, iso, log } from "./support.js";
 import { workflowWriteOps } from "./flow-guard.js"; import { TRANSACTION_ITEMS_MAX, flowWorkEventItems } from "../work-events/flow-events.js";
@@ -484,6 +486,12 @@ export async function queueFirstRun(deps: TaskFlowDeps, task: TaskRecord): Promi
  * After an operation's terminal result committed: the next move of the task. Idempotent: a repeat finds the step already taken (its request id is
  * the first one's) and does nothing. Never throws for a task that moved on.
  */
+async function pauseInstallTask(deps: TaskFlowDeps, task: TaskRecord, operation: OperationRecord, ended: { status: string; error?: string | undefined }): Promise<boolean> {
+  if (ended.status !== "FAILED" || ended.error !== `MODEL_NOT_ALLOWED: ${ROVARA_AI_PAUSED_MESSAGE}` || task.workflow === undefined || operation.workflowRevision !== task.workflow.revision) return false;
+  await blockStoppedStep(deps, task.taskId, operation, ROVARA_AI_PAUSED_MESSAGE);
+  return true;
+}
+
 export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationRecord, ended: { status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED"; error?: string | undefined; outcome?: StepOutcome | undefined }): Promise<void> {
   const pointer = fromDocument<TaskPointerRecord>(await deps.store.get((await workspaceKeys(deps, operation.workspaceId)).taskPointerKey()));
   if (pointer === undefined) {
@@ -492,7 +500,7 @@ export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationR
     return;
   }
   const task = await readTask(deps, pointer.taskId);
-  if (task === undefined || task.closeOperationId !== undefined || task.closedAt !== undefined) return;
+  if (task === undefined || task.closeOperationId !== undefined || task.closedAt !== undefined || await pauseInstallTask(deps, task, operation, ended)) return;
   const succeeded = ended.status === "SUCCEEDED";
 
   // A setup run's own operation, or its preparation failing, ends the run with what the broker reads of the worker's answer (idempotent: a repeat finds the result kept and changes nothing).

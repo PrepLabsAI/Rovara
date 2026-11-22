@@ -16,7 +16,7 @@
 import { createHash } from "node:crypto";
 import {
   DESIGN_REVIEW_ANSWER_MAX_BYTES, DESIGN_REVIEW_REVIEWER_TIMEOUT_MS, DESIGN_REVIEW_STAGE_TIMEOUT_MS, DESIGN_REVIEW_INFO_STRING, MODEL_NOT_ENABLED_CODE, PacketDeliverySchema, READ_ONLY_TOOLS,
-  filterReviewerCitations, itemOf, lightCriticWritesParaphrase, mergeDesignFindings, modelFailureCodeOf, packetDigestOf, readDesignReview, reviewerMessagesOf,
+  filterReviewerCitations, itemOf, lightCriticWritesParaphrase, mergeDesignFindings, modelFailureCodeOf, packetDigestOf, readDesignReview, reviewerMessagesOf, rethrowRovaraAiPause,
   type DesignReviewBinding, type DesignReviewRunFailure, type DesignReviewWorkerResult, type DesignReviewerOutcome, type InvocationModelRoute, type ModelSelection,
   type DroppedFinding, type PacketDelivery, type RawDesignFinding, type ReviewerRole,
 } from "@agentx/contracts";
@@ -131,6 +131,7 @@ class Stopped extends Error {
 }
 
 function failureOf(error: unknown, opening: boolean): DesignReviewRunFailure {
+  rethrowRovaraAiPause(error);
   if (error instanceof Stopped) return error.failure;
   if (error instanceof ModelBudgetExhaustedError) return "budget_exhausted";
   if (error instanceof ModelNotAllowedError || (error instanceof Error && (error as { code?: unknown }).code === "MODEL_NOT_ALLOWED")) return "model_not_allowed";
