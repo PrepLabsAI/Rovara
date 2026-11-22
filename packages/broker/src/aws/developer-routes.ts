@@ -1,3 +1,8 @@
+import { companyMembershipFromDynamo } from "./company-check.js";
+import type { TaskPeopleDependencies } from "../developer/task-people.js";
+import { serverReadContext, type AbortableReadSender, type ServerKeyRead } from "./server-read-context.js";
+import { taskStartRequestRoute } from "./task-start-request-routes.js";
+import { connectionImpactRoute } from "./connection-impact.js";
 import { taskOwnerView } from "../developer/task-owner-view.js";
 import { slackRecordScope } from "./slack-workspace-tokens.js";
 import { listSlackWorkspaceScopes, SlackWorkspaceRefused, type SlackWorkspaceBindings } from "./slack-workspace-binding.js";
@@ -219,7 +224,7 @@ export interface DeveloperApiConfiguration {
   /** Spec 025 E12: a public channel by its name, through DeveloperIdentity. */
   channelByName?: (request: ChannelByNameRequest) => Promise<ChannelByNameResponse>;
   /** Verifies the Authorization header's developer access token (D17; verify-token.ts) and returns its claims. */
-  verifyAccessToken(authorization: string | undefined, audience?: string): Promise<Record<string, unknown>>;
+  verifyAccessToken(authorization: string | undefined, audience?: string, read?: ServerKeyRead): Promise<Record<string, unknown>>;
   /**
    * Owner decision 132: a host's stricter rules on the access check (spec 063 FR-004), such as a fresh sign-in or an approval it keeps. They can only refuse
    * or narrow Rovara's own answer (`developer/access-rules.ts`); none means Rovara's answer as is.
@@ -229,6 +234,8 @@ export interface DeveloperApiConfiguration {
   slackRequestQueue?: SlackRequestQueue;
 }
 export interface DeveloperRouteDependencies {
+  serverReadSender?: AbortableReadSender;
+  serverReadBudget?: ReturnType<typeof boundedCompanyReads>;
   workspaces?: Pick<SlackWorkspaceBindings, "requireCompany"> & { getProject?(name: string, companyId?: string): Promise<unknown> };
   workspace?: SlackWorkspaceScope;
   channelLinkCodes?: { preview(personId: string, code: string): Promise<{ channel: string; maskedUserId: string } | undefined>; redeem(personId: string, code: string): ReturnType<typeof redeemLinkCode> };
@@ -637,19 +644,13 @@ const methodName = (amr: DeveloperSignInMethod) => (amr === "slack" ? "Slack" : 
  * JWKS route (D17): the broker may not call kms:GetPublicKey, which the key policy keeps to
  * DeveloperIdentity. Any failure throws, and the verifier answers 503 for it.
  */
-export function developerKeysThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): () => Promise<unknown[]> {
+export function developerKeysThroughLambda(invoke: (payload: Uint8Array, options?: { abortSignal: AbortSignal }) => Promise<ChannelMembersInvokeResult>): (read?: ServerKeyRead) => Promise<unknown[]> {
   const request = { version: "2.0", rawPath: "/v1/auth/.well-known/jwks.json", requestContext: { requestId: "broker-jwks", http: { method: "GET" } } };
   const failed = (reason: string, entry: Record<string, string> = {}) => {
     logDeveloperEvent({ event: "developer.jwks_failed", reason, ...entry });
     return new Error(`the developer sign-in keys could not be read (${reason})`);
   };
-  return async () => {
-    let response: ChannelMembersInvokeResult;
-    try {
-      response = await invoke(Buffer.from(JSON.stringify(request)));
-    } catch (error) {
-      throw failed("invoke_error", { error: errorName(error) });
-    }
+  const decode = (response: ChannelMembersInvokeResult): unknown[] => {
     if (response.FunctionError !== undefined) throw failed("function_error", { functionError: response.FunctionError });
     if (response.Payload === undefined) throw failed("empty_reply");
     let keys: unknown;
@@ -657,11 +658,17 @@ export function developerKeysThroughLambda(invoke: (payload: Uint8Array) => Prom
       const reply = JSON.parse(Buffer.from(response.Payload).toString("utf8")) as { statusCode?: unknown; body?: unknown };
       if (reply.statusCode !== 200 || typeof reply.body !== "string") throw new Error("not 200");
       keys = (JSON.parse(reply.body) as { keys?: unknown }).keys;
-    } catch {
-      throw failed("unreadable_reply");
-    }
+    } catch { throw failed("unreadable_reply"); }
     if (!Array.isArray(keys) || keys.length === 0) throw failed("no_keys");
     return keys as unknown[];
+  };
+  return async (read) => {
+    const work = async () => {
+      try { return await invoke(Buffer.from(JSON.stringify(request)), read === undefined ? undefined : { abortSignal: read.abortSignal }); }
+      catch (error) { throw failed("invoke_error", { error: errorName(error) }); }
+    };
+    const response = read === undefined ? await work() : await read.readCounted(work, response => decode(response).length);
+    return decode(response);
   };
 }
 
@@ -713,6 +720,14 @@ function withSignInReads(deps: DeveloperRouteDependencies): DeveloperRouteDepend
   } } };
 }
 
+function usesCompanySignIn(session: SessionRecord): boolean {
+  return session.amr === "oidc" || session.amr === "github" || (session.amr === "slack" && session.installMethod !== undefined);
+}
+
+async function sessionCompanyId(deps: DeveloperRouteDependencies, session: SessionRecord, scope: ReturnType<typeof boundedCompanyReads>, resolvedCompany?: string): Promise<string | undefined> {
+  return resolvedCompany ?? await (deps.serverReadBudget === undefined ? scope.read(() => resolveCompany(deps.companies, session.developerId)) : resolveCompany(deps.companies, session.developerId));
+}
+
 /** Company policy is selected only from live membership and the stored session (OIDC, and since DEC 254e Slack too).
  * Fixed-size reads share one budget and the host's existing SDK timeout; no cache or token company.
  * Undefined: the session is held to the install's own method (the built-in company, a shared-method session of a company with no issuer, or a
@@ -721,10 +736,10 @@ async function companyOidcSession(deps: DeveloperRouteDependencies, session: Ses
   // DEC 254e: a Slack session is checked here when it carries the shared-method mark (the sign-in server rechecks every Slack session at refresh,
   // as before); an OIDC session always.
   // DEC 254h/254n: a GitHub session always, marked or not, as OIDC (an unmarked one is held to the built-in company; GitHub is only the shared method).
-  if (deps.companies === undefined || !(session.amr === "oidc" || session.amr === "github" || (session.amr === "slack" && session.installMethod !== undefined))) return undefined;
+  if (deps.companies === undefined || !usesCompanySignIn(session)) return undefined;
   try {
-    const scope = boundedCompanyReads(deps.documentClient, deps.now);
-    const companyId = resolvedCompany ?? await scope.read(() => resolveCompany(deps.companies, session.developerId));
+    const scope = deps.serverReadBudget ?? boundedCompanyReads(deps.documentClient, deps.now);
+    const companyId = await sessionCompanyId(deps, session, scope, resolvedCompany);
     if ((session.companyId ?? IMPLICIT_COMPANY_ID) !== companyId) throw new Error("session company");
     if (companyId === IMPLICIT_COMPANY_ID) {
       if (session.installMethod !== undefined) throw new Error("session method");
@@ -734,7 +749,7 @@ async function companyOidcSession(deps: DeveloperRouteDependencies, session: Ses
       sessionId: z.string().uuid(), developerId: z.string().regex(/^[a-f0-9]{64}$/), amr: z.enum(["oidc", "slack", "github"]),
       companyId: OrgIdSchema, startedAt: z.iso.datetime(), endsAt: z.number().finite(),
       reviewExpiresAt: z.number().finite().optional(), installMethod: z.literal(true).optional(),
-    }).safeParse(await scope.read(async () => session));
+    }).safeParse(deps.serverReadBudget === undefined ? await scope.read(async () => session) : session);
     if (!parsed.success) throw new Error("session record");
     const key = companyIssuerKey(companyId);
     const response = await scope.client.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: key, ConsistentRead: true })) as { Item?: unknown };
@@ -2523,6 +2538,7 @@ async function knowledgeRoute(deps: DeveloperRouteDependencies, request: Adapted
 }
 
 export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  if (isServerReadRequest(request.method, url.pathname)) return routeServerRead(deps, request, url);
   if (isCompanyMemberPath(url.pathname)) return companyAdminRoute(deps, request, url);
   if (isGithubConnectPath(url.pathname)) return githubConnectRoute(deps, request, url);
   if (isGithubLinkPath(url.pathname)) return githubLinkRoute(deps, request, url);
@@ -2798,4 +2814,91 @@ async function companyLearningModelRoute(deps: DeveloperRouteDependencies, reque
   const companyId = await resolveCompany(deps.companies, caller.developerId);
   if (companyId === undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   return routeCompanyLearningModel({ documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName, now: deps.now, wiring }, caller, companyId, request);
+}
+
+const START_REQUEST_READ_PATH = "/v1/dev/tasks/start-requests/{requestId}";
+const START_REQUEST_READ_PREFIX = START_REQUEST_READ_PATH.slice(0, -"{requestId}".length);
+
+/** Exact methods only. Malformed start selectors remain owned by the dedicated validator. */
+export function isServerReadRequest(method: string, path: string): boolean {
+  return (method === "GET" && (path === START_REQUEST_READ_PREFIX.slice(0, -1) || path.startsWith(START_REQUEST_READ_PREFIX)))
+    || (method === "POST" && path === "/v1/dev/company/connections/impact");
+}
+
+async function routeServerRead(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  const start = request.method === "GET";
+  // Invalid selectors cannot fall through as a generic task ID. Registration still fails closed.
+  const route = devRouteOf(request.method, start ? `${START_REQUEST_READ_PREFIX}invalid` : url.pathname);
+  if (route === undefined) throw agentXError("NOT_FOUND", "route not found");
+  const unavailable = () => agentXError("RUNTIME_UNAVAILABLE", start ? "Start status is unavailable." : "GitHub disconnect preview is unavailable.");
+  if (deps.serverReadSender === undefined || deps.companies === undefined) throw unavailable();
+  const context = serverReadContext(deps.serverReadSender, deps.now);
+  const companies = companyMembershipFromDynamo(context.client, deps.developer.signInTableName);
+  const scoped: DeveloperRouteDependencies = { ...deps, documentClient: context.client, companies, serverReadBudget: context.budget,
+    developer: { ...deps.developer, companies, verifyAccessToken: (authorization, audience) => deps.developer.verifyAccessToken(authorization, audience, context) } };
+  let authenticated = false;
+  try {
+    const caller = await authenticateCaller(scoped, request.headers.authorization, route);
+    context.check(); authenticated = true;
+    const standing = async () => {
+      const fresh = await authenticateCaller(scoped, request.headers.authorization, route);
+      const member = await companies.membershipOf!(fresh.developerId);
+      if (fresh.developerId !== caller.developerId || fresh.sessionId !== caller.sessionId || member === undefined) throw unavailable();
+      context.check(); return { caller: fresh, companyId: member.companyId, role: member.role };
+    };
+    let startCompany: string | undefined;
+    const startCompanyOf = async () => {
+      const key = membershipKey(caller.developerId);
+      const response = await context.client.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> };
+      if (response.Item !== undefined && (response.Item.pk !== key.pk || response.Item.sk !== key.sk)) throw unavailable();
+      const live = strictLiveMembership(response.Item, caller.developerId);
+      if (live === undefined || (startCompany !== undefined && live.companyId !== startCompany)) throw agentXError("TASK_NOT_FOUND", "That task is unavailable.");
+      const fresh = await standing();
+      if (fresh.companyId !== live.companyId) throw agentXError("TASK_NOT_FOUND", "That task is unavailable.");
+      startCompany = live.companyId;
+      return live.companyId;
+    };
+    const result = start
+      ? await taskStartRequestRoute(scoped, request, url, caller, context, startCompanyOf, webOnlyTaskPersonReader(scoped))
+      : await connectionImpactRoute(scoped, request, url, caller, context, standing);
+    context.check(); return result;
+  } catch (error) {
+    // Aggregate invalidation wins even when an inner reader masked a transport exception.
+    try { context.check(); } catch { throw unavailable(); }
+    if (!authenticated && context.readFailed()) throw unavailable();
+    if (error instanceof AgentXError && (!authenticated || ["CONFIG_INVALID", "TASK_NOT_FOUND", "NOT_FOUND", "FORBIDDEN"].includes(error.code))) throw error;
+    throw unavailable();
+  } finally { await context.close(); }
+}
+
+/** Selected web-only local proof; never constructs the Slack adapter or memoizes project authority. */
+function webOnlyTaskPersonReader(deps: DeveloperRouteDependencies): NonNullable<TaskPeopleDependencies["checkTaskPerson"]> {
+  const local = { ...deps };
+  delete local.workspaces; // Every selected proof read must use the counted local client.
+  const noSlack = async (): Promise<never> => { throw agentXError("RUNTIME_UNAVAILABLE", "Start status is unavailable."); };
+  return (task, personId) => checkTaskPersonIdentity({
+    documentClient: deps.documentClient, tableName: deps.tableName, now: deps.now, uuid: randomUUID, slackTeamId: "",
+    slackUnavailable: agentXError("RUNTIME_UNAVAILABLE", "Start status is unavailable."), taskPersonProof: noSlack, projectChannelIds: noSlack, targetProjectAccess: noSlack,
+    developerRecord: async id => {
+      const key = { pk: `DEVELOPER#${id}`, sk: META };
+      const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: key, ConsistentRead: true })) as { Item?: DeveloperRecord & { pk?: unknown; sk?: unknown } };
+      if (response.Item !== undefined && (response.Item.pk !== key.pk || response.Item.sk !== key.sk)) return noSlack();
+      return response.Item;
+    },
+    companyMembership: async id => {
+      const key = membershipKey(id);
+      const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> };
+      if (response.Item !== undefined && (response.Item.pk !== key.pk || response.Item.sk !== key.sk)) return noSlack();
+      return strictLiveMembership(response.Item, id);
+    },
+    projectGrant: async (id, project, companyId) => {
+      const revision = await latestDefinition(local, project, companyId);
+      if (revision === undefined) return noSlack();
+      const memberships = await grantRowsOf<{ pk?: string; sk?: string; projectName: string; role?: string }>(deps, id, companyId, WEB_PROOF_GRANT_ROWS_MAX);
+      const result = evaluateProjectAuthority({ project, revision: { revision: revision.revision, definition: { developerTasks: revision.developerTasks } }, memberships, bindings: [] });
+      if (result.kind === "allowed") return result.access === "granted";
+      if (result.kind === "denied" && result.reason === "project-access") return false;
+      return noSlack();
+    },
+  }, task, personId);
 }

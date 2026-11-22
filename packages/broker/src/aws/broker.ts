@@ -1,5 +1,6 @@
 import "./broker-environment-init.js"; import { companyMembershipFromDynamo, resolveAdminCompany, resolveCompany } from "./company-check.js"; // ENV-ROOM: the init first (broker-environment-init.ts; kept first by tests/contract/broker-environment-first.test.ts)
 import { coreContextWorkerRouteOf } from "./dev-route-scopes.js";
+import { isServerReadRequest } from "./developer-routes.js";
 import { createHostedBrokerCoreServices } from "./core-job-services.js"; import { codeSettingsReader, companyCodeSettingsReader } from "./project-code-settings.js"; import { hostedPolicySource } from "./core-policy-source.js";
 import { guardCoreProjectSource, planCoreProjectWrites, planCanonicalProjectIdentity, coreProjectSnapshotFence } from "./core-project-backfill.js"; import { coreCopyRefusalWords } from "./core-copy-refusal.js";
 import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
@@ -1722,11 +1723,12 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
       if (url.pathname.startsWith("/v1/dev/")) {
         if (!dependencies.developer && dependencies.linking) return json(await routeLinkingRequest(linkingRouteDependencies(dependencies, dependencies.linking), request, url), request.requestId);
         if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
-        return json(await routeDeveloperRequest({ ...(dependencies.developer.companies === undefined ? {} : { companies: dependencies.developer.companies }), ...(core?.lessons === undefined ? {} : { lessons: core.lessons }), ...(core?.lessonsSlackSwitch === undefined ? {} : { lessonsSlackSwitch: core.lessonsSlackSwitch }), ...(core?.knowledgeSwitch === undefined ? {} : { knowledgeSwitch: core.knowledgeSwitch }), ...(core?.knowledge === undefined ? {} : { knowledge: core.knowledge }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
+        const developer = dependencies.developer;
+        return await developerRouteResponse(request, url, () => routeDeveloperRequest({ serverReadSender: { send: (command, options) => dependencies.documentClient.send(command as never, options) }, ...(developer.companies === undefined ? {} : { companies: developer.companies }), ...(core?.lessons === undefined ? {} : { lessons: core.lessons }), ...(core?.lessonsSlackSwitch === undefined ? {} : { lessonsSlackSwitch: core.lessonsSlackSwitch }), ...(core?.knowledgeSwitch === undefined ? {} : { knowledgeSwitch: core.knowledgeSwitch }), ...(core?.knowledge === undefined ? {} : { knowledge: core.knowledge }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks,
           ...channelLinkRouteDependencies(dependencies),
           ...clientProjectRouteDependencies(dependencies),
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
-          ...workflowApplicationRouteDependencies(dependencies) }, request, url), request.requestId);
+          ...workflowApplicationRouteDependencies(dependencies) }, request, url));
       }
 
       const identity = identityFromJwtClaims(request.jwtClaims, {
@@ -15949,7 +15951,7 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
     // D17: kept for the Lambda's lifetime; an unknown kid refetches at most once a minute.
     verifyAccessToken: developerTokenVerifier({
       issuer,
-      keys: developerKeysThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+      keys: developerKeysThroughLambda((payload, options) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }), options)),
       now: Date.now,
     }),
   }), inviteTaskPerson);
@@ -16261,4 +16263,22 @@ function withClientGithubBindings(dependencies: AwsBrokerDependencies): AwsBroke
   const companies = dependencies.companies ?? (dependencies.developer ?? dependencies.linking)?.companies;
   if (bindings === undefined || dependencies.githubBindings !== undefined || companies === undefined) return dependencies;
   return { ...dependencies, githubBindings: bindings, companies };
+}
+
+/** The two dedicated read contracts have no transport request ID in their domain body. */
+function serverReadJson(value: unknown, statusCode = 200) {
+  return { statusCode, headers: { "content-type": "application/json", "cache-control": "private, no-store" }, body: JSON.stringify(value) };
+}
+
+/** Keep the dedicated read contracts' domain bodies and failures at the transport boundary. */
+async function developerRouteResponse(request: AdaptedHttpRequest, url: URL, work: () => Promise<unknown>) {
+  const selectedRead = isServerReadRequest(request.method, url.pathname);
+  try {
+    const value = await work();
+    return selectedRead ? serverReadJson(value) : json(value, request.requestId);
+  } catch (error) {
+    if (!selectedRead) throw error;
+    if (error instanceof AgentXError) return serverReadJson({ error: { code: error.code, message: stripCode(error.message, error.code) } }, error.statusCode);
+    return serverReadJson({ error: { code: "RUNTIME_UNAVAILABLE", message: request.method === "GET" ? "Start status is unavailable." : "GitHub disconnect preview is unavailable." } }, 503);
+  }
 }

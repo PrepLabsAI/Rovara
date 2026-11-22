@@ -1420,3 +1420,22 @@ it("core plan comments use the existing developer tasks:act scope", async () => 
   expect(devRouteOf("GET", path)).toMatchObject({ requires: "tasks:read" });
   expect(devRouteOf("DELETE", path)).toBeUndefined();
 });
+
+// The server-read routes belong to the outer DEV dispatcher, with no APP aliases.
+describe("dedicated server-read route registration", () => {
+  it("registers only the approved methods/scopes and no script-token APP alias", async () => {
+    const { devRouteOf, appRouteOf } = await import("../../packages/broker/src/aws/dev-route-scopes.js");
+    expect(devRouteOf("GET", "/v1/dev/tasks/start-requests/original")).toMatchObject({ requires: "tasks:read" });
+    expect(devRouteOf("POST", "/v1/dev/company/connections/impact")).toMatchObject({ requires: "full" });
+    expect(devRouteOf("DELETE", "/v1/dev/company/connections/impact")).toBeUndefined();
+    expect(appRouteOf("GET", "/v1/app/task-start-requests/original")).toBeUndefined();
+    expect(appRouteOf("POST", "/v1/app/github/disconnect-preview")).toBeUndefined();
+  });
+  it("reaches the outer broker and preserves the original operation ID", async () => {
+    const { serverReadWorld } = await import("../support/server-read-world.js");
+    const w = await serverReadWorld();
+    const r = await w.start(); expect(r.status).toBe(200); expect(r.body.requestId).toBe(w.requestId);
+    w.addInstallation(); const impact = await w.impact();
+    expect(impact.status).toBe(200); expect(impact.body).not.toHaveProperty("requestId");
+  });
+});
