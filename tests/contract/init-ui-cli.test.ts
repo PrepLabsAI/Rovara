@@ -1,3 +1,4 @@
+import { installGatewayFixture, readyCoreEngine } from "../support/install-gateway.js";
 // SC-003: a full `agentx init --ui` install driven entirely from the page, with nothing typed in
 // the terminal after the command. The wizard server and the GitHub manifest listener are both
 // real, on 127.0.0.1; every AWS, GitHub, Slack and clock dependency is injected, so nothing here
@@ -15,11 +16,13 @@ import { READY_HOLD_MS, READY_OUTCOME, holdReadyScreen } from "../../packages/cl
 import { NO_BROWSER_LINE } from "../../packages/cli/src/init/ui-mode.js";
 import { installAnswersParameterName, readInstallProgress, writeInstallAnswers, type InitAnswers } from "../../packages/cli/src/init/install-state.js";
 import { allStackOutputs, fakeGitHubApi, fakeSlackApi, passingChecks, sampleAnswers, scriptedDeployer, scriptedPrompter, TEST_BOT_TOKEN, TEST_SIGNING_SECRET } from "../support/init-fakes.js";
-import { fakeWizardOperator } from "../support/wizard-browser.js";
+import { fakeWizardOperator, runWithWizardErrors } from "../support/wizard-browser.js";
 import { ADMIN_EMAIL } from "../support/setup-fakes.js";
 import { markOperatorStop } from "../../packages/cli/src/init/stop.js";
 import { WIZARD_TOKEN_HEADER, type WizardPlan, type WizardSnapshot } from "../../packages/cli/src/init/ui/protocol.js";
 import { FINISH, FIRST_RUN, harness, releaseDir, SETTINGS, SIGNIN, SLACK, SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, TERMINAL_FIRST_RUN, TERMINAL_SLACK } from "../support/init-ui-harness.js";
+
+installGatewayFixture();
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
@@ -35,10 +38,10 @@ describe("agentx init --ui", () => {
     const h = await harness();
     const operator = fakeWizardOperator([]);
     const missing: typeof fetch = async () => new Response("not found", { status: 404 });
-    const code = await executeCli(["--env", "staging", "init", "--region", "us-east-1", "--ui"], {
+    const code = await runWithWizardErrors(operator.open, () => executeCli(["--env", "staging", "init", "--region", "us-east-1", "--ui"], {
       stdout: { write: () => undefined }, stderr: { write: (text: string) => h.err.push(text) }, environments: { home: h.home },
       init: { ...h.base, releaseVersion: "9.9.9", fetch: missing, openBrowser: operator.open },
-    });
+    }));
     await operator.settled();
     expect(code).not.toBe(0);
     expect(operator.states.some((state) => state.failure?.what.toLowerCase().includes("release 9.9.9 was not found"))).toBe(true);
@@ -96,7 +99,7 @@ describe("agentx init --ui", () => {
     const dir = await tmp("agentx-init-ui-bundle-");
     await writeFile(join(dir, "init-answers.json"), JSON.stringify({
       schemaVersion: 1, env: "staging", region: "us-east-1", account: "123456789012", engine: "templates", releaseVersion: "1.2.3",
-      identity: { mode: "cognito" }, models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "us.anthropic.claude-haiku-4-5-20251001-v1:0", worker: "us.anthropic.claude-sonnet-4-6" },
+      coreEngine: readyCoreEngine, identity: { mode: "cognito" }, models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "us.anthropic.claude-haiku-4-5-20251001-v1:0", worker: "us.anthropic.claude-sonnet-4-6" },
     }));
     // A bundle for another environment is refused before the wizard starts: no page is opened.
     const wrong = await tmp("agentx-init-ui-bundle-dev-");
@@ -181,10 +184,11 @@ describe("agentx init --ui", () => {
     const h = await harness();
     // No --region, so the region is the first question; then the first-run answers, through to the end.
     const operator = fakeWizardOperator(["", ...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
-    await executeCli(["--env", "staging", "init", "--release", await releaseDir(), "--ui"], {
+    const release = await releaseDir();
+    await runWithWizardErrors(operator.open, () => executeCli(["--env", "staging", "init", "--release", release, "--ui"], {
       stdout: { write: () => undefined }, stderr: { write: () => undefined }, environments: { home: h.home },
       init: { ...h.base, openBrowser: operator.open },
-    });
+    }));
     await operator.settled();
     const region = operator.states.find((state) => state.question?.text === "AWS region")?.question;
     expect(region?.choices?.map((choice) => choice.value)).toEqual(["us-east-1"]);
@@ -196,10 +200,11 @@ describe("agentx init --ui", () => {
     await writeFile(join(h.home, ".aws", "config"), "[default]\nregion = us-east-1\n[profile dev]\nsso_session = acme\nregion = us-west-2\n");
     // The profile, then the region (us-east-1, not the default), then the first-run answers, through to the end.
     const operator = fakeWizardOperator(["dev", "us-east-1", ...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
-    await executeCli(["--env", "staging", "init", "--release", await releaseDir(["us-east-1", "us-west-2"]), "--ui"], {
+    const release = await releaseDir(["us-east-1", "us-west-2"]);
+    await runWithWizardErrors(operator.open, () => executeCli(["--env", "staging", "init", "--release", release, "--ui"], {
       stdout: { write: () => undefined }, stderr: { write: () => undefined }, environments: { home: h.home },
       init: { ...h.base, openBrowser: operator.open, processEnv: {} },
-    });
+    }));
     await operator.settled();
     const region = operator.states.find((state) => state.question?.text === "AWS region")?.question;
     expect(region?.choices?.map((choice) => choice.value)).toEqual(["us-east-1", "us-west-2"]);
@@ -221,7 +226,7 @@ describe("agentx init --ui", () => {
     const h = await harness();
     // Spread from the harness's own fake, so the conversions counted below are this run's.
     const github = { ...h.github, owner: async (login: string) => (login === "acme" ? { login: "acme", type: "Organization" as const } : undefined) };
-    const wrong = JSON.stringify({ email: ADMIN_EMAIL, githubAccount: "acmee", alertEmail: "ops@example.com" });
+    const wrong = JSON.stringify({ ...readyCoreEngine, email: ADMIN_EMAIL, githubAccount: "acmee", alertEmail: "ops@example.com" });
     const operator = fakeWizardOperator([wrong, "organization", "change", SETTINGS, "create", ...SLACK, ...SIGNIN, ...FINISH]);
     expect(await h.run(["--ui"], { openBrowser: operator.open, github })).toBe(0);
     await operator.settled();
@@ -236,7 +241,7 @@ describe("agentx init --ui", () => {
   it("FR-029 and Review Focus 2: Change answers keeps every answer and recomputes an app name the user never typed", async () => {
     const h = await harness();
     const github = { ...fakeGitHubApi({ owner: "acme-labs" }), owner: async (login: string) => ({ login, type: "Organization" as const }) };
-    const moved = JSON.stringify({ email: ADMIN_EMAIL, githubAccount: "acme-labs", alertEmail: "ops@example.com" });
+    const moved = JSON.stringify({ ...readyCoreEngine, email: ADMIN_EMAIL, githubAccount: "acme-labs", alertEmail: "ops@example.com" });
     const operator = fakeWizardOperator([SETTINGS, "change", moved, "create"], { beforeAnswer: async (question) => { if (question.text === "Create all of this?" && h.store.values.size > 0) throw new Error("test setup: something was saved before Create AgentX"); } });
     // --stop-after prerequisites: the run ends before the GitHub step, which is all this test needs.
     expect(await h.run(["--ui", "--stop-after", "prerequisites"], { openBrowser: operator.open, github })).toBe(0);
@@ -254,7 +259,7 @@ describe("agentx init --ui", () => {
 
   it("FR-020: a new install name is the install's name from then on, and a used one is refused", async () => {
     const h = await harness();
-    const renamed = JSON.stringify({ email: ADMIN_EMAIL, githubAccount: "acme", installName: "trial", alertEmail: "ops@example.com" });
+    const renamed = JSON.stringify({ ...readyCoreEngine, email: ADMIN_EMAIL, githubAccount: "acme", installName: "trial", alertEmail: "ops@example.com" });
     const operator = fakeWizardOperator([renamed, "create"]);
     expect(await h.run(["--ui", "--stop-after", "prerequisites"], { openBrowser: operator.open })).toBe(0);
     await operator.settled();

@@ -1,3 +1,4 @@
+import { installGatewayFixture } from "../support/install-gateway.js";
 // Spec 054: an administrator's own Anthropic or OpenAI API key, from init's questions to doctor.
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_BEDROCK_MODELS, MissingProviderSecret } from "@agentx/model-runtime/config";
@@ -10,11 +11,14 @@ import { doctorContext, doctorServices, SECRETS } from "../support/doctor-fakes.
 import { fakeRelease, memoryInitSecrets, passingChecks, sampleAnswers, scriptedPrompter, settingsScript } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
+installGatewayFixture();
+
 const T0 = Date.parse("2026-10-01T00:00:00.000Z");
 const base = { env: "staging", region: "us-east-1", account: "123456789012", releaseVersion: "1.2.3", processEnv: {}, now: () => T0 };
 const ANTHROPIC_KEY = "sk-ant-api03-0123456789abcdefKEYSECRET";
 const OPENAI_KEY = "sk-proj-0123456789abcdefKEYSECRET";
 const everyFlag: InitFlags = {
+  modelGatewayUrl: "https://gateway.example", agentModel: "claude-sonnet-4-6",
   engine: "templates", identity: "cognito", permissionBoundary: "", operatorPrincipal: "", alertEmail: "ops@example.com", budget: "0",
   githubAccount: "acme", githubAccountType: "organization", githubAppName: "AgentX acme staging", slackAppName: "AgentX", slackAppPostedMessages: "accept",
 };

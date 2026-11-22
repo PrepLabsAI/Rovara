@@ -268,6 +268,7 @@ export function cdkDiffRisks(text: string): { data: DataChange[]; iam: boolean }
 /** The cdk engine has no change set to confirm: each stack is reviewed (cdk diff) just before it deploys. */
 export function cdkReviewedDeployer(inner: StackDeployer, review: (request: DeployRequest) => Promise<void>): StackDeployer {
   return {
+    ...(inner.qualifyBroker === undefined ? {} : { qualifyBroker: () => inner.qualifyBroker!() }),
     async deploy(request) {
       await review(request);
       return inner.deploy(request);

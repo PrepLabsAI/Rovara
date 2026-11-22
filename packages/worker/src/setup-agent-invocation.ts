@@ -1,3 +1,4 @@
+import type { ModelProxyOptions } from "@agentx/model-runtime";
 // The setup run as the worker receives it (sh-setup-wire, SH14): builds the real ports of `runSetupAgent` from the task invocation's dependencies and returns the task's result. `run-task.ts` calls it from one
 // early hunk; everything about the run itself is in `setup-agent-run.ts`.
 import { SETUP_RUN_REFUSED_MESSAGES, agentXError } from "@agentx/contracts";
@@ -12,7 +13,7 @@ import { assertSetupIsolation } from "./setup-isolation.js";
 import { setupWorkspaceKey, startRunNetwork } from "./setup-network.js";
 import { TASK_SANDBOX_IMAGE_ENVIRONMENT, gatewayEgressFor, sandboxNetworkFromEnvironment, type TaskShellSelection } from "./task-sandbox.js";
 import type { RunNetwork } from "./setup-network.js";
-import { modelSpendIsMetered, setupModelPrice } from "./setup-agent-price.js";
+import { modelSpendIsMetered, invocationModelPrice } from "./setup-agent-price.js";
 import { createDockerCli, type DockerCli } from "./swebench/containers.js";
 import { EVAL_WORKER_IMAGE_VARIABLE } from "./verification/eval-wiring.js";
 import { runSetupEvalDryRun } from "./verification/eval-dry-run.js";
@@ -25,6 +26,8 @@ export interface SetupInvocationDependencies {
   rootPath: string;
   model: WorkspaceModelConfiguration;
   piAdapter?: PiSessionAdapter | undefined;
+  /** The proxy used by the selected adapter, supplied only by worker session resolution. */
+  meteredProxy?: ModelProxyOptions | undefined;
   eventSink: EventBatchSink;
   cancellationController?: WorkerCancellationController | undefined;
   /** The broker's setup callback, with this invocation's own capability (callback-client.ts). Without it the worker cannot run a setup run. */
@@ -76,9 +79,9 @@ export async function runSetupAgentInvocation(
   const image = environment[TASK_SANDBOX_IMAGE_ENVIRONMENT];
   if (image === undefined || image === "") throw agentXError("RUNTIME_UNAVAILABLE", SETUP_RUN_REFUSED_MESSAGES.noSandboxImage);
   // Money: a setup run is metered by the model proxy (the broker's spend ledger) and priced from the catalog; without either it does not start.
-  // Hotfix 0.5.33: the boot-time proxy (laptop) OR the invocation's own model route (hosted, metered through the control plane); neither refuses.
-  if (!modelSpendIsMetered(environment, invocation.payload)) throw agentXError("RUNTIME_UNAVAILABLE", SETUP_RUN_REFUSED_MESSAGES.noModelProxy);
-  const price = setupModelPrice(dependencies.model, invocation.payload.modelRoute);
+  // Routed sessions must match the selected proxy adapter; the legacy laptop path retains its environment gate.
+  if (!modelSpendIsMetered(environment, invocation.payload, dependencies)) throw agentXError("RUNTIME_UNAVAILABLE", SETUP_RUN_REFUSED_MESSAGES.noModelProxy);
+  const price = await invocationModelPrice(dependencies.model, invocation.payload.modelRoute, dependencies.meteredProxy);
   const docker = dependencies.docker ?? createDockerCli();
   const callback = dependencies.setupAgent;
   // On a laptop (`rovara up`) the worker is walled in by its own sandbox network and name server: the run joins that network, and the Docker socket guard does not let a worker make a network of its own or

@@ -33,7 +33,7 @@ import type {
 } from "@agentx/contracts";
 import type { TaskLogHooks } from "../task-log/hooks.js";
 import type { RepositoryGrantService } from "../../repository-access.js";
-import type { OperationRecord, DispatchRowRecord, TaskRecord } from "./records.js";
+import type { OperationRecord, DispatchRowRecord, TaskRecord, WorkspaceRecord } from "./records.js";
 import type { StepOutcome } from "./outcome.js";
 import type { CodeMilestones, SessionBindingsReader } from "../merge/seams.js";
 import type { PlaybookMode } from "../playbook/service.js";
@@ -236,6 +236,8 @@ export interface TaskFlowDeps {
   audit: AuditSink;
   projects: ProjectSource;
   access: TaskAccess;
+  /** Final delivery authority, independent of step admission. PARKED means the exact dispatch was durably paused; only an explicit owner retry resumes it. Local installs use their accepted owner authority. */
+  deliveryAccess?: (deps: TaskFlowDeps, operation: OperationRecord, workspace: WorkspaceRecord) => Promise<"ALLOWED" | "PARKED">;
   /**
    * L4-P1 (owner DEC 254zzl): whether this company's SYSTEM RUNS are on (the per-company `CoreSystemRuns` flag). Absent (the laptop): today's behaviour. Present and off: Rovara starts nothing by itself, the free
    * re-check at task start included. A hosted install fills it from the flag, read for this company.
@@ -377,8 +379,8 @@ export interface TaskFlowDeps {
    */
   evalGatewayUrl?: string;
   /**
-   * DEC 254n (1): the company's engine model check, asked once before a task starts (after the access and project checks, before the limits, the admission and any write). An answer is the
-   * refusal (fixed words) and the start writes nothing but its refusal audit; undefined lets the start go on. Absent: no check, exactly as before.
+   * The company's engine model check, asked once before any refusal audit, admission or task write. Hosted starts also check signed-price readiness here, before marking the company in use.
+   * A thrown readiness fault writes nothing; a returned refusal uses the existing refusal audit. Undefined lets the start go on. Absent: no check, exactly as before.
    */
   startModelCheck?: () => Promise<AgentXError | undefined>;
   /**

@@ -1,7 +1,10 @@
+import { readDeploymentOutputs } from "./cx-b/stack-outputs.js";
+import { coreEngineParameters } from "./core-engine-answers.js";
 // The deploy orchestrator: ties a stack deployer engine to install/upgrade order, the environment
 // lock, the callback signing key and environment settings. Phase 15d's `agentx init`/`agentx
 // upgrade` build a StackDeployer (the templates or cdk engine), collect DeployAnswers, and call
 // deployEnvironment; everything else (order, outputs feeding forward, the lock, settings) lives here.
+import { assertBrokerRunPrices, assertGatewayRunPrices, assertBrokerArtifactRunPrices } from "./gateway-price-preflight.js";
 import { agentXError, environmentStackName } from "@agentx/contracts";
 import { PROTECTED_PARTS, type DeployEvent, type DeployRequest, type StackDeployer } from "./deployer.js";
 import { currentLockHolder, withEnvironmentLock } from "../environments/lock.js";
@@ -201,6 +204,40 @@ function assertDeployAllowed(existing: EnvironmentSettings | undefined, mode: "i
   }
 }
 
+/** Keep the existing release/region diagnostic for an unreadable selected template. */
+function qualifyReleaseBroker(input: DeployEnvironmentInput): void {
+  const { release, answers } = input;
+  let text: string;
+  try {
+    text = release.template("control-plane", answers.region, answers.env);
+    JSON.parse(text);
+  } catch {
+    throw agentXError("CONFIG_INVALID", `the release's control-plane template for ${answers.region} could not be read; rebuild or re-download release ${release.manifest.version}`);
+  }
+  assertBrokerArtifactRunPrices(text);
+}
+
+/** Before any secret or stack write, qualify the selected broker, then the effective gateway.
+ * Partial upgrades that do not replace the broker must qualify the installed one. */
+export async function assertDeployGatewayReady(input: DeployEnvironmentInput, deploySet: ReadonlySet<DeployPart>, declaredFor: (part: DeployPart) => ReadonlySet<string> | undefined): Promise<Record<string, string>> {
+  const stackName = environmentStackName(input.answers.env, "control-plane");
+  const keepInstalled = input.mode === "upgrade" && (input.answers.coreEngine === undefined || !deploySet.has("control-plane"));
+  const computed = keepInstalled ? {} : coreEngineParameters(input.answers.coreEngine);
+  const deployed = input.mode === "upgrade" ? await input.deployedParameters?.(stackName) : undefined;
+  const kept = keptOperatorParameters({ part: "control-plane", computed, deployed, declared: input.mode === "upgrade" && deploySet.has("control-plane") ? declaredFor("control-plane") : undefined }).kept;
+  const effective = { ...kept, ...computed };
+  if (input.mode === "install" || deploySet.has("control-plane")) {
+    if (input.deployer.qualifyBroker !== undefined) await input.deployer.qualifyBroker();
+    else qualifyReleaseBroker(input);
+  } else {
+    assertBrokerRunPrices(await input.deployer.outputs(stackName));
+  }
+  const host = effective.CoreModelGatewayHost;
+  if (!host || !effective.CoreAgentModel) throw agentXError("CONFIG_INVALID", "coreEngine.modelGatewayUrl and coreEngine.agentModel must both be configured before worker activation; supply coreEngine answers to repair this install");
+  await assertGatewayRunPrices(`https://${host}`);
+  return effective;
+}
+
 /**
  * Runs one install or upgrade: validates the engine, mode and naming against existing settings
  * (before the lock, and again just after taking it), validates your own OIDC provider carries a
@@ -241,6 +278,8 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
   const needsKeptAppId = mode === "upgrade" && answers.github.appId === undefined && deploySet.has("control-plane");
   if (needsKeptAppId) await deployedGitHubAppId(input.deployedParameters, environmentStackName(env, "control-plane"));
 
+  await assertDeployGatewayReady(input, deploySet, declaredFor);
+
   const work = async (): Promise<DeployEnvironmentResult> => {
     // Settings may have changed in the window between the check above and taking the lock (or, with
     // lockHeld, in whatever window the caller's own held lock does not cover); the lock now held (or
@@ -248,6 +287,7 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
     const existing = await readEnvironmentSettings(store, env);
     assertDeployAllowed(existing, mode, engine, input.parts, env);
 
+    let gatewayParameters = await assertDeployGatewayReady(input, deploySet, declaredFor);
     const key = await callbackSigningKey(secrets, env);
 
     // Extra defense-in-depth, not itself the F24 "only the keys the template declares" fix (that is
@@ -267,41 +307,7 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
     const outputs: Partial<Record<DeployPart, StackOutputs>> = {};
     const droppedParameters: DeployEnvironmentResult["droppedParameters"] = [];
 
-    if (existing !== undefined) {
-      // Every part this environment already has settings for supplies its outputs by reading the
-      // existing stack, whether or not it is also being (re)deployed below: a part deployed on its
-      // own (`--parts slack`) still needs the current outputs of the parts it is not redeploying.
-      for (const part of Object.keys(existing.stacks) as DeployPart[]) {
-        const knownStackName = existing.stacks[part];
-        if (knownStackName === undefined) continue;
-        const fetched = await deployer.outputs(knownStackName);
-        if (fetched === undefined) {
-          // access and identity are optional in the settings schema: silently treating a stack
-          // settings names as gone would just drop it from the rewritten settings below, hiding a
-          // real inconsistency (the recorded stack no longer reports outputs) as if it had never
-          // existed. The other four parts are required by the schema, so the same silent loss
-          // cannot happen for them: either something downstream needs their output and
-          // `stackParameters` already names what is missing, or nothing does and settings simply
-          // are not written (see the foundation/runtime/slack check below).
-          if (part === "access" || part === "identity") {
-            throw agentXError("CONFIG_INVALID", `stack ${knownStackName} (environment ${env}'s ${part} stack) no longer reports outputs; its settings may be stale`);
-          }
-          continue;
-        }
-        outputs[part] = fetched;
-      }
-    } else {
-      // No settings yet: this may be a fresh install resuming after an earlier partial failure.
-      // Whatever isn't being (re)deployed this run may already exist from that earlier attempt;
-      // probe it directly by the name this orchestrator would have used. A part whose stack does
-      // not exist yet yields no outputs, exactly as `deployer.outputs` documents; `stackParameters`
-      // reports clearly whatever a later part still needs and does not have.
-      for (const part of fullOrder) {
-        if (deploySet.has(part)) continue;
-        const fetched = await deployer.outputs(environmentStackName(env, part));
-        if (fetched !== undefined) outputs[part] = fetched;
-      }
-    }
+    await readDeploymentOutputs({ existing, deployer, env, fullOrder, deploySet, outputs });
 
     for (const part of fullOrder) {
       if (!deploySet.has(part)) continue;
@@ -340,6 +346,11 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
         ...(input.confirm === undefined ? {} : { confirm: input.confirm }),
         ...(roleArn === undefined ? {} : { roleArn }),
       };
+      if (part === "control-plane") gatewayParameters = parameters;
+      if (part === "runtime") {
+        assertBrokerRunPrices(outputs["control-plane"]);
+        await assertGatewayRunPrices(`https://${gatewayParameters.CoreModelGatewayHost}`);
+      }
       outputs[part] = await deployer.deploy(request);
     }
 

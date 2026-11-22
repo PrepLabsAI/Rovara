@@ -1,3 +1,4 @@
+import { GatewayModelIdentitySchema } from "./gateway-model-identity.js";
 import { PrepareSetupProveSchema } from "./setup-prove.js";
 import { PREPARE_EVAL_HEALTH_FEATURE, PrepareEvalHealthSchema } from "./eval-health-run.js";
 import { TEST_ENV_PROVE_MEASURE_FEATURE } from "./machine-size.js";
@@ -276,6 +277,7 @@ export type AgentStepPayload = z.infer<typeof AgentStepPayloadSchema>;
 export const MODEL_ROUTE_APIS = ["anthropic-messages", "openai-responses", "openai-completions"] as const;
 /** Where one operation's model comes from: the proxy alias its key may call, the API it speaks, and the catalog entry for its limits and usage. */
 export const ModelRouteSchema = z.object({
+  identity: GatewayModelIdentitySchema.optional(),
   alias: z.string().min(1).max(512),
   api: z.enum(MODEL_ROUTE_APIS),
   catalog: z.string().min(1).max(256),

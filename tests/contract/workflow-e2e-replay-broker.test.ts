@@ -7,6 +7,7 @@ import { agentRunnable, downloadsOf, runAgentCase, type AgentRun } from "../supp
 import { recordingsOf, runReplayCase, type ReplayRun } from "../support/agent-replay-run.js";
 import { asLinuxRun, assembleAgentRun, assembleReplayRun, brokerRoundFor, type AssembledRun } from "../support/agent-collection.js";
 import { FIXED_RUNTIME_AT, type OrdersM14Variant } from "../support/orders-m14-agent.js";
+import { atEvidenceCollectionTime, retainEvidenceCollection } from "../support/agent-evidence-clock.js";
 import { verifyApplicationE2EEvidence } from "../../packages/broker/src/e2e/application-evidence.js";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -16,21 +17,38 @@ import { readWorkflowE2EReplayRecord, recordWorkflowE2EReplay, replayResultOf, r
 // evidence, and records `{ status, reproduced, downloadSha256Match, reason? }` from that and from what the verified round showed, which the replay admission signs.
 const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const plan = { runtimeAt: FIXED_RUNTIME_AT };
+const diagnoseExecutor = (label: string, run: AgentRun | ReplayRun) => {
+  console.info("REPLAY-BROKER-DIAGNOSTIC " + JSON.stringify({ label, phase: "executor", executor: run.result, downloadCount: downloadsOf(run.out).length }));
+};
 
 describe.runIf(agentRunnable)("the broker verifies an audit replay (Task 4.6b)", () => {
   const cleanups: Array<AgentRun | ReplayRun> = [];
   let source: AgentRun; let traces: E2EReplayTrace[]; let sourceCases: E2EReplaySourceCase[]; let sourceBytesSha: string;
+  let sourceAssembled: AssembledRun;
+  let sourceCollectedAt: string;
+  const assembledReplays = new WeakMap<ReplayRun, { evidence: AssembledRun; collectedAt: string }>();
   const replays = {} as Record<"whole" | "stale" | "hidden" | "lf" | "changed", ReplayRun>;
   const start = async (name: keyof typeof replays, options: Partial<Parameters<typeof runReplayCase>[0]> = {}, recordings: E2EReplayTrace[] = traces) => {
     const run = await runReplayCase({ traces: recordings, plan, sourceCases, ...options }); cleanups.push(run); replays[name] = run;
+    diagnoseExecutor(name, run);
+    // Capture after the supervisor proof is assembled, before waiting for another executor run.
+    assembledReplays.set(run, await retainEvidenceCollection(async () => asLinuxRun(await assembleReplayRun(run))));
+    await roundOf(run); // Emit the real collector/broker reasons before another run can hide the cause.
   };
   beforeAll(async () => {
     source = await runAgentCase({ script: [{ kind: "tap", name: /Download orders/ }, { kind: "done" }], plan });
     cleanups.push(source);
+    diagnoseExecutor("source", source);
+    const retainedSource = await retainEvidenceCollection(async () => asLinuxRun(await assembleAgentRun(source)));
+    sourceAssembled = retainedSource.evidence;
+    sourceCollectedAt = retainedSource.collectedAt;
     traces = await recordingsOf(source);
     sourceBytesSha = sha(readFileSync(join(source.out, "downloads", downloadsOf(source.out)[0]!)));
-    const verified = brokerRoundFor(asLinuxRun(await assembleAgentRun(source))).verify();
+    const verified = (await sourceRoundFor()).verify();
+    // Never sign empty or incomplete source facts into every replay after a failed source verification.
+    expect(verified.verdict, verified.reason).toBe("PASS");
     sourceCases = replaySourceCasesOf(verified);
+    expect(sourceCases).toEqual([{ caseId: source.caseId, assertionOutcomes: ["passed"], csvSha256: sourceBytesSha }]);
     await start("whole");
     await start("stale", { renamed: true });
     const file = JSON.parse(Buffer.from(traces[0]!.traceBase64, "base64").toString("utf8")) as { trace: { actions: unknown[] } };
@@ -41,9 +59,29 @@ describe.runIf(agentRunnable)("the broker verifies an audit replay (Task 4.6b)",
   }, 900_000);
   afterAll(async () => { await Promise.all(cleanups.splice(0).map((run) => run.cleanup())); });
 
-  const roundOf = async (run: ReplayRun, edit?: (a: AssembledRun) => AssembledRun) => {
-    const assembled = asLinuxRun(await assembleReplayRun(run));
-    return brokerRoundFor(edit === undefined ? assembled : edit(assembled), { modelRouteDefinition: undefined });
+  const diagnose = (label: string, assembled: AssembledRun, round: ReturnType<typeof brokerRoundFor>, purpose: "candidate" | "replay") => {
+    const verified = verifyApplicationE2EEvidence({ ...round.input, purpose });
+    const supervisor = assembled.actual.supervisorReadback === null ? null
+      : JSON.parse(Buffer.from(assembled.actual.supervisorReadback.receipt.bytes).toString("utf8")) as { context: { observedAt: string } };
+    console.info("REPLAY-BROKER-DIAGNOSTIC " + JSON.stringify({ label, executor: assembled.run.result,
+      observations: { ownedClosedAt: assembled.cleanup.removedAt, receivedAt: round.collected.collection?.receivedAt,
+        supervisorObservedAt: supervisor?.context.observedAt,
+        cases: assembled.actual.applicationCaptures.map((item) => ({ caseId: item.caseId,
+          steps: item.steps.map((step) => ({ index: step.index, declaredStepIndex: step.declaredStepIndex, kind: step.kind, outcome: step.outcome })),
+          assertions: item.assertions.map((assertion) => ({ index: assertion.index, outcome: assertion.outcome, reason: assertion.reason })) })) },
+      collection: { status: round.collected.qualification?.status ?? "UNKNOWN", reason: round.collected.qualification?.reason ?? round.collected.unavailableReason },
+      verification: { status: verified.verdict, reason: verified.reason, groups: verified.groups.map((group) => ({ status: group.verdict, reason: group.reason })),
+        cases: verified.results.flatMap((result) => result.cases.map((item) => ({ caseId: item.caseId, status: item.status, reason: item.reason }))) } }));
+    return round;
+  };
+  const sourceRoundFor = async (options?: Parameters<typeof brokerRoundFor>[1]) =>
+    diagnose("source", sourceAssembled, await atEvidenceCollectionTime(sourceCollectedAt, () => brokerRoundFor(sourceAssembled, options)), "candidate");
+  const roundOf = (run: ReplayRun, edit?: (a: AssembledRun) => AssembledRun) => {
+    const { evidence: assembled, collectedAt } = assembledReplays.get(run)!;
+    // Re-collect at the captured post-assembly time; close can precede the supervisor receipt.
+    const readback = edit === undefined ? assembled : edit(assembled);
+    const label = Object.keys(replays).find((key) => replays[key as keyof typeof replays] === run)!;
+    return atEvidenceCollectionTime(collectedAt, () => diagnose(label, readback, brokerRoundFor(readback, { modelRouteDefinition: undefined }), "replay"));
   };
   const replayOf = async (run: ReplayRun, edit?: (a: AssembledRun) => AssembledRun) => {
     const round = await roundOf(run, edit);
@@ -53,23 +91,22 @@ describe.runIf(agentRunnable)("the broker verifies an audit replay (Task 4.6b)",
   };
 
   it("test 19: a source round whose stored evidence was edited is not verified, keeps no recording, and so gives the replay nothing to serve", async () => {
-    const assembled = asLinuxRun(await assembleAgentRun(source));
     // Control: the unedited round is PASS and keeps its recording.
-    const control = brokerRoundFor(assembled).verify();
+    const control = (await sourceRoundFor()).verify();
     expect(control.verdict).toBe("PASS");
     expect(control.agentTraces).toHaveLength(1);
     // The stored ledger edited after the fact (one receipt of the model dropped from the inputs the worker packed): the broker's own re-collection no longer matches what was stored.
-    const edited = brokerRoundFor(assembled, { editGroupRun: (groupRun) => {
+    const edited = (await sourceRoundFor({ editGroupRun: (groupRun) => {
       const actual = groupRun["actual"] as { collectionInputs: { agentModel?: { receipts: unknown[] } } };
       actual.collectionInputs.agentModel!.receipts = actual.collectionInputs.agentModel!.receipts.slice(1);
-    } }).verify();
+    } })).verify();
     expect(edited.verdict).not.toBe("PASS");
     expect(edited.agentTraces ?? []).toHaveLength(0);
     expect(replaySourceCasesOf(edited)).toEqual([]);
   });
 
   it("the verified source round: PASS, with the recording the replay will serve and the facts the replay is judged against", async () => {
-    const verified = brokerRoundFor(asLinuxRun(await assembleAgentRun(source))).verify();
+    const verified = (await sourceRoundFor()).verify();
     expect(verified.verdict).toBe("PASS");
     expect(verified.agentTraces).toHaveLength(1);
     expect(sourceCases).toEqual([{ caseId: source.caseId, assertionOutcomes: ["passed"], csvSha256: sourceBytesSha }]);
@@ -119,7 +156,7 @@ describe.runIf(agentRunnable)("the broker verifies an audit replay (Task 4.6b)",
     const asCandidate = verifyApplicationE2EEvidence({ ...replayRound.input, purpose: "candidate" });
     expect(asCandidate.verdict).toBe("UNKNOWN");
     expect(asCandidate.reason).toMatch(/audit replay/);
-    const candidateRound = brokerRoundFor(asLinuxRun(await assembleAgentRun(source)));
+    const candidateRound = await sourceRoundFor();
     const asReplay = verifyApplicationE2EEvidence({ ...candidateRound.input, purpose: "replay" });
     expect(asReplay.verdict).toBe("UNKNOWN");
     expect(asReplay.reason).toMatch(/not a replay|purpose differs/);
@@ -133,7 +170,7 @@ describe.runIf(agentRunnable)("the broker verifies an audit replay (Task 4.6b)",
     const asReplay = verifyApplicationE2EEvidence({ ...replayRound.input, purpose: "replay" });
     expect(asReplay.purpose).toBe("replay");
     expect(asReplay.display?.scenarios).toHaveLength(1);
-    const candidateRound = brokerRoundFor(asLinuxRun(await assembleAgentRun(source)));
+    const candidateRound = await sourceRoundFor();
     const asCandidate = candidateRound.verify();
     expect(asCandidate.purpose).toBe("candidate");
     // The rows are the candidate's derivation for both (screenshots only for a failed or incomplete row; a passed row has none): the label changes nothing shown.

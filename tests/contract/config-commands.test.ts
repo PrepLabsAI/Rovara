@@ -177,3 +177,20 @@ describe("agentx config set", () => {
       .rejects.toThrow("a webhook alert address is a secret; pass it with --value-file <path> or --value-env <NAME>, never on the command line");
   });
 });
+
+
+it("refuses later gateway activation before any change when the broker cannot sign run-price ceilings", async () => {
+  const cloudFormation = fakeCloudFormation({ parameters: { CoreModelGatewayHost: "" } });
+  await expect(runConfigSet(services({ store: await seeded(), cloudFormation }), ENV, { key: "coreEngine.modelGatewayUrl", value: "https://gateway.example", yes: true })).rejects.toThrow("price-serving broker");
+  expect(cloudFormation.calls).toEqual([]);
+});
+
+it.each([false, true])("checks the gateway on later config activation after broker qualification (ready=%s)", async ready => {
+  const cloudFormation = fakeCloudFormation({ parameters: { CoreModelGatewayHost: "" } });
+  const svc = services({ store: await seeded(), cloudFormation, stacks: { describe: async () => ({ status: "UPDATE_COMPLETE", outputs: { ModelRunPriceVersion: "1" }, parameters: { CoreModelGatewayHost: "" } }) } });
+  const recorder = svc.fetch!;
+  svc.fetch = async (input, init) => (typeof input === "string" ? input : input instanceof URL ? input.href : input.url).endsWith("/healthz") ? Response.json(ready ? { ok: true, runPrice: { version: 1, admissionVersion: 1, snapshotVersion: 7 } } : { ok: true }) : recorder(input, init);
+  const change = runConfigSet(svc, ENV, { key: "coreEngine.modelGatewayUrl", value: "https://gateway.example", yes: true });
+  if (ready) { expect(await change).toEqual({ changed: true }); expect(cloudFormation.calls.length).toBeGreaterThan(0); }
+  else { await expect(change).rejects.toThrow("gateway must serve run prices"); expect(cloudFormation.calls).toEqual([]); }
+});

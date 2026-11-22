@@ -1,3 +1,6 @@
+import { runPriceReader } from "../core-host/run-price-http.js";
+import { accessRetryRoute } from "./core-access-retry.js";
+import { sweepCoreIdleSlack } from "./core-idle-slack.js";
 import { isContextSourceStage } from "@agentx/contracts";
 import { createHostedDesignReview } from "../core-host/hosted-design-review.js";
 import { DESIGN_REVIEW_PACKET_PATH, storedBindingOf } from "../core/design-review/packet-route.js";
@@ -110,6 +113,7 @@ import type { RegistryTaskFlowOptions, TaskFlow } from "../core/task-flow/flow.j
 import { workspaceKeys } from "../core/task-flow/workspace-location.js";
 import { createCompanyArtifactReader } from "../core-host/company-artifact-reader.js";
 import { hostedKeepEvidence } from "../core-host/hosted-evidence.js";
+import { hostedPlanEvidence } from "../core-host/hosted-plan-evidence.js";
 import { sessionBindingsOf } from "../core/sessions/bindings.js";
 import { createLocalAfterMerge } from "../local/app/after-merge.js";
 import { hostedAutonomy, reviewerRoomUsd } from "../core-host/reviewer-authority.js";
@@ -154,7 +158,7 @@ import { evalHealthRunDeps, evalHealthRunsAvailable, kickEvalHealth } from "../c
 import { MODEL_ACCESS_PATH } from "../core/model-gateway/route.js";
 import { CallbackCapabilities } from "../callbacks.js";
 import type { TokenSigner } from "../developer/tokens.js";
-import { coreModelGatewayWiring, gatewayModelKeysModules, taskTokensFromEnvironment } from "../core-host/gateway-model-access.js";
+import { coreModelGatewayWiring, gatewayModelAccessFromEnvironment, gatewayModelKeysModules, taskTokensFromEnvironment } from "../core-host/gateway-model-access.js";
 import { hostedAnswersModel } from "../core-host/gateway-answers.js";
 import type { HostedLearningContext } from "../core-host/hosted-learning.js";
 import { hostedStartRoute } from "../core/answers/model-start-router.js";
@@ -733,9 +737,23 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const engineOffered: EngineModelOfferedReader | undefined = inputs.offeredModels !== undefined ? (companyId) => inputs.offeredModels!.offered(companyId) : adminOfferedModelsFromEnvironment(env, inputs.taskTokens ?? (() => undefined));
   const modelFlowOptions = (registry: AdapterRegistry, companyId: OrgId): Partial<RegistryTaskFlowOptions> => {
     const gateway = modelGateway()!.flowOptions;
+    const gatewayUrl = gatewayModelAccessFromEnvironment(env)!.gatewayUrl;
     const store = registry.require("storage");
-    const modelAccess = companyEngineModelRoute({ store, companyId, install: gateway.modelAccess });
-    return { ...modelChoices.flowOptionsFor(registry, companyId, { ...gateway, modelAccess }), startModelCheck: companyEngineModelStartCheck({ store, companyId, offered: engineOffered }) };
+    const modelAccess = companyEngineModelRoute({ store, companyId, offered: engineOffered, install: gateway.modelAccess });
+    const modelCheck = companyEngineModelStartCheck({ store, companyId, offered: engineOffered });
+    return { ...modelChoices.flowOptionsFor(registry, companyId, { ...gateway, modelAccess }), startModelCheck: async () => {
+      // Read THIS company's effective model and signed price on every start. A
+      // readiness fault throws before the start can mark in-use or audit a refusal.
+      try {
+        const route = await modelAccess.route();
+        const tokens = inputs.taskTokens?.();
+        const price = route === undefined || tokens === undefined ? undefined : await runPriceReader({ gatewayUrl, ...tokens, now: () => now().getTime() })(companyId, route.alias);
+        if (price === undefined) throw new Error("unavailable");
+      } catch {
+        throw agentXError("RUNTIME_UNAVAILABLE", "The signed-price model gateway is not ready. Restore the gateway's signed run prices for this company's engine model, then retry.");
+      }
+      return modelCheck();
+    } };
   };
   const lessonsSwitch: ReturnType<typeof readCoreLessonsSwitch> = readCoreLessonsSwitch(env);
   // The weekly lessons summary's pilot list, resolved ONCE so the sender (createCoreLessons) and the settings API (createLessonsApi) can never disagree about which companies default to on.
@@ -825,7 +843,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       // Configured without the task-token signer: refused here, so no task starts. The money stop is wired in every case.
       flowOptions: { captureStartComparison: async ({ project, inputText }) => {
         const store = registry.require("storage");
-        const context = await hostedPreviewContext({ store, companyId, project, now, rateQuote: previewRates, workflowVersion: inputs.understandFirst === false ? "1.0.0" : "1.1.0", settings: admissionSettings, projectTaskCap, defaultRoute: async () => { const gateway = modelGateway(); return gateway === undefined ? undefined : companyEngineModelRoute({ store, companyId, install: gateway.flowOptions.modelAccess }).route(); } });
+        const context = await hostedPreviewContext({ store, companyId, project, now, rateQuote: previewRates, workflowVersion: inputs.understandFirst === false ? "1.0.0" : "1.1.0", settings: admissionSettings, projectTaskCap, defaultRoute: async () => { const gateway = modelGateway(); return gateway === undefined ? undefined : companyEngineModelRoute({ store, companyId, offered: engineOffered, install: gateway.flowOptions.modelAccess }).route(); } });
         return startEstimates({ store }, { orgId: companyId, project, request: { quoteVersion: 2, ...(inputText.length <= 4000 ? { inputText } : {}) }, asOf: now().toISOString(), context });
       }, understandFirst: inputs.understandFirst ?? true, limits: async () => {
         const fallback = { member: Number(env.SLACK_MEMBER_WORKSPACE_LIMIT ?? "3"), organization: Number(env.SLACK_ORGANIZATION_WORKSPACE_LIMIT ?? "20") };
@@ -877,6 +895,21 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       log,
       ciReporting: inputs.ciReporting === undefined ? policyCiReporting(policySource) : inputs.ciReporting,
       services: (flow, wiring) => {
+        flow.deps.afterPlanStored = hostedPlanEvidence(flow.deps, registry.require("object-storage"));
+        const runWatch = flow.sweepRunsOnce.bind(flow);
+        const idleScan = { cursor: undefined as string | undefined };
+        flow.sweepRunsOnce = async (options) => {
+          const report = await runWatch(options);
+          const idle = await sweepCoreIdleSlack({ flow: flow.deps, documentClient: inputs.documentClient, threadsTableName: env.SLACK_THREADS_TABLE_NAME,
+            scan: idleScan, companyOf: async (where) => inputs.chatThreads?.companyOf(where),
+            postNote: async (conversation, text, operationId) => {
+              const adapter = inputs.chatThreads?.adapterFor(companyId, conversation.channel);
+              if (adapter === undefined) throw new Error("thread transport unavailable");
+              await adapter.deliver({ version: 1, id: `idle-cancel-${operationId}`, channel: conversation.channel, conversation, createdAt: now().toISOString(), type: "progress", data: { text } });
+            } });
+          report.failed += idle.failed;
+          return report;
+        };
         flow.deps.secondReview = createHostedReviewers({ flow: flow.deps, registry, companyId, offered: engineOffered, taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task) }).secondReview;
         createHostedDesignReview({ flow: flow.deps, registry, companyId, offered: engineOffered,
           taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task),
@@ -1047,7 +1080,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         const healthDeps = healthRuns ? evalHealthRunDeps({ registry, environment: env, companyId: runtime.companyId, now: () => now().getTime(), members: setupApproval.evalMembers, flow: runtime.flow.deps, modelGatewayConfigured }) : undefined;
         return {
           origin: inputs.origin,
-          startEstimates: (project) => hostedPreviewContext({ store: runtime.flow.deps.store, companyId: runtime.companyId, project, now, rateQuote: previewRates, workflowVersion: inputs.understandFirst === false ? "1.0.0" : "1.1.0", settings: admissionSettings, projectTaskCap, defaultRoute: async () => { const gateway = modelGateway(); return gateway === undefined ? undefined : companyEngineModelRoute({ store: runtime.flow.deps.store, companyId: runtime.companyId, install: gateway.flowOptions.modelAccess }).route(); } }),
+          startEstimates: (project) => hostedPreviewContext({ store: runtime.flow.deps.store, companyId: runtime.companyId, project, now, rateQuote: previewRates, workflowVersion: inputs.understandFirst === false ? "1.0.0" : "1.1.0", settings: admissionSettings, projectTaskCap, defaultRoute: async () => { const gateway = modelGateway(); return gateway === undefined ? undefined : companyEngineModelRoute({ store: runtime.flow.deps.store, companyId: runtime.companyId, offered: engineOffered, install: gateway.flowOptions.modelAccess }).route(); } }),
           sessionCapSeconds: hostedSessionCapSeconds(),
           scriptTokens: {}, ...(attention === undefined ? {} : { unsubscribeKey: attention.unsubscribeKey }),
           ...(modelChoices.choiceFor(runtime.companyId) === undefined ? {} : { modelChoice: modelChoices.choiceFor(runtime.companyId)! }),
@@ -1301,7 +1334,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   if (coreTasks !== undefined && !settingsBlocked) {
     const entry = coreTasks;
     coreTasks = {
-      route: (request, caller) => entry.route(request, caller),
+      route: accessRetryRoute(entry, { caller: deployedCallerFromMembership(membershipOf), flowFor: async (companyId) => (await app.runtimeFor(companyId)).flow.deps }),
       // L4-U5d: the chat thread's own methods are the entry's (this wrapper once dropped them, so a hosted start never remembered its thread and a later message had nowhere to go).
       ...(entry.recordThread === undefined ? {} : { recordThread: (caller: CoreEntryCaller, input: Parameters<NonNullable<CoreTaskEntry["recordThread"]>>[1]) => entry.recordThread!(caller, input) }),
       ...(entry.threadInput === undefined ? {} : { threadInput: (caller: CoreEntryCaller, input: Parameters<NonNullable<CoreTaskEntry["threadInput"]>>[1]) => entry.threadInput!(caller, input) }),
@@ -1336,7 +1369,10 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         const grants = new RepositoryGrantService(inputs.repositoryGrantKey, inputs.repositoryCredential);
         return createCallbackService({
           ...(saved === undefined || !saved.session.config.enabled ? {} : { savedEnv: { deps: saved, inspectGrant: (grant: string) => grants.inspect(grant), registryAuthSchema: HostedSavedEnvRegistryAuthSchema } }),
-          ...(gateway === undefined ? {} : { modelGateway: gateway }),
+          ...(gateway === undefined ? {} : { modelGateway: { ...gateway, runPrice: async (model: string) => {
+            const tokens = inputs.taskTokens?.();
+            return tokens === undefined ? undefined : runPriceReader({ gatewayUrl: gateway.gatewayUrl, ...tokens, now: () => now().getTime() })(companyId, model);
+          } } }),
           authorizeDesignReviewPacket: async (claims) => withinTaskTokenDeadline(async (deadline) => {
             const { task, operation, workspace } = await readTaskTokenRecords(runtime.flow.deps, claims, deadline);
             if ((workspace.orgId !== undefined && workspace.orgId !== companyId) || typeof task.developerId !== "string" || task.developerId === ""

@@ -1,3 +1,5 @@
+import { runPriceFor } from "../support/hosted-run-price.js";
+import { signedRunPriceResponse } from "../support/signed-run-price-fetch.js";
 // Lead 4 L4-AG: the hosted answers adapter over the gateway's "answers" purpose (Cloud #125, DEC 254z-amend2). An injected fetch stands in for the gateway; nothing reaches a network and no key exists.
 // What is proved: the token names ONLY the answers step and the caller's company, on the one answers path; a pause or a missing key is its own fixed outcome; two companies never share a token, a
 // reservation or a refusal; nothing the gateway or the model sent is echoed.
@@ -40,11 +42,11 @@ const refusal = (status: number, type: string, reason?: string) =>
 interface Seen { url: string; init: RequestInit }
 function recording(answer: (n: number) => Response | Promise<Response> = () => reply()) {
   const seen: Seen[] = [];
-  const fetchImpl = vi.fn(async (url: unknown, init?: RequestInit) => { seen.push({ url: String(url), init: init ?? {} }); return answer(seen.length - 1); }) as unknown as typeof fetch;
+  const fetchImpl = vi.fn(async (url: unknown, init?: RequestInit) => { const quote = signedRunPriceResponse(String(url), [ORG_A, ORG_B], [MODEL, "claude-haiku-5-5"], Date.now(), GATEWAY); if (quote !== undefined) return quote; seen.push({ url: String(url), init: init ?? {} }); return answer(seen.length - 1); }) as unknown as typeof fetch;
   return { seen, fetchImpl };
 }
 const gatewayWith = (fetchImpl: typeof fetch, extra: Partial<Parameters<typeof createHttpAnswersGateway>[0]> = {}) =>
-  createHttpAnswersGateway({ gatewayUrl: GATEWAY, issuer: ISSUER, signer: taskKey(), model: MODEL, fetch: fetchImpl, now: () => NOW, timeoutMs: 200, ...extra });
+  createHttpAnswersGateway({ gatewayUrl: GATEWAY, issuer: ISSUER, signer: taskKey(), model: MODEL, fetch: fetchImpl, now: () => NOW, timeoutMs: 200, runPrice: async (companyId, model) => ({ ...runPriceFor(model, NOW), companyId }), ...extra });
 const tokenOf = (seen: Seen) => (seen.init.headers as Record<string, string>)["x-api-key"]!;
 const claimsOf = (token: string) => JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString()) as Record<string, unknown>;
 const headerOf = (token: string) => JSON.parse(Buffer.from(token.split(".")[0]!, "base64url").toString()) as Record<string, unknown>;
@@ -116,7 +118,7 @@ describe("the token: the answers step, this company, nothing else", () => {
     const iat = NOW / 1000;
     expect({ ...claims, jti: "<uuid>", ws: "<uuid>", op: "<uuid>" }).toEqual({
       iss: ISSUER, aud: "rovara-model-gateway", jti: "<uuid>", iat, nbf: iat - 30, exp: iat + 900, cid: ORG_A, pid: "alpha", pay: { kind: "project", project: "alpha" },
-      tid: key(ANSWER_ID_A), ws: "<uuid>", op: "<uuid>", stp: "rovara-answers-call", mdl: [MODEL],
+      tid: key(ANSWER_ID_A), ws: "<uuid>", op: "<uuid>", stp: "rovara-answers-call", mdl: [MODEL], runPrice: { ...runPriceFor(MODEL, NOW), companyId: ORG_A },
     });
     expect(ANSWERS_STEP).toBe("rovara-answers-call");
     // No person (no person pays), no work origin.
@@ -288,7 +290,7 @@ describe("the deployment's wiring (hostedAnswersModel)", () => {
     expect(await modelA.available()).toBe(true);
     const session = await modelA.open({ companyId: ORG_A, project: "alpha", personId: "ada", answerId: ANSWER_ID_A, ceilingCents: 15 });
     await session.complete(turn());
-    expect(claimsOf(tokenOf(r.seen[0]!))).toMatchObject({ cid: ORG_A, stp: "rovara-answers-call", mdl: [MODEL], iss: ISSUER });
+    expect(claimsOf(tokenOf(r.seen[0]!))).toMatchObject({ cid: ORG_A, stp: "rovara-answers-call", mdl: [MODEL], runPrice: { companyId: ORG_A, model: MODEL }, iss: ISSUER });
     await session.finish({ tokens: 0 });
     expect(factory("not-a-company")).toBeUndefined();
     expect(hostedAnswersModel({}, tokens, r.fetchImpl)).toBeUndefined();
@@ -342,5 +344,35 @@ describe("the dedicated answers model (ROVARA_CORE_ANSWERS_MODEL)", () => {
     expect(hostedAnswersModel({ [CORE_ANSWERS_MODEL_VARIABLE]: ANSWERS_MODEL }, tokens)).toBeUndefined();
     expect(hostedAnswersModel({ [CORE_MODEL_GATEWAY_URL_VARIABLE]: GATEWAY, [CORE_ANSWERS_MODEL_VARIABLE]: ANSWERS_MODEL }, tokens)).toBeUndefined();
     expect(hostedAnswersModel({ ...BASE, [CORE_MODEL_GATEWAY_URL_VARIABLE]: "http://gateway.example", [CORE_ANSWERS_MODEL_VARIABLE]: ANSWERS_MODEL }, tokens)).toBeUndefined();
+  });
+});
+
+
+describe("signed per-call answers price", () => {
+  it.each([undefined, { estimated: true }, { companyId: ORG_B }, { model: "claude-other-5" }, { expiresAt: NOW }, { inputUsdPerMillion: 0 }])("refuses missing, estimated or mismatched prices before an inference token or POST (%j)", async change => {
+    const r = recording();
+    const signer = taskKey();
+    const signCall = vi.spyOn(signer, "sign");
+    const g = gatewayWith(r.fetchImpl, { signer, runPrice: async () => change === undefined ? undefined : ({ ...runPriceFor(MODEL, NOW), companyId: ORG_A, ...change }) });
+    expect(await reasonOf(callOf(g, (await reserveFor(g)).reservationId))).toBe("unavailable");
+    expect(signCall).not.toHaveBeenCalled();
+    expect(r.seen).toEqual([]);
+  });
+
+  it("refreshes every turn, binds the exact quote, and refuses a higher price before mint/send when the answer has too little room", async () => {
+    const r = recording();
+    let reads = 0;
+    const signer = taskKey();
+    const signCall = vi.spyOn(signer, "sign");
+    const g = gatewayWith(r.fetchImpl, { signer, runPrice: async (companyId, model) => ({ ...runPriceFor(model, NOW), companyId, outputUsdPerMillion: ++reads === 1 ? 40 : 400 }) });
+    const { reservationId } = await reserveFor(g);
+    await callOf(g, reservationId);
+    expect(claimsOf(tokenOf(r.seen[0]!)).runPrice).toMatchObject({ companyId: ORG_A, model: MODEL, outputUsdPerMillion: 40 });
+    expect(await reasonOf(callOf(g, reservationId))).toBe("over_budget");
+    await g.settle({ reservationId });
+    await g.settle({ reservationId });
+    expect(reads).toBe(2);
+    expect(signCall).toHaveBeenCalledTimes(1);
+    expect(r.seen).toHaveLength(1);
   });
 });

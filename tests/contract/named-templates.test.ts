@@ -16,6 +16,7 @@ import { normalizedTemplate } from "../support/template-snapshot.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { withoutSlackCompanyMode, withoutSlackCompanyService } from "../support/slack-company-template.js";
 import { createHash } from "node:crypto";
+import { withoutBatchFAdditions } from "../support/batch-f-template.js";
 import { withoutBrokerMemberConditionCheck } from "../support/broker-member-condition-check-template.js";
 
 skipLambdaBundling();
@@ -277,6 +278,8 @@ function withoutSigninAuditWriter(template: unknown): unknown {
 // as they were, apart from issue 46's dispatch dead-letter alarm, issue 173's reconciler backstop,
 // issue 195's stuck-cancel alarm, the false-default Task People controls and the staging switch-over parity additions (DNS firewall, evidence expiry, broker
 // names; tests/support/switchover-parity-template.ts), each checked and taken out.
+// Batch F adds only Outputs.ModelRunPriceVersion; the invariant below retains code/next's full pin.
+// The separate proof removes it; existing snapshots retain the capability output.
 describe("named environment templates", () => {
   const stacks = buildAgentXApp({ agentxEnv: "staging" }).node.children.filter((child): child is Stack => Stack.isStack(child));
   it("pins L1a's broker core dispatch queue references", () => {
@@ -287,12 +290,18 @@ describe("named environment templates", () => {
     expect({ CORE_DISPATCH_QUEUE_URL: variables.CORE_DISPATCH_QUEUE_URL, CORE_DISPATCH_DEAD_LETTER_URL: variables.CORE_DISPATCH_DEAD_LETTER_URL }).toMatchSnapshot();
   });
   for (const stack of stacks) {
+    if (stack.stackName === "agentx-staging-control-plane") {
+      it("removing only Batch F additions preserves code/next's agentx-staging-control-plane template", () => {
+        const beforeBatchF = withoutBatchFAdditions(normalizedTemplate(stack));
+        expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("ef7ec71baeba564d5fa957374727f876d1602a7a43ced9676ff93219402c04dd");
+      }, 120_000);
+    }
     it(`${stack.stackName} is unchanged`, () => {
       let template = normalizedTemplate(stack);
       // SIGNIN-MEMBER-CONDITIONCHECK, DEC 254zzz282 B014-A: pin the new full synth
       // before the existing normalizers, then preserve every old policy/snapshot assertion.
       if (stack.stackName === "agentx-staging-control-plane") {
-        expect(createHash("sha256").update(JSON.stringify(template)).digest("hex")).toBe("ef7ec71baeba564d5fa957374727f876d1602a7a43ced9676ff93219402c04dd");
+        expect(createHash("sha256").update(JSON.stringify(template)).digest("hex")).toBe("2075dc4d2c1c19dff2e2489a9404fe36cb304d8d425b7be2ef20177c6c90ac91");
         template = withoutBrokerMemberConditionCheck(template);
       }
       const parity = stack.stackName === "agentx-staging-foundation" ? withoutNatEgressAddresses(withoutDnsFirewall(template))

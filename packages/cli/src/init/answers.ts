@@ -1,3 +1,4 @@
+import { CoreEngineAnswersSchema } from "../deploy/core-engine-answers.js";
 import { DEFAULT_BEDROCK_MODELS, DEFAULT_DIRECT_MODELS, PROVIDER_KEY_MIN_LENGTH, providerKeyProblem } from "@agentx/model-runtime/config";
 // FR-016's questions, each with a flag (FR-020). Only flags the engineer typed arrive here, so a
 // commander default never silently skips a question. An alert webhook carries its integration
@@ -47,6 +48,7 @@ export const BUDGET_TAG_NOTE =
   "The budget counts costs tagged agentx:env. Someone with billing rights must activate that tag once in Billing, Cost allocation tags; it appears there up to 24 hours after the first tagged resource is billed. Until then the budget reads $0. For an account used only by AgentX, --budget-scope account needs no tag.";
 
 export interface InitFlags {
+  modelGatewayUrl?: string; agentModel?: string;
   engine?: "templates" | "cdk";
   identity?: "cognito" | "oidc";
   oidcIssuer?: string; oidcAudience?: string; oidcClientId?: string; adminClaim?: string; adminValues?: string;
@@ -135,6 +137,13 @@ function digestFlag(value: string | undefined, flag: string): string | undefined
  * knows (`fixed`), or read from the settings form. */
 type PlatformAnswers = Pick<InitAnswers, "engine" | "identity" | "models" | "permissionsBoundaryArn" | "operatorPrincipalArn" | "operatorExternalId">;
 type SettingsValues = Readonly<Record<string, string>>;
+
+function collectCoreEngineAnswers(fixed: BundleAnswers | undefined, flags: InitFlags, typed: (name: SettingsFieldName) => string | undefined): NonNullable<InitAnswers["coreEngine"]> {
+  return CoreEngineAnswersSchema.parse(fixed?.coreEngine ?? {
+    modelGatewayUrl: flags.modelGatewayUrl ?? typed(SETTINGS_FIELD.modelGatewayUrl) ?? "",
+    agentModel: flags.agentModel ?? typed(SETTINGS_FIELD.agentModel) ?? "",
+  });
+}
 
 /** Spec 048 FR-020 to FR-023 and FR-025: every setting comes from one form (settings-form.ts): four
  * fields, then the Advanced settings, each with its recommended value. A typed flag answers its
@@ -259,6 +268,7 @@ export async function collectInitAnswers(input: {
     env, region: input.region, account: input.account, engine: platform.engine, releaseVersion: input.releaseVersion,
     identity: platform.identity,
     models: platform.models,
+    coreEngine: collectCoreEngineAnswers(input.fixed, flags, typed),
     ...(platform.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: platform.permissionsBoundaryArn }),
     ...(platform.operatorPrincipalArn === undefined ? {} : { operatorPrincipalArn: platform.operatorPrincipalArn }),
     ...(platform.operatorExternalId === undefined ? {} : { operatorExternalId: platform.operatorExternalId }),
@@ -442,6 +452,8 @@ export async function readProviderKeyAnswer(provider: KeyedModelProvider, input:
 type ResumeCheckKind = "url" | "login" | "email";
 
 const RESUME_CHECKS: Array<{ flag: string; key: keyof InitFlags; kind?: ResumeCheckKind; stored: (answers: InitAnswers) => string | undefined }> = [
+  { flag: "--model-gateway-url", key: "modelGatewayUrl", stored: (a) => a.coreEngine?.modelGatewayUrl },
+  { flag: "--agent-model", key: "agentModel", stored: (a) => a.coreEngine?.agentModel },
   { flag: "--engine", key: "engine", stored: (a) => a.engine },
   { flag: "--identity", key: "identity", stored: (a) => a.identity.mode },
   { flag: "--oidc-issuer", key: "oidcIssuer", kind: "url", stored: (a) => (a.identity.mode === "oidc" ? a.identity.issuer : undefined) },

@@ -1,3 +1,4 @@
+import { installGatewayFixture } from "../support/install-gateway.js";
 // agentx init's deploy steps: each drives deployEnvironment for its own parts under the lock the
 // step runner already holds, and first waits out any of its stacks an interrupted run left busy
 // (Review Focus 2). No test here reaches AWS, GitHub or Slack.
@@ -7,6 +8,8 @@ import { deployStep, initDeployAnswers, waitForIdleStacks } from "../../packages
 import { emptyProgress } from "../../packages/cli/src/init/install-state.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 import { initContext, progressHandle, sampleAnswers, T0 } from "../support/init-fakes.js";
+
+installGatewayFixture();
 
 const homes: string[] = [];
 afterEach(async () => { await Promise.all(homes.splice(0).map((home) => rm(home, { recursive: true, force: true }))); });
@@ -19,6 +22,7 @@ describe("init deploy answers", () => {
     const early = initDeployAnswers(answers, emptyProgress("staging", T0), ["access"]);
     expect(early).toEqual({
       env: "staging", region: "us-east-1", account: "123456789012",
+      coreEngine: answers.coreEngine,
       models: answers.models, identity: { mode: "cognito" },
       github: { account: "", appId: "", installationId: "", privateKeySecretArn: "" },
       permissionsBoundaryArn: "arn:aws:iam::123456789012:policy/B",

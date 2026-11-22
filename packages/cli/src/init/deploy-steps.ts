@@ -45,6 +45,7 @@ export function initDeployAnswers(answers: InitAnswers, progress: InstallProgres
     region: answers.region,
     account: answers.account,
     models: answers.models,
+    ...(answers.coreEngine === undefined ? {} : { coreEngine: answers.coreEngine }),
     identity: deployIdentityAnswers(answers.identity),
     github,
     ...(answers.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: answers.permissionsBoundaryArn }),

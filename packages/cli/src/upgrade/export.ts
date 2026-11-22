@@ -6,7 +6,9 @@
 import { chmod, copyFile, mkdir, mkdtemp, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { agentXError, environmentStackName } from "@agentx/contracts";
-import { templateParameterNames, upgradeKeptParameterNames, withDeclaredSignIn, type DeployAnswers } from "../deploy/deploy-environment.js";
+import { keptOperatorParameters, templateParameterNames, upgradeKeptParameterNames, withDeclaredSignIn, type DeployAnswers } from "../deploy/deploy-environment.js";
+import { coreEngineParameters } from "../deploy/core-engine-answers.js";
+import { exportReadinessScript } from "../deploy/export-readiness.js";
 import { assertClaimable } from "../deploy/export-bundle.js";
 import { MissingStackOutputError, SECRET_PARAMETERS, stackParameters, type DeployPart, type StackOutputs } from "../deploy/parameters.js";
 import { assertReleaseCoversRegion, type LoadedRelease } from "../deploy/release.js";
@@ -35,6 +37,22 @@ function parameterFile(input: { part: DeployPart; version: string; computed: Rec
     ...Object.entries(computed).map(([ParameterKey, ParameterValue]) => ({ ParameterKey, ParameterValue })),
     ...kept.map((ParameterKey) => ({ ParameterKey, UsePreviousValue: true as const })),
   ];
+}
+
+/** Match deploy preflight: omitted answers keep only parameters the selected broker declares. */
+function upgradeReadiness(input: Parameters<typeof writeUpgradeBundle>[0]) {
+  const { env, region } = input.settings;
+  const selectedBroker = input.parts.includes("control-plane");
+  const computed = selectedBroker && input.answers.coreEngine !== undefined ? coreEngineParameters(input.answers.coreEngine) : {};
+  const kept = keptOperatorParameters({ part: "control-plane", computed, deployed: input.deployed["control-plane"], declared: selectedBroker ? templateParameterNames(input.release, "control-plane", env) : undefined }).kept;
+  const effectiveCore = { ...kept, ...computed };
+  const gatewayUrl = effectiveCore?.CoreModelGatewayHost ? `https://${effectiveCore.CoreModelGatewayHost}` : "<unconfigured gateway>";
+  const readinessError = `'${`${gatewayUrl}: cannot verify signed-price readiness; install Node.js 22+ and repair the broker or gateway before retrying.`.replaceAll("'", "'\\''")}'`;
+  const guarded = (command: string, part?: DeployPart) => `(node check-readiness.mjs${part === "runtime" ? " --runtime" : ""} || { echo ${readinessError} >&2; exit 1; }) && ${command}`;
+  return {
+    script: exportReadinessScript({ gatewayHost: effectiveCore.CoreModelGatewayHost, agentModel: effectiveCore.CoreAgentModel, brokerStack: environmentStackName(env, "control-plane"), region, selectedBroker }),
+    guarded,
+  };
 }
 
 /**
@@ -69,6 +87,7 @@ export async function writeUpgradeBundle(input: {
     const uploads: string[] = [];
     const sums: string[] = [];
     const steps: string[] = [];
+    const { script, guarded } = upgradeReadiness(input);
     const changeSet = `agentx-upgrade-${version.replaceAll(".", "-")}`;
     await mkdir(join(scratchDir, "packages"), { recursive: true });
     for (const part of input.parts) {
@@ -95,26 +114,27 @@ export async function writeUpgradeBundle(input: {
         await copyFile(release.packagePath(pkg.assetId), join(scratchDir, relative));
         files.push(relative);
         sums.push(`${pkg.sha256}  ${relative}`);
-        uploads.push(`aws s3 cp ${relative} s3://${bucket}/packages/${pkg.assetId}.zip --metadata sha256=${pkg.sha256} --region ${region}`);
+        uploads.push(guarded(`aws s3 cp ${relative} s3://${bucket}/packages/${pkg.assetId}.zip --metadata sha256=${pkg.sha256} --region ${region}`));
       }
       const key = `templates/${version}/${region}/${part}.template.json`;
       const roleFlag = part === "access" ? "" : ` --role-arn ${role}`;
       steps.push(
         `### ${stackName}`, "", "```",
-        `aws s3 cp templates/${part}.template.json s3://${bucket}/${key} --region ${region}`,
-        `aws cloudformation create-change-set --stack-name ${stackName} --change-set-name ${changeSet} --template-url https://${bucket}.s3.${region}.amazonaws.com/${key} --parameters file://parameters/${part}.json --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM${roleFlag} --region ${region}`,
+        guarded(`aws s3 cp templates/${part}.template.json s3://${bucket}/${key} --region ${region}`, part),
+        guarded(`aws cloudformation create-change-set --stack-name ${stackName} --change-set-name ${changeSet} --template-url https://${bucket}.s3.${region}.amazonaws.com/${key} --parameters file://parameters/${part}.json --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM${roleFlag} --region ${region}`, part),
         `aws cloudformation wait change-set-create-complete --stack-name ${stackName} --change-set-name ${changeSet} --region ${region}`,
         `aws cloudformation describe-change-set --stack-name ${stackName} --change-set-name ${changeSet} --region ${region}`,
-        `aws cloudformation execute-change-set --stack-name ${stackName} --change-set-name ${changeSet} --region ${region}`,
+        guarded(`aws cloudformation execute-change-set --stack-name ${stackName} --change-set-name ${changeSet} --region ${region}`, part),
         `aws cloudformation wait stack-update-complete --stack-name ${stackName} --region ${region}`,
         "```", "",
       );
     }
+    await write("check-readiness.mjs", script);
     const readme = [
       `# Upgrade AgentX environment ${env} to ${version}`, "",
       `Environment ${env} (account ${settings.account}, region ${region}) runs ${settings.version}. This bundle upgrades it to ${version}.`,
       "No file here holds a secret. The parameters an upgrade keeps (the operator's settings, the callback signing key and developer sign-in) are marked UsePreviousValue, so they keep their values. Any other parameter set by hand in the console goes back to the template's default, as it does with agentx upgrade.", "",
-      "Run every command below from this bundle's directory.",
+      "Requires Node.js 22+ and the AWS CLI. Run every command below from this bundle's directory. Every write qualifies the selected broker, then checks the gateway for signed prices. Runtime writes also recheck the completed broker. A refusal names the gateway URL; repair it before retrying.",
       `Deploy the stacks in this order, one at a time, each only after the one before it finished: ${input.parts.map((part) => environmentStackName(env, part)).join(", ")}.`,
       "Read each change set before executing it: a replaced or deleted table, user pool, bucket, key or secret loses its data.",
       ...(input.parts.includes("access") ? ["This release changes the access stack. The access stack deploys with your own credentials, without --role-arn; every other stack deploys through the CloudFormation role."] : []), "",

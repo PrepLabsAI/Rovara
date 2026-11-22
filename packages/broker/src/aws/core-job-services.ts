@@ -26,6 +26,9 @@ import { boundedCorePass } from "./core-job-pass.js";
 import { evalCheckEvidencePort } from "../core/ci-evidence/eval-check-setting.js";
 import { createTaskRepositoryEdgesSeam } from "../core/merge/repository-edges.js";
 import { hostedEvidenceBlobs } from "../core-host/hosted-evidence.js";
+import { installCiFixDecider } from "../core/ci-fix/ci-fix.js";
+import { installBranchSyncDeciders } from "../core/branch-sync/branch-sync.js";
+import { registerMergeActionDecider } from "../core/merge/merge-tracking.js";
 
 // One invocation shares recovery pages and ownership reads across all company passes. No cache survives a scheduled run.
 const recoveryPass = new AsyncLocalStorage<{
@@ -118,6 +121,10 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
   if (!OrgIdSchema.safeParse(companyId).success || flow.deps.companyId !== companyId) throw new Error("the core job company does not match its flow");
   const ci = checkedCiReporting({ honest: true, ciMode: options.ciMode });
   if (ci === undefined) throw new Error("the core jobs need a CI mode reader");
+  // The same action slots as the laptop: existing paid IMPLEMENT/SYNC paths and round limits.
+  // Installers are process-idempotent; deciders take the company from each pass's context.
+  installCiFixDecider(registerMergeActionDecider);
+  installBranchSyncDeciders(registerMergeActionDecider);
   const clock = options.now ?? (() => new Date());
   const now = () => clock().getTime();
   // Existing helpers may log error class names supplied by adapters. Deployed job evidence uses fixed words only.

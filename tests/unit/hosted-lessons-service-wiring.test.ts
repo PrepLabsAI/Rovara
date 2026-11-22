@@ -1,3 +1,4 @@
+import { signedRunPriceResponse } from "../support/signed-run-price-fetch.js";
 // Lead 4 L4-HW2: the hosted lessons job and the learning port are what the broker hands the core root. The root, registry, runtime, lessons and the hosted people port are real; only the deployment's adapters
 // (the fake world) and the model gateway (an injected fetch) are stand-ins.
 //   (a) `lessons.service` is returned from the company's services, so the 5-minute `lessons` schedule runs the pass: the reflection queue pump, milestones.deliverDue() retries, the nightly upkeep.
@@ -81,6 +82,11 @@ async function setup(options: { lessons?: string; gateway?: boolean; answer?: (n
   } };
   const seen: Seen[] = [];
   const fetchImpl = vi.fn(async (url: unknown, init?: RequestInit) => {
+    const quote = signedRunPriceResponse(String(url), [A, B], [MODEL, CORE_LEARNING_MODEL_DEFAULT, "claude-haiku-4-5"], world.clock.now, GATEWAY);
+    if (quote !== undefined) {
+      const body = await quote.json() as { runPrice: object };
+      return Response.json({ runPrice: { ...body.runPrice, inputUsdPerMillion: 1, outputUsdPerMillion: 1, cacheWriteUsdPerMillion: 1, cacheReadUsdPerMillion: 1 } });
+    }
     const entry: Seen = { url: String(url), token: (init?.headers as Record<string, string>)["x-api-key"]!, body: JSON.parse(init?.body as string) as Seen["body"] };
     seen.push(entry);
     return await (options.answer ?? (() => new Response(JSON.stringify({ model: MODEL, content: [{ type: "text", text: reply() }] }), { status: 200, headers: { "content-type": "application/json" } })))(seen.length - 1, entry);

@@ -12,6 +12,7 @@ import { createFakeWorld } from "../support/core-host-fakes.js";
 import { taskKeySigner } from "../../packages/broker/src/core-host/gateway-model-access.js";
 import { COMPANY_INSTRUCTIONS_PATH } from "../../packages/broker/src/core-host/company-instructions-http.js";
 import { makeKey, signerOf } from "../unit/policy-hook-fixture.js";
+import { signedRunPriceResponse } from "../support/signed-run-price-fetch.js";
 
 const adapters = vi.hoisted(() => ({ modules: [] as unknown[] }));
 // Only the code adapters are replaced (as in the other two-company runs); company-instructions-http.js is NOT mocked.
@@ -67,6 +68,8 @@ const cidOf = (init: RequestInit | undefined): string => (JSON.parse(Buffer.from
 const asked: string[] = [];
 function stubGateway(answerFor: (company: string) => string = (company) => company): void {
   vi.stubGlobal("fetch", vi.fn(async (url: unknown, init?: RequestInit) => {
+    const price = signedRunPriceResponse(String(url), [A, B], [MODEL]);
+    if (price !== undefined) return price;
     if (String(url) !== `${gateway}${COMPANY_INSTRUCTIONS_PATH}`) throw new Error(`unexpected fetch ${String(url)}`);
     const company = cidOf(init);
     asked.push(company);

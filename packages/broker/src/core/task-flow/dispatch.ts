@@ -156,23 +156,16 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     // The workspace has moved on (closed, or taken by a newer hold): this job is no longer wanted.
     return endAndAck("INTERRUPTED", "the workspace no longer waits for this job");
   }
+  if (await deps.deliveryAccess?.(deps, operation, workspace) === "PARKED") {
+    await queue.ack(message.receiptHandle);
+    return "dropped";
+  }
   // Standing instructions (the company's rules and the project's How we work): read now, before admission and before any machine is started, since a refusal needs no machine and a code host that is down must
   // not wake one on every try. The playbook is read at the commit the task pinned when it started. A refusal that waiting will not mend ends the step with its sentence; a read that may pass is tried again, and when
   // the tries run out the step ends with the true cause (the rules could not be read), never "the machine did not become ready".
-  let standing: StandingInstructionsPayload | undefined;
-  if (operation.dispatch.kind === "task" && deps.standingInstructions !== undefined) {
-    try {
-      standing = await deps.standingInstructions.forOperation({
-        project: workspace.projectName, mode: operation.dispatch.payload["workflowMode"] as PlaybookMode | undefined, ...(workspace.playbookCommit === undefined ? {} : { playbookCommit: workspace.playbookCommit }),
-        ...(workspace.standingPin === undefined ? {} : { pinned: workspace.standingPin }),
-      });
-    } catch (error) {
-      const sentence = error instanceof AgentXError ? error.message.replace(/^[A-Z_]+: /u, "") : undefined;
-      if (sentence !== undefined && error instanceof AgentXError && (error.code === "CONFIG_INVALID" || error.code === "PROCESS_UNAVAILABLE")) return endAndAck("FAILED", sentence);
-      if (sentence !== undefined && error instanceof AgentXError && error.code === "RUNTIME_UNAVAILABLE") return message.receiveCount >= DISPATCH_ATTEMPTS_MAX ? endAndAck("FAILED", sentence) : retryLater();
-      throw error;
-    }
-  }
+  const rules = await dispatchStanding(deps, operation, workspace, message.receiveCount);
+  if (rules.error !== undefined) return rules.retry ? retryLater() : endAndAck("FAILED", rules.error);
+  const standing = rules.standing;
   if (message.receiveCount > DISPATCH_ATTEMPTS_MAX) return endAndAck("FAILED", DISPATCH_EXHAUSTED_ERROR);
 
   // The model of this step (the install's per-step rule), before any machine is started for it: a step no model can serve ends here, with the reason in words, and costs nothing.
@@ -248,6 +241,10 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     if (missing.length > 0) return endAndAck("FAILED", testServicesMissingWords(missing) ?? "this worker is too old to run this step; upgrade it");
     // A block is never dropped: a worker that cannot place it is refused the step (the rules were read above, before any machine was asked for).
     if (standing !== undefined && !health.features.includes(STANDING_INSTRUCTIONS_FEATURE)) return endAndAck("FAILED", "this worker is too old to run this step; upgrade it");
+    if (await deps.deliveryAccess?.(deps, operation, workspace) === "PARKED") {
+      await queue.ack(message.receiptHandle);
+      return "dropped";
+    }
     // The claim: in one transaction, the workspace is still held by this operation at its fence and is not closing, and the operation is handed over.
     // Nothing is issued to the worker (no grant, no capability) before it applies.
     let sent = stepModel?.ok === true ? stepModel : undefined;
@@ -506,4 +503,23 @@ async function endOperation(deps: TaskFlowDeps, operation: OperationRecord, stat
   }
   const fresh = await readOperation(deps, operation.workspaceId, operation.id);
   return fresh !== undefined && isTerminalStatus(fresh.status);
+}
+
+
+async function dispatchStanding(deps: TaskFlowDeps, operation: OperationRecord, workspace: WorkspaceRecord, receiveCount: number): Promise<{ standing?: StandingInstructionsPayload; error?: string; retry?: boolean }> {
+  let standing: StandingInstructionsPayload | undefined;
+  if (operation.dispatch.kind === "task" && deps.standingInstructions !== undefined) {
+    try {
+      standing = await deps.standingInstructions.forOperation({
+        project: workspace.projectName, mode: operation.dispatch.payload["workflowMode"] as PlaybookMode | undefined, ...(workspace.playbookCommit === undefined ? {} : { playbookCommit: workspace.playbookCommit }),
+        ...(workspace.standingPin === undefined ? {} : { pinned: workspace.standingPin }),
+      });
+    } catch (error) {
+      const sentence = error instanceof AgentXError ? error.message.replace(/^[A-Z_]+: /u, "") : undefined;
+      if (sentence !== undefined && error instanceof AgentXError && (error.code === "CONFIG_INVALID" || error.code === "PROCESS_UNAVAILABLE")) return { error: sentence };
+      if (sentence !== undefined && error instanceof AgentXError && error.code === "RUNTIME_UNAVAILABLE") return { error: sentence, retry: receiveCount < DISPATCH_ATTEMPTS_MAX };
+      throw error;
+    }
+  }
+  return standing === undefined ? {} : { standing };
 }

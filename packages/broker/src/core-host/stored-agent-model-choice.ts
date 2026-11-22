@@ -17,10 +17,9 @@ const refused = () => ({ ok: false as const, code: "MODEL_STALE" as const, words
 
 /** Publish only after the broker has checked every saved choice (and its fallback) against this company's list. Fence concurrent policy changes. */
 export async function publishAgentModelChoice(input: { store: Pick<DocumentStore, "get" | "put" | "transact">; companyId: OrgId; offered: unknown; defaultModel: string; now: () => number }): Promise<void> {
-  // DEC 254zzz96 (2): a model's list price is for the page only, never stored: the stored copy holds the names (and reviewer attestation) alone, so a
-  // dispatcher of an older release reads it during a rolling upgrade, and a rollback never meets a priced row it would refuse.
+  // DEC 254zzz96 (2): a model's list price is for the page only, never stored: the stored copy holds names, connection identities and reviewer attestation, with no display tariff. Legacy rows without connection identity still read.
   const parsed = OfferedAgentModelsSchema.parse(input.offered);
-  const offered = { ...parsed, models: parsed.models.map(({ model }) => ({ model })) };
+  const offered = { ...parsed, models: parsed.models.map(({ model, identity }) => ({ model, ...(identity === undefined ? {} : { identity }) })) };
   const policy = await readModelSelectionPolicy(input.store, input.companyId);
   const names = new Set(offered.models.map((model) => model.model));
   if (!names.has(input.defaultModel)) throw new Error(STORED_MODEL_CHOICE_UNAVAILABLE);
@@ -58,7 +57,7 @@ export function storedAgentModelChoice(input: { store: Pick<DocumentStore, "get"
         audit: { stage: () => [], record: async () => undefined }, approvers: { requirement: async () => { throw new Error("read only"); }, verify: async () => { throw new Error("read only"); } },
         now: input.now, capApplies: () => false, prices: { find: () => undefined, findCap: () => undefined }, usable: { unusable: async () => new Set<string>(), markUnusable: async () => undefined },
         seams: { servable: async () => offered.models.map((entry) => agentModelIdentity(entry.model)), installModel: async () => agentModelIdentity(choice.defaultModel),
-          canServe: async (model) => names.has(agentModelName(model) ?? ""), route: async (model) => { const name = agentModelName(model); return name === undefined || !names.has(name) ? undefined : { alias: name, api: "anthropic-messages", catalog: name }; } },
+          canServe: async (model) => names.has(agentModelName(model) ?? ""), route: async (model) => { const name = agentModelName(model); return name === undefined || !names.has(name) ? undefined : { alias: name, api: "anthropic-messages", catalog: name, ...(offered.models.find(entry => entry.model === name)?.identity === undefined ? {} : { identity: offered.models.find(entry => entry.model === name)!.identity! }) }; } },
       });
       const chosen = await service.choose(request);
       return chosen.ok ? chosen : refused();

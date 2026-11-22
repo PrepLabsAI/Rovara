@@ -89,6 +89,11 @@
       "required": true
     },
     {
+      "name": "runPrice",
+      "type": "RunPrice",
+      "required": false
+    },
+    {
       "name": "reviewer",
       "type": "ReviewerGrant",
       "required": false
@@ -121,7 +126,22 @@
       "src": "app",
       "mdl": [
         "claude-sonnet-4-5"
-      ]
+      ],
+      "runPrice": {
+        "companyId": "org_aaaaaaaaaaaaaaaaaaaa",
+        "model": "claude-sonnet-4-5",
+        "provider": "bedrock",
+        "sourceId": "fixture-company-bedrock",
+        "connectionRevision": "fixture-r1",
+        "catalogModel": "us.anthropic.claude-sonnet-4-5-v1:0",
+        "snapshotHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "snapshotVersion": 1,
+        "expiresAt": 1800000060000,
+        "inputUsdPerMillion": 1,
+        "outputUsdPerMillion": 2,
+        "cacheWriteUsdPerMillion": 1,
+        "cacheReadUsdPerMillion": 1
+      }
     },
     "expectedVerifyResult": true
   }

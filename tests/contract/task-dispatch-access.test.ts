@@ -484,3 +484,55 @@ describe("task dispatch access", () => {
     await expect(resumeTaskDispatch({ documentClient: h.db, tableName: "state", now: () => Date.parse("2026-10-11T10:05:00.000Z") }, input as never)).rejects.toThrow("caller revoked");
   });
 });
+
+// Core keeps the same proof policy and pause records, with scoped workspace/outbox keys and a queue message body.
+describe("core delivery access layout", () => {
+  function coreHarness(ttlAttribute = "indexExpiresAt") {
+    const h = harness();
+    const companyId = `org_${"a".repeat(20)}`;
+    const workspacePk = `ORG#${companyId}#WORKSPACE#${WORKSPACE_ID}`;
+    h.current.companyId = companyId;
+    h.db.set(h.current as unknown as Record<string, unknown>);
+    for (const sk of ["META", "DEVELOPER_TASK", `OPERATION#${h.outbox.operationId}`]) h.db.set({ ...h.db.get(`WORKSPACE#${WORKSPACE_ID}`, sk), pk: workspacePk, sk, companyId });
+    const outboxPk = `ORG#${companyId}#OUTBOX#${h.outbox.id}`;
+    h.db.set({ pk: outboxPk, sk: "OUTBOX", entityType: "OUTBOX", companyId, id: h.outbox.id, status: "QUEUED", expiresAt: 100, [ttlAttribute]: 100, body: { v: 1, companyId, workspaceId: WORKSPACE_ID, operationId: h.outbox.operationId } });
+    return { ...h, outboxPk, deps: { documentClient: h.db, tableName: "state", core: { companyId, workspacePk, ttlAttribute }, checkTaskPerson: h.checkTaskPerson } };
+  }
+
+  it("parks durably without expiring the outbox, and restoration alone never resumes", async () => {
+    const h = coreHarness();
+    h.checkTaskPerson.mockRejectedValue(new Error("proof unavailable"));
+    expect(await guardTaskDispatch(h.deps, h.outbox)).toBe("PARKED");
+    expect(h.db.get(h.outboxPk, "OUTBOX")).toMatchObject({ status: "WAITING_FOR_TASK_ACCESS" });
+    expect(h.db.get(h.outboxPk, "OUTBOX")).not.toHaveProperty("expiresAt");
+    expect(h.db.get(h.outboxPk, "OUTBOX")).not.toHaveProperty("indexExpiresAt");
+    expect(h.db.get(`OUTBOX#${h.outbox.id}`, "TASK_ACCESS_PAUSE")).toMatchObject({ operationId: h.outbox.operationId, peopleRevision: 3 });
+    expect(h.db.get(`OUTBOX#${h.outbox.id}`, "OUTBOX")?.status).toBe("QUEUED");
+    h.checkTaskPerson.mockReset();
+    expect(await guardTaskDispatch(h.deps, h.outbox)).toBe("PARKED");
+  });
+
+  it.each(["expiresAt", "queuedUntil"])("removes the store's %s expiry when access is paused", async (ttlAttribute) => {
+    const h = coreHarness(ttlAttribute);
+    h.checkTaskPerson.mockRejectedValue(new Error("proof unavailable"));
+    expect(await guardTaskDispatch(h.deps, h.outbox)).toBe("PARKED");
+    const parked = h.db.get(h.outboxPk, "OUTBOX");
+    expect(parked).toMatchObject({ status: "WAITING_FOR_TASK_ACCESS" });
+    expect(parked).not.toHaveProperty(ttlAttribute);
+    expect(parked).not.toHaveProperty("expiresAt");
+  });
+
+  it("refuses a foreign company's task even when its workspace pointer is locally scoped", async () => {
+    const h = coreHarness();
+    h.db.set({ ...h.current, companyId: `org_${"b".repeat(20)}` });
+    await expect(guardTaskDispatch(h.deps, h.outbox)).rejects.toMatchObject({ name: "TaskDispatchGuardRetryError" });
+    expect(h.db.get(h.outboxPk, "OUTBOX")?.status).toBe("QUEUED");
+  });
+
+  it("does not acknowledge a pause that lost its People revision fence", async () => {
+    const h = coreHarness();
+    h.checkTaskPerson.mockImplementation(async () => { h.db.set({ ...h.db.get(`DEVTASK#${TASK_ID}`, "PEOPLE"), pk: `DEVTASK#${TASK_ID}`, sk: "PEOPLE", revision: 9 }); throw new Error("proof unavailable"); });
+    await expect(guardTaskDispatch(h.deps, h.outbox)).rejects.toMatchObject({ name: "TaskDispatchGuardRetryError" });
+    expect(h.db.get(h.outboxPk, "OUTBOX")?.status).toBe("QUEUED");
+  });
+});

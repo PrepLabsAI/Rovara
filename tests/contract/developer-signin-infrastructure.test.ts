@@ -182,6 +182,11 @@ function withoutBrokerMemberConditionCheck(template: TemplateJson): TemplateJson
 describe("broker membership condition-check grant", () => {
   it("adds only the exact member-key statement to the broker; every other action, resource and principal stays pinned", () => {
     const before = withoutBrokerMemberConditionCheck(namedRaw);
+    // The providers branch also adds this exact capability output. Keep a measured
+    // combined pin, then remove only the asserted output to retain the upstream pin.
+    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("946f06d30e6b8150a1fe4086c119c5d6d22bf0b83c1981cf1e79b3ca4be6913b");
+    expect(before.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
+    delete before.Outputs.ModelRunPriceVersion;
     expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("06108dfc29ca5002c166873dc011428a489f0d524e6c3e197828d805d0052bc7");
     const afterTuples = accessTuples(namedRaw);
     const beforeTuples = accessTuples(before);
@@ -781,7 +786,14 @@ describe("task-token key and membership IAM", () => {
     // Owner DEC 254zzz73 (rule D, a removal): re-pinned for the step-up's removal ONLY: the StepUpEmailSender parameter, the sign-in function's STEP_UP_EMAIL_FROM and DEVELOPER_PASSKEYS variables,
     // its ses:SendEmail statement and its PASSKEYS# Query/DeleteItem statement. The named-templates snapshot diff of the same change is those 68 lines deleted and nothing added, and the
     // effective-tuple pin below drops exactly those three tuples. The old value was ed3d1dc0a51d0607302a7b61ad15bc4613a4fbe86e8031beadbcc58a2b125668.
-    expect(createHash("sha256").update(text).digest("hex")).toBe("7a0c1f8f959f8a5d4546e251f9df1eecf5b8fc63c0de796f45b9c4feda58c5f4");
+    // b28 first-gateway fix: every current broker advertises its capability before a gateway
+    // is configured. Pin the complete new template AND prove this exact output is its only delta.
+    expect(remainder.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
+    expect(createHash("sha256").update(text).digest("hex")).toBe("45381fa27ed39c910005a077c4c7afd1314354136ba6ccbf00ee9e90b6f173de");
+    const beforeFirstGateway = structuredClone(remainder);
+    delete beforeFirstGateway.Outputs.ModelRunPriceVersion;
+    const beforeText = JSON.stringify(beforeFirstGateway).replace(/[a-f0-9]{64}/g, "<asset-hash>");
+    expect(createHash("sha256").update(beforeText).digest("hex")).toBe("7a0c1f8f959f8a5d4546e251f9df1eecf5b8fc63c0de796f45b9c4feda58c5f4");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {

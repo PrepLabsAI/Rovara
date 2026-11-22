@@ -1,3 +1,4 @@
+import { signedRunPriceResponse } from "../support/signed-run-price-fetch.js";
 // Lead 4 L4-D79 (DEC 254zzz79 (3)): Rovara's Slack chat and message router run on the COMPANY's AI through the model gateway, never on Rovara-paid Bedrock.
 //
 // Broker side (aws/slack-model-access.ts): the route that says how a thread's model calls are made. Proved: the token names ONLY the answers step and the workspace's own company (never a caller's), a company
@@ -44,7 +45,7 @@ const identityOf = (teamId: string, project = "payments") => ({ slack: { thread:
 const BOUND: Record<string, string> = { [TEAM_A]: ORG_A, [TEAM_B]: ORG_B, [TEAM_INSTALL]: IMPLICIT };
 
 function wiring(over: Partial<SlackModelAccessWiring> = {}, signer = countingSigner()): { wiring: SlackModelAccessWiring; signer: ReturnType<typeof countingSigner> } {
-  return { signer, wiring: { companyMode: true, companyOf: async (team) => BOUND[team], env: ENV, taskTokens: signer.tokens, now: () => NOW, ...over } };
+  return { signer, wiring: { companyMode: true, companyOf: async (team) => BOUND[team], env: ENV, taskTokens: signer.tokens, now: () => NOW, fetch: async url => signedRunPriceResponse(url, [ORG_A, ORG_B], [ANSWERS_MODEL], NOW, GATEWAY) ?? Response.json({}), ...over } };
 }
 
 describe("the broker's model access for a Slack thread", () => {
@@ -61,7 +62,26 @@ describe("the broker's model access for a Slack thread", () => {
     expect(claims.stp).toBe(ANSWERS_STEP);
     expect(claims.mdl).toEqual([ANSWERS_MODEL]);
     expect(claims.per).toBeUndefined();
-    expect(signer.signed()).toBe(1);
+    expect(signer.signed()).toBe(2);
+    expect(claims.runPrice).toMatchObject({ companyId: ORG_A, model: ANSWERS_MODEL, sourceId: "operator-ai" });
+  });
+
+  it("a no-source company gets a fresh source-bound price on every mint; an absent or estimated quote yields no inference token", async () => {
+    let reads = 0;
+    const { wiring: w } = wiring({ fetch: async url => {
+      reads++;
+      if (reads === 2) return Response.json({ state: "unavailable" });
+      const response = signedRunPriceResponse(url, [ORG_A], [ANSWERS_MODEL], NOW, GATEWAY)!;
+      if (reads === 3) { const body = await response.json() as { runPrice: object }; return Response.json({ runPrice: { ...body.runPrice, estimated: true } }); }
+      return response;
+    } });
+    const first = await askSlackModelAccessForIdentity(w, identityOf(TEAM_A));
+    expect(first.status).toBe("gateway");
+    if (first.status !== "gateway") throw new Error("expected gateway");
+    expect(claimsOf(first.token).runPrice).toMatchObject({ companyId: ORG_A, model: ANSWERS_MODEL });
+    expect(await askSlackModelAccessForIdentity(w, identityOf(TEAM_A))).toEqual({ status: "unavailable" });
+    expect(await askSlackModelAccessForIdentity(w, identityOf(TEAM_A))).toEqual({ status: "unavailable" });
+    expect(reads).toBe(3);
   });
 
   it("two companies never share a token: each workspace's own binding names the company, and every call mints a fresh token", async () => {

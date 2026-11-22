@@ -1,3 +1,4 @@
+import { installGatewayFixture, brokerTemplate } from "../support/install-gateway.js";
 // agentx init end to end through executeCli, with every AWS, GitHub, Slack, browser and clock
 // dependency injected. Nothing here reaches AWS, GitHub or Slack; the GitHub manifest listener is
 // real, on 127.0.0.1.
@@ -29,6 +30,8 @@ import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 import type { SetupServices } from "../../packages/cli/src/setup/services.js";
 import { ADMIN_EMAIL, FOUNDATION_OUTPUTS, fakeAlerts, fakeCognito, fakeControlPlane, fakeRepositories, fakeSlackChannels, setupServices, turn } from "../support/setup-fakes.js";
 
+installGatewayFixture();
+
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
 const tmp = async (prefix: string) => { const dir = await mkdtemp(join(tmpdir(), prefix)); dirs.push(dir); return dir; };
@@ -41,8 +44,9 @@ async function releaseDir(version = "1.2.3", regions = ["us-east-1"]): Promise<s
     await mkdir(join(dir, "templates", region), { recursive: true });
     for (const part of ["access", "foundation", "identity", "control-plane", "runtime", "slack"]) {
       const file = `templates/${region}/${part}.template.json`;
-      await writeFile(join(dir, file), "{}");
-      templates.push({ region, part, file, sha256: sha256("{}") });
+      const content = part === "control-plane" ? brokerTemplate() : "{}";
+      await writeFile(join(dir, file), content);
+      templates.push({ region, part, file, sha256: sha256(content) });
     }
   }
   await writeFile(join(dir, "release.json"), JSON.stringify({
@@ -65,6 +69,8 @@ async function harness(options: { releaseVersion?: string; regions?: string[] } 
   // The control plane creates agentx/<env>/slack with a placeholder; the fake deployer does not, so it exists up front.
   const secrets = memoryInitSecrets({ "agentx/staging/slack": JSON.stringify({ botToken: "unset", signingSecret: "placeholder" }) });
   const deployer = scriptedDeployer(allStackOutputs());
+  // Test replacement for the selected synthesized broker in source-only CDK runs.
+  deployer.qualifyBroker = async () => { JSON.parse(brokerTemplate()); };
   const github = fakeGitHubApi();
   const opened: string[] = [];
   const out: string[] = [];
@@ -157,6 +163,7 @@ const FINISH = ["acme/payments-api", "", true, "payments", false, false, false, 
 const FIRST_RUN_BUDGET_USD = suggestedBudgetUsd(estimateMonthlyCost({ orchestrator: DEFAULT_ORCHESTRATOR_MODEL, classifier: DEFAULT_CLASSIFIER_MODEL, worker: DEFAULT_WORKER_MODEL }));
 // A GitHub App made beforehand, and both Slack secrets, so --yes needs no prompt at all.
 const UNATTENDED = [
+  "--model-gateway-url", "https://gateway.example", "--agent-model", "claude-sonnet-4-6",
   "--yes", "--no-browser", "--github-account", "acme", "--github-app-id", "424242", "--github-installation-id", "777",
   "--github-private-key-env", "GH_KEY", "--slack-bot-token-env", "BOT", "--slack-signing-secret-env", "SIGNING",
   "--slack-client-id", "1111111111.2222222222222", "--slack-client-secret-env", "SLACK_CLIENT_SECRET",
@@ -173,7 +180,7 @@ describe("agentx init", () => {
     expect(initSteps({ github: fakeGitHubApi(), slack: fakeSlackApi() }).map((step) => step.id)).toEqual([...INSTALL_STEP_ORDER]);
   });
 
-  const YES = ["--yes", "--admin-email", ADMIN_EMAIL, "--alert-email", "ops@example.com", "--github-account", "acme", "--channel", "payments"];
+  const YES = ["--model-gateway-url", "https://gateway.example", "--agent-model", "claude-sonnet-4-6","--yes", "--admin-email", ADMIN_EMAIL, "--alert-email", "ops@example.com", "--github-account", "acme", "--channel", "payments"];
   it.each<[string, string[], Partial<InitCliDependencies>, string]>([
     ["model access and the Anthropic form", [], { checks: passingChecks({ converse: async () => { throw Object.assign(new Error("Model use case details have not been submitted for this account"), { name: "ResourceNotFoundException" }); } }) }, "one-time usage form"],
     // "app name" alone also matches the plan's "an app named", which a run that never checked the length printed.
@@ -781,7 +788,7 @@ describe("agentx init", () => {
             synthDirs.push(outDir);
             const artifacts: Record<string, unknown> = {};
             for (const [part, id] of Object.entries(CDK_CONSTRUCT_IDS)) {
-              await writeFile(join(outDir, `${id}.template.json`), JSON.stringify({ Parameters: {} }));
+              await writeFile(join(outDir, `${id}.template.json`), JSON.stringify({ Parameters: {}, Outputs: { ModelRunPriceVersion: { Value: "1" } } }));
               artifacts[id] = { type: "aws:cloudformation:stack", properties: { templateFile: `${id}.template.json`, stackName: environmentStackName("staging", part as never) } };
             }
             await writeFile(join(outDir, "manifest.json"), JSON.stringify({ version: "54.0.0", artifacts }));
@@ -1065,6 +1072,7 @@ async function bundleDir(overrides: Record<string, unknown> = {}): Promise<strin
   const dir = await tmp("agentx-bundle-");
   await writeFile(join(dir, "init-answers.json"), JSON.stringify({
     schemaVersion: 1, env: "staging", region: "us-east-1", account: "123456789012", engine: "templates", releaseVersion: "1.2.3",
+    coreEngine: { modelGatewayUrl: "https://gateway.example", agentModel: "claude-sonnet-4-6" },
     identity: { mode: "cognito" }, models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "us.anthropic.claude-haiku-4-5-20251001-v1:0", worker: "us.anthropic.claude-sonnet-4-6" },
     ...overrides,
   }));
@@ -1207,7 +1215,7 @@ describe("init --export and production (spec decision, 2026-09-27)", () => {
   it("writes a bundle for production when nothing is installed there", async () => {
     const h = await harness();
     const out = await tmp("agentx-export-");
-    const code = await executeCli(["--env", "production", "init", "--export", join(out, "bundle"), "--region", "us-east-1", "--release", h.release, "--account", "123456789012"], { deploy: { store: new MemoryParameterStore(), identity: EXPORTER }, stdout: { write: () => true }, stderr: { write: () => true } });
+    const code = await executeCli(["--env", "production", "init", "--model-gateway-url", "https://gateway.example", "--agent-model", "claude-sonnet-4-6", "--export", join(out, "bundle"), "--region", "us-east-1", "--release", h.release, "--account", "123456789012"], { deploy: { store: new MemoryParameterStore(), identity: EXPORTER }, stdout: { write: () => true }, stderr: { write: () => true } });
     expect(code).toBe(0);
   });
 
@@ -1217,7 +1225,7 @@ describe("init --export and production (spec decision, 2026-09-27)", () => {
     store.values.set("/agentx/production/settings", "{}");
     const err: string[] = [];
     const out = await tmp("agentx-export-");
-    const code = await executeCli(["--env", "production", "init", "--export", join(out, "bundle"), "--region", "us-east-1", "--release", h.release, "--account", "123456789012"], { deploy: { store, identity: EXPORTER }, stdout: { write: () => true }, stderr: { write: (text: string) => err.push(text) } });
+    const code = await executeCli(["--env", "production", "init", "--model-gateway-url", "https://gateway.example", "--agent-model", "claude-sonnet-4-6", "--export", join(out, "bundle"), "--region", "us-east-1", "--release", h.release, "--account", "123456789012"], { deploy: { store, identity: EXPORTER }, stdout: { write: () => true }, stderr: { write: (text: string) => err.push(text) } });
     expect(code).not.toBe(0);
     expect(err.join("")).toContain("environment production is already installed in this account; export a bundle for a new --env");
   });

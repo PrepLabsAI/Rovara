@@ -150,15 +150,15 @@ export const BROKER_NAMES = {
 
 export type BrokerNameKey = keyof typeof BROKER_NAMES;
 
-/** What a setting's value may be: letters, digits and `. _ : -`, at most 64 characters, or empty. */
-export const BROKER_SETTING_VALUE = /^[A-Za-z0-9._:-]{0,64}$/u;
+/** What a setting's value may be: letters, digits and `. _ : / -`, at most 127 characters, or empty; the slash preserves OpenRouter IDs. */
+export const BROKER_SETTING_VALUE = /^[A-Za-z0-9._:/-]{0,127}$/u;
 
 export interface BrokerSettingSpec {
   /** The key in AGENTX_SETTINGS: two letters. */
   readonly code: string;
   /** The variable the broker's code reads the value as. */
   readonly variable: string;
-  /** The value is a host (with an optional port) and the variable gets its https origin, `https://<value>`; an empty value stays empty. A slash cannot be packed, so the scheme is added here. */
+  /** The value is a host (with an optional port) and the variable gets its https origin, `https://<value>`; an empty value stays empty. Hosts stay bare; their https scheme is added here. */
   readonly httpsOrigin?: true;
   /**
    * DEC 254zg (a), 254zk (room in the broker's 4 KB): an on/off switch packed as one character, "1" or "0", which the variable gets as "enabled" or "disabled". Any other packed

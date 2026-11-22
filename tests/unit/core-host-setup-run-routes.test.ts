@@ -3,7 +3,7 @@
 // project; a re-run only proposes; an audit record naming the person for every act; a start refused before anything is written when the company or the install cannot run it.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { orgProjectCatalogKey, projectRevisionKey, type AuditEvent, type AuditSink, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
+import { agentXError, orgProjectCatalogKey, projectRevisionKey, type AuditEvent, type AuditSink, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { setupAgentKey } from "../../packages/broker/src/core/setup-agent/keys.js";
@@ -24,10 +24,10 @@ const project = (name: string): ProjectDefinition => ({
   repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "host-app" }],
 });
 
-function appOver(world: FakeWorld): CoreHostApp {
+function appOver(world: FakeWorld, startModelCheck?: () => Promise<undefined>): CoreHostApp {
   return createCoreHostApp({
     modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
-    runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: HONEST_CI }),
+    runtime: () => ({ ...(startModelCheck === undefined ? {} : { flowOptions: { startModelCheck } }), callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: SERVICES, ciReporting: HONEST_CI }),
   });
 }
 
@@ -43,12 +43,12 @@ const RUN = "/v1/app/projects/payments/setup-agent";
 
 interface Person { caller: DeployedCaller; membership: CompanyMembership; grant?: "developer" | "administrator" }
 
-async function setupWorld(options: { env?: NodeJS.ProcessEnv; gateway?: boolean; standing?: HostedSetupRunWiring["standing"]; audit?: (sink: AuditSink) => AuditSink } = {}) {
+async function setupWorld(options: { startModelCheck?: () => Promise<undefined>; env?: NodeJS.ProcessEnv; gateway?: boolean; standing?: HostedSetupRunWiring["standing"]; audit?: (sink: AuditSink) => AuditSink } = {}) {
   const world = createFakeWorld();
   await register(world, FAKE_COMPANY, "payments");
   await register(world, OTHER, "payments");
   await register(world, OTHER, "ledger");
-  const app = appOver(world);
+  const app = appOver(world, options.startModelCheck);
   const people = new Map<string, Person>();
   const person = (personId: string, companyId: string, role: CompanyMembership["role"], grant?: Person["grant"]): DeployedCaller => {
     const caller: DeployedCaller = { principal: { companyId, personId, displayName: `Name ${personId}`, roles: [role], provider: HOSTED_IDENTITY_PROVIDER }, client: "cloud" };
@@ -193,6 +193,20 @@ describe("hosted setup run: starting, re-running and stopping", () => {
       // Reading still works.
       expect((await call(get(RUN), caller)).status).toBe(200);
     }
+  });
+
+  it("refuses an authorized setup run before any write when signed-price readiness fails", async () => {
+    const { world, app, person, call } = await setupWorld({ startModelCheck: async () => { throw agentXError("RUNTIME_UNAVAILABLE", "signed-price gateway is not ready"); } });
+    const caller = person("p-admin", FAKE_COMPANY, "admin");
+    const flow = (await app.runtimeFor(FAKE_COMPANY)).flow;
+    const writes = [vi.spyOn(world.store, "put"), vi.spyOn(world.store, "update"), vi.spyOn(world.store, "delete"), vi.spyOn(world.store, "transact"), vi.spyOn(flow.deps.audit, "record"), vi.spyOn(flow.deps.audit, "stage")];
+    const answer = await call(post(RUN, { requestId: randomUUID() }), caller);
+    expect(answer.status).toBe(503);
+    expect(answer.body).toEqual({ error: { code: "RUNTIME_UNAVAILABLE", message: "signed-price gateway is not ready" } });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    expect(await pointerOf(world, FAKE_COMPANY)).toBeUndefined();
+    expect(world.spend).toEqual([]);
+    expect(await (await world.queues.queue("task-dispatch")).receive()).toEqual([]);
   });
 
   it("takes a request id and nothing else: limits or a payer from the client are refused, writing nothing", async () => {

@@ -1,3 +1,4 @@
+import { signedRunPriceResponse } from "../support/signed-run-price-fetch.js";
 // Lead 4 L4-HC: the hosted start box classifier. ONE small model call through the answers gateway path (same adapter, same purpose, same company binding as the hosted answers), a fixed token cap, every refusal
 // or missing gateway is `classifier: unavailable`, and the hourly counter is a stored row per company, project and person (app-driven expiry, no table TTL). An injected fetch stands in for the gateway:
 // no network, no key, no real model.
@@ -139,7 +140,10 @@ const refused = (status: number, type: string, reason?: string) =>
 interface Seen { url: string; init: RequestInit }
 function gatewayWorld(answer: (n: number) => Response | Promise<Response> = () => messages(ROUTE("large_change")), env: NodeJS.ProcessEnv = ENV) {
   const seen: Seen[] = [];
-  const fetchImpl = vi.fn(async (url: unknown, init?: RequestInit) => { seen.push({ url: String(url), init: init ?? {} }); return answer(seen.length - 1); }) as unknown as typeof fetch;
+  const fetchImpl = vi.fn(async (url: unknown, init?: RequestInit) => { const quote = signedRunPriceResponse(String(url), [A, B], [MODEL, "claude-haiku-5-5"], Date.now(), GATEWAY); if (quote !== undefined) {
+      const body = await quote.json() as { runPrice: object };
+      return Response.json({ runPrice: { ...body.runPrice, inputUsdPerMillion: 1, outputUsdPerMillion: 1, cacheWriteUsdPerMillion: 1, cacheReadUsdPerMillion: 1 } });
+    } seen.push({ url: String(url), init: init ?? {} }); return answer(seen.length - 1); }) as unknown as typeof fetch;
   const route = hostedStartRoute(() => hostedAnswersModel(env, () => ({ signer: taskKey(), issuer: ISSUER }), fetchImpl));
   const store = new MemoryDocumentStore();
   const roles = new Map<string, SetupRunStanding["access"]>([[`${A}/alpha/ada`, "view"], [`${A}/beta/ada`, "view"], [`${B}/alpha/ada`, "view"], [`${A}/alpha/bob`, "manage"]]);

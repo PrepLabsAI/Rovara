@@ -1,3 +1,4 @@
+import { installGatewayFixture } from "../support/install-gateway.js";
 // Spec 048 FR-031, FR-035, FR-072, SC-006 and SC-015: the page and the terminal ask in the same
 // order and run the same early checks; once the build starts, only Connect GitHub and Slack and Finish wait.
 import { describe, expect, it } from "vitest";
@@ -7,6 +8,8 @@ import { FINISH, FIRST_RUN, harness, SIGNIN, SLACK, TERMINAL_SLACK } from "../su
 import { ADVANCED_QUESTION } from "../../packages/cli/src/init/prompts.js";
 import { SETTINGS_TITLE, settingsFields } from "../../packages/cli/src/init/settings-form.js";
 import { SLACK_VALUES_TITLE, slackValuesFields } from "../../packages/cli/src/init/slack-app.js";
+
+installGatewayFixture();
 
 /** The terminal's questions, with each form's own questions folded into the form's title, as the page asks them. */
 function folded(asked: readonly string[]): string[] {

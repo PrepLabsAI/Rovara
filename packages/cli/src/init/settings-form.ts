@@ -1,3 +1,4 @@
+import { CoreEngineAnswersSchema } from "../deploy/core-engine-answers.js";
 // packages/cli/src/init/settings-form.ts
 // Spec 048 FR-020 to FR-023 and FR-025: the settings as one form. Four fields on the default path
 // (your email, the GitHub owner, the install name, the app name for both apps), then every other
@@ -18,6 +19,7 @@ export const GITHUB_APP_NAME_LIMIT = 34;
 export const SLACK_APP_NAME_LIMIT = 35;
 
 export const SETTINGS_FIELD = {
+  modelGatewayUrl: "modelGatewayUrl", agentModel: "agentModel",
   email: "email", githubAccount: "githubAccount", installName: "installName", appName: "appName",
   engine: "engine", identity: "identity", signin: "signin", modelProvider: "modelProvider",
   orchestratorModel: "orchestratorModel", classifierModel: "classifierModel", workerModel: "workerModel",
@@ -108,6 +110,24 @@ export interface SettingsFieldsInput {
   budgetWhy: string;
 }
 
+function coreProblem(name: "modelGatewayUrl" | "agentModel") {
+  return (value: string): string | undefined => {
+    const result = CoreEngineAnswersSchema.safeParse({ modelGatewayUrl: "https://gateway.example", agentModel: "claude-sonnet-4-6", [name]: value });
+    return result.success ? undefined : result.error.issues[0]?.message;
+  };
+}
+
+function coreSettingsFields(flags: InitFlags, fixed: true | undefined): FormField[] {
+  const fields: FormField[] = [];
+  if ((fixed ?? flags.modelGatewayUrl) === undefined) {
+    fields.push({ name: SETTINGS_FIELD.modelGatewayUrl, question: "Signed-price model gateway URL", flag: "--model-gateway-url", validate: coreProblem("modelGatewayUrl") });
+  }
+  if ((fixed ?? flags.agentModel) === undefined) {
+    fields.push({ name: SETTINGS_FIELD.agentModel, question: "Core agent model", flag: "--agent-model", validate: coreProblem("agentModel") });
+  }
+  return fields;
+}
+
 export function settingsFields(input: SettingsFieldsInput): FormField[] {
   const { flags } = input;
   const fields: FormField[] = [];
@@ -127,6 +147,7 @@ export function settingsFields(input: SettingsFieldsInput): FormField[] {
   unless(fixed, { name: SETTINGS_FIELD.installName, question: "Install name", flag: "--env", defaultValue: input.env, validate: installNameProblem });
   unless(flags.githubAppName, { name: SETTINGS_FIELD.appName, question: "App name for GitHub and Slack (unique on GitHub)", flag: "--github-app-name", defaultValue: "", validate: appNameProblem });
 
+  fields.push(...coreSettingsFields(flags, fixed));
   unless(fixed ?? flags.engine, advanced({ name: SETTINGS_FIELD.engine, question: "Deploy engine", flag: "--engine", defaultValue: "templates", choices: ENGINE_CHOICES }));
   unless(fixed ?? flags.identity, advanced({ name: SETTINGS_FIELD.identity, group: SIGN_IN_GROUP, question: "Sign-in", flag: "--identity", defaultValue: "cognito", choices: IDENTITY_CHOICES }));
   unless(input.signinMethods, advanced({ name: SETTINGS_FIELD.signin, group: SIGN_IN_GROUP, question: "How will developers sign in to AgentX from their AI tools?", flag: "--signin", defaultValue: "slack", choices: SIGNIN_CHOICES }));

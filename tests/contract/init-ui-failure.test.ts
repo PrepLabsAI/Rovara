@@ -1,3 +1,4 @@
+import {  } from "../support/install-gateway.js";
 // tests/contract/init-ui-failure.test.ts
 // Spec 048 FR-060: what a failure screen says, kept in plain words, with raw messages, codes and
 // stack names in the technical details.

@@ -1,6 +1,6 @@
 // rovara loop (#355): the commands that set a repository up and show where its loops stand.
 import * as fs from "node:fs";
-import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -12,7 +12,7 @@ const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
 
 async function setUp() {
-  const root = await mkdtemp(join(tmpdir(), "rovara-loop-cli-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "rovara-loop-cli-")));
   dirs.push(root);
   const home = join(root, "home");
   const checkout = join(root, "checkout");

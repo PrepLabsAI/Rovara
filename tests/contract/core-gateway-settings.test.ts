@@ -2,15 +2,17 @@
 // packed for the broker and the dispatcher (which read ROVARA_CORE_MODEL_GATEWAY_URL = https://<host> and ROVARA_CORE_AGENT_MODEL), set with `agentx config set
 // coreEngine.modelGatewayUrl` / `coreEngine.agentModel`, and kept across upgrades. Before this they could only be set by a template overlay, which every `agentx upgrade` dropped,
 // so the core then refused work. The synthesized templates are checked in core-engine-infrastructure.test.ts ("the model gateway settings").
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { BROKER_SETTINGS, BROKER_SETTING_VALUE, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PATTERN, CORE_ANSWERS_MODEL_VARIABLE, CORE_LEARNING_MODEL_MAX_LENGTH, CORE_LEARNING_MODEL_PATTERN, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_MODEL_GATEWAY_URL_VARIABLE, CORE_OFFERED_MODELS_ADMIN_PATH, isCoreAgentModelId } from "@agentx/contracts";
 import { hydrateBrokerEnvironment, hydrateBrokerSettings } from "../../packages/broker/src/aws/broker-environment.js";
 import { gatewayModelKeysModules, readGatewayModelAccess } from "../../packages/broker/src/core-host/gateway-model-access.js";
 import { runConfigGet, runConfigList, runConfigSet } from "../../packages/cli/src/config/commands.js";
+import { deployEnvironment } from "../../packages/cli/src/deploy/deploy-environment.js";
+import { allStackOutputs, fakeRelease, memoryInitSecrets, sampleAnswers, scriptedDeployer, HOLDER } from "../support/init-fakes.js";
 import { configKey } from "../../packages/cli/src/config/keys.js";
 import { updateStackParameters } from "../../packages/cli/src/deploy/parameter-update.js";
 import { fakeCloudFormation } from "../support/fake-cloudformation.js";
-import { ADMIN_SESSION, fakeChangeRecorder, seeded, services, stacks } from "../support/config-services.js";
+import { ADMIN_SESSION, fakeChangeRecorder, seeded, services as configServices, stacks as configStacks } from "../support/config-services.js";
 import { GATEWAY_CONVERSE_MODELS, GATEWAY_OFFERED_MODELS, offeredAnswer } from "../support/offered-models-fake.js";
 
 const ENV = "staging";
@@ -19,14 +21,37 @@ const GATEWAY = `https://${HOST}`;
 const MODEL = "claude-sonnet-4-6";
 const URL_KEY = "coreEngine.modelGatewayUrl";
 const MODEL_KEY = "coreEngine.agentModel";
+// DEC 254zzz224: config activation requires an installed price-serving broker and
+// a gateway that can enforce signed ceilings. Keep these fixtures local so tests
+// of older installs elsewhere still exercise the missing-capability refusal.
+const stacks: typeof configStacks = (parameters) => {
+  const source = configStacks(parameters);
+  return { describe: async (name) => {
+    const stack = await source.describe(name);
+    return stack === undefined ? undefined : { ...stack, outputs: { ...stack.outputs, ModelRunPriceVersion: "1" } };
+  } };
+};
+const services: typeof configServices = (overrides) => {
+  const configured = configServices(overrides);
+  const transport = configured.fetch!;
+  configured.fetch = async (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : input);
+    if (url.origin === GATEWAY && url.pathname === "/healthz") {
+      expect(init?.redirect).toBe("error");
+      return Response.json({ runPrice: { version: 1, admissionVersion: 1, snapshotVersion: 7 } });
+    }
+    return transport(input, init);
+  };
+  return configured;
+};
 const URL_ALLOWED = `${URL_KEY} must be empty (none) or the model gateway's https origin, such as https://gateway.example.com, with no user name, password, path, query or fragment and a host of at most ${CORE_MODEL_GATEWAY_HOST_MAX_LENGTH} characters; nothing changed`;
-const MODEL_ALLOWED = `${MODEL_KEY} must be empty (none), an Anthropic model id this Rovara knows, such as claude-sonnet-4-6 (not a Bedrock us.anthropic. id), or the exact id of a model the model gateway offers, such as zai.glm-5 (lowercase letters, digits and . _ : - only, at most ${CORE_AGENT_MODEL_MAX_LENGTH} characters); nothing changed`;
+const MODEL_ALLOWED = `${MODEL_KEY} must be empty (none), an Anthropic model id this Rovara knows, such as claude-sonnet-4-6 (not a Bedrock us.anthropic. id), or the exact id of a model the model gateway offers, such as zai.glm-5 (lowercase letters, digits and . _ : - or an exact vendor/model ID, at most ${CORE_AGENT_MODEL_MAX_LENGTH} characters); nothing changed`;
 /** DEC 254g: the strongest GLM model the gateway offers. */
 const GLM = "zai.glm-5";
 /** Well-formed ids no list in Code names: the gateway, not Code, decides whether it offers them. */
-const WELL_FORMED = ["zai.glm-9", "us.zai.glm-5", "global.zai.glm-5.3", "deepseek.v3.2", "zai.glm-5:0", "zai.glm-5.", "qwen.qwen3-coder-480b-a35b-v1:1", "a", `a${"b".repeat(CORE_AGENT_MODEL_MAX_LENGTH - 1)}`];
+const WELL_FORMED = ["zai.glm-9", "us.zai.glm-5", "global.zai.glm-5.3", "deepseek.v3.2", "zai.glm-5:0", "zai.glm-5.", "qwen.qwen3-coder-480b-a35b-v1:1", "a", `a${"b".repeat(63)}`, "openai/gpt-5-mini", `a${"b".repeat(62)}/c${"d".repeat(62)}`];
 /** Malformed ids: refused by the stack pattern itself (no URL, path, credentials, packing separator, space, quote, newline or upper case, and not too long). */
-const MALFORMED = ["https://evil.example/zai.glm-5", "zai/glm-5", "zai glm-5", "zai,glm-5", "zai=glm-5", "zai.glm-5,am=x", "u:p@zai.glm-5", "zai.glm-5 ", " zai.glm-5", "ZAI.GLM-5", "zai.glm-5\n", "zai.glm-5\nam=x",
+const MALFORMED = ["https://evil.example/zai.glm-5", "zai/glm-5/other", "zai glm-5", "zai,glm-5", "zai=glm-5", "zai.glm-5,am=x", "u:p@zai.glm-5", "zai.glm-5 ", " zai.glm-5", "ZAI.GLM-5", "zai.glm-5\n", "zai.glm-5\nam=x",
   "zai\"glm", "zai'glm", "zai;glm", "zai$(id)", "zai`id`", ".zai.glm-5", "-zai", "_zai", ":zai", `a${"b".repeat(CORE_AGENT_MODEL_MAX_LENGTH)}`, "arn:aws:bedrock:us-west-2:123456789012:inference-profile/x"];
 
 describe("the broker reads the packed settings back", () => {
@@ -133,18 +158,18 @@ describe("the config keys", () => {
 });
 
 describe("agentx config set", () => {
-  const controlPlane = (parameters: Record<string, string>) => stacks({ "agentx-staging-control-plane": { CoreEngine: "off", CoreModelGatewayHost: "", CoreAgentModel: "", ...parameters } });
+  const controlPlane = (parameters: Record<string, string>) => stacks({ "agentx-staging-control-plane": { CoreModelGatewayHost: "", CoreAgentModel: "", ...parameters } });
   const changed = (cloudFormation: ReturnType<typeof fakeCloudFormation>) => {
     const create = cloudFormation.calls.find((call) => call.name === "CreateChangeSetCommand")!.input as { Parameters: Array<Record<string, unknown>>; UsePreviousTemplate?: boolean };
     return { create, values: create.Parameters.filter((parameter) => parameter["ParameterValue"] !== undefined) };
   };
 
-  it("sets the agent model, and says the gateway URL is still needed when it is empty", async () => {
+  it("refuses setting a nonempty agent model until the gateway is configured (DEC 254zzz224)", async () => {
     const cloudFormation = fakeCloudFormation({ parameters: { CoreModelGatewayHost: "", CoreAgentModel: "" } });
     const run = services({ store: await seeded(), cloudFormation, stacks: controlPlane({}) });
-    expect((await runConfigSet(run, ENV, { key: MODEL_KEY, value: MODEL, yes: true })).changed).toBe(true);
-    expect(changed(cloudFormation).values).toEqual([{ ParameterKey: "CoreAgentModel", ParameterValue: MODEL }]);
-    expect(run.lines).toContain(`Note: ${URL_KEY} is not set yet; the core engine refuses work until both ${MODEL_KEY} and ${URL_KEY} are set. Next: agentx --env staging config set ${URL_KEY} <value>`);
+    await expect(runConfigSet(run, ENV, { key: MODEL_KEY, value: MODEL, yes: true }))
+      .rejects.toThrow("configure the model gateway before activating the engine");
+    expect(cloudFormation.calls).toEqual([]);
   });
 
   it("clears with none, and says the other one is still set", async () => {
@@ -265,11 +290,50 @@ describe("agentx config set", () => {
       expect(gateway.asked).toEqual([]);
     });
 
+    it("keeps a Claude id on its catalog rule: readiness check only, no offered-model read", async () => {
+      const gateway = withGateway(() => { throw new Error("must not be asked"); });
+      const cloudFormation = fakeCloudFormation({ parameters: { CoreModelGatewayHost: HOST, CoreAgentModel: "" } });
+      const configured = services({ store: await seeded(), cloudFormation, stacks: controlPlane({ CoreModelGatewayHost: HOST }), fetch: gateway.fetch });
+      expect((await runConfigSet(configured, ENV, { key: MODEL_KEY, value: "claude-haiku-4-5", yes: true })).changed).toBe(true);
+      expect(gateway.asked).toEqual([]);
+    });
+
+  });
+
+  it.each([
+    [URL_KEY, GATEWAY, "CoreModelGatewayHost"],
+    [MODEL_KEY, "claude-haiku-4-5", "CoreAgentModel"],
+  ] as const)("enforces broker then signed gateway readiness before activating %s", async (key, value, parameter) => {
+    for (const state of ["old-broker", "unsigned-gateway", "ready"] as const) {
+      const parameters = { CoreModelGatewayHost: key === URL_KEY ? "" : HOST, CoreAgentModel: MODEL };
+      const cloudFormation = fakeCloudFormation({ parameters });
+      const recorder = fakeChangeRecorder();
+      const health: string[] = [];
+      const run = configServices({ store: await seeded(), cloudFormation,
+        stacks: { describe: async () => ({ status: "UPDATE_COMPLETE", parameters, outputs: state === "old-broker" ? {} : { ModelRunPriceVersion: "1" } }) },
+        fetch: async (input, init) => {
+          const url = new URL(input instanceof Request ? input.url : input);
+          if (url.pathname !== "/healthz") return recorder(input, init);
+          health.push(url.toString());
+          return Response.json({ runPrice: { version: 1, snapshotVersion: 7, ...(state === "ready" ? { admissionVersion: 1 } : {}) } });
+        },
+      });
+      const change = runConfigSet(run, ENV, { key, value, yes: true });
+      if (state === "ready") {
+        expect(await change).toEqual({ changed: true });
+        expect(changed(cloudFormation).values).toEqual([{ ParameterKey: parameter, ParameterValue: parameter === "CoreModelGatewayHost" ? HOST : value }]);
+      } else {
+        await expect(change).rejects.toThrow(state === "old-broker" ? "price-serving broker" : "gateway must serve run prices");
+        expect(cloudFormation.calls).toEqual([]);
+        expect(recorder.records).toEqual([]);
+      }
+      expect(health).toEqual(state === "old-broker" ? [] : [`${GATEWAY}/healthz`]);
+    }
   });
 
   it("says nothing changes when the stack already has the value, naming the origin", async () => {
     const cloudFormation = fakeCloudFormation();
-    const run = services({ store: await seeded(), cloudFormation, stacks: controlPlane({ CoreModelGatewayHost: HOST, CoreAgentModel: MODEL }) });
+    const run = services({ store: await seeded(), cloudFormation, stacks: configStacks({ "agentx-staging-control-plane": { CoreModelGatewayHost: HOST, CoreAgentModel: MODEL } }), fetch: async () => { throw new Error("a no-op must not fetch"); } });
     expect((await runConfigSet(run, ENV, { key: URL_KEY, value: GATEWAY, yes: true })).changed).toBe(false);
     expect(run.lines).toContain(`${URL_KEY} is already ${GATEWAY}; nothing to change`);
     expect(cloudFormation.calls).toEqual([]);
@@ -279,14 +343,14 @@ describe("agentx config set", () => {
     const store = await seeded();
     expect((await runConfigGet(services({ store, stacks: controlPlane({ CoreModelGatewayHost: HOST }) }), ENV, URL_KEY)).value).toBe(GATEWAY);
     expect((await runConfigGet(services({ store, stacks: controlPlane({}) }), ENV, URL_KEY)).value).toBe("");
-    expect((await runConfigGet(services({ store, stacks: stacks({ "agentx-staging-control-plane": { CoreEngine: "off" } }) }), ENV, MODEL_KEY)).value).toBe("");
+    expect((await runConfigGet(services({ store, stacks: stacks({ "agentx-staging-control-plane": {} }) }), ENV, MODEL_KEY)).value).toBe("");
     const rows = await runConfigList(services({ store, stacks: controlPlane({ CoreModelGatewayHost: HOST, CoreAgentModel: MODEL }) }), ENV);
     expect(rows.find((row) => row.key === URL_KEY)?.value).toBe(GATEWAY);
     expect(rows.find((row) => row.key === MODEL_KEY)?.value).toBe(MODEL);
   });
 
   it("asks for an upgrade first when the stack has no such parameter", async () => {
-    const cloudFormation = fakeCloudFormation({ parameters: { CoreEngine: "off" } });
+    const cloudFormation = fakeCloudFormation();
     await expect(updateStackParameters({ cloudFormation, stackName: "agentx-staging-control-plane", roleArn: "arn:aws:iam::123456789012:role/x", changes: { CoreModelGatewayHost: HOST }, label: "config", confirm: async () => true, write: () => undefined }))
       .rejects.toThrow("stack agentx-staging-control-plane has no CoreModelGatewayHost parameter; it runs an older AgentX release, so upgrade it with agentx upgrade, then run this again");
   });
@@ -359,4 +423,57 @@ describe("coreEngine.learningModel (the hosted lessons learning model)", () => {
     expect(message).not.toContain("evil.example");
   });
 
+});
+
+// Retaining a configured value must not make an unrelated upgrade depend on readiness.
+describe.each(["templates", "cdk"] as const)("%s upgrade readiness scope", (engine) => {
+  const answers = { env: "staging", region: "us-east-1", account: "123456789012", models: sampleAnswers().models, identity: { mode: "cognito" } as const, github: { account: "acme", appId: "123", privateKeySecretArn: "test" } };
+  const configured = { CoreModelGatewayHost: HOST, CoreAgentModel: MODEL };
+  const setup = async (state: "old-broker" | "unavailable-gateway") => {
+    const store = await seeded();
+    const { readEnvironmentSettings, writeEnvironmentSettings } = await import("../../packages/cli/src/environments/settings.js");
+    const settings = (await readEnvironmentSettings(store, ENV))!;
+    await writeEnvironmentSettings(store, { ...settings, engine, stacks: { ...settings.stacks, access: "agentx-staging-access", identity: "agentx-staging-identity" } });
+    const outputs = allStackOutputs();
+    if (state === "old-broker") delete outputs["agentx-staging-control-plane"]!.ModelRunPriceVersion;
+    const deployer = scriptedDeployer(outputs, Object.keys(outputs));
+    const transport = vi.fn<typeof fetch>(async () => { throw new Error("private upstream detail"); });
+    vi.stubGlobal("fetch", transport);
+    const release = fakeRelease();
+    release.template = () => JSON.stringify({ Parameters: { CoreModelGatewayHost: {}, CoreAgentModel: {} }, Outputs: { ModelRunPriceVersion: { Value: "1" } } });
+    return { store, deployer, release, transport, secrets: memoryInitSecrets() };
+  };
+
+  it.each(["old-broker", "unavailable-gateway"] as const)("refuses unchanged configured settings with an %s", async (state) => {
+    for (const parts of [["access", "control-plane", "runtime"], ["control-plane"], ["runtime"]] as const) {
+      const h = await setup(state);
+      const before = new Map(h.store.values);
+      try {
+        await expect(deployEnvironment({ ...h, mode: "upgrade", engine, holder: HOLDER, answers, parts: [...parts], deployedParameters: async () => configured }))
+          .rejects.toThrow(parts.length === 1 && parts[0] === "runtime" && state === "old-broker" ? "price-serving broker" : "gateway must serve run prices");
+        expect(h.deployer.requests).toEqual([]); expect(h.secrets.values.size).toBe(0); expect(h.store.values).toEqual(before);
+      } finally { vi.unstubAllGlobals(); }
+    }
+  });
+  it.each(["old-broker", "unavailable-gateway"] as const)("refuses an artifact lacking broker prices before gateway or writes (%s)", async (state) => {
+    const h = await setup(state); h.release.template = () => JSON.stringify({ Parameters: { CoreModelGatewayHost: {}, CoreAgentModel: {} } });
+    try {
+      await expect(deployEnvironment({ ...h, mode: "upgrade", engine, holder: HOLDER, answers, parts: ["access", "control-plane", "runtime"], deployedParameters: async () => configured })).rejects.toThrow("release must contain a price-serving broker");
+      expect(h.deployer.requests).toEqual([]); expect(h.secrets.values.size).toBe(0); expect(h.transport).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it("rechecks the final gateway before deploying runtime", async () => {
+    const h = await setup("unavailable-gateway");
+    h.transport.mockImplementation(async (...args: unknown[]) => {
+      if (String(args[0]).includes("changed.example")) throw new Error("unavailable");
+      return Response.json({ runPrice: { version: 1, admissionVersion: 1, snapshotVersion: 7 } });
+    });
+    let reads = 0;
+    try {
+      await expect(deployEnvironment({ ...h, mode: "upgrade", engine, holder: HOLDER, answers, parts: ["control-plane", "runtime"],
+        deployedParameters: async (name) => name.endsWith("control-plane") ? (++reads <= 2 ? configured : { ...configured, CoreModelGatewayHost: "changed.example" }) : {},
+      })).rejects.toThrow("gateway must serve run prices");
+      expect(h.deployer.requests.map(({ part }) => part)).toEqual(["control-plane"]);
+    } finally { vi.unstubAllGlobals(); }
+  });
 });

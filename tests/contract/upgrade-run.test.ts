@@ -1,7 +1,8 @@
+import { installGatewayFixture } from "../support/install-gateway.js";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { GetTemplateCommand } from "@aws-sdk/client-cloudformation";
 import type { ChangeSetChange, DeployRequest, StackDeployer } from "../../packages/cli/src/deploy/deployer.js";
 import type { LoadedRelease } from "../../packages/cli/src/deploy/release.js";
@@ -17,8 +18,10 @@ import { SETTINGS } from "../support/doctor-fakes.js";
 import { allStackOutputs, fakeGitHubApi, fakeRelease, memoryInitSecrets, scriptedDeployer, T0, TEST_PRIVATE_KEY } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
+installGatewayFixture();
+
 const dirs: string[] = [];
-afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
+afterEach(async () => { vi.unstubAllGlobals(); await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
 /** A bundle path in a fresh temporary directory, removed after each test. */
 async function bundleDir(prefix: string): Promise<string> {
   const parent = await mkdtemp(join(tmpdir(), prefix));
@@ -36,13 +39,20 @@ const INSTALLED = {
   access: { artifactBucket: "agentx-staging-access-artifactbucket-abc", cloudFormationRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-cloudformation", operatorRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-operator", pullThroughPrefix: "agentx-staging" },
 };
 
-function release(version = "1.3.0", declared: string[] = ["BudgetMonthlyUsd", "BudgetScope", "SlackThreadTurnsPerMinute"], accessTemplate = ACCESS_TEMPLATE): LoadedRelease {
-  return { ...fakeRelease(version), template: (part) => (part === "access" ? accessTemplate : JSON.stringify({ Parameters: Object.fromEntries(declared.map((name) => [name, {}])) })) };
+function release(version = "1.3.0", declared: string[] = ["CoreModelGatewayHost", "CoreAgentModel", "BudgetMonthlyUsd", "BudgetScope", "SlackThreadTurnsPerMinute"], accessTemplate = ACCESS_TEMPLATE): LoadedRelease {
+  return { ...fakeRelease(version), template: (part) => (part === "access" ? accessTemplate : JSON.stringify({ Outputs: { ModelRunPriceVersion: { Value: "1" } }, Parameters: Object.fromEntries([...new Set([...declared, "CoreModelGatewayHost", "CoreAgentModel"])].map((name) => [name, {}])) })) };
 }
 
 /** The templates engine's contract, faked: it asks request.confirm, and declines the way the engine does. */
+function upgradeStackOutputs() {
+  const outputs = allStackOutputs();
+  outputs["agentx-staging-control-plane"] = { ...outputs["agentx-staging-control-plane"], ModelRunPriceVersion: "1" };
+  return outputs;
+}
+
 function confirmingDeployer(changes: Record<string, ChangeSetChange[]> = {}): StackDeployer & { deployed: string[]; requests: DeployRequest[] } {
-  const inner = scriptedDeployer(allStackOutputs(), Object.keys(allStackOutputs()));
+  const outputs = upgradeStackOutputs();
+  const inner = scriptedDeployer(outputs, Object.keys(outputs));
   return {
     get deployed() { return inner.requests.map((request) => request.stackName); },
     get requests() { return inner.requests; },
@@ -71,10 +81,10 @@ async function harness(overrides: Partial<UpgradeDependencies> & { caller?: stri
   const prepared: string[] = [];
   const github = fakeGitHubApi(overrides.github);
   const githubSecrets = memoryInitSecrets(overrides.githubSecret === null ? {} : { [GITHUB_APP_SECRET]: overrides.githubSecret ?? JSON.stringify({ appId: "123", slug: "agentx-acme-staging", account: "acme", privateKey: TEST_PRIVATE_KEY, webhookSecret: HAND_SET_WEBHOOK_SECRET }) });
-  const controlPlane = overrides.controlPlane ?? { GitHubAppId: "123", GitHubAppPrivateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf", BudgetMonthlyUsd: "250", CallbackSigningKey: "****" };
+  const controlPlane = { CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6", ...(overrides.controlPlane ?? { GitHubAppId: "123", GitHubAppPrivateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf", BudgetMonthlyUsd: "250", CallbackSigningKey: "****" }) };
   const deps: UpgradeDependencies = {
     store,
-    stacks: { describe: async (name): Promise<StackDescription | undefined> => ({ status: "UPDATE_COMPLETE", outputs: allStackOutputs()[name] ?? {}, parameters: name === "agentx-staging-control-plane" ? controlPlane : {} }) },
+    stacks: { describe: async (name): Promise<StackDescription | undefined> => ({ status: "UPDATE_COMPLETE", outputs: upgradeStackOutputs()[name] ?? {}, parameters: name === "agentx-staging-control-plane" ? controlPlane : {} }) },
     cloudFormation: { async send(command: unknown) { if (command instanceof GetTemplateCommand) return { TemplateBody: ACCESS_TEMPLATE }; throw new Error("unexpected"); } },
     identity: { get: async () => ({ account: "123456789012", arn: overrides.caller ?? ADMIN }) },
     loadRelease: async () => release(),
@@ -100,6 +110,101 @@ async function harness(overrides: Partial<UpgradeDependencies> & { caller?: stri
 const options = { env: "staging", yes: true, allowReplace: [] as string[] };
 
 describe("agentx upgrade (FR-042 to FR-044)", () => {
+  it("upgrades a source-only CDK release using its selected synthesized broker", async () => {
+    const h = await harness({ cliVersion: undefined });
+    await writeEnvironmentSettings(h.store, { ...INSTALLED, engine: "cdk" });
+    h.deps.sourceRelease = async () => ({ ...release(), template: () => { throw new Error("source has no published templates"); } });
+    const inner = confirmingDeployer();
+    const qualifyBroker = vi.fn(async () => undefined);
+    const prepare = h.deps.prepare.bind(h.deps);
+    h.deps.prepare = async (input) => ({ ...await prepare(input),
+      declaredParameters: () => new Set(["CoreModelGatewayHost", "CoreAgentModel", "BudgetMonthlyUsd", "BudgetScope"]),
+      deployer: { ...inner, qualifyBroker },
+    });
+    await runUpgrade({ ...options, source: "/selected-source" }, h.deps);
+    // deployEnvironment qualifies before the lock and again under it.
+    expect(qualifyBroker).toHaveBeenCalledTimes(2);
+    expect(inner.requests.map((request) => request.part)).toEqual(["access", "foundation", "identity", "control-plane", "runtime", "slack"]);
+    expect((await readEnvironmentSettings(h.store, "staging"))?.version).toBe("1.3.0");
+  });
+
+  it("rejects the selected CDK broker before gateway, secret or stack writes even when published templates qualify", async () => {
+    const h = await harness({ cliVersion: undefined, sourceRelease: async () => release() });
+    await writeEnvironmentSettings(h.store, { ...INSTALLED, engine: "cdk" });
+    const inner = confirmingDeployer();
+    const qualifyBroker = vi.fn(async () => { throw new Error("selected synthesized broker does not serve run prices"); });
+    const secrets = memoryInitSecrets();
+    const create = vi.spyOn(secrets, "create");
+    const put = vi.spyOn(secrets, "put");
+    const transport = vi.fn(async () => Response.json({ runPrice: { version: 1, admissionVersion: 1, snapshotVersion: 1 } }));
+    vi.stubGlobal("fetch", transport);
+    const prepare = h.deps.prepare.bind(h.deps);
+    h.deps.prepare = async (input) => ({ ...await prepare(input), secrets, deployer: {
+      qualifyBroker,
+      outputs: (name) => inner.outputs(name),
+      deploy: async (request) => {
+        if (request.part === "control-plane") await qualifyBroker();
+        return inner.deploy(request);
+      },
+    } });
+    await expect(runUpgrade({ ...options, source: "/selected-source" }, h.deps)).rejects.toThrow("selected synthesized broker does not serve run prices");
+    expect(inner.requests).toEqual([]);
+    expect(qualifyBroker).toHaveBeenCalledTimes(1);
+    expect(transport).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect(put).not.toHaveBeenCalled();
+    expect((await readEnvironmentSettings(h.store, "staging"))?.version).toBe("1.2.3");
+  });
+
+  it.each(["old-broker", "unsigned-gateway", "unavailable-gateway", "ready"] as const)("upgrades with unchanged core model settings (%s)", async (state) => {
+    const coreSettings = {
+      CoreTaskCapUsd: "500",
+      CoreCompanyDayCapUsd: "800",
+      CorePolicyHook: `{"address":"https://hook.example/answer","jwks":"https://hook.example/jwks.json","thumbprints":["${"a".repeat(43)}"]}`,
+      CoreLessons: "on:org_aaaaaaaaaaaaaaaaaaaa",
+      // Core switch-on blocker (2026-11-17): the model gateway settings an overlay used to carry, now kept like the rest.
+      CoreModelGatewayHost: "gateway.staging.example.dev",
+      CoreAgentModel: "claude-sonnet-4-6",
+      // L4-AM (DEC 254zzn(2)): the hosted answers model is kept across an upgrade too.
+      CoreAnswersModel: "claude-haiku-5-5",
+      // DEC 254zzz58: the hosted lessons learning model is kept across an upgrade too.
+      CoreLearningModel: "claude-haiku-5-5",
+    };
+    const outputs = upgradeStackOutputs();
+    if (state === "old-broker") delete outputs["agentx-staging-control-plane"]!.ModelRunPriceVersion;
+    const deployer = scriptedDeployer(outputs, Object.keys(outputs));
+    const deploy = deployer.deploy.bind(deployer);
+    deployer.deploy = async (request) => ({ ...await deploy(request), ...(request.part === "control-plane" ? { ModelRunPriceVersion: "1" } : {}) });
+    const h = await harness({ deployer, controlPlane: { GitHubAppId: "123", GitHubAppPrivateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf", BudgetMonthlyUsd: "250", CallbackSigningKey: "****", ...coreSettings }, loadRelease: async () => release("1.3.0", ["BudgetMonthlyUsd", ...Object.keys(coreSettings)]) });
+    const transport = vi.fn(async () => {
+      if (state === "unavailable-gateway") throw new Error("gateway unavailable");
+      return Response.json({ runPrice: { version: 1, snapshotVersion: 1, ...(state === "ready" || state === "old-broker" ? { admissionVersion: 1 } : {}) } });
+    });
+    vi.stubGlobal("fetch", transport);
+    if (state === "unsigned-gateway" || state === "unavailable-gateway") {
+      await expect(runUpgrade(options, h.deps)).rejects.toThrow("gateway must serve run prices");
+      expect(h.deployer.requests).toEqual([]);
+      return;
+    }
+    await runUpgrade(options, h.deps);
+    expect(transport).toHaveBeenCalled();
+    expect((await readEnvironmentSettings(h.store, "staging"))?.version).toBe("1.3.0");
+    const deployed = h.deployer.requests.find((request) => request.stackName === "agentx-staging-control-plane")?.parameters;
+    for (const [name, value] of Object.entries(coreSettings)) expect(deployed?.[name], name).toBe(value);
+  });
+
+  it("shows the notes, deploys in upgrade order, records the new version, keeps the budget and runs doctor", async () => {
+    const h = await harness();
+    const result = await runUpgrade(options, h.deps);
+    expect(h.lines).toContain("Upgrading staging from 1.2.3 to 1.3.0 (templates engine)");
+    expect(h.lines).toContain("Release notes for 1.3.0:\n  Fixes.");
+    expect(h.deployer.deployed).toEqual(["agentx-staging-access", "agentx-staging-foundation", "agentx-staging-identity", "agentx-staging-control-plane", "agentx-staging-runtime", "agentx-staging-slack"]);
+    // Ruling F7: the operator's budget survives the upgrade.
+    expect(h.deployer.requests.find((request) => request.stackName === "agentx-staging-control-plane")?.parameters.BudgetMonthlyUsd).toBe("250");
+    expect((await readEnvironmentSettings(h.store, "staging"))?.version).toBe("1.3.0");
+    expect(h.doctorRuns).toEqual(["staging"]);
+    expect(result).toMatchObject({ from: "1.2.3", to: "1.3.0", doctor: { failed: 0 } });
+  });
 
   describe("the GitHub webhook", () => {
 
@@ -268,8 +373,16 @@ describe("agentx upgrade with the cdk engine", () => {
   it("reviews each stack's cdk diff before deploying it", async () => {
     const h = await cdk({ cdkDiff: async (request) => (request.part === "control-plane" ? "Stack agentx-staging-control-plane\nResources\n[-] AWS::S3::Bucket Artifacts Artifacts9F8E7D destroy" : `Stack ${request.stackName}\nThere were no differences`) });
     await expect(runUpgrade({ ...options, source: "/src" }, h.deps)).rejects.toThrow("upgrade stopped: agentx-staging-control-plane would delete Artifacts9F8E7D (AWS::S3::Bucket)");
-    expect(h.deployer.deployed).toContain("agentx-staging-runtime");
+    expect(h.deployer.deployed).not.toContain("agentx-staging-runtime");
     expect(h.deployer.deployed).not.toContain("agentx-staging-control-plane");
+  });
+
+  it("upgrades every stack with admin credentials and runs doctor, which must pass (ruling F4)", async () => {
+    const h = await cdk();
+    const result = await runUpgrade({ ...options, source: "/src" }, h.deps);
+    expect(h.deployer.deployed).toEqual(["agentx-staging-access", "agentx-staging-foundation", "agentx-staging-identity", "agentx-staging-control-plane", "agentx-staging-runtime", "agentx-staging-slack"]);
+    expect(h.doctorRuns).toEqual(["staging"]);
+    expect(result.doctor).toEqual({ failed: 0, warned: 0 });
   });
 
   it("refuses a --to that is not the source's tag before anything deploys, through the real prepare (review M9)", async () => {
@@ -291,11 +404,11 @@ describe("agentx upgrade with the cdk engine", () => {
       loadRelease: async () => release("1.3.0", ["BudgetScope", "SlackThreadTurnsPerMinute"]),
     });
     const prepare = h.deps.prepare.bind(h.deps);
-    h.deps.prepare = async (input) => ({ ...(await prepare(input)), declaredParameters: (part) => new Set(part === "control-plane" ? ["BudgetMonthlyUsd"] : []) });
+    h.deps.prepare = async (input) => ({ ...(await prepare(input)), declaredParameters: (part) => new Set(part === "control-plane" ? ["BudgetMonthlyUsd", "CoreModelGatewayHost", "CoreAgentModel"] : []) });
     await runUpgrade({ ...options, source: "/src" }, h.deps);
     // Exactly the synth's drop: the budget, which the release's template does not declare, is kept.
     expect(h.lines.filter((line) => line.startsWith("config key"))).toEqual(["config key limits.threadTurnsPerMinute (12) is not in release 1.3.0, so the upgrade drops it; nothing replaces it"]);
-    expect(h.lines).toContain("kept agentx-staging-control-plane: BudgetMonthlyUsd; not in this release, so not sent: SlackThreadTurnsPerMinute");
+    expect(h.lines).toContain("kept agentx-staging-control-plane: BudgetMonthlyUsd, CoreModelGatewayHost, CoreAgentModel; not in this release, so not sent: SlackThreadTurnsPerMinute");
     const controlPlane = h.deployer.requests.find((request) => request.stackName === "agentx-staging-control-plane")!;
     expect(controlPlane.parameters.BudgetMonthlyUsd).toBe("250");
     expect(controlPlane.parameters).not.toHaveProperty("SlackThreadTurnsPerMinute");

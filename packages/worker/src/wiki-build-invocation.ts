@@ -1,3 +1,4 @@
+import type { ModelProxyOptions } from "@agentx/model-runtime";
 // The wiki build run as the worker receives it (W3b): builds the real ports of `runWikiBuild` from the task invocation's dependencies and returns the task's result. `run-task.ts` calls it from one early hunk; everything about the
 // run itself is in `wiki-build-run.ts`. The session is read-only: its file tools run in the task sandbox's container on a hosted worker (R56), and in the worker only where the local shell was chosen explicitly.
 import type { WorkerInvocation } from "@agentx/contracts";
@@ -7,13 +8,15 @@ import { createWorkspacePiSession, type PiSessionAdapter, type WorkspaceModelCon
 import type { PreparationManifest } from "./prepare.js";
 import { WorkerOperationCancelledError, type WorkerCancellationController } from "./cancel.js";
 import { runWikiBuild, type WikiSessionParts } from "./wiki-build-run.js";
-import { modelSpendIsMetered, setupModelPrice } from "./setup-agent-price.js";
+import { modelSpendIsMetered, invocationModelPrice } from "./setup-agent-price.js";
 import { taskSandboxFor, taskShellSelection, type TaskShellSelection } from "./task-sandbox.js";
 
 export interface WikiInvocationDependencies {
   rootPath: string;
   model: WorkspaceModelConfiguration;
   piAdapter?: PiSessionAdapter | undefined;
+  /** The proxy used by the selected adapter, supplied only by worker session resolution. */
+  meteredProxy?: ModelProxyOptions | undefined;
   eventSink: EventBatchSink;
   cancellationController?: WorkerCancellationController | undefined;
   /** The broker's wiki build callback, with this invocation's own capability (callback-client.ts). Without it the worker cannot run a wiki build. */
@@ -49,9 +52,10 @@ export async function runWikiBuildInvocation(
   if (dependencies.wikiBuild === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the worker cannot reach the control plane's wiki build callback");
   const environment = dependencies.environment ?? process.env;
   // Money: a wiki build is metered by the model proxy (the broker's spend ledger) and priced from the catalog; without either it does not start.
-  // Hotfix 0.5.33: the boot-time proxy (laptop) OR the invocation's own model route (hosted, metered through the control plane); neither refuses.
-  if (!modelSpendIsMetered(environment, invocation.payload)) throw agentXError("RUNTIME_UNAVAILABLE", "this install has no model proxy, so AgentX did not build the wiki (its spending could not be counted)");
-  const price = setupModelPrice(dependencies.model, invocation.payload.modelRoute);
+  // Routed sessions must match the selected proxy adapter; the legacy laptop path retains its environment gate.
+  if (!modelSpendIsMetered(environment, invocation.payload, dependencies)) throw agentXError("RUNTIME_UNAVAILABLE", "this install has no model proxy, so AgentX did not build the wiki (its spending could not be counted)");
+  const price = await invocationModelPrice(dependencies.model, invocation.payload.modelRoute, dependencies.meteredProxy);
+  if (price === undefined || !Number.isFinite(price.inputPerMTok) || !Number.isFinite(price.outputPerMTok)) throw agentXError("RUNTIME_UNAVAILABLE", "AgentX does not know this model's price, so it did not start the wiki build");
   const callback = dependencies.wikiBuild;
   const events = new EventBatcher(dependencies.eventSink);
   const conversationId = invocation.payload.conversationId;

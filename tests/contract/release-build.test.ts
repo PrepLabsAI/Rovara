@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONTEXT_ENV, CONTEXT_OVERFLOW_LOCATION_ENV } from "aws-cdk-lib/cx-api";
+import { CORE_AGENT_MODEL_PATTERN, CORE_AGENT_MODEL_MAX_LENGTH } from "@agentx/contracts";
 import type { ContainerImageAssetMetadataEntry } from "@aws-cdk/cloud-assembly-schema";
 import { beforeAll, describe, expect, it } from "vitest";
 import { accumulateAsset, assetSignatureMismatch, buildRelease, parseBuildArgs, type PackageAccumulator } from "../../scripts/release/build.js";
@@ -60,6 +61,11 @@ describe("release builder", () => {
     for (const t of a.manifest.templates) {
       expect(t.file).toBe(`templates/${t.region}/${t.part}.template.json`);
       expect(sha(await readFile(join(a.out, t.file)))).toBe(t.sha256);
+      if (t.part === "control-plane") {
+        const template = JSON.parse(await readFile(join(a.out, t.file), "utf8")) as { Outputs: Record<string, unknown>; Parameters: Record<string, unknown> };
+        expect(template.Outputs.ModelRunPriceVersion).toMatchObject({ Value: "1" });
+        expect(template.Parameters.CoreAgentModel).toMatchObject({ AllowedPattern: CORE_AGENT_MODEL_PATTERN, MaxLength: CORE_AGENT_MODEL_MAX_LENGTH });
+      }
     }
     for (const p of a.manifest.packages) {
       expect(sha(await readFile(join(a.out, p.file)))).toBe(p.sha256);

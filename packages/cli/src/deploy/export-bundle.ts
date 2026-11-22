@@ -1,7 +1,10 @@
+import { exportReadinessScript } from "./export-readiness.js";
+import { coreEngineParameters } from "./core-engine-answers.js";
+import { CoreEngineAnswersSchema } from "./core-engine-answers.js";
 // The export bundle: everything a platform team needs to deploy the access stack themselves, with
 // their own AWS credentials and no AWS call ever made by our CLI. It writes a self-contained
-// directory: the access stack's template and parameters, a deploy script that uses the AWS CLI
-// only, the policy the platform team attaches to run that script, and the inline policies every
+// directory: the access stack's template and parameters, a deploy script that uses Node.js and
+// the AWS CLI, the policy the platform team attaches to run that script, and the inline policies every
 // later stack's roles carry (with this environment's real account, region and partition, so they
 // can be reviewed as plain JSON). Every part's template and parameters are included, in install
 // order, so the bundle also documents the full deploy — even though only the access stack's is
@@ -46,7 +49,7 @@ export interface ExportBundleInput {
 /** The answers an export knows, written to `init-answers.json` so the AgentX operator's
  * `agentx init --resume --from-bundle` asks only the rest (alerts, budget, GitHub, Slack). Answers
  * only, never a secret: the same fields `InitAnswers` holds, which never holds one either. */
-export type BundleAnswers = Pick<InitAnswers, "schemaVersion" | "env" | "region" | "account" | "engine" | "releaseVersion" | "identity" | "models" | "permissionsBoundaryArn" | "operatorPrincipalArn" | "operatorExternalId">;
+export type BundleAnswers = Pick<InitAnswers, "schemaVersion" | "env" | "region" | "account" | "engine" | "releaseVersion" | "identity" | "models" | "coreEngine" | "permissionsBoundaryArn" | "operatorPrincipalArn" | "operatorExternalId">;
 
 /** A bundle is always the templates engine: the platform team deploys published templates. The
  * boundary and principal patterns are `InitAnswersSchema`'s, so a bundle answer the resume accepts
@@ -60,6 +63,7 @@ export const BundleAnswersSchema: z.ZodType<BundleAnswers> = z.object({
   releaseVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
   identity: IdentityAnswersSchema,
   models: ModelsAnswersSchema,
+  coreEngine: CoreEngineAnswersSchema.optional(),
   permissionsBoundaryArn: z.string().regex(/^arn:aws[a-z-]*:iam::\d{12}:policy\/.+$/).optional(),
   operatorPrincipalArn: z.string().regex(OPERATOR_PRINCIPAL_PATTERN).optional(),
   operatorExternalId: z.string().regex(OPERATOR_EXTERNAL_ID_PATTERN).optional(),
@@ -84,6 +88,7 @@ function bundleAnswersFor(answers: DeployAnswers, release: LoadedRelease): Bundl
     releaseVersion: release.manifest.version,
     identity: answers.identity,
     models: answers.models,
+    ...(answers.coreEngine === undefined ? {} : { coreEngine: answers.coreEngine }),
     ...(answers.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: answers.permissionsBoundaryArn }),
     ...(answers.operatorPrincipalArn === undefined ? {} : { operatorPrincipalArn: answers.operatorPrincipalArn }),
     ...(answers.operatorExternalId === undefined ? {} : { operatorExternalId: answers.operatorExternalId }),
@@ -351,7 +356,7 @@ function accessDeployerStatements(scope: { env: string; partition: string; regio
 
 /**
  * The bash script the platform team runs: the six-step change-set flow (create, wait, describe the
- * changes, execute, wait, enable termination protection) using the AWS CLI only, with a
+ * changes, execute, wait, enable termination protection) using Node.js and the AWS CLI, with a
  * y/N confirmation before executing (skipped with `--yes`) and recovery guidance on failure.
  *
  * The change set name follows the same pinned format the templates deploy engine uses
@@ -375,7 +380,7 @@ function operatorResumeCommand(env: string, region: string): string {
 /** One wording for a failed or refused change set on a new stack, shared by the script and README. */
 const NEW_STACK_RECOVERY = "delete the change set, then delete the stack only if it is still REVIEW_IN_PROGRESS with no resources";
 
-function deployAccessScript(scope: { env: string; region: string; version: string }): string {
+function deployAccessScript(scope: { env: string; region: string; version: string; gatewayUrl: string }): string {
   const stackName = environmentStackName(scope.env, "access");
   const dashedVersion = scope.version.replaceAll(".", "-");
   const region = scope.region;
@@ -452,6 +457,12 @@ not_executed() {
 }
 
 cd "$(dirname "\${BASH_SOURCE[0]}")"
+
+# Readiness failure is deliberate: do not enter AWS recovery or create a change set.
+if ! node check-readiness.mjs; then
+  echo "Signed-price readiness failed for ${scope.gatewayUrl}; install Node.js 22+ and repair the selected broker or gateway before retrying." >&2
+  exit 1
+fi
 
 echo "Creating change set \${CHANGE_SET_NAME} for stack \${STACK_NAME} in ${region}..."
 aws cloudformation create-change-set \\
@@ -553,6 +564,8 @@ changed permissions boundary, which needs \`iam:UpdateAssumeRolePolicy\` and
 one: a separate, broader admin action outside this bundle, not something \`deploy-access.sh\` does.
 
 ## Deploying
+
+Requires Node.js 22+ and the AWS CLI. The script qualifies the selected broker template, then checks the gateway for signed prices before creating anything.
 
 Run \`./deploy-access.sh\` with AWS CLI credentials that can create the resources above (see
 \`policies/access-deployer.json\` for exactly what that principal needs). Pass \`--yes\` to skip the
@@ -758,6 +771,7 @@ export async function writeExportBundle(input: ExportBundleInput): Promise<Expor
   const partition = answers.partition ?? "aws";
 
   assertReleaseCoversRegion(release, region);
+  const core = coreEngineParameters(answers.coreEngine);
   await assertClaimable(dir);
   const initAnswers = bundleAnswersFor(answers, release);
 
@@ -825,7 +839,8 @@ export async function writeExportBundle(input: ExportBundleInput): Promise<Expor
     await write("policies/default-boundary.json", policyDocument(defaultBoundaryStatements(policyScope)));
     await write("policies/access-deployer.json", policyDocument(accessDeployerStatements({ env, partition, region, account })));
 
-    await write("deploy-access.sh", deployAccessScript({ env, region, version: release.manifest.version }), { mode: 0o755 });
+    await write("check-readiness.mjs", exportReadinessScript({ gatewayHost: core.CoreModelGatewayHost, agentModel: core.CoreAgentModel, brokerStack: environmentStackName(env, "control-plane"), region, selectedBroker: true }));
+    await write("deploy-access.sh", deployAccessScript({ env, region, version: release.manifest.version, gatewayUrl: `https://${core.CoreModelGatewayHost}` }), { mode: 0o755 });
     await write("README.md", readme({ env, region, account, order }));
     await write(BUNDLE_ANSWERS_FILE, `${JSON.stringify(initAnswers, null, 2)}\n`);
 

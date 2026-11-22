@@ -35,6 +35,8 @@ export interface DeployRequest {
 }
 
 export interface StackDeployer {
+  /** Read-only qualification of the broker artifact this deployer will install. */
+  qualifyBroker?(): Promise<void>;
   deploy(request: DeployRequest): Promise<StackOutputs>;
   /** undefined when the stack does not exist */
   outputs(stackName: string): Promise<StackOutputs | undefined>;

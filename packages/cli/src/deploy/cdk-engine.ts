@@ -1,3 +1,4 @@
+import { assertGatewayRunPrices, assertBrokerArtifactRunPrices } from "./gateway-price-preflight.js";
 // The cdk deploy engine: an alternative to the templates engine that shells out to `cdk deploy`
 // from a release-tagged source checkout, one stack at a time. Chosen for an install/upgrade that
 // needs the flexibility of a real CDK deploy (drift reconciliation, asset diffing) instead of the
@@ -163,6 +164,7 @@ function cdkArguments(input: { env: string; region: string; identityMode: "cogni
   // --no-install: only the CDK CLI `npm ci` installed from the release's own lockfile, never one npx
   // would otherwise download on the fly.
   const args = ["--no-install", "cdk", command, CDK_CONSTRUCT_IDS[request.part], "--exclusively", ...cdkAppArguments(input)];
+  if (request.part === "control-plane" && request.parameters.CoreModelGatewayHost) args.push("-c", `CoreModelGatewayHost=${request.parameters.CoreModelGatewayHost}`);
   // cdk diff ignores --parameters (CDK 2.1142 warns that they apply only to deploy).
   if (command === "diff") return args;
   // The CDK CLI looks `--parameters` up by the physical stack name (parameterMap[stack.stackName]),
@@ -193,10 +195,23 @@ export function cdkDeployer(input: {
   region: string;
   identityMode: "cognito" | "oidc";
   outputsDir: string;
+  brokerTemplate?: () => string;
+  deployedParameters?: (stackName: string) => Promise<Record<string, string> | undefined>;
   outputs: (stackName: string) => Promise<StackOutputs | undefined>;
 }): StackDeployer {
+  const qualifyBroker = async () => {
+    const template = input.brokerTemplate ?? (await import("./cdk-source.js").then(({ synthDeclaredParameters }) => synthDeclaredParameters(input))).brokerTemplate;
+    assertBrokerArtifactRunPrices(template());
+  };
   return {
+    qualifyBroker,
     async deploy(request: DeployRequest): Promise<StackOutputs> {
+      if (request.part === "control-plane") {
+        await qualifyBroker();
+        const host = request.parameters.CoreModelGatewayHost;
+        if (!host || !request.parameters.CoreAgentModel) throw agentXError("CONFIG_INVALID", "coreEngine gateway and agent model must be configured before worker activation");
+        await assertGatewayRunPrices(`https://${host}`);
+      }
       const outputsFile = join(input.outputsDir, `${request.part}.json`);
       const args = [...cdkArguments(input, request, "deploy"), "--require-approval", "never", "--outputs-file", outputsFile, ...(request.roleArn === undefined ? [] : ["--role-arn", request.roleArn])];
 

@@ -23,6 +23,7 @@ import { commitWorkflow } from "../../packages/broker/src/core/task-flow/stage-m
 import { workflowDependenciesAllowed } from "../../packages/broker/src/core/work-breakdown/parallel-parts.js";
 import { createFakeWorld } from "../support/core-host-fakes.js";
 import { makeKey, signerOf } from "./policy-hook-fixture.js";
+import { signedRunPriceResponse } from "../support/signed-run-price-fetch.js";
 
 const adapters = vi.hoisted(() => ({ modules: [] as unknown[] }));
 vi.mock("../../packages/broker/src/core-host/code-modules.js", async (original) => ({ ...await original<object>(), codeAdapterModules: () => adapters.modules }));
@@ -43,6 +44,7 @@ const ANSWERS = [{ questionId: "q1", optionId: "a" }, { questionId: "q2", text: 
 async function world() {
   const w = createFakeWorld();
   w.clock.now = Date.now();
+  vi.stubGlobal("fetch", async (input: string | URL | Request) => signedRunPriceResponse(input, [A, B], ["claude-sonnet-4-6"], w.clock.now) ?? Response.json({}, { status: 404 }));
   adapters.modules = w.modules.filter((module) => ["storage", "queue", "worker-machines", "object-storage", "code-host", "check-runner", "secrets"].includes(module.point));
   // The sign-in table's live memberships; the project grants are the defaults ("developer").
   const members = new Map<string, { companyId: OrgId; role: "owner" | "admin" | "member" }>([[personA, { companyId: A, role: "owner" }], [personB, { companyId: B, role: "owner" }], [commenterA, { companyId: A, role: "member" }]]);
