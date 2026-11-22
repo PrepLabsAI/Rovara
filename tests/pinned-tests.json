@@ -17,21 +17,21 @@
     },
     {
       "path": "tests/contract/admin-change-plans.test.ts",
-      "minimumTests": 9,
+      "minimumTests": 12,
       "reason": "Keep destructive-action impact warnings and private projections before confirmation. Base floor 9; RESTORE-8F1BE0A80 item 2 must restore the reviewed floor 12 trimmed by 8f1be0a80.",
       "decision": "DEC 254zzz333",
       "restoreTarget": 12
     },
     {
       "path": "tests/contract/admin-change-routes.test.ts",
-      "minimumTests": 38,
+      "minimumTests": 43,
       "reason": "Preview writes nothing; stale review and lost authority refuse apply. Base floor 38; RESTORE-8F1BE0A80 item 2 must restore the reviewed floor 43 trimmed by 8f1be0a80.",
       "decision": "DEC 254zzz333",
       "restoreTarget": 43
     },
     {
       "path": "tests/contract/signin-workspace-hint.test.ts",
-      "minimumTests": 9,
+      "minimumTests": 15,
       "reason": "Only verified signed-in identity supplies workspace metadata; revoked access is refused. Base floor 9; RESTORE-8F1BE0A80 item 1 must restore the reviewed floor 15 trimmed by 8f1be0a80.",
       "decision": "DEC 254zzz333",
       "restoreTarget": 15
@@ -51,7 +51,7 @@
     },
     {
       "path": "tests/unit/core-host-dev-routes.test.ts",
-      "minimumTests": 57,
+      "minimumTests": 66,
       "reason": "Production route dispatch retains dedicated server-read registrations.",
       "decision": "DEC 254zzz333",
       "restoreTarget": 59
@@ -160,9 +160,7 @@
       "minimumTests": 11,
       "reason": "Always-run regression ratchet; preserve its runnable declarations.",
       "decision": "DEC 254zzz333"
-    }
-  ],
-  "pendingRestore": [
+    },
     {
       "path": "tests/contract/access-recheck-merged-signin.test.ts",
       "minimumTests": 11,
@@ -178,7 +176,9 @@
       "decision": "DEC 254zzz333",
       "restoringLane": "RESTORE-8F1BE0A80 item 2",
       "deletedBy": "8f1be0a80"
-    },
+    }
+  ],
+  "pendingRestore": [
     {
       "path": "tests/unit/connection-impact.test.ts",
       "minimumTests": 15,
