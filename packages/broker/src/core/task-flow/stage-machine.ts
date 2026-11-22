@@ -199,7 +199,7 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
       kind: "update",
       key: taskKey(task.taskId),
       ops: [...(workflowWrite === undefined ? [] : workflowWrite.ops), change.set("updatedAt", now), ...(fed === undefined ? [] : fed.ops)],
-      condition: when.and(when.notExists("closedAt"), when.notExists("closeOperationId"), ...(input.workflow === undefined ? [] : [when.eq(["workflow", "revision"], input.workflow.current.revision), ...(workflowWrite?.guard ?? [])]), ...(fed === undefined ? [] : [fed.condition])),
+      condition: when.and(when.eq("companyId", deps.companyId), when.notExists("closedAt"), when.notExists("closeOperationId"), ...(input.workflow === undefined ? [] : [when.eq(["workflow", "revision"], input.workflow.current.revision), ...(workflowWrite?.guard ?? [])]), ...(fed === undefined ? [] : [fed.condition])),
     },
     holdWorkspaceItem(workspace, built.operation.id, now),
     ...built.items,
@@ -419,6 +419,15 @@ const STEP_NAMES: Record<DispatchRowRecord["kind"], string> = {
   UNDERSTAND: "step that reads the request", PLAN: "planning step", REPLAN: "planning step", CRITIQUE: "plan check", CRITIC_REPLAN: "revision of the plan", IMPLEMENT: "coding step", REVIEW: "reviews", PUBLISH: "pull request", SYNC: "merge of the base branch", AUTOFIX: "automatic fix",
 };
 
+async function blockDispatchFailure(deps: TaskFlowDeps, row: DispatchRowRecord, reason: string): Promise<void> {
+  const task = await readTask(deps, row.taskId);
+  if (row.kind === "REVIEW" && task?.workflow?.revision === row.workflowRevision && task.workflow.feedbackReview?.status === "COLLECTING") {
+    const { failQueuedReview } = await import("../pr-feedback/recovery.js");
+    if (await failQueuedReview(deps, task, reason)) return;
+  }
+  await blockTaskWorkflow(deps, row.taskId, row.workflowRevision, reason);
+}
+
 export interface DispatchSweepReport { started: number; waiting: number; stale: number; failed: number; blocked: number }
 
 /** The recovery sweep for rows left behind (and the way a row becomes due after a backoff). Safe to run from a timer; a repeat of a step is the first one's duplicate. */
@@ -432,7 +441,7 @@ export async function runDueDispatches(deps: TaskFlowDeps, options: { limit?: nu
       else if (result === "STALE") report.stale += 1;
       else if (Date.parse(iso(deps)) - Date.parse(row.createdAt) > WAIT_ROW_MAX_SECONDS * 1_000) {
         // The workspace never became free for this step: it is not going to without help, so the owner is told instead of the row waiting for ever.
-        await blockTaskWorkflow(deps, row.taskId, row.workflowRevision, "Rovara could not start the next step because the workspace did not become ready; retry it.");
+        await blockDispatchFailure(deps, row, "Rovara could not start the next step because the workspace did not become ready; retry it.");
         await deps.store.transact([resolveRowItem(deps, row.taskId, row.workflowRevision)]);
         report.blocked += 1;
       } else {
@@ -445,7 +454,7 @@ export async function runDueDispatches(deps: TaskFlowDeps, options: { limit?: nu
       log(deps, { event: "task_flow.dispatch_row_failed", taskId: row.taskId, kind: row.kind, attempts, error: error instanceof AgentXError ? error.code : "unknown" });
       try {
         if (attempts >= DISPATCH_ROW_ATTEMPTS_MAX) {
-          await blockTaskWorkflow(deps, row.taskId, row.workflowRevision, `Rovara could not start the ${STEP_NAMES[row.kind]}: ${message}`.slice(0, 500));
+          await blockDispatchFailure(deps, row, `Rovara could not start the ${STEP_NAMES[row.kind]}: ${message}`.slice(0, 500));
           await deps.store.transact([resolveRowItem(deps, row.taskId, row.workflowRevision)]);
           report.blocked += 1;
         } else {
@@ -562,7 +571,7 @@ export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationR
   }
 
   // The steps after the plan: coding, a rerun of the checks, the reviews, the publication and the push of a fix (lane L10).
-  if (operation.kind === "publish" || operation.kind === "maintain" || operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS" || operation.workflowMode === "REVIEW" || operation.workflowMode === "PLAN_CRITIQUE") {
+  if (operation.kind === "publish" || operation.kind === "maintain" || operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS" || operation.workflowMode === "REVIEW" || operation.workflowMode === "FEEDBACK_REVIEW" || operation.workflowMode === "PLAN_CRITIQUE") {
     if (deps.buildSteps !== undefined) await deps.buildSteps.onEnded(deps, task, operation, ended);
     return;
   }

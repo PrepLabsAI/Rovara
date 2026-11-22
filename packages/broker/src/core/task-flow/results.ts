@@ -1,14 +1,14 @@
 import { workspaceKeys, locateWorkspace } from "./workspace-location.js";
 // Lane L6a, task flow core: a worker's terminal result. This is the entry the callback API calls once it has checked the worker's capability
 // and read what the worker sent (Cloud's `terminal-result.ts`, whose artifact reading is not ported: it hands the flow a `StepOutcome`).
-import { agentXError, change, when, type TransactItem } from "@agentx/contracts";
+import { agentXError, companyScoped, change, when, type Condition, type TransactItem } from "@agentx/contracts";
 import type { TaskFlowDeps } from "./deps.js";
-import { preparationResultItems } from "./prepare-result.js";
+import { preparationResultItems, releasePreparationAdmission } from "./prepare-result.js";
 import { taskIndexKey } from "./keys.js";
 import { runWatchKey } from "./run-watch-rows.js";
 import type { OperationResult, StepOutcome } from "./outcome.js";
 import { readTask, taskViewOf } from "./reads.js";
-import { fromDocument, toDocument, type OperationRecord, type TaskPointerRecord } from "./records.js";
+import { fromDocument, toDocument, type OperationRecord, type TaskPointerRecord, type WorkspaceRecord } from "./records.js";
 import { onOperationEnded, readWorkspace } from "./stage-machine.js";
 import { learnModelNotEnabled } from "../model-selection/learn-not-enabled.js";
 import { iso } from "./support.js";
@@ -34,20 +34,22 @@ const RESULT_ATTEMPTS = 3;
  * recorded answers `duplicate` and runs the next move again, which is a no-op when the first run took it: a crash between the two commits
  * is thereby mended by the worker's own retry.
  */
-export async function recordOperationResult(deps: TaskFlowDeps, result: OperationResult): Promise<{ duplicate: boolean }> {
+type PreparationRecovery = { before: string; outboxStatus: "DEAD" | "absent" };
+
+export async function recordOperationResult(deps: TaskFlowDeps, result: OperationResult, preparationRecovery?: PreparationRecovery): Promise<{ duplicate: boolean }> {
   let operation = await readOperation(deps, result.workspaceId, result.operationId);
   if (operation === undefined || operation.companyId !== deps.companyId) throw agentXError("NOT_FOUND", "operation not found");
   if (operation.fence !== result.fence) throw agentXError("STALE_FENCE", "this result is for an older hold of the workspace");
   // A worker is cancelled only by a cancel the flow asked for. A worker that reports itself cancelled unasked has not finished its step, so it
   // reads as a failure (which blocks the workflow for the owner), never as a quiet end that would leave the step running for ever.
-  const unaskedCancel = result.status === "CANCELLED" && operation.status !== "CANCEL_REQUESTED" && !isTerminalStatus(operation.status);
-  const status: OperationResult["status"] = unaskedCancel ? "FAILED" : result.status;
-  const error = unaskedCancel ? (result.error ?? "the worker stopped the job without being asked") : result.error;
+  const { status, error } = normalizedResult(operation, result);
   let duplicate = isTerminalStatus(operation.status);
   for (let attempt = 1; !duplicate && attempt <= RESULT_ATTEMPTS; attempt += 1) {
     const workspace = await readWorkspace(deps, operation.workspaceId);
     const now = iso(deps);
     const holds = workspace !== undefined && workspace.activeOperationId === operation.id && workspace.fence === operation.fence;
+    const recovery = recoveryFence(deps, operation, workspace, preparationRecovery);
+    if (!recovery.allowed) return { duplicate: true };
     const location = await workspaceKeys(deps, operation.workspaceId);
     const items: TransactItem[] = [{
       kind: "update",
@@ -57,7 +59,7 @@ export async function recordOperationResult(deps: TaskFlowDeps, result: Operatio
         ...(error === undefined ? [] : [change.set("error", error.slice(0, 16_384))]),
         ...(result.outcome === undefined ? [] : [change.set("result", toDocument({ outcome: result.outcome }))]),
       ],
-      condition: when.and(when.eq("fence", operation.fence), when.not(when.or(when.eq("status", "SUCCEEDED"), when.eq("status", "FAILED"), when.eq("status", "CANCELLED"), when.eq("status", "INTERRUPTED")))),
+      condition: when.and(...recovery.operation, when.eq("fence", operation.fence), when.not(when.or(when.eq("status", "SUCCEEDED"), when.eq("status", "FAILED"), when.eq("status", "CANCELLED"), when.eq("status", "INTERRUPTED")))),
     }];
     // The operation is no longer watched for a lost machine (`sweepLostRuns`); an end that does not pass here (a close) leaves the row for the sweep to drop.
     items.push({ kind: "delete", key: runWatchKey(deps.companyId, operation.workspaceId, operation.id) });
@@ -70,12 +72,14 @@ export async function recordOperationResult(deps: TaskFlowDeps, result: Operatio
           change.set("activeOperationId", null), change.set("updatedAt", now),
           change.set("status", prepared ? (status === "SUCCEEDED" ? "READY" : "PREPARATION_FAILED") : "READY"),
         ],
-        condition: when.and(when.eq("activeOperationId", operation.id), when.eq("fence", operation.fence)),
+        condition: when.and(...recovery.workspace, when.eq("activeOperationId", operation.id), when.eq("fence", operation.fence)),
       });
     }
+    items.push(...recovery.items);
     items.push(...await preparationResultItems(deps, operation, status));
     const applied = await deps.store.transact(items);
     if (applied.applied) break;
+    if (preparationRecovery !== undefined) return { duplicate: true };
     // Lost a race: read again. The operation may have been ended by another path.
     const fresh = await readOperation(deps, operation.workspaceId, operation.id);
     if (fresh === undefined) throw agentXError("NOT_FOUND", "operation not found");
@@ -92,6 +96,7 @@ async function finishRecordedResult(deps: TaskFlowDeps, ended: OperationRecord, 
   // The model proxy frees the operation's tokens and spend record now, not at its next refused call (a repeat of the result does it again, harmlessly).
   try { deps.onOperationEnded?.(ended.id); } catch { /* a proxy's bookkeeping never fails a result */ }
   await deps.secondReview?.operationEnded(ended);
+  await releasePreparationAdmission(deps, ended);
   // A step that failed because its model could not be called (not enabled for the account, or not priced under a limit) teaches the next choice to leave that model out for a while. Best effort: it never changes the result.
   await learnModelNotEnabled(deps.usableModels, { model: ended.modelChoice?.model }, ended.status, ended.error, ended.result);
   // The next move is made from what was RECORDED, never from a repeat's own words: a late retry cannot turn a failure into a success.
@@ -117,4 +122,22 @@ export async function syncTaskIndex(deps: TaskFlowDeps, workspaceId: string): Pr
   } catch {
     // The index is a convenience for lists.
   }
+}
+
+function normalizedResult(operation: OperationRecord, result: OperationResult): { status: OperationResult["status"]; error: string | undefined } {
+  const unaskedCancel = result.status === "CANCELLED" && operation.status !== "CANCEL_REQUESTED" && !isTerminalStatus(operation.status);
+  const status: OperationResult["status"] = unaskedCancel ? "FAILED" : result.status;
+  const error = unaskedCancel ? (result.error ?? "the worker stopped the job without being asked") : result.error;
+  return { status, error };
+}
+
+/** Extra read predicates and their atomic equivalents for the internal scheduled orphan repair. */
+function recoveryFence(deps: TaskFlowDeps, operation: OperationRecord, workspace: WorkspaceRecord | undefined, recovery: PreparationRecovery | undefined): { allowed: boolean; operation: Condition[]; workspace: Condition[]; items: TransactItem[] } {
+  if (recovery === undefined) return { allowed: true, operation: [], workspace: [], items: [] };
+  const allowed = workspace?.status === "PREPARING" && workspace?.activeOperationId === operation.id && workspace?.fence === operation.fence && operation.kind === "prepare" && operation.status === "ACCEPTED" && operation.deliveredAt === undefined && Date.parse(operation.createdAt) < Date.parse(recovery.before);
+  return { allowed,
+    operation: [when.eq("kind", "prepare"), when.eq("status", "ACCEPTED"), when.notExists("deliveredAt"), when.eq("createdAt", operation.createdAt)],
+    workspace: [when.eq("status", "PREPARING")],
+    items: [{ kind: "check", key: { pk: companyScoped(deps.companyId, `OUTBOX#${operation.id}`), sk: "OUTBOX" }, condition: recovery.outboxStatus === "DEAD" ? when.eq("status", "DEAD") : when.absent() }],
+  };
 }

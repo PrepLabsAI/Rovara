@@ -214,7 +214,7 @@ export async function runTaskCanvasCloseout(
     const attempted = pendingState({ terminalState: closeout.terminalState, digest: closeout.manifestDigest,
       key: closeout.manifestRef, now: closeout.preparedAt,
       canvases: closeout.canvases.map((item) => item.lineageKey === entry.lineageKey
-        ? { ...item, status: "PENDING" as const, attempts: item.attempts + 1, attemptedAt: attemptAt }
+        ? { ...item, status: "PENDING" as const, attempts: Math.min(1000, item.attempts + 1), attemptedAt: attemptAt }
         : item) });
     if (!await store.saveCloseout(task.taskId, attempted, workflow.revision)) return persistPreparationFailure({ store, taskId: task.taskId,
       workflowRevision: workflow.revision, terminalState: terminal, previousAttempts: priorAttempt?.attempts ?? 0,

@@ -14,6 +14,7 @@ import { approvedCodingPlan, reviewPlanOf } from "../../packages/broker/src/core
 import { WORKSPACE_DIFF_ARTIFACT, artifactRowKey, reportedChangedFiles } from "../../packages/broker/src/core/build-step/changed-files.js";
 import { evalRequestForChecks } from "../../packages/broker/src/core/proof/eval-round-reader.js";
 import { earlierPlans } from "../../packages/broker/src/core/plan/context.js";
+import { workflowDocumentTextReader } from "../../packages/broker/src/core/plan/document.js";
 import { PLAN_UNREADABLE, approvedGraphOf, breakdownForApproval } from "../../packages/broker/src/core/work-breakdown/plan-graph.js";
 import { planContextOf, readWorkspace } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { operationKey, taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -134,6 +135,26 @@ const approved = (artifact: WorkflowArtifact) => ({ artifacts: [artifact], decis
 const PLAN_TEXT = "# The plan\n\nChange one file.\n";
 const settle = async <T>(run: () => Promise<T>): Promise<{ value: T } | { error: string }> => run().then((value) => ({ value }), (error: unknown) => ({ error: typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : (error as Error).name }));
 
+describe("the core text reader used by thread documents and closeout", () => {
+  it.each([false, true])("reads only accessible task artifacts (fallback: %s)", async (fallback) => {
+    const w = await world();
+    const { own, foreign } = await documents(w, "markdown", "plan.md", PLAN_TEXT);
+    const read = workflowDocumentTextReader(fallback ? {} : w.h.deps, w.hosted());
+    expect(await read(own.objectKey)).toBe(PLAN_TEXT);
+    const reads = [...w.stored.asked];
+    expect(await read(foreign.objectKey)).toBeUndefined();
+    expect(w.stored.asked).toEqual(reads);
+  });
+
+  it("a refusal by the configured reader never retries against the fallback", async () => {
+    const w = await world();
+    const { own } = await documents(w, "markdown", "plan.md", PLAN_TEXT);
+    const read = workflowDocumentTextReader({ artifacts: { get: async () => undefined } }, w.hosted());
+    expect(await read(own.objectKey)).toBeUndefined();
+    expect(w.stored.asked).toEqual([]);
+  });
+});
+
 describe("every other reader of the flow's artifacts, with the hosted reader", () => {
   it("approvedCodingPlan and reviewPlanOf (the coding step, the reviewers, the PR body, setup offers, mocks): the own plan reads; another company's pointer is today's refusal", async () => {
     const w = await world();
@@ -223,7 +244,10 @@ const READERS: Record<string, string> = {
   "core/design-review/steps.ts": "DORMANT on hosted: no design review is wired",
   "core/plan/check.ts": "DORMANT on hosted: the plan check runs only for a task with the Rovara Code program (understandFirst), which no hosted root sets",
   "core/plan/context.ts": "ON: a structured planning run's earlier documents (a revision, a Full task's design from its requirements)",
-  "core/plan/document.ts": "ON: every approval surface reads the structured plan through it (hosted approvals of a structured plan were refused as unreadable)",
+  "core/plan/document.ts": "ON: every approval surface reads the structured plan through it; thread document/Canvas/closeout reads use its text reader over the same company-checked flow reader or fallback",
+  "core/pr-feedback/inputs.ts": "ON: owner-approved task requirements and scoped owner notes for the read-only PR critic",
+  "core/pr-feedback/review.ts": "ON: exact operation-folder critic report, bounded and digest checked before settlement",
+  "core/pr-feedback/validate.ts": "ON: company/task-owned immutable report and bundle validation for feedback selection and worker approval",
   "core/proof/eval-round-reader.ts": "ON: the eval request (first pass reads nothing; later passes read the saved rounds, bounded and operation-folder checked)",
   "core/setup-agent/plan-update.ts": "ON: at merge, the approved plan's setup changes become the setup-update offer (wrapper of approvedCodingPlan)",
   "core/sessions/ask-context-load.ts": "NOT the flow's reader: takes its own `artifacts` (not wired on a hosted root here; the hosted ask surface is separate)",

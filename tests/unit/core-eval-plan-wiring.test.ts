@@ -1,3 +1,4 @@
+import type { DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
 // EVAL-PLAN-CORE-WIRING (DEC 253c, 253j(1), 253k): the deployed (AWS) core callback layer answers a CHECKS run's `eval-plan` callback from the trusted eval plan source, with the
 // approver's CURRENT role from the hosted members reader (live `COMPANY_MEMBER#` membership in this company, the broker's project grant). The gateway's word for the approver's roles is
 // never the role, and a stored approval of a person who is no longer a member gives no grant. Real broker root, registry and callbacks over fakes; the gateway is a fake fetch.
@@ -86,6 +87,8 @@ async function world() {
   }));
   const key = makeKey("t".repeat(16));
   const root = createBrokerCoreRoot({
+    // This fixture isolates the existing root behavior; core-task-people-hosted/identity tests exercise creation's real identity proof.
+    taskRules: () => ({ taskPeopleStart: async () => [] }) as unknown as DeveloperTaskRouteDependencies,
     env: { ROVARA_CORE_MODEL_GATEWAY_URL: GATEWAY, ROVARA_CORE_AGENT_MODEL: "claude-sonnet-4-6" },
     documentClient: client, stateTableName: "state", signInTableName: "signin", callbackSigningKey: SIGNING, repositoryGrantKey: Buffer.alloc(32, 1),
     repositoryCredential: async () => ({ token: "fake" }), codeModules: () => ({}) as never,

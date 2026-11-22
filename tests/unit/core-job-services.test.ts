@@ -1,3 +1,4 @@
+import type { DocumentStore } from "@agentx/contracts";
 import { expect, it, vi } from "vitest";
 import { sweepOpenSessions } from "../../packages/broker/src/core/sessions/sweep.js";
 import { deliverAttention } from "../../packages/broker/src/core/notify/attention.js";
@@ -169,4 +170,17 @@ it("shares one recovery-index read across company passes in a scheduled invocati
     for (const service of services) expect(await service["merge-tracking"].pass({ budgetMs: 1000 })).toMatchObject({ attempted: 1 });
   });
   expect(query.mock.calls.filter(([input]) => input.pk === "WORKFLOW_MERGE_RECOVERY")).toHaveLength(1);
+});
+
+it("retries thread refreshes from the real company session pass even when the summary is unchanged", async () => {
+  const { host, ORG } = await import("../support/service-host.js");
+  const { createBrokerCoreServices } = await import("../../packages/broker/src/aws/core-job-services.js");
+  const w = await host();
+  const threadRefresh = vi.fn(async (_orgId: string, _sessionId: string, store: DocumentStore) => { expect(store).not.toBe(w.h.store); });
+  const services = createBrokerCoreServices({ companyId: ORG, flow: w.h.flow, registry: w.registry, ciMode: async () => "their_ci_fix" as const, people: w.people,
+    summary: { facts: w.sessions.deps.facts, cost: w.sessions.deps.cost }, threadRefresh, now: () => new Date(w.clock.ms) });
+  await services["session-sweep"].pass({ budgetMs: 1000 });
+  await services["session-sweep"].pass({ budgetMs: 1000 });
+  expect(threadRefresh).toHaveBeenCalledTimes(2);
+  expect(threadRefresh.mock.calls.every(([org]) => org === ORG)).toBe(true);
 });

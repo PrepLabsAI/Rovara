@@ -1,3 +1,4 @@
+import type { DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
 import { createConfiguredModelRuntime } from "../../packages/model-runtime/src/index.js";
 import { operationModelProxy } from "../../packages/worker/src/design-review-sessions.js";
 // L6 composition contract: real broker root, registry, dispatch host, callbacks, actions and jobs over fake adapters.
@@ -79,6 +80,8 @@ async function world(options: { noSigner?: boolean; offeredModels?: OfferedModel
   } };
   const key = makeKey("t".repeat(16));
   const root = createBrokerCoreRoot({
+    // This fixture isolates the existing root behavior; core-task-people-hosted/identity tests exercise creation's real identity proof.
+    taskRules: () => ({ taskPeopleStart: async () => [] }) as unknown as DeveloperTaskRouteDependencies,
     env: { ROVARA_CORE_MODEL_GATEWAY_URL: gateway, ROVARA_CORE_AGENT_MODEL: MODEL, ROVARA_CORE_LESSONS: "on" },
     documentClient: client, stateTableName: "state", signInTableName: "signin", callbackSigningKey: SIGNING, repositoryGrantKey: Buffer.alloc(32, 1),
     repositoryCredential: async () => ({ token: "fake" }), codeModules: () => ({}) as never,

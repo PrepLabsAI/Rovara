@@ -11,6 +11,7 @@ import { isTerminalStatus, readOperation, recordOperationResult } from "./result
 import { runWatchPartition, runWatchKey, type RunWatchRecord } from "./run-watch-rows.js";
 import { fromDocument, type OperationRecord } from "./records.js";
 import { acceptedCloseForRun } from "./close-recovery-state.js";
+import { sweepHistoricalPreparations } from "./prepare-recovery.js";
 import { sweepPreparations } from "./prepare-watch.js";
 import { iso, log } from "./support.js";
 import { endUnflushed, spendStopOverdue, spendStopReason, type SpendStopCode } from "./money-stop.js";
@@ -56,6 +57,8 @@ export async function sweepLostRuns(deps: TaskFlowDeps, options: { limit?: numbe
       log(deps, { event: "task_flow.run_watch_failed", error: error instanceof AgentXError ? error.code : error instanceof Error ? error.name : "unknown" });
     }
   }
+  // Historical repair is best-effort and must never preempt the lost-run / spend-stop backstop.
+  await sweepHistoricalPreparations(deps, options).catch(() => { log(deps, { event: "task_flow.prepare_recovery_failed" }); });
   return report;
 }
 

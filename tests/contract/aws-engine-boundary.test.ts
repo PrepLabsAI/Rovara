@@ -432,6 +432,29 @@ const detailRow = async (dev: Awaited<ReturnType<typeof coreWorld>>["dev"], who:
 
 
 describe("the AWS readers see only workflow rows", () => {
+  it.each(["RUNNING", "SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED", "CLOSED", "STARTING"] as const)("only adds startupReason when the listed index status is STARTING (index: %s)", async (status) => {
+    const { world, db, task, dev, workspaceReads } = await coreWorld();
+    await publish(world, db, task.taskId);
+    db.set({ ...indexRowOf(task.taskId, MAYA), status });
+    const writes: unknown[] = [];
+    db.onWrite((change) => writes.push(change));
+
+    // The live core view is still starting, even when the index lists another status.
+    const single = await dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}`);
+    expect(single.status).toBe(200);
+    expect(single.body).toMatchObject({ task: { status: "STARTING", startupReason: "own-machine-starting" } });
+    const row = await detailRow(dev, MAYA, task.taskId);
+    expect(row?.status).toBe(status);
+    if (status === "STARTING") expect(row).toHaveProperty("startupReason", "own-machine-starting");
+    else expect(row).not.toHaveProperty("startupReason");
+
+    const ordinary = await dev(MAYA, "GET", "/v1/dev/tasks");
+    expect(ordinary.status).toBe(200);
+    expect(DeveloperTaskDetailedListResponseSchema.parse(ordinary.body).tasks[0]).not.toHaveProperty("startupReason");
+    expect(writes).toEqual([]);
+    expect(workspaceReads()).toEqual([]);
+  });
+
   it("the task actions (READERS.md: workspace, operations, artifacts, pull requests, failed publications) answer nothing for a core task's workspace", async () => {
     const { actions, task } = await coreWorld();
     await expect(actions.workspace(task.workspaceId)).rejects.toMatchObject({ code: "NOT_FOUND" });

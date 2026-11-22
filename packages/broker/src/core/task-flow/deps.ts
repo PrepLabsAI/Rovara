@@ -16,6 +16,7 @@ import type {
   CheckEntry,
   DocumentStore,
   OrgId,
+  ObjectStorage,
   PlanDocument,
   InvocationModelRoute,
   ModelIdentifier,
@@ -322,6 +323,8 @@ export interface TaskFlowDeps {
   machineEnvironment?: Readonly<Record<string, string>>;
   /** Lane L10: reads the documents workers saved (the approved plan the coding step is given, the plan the reviewers are shown). */
   artifacts?: ArtifactReader;
+  /** Immutable PR feedback evidence, supplied by both host roots. This is an adapter dependency, never a feature switch. */
+  feedbackArtifacts?: Pick<ObjectStorage, "put" | "get">;
   /**
    * Lane L10, Rovara's own fixing of a block (the owner's rule: a code fault is sent back to coding by itself at most twice, one hiccup of the checks is retried once, anything unclear is asked
    * about). `capUsd` bounds what automatic rounds may add to a task whose spend is known; `taskSpendUsd` says what it is (undefined: nothing is priced, which Code treats as 0 so the

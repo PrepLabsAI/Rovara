@@ -8,16 +8,24 @@
 //   planCarded        the plan's approval card was already posted in the thread for this plan, so the needs-you reminder is not sent there again.
 //   setupPausedTold   the same for the setup pause message.
 //   doneToldInThread  the thread's own "done" line is told by the thread's milestones, only where those run (the company has milestones).
-import type { AdapterRegistry, DocumentStore, OrgId } from "@agentx/contracts";
+import type { AdapterRegistry, DocumentStore, OrgId, WorkflowSnapshot } from "@agentx/contracts";
 import { channelThreadHandler, planCardPosted, setupPausedPosted } from "../core/channel/thread-notices.js";
 import type { CodeMilestoneHandler } from "../core/milestones/milestones.js";
+import { PendingMilestoneDelivery } from "../core/milestones/pending-delivery.js";
 import type { ChannelMemberRule } from "../core/channel/company.js";
 import type { AttentionDeliveryDependencies } from "../core/notify/attention.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 import { hostedDecisionService } from "./deployed-decisions.js";
-import { readTaskThread } from "../core/channel/threads.js";
+import { readTaskThread, type TaskThread } from "../core/channel/threads.js";
 import { projectPageUrl, sessionPageUrl } from "../core/decisions/open-path.js";
 import { developerIdOf } from "../core/sessions/create.js";
+import { threadDocumentLink, threadCanvasCloseout } from "./thread-documents.js";
+import { createCompanyArtifactReader } from "./company-artifact-reader.js";
+import { workflowDocumentTextReader } from "../core/plan/document.js";
+import { workflowThreadRefresh } from "../core/channel/workflow-notices.js";
+import { taskKey } from "../core/task-flow/keys.js";
+import { workflowMessage } from "../developer/workflow-messages.js";
+import { agentSessionKey } from "@agentx/contracts";
 import type { ChatThreads } from "./chat-threads.js";
 
 export interface HostedThreadNotificationInputs {
@@ -84,6 +92,12 @@ export interface HostedThreadHandlerInputs {
 export function hostedThreadHandler(input: HostedThreadHandlerInputs): CodeMilestoneHandler {
   const { threads, registry, companyId, deps } = input;
   const gate = hostedDecisionService({ deps, registry, companyId, now: input.clock }).gate;
+  const documents = { store: registry.require("storage"), blobs: registry.require("object-storage"), readArtifact: workflowDocumentTextReader(deps, createCompanyArtifactReader({ store: registry.require("storage"), blobs: registry.require("object-storage"), companyId })), companyId, now: input.now, ...(threads.documentFailure === undefined ? {} : { documentFailure: threads.documentFailure.bind(threads) }), ...(threads.createPlanCanvas === undefined ? {} : { createPlanCanvas: threads.createPlanCanvas.bind(threads) }) };
+  const commandFor = (thread: TaskThread) => {
+    const adapter = threads.adapterFor(companyId, thread.conversation.channel);
+    if (adapter === undefined) throw new Error("thread adapter is unavailable");
+    return { adapter, channel: thread.conversation.channel, orgId: companyId, companyOf: threads.companyOf, now: input.now };
+  };
   return channelThreadHandler({
     store: registry.require("storage"), registry: { get: ((point: string, name: string) => (point === "channel" ? threads.adapterFor(companyId, name) : undefined)) as never },
     now: input.now, companyOf: threads.companyOf, isMember: input.isMember,
@@ -91,6 +105,36 @@ export function hostedThreadHandler(input: HostedThreadHandlerInputs): CodeMiles
     // The task's page on the web app: its session's when it has one, else its project's (the same rule as a decision card's "Open", `taskOpenPath`).
     taskUrl: (_taskId, task) => (task?.sessionId === undefined ? projectPageUrl(input.origin(), task?.project) : sessionPageUrl(input.origin(), task.sessionId)),
     setupUrl: (project) => projectPageUrl(input.origin(), project),
+    document: async (taskId, workflow, thread) => {
+      const task = await documents.store.get(taskKey(taskId));
+      if (task?.["companyId"] !== companyId) return {};
+      const sessionId = typeof task["sessionId"] === "string" ? task["sessionId"] : undefined;
+      return threadDocumentLink(documents, { taskId, title: typeof task["title"] === "string" ? task["title"] : "Plan" }, workflow, thread.conversation.space, thread.conversation.tenant, sessionId === undefined ? undefined : sessionPageUrl(input.origin(), sessionId));
+    },
+    closeout: async (taskId, thread) => {
+      const task = await documents.store.get(taskKey(taskId));
+      const workflow = task?.["workflow"] as WorkflowSnapshot | undefined;
+      const words = workflow?.stage === "MERGED" || workflow?.stage === "CLOSED" ? workflowMessage({ taskId, workflow })?.text : undefined;
+      if ((workflow?.canvasLineage?.length ?? 0) === 0) return words;
+      // A pending deletion must keep the milestone due. The thread handler posts
+      // the final notice independently before propagating this retryable failure.
+      const cleanup = await threadCanvasCloseout(documents, commandFor(thread), thread.conversation.tenant, taskId);
+      if (cleanup.status !== "COMPLETE") throw new PendingMilestoneDelivery("Canvas closeout remains pending");
+      return words;
+    },
     log: input.log,
   });
+}
+
+/** Every session refresh retries the current workflow's additional thread notice. */
+export function hostedWorkflowThreadRefresh(input: HostedThreadHandlerInputs) {
+  const refreshFor = (store: DocumentStore) => workflowThreadRefresh({ store, companyId: input.companyId, now: input.now,
+    messageOf: (message) => input.threads.messageOf?.(message), registry: hostedChannelView(input.threads, input.registry, input.companyId), companyOf: input.threads.companyOf, isMember: input.isMember,
+    taskUrl: (_taskId, task) => task?.sessionId === undefined ? undefined : sessionPageUrl(input.origin(), task.sessionId), log: input.log });
+  return async (orgId: OrgId, sessionId: string, store: DocumentStore) => {
+    if (orgId !== input.companyId) return;
+    const session = await store.get(agentSessionKey(orgId, sessionId, "META"));
+    const subject = session?.["subject"] as { kind?: string; taskId?: string } | undefined;
+    if (subject?.kind === "task" && typeof subject.taskId === "string") await refreshFor(store)(orgId, sessionId, subject.taskId);
+  };
 }

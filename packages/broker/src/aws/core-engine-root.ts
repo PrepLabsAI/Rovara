@@ -2,6 +2,7 @@ import { createStoreProjectSource } from "../core/task-flow/project-source.js";
 import { developerTaskPolicy } from "@agentx/contracts";
 import { prepareCoreShare } from "./core-task-sharing.js";
 import { runPriceReader } from "../core-host/run-price-http.js";
+import { withFeedbackMergeReads } from "../core/pr-feedback/service.js";
 import { accessRetryRoute } from "./core-access-retry.js";
 import { sweepCoreIdleSlack } from "./core-idle-slack.js";
 import { isContextSourceStage } from "@agentx/contracts";
@@ -43,7 +44,7 @@ import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
   HostedSavedEnvRegistryAuthSchema,
   DEFAULT_CODE_SETTINGS,
-  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, LESSONS_REFLECT_QUEUE, IMPLICIT_COMPANY_ID, evalStandInsOn, codeRepositoriesOf, OrgRoleSchema, agentXError, WIKI_BUILD_WORDS,
+  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, LESSONS_REFLECT_QUEUE, IMPLICIT_COMPANY_ID, evalStandInsOn, codeRepositoriesOf, OrgRoleSchema, AgentXError, agentXError, WIKI_BUILD_WORDS,
   when, isSystemOwnerId, type PolicySource, type AdapterRegistry, type HostedPolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
 import { wakeMergeTracking } from "../services/merge-tracking.js";
@@ -96,7 +97,7 @@ import { projectPageUrl } from "../core/decisions/open-path.js";
 import { createCoreTaskRuleRoutes } from "./core-task-rule-routes.js";
 import type { DeveloperTaskRouteDependencies } from "./developer-tasks.js";
 import { recordChatThread } from "../core-host/chat-thread-record.js";
-import { hostedChannelView, hostedThreadHandler, hostedThreadNotification } from "../core-host/thread-notification.js";
+import { hostedChannelView, hostedThreadHandler, hostedThreadNotification, hostedWorkflowThreadRefresh } from "../core-host/thread-notification.js";
 import { addChatThreadInput } from "../core-host/chat-thread-input.js";
 import { readSetupBrokenNotice } from "../core/setup-agent/repair-view.js";
 import { admissionEnforcesCost } from "../core/automation/run-seam.js";
@@ -485,6 +486,14 @@ export function wikiProjectRoleFrom(people: { membershipOf: (personId: string) =
 // L4-P1/L4-P2: the gate every hosted runtime carries (core-host/system-runs.ts). Re-exported: tests/unit/system-runs-hosted-gate.test.ts holds the function and the call on the broker AND on the dispatcher.
 export { hostedSystemRunsFor };
 
+/** Both read and action callers must see a People proof denial as a missing task. */
+async function taskAccessOrHidden<T>(resolve: () => Promise<T>): Promise<T | undefined> {
+  try { return await resolve(); } catch (error) {
+    if (error instanceof AgentXError && error.code === "TASK_ACCESS_DENIED") return undefined;
+    throw error;
+  }
+}
+
 export function hostedTaskAccess(inputs: {
   membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>;
   /** The person's grant; `checkedCompany` is the company whose live membership the caller just checked (review L3: the grant is read there, membership is not read again). */
@@ -515,7 +524,7 @@ export function hostedTaskAccess(inputs: {
     return membership !== undefined && membership.companyId === inputs.companyId ? membership : undefined;
   };
   /** The caller's live access to the task, for the roles asked (owners only for every act; owners, commenters and viewers for a read). Undefined: none. Every check re-reads the live proof. */
-  const resolve = async (principal: Principal, task: { developerId: string; project: string; taskId?: string }, roles: readonly string[]) => {
+  const resolve = (principal: Principal, task: { developerId: string; project: string; taskId?: string }, roles: readonly string[]) => taskAccessOrHidden(async () => {
     if (principal.companyId !== inputs.companyId || await liveMember(principal.personId) === undefined) return undefined;
     if (task.taskId === undefined || inputs.storage === undefined) return principal.personId === task.developerId ? { revision: undefined, ownerIds: [] as readonly string[] } : undefined;
     const store = await inputs.storage();
@@ -529,7 +538,7 @@ export function hostedTaskAccess(inputs: {
     }
     if (people.orphaned || !roles.includes(people.role) || !await inputs.projectGrant(principal.personId, task.project, inputs.companyId)) return undefined;
     return { revision: people.peopleRevision, ownerIds: people.ownerActorIds };
-  };
+  });
   const owner = (principal: Principal, task: { developerId: string; project: string; taskId?: string }) => resolve(principal, task, ["owner"]);
   return {
     async checkStart(principal, project, purpose, origin) {
@@ -866,6 +875,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       // L2-4 + core-task-web-routes (#1045): every person's start (web, Slack, API, intake) gets its session in its own start transaction, as on a laptop, so Retry, Close and the log reach it;
       // a task started from a ticket also gets the ticket binding there. A system owner's start gets nothing added.
       startExtras: ticketSessionStartExtras(companyId, { chatThreads: inputs.chatThreads !== undefined }),
+      // People is initialized lazily by its owner view. Starting work must not require the optional person-proof runtime.
       moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }),
       // L6a: a finished task teaches this company's estimate from the same company-scoped usage ledger as hosted spend.
       onTaskClosed: async (task, closedAt) => {
@@ -883,6 +893,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       sessionBindings: { read: (_orgId, sessionId) => sessionBindingsOf(registry.require("storage"), companyId, sessionId) },
       // L4-ART: the flow's reader of the documents workers and the engine saved (the approved plan, a diff, the eval rounds): the registry's object storage held to THIS company's own workspaces (an
       // outside key, another company's workspace or another owner's key reads as "not there"). Without it each reader of the flow gives its "no reader" answer (core/proof/eval-round-reader.ts: no eval request).
+      feedbackArtifacts: registry.require("object-storage"),
       artifacts: createCompanyArtifactReader({ blobs: registry.require("object-storage"), store: registry.require("storage"), companyId, refused: (reason) => log({ event: "core_engine.artifact_read_refused", companyId, reason }) }),
       // L4-HW3: a starting task copies the project's How we work and the company's rules onto its workspace (the broker has the code host and the company-instructions point; the dispatcher has neither and
       // builds every step's block from that copy).
@@ -1025,7 +1036,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
               ...(inputs.chatThreads === undefined ? {} : hostedThreadNotification({ threads: inputs.chatThreads, registry, companyId, store: registry.require("storage"), now: () => now().getTime(), origin: originOf, threadsTold: lessons !== undefined })),
               ...(attention === undefined ? {} : { address: attention.addressFor(flow.deps.store), emailLinks: attention.links, remember: attention.rememberFor(flow.deps.store) }),
             } }),
-            ...(inputs.chatThreads === undefined ? {} : { threadMoments: lessons !== undefined }),
+            ...(inputs.chatThreads === undefined ? {} : { threadMoments: lessons !== undefined, threadRefresh: hostedWorkflowThreadRefresh({ threads: inputs.chatThreads, registry, companyId, deps: flow.deps, now: () => now().getTime(), clock: now, origin: originOf,
+              isMember: async (orgId, personId) => (await membershipOf(personId))?.companyId === orgId, log: (event, fields) => log({ component: "channel_thread", event, companyId, ...fields }) }) }),
             ...(lessons === undefined ? {} : { humanEdit: lessons.host.noteHumanEdit }), upkeep: { administers: upkeep.administers, setupRead: (orgId, project) => (orgId === companyId ? readSetupBrokenNotice({ flow: flow.deps, store: flow.deps.store, companyId, now: () => now().getTime() }, project) : Promise.resolve(undefined)), setupLink: (project) => projectPageUrl(originOf(), project) } }) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }),
           // L6a: the project setting is off by default; the service is bound to this runtime's company.
           "after-merge": afterMerge,
@@ -1100,7 +1112,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           // DEC 254zzz94: the Merge button, over the root's own grant reader, the project's pinned repositories on the registry's code host, and the project's merge method (Code's default: squash).
           merge: {
             projectGrantRole: (personId, project, companyId) => projectGrantRole(personId, project, companyId),
-            merge: (audit) => hostedMergeDependencies({ runtime, registry, audit, settings: inputs.codeSettings, defaults: DEFAULT_CODE_SETTINGS, now: () => now().getTime(), policyHook: hookSettings !== undefined || hookProblem }),
+            merge: (audit) => withFeedbackMergeReads(hostedMergeDependencies({ runtime, registry, audit, settings: inputs.codeSettings, defaults: DEFAULT_CODE_SETTINGS, now: () => now().getTime(), policyHook: hookSettings !== undefined || hookProblem }), runtime.flow.deps, registry),
             afterMerge: (taskId) => wakeMergeTracking(runtime.flow.deps.store, taskId, now().getTime()),
           },
           // DEC 254z-amend3: the project's test environment state, with the install's switches (and the host's "not available here" marker, broker-environment-init.ts) and the owner starter list as the catalog.

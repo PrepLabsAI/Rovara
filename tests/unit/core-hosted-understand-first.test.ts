@@ -1,3 +1,4 @@
+import type { DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
 // L4-HW1: the hosted core root starts workflow tasks on workflow 1.1.0 (Understand first, the plan check program), as the laptop's root does (local/app/app.ts `understandFirst: true`).
 // The real broker root, registry and dev routes over fakes. Proved here, on the hosted root itself:
 //   - a workflow start with no Quick/Full path is accepted (it was refused with WORKFLOW_PATH_REQUIRED) and is a 1.1.0 task with Understand queued first and the Rovara Code program (plan check) attached;
@@ -63,6 +64,8 @@ async function world() {
   const key = makeKey("t".repeat(16));
   /** A root over the shared fake store; `understandFirst` left out is the production wiring (nothing is passed). */
   const rootWith = (understandFirst?: boolean) => createBrokerCoreRoot({
+    // This fixture isolates the existing root behavior; core-task-people-hosted/identity tests exercise creation's real identity proof.
+    taskRules: () => ({ taskPeopleStart: async () => [] }) as unknown as DeveloperTaskRouteDependencies,
     env: { ROVARA_CORE_MODEL_GATEWAY_URL: GATEWAY, ROVARA_CORE_AGENT_MODEL: "claude-sonnet-4-6" },
     documentClient: client, stateTableName: "state", signInTableName: "signin", callbackSigningKey: SIGNING, repositoryGrantKey: Buffer.alloc(32, 1),
     repositoryCredential: async () => ({ token: "fake" }), codeModules: () => ({}) as never,

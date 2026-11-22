@@ -37,6 +37,7 @@ export async function developerTaskView(task: TaskRecord, view: TaskView, blobs:
   }
   return JSON.parse(JSON.stringify({
     taskId: task.taskId, ...(!revealMoney || money === undefined ? {} : { money }), ...(view.owner === undefined ? {} : { owner: view.owner }), ...taskPullRequestsView(view), title: task.title, project: task.project, status: view.status, startingRevision: task.startingRevision, client: task.client, ...taskSharingView(task),
+    startupReason: view.startupReason,
     ...(view.feature === undefined ? {} : { feature: view.feature }),
     ...(view.closing ? { closing: true } : {}), createdAt: task.createdAt, updatedAt: task.updatedAt, events: [],
     ...(workflow === undefined ? {} : { workflow: { ...withoutDesignReviewMoney(workflow, revealMoney), ...(planContent === undefined ? {} : { planContent }) } }),

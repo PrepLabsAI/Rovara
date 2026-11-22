@@ -8,6 +8,7 @@ import { createTaskAuthorityAdmission } from "../../packages/broker/src/aws/task
 import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import type { ProjectAuthorityWitness } from "../../packages/broker/src/developer/task-project-access.js";
+import { resolveTaskDispatchPeople } from "../../packages/broker/src/developer/task-people.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const TASK_ID = "11111111-1111-4111-8111-111111111111";
@@ -57,6 +58,67 @@ function harness(withPeople = true) {
 }
 
 describe("task dispatch access", () => {
+  it("binds a checker-free hosted creator-only allowance to the People revision and owner actor", async () => {
+    const h = harness();
+    Object.assign(h.current, { provider: "rovara-sign-in" });
+    h.db.set(h.current as unknown as Record<string, unknown>);
+    const deps = { documentClient: h.db, tableName: "state" };
+    await expect(resolveTaskDispatchPeople(deps, h.current)).resolves.toEqual({ status: "ALLOWED", peopleRevision: 3, ownerActorIds: [taskOwnerKey(OWNER, TASK_ID)] });
+    await expect(guardTaskDispatch(deps, h.outbox)).resolves.toBe("ALLOWED");
+    expect(h.db.find(row => String(row.sk).includes("TASK_ACCESS"))).toEqual([]);
+    h.db.delete(h.current.pk, "PEOPLE");
+    await expect(resolveTaskDispatchPeople(deps, h.current)).resolves.toBeUndefined();
+    await expect(guardTaskDispatch(deps, h.outbox)).resolves.toBe("ALLOWED");
+  });
+
+  it.each(["reader", "denied extra", "second owner", "foreign owner", "viewer", "commenter", "denied owner", "empty", "orphaned", "slack", "unknown adapter"])("parks checker-free People with %s instead of using the creator allowance", async reason => {
+    const h = harness();
+    Object.assign(h.current, { provider: reason === "slack" ? "slack" : reason === "unknown adapter" ? "other-adapter" : "rovara-sign-in" });
+    h.db.set(h.current as unknown as Record<string, unknown>);
+    const owner = { developerId: OWNER, slackUserId: OWNER_SLACK, name: "Avery", role: "owner" };
+    const extra = { developerId: "b".repeat(64), slackUserId: "U0READER01", name: "Reader", role: reason === "second owner" ? "owner" : reason === "denied extra" ? "denied" : "viewer" };
+    const entries = ["reader", "denied extra", "second owner"].includes(reason) ? [owner, extra]
+      : reason === "foreign owner" ? [{ ...owner, developerId: extra.developerId }]
+      : reason === "empty" ? []
+      : ["viewer", "commenter", "denied owner"].includes(reason) ? [{ ...owner, role: reason === "denied owner" ? "denied" : reason }]
+      : [owner];
+    h.db.set({ pk: h.current.pk, sk: "PEOPLE", schemaVersion: 1, revision: 3, orphaned: reason === "orphaned", people: entries });
+    await expect(guardTaskDispatch({ documentClient: h.db, tableName: "state" }, h.outbox)).resolves.toBe("PARKED");
+    expect(h.db.get(`OUTBOX#${h.outbox.id}`, "OUTBOX")?.status).toBe("WAITING_FOR_TASK_ACCESS");
+  });
+
+  it("keeps fresh proof authoritative when a hosted creator checker is configured", async () => {
+    const h = harness();
+    Object.assign(h.current, { provider: "rovara-sign-in" });
+    h.db.set(h.current as unknown as Record<string, unknown>);
+    h.checkTaskPerson.mockRejectedValue(new Error("proof unavailable"));
+    await expect(guardTaskDispatch({ documentClient: h.db, tableName: "state", checkTaskPerson: h.checkTaskPerson }, h.outbox)).resolves.toBe("PARKED");
+    expect(h.db.get(`OUTBOX#${h.outbox.id}`, "TASK_ACCESS_PAUSE")?.reason).toBe("PROOF_UNAVAILABLE");
+  });
+
+  it.each([false, true])("re-evaluates a checker-free allowance when People changes before the fence (reader added=%s)", async readerAdded => {
+    const h = harness();
+    Object.assign(h.current, { provider: "rovara-sign-in" });
+    h.db.set(h.current as unknown as Record<string, unknown>);
+    const revisions: unknown[] = [];
+    const documentClient = { async send(command: unknown): Promise<unknown> {
+      if (command instanceof TransactWriteCommand) {
+        const fence = command.input.TransactItems?.find(item => item.ConditionCheck?.Key?.sk === "PEOPLE")?.ConditionCheck;
+        if (fence !== undefined) {
+          revisions.push(fence.ExpressionAttributeValues?.[":revision"]);
+          if (revisions.length === 1) {
+            const prior = h.db.get(h.current.pk, "PEOPLE")!;
+            h.db.set({ ...prior, revision: 4, people: [...prior.people as object[], ...(readerAdded ? [{ developerId: "b".repeat(64), slackUserId: "U0READER01", name: "Reader", role: "viewer" }] : [])] });
+          }
+        }
+      }
+      return h.db.send(command as never);
+    } };
+    await expect(guardTaskDispatch({ documentClient, tableName: "state" }, h.outbox)).resolves.toBe(readerAdded ? "PARKED" : "ALLOWED");
+    expect(revisions).toEqual([3, 4]);
+    expect(h.db.get(`OUTBOX#${h.outbox.id}`, "OUTBOX")?.status).toBe(readerAdded ? "WAITING_FOR_TASK_ACCESS" : "QUEUED");
+  });
+
   it("classifies only rejected core guard decisions as retryable and preserves the original failure", async () => {
     const original = agentXError("RUNTIME_UNAVAILABLE", "task access pause reserve is unavailable");
     const guard = guardTaskDispatch({ documentClient: { async send() { throw original; } }, tableName: "state" }, record());

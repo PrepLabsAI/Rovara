@@ -9,7 +9,7 @@ import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
 import { machineSizePicker, optionalPicker } from "./worker-machines/machine-size-pick.js";
 import { GetCommand, QueryCommand, DynamoDBDocumentClient, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { randomUUID } from "node:crypto";
-import { CORE_DISPATCH_QUEUE_URL_VARIABLE, Ec2RuntimeBindingSchema, ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, SlackTeamIdSchema, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, agentXError, projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey, workspaceSessionKey, type SlackChannelBinding, type WorkerInvocation, SLACK_CHANNEL, channelBindingPartition, channelBindingSortPrefix } from "@agentx/contracts";
+import { WORKER_POST_TIMEOUT_MS, CORE_DISPATCH_QUEUE_URL_VARIABLE, Ec2RuntimeBindingSchema, ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, SlackTeamIdSchema, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, agentXError, projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey, workspaceSessionKey, type SlackChannelBinding, type WorkerInvocation, SLACK_CHANNEL, channelBindingPartition, channelBindingSortPrefix } from "@agentx/contracts";
 import { requiredEnvironment, type DurableOutboxRecord, type Ec2OutboxRecord } from "./lambda.js";
 import type { Ec2Delivery } from "./ec2-delivery.js";
 import { failOutboxOperation } from "./outbox-failure.js";
@@ -580,8 +580,8 @@ async function guardProjectSetupDispatch(record: DurableOutboxRecord): Promise<"
   if (!catalogId || !stateTable) return "PARKED";
   return createProjectSetupDispatchGuard({ documentClient, tableName: stateTable, runtimeCatalogId: catalogId })(record);
 }
-/** A worker answers /invocations as soon as it has journaled the operation. */
-const WORKER_POST_TIMEOUT_MS = 10_000;
+// The worker POST timeout is shared with claim freshness (contracts/dispatch-timing.ts).
+
 /** Asking a worker what it parses (spec 053); one that does not answer gets no optional field. */
 const WORKER_PING_TIMEOUT_MS = 3_000;
 /** A /ping answer is a few fields and a feature list; a longer one is not read. */

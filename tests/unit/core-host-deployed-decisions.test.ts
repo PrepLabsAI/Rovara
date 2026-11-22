@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it, vi } from "vitest";
 import {
-  DecisionCardsViewSchema, createWorkflowSnapshot, orgProjectCatalogKey, projectRevisionKey, submitWorkflowArtifact,
+  agentXError, DecisionCardsViewSchema, createWorkflowSnapshot, orgProjectCatalogKey, projectRevisionKey, submitWorkflowArtifact,
   type AdapterRegistry, type ApprovalProof, type ApprovalRequest, type Approvers, type JsonValue, type OrgId, type OrgRole, type Principal, type ProjectDefinition, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
@@ -505,6 +505,19 @@ describe("a core task's read by the People list's commenters and viewers (web ta
     return { ...t, taskId, get, routes };
   }
 
+  it("returns HTTP 404 to a same-company non-reader on a hosted task with People", async () => {
+    const t = await readWorld();
+    const task = await t.world.store.get(taskKey(t.taskId));
+    await t.world.store.put({ item: { ...task!, provider: "rovara-sign-in" } });
+    const original = t.check.getMockImplementation()!;
+    t.check.mockImplementation(async (task, developerId) => {
+      if (developerId === PE) throw agentXError("PROJECT_ACCESS_DENIED", "task access could not be verified");
+      return original(task, developerId);
+    });
+    expect((await t.get(PA))?.statusCode).toBe(200);
+    expect((await t.get(PE))?.statusCode).toBe(404);
+  });
+
   it("refuses the reader when membership, the grant or the live proof is lost, or the list has no one left to own the task, at once", async () => {
     const losses: Array<[string, (t: Awaited<ReturnType<typeof readWorld>>) => Promise<void> | void]> = [
       ["membership", (t) => { t.memberships.delete(PC); }],
@@ -535,7 +548,7 @@ describe("a core task's read by the People list's commenters and viewers (web ta
     expect(await asked(PC)).toBe(false);
     expect(await asked(PD)).toBe(false);
     expect(await asked(PB, OTHER)).toBe(false);
-    await expect(asked(PE)).rejects.toBeDefined();
+    expect(await asked(PE)).toBe(false);
   });
 });
 

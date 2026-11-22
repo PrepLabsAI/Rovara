@@ -43,7 +43,7 @@ describe("outbox failures", () => {
     expect(row.outboxState).toBeUndefined();
   });
 
-  it("logs why a hand-over failed: the error name and cause only, never the payload, URL or provider text", async () => {
+  it("logs why a hand-over failed: error names, attempt and retryability, never the payload, URL or provider text", async () => {
     const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     try {
       const store = new MemoryDocumentStore({ indexes: [OUTBOX_PENDING_INDEX] });
@@ -55,7 +55,7 @@ describe("outbox failures", () => {
       expect(await outbox.relay({ companyId: COMPANY })).toEqual({ delivered: 0, failed: 1, dead: 0 });
       expect(warning).toHaveBeenCalledTimes(1);
       const entry: unknown = JSON.parse(String(warning.mock.calls[0]![0]));
-      expect(entry).toEqual({ event: "outbox.relay_failed", companyId: COMPANY, outboxId: "op-log", queue: "dispatch", operation: "enqueue", error: "QueueFailure", cause: "InvalidAttributeName" });
+      expect(entry).toEqual({ event: "outbox.relay_failed", companyId: COMPANY, outboxId: "op-log", queue: "dispatch", attempt: 1, retryable: true, operation: "enqueue", error: "QueueFailure", cause: "InvalidAttributeName" });
       expect(warning.mock.calls.flat().join(" ")).not.toMatch(/private|https:|123456789012/u);
     } finally { warning.mockRestore(); }
   });

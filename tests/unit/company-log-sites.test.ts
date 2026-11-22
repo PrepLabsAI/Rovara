@@ -129,9 +129,9 @@ it("two real dispatch flows capture only the consumer company and no foreign can
   for (const [own, other] of [[A, B], [B, A]] as const) {
     const h = createHarness(); h.deps.companyId = own; const lines: Record<string, unknown>[] = [];
     h.deps.log = (line) => { lines.push(line); };
-    await (await h.queues.queue("task-dispatch")).enqueue({ body: { v: 1, companyId: other, workspaceId: `canary-${other}`, operationId: `canary-${other}` } });
+    const sent = await (await h.queues.queue("task-dispatch")).enqueue({ body: { v: 1, companyId: other, workspaceId: `canary-${other}`, operationId: `canary-${other}` } });
     expect((await runDispatchOnce(h.deps)).foreign).toBe(1);
-    expect(lines).toEqual([{ companyId: own, component: "task-flow", event: "task_flow.dispatch_foreign" }]);
+    expect(lines).toEqual([{ companyId: own, component: "task-flow", event: "task_flow.dispatch_foreign" }, { companyId: own, component: "task-flow", event: "task_flow.dispatch_delivery", operationId: null, attempt: null, stateAtReceipt: "unread", decision: "defer-foreign", messageId: sent.messageId, receiveCount: 1 }]);
     expect(JSON.stringify(lines)).not.toContain(other);
   }
 });

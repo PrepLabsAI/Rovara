@@ -83,6 +83,9 @@ function fakeSlack() {
     const token = String((init?.headers as Record<string, string>)["authorization"]).replace("Bearer ", "");
     const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as Record<string, unknown>;
     if (method === "auth.test") return new Response(JSON.stringify({ ok: true, team_id: tokenTeams[token] ?? "T0UNKNOWN00", user_id: "U0BOT000000" }), { status: 200 });
+    if (method === "canvases.create") return Response.json({ ok: true, canvas_id: "F0123456789" });
+    if (method === "canvases.access.set" || method === "canvases.delete") return Response.json({ ok: true });
+    if (method.startsWith("files.info")) return Response.json({ ok: true, file: { permalink: "https://example.slack.com/docs/F0123456789" } });
     if (method === "chat.postMessage") {
       posts.push({ token, channel: String(body["channel"]), ...(typeof body["thread_ts"] === "string" ? { thread_ts: body["thread_ts"] } : {}), text: String(body["text"]), ...(Array.isArray(body["blocks"]) ? { blocks: body["blocks"] as Array<Record<string, unknown>> } : {}) });
       return new Response(JSON.stringify({ ok: true, ts: CARD_TS }), { status: 200 });

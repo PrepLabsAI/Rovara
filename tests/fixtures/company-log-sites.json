@@ -91,6 +91,6 @@
   "packages/broker/src/local/app/automation.ts": 1,
   "packages/broker/src/local/runtime.ts": 6,
   "packages/broker/src/plugins/channel/slack/plugin.ts": 1,
-  "packages/broker/src/ports/transactional-outbox.ts": 1,
+  "packages/broker/src/ports/transactional-outbox.ts": 2,
   "packages/broker/src/services/merge-tracking.ts": 1
 }

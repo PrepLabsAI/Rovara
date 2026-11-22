@@ -1,3 +1,5 @@
+import { startPrFeedbackReview, recordPrFeedbackReview } from "../pr-feedback/review.js";
+import { readTask } from "../task-flow/reads.js";
 // Lane L10: the build step. The steps after the plan is approved, on the document store, the queue and the code-host port: coding, the checks, the reviews, Rovara's own fixing of a block, the
 // publication of the checked code, and the round-trips of a pull request's fix. See docs/ports.md.
 import { agentXError } from "@agentx/contracts";
@@ -27,7 +29,10 @@ export function createBuildSteps(): BuildSteps {
     async runRow(deps, row) {
       switch (row.kind) {
         case "IMPLEMENT": return startImplementation(deps, row);
-        case "REVIEW": return startReview(deps, row);
+        case "REVIEW": {
+          const task = await readTask(deps, row.taskId);
+          return task?.workflow?.stage === "WAIT_FOR_MERGE" ? startPrFeedbackReview(deps, row) : startReview(deps, row);
+        }
         case "PUBLISH": return startPublication(deps, row);
         case "SYNC": return startBranchSync(deps, row);
         case "AUTOFIX": return runAutofix(deps, row);
@@ -43,6 +48,7 @@ export function createBuildSteps(): BuildSteps {
       if (operation.kind === "publish") return recordPublished(deps, task, operation, ended);
       if (operation.kind === "maintain") return recordMaintained(deps, task, operation, ended);
       if (operation.workflowMode === "PLAN_CRITIQUE") return recordCritiqued(deps, task, operation, ended);
+      if (operation.workflowMode === "FEEDBACK_REVIEW") return recordPrFeedbackReview(deps, task, operation, ended);
       if (operation.workflowMode === "REVIEW") return recordReviewed(deps, task, operation, ended);
       if (operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS") return recordBuilt(deps, task, operation, ended);
     },

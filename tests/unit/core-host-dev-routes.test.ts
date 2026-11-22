@@ -1291,6 +1291,15 @@ it("inventories the four exact context worker routes without person authority", 
 });
 
 
+it("the existing PR feedback action paths retain their production scopes", () => {
+  const id = "11111111-1111-4111-8111-111111111111";
+  for (const [action, scope] of [["feedback-decision", "decisions:decide"], ["feedback-retry", "tasks:act"], ["keep-pull-requests", "tasks:act"]] as const) {
+    const path = `/v1/dev/tasks/${id}/workflow/${action}`;
+    expect(contextDevRouteOf("POST", path)?.requires).toBe(scope);
+    expect(contextDevRouteOf("DELETE", path)).toBeUndefined();
+  }
+});
+
 it("registers close preview reads at both deployed boundaries", () => {
   expect(contextDevRouteOf("GET", "/v1/dev/tasks/t1/close")?.requires).toBe("tasks:read");
   expect(contextAppRouteOf("GET", "/v1/app/sessions/s1/close")?.requires).toBe("tasks:read");
