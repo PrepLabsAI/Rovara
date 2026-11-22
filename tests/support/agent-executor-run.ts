@@ -10,7 +10,8 @@ import { createE2EModelEvidenceCollector, openE2EModelChannelSession } from "../
 import { createScriptedE2EInvoke, type ScriptedTurn } from "../../packages/worker/src/e2e-model-scripted.js";
 import { E2E_EXECUTOR_HOST_MODULE_PATH } from "../../packages/verifier/src/executor/host-registry.js";
 import { E2E_AGENT_EVIDENCE_DIR, E2E_AGENT_LEDGER_FILE, agentCaseDirectoryName } from "../../packages/verifier/src/executor/agent-ledger.js";
-import { runE2EExecutorSerially as runE2EExecutor } from "./executor-run-lock.js";
+import { runE2EExecutor } from "../../packages/verifier/src/executor/run.js";
+import { withExecutorRunLock } from "./executor-run-lock.js";
 import { AGENT_GOAL, SCRIPTED_ROUTE, createOrdersM14AgentPlan, sha256Hex, startOrdersM14App, withModelChannel, type AgentPlanOptions, type OrdersM14AppProcess } from "./orders-m14-agent.js";
 import type { WebApiProbePlan } from "../../packages/verifier/src/host/web-api-probe-plan.js";
 import type { E2EModelChannelClosed } from "../../packages/verifier/src/host/agent-model-evidence.js";
@@ -37,36 +38,39 @@ export type AgentRun = {
 };
 
 export async function runAgentCase(options: { script: readonly ScriptedTurn[]; plan?: AgentPlanOptions; goal?: string; timeoutMs?: number }): Promise<AgentRun> {
-  const goal = options.goal ?? options.plan?.goal ?? AGENT_GOAL;
-  const fixture = createOrdersM14AgentPlan({ ...options.plan, goal });
-  const app = await startOrdersM14App(fixture);
-  const dir = realpathSync(await mkdtemp(join(tmpdir(), "agent-run-")));
-  // A unix socket path must stay under about 100 bytes: a short directory.
-  const socketDir = realpathSync(mkdtempSync("/tmp/rva-"));
-  const evidence = createE2EModelEvidenceCollector();
-  const requestBytes: number[] = [];
-  const screenBytes: number[] = [];
-  const scripted = createScriptedE2EInvoke({ scripts: { [sha256Hex(goal)]: options.script } });
-  const allowedSteps = e2eApplicationGroupAgentSteps(fixture.compiled);
-  const session = await openE2EModelChannelSession({ runId: fixture.plan.runId, modelRoute: SCRIPTED_ROUTE, policyScope: "standard", socketPath: join(socketDir, "m.sock"), allowedSteps,
-    credentialSet: { passwords: fixture.plan.accounts.map((item) => item.password), emails: fixture.plan.accounts.map((item) => item.email), cookieValues: [] }, deadlineAt: fixture.plan.deadlineAt,
-    dayBudget: createInMemoryE2EDayBudget(), evidence, signal: new AbortController().signal, environment: { ROVARA_E2E_SCRIPTED_MODEL: "1" },
-    invoke: async (input) => { requestBytes.push(Buffer.byteLength(JSON.stringify(input.call), "utf8")); screenBytes.push(newestScreenBytes(input.call)); return scripted(input); } });
-  const valueKey = "5a".repeat(32);
-  const plan = withModelChannel(fixture.plan, valueKey);
-  const out = join(dir, "out");
-  await writeFile(join(dir, "plan.json"), JSON.stringify(plan));
-  const result = await runE2EExecutor({ planPath: join(dir, "plan.json"), outDir: out, signal: AbortSignal.timeout(options.timeoutMs ?? 240_000), localAppUpstream: app.upstream,
-    inspectChromiumSandbox: sandboxed, chromiumSandboxSettleMs: 0, modelSocketPath: session.socketPath });
-  const summary = await session.close();
-  const caseId = fixture.compiled.expectedCases[0]!.caseId;
-  const closed: E2EModelChannelClosed = { ...summary, transcripts: evidence.transcripts(), valueKey, definition: session.definition };
-  return { fixture, out, result, receipts: summary.receipts, closed, valueKey, caseId, requestBytes, screenBytes, app,
-    readLedger() {
-      const path = join(out, E2E_AGENT_EVIDENCE_DIR, agentCaseDirectoryName(caseId), E2E_AGENT_LEDGER_FILE);
-      return existsSync(path) ? E2EAgentActionLedgerSchema.parse(JSON.parse(readFileSync(path, "utf8"))) : null;
-    },
-    async cleanup() { await app.stop(); await rm(dir, { recursive: true, force: true }); await rm(socketDir, { recursive: true, force: true }); } };
+  // Admission and its abort clock start only once the executor slot is ours.
+  return withExecutorRunLock(async () => {
+    const goal = options.goal ?? options.plan?.goal ?? AGENT_GOAL;
+    const fixture = createOrdersM14AgentPlan({ ...options.plan, goal });
+    const app = await startOrdersM14App(fixture);
+    const dir = realpathSync(await mkdtemp(join(tmpdir(), "agent-run-")));
+    // A unix socket path must stay under about 100 bytes: a short directory.
+    const socketDir = realpathSync(mkdtempSync("/tmp/rva-"));
+    const evidence = createE2EModelEvidenceCollector();
+    const requestBytes: number[] = [];
+    const screenBytes: number[] = [];
+    const scripted = createScriptedE2EInvoke({ scripts: { [sha256Hex(goal)]: options.script } });
+    const allowedSteps = e2eApplicationGroupAgentSteps(fixture.compiled);
+    const session = await openE2EModelChannelSession({ runId: fixture.plan.runId, modelRoute: SCRIPTED_ROUTE, policyScope: "standard", socketPath: join(socketDir, "m.sock"), allowedSteps,
+      credentialSet: { passwords: fixture.plan.accounts.map((item) => item.password), emails: fixture.plan.accounts.map((item) => item.email), cookieValues: [] }, deadlineAt: fixture.plan.deadlineAt,
+      dayBudget: createInMemoryE2EDayBudget(), evidence, signal: new AbortController().signal, environment: { ROVARA_E2E_SCRIPTED_MODEL: "1" },
+      invoke: async (input) => { requestBytes.push(Buffer.byteLength(JSON.stringify(input.call), "utf8")); screenBytes.push(newestScreenBytes(input.call)); return scripted(input); } });
+    const valueKey = "5a".repeat(32);
+    const plan = withModelChannel(fixture.plan, valueKey);
+    const out = join(dir, "out");
+    await writeFile(join(dir, "plan.json"), JSON.stringify(plan));
+    const result = await runE2EExecutor({ planPath: join(dir, "plan.json"), outDir: out, signal: AbortSignal.timeout(options.timeoutMs ?? 240_000), localAppUpstream: app.upstream,
+      inspectChromiumSandbox: sandboxed, chromiumSandboxSettleMs: 0, modelSocketPath: session.socketPath });
+    const summary = await session.close();
+    const caseId = fixture.compiled.expectedCases[0]!.caseId;
+    const closed: E2EModelChannelClosed = { ...summary, transcripts: evidence.transcripts(), valueKey, definition: session.definition };
+    return { fixture, out, result, receipts: summary.receipts, closed, valueKey, caseId, requestBytes, screenBytes, app,
+      readLedger() {
+        const path = join(out, E2E_AGENT_EVIDENCE_DIR, agentCaseDirectoryName(caseId), E2E_AGENT_LEDGER_FILE);
+        return existsSync(path) ? E2EAgentActionLedgerSchema.parse(JSON.parse(readFileSync(path, "utf8"))) : null;
+      },
+      async cleanup() { await app.stop(); await rm(dir, { recursive: true, force: true }); await rm(socketDir, { recursive: true, force: true }); } };
+  });
 }
 
 /** The byte size of the newest text in a request that holds node lines (`#id role "name"`): a tool result of the latest action, else the first user message. */
