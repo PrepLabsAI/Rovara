@@ -159,7 +159,7 @@ describe("named T-lane known gaps (not isolation claims)", () => {
     h.project(COMPANY_B.orgId);
     expect((await h.call(`${projectPath}/members${method === "GET" ? "" : `/${PERSON}`}`, method)).statusCode).toBe(200);
   });
-  it.each(["messages", "comments"])("T2 task POST %s does not resolve supplied membership", async (kind) => {
+  it.each(["messages"])("T2 task POST %s does not resolve supplied membership", async (kind) => {
     const h = harness(); h.task();
     const companyOf = vi.fn(async () => { throw new AgentXError("AUTH_REQUIRED", "membership-canary", 401); });
     h.deps.companies = { companyOf };
@@ -241,4 +241,16 @@ it("merge-up 2 checks the linking deadline after the last provider read", async 
     expect(h.deps.developer.channelInfo).toHaveBeenCalledTimes(2);
     expect(h.deps.developer.channelInfo).toHaveBeenLastCalledWith({ kind: "channel-info", channelIds: ["C0SHARED"], workspace: { companyId: COMPANY_A.orgId, teamId: "T0SHARED" } });
   } finally { clock.mockRestore(); }
+});
+
+// The retired workflow fixture stays unreadable; the authenticated core success path is covered in core-task-rule-routes.test.ts.
+it("comment POST resolves live membership before dispatch and hides an unavailable membership cause", async () => {
+  const h = harness(); h.task();
+  const companyOf = vi.fn(async () => { throw new Error("membership-canary"); });
+  h.deps.companies = { companyOf };
+  const response = await h.call(`/v1/dev/tasks/${TASK}/comments`, "POST", { requestId: "company-comment", document: "plan", text: "Current" });
+  expect(response.statusCode).toBe(401);
+  expect(response.body).not.toContain("membership-canary");
+  expect(companyOf).toHaveBeenCalledWith(PERSON);
+  expect(h.db.get(`DEVTASK#${TASK}`, "COMMENTS")).toBeUndefined();
 });

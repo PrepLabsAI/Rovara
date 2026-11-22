@@ -21,6 +21,7 @@ const Messages = z.object({ messages: z.array(Message), next: z.string().optiona
 const Sent = z.object({ message: Message }).strict();
 const PlanComment = z.object({
   commentId: z.string(), document: z.enum(["requirements", "design", "plan"]), author: Author, text: z.string(), at: z.string().datetime(), rev: z.number().int(), resolved: z.boolean(),
+  anchor: z.string().optional(), replyTo: z.string().uuid().optional(),
 }).strict();
 const Comments = z.object({ comments: z.array(PlanComment) }).strict();
 const Created = z.object({ comment: PlanComment }).strict();
@@ -57,6 +58,8 @@ describe("plan comments", () => {
     expect(created.comment).toMatchObject({ document: "plan", text: "Should this be above?", rev: 1, resolved: false, author: { developerId: SAM.developerId, name: "Sam Lee" } });
     const owner = Created.parse(await createPlanComment(fixture.deps, PRIYA, fixture.taskId, { requestId: "req-2", document: "plan", text: "Agreed.", replyTo: created.comment.commentId }));
     expect(owner.comment.author.name).toBe("Priya Shah");
+    expect(created.comment.anchor).toBe("claim:2.1");
+    expect(owner.comment).toMatchObject({ anchor: "claim:2.1", replyTo: created.comment.commentId });
     const listed = Comments.parse(await listPlanComments(fixture.deps, PRIYA, fixture.taskId));
     expect(listed.comments.map((comment) => comment.commentId)).toEqual([created.comment.commentId, owner.comment.commentId]);
     // The same request again is the same comment.

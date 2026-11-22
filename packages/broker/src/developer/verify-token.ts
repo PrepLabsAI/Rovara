@@ -5,12 +5,14 @@
 import { agentXError, DEVELOPER_TOKEN_AUDIENCE } from "@agentx/contracts";
 import { decodeProtectedHeader, importJWK, jwtVerify, type CryptoKey, type JWTPayload, type KeyObject } from "jose";
 
+import type { ServerKeyRead } from "../aws/server-read-context.js";
+
 type VerifyKey = CryptoKey | KeyObject | Uint8Array;
 
 export interface DeveloperTokenVerifierInput {
   issuer: string;
   /** The sign-in server's public keys (its JWKS `keys`). A throw means they could not be read. */
-  keys: () => Promise<unknown[]>;
+  keys: (read?: ServerKeyRead) => Promise<unknown[]>;
   now: () => number;
 }
 
@@ -42,18 +44,18 @@ async function importKeys(jwks: unknown[]): Promise<Map<string, VerifyKey>> {
 }
 
 /** `audience` defaults to Rovara's own; only the access check (spec 063 FR-004) names a registered client's. */
-export function developerTokenVerifier(input: DeveloperTokenVerifierInput): (authorization: string | undefined, audience?: string) => Promise<JWTPayload> {
+export function developerTokenVerifier(input: DeveloperTokenVerifierInput): (authorization: string | undefined, audience?: string, read?: ServerKeyRead) => Promise<JWTPayload> {
   let cached: Map<string, VerifyKey> | undefined;
   let fetchedAt = Number.NEGATIVE_INFINITY;
 
   let failedAt = Number.NEGATIVE_INFINITY;
 
-  async function load(): Promise<Map<string, VerifyKey>> {
+  async function load(read?: ServerKeyRead): Promise<Map<string, VerifyKey>> {
     if (input.now() - failedAt < FAILURE_PAUSE_MS) throw unavailable();
     fetchedAt = input.now();
     let keys: Map<string, VerifyKey>;
     try {
-      keys = await importKeys(await input.keys());
+      keys = await importKeys(await input.keys(read));
     } catch {
       failedAt = input.now();
       throw unavailable();
@@ -62,14 +64,14 @@ export function developerTokenVerifier(input: DeveloperTokenVerifierInput): (aut
     return keys;
   }
 
-  async function keyFor(kid: string): Promise<VerifyKey | undefined> {
-    const keys = cached ?? await load();
+  async function keyFor(kid: string, read?: ServerKeyRead): Promise<VerifyKey | undefined> {
+    const keys = cached ?? await load(read);
     const key = keys.get(kid);
     if (key !== undefined || input.now() - fetchedAt < REFETCH_MS) return key;
-    return (await load()).get(kid);
+    return (await load(read)).get(kid);
   }
 
-  return async (authorization, audience = DEVELOPER_TOKEN_AUDIENCE) => {
+  return async (authorization, audience = DEVELOPER_TOKEN_AUDIENCE, read) => {
     const token = COMPACT_JWT.exec(authorization ?? "")?.[1];
     if (token === undefined) throw refused();
     let header: ReturnType<typeof decodeProtectedHeader>;
@@ -79,7 +81,7 @@ export function developerTokenVerifier(input: DeveloperTokenVerifierInput): (aut
       throw refused();
     }
     if (header.alg !== "RS256" || typeof header.kid !== "string" || header.crit !== undefined) throw refused();
-    const key = await keyFor(header.kid);
+    const key = await keyFor(header.kid, read);
     if (key === undefined) throw refused();
     let payload: JWTPayload;
     try {

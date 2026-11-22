@@ -3,9 +3,10 @@
 import { createHash } from "node:crypto";
 import type { ChangeRequestFile, CodeHost, HostScope, PageBudget, WorkflowSnapshot } from "@agentx/contracts";
 import { changedFilesFromHostFiles, plainChangedPath } from "../proof/changed-files.js";
-import { TIER_ENTRY_KINDS, TIER_REASON_CODES, canonicalPatchText, factKey, tierFromDiff, type DiffInput, type HeadFacts, type TierEntryKind, type TierFile, type TierFileEntry, type TierReason } from "../decisions/change-tier.js";
+import { TIER_ENTRY_KINDS, TIER_REASON_CODES, canonicalPatchText, documentFactsOf, factKey, tierFromDiff, type DiffInput, type DocumentFacts, type HeadFacts, type TierEntryKind, type TierFile, type TierFileEntry, type TierReason } from "../decisions/change-tier.js";
 import { DOCS_SITE_PROBES, fileTypeOf, normalizedTierPath } from "../decisions/sensitive-list.js";
 import { changeRequestRef, readChangeRequestFiles } from "./host-port.js";
+import { HeadFactMemo } from "./head-fact-memo.js";
 
 export interface TierReadTarget {
   host: CodeHost;
@@ -91,13 +92,49 @@ export function importsOf(instructionPath: string, text: string): string[] {
 
 export interface TierReadInput { diff: DiffInput; head: HeadFacts }
 
+// Only immutable tree reads are memoised: a pull request's diff can change when its base moves.
+// The adapter identity and scope keep connections and companies apart; failures are never kept.
+type HeadFactValue = Awaited<ReturnType<NonNullable<CodeHost["pathKind"]>>> | boolean | readonly string[] | DocumentFacts | undefined;
+const headFactReads = new HeadFactMemo<HeadFactValue>();
+const hostIds = new WeakMap<CodeHost, number>();
+let nextHostId = 0;
+async function headFactRead<T extends HeadFactValue>(
+  target: TierReadTarget & { headSha: string }, scope: HostScope, probe: readonly (string | number)[],
+  read: () => Promise<T>, beforeRequest?: () => void, tolerateFailure = false,
+): Promise<{ value: T } | undefined> {
+  let hostId = hostIds.get(target.host);
+  if (hostId === undefined) { hostId = ++nextHostId; hostIds.set(target.host, hostId); }
+  const scopeKey = "orgId" in scope ? `org:${scope.orgId}` : `system:${scope.system}`;
+  const key = JSON.stringify([hostId, scopeKey, target.repositoryUrl, target.headSha, ...probe]);
+  const known = headFactReads.get(key);
+  if (known !== undefined) return known as { value: T };
+  beforeRequest?.();
+  let value: T;
+  try { value = await read(); } catch (error) { if (tolerateFailure) return undefined; throw error; }
+  const result = { value };
+  headFactReads.set(key, value);
+  return result;
+}
+
+async function readDocuments(target: TierReadTarget & { headSha: string }, documents: readonly TierFile[], scope: HostScope, out: Map<string, DocumentFacts>, beforeRequest?: () => void): Promise<void> {
+  const ref = changeRequestRef(target.repositoryUrl, target.number);
+  for (const document of documents) {
+    if (document.patch === undefined) continue;
+    const patch = document.patch;
+    const digest = createHash("sha256").update(patch).digest("hex");
+    const facts = (await headFactRead(target, scope, ["document", document.path, digest], async () =>
+      documentFactsOf(patch, await target.host.fileAtRevision(ref.repository, document.path, target.headSha, scope, { maxBytes: DOCUMENT_READ_MAX_BYTES })), beforeRequest, true))?.value;
+    if (facts !== undefined) out.set(factKey(target.repositoryId, document.path), facts);
+  }
+}
+
 /**
- * What the host knows of the code at each head commit, beyond the file list: the text of the documents the change touches (so the section a changed line sits in is known), which paths the instruction files import, and
+ * What the host knows of the code at each head commit, beyond the file list: parsed decisions for the documents the change touches (including the section around a changed line), which paths the instruction files import, and
  * which paths are symbolic links. A path kind the host cannot answer THROWS (the caller refuses, or leaves the tier unwritten); a document or an instruction file that cannot be read leaves that fact unknown, and the rules
  * then do not clear the document as plain docs. `files` are the tier files already read (each names its repository).
  */
 export async function readHeadFacts(targets: ReadonlyArray<TierReadTarget & { headSha: string }>, files: readonly TierFile[], scope: HostScope, beforeRequest?: () => void): Promise<HeadFacts> {
-  const text = new Map<string, string>();
+  const documentsRead = new Map<string, DocumentFacts>();
   const imports = new Set<string>();
   const links = new Set<string>();
   const submodules = new Set<string>();
@@ -108,28 +145,27 @@ export async function readHeadFacts(targets: ReadonlyArray<TierReadTarget & { he
     const ref = changeRequestRef(target.repositoryUrl, target.number);
     const all = files.filter((file) => file.repository === target.repositoryId);
     const listed = all.filter((file) => file.status !== "removed");
-    // Documents: the text at the head, so a changed line's heading and block are known. Past the limit the text is not read, and the document is then not cleared.
+    // Documents: decisions from the text at the head, so a changed line's heading and block are known. Past the limit the text is not read, and the document is then not cleared.
     const documents = listed.filter((file) => fileTypeOf(file.path) === "prose").slice(0, DOCUMENTS_READ_MAX);
-    for (const document of documents) {
-      beforeRequest?.();
-      const body = await target.host.fileAtRevision(ref.repository, document.path, target.headSha, scope, { maxBytes: DOCUMENT_READ_MAX_BYTES }).catch(() => undefined);
-      if (body !== undefined) text.set(factKey(target.repositoryId, document.path), body);
-    }
+    await readDocuments(target, documents, scope, documentsRead, beforeRequest);
     // A document (changed, added OR removed) may be read by an instruction file, and may be built into a documentation site.
     if (all.some((file) => fileTypeOf(file.path) === "prose" || (file.previousPath !== undefined && fileTypeOf(file.previousPath) === "prose"))) {
       importsKnown ??= true;
       const exists = async (path: string): Promise<boolean> => {
-        beforeRequest?.();
-        try {
-          if (target.host.pathKind !== undefined) return (await target.host.pathKind(ref.repository, path, target.headSha, scope)) !== "none";
-          return (await target.host.fileAtRevision(ref.repository, path, target.headSha, scope, { maxBytes: 2_000_000 })) !== undefined;
-        } catch {
-          return true; // it could not be asked: it may be there
+        if (target.host.pathKind !== undefined) {
+          const got = await headFactRead(target, scope, ["kind", path], () => target.host.pathKind!(ref.repository, path, target.headSha, scope), beforeRequest, true);
+          return got === undefined || got.value !== "none";
         }
+        const got = await headFactRead(target, scope, ["exists", path],
+          async () => (await target.host.fileAtRevision(ref.repository, path, target.headSha, scope, { maxBytes: 2_000_000 })) !== undefined, beforeRequest, true);
+        return got === undefined || got.value;
       };
-      const read = async (path: string): Promise<{ body: string | undefined } | undefined> => {
-        beforeRequest?.();
-        try { return { body: await target.host.fileAtRevision(ref.repository, path, target.headSha, scope, { maxBytes: INSTRUCTION_READ_MAX_BYTES }) }; } catch { return undefined; }
+      const read = async (path: string): Promise<{ imports: readonly string[] | undefined } | undefined> => {
+        const got = await headFactRead(target, scope, ["imports", path], async () => {
+          const body = await target.host.fileAtRevision(ref.repository, path, target.headSha, scope, { maxBytes: INSTRUCTION_READ_MAX_BYTES });
+          return body === undefined ? undefined : importsOf(path, body);
+        }, beforeRequest, true);
+        return got === undefined ? undefined : { imports: got.value };
       };
       // Instruction files: the roots, the ones in the folders of the changed files, then what each of them imports, to a depth of five.
       const folders = [...new Set(all.flatMap((file) => [file.path, ...(file.previousPath === undefined ? [] : [file.previousPath])]).flatMap((path) => {
@@ -148,9 +184,9 @@ export async function readHeadFacts(targets: ReadonlyArray<TierReadTarget & { he
         if (depth > 0 && ++followed > IMPORTED_FILES_MAX) { importsKnown = false; break; }
         const got = await read(path);
         if (got === undefined) { importsKnown = false; continue; }
-        const body = got.body;
-        if (body === undefined) continue;
-        for (const imported of importsOf(path, body)) {
+        const importedPaths = got.imports;
+        if (importedPaths === undefined) continue;
+        for (const imported of importedPaths) {
           imports.add(factKey(target.repositoryId, imported));
           if (depth + 1 > IMPORT_DEPTH_MAX) importsKnown = false;
           else if (!seen.has(imported) && fileTypeOf(imported) !== "code") queue.push({ path: imported, depth: depth + 1 });
@@ -165,8 +201,8 @@ export async function readHeadFacts(targets: ReadonlyArray<TierReadTarget & { he
     // Symbolic links, where the host can tell (the port's own optional read).
     if (target.host.pathKind !== undefined) {
       for (const file of listed.slice(0, PATH_KINDS_READ_MAX)) {
-        beforeRequest?.();
-        const kind = await target.host.pathKind(ref.repository, file.path, target.headSha, scope);
+        const kind = (await headFactRead(target, scope, ["kind", file.path],
+          () => target.host.pathKind!(ref.repository, file.path, target.headSha, scope), beforeRequest))!.value;
         if (kind === "symlink") links.add(factKey(target.repositoryId, file.path));
         // A changed path that is a directory at the head is a submodule (a host reads a submodule as a directory).
         if (kind === "dir") submodules.add(factKey(target.repositoryId, file.path));
@@ -175,7 +211,7 @@ export async function readHeadFacts(targets: ReadonlyArray<TierReadTarget & { he
       for (const file of listed.slice(PATH_KINDS_READ_MAX)) unchecked.add(factKey(target.repositoryId, file.path));
     }
   }
-  return { text, instructionImports: imports, ...(importsKnown === undefined ? {} : { importsKnown }), links, submodules, unchecked, ...(docsSite === undefined ? {} : { docsSite }) };
+  return { documents: documentsRead, instructionImports: imports, ...(importsKnown === undefined ? {} : { importsKnown }), links, submodules, unchecked, ...(docsSite === undefined ? {} : { docsSite }) };
 }
 
 /** What the tier is computed from: the files of every change request of the task (as the host lists them), and the facts of `readHeadFacts`. A host that cannot answer THROWS. */
