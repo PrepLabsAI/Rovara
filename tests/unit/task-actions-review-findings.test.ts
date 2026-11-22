@@ -234,7 +234,7 @@ describe("what the owner writes is redacted and fenced", () => {
     expect(await holds.h.store.get({ pk: "ACCESS_FENCE#payments", sk: "META" })).toBeDefined();
     const broken = await seed({ workflow: both(), access: fence() });
     await broken.h.store.put({ item: { pk: "ACCESS_FENCE#payments", sk: "META", entityType: "ACCESS_FENCE" } });
-    await expect(pageActions(broken.h.deps).resolveFindings(broken.caller, TASK_ID, mixed())).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    await expect(pageActions(broken.h.deps).resolveFindings(broken.caller, TASK_ID, mixed())).rejects.toMatchObject({ code: "CHANGE_STALE" });
     expect((await taskOf(broken.h)).workflow!.acceptedFindings).toBeUndefined();
     expect(await codingOperations(broken.h)).toHaveLength(0);
   });
@@ -268,8 +268,8 @@ describe("the lessons hook after a findings fix", () => {
     const guest = await seed({ workflow: both() }); guest.h.deps.lessonsSentBack = seam;
     await expect(pageActions(guest.h.deps).resolveFindings(guest.h.guest, TASK_ID, mixed())).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
     const stale = await seed({ workflow: both() }); stale.h.deps.lessonsSentBack = seam;
-    await expect(pageActions(stale.h.deps).resolveFindings(stale.caller, TASK_ID, { ...mixed(), expectedRevision: 5 })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
-    await expect(pageActions(stale.h.deps).resolveFindings(stale.caller, TASK_ID, { ...mixed(), candidateDigest: "f".repeat(64) })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    await expect(pageActions(stale.h.deps).resolveFindings(stale.caller, TASK_ID, { ...mixed(), expectedRevision: 5 })).rejects.toMatchObject({ code: "CHANGE_STALE" });
+    await expect(pageActions(stale.h.deps).resolveFindings(stale.caller, TASK_ID, { ...mixed(), candidateDigest: "f".repeat(64) })).rejects.toMatchObject({ code: "CHANGE_STALE" });
     await expect(pageActions(stale.h.deps).resolveFindings(stale.caller, TASK_ID, request([answer(parserId, "FIX")]))).rejects.toBeDefined();
     const closed = await seed({ workflow: both(), task: { closedAt: NOW } }); closed.h.deps.lessonsSentBack = seam;
     await expect(pageActions(closed.h.deps).resolveFindings(closed.caller, TASK_ID, mixed())).rejects.toBeDefined();
