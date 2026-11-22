@@ -1,9 +1,10 @@
 // DEC 254e: with Code's company layer on, Slack is the shared sign-in method for every company: any Slack workspace may sign in, the company comes
 // only from live membership (or an invite), never from the workspace. And (DEC 254b, the import lane) a merged sign-in is seated as its survivor.
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, SLACK_OIDC_ISSUER } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, SLACK_OIDC_ISSUER, companyInviteCodeHash } from "@agentx/contracts";
 import { membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
+import { inviteLinkKey } from "../../packages/broker/src/developer/company-membership.js";
 import { TEAM } from "../support/developer-fakes.js";
 import { B, OWN_SIGNIN, person, sharedSignInWorld, X } from "../support/company-shared-signin-world.js";
 
@@ -53,6 +54,21 @@ describe("Slack from any workspace (DEC 254e)", () => {
     expect((await w.access(own.access)).body).toMatchObject({ companyId: X, companyRole: "member", joinedByInvite: true });
     expect(w.sessionOf(slackId("U0INSTALL"))).toEqual([expect.objectContaining({ companyId: X, installMethod: true, amr: "slack" })]);
     expect((await w.signIn("U0INSTALL", { slackTeam: TEAM, company: B })).refused).toBe(OWN_SIGNIN);
+  });
+
+  it("a Slack invite uses only the trusted install workspace's current verified email", async () => {
+    const w = world();
+    await w.setup();
+    const owner = await w.signIn("owner");
+    const made = await w.call("POST", "/v1/dev/company/preapprovals", owner.access, { email: "install@example.test", role: "member", expiresInHours: 24 });
+    const secret = (made.body as { invite: { secret: string } }).invite.secret;
+    const key = inviteLinkKey(X, companyInviteCodeHash(secret));
+    const mismatch = await w.signIn("U0MERGED1", { slackTeam: TEAM, company: X, invite: secret });
+    expect(mismatch.refused).toBe("This invite is for another email");
+    expect(w.db.get(key.pk, key.sk)).toMatchObject({ status: "live" });
+    const joined = await w.signIn("U0INSTALL", { slackTeam: TEAM, company: X, invite: secret });
+    expect((await w.access(joined.access)).body).toMatchObject({ companyId: X, companyRole: "member", joinedByInvite: true });
+    expect(w.db.get(key.pk, key.sk)).toMatchObject({ status: "used", usedBy: slackId("U0INSTALL") });
   });
 
   it("a company with its own issuer keeps it: Slack from another workspace is refused before the invite is spent", async () => {

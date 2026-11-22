@@ -5,6 +5,7 @@
 // admin-ended sessions and channel by name).
 // Nothing here logs or echoes a secret, a code, a token or a caught error's message.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import type { CompanyJoin } from "./company-membership.js";
 import type { CompanySignInAuditInput, CompanySignInCause, CompanySignInMethod } from "./company-signin-audit.js";
 import {
   AGENTX_CLI_CLIENT_ID,
@@ -214,6 +215,14 @@ const INVALID_CODE = ["invalid_grant", "the sign-in code is invalid, used or exp
 const SIGN_IN_ENDED = ["invalid_grant", "your Rovara sign-in has ended; start signing in again"] as const;
 /** DEC 254b (a): a member of a company with its own sign-in tried the install's. Fixed words, nothing echoed. */
 const COMPANY_OWN_SIGNIN = "your company signs in with its own sign-in method";
+
+/** Fixed invite guidance; the existing audit vocabulary records email proof failures as not invited. */
+function joinRefusal(reason: Extract<CompanyJoin, { ok: false }>["reason"], byInvite: boolean): { cause: CompanySignInCause; params: Record<string, string> } {
+  if (reason === "invite_email_mismatch") return { cause: "not_invited", params: { error: "access_denied", error_description: "This invite is for another email", invite_error: "mismatch" } };
+  if (reason === "invite_email_unverified") return { cause: "not_invited", params: { error: "access_denied", error_description: "This sign-in has no verified email. Sign in with the invited email.", invite_error: "unverified" } };
+  const text = byInvite ? "not invited" : { not_invited: "not invited", member_elsewhere: "already a member of another company", member_revoked: "access ended by a company admin" }[reason];
+  return { cause: reason, params: { error: "access_denied", error_description: text } };
+}
 
 export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependencies) {
   const { config, store } = deps;
@@ -713,12 +722,13 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         deps.log({ event: "signin.refused", reason: "company_own_signin", developerId });
         return request.browserReturnTo === undefined ? client({ error: "access_denied", error_description: COMPANY_OWN_SIGNIN }) : browserReturn(request.browserReturnTo, false);
       }
-      // DEC 254h: a sign-in carrying an invite link's secret joins by that secret alone (any method, with or without an email), never by email.
+      // DEC 254zzz218: the current provider's verified identity email is mandatory for invite redemption; future methods must use this same guarded path.
       const byInvite = request.inviteHash !== undefined;
+      const inviteProof = identity.email === undefined ? {} : { verifiedEmail: identity.email };
       const joined = candidate === undefined || !OrgIdSchema.safeParse(candidate).success || (request.companyId !== undefined && request.companyId !== candidate) || !clientAllowed
         || (byInvite && request.companyId === undefined)
         ? { ok: false as const, reason: "not_invited" as const }
-        : byInvite ? await deps.company.joinByInvite({ personId: developerId, companyId: candidate, inviteHash: request.inviteHash! })
+        : byInvite ? await deps.company.joinByInvite({ personId: developerId, companyId: candidate, inviteHash: request.inviteHash!, ...inviteProof })
           : await deps.company.join({ personId: developerId, companyId: candidate, ...(identity.email === undefined ? {} : { email: identity.email }) });
       if (joined.ok) outcome.companyId = joined.membership.companyId;
       else if (joined.attributedCompanyId !== undefined) outcome.companyId = joined.attributedCompanyId;
@@ -726,11 +736,10 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       companyless = !joined.ok && joined.reason === "not_invited" && request.companyId === undefined && request.browserReturnTo === undefined
         && await companylessMayMint(developerId, method, registered);
       if (!joined.ok && !companyless) {
-        outcome.cause = joined.reason;
-        // DEC 254h: with an invite secret, every failure (unknown, used, expired, withdrawn, wrong company, a member elsewhere, a removed member) is the one answer.
-        const text = byInvite ? "not invited" : { not_invited: "not invited", member_elsewhere: "already a member of another company", member_revoked: "access ended by a company admin" }[joined.reason];
+        const refusal = joinRefusal(joined.reason, byInvite);
+        outcome.cause = refusal.cause;
         deps.log({ event: "signin.refused", reason: joined.reason, developerId });
-        return request.browserReturnTo === undefined ? client({ error: "access_denied", error_description: text }) : browserReturn(request.browserReturnTo, false);
+        return request.browserReturnTo === undefined ? client(refusal.params) : browserReturn(request.browserReturnTo, false);
       }
       if (joined.ok) companyId = joined.membership.companyId;
       installMethod = installMethod && joined.ok && companyId === candidate;
