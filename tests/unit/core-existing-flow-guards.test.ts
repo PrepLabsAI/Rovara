@@ -22,14 +22,14 @@ describe("existing close and revision fences", () => {
     expect((await taskOf(h)).workflow).toMatchObject({ stage: "PLAN", state: "READY", revision: 6 });
   });
 
-  it.each([5, 6])("AI-stop from operation revision %s only blocks its own current revision", async revision => {
+  it.each([5, 6, 7])("AI-stop from operation revision %s only blocks its own current revision", async revision => {
     const { h } = await seedPlain();
     const operation = (await operationsOf(h))[0]!;
     await h.store.update({ key: taskKey(TASK_ID), ops: [change.set("workflow", toDocument(blockedReview({ stage: "PLAN", state: "RUNNING", blockReason: undefined })))] });
     await h.store.put({ item: { ...taskPointerKey(COMPANY, WORKSPACE_ID), taskId: TASK_ID } });
     const before = (await taskOf(h)).workflow;
     await onOperationEnded(h.deps, { ...operation, workflowMode: "PLAN", workflowRevision: revision }, { status: "FAILED", error: `MODEL_NOT_ALLOWED: ${ROVARA_AI_PAUSED_MESSAGE}` });
-    if (revision === 5) expect((await taskOf(h)).workflow).toEqual(before);
+    if (revision !== 6) expect((await taskOf(h)).workflow).toEqual(before);
     else expect((await taskOf(h)).workflow).toMatchObject({ state: "BLOCKED", blockReason: ROVARA_AI_PAUSED_MESSAGE });
     expect(await operationsOf(h)).toHaveLength(1);
   });
