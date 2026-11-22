@@ -1,13 +1,68 @@
-import { describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
+import { describe, expect, it, vi } from "vitest";
 import { agentSessionKey, change } from "@agentx/contracts";
 import { closeRecoveryHarness as fixture, textField } from "../support/close-recovery-harness.js";
 import { flushBeforeClose } from "../../packages/broker/src/core/task-flow/money-stop.js";
 import { readWorkspace } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { CAPABILITY_HEADER, createCallbackHandler } from "../../packages/broker/src/services/callbacks.js";
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
+import { operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { acceptedCloseForRun } from "../../packages/broker/src/core/task-flow/close-recovery-state.js";
+import { readOperation } from "../../packages/broker/src/core/task-flow/results.js";
+import { readWikiBuildPointer, wikiBuildPointerItem } from "../../packages/broker/src/core/wiki-build/run.js";
 
 // Missing consumer, early ack, any unreceipted effect, recomputed money or workflow output must fail these cases.
 describe("accepted close recovery", () => {
+  it.each(["wiki_build", "setup_agent"] as const)("leaves a closing %s task unchanged when another already-ended run replays", async (purpose) => {
+    const w = await fixture();
+    // Reproduce a crash after the terminal run was persisted, before its task follow-up.
+    // The retained live run belongs to Close; this older terminal run does not.
+    await w.h.store.update({ key: w.tk, ops: [change.set("purpose", purpose)] });
+    const replayId = randomUUID(), replayKey = operationKey(w.h.deps.companyId, w.task.workspaceId, replayId);
+    await w.h.store.put({ item: {
+      ...(await w.h.store.get(w.runKey))!, ...replayKey, id: replayId, status: "SUCCEEDED",
+      createdAt: new Date(w.h.clock.now - 1_000).toISOString(),
+      workflowMode: purpose === "wiki_build" ? "WIKI_BUILD" : "SETUP_AGENT",
+    } });
+    if (purpose === "wiki_build") {
+      expect((await w.h.store.transact([wikiBuildPointerItem({
+        orgId: w.h.deps.companyId, project: w.task.project, taskId: w.task.taskId,
+        requestId: randomUUID(), requestedBy: w.h.owner.principal.personId, startedAt: w.task.createdAt,
+        limits: { pages: 1, budgetCents: 100, wallClockMin: 10, pageReserveCents: 10 },
+        pins: [{ repo: "demo", commit: "a".repeat(40) }], plan: [], keptFromEarlier: [], doneIds: [],
+        pagesWritten: 0, claimsKept: 0, claimsDropped: 0, spentCents: 0, spentEarlierCents: 0,
+        payer: { kind: "project", project: w.task.project }, buildKind: "first",
+      }, undefined)])).applied).toBe(true);
+    }
+    const wikiEnded = vi.fn(async () => {});
+    w.h.deps.wikiBuildEnded = wikiEnded;
+    w.h.deps.resumeAcceptedClose = async () => {};
+    await w.h.flow.close(w.h.owner, w.task.taskId, w.input);
+    const claim = (await w.accepted())!;
+    expect(claim.closeAcceptance?.original.run?.id).toBe(w.run.id);
+    expect(claim.closeAcceptance?.original.run?.id).not.toBe(replayId);
+    const replay = (await readOperation(w.h.deps, w.task.workspaceId, replayId))!;
+    expect(replay.status).toBe("SUCCEEDED");
+    expect(await acceptedCloseForRun(w.h.deps, replay)).toBeUndefined();
+    const snapshot = async () => Promise.all([
+      w.h.store.get(w.tk), w.h.store.get(w.wk), w.h.store.get(replayKey),
+      readWikiBuildPointer(w.h.store, w.h.deps.companyId, w.task.project), w.accepted(),
+    ]);
+    const before = await snapshot();
+    expect(before[0]).toMatchObject({ purpose, closeOperationId: claim.id });
+    expect(before[0]?.closedAt).toBeUndefined();
+    expect(before[1]).toMatchObject({ status: "CLOSING", activeOperationId: claim.id });
+    w.h.clock.advance(1);
+    await expect(w.h.flow.recordResult({
+      workspaceId: replay.workspaceId, operationId: replay.id, fence: replay.fence, status: "SUCCEEDED",
+    })).resolves.toEqual({ duplicate: true });
+    expect(await snapshot()).toEqual(before);
+    expect(wikiEnded).not.toHaveBeenCalled();
+    expect(w.destroyed.size).toBe(0);
+    expect(w.terminated.size).toBe(0);
+    expect(w.cleaned.size).toBe(0);
+  });
+
   it("resumes after acceptance without another POST using the existing relay and consumer", async () => {
     const w = await fixture({ session: true });
     w.h.deps.resumeAcceptedClose = async () => { throw new Error("process lost after acceptance"); };
