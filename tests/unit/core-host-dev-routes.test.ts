@@ -1454,3 +1454,122 @@ it("dispatches only GET task Ask history through the app scope table", () => {
   expect(contextAppRouteOf("GET", path)).toMatchObject({ requires: "full" });
   expect(contextAppRouteOf("POST", path)).toBeUndefined();
 });
+
+import { toDocument } from "../../packages/broker/src/core/task-flow/records.js";
+import { hostedFeedbackWorld, type FeedbackRouteBody } from "../support/hosted-pr-feedback-world.js";
+import { servesPrFeedbackDecisions, propagatePrFeedbackDecisions } from "../../packages/broker/src/core-host/pr-feedback-routes.js";
+import { collectTrackedFeedback } from "../../packages/broker/src/core/pr-feedback/service.js";
+import { WORKFLOW_KEEP_PULL_REQUESTS_NOTE } from "@agentx/contracts";
+
+const feedbackMethods = [["GET", "feedback"], ["POST", "feedback-decision"], ["POST", "feedback-retry"], ["POST", "keep-pull-requests"]] as const;
+it.each(feedbackMethods)("hosted %s %s reaches the real feedback service", async (method, action) => {
+  const w = await hostedFeedbackWorld(action === "feedback-retry" ? "BLOCKED" : "COMPLETE");
+  if (action === "keep-pull-requests") {
+    w.task.workflow!.feedbackReview = { status: "COLLECTING", bundleRefs: w.task.workflow!.feedbackReview!.bundleRefs, threadObservations: [] };
+    await w.h.store.put({ item: toDocument(w.task) });
+  }
+  const body = action === "feedback-retry" ? { reviewDigest: w.request.reviewDigest } : action === "keep-pull-requests" ? { requestId: w.request.requestId, expectedRevision: w.task.workflow!.revision } : { ...w.request, decision: "DISMISS", selectedFindingIds: [], ownerNote: WORKFLOW_KEEP_PULL_REQUESTS_NOTE };
+  const response = await w.send(method, `/workflow/${action}`, body);
+  expect(response?.statusCode).toBe(200);
+  const result = (JSON.parse(response!.body) as FeedbackRouteBody);
+  expect(Object.keys(result).sort()).toEqual(action === "feedback" ? ["review"] : action === "feedback-retry" ? ["started", "task"] : ["task"]);
+  if (action === "feedback") expect(result.review).toMatchObject({ findings: [expect.objectContaining({ comments: [expect.objectContaining({ body: "Handle this failure." })] })], proposalDigest: w.request.proposalDigest });
+  else expect(result.task.taskId).toBe(w.task.taskId);
+  if (action === "keep-pull-requests") expect(w.admit).not.toHaveBeenCalled();
+  expect(await w.send(method === "GET" ? "POST" : "GET", `/workflow/${action}`)).toBeUndefined();
+  expect(await w.send(method, `/workflow/${action}/extra`)).toBeUndefined();
+});
+
+it.each(feedbackMethods)("hosted script token %s %s gets not-found before feedback reads", async (method, action) => {
+  const w = await hostedFeedbackWorld();
+  const get = vi.spyOn(w.h.store, "get");
+  const answer = await w.send(method, `/workflow/${action}`, {}, { ...w.caller, scriptToken: { tokenId: "script" } });
+  expect(answer?.statusCode).toBe(404);
+  expect((JSON.parse(answer!.body) as FeedbackRouteBody).error.code).toBe("NOT_FOUND");
+  expect(get).not.toHaveBeenCalled();
+  expect(w.admit).not.toHaveBeenCalled();
+});
+
+it.each(["viewer", "commenter", "shared-reader", "admin", "repository-writer", "revoked-co-owner"])("feedback GET refuses a %s even when full task is readable", async kind => {
+  const w = await hostedFeedbackWorld();
+  w.h.deps.access.canRead = async () => true;
+  w.h.deps.access.canAct = async () => true;
+  w.h.deps.access.ownerActing = async () => undefined;
+  if (kind === "admin") w.membership.role = "admin";
+  expect((await w.send("GET"))?.statusCode).toBe(200);
+  const get = vi.spyOn(w.h.deps.feedbackArtifacts!, "get");
+  const response = await w.send("GET", "/workflow/feedback");
+  expect(response?.statusCode).toBe(404);
+  expect(get).not.toHaveBeenCalled();
+});
+
+it("an acting co-owner gets the hosted task projection with this task's money but without the run estimate (ruling a: see core-pr-feedback-co-owner-money.test.ts)", async () => {
+  const w = await hostedFeedbackWorld("BLOCKED");
+  w.task.runEstimate = { lowUsd: 4.37, highUsd: 10.19, runLimitUsd: 12.71, stopAtUsd: 12.71, basis: "default", samples: 0 };
+  await w.h.store.put({ item: toDocument(w.task) });
+  const actorId = "c".repeat(64);
+  w.caller.principal = { ...w.caller.principal, personId: actorId, roles: ["member"] };
+  w.h.deps.access.canAct = async () => true;
+  w.h.deps.access.ownerActing = async () => ({ actorId, authority: { actorId, ownerIds: [actorId] } });
+  const response = await w.send("POST", "/workflow/feedback-decision", { ...w.request, decision: "DISMISS", selectedFindingIds: [], ownerNote: WORKFLOW_KEEP_PULL_REQUESTS_NOTE });
+  expect(response?.statusCode).toBe(200);
+  const task = (JSON.parse(response!.body) as FeedbackRouteBody).task;
+  expect(task).toHaveProperty("money");
+  expect(task).not.toHaveProperty("runEstimate");
+  expect(task.workflow.feedbackDecisions![0]!.actorId).toBe(actorId);
+});
+
+it.each(["ownerActing", "taskCapUsd", "taskSpendUsd", "feedbackArtifacts", "codeHosts"] as const)("missing hosted %s keeps base and job dependencies unserved", async seam => {
+  const w = await hostedFeedbackWorld("COMPLETE", seam);
+  const derived = { ...w.h.deps };
+  propagatePrFeedbackDecisions(w.h.deps, derived);
+  expect(servesPrFeedbackDecisions(w.h.deps)).toBe(false);
+  expect(servesPrFeedbackDecisions(derived)).toBe(false);
+  w.read.mockClear(); w.put.mockClear();
+  expect(await collectTrackedFeedback({ ...w.deps, flow: derived, registry: w.registry }, w.task, w.budget)).toBe("unchanged");
+  expect(w.read).not.toHaveBeenCalled(); expect(w.put).not.toHaveBeenCalled();
+  for (const [method, action] of feedbackMethods) expect(await w.send(method, `/workflow/${action}`, {})).toBeUndefined();
+});
+
+it.each(["APPROVE", "REQUEST_CHANGES", "retry"])("hosted paid %s refuses each money and authority fence independently", async action => {
+  for (const fence of ["cap", "unknown-spend", "grant", "admission"] as const) {
+    const w = await hostedFeedbackWorld(action === "retry" ? "BLOCKED" : "COMPLETE");
+    if (fence === "cap") w.h.deps.taskSpendUsd = async () => 10;
+    if (fence === "unknown-spend") w.h.deps.taskSpendUsd = async () => undefined;
+    if (fence === "grant") w.h.deps.access.checkStep = async () => ({ allowed: false, message: "revoked" });
+    if (fence === "admission") w.admit.mockResolvedValue({ allowed: false, code: "budget_exceeded", message: "refused" });
+    const before = await w.h.store.get(w.task);
+    const transact = vi.spyOn(w.h.store, "transact");
+    const response = await w.send("POST", `/workflow/${action === "retry" ? "feedback-retry" : "feedback-decision"}`, action === "retry" ? { reviewDigest: w.request.reviewDigest } : { ...w.request, decision: action, selectedFindingIds: action === "REQUEST_CHANGES" ? [] : w.request.selectedFindingIds, ownerNote: "Review this finding again." });
+    expect(response?.statusCode, fence).toBe(fence === "grant" ? 403 : 402);
+    expect(await w.h.store.get(w.task), fence).toEqual(before);
+    expect(transact, fence).not.toHaveBeenCalled();
+    expect(w.held.size, fence).toBe(0);
+    expect((await w.h.store.query({ pk: `ORG#${w.h.deps.companyId}#WORKFLOW_DISPATCH` })).items).toEqual([]);
+  }
+});
+
+it("a hosted owner action returns the same money projection as the full task read", async () => {
+  const w = await hostedFeedbackWorld("BLOCKED");
+  w.caller.principal = { ...w.caller.principal, personId: w.task.developerId };
+  w.task.runEstimate = { lowUsd: 4.37, highUsd: 10.19, runLimitUsd: 12.71, stopAtUsd: 12.71, basis: "default", samples: 0 };
+  await w.h.store.put({ item: toDocument(w.task) });
+  const before = (JSON.parse((await w.send("GET"))!.body) as FeedbackRouteBody).task;
+  const response = await w.send("POST", "/workflow/feedback-decision", { ...w.request, decision: "DISMISS", selectedFindingIds: [], ownerNote: WORKFLOW_KEEP_PULL_REQUESTS_NOTE });
+  expect(response?.statusCode).toBe(200);
+  const task = (JSON.parse(response!.body) as FeedbackRouteBody).task;
+  expect(task.runEstimate).toEqual(w.task.runEstimate);
+  expect(task.money).toEqual(before.money);
+  expect(task.money).toBeDefined();
+  expect(w.held.size).toBe(0);
+});
+
+it.each(["feedback-decision", "feedback-retry", "keep-pull-requests"])("hosted %s malformed JSON answers missing for a non-owner", async action => {
+  const w = await hostedFeedbackWorld();
+  w.h.deps.access.ownerActing = async () => undefined;
+  const transact = vi.spyOn(w.h.store, "transact");
+  const response = await w.routes.route({ method: "POST", path: `/v1/dev/tasks/${w.task.taskId}/workflow/${action}`, headers: {}, body: "{" }, w.caller);
+  expect(response?.statusCode).toBe(404);
+  expect(transact).not.toHaveBeenCalled();
+  expect(w.admit).not.toHaveBeenCalled();
+});

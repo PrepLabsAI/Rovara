@@ -1692,6 +1692,21 @@ export function retryWorkflowFeedbackReview(currentInput: unknown, input: {
     feedbackReviewHistory: history, updatedAt: input.now });
 }
 
+/** DEC 254zzz398 (1): the most review rounds Rovara starts on its own for one task. Past it the card says the review limit is reached; the owner can still Retry a failed review or Keep. */
+export const WORKFLOW_FEEDBACK_AUTO_REVIEW_ROUNDS_MAX = 3;
+
+/**
+ * The review rounds a task has used, counted from the records it already keeps (no counter of its own): one round per DISTINCT set of collected comment bundles that was reviewed or is being reviewed,
+ * across the review reports kept in `feedbackReviewHistory` and the current `feedbackReview`. A Retry of a failed review and a Request changes review the same bundles again, so they are the same round;
+ * new comments (or a new head after a fix) make new bundles and so a new round.
+ */
+export function workflowFeedbackReviewRounds(workflow: Pick<WorkflowSnapshot, "feedbackReview" | "feedbackReviewHistory">): number {
+  const sets = new Set<string>();
+  for (const report of workflow.feedbackReviewHistory ?? []) sets.add([...report.bundleDigests].sort().join(","));
+  if (workflow.feedbackReview !== undefined) sets.add(workflow.feedbackReview.bundleRefs.map(bundle => bundle.sha256).sort().join(","));
+  return sets.size;
+}
+
 /** The digest of a set of failing checks' names (sorted, so the order they were seen in does not matter). */
 export function feedbackCiFailuresDigest(checks: readonly string[]): string {
   return createHash("sha256").update(JSON.stringify([...new Set(checks)].sort()), "utf8").digest("hex");

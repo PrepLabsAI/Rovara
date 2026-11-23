@@ -12,7 +12,7 @@ import { APP_ROUTES, appRouteOf } from "../../packages/broker/src/aws/dev-route-
 import { CORE_APP_SIGN_IN_AGAIN, CORE_APP_UNAVAILABLE, coreAppEntryFrom, type CoreAppEntry } from "../../packages/broker/src/aws/core-app-routes.js";
 import { deployedCallerFromMembership, membershipWithRoleFromDynamo, personStandingFromDynamo, projectGrantFromDynamo } from "../../packages/broker/src/aws/core-engine-root.js";
 import type { DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
-import type { CoreEntryCaller } from "../../packages/broker/src/aws/engine-boundary.js";
+import type { CoreTaskEntry, CoreEntryCaller } from "../../packages/broker/src/aws/engine-boundary.js";
 import { createCoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { NOT_ON_THE_CORE_YET, createCoreDevRoutes } from "../../packages/broker/src/core-host/dev-routes.js";
 import { createPersonEraseRoute } from "../../packages/broker/src/core-host/person-erase-route.js";
@@ -158,12 +158,13 @@ function person(developerId: string, name: string, sessionId: string, clientId?:
 const membership = (personId: string, companyId: string, role: string, revokedAt?: string) =>
   db.set({ pk: `COMPANY_MEMBER#${personId}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId, companyId, role, joinedAt: "2026-11-01T00:00:00.000Z", ...(revokedAt === undefined ? {} : { revokedAt }) });
 
-async function setUp(coreApp: CoreAppEntry | undefined, mode: "developer" | "linking" = "developer"): Promise<void> {
+async function setUp(coreApp: CoreAppEntry | undefined, mode: "developer" | "linking" = "developer", coreTasks?: CoreTaskEntry): Promise<void> {
   vi.useFakeTimers({ now: T0, toFake: ["Date"] });
   const config: DeveloperApiConfiguration = {
     issuer: ISSUER, env: "staging", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(),
     verifyAccessToken: developerTokenVerifier({ issuer: ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
     ...(coreApp === undefined ? {} : { coreApp }),
+    ...(coreTasks === undefined ? {} : { coreTasks }),
   };
   ({ db, handler } = await createAdminBroker(mode === "linking" ? { linking: config } : { developer: config }));
   person(ADA, "Ada", "s-aa");
@@ -406,6 +407,11 @@ it("inventories the four exact context worker routes without person authority", 
 
 
 it("the existing PR feedback action paths retain their production scopes", () => {
+  const taskPath = "/v1/dev/tasks/99999999-9999-4999-8999-999999999999";
+  expect(contextDevRouteOf("GET", taskPath)?.requires).toBe("tasks:read");
+  expect(contextDevRouteOf("GET", `${taskPath}/workflow/feedback`)?.requires).toBe("tasks:read");
+  expect(contextDevRouteOf("POST", `${taskPath}/workflow/feedback`)).toBeUndefined();
+  expect(contextAppRouteOf("GET", taskPath.replace("/v1/dev/", "/v1/app/") + "/workflow/feedback")).toBeUndefined();
   const id = "11111111-1111-4111-8111-111111111111";
   for (const [action, scope] of [["feedback-decision", "decisions:decide"], ["feedback-retry", "tasks:act"], ["keep-pull-requests", "tasks:act"]] as const) {
     const path = `/v1/dev/tasks/${id}/workflow/${action}`;
@@ -462,4 +468,69 @@ describe("dedicated server-read route registration", () => {
 it("task Ask history is a full-access GET route, distinct from asking", () => {
   expect(appRouteOf("GET", "/v1/app/projects/alpha/tasks/11111111-1111-4111-8111-111111111111/answers")).toMatchObject({ requires: "full" });
   expect(appRouteOf("POST", "/v1/app/projects/alpha/tasks/11111111-1111-4111-8111-111111111111/answers")).toBeUndefined();
+});
+
+import { toDocument } from "../../packages/broker/src/core/task-flow/records.js";
+import { hostedFeedbackWorld } from "../support/hosted-pr-feedback-world.js";
+import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
+
+it.each([["GET", "feedback"], ["POST", "feedback-decision"], ["POST", "feedback-retry"], ["POST", "keep-pull-requests"]] as const)("the real developer broker reaches hosted %s %s and preserves missing-task answers", async (method, action) => {
+  const w = await hostedFeedbackWorld(action === "feedback-retry" ? "BLOCKED" : "COMPLETE");
+  w.h.deps.access.ownerActing = async principal => principal.personId === ADA ? { actorId: w.task.ownerKey } : undefined;
+  let wrongCompany = false;
+  let coreStatus: number | undefined;
+  const entry: CoreTaskEntry = { route: async (request, caller) => {
+    const response = await w.routes.route(request, { ...w.caller, principal: { ...w.caller.principal, personId: caller.developerId, companyId: wrongCompany ? "org_bbbbbbbbbbbbbbbbbbbb" : w.caller.principal.companyId } });
+    coreStatus = response?.statusCode;
+    return response;
+  } };
+  await setUp(undefined, "developer", entry);
+  membership(ADA, w.h.deps.companyId, "member");
+  const path = `/v1/dev/tasks/${w.task.taskId}/workflow/${action}`;
+  const authorization = await cli();
+  const options = { routeKey: "ANY /v1/dev/{proxy+}", body: action === "feedback-retry" ? { reviewDigest: w.request.reviewDigest } : action === "keep-pull-requests" ? { requestId: w.request.requestId, expectedRevision: w.task.workflow!.revision } : { ...w.request, decision: "DISMISS", selectedFindingIds: [], ownerNote: "The owner kept the pull request as it is." } };
+  const missing = await call(method, path, authorization, options);
+  db.set((await w.h.store.get(engineStampKey(w.task.taskId)))!);
+  db.set(toDocument(w.task));
+  if (action === "keep-pull-requests") {
+    w.task.workflow!.feedbackReview = { status: "COLLECTING", bundleRefs: w.task.workflow!.feedbackReview!.bundleRefs, threadObservations: [] };
+    await w.h.store.put({ item: toDocument(w.task) });
+    expect(await call("GET", `/v1/dev/tasks/${w.task.taskId}/workflow/feedback`, authorization, options)).toEqual(missing);
+  }
+  expect(contextDevRouteOf(method, path)?.requires).toBe(action === "feedback" ? "tasks:read" : action === "feedback-decision" ? "decisions:decide" : "tasks:act");
+  const response = await call(method, path, authorization, options);
+  expect(response.status).toBe(200);
+  expect(JSON.stringify(response.body)).not.toContain(NOT_ON_THE_CORE_YET);
+  expect(Object.keys(response.body).filter(key => key !== "requestId").sort()).toEqual(action === "feedback" ? ["review"] : action === "feedback-retry" ? ["started", "task"] : ["task"]);
+  w.h.deps.access.ownerActing = async () => undefined;
+  expect(await call(method, path, authorization, options)).toEqual(missing);
+  expect(coreStatus).toBe(404);
+  wrongCompany = true;
+  expect(await call(method, path, authorization, options)).toEqual(missing);
+  expect(coreStatus).toBe(401);
+});
+
+it.each([["GET", "feedback", "tasks:read"], ["POST", "feedback-decision", "decisions:decide"], ["POST", "feedback-retry", "tasks:act"], ["POST", "keep-pull-requests", "tasks:act"]] as const)("the developer broker enforces %s %s scope before the mounted handler", async (method, action, scope) => {
+  const w = await hostedFeedbackWorld(action === "feedback-retry" ? "BLOCKED" : "COMPLETE");
+  const route = vi.fn(async (request: BrokerRequest) => w.routes.route(request, w.caller));
+  await setUp(undefined, "developer", { route });
+  membership(ADA, w.h.deps.companyId, "member");
+  db.set((await w.h.store.get(engineStampKey(w.task.taskId)))!);
+  db.set(toDocument(w.task));
+  const at = new Date(T0 - 60_000).toISOString();
+  const client = { pk: "SIGNIN_CLIENTS", sk: "CLIENT#tool", entityType: "SIGN_IN_CLIENT", clientId: "tool", name: "Tool", audience: "tool", redirectUris: ["https://tool.example/callback"], loopback: false, installLevel: true, scopes: ["tasks:start"], secretHash: "f".repeat(64), createdAt: at, updatedAt: at, updatedBy: "operator" };
+  db.set(client);
+  person(ADA, "Ada", "s-tool", "tool");
+  const authorization = await bearer({ aud: "tool", azp: "tool", sid: "s-tool", scope });
+  const path = `/v1/dev/tasks/${w.task.taskId}/workflow/${action}`;
+  const options = { routeKey: "ANY /v1/dev/{proxy+}", body: action === "feedback-retry" ? { reviewDigest: w.request.reviewDigest } : action === "keep-pull-requests" ? { requestId: w.request.requestId, expectedRevision: w.task.workflow!.revision } : w.request };
+  expect((await call(method, path, authorization, options)).status).toBe(403);
+  expect(route).not.toHaveBeenCalled();
+  db.set({ ...client, scopes: [scope] });
+  if (action === "keep-pull-requests") {
+    w.task.workflow!.feedbackReview = { status: "COLLECTING", bundleRefs: w.task.workflow!.feedbackReview!.bundleRefs, threadObservations: [] };
+    await w.h.store.put({ item: toDocument(w.task) });
+  }
+  expect((await call(method, path, authorization, options)).status).toBe(200);
+  expect(route).toHaveBeenCalled();
 });
