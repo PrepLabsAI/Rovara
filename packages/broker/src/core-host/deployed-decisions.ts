@@ -24,6 +24,7 @@ import { SETUP_CHANGE_CARD_WORDS, WorkflowSnapshotSchema, setupChangeLines } fro
 import { createDecisionService, type DecisionService, type DecisionServiceOptions } from "../services/decisions.js";
 import { auditViaCaller } from "../core/audit-read/index.js";
 import { hostedKnownFailing } from "./known-failing.js";
+import { setupHostItems } from "./setup-host-items.js";
 import { createDecisionGate } from "../core/decisions/approval-gate.js";
 import { CARD_REFUSAL_OF_GATE } from "../core/decisions/performer.js";
 import type { Credential, DecisionOutcome } from "../core/decisions/approval-gate.js";
@@ -373,6 +374,8 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
       }
       // An older task past the bound is not shown here (it is still decided on its own page); the log says the listing was cut.
       if (cursor !== undefined) log({ event: "core_engine.decision_cards_cut", companyId, read });
+      // The websites a setup run asked for: only the people who may decide one (a company owner or admin) are shown the card.
+      items.push(...await setupHostItems({ store: deps.store, now: nowMs }, companyId, viewer.admin, log));
       items.push(...await knownFailing.items(companyId, caller.principal));
       return items;
     },

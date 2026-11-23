@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it, vi } from "vitest";
 import {
-  agentXError, DecisionCardsViewSchema, createWorkflowSnapshot, orgProjectCatalogKey, projectRevisionKey, submitWorkflowArtifact,
+  agentXError, change, orgScoped, INDEX_EXPIRY_ATTRIBUTE, DecisionCardsViewSchema, createWorkflowSnapshot, orgProjectCatalogKey, projectRevisionKey, submitWorkflowArtifact,
   type AdapterRegistry, type ApprovalProof, type ApprovalRequest, type Approvers, type JsonValue, type OrgId, type OrgRole, type Principal, type ProjectDefinition, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
@@ -24,6 +24,8 @@ import { decisionCardPath, projectDecisionCards } from "../../packages/broker/sr
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { fixedCodeSettings } from "../../packages/broker/src/core/merge/defaults.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { hostAskDigest, hostAskSubjectId, requestHostAsk, type SetupHostAsk } from "../../packages/broker/src/core/setup-agent/host-ask.js";
+import { hostAskKey } from "../../packages/broker/src/core/setup-agent/keys.js";
 import { deleteInvolvedRow, writeInvolvedRow } from "../../packages/broker/src/core/task-flow/involved.js";
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import type { TaskPeopleDependencies } from "../../packages/broker/src/developer/task-people.js";
@@ -780,4 +782,116 @@ it("lets a hosted tool token with decisions:decide approve as its person, and re
   expect(replay.statusCode).toBe(200);
   expect(await t.stored(taskId)).toEqual(after);
   expect(t.world.audit.filter((event) => event.action === "decision.approved")).toHaveLength(1);
+});
+
+// PROD BUG (setup host asks): a setup run's website ask said "waiting for an administrator on the Decisions page", but the list never held a card for it. The list now draws one card per open ask of
+// the company for the people who may decide it (a company owner or admin, the rule of the run page's host-decide route), and nobody else.
+describe("the deployed decision cards: a setup run's website asks", () => {
+  const HOST = "deps.exampledeps.dev";
+  async function hostWorld() {
+    const t = await setup();
+    t.memberships.set("dev-o", { companyId: ORG, role: "owner" });
+    t.grants.set("dev-o|payments", "developer");
+    // A project maintainer who is only a member, and a plain member with no grant on the project.
+    t.memberships.set("dev-m", { companyId: ORG, role: "member" });
+    t.grants.set("dev-m|payments", "administrator");
+    t.memberships.set("dev-n", { companyId: ORG, role: "member" });
+    const seedAsk = async (companyId: OrgId, project: string, host = HOST): Promise<SetupHostAsk> => {
+      const taskId = randomUUID();
+      await t.world.store.put({ item: { pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", purpose: "setup_agent", companyId, project, developerId: "dev-starter", provider: HOSTED_IDENTITY_PROVIDER, workspaceId: randomUUID() } });
+      const outcome = await requestHostAsk({ store: t.world.store, now: () => t.world.clock.now }, { orgId: companyId, project, host, taskId, projectDomains: [], journalN: 4, from: { path: "package.json", line: 12 } });
+      if (outcome.outcome !== "created") throw new Error(`the ask was not made: ${outcome.outcome}`);
+      return outcome.ask;
+    };
+    return { ...t, seedAsk };
+  }
+  const hostCards = async (deps: Deps, personId: string, companyId: string = ORG) => (await view(deps, personId, companyId)).cards.filter((card) => card.kind === "setup_host");
+
+  it("lists an open ask as one card for a company owner and for an admin, with the host, where it came from, and the way to the run page", async () => {
+    const t = await hostWorld();
+    const ask = await t.seedAsk(ORG, "payments");
+    const subjectId = hostAskSubjectId(ORG, "payments", HOST);
+    for (const person of ["dev-o", "dev-b"]) {
+      const cards = await hostCards(t.deps, person);
+      expect(cards, person).toHaveLength(1);
+      expect(cards[0]).toMatchObject({ id: `setup_host:${subjectId}`, kind: "setup_host", project: "payments" });
+      expect(JSON.stringify(cards[0])).toContain(HOST);
+      expect(JSON.stringify(cards[0])).toContain("package.json:12");
+      expect(JSON.stringify(cards[0])).toContain("/app/projects/payments/setup");
+      // Open-only: the person decides on the setup page (the decisions performer has no handler for it), so the card has no Approve, Reject or Request changes.
+      expect(cards[0]!.actions.map((action) => action.kind), person).toEqual(["open"]);
+      expect(cards[0]!.actions[0]).toMatchObject({ method: "GET", href: "/app/projects/payments/setup", label: "Open the setup" });
+      expect(cards[0]!.rejectReasons).toEqual([]);
+    }
+    expect(hostAskDigest(ask)).toMatch(/^[a-f0-9]{64}$/u);
+  });
+
+  it("shows the card to nobody who may not decide it: a plain member, a project maintainer who is only a member, a non-member", async () => {
+    const t = await hostWorld();
+    await t.seedAsk(ORG, "payments");
+    for (const person of ["dev-a", "dev-m", "dev-n"]) expect(await hostCards(t.deps, person), person).toEqual([]);
+    expect(await hostCards(t.deps, "nobody")).toEqual([]);
+  });
+
+  it("never lists another company's ask, and the other company's owner sees only theirs", async () => {
+    const t = await hostWorld();
+    await t.seedAsk(OTHER, "payments", "theirs.exampledeps.dev");
+    expect(await hostCards(t.deps, "dev-b")).toEqual([]);
+    expect(await hostCards(t.deps, "dev-o")).toEqual([]);
+    await t.seedAsk(ORG, "payments");
+    const mine = await hostCards(t.deps, "dev-b");
+    expect(mine).toHaveLength(1);
+    expect(JSON.stringify(mine)).not.toContain("theirs.exampledeps.dev");
+    const theirs = await hostCards(t.otherDeps, "dev-x", OTHER);
+    expect(theirs).toHaveLength(1);
+    expect(JSON.stringify(theirs)).toContain("theirs.exampledeps.dev");
+    expect(JSON.stringify(theirs)).not.toContain(HOST);
+  });
+
+  it("drops a resolved ask: approved or refused (the index row is removed), and a stale index row whose ask is no longer open", async () => {
+    const t = await hostWorld();
+    const first = await t.seedAsk(ORG, "payments");
+    const second = await t.seedAsk(ORG, "payments", "other.exampledeps.dev");
+    expect(await hostCards(t.deps, "dev-b")).toHaveLength(2);
+    // What the decision's transaction does: the ask's state changes and its index row goes.
+    await t.world.store.update({ key: hostAskKey(ORG, "payments", first.host), ops: [change.set("state", "approved")] });
+    await t.world.store.delete({ key: { pk: orgScoped(ORG, "SETUP_HOST_OPEN"), sk: `payments#${first.host}` } });
+    const remaining = await hostCards(t.deps, "dev-b");
+    expect(remaining).toHaveLength(1);
+    expect(JSON.stringify(remaining)).toContain("other.exampledeps.dev");
+    // The index row alone is not enough: an ask that is no longer open is not listed even when its row was left behind.
+    await t.world.store.update({ key: hostAskKey(ORG, "payments", second.host), ops: [change.set("state", "refused")] });
+    expect(await hostCards(t.deps, "dev-b")).toEqual([]);
+  });
+
+  // Review test (lead 4 Opus, e9add25b3): a row whose store lifetime has passed is no longer an ask, whichever of the two rows (the company's index pointer, or the ask itself) ran out first.
+  it("drops an ask whose store lifetime has passed: the index row's, or the ask row's own", async () => {
+    const t = await hostWorld();
+    const first = await t.seedAsk(ORG, "payments");
+    const second = await t.seedAsk(ORG, "payments", "other.exampledeps.dev");
+    expect(await hostCards(t.deps, "dev-b")).toHaveLength(2);
+    const past = Math.floor(t.world.clock.now / 1000) - 1;
+    // The index row ran out (the store has not removed it yet); the ask row itself still looks open and fresh.
+    await t.world.store.update({ key: { pk: orgScoped(ORG, "SETUP_HOST_OPEN"), sk: `payments#${first.host}` }, ops: [change.set(INDEX_EXPIRY_ATTRIBUTE, past)] });
+    const left = await hostCards(t.deps, "dev-b");
+    expect(left).toHaveLength(1);
+    expect(JSON.stringify(left)).toContain("other.exampledeps.dev");
+    // The ask row ran out while its index row is still fresh.
+    await t.world.store.update({ key: hostAskKey(ORG, "payments", second.host), ops: [change.set(INDEX_EXPIRY_ATTRIBUTE, past)] });
+    expect(await hostCards(t.deps, "dev-b")).toEqual([]);
+  });
+
+  it("is mounted: the deployed developer route lists it for an admin and not for a member", async () => {
+    const t = await hostWorld();
+    await t.seedAsk(ORG, "payments");
+    const companyOf = async (caller: { principal: Principal }) => t.memberships.get(caller.principal.personId);
+    const wired = createCoreDevRoutes({ app: t.app, companyOf, wiring: async (runtime) => ({ origin: () => "https://api.example", ...deployedDevWiringParts({ runtime, registry: t.registry, people: t.people, decisionProofs: t.point.proofs }) }) });
+    const list = async (personId: string) => {
+      const answer = await wired.route({ method: "GET", path: "/v1/app/decisions", headers: {} }, { principal: principalOf(personId), client: "app" });
+      expect(answer?.statusCode).toBe(200);
+      return DecisionCardsViewSchema.parse(JSON.parse(answer!.body)).cards.filter((card) => card.kind === "setup_host");
+    };
+    expect(await list("dev-b")).toHaveLength(1);
+    expect(await list("dev-a")).toEqual([]);
+  });
 });
