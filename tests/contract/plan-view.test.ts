@@ -159,6 +159,13 @@ describe("an unreadable plan", () => {
     revision: 3, stage: "PLAN", state: "BLOCKED", blockReason: "the plan couldn't be read", ...extra });
   const taskId = "11111111-1111-4111-8111-111111111111";
 
+  // PLAN-FILE-EXTENSIONS review (Opus): the reason became a sentence; a task blocked before still holds the old lower-case words.
+  it.each(["The plan couldn't be read.", "the plan couldn't be read"])("reads the block reason %j as an unreadable plan: the card names the category, and the reason reads as the sentence", (blockReason) => {
+    const card = workflowMessage({ taskId, workflow: blocked({ blockReason }), planUnreadableCategory: "claims-shape" })!.text;
+    expect(card).toBe("AgentX couldn't read the coding plan it wrote: the claims or decisions did not match the required format. Choose Retry planning (it gets the problems found), or Close.");
+    expect(plainBlockReason(blockReason)).toBe("The plan couldn't be read.");
+  });
+
   it("says a stop the owner asked for once, not twice (CANCELDUP)", () => {
     const stopped = (stage: string, blockReason: string) => workflowMessage({ taskId, workflow: WorkflowSnapshotSchema.parse({ ...blocked(), stage, blockReason }) })!.text;
     expect(stopped("IMPLEMENT", "implementation operation ended cancelled")).toBe("Coding was stopped before it finished. Choose Retry to run it again.");

@@ -1,7 +1,7 @@
 // The retired workflow's additional thread moments, using its message builders and the core's
 // company/member checks and durable notice claims. Re-read on every session refresh: a failed
 // post is retried even when the summary did not change, and an old event never narrates an old step.
-import { WORKFLOW_BLOCK_REASONS, type OrgId, type RichMessage, type WorkflowSnapshot } from "@agentx/contracts";
+import { isPlanUnreadableBlockReason, type OrgId, type RichMessage, type WorkflowSnapshot } from "@agentx/contracts";
 import { workflowMessage, workflowMessageKey, type WorkflowMessageContext } from "../../developer/workflow-messages.js";
 import { AutoFixAskSchema } from "../../developer/autofix-messages.js";
 import { planRevisionsUsed } from "../../developer/plan-self-check.js";
@@ -87,7 +87,7 @@ function workflowContext(task: TaskRecord, workflow: WorkflowSnapshot, taskPageU
     const ask = AutoFixAskSchema.safeParse(task.autofixAsk);
     context.autoFix = { ask: ask.success ? ask.data : undefined };
   }
-  if (workflow.stage === "PLAN" && workflow.blockReason === WORKFLOW_BLOCK_REASONS.planUnreadable && task.planUnreadable?.workflowRevision === workflow.revision) unreadableContext(context, task);
+  if (workflow.stage === "PLAN" && isPlanUnreadableBlockReason(workflow.blockReason) && task.planUnreadable?.workflowRevision === workflow.revision) unreadableContext(context, task);
   return context;
 }
 function unreadableContext(context: WorkflowMessageContext, task: TaskRecord): void {

@@ -105,6 +105,7 @@ import {
   retryWorkflowFeedbackReview,
   WORKFLOW_PLAN_MAX_BYTES,
   WORKFLOW_BLOCK_REASONS,
+  isPlanUnreadableBlockReason,
   WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX,
   WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX,
   WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX,
@@ -2205,7 +2206,7 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
   const retired = await retiredClaimIdList(deps, task.workflow);
   // An unreadable answer is retried with what was wrong in it (the planning prompt adds the format instructions).
   const unreadable = task.planUnreadable;
-  const retryInstructions = unreadable !== undefined && task.workflow.blockReason === WORKFLOW_BLOCK_REASONS.planUnreadable && unreadable.workflowRevision === task.workflow.revision
+  const retryInstructions = unreadable !== undefined && isPlanUnreadableBlockReason(task.workflow.blockReason) && unreadable.workflowRevision === task.workflow.revision
     ? planUnreadablePrompt(unreadable.errors) : request.instructions;
   try {
     await withCurrentThreadNotes(deps, task, request.requestId, (current, notes) => {

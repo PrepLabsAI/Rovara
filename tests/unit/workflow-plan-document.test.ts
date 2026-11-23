@@ -413,7 +413,7 @@ describe("WorkflowArtifactSchema", () => {
   });
 
   it("has a block reason for a plan that could not be read", () => {
-    expect(WORKFLOW_BLOCK_REASONS.planUnreadable).toBe("the plan couldn't be read");
+    expect(WORKFLOW_BLOCK_REASONS.planUnreadable).toBe("The plan couldn't be read.");
   });
 });
 

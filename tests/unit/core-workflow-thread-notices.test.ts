@@ -88,3 +88,18 @@ it.each(["IMPLEMENT", "VERIFY", "REVIEW", "PULL_REQUEST"] as const)("review3: %s
   expect(event.data.text).toContain("https://app.example/app/sessions/");
   expect((event.data.parts ?? []).some((part) => part.type === "section" && part.text.includes("https://app.example/app/sessions/"))).toBe(true);
 });
+
+// PLAN-FILE-EXTENSIONS review (Opus): a task blocked before the reason became a sentence still holds the old lower-case
+// words; its notice still says why the plan couldn't be read (the stored category), not only that it couldn't.
+it.each(["The plan couldn't be read.", "the plan couldn't be read"])("an unreadable plan blocked with the reason %j still names the stored category", async (blockReason) => {
+  const w = await world();
+  const workflow = { ...w.workflow, stage: "PLAN" as const, state: "BLOCKED" as const, blockReason };
+  const sessionId = taskSessionId(workflow.taskId);
+  await w.fake.store.put({ item: JSON.parse(JSON.stringify({ ...taskKey(workflow.taskId), entityType: "DEVELOPER_TASK", taskId: workflow.taskId, companyId: FAKE_COMPANY, orgId: FAKE_COMPANY, sessionId, workflow,
+    planUnreadable: { workflowRevision: workflow.revision, errors: ["The plan must say which files change."], category: "claims-shape" } })) as StoredDocument });
+  await w.refresh();
+  expect(w.events).toHaveLength(1);
+  const event = w.events[0]!;
+  if (event.type !== "message") throw new Error("not a workflow notice");
+  expect(event.data.text).toContain("the claims or decisions did not match the required format");
+});
