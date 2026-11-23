@@ -282,7 +282,7 @@ describe("the run is stopped as its usage is booked (the broker root's wiring an
     const a = await operationOf(A);
     const b = await operationOf(B);
     const handler = createCallbackHandler({
-      flow: flowFor(A), blobs: {} as never, grants: { exchange: async () => { throw new Error("unused"); } },
+      flow: flowFor(A), blobs: {} as never, grants: { exchange: async () => { throw new Error("unused"); }, inspect: () => { throw new Error("unused"); } },
       bookUsage: async () => ({ booked: 1, unreadable: 0, spendStop: "company_day_cap" }),
     });
     const capability = new CallbackCapabilities(signingKey).issue({ workspaceId: a.workspaceId, operationId: a.id, fence: 1, actions: ["events"], expiresInSeconds: 600 });

@@ -127,6 +127,7 @@ describe("making a registry credential", () => {
     await expect(companyRegistryCredential(undefined, COMPANY, HOST, "ghnpm-1")).rejects.toThrow(REGISTRY_UNAVAILABLE_MESSAGE("ghnpm-1"));
     const failing: CompanyRegistryStore = { entries: async () => [], token: async () => { throw new Error(`denied ${PAT}`); } };
     const error = await companyRegistryCredential(failing, COMPANY, HOST, "ghnpm-1").catch((caught: unknown) => caught as Error);
+    if (!(error instanceof Error)) throw new Error("expected the failure to be an Error");
     expect(error.message).toContain(REGISTRY_UNAVAILABLE_MESSAGE("ghnpm-1"));
     expect(error.message).not.toContain(PAT);
   });
@@ -175,6 +176,7 @@ describe("the registries a prepare carries", () => {
     await expect(registriesPrepareFor({ ...base(many), project: project("payments") })).rejects.toThrow(REGISTRIES_TOO_MANY);
     // The sentence never carries what the store said.
     const error = await registriesPrepareFor({ ...base(companyStore({ failEntries: true })), project: project("payments") }).catch((caught: unknown) => caught as Error);
+    if (!(error instanceof Error)) throw new Error("expected the refusal to be an Error");
     expect(error.message).not.toContain(PAT);
   });
   it("keep CodeArtifact to an enterprise install that bound the domain to this company, and add the company's entries beside it", async () => {

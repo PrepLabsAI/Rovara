@@ -134,7 +134,7 @@ describe("a PR-feedback review's usage reaches the cost ledger", () => {
     const key = "k".repeat(40);
     await w.store.put({ item: { ...operationKey(COMPANY, w.workspaceId, opId), entityType: "OPERATION", id: opId, workspaceId: w.workspaceId, companyId: COMPANY, kind: "task", status: "RUNNING", fence: 1, eventSequence: 0 } });
     const flow = { store: w.store, companyId: COMPANY, callbackSigningKey: key, now: () => NOW, log: () => undefined } as unknown as TaskFlowDeps;
-    const handler = createCallbackHandler({ flow, blobs: {} as never, grants: { exchange: async () => { throw new Error("unused"); } } });
+    const handler = createCallbackHandler({ flow, blobs: {} as never, grants: { exchange: async () => { throw new Error("unused"); }, inspect: () => { throw new Error("unused"); } } });
     const token = new CallbackCapabilities(Buffer.from(key)).issue({ workspaceId: w.workspaceId, operationId: opId, fence: 1, actions: ["events"], expiresInSeconds: 600 });
     const answer = await handler({ method: "POST", path: `/v1/internal/workspaces/${w.workspaceId}/operations/${opId}/events`, headers: { [CAPABILITY_HEADER]: token }, body: JSON.stringify({ events: [event(endReport(0.0346))] }) });
     expect(answer.statusCode).toBe(200);
