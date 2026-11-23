@@ -1,4 +1,5 @@
 import { validateFeedbackApproval } from "../pr-feedback/fix-context.js";
+import { runClosePreparation } from "./close-preparation.js";
 import { workspaceKeys } from "./workspace-location.js";
 import { acceptedCloseForRun, closeDeliveryReceipt, readAcceptedClose, retireCloseDelivery } from "./close-recovery-state.js";
 // Lane L6a, task flow core: dispatching operations to worker machines. The consumer of the dispatch queue: for each message it finds the
@@ -31,6 +32,7 @@ import {
   type Queue,
   type ReceivedMessage,
   type StandingInstructionsPayload,
+  type MachineHealth,
   type WorkerInvocation,
   type WorkflowDependencyInvocation,
 } from "@agentx/contracts";
@@ -168,6 +170,7 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
   delivery.decision = operation.status === "RUNNING" ? "ack-running" : operation.status === "DISPATCHING" ? staleDispatch(deps, operation) ? "recover-stale" : "defer-fresh-duplicate" : "dispatch";
   // Broker-owned accepted close work stays retryable until every effect and receipt completes.
   // Never route it through worker dispatch, which would interrupt a CLOSING workspace and acknowledge away recovery.
+  if (operation.closePreflight !== undefined) return runClosePreparation(deps, queue, message, operation);
   if (operation.closeAcceptance !== undefined) return resumeCloseDelivery(deps, queue, message, operation);
   return handleWorkerDispatch(deps, queue, message, operation, delivery);
 }
@@ -317,6 +320,7 @@ async function handleWorkerDispatch(deps: TaskFlowDeps, queue: Queue, message: R
     // The workspace must still be ours to give the machine to; if a close got in first, the machine it could not see is stopped here.
     if (!(await rememberMachine(deps, workspace, handle, reservationId))) return abandon(deps, queue, message, operation, handle.machineId, reservationId, delivery);
     const health = await deps.machines.health(handle.machineId);
+    await deps.closeInspection?.noteRuntime?.(workspace.id, health);
     if (health.state === "terminated") {
       // The machine is gone for good (reaped): forget it; the next try starts another, admitted on its own.
       await forgetMachine(deps, workspace.id, handle.machineId, workspace.machineReservationId ?? reservationId);
@@ -352,7 +356,7 @@ async function handleWorkerDispatch(deps: TaskFlowDeps, queue: Queue, message: R
     if (!claimed) return abandon(deps, queue, message, operation, handle.machineId, reservationId ?? workspace.machineReservationId, delivery);
     const invocation = await buildInvocation(deps, operation, workspace, health.features, standing, sent);
     if (typeof invocation === "string") return endAndAck("FAILED", invocation);
-    await deps.machines.deliver(handle.machineId, invocation);
+    await deliverNotingRuntime(deps, workspace.id, handle.machineId, health, operation, invocation);
     await queue.ack(message.receiptHandle);
     return "delivered";
   } catch (error) {
@@ -401,6 +405,18 @@ async function abandon(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessag
   await queue.ack(message.receiptHandle);
   return "dropped";
 }
+
+/** Hands the invocation to the machine. A step that supersedes a retention records the machine's runtime after the hand-over, every other step before it. */
+async function deliverNotingRuntime(deps: TaskFlowDeps, workspaceId: string, machineId: string, health: MachineHealth, operation: OperationRecord, invocation: WorkerInvocation): Promise<void> {
+  const successor = operation.supersedesRetention !== undefined;
+  if (!successor) await deps.closeInspection?.noteRuntime?.(workspaceId, health, operation);
+  await deps.machines.deliver(machineId, invocation);
+  if (successor) await deps.closeInspection?.noteRuntime?.(workspaceId, await deps.machines.health(machineId), operation);
+}
+
+/** The retention a superseding step replaces rides on its invocation. */
+const retentionField = (operation: OperationRecord): Pick<OperationRecord, "supersedesRetention"> =>
+  operation.supersedesRetention === undefined ? {} : { supersedesRetention: operation.supersedesRetention };
 
 /** Builds the worker's invocation, or a sentence saying why this operation cannot be sent to this worker. */
 async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, workspace: WorkspaceRecord, features: readonly string[], standing: StandingInstructionsPayload | undefined, stepModel?: Extract<StepModelOutcome, { ok: true }>): Promise<WorkerInvocation | string> {
@@ -501,7 +517,7 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
   }
   const draft = {
     protocolVersion: AGENTX_PROTOCOL_VERSION, kind: spec.kind, operationId: operation.id, workspaceId: workspace.id, fence: operation.fence,
-    projectRevision: spec.projectRevision, callbackCapability: capability, payload,
+    projectRevision: spec.projectRevision, callbackCapability: capability, payload, ...retentionField(operation),
   };
   // A publication of a checked tree carries the digest of its context (which workspace, operation, fence, repository, branch and tree it is for); the worker's signed token names the same
   // digest, so a captured token cannot carry a different publication. The schema wants the digest and the mode together, so the digest is made from the draft before it is read.

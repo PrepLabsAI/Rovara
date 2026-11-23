@@ -1,3 +1,4 @@
+import { textField } from "../support/close-recovery-harness.js";
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { change, type TaskClosePreviewResponse } from "@agentx/contracts";
@@ -108,4 +109,63 @@ describe("core retained close inspection (P1)", () => {
     expect(digest(await w.preview())).toBe(a);
     await expect(previewTaskClose(w.h.deps, w.h.guest, w.task.taskId, "discard")).rejects.toThrow();
   });
+});
+
+it("stages one stable preflight and durable delivery in the same workspace claim transaction", async () => {
+  const { planClosePreparation } = await import("../../packages/broker/src/core/task-flow/close-preparation.js");
+  const { readWorkspace } = await import("../../packages/broker/src/core/task-flow/stage-machine.js");
+  const w = await fixture();
+  Object.assign(w.h.deps.closeInspection!, { ready: async () => true });
+  await w.h.store.update({ key: w.wk, ops: [change.set("status", "READY"), change.set("activeOperationId", null), change.set("machine", { machineId: "machine", machineKey: w.task.workspaceId })] });
+  const workspace = (await readWorkspace(w.h.deps, w.task.workspaceId))!;
+  const before = await w.h.store.get(w.wk);
+  const first = await planClosePreparation(w.h.deps, workspace), second = await planClosePreparation(w.h.deps, workspace);
+  expect(await w.h.store.get(w.wk)).toEqual(before);
+  expect(first).toHaveLength(3);
+  expect(first).toEqual(second);
+  expect((await w.h.store.transact(first)).applied).toBe(true);
+  expect((await w.h.store.transact(second)).applied).toBe(false);
+  const held = (await readWorkspace(w.h.deps, w.task.workspaceId))!;
+  expect(held.fence).toBe(workspace.fence + 1);
+  expect(held.activeOperationId).not.toBeNull();
+  const operation = await w.h.store.get(operationKey(w.h.deps.companyId, held.id, held.activeOperationId!));
+  expect(operation).toMatchObject({ kind: "close", closePreflight: { schemaVersion: 1 }, status: "ACCEPTED" });
+  expect(await planClosePreparation(w.h.deps, held)).toEqual([]);
+});
+
+it("automatically stages retention with a quiescent plain run's terminal result", async () => {
+  const w = await fixture();
+  w.h.deps.closeInspection!.ready = async () => true;
+  await w.h.store.update({ key: w.op, ops: [change.set("kind", "task")] });
+  await w.h.store.update({ key: w.wk, ops: [change.set("status", "BUSY"), change.set("machine", { machineId: "machine", machineKey: w.task.workspaceId })] });
+  await w.h.flow.recordResult({ workspaceId: w.task.workspaceId, operationId: w.op.sk.slice(10), fence: Number((await w.h.store.get(w.wk))!.fence), status: "SUCCEEDED" });
+  const workspace = (await w.h.store.get(w.wk))!;
+  expect(workspace.activeOperationId).not.toBeNull();
+  expect(workspace.activeOperationId).not.toBe(w.op.sk.slice(10));
+  expect(await w.h.store.get(operationKey(w.h.deps.companyId, w.task.workspaceId, textField(workspace, "activeOperationId")))).toMatchObject({ kind: "close", closePreflight: { schemaVersion: 1 }, status: "ACCEPTED" });
+});
+
+it.each([
+  ["companyId", "org_bbbbbbbbbbbbbbbbbbbb"], ["status", "BUSY"], ["fence", 999],
+  ["activeOperationId", "other"], ["legacyCloseClaim", "other"],
+] as const)("preparation atomically refuses a racing workspace %s without an operation or outbox", async (path, value) => {
+  const { planClosePreparation } = await import("../../packages/broker/src/core/task-flow/close-preparation.js");
+  const { readWorkspace } = await import("../../packages/broker/src/core/task-flow/stage-machine.js");
+  const w = await fixture(); w.h.deps.closeInspection!.ready = async () => true;
+  await w.h.store.update({ key: w.wk, ops: [change.set("status", "READY"), change.set("activeOperationId", null), change.set("machine", { machineId: "machine", machineKey: w.task.workspaceId })] });
+  const items = await planClosePreparation(w.h.deps, (await readWorkspace(w.h.deps, w.task.workspaceId))!);
+  expect(items).toHaveLength(3);
+  const operation = items.find(item => item.kind === "put");
+  if (operation?.kind !== "put") throw new Error("missing preparation operation");
+  await w.h.store.update({ key: w.wk, ops: [change.set(path, value)] });
+  expect((await w.h.store.transact(items)).applied).toBe(false);
+  expect(await w.h.store.get({ pk: String(operation.item.pk), sk: String(operation.item.sk) })).toBeUndefined();
+});
+
+it("a legacy claim arriving after the provider inspection refuses its transaction (K)", async () => {
+  const w = await fixture();
+  w.retained.mockImplementation(async () => { await w.h.store.update({ key: w.wk, ops: [change.set("legacyCloseClaim", w.task.taskId)] }); return true; });
+  const before = await w.h.store.get(w.op);
+  expect(await w.prepare()).toBe(false);
+  expect(await w.h.store.get(w.op)).toEqual(before);
 });

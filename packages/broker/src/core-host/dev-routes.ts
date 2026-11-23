@@ -2,7 +2,7 @@ import { feedbackOwner } from "../core/pr-feedback/decide.js";
 import { isPrFeedbackPath, type createPrFeedbackRoutes } from "./pr-feedback-routes.js";
 import { committedResponse } from "../core/task-flow/committed-response.js";
 import type { WorkflowDecisionRequest } from "@agentx/contracts";
-import { parityTaskRoute, routeParityTask } from "./parity-task-routes.js";
+import { parityTaskRoute, requireGuardedCloseReady, routeParityTask } from "./parity-task-routes.js";
 import { PullRequestResultSchema } from "@agentx/contracts";
 import type { OperationRecord } from "../core/task-flow/records.js";
 import { startManualPublication } from "../core/task-flow/manual-publication.js";
@@ -349,10 +349,7 @@ function bodyOf(request: BrokerRequest): Record<string, unknown> {
 async function sessionAnswer(target: Mounted, request: BrokerRequest, caller: TaskCaller, path: string): Promise<BrokerResponse> {
   if (target.sessions === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
   // Readiness follows the production retention provider, never an install switch.
-  if (request.method === "POST" && path.endsWith("/close") && target.runtime.flow.deps.closeInspection === undefined) {
-    const body = bodyOf(request);
-    if (["expectedPreviewDigest", "discard_unpublished", "discardUnpublished"].some((field) => Object.hasOwn(body, field))) throw agentXError("RUNTIME_UNAVAILABLE", "Guarded close and discarding unpublished work are not available yet.");
-  }
+  if (request.method === "POST" && path.endsWith("/close") && target.runtime.flow.deps.closeInspection === undefined) requireGuardedCloseReady(target.runtime.flow.deps, bodyOf(request));
   return (await target.sessions(request, caller)) ?? errorAnswer(agentXError("NOT_FOUND", "route not found"));
 }
 

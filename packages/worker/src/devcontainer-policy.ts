@@ -28,7 +28,7 @@ export const DOCKER_DATA_VISIBLE = "the workspace's Docker data folder (.docker)
 /** The problem a missing mask over one of the worker's own folders of the workspace is reported as (workspace-state.ts). */
 export const WORKER_STATE_VISIBLE = "the worker's own folders of the workspace (.agentx, agent-sessions, .agentx-runtime) visible inside it";
 /** Folders of the workspace volume that are the worker's: no bind mount may reach into one. */
-const WORKER_FOLDERS = [DOCKER_DATA_DIRECTORY, ".agentx", "agent-sessions", RUNTIME_BACKING_DIRECTORY];
+const WORKER_FOLDERS = [".agentx-control", DOCKER_DATA_DIRECTORY, ".agentx", "agent-sessions", RUNTIME_BACKING_DIRECTORY];
 
 export interface DevcontainerPolicyContext {
   /** The AgentX workspace (canonical). */

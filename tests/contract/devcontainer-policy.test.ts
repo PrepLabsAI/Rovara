@@ -330,3 +330,12 @@ describe("a started dev container on a walled worker network", () => {
   });
 
 });
+
+it.each(["/mnt/workspace", "/mnt/workspace/data"])("refuses direct and canonical alias control binds in %s", rootPath => {
+  for (const name of [".agentx-control", "alias"]) {
+    const source = `${rootPath}/${name}`;
+    const resolvePath = (path: string) => path.replace(`${rootPath}/alias`, `${rootPath}/.agentx-control`);
+    expect(containerProblems({ Mounts: [{ Type: "bind", Source: source, Destination: "/steal" }] }, { rootPath, resolvePath })).not.toEqual([]);
+    expect(containerProblems({ Mounts: [{ Type: "bind", Source: rootPath, Destination: "/task" }] }, { rootPath, maskedPaths: [`${rootPath}/.agentx-control`] })).not.toEqual([]);
+  }
+});

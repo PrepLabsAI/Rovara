@@ -1,0 +1,129 @@
+{
+  "version": 1,
+  "note": "Shared with the Cloud close dialog: copied byte for byte into its tests/web/fixtures. The four 409s share status and code, so a client matches the EXACT sentence; the try-again one is never final.",
+  "taskId": "11111111-1111-4111-8111-111111111111",
+  "refusals": {
+    "retained": {
+      "status": 409,
+      "final": true,
+      "body": {
+        "error": {
+          "code": "WORKSPACE_BUSY",
+          "message": "This workspace is retained. Review the Close preview at /v1/dev/tasks/11111111-1111-4111-8111-111111111111/close before closing it."
+        }
+      }
+    },
+    "checking": {
+      "status": 409,
+      "final": true,
+      "body": {
+        "error": {
+          "code": "WORKSPACE_BUSY",
+          "message": "Rovara is checking this task's workspace for unpublished work, so nothing was closed yet. Press Close again in a minute."
+        }
+      }
+    },
+    "cannot_check": {
+      "status": 409,
+      "final": true,
+      "body": {
+        "error": {
+          "code": "WORKSPACE_BUSY",
+          "message": "Rovara can't check this task's workspace for unpublished work, so nothing was closed. If this keeps happening, ask your admin for help."
+        }
+      }
+    },
+    "try_again": {
+      "status": 409,
+      "final": false,
+      "body": {
+        "error": {
+          "code": "WORKSPACE_BUSY",
+          "message": "Rovara could not close the task just now; try again"
+        }
+      }
+    }
+  },
+  "runtimeUnavailable": {
+    "status": 503,
+    "final": true,
+    "body": {
+      "error": {
+        "code": "RUNTIME_UNAVAILABLE",
+        "message": "Guarded close and discarding unpublished work are not available yet."
+      }
+    }
+  },
+  "badQuery": {
+    "status": 400,
+    "final": true,
+    "body": {
+      "error": {
+        "code": "CONFIG_INVALID",
+        "message": "the close preview takes only ?action=close or ?action=discard"
+      }
+    }
+  },
+  "previews": {
+    "clean": {
+      "preview": {
+        "action": "close",
+        "taskId": "11111111-1111-4111-8111-111111111111",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "taskStatus": "SUCCEEDED",
+        "workflow": null,
+        "workspace": {
+          "status": "READY",
+          "fence": 3,
+          "activeOperationId": "22222222-2222-4222-8222-222222222222"
+        },
+        "unpublished": [],
+        "inspection": {
+          "operationId": "22222222-2222-4222-8222-222222222222",
+          "workspaceFence": 3,
+          "contentDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      }
+    },
+    "discard": {
+      "preview": {
+        "action": "discard",
+        "taskId": "11111111-1111-4111-8111-111111111111",
+        "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "taskStatus": "SUCCEEDED",
+        "workflow": null,
+        "workspace": {
+          "status": "READY",
+          "fence": 3,
+          "activeOperationId": "22222222-2222-4222-8222-222222222222"
+        },
+        "unpublished": [
+          {
+            "repository": "demo",
+            "reasons": [
+              "unpushed_head",
+              "untracked_files"
+            ]
+          }
+        ],
+        "inspection": {
+          "operationId": "22222222-2222-4222-8222-222222222222",
+          "workspaceFence": 3,
+          "contentDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      }
+    },
+    "inspection_required": {
+      "preview": null,
+      "unavailable": "inspection_required"
+    },
+    "busy": {
+      "preview": null,
+      "unavailable": "busy"
+    }
+  },
+  "acceptedClosing": {
+    "closed": false,
+    "message": "Rovara is closing this task. Read it again in a moment."
+  }
+}

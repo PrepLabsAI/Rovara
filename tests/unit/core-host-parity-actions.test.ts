@@ -98,7 +98,13 @@ describe("the ported core developer actions", () => {
     let observed: unknown;
     const flow = { ...h.flow, close: async (_who: typeof caller, _id: string, input?: unknown): ReturnType<typeof h.flow.close> => { observed = input; throw agentXError("CHANGE_STALE", "the close preview has changed; review it again"); } };
     const before = await stateOf(h);
-    await expect(routeParityTask({ flow, blobs: {} as never, wiring: { origin: () => "https://api.example" }, caller, decisionCaller: { principal: caller.principal, orgId: h.deps.companyId, developerId: "local-owner" }, view: async () => ({}) }, { taskId: TASK_ID, action: "close" }, { method: "POST", path: `/v1/dev/tasks/${TASK_ID}/close`, headers: {}, body: JSON.stringify(request) })).rejects.toMatchObject({ code: "CHANGE_STALE" });
+    const route = () => routeParityTask({ flow, blobs: {} as never, wiring: { origin: () => "https://api.example" }, caller, decisionCaller: { principal: caller.principal, orgId: h.deps.companyId, developerId: "local-owner" }, view: async () => ({}) }, { taskId: TASK_ID, action: "close" }, { method: "POST", path: `/v1/dev/tasks/${TASK_ID}/close`, headers: {}, body: JSON.stringify(request) });
+    // Without a retained-inspection provider a digest-bearing body is refused before anything is read or forwarded (CORE-CLOSE-PREVIEW: never a misleading stale-preview answer).
+    await expect(route()).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    expect(observed).toBeUndefined();
+    // With the provider the fields are forwarded unchanged and the flow's own stale refusal is not swallowed.
+    h.deps.closeInspection = { async raiseFence() {}, async retained() { return true; }, async inspectWorkspaceForClose() { throw new Error("not asked"); } };
+    await expect(route()).rejects.toMatchObject({ code: "CHANGE_STALE" });
     expect(observed).toEqual(request);
     expect(await stateOf(h)).toEqual(before);
   });

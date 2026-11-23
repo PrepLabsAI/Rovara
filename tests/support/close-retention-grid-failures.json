@@ -1,0 +1,277 @@
+[
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "            require(all(mount!=root and not mount.startswith(root+'/') for root in (CONTROL,ROOT+'/.agentx')))",
+    "failure": "ERROR: test_identity_validators_refuse_before_any_docker_or_control_writes (__main__.MigrationTests.test_identity_validators_refuse_before_any_docker_or_control_writes)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "            info=os.fstat(child); require(info.st_uid in (HOST_UID,owner) and not info.st_mode&0o022 and info.st_dev==os.stat(ROOT).st_dev)",
+    "failure": "ERROR: test_directory_owners_modes_and_device_are_checked (__main__.MigrationTests.test_directory_owners_modes_and_device_are_checked)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "        if target_fd is not None: os.close(target_fd)",
+    "failure": "ERROR: test_copy_closes_both_file_descriptors (__main__.MigrationTests.test_copy_closes_both_file_descriptors)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "    try: require(os.fstat(fd).st_uid in (HOST_UID,WORKER_UID))",
+    "failure": "ERROR: test_data_directory_rejects_a_foreign_owner (__main__.MigrationTests.test_data_directory_rejects_a_foreign_owner)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "    value=current(); protected(image(value)); data_directory(); held=False",
+    "failure": "ERROR: test_restore_rejects_untrusted_image_before_any_mount_command (__main__.MigrationTests.test_restore_rejects_untrusted_image_before_any_mount_command)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "        if not os.path.lexists(path):",
+    "failure": "ERROR: test_runtime_is_created_idempotently_and_rejects_bad_state (__main__.MigrationTests.test_runtime_is_created_idempotently_and_rejects_bad_state)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "        require(stat.S_ISDIR(info.st_mode) and info.st_uid in owners and stat.S_IMODE(info.st_mode)==mode)",
+    "failure": "ERROR: test_runtime_is_created_idempotently_and_rejects_bad_state (__main__.MigrationTests.test_runtime_is_created_idempotently_and_rejects_bad_state)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "    uid(workspace); text(generation,r'[1-9][0-9]*'); positive(int(generation))",
+    "failure": "ERROR: test_identity_validators_refuse_before_any_docker_or_control_writes (__main__.MigrationTests.test_identity_validators_refuse_before_any_docker_or_control_writes)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "    text(instance,r'i-(?:[a-f0-9]{8}|[a-f0-9]{17})'); text(volume,r'vol-(?:[a-f0-9]{8}|[a-f0-9]{17})')",
+    "failure": "ERROR: test_identity_validators_refuse_before_any_docker_or_control_writes (__main__.MigrationTests.test_identity_validators_refuse_before_any_docker_or_control_writes)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "        if running: raise ValueError('restore requires quiescence')",
+    "failure": "ERROR: test_current_layout_requires_quiescence_then_restores_without_legacy_fallback (__main__.MigrationTests.test_current_layout_requires_quiescence_then_restores_without_legacy_fallback)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "    if os.path.lexists(CURRENT):",
+    "failure": "ERROR: test_current_layout_requires_quiescence_then_restores_without_legacy_fallback (__main__.MigrationTests.test_current_layout_requires_quiescence_then_restores_without_legacy_fallback)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "    for r in records: require(r['workspaceId']==workspace)",
+    "failure": "ERROR: test_retained_and_destroy_state_refuse_even_with_pure_preconditions (__main__.MigrationTests.test_retained_and_destroy_state_refuse_even_with_pure_preconditions)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "    if high_water>0:",
+    "failure": "AssertionError [ERR_ASSERTION]: legacy fence high-water"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "    if size<256*1024*1024:",
+    "failure": "ERROR: test_low_space_status_change_keeps_single_legacy_authority (__main__.MigrationTests.test_low_space_status_change_keeps_single_legacy_authority)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "    data_directory(); run('mount','-t','ext4','-o','rw,noatime',device,DATA)",
+    "failure": "AssertionError [ERR_ASSERTION]: successor refuses foreign data owner"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "    reject_control_mount_aliases()",
+    "failure": "AssertionError [ERR_ASSERTION]: control mount aliases refused"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "    reject_control_mount_aliases()",
+    "failure": "AssertionError [ERR_ASSERTION]: control mount aliases refused"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "    if not os.path.lexists(CONTROL):",
+    "failure": "AssertionError [ERR_ASSERTION]: foreign control owner refused"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "    protected(CONTROL,True)",
+    "failure": "AssertionError [ERR_ASSERTION]: foreign control owner refused"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "    require(stat.S_IMODE(os.lstat(CONTROL).st_mode)==0o755)",
+    "failure": "AssertionError [ERR_ASSERTION]: control directory mode refused"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "    if not os.path.lexists(CONTROL+'/ownership.lock'):",
+    "failure": "AssertionError [ERR_ASSERTION]: ownership lock refused"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "    reject_control_mount_aliases()",
+    "failure": "AssertionError [ERR_ASSERTION]: control mount aliases refused"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "    if os.path.lexists(CURRENT): validate_boot(*sys.argv[2:])",
+    "failure": "AssertionError [ERR_ASSERTION]: serve rejects foreign workspace"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "    protected(CONTROL+'/ownership.lock'); prepare_run()",
+    "failure": "AssertionError [ERR_ASSERTION]: ownership lock refused"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "source": "    if not os.path.lexists(q): os.mkdir(q,0o700)",
+    "failure": "AssertionError [ERR_ASSERTION]: missing host runtime created"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "source": "    if not stat.S_ISDIR(s.st_mode) or s.st_uid!=0 or s.st_gid!=0 or s.st_mode&0o022: raise ValueError('untrusted host runtime')",
+    "failure": "AssertionError [ERR_ASSERTION]: untrusted host runtime refused"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "source": "if stat.S_IMODE(os.lstat(p).st_mode)!=0o700: raise ValueError('host runtime mode')",
+    "failure": "AssertionError [ERR_ASSERTION]: host runtime mode refused"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "source": "  if ! mountpoint -q \"$HOST_RUN\"; then mount -t tmpfs -o nodev,nosuid,mode=0700,uid=0,gid=0 tmpfs \"$HOST_RUN\"; fi",
+    "failure": "AssertionError [ERR_ASSERTION]: untrusted host runtime mount"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "source": "  [[ $(findmnt -n -o FSTYPE,TARGET --target \"$HOST_RUN\") == \"tmpfs $HOST_RUN\" ]] || fail \"untrusted host runtime mount\"",
+    "failure": "AssertionError [ERR_ASSERTION]: host runtime tmpfs required"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "source": "  [[ \",$opts,\" == *,nodev,* && \",$opts,\" == *,nosuid,* && $(stat -c %u:%g:%a \"$HOST_RUN\") == 0:0:700 ]] || fail \"unsafe host runtime mount\"",
+    "failure": "AssertionError [ERR_ASSERTION]: unsafe host runtime refused"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "source": "  if ! timeout \"$(try_seconds 60)\" docker run --rm --pull=never --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint /bin/cat \"$AGENTX_WORKER_IMAGE\" /opt/agentx/packages/worker/ec2/close-retention.sh >\"$helper_tmp\"; then",
+    "failure": "AssertionError [ERR_ASSERTION]: extractor network isolation"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "source": "  if ! python3 - \"$helper_tmp\" \"$CLOSE_HELPER_SHA256\" <<'CHECK'",
+    "failure": "AssertionError [ERR_ASSERTION]: planted helper did not execute"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "source": "  /bin/bash \"$HOST_RUN/helper.sh\" install \"$AGENTX_WORKSPACE_ID\" \"$AGENTX_SESSION_GENERATION\" \"$1\" \"$AGENTX_VOLUME_ID\" || fail \"retained layout requires explicit recovery\"",
+    "failure": "AssertionError [ERR_ASSERTION]: wrong helper prevents worker start"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "source": "[[ ! -L ${f%/*} && $(stat -c %u:%g:%a \"${f%/*}\") == 0:0:700 && -f \"$f\" && ! -L \"$f\" && $(stat -c %u:%g:%a:%h \"$f\") == 0:0:444:1 ]] || exit 1",
+    "failure": "AssertionError [ERR_ASSERTION]: untrusted mount source refused"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "source": "  chmod 0700 /usr/local/libexec/agentx-retention-restore",
+    "failure": "AssertionError [ERR_ASSERTION]: restore script mode"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "source": "    if systemctl is-active --quiet \"$unit\"; then systemctl stop \"$unit\" || fail \"could not quiesce old worker\"; fi",
+    "failure": "AssertionError [ERR_ASSERTION]: in-place units quiesced"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "  [[ \"$layout\" == migrated || \"$layout\" == legacy ]] || exit 1",
+    "failure": "AssertionError [ERR_ASSERTION]: install succeeds after control socket readiness"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "[[ -S /run/agentx-close-retention/control.sock ]] || return 1",
+    "failure": "AssertionError [ERR_ASSERTION]: mount source refuses missing socket"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "  if [[ \"$layout\" == migrated ]]; then",
+    "failure": " FAIL  tests/contract/close-retention-worker-layout.test.ts > emitted migrated env and mounts are accepted by main's real workerControlLayout"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "  for attempt in {1..50}; do [[ ! -S \"$RUN/control.sock\" ]] || exit 0; sleep 0.1; done",
+    "failure": "AssertionError [ERR_ASSERTION]: install succeeds after control socket readiness"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "    if any(r.get('closeRetention') for r in records): raise ValueError('retained operation requires explicit recovery')",
+    "failure": "ERROR: test_retained_and_destroy_state_refuse_even_with_pure_preconditions (__main__.MigrationTests.test_retained_and_destroy_state_refuse_even_with_pure_preconditions)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "    legacy_only=running or bool(run('docker','ps','--all','--quiet')) or os.path.lexists(DATA) or any(r['status'] not in ('SUCCEEDED','FAILED','CANCELLED','INTERRUPTED') for r in records)",
+    "failure": "ERROR: test_running_and_stopped_containers_keep_legacy_without_migration (__main__.MigrationTests.test_running_and_stopped_containers_keep_legacy_without_migration)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "        if target.startswith(ROOT+'/') and target[len(ROOT)+1:].split('/')[0] not in exclusions: legacy_only=True",
+    "failure": "ERROR: test_legacy_process_keeps_legacy (__main__.MigrationTests.test_legacy_process_keeps_legacy)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "    if legacy_only:",
+    "failure": "ERROR: test_legacy_status_change_reboots_then_migrates_with_latest_record (__main__.MigrationTests.test_legacy_status_change_reboots_then_migrates_with_latest_record)"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "source": "  running=$(docker ps --quiet) || fail \"could not quiesce old worker\"",
+    "failure": " FAIL  tests/contract/close-retention-boot-preconditions.test.ts > quiesces the dedicated workspace daemon before restore: list failure"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "source": "  [[ -z \"$running\" ]] || timeout \"$(try_seconds 60)\" docker stop --time 10 $running || fail \"could not quiesce old worker\"",
+    "failure": " FAIL  tests/contract/close-retention-boot-preconditions.test.ts > quiesces the dedicated workspace daemon before restore: running"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "source": "  docker image inspect --format '{{json .RepoDigests}}' \"$AGENTX_WORKER_IMAGE\" | python3 -c 'import json,sys; v=json.load(sys.stdin); sys.exit(0 if type(v) is list and all(type(x) is str for x in v) and sys.argv[1] in v else 1)' \"$AGENTX_WORKER_IMAGE\" || fail \"worker image digest mismatch\"",
+    "failure": "AssertionError [ERR_ASSERTION]: RepoDigests mismatch refused"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "source": "Before=$WORKER_UNIT ${SE_UNIT:-rovara-sandbox-egress.service} ${TS_UNIT:-rovara-test-services.service}",
+    "failure": "AssertionError [ERR_ASSERTION]: restore precedes gateway and services"
+  },
+  {
+    "file": "packages/worker/ec2/sandbox-egress.sh",
+    "source": "After=docker.service $FIREWALL_UNIT ${RESTORE_UNIT:-agentx-close-retention-restore.service}",
+    "failure": " FAIL  tests/contract/ec2-sandbox-egress-stage.test.ts > orders gateway restoration after close retention restore"
+  },
+  {
+    "file": "packages/worker/ec2/test-services-stage.sh",
+    "source": "After=docker.service $FIREWALL_UNIT ${RESTORE_UNIT:-agentx-close-retention-restore.service}",
+    "failure": " FAIL  tests/contract/ec2-test-services-stage.test.ts > orders test services after close retention restore"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "        for journal in (JOURNAL,legacy):",
+    "failure": "ERROR: test_active_journal_keeps_legacy_and_preserves_fence_and_record (__main__.MigrationTests.test_active_journal_keeps_legacy_and_preserves_fence_and_record)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "  if [[ \"$serve_state\" != not-found ]]; then",
+    "failure": "AssertionError: reinstall stops previous serve unit: active"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "    systemctl stop agentx-close-retention.service",
+    "failure": "AssertionError: reinstall stops previous serve unit: active"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "source": "  serve_state=$(systemctl show --property=LoadState --value agentx-close-retention.service)",
+    "failure": "AssertionError: reinstall stops previous serve unit: active"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "source": "  for unit in \"$WORKER_UNIT\" agentx-close-retention.service \"$RESTORE_UNIT\" \"${SE_UNIT:-rovara-sandbox-egress.service}\" \"${TS_UNIT:-rovara-test-services.service}\"; do",
+    "failure": "AssertionError: in-place units quiesced"
+  }
+]

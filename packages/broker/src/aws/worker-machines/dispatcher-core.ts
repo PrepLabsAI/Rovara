@@ -1,5 +1,9 @@
 import { hostedAutofixDayBudgetHasRoom } from "../../core-host/autofix-day-budget.js";
 import { readHostedAdmissionSettings } from "../../core-host/hosted-modules.js";
+import { CLOSE_GUARD } from "../../core/task-flow/close-guard.js";
+import { closeCheckPort } from "../../core/task-flow/close-check.js";
+import { createDispatcherCloseInspection } from "./close-retention.js";
+import { SessionWorkerMachines } from "./session-worker-machines.js";
 // Engine host (migration plan v3.2 lane E2, step 4): the dispatcher's half of the core engine.
 //
 // The dispatcher Lambda reads two queues: the spec 056 DispatchQueue (the old workflow's tasks, until it is removed: #1274) and the core's dispatch queue through an event source mapping of its
@@ -199,7 +203,7 @@ export function refusingTaskAccess(): TaskAccess {
  * (`dispatcherStopInstance`). The dispatch consumer never stops a machine; only a cancel does, on the broker.
  */
 export interface DispatcherMachineOps {
-  sessions: Pick<SessionManager, "get" | "ensureSession" | "deleteSession" | "claimStop" | "requestStop" | "markStopped">;
+  sessions: Pick<SessionManager, "get" | "ensureSession" | "deleteSession" | "claimStop" | "requestStop" | "markStopped"> & Partial<Pick<SessionManager, "deleteRetainedSession">>;
   stopInstance: SessionWorkerMachinesDependencies["stopInstance"];
   sign: SessionWorkerMachinesDependencies["sign"];
   post: SessionWorkerMachinesDependencies["post"];
@@ -304,6 +308,8 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
       // DEC 254n (1): each step's route is the company's own engine model when it set one, else the install's (the same answer as before); an unreadable setting dispatches nothing.
       const modelAccess = flow.modelAccess === null || flow.modelAccess === undefined ? flow.modelAccess : companyEngineModelRoute({ store: registry.require("storage"), companyId, install: flow.modelAccess });
       const flowOptions: Partial<RegistryTaskFlowOptions> = {
+        closeGuard: CLOSE_GUARD, closeCheck: closeCheckPort,
+        closeInspection: createDispatcherCloseInspection({ store: registry.require("storage"), companyId, sessions: inputs.machines.sessions, machines: new SessionWorkerMachines({ ...deps.workerMachines!, companyId }) }),
         deliveryAccess: inputs.deliveryAccess ?? (async () => { throw agentXError("RUNTIME_UNAVAILABLE", "final delivery authority is unavailable"); }),
         ...(standingInstructions === null || standingInstructions === undefined ? {} : { standingInstructions }),
         ...(modelAccess === null || modelAccess === undefined ? {} : { modelAccess }),

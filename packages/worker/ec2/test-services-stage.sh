@@ -146,7 +146,7 @@ ts_install_restore_unit() {
 [Unit]
 Description=Test services walls and run directory, before the worker
 Requires=docker.service
-After=docker.service $FIREWALL_UNIT
+After=docker.service $FIREWALL_UNIT ${RESTORE_UNIT:-agentx-close-retention-restore.service}
 Before=$WORKER_UNIT
 [Service]
 Type=oneshot

@@ -174,13 +174,14 @@ describe("core accepted close preview races (P2)", () => {
   });
   it("absent digest keeps DEC 304 close and accounting behavior, without claiming checked consent", async () => {
     const w = await fixture();
-    // Old clients never had the retained preflight. Restore the original running holder.
+    // Old clients never had a retained preflight. Remove that fixture before restoring the running holder.
+    await w.originalUpdate({ key: w.op, ops: [change.remove("result")] });
     await w.originalUpdate({ key: w.wk, ops: [change.set("activeOperationId", w.run.sk.slice(10))] });
     expect((await w.close({ requestId: randomUUID(), discard_unpublished: true })).status).toBe("CLOSED");
     expect(w.effects.flush).toBe(1); expect(w.effects.holds).toBe(1); expect(w.effects.terminations).toBe(1);
     expect((await w.snapshot()).some((r) => r.closeAcceptance !== undefined)).toBe(false);
   });
-  it("R1 an in-flight legacy close cannot overwrite a concurrently accepted close", async () => {
+  it("R1 retained legacy refusal leaves the bound close as the only acceptance", async () => {
     const w = await fixture(), transact = w.h.store.transact.bind(w.h.store);
     let injected = false;
     w.h.store.transact = async (items) => {
@@ -189,8 +190,9 @@ describe("core accepted close preview races (P2)", () => {
       }
       return transact(items);
     };
-    await expect(w.h.flow.close(w.h.owner, w.task.taskId)).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
-    expect(injected).toBe(true);
+    await expect(w.h.flow.close(w.h.owner, w.task.taskId)).rejects.toMatchObject({ code: "WORKSPACE_BUSY" });
+    expect(injected).toBe(false);
+    await w.close();
     const accepted = (await w.snapshot()).find((r) => r.closeAcceptance !== undefined);
     expect(accepted).toMatchObject({ status: "ACCEPTED", closeAcceptance: { phase: "accepted" } });
     expect((await w.h.store.get(w.wk))!.status).toBe("CLOSING");
@@ -205,12 +207,14 @@ describe("core accepted close preview races (P2)", () => {
     await stale(w, await w.snapshot());
     expect(relay).not.toHaveBeenCalled();
   });
-  it("R3 absent digest with a valid preview remains a legacy close, never checked consent", async () => {
+  it("R3 absent digest with a valid retained preview refuses without manufacturing consent", async () => {
     const w = await fixture(false);
     expect((await w.h.flow.previewClose(w.h.owner, w.task.taskId, "close")).preview).not.toBeNull();
-    expect((await w.close({ requestId: randomUUID() })).status).toBe("CLOSED");
+    const before = await w.snapshot();
+    await expect(w.close({ requestId: randomUUID() })).rejects.toMatchObject({ code: "WORKSPACE_BUSY" });
+    expect(await w.snapshot()).toEqual(before);
     expect((await w.snapshot()).some((r) => r.closeAcceptance !== undefined)).toBe(false);
-    expect(w.effects.terminations).toBe(1);
+    expect(w.effects.terminations).toBe(0);
   });
   it("R4 accepts a matching preview with over 100 historical operations in a bounded transaction", async () => {
     const w = await fixture(false);

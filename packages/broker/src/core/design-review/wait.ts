@@ -7,13 +7,18 @@
 //   - at 30 days parked closes the task as "not decided" (`closeParkedDesignReview`).
 // NOTHING HERE APPROVES, ANSWERS OR SKIPS. With the switch off, or the project Off, it does nothing new for the task; the one exception is the cost hold, which is ended as every step of a switched-off review is (`switched_off`).
 import {
-  WORKFLOW_DISPATCH_DUE_INDEX, WorkflowSnapshotSchema, change, closeDesignReview, closeParkedDesignReview, parkDesignReview, when, type DocumentStore, type TransactItem, type WorkflowSnapshot,
+  WORKFLOW_DISPATCH_DUE_INDEX, WorkflowSnapshotSchema, sessionEventId, change, closeDesignReview, closeParkedDesignReview, parkDesignReview, when, type DocumentStore, type TransactItem, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import type { SessionTimeline } from "../merge/seams.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { taskKey } from "../task-flow/keys.js";
 import { fromDocument, type TaskRecord } from "../task-flow/records.js";
-import { closeParts, finishClose } from "../task-flow/close.js";
+import { claimLegacyClose } from "../task-flow/legacy-close-claim.js";
+import { workspaceKeys } from "../task-flow/workspace-location.js";
+import { closeParts, finishClose, type CloseParts } from "../task-flow/close.js";
+import { systemCloseActorId } from "../task-flow/close-acceptance-record.js";
+import { decideClose, type CloseDecision } from "../task-flow/close-guard.js";
+import { acceptSystemClose } from "../task-flow/close-system.js";
 import { commitWorkflow } from "../task-flow/stage-machine.js";
 import { iso, log } from "../task-flow/support.js";
 import type { ProjectPlaybookReader } from "./playbook-store.js";
@@ -70,7 +75,12 @@ export interface DesignWaitSweepPorts {
   releaseKeys(task: TaskRecord, throughRound: number): Promise<void>;
 }
 
-export type DesignWaitSweepOutcome = "off" | "none" | "reminded" | "already_sent" | "parked" | "closed" | "stale" | "gone";
+export type DesignWaitSweepOutcome = "off" | "none" | "reminded" | "already_sent" | "parked" | "closed" | "stale" | "gone" | "skipped";
+
+/** The name this sweep closes under (its audit, its request id). */
+const CLOSER = "design-review";
+/** A close the guard skips is looked at again after this long: a check may have found the workspace clean by then. */
+const CLOSE_RETRY_MS = 7 * 24 * 60 * 60 * 1000;
 
 async function reschedule(store: Pick<DocumentStore, "update">, taskId: string, revision: number, dueAtMs: number | undefined): Promise<void> {
   // A newer arm (the workflow moved meanwhile) has set the row; it is not ours to overwrite.
@@ -107,8 +117,9 @@ export async function settleDesignWait(ports: DesignWaitSweepPorts, taskId: stri
   const { flow } = ports;
   const nowIso = new Date(nowMs).toISOString();
   const task = fromDocument<TaskRecord>(await flow.store.get(taskKey(taskId)));
+  if (task !== undefined && task.companyId !== flow.companyId) return "gone";
   const parsed = task?.workflow === undefined ? undefined : WorkflowSnapshotSchema.safeParse(task.workflow);
-  if (task === undefined || task.closedAt !== undefined || parsed === undefined || !parsed.success) {
+  if (task === undefined || task.closedAt !== undefined || task.closeOperationId !== undefined || parsed === undefined || !parsed.success) {
     await reschedule(flow.store, taskId, rowRevision, undefined);
     return "gone";
   }
@@ -140,7 +151,7 @@ export async function settleDesignWait(ports: DesignWaitSweepPorts, taskId: stri
   /** The notice of this step, written once: its NOTIFY row and a line on the task's session. */
   const notice = (revision: number): TransactItem[] => [
     { kind: "put", item: { ...designWaitNotifyKey(taskId, revision, noticeStep), entityType: "DESIGN_WAIT_NOTIFY", schemaVersion: 1, taskId, workflowRevision: revision, step: noticeStep, waitKind: wait.kind, at: nowIso, status: "PENDING" }, condition: when.absent() },
-    ...(task.sessionId === undefined || ports.timeline === undefined ? [] : [ports.timeline.statusLine({ orgId: flow.companyId, sessionId: task.sessionId }, { eventId: `design_wait:${taskId}:${String(revision)}:${noticeStep}`, at: nowIso, text: designWaitWords(noticeStep, wait.kind, task.title) })]),
+    ...(task.sessionId === undefined || ports.timeline === undefined ? [] : [ports.timeline.statusLine({ orgId: flow.companyId, sessionId: task.sessionId }, { eventId: sessionEventId("design_wait", `${taskId}:${String(revision)}:${noticeStep}`), at: nowIso, text: designWaitWords(noticeStep, wait.kind, task.title) })]),
   ];
   if (step.kind === "remind") {
     const written = await flow.store.transact(notice(workflow.revision));
@@ -149,21 +160,100 @@ export async function settleDesignWait(ports: DesignWaitSweepPorts, taskId: stri
     log(flow, { event: "design_review.wait_reminded", taskId, step: noticeStep, wait: wait.kind });
     return "reminded";
   }
-  // Park and close both end the task's use of its model keys for good: they are released first (idempotent), so a commit that loses a race has still left nothing live.
+  return parkOrClose(ports, task, asTask, step.kind, wait.kind, notice, nowMs);
+}
+
+/**
+ * Park and close both end the task's use of its model keys for good. A close of a workspace that may hold work is decided BEFORE anything is released or written: the guard closes it on proof, closes it through
+ * the bound path on a clean retained preview, or SKIPS (Q4: a system close never deletes unproven work). Without the guard on this install it is the close it always was.
+ */
+async function parkOrClose(
+  ports: DesignWaitSweepPorts, task: TaskRecord, asTask: TaskRecord & { workflow: WorkflowSnapshot }, kind: "park" | "close", waitKind: string, notice: (revision: number) => TransactItem[], nowMs: number,
+): Promise<DesignWaitSweepOutcome> {
+  const { flow } = ports;
+  const { workflow } = asTask;
+  const nowIso = new Date(nowMs).toISOString();
+  const decision: CloseDecision | undefined = kind === "close" && flow.closeGuard !== undefined ? await decideClose(flow, task, systemCloseActorId(CLOSER), "system") : undefined;
+  if (decision?.kind === "skip") return skipDesignClose(ports, task, workflow, nowMs, decision.words, decision.reason);
+  // An unbound close of a workspace proven empty claims the workspace before any key is ended or any close effect is built (a retained workspace is refused here, as a person's close is).
+  if (kind === "close" && decision?.kind !== "bound" && !(await claimTimeoutClose(ports, task, workflow, kind, nowMs))) return "stale";
+  // The keys are released first (idempotent), so a commit that loses a race has still left nothing live.
   await ports.releaseKeys(task, workflow.designReview?.rounds.length ?? 0);
-  const next = step.kind === "park"
+  const next = kind === "park"
     ? parkDesignReview(workflow, { expectedRevision: workflow.revision, now: nowIso })
     : closeParkedDesignReview(workflow, { expectedRevision: workflow.revision, now: nowIso });
+  if (decision?.kind === "bound") return closeThroughPreview(ports, task, workflow, decision, notice(next.revision), nowMs);
   // A review nobody decided closes the task the way closing it by hand does, in the same commit: its slot goes back, its workspace and pointer are closed, and a running step is interrupted (the machines and the allowances follow).
-  const closing = step.kind === "close" ? await closeParts(flow, task, nowIso, { type: "system", id: "design-review" }) : undefined;
+  const closing = kind === "close" ? await closeParts(flow, task, nowIso, { type: "system", id: CLOSER }, decision?.kind === "close" ? decision.proof : undefined) : undefined;
   // The task moved (a person answered or decided meanwhile): theirs is the newer word, and the move that made it armed the row again.
-  const committed = await commitWorkflow(flow, asTask, next, [...notice(next.revision), ...(closing?.items ?? [])], closing === undefined ? [] : closing.taskOps.filter((op) => op.path[0] !== "updatedAt"));
-  if (!committed) return "stale";
-  if (closing !== undefined) await finishClose(flow, task, closing, nowIso).catch((error: unknown) => log(flow, { event: "design_review.close_finish_failed", taskId, error: error instanceof Error ? error.name : "unknown" }));
+  if (!(await commitDesignWait(flow, asTask, next, notice(next.revision), closing, nowMs))) return "stale";
   const after = designWaitStep(next, nowMs);
-  await reschedule(flow.store, taskId, next.revision, after === undefined ? undefined : nextDesignWaitDueAt(after.wait, nowMs));
-  log(flow, { event: step.kind === "park" ? "design_review.wait_parked" : "design_review.wait_closed", taskId, wait: wait.kind });
-  return step.kind === "park" ? "parked" : "closed";
+  await reschedule(flow.store, task.taskId, next.revision, after === undefined ? undefined : nextDesignWaitDueAt(after.wait, nowMs));
+  log(flow, { event: kind === "park" ? "design_review.wait_parked" : "design_review.wait_closed", taskId: task.taskId, wait: waitKind });
+  return kind === "park" ? "parked" : "closed";
+}
+
+/**
+ * The review's workspace cannot be proven clean, so the task is NOT closed: nothing is written to the task, the workspace or the machine and nothing is terminated; the review stays parked, its slot stays held
+ * (there is no honest way to give back the slot of a task whose workspace is kept), a line on the task's session and a log line say so, and the row is looked at again in a week.
+ */
+async function skipDesignClose(ports: DesignWaitSweepPorts, task: TaskRecord, workflow: WorkflowSnapshot, nowMs: number, words: string, reason: string): Promise<DesignWaitSweepOutcome> {
+  const { flow } = ports;
+  const at = new Date(nowMs).toISOString();
+  log(flow, { event: "design_review.close_skipped", taskId: task.taskId, reason });
+  if (task.sessionId !== undefined && ports.timeline !== undefined) {
+    await flow.store.transact([ports.timeline.statusLine({ orgId: flow.companyId, sessionId: task.sessionId }, { eventId: `design_wait:${task.taskId}:${String(workflow.revision)}:close_skipped:${at.slice(0, 10)}`, at, text: `Rovara kept this task open and did not close it. ${words}` })]).catch(() => undefined);
+  }
+  await reschedule(flow.store, task.taskId, workflow.revision, nowMs + CLOSE_RETRY_MS);
+  return "skipped";
+}
+
+/**
+ * A retained preview says the workspace is clean: the task closes through the bound path (accepted first; its destruction is `destroyRetained`, never a discard). The accepted close fences the workflow's own
+ * commit (`commitWorkflow` needs no accepted close), so the review's end word is not written: the notice is, once, and the row is cleared. A crash after the acceptance finds the accepted close on the next
+ * pass (`closeOperationId`) and does nothing more.
+ */
+async function closeThroughPreview(ports: DesignWaitSweepPorts, task: TaskRecord, workflow: WorkflowSnapshot, decision: Extract<CloseDecision, { kind: "bound" }>, notice: TransactItem[], nowMs: number): Promise<DesignWaitSweepOutcome> {
+  const { flow } = ports;
+  const accepted = await acceptSystemClose(flow, task, CLOSER, String(workflow.revision), decision.snapshot);
+  if (accepted === undefined) return skipDesignClose(ports, task, workflow, nowMs, "The workspace's preview changed while it was being closed.", "retained");
+  await flow.store.transact(notice).catch((error: unknown) => log(flow, { event: "design_review.close_notice_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }));
+  await reschedule(flow.store, task.taskId, workflow.revision, undefined);
+  log(flow, { event: "design_review.wait_closed", taskId: task.taskId, wait: "bound" });
+  return "closed";
+}
+
+async function claimTimeoutClose(ports: DesignWaitSweepPorts, task: TaskRecord, workflow: WorkflowSnapshot, step: "park" | "close", nowMs: number): Promise<boolean> {
+  if (step !== "close") return true;
+  const { flow } = ports;
+  try { await claimLegacyClose(flow, task); return true; }
+  catch (error) {
+    if ((error as { code?: unknown }).code !== "WORKSPACE_BUSY") throw error;
+    await reschedule(flow.store, task.taskId, workflow.revision, nowMs + 86_400_000);
+    if (task.sessionId !== undefined && ports.timeline !== undefined) {
+      await flow.store.transact([
+        { kind: "check", key: taskKey(task.taskId), condition: when.eq("workflow.revision", workflow.revision) },
+        ports.timeline.statusLine({ orgId: flow.companyId, sessionId: task.sessionId }, { eventId: sessionEventId("design_wait_close_preview", `${task.taskId}:${String(workflow.revision)}`), at: new Date(nowMs).toISOString(), text: "This workspace needs its Close preview. Open the task to review and close it. Nothing has been closed." }),
+      ]);
+    }
+    return false;
+  }
+}
+
+async function commitDesignWait(flow: TaskFlowDeps, task: TaskRecord & { workflow: WorkflowSnapshot }, next: WorkflowSnapshot, notices: TransactItem[], closing: CloseParts | undefined, nowMs: number): Promise<boolean> {
+  const committed = await commitWorkflow(flow, task, next, [...notices, ...(closing?.items ?? [])], closing === undefined ? [] : closing.taskOps.filter((op) => op.path[0] !== "updatedAt"));
+  if (!committed) {
+    if (closing?.workspace !== undefined) {
+      const workspace = closing.workspace, location = await workspaceKeys(flow, workspace.id);
+      await flow.store.transact([{ kind: "update", key: location.workspaceKey,
+        condition: when.and(when.eq("companyId", flow.companyId), when.eq("fence", workspace.fence), when.eq("legacyCloseClaim", task.taskId)),
+        ops: [change.remove("legacyCloseClaim")] }]);
+    }
+    if (closing !== undefined) await reschedule(flow.store, task.taskId, task.workflow.revision, nowMs + 86_400_000);
+    return false;
+  }
+  if (closing !== undefined) await finishClose(flow, task, closing, new Date(nowMs).toISOString()).catch((error: unknown) => log(flow, { event: "design_review.close_finish_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }));
+  return true;
 }
 
 export { iso };

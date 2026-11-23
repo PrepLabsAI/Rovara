@@ -646,3 +646,10 @@ describe("boot.sh's sandbox-egress hook and the boot configuration", () => {
     expect(spawnSync("test", ["-x", new URL("../../packages/worker/ec2/devcontainer-docker.sh", import.meta.url).pathname]).status).toBe(0);
   });
 });
+
+ it("orders gateway restoration after close retention restore", () => {
+  const h = host();
+  expect(runStage(h).status).toBe(0);
+  const unit = readFileSync(join(h.units, "rovara-sandbox-egress.service"), "utf8");
+  expect(unit, "orders gateway restoration after close retention restore").toMatch(/^After=.* agentx-close-retention-restore\.service$/mu);
+});

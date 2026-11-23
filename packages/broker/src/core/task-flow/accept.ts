@@ -1,4 +1,4 @@
-import type { E2EWorkflowAdmissionRef } from "@agentx/contracts";
+import type { E2EWorkflowAdmissionRef, CloseRetention } from "@agentx/contracts";
 // Lane L6a, task flow core: accepting an operation. An operation is one job for a workspace's worker (a preparation, one step of the
 // workflow). Accepting it writes the operation record and stages its dispatch message with the caller's own change, in one transaction
 // (the transactional outbox), so an operation exists if and only if its message does.
@@ -10,6 +10,7 @@ import { toDocument, type DispatchSpec, type MaintenanceExpectation, type Operat
 import { dispatchQueueName, hashJson, iso, newId } from "./support.js";
 
 export interface AcceptInput {
+  supersedesRetention?: CloseRetention;
   workspace: Pick<WorkspaceRecord, "id" | "pk" | "fence" | "ownerKey">;
   kind: "prepare" | "task" | "publish" | "maintain";
   requestId: string;
@@ -67,6 +68,7 @@ export function buildOperation(deps: TaskFlowDeps, input: AcceptInput): { operat
   const location = keysOfWorkspace(deps, input.workspace);
   const now = input.now ?? iso(deps);
   const id = input.operationId ?? newId(deps);
+  const superseding = retentionFields(input);
   const operation: OperationRecord = {
     ...location.operationKey(id),
     entityType: "OPERATION",
@@ -76,11 +78,12 @@ export function buildOperation(deps: TaskFlowDeps, input: AcceptInput): { operat
     workspaceId: input.workspace.id,
     orgId: deps.companyId,
     kind: input.kind,
+    ...superseding,
     ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }),
     ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
     ...(input.programStepId === undefined ? {} : { programStepId: input.programStepId }),
     requestId: input.requestId,
-    payloadHash: hashJson({ kind: input.kind, mode: input.workflowMode ?? null, requestId: input.requestId, dispatch: input.dispatch }),
+    payloadHash: hashJson({ kind: input.kind, mode: input.workflowMode ?? null, requestId: input.requestId, dispatch: input.dispatch, ...superseding }),
     status: "ACCEPTED",
     fence: input.workspace.fence,
     createdAt: now,
@@ -125,4 +128,8 @@ export function buildOperation(deps: TaskFlowDeps, input: AcceptInput): { operat
 export function assertPromptFits(prompt: string): void {
   if (prompt.length === 0) throw agentXError("CONFIG_INVALID", "the request is empty");
   if (Buffer.byteLength(prompt, "utf8") > 65_536) throw agentXError("CONFIG_INVALID", "the request is too long for the worker");
+}
+
+function retentionFields(input: AcceptInput): Pick<OperationRecord, "supersedesRetention"> {
+  return input.supersedesRetention === undefined ? {} : { supersedesRetention: input.supersedesRetention };
 }

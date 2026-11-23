@@ -1,3 +1,4 @@
+import { withoutCloseRetention } from "../support/close-retention-template.js";
 // Engine host (migration plan v3.2 lane E2): the core engine's deployment half, on the synthesised templates. Ported from the monolith's core-engine infrastructure test.
 // What must hold:
 //   1. no switch (#1275): no CoreEngine or CoreAllowedCompanies parameter, no switch variable on either function, no `coreEngine.switch` config key;
@@ -642,7 +643,7 @@ describe("L1a broker environment derivation", () => {
     // The merged template adds both the exact first-gateway output and the narrow
     // SIGNIN-MEMBER-CONDITIONCHECK statement (DEC 254zzz282 B014-A). Assert each
     // addition before removing it; all historical pins still cover every other byte.
-    const beforeFirstGateway = structuredClone(legacy.toJSON()) as Json & { Outputs: Record<string, unknown> };
+    const beforeFirstGateway = withoutCloseRetention(legacy.toJSON()) as Json & { Outputs: Record<string, unknown> };
     expect(beforeFirstGateway.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     delete beforeFirstGateway.Outputs.ModelRunPriceVersion;
     expect(digest(beforeFirstGateway), "legacy without the first-gateway output retains the upstream member-check pin").toBe("8f8df2aeed3082d74b0fee456be77fb5e562b86eb2c047b79f3585aa439ec150");
@@ -653,7 +654,7 @@ describe("L1a broker environment derivation", () => {
     delete withoutCapabilityRoutes.Resources.ContextToolsListRoute;
     delete withoutCapabilityRoutes.Resources.DesignReviewPacketRoute;
     expect(digest(withoutCapabilityRoutes), "legacy with the two capability routes taken out").toBe("33220db5faf6815c6effbb6c57c7b495eb26d73fe7fdf6b21bb10433718659d4");
-    expect(digest(legacy.toJSON())).toBe("99c852b0d794c4b0d27ec6b804839c1c3592fa8eeacaaa55dbbedb90153d4665");
+    expect(digest(legacy.toJSON())).toBe("d5cc84405a048e0b9c35b51bf37f8af029273bf29136a7f35f85c3d4cdfeffcc");
   });
 });
 import { createHash } from "node:crypto";
@@ -718,4 +719,17 @@ describe("the test service images setting (stack parameter TestServiceImages)", 
     expect(key.parse("none")).toBe("none");
     for (const bad of ["Mirrored", "yes", "1", ""]) expect(() => key.parse(bad), bad).toThrow();
   });
+});
+
+it("DEC331 grants the broker only InvokeFunction on the existing dispatcher ARN for read-only retention proof", () => {
+  const policies = resources(named, "AWS::IAM::Policy").filter(([, resource]) => list(resource.Properties.Roles).some(role => JSON.stringify(role) === JSON.stringify({ Ref: brokerRoleId })));
+  const statements = policies.flatMap(([, resource]) => (resource.Properties.PolicyDocument as { Statement: Statement[] }).Statement);
+  const permission = resources(named, "AWS::Lambda::Permission").filter(([id]) => id.startsWith("DispatcherVerifyCloseRetention"));
+  expect(permission).toHaveLength(1);
+  expect(permission[0]![1]).toEqual({ Type: "AWS::Lambda::Permission", Properties: {
+    Action: "lambda:InvokeFunction", FunctionName: { "Fn::GetAtt": [dispatcher[0], "Arn"] }, Principal: { "Fn::GetAtt": [brokerRoleId, "Arn"] },
+  } });
+  // The approved grant adds no broker inline statement or wildcard/alias resource.
+  expect(statements.filter(item => list(item.Action).includes("lambda:InvokeFunction"))).toHaveLength(1);
+
 });

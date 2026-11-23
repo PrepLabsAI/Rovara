@@ -1,3 +1,4 @@
+import { plainClosePreparationItems } from "./close-preparation.js";
 import { workspaceKeys, locateWorkspace } from "./workspace-location.js";
 // Lane L6a, task flow core: a worker's terminal result. This is the entry the callback API calls once it has checked the worker's capability
 // and read what the worker sent (Cloud's `terminal-result.ts`, whose artifact reading is not ported: it hands the flow a `StepOutcome`).
@@ -63,18 +64,7 @@ export async function recordOperationResult(deps: TaskFlowDeps, result: Operatio
     }];
     // The operation is no longer watched for a lost machine (`sweepLostRuns`); an end that does not pass here (a close) leaves the row for the sweep to drop.
     items.push({ kind: "delete", key: runWatchKey(deps.companyId, operation.workspaceId, operation.id) });
-    if (holds) {
-      const prepared = operation.kind === "prepare";
-      items.push({
-        kind: "update",
-        key: location.workspaceKey,
-        ops: [
-          change.set("activeOperationId", null), change.set("updatedAt", now),
-          change.set("status", prepared ? (status === "SUCCEEDED" ? "READY" : "PREPARATION_FAILED") : "READY"),
-        ],
-        condition: when.and(...recovery.workspace, when.eq("activeOperationId", operation.id), when.eq("fence", operation.fence)),
-      });
-    }
+    if (holds) items.push(...await workspaceReleaseItems(deps, workspace, operation, location, recovery.workspace, status, now));
     items.push(...recovery.items);
     items.push(...await preparationResultItems(deps, operation, status));
     const applied = await deps.store.transact(items);
@@ -122,6 +112,22 @@ export async function syncTaskIndex(deps: TaskFlowDeps, workspaceId: string): Pr
   } catch {
     // The index is a convenience for lists.
   }
+}
+
+/** The held workspace goes back to READY (or PREPARATION_FAILED for a preparation); a plain run's retention commits with that release. Moved unchanged out of recordOperationResult. */
+async function workspaceReleaseItems(deps: TaskFlowDeps, workspace: WorkspaceRecord, operation: OperationRecord, location: Awaited<ReturnType<typeof workspaceKeys>>, recoveryWorkspace: Condition[], status: OperationResult["status"], now: string): Promise<TransactItem[]> {
+  const prepared = operation.kind === "prepare";
+  const preparation = await plainClosePreparationItems(deps, workspace, operation);
+  if (preparation.length > 0) return preparation;
+  return [{
+    kind: "update",
+    key: location.workspaceKey,
+    ops: [
+      change.set("activeOperationId", null), change.set("updatedAt", now),
+      change.set("status", prepared ? (status === "SUCCEEDED" ? "READY" : "PREPARATION_FAILED") : "READY"),
+    ],
+    condition: when.and(...recoveryWorkspace, when.eq("activeOperationId", operation.id), when.eq("fence", operation.fence)),
+  }];
 }
 
 function normalizedResult(operation: OperationRecord, result: OperationResult): { status: OperationResult["status"]; error: string | undefined } {

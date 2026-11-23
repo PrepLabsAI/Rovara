@@ -25,16 +25,31 @@ describe("the runner's arguments", () => {
 });
 
 describe("the steps, read from ci.yml", () => {
-  it("are the real linux-runtime job's run steps, in order, with checkout and setup-node replaced and only the GHCR login skipped", () => {
+  it("keeps run steps whose uses metadata is not an action string", () => {
+    for (const uses of [null, 4, false, {}]) {
+      const workflow = JSON.stringify({ jobs: { "linux-runtime": { steps: [{ name: "run", uses, run: "echo ready" }] } } });
+      expect(linuxRuntimeSteps(workflow)).toEqual({ steps: [{ name: "run", run: "echo ready", env: {} }], replaced: [], skipped: [] });
+    }
+  });
+  it("are the real linux-runtime job's run steps, in order, with checkout and setup-node replaced and the GHCR login and GitHub artifact archival explicitly skipped", () => {
     const plan = linuxRuntimeSteps(WORKFLOW);
     expect(plan.replaced).toEqual([expect.stringMatching(/^actions\/checkout@/u), expect.stringMatching(/^actions\/setup-node@/u)]);
-    expect(plan.skipped).toEqual([expect.stringMatching(/GHCR/u)]);
+    expect(plan.skipped).toEqual([expect.stringMatching(/GHCR/u), "Upload close retention Linux mutations"]);
     const runs = plan.steps.map((step) => step.run).join("\n");
     expect(runs).toContain("npm ci");
     expect(runs).toContain("npm run build");
     expect(runs).toContain("scripts/executor-smoke.ts");
     expect(plan.steps.at(-1)!.run).toContain("tests/linux/worker-sandbox-egress.test.ts");
     expect(plan.steps.find((step) => step.run.includes("vitest run tests/linux --exclude"))!.env).toMatchObject({ ROVARA_DOCKER: "1", ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:ci" });
+  });
+
+  it("acknowledges exactly the manual JSON artifact archive and refuses changed actions, paths, conditions or options", () => {
+    const archive = { name: "Upload close retention Linux mutations", uses: "actions/upload-artifact@v4", if: "always() && github.event_name == 'workflow_dispatch'", with: { name: "close-retention-linux-mutants", path: "linux-mutants.json", "if-no-files-found": "error" } };
+    const yaml = (step: unknown) => JSON.stringify({ jobs: { "linux-runtime": { steps: [step] } } });
+    expect(linuxRuntimeSteps(yaml(archive))).toEqual({ steps: [], replaced: [], skipped: [archive.name] });
+    for (const change of [{ uses: "actions/upload-artifact@v3" }, { name: "other archive" }, { if: "always()" }, { with: { ...archive.with, path: "**/*" } }, { with: { ...archive.with, name: "other" } }, { with: { ...archive.with, "if-no-files-found": "ignore" } }]) {
+      expect(() => linuxRuntimeSteps(yaml({ ...archive, ...change }))).toThrow(/does not reproduce/u);
+    }
   });
 
   it("refuses an action it does not reproduce, a workflow expression, or a step condition, so a change to the job is never silently missed", () => {

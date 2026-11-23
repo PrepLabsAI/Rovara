@@ -1,7 +1,7 @@
 // The empty volumes a dev container's start mounts over the worker's own folders are named per start, so they are removed
 // wherever their container is: when a started container is refused or created again, in the sweep before a push, and, when
 // nothing uses them, at the worker's startup. A volume the project named itself is never touched.
-import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -52,8 +52,8 @@ describe("the mask volumes of a dev container", () => {
     };
     const first = await volumes();
     const second = await volumes();
-    expect(first).toHaveLength(2);
-    expect(new Set([...first, ...second]).size).toBe(4);
+    expect(first).toHaveLength(3);
+    expect(new Set([...first, ...second]).size).toBe(6);
   });
 
   it("are removed with a started container AgentX refuses", async () => {
@@ -81,7 +81,7 @@ describe("the mask volumes of a dev container", () => {
     ] };
     const masked: ContainerInspection = { Mounts: [
       { Type: "bind", Source: target.rootPath, Destination: target.rootPath },
-      ...[".agentx", "agent-sessions", ".docker"].map((name) => ({ Type: "volume", Destination: join(target.rootPath, name) })),
+      ...[".agentx", "agent-sessions", ".docker", ".agentx-control"].map((name) => ({ Type: "volume", Destination: join(target.rootPath, name) })),
     ] };
     const { cli, removed, volumesRemoved } = fakeCli([unmasked, masked]);
     await expect(ensureDevcontainer(cli, target)).resolves.toMatchObject({ containerId: "id-2" });
@@ -163,4 +163,28 @@ describe("the worker's startup sweep", () => {
     await expect(removeLeftoverMaskVolumes(docker)).resolves.toBe(0);
     expect(calls.filter((args) => args[1] === "rm")).toEqual([]);
   });
+});
+
+it("removes a pre-upgrade container missing its control mask before up can restart task code", async () => {
+  const target = await workspace();
+  const events: string[] = [];
+  const { cli } = fakeCli([{ Mounts: [{ Type: "bind", Source: target.rootPath, Destination: target.rootPath }] }, { Mounts: [] }]);
+  cli.checks!.existing = async () => ["old"];
+  cli.checks!.remove = async id => { events.push(`remove:${id}`); };
+  const up = cli.run.bind(cli); cli.run = async (...args) => { events.push("up"); return up(...args); };
+  await ensureDevcontainer(cli, target);
+  expect(events).toEqual(["remove:old", "up"]);
+});
+
+it("refuses an existing canonical alias into control before task code can restart", async () => {
+  const target = await workspace();
+  await mkdir(join(target.rootPath, ".agentx-control"), { mode: 0o700 });
+  await symlink(join(target.rootPath, ".agentx-control"), join(target.rootPath, "alias"));
+  const events: string[] = [];
+  const { cli } = fakeCli([{ Mounts: [{ Type: "bind", Source: join(target.rootPath, "alias"), Destination: "/steal" }] }, { Mounts: [] }]);
+  cli.checks!.existing = async () => ["old"];
+  cli.checks!.remove = async id => { events.push(`remove:${id}`); };
+  const up = cli.run.bind(cli); cli.run = async (...args) => { events.push("up"); return up(...args); };
+  await ensureDevcontainer(cli, target);
+  expect(events).toEqual(["remove:old", "up"]);
 });

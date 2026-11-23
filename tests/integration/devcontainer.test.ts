@@ -354,6 +354,7 @@ describe("the devcontainer CLI seam", () => {
         { Type: "bind", Source: target.rootPath, Destination: target.rootPath },
         { Type: "volume", Source: "/var/lib/docker/volumes/agentx-mask-agentx/_data", Destination: join(target.rootPath, ".agentx") },
         { Type: "volume", Source: "/var/lib/docker/volumes/agentx-mask-agent-sessions/_data", Destination: join(target.rootPath, "agent-sessions") },
+        { Type: "volume", Source: "/var/lib/docker/volumes/agentx-mask-agentx-control/_data", Destination: join(target.rootPath, ".agentx-control") },
         { Type: "volume", Source: "/var/lib/docker/volumes/agentx-docker-data-mask/_data", Destination: join(target.rootPath, ".docker") },
       ] })], { configuration: {}, mergedConfiguration: {}, featuresConfiguration });
       await writeFile(join(target.workspaceFolder, ".devcontainer/devcontainer-lock.json"), "the project's own lockfile\n", "utf8");
@@ -369,6 +370,7 @@ describe("the devcontainer CLI seam", () => {
         // The worker's own state is hidden too: created if missing, then masked.
         "--mount", `type=volume,source=agentx-mask-agentx-${maskToken(calls)},target=${join(target.rootPath, ".agentx")}`,
         "--mount", `type=volume,source=agentx-mask-agent-sessions-${maskToken(calls)},target=${join(target.rootPath, "agent-sessions")}`,
+        "--mount", `type=volume,source=agentx-mask-agentx-control-${maskToken(calls)},target=${join(target.rootPath, ".agentx-control")}`,
         "--mount", `type=volume,source=agentx-docker-data-mask-${maskToken(calls)},target=${join(target.rootPath, ".docker")}`,
         "--log-format", "json",
       ]]);
@@ -378,7 +380,7 @@ describe("the devcontainer CLI seam", () => {
     it("creates again a container made before the Docker data folder was hidden (a resumed workspace)", async () => {
       const target = await workspaceWith('{ "image": "node:22" }', { dockerData: true });
       const unmasked = { ...ordinary, Mounts: [{ Type: "bind", Source: target.rootPath, Destination: target.rootPath }] };
-      const masked = { ...ordinary, Mounts: [...unmasked.Mounts, ...[".agentx", "agent-sessions", ".docker"].map((name) => ({ Type: "volume", Destination: join(target.rootPath, name) }))] };
+      const masked = { ...ordinary, Mounts: [...unmasked.Mounts, ...[".agentx", "agent-sessions", ".docker", ".agentx-control"].map((name) => ({ Type: "volume", Destination: join(target.rootPath, name) }))] };
       const { cli, calls, removed } = dockerCli([() => unmasked, () => masked]);
       await expect(ensureDevcontainer(cli, target)).resolves.toMatchObject({ containerId: "id-2" });
       expect(removed).toEqual(["id-1"]);

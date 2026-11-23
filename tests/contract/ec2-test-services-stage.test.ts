@@ -177,3 +177,9 @@ describe("boot.sh's test-services hook", () => {
     expect(spawnSync("bash", ["-n"], { input: stage, encoding: "utf8" }).status).toBe(0);
   });
 });
+
+it("orders test services after close retention restore", () => {
+  const h = host();
+  expect(runStage(h).status).toBe(0);
+  expect(readFileSync(join(h.units, "rovara-test-services.service"), "utf8"), "orders test services after close retention restore").toMatch(/^After=.* agentx-close-retention-restore\.service$/mu);
+});

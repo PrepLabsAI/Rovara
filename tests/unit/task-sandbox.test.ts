@@ -274,6 +274,8 @@ describe("starting and stopping a sandbox", () => {
     expect(tmpfs).toEqual([
       `${root}/.agentx:ro,noexec,nosuid,size=4k`,
       `${root}/agent-sessions:ro,noexec,nosuid,size=4k`,
+      // The close retention's own control folder (workspace-state.ts creates it with the workspace) is the worker's too: never the task's.
+      `${root}/.agentx-control:ro,noexec,nosuid,size=4k`,
       `${root}/.docker:ro,noexec,nosuid,size=4k`,
     ]);
     // Created by the worker, private to it, before the container could create them.

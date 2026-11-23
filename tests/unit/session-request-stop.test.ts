@@ -1,6 +1,7 @@
 // STOP-NON-DESTRUCTIVE: SessionManager.requestStop (READY -> STOPPING for a person's Stop, fenced on the workspace's active operation in the same transaction) and what it needs around it:
 // the reaper finishes the stop and keeps the volume, a Close inside the STOPPING window still deletes the volume (STOPPING -> DELETING), and the reaper survives that race.
 // The real SessionManager, reaper handler and session-steps over the fake table; the provisioner and deleter state machines are played by timers (tests/support/session-machines-world.ts).
+import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { COMPANY_A, createSessionMachinesWorld, type SessionMachinesWorld } from "../support/session-machines-world.js";
@@ -66,6 +67,43 @@ describe("requestStop: READY to STOPPING, only while the workspace still runs th
     inTheGap(world, () => setActiveOperation(world, workspaceId, "op-next-step"));
     expect(await world.sessions.requestStop(workspaceId)).toBe(false);
     expect((await world.sessions.get(workspaceId))!.state).toBe("READY");
+  });
+
+  // CLOSE-RETENTION (the binding rebase item of STOP-NON-DESTRUCTIVE): a session held for a Close's retention is never claimed by a Stop, and no deleter path reaches it, in any state.
+  /** The session item with a valid retention (or destroy) record on the volume it holds. */
+  const retain = (world: SessionMachinesWorld, workspaceId: string, field: "closeRetention" | "closeDestroy", state?: string) => {
+    const row = world.db.get(`WORKSPACE#${workspaceId}`, "SESSION")!;
+    const generation = { sessionGeneration: Number(row["generation"]), instanceId: String(row["instanceId"]), volumeId: String(row["volumeId"]), dataGeneration: randomUUID() };
+    const retained = { inspectionOperationId: randomUUID(), inspectionFence: 2, retentionId: randomUUID(), contentDigest: "a".repeat(64), generation };
+    const record = field === "closeRetention"
+      ? { schemaVersion: 1, operationId: randomUUID(), fence: 2, generation, retained }
+      : { schemaVersion: 1, acceptedOperationId: randomUUID(), retention: retained, effectId: "terminate-1", machineIds: ["machine-1"] };
+    // A STOPPED session has no instance or address (the schema says so).
+    const item: Record<string, unknown> = { ...row, ...(state === undefined ? {} : { state }), [field]: record };
+    if (state === "STOPPED") { delete item["instanceId"]; delete item["privateIp"]; }
+    world.db.set(item);
+  };
+
+  for (const field of ["closeRetention", "closeDestroy"] as const) {
+    it(`T7r a READY session that carries ${field} is never claimed by a Stop: a no-op, not a throw, and the session is untouched`, async () => {
+      const { world, workspaceId } = await readyWithOperation();
+      retain(world, workspaceId, field);
+      const before = world.db.get(`WORKSPACE#${workspaceId}`, "SESSION");
+      expect(await world.sessions.requestStop(workspaceId)).toBe(false);
+      expect(world.db.get(`WORKSPACE#${workspaceId}`, "SESSION")).toEqual(before);
+      expect(deleterRuns(world)).toEqual([]);
+    });
+  }
+
+  it("T7s a retained session is never deleted from STOPPING, STOPPED or READY by the plain deleter: WORKSPACE_BUSY, no deleter execution, the volume stays", async () => {
+    for (const state of ["READY", "STOPPING", "STOPPED"] as const) {
+      const { world, workspaceId } = await readyWithOperation();
+      const volumeBefore = world.db.get(`WORKSPACE#${workspaceId}`, "SESSION")!["volumeId"];
+      retain(world, workspaceId, "closeRetention", state);
+      await expect(world.sessions.deleteSession(workspaceId)).rejects.toMatchObject({ code: "WORKSPACE_BUSY" });
+      expect(deleterRuns(world)).toEqual([]);
+      expect(world.db.get(`WORKSPACE#${workspaceId}`, "SESSION")).toMatchObject({ state, volumeId: String(volumeBefore) });
+    }
   });
 
   it("T7e two concurrent Stops: one claims, the other sees STOPPING and does nothing; neither throws", async () => {

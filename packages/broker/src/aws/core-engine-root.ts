@@ -3,6 +3,9 @@ import type { E2ESourceSnapshot } from "@agentx/contracts";
 import { hostedAuthorityStore } from "./core-e2e-authority-store.js";
 import { wireHostedApplicationE2E } from "./core-application-e2e.js";
 import { composeHostedPrFeedbackRoutes } from "../core-host/pr-feedback-routes.js";
+import { CLOSE_GUARD } from "../core/task-flow/close-guard.js";
+import { closeCheckPort } from "../core/task-flow/close-check.js";
+import { createBrokerCloseInspection, type CloseVerificationEvent } from "./worker-machines/close-retention.js";
 import { createStoreProjectSource } from "../core/task-flow/project-source.js";
 import { developerTaskPolicy } from "@agentx/contracts";
 import { prepareCoreShare } from "./core-task-sharing.js";
@@ -141,7 +144,7 @@ import { Membership, membershipKey, ownPartitionRow } from "./company-check.js";
 import { grantKeyFor, namedCompany } from "./company-layout.js";
 import { coreTaskEntryFrom, type CoreEntryCaller, type CoreTaskEntry } from "./engine-boundary.js";
 import { coreAppEntryFrom, type CoreAppEntry } from "./core-app-routes.js";
-import { auditSinkForDeployedCaller, hostedSessionCapSeconds } from "./hosted-wiring.js"; import { attentionEmailFromEnvironment, attentionEmailModule } from "./attention-email.js"; import { LambdaClient } from "@aws-sdk/client-lambda";
+import { auditSinkForDeployedCaller, hostedSessionCapSeconds } from "./hosted-wiring.js"; import { attentionEmailFromEnvironment, attentionEmailModule } from "./attention-email.js"; import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { hostedServiceCatalog, hostedWorkersRunTestServices } from "./hosted-test-services.js";
 import { createTaskTestEnvironment } from "../core/test-env/seam.js";
 import { savedEnvEnabled } from "../core/test-env/saved-env-switch.js";
@@ -202,6 +205,7 @@ export interface BrokerCoreModuleContext {
 }
 
 export interface BrokerCoreRootInputs {
+  closeVerification?: (event: CloseVerificationEvent) => Promise<boolean>;
   env: NodeJS.ProcessEnv;
   checkTaskPerson?: CheckTaskPerson;
   /**
@@ -861,7 +865,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       // The per-run stop and the usage flush on Stop and close (core-money-stop): a stopped run whose usage did not arrive keeps its task's whole hold, marked estimated.
       // L2b: every core step on the gateway's agent model (the token's description reads the same route).
       // Configured without the task-token signer: refused here, so no task starts. The money stop is wired in every case.
-      flowOptions: { ...(inputs.taskRules === undefined ? {} : { taskSharing: { prepare: async (caller, project, wanted) => {
+      flowOptions: { closeGuard: CLOSE_GUARD, closeCheck: closeCheckPort, closeInspection: createBrokerCloseInspection(inputs.closeVerification ?? closeVerifierFromEnvironment(env), companyId, registry.require("storage")), ...(inputs.taskRules === undefined ? {} : { taskSharing: { prepare: async (caller, project, wanted) => {
         const latest = await createStoreProjectSource(registry.require("storage"), companyId).latest(project);
         if (latest === undefined) throw agentXError("CONFIG_INVALID", "this task's project is no longer registered; ask an admin");
         if (!wanted.shareToChannel && developerTaskPolicy(latest.definition).share !== "required") return undefined;
@@ -1648,5 +1652,17 @@ export function brokerCoreModuleDeps(env: NodeJS.ProcessEnv, parts: BrokerCoreMo
     ...(parts.dynamo === undefined ? {} : { dynamo: parts.dynamo }),
     objects: parts.objects, secrets: parts.secrets,
     ...parts.codeHost!(), workerMachines: parts.workerMachines!(),
+  };
+}
+
+function closeVerifierFromEnvironment(env: NodeJS.ProcessEnv): (event: CloseVerificationEvent) => Promise<boolean> {
+  const functionName = env["CLOSE_RETENTION_DISPATCHER_ARN"];
+  const client = new LambdaClient({ maxAttempts: 1 });
+  return async event => {
+    if (functionName === undefined) return false;
+    const reply = await client.send(new InvokeCommand({ FunctionName: functionName, InvocationType: "RequestResponse", Payload: Buffer.from(JSON.stringify(event)) }));
+    if (reply.FunctionError !== undefined || reply.Payload === undefined) return false;
+    const parsed = JSON.parse(Buffer.from(reply.Payload).toString("utf8")) as Record<string, unknown>;
+    return Object.keys(parsed).sort().join(",") === "queryId,schemaVersion,verified" && parsed["schemaVersion"] === 1 && parsed["queryId"] === event.queryId && parsed["verified"] === true;
   };
 }

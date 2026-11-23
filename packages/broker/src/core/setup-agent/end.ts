@@ -33,6 +33,9 @@ export async function endSetupAgentTask(
   const result = ended.outcome?.kind === "setup-run" ? ended.outcome.result : undefined;
   await recordSetupAgentEnd(deps, fresh, operation, { status: ended.status, result, error: ended.error, repositories }, now);
   // The run is over: its workspace, machine and slot go back. The record of what it learned stays.
-  await closeLoadedTask(deps, fresh, fresh.developerId).catch((error: unknown) => log(deps, { event: "setup_agent.close_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }));
+  // A system close: the run's product is written above, so the guard closes it by type (the scratch workspace holds nothing a person owns). Without that proof the close is SKIPPED, and said so here, never swallowed.
+  const closed = await closeLoadedTask(deps, fresh, fresh.developerId, { mode: "system", closer: "setup-run" })
+    .catch((error: unknown) => { log(deps, { event: "setup_agent.close_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }); return undefined; });
+  if (closed?.outcome === "skipped") log(deps, { event: "setup_agent.close_skipped", taskId: task.taskId, reason: closed.reason });
   await deps.store.update({ key: taskKey(task.taskId), ops: [change.set("updatedAt", iso(deps))], condition: when.present() }).catch(() => undefined);
 }

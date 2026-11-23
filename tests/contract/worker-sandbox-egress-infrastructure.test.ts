@@ -67,7 +67,7 @@ describe("the stack parameter WorkerSandboxEgress", () => {
 describe("the session steps handler", () => {
   const launch = async (more: { sandboxEgressGateway?: boolean }): Promise<string> => {
     const handler = createSessionStepsHandler({
-      sessions: { markVolume: vi.fn(), markInstance: vi.fn(), markReady: vi.fn(), markFailed: vi.fn(), markDeleted: vi.fn() },
+      sessions: { markVolume: vi.fn(), markInstance: vi.fn(), markReady: vi.fn(), markFailed: vi.fn(), markDeleted: vi.fn(), validateDeletion: vi.fn() },
       workerSettings: async () => ({ workerImage: `111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production@sha256:${"a".repeat(64)}`, modelProvider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6", promptCacheRetention: "long" as const }),
       invokePublicKey: async () => `MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE${"A".repeat(88)}`,
       bootScript: () => bootScript,

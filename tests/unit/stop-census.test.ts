@@ -6,11 +6,13 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const ROOT = "packages/broker/src";
+/** The close census table names these calls as TEXT (it is classified by `tests/contract/close-census.test.ts`); it holds no call. */
+const SKIPPED = new Set([join(ROOT, "core/task-flow/close-census.ts")]);
 
 function sources(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
     const path = join(dir, name);
-    return statSync(path).isDirectory() ? sources(path) : /\.(ts|tsx|mts)$/u.test(name) ? [path] : [];
+    return statSync(path).isDirectory() ? sources(path) : /\.(ts|tsx|mts)$/u.test(name) && !SKIPPED.has(path) ? [path] : [];
   });
 }
 

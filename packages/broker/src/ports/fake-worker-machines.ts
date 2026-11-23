@@ -2,7 +2,7 @@
 // "deliver" records the job. The EC2, local Docker and this-machine adapters replace it, one lane each.
 import { randomUUID } from "node:crypto";
 import {
-  ANSWERED_INVOCATION_KINDS,
+  isAnsweredInvocation,
   MachineError,
   type DeliveryReceipt,
   type MachineCapabilities,
@@ -112,7 +112,7 @@ export class FakeWorkerMachines implements WorkerMachines {
     if (machine === undefined || machine.handle.state === "terminated") throw new MachineError("not_found", "no such machine");
     if (machine.handle.state !== "ready" && machine.handle.state !== "busy") throw new MachineError("not_ready", `the machine is ${machine.handle.state}`);
     // A live steer and a peek are answered on the request: they are not jobs, so they neither hold the machine nor use up an operation id.
-    if ((ANSWERED_INVOCATION_KINDS as readonly string[]).includes(invocation.kind)) {
+    if (isAnsweredInvocation(invocation)) {
       this.answered.push(structuredClone(invocation));
       return { duplicate: false, answer: this.#options.answer?.(invocation) ?? (invocation.kind === "steer" ? { accepted: true, outcome: "steered" } : { accepted: true, outcome: "unavailable" }) };
     }

@@ -16,5 +16,8 @@ export async function endWikiBuildTask(deps: TaskFlowDeps, task: TaskRecord): Pr
     if (pointer.end === undefined) await endWikiBuild(deps.store, scope, pointer.stop === undefined ? "infrastructure" : "stopped_by_person", () => (deps.now?.() ?? new Date()).getTime());
     await deps.wikiBuildEnded?.(scope).catch(() => undefined);
   }
-  await closeLoadedTask(deps, fresh, fresh.developerId).catch((error: unknown) => log(deps, { event: "wiki_build.close_failed", taskId: fresh.taskId, error: error instanceof Error ? error.name : "unknown" }));
+  // A system close: the end word and the pointer are written above, so the guard closes it by type. Without that proof the close is SKIPPED, and said so here, never swallowed.
+  const closed = await closeLoadedTask(deps, fresh, fresh.developerId, { mode: "system", closer: "wiki-build" })
+    .catch((error: unknown) => { log(deps, { event: "wiki_build.close_failed", taskId: fresh.taskId, error: error instanceof Error ? error.name : "unknown" }); return undefined; });
+  if (closed?.outcome === "skipped") log(deps, { event: "wiki_build.close_skipped", taskId: fresh.taskId, reason: closed.reason });
 }

@@ -1,8 +1,8 @@
 import { createServer, type Server } from "node:http";
-import { AgentXError, PREPARE_SAVED_ENV_BUILD_FEATURE, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, modelFailureCodeOf, noChangeFindingsFrom, redactText, type WorkerInvocation, type WorkerInvocationFeature } from "@agentx/contracts";
+import { AgentXError, CloseRetentionReplySchema, WorkspaceDataIdentitySchema, type CloseRetentionReply, type WorkspaceDataIdentity, PREPARE_SAVED_ENV_BUILD_FEATURE, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, modelFailureCodeOf, noChangeFindingsFrom, redactText, type WorkerInvocation, type WorkerInvocationFeature } from "@agentx/contracts";
 import { pinnedSavedEnvBuilder } from "./saved-env/builder.js";
 import { WORKER_IMPLEMENTED_FEATURES } from "./implemented-features.js";
-import type { OperationJournal } from "./journal.js";
+import type { JournalRecord, OperationJournal } from "./journal.js";
 import { WorkerOperationCancelledError } from "./cancel.js";
 import {
   invocationMatchesClaims,
@@ -16,6 +16,9 @@ const MAX_INVOCATION_BYTES = 1_048_576;
 
 export interface WorkerExecutor {
   execute(invocation: WorkerInvocation): Promise<unknown>;
+  admit?(invocation: WorkerInvocation): Promise<{ record: JournalRecord; duplicate: boolean }>;
+  retention?(invocation: WorkerInvocation): Promise<CloseRetentionReply>;
+  workspaceDataIdentity?: WorkspaceDataIdentity;
   /** Live steer (steer-invocation.ts): answers a `steer` invocation on the same request. Absent: the invocation is refused (the worker does not list the feature). */
   steer?(invocation: Extract<WorkerInvocation, { kind: "steer" }>): Promise<Record<string, unknown>>;
   /** Live interaction A2: answers a `peek` invocation (a read-only look at the working tree) on the same request. Absent: refused. */
@@ -119,54 +122,64 @@ export async function handleWorkerRequest(request: Request, state: WorkerServerS
     return response(200, {
       status: state.activeOperations.size === 0 ? "Healthy" : "HealthyBusy",
       activeOperations: state.activeOperations.size,
+      ...(state.executor.workspaceDataIdentity === undefined ? {} : { workspaceDataIdentity: WorkspaceDataIdentitySchema.parse(state.executor.workspaceDataIdentity) }),
       // Spec 053: the optional invocation fields this build parses and can use now; the dispatcher sends one only when listed.
       [WORKER_PING_FEATURES_FIELD]: features,
       ...(Object.keys(diagnostics).length === 0 ? {} : { invocationFeatureDiagnostics: diagnostics }),
     });
   }
   if (request.method === "POST" && url.pathname === "/invocations") {
-    const verified = state.invokeAuthentication
-      ? verifyInvokeAuthorization(request.headers.get("authorization"), state.invokeAuthentication)
-      : undefined;
-    if (verified && !verified.ok) return unauthorized(verified.reason);
-    try {
-      const text = await request.text();
-      if (Buffer.byteLength(text, "utf8") > MAX_INVOCATION_BYTES) {
-        return response(413, { error: "invocation is too large" });
-      }
-      const invocation = WorkerInvocationSchema.parse(JSON.parse(text) as unknown);
-      if (verified && !invocationMatchesClaims(invocation, verified.claims)) return unauthorized("invocation_mismatch");
-      // A live steer is answered on this request and is not an operation: no journal record of its own here, no background run, no terminal callback.
-      if (invocation.kind === "steer") {
-        if (state.executor.steer === undefined) return response(400, { error: "live steer is not supported by this worker" });
-        return response(200, await state.executor.steer(invocation));
-      }
-      // A peek is answered on this request and is not an operation: no journal record, no background run, no terminal callback.
-      if (invocation.kind === "peek") {
-        if (state.executor.peek === undefined) return response(400, { error: "peek is not supported by this worker" });
-        return response(200, await state.executor.peek(invocation));
-      }
-      const accepted = await state.journal.accept(invocation);
-      if (!accepted.duplicate) {
-        state.activeOperations.add(invocation.operationId);
-        queueMicrotask(() => {
-          void executeInBackground(invocation, state);
-        });
-      }
-      return response(200, {
-        accepted: true,
-        operationId: invocation.operationId,
-        status: accepted.duplicate ? accepted.record.status : "ACCEPTED",
-        duplicate: accepted.duplicate,
-      });
-    } catch (error) {
-      const conflict = error instanceof AgentXError && error.code === "IDEMPOTENCY_CONFLICT";
-      return response(conflict ? 409 : 400, {
-        error: error instanceof Error ? error.message : "invalid invocation",
-      });
-    }
+    return handleInvocationRequest(request, state);
   }
   return response(404, { error: "not found" });
+}
+
+async function handleInvocationRequest(request: Request, state: WorkerServerState): Promise<Response> {
+  const verified = state.invokeAuthentication
+    ? verifyInvokeAuthorization(request.headers.get("authorization"), state.invokeAuthentication)
+    : undefined;
+  if (verified && !verified.ok) return unauthorized(verified.reason);
+  try {
+    const text = await request.text();
+    if (Buffer.byteLength(text, "utf8") > MAX_INVOCATION_BYTES) {
+      return response(413, { error: "invocation is too large" });
+    }
+    const invocation = WorkerInvocationSchema.parse(JSON.parse(text) as unknown);
+    if (verified && !invocationMatchesClaims(invocation, verified.claims)) return unauthorized("invocation_mismatch");
+    if (invocation.kind === "close" && "schemaVersion" in invocation.payload) {
+      if (state.executor.retention === undefined) return response(400, { error: "close retention is unsupported" });
+      return response(200, CloseRetentionReplySchema.parse(await state.executor.retention(invocation)));
+    }
+    await state.journal.assertFence(invocation);
+    // A live steer is answered on this request and is not an operation: no journal record of its own here, no background run, no terminal callback.
+    if (invocation.kind === "steer") {
+      if (state.executor.steer === undefined) return response(400, { error: "live steer is not supported by this worker" });
+      return response(200, await state.executor.steer(invocation));
+    }
+    // A peek is answered on this request and is not an operation: no journal record, no background run, no terminal callback.
+    if (invocation.kind === "peek") {
+      if (state.executor.peek === undefined) return response(400, { error: "peek is not supported by this worker" });
+      return response(200, await state.executor.peek(invocation));
+    }
+    const accepted = await (state.executor.admit?.(invocation) ?? state.journal.accept(invocation));
+    if (!accepted.duplicate) {
+      state.activeOperations.add(invocation.operationId);
+      queueMicrotask(() => {
+        void executeInBackground(invocation, state);
+      });
+    }
+    return response(200, {
+      accepted: true,
+      operationId: invocation.operationId,
+      status: accepted.duplicate ? accepted.record.status : "ACCEPTED",
+      duplicate: accepted.duplicate,
+    });
+  } catch (error) {
+    const conflict = error instanceof AgentXError && error.code === "IDEMPOTENCY_CONFLICT";
+    return response(conflict ? 409 : 400, {
+      error: error instanceof Error ? error.message : "invalid invocation",
+    });
+  }
 }
 
 export function startWorkerServer(

@@ -1,5 +1,5 @@
 import type { CloseAcceptance } from "./close-acceptance-record.js";
-import type { PreviewV2, WorkOrigin, RunStartQuote } from "@agentx/contracts";
+import type { CloseRetention, WorkspaceDataIdentity, PreviewV2, WorkOrigin, RunStartQuote } from "@agentx/contracts";
 // Lane L6a, task flow core: the records the flow keeps in the document store, and the plain-JSON conversion that goes with them.
 import type {
   DesignReviewBinding,
@@ -70,6 +70,7 @@ export type TaskPointerRecord = Omit<DeveloperTaskPointerRecord, "requester" | "
 
 /** `WORKSPACE#<id>/META`: where a task's worker runs. `machine` is set once a worker machine was started for it. */
 export interface WorkspaceRecord {
+  legacyCloseClaim?: string;
   pk: string;
   sk: "META";
   entityType: "WORKSPACE";
@@ -114,6 +115,8 @@ export interface DispatchSpec {
 
 export interface OperationRecord extends Operation {
   closeAcceptance?: CloseAcceptance;
+  closePreflight?: { schemaVersion: 1; target?: WorkspaceDataIdentity };
+  supersedesRetention?: CloseRetention;
   pk: string;
   sk: string;
   entityType: "OPERATION";

@@ -1,5 +1,8 @@
 import type { E2EWorkflowAdmissionRef } from "@agentx/contracts";
 import { combinedChecks } from "./transaction-checks.js";
+import { retainedSuccessor } from "./supersede-retention.js";
+import { planClosePreparation } from "./close-preparation.js";
+import { mergeCloseConditions } from "./close-conditions.js";
 import { workspaceKeys, locateWorkspace } from "./workspace-location.js";
 // Lane L6a, task flow core: the stage machine's driver. The transitions themselves are the pure functions in `@agentx/contracts`
 // (`task-workflow-node.ts`: `startWorkflowUnderstand`, `recordIntentAssessment`, `submitWorkflowArtifact`, ...). This module is what Cloud's
@@ -94,7 +97,7 @@ export function holdWorkspaceItem(workspace: WorkspaceRecord, operationId: strin
     kind: "update",
     key: { pk: workspace.pk, sk: "META" },
     ops: [change.set("status", "BUSY"), change.set("activeOperationId", operationId), change.set("fence", workspace.fence + 1), change.set("updatedAt", now)],
-    condition: when.and(when.eq("status", "READY"), when.eq("activeOperationId", null), when.eq("fence", workspace.fence)),
+    condition: when.and(when.eq("status", "READY"), when.eq("activeOperationId", workspace.activeOperationId), when.eq("fence", workspace.fence), when.notExists("legacyCloseClaim")),
   };
 }
 
@@ -156,7 +159,8 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
   const location = await workspaceKeys(deps, workspace.id);
   const existing = await deps.store.get(location.operationRequestKey(workspace.ownerKey, input.requestId));
   if (existing !== undefined) return { result: "DUPLICATE" };
-  if (workspace.status !== "READY" || workspace.activeOperationId !== null) return { result: "WAITING" };
+  const successor = await retainedSuccessor(deps, workspace);
+  if (!workspaceAdmitsStep(workspace, successor)) return { result: "WAITING" };
   // The person the step runs for must still be allowed to have it run, asked now and fenced into the step's own transaction.
   const permitted = await deps.access.checkStep(task);
   if (!permitted.allowed) {
@@ -196,6 +200,7 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
       ...(input.requires === undefined && !withSources ? {} : { requires: [...(input.requires ?? []), ...(withSources ? ["task.contextSources.v1"] : [])] }),
       ...(input.extraActions === undefined && !withSources ? {} : { extraActions: [...(input.extraActions ?? []), ...(withSources ? ["context-tools"] : [])] }),
     },
+    ...successorFields(successor),
     requester: { personId: task.developerId, provider: task.provider },
   });
   const workflowWrite = input.workflow === undefined ? undefined : workflowWriteOps(input.workflow.current, input.workflow.next, { ownsFlow: true });
@@ -209,6 +214,7 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
     holdWorkspaceItem(workspace, built.operation.id, now),
     ...built.items,
     ...comments.items,
+    ...(successor?.items ?? []),
     ...(permitted.items ?? []),
     ...(input.extra ?? []),
   ]);
@@ -237,7 +243,7 @@ async function stepRefusal(deps: TaskFlowDeps, input: StepInput, commentsChanged
   // The same request committed first, the workspace is taken, the comments changed, or the task moved on.
   if (await deps.store.get(location.operationRequestKey(workspace.ownerKey, input.requestId)) !== undefined) return { result: "DUPLICATE" };
   const fresh = await readWorkspace(deps, workspace.id);
-  if (fresh !== undefined && (fresh.status !== "READY" || fresh.activeOperationId !== null || fresh.fence !== workspace.fence) && fresh.status !== "CLOSED" && fresh.status !== "PREPARATION_FAILED") return { result: "WAITING" };
+  if (fresh !== undefined && (fresh.status !== "READY" || fresh.activeOperationId !== null || fresh.fence !== workspace.fence || fresh.legacyCloseClaim !== undefined) && fresh.status !== "CLOSED" && fresh.status !== "PREPARATION_FAILED") return { result: "WAITING" };
   if (fresh?.status === "READY" && await commentConflict(deps, input, commentsChanged)) return { result: "WAITING" };
   return { result: "STALE" };
 }
@@ -273,9 +279,14 @@ export async function commitWorkflow(deps: TaskFlowDeps, task: TaskRecord, next:
     },
     ...extra,
   ]);
+  // An owner-waiting boundary has no next dispatch row; claim preparation with that workflow revision.
+  if (next.state !== "RUNNING" && !extra.some(item => item.kind === "put" && item.item["entityType"] === "WORKFLOW_DISPATCH") && task.purpose === undefined) {
+    const workspace = await readWorkspace(deps, task.workspaceId);
+    if (workspace !== undefined) items.push(...await planClosePreparation(deps, workspace));
+  }
   // The work events of this transition (slice A4): extra items of the same transaction, left out when off or when they do not fit.
   items.push(...flowWorkEventItems({ enabled: deps.workEvents, orgId: deps.companyId, project: task.project, before: current, after: next, room: TRANSACTION_ITEMS_MAX - items.length }));
-  const result = await deps.store.transact(items);
+  const result = await deps.store.transact(mergeCloseConditions(items));
   return result.applied;
 }
 
@@ -721,3 +732,11 @@ async function planRunEstimate(deps: TaskFlowDeps, task: TaskRecord, workflow: W
 }
 
 export type { DispatchSpec, DocumentKey };
+
+type StepSuccessor = Awaited<ReturnType<typeof retainedSuccessor>>;
+function workspaceAdmitsStep(workspace: WorkspaceRecord, successor: StepSuccessor): boolean {
+  return workspace.legacyCloseClaim === undefined && workspace.status === "READY" && (workspace.activeOperationId === null || successor !== undefined);
+}
+function successorFields(successor: StepSuccessor): Pick<OperationRecord, "supersedesRetention"> {
+  return successor === undefined ? {} : { supersedesRetention: successor.retention };
+}

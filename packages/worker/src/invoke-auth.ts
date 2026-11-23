@@ -4,6 +4,8 @@ import {
   WorkerInvokeTokenClaimsSchema,
   type WorkerInvocation,
   type WorkerInvokeTokenClaims,
+  needsRetentionBinding,
+  retentionInvocationDigest,
   workflowPublicationContext,
   workflowPublicationContextDigest,
 } from "@agentx/contracts";
@@ -129,6 +131,7 @@ export function invocationMatchesClaims(invocation: WorkerInvocation, claims: Wo
     invocation.fence === claims.fence
   );
   if (!common) return false;
+  if (!retentionMatchesClaims(invocation, claims)) return false;
   if (claims.purpose === "PROJECT_SETUP") {
     return invocation.kind === "project-setup-smoke"
       && invocation.payload.setupExecutionId === claims.setupExecutionId
@@ -136,6 +139,10 @@ export function invocationMatchesClaims(invocation: WorkerInvocation, claims: Wo
       && invocation.payload.approvalRevision === claims.setupApprovalRevision
       && invocation.payload.transportCorrelationId === claims.workspaceId;
   }
+  return invocation.kind !== "project-setup-smoke" && publicationMatchesClaims(invocation, claims);
+}
+
+function publicationMatchesClaims(invocation: WorkerInvocation, claims: WorkerInvokeTokenClaims): boolean {
   const invocationPublicationMode = invocation.kind === "publish" ? invocation.payload.publicationMode : undefined;
   if (claims.publicationMode !== invocationPublicationMode) return false;
   if (invocationPublicationMode !== undefined) {
@@ -149,5 +156,14 @@ export function invocationMatchesClaims(invocation: WorkerInvocation, claims: Wo
       return false;
     }
   } else if (claims.publicationContextDigest !== undefined) return false;
-  return invocation.kind !== "project-setup-smoke";
+  return true;
+}
+
+function retentionMatchesClaims(invocation: WorkerInvocation, claims: WorkerInvokeTokenClaims): boolean {
+  const bound = needsRetentionBinding(invocation);
+  if (bound !== (claims.retentionProtocolVersion === 1 && claims.retentionPayloadDigest !== undefined)) return false;
+  if (bound) {
+    try { if (retentionInvocationDigest(invocation) !== claims.retentionPayloadDigest) return false; } catch { return false; }
+  }
+  return true;
 }

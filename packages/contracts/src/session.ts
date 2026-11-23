@@ -1,3 +1,4 @@
+import { CloseRetentionSchema, CloseRetentionMachineIdsSchema, WorkspaceDataIdentitySchema } from "./close-retention.js";
 import { Buffer } from "node:buffer";
 import { gzipSync } from "node:zlib";
 import { z } from "zod";
@@ -68,10 +69,24 @@ export const ProvisionerMachineFallbackSchema = z.literal("size-unavailable");
  * same partition as the workspace's OPERATION# items. `generation` counts provisioning attempts and
  * fences every write that belongs to one of them.
  */
+export const SessionCloseRetentionSchema = z.object({
+  schemaVersion: z.literal(1), operationId: z.string().uuid(), fence: z.number().int().positive().safe(),
+  generation: WorkspaceDataIdentitySchema, retained: CloseRetentionSchema.optional(), acceptedOperationId: z.string().uuid().optional(),
+}).strict();
+export const SessionCloseDestroySchema = z.object({
+  schemaVersion: z.literal(1), acceptedOperationId: z.string().uuid(), retention: CloseRetentionSchema,
+  effectId: z.string().min(1).max(256), machineIds: CloseRetentionMachineIdsSchema,
+}).strict();
+export type SessionCloseDestroy = z.infer<typeof SessionCloseDestroySchema>;
+
 export const WorkspaceSessionSchema = z
   .object({
     workspaceId: z.string().uuid(),
     state: WorkspaceSessionStateSchema,
+    workspaceDataIdentity: WorkspaceDataIdentitySchema.optional(),
+    closeRetention: SessionCloseRetentionSchema.optional(),
+    closeDestroy: SessionCloseDestroySchema.optional(),
+    closeDestroyCompleted: z.boolean().optional(),
     generation: z.number().int().nonnegative(),
     volumeId: z.string().regex(/^vol-[0-9a-f]{8,17}$/, "invalid volume ID").optional(),
     availabilityZone: AvailabilityZoneSchema.optional(),
@@ -356,11 +371,14 @@ export const WorkerInvokeTokenClaimsSchema = z
     setupSubjectId: z.string().uuid().optional(),
     setupApprovalRevision: z.number().int().positive().optional(),
     /** Signed only for publish operations carrying a server-selected candidate publication mode. */
+    retentionProtocolVersion: z.literal(1).optional(),
+    retentionPayloadDigest: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
     publicationMode: z.enum(["COMMITTED_HEAD", "CHECKED_TREE"]).optional(),
     /** Signed binding for every immutable workflow publication selector carried by that invocation. */
     publicationContextDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   })
   .strict().superRefine((claims, context) => {
+    if ((claims.retentionProtocolVersion === undefined) !== (claims.retentionPayloadDigest === undefined)) context.addIssue({ code: "custom", path: ["retentionPayloadDigest"], message: "retention version and payload digest must be signed together" });
     const hasSetup = claims.setupExecutionId !== undefined && claims.setupSubjectId !== undefined && claims.setupApprovalRevision !== undefined;
     if ((claims.purpose === "PROJECT_SETUP") !== hasSetup) context.addIssue({ code: "custom", path: ["setupExecutionId"], message: "setup purpose requires exact setup subject claims and workspace purpose forbids them" });
     if ((claims.publicationMode === undefined) !== (claims.publicationContextDigest === undefined)) {

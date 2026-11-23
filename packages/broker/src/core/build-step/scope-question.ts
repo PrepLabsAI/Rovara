@@ -15,7 +15,7 @@
 //
 // The record lives beside the task (`SCOPE_QUESTION`), not in the workflow's strict `flow` record. This module is the Code API Cloud shows on the web and in Slack: `scopeQuestionOf`, `answerScopeQuestion`, `retryScopeChecks`.
 import { createHash } from "node:crypto";
-import { approvalProofKey, change, when, type ApprovalProof, type ApprovalRequest, type Approvers, type FlowTier, type TransactItem, type WorkflowFlow, type WorkflowSnapshot } from "@agentx/contracts";
+import { AgentXError, approvalProofKey, change, sessionEventId, when, type ApprovalProof, type ApprovalRequest, type Approvers, type FlowTier, type TransactItem, type WorkflowFlow, type WorkflowSnapshot } from "@agentx/contracts";
 import { TIER_QUESTIONS } from "../decisions/tier-reviewer.js";
 import { TIER_REASON_CODES, planningLevelOf, skippedPlanning, tierGrowthPhrase, tierRank, tierReviewRecorded, type TierFile } from "../decisions/change-tier.js";
 import { strictMethodsFor } from "../decisions/strong-methods.js";
@@ -27,6 +27,7 @@ import { taskKey } from "../task-flow/keys.js";
 import { readTask } from "../task-flow/reads.js";
 import type { TaskRecord } from "../task-flow/records.js";
 import { closeLoadedTask } from "../task-flow/close.js";
+import { sessionEventItem } from "../sessions/store.js";
 import { iso, log } from "../task-flow/support.js";
 
 export const scopeQuestionKey = (taskId: string) => ({ pk: `DEVTASK#${taskId}`, sk: "SCOPE_QUESTION" });
@@ -312,7 +313,8 @@ export async function scopeQuestionOf(deps: Pick<TaskFlowDeps, "store" | "compan
   return { question, reviews, held: scopeHolds(flow, question), choices, requests };
 }
 
-export type ScopeAnswerResult = { status: "recorded"; question: ScopeQuestionRecord } | { status: "refused"; sentence: string };
+/** `closeRefused`: the close that Stop asks for did not happen (the workspace may hold work that no pull request has). The task stays open until a close the person previews and confirms, and these are the exact words. */
+export type ScopeAnswerResult = { status: "recorded"; question: ScopeQuestionRecord; closeRefused?: string } | { status: "refused"; sentence: string };
 
 /**
  * A person's answer, proven to the server. The proof is checked like the merge press checks its own: a method the approvers adapter lists, verified by the adapter (which also says who may answer: the
@@ -344,8 +346,28 @@ export async function answerScopeQuestion(deps: TaskFlowDeps & { approvers: Appr
   ]).then((result) => result.applied).catch(() => false);
   if (!written) return { status: "refused", sentence: "This question changed while you answered, or this proof was already used. Open the task page to see it as it is now." };
   log(deps, { event: "scope_question.answered", taskId: input.taskId, choice: input.choice, method: verdict.method, version: question.version });
-  if (input.choice === "stop") await closeLoadedTask(deps, task, verdict.approver.personId).catch((error: unknown) => log(deps, { event: "scope_question.stop_failed", taskId: input.taskId, error: error instanceof Error ? error.name : "unknown" }));
-  return { status: "recorded", question: answered };
+  return { status: "recorded", question: answered, ...(await stopClose(deps, task, input.choice, verdict.approver.personId, question.version)) };
+}
+
+/**
+ * Stop closes the task, and the close may be refused (the workspace holds the build's files; the guard asks for a preview). The refusal was swallowed and the answer said only `recorded`, so the person was never told
+ * the task was still open. It is now written on the task's session timeline and returned in the answer, in the guard's exact words, so the person goes to the Close preview. The task keeps its slot until a bound close.
+ */
+async function stopClose(deps: TaskFlowDeps, task: TaskRecord, choice: ScopeChoice, personId: string, version: number): Promise<{ closeRefused?: string }> {
+  if (choice !== "stop") return {};
+  try {
+    await closeLoadedTask(deps, task, personId);
+    return {};
+  } catch (error) {
+    log(deps, { event: "scope_question.stop_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
+    if (!(error instanceof AgentXError) || error.code !== "WORKSPACE_BUSY") return {};
+    const words = error.message.slice(error.code.length + 2);
+    if (task.sessionId !== undefined) {
+      await deps.store.transact([sessionEventItem({ orgId: deps.companyId, sessionId: task.sessionId }, { eventId: sessionEventId("status", `scope-stop-not-closed-${task.taskId}-${String(version)}`), at: iso(deps), type: "status", actor: { kind: "system" }, text: words })])
+        .catch(() => undefined);
+    }
+    return { closeRefused: words };
+  }
 }
 
 /**

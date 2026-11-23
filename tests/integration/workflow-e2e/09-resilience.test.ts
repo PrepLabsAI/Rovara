@@ -187,7 +187,8 @@ function installProductionDispatcher(e2e: WorkflowE2E, options: {
       const previousPostCount = posts.length;
       const result = await productionDispatcher({ Records: [{ messageId: `production-${record.id}`, body: JSON.stringify(record),
         attributes: { ApproximateReceiveCount: String(receiveCount) } }] }, { getRemainingTimeInMillis: () => remainingTimeMs });
-      batchFailures.push(result.batchItemFailures);
+      // The dispatcher answers a close-retention verification query with its own reply; a batch of queue records never gets that one.
+      batchFailures.push((result as { batchItemFailures: Array<{ itemIdentifier: string }> }).batchItemFailures);
       return posts.slice(previousPostCount).find((post) => post.invocation.operationId === record.operationId)?.invocation;
     },
     restore(): void { state.mockRestore(); sign.mockRestore(); secret.mockRestore(); proof.mockRestore(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); },

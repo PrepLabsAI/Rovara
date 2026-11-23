@@ -18,6 +18,7 @@ function setup(ping: SessionStepsDependencies["ping"] = async () => ({ status: "
     markReady: vi.fn(async () => ({ requeued: ["r"] })),
     markFailed: vi.fn(async () => ({ failed: [] })),
     markDeleted: vi.fn(async () => undefined),
+    validateDeletion: vi.fn(async () => undefined),
   };
   const pingSpy = vi.fn(ping);
   const handler = createSessionStepsHandler({

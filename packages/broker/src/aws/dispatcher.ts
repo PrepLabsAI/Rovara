@@ -1,4 +1,8 @@
-import "./broker-environment-init.js"; import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import "./broker-environment-init.js"; import { DynamoDocumentStore } from "@rovara/aws-adapters";
+import { createDispatcherCloseInspection, withCloseVerification } from "./worker-machines/close-retention.js";
+import { SessionWorkerMachines } from "./worker-machines/session-worker-machines.js";
+import { workspaceCompanyReader } from "./worker-machines/workspace-company.js";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { grantKeyFor } from "./company-layout.js";
 import type { SlackWorkspaceBindings } from "./slack-workspace-binding.js";
 import { KMSClient, SignCommand } from "@aws-sdk/client-kms";
@@ -772,7 +776,7 @@ const workflowHandler = createDispatcherHandler({
  * (the legacy template) this is today's handler itself. The core is built on the first core batch.
  */
 let coreDispatch: Promise<CoreDispatchHost> | undefined;
-export const handler = withCoreDispatch(workflowHandler, {
+const queueHandler = withCoreDispatch(workflowHandler, {
   coreQueueArn: coreDispatchQueueArn(process.env),
   host: () => {
     coreDispatch ??= loadCallbackSigningKey(process.env).then((callbackSigningKey) => {
@@ -970,3 +974,15 @@ function logDispatchFailure(
   }
   process.stderr.write(`${JSON.stringify(entry)}\n`);
 }
+
+export const handler = withCloseVerification(queueHandler, async event => {
+  const tableName = requiredEnvironment("STATE_TABLE_NAME");
+  const store = new DynamoDocumentStore({ tableName, client: new DynamoDBClient(awsClientConfiguration) });
+  const machines = new SessionWorkerMachines({ companyId: event.companyId, sessions: dispatcherSessions,
+    companyOfWorkspace: workspaceCompanyReader(documentClient, tableName), binding: async () => undefined,
+    stopInstance: dispatcherStopInstance, sign: signWithInvokeKey, post: postToWorker, ping: pingWorker });
+  return createDispatcherCloseInspection({ store, companyId: event.companyId, machines, sessions: dispatcherSessions }).retained({
+    workspaceId: event.workspaceId, operationId: event.retention.inspectionOperationId, fence: event.retention.inspectionFence,
+    retentionId: event.retention.retentionId, contentDigest: event.retention.contentDigest, retentionProof: { schemaVersion: 1, generation: event.retention.generation },
+  });
+});

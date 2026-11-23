@@ -1,4 +1,5 @@
 import type { CloseInspectionProvider } from "./close-inspection.js";
+import type { CloseCheckPort, CloseGuardPort } from "./close-guard.js";
 import type { PreviewV2 } from "@agentx/contracts";
 import type { AgentXError, ScriptTokenPermission, WorkOrigin } from "@agentx/contracts";
 // Lane L6a, task flow core: what the flow is built on. Every dependency is a W0 port or a small seam named here; nothing names DynamoDB, SQS,
@@ -227,6 +228,13 @@ export interface DesignReviewSteps {
 export interface TaskFlowDeps {
   /** Retained close preparation; absent/unproven means preview unavailable. */
   closeInspection?: CloseInspectionProvider;
+  /**
+   * The unbound-close guard (close-guard.ts): when set, a close nobody previewed reaches a machine-backed workspace only on proof it holds nothing; otherwise it is refused. Absent: today's close
+   * (the laptop, and any install that has not been given the guard). It is wired together with `closeInspection` or not at all (`assertCloseGuardComposition`).
+   */
+  closeGuard?: CloseGuardPort;
+  /** The seam that asks for a check of a workspace's unpublished work when a close finds none (the implementation wakes a stopped machine and retains + inspects it). Never starts a machine by itself. */
+  closeCheck?: CloseCheckPort;
   /** Approved accepted-close continuation, invoked only after commit or immutable replay. P4 supplies its durable effects. */
   resumeAcceptedClose?: (operation: OperationRecord) => Promise<void>;
   taskSharing?: TaskSharing;

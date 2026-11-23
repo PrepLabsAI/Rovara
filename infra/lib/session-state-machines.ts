@@ -398,11 +398,13 @@ export function deleterDefinition(props: SessionStateMachineProps): State {
           workspaceId: "{% $states.input.workspaceId %}",
           instanceId: "{% $states.input.instanceId %}",
           volumeId: "{% $states.input.volumeId %}",
+          closeDestroy: "{% $exists($states.input.closeDestroy) ? $states.input.closeDestroy : null %}",
           waits: 0,
           lastError: null,
         },
-        Next: "HasInstance",
+        Next: "ValidateDeletion",
       },
+      ValidateDeletion: step(props, { action: "validateDeletion", workspaceId: "{% $workspaceId %}", closeDestroy: "{% $closeDestroy %}" }, { Next: "HasInstance" }),
       HasInstance: {
         Type: "Choice",
         Choices: [{ Condition: "{% $instanceId != null %}", Next: "TerminateInstance" }],
@@ -469,7 +471,7 @@ export function deleterDefinition(props: SessionStateMachineProps): State {
         Catch: [rememberError("VolumeAlreadyGone")],
         Next: "MarkDeleted",
       },
-      MarkDeleted: step(props, { action: "markDeleted", workspaceId: "{% $workspaceId %}" }, { Next: "Deleted" }),
+      MarkDeleted: step(props, { action: "markDeleted", workspaceId: "{% $workspaceId %}", closeDestroy: "{% $closeDestroy %}" }, { Next: "Deleted" }),
       Deleted: { Type: "Succeed" },
       // Left DELETING for the reconciler; the failed-executions alarm tells the operator.
       DeletionFailed: { Type: "Fail", Error: "DeletionFailed", Cause: "{% $string($lastError) %}" },

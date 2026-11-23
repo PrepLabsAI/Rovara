@@ -142,19 +142,21 @@ describe("the worker role's ECR image read is scoped (L4-IAM)", () => {
     // every EC2 boot script except the swebench one (its own role): a new script cannot add a pull unseen
     const scripts = readdirSync("packages/worker/ec2").filter((name) => name.endsWith(".sh") && name !== "swebench-boot.sh").sort();
     // L4-NETG: sandbox-egress.sh and devcontainer-docker.sh pull nothing (checked just below); the only image they start is the worker image the boot already pulled, inside the scope above.
-    expect(scripts).toEqual(["boot.sh", "devcontainer-docker.sh", "sandbox-egress.sh", "test-services-stage.sh"]);
+    expect(scripts).toEqual(["boot.sh", "close-retention.sh", "devcontainer-docker.sh", "sandbox-egress.sh", "test-services-stage.sh"]);
     const read = (name: string) => readFileSync(`packages/worker/ec2/${name}`, "utf8");
     const boot = read("boot.sh");
     const stage = read("test-services-stage.sh");
     // `docker pull X` and `docker image pull X`, whether X is a variable or a literal reference
     const pulls = (text: string) => [...text.matchAll(/docker (?:image )?pull(?: --[a-z-]+)* (\S+)/gu)].map((match) => match[1]!.replace(/[";|&)]+$/u, "").replace(/["{}]/gu, "")).sort();
     // calls of the helper that wraps `docker pull "$1"`
-    const helperCalls = (text: string) => [...text.matchAll(/pull_image_once (\S+)/gu)].map((match) => match[1]!).filter((arg) => arg !== "()").sort();
+    const helperCalls = (text: string) => [...text.split("\n").filter(line => !line.trimStart().startsWith("declare -f ")).join("\n").matchAll(/pull_image_once (\S+)/gu)].map((match) => match[1]!).filter((arg) => arg !== "()").sort();
     expect(pulls(boot)).toEqual(["$1", "$CONTAINED_IMAGE", "$EXECUTOR", "$EXECUTOR_IMAGE"]);
     expect(helperCalls(boot)).toEqual(['"$AGENTX_WORKER_IMAGE"']); // the worker image only (pull_worker_image)
     expect(boot).toContain("AGENTX_SANDBOX_IMAGE=$AGENTX_WORKER_IMAGE");
     expect(boot).toContain("readonly CONTAINED_IMAGE=node@sha256:"); // Docker Hub: no ECR
     expect(pulls(stage)).toEqual(["$reference"]);
+    // Retention uses host mount tools only; it adds no image pull or ECR authority.
+    expect(pulls(read("close-retention.sh"))).toEqual([]);
     // L4-NETG (DEC 254zzz77): the gateway stage and the devcontainer wrapper make no pull and no ECR login. The gateway container, the program and deny-list reads and the boot probe all start `$AGENTX_WORKER_IMAGE`
     // (already on the host, pulled by pull_worker_image from agentx-<env>/worker, inside the pull-through prefix the role reads); `docker run`/`create` of a present image never pulls, and the wrapper only passes
     // `run`/`create` of whatever image the dev container CLI names to the same Docker daemon, exactly as the CLI did before (a dev container's own base image comes from its public registry through the host's dockerd, not through this role).

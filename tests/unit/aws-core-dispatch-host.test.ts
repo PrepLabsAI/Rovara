@@ -240,6 +240,16 @@ describe("the core on the dispatcher", () => {
     };
   };
 
+
+it("installs the production retained-close provider in each dispatcher company runtime", async () => {
+  const made = inputs(env({}));
+  const owed = new Set(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
+  const built = createDispatcherCoreHost({ ...made.inputs, flow: { standingInstructions: null, modelAccess: null, learned: null }, extraModules: createFakeWorld().modules.filter(module => owed.has(module.point)) });
+  const a = await built.app.runtimeFor(COMPANY_A), b = await built.app.runtimeFor(COMPANY_B);
+  expect(a.flow.deps.closeInspection).toBeDefined();
+  expect(a.flow.deps.closeInspection).not.toBe(b.flow.deps.closeInspection);
+});
+
   // M3: an omitted hosted guard must retry, before allocating worker authority.
   it("never delivers when the hosted delivery authority is unwired", async () => {
     const made = inputs(env());

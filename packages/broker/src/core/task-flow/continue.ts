@@ -1,3 +1,4 @@
+import { retainedSuccessor } from "./supersede-retention.js";
 // Task actions (owner decision 198), continue: more work for a task that has ended its run (finished, failed, stopped or interrupted). The new instructions start a new round on the same task, in the same workspace
 // and conversation: the code and the branch are as the last round left them. Cloud's `continueTask`, over the ports; Code refused it.
 //
@@ -42,7 +43,7 @@ export async function continueTask(deps: TaskFlowDeps, options: TaskActionsOptio
   if (workspace.status === "PREPARATION_FAILED") throw agentXError("CONFIG_INVALID", NEVER_STARTED_TASK);
   // A task whose first instructions have not run yet is still starting: they are its first round, and this is not. A task still working holds its workspace; any other state that cannot take a round is the step's own WAITING, below.
   const pointer = fromDocument<TaskPointerRecord>(await deps.store.get((await workspaceKeys({ store: deps.store, companyId: task.companyId }, task.workspaceId)).taskPointerKey()));
-  if (pointer?.pendingPrompt !== undefined || workspace.activeOperationId !== null) throw agentXError("TASK_BUSY", STILL_WORKING);
+  if (pointer?.pendingPrompt !== undefined || await hasBlockingHolder(deps, workspace)) throw agentXError("TASK_BUSY", STILL_WORKING);
   // The money, access and admission checks come last, so a refusal for any other reason is the one the person reads first, and nothing has been written when one is refused.
   await admitRound(deps, options, { task, caller, requestId: request.requestId });
   const operationId = newId(deps);
@@ -65,4 +66,8 @@ export async function continueTask(deps: TaskFlowDeps, options: TaskActionsOptio
   const fresh = await readTask(deps, task.taskId);
   if (fresh === undefined || fresh.closedAt !== undefined) throw agentXError("CONFIG_INVALID", CLOSED_TASK);
   throw agentXError("WORKSPACE_BUSY", CONTINUE_RETRY);
+}
+
+async function hasBlockingHolder(deps: TaskFlowDeps, workspace: NonNullable<Awaited<ReturnType<typeof readWorkspace>>>): Promise<boolean> {
+  return workspace.activeOperationId !== null && await retainedSuccessor(deps, workspace) === undefined;
 }

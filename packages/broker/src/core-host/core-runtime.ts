@@ -9,6 +9,7 @@
 import { agentXError, type AdapterRegistry, type DocumentStore, type OrgId } from "@agentx/contracts";
 import { RepositoryGrantService } from "../repository-access.js";
 import { createStoreProjectSource } from "../core/task-flow/project-source.js";
+import { assertCloseGuardComposition } from "../core/task-flow/close-guard.js";
 import { createTaskFlowFromRegistry, type RegistryTaskFlowOptions, type TaskFlow } from "../core/task-flow/flow.js";
 import type { StartExtras, StartExtrasInput, TaskAccess } from "../core/task-flow/deps.js";
 import { withStepFenceRetry } from "./step-fence.js";
@@ -118,6 +119,8 @@ export function createCoreRuntime(options: CoreRuntimeOptions): CoreRuntime {
   const { registry, companyId } = options;
   // Checked at run time, not only by the type: the core's own default is the laptop's sole-owner rule, which a deployed install must never get by omission.
   if ((options as { access?: unknown }).access == null) throw new Error("the core runtime needs an access rule");
+  // The close guard and the retained-inspection provider are wired together or not at all (a guard alone strands every close; a provider alone leaves the unbound close unguarded).
+  assertCloseGuardComposition(options.flowOptions ?? {});
   const store = registry.require("storage");
   const given = options.flowOptions?.startExtras;
   // Every core start writes the engine stamp with the task (a task keeps its engine). Joined with any start extras the deployment gives. A start the setting does not send to the core

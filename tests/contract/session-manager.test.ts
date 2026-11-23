@@ -265,3 +265,65 @@ describe("session manager: deletion", () => {
     await expect(sessions.deleteSession(workspaceId)).rejects.toThrow(/WORKSPACE_BUSY/);
   });
 });
+
+
+describe("retained SESSION lifecycle refuses generic authority", () => {
+  const generation = { sessionGeneration: 1, instanceId: "i-0123456789abcdef0", volumeId: "vol-0123456789abcdef0", dataGeneration: "11111111-1111-4111-8111-111111111111" };
+  it("refuses legacy deletion before any state change when an exact retention is claimed", async () => {
+    const w = setup(); await provisionToReady(w.sessions, w.workspaceId);
+    const row = w.session()!;
+    w.db.set({ ...row, workspaceDataIdentity: generation, closeRetention: { schemaVersion: 1, operationId: randomUUID(), fence: 2, generation } });
+    const before = w.session(); w.startExecution.mockClear();
+    await expect(w.sessions.deleteSession(w.workspaceId)).rejects.toMatchObject({ code: "WORKSPACE_BUSY" });
+    expect(w.session()).toEqual(before); expect(w.startExecution).not.toHaveBeenCalled();
+  });
+  it("a stale generic deleter completion cannot mark a retained replacement deleted", async () => {
+    const w = setup(); await provisionToReady(w.sessions, w.workspaceId);
+    const row = w.session()!;
+    w.db.set({ ...row, state: "DELETING", workspaceDataIdentity: generation, closeRetention: { schemaVersion: 1, operationId: randomUUID(), fence: 2, generation } });
+    const before = w.session();
+    await expect(w.sessions.markDeleted(w.workspaceId)).rejects.toMatchObject({ code: "STALE_FENCE" });
+    expect(w.session()).toEqual(before);
+  });
+});
+
+it("retained destruction captures one tuple, stays pending until completion and never follows a successor", async () => {
+  const w = setup(); await provisionToReady(w.sessions, w.workspaceId);
+  const generation = { sessionGeneration: 1, instanceId: "i-0123456789abcdef0", volumeId: "vol-0123456789abcdef0", dataGeneration: randomUUID() };
+  const retained = { inspectionOperationId: randomUUID(), inspectionFence: 2, retentionId: randomUUID(), contentDigest: "a".repeat(64), generation };
+  const target = { schemaVersion: 1 as const, acceptedOperationId: randomUUID(), retention: retained, effectId: "close:terminate", machineIds: [sessionMachineId(w.workspaceId)] };
+  const row = w.session()!;
+  w.db.set({ ...row, state: "DELETING", workspaceDataIdentity: generation, closeRetention: { schemaVersion: 1, operationId: retained.inspectionOperationId, fence: 2, generation, retained, acceptedOperationId: target.acceptedOperationId }, closeDestroy: target });
+  w.startExecution.mockClear();
+  expect(await w.sessions.deleteRetainedSession(w.workspaceId, target)).toBe(false);
+  const execution = w.startExecution.mock.calls[0]![0];
+  expect(JSON.parse(execution.input)).toEqual({ workspaceId: w.workspaceId, instanceId: generation.instanceId, volumeId: generation.volumeId, closeDestroy: target });
+  await expect(w.sessions.validateDeletion(w.workspaceId, target)).resolves.toBeUndefined();
+  const before = w.session();
+  for (const stale of [{ ...target, effectId: "different" }, { ...target, retention: { ...retained, generation: { ...generation, dataGeneration: randomUUID() } } }]) {
+    expect(await w.sessions.deleteRetainedSession(w.workspaceId, stale)).toBe(false);
+    await expect(w.sessions.markDeleted(w.workspaceId, stale)).rejects.toMatchObject({ code: "STALE_FENCE" });
+    expect(w.session()).toEqual(before);
+  }
+  for (const delta of [
+    { state: "READY" }, { generation: 2 }, { instanceId: "i-11111111111111111" }, { volumeId: "vol-11111111111111111" },
+    { workspaceDataIdentity: { ...generation, dataGeneration: randomUUID() } },
+  ]) {
+    w.db.set({ ...before!, ...delta });
+    expect(await w.sessions.deleteRetainedSession(w.workspaceId, target)).toBe(false);
+    await expect(w.sessions.validateDeletion(w.workspaceId, target)).rejects.toMatchObject({ code: "STALE_FENCE" });
+    expect(w.startExecution).toHaveBeenCalledTimes(1);
+    const changed = w.session();
+    await expect(w.sessions.markDeleted(w.workspaceId, target)).rejects.toMatchObject({ code: "STALE_FENCE" });
+    expect(w.session()).toEqual(changed);
+  }
+  w.db.set(before!);
+  await w.sessions.markDeleted(w.workspaceId, target);
+  expect(await w.sessions.deleteRetainedSession(w.workspaceId, target)).toBe(true);
+  expect(w.startExecution).toHaveBeenCalledTimes(1);
+  w.db.set({ ...row, generation: 2, workspaceDataIdentity: { ...generation, sessionGeneration: 2 } });
+  const successor = w.session();
+  expect(await w.sessions.deleteRetainedSession(w.workspaceId, target)).toBe(false);
+  await expect(w.sessions.markDeleted(w.workspaceId, target)).rejects.toMatchObject({ code: "STALE_FENCE" });
+  expect(w.session()).toEqual(successor);
+});

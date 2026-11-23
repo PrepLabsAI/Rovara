@@ -256,7 +256,7 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
 /** The bridge's existing camel-case flag is the same intent, never a replacement digest. */
 function closeInput(body: Record<string, unknown>): { requestId: string; expectedPreviewDigest?: unknown; discard_unpublished?: boolean } {
   // DEC 304: the old session request still takes only requestId. Boolean forwarding accompanies displayed consent.
-  if (!closeHasDigest(body) && Object.keys(body).some((name) => name !== "requestId")) throw agentXError("CONFIG_INVALID", "a close needs a request ID and takes nothing else (there is no unpublished work to discard on this install)");
+  if (!closeHasDigest(body) && Object.keys(body).some((name) => name !== "requestId")) throw agentXError("CONFIG_INVALID", "a close needs a request ID and takes nothing else (this install cannot check for unpublished work or discard it yet, and closing may remove the workspace folder)");
   if (typeof body["requestId"] !== "string" || Object.keys(body).some((name) => !["requestId", "expectedPreviewDigest", "discard_unpublished", "discardUnpublished"].includes(name))) throw agentXError("CONFIG_INVALID", "a close needs a request ID and valid close fields");
   const snake = body["discard_unpublished"], camel = body["discardUnpublished"];
   if ((snake !== undefined && typeof snake !== "boolean") || (camel !== undefined && typeof camel !== "boolean") || (snake !== undefined && camel !== undefined && snake !== camel)) throw agentXError("CONFIG_INVALID", "discard unpublished must be one boolean");

@@ -22,7 +22,6 @@ import {
   WORKER_STATE_VISIBLE,
   containerProblems,
   devcontainerConfigRefusal,
-  walledNetworkProblem,
   localDevcontainerRefusal,
   parseJsonc,
   hostPathResolver,
@@ -282,11 +281,12 @@ export async function ensureDevcontainer(cli: DevcontainerCli, target: Devcontai
   let hidden = await hiddenWorkspaceDirectories(target.rootPath);
   // The network is made (or made again) before any container can join it.
   await cli.walledNetwork?.ensure();
-  // L4-NETG: a container of this target that is not on the walled network (made before the worker was walled, or in `bridge` mode on a volume that has since moved to `gateway`) is removed before `up` can restart it on a bridge with a way out.
-  if (walledNetwork !== undefined && cli.checks?.existing !== undefined) {
+  // Inspect before up can restart an old container: missing state masks and network isolation require recreation.
+  const existingContext = { rootPath: target.rootPath, maskedPaths: hidden, resolvePath: hostPathResolver(target.rootPath), ...(walledNetwork === undefined ? {} : { walledNetwork }) };
+  if (cli.checks?.existing !== undefined) {
     for (const id of await cli.checks.existing(target)) {
       const found = await cli.checks.inspect(id).catch(() => undefined);
-      if (found === undefined || walledNetworkProblem(found, walledNetwork)) await removeStartedContainer(cli.checks, id);
+      if (found === undefined || containerProblems(found, existingContext).length > 0) await removeStartedContainer(cli.checks, id);
     }
   }
   const started = await start(hidden);

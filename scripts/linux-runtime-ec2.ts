@@ -85,6 +85,21 @@ export function parseArgs(argv: readonly string[]): Options {
 export interface Step { name: string; run: string; env: Record<string, string>; afterStep?: number }
 export interface WorkflowSteps { steps: Step[]; replaced: string[]; skipped: string[] }
 
+function isRetentionArchive(raw: Record<string, unknown>): boolean {
+  return JSON.stringify([raw.uses, raw.name, raw.if, raw.with]) === JSON.stringify([
+    "actions/upload-artifact@v4", "Upload close retention Linux mutations", "always() && github.event_name == 'workflow_dispatch'",
+    { name: "close-retention-linux-mutants", path: "linux-mutants.json", "if-no-files-found": "error" },
+  ]);
+}
+
+function consumeWorkflowAction(raw: Record<string, unknown>, name: string, out: WorkflowSteps): boolean {
+  if (isRetentionArchive(raw)) { out.skipped.push(name); return true; }
+  if (typeof raw.uses !== "string") return false;
+  if (!REPLACED_ACTIONS.some((pattern) => pattern.test(raw.uses as string))) throw new Error(`linux-runtime step "${name}" uses ${raw.uses}, which this runner does not reproduce`);
+  out.replaced.push(raw.uses);
+  return true;
+}
+
 /** `(success() || failure()) && steps.<id>.outcome == 'success'`, exactly (CI-REL-LAYOUT); <id> must name an earlier run step. */
 const AFTER_SETUP = /^\(success\(\) \|\| failure\(\)\) && steps\.([A-Za-z_][A-Za-z0-9_-]*)\.outcome == 'success'$/u;
 /** The bootstrap does these instead; anything else a `uses:` step brings is refused. */
@@ -101,11 +116,9 @@ export function linuxRuntimeSteps(workflowYaml: string): WorkflowSteps {
     const uses = typeof raw.uses === "string" ? raw.uses : undefined;
     const run = typeof raw.run === "string" ? raw.run : undefined;
     const name = typeof raw.name === "string" ? raw.name : (run?.split("\n")[0] ?? uses ?? `step ${index + 1}`);
-    if (uses !== undefined) {
-      if (!REPLACED_ACTIONS.some((pattern) => pattern.test(uses))) throw new Error(`linux-runtime step "${name}" uses ${uses}, which this runner does not reproduce`);
-      out.replaced.push(uses);
-      return;
-    }
+    // GitHub archives this manual proof's local JSON; the standalone runner cannot upload artifacts.
+    // It still executes both preceding shell steps (CODE_CI_LINUX is enabled only by workflow_dispatch).
+    if (consumeWorkflowAction(raw, name, out)) return;
     if (run === undefined) throw new Error(`linux-runtime step "${name}" has neither run nor uses`);
     const env: Record<string, string> = {};
     for (const [key, value] of Object.entries((raw.env as Record<string, unknown> | undefined) ?? {})) env[key] = String(value);

@@ -1,3 +1,4 @@
+import { withoutCloseRetention } from "../support/close-retention-template.js";
 import { App, Stack } from "aws-cdk-lib";
 import { withoutGithubSignIn } from "../support/github-signin-template.js";
 import { withoutSavedEnvImages } from "../support/saved-env-images-template.js";
@@ -75,7 +76,7 @@ function appControlPlane(env: string): TemplateJson {
 }
 
 function parentRemainderDigest(template: TemplateJson, named = true): string {
-  const remainder = structuredClone(template);
+  const remainder = withoutCloseRetention(template);
   withoutCoreModelAccessRoute(remainder);
   // The core engine's named-environment addition (E2) is checked in full by core-engine-infrastructure.test.ts. A named environment must carry it (its shape is asserted as it is removed);
   // #1148: the legacy template carries it too now (off by default), and its digest pins it whole, so only a named template has it taken out.

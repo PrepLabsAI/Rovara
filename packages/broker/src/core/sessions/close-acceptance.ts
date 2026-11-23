@@ -3,6 +3,7 @@ import { INDEX_EXPIRY_ATTRIBUTE, agentSessionKey, agentXError, cleanSessionName,
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { toDocument, type TaskRecord } from "../task-flow/records.js";
 import { closeFacts } from "../task-flow/close-conditions.js";
+import { SYSTEM_CLOSE_PROVIDER } from "../task-flow/close-acceptance-record.js";
 import { developerIdOf } from "./create.js";
 import { SessionStore, sessionEventItem } from "./store.js";
 
@@ -10,11 +11,13 @@ export async function sessionCloseAcceptanceItems(deps: TaskFlowDeps, task: Task
   if (task.sessionId === undefined) return [];
   const session = await new SessionStore(deps.store).get(deps.companyId, task.sessionId);
   if (session === undefined || session.subject.kind !== "task" || session.subject.taskId !== task.taskId || session.endedAt !== undefined) throw agentXError("CHANGE_STALE", "the close preview has changed");
-  const name = cleanSessionName(principal.displayName) ?? "Someone";
+  // A system closer (the abandoned-review sweep) is named as the system, never as a member.
+  const system = principal.provider === SYSTEM_CLOSE_PROVIDER;
+  const name = system ? "Rovara" : cleanSessionName(principal.displayName) ?? "Someone";
   return [
     { kind: "check", key: agentSessionKey(session.orgId, session.sessionId, "META"), condition: closeFacts(toDocument({ ...session, ...agentSessionKey(session.orgId, session.sessionId, "META") }), ["orgId", "subject", "owner", "project", "endedAt"]) },
     { kind: "put", item: { ...agentSessionKey(session.orgId, session.sessionId, `REQUEST#${receipt.requestId}`), entityType: "AGENT_SESSION_REQUEST", orgId: session.orgId, sessionId: session.sessionId, action: "close", by: developerIdOf(principal), ...receipt, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(receipt.at) / 1000) + 400 * 86_400 }, condition: when.absent() },
-    sessionEventItem(session, { eventId: sessionEventId("status", `close-accepted-${receipt.requestId}`), at: receipt.at, type: "status", actor: { kind: "member", developerId: developerIdOf(principal), name }, text: `${name} requested close.` }),
-    ...deps.audit.stage({ eventId: `session:${session.sessionId}:close:${receipt.requestId}`, companyId: deps.companyId, at: receipt.at, actor: { type: "person", id: principal.personId }, action: "session.close_requested", subject: { type: "session", id: session.sessionId } }),
+    sessionEventItem(session, { eventId: sessionEventId("status", `close-accepted-${receipt.requestId}`), at: receipt.at, type: "status", actor: system ? { kind: "system" } : { kind: "member", developerId: developerIdOf(principal), name }, text: `${name} requested close.` }),
+    ...deps.audit.stage({ eventId: `session:${session.sessionId}:close:${receipt.requestId}`, companyId: deps.companyId, at: receipt.at, actor: { type: system ? "system" : "person", id: principal.personId }, action: "session.close_requested", subject: { type: "session", id: session.sessionId } }),
   ];
 }

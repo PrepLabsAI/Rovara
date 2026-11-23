@@ -31,7 +31,7 @@ function snapshotConditions(snapshot: CloseSnapshot): TransactItem[] {
   const sources = snapshot.operations.filter((op) => op.id === snapshot.operation.id || op.id === current?.id);
   return [
     { kind: "check", key: taskKey(task.taskId), condition: closeFacts(toDocument(task), ["companyId", "orgId", "taskId", "workspaceId", "project", "developerId", "ownerKey", "closedAt", "releasedAt", "closeOperationId", "sessionId", "workflow.revision", "workflow.stage", "workflow.state", "workflow.ownerId", "admissionReservationId", "charge"]) },
-    { kind: "check", key: location.workspaceKey, condition: closeFacts(toDocument(workspace), ["companyId", "orgId", "id", "status", "fence", "activeOperationId", "ownerKey", "closedAt", "machine", "machineReservationId", "projectRevision", "preparationManifest"]) },
+    { kind: "check", key: location.workspaceKey, condition: closeFacts(toDocument(workspace), ["companyId", "orgId", "id", "status", "fence", "activeOperationId", "legacyCloseClaim", "ownerKey", "closedAt", "machine", "machineReservationId", "projectRevision", "preparationManifest"]) },
     { kind: "check", key: location.taskPointerKey(), condition: closeFacts(pointer, ["companyId", "taskId", "pendingPrompt", "pendingWorkflowMode", "cancelledAt", "closeOperationId"]) },
     ...sources.map((op): TransactItem => ({ kind: "check", key: location.operationKey(op.id), condition: closeFacts(toDocument(op), ["companyId", "workspaceId", "id", "kind", "status", "fence", "createdAt", "machineId", "secondReviewPlan", ...(op.id === snapshot.operation.id ? ["result"] : [])]) })),
   ];
@@ -43,6 +43,7 @@ export async function planCloseAcceptance(deps: TaskFlowDeps, caller: TaskCaller
   const { task, location } = snapshot, at = operation.createdAt;
   const items = mergeCloseConditions([
     ...snapshotConditions(snapshot), ...authority,
+    ...(deps.closeInspection?.acceptanceItems?.(snapshot.inspection, operation.id) ?? []),
     { kind: "put", item: toDocument(operation), condition: when.absent() },
     { kind: "update", key: taskKey(task.taskId), ops: [change.set("closeOperationId", operation.id), change.set("updatedAt", at)] },
     { kind: "update", key: location.workspaceKey, ops: [change.set("status", "CLOSING"), change.set("fence", operation.fence), change.set("activeOperationId", operation.id), change.set("updatedAt", at)] },
@@ -70,13 +71,19 @@ export async function prepareTaskCloseAcceptance(deps: TaskFlowDeps, caller: Tas
   const intent = parseCloseIntent(input);
   const { task, acting } = await authorizedTask(deps, caller, taskId);
   if (sessionId !== undefined && task.sessionId !== sessionId) throw stale();
+  return prepareAcceptance(deps, caller, task, intent, acting.items ?? []);
+}
+
+/** The acceptance once the task and the caller's authority are settled: the person's (above) and the system's (`close-system.ts`, no owner to check: the flow has just read its own task). */
+export async function prepareAcceptance(deps: TaskFlowDeps, caller: TaskCaller, task: TaskRecord, intent: CloseIntent, authority: readonly TransactItem[]) {
+  const taskId = task.taskId;
   const intentHash = hashJson({ companyId: deps.companyId, actorId: caller.principal.personId, taskId, requestId: intent.requestId, expectedPreviewDigest: intent.expectedPreviewDigest, discard_unpublished: intent.discard_unpublished === true });
   const id = closeOperationId(deps.companyId, taskId, intent.requestId);
   const prior = replay(await readOperation(deps, task.workspaceId, id), intentHash);
   if (prior !== undefined) return preparedAcceptance(deps, prior, [], true, intentHash);
   if (task.closedAt !== undefined || task.closeOperationId !== undefined) throw stale();
   const snapshot = await requireCloseSnapshot(deps, caller, task, intent);
-  const { operation, items } = await planCloseAcceptance(deps, caller, snapshot, intent, intentHash, acting.items ?? []);
+  const { operation, items } = await planCloseAcceptance(deps, caller, snapshot, intent, intentHash, authority);
   return preparedAcceptance(deps, operation, items, false, intentHash);
 }
 
@@ -99,7 +106,10 @@ function preparedAcceptance(deps: TaskFlowDeps, operation: OperationRecord, item
 
 /** Returns durable acceptance. Accounting/destruction belong to resume, never the request's pre-accept reads. */
 export async function acceptTaskClose(deps: TaskFlowDeps, caller: TaskCaller, taskId: string, input: unknown): Promise<OperationRecord> {
-  const plan = await prepareTaskCloseAcceptance(deps, caller, taskId, input);
+  return commitAcceptance(deps, await prepareTaskCloseAcceptance(deps, caller, taskId, input));
+}
+
+export async function commitAcceptance(deps: TaskFlowDeps, plan: Awaited<ReturnType<typeof prepareAcceptance>>): Promise<OperationRecord> {
   if (!plan.repeated) {
     let applied = false;
     try { applied = (await deps.store.transact(plan.items)).applied; }

@@ -5352,6 +5352,12 @@ describe("sessions: stop, retry and close through the session", () => {
     const h = await launch({ audit });
     const { taskId } = await toPlanReview(h);
     const sessionId = (await h.api(`/v1/dev/tasks/${taskId}`)).body.task.sessionId!;
+    // The laptop has no retained-inspection provider: its Close preview says the check is required, which the Close dialog shows as the loss warning (changes that are not in a pull request may be discarded).
+    for (const action of ["close", "discard"]) {
+      const preview = await h.api(`/v1/app/sessions/${sessionId}/close?action=${action}`);
+      expect(preview.status, JSON.stringify(preview.body)).toBe(200);
+      expect(preview.body).toEqual({ preview: null, unavailable: "inspection_required" });
+    }
     const closed = await h.api(`/v1/app/sessions/${sessionId}/close`, { method: "POST", body: { requestId: REQ(43) } });
     expect(closed.status, JSON.stringify(closed.body)).toBe(200);
     expect(closed.body).toMatchObject({ closed: true, session: { sessionId } });
@@ -5368,7 +5374,7 @@ describe("sessions: stop, retry and close through the session", () => {
     // `discardUnpublished` is refused in a fixed sentence: this install has no unpublished-work check to agree to.
     const discard = await h.api(`/v1/app/sessions/${sessionId}/close`, { method: "POST", body: { requestId: REQ(46), discardUnpublished: true } });
     expect(discard.status).toBe(400);
-    expect(discard.body).toMatchObject({ error: { message: "a close needs a request ID and takes nothing else (there is no unpublished work to discard on this install)" } });
+    expect(discard.body).toMatchObject({ error: { message: "a close needs a request ID and takes nothing else (this install cannot check for unpublished work or discard it yet, and closing may remove the workspace folder)" } });
     expect((await h.api(`/v1/app/sessions/${sessionId}/close`, { method: "POST", body: {} })).status).toBe(400);
   });
 });

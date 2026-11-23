@@ -134,10 +134,12 @@ describe("P3 session and developer close transport", () => {
     expect(await control.close(w.h.owner.principal, w.h.deps.companyId, w.sessionId, w.input)).toMatchObject({ status: "done", repeated: true });
     expect(resumed).toHaveBeenCalledTimes(2);
   });
-  for (const surface of ["session", "dev"] as const) it(`${surface}: absent digest keeps legacy close without an acceptance record`, async () => {
+  for (const surface of ["session", "dev"] as const) it(`${surface}: absent digest refuses retained close without an acceptance record`, async () => {
     const w = await fixture();
-    expect((await w[surface]({ requestId: randomUUID() }))?.status).toBe(200);
-    expect(await w.h.store.get(w.tk)).toHaveProperty("closedAt");
+    const before = await w.snapshot();
+    expect((await w[surface]({ requestId: randomUUID() }))?.status).toBe(409);
+    expect(await w.snapshot()).toEqual(before);
+    expect((await w.h.store.get(w.tk))?.closedAt).toBeUndefined();
     expect((await w.snapshot()).some((r) => r.closeAcceptance !== undefined)).toBe(false);
   });
   for (const surface of ["session", "dev"] as const) it(`${surface}: resume failure returns durable acceptance and an exact retry succeeds`, async () => {

@@ -1,3 +1,4 @@
+import { SessionCloseDestroySchema, canonicalRetentionValue, type SessionCloseDestroy } from "@agentx/contracts";
 import { readWorkspaceMeta } from "./worker-machines/workspace-company.js";
 import {
   GetCommand,
@@ -49,6 +50,7 @@ export interface DeletionInput {
   workspaceId: string;
   instanceId: string | null;
   volumeId: string | null;
+  closeDestroy?: SessionCloseDestroy;
 }
 
 export type EnsureSessionResult =
@@ -110,6 +112,8 @@ export class SessionManager {
     const { workspaceId, binding, waitingOutboxId } = input;
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
       const session = await this.get(workspaceId);
+      const retainedReady = retainedReadySession(session);
+      if (retainedReady !== undefined) return retainedReady;
       const state = session?.state ?? "NONE";
       switch (state) {
         case "READY": {
@@ -153,7 +157,7 @@ export class SessionManager {
               }) };
           if (!(await this.writeWithOutbox(sessionWrite, waitingOutboxId))) continue;
           const started = await this.get(workspaceId);
-          if (started?.state === "PROVISIONING" && started.generation === generation) await this.startProvisioning(started, binding);
+          await this.startMatchingProvisioning(started, binding, generation);
           return { ready: false, generation, state: "PROVISIONING" };
         }
         case "PROVISIONING":
@@ -282,6 +286,7 @@ export class SessionManager {
   async deleteSession(workspaceId: string): Promise<{ state: "DELETING" | "DELETED" }> {
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
       const session = await this.get(workspaceId);
+      assertUnretainedSession(session);
       if (session === undefined || session.state === "DELETED") return { state: "DELETED" };
       switch (session.state) {
         case "NONE":
@@ -319,7 +324,7 @@ export class SessionManager {
    * the workspace's active operation: it must still be the operation read a moment ago, so a step dispatched in the gap is never ended by a Stop meant for the one before it.
    * Returns whether this call made the claim. A no-op (false), never a throw, for a session that is already STOPPING, STOPPED, FAILED, DELETING, NONE, DELETED or absent, and for
    * a workspace with no running operation (the idle rule takes that instance). A PROVISIONING session throws WORKSPACE_BUSY: its instance is not up yet.
-   * (A session in the middle of a retention hold is never claimed here once the retention lane lands: it must add its lifecycle guard to this method and to the STOPPING arm of deleteSession.)
+   * A session in the middle of a retention hold (`closeRetention` / `closeDestroy`) is never claimed here, and `deleteSession` (every state, the STOPPING arm included) refuses it: only the accepted Close destroys it.
    */
   async requestStop(workspaceId: string): Promise<boolean> {
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
@@ -351,6 +356,8 @@ export class SessionManager {
     const session = await this.get(workspaceId);
     if (session?.state === "PROVISIONING") throw agentXError("WORKSPACE_BUSY", "workspace compute is starting; stop it once it is ready");
     if (session?.state !== "READY") return undefined;
+    // A session held for a Close's retention (or being destroyed by an accepted Close) is never stopped by a Stop: the preparation holds the workspace and owns the instance until the person decides.
+    if (session.closeRetention !== undefined || session.closeDestroy !== undefined) return undefined;
     const workspace = await readWorkspaceMeta(this.dependencies.documentClient, this.dependencies.tableName, workspaceId);
     const operationId = workspace?.item.activeOperationId;
     if (workspace === undefined || typeof operationId !== "string" || operationId === "") return undefined;
@@ -382,8 +389,9 @@ export class SessionManager {
    * checked in one transaction, so a dispatch racing the reap always wins.
    */
   async claimStop(seen: WorkspaceSession): Promise<boolean> {
+    if (seen.closeRetention !== undefined && (seen.closeRetention.retained === undefined || seen.closeRetention.acceptedOperationId !== undefined)) return false;
     const workspace = await readWorkspaceMeta(this.dependencies.documentClient, this.dependencies.tableName, seen.workspaceId);
-    const claim = this.update(seen.workspaceId, { set: { state: "STOPPING" }, when: { state: "READY", generation: seen.generation } });
+    const claim = this.update(seen.workspaceId, { retention: seen.closeRetention, set: { state: "STOPPING" }, when: { state: "READY", generation: seen.generation } });
     return this.conditional({ transaction: [
       { Update: {
         ...claim,
@@ -394,9 +402,9 @@ export class SessionManager {
         TableName: this.dependencies.tableName,
         Key: workspace?.key ?? { pk: `WORKSPACE#${seen.workspaceId}`, sk: "META" },
         // Terminal transitions remove activeOperationId; some records store it as null instead.
-        ConditionExpression: "attribute_not_exists(activeOperationId) OR attribute_type(activeOperationId, :null)",
-        ExpressionAttributeValues: { ":null": "NULL" },
+        ...idleWorkspaceCondition(seen),
       } },
+      ...idleInspectionCheck(seen, this.dependencies.tableName, workspace?.key.pk),
     ] });
   }
 
@@ -406,6 +414,7 @@ export class SessionManager {
    */
   async markLost(seen: WorkspaceSession): Promise<boolean> {
     const lost = this.update(seen.workspaceId, {
+      retention: seen.closeRetention,
       set: { state: "STOPPED" },
       remove: ["instanceId", "privateIp", "pingFailures"],
       when: { state: "READY", generation: seen.generation },
@@ -420,22 +429,23 @@ export class SessionManager {
   /** Counts one more failed health probe of a READY session; returns the new count, or 0 if it moved on. */
   async recordPingFailure(seen: WorkspaceSession): Promise<number> {
     const counted = await this.conditional(this.update(seen.workspaceId, {
-      addPingFailure: true,
+      addPingFailure: true, retention: seen.closeRetention,
       when: { state: "READY", generation: seen.generation },
     }));
     return counted ? (await this.get(seen.workspaceId))?.pingFailures ?? 0 : 0;
   }
 
   async clearPingFailures(seen: WorkspaceSession): Promise<void> {
-    await this.conditional(this.update(seen.workspaceId, { remove: ["pingFailures"], when: { state: "READY", generation: seen.generation } }));
+    await this.conditional(this.update(seen.workspaceId, { retention: seen.closeRetention, remove: ["pingFailures"], when: { state: "READY", generation: seen.generation } }));
   }
 
   /** STOPPING → STOPPED once the instance is gone and the volume detached. Returns the session after. */
   async markStopped(workspaceId: string, generation: number): Promise<WorkspaceSession> {
+    const seen = await this.get(workspaceId);
     const moved = await this.conditional(this.update(workspaceId, {
       set: { state: "STOPPED" },
       remove: ["instanceId", "privateIp"],
-      when: { state: "STOPPING", generation },
+      when: { state: "STOPPING", generation }, retention: seen?.closeRetention,
     }));
     const session = await this.get(workspaceId);
     if (!moved && !(session?.state === "STOPPED" && session.generation === generation)) {
@@ -445,18 +455,65 @@ export class SessionManager {
   }
 
   /** DELETING → DELETED once the instance is gone and the volume is deleted. */
-  async markDeleted(workspaceId: string): Promise<void> {
+  async markDeleted(workspaceId: string, closeDestroy?: SessionCloseDestroy): Promise<void> {
+    if (closeDestroy !== undefined) return this.markRetainedDeleted(workspaceId, closeDestroy);
     const moved = await this.conditional({ update: {
       TableName: this.dependencies.tableName,
       Key: workspaceSessionKey(workspaceId),
       UpdateExpression: "SET #state = :deleted REMOVE instanceId, privateIp, waitingOutboxIds, #index",
-      ConditionExpression: "#state = :deleting",
+      ConditionExpression: "#state = :deleting AND attribute_not_exists(closeRetention) AND attribute_not_exists(closeDestroy)",
       ExpressionAttributeNames: { "#state": "state", "#index": WORKSPACE_SESSION_STATE_INDEX.partitionKey },
       ExpressionAttributeValues: { ":deleted": "DELETED", ":deleting": "DELETING" },
     } });
-    if (!moved && (await this.get(workspaceId))?.state !== "DELETED") {
+    const current = await this.get(workspaceId);
+    if (!moved && (current?.state !== "DELETED" || current.closeRetention !== undefined || current.closeDestroy !== undefined)) {
       throw agentXError("STALE_FENCE", `session ${workspaceId} is not being deleted`);
     }
+  }
+
+  /** A captured claim is checked before the immutable-target deleter starts; DELETING is only pending. */
+  async deleteRetainedSession(workspaceId: string, input: SessionCloseDestroy): Promise<boolean> {
+    const target = SessionCloseDestroySchema.parse(input), session = await this.get(workspaceId);
+    if (session === undefined || canonicalRetentionValue(session.closeDestroy) !== canonicalRetentionValue(target)) return false;
+    if (session.state === "DELETED") return session.closeDestroyCompleted === true;
+    if (session.state !== "DELETING" || !this.sameDestroyGeneration(session, target)) return false;
+    const name = `close-${createHash("sha256").update(canonicalRetentionValue({ workspaceId, target })).digest("hex").slice(0, 64)}`;
+    await this.start("deleter", name, { workspaceId, instanceId: target.retention.generation.instanceId, volumeId: target.retention.generation.volumeId, closeDestroy: target });
+    return false;
+  }
+
+  /** Called by the deleter before any physical effect, including a resumed execution. */
+  async validateDeletion(workspaceId: string, closeDestroy?: SessionCloseDestroy): Promise<void> {
+    const session = await this.get(workspaceId);
+    const valid = session?.state === "DELETING" && (closeDestroy === undefined
+      ? session.closeRetention === undefined && session.closeDestroy === undefined
+      : canonicalRetentionValue(session.closeDestroy) === canonicalRetentionValue(closeDestroy) && this.sameDestroyGeneration(session, closeDestroy));
+    if (!valid) throw agentXError("STALE_FENCE", "deletion no longer owns this exact generation");
+  }
+
+  private sameDestroyGeneration(session: WorkspaceSession, target: SessionCloseDestroy): boolean {
+    const generation = target.retention.generation;
+    return session.generation === generation.sessionGeneration && session.instanceId === generation.instanceId && session.volumeId === generation.volumeId && canonicalRetentionValue(session.workspaceDataIdentity) === canonicalRetentionValue(generation);
+  }
+
+  private async markRetainedDeleted(workspaceId: string, target: SessionCloseDestroy): Promise<void> {
+    SessionCloseDestroySchema.parse(target);
+    const generation = target.retention.generation;
+    const moved = await this.conditional({ update: {
+      TableName: this.dependencies.tableName, Key: workspaceSessionKey(workspaceId),
+      UpdateExpression: "SET #state = :deleted, closeDestroyCompleted = :completed REMOVE instanceId, privateIp, waitingOutboxIds, #index",
+      ConditionExpression: "#state = :deleting AND #generation = :generation AND instanceId = :instance AND volumeId = :volume AND workspaceDataIdentity = :identity AND closeDestroy = :target",
+      ExpressionAttributeNames: { "#state": "state", "#generation": "generation", "#index": WORKSPACE_SESSION_STATE_INDEX.partitionKey },
+      ExpressionAttributeValues: { ":deleted": "DELETED", ":deleting": "DELETING", ":completed": true, ":generation": generation.sessionGeneration, ":instance": generation.instanceId, ":volume": generation.volumeId, ":identity": generation, ":target": target },
+    } });
+    if (!moved) {
+      const session = await this.get(workspaceId);
+      if (session?.state !== "DELETED" || session.closeDestroyCompleted !== true || canonicalRetentionValue(session.closeDestroy) !== canonicalRetentionValue(target)) throw agentXError("STALE_FENCE", "deletion completion is for another generation");
+    }
+  }
+
+  private async startMatchingProvisioning(session: WorkspaceSession | undefined, binding: Ec2RuntimeBinding, generation: number): Promise<void> {
+    if (session?.state === "PROVISIONING" && session.generation === generation) await this.startProvisioning(session, binding);
   }
 
   private async startProvisioning(session: WorkspaceSession, binding: Ec2RuntimeBinding): Promise<void> {
@@ -545,6 +602,7 @@ export class SessionManager {
   }
 
   private update(workspaceId: string, change: {
+    retention?: WorkspaceSession["closeRetention"];
     set?: Partial<Record<keyof WorkspaceSession, unknown>>;
     remove?: Array<keyof WorkspaceSession>;
     addWaiting?: string;
@@ -574,12 +632,14 @@ export class SessionManager {
     ];
     if (change.addPingFailure) values[":one"] = 1;
     if (change.addWaiting !== undefined) values[":waiting"] = new Set([change.addWaiting]);
+    const retained = retainedLifecycleGuard(change.retention);
+    Object.assign(values, retained.values);
     const required = (change.require ?? []).map((field) => ` AND attribute_exists(${field})`).join("");
     return {
       TableName: this.dependencies.tableName,
       Key: workspaceSessionKey(workspaceId),
       UpdateExpression: clauses.join(" "),
-      ConditionExpression: `#state = :whenState AND #generation = :whenGeneration${required}`,
+      ConditionExpression: `#state = :whenState AND #generation = :whenGeneration${required}${retained.condition}`,
       ExpressionAttributeNames: names,
       ExpressionAttributeValues: values,
     };
@@ -722,4 +782,30 @@ function isConditionalFailure(error: unknown): boolean {
 
 function unhandledState(state: never): never {
   throw agentXError("CONFIG_INVALID", `unsupported session state ${String(state)}`);
+}
+
+function assertUnretainedSession(session: WorkspaceSession | undefined): void {
+  if (session?.closeRetention !== undefined || session?.closeDestroy !== undefined) throw agentXError("WORKSPACE_BUSY", "retained workspace requires the Close preview");
+}
+function retainedReadySession(session: WorkspaceSession | undefined): EnsureSessionResult | undefined {
+  if (session?.closeRetention?.acceptedOperationId !== undefined || session?.closeDestroy !== undefined) throw agentXError("WORKSPACE_BUSY", "accepted Close owns this workspace");
+  if (session?.closeRetention !== undefined && session.state === "READY") return { ready: true, generation: session.generation, privateIp: session.privateIp! };
+  return undefined;
+}
+
+function retainedLifecycleGuard(retention: WorkspaceSession["closeRetention"]): { condition: string; values: Record<string, unknown> } {
+  if (retention === undefined) return { condition: " AND attribute_not_exists(closeRetention) AND attribute_not_exists(closeDestroy)", values: {} };
+  return { condition: " AND closeRetention = :seenRetention AND instanceId = :retainedInstance AND volumeId = :retainedVolume AND attribute_not_exists(closeDestroy)",
+    values: { ":seenRetention": retention, ":retainedInstance": retention.generation.instanceId, ":retainedVolume": retention.generation.volumeId } };
+}
+function idleWorkspaceCondition(seen: WorkspaceSession): Pick<UpdateCommandInput, "ConditionExpression" | "ExpressionAttributeValues" | "ExpressionAttributeNames"> {
+  if (seen.closeRetention === undefined) return { ConditionExpression: "attribute_not_exists(activeOperationId) OR attribute_type(activeOperationId, :null)", ExpressionAttributeValues: { ":null": "NULL" } };
+  return { ConditionExpression: "#workspaceStatus = :retainedReady AND activeOperationId = :retainedOperation AND fence = :retainedFence",
+    ExpressionAttributeNames: { "#workspaceStatus": "status" }, ExpressionAttributeValues: { ":retainedReady": "READY", ":retainedOperation": seen.closeRetention.operationId, ":retainedFence": seen.closeRetention.fence } };
+}
+function idleInspectionCheck(seen: WorkspaceSession, tableName: string, pk: string | undefined): Array<Record<string, unknown>> {
+  if (seen.closeRetention === undefined) return [];
+  return [{ ConditionCheck: { TableName: tableName, Key: { pk: pk ?? `WORKSPACE#${seen.workspaceId}`, sk: `OPERATION#${seen.closeRetention.operationId}` },
+    ConditionExpression: "#status = :completed AND #kind = :close AND fence = :fence AND workspaceId = :workspace AND closePreflight.schemaVersion = :version",
+    ExpressionAttributeNames: { "#status": "status", "#kind": "kind" }, ExpressionAttributeValues: { ":completed": "SUCCEEDED", ":close": "close", ":fence": seen.closeRetention.fence, ":workspace": seen.workspaceId, ":version": 1 } } }];
 }

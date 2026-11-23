@@ -100,6 +100,9 @@ export class CoreEngine extends Construct {
     const stack = Stack.of(this);
     const { env, broker, dispatcher } = props;
     this.brokerFunctionArn = broker.functionArn;
+    broker.addEnvironment("CLOSE_RETENTION_DISPATCHER_ARN", dispatcher.functionArn);
+    // Exact resource-policy grant preserves the broker's reserved inline-policy headroom.
+    dispatcher.addPermission("VerifyCloseRetention", { principal: new iam.ArnPrincipal(broker.role!.roleArn), action: "lambda:InvokeFunction" });
     if (new Set(CORE_JOB_SCHEDULES.map((entry) => entry.job)).size !== CORE_JOB_SCHEDULES.length) throw new Error("core engine: a job is scheduled once");
     if (CORE_DISPATCH_MAX_RECEIVES <= CORE_DISPATCH_ATTEMPTS_MAX) throw new Error("core engine: the dispatch queue's redrive limit must be above the core's retry budget");
 

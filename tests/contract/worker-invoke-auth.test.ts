@@ -7,6 +7,7 @@ import {
   WORKER_INVOKE_AUTHORIZATION_SCHEME,
   workerInvokeToken,
   workerInvokeTokenPayload,
+  retentionInvocationDigest,
   WorkerInvokeTokenClaimsSchema,
   workflowPublicationContext,
   workflowPublicationContextDigest,
@@ -209,6 +210,41 @@ describe("an EC2 worker authenticating invocations", () => {
       expect(await journal.get(changed.operationId)).toBeUndefined();
     }
     expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("binds close actions, generation, digest, effect and targets before journal or execution", async () => {
+    const generation = { sessionGeneration: 3, instanceId: "i-0123456789abcdef0", volumeId: "vol-0123456789abcdef0", dataGeneration: randomUUID() };
+    const retention = { inspectionOperationId: randomUUID(), inspectionFence: 1, retentionId: randomUUID(), contentDigest: "a".repeat(64), generation };
+    const invocation = { ...invocationFor(), kind: "close" as const, payload: { schemaVersion: 1 as const, action: "destroy" as const, retention, effectId: "close:destroy", machineIds: ["ec2ws." + workspaceId] } };
+    const claims = claimsFor(invocation, { retentionProtocolVersion: 1, retentionPayloadDigest: retentionInvocationDigest(invocation) });
+    const authorization = `AgentX-Invoke ${tokenFor(claims)}`;
+    const mutations = [
+      { ...invocation, payload: { ...invocation.payload, effectId: "other" } },
+      { ...invocation, payload: { ...invocation.payload, machineIds: ["other"] } },
+      { ...invocation, payload: { ...invocation.payload, retention: { ...retention, contentDigest: "b".repeat(64) } } },
+      { ...invocation, payload: { ...invocation.payload, retention: { ...retention, generation: { ...generation, dataGeneration: randomUUID() } } } },
+      { ...invocation, payload: { schemaVersion: 1 as const, action: "verify" as const, retention, queryId: randomUUID() } },
+    ];
+    const h = await workerState(authentication);
+    const append = vi.spyOn(h.journal, "accept");
+    for (const changed of mutations) {
+      const response = await handleWorkerRequest(post(changed, authorization), h.state);
+      expect(response.status).toBe(401);
+      expect(await response.json()).toMatchObject({ reason: "invocation_mismatch" });
+    }
+    expect(append).not.toHaveBeenCalled();
+    expect(h.execute).not.toHaveBeenCalled();
+    expect(await h.journal.get(invocation.operationId)).toBeUndefined();
+  });
+
+  it("requires paired retention claims and forbids them on legacy commands", async () => {
+    const invocation = invocationFor();
+    const h = await workerState(authentication);
+    const claims = claimsFor(invocation, { retentionProtocolVersion: 1, retentionPayloadDigest: "a".repeat(64) });
+    expect(WorkerInvokeTokenClaimsSchema.safeParse({ ...claims, retentionPayloadDigest: undefined }).success).toBe(false);
+    const response = await handleWorkerRequest(post(invocation, `AgentX-Invoke ${tokenFor(claims)}`), h.state);
+    expect(response.status).toBe(401);
+    expect(await h.journal.get(invocation.operationId)).toBeUndefined();
   });
 
   it("uses the shared scheme name", () => {

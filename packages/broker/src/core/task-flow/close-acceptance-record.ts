@@ -30,6 +30,10 @@ export interface CloseAcceptance {
   accounting?: { mode: "flushed" | "none" } | { mode: "unflushed"; plan: UnflushedPlan };
 }
 
+/** The identity a system closer (the abandoned-review sweep) accepts a close under: not a person, never a developer id. */
+export const SYSTEM_CLOSE_PROVIDER = "system-close";
+export const systemCloseActorId = (closer: string): string => `system:${closer}`;
+
 export const closeOperationId = (companyId: string, taskId: string, requestId: string): string => {
   const hash = hashJson({ kind: "accepted-close", companyId, taskId, requestId });
   return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;

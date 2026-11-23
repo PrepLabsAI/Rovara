@@ -24,6 +24,8 @@ export async function executeWorkerCancelInvocation(
   journal: OperationJournal,
   options: { waitMs?: number; pollMs?: number } = {},
 ): Promise<{ status: "CANCELLED" | "INTERRUPTED"; remainingProcesses: number }> {
+  await journal.assertFence(invocation);
+  await journal.raiseFence(invocation.workspaceId, invocation.fence);
   const target = invocation.payload.targetOperationId;
   if (!cancellationController.isRegistered(target)) {
     let record: JournalRecord | undefined = await journal.get(target);

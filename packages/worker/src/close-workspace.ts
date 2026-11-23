@@ -10,6 +10,8 @@ import {
 } from "@agentx/contracts";
 import { runIsolatedGit } from "./isolated-repository.js";
 import { storedCommandOutput } from "./command-failure.js";
+import { OperationJournal } from "./journal.js";
+import type { WorkerInvocation } from "@agentx/contracts";
 
 const MAX_GIT_OUTPUT = 1_048_576;
 
@@ -90,8 +92,17 @@ function assertContained(rootPath: string, candidate: string): void {
 /**
  * The worker's answer to a close invocation (058-stop-close): the check judges a workspace nothing is writing to. While another operation is active here (an old run whose stop did not land, say), its
  * answer could be stale a moment later, so it refuses, and the close fails without deleting anything.
+ * OperationJournal.accept raises the durable workspace fence before this check
+ * runs, so delayed older invocations cannot write after a completed inspection.
  */
-export async function closeInvocationResult(rootPath: string, otherOperationActive: () => boolean): Promise<WorkspaceClosePreflightResult> {
+export async function closeInvocationResult(
+  rootPath: string,
+  otherOperationActive: () => boolean,
+  invocation?: Pick<WorkerInvocation, "workspaceId" | "fence">,
+): Promise<WorkspaceClosePreflightResult> {
+  // The server raises at append too; retain the barrier for direct executor
+  // calls, including a close whose busy check or inspection later fails.
+  if (invocation !== undefined) await new OperationJournal(rootPath).raiseFence(invocation.workspaceId, invocation.fence);
   if (otherOperationActive()) throw agentXError("WORKSPACE_BUSY", "another operation is still active in this workspace; the close check cannot judge it");
   return inspectWorkspaceForClose(rootPath);
 }

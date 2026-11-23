@@ -27,6 +27,15 @@ export async function hiddenWorkspaceDirectories(rootPath: string, options: { ui
     await ensurePrivateDirectory(path, uid);
     hidden.push(path);
   }
+  const control = join(root, ".agentx-control");
+  await mkdir(control, { mode: 0o700 }).catch((error: unknown) => {
+    if ((error as { code?: unknown }).code !== "EEXIST") throw error;
+  });
+  const info = await lstat(control);
+  if (!info.isDirectory() || info.isSymbolicLink() || (info.uid !== 0 && info.uid !== uid) || (info.mode & 0o022) !== 0) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "The workspace control directory requires recovery before a task can start");
+  }
+  hidden.push(control);
   for (const name of [DOCKER_DATA_DIRECTORY, RUNTIME_BACKING_DIRECTORY]) {
     const path = join(root, name);
     if ((await stat(path).catch(() => undefined))?.isDirectory() === true) hidden.push(path);

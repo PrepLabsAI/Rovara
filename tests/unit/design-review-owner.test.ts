@@ -1,11 +1,11 @@
 import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // What the owner does to a design review. The cost hold and its choices (through the approval gate), the question card, Skip, Retry, Resume, `design first`, the wait sweep (reminders, parking,
 // closing), and the design's approval that carries the task on through the plan, the build and the reviews. The worker is simulated; the broker's records are checked in the store.
-import { describe, expect, it } from "vitest";
-import { BUDGET_EXHAUSTED_FAILURE_MESSAGE, DesignReviewBindingSchema, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, createCandidateManifest, type PlanDocument, type WorkflowSnapshot } from "@agentx/contracts";
+import { describe, expect, it, vi } from "vitest";
+import { change, workspaceSessionKey, BUDGET_EXHAUSTED_FAILURE_MESSAGE, DesignReviewBindingSchema, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, createCandidateManifest, type PlanDocument, type WorkflowSnapshot } from "@agentx/contracts";
 import { designChoicesOf } from "../../packages/broker/src/core/design-review/choice-subject.js";
 import { answerReviewQuestions, resumeParkedReview, retryBlockedReview } from "../../packages/broker/src/core/design-review/actions.js";
-import { sweepDesignWaits, designWaitNotifyKey, designWaitRowKey } from "../../packages/broker/src/core/design-review/wait.js";
+import { sweepDesignWaits, settleDesignWait, designWaitNotifyKey, designWaitRowKey } from "../../packages/broker/src/core/design-review/wait.js";
 import { designPanelOf, designQuestionsOf } from "../../packages/broker/src/core/design-review/panel.js";
 import { loadDesignProof } from "../../packages/broker/src/core/design-review/design-proof.js";
 import { designProofLine } from "../../packages/broker/src/core/design-review/proof-line.js";
@@ -395,4 +395,154 @@ describe("the run-anyway choice and the answers, as the owner's page makes them"
     const after = await workflowOf(w);
     expect(after.designReview!.rounds[0]!.answers).toMatchObject({ by: { actorId: asking.ownerId } });
   });
+});
+
+
+describe("retained design timeout refuses before releasing anything", () => {
+  it.each(["before", "claim-race", "lost-claim"] as const)("keeps parked holder and retries in 24h (%s)", async (race) => {
+    const w = await world({ price: false, holdAnswerable: true });
+    await toRound(w); w.h.clock.advance(8 * DAY); await sweep(w);
+    expect((await readWorkspace(w.h.deps, w.workspaceId))?.legacyCloseClaim).toBeUndefined();
+    w.h.clock.advance(31 * DAY);
+    const sk = workspaceSessionKey(w.workspaceId);
+    const operationId = newRequestId(), generation = { sessionGeneration: 1, instanceId: "i-0123456789abcdef0", volumeId: "vol-0123456789abcdef0", dataGeneration: newRequestId() };
+    const retained = { schemaVersion: 1, operationId, fence: 4, generation, retained: { inspectionOperationId: operationId, inspectionFence: 4, retentionId: newRequestId(), contentDigest: "a".repeat(64), generation } };
+    await w.h.store.put({ item: { ...sk, state: "READY", ...(race === "before" ? { closeRetention: retained } : {}) } });
+    const before = await taskOf(w), ws = await readWorkspace(w.h.deps, w.workspaceId);
+    const transact = w.h.store.transact.bind(w.h.store); let injected = false;
+    w.h.store.transact = async items => {
+      if (race !== "before" && !injected) {
+        injected = true;
+        if (race === "claim-race") await w.h.store.update({ key: sk, ops: [change.set("closeRetention", retained)] });
+        else return { applied: false, reason: "condition_failed", failed: [0] };
+      }
+      return transact(items);
+    };
+    const releaseKeys = vi.fn(async () => undefined), release = vi.spyOn(w.h.deps.admission, "release");
+    const run = () => sweepDesignWaits({ flow: w.h.deps, reader: w.runtime.reader, env: w.runtime.env, releaseKeys });
+    expect(await run()).toMatchObject({ closed: 0 });
+    expect(await taskOf(w)).toEqual(before); expect(await readWorkspace(w.h.deps, w.workspaceId)).toEqual(ws);
+    expect(releaseKeys).not.toHaveBeenCalled(); expect(release).not.toHaveBeenCalled();
+    const row = await w.h.store.get(designWaitRowKey(w.taskId));
+    const now = w.h.clock.now;
+    expect(row?.["dispatchDueSk"]).toBe(`${new Date(now + 86_400_000).toISOString()}#${w.taskId}`);
+    expect(await run()).toMatchObject({ attempted: 0 });
+  });
+});
+
+it("a timeout claim store error preserves the due row and never releases keys", async () => {
+  const w = await world({ price: false, holdAnswerable: true });
+  await toRound(w); w.h.clock.advance(8 * DAY); await sweep(w); w.h.clock.advance(31 * DAY);
+  const before = await w.h.store.get(designWaitRowKey(w.taskId));
+  const releaseKeys = vi.fn(async () => undefined);
+  vi.spyOn(w.h.store, "transact").mockRejectedValueOnce(new Error("store unavailable"));
+  expect(await sweepDesignWaits({ flow: w.h.deps, reader: w.runtime.reader, env: w.runtime.env, releaseKeys })).toMatchObject({ closed: 0 });
+  expect(await w.h.store.get(designWaitRowKey(w.taskId))).toEqual(before);
+  expect(releaseKeys).not.toHaveBeenCalled();
+});
+
+it.each(["closeRetention", "closeDestroy", "claim", "fence", "workflow", "cleanup-company"] as const)("the final timeout transaction refuses a racing %s without closing or releasing the slot", async field => {
+  const w = await world({ price: false, holdAnswerable: true });
+  await toRound(w); w.h.clock.advance(8 * DAY); await sweep(w); w.h.clock.advance(31 * DAY);
+  const before = await taskOf(w), workspace = await readWorkspace(w.h.deps, w.workspaceId);
+  const transact = w.h.store.transact.bind(w.h.store); let raced = false;
+  w.h.store.transact = async items => {
+    if (!raced && items.some(item => item.kind === "update" && item.key.pk === taskKey(w.taskId).pk)) {
+      raced = true;
+      if (field === "workflow" || field === "cleanup-company") {
+        await w.h.store.update({ key: taskKey(w.taskId), ops: [change.set("workflow.revision", before.workflow.revision + 1)] });
+        await w.h.store.update({ key: designWaitRowKey(w.taskId), ops: [change.set("workflowRevision", before.workflow.revision + 1)] });
+      } else if (field === "claim" || field === "fence") {
+        const { workspaceKey } = await import("../../packages/broker/src/core/task-flow/keys.js");
+        await w.h.store.update({ key: workspaceKey(w.h.deps.companyId, w.workspaceId), ops: [field === "claim" ? change.set("legacyCloseClaim", newRequestId()) : change.set("fence", (workspace?.fence ?? 0) + 1)] });
+      } else await w.h.store.put({ item: { ...workspaceSessionKey(w.workspaceId), state: "READY", [field]: { schemaVersion: 1 } } });
+    }
+    if (field === "cleanup-company" && items.some(item => item.kind === "update" && item.ops.some(op => op.op === "remove" && op.path[0] === "legacyCloseClaim"))) {
+      const { workspaceKey } = await import("../../packages/broker/src/core/task-flow/keys.js");
+      await w.h.store.update({ key: workspaceKey(w.h.deps.companyId, w.workspaceId), ops: [change.set("companyId", newRequestId())] });
+    }
+    return transact(items);
+  };
+  const release = vi.spyOn(w.h.deps.admission, "release");
+  expect(await sweep(w)).toMatchObject({ closed: 0 }); expect(raced).toBe(true);
+  const after = await taskOf(w);
+  expect(after.closedAt).toBeUndefined(); expect(after.releasedAt).toBeUndefined();
+  expect(after.workflow.stage).toBe(before.workflow.stage);
+  expect(await w.h.store.get(chargeMarkerKey(before.charge, w.taskId))).toBeDefined();
+  if (field !== "cleanup-company") expect((await readWorkspace(w.h.deps, w.workspaceId))?.status).toBe(workspace?.status);
+  expect(release).not.toHaveBeenCalled();
+  const { workspaceKey } = await import("../../packages/broker/src/core/task-flow/keys.js");
+  const remainingClaim = (await w.h.store.get(workspaceKey(w.h.deps.companyId, w.workspaceId)))?.["legacyCloseClaim"];
+  if (field === "claim" || field === "fence" || field === "cleanup-company") expect(remainingClaim).toBeDefined();
+  else expect(remainingClaim).toBeUndefined();
+  const row = await w.h.store.get(designWaitRowKey(w.taskId));
+  if (field === "workflow" || field === "cleanup-company") expect(row?.["workflowRevision"]).toBe(before.workflow.revision + 1);
+  else expect(row?.["dispatchDueSk"]).toBe(`${new Date(w.h.clock.now + 86_400_000).toISOString()}#${w.taskId}`);
+});
+
+
+it.each([false, true] as const)("retained timeout directs the owner through the existing timeline, guarded by the workflow revision (drift=%s)", async drift => {
+  const { sessionEventItem } = await import("../../packages/broker/src/core/sessions/store.js");
+  const w = await world({ price: false, holdAnswerable: true });
+  await toRound(w); w.h.clock.advance(8 * DAY); await sweep(w); w.h.clock.advance(31 * DAY);
+  const { taskSessionId } = await import("../../packages/broker/src/core/sessions/create.js");
+  const sessionId = taskSessionId(w.taskId);
+  await w.h.store.update({ key: taskKey(w.taskId), ops: [change.set("sessionId", sessionId)] });
+  await w.h.store.put({ item: { ...workspaceSessionKey(w.workspaceId), state: "READY", closeRetention: { schemaVersion: 1 } } });
+  const before = await taskOf(w), transact = w.h.store.transact.bind(w.h.store);
+  const events: TransactItem[] = [];
+  w.h.store.transact = async items => {
+    if (drift && items.some(item => item.kind === "put" && item.item["entityType"] === "AGENT_SESSION_EVENT")) await w.h.store.update({ key: taskKey(w.taskId), ops: [change.set("workflow.revision", before.workflow.revision + 1)] });
+    return transact(items);
+  };
+  const timeline = { statusLine: (session: { orgId: typeof COMPANY; sessionId: string }, event: { eventId: string; at: string; text: string }) => {
+    expect(session).toEqual({ orgId: w.h.deps.companyId, sessionId }); expect(event.text).toContain("Close preview");
+    const item = sessionEventItem(session, { ...event, type: "status", actor: { kind: "system" } }); events.push(item); return item;
+  } };
+  const ports = { flow: w.h.deps, reader: w.runtime.reader, env: w.runtime.env, releaseKeys: async () => undefined };
+  expect(await settleDesignWait({ ...ports, timeline }, w.taskId, before.workflow.revision, w.h.clock.now)).toBe("stale");
+  expect(events).toHaveLength(1);
+  const event = events[0]!;
+  if (event.kind !== "put") throw new Error("timeline must append an existing session event");
+  expect(await w.h.store.get({ pk: String(event.item["pk"]), sk: String(event.item["sk"]) })).toEqual(drift ? undefined : event.item);
+  if (!drift) await expect(settleDesignWait(ports, w.taskId, before.workflow.revision, w.h.clock.now)).resolves.toBe("stale");
+});
+
+it("a park that loses its workflow commit leaves the existing wait due, and does not finish a close", async () => {
+  const w = await world({ price: false, holdAnswerable: true }); await toRound(w); w.h.clock.advance(8 * DAY);
+  const before = await w.h.store.get(designWaitRowKey(w.taskId)), events: string[] = [];
+  w.h.deps.log = entry => { events.push(String(entry["event"])); };
+  vi.spyOn(w.h.store, "transact").mockResolvedValueOnce({ applied: false, reason: "condition_failed", failed: [0] });
+  expect(await sweep(w)).toMatchObject({ parked: 0, closed: 0 });
+  expect(await w.h.store.get(designWaitRowKey(w.taskId))).toEqual(before);
+  expect(events).not.toContain("design_review.close_finish_failed");
+});
+it("parking never attempts close cleanup", async () => {
+  const w = await world({ price: false, holdAnswerable: true }); await toRound(w); w.h.clock.advance(8 * DAY);
+  const events: string[] = []; w.h.deps.log = entry => { events.push(String(entry["event"])); };
+  expect(await sweep(w)).toMatchObject({ parked: 1, closed: 0 });
+  expect(events).not.toContain("design_review.close_finish_failed");
+});
+
+it("the existing wait notices accept the real session timeline contract through reminder, park and close", async () => {
+  const { sessionEventItem } = await import("../../packages/broker/src/core/sessions/store.js");
+  const { taskSessionId } = await import("../../packages/broker/src/core/sessions/create.js");
+  const w = await world({ price: false, holdAnswerable: true }); await toRound(w);
+  await w.h.store.update({ key: taskKey(w.taskId), ops: [change.set("sessionId", taskSessionId(w.taskId))] });
+  const timeline = { statusLine: (session: { orgId: typeof COMPANY; sessionId: string }, event: { eventId: string; at: string; text: string }) => sessionEventItem(session, { ...event, type: "status", actor: { kind: "system" } }) };
+  const run = () => sweepDesignWaits({ flow: w.h.deps, reader: w.runtime.reader, env: w.runtime.env, releaseKeys: async () => undefined, timeline });
+  w.h.clock.advance(2 * DAY); expect(await run()).toMatchObject({ reminded: 1 });
+  w.h.clock.advance(6 * DAY); expect(await run()).toMatchObject({ parked: 1 });
+  w.h.clock.advance(31 * DAY); expect(await run()).toMatchObject({ closed: 1 });
+});
+
+it("a foreign-company timeout row produces no writes, notices or key releases", async () => {
+  const w = await world({ price: false, holdAnswerable: true }); await toRound(w);
+  w.h.clock.advance(8 * DAY); await sweep(w); w.h.clock.advance(31 * DAY);
+  await w.h.store.update({ key: taskKey(w.taskId), ops: [change.set("companyId", "org_aaaaaaaaaaaaaaaaaaaa")] });
+  const writes = [vi.spyOn(w.h.store, "transact"), vi.spyOn(w.h.store, "update"), vi.spyOn(w.h.store, "put"), vi.spyOn(w.h.store, "delete")];
+  const releaseKeys = vi.fn(async () => undefined);
+  expect(await settleDesignWait({ flow: w.h.deps, reader: w.runtime.reader, env: w.runtime.env, releaseKeys }, w.taskId, 0, w.h.clock.now)).toBe("gone");
+  for (const write of writes) expect(write).not.toHaveBeenCalled();
+  expect(releaseKeys).not.toHaveBeenCalled();
 });

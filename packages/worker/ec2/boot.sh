@@ -1,5 +1,4 @@
 #!/bin/bash
-# EC2 worker user data: mount the workspace EBS volume and start the worker (#81).
 set -euo pipefail
 
 readonly MOUNT_PATH=/mnt/workspace
@@ -108,6 +107,7 @@ require_configuration() {
     AGENTX_MODEL_ID PI_CACHE_RETENTION AGENTX_LOG_GROUP; do
     [[ -n "${!name:-}" ]] || fail "$name is not set"
   done
+  [[ "$AGENTX_WORKER_IMAGE" =~ ^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$ ]] || fail "worker image must be pinned by ECR digest"
   [[ "$AGENTX_EXPECT_NEW_VOLUME" == true || "$AGENTX_EXPECT_NEW_VOLUME" == false ]] \
     || fail "AGENTX_EXPECT_NEW_VOLUME must be true or false"
 }
@@ -187,6 +187,48 @@ mount_workspace() {
   log "mounted $AGENTX_VOLUME_ID at $MOUNT_PATH"
 }
 
+readonly CLOSE_HELPER_SHA256=5557378eac3fa2a33f2ea8b5fe801dcd257996a9af30440445336d3ca86655c0
+readonly HOST_RUN=/run/agentx-close-retention-host
+readonly RESTORE_UNIT=agentx-close-retention-restore.service
+quiesce_workspace_containers() {
+  local running
+  running=$(docker ps --quiet) || fail "could not quiesce old worker"
+  [[ -z "$running" ]] || timeout "$(try_seconds 60)" docker stop --time 10 $running || fail "could not quiesce old worker"
+}
+initialize_close_retention() {
+  umask 077
+  local helper_tmp
+  quiesce_workspace_containers
+  python3 - "$HOST_RUN" <<'HOST'
+import os,stat,sys
+p=sys.argv[1]
+for q in ('/run',p):
+    if not os.path.lexists(q): os.mkdir(q,0o700)
+    s=os.lstat(q)
+    if not stat.S_ISDIR(s.st_mode) or s.st_uid!=0 or s.st_gid!=0 or s.st_mode&0o022: raise ValueError('untrusted host runtime')
+if stat.S_IMODE(os.lstat(p).st_mode)!=0o700: raise ValueError('host runtime mode')
+HOST
+  if ! mountpoint -q "$HOST_RUN"; then mount -t tmpfs -o nodev,nosuid,mode=0700,uid=0,gid=0 tmpfs "$HOST_RUN"; fi
+  [[ $(findmnt -n -o FSTYPE,TARGET --target "$HOST_RUN") == "tmpfs $HOST_RUN" ]] || fail "untrusted host runtime mount"
+  local opts
+  opts=$(findmnt -n -o OPTIONS --target "$HOST_RUN")
+  [[ ",$opts," == *,nodev,* && ",$opts," == *,nosuid,* && $(stat -c %u:%g:%a "$HOST_RUN") == 0:0:700 ]] || fail "unsafe host runtime mount"
+  helper_tmp=$(mktemp "$HOST_RUN/helper.XXXXXX")
+  if ! timeout "$(try_seconds 60)" docker run --rm --pull=never --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint /bin/cat "$AGENTX_WORKER_IMAGE" /opt/agentx/packages/worker/ec2/close-retention.sh >"$helper_tmp"; then
+    rm -f "$helper_tmp"; fail "retention helper extraction failed"
+  fi
+  if ! python3 - "$helper_tmp" "$CLOSE_HELPER_SHA256" <<'CHECK'
+import hashlib,os,stat,sys
+fd=os.open(sys.argv[1],os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+with os.fdopen(fd,'rb') as f:
+    s=os.fstat(f.fileno()); b=f.read(262145)
+    if not stat.S_ISREG(s.st_mode) or s.st_nlink!=1 or (s.st_uid,s.st_gid,stat.S_IMODE(s.st_mode))!=(0,0,0o600) or not 0<len(b)<=262144 or hashlib.sha256(b).hexdigest()!=sys.argv[2]: raise ValueError('helper provenance mismatch')
+CHECK
+  then rm -f "$helper_tmp"; fail "retention helper provenance failed"; fi
+  chmod 0500 "$helper_tmp"; mv -fT "$helper_tmp" "$HOST_RUN/helper.sh"
+  /bin/bash "$HOST_RUN/helper.sh" install "$AGENTX_WORKSPACE_ID" "$AGENTX_SESSION_GENERATION" "$1" "$AGENTX_VOLUME_ID" || fail "retained layout requires explicit recovery"
+}
+
 runtime_unavailable() { log "verifier unavailable; setup smoke withheld"; }
 
 prepare_contained_runtime_directories() {
@@ -237,7 +279,7 @@ f iptables DOCKER-USER -i rvi+ ! -o rvi+ -j DROP
 for r in $(awk '$1=="nameserver"&&$2~/^[0-9.]+$/{print $2}' /etc/resolv.conf /run/systemd/resolve/resolv.conf 2>/dev/null); do
   for p in udp tcp; do f iptables DOCKER-USER -i rvb+ -d $r -p $p --dport 53 -j RETURN; done
 done
-# Setup runs (rvbs<slot>: helper .2, sandbox .3) get only their helper's port 53, above every rvb+ rule; failing that, exactly these 5 go and setup is refused.
+# Setup DNS rules precede rvb+; failed setup removes all five.
 S=("-i rvbs+ -o rvbs+ -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN" "-i rvbs+ -o rvbs+ -m physdev --physdev-is-bridged -d 172.29.0.0/16 -p udp --dport 53 -j RETURN" "-i rvbs+ -o rvbs+ -m physdev --physdev-is-bridged -d 172.29.0.0/16 -p tcp --dport 53 -j RETURN" "-i rvbs+ -s 172.29.0.3/255.255.0.255 -p udp --dport 53 ! -o rvbs+ -j DROP" "-i rvbs+ -s 172.29.0.3/255.255.0.255 -p tcp --dport 53 ! -o rvbs+ -j DROP")
 x() { for r in "${S[@]}"; do while iptables -C DOCKER-USER $r 2>/dev/null; do iptables -D DOCKER-USER $r || return; done; done; }
 y() {
@@ -272,7 +314,7 @@ EOF
   systemctl enable "$FIREWALL_UNIT" && bash /usr/local/libexec/rovara-container-firewall || fail "could not wall containers off from the host and private networks"
 }
 
-# The password goes from the AWS CLI to Docker through a pipe, never through the log.
+# Pipe the registry password.
 registry_login() {
   timeout "$(try_seconds 60)" aws ecr get-login-password --region "$1" \
     | timeout "$(try_seconds 60)" docker login --username AWS --password-stdin "$2"
@@ -284,6 +326,7 @@ pull_worker_image() {
   local region=$1 registry=${AGENTX_WORKER_IMAGE%%/*}
   retry "could not log in to the worker image registry" registry_login "$region" "$registry"
   retry "could not download the worker image" pull_image_once "$AGENTX_WORKER_IMAGE"
+  docker image inspect --format '{{json .RepoDigests}}' "$AGENTX_WORKER_IMAGE" | python3 -c 'import json,sys; v=json.load(sys.stdin); sys.exit(0 if type(v) is list and all(type(x) is str for x in v) and sys.argv[1] in v else 1)' "$AGENTX_WORKER_IMAGE" || fail "worker image digest mismatch"
 }
 
 pull_contained_image() {
@@ -307,7 +350,7 @@ pull_executor_image() {
   return 1
 }
 
-# Root-only: nothing here is secret today, but it must not become world-readable.
+# Root-only environment.
 write_worker_environment() {
   local region=$1
   install -d -m 0700 "$(dirname "$WORKER_ENV_FILE")"
@@ -330,6 +373,7 @@ AGENTX_SESSION_GENERATION=$AGENTX_SESSION_GENERATION
 AGENTX_SANDBOX_IMAGE=$AGENTX_WORKER_IMAGE
 AGENTX_RUNTIME=ec2
 EOF
+
   printf 'TMPDIR=/tmp\n' >>"$WORKER_ENV_FILE"
   [[ -z "${AGENTX_SAVED_ENV_BUILDER_IMAGE:-}" ]] || printf 'AGENTX_SAVED_ENV_BUILDER_IMAGE=%s\n' "$AGENTX_SAVED_ENV_BUILDER_IMAGE" >>"$WORKER_ENV_FILE"
   [[ -z "${EXECUTOR_IMAGE:-}" ]] || printf 'EXECUTOR_IMAGE=%s\n' "$EXECUTOR_IMAGE" >>"$WORKER_ENV_FILE"
@@ -385,7 +429,10 @@ if [[ -d "$RUNTIME_SOURCE" && ! -L "$RUNTIME_SOURCE" && $(stat -c %u:%g:%a "$RUN
     fi
   fi
 fi
-args=(run --rm --name "$WORKER_CONTAINER" --network host --env-file "$WORKER_ENV_FILE" --volume "$MOUNT_PATH:$MOUNT_PATH")
+args=(run --rm --name "$WORKER_CONTAINER" --network host --env-file "$WORKER_ENV_FILE")
+f=/run/agentx-close-retention-host/worker-mounts
+[[ ! -L ${f%/*} && $(stat -c %u:%g:%a "${f%/*}") == 0:0:700 && -f "$f" && ! -L "$f" && $(stat -c %u:%g:%a:%h "$f") == 0:0:444:1 ]] || exit 1
+. "$f" || exit 1
 if [[ "$runtime_ready" == true ]]; then
   args+=(--volume "$RUNTIME_ROOT:$RUNTIME_ROOT" --env CONTAINED_FOUNDATION_EVIDENCE_DIR="$RUNTIME_ROOT/evidence" --env TMPDIR="$RUNTIME_ROOT/tmp")
 else
@@ -394,7 +441,7 @@ else
 fi
 t=/run/agentx-test-services; ! mountpoint -q $t || args+=(--volume $t:$t --env AGENTX_TEST_SERVICES_RUN_DIR=$t)
 t=/var/lib/rovara-egress; [[ ! -d $t ]] || args+=(--volume $t:$t)
-# L4-NETG2: the host resolvers a gateway-mode stage wrote (the daemon default name server is the egress gateway there, which this host-network container cannot reach). Before the image, which stays the last docker argument.
+# Use the host resolvers for the host-network worker; keep the image last.
 while read -r r; do args+=(--dns "$r"); done < <(cat /etc/agentx/worker-dns 2>/dev/null)
 f=/etc/agentx/setup-isolation; [[ -f $f && ! -L $f && $(stat -c %u:%a $f) == 0:644 && $(<$f) == ready ]] && s=ready || s=unavailable
 args+=(--env AGENTX_SETUP_ISOLATION=$s)
@@ -411,11 +458,29 @@ write_worker_unit() {
   local region=$1 instance_id=$2 docker
   docker=$(command -v docker)
   write_worker_launcher "$docker" "$instance_id"
+  {
+    printf '#!/bin/bash\nset -euo pipefail\nreadonly HOST_RUN=%q CLOSE_HELPER_SHA256=%q\nBOOT_DEADLINE=$((SECONDS+480))\n' "$HOST_RUN" "$CLOSE_HELPER_SHA256"
+    printf 'AGENTX_WORKER_IMAGE=%q AGENTX_WORKSPACE_ID=%q AGENTX_SESSION_GENERATION=%q AGENTX_VOLUME_ID=%q\n' "$AGENTX_WORKER_IMAGE" "$AGENTX_WORKSPACE_ID" "$AGENTX_SESSION_GENERATION" "$AGENTX_VOLUME_ID"
+    declare -f log fail try_seconds tries retry registry_login pull_image_once pull_worker_image quiesce_workspace_containers initialize_close_retention
+    printf 'RETRY_ATTEMPTS=5 RETRY_BASE_SECONDS=2 RETRY_MAX_SECONDS=30 FAILURE_FILE=/run/agentx-boot-failure\npull_worker_image %q\ninitialize_close_retention %q\n' "$region" "$instance_id"
+  } >/usr/local/libexec/agentx-retention-restore
+  chmod 0700 /usr/local/libexec/agentx-retention-restore
+  cat >"/etc/systemd/system/$RESTORE_UNIT" <<EOF
+[Unit]
+Requires=docker.service
+After=docker.service
+Before=$WORKER_UNIT ${SE_UNIT:-rovara-sandbox-egress.service} ${TS_UNIT:-rovara-test-services.service}
+RequiresMountsFor=$MOUNT_PATH
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /usr/local/libexec/agentx-retention-restore
+EOF
   cat >"/etc/systemd/system/$WORKER_UNIT" <<EOF
 [Unit]
 Description=AgentX worker for workspace $AGENTX_WORKSPACE_ID generation $AGENTX_SESSION_GENERATION
-Requires=docker.service $FIREWALL_UNIT
-After=docker.service $FIREWALL_UNIT network-online.target
+Requires=docker.service $FIREWALL_UNIT $RESTORE_UNIT
+After=docker.service $FIREWALL_UNIT $RESTORE_UNIT network-online.target
 Wants=network-online.target
 RequiresMountsFor=$MOUNT_PATH
 
@@ -437,13 +502,13 @@ test_services_stage() {
   timeout "$(try_seconds 60)" docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint cat "$AGENTX_WORKER_IMAGE" /opt/agentx/packages/worker/ec2/test-services-stage.sh >"$f" && . "$f" && test_services_stage_main "$1"
 }
 
-# L4-NETG (DEC 254zzz77): only for AGENTX_SANDBOX_EGRESS=gateway. The stage ships in the worker image (pulled by digest); sandboxes and dev containers get an internal network whose only exit is the host's egress gateway. Unlike the stage above, ANY failure fails the boot.
+# Digest-image gateway stage; a failure stops boot.
 sandbox_egress_stage() {
   local f=/run/agentx-se-stage.sh
   timeout "$(try_seconds 60)" docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint cat "$AGENTX_WORKER_IMAGE" /opt/agentx/packages/worker/ec2/sandbox-egress.sh >"$f" && . "$f" && sandbox_egress_main
 }
 
-# Opt-in TEST qualification (AGENTX_E2E_QUALIFICATION_*): its own unit, so it cannot fail the boot.
+# Qualification runs in its own unit.
 write_e2e_qualification_script() {
   install -d -o root -g root -m 0755 /usr/local/libexec
   cat >/usr/local/libexec/agentx-e2e-qualification <<'QUALIFICATION'
@@ -541,6 +606,9 @@ start_e2e_qualification() {
 }
 
 main() {
+  for unit in "$WORKER_UNIT" agentx-close-retention.service "$RESTORE_UNIT" "${SE_UNIT:-rovara-sandbox-egress.service}" "${TS_UNIT:-rovara-test-services.service}"; do
+    if systemctl is-active --quiet "$unit"; then systemctl stop "$unit" || fail "could not quiesce old worker"; fi
+  done
   BOOT_STEP="read the boot configuration"
   require_configuration
   log "booting workspace $AGENTX_WORKSPACE_ID generation $AGENTX_SESSION_GENERATION"

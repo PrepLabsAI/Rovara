@@ -1,0 +1,585 @@
+[
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 221,
+    "function": "reject_control_mount_aliases",
+    "kind": "call",
+    "source": "            require(all(mount!=root and not mount.startswith(root+'/') for root in (CONTROL,ROOT+'/.agentx')))",
+    "test": "boot v2",
+    "originLine": 217,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:test_identity_validators_refuse_before_any_docker_or_control_writes|control mount aliases refused)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 231,
+    "function": "ensure_dir",
+    "kind": "call",
+    "source": "            info=os.fstat(child); require(info.st_uid in (HOST_UID,owner) and not info.st_mode&0o022 and info.st_dev==os.stat(ROOT).st_dev)",
+    "test": "boot v2",
+    "originLine": 227,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:test_directory_owners_modes_and_device_are_checked)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 243,
+    "function": "copy_regular",
+    "kind": "if",
+    "source": "        if target_fd is not None: os.close(target_fd)",
+    "test": "boot v2",
+    "originLine": 239,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:test_copy_closes_both_file_descriptors)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 247,
+    "function": "data_directory",
+    "kind": "call",
+    "source": "    try: require(os.fstat(fd).st_uid in (HOST_UID,WORKER_UID))",
+    "test": "boot v2",
+    "originLine": 243,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:test_data_directory_rejects_a_foreign_owner)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 320,
+    "function": "restore",
+    "kind": "call",
+    "source": "    value=current(); protected(image(value)); data_directory(); held=False",
+    "test": "boot v2",
+    "originLine": 316,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:test_restore_rejects_untrusted_image_before_any_mount_command)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 346,
+    "function": "prepare_run",
+    "kind": "if",
+    "source": "        if not os.path.lexists(path):",
+    "test": "boot v2",
+    "originLine": 342,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:test_runtime_is_created_idempotently_and_rejects_bad_state)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 349,
+    "function": "prepare_run",
+    "kind": "call",
+    "source": "        require(stat.S_ISDIR(info.st_mode) and info.st_uid in owners and stat.S_IMODE(info.st_mode)==mode)",
+    "test": "boot v2",
+    "originLine": 345,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:test_runtime_is_created_idempotently_and_rejects_bad_state)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 382,
+    "function": "migrate",
+    "kind": "call",
+    "source": "    uid(workspace); text(generation,r'[1-9][0-9]*'); positive(int(generation))",
+    "test": "boot v2",
+    "originLine": 378,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:test_identity_validators_refuse_before_any_docker_or_control_writes)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 383,
+    "function": "migrate",
+    "kind": "call",
+    "source": "    text(instance,r'i-(?:[a-f0-9]{8}|[a-f0-9]{17})'); text(volume,r'vol-(?:[a-f0-9]{8}|[a-f0-9]{17})')",
+    "test": "boot v2",
+    "originLine": 379,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:test_identity_validators_refuse_before_any_docker_or_control_writes)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 386,
+    "function": "migrate",
+    "kind": "if",
+    "source": "        if running: raise ValueError('restore requires quiescence')",
+    "test": "boot v2",
+    "originLine": 380,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:test_current_layout_requires_quiescence_then_restores_without_legacy_fallback)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 385,
+    "function": "migrate",
+    "kind": "if",
+    "source": "    if os.path.lexists(CURRENT):",
+    "test": "boot v2",
+    "originLine": 381,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:test_current_layout_requires_quiescence_then_restores_without_legacy_fallback)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 394,
+    "function": "migrate",
+    "kind": "call",
+    "source": "    for r in records: require(r['workspaceId']==workspace)",
+    "test": "boot v2",
+    "originLine": 390,
+    "equivalences": {
+      "remove": "migration_journals already validates each record workspace before returning; removing this duplicate cannot admit a foreign record.",
+      "loosen": "migration_journals already validates each record workspace before returning; removing this duplicate cannot admit a foreign record."
+    },
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:test_retained_and_destroy_state_refuse_even_with_pure_preconditions|test_current_layout_requires_quiescence_then_restores_without_legacy_fallback)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 404,
+    "function": "migrate",
+    "kind": "if",
+    "source": "    if high_water>0:",
+    "test": "boot v2",
+    "originLine": 401,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:legacy fence high-water|test_active_journal_keeps_legacy_and_preserves_fence_and_record)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 414,
+    "function": "migrate",
+    "kind": "if",
+    "source": "    if size<256*1024*1024:",
+    "test": "boot v2",
+    "originLine": 414,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:worker readiness legacy|legacy layout selected|test_low_space_status_change_keeps_single_legacy_authority)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 446,
+    "function": "successor",
+    "kind": "call",
+    "source": "    data_directory(); run('mount','-t','ext4','-o','rw,noatime',device,DATA)",
+    "test": "kernel seal",
+    "originLine": 438,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:successor refuses foreign data owner)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 474,
+    "function": "<entry>",
+    "kind": "call",
+    "source": "    reject_control_mount_aliases()",
+    "test": "boot v2",
+    "originLine": 466,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:control mount aliases refused)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 477,
+    "function": "<entry>",
+    "kind": "call",
+    "source": "    reject_control_mount_aliases()",
+    "test": "boot v2",
+    "originLine": 469,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:control mount aliases refused)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 478,
+    "function": "<entry>",
+    "kind": "if",
+    "source": "    if not os.path.lexists(CONTROL):",
+    "test": "boot v2",
+    "originLine": 470,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:foreign control owner refused)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 480,
+    "function": "<entry>",
+    "kind": "call",
+    "source": "    protected(CONTROL,True)",
+    "test": "boot v2",
+    "originLine": 472,
+    "equivalences": {
+      "remove": "open_regular(ownership.lock) immediately walks and validates CONTROL before lock acquisition or migrate/serve; removing this duplicate cannot admit an untrusted directory.",
+      "loosen": "open_regular(ownership.lock) immediately walks and validates CONTROL before lock acquisition or migrate/serve; removing this duplicate cannot admit an untrusted directory."
+    },
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:foreign control owner refused)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 481,
+    "function": "<entry>",
+    "kind": "call",
+    "source": "    require(stat.S_IMODE(os.lstat(CONTROL).st_mode)==0o755)",
+    "test": "boot v2",
+    "originLine": 473,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:control directory mode refused)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 482,
+    "function": "<entry>",
+    "kind": "if",
+    "source": "    if not os.path.lexists(CONTROL+'/ownership.lock'):",
+    "test": "boot v2",
+    "originLine": 474,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:worker readiness migrated|ownership lock refused)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 487,
+    "function": "<entry>",
+    "kind": "call",
+    "source": "    reject_control_mount_aliases()",
+    "test": "boot v2",
+    "originLine": 479,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:control mount aliases refused)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 488,
+    "function": "<entry>",
+    "kind": "if",
+    "source": "    if os.path.lexists(CURRENT): validate_boot(*sys.argv[2:])",
+    "test": "boot v2",
+    "originLine": 480,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:serve rejects foreign workspace)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 489,
+    "function": "<entry>",
+    "kind": "call",
+    "source": "    protected(CONTROL+'/ownership.lock'); prepare_run()",
+    "test": "boot v2",
+    "originLine": 481,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:ownership lock refused)"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "line": 206,
+    "kind": "shell",
+    "function": "boot/install",
+    "source": "    if not os.path.lexists(q): os.mkdir(q,0o700)",
+    "test": "boot v2",
+    "originLine": 202,
+    "guard": 202,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:missing host runtime created)"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "line": 208,
+    "kind": "shell",
+    "function": "boot/install",
+    "source": "    if not stat.S_ISDIR(s.st_mode) or s.st_uid!=0 or s.st_gid!=0 or s.st_mode&0o022: raise ValueError('untrusted host runtime')",
+    "test": "boot v2",
+    "originLine": 204,
+    "guard": 204,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:untrusted host runtime refused)"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "line": 209,
+    "kind": "shell",
+    "function": "boot/install",
+    "source": "if stat.S_IMODE(os.lstat(p).st_mode)!=0o700: raise ValueError('host runtime mode')",
+    "test": "boot v2",
+    "originLine": 205,
+    "guard": 205,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:host runtime mode refused)"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "line": 211,
+    "kind": "shell",
+    "function": "boot/install",
+    "source": "  if ! mountpoint -q \"$HOST_RUN\"; then mount -t tmpfs -o nodev,nosuid,mode=0700,uid=0,gid=0 tmpfs \"$HOST_RUN\"; fi",
+    "test": "boot v2",
+    "originLine": 207,
+    "guard": 207,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:host runtime tmpfs required|untrusted host runtime mount)"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "line": 212,
+    "kind": "shell",
+    "function": "boot/install",
+    "source": "  [[ $(findmnt -n -o FSTYPE,TARGET --target \"$HOST_RUN\") == \"tmpfs $HOST_RUN\" ]] || fail \"untrusted host runtime mount\"",
+    "test": "boot v2",
+    "originLine": 208,
+    "guard": 208,
+    "equivalences": {
+      "remove": "After a successful dedicated tmpfs mount under set -e, findmnt reports that same tmpfs/target. A pre-existing host runtime mount is root-only configuration; the following options and owner/mode check still refuses unsafe input. No task/control JSON input changes this mount.",
+      "loosen": "After a successful dedicated tmpfs mount under set -e, findmnt reports that same tmpfs/target. A pre-existing host runtime mount is root-only configuration; the following options and owner/mode check still refuses unsafe input. No task/control JSON input changes this mount."
+    },
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:host runtime tmpfs required)"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "line": 215,
+    "kind": "shell",
+    "function": "boot/install",
+    "source": "  [[ \",$opts,\" == *,nodev,* && \",$opts,\" == *,nosuid,* && $(stat -c %u:%g:%a \"$HOST_RUN\") == 0:0:700 ]] || fail \"unsafe host runtime mount\"",
+    "test": "boot v2",
+    "originLine": 211,
+    "guard": 211,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:unsafe host runtime refused|unsafe host runtime mount)"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "line": 217,
+    "kind": "shell",
+    "function": "boot/install",
+    "source": "  if ! timeout \"$(try_seconds 60)\" docker run --rm --pull=never --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint /bin/cat \"$AGENTX_WORKER_IMAGE\" /opt/agentx/packages/worker/ec2/close-retention.sh >\"$helper_tmp\"; then",
+    "test": "boot v2",
+    "originLine": 213,
+    "guard": 213,
+    "equivalences": {
+      "remove": "The command and all isolation flags remain. Empty/partial/changed output is refused by the following bounded SHA-256 check. A successful preloaded /bin/cat has zero status; only an external Docker/host transport failure after delivering the exact pinned bytes distinguishes ignoring its status, not a task/control input."
+    },
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:extractor network isolation)"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "line": 220,
+    "kind": "shell",
+    "function": "boot/install",
+    "source": "  if ! python3 - \"$helper_tmp\" \"$CLOSE_HELPER_SHA256\" <<'CHECK'",
+    "test": "boot v2",
+    "originLine": 216,
+    "guard": 216,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:retention helper provenance failed|planted helper did not execute|retention helper provenance failed)"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "line": 229,
+    "kind": "shell",
+    "function": "boot/install",
+    "source": "  /bin/bash \"$HOST_RUN/helper.sh\" install \"$AGENTX_WORKSPACE_ID\" \"$AGENTX_SESSION_GENERATION\" \"$1\" \"$AGENTX_VOLUME_ID\" || fail \"retained layout requires explicit recovery\"",
+    "test": "boot v2",
+    "originLine": 225,
+    "guard": 225,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:retained layout requires explicit recovery|wrong helper prevents worker start|install publishes worker mounts and control socket)"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "line": 434,
+    "kind": "shell",
+    "function": "boot/install",
+    "source": "[[ ! -L ${f%/*} && $(stat -c %u:%g:%a \"${f%/*}\") == 0:0:700 && -f \"$f\" && ! -L \"$f\" && $(stat -c %u:%g:%a:%h \"$f\") == 0:0:444:1 ]] || exit 1",
+    "test": "boot v2",
+    "originLine": 430,
+    "guard": 430,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:untrusted mount source refused)"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "line": 467,
+    "kind": "shell",
+    "function": "boot/install",
+    "source": "  chmod 0700 /usr/local/libexec/agentx-retention-restore",
+    "test": "boot v2",
+    "originLine": 463,
+    "guard": 463,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:restore script mode)"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "line": 610,
+    "kind": "shell",
+    "function": "boot/install",
+    "source": "    if systemctl is-active --quiet \"$unit\"; then systemctl stop \"$unit\" || fail \"could not quiesce old worker\"; fi",
+    "test": "boot v2",
+    "originLine": 606,
+    "guard": 606,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:in-place units quiesced|manual stop refusal)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 14,
+    "kind": "shell",
+    "function": "boot/install",
+    "source": "  [[ \"$layout\" == migrated || \"$layout\" == legacy ]] || exit 1",
+    "test": "boot v2",
+    "originLine": 10,
+    "guard": 10,
+    "equivalences": {
+      "remove": "init has exactly two successful outputs (legacy and migrated); every invalid/protected state exits nonzero under set -e before this output check. No input produces a third successful layout.",
+      "loosen": "init has exactly two successful outputs (legacy and migrated); every invalid/protected state exits nonzero under set -e before this output check. No input produces a third successful layout."
+    },
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:worker readiness legacy|worker readiness migrated|install succeeds after control socket readiness)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 20,
+    "kind": "shell",
+    "function": "boot/install",
+    "source": "[[ -S /run/agentx-close-retention/control.sock ]] || return 1",
+    "test": "boot v2",
+    "originLine": 16,
+    "guard": 16,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:mount source refuses missing socket)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 22,
+    "kind": "shell",
+    "function": "boot/install",
+    "source": "  if [[ \"$layout\" == migrated ]]; then",
+    "test": "boot v2",
+    "originLine": 19,
+    "guard": 19,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:legacy layout selected|worker readiness legacy|worker readiness migrated|emitted (?:legacy|low-space|migrated) env and mounts are accepted by main)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 32,
+    "kind": "shell",
+    "function": "boot/install",
+    "source": "  for attempt in {1..50}; do [[ ! -S \"$RUN/control.sock\" ]] || exit 0; sleep 0.1; done",
+    "test": "boot v2",
+    "originLine": 28,
+    "guard": 28,
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:install requires control socket|install succeeds after control socket readiness)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 395,
+    "source": "    if any(r.get('closeRetention') for r in records): raise ValueError('retained operation requires explicit recovery')",
+    "kind": "if",
+    "guard": "retained",
+    "function": "migrate",
+    "test": "boot v2",
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:test_retained_and_destroy_state_refuse_even_with_pure_preconditions)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 396,
+    "source": "    legacy_only=running or bool(run('docker','ps','--all','--quiet')) or os.path.lexists(DATA) or any(r['status'] not in ('SUCCEEDED','FAILED','CANCELLED','INTERRUPTED') for r in records)",
+    "kind": "decision",
+    "guard": "legacy-inputs",
+    "function": "migrate",
+    "test": "boot v2",
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:test_running_and_stopped_containers_keep_legacy_without_migration|test_existing_data_keeps_legacy_and_never_overwrites_repository|test_active_journal_keeps_legacy_and_preserves_fence_and_record)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 401,
+    "source": "        if target.startswith(ROOT+'/') and target[len(ROOT)+1:].split('/')[0] not in exclusions: legacy_only=True",
+    "kind": "if",
+    "guard": "process",
+    "function": "migrate",
+    "test": "boot v2",
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:test_legacy_process_keeps_legacy)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 411,
+    "source": "    if legacy_only:",
+    "kind": "if",
+    "guard": "legacy-return",
+    "function": "migrate",
+    "test": "boot v2",
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:test_legacy_status_change_reboots_then_migrates_with_latest_record|test_active_journal_keeps_legacy_and_preserves_fence_and_record)"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "line": 195,
+    "source": "  running=$(docker ps --quiet) || fail \"could not quiesce old worker\"",
+    "kind": "shell",
+    "guard": "list-containers",
+    "function": "quiesce",
+    "test": "boot v2",
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:quiesces the dedicated workspace daemon before restore: list failure)"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "line": 196,
+    "source": "  [[ -z \"$running\" ]] || timeout \"$(try_seconds 60)\" docker stop --time 10 $running || fail \"could not quiesce old worker\"",
+    "kind": "shell",
+    "guard": "stop-containers",
+    "function": "quiesce",
+    "test": "boot v2",
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:quiesces the dedicated workspace daemon before restore: stop failure|quiesces the dedicated workspace daemon before restore: running)"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "line": 329,
+    "source": "  docker image inspect --format '{{json .RepoDigests}}' \"$AGENTX_WORKER_IMAGE\" | python3 -c 'import json,sys; v=json.load(sys.stdin); sys.exit(0 if type(v) is list and all(type(x) is str for x in v) and sys.argv[1] in v else 1)' \"$AGENTX_WORKER_IMAGE\" || fail \"worker image digest mismatch\"",
+    "kind": "shell",
+    "guard": "repo-digests",
+    "function": "pull",
+    "test": "boot v2",
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:worker image digest mismatch|RepoDigests mismatch refused)"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "line": 472,
+    "source": "Before=$WORKER_UNIT ${SE_UNIT:-rovara-sandbox-egress.service} ${TS_UNIT:-rovara-test-services.service}",
+    "kind": "shell",
+    "guard": "restore-order",
+    "function": "restore-ordering",
+    "test": "boot v2",
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:restore precedes gateway and services)"
+  },
+  {
+    "file": "packages/worker/ec2/sandbox-egress.sh",
+    "line": 351,
+    "source": "After=docker.service $FIREWALL_UNIT ${RESTORE_UNIT:-agentx-close-retention-restore.service}",
+    "kind": "shell",
+    "guard": "gateway-order",
+    "function": "restore-ordering",
+    "test": "boot v2",
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:orders gateway restoration after close retention restore|gateway running at worker start)"
+  },
+  {
+    "file": "packages/worker/ec2/test-services-stage.sh",
+    "line": 149,
+    "source": "After=docker.service $FIREWALL_UNIT ${RESTORE_UNIT:-agentx-close-retention-restore.service}",
+    "kind": "shell",
+    "guard": "services-order",
+    "function": "restore-ordering",
+    "test": "boot v2",
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:orders test services after close retention restore)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 405,
+    "source": "        for journal in (JOURNAL,legacy):",
+    "kind": "fence-paths",
+    "guard": "fence-authorities",
+    "function": "migrate",
+    "test": "boot v2",
+    "expectedFailure": "^\\s*(?:FAIL|ERROR): test_active_journal_keeps_legacy_and_preserves_fence_and_record"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 10,
+    "kind": "shell",
+    "guard": "serve-reinstall",
+    "source": "  if [[ \"$serve_state\" != not-found ]]; then",
+    "test": "boot v2",
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*)(?:reinstall stops previous serve unit|reinstall stops the previous serve unit)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 11,
+    "kind": "shell",
+    "guard": "serve-stop",
+    "source": "    systemctl stop agentx-close-retention.service",
+    "test": "boot v2",
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*)(?:reinstall stops previous serve unit|reinstall stops the previous serve unit)"
+  },
+  {
+    "file": "packages/worker/ec2/close-retention.sh",
+    "line": 9,
+    "kind": "shell",
+    "guard": "serve-state",
+    "source": "  serve_state=$(systemctl show --property=LoadState --value agentx-close-retention.service)",
+    "test": "boot v2",
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*)(?:reinstall stops previous serve unit|reinstall stops the previous serve unit)"
+  },
+  {
+    "file": "packages/worker/ec2/boot.sh",
+    "line": 609,
+    "kind": "shell",
+    "function": "boot/install",
+    "source": "  for unit in \"$WORKER_UNIT\" agentx-close-retention.service \"$RESTORE_UNIT\" \"${SE_UNIT:-rovara-sandbox-egress.service}\" \"${TS_UNIT:-rovara-test-services.service}\"; do",
+    "test": "boot v2",
+    "originLine": 606,
+    "guard": "rerun-units",
+    "expectedFailure": "^\\s*(?:AssertionError[^\\n]*|FAIL[^\\n]*|ERROR[^\\n]*|agentx-boot: FAILED:[^\\n]*|ValueError:[^\\n]*)(?:in-place units quiesced|manual stop refusal)"
+  }
+]

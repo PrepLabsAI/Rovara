@@ -1,3 +1,4 @@
+import { withoutCloseRetention } from "../support/close-retention-template.js";
 // tests/contract/developer-signin-infrastructure.test.ts
 import { createHash } from "node:crypto";
 import { App, CfnParameter, Stack, aws_iam as iam } from "aws-cdk-lib";
@@ -63,6 +64,7 @@ const ARN_ESTIMATE_CONTEXT = "@aws-cdk/aws-iam.arnSizeEstimate";
 let foundation: TemplateJson;
 /** The named control-plane template as synthesized, before any test stripper (SIGNIN-STATE-TABLE reads the sign-in function's own variables). */
 let namedRaw: TemplateJson;
+let retentionRaw: TemplateJson;
 
 const controlPlane = (app: ReturnType<typeof buildAgentXApp>, name: string) =>
   Template.fromStack(app.node.children.find((child): child is Stack => Stack.isStack(child) && child.stackName === name)!).toJSON() as TemplateJson;
@@ -146,8 +148,9 @@ const SAMPLE_TABLE_ARN = "arn:aws:dynamodb:us-east-1:111122223333:table/agentx-s
 beforeAll(() => {
   const app = buildAgentXApp({ agentxEnv: "staging" });
   const raw = controlPlane(app, "agentx-staging-control-plane");
-  namedRaw = structuredClone(raw);
-  const full = withoutSlackCompanyMode(raw) as TemplateJson;
+  retentionRaw = structuredClone(raw);
+  namedRaw = withoutCloseRetention(raw);
+  const full = withoutSlackCompanyMode(structuredClone(namedRaw)) as TemplateJson;
   namedWithSignInGrants = structuredClone(full);
   // DEC 254zzz33: the sign-in function's company grants (SignInCompanyGrants) are asserted exactly by tests/support/company-import-reads-template.ts and taken out, so every pin
   // below holds what it held before (rule D); tests/contract/signin-company-grants.test.ts runs each code path under the full synthesized policy.
@@ -158,8 +161,8 @@ beforeAll(() => {
   const document = policy.document as unknown as { statements: Array<{ _estimateSize(options: { actionEstimate: number; arnEstimate: number }): number }> };
   brokerArnEstimate = (policy.node.tryGetContext(ARN_ESTIMATE_CONTEXT) as number | undefined) ?? 150;
   brokerEstimate = document.statements.reduce((total, statement) => total + statement._estimateSize({ actionEstimate: 20, arnEstimate: brokerArnEstimate }), 0);
-  longestNamed = withoutSlackCompanyMode(controlPlane(buildAgentXApp({ agentxEnv: LONGEST_ENV }), `agentx-${LONGEST_ENV}-control-plane`)) as TemplateJson;
-  legacy = controlPlane(buildAgentXApp(), "AgentXControlPlane");
+  longestNamed = withoutSlackCompanyMode(withoutCloseRetention(controlPlane(buildAgentXApp({ agentxEnv: LONGEST_ENV }), `agentx-${LONGEST_ENV}-control-plane`))) as TemplateJson;
+  legacy = withoutCloseRetention(controlPlane(buildAgentXApp(), "AgentXControlPlane"));
 }, 300_000);
 
 // DEC 254zzz284: the only new authority is the broker's membership transaction fence.
@@ -178,6 +181,17 @@ function withoutBrokerMemberConditionCheck(template: TemplateJson): TemplateJson
   document.Statement = document.Statement.filter((statement) => !added.includes(statement));
   return copy;
 }
+
+describe("DEC331 exact relay IAM delta", () => {
+  it.each(["action", "resource", "principal"] as const)("rejects any other %s in the relay statement before subtracting it", field => {
+    const copy = structuredClone(retentionRaw);
+    const permission = ofType(copy, "AWS::Lambda::Permission").find(([id]) => id.startsWith("DispatcherVerifyCloseRetention"))![1];
+    if (field === "action") permission.Properties.Action = "lambda:*";
+    if (field === "resource") permission.Properties.FunctionName = "*";
+    if (field === "principal") permission.Properties.Principal = "*";
+    expect(() => withoutCloseRetention(copy)).toThrow();
+  });
+});
 
 describe("broker membership condition-check grant", () => {
   it("adds only the exact member-key statement to the broker; every other action, resource and principal stays pinned", () => {

@@ -232,3 +232,16 @@ it("advertises saved image builds only with a digest-pinned builder", async () =
     }
   } finally { vi.unstubAllEnvs(); await rm(root, { recursive: true, force: true }); }
 });
+
+it("refuses versioned close on a runtime without retention and never treats it as a legacy job", async () => {
+  const root = await mkdtemp(join(tmpdir(), "close-retention-server-"));
+  try {
+    const journal = new OperationJournal(root), execute = vi.fn(async () => undefined);
+    const state = createWorkerServerState(journal, { execute });
+    const invocation = { ...taskInvocation(), kind: "close", payload: { schemaVersion: 1, action: "retain", target: { sessionGeneration: 3, instanceId: "i-0123456789abcdef0", volumeId: "vol-0123456789abcdef0", dataGeneration: randomUUID() } } };
+    const response = await handleWorkerRequest(new Request("http://worker/invocations", { method: "POST", body: JSON.stringify(invocation) }), state);
+    expect(response.status).toBe(400);
+    expect(await journal.get(invocation.operationId)).toBeUndefined();
+    expect(execute).not.toHaveBeenCalled();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

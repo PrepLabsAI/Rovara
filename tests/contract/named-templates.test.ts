@@ -1,3 +1,4 @@
+import { withoutCloseRetention } from "../support/close-retention-template.js";
 import { Stack } from "aws-cdk-lib";
 import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
@@ -292,7 +293,7 @@ describe("named environment templates", () => {
   for (const stack of stacks) {
     if (stack.stackName === "agentx-staging-control-plane") {
       it("removing only Batch F additions preserves code/next's agentx-staging-control-plane template", () => {
-        const beforeBatchF = withoutBatchFAdditions(normalizedTemplate(stack));
+        const beforeBatchF = withoutBatchFAdditions(withoutCloseRetention(normalizedTemplate(stack)));
         expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("ef7ec71baeba564d5fa957374727f876d1602a7a43ced9676ff93219402c04dd");
       }, 120_000);
     }
@@ -301,6 +302,9 @@ describe("named environment templates", () => {
       // SIGNIN-MEMBER-CONDITIONCHECK, DEC 254zzz282 B014-A: pin the new full synth
       // before the existing normalizers, then preserve every old policy/snapshot assertion.
       if (stack.stackName === "agentx-staging-control-plane") {
+        // DEC331: pin the full synth, then assert/subtract only the approved retention delta.
+        expect(createHash("sha256").update(JSON.stringify(template)).digest("hex")).toBe("48c532ab766449dc33c2a59c74235026381ba557a0d037e75569f168258c822d");
+        template = withoutCloseRetention(template);
         expect(createHash("sha256").update(JSON.stringify(template)).digest("hex")).toBe("2075dc4d2c1c19dff2e2489a9404fe36cb304d8d425b7be2ef20177c6c90ac91");
         template = withoutBrokerMemberConditionCheck(template);
       }

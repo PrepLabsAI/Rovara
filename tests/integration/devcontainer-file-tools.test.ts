@@ -85,7 +85,7 @@ function startedMounts(root: string, hostFolder: string): unknown[] {
   return [
     { Type: "bind", Source: root, Destination: root },
     { Type: "bind", Source: hostFolder, Destination: CONTAINER_FOLDER },
-    ...[".agentx", "agent-sessions"].map((name) => ({ Type: "volume", Name: `agentx-mask-${name}`, Source: `/var/lib/docker/volumes/agentx-mask-${name}/_data`, Destination: join(root, name) })),
+    ...[".agentx", "agent-sessions", ".agentx-control"].map((name) => ({ Type: "volume", Name: `agentx-mask-${name}`, Source: `/var/lib/docker/volumes/agentx-mask-${name}/_data`, Destination: join(root, name) })),
   ];
 }
 
@@ -243,7 +243,7 @@ describe("the dev container's start", () => {
     const { cli, calls } = fakeCli();
     await ensureDevcontainer(cli, target);
     const mounts = calls[0]!.flatMap((arg, index) => (calls[0]![index - 1] === "--mount" ? [arg] : []));
-    for (const name of [".agentx", "agent-sessions", ".docker"]) {
+    for (const name of [".agentx", "agent-sessions", ".agentx-control", ".docker"]) {
       expect(mounts.some((mount) => mount.startsWith("type=volume,") && mount.endsWith(`,target=${join(root, name)}`)), name).toBe(true);
     }
   });
@@ -258,7 +258,7 @@ describe("the dev container's start", () => {
     };
     const first = await volumes();
     const second = await volumes();
-    expect(first).toHaveLength(2);
-    expect(new Set([...first, ...second]).size).toBe(4);
+    expect(first).toHaveLength(3);
+    expect(new Set([...first, ...second]).size).toBe(6);
   });
 });

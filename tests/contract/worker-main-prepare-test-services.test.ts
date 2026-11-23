@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from "node:crypto";
 // Test services, slice 1, T2: the worker's PREPARE handler as main.ts wires it. main.ts is imported for real (its server is not started and the preparation itself is replaced), the handler is called with a prepare
 // invocation that carries a `testServices` plan, and what comes back is checked: the plan reaches the preparation, and the usage record the preparation reports rides in the result under `testServicesUsage`.
 import { mkdtemp, realpath, rm } from "node:fs/promises";
@@ -6,7 +7,6 @@ import { join } from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import type * as ServerModule from "../../packages/worker/src/server.js";
 import type * as PrepareModule from "../../packages/worker/src/prepare.js";
-import type * as InvokeAuthModule from "../../packages/worker/src/invoke-auth.js";
 import type * as ChecksRuntimeModule from "../../packages/worker/src/workflow-e2e-application-runtime.js";
 import { TaskDependencyPlanSchema, TestServicesUsageRecordSchema, type TestServicesUsageRecord } from "@agentx/contracts";
 
@@ -33,10 +33,6 @@ vi.mock("../../packages/worker/src/prepare.js", async (importOriginal) => {
     },
   };
 });
-vi.mock("../../packages/worker/src/invoke-auth.js", async (importOriginal) => {
-  const original = await importOriginal<typeof InvokeAuthModule>();
-  return { ...original, invokeAuthenticationFromEnvironment: () => undefined as never };
-});
 vi.mock("../../packages/worker/src/workflow-e2e-application-runtime.js", async (importOriginal) => {
   const original = await importOriginal<typeof ChecksRuntimeModule>();
   return { ...original, createApplicationChecksFeatureMonitor: () => ({ start: () => undefined, executor: {} }) };
@@ -47,6 +43,10 @@ vi.stubEnv("AGENTX_WORKSPACE_ROOT", root);
 vi.stubEnv("AGENTX_CONTROL_PLANE_URL", "http://127.0.0.1:1");
 vi.stubEnv("AGENTX_TASK_SHELL", "local");
 vi.stubEnv("CONTAINED_FOUNDATION_EVIDENCE_DIR", join(root, "evidence"));
+// Use the real authentication parser: boot always supplies a workspace, generation and public key.
+vi.stubEnv("AGENTX_WORKSPACE_ID", "22222222-2222-4222-8222-222222222222");
+vi.stubEnv("AGENTX_SESSION_GENERATION", "1");
+vi.stubEnv("AGENTX_INVOKE_PUBLIC_KEY", generateKeyPairSync("ec", { namedCurve: "prime256v1" }).publicKey.export({ type: "spki", format: "pem" }).toString());
 await import("../../packages/worker/src/main.js");
 afterAll(async () => { vi.unstubAllEnvs(); await rm(root, { recursive: true, force: true }); });
 

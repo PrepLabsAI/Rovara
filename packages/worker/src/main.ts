@@ -1,8 +1,10 @@
 import { withWorkspaceGuard } from "./workspace-quarantine.js";
 import {taskFallbackAuthorizer} from "./model-fallback-authority.js";
-import { evalStandInsOn, type WorkerInvocation } from "@agentx/contracts";
+import { CLOSE_RETENTION_FEATURE, evalStandInsOn, type WorkerInvocation } from "@agentx/contracts";
 import { CONTAINED_RUNTIME_PROFILE, inspectContainedRuntimeReadiness, type ContainedRuntimeReadiness } from "@agentx/verifier";
 import { OperationJournal } from "./journal.js";
+import { CloseRetentionExecutor } from "./close-retention.js";
+import { HostCloseRetentionStorage } from "./close-retention-storage.js";
 import { prepareWorkspace, preparedBaseResult } from "./prepare.js";
 import { publishEgressS3Allow } from "./sandbox-egress-allow.js";
 import { createWorkerCallbackSinks } from "./callback-client.js";
@@ -13,7 +15,7 @@ import { runTaskInvocation } from "./run-task.js";
 import { publishWorkspace } from "./publish.js";
 import { maintainPullRequest } from "./maintain-pull-request.js";
 import { WorkerCancellationController } from "./cancel.js";
-import { closeInvocationResult } from "./close-workspace.js";
+import { closeInvocationResult, inspectWorkspaceForClose } from "./close-workspace.js";
 import { advertisedInvocationFeatures, anotherOperationActive, createWorkerServerState, startWorkerServer } from "./server.js";
 import { consoleWorkerLog, logWorkerStarted } from "./worker-log.js";
 import { invokeAuthenticationFromEnvironment } from "./invoke-auth.js";
@@ -51,14 +53,11 @@ import { createApplicationChecksFeatureMonitor, createWorkflowE2EApplicationRunt
 
 const rootPath = process.env.AGENTX_WORKSPACE_ROOT ?? "/mnt/workspace";
 const port = Number.parseInt(process.env.PORT ?? "8080", 10);
-const trustedRuntimeBackingOwner = CONTAINED_RUNTIME_PROFILE?.id === "linux-arm64-docker-v1"
-  && rootPath === "/mnt/workspace"
-  && CONTAINED_RUNTIME_PROFILE.stateRoot === "/mnt/agentx-runtime/state"
-  ? { uid: 0, gid: 0 }
-  : undefined;
+const trustedRuntimeBackingOwner = trustedRuntimeOwner(rootPath);
 
 // Read first, so a partly configured EC2 boot fails before the port opens.
 const invokeAuthentication = invokeAuthenticationFromEnvironment();
+const { journal, closeStorage, workspaceDataIdentity, retainedAtBoot } = await workerControlLayout(rootPath, process.env.AGENTX_CONTROL_ROOT, invokeAuthentication.generation);
 // Port lane P6 (item B1): the build systems this worker was started with (extra detectors and setup programs). A value that cannot be read stops the boot, so no task runs under a half-described build system.
 const buildSystems = installBuildSystemProfiles();
 if (buildSystems.length > 0) console.log(JSON.stringify({ component: "worker", event: "build-systems.installed", names: buildSystems.map((profile) => profile.name) }));
@@ -67,10 +66,10 @@ process.env.PI_OFFLINE = "1";
 // Pi reports install telemetry and attributes provider requests to itself unless told not to (Pi 1.3+); the worker sends neither.
 process.env.PI_TELEMETRY = "0";
 // N9: a preparation that crashed may have left a package registry's config (and its token) in the workspace; it is removed before any task runs.
-await removeLeftoverRegistryConfigs(rootPath).catch(() => 0);
+if (!retainedAtBoot) await removeLeftoverRegistryConfigs(rootPath).catch(() => 0);
 // R56: where a project without a devcontainer runs its commands comes from the environment (always the task sandbox on EC2),
 // so a bad AGENTX_TASK_SHELL, or a request for the local shell on EC2, stops the worker here, not on its first task.
-if (taskShellSelection().kind === "sandbox") {
+if (!retainedAtBoot && taskShellSelection().kind === "sandbox") {
   // A crash or restart skips a sandbox's removal; none of this process's exists yet, so none found is in use.
   await removeLeftoverTaskSandboxes(rootPath).then(
     (removed) => { if (removed > 0) console.log(JSON.stringify({ component: "worker", event: "task-sandbox.leftovers.removed", removed })); },
@@ -108,12 +107,21 @@ const projectSetupRuntime = createReadinessGatedProjectSetupRuntime(containedRun
 }));
 const applicationChecks = createApplicationChecksFeatureMonitor({ environment: process.env });
 applicationChecks.start();
-const journal = new OperationJournal(rootPath);
 const cancellationController = new WorkerCancellationController();
+const closeRuntime = closeStorage === undefined ? undefined : new CloseRetentionExecutor(journal, closeStorage, () => inspectWorkspaceForClose(rootPath), () => state.activeOperations.size > 0);
 const state = createWorkerServerState(
   journal,
   {
-    invocationFeatures: [...projectSetupRuntime.invocationFeatures, ...testServicesAdvertisedFeatures()],
+    invocationFeatures: [...projectSetupRuntime.invocationFeatures, ...testServicesAdvertisedFeatures(), ...(closeRuntime === undefined ? [] : [CLOSE_RETENTION_FEATURE] as const)],
+    ...(workspaceDataIdentity === undefined ? {} : { workspaceDataIdentity }),
+    ...(closeRuntime === undefined ? {} : {
+      retention: (invocation: WorkerInvocation) => closeRuntime.answer(invocation),
+      admit: async (invocation: WorkerInvocation) => {
+        const accepted = await closeRuntime.admitWriter(invocation);
+        state.executor.workspaceDataIdentity = await closeStorage!.identity();
+        return accepted;
+      },
+    }),
     invocationFeatureDiagnostics: { ...projectSetupRuntime.invocationFeatureDiagnostics, "worker.scratch": workerScratch },
     // Application CHECKS are listed on /ping only while this worker can run them, from the last background check (never a Docker call per ping).
     ...applicationChecks.executor,
@@ -123,6 +131,8 @@ const state = createWorkerServerState(
     peek: (invocation) => handlePeekInvocation(invocation, rootPath),
     // FIX-RUNNER-ABORT-JOIN: every kind of invocation (preparation, publication, maintenance, a task) runs inside the workspace-safety latch, so a command that could not be confirmed stopped is recorded and quarantined wherever it ran.
     execute: (invocation: WorkerInvocation): Promise<unknown> => withWorkspaceGuard(rootPath, async () => {
+      await journal.assertFence(invocation);
+      await closeRuntime?.admitWriter(invocation);
       assertWorkerScratchReady(workerScratch);
       if (invocation.kind === "project-setup-smoke") {
         return projectSetupRuntime.execute(invocation);
@@ -273,7 +283,7 @@ const state = createWorkerServerState(
         return executeWorkerCancelInvocation(invocation, cancellationController, journal);
       }
       if (invocation.kind === "close") {
-        return closeInvocationResult(rootPath, () => anotherOperationActive(state, invocation.operationId));
+        return closeInvocationResult(rootPath, () => anotherOperationActive(state, invocation.operationId), invocation);
       }
       throw new Error(`worker operation ${invocation.kind} is not implemented in this delivery slice`);
     }),
@@ -308,4 +318,20 @@ function requiredEnvironment(name: string): string {
   const value = process.env[name];
   if (!value) throw new Error(`${name} is required for coding tasks`);
   return value;
+}
+
+function trustedRuntimeOwner(root: string): { uid: number; gid: number } | undefined {
+  return CONTAINED_RUNTIME_PROFILE?.id === "linux-arm64-docker-v1"
+    && (root === "/mnt/workspace" || root === "/mnt/workspace/data")
+    && CONTAINED_RUNTIME_PROFILE.stateRoot === "/mnt/agentx-runtime/state" ? { uid: 0, gid: 0 } : undefined;
+}
+
+async function workerControlLayout(root: string, controlRoot: string | undefined, generation: number) {
+  if (controlRoot !== undefined && (controlRoot !== "/mnt/agentx-control" || root !== "/mnt/workspace/data")) throw new Error("invalid trusted worker control layout");
+  const journal = new OperationJournal(root, controlRoot);
+  const closeStorage = controlRoot === undefined ? undefined : new HostCloseRetentionStorage();
+  const workspaceDataIdentity = await closeStorage?.withOwnership("read", () => closeStorage.identity());
+  if (workspaceDataIdentity !== undefined && workspaceDataIdentity.sessionGeneration !== generation) throw new Error("workspace data belongs to another session generation");
+  const retainedAtBoot = (await journal.readRecords()).some((record) => record.closeRetention !== undefined && record.closeRetention.supersededBy === undefined);
+  return { journal, closeStorage, workspaceDataIdentity, retainedAtBoot };
 }

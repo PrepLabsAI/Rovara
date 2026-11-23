@@ -25,7 +25,7 @@ import {
   createGateway, createGuard, dockerRun, ensureNetworks, gatewayAddresses, isolationNames, type IsolationNames, type Run,
 } from "./isolation/stack.js";
 import {
-  ANSWERED_INVOCATION_KINDS,
+  isAnsweredInvocation,
   BUILD_SYSTEM_PROFILES_ENV,
   MachineError,
   TEST_SERVICES_WORKER_MAX_CONTAINERS_VARIABLE,
@@ -642,7 +642,7 @@ export class DockerWorkerMachines implements WorkerMachines {
     // The worker's answer is read at most `ANSWER_MAX_BYTES` (a peek's patch is bounded to 128 KiB by its own schema, a steer answer is a few words): a worker that sends more is not buffered whole.
     const answer = await readBoundedJson(response, ANSWER_MAX_BYTES) as { duplicate?: unknown };
     // A live steer and a peek are answered on this request: the broker reads the answer with the kind's own schema.
-    const answered = (ANSWERED_INVOCATION_KINDS as readonly string[]).includes(invocation.kind) && typeof answer === "object" && answer !== null && !Array.isArray(answer);
+    const answered = isAnsweredInvocation(invocation) && typeof answer === "object" && answer !== null && !Array.isArray(answer);
     return { duplicate: answer.duplicate === true, ...(answered ? { answer: answer } : {}) };
   }
 

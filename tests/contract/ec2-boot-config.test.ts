@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, symlinkSync, unlinkSync, realpathSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
@@ -121,11 +121,9 @@ describe("EC2 worker user data", () => {
     expect(worstCase.openRouterProviders).toHaveLength(512);
     expect(worstCase.anthropicSecretArn).toHaveLength(SECRET_ARN_MAX_LENGTH);
     const compressed = Buffer.from(ec2WorkerUserData(worstCase, bootScript), "base64").length;
-    // EC2 measures user data before base64 encoding; at least 1 KB of it stays free for boot changes. It was 4 KB until the opt-in
-    // TEST qualification hook (about 1.5 KB compressed) and the executor image setting were added, then 2 KB until the container firewall
-    // rules (about 330 bytes compressed) landed, then 1.5 KB until the setup-run rules and their state file (about 600 bytes compressed,
-    // 2026-11-20) landed: this worst case sets every value at its maximum at once, which no real worker's configuration does.
-    expect(compressed).toBeLessThanOrEqual(EC2_USER_DATA_MAX_BYTES - 1_024 - HEADROOM_MARGIN_BYTES);
+    // Boot v2's bounded provenance validation and fail-closed restore unit consume the prior reserve.
+    // Keep 128 bytes plus the existing 32-byte random-input margin below the actual EC2 limit.
+    expect(compressed).toBeLessThanOrEqual(EC2_USER_DATA_MAX_BYTES - 128 - HEADROOM_MARGIN_BYTES);
   });
 
   it("measures the limit on the compressed user data, not the script (#229)", () => {
@@ -152,7 +150,7 @@ describe("EC2 worker user data", () => {
     expect(bootScript).toContain(`printf '{"data-root": "%s"}\\n' "$DOCKER_DATA_ROOT" >/etc/docker/daemon.json`);
     // The daemon starts only after the workspace is mounted, so its data root is on the volume.
     expect(bootScript.indexOf("mount_workspace \"$device\"")).toBeLessThan(bootScript.indexOf("  ensure_docker\n"));
-    expect(workerLauncher).toContain('args=(run --rm --name "$WORKER_CONTAINER" --network host --env-file "$WORKER_ENV_FILE" --volume "$MOUNT_PATH:$MOUNT_PATH")');
+    expect(readFileSync('packages/worker/ec2/close-retention.sh', 'utf8')).toContain('args+=(--volume "$MOUNT_PATH:$MOUNT_PATH")');
     expect(workerLauncher).toContain('args+=(--volume "$RUNTIME_ROOT:$RUNTIME_ROOT" --env CONTAINED_FOUNDATION_EVIDENCE_DIR="$RUNTIME_ROOT/evidence" --env TMPDIR="$RUNTIME_ROOT/tmp")');
     expect(workerLauncher).toContain("args+=(--env TMPDIR=/tmp)");
     expect(bootScript).toContain("ExecStart=/usr/local/libexec/agentx-worker-start");
@@ -194,7 +192,7 @@ describe("EC2 worker user data", () => {
     expect(bootScript).toMatch(/\[Unit\][^]*?After=docker\.service network-online\.target systemd-resolved\.service\nWants=network-online\.target\nBefore=\$WORKER_UNIT/);
     expect(bootScript).toContain("ExecStart=/bin/bash /usr/local/libexec/rovara-container-firewall");
     // A worker must not start unless the rules are in place: it requires and follows the firewall unit.
-    expect(bootScript).toContain("Requires=docker.service $FIREWALL_UNIT\nAfter=docker.service $FIREWALL_UNIT network-online.target");
+    expect(bootScript).toContain("Requires=docker.service $FIREWALL_UNIT $RESTORE_UNIT\nAfter=docker.service $FIREWALL_UNIT $RESTORE_UNIT network-online.target");
     expect(bootScript).toContain('systemctl enable "$FIREWALL_UNIT" && bash /usr/local/libexec/rovara-container-firewall || fail');
     expect(bootScript).not.toContain("rovara-imds-drop");
     expect(bootScript).toContain('docker pull "$EXECUTOR_IMAGE"');
@@ -287,8 +285,10 @@ function runBootFunction(name: string, args: string[], environment: Record<strin
   expect(start, `${name} is in boot.sh`).toBeGreaterThan(-1);
   let text = bootScript.slice(start + 1, end + 3);
   for (const [from, to] of replace) text = text.split(from).join(to);
-  const program = `log() { printf 'agentx-boot: %s\\n' "$*" >&2; }\n${text}\n${name} "$@"`;
-  const ran = spawnSync("bash", ["-c", program, "bash", ...args], { encoding: "utf8", env: { PATH: process.env.PATH ?? "", ...environment } });
+  const failStart = bootScript.indexOf("\nfail() {");
+  const failFunction = bootScript.slice(failStart + 1, bootScript.indexOf("\n}\n", failStart) + 3);
+  const program = `${failFunction}\nlog() { printf 'agentx-boot: %s\\n' "$*" >&2; }\n${text}\n${name} "$@"`;
+  const ran = spawnSync("bash", ["-c", program, "bash", ...args], { encoding: "utf8", env: { PATH: process.env.PATH ?? "", FAILURE_FILE: join(tmpdir(), `close-retention-failure-${randomUUID()}`), ...environment } });
   return { status: ran.status, stdout: ran.stdout, stderr: ran.stderr };
 }
 
@@ -342,7 +342,7 @@ describe("the task sandbox on the worker", () => {
   });
 
   it("mounts the workspace inside the worker at the path it has on the host, so the sandbox's bind mount names the same files", () => {
-    expect(bootScript).toContain('--volume "$MOUNT_PATH:$MOUNT_PATH"');
+    expect(readFileSync('packages/worker/ec2/close-retention.sh', 'utf8')).toContain('--volume "$MOUNT_PATH:$MOUNT_PATH"');
   });
 });
 
@@ -776,4 +776,81 @@ describe("saved environment builder boot field", () => {
       expect(() => Ec2WorkerBootConfigSchema.parse({ ...config, savedEnvBuilderImage: image })).toThrow();
     }
   });
+});
+
+describe("retention boot provenance v2", () => {
+  const helper = readFileSync("packages/worker/ec2/close-retention.sh", "utf8");
+  it("pins exactly the tested helper bytes in trusted user-data", () => {
+    expect(bootScript).toContain(`readonly CLOSE_HELPER_SHA256=${createHash("sha256").update(helper).digest("hex")}`);
+    expect(bootScript).not.toContain('/bin/bash "$c/helper.sh"');
+    expect(helper).not.toContain('install -o root -g root -m 0755 "$0"');
+  });
+  it("executes the actual bounded regular-file/hash validator before publishing a helper", () => {
+    const checker = bootScript.split("<<'CHECK'\n")[1]!.split("\nCHECK")[0]!
+      .replace("(0,0,0o600)", `(${process.getuid!()},${process.getgid!()},0o600)`);
+    const root = mkdtempSync(join(tmpdir(), "close-ret-validate-")), file = join(root, "helper");
+    const bytes = "#!/bin/bash\nexit 0\n";
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    writeFileSync(file, bytes, { mode: 0o600 });
+    const check = (digest = hash) => spawnSync("python3", ["-c", checker, file, digest], { encoding: "utf8" }).status;
+    expect(check()).toBe(0); expect(check("0".repeat(64))).not.toBe(0);
+    chmodSync(file, 0o666); expect(check()).not.toBe(0); chmodSync(file, 0o600);
+    writeFileSync(file, "x".repeat(262145)); expect(check(createHash("sha256").update("x".repeat(262145)).digest("hex"))).not.toBe(0);
+    writeFileSync(file, bytes); const link = join(root, "link"); linkSync(file, link); expect(check()).not.toBe(0); unlinkSync(link);
+    unlinkSync(file); const target = join(root, "target"); writeFileSync(target, bytes, { mode: 0o600 });
+    symlinkSync(target, file); expect(check()).not.toBe(0); unlinkSync(file);
+    symlinkSync(join(root, "missing"), file); expect(check()).not.toBe(0); unlinkSync(file);
+    expect(spawnSync("mkfifo", [file]).status).toBe(0);
+    const fifo = spawnSync("python3", ["-c", checker, file, hash], { encoding: "utf8", timeout: 1500 });
+    expect(fifo.error).toBeUndefined(); expect(fifo.status).not.toBe(0); unlinkSync(file);
+    writeFileSync(file, "", { mode: 0o600 }); expect(check(createHash("sha256").update("").digest("hex"))).not.toBe(0);
+  });
+  it("runs the real restore script against a planted volume helper and malformed control state", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "close-ret-planted-"))), control = join(root, ".agentx-control"), marker = join(root, "executed");
+    mkdirSync(control, { mode: 0o755 });
+    writeFileSync(join(control, "helper.sh"), `#!/bin/bash\ntouch '${marker}'\n`, { mode: 0o755 });
+    writeFileSync(join(control, "ownership.lock"), "", { mode: 0o600 });
+    writeFileSync(join(control, "current.json"), '{"schemaVersion":1,"generation":{"dataGeneration":"12345678-1234-4234-8234-123456789abc"}}', { mode: 0o600 });
+    const script = join(root, "trusted.sh"), mountInfo = join(root, "mountinfo");
+    writeFileSync(mountInfo, "");
+    writeFileSync(script, helper.replaceAll("/proc/self/mountinfo", mountInfo).replaceAll("/mnt/workspace", root).replace("HOST_UID=0; WORKER_UID=1000", `HOST_UID=${process.getuid!()}; WORKER_UID=${process.getuid!()}`));
+    const result = spawnSync("bash", [script, "restore", randomUUID(), "1", "i-0123456789abcdef0", "vol-0123456789abcdef0"], { encoding: "utf8" });
+    expect(result.status).not.toBe(0); expect(result.stderr).toContain("invalid control state"); expect(existsSync(marker)).toBe(false);
+  });
+  it("requires successful validated restore or safe legacy initialization before worker startup", () => {
+    const unit = bootScript.slice(bootScript.indexOf('cat >"/etc/systemd/system/$WORKER_UNIT"'));
+    expect(unit).toContain("Requires=docker.service $FIREWALL_UNIT $RESTORE_UNIT");
+    expect(unit).toContain("After=docker.service $FIREWALL_UNIT $RESTORE_UNIT network-online.target");
+    expect(bootScript).toContain("Type=oneshot\nRemainAfterExit=yes\nExecStart=/bin/bash /usr/local/libexec/agentx-retention-restore");
+    expect(bootScript).toContain("After=docker.service\nBefore=$WORKER_UNIT");
+    expect(bootScript).toContain('chmod 0500 "$helper_tmp"; mv -fT "$helper_tmp" "$HOST_RUN/helper.sh"');
+    expect(bootScript).not.toContain('[[ ! -e "$c/current.json" ]] || fail');
+    const launcher = /<<'LAUNCHER'\n([\s\S]*?)\nLAUNCHER/u.exec(bootScript)![1]!;
+    expect(launcher).toContain('. "$f" || exit 1');
+    expect(launcher).not.toContain('if [[ -f "$MOUNT_PATH/.agentx-control/current.json" ]]');
+  });
+});
+
+it("pins the isolated extraction and data-only journal mount commands (real Docker proof is deferred to Linux)", () => {
+  expect(bootScript).toContain('docker run --rm --pull=never --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint /bin/cat "$AGENTX_WORKER_IMAGE" /opt/agentx/packages/worker/ec2/close-retention.sh');
+  const helper = readFileSync("packages/worker/ec2/close-retention.sh", "utf8");
+  expect(helper).toContain('chmod 0444 "$mounts_tmp"');
+  expect(helper).toContain('mv -fT "$mounts_tmp" "$HOST_RUN/worker-mounts"');
+  expect(helper).toContain('mount -o remount,bind,rw,nodev,nosuid,noexec "$RUN/journal"');
+  expect(helper).toContain('mount --make-rprivate "$RUN/journal"');
+  expect(helper).toContain('dst=/mnt/agentx-control,bind-propagation=rprivate');
+  expect(helper).not.toContain('--volume /run/agentx-close-retention-host');
+});
+
+it("requires the actual boot configuration's ECR digest before a pull", () => {
+  const env = Object.fromEntries(["AGENTX_WORKSPACE_ID", "AGENTX_SESSION_GENERATION", "AGENTX_VOLUME_ID", "AGENTX_INVOKE_PUBLIC_KEY", "AGENTX_CONTROL_PLANE_URL", "AGENTX_MODEL_PROVIDER", "AGENTX_MODEL_ID", "PI_CACHE_RETENTION", "AGENTX_LOG_GROUP"].map(key => [key, "fixture"]));
+  const run = (image: string) => runBootFunction("require_configuration", [], { ...env, AGENTX_EXPECT_NEW_VOLUME: "false", AGENTX_WORKER_IMAGE: image }).status;
+  expect(run(config.workerImage)).toBe(0);
+  for (const bad of [config.workerImage.replace("@sha256:", ":"), "node:latest", config.workerImage.replace("b".repeat(64), "B".repeat(64))]) expect(run(bad)).not.toBe(0);
+});
+it("executes the real RepoDigest membership parser, rejecting IDs, tags and absent exact membership", () => {
+  const parser = bootScript.split("docker image inspect --format '{{json .RepoDigests}}'")[1]!.split("python3 -c '")[1]!.split("'")[0]!;
+  const parse = (value: unknown) => spawnSync("python3", ["-c", parser, config.workerImage], { encoding: "utf8", input: JSON.stringify(value) }).status;
+  expect(parse([config.workerImage])).toBe(0);
+  for (const value of [null, {}, config.workerImage, [], [config.workerImage, false], ["sha256:" + "b".repeat(64)], [config.workerImage.replace("b".repeat(64), "c".repeat(64))]]) expect(parse(value)).not.toBe(0);
 });

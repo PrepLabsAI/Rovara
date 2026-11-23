@@ -11,13 +11,17 @@
 // and the bound `SessionWorkerMachines` reads which company the workspace belongs to on every call and treats a machine of any other company as one that does not exist: it is never started,
 // stopped, ended, asked about or handed a job through that company's adapter.
 import {
-  ANSWERED_INVOCATION_KINDS,
+  isAnsweredInvocation,
   MachineError,
   OrgIdSchema,
   WORKER_INVOKE_AUTHORIZATION_SCHEME,
   WORKER_PING_FEATURES_FIELD,
   workerInvokeToken,
   workerInvokeTokenPayload,
+  needsRetentionBinding,
+  retentionInvocationDigest,
+  WorkspaceDataIdentitySchema,
+  type WorkspaceDataIdentity,
   type DeliveryReceipt,
   type Ec2RuntimeBinding,
   type MachineCapabilities,
@@ -48,6 +52,7 @@ export interface SessionWorkerPing {
   status?: string;
   activeOperations?: number;
   features?: readonly string[];
+  workspaceDataIdentity?: WorkspaceDataIdentity;
 }
 
 export interface SessionWorkerMachinesDependencies {
@@ -225,7 +230,7 @@ export class SessionWorkerMachines implements WorkerMachines {
     const active = typeof reported === "number" && Number.isSafeInteger(reported) && reported >= 0 ? reported : ping.status === "HealthyBusy" ? 1 : 0;
     // What the worker lists now; the list recorded when the session became READY when the ping had none. Unknown is none (fail closed).
     const features = [...(ping.features ?? session.workerFeatures ?? [])];
-    return { state: active > 0 ? "busy" : "ready", activeOperations: active, features, checkedAt };
+    return { state: active > 0 ? "busy" : "ready", activeOperations: active, features, checkedAt, ...reportedIdentity(ping) };
   }
 
   async deliver(machineId: string, invocation: WorkerInvocation): Promise<DeliveryReceipt> {
@@ -248,6 +253,7 @@ export class SessionWorkerMachines implements WorkerMachines {
       fence: invocation.fence,
       expiresAt: Math.floor(this.#now() / 1_000) + SESSION_INVOKE_TOKEN_SECONDS,
       purpose: "WORKSPACE",
+      ...retentionClaims(invocation),
       ...(invocation.kind === "publish" && invocation.payload.publicationMode !== undefined
         ? { publicationMode: invocation.payload.publicationMode, publicationContextDigest: invocation.payload.publicationContextDigest }
         : {}),
@@ -266,7 +272,7 @@ export class SessionWorkerMachines implements WorkerMachines {
     if (response.status === 400 || response.status === 409 || response.status === 413) throw new MachineError("rejected", `the worker refused the job (HTTP ${response.status})`);
     if (response.status < 200 || response.status >= 300) throw new MachineError("unavailable", `the worker answered HTTP ${response.status}`);
     const answer = readAnswer(response.body);
-    const answered = (ANSWERED_INVOCATION_KINDS as readonly string[]).includes(invocation.kind);
+    const answered = isAnsweredInvocation(invocation);
     return { duplicate: answer.duplicate === true, ...(answered ? { answer } : {}) };
   }
 
@@ -318,7 +324,9 @@ export function sessionWorkerPing(body: unknown): SessionWorkerPing {
   if (typeof body !== "object" || body === null) return {};
   const value = body as Record<string, unknown>;
   const listed = value[WORKER_PING_FEATURES_FIELD];
+  const identity = WorkspaceDataIdentitySchema.safeParse(value.workspaceDataIdentity);
   return {
+    ...(identity.success ? { workspaceDataIdentity: identity.data } : {}),
     ...(typeof value.status === "string" ? { status: value.status } : {}),
     ...(typeof value.activeOperations === "number" ? { activeOperations: value.activeOperations } : {}),
     ...(Array.isArray(listed) ? { features: listed.filter((feature): feature is string => typeof feature === "string") } : {}),
@@ -374,4 +382,12 @@ export class SessionWorkerFleet implements WorkerMachines {
   async deliver(): Promise<DeliveryReceipt> {
     throw new MachineError("rejected", FLEET_UNBOUND_WORDS);
   }
+}
+
+function retentionClaims(invocation: WorkerInvocation): { retentionProtocolVersion: 1; retentionPayloadDigest: string } | Record<string, never> {
+  return needsRetentionBinding(invocation) ? { retentionProtocolVersion: 1, retentionPayloadDigest: retentionInvocationDigest(invocation) } : {};
+}
+
+function reportedIdentity(ping: SessionWorkerPing): Pick<MachineHealth, "workspaceDataIdentity"> {
+  return ping.workspaceDataIdentity === undefined ? {} : { workspaceDataIdentity: ping.workspaceDataIdentity };
 }

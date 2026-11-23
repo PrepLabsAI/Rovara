@@ -53,3 +53,17 @@ describe("accepted close record boundaries", () => {
     expect(await w.rows()).toEqual(before);
   });
 });
+
+it("a legacy claim arriving between the preview snapshot and acceptance leaves every close row alone (N5)", async () => {
+  const w = await world(), transact = w.h.store.transact.bind(w.h.store); let raced = false, before: StoredDocument[] = [];
+  w.h.store.transact = async items => {
+    if (!raced) {
+      raced = true;
+      await w.h.store.update({ key: workspaceKey(w.h.deps.companyId, w.task.workspaceId), ops: [change.set("legacyCloseClaim", w.task.taskId)] });
+      before = await w.rows();
+    }
+    return transact(items);
+  };
+  await expect(w.h.flow.close(w.h.owner, w.task.taskId, w.input)).rejects.toMatchObject({ code: "CHANGE_STALE" });
+  expect(await w.rows()).toEqual(before);
+});

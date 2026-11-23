@@ -1,3 +1,4 @@
+import { SessionCloseDestroySchema } from "@agentx/contracts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
@@ -38,7 +39,8 @@ export const SessionStepSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("probePing"), privateIp: z.ipv4() }).strict(),
   z.object({ action: z.literal("markReady"), workspaceId: uuid, generation }).strict(),
   z.object({ action: z.literal("markFailed"), workspaceId: uuid, generation, error: z.string().max(16_384) }).strict(),
-  z.object({ action: z.literal("markDeleted"), workspaceId: uuid }).strict(),
+  z.object({ action: z.literal("markDeleted"), workspaceId: uuid, closeDestroy: SessionCloseDestroySchema.nullable().optional() }).strict(),
+  z.object({ action: z.literal("validateDeletion"), workspaceId: uuid, closeDestroy: SessionCloseDestroySchema.nullable().optional() }).strict(),
 ]);
 
 export type SessionStep = z.infer<typeof SessionStepSchema>;
@@ -60,7 +62,7 @@ export interface WorkerSettings {
 }
 
 export interface SessionStepsDependencies {
-  sessions: Pick<SessionManager, "markVolume" | "markInstance" | "markReady" | "markFailed" | "markDeleted">;
+  sessions: Pick<SessionManager, "markVolume" | "markInstance" | "markReady" | "markFailed" | "markDeleted" | "validateDeletion">;
   workerSettings: () => Promise<WorkerSettings>;
   /** The invoke signing key's public key as base64 DER, as KMS GetPublicKey returns it. */
   invokePublicKey: () => Promise<string>;
@@ -162,14 +164,7 @@ export function createSessionStepsHandler(dependencies: SessionStepsDependencies
         await dependencies.sessions.markVolume(step.workspaceId, step.generation, step.volumeId);
         return {};
       case "recordInstance":
-        if (step.instanceType === undefined) {
-          await dependencies.sessions.markInstance(step.workspaceId, step.generation, step.instanceId, step.privateIp);
-        } else {
-          await dependencies.sessions.markInstance(step.workspaceId, step.generation, step.instanceId, step.privateIp, {
-            instanceType: step.instanceType,
-            ...(step.machineFallback === undefined || step.machineFallback === null ? {} : { machineFallback: step.machineFallback }),
-          });
-        }
+        await recordInstanceStep(dependencies, step);
         return {};
       case "probePing": {
         let ping: WorkerPing | undefined;
@@ -194,8 +189,11 @@ export function createSessionStepsHandler(dependencies: SessionStepsDependencies
         return dependencies.sessions.markReady(step.workspaceId, step.generation);
       case "markFailed":
         return dependencies.sessions.markFailed(step.workspaceId, step.generation, plainFailure(step.error));
+      case "validateDeletion":
+        await dependencies.sessions.validateDeletion(step.workspaceId, step.closeDestroy ?? undefined);
+        return {};
       case "markDeleted":
-        await dependencies.sessions.markDeleted(step.workspaceId);
+        await markDeletedStep(dependencies, step);
         return {};
     }
   };
@@ -252,3 +250,12 @@ export const handler = createSessionStepsHandler({
   ...(process.env["ROVARA_SAVED_ENVIRONMENTS"] === "1" && process.env["AGENTX_SAVED_ENV_BUILDER_IMAGE"] ? { savedEnvBuilderImage: process.env["AGENTX_SAVED_ENV_BUILDER_IMAGE"] } : {}),
   sandboxEgressGateway: workerSandboxEgressGateway(process.env),
 });
+
+async function recordInstanceStep(deps: SessionStepsDependencies, step: Extract<SessionStep, { action: "recordInstance" }>): Promise<void> {
+  if (step.instanceType === undefined) await deps.sessions.markInstance(step.workspaceId, step.generation, step.instanceId, step.privateIp);
+  else await deps.sessions.markInstance(step.workspaceId, step.generation, step.instanceId, step.privateIp, { instanceType: step.instanceType, ...(step.machineFallback == null ? {} : { machineFallback: step.machineFallback }) });
+}
+async function markDeletedStep(deps: SessionStepsDependencies, step: Extract<SessionStep, { action: "markDeleted" }>): Promise<void> {
+  if (step.closeDestroy == null) await deps.sessions.markDeleted(step.workspaceId);
+  else await deps.sessions.markDeleted(step.workspaceId, step.closeDestroy);
+}

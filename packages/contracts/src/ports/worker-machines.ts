@@ -5,6 +5,7 @@
 // broker). The port is what the broker does with a machine, in provider-neutral words: start it (or wake it), stop it, ask
 // whether it is healthy, and hand it a job. A job is the worker's existing `WorkerInvocation`; the answer to it comes back
 // through the broker's callback API (the worker posts its terminal result), not through this port.
+import type { WorkspaceDataIdentity } from "../close-retention.js";
 import type { WorkerInvocation } from "../protocol.js";
 import type { Cost } from "./json.js";
 
@@ -47,6 +48,7 @@ export interface MachineHealth {
   /** The optional invocation features this worker build lists now (its `/ping` list). The broker sends a field only when it is listed. */
   features: readonly string[];
   checkedAt: string;
+  workspaceDataIdentity?: WorkspaceDataIdentity;
   /** Short words for a person, never a secret or an address. */
   detail?: string;
 }
@@ -96,6 +98,9 @@ export interface DeliveryReceipt {
 
 /** The invocation kinds a worker answers on the same request and does not journal or run (see `DeliveryReceipt.answer`). */
 export const ANSWERED_INVOCATION_KINDS = ["steer", "peek"] as const;
+export function isAnsweredInvocation(invocation: WorkerInvocation): boolean {
+  return invocation.kind === "steer" || invocation.kind === "peek" || (invocation.kind === "close" && "schemaVersion" in invocation.payload);
+}
 
 export interface WorkerMachines {
   readonly capabilities: MachineCapabilities;

@@ -19,7 +19,7 @@ interface Shape { networks?: string[]; capDrop?: string[] | null }
 const on = (network: string, root: string, shape: Shape = {}): ContainerInspection => ({
   HostConfig: { NetworkMode: network, CapDrop: shape.capDrop === undefined ? ["NET_RAW"] : shape.capDrop },
   NetworkSettings: { Networks: Object.fromEntries((shape.networks ?? [network]).map((name) => [name, {}])) },
-  Mounts: [{ Type: "bind", Source: root, Destination: root }, ...[".agentx", "agent-sessions"].map((name) => ({ Type: "volume", Destination: join(root, name) }))],
+  Mounts: [{ Type: "bind", Source: root, Destination: root }, ...[".agentx", "agent-sessions", ".agentx-control"].map((name) => ({ Type: "volume", Destination: join(root, name) }))],
 });
 
 /** `containers` answers `inspect` in turn for what `up` started. */
@@ -73,7 +73,7 @@ describe("a dev container left from before the host was walled (L4-NETG: bridge 
     expect(events).toEqual(["ensure", "remove old1", "remove old3", "up (removed: old1,old3)"]);
   });
 
-  it("does not look for old containers where the host walls nothing (a laptop)", async () => {
+  it("checks old masks on a laptop without requiring a cloud network", async () => {
     const target = await workspace();
     let asked = false;
     const cli: DevcontainerCli = {
@@ -81,7 +81,7 @@ describe("a dev container left from before the host was walled (L4-NETG: bridge 
       checks: { fullConfiguration: async () => ({ configuration: {}, mergedConfiguration: {} }), existing: async () => { asked = true; return ["x"]; }, inspect: async () => on("bridge", target.rootPath), remove: async () => undefined },
     };
     await ensureDevcontainer(cli, target).catch(() => undefined);
-    expect(asked).toBe(false);
+    expect(asked).toBe(true);
   });
 });
 
