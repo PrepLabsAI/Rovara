@@ -46,6 +46,17 @@ describe("GitHub webhook signature verification", () => {
     expect(verifyGithubWebhookSignature(body, signature, "different-secret")).toBe(false);
   });
 
+  it("accepts only GitHub's own spelling: lower-case prefix and lower-case hex (webhook lane W0)", () => {
+    const body = "{}";
+    const secret = "fixture-webhook-secret";
+    const hex = createHmac("sha256", secret).update(body, "utf8").digest("hex");
+    expect(verifyGithubWebhookSignature(body, `sha256=${hex}`, secret)).toBe(true);
+    expect(verifyGithubWebhookSignature(body, `SHA256=${hex}`, secret)).toBe(false);
+    expect(verifyGithubWebhookSignature(body, `sha256=${hex.toUpperCase()}`, secret)).toBe(false);
+    expect(verifyGithubWebhookSignature(body, `sha1=${hex.slice(0, 40)}`, secret)).toBe(false);
+    expect(verifyGithubWebhookSignature(body, undefined, secret)).toBe(false);
+  });
+
   it("rejects GitHub issue events so they cannot start or update AgentX work", async () => {
     const payload = JSON.stringify({ action: "opened", installation: { id: 777 }, repository: { id: 1234, full_name: "acme/payments" }, issue: { number: 9, title: "Fix it" } });
     const signature = `sha256=${createHmac("sha256", "secret").update(payload).digest("hex")}`;

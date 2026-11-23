@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { IMPLICIT_COMPANY_ID, OrgIdSchema, companyScoped, WORKFLOW_BLOCK_REASONS, WorkflowFeedbackBundleSchema, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleRefSchema, WorkflowSnapshotSchema, collectWorkflowFeedbackBundles, type WorkflowFeedbackBundle, type WorkflowFeedbackBundleRef, type WorkflowFeedbackThreadObservation, observeWorkflowPullRequest, observeWorkflowPullRequestMergedWithFix, recordWorkflowPullRequestHeadTrees, recordWorkflowPullRequestUpdate, workflowFollowsOnlyMerge, type WorkflowSnapshot } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, OrgIdSchema, companyScoped, WORKFLOW_BLOCK_REASONS, WorkflowFeedbackBundleSchema, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleRefSchema, WorkflowSnapshotSchema, collectWorkflowFeedbackBundles, type WorkflowFeedbackBundle, type WorkflowFeedbackBundleRef, type WorkflowFeedbackThreadObservation, observeWorkflowPullRequest, observeWorkflowPullRequestMergedWithFix, recordWorkflowPullRequestHeadTrees, recordWorkflowPullRequestUpdate, workflowFollowsOnlyMerge, type WorkflowSnapshot } from "@agentx/contracts";
 import { githubWorkflowPullRequestKey, type GithubWorkflowPullRequestRecord } from "../developer/task-records.js";
 import { parseGitHubRepository, type GitHubPullRequestFeedback } from "../github-app.js";
 import { verifyGithubWebhookSignature } from "../plugins/code-host/github/signature.js";
@@ -556,6 +556,9 @@ function removeControlCharacters(value: string): string {
   }).join("");
 }
 
+/** The delivery row's expiry for the table's TTL: a NUMBER in epoch SECONDS, 7 days out (an ISO string or milliseconds would silently keep the row forever). */
+export const deliveryExpiry = (at: string): number => Math.floor(Date.parse(at) / 1000) + 7 * 86_400;
+
 export async function reserveGithubWebhookDelivery(input: {
   companyId?: string;
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -584,7 +587,7 @@ export async function reserveGithubWebhookDelivery(input: {
     repositoryId: input.repositoryId,
     eventHash: input.eventHash,
     status: "RECEIVED",
-    receivedAt: input.now,
+    receivedAt: input.now, [INDEX_EXPIRY_ATTRIBUTE]: deliveryExpiry(input.now),
     event: input.event,
     nextAttemptAt: input.now,
     webhookRecoveryPk: recoveryPk,
@@ -624,10 +627,10 @@ export async function completeGithubWebhookDelivery(input: {
     await input.documentClient.send(new UpdateCommand({
       TableName: input.tableName,
       Key: { pk: `GITHUB_DELIVERY#${input.deliveryId}`, sk: "META" },
-      UpdateExpression: "SET #status = :completed, completedAt = :now REMOVE leaseToken, leaseExpiresAt, webhookRecoveryPk, webhookRecoverySk, nextAttemptAt",
+      UpdateExpression: "SET #status = :completed, completedAt = :now, #ttl = :expires REMOVE leaseToken, leaseExpiresAt, webhookRecoveryPk, webhookRecoverySk, nextAttemptAt",
       ConditionExpression: "#status = :processing AND leaseToken = :leaseToken",
-      ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: { ":processing": "PROCESSING", ":leaseToken": input.leaseToken, ":completed": "COMPLETED", ":now": input.now },
+      ExpressionAttributeNames: { "#status": "status", "#ttl": INDEX_EXPIRY_ATTRIBUTE },
+      ExpressionAttributeValues: { ":processing": "PROCESSING", ":leaseToken": input.leaseToken, ":completed": "COMPLETED", ":now": input.now, ":expires": deliveryExpiry(input.now) },
     }));
   } catch (error) {
     if (isConditional(error)) throw new GithubWebhookRefusal("GitHub delivery is missing or already complete");

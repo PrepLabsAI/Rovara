@@ -234,13 +234,16 @@ export class GithubInstallationBindings {
     });
   }
 
-  /** The owner and state of an installation: its binding's, or (no binding) the implicit company's before backfill and nobody's after. */
-  private async ownerAndState(installationId: number): Promise<{ owner: string | undefined; state: InstallationState }> {
+  /**
+   * The owner and state of an installation: its binding's, or (no binding) the implicit company's before backfill and nobody's after. `bound` says whether a binding row names the owner: an
+   * implicit owner (no row) is the install's old single company, which only the legacy webhook path serves (webhook lane W0).
+   */
+  async ownerAndState(installationId: number): Promise<{ owner: string | undefined; state: InstallationState; bound: boolean }> {
     return this.run(async (send) => {
       installationIdSchema.parse(installationId);
       const row = await this.binding(send, installationId);
-      if (row !== undefined) return { owner: row.companyId, state: stateOf(row) };
-      return { owner: await this.marker(send) ? undefined : IMPLICIT_COMPANY_ID, state: "active" as const };
+      if (row !== undefined) return { owner: row.companyId, state: stateOf(row), bound: true };
+      return { owner: await this.marker(send) ? undefined : IMPLICIT_COMPANY_ID, state: "active" as const, bound: false };
     });
   }
 

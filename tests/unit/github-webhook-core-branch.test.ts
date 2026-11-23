@@ -1,0 +1,591 @@
+// Webhook lane W0: the core branch of POST /v1/github/webhooks. The route verifies the HMAC over the raw body first, then maps the delivery (reads only) to a core task and makes that task's tracking row due sooner.
+// Every guard has a test here and a mutant in the lane's MUTANTS.md that this file kills.
+import { createHmac } from "node:crypto";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, prHeadKey, projectRevisionKey } from "@agentx/contracts";
+import { handleGithubWebhookRoute, GITHUB_WEBHOOK_MAX_BYTES } from "../../packages/broker/src/aws/github-webhook-route.js";
+import { GITHUB_DELIVERY_TTL_SECONDS, GITHUB_WEBHOOK_PER_MINUTE, hintTrackingRow, resetGithubWebhookWindows } from "../../packages/broker/src/aws/github-core-webhooks.js";
+import { GithubInstallationBindings } from "../../packages/broker/src/aws/github-credentials.js";
+import { listDueGithubWebhookDeliveries, reserveGithubWebhookDelivery } from "../../packages/broker/src/aws/github-webhooks.js";
+import { stampItem } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { recoveryRowKey, taskRecordKey } from "../../packages/broker/src/core/merge/store.js";
+import { githubWorkflowPullRequestKey } from "../../packages/broker/src/developer/task-records.js";
+import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+
+// The constant-time compare is observed, not replaced: the mutant that swaps it for `===` has the same answers, so only a call count tells.
+const compare = vi.hoisted(() => ({ calls: 0 }));
+vi.mock("node:crypto", async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  const original = actual.timingSafeEqual as (a: Uint8Array, b: Uint8Array) => boolean;
+  return { ...actual, timingSafeEqual: (a: Uint8Array, b: Uint8Array) => { compare.calls += 1; return original(a, b); } };
+});
+
+const ORG_A = "org_aaaaaaaaaaaaaaaaaaaa";
+const ORG_B = "org_bbbbbbbbbbbbbbbbbbbb";
+const SECRET = "fixture-only-webhook-secret-".padEnd(40, "x");
+const NOW = Date.parse("2026-11-23T12:00:00.000Z");
+const DIGEST = "d".repeat(64);
+const SHA = "a".repeat(40);
+const TASK_A = "11111111-1111-4111-8111-111111111111";
+const TASK_B = "22222222-2222-4222-8222-222222222222";
+const WRITES = new Set(["PutCommand", "UpdateCommand", "DeleteCommand", "TransactWriteCommand"]);
+
+interface Seed { taskId: string; company: string; number: number; sha?: string; engine?: "core" | "workflow" | undefined; repo?: string; pinned?: string; tracking?: Record<string, unknown> | null; ended?: boolean }
+
+function seed(db: FakeDynamoDb, input: Seed): void {
+  const repo = input.repo ?? "example/demo";
+  const url = `https://github.com/${repo}/pull/${input.number}`;
+  db.set({ ...taskRecordKey(input.taskId), companyId: input.company, project: "demo", startingRevision: 1, ...(input.ended === true ? { closedAt: "2026-11-22T00:00:00.000Z" } : {}),
+    workflow: { stage: "WAIT_FOR_MERGE", pullRequests: [{ repositoryId: "demo", number: input.number, url, candidateDigest: DIGEST }] } });
+  if (input.engine !== undefined) db.set(stampItem(input.company, input.taskId, { engine: input.engine, areas: { flow: input.engine, build: input.engine, merge: input.engine }, flags: "fixture", stampedAt: "2026-11-22T00:00:00.000Z" }).item);
+  db.set({ ...githubWorkflowPullRequestKey(repo, input.number), entityType: "GITHUB_WORKFLOW_PR", repositoryFullName: repo, repositoryId: "demo", number: input.number, url, taskId: input.taskId, workspaceId: "workspace", candidateDigest: DIGEST });
+  db.set({ ...projectRevisionKey(input.company, "demo", 1), definition: { repositories: [{ name: "demo", url: `https://github.com/${input.pinned ?? repo}.git` }] } });
+  if (input.sha !== undefined) db.set({ ...prHeadKey(input.company, repo, input.sha), entityType: "PR_HEAD", orgId: input.company, taskId: input.taskId, repositoryId: "demo", number: input.number });
+  if (input.tracking !== null) db.set({ ...recoveryRowKey(input.taskId), entityType: "WORKFLOW_MERGE_RECOVERY", kind: "tracking", taskId: input.taskId, nextAttemptAt: NOW + 240_000, attempts: 0, quiet: 3, ...input.tracking });
+}
+
+async function world(options: { perMinute?: number } = {}) {
+  const db = new FakeDynamoDb();
+  const bindings = new GithubInstallationBindings(db, "state");
+  await bindings.backfill(async () => []);
+  await bindings.claim(ORG_A, 77, "acct-a", "operator");
+  await bindings.claim(ORG_B, 78, "acct-b", "operator");
+  seed(db, { taskId: TASK_A, company: ORG_A, number: 7, sha: SHA, engine: "core" });
+  const logs: Array<Record<string, unknown>> = [];
+  const secretCalls: Array<{ refresh?: boolean } | undefined> = [];
+  const legacy = vi.fn(async () => ({ status: "ACCEPTED" as const, deliveryId: "legacy" }));
+  const state = { now: NOW, sequence: 0 };
+  const secret = async (options?: { refresh?: boolean }): Promise<string> => { secretCalls.push(options); return SECRET; };
+  const post = (event: string, payload: unknown, extra: { secret?: string; deliveryId?: string; headers?: Record<string, string | undefined>; raw?: string; signWith?: string; core?: boolean } = {}) => {
+    const raw = extra.raw ?? JSON.stringify(payload);
+    state.sequence += 1;
+    const headers = { "x-github-event": event, "x-github-delivery": extra.deliveryId ?? `550e8400-e29b-41d4-a716-${String(state.sequence).padStart(12, "0")}`,
+      "x-hub-signature-256": `sha256=${createHmac("sha256", extra.signWith ?? extra.secret ?? SECRET).update(raw).digest("hex")}`, ...extra.headers };
+    return handleGithubWebhookRoute({ headers, body: raw, secret, isSecretMissing: () => false, now: () => state.now, log: (entry) => logs.push(entry), legacy,
+      ...(extra.core === false ? {} : { core: { documentClient: db, tableName: "state", bindings, ...(options.perMinute === undefined ? {} : { perMinute: options.perMinute }) } }) });
+  };
+  const row = (taskId = TASK_A) => db.get(recoveryRowKey(taskId).pk, recoveryRowKey(taskId).sk)!;
+  const snapshot = () => JSON.stringify(db.find(() => true).sort((x, y) => `${String(x.pk)}|${String(x.sk)}`.localeCompare(`${String(y.pk)}|${String(y.sk)}`)));
+  const sentAfterSetup = db.commandNames().length;
+  const sentSince = () => db.commandNames().slice(sentAfterSetup);
+  const writesSince = () => sentSince().filter((name) => WRITES.has(name));
+  return { db, bindings, logs, secretCalls, legacy, state, post, row, snapshot, writesSince, sentSince };
+}
+
+const comment = (overrides: Record<string, unknown> = {}) => ({ action: "created", installation: { id: 77 }, repository: { id: 42, full_name: "example/demo" }, issue: { number: 7, pull_request: { url: "https://api.github.com/x" } }, comment: { id: 1 }, ...overrides });
+const pullRequest = (action: string, overrides: Record<string, unknown> = {}) => ({ action, installation: { id: 77 }, repository: { id: 42, full_name: "example/demo" }, pull_request: { number: 7 }, ...overrides });
+const checkSuite = (action: string, sha = SHA, overrides: Record<string, unknown> = {}) => ({ action, installation: { id: 77 }, repository: { id: 42, full_name: "example/demo" }, check_suite: { head_sha: sha }, ...overrides });
+
+beforeEach(() => { compare.calls = 0; vi.restoreAllMocks(); resetGithubWebhookWindows(); });
+
+describe("the signature is checked on the raw body, before any work", () => {
+  it.each([
+    ["a missing header", undefined],
+    ["a malformed header", "sha256=zz"],
+    ["a truncated header", `sha256=${"a".repeat(63)}`],
+    ["the sha1 form", `sha1=${"a".repeat(40)}`],
+    ["an upper-case prefix", `SHA256=${"a".repeat(64)}`],
+    ["upper-case hex", `sha256=${"A".repeat(64)}`],
+    ["an empty header", ""],
+  ])("%s: 403, no secret read, no parse, no write, no legacy call", async (_name, header) => {
+    const w = await world();
+    const parse = vi.spyOn(JSON, "parse");
+    const answer = await w.post("issue_comment", comment(), { headers: { "x-hub-signature-256": header } });
+    expect(answer.status).toBe(403);
+    expect(w.secretCalls).toEqual([]);
+    expect(parse).not.toHaveBeenCalled();
+    expect(w.writesSince()).toEqual([]);
+    expect(w.legacy).not.toHaveBeenCalled();
+    expect(compare.calls).toBe(0);
+  });
+
+  it("a wrong secret, or a body signed for another body: 403 before any parse, mapping, read or write", async () => {
+    for (const mode of ["wrong secret", "other body"] as const) {
+      const w = await world();
+      const parse = vi.spyOn(JSON, "parse");
+      const answer = mode === "wrong secret"
+        ? await w.post("issue_comment", comment(), { signWith: "another-secret-".padEnd(40, "y") })
+        : await w.post("issue_comment", comment(), { headers: { "x-hub-signature-256": `sha256=${createHmac("sha256", SECRET).update(JSON.stringify({ other: 1 })).digest("hex")}` } });
+      expect(answer.status, mode).toBe(403);
+      expect(parse, mode).not.toHaveBeenCalled();
+      // Not even a read of the table: nothing of the installation, the link or the task was looked at.
+      expect(w.sentSince(), mode).toEqual([]);
+      expect(w.legacy).not.toHaveBeenCalled();
+      parse.mockRestore();
+    }
+  });
+
+  it("compares in constant time: the HMAC check goes through timingSafeEqual (observed, valid and invalid)", async () => {
+    const w = await world();
+    await w.post("issue_comment", comment());
+    expect(compare.calls).toBeGreaterThan(0);
+    const before = compare.calls;
+    await w.post("issue_comment", comment(), { signWith: "another-secret-".padEnd(40, "y") });
+    expect(compare.calls).toBeGreaterThan(before);
+  });
+
+  it("checks the HMAC over the raw bytes as received, not over a re-serialised body", async () => {
+    const w = await world();
+    // Different spacing and key order than JSON.stringify would write: only the raw text matches the signature.
+    const raw = `{ "repository" : {"full_name":"example/demo","id":42},\n "installation":{"id":77}, "issue":{"pull_request":{"url":"https://api.github.com/x"},"number":7}, "action":"created","comment":{"id":1} }`;
+    expect(raw).not.toBe(JSON.stringify(JSON.parse(raw)));
+    expect((await w.post("issue_comment", undefined, { raw })).status).toBe(200);
+    expect(w.row().lastHintKind).toBe("comment");
+  });
+
+  it("answers a ping only after a valid signature, and a signed ping writes nothing", async () => {
+    const w = await world();
+    expect((await w.post("ping", { zen: "x" }, { headers: { "x-hub-signature-256": undefined } })).status).toBe(403);
+    expect((await w.post("ping", { zen: "x" }, { signWith: "forged-".padEnd(40, "f") })).status).toBe(403);
+    const answer = await w.post("ping", { zen: "Keep it logically awesome." });
+    expect(answer).toEqual({ status: 200, body: { delivery: "PONG" } });
+    expect(w.writesSince()).toEqual([]);
+  });
+
+  it("refuses a body over 1 MiB before any secret read, and accepts exactly 1 MiB", async () => {
+    const w = await world();
+    const exact = JSON.stringify(comment()) + " ".repeat(GITHUB_WEBHOOK_MAX_BYTES - Buffer.byteLength(JSON.stringify(comment())));
+    expect(Buffer.byteLength(exact)).toBe(GITHUB_WEBHOOK_MAX_BYTES);
+    const big = await w.post("issue_comment", undefined, { raw: exact + " " });
+    expect(big.status).toBe(413);
+    expect(w.secretCalls).toEqual([]);
+    expect(compare.calls).toBe(0);
+    expect((await w.post("issue_comment", undefined, { raw: exact })).status).toBe(200);
+  });
+
+  it("answers a bad delivery id or an event outside the allow-list before any secret read", async () => {
+    const w = await world();
+    expect((await w.post("issue_comment", comment(), { deliveryId: "not-a-uuid" })).status).toBe(403);
+    expect((await w.post("push", { ref: "x" })).status).toBe(403);
+    expect((await w.post("issue_comment", comment(), { headers: { "x-github-event": undefined } })).status).toBe(403);
+    expect(w.secretCalls).toEqual([]);
+  });
+
+  it("makes no Secrets Manager read per forged request: malformed ones read none, well-formed forged ones force at most one re-read per interval", async () => {
+    const w = await world();
+    for (let n = 0; n < 100; n += 1) await w.post("issue_comment", comment(), { headers: { "x-hub-signature-256": "nonsense" } });
+    expect(w.secretCalls).toEqual([]);
+    for (let n = 0; n < 100; n += 1) await w.post("issue_comment", comment(), { signWith: "forged-".padEnd(40, "f") });
+    expect(w.secretCalls.filter((call) => call?.refresh === true)).toHaveLength(1);
+    w.state.now += 31_000;
+    await w.post("issue_comment", comment(), { signWith: "forged-".padEnd(40, "f") });
+    expect(w.secretCalls.filter((call) => call?.refresh === true)).toHaveLength(2);
+    expect(w.writesSince()).toEqual([]);
+  });
+
+  it("answers 503 and does no work while the secret is not configured, without asking the legacy path", async () => {
+    const w = await world();
+    const answer = await handleGithubWebhookRoute({ headers: { "x-github-event": "issue_comment", "x-github-delivery": "550e8400-e29b-41d4-a716-000000000001", "x-hub-signature-256": `sha256=${"a".repeat(64)}` },
+      body: "{}", secret: async () => { throw new Error("missing"); }, isSecretMissing: () => true, now: () => NOW, log: () => undefined, legacy: w.legacy });
+    expect(answer.status).toBe(503);
+    expect(w.legacy).not.toHaveBeenCalled();
+  });
+});
+
+describe("replay protection and the delivery rows", () => {
+  it("the same delivery id twice has one effect; the second is DUPLICATE", async () => {
+    const w = await world();
+    const first = await w.post("issue_comment", comment(), { deliveryId: "550e8400-e29b-41d4-a716-0000000000aa" });
+    expect(first).toMatchObject({ status: 200, body: { delivery: "ACCEPTED" } });
+    const hinted = w.row().lastHintAt;
+    const second = await w.post("issue_comment", comment(), { deliveryId: "550e8400-e29b-41d4-a716-0000000000aa" });
+    expect(second).toMatchObject({ status: 200, body: { delivery: "DUPLICATE" } });
+    expect(w.row().lastHintAt).toBe(hinted);
+  });
+
+  it("the same body under a FRESH delivery id is a duplicate with no effect", async () => {
+    const w = await world();
+    const raw = JSON.stringify(comment());
+    await w.post("issue_comment", undefined, { raw });
+    const hinted = w.row().lastHintAt;
+    w.state.now += 5_000;
+    const replay = await w.post("issue_comment", undefined, { raw });
+    expect(replay).toMatchObject({ status: 200, body: { delivery: "DUPLICATE" } });
+    expect(w.row().lastHintAt).toBe(hinted);
+  });
+
+  it("the same delivery id with a different body is refused", async () => {
+    const w = await world();
+    await w.post("issue_comment", comment(), { deliveryId: "550e8400-e29b-41d4-a716-0000000000bb" });
+    const other = await w.post("issue_comment", comment({ comment: { id: 2 } }), { deliveryId: "550e8400-e29b-41d4-a716-0000000000bb" });
+    expect(other.status).toBe(403);
+  });
+
+  it("binds the event name into the replay identity: a body signed for one event is not a duplicate of another", async () => {
+    const w = await world();
+    const raw = JSON.stringify({ ...comment(), pull_request: { number: 7 } });
+    await w.post("issue_comment", undefined, { raw });
+    const other = await w.post("pull_request_review_comment", undefined, { raw });
+    expect(other).toMatchObject({ status: 200, body: { delivery: "ACCEPTED" } });
+  });
+
+  it("every delivery, body and counter row carries a NUMERIC expiry in epoch seconds, about 7 days out", async () => {
+    const w = await world();
+    await w.post("issue_comment", comment());
+    const expected = Math.floor(NOW / 1000) + GITHUB_DELIVERY_TTL_SECONDS;
+    const rows = w.db.find((item) => /^GITHUB_(DELIVERY|BODY|RL)#/.test(String(item.pk)));
+    expect(rows.map((item) => String(item.pk).split("#")[0]).sort()).toEqual(["GITHUB_BODY", "GITHUB_DELIVERY", "GITHUB_RL"]);
+    for (const item of rows) expect(typeof item[INDEX_EXPIRY_ATTRIBUTE], String(item.pk)).toBe("number");
+    for (const item of rows.filter((entry) => !String(entry.pk).startsWith("GITHUB_RL"))) expect(item[INDEX_EXPIRY_ATTRIBUTE]).toBe(expected);
+    const counter = rows.find((item) => String(item.pk).startsWith("GITHUB_RL"))!;
+    expect(counter[INDEX_EXPIRY_ATTRIBUTE] as number).toBeGreaterThan(Math.floor(NOW / 1000));
+    expect(counter[INDEX_EXPIRY_ATTRIBUTE] as number).toBeLessThan(Math.floor(NOW / 1000) + 3_600);
+  });
+
+  it("the legacy delivery row gets the same numeric 7-day expiry, and a completion refreshes it", async () => {
+    const db = new FakeDynamoDb();
+    const id = "550e8400-e29b-41d4-a716-0000000000cc";
+    const base = { documentClient: db, tableName: "state", deliveryId: id, installationId: 77, repositoryId: 42, eventHash: "e".repeat(64), now: "2026-11-23T12:00:00.000Z",
+      event: { kind: "PR_COMMENT" as const, action: "created", installationId: 77, repositoryId: 42, fullName: "example/demo", number: 7 } };
+    expect(await reserveGithubWebhookDelivery(base)).toBe("reserved");
+    expect(db.get(`GITHUB_DELIVERY#${id}`, "META")![INDEX_EXPIRY_ATTRIBUTE]).toBe(Math.floor(Date.parse(base.now) / 1000) + GITHUB_DELIVERY_TTL_SECONDS);
+  });
+
+  it("a core delivery row is COMPLETED at once, holds no event body, and never enters the legacy recovery index", async () => {
+    const w = await world();
+    const id = "550e8400-e29b-41d4-a716-0000000000dd";
+    await w.post("issue_comment", comment({ comment: { id: 9, body: "secret words" } }), { deliveryId: id });
+    const stored = w.db.get(`GITHUB_DELIVERY#${id}`, "META")!;
+    expect(stored).toMatchObject({ status: "COMPLETED", core: true, companyId: ORG_A });
+    for (const field of ["event", "webhookRecoveryPk", "webhookRecoverySk", "nextAttemptAt", "leaseToken"]) expect(stored[field], field).toBeUndefined();
+    expect(JSON.stringify(w.db.find(() => true))).not.toContain("secret words");
+    expect(await listDueGithubWebhookDeliveries({ documentClient: w.db, tableName: "state", now: "2026-12-30T00:00:00.000Z", limit: 100 })).toEqual([]);
+  });
+
+  it("a wake that fails releases the reservation, so GitHub's redelivery is processed, not taken for a duplicate", async () => {
+    const w = await world();
+    const id = "550e8400-e29b-41d4-a716-0000000000ee";
+    w.db.injectFault({ command: "UpdateCommand", match: (input) => (input.Key as { pk: string }).pk === "WORKFLOW_MERGE_RECOVERY", error: { name: "InternalServerError" } });
+    await expect(w.post("issue_comment", comment(), { deliveryId: id })).rejects.toThrow();
+    expect(w.db.get(`GITHUB_DELIVERY#${id}`, "META")).toBeUndefined();
+    expect(w.db.find((item) => String(item.pk).startsWith("GITHUB_BODY#"))).toEqual([]);
+    expect(await w.post("issue_comment", comment(), { deliveryId: id })).toMatchObject({ body: { delivery: "ACCEPTED" } });
+  });
+});
+
+describe("a signed delivery that maps to nothing is 202 IGNORED with zero writes", () => {
+  type World = Awaited<ReturnType<typeof world>>;
+  const status = (extra: Record<string, unknown> = {}) => ({ sha: SHA, state: "pending", installation: { id: 77 }, repository: { id: 42, full_name: "example/demo" }, ...extra });
+  const cases: Array<[string, (w: World) => unknown, string, () => unknown, string]> = [
+    ["an unknown installation", () => undefined, "issue_comment", () => comment({ installation: { id: 999 } }), "unknown_installation"],
+    ["an unknown repository", () => undefined, "issue_comment", () => comment({ repository: { id: 42, full_name: "example/other" } }), "no_link"],
+    ["an unknown pull request", () => undefined, "issue_comment", () => comment({ issue: { number: 99, pull_request: { url: "https://api.github.com/x" } } }), "no_link"],
+    ["a comment on an issue (not a pull request)", () => undefined, "issue_comment", () => comment({ issue: { number: 7 } }), "unsupported_action"],
+    ["an action the sweep does not care about", () => undefined, "pull_request", () => pullRequest("labeled"), "unsupported_action"],
+    ["a malformed payload", () => undefined, "issue_comment", () => ({ action: "created", installation: { id: "77" } }), "malformed"],
+    ["a pull request event with no pull request", () => undefined, "pull_request", () => comment({ issue: undefined }), "malformed"],
+    ["a review thread event with an action that changes nothing", () => undefined, "pull_request_review_thread", () => pullRequest("edited"), "unsupported_action"],
+    ["a review thread event with no pull request", () => undefined, "pull_request_review_thread", () => comment({ issue: undefined }), "malformed"],
+    ["a check run that was only created", () => undefined, "check_run", () => ({ action: "created", installation: { id: 77 }, repository: { id: 42, full_name: "example/demo" }, check_run: { head_sha: SHA } }), "unsupported_action"],
+    ["a check run of a head Rovara has no task for", () => undefined, "check_run", () => ({ action: "completed", installation: { id: 77 }, repository: { id: 42, full_name: "example/demo" }, check_run: { head_sha: "f".repeat(40) } }), "no_head"],
+    ["a check suite that was only requested", () => undefined, "check_suite", () => checkSuite("requested"), "unsupported_action"],
+    ["a pending commit status", () => undefined, "status", () => status(), "unsupported_action"],
+    ["a head the company has no index for", () => undefined, "check_suite", () => checkSuite("completed", "b".repeat(40)), "no_head"],
+    ["a suspended installation", async (w: World) => { await w.bindings.markLifecycle(77, "suspend", "550e8400-e29b-41d4-a716-0000000000f1"); }, "issue_comment", () => comment(), "installation_inactive"],
+    ["a closed task", (w: World) => seed(w.db, { taskId: TASK_A, company: ORG_A, number: 7, sha: SHA, engine: "core", ended: true }), "issue_comment", () => comment(), "task_ended"],
+    ["a task with no tracking row yet", (w: World) => w.db.delete(recoveryRowKey(TASK_A).pk, recoveryRowKey(TASK_A).sk), "issue_comment", () => comment(), "no_row"],
+    ["a project that pins another repository", (w: World) => seed(w.db, { taskId: TASK_A, company: ORG_A, number: 7, sha: SHA, engine: "core", pinned: "example/elsewhere" }), "issue_comment", () => comment(), "repository_mismatch"],
+    ["a workflow that no longer holds the linked pull request", (w: World) => w.db.set({ ...taskRecordKey(TASK_A), companyId: ORG_A, project: "demo", startingRevision: 1, workflow: { stage: "WAIT_FOR_MERGE", pullRequests: [] } }), "issue_comment", () => comment(), "workflow_mismatch"],
+  ];
+  it.each(cases)("%s", async (_name, arrange, event, payload, reason) => {
+    const w = await world();
+    await arrange(w);
+    const before = w.snapshot();
+    const writesBefore = w.writesSince().length;
+    const answer = await w.post(event, payload());
+    expect(answer).toEqual({ status: 202, body: { delivery: "IGNORED" } });
+    expect(w.snapshot()).toBe(before);
+    expect(w.writesSince().length).toBe(writesBefore);
+    expect(w.logs.filter((entry) => entry.event === "github_webhook.ignored")).toMatchObject([{ reason }]);
+    expect(w.legacy).not.toHaveBeenCalled();
+  });
+
+  it("the answer to GitHub says nothing about why", async () => {
+    const w = await world();
+    const known = await w.post("issue_comment", comment({ installation: { id: 999 } }));
+    const unknown = await w.post("issue_comment", comment({ repository: { id: 42, full_name: "example/other" } }));
+    expect(known).toEqual(unknown);
+  });
+});
+
+describe("the mapping is exact and never crosses a company", () => {
+  it("a delivery under another company's installation wakes nothing, in both directions", async () => {
+    const w = await world();
+    seed(w.db, { taskId: TASK_B, company: ORG_B, number: 7, repo: "example/b-repo", engine: "core" });
+    const before = w.snapshot();
+    // Company B's installation names company A's repository and pull request.
+    expect(await w.post("issue_comment", comment({ installation: { id: 78 } }))).toMatchObject({ status: 202, body: { delivery: "IGNORED" } });
+    expect(w.snapshot()).toBe(before);
+    expect(w.logs.at(-1)).toMatchObject({ event: "github_webhook.ignored", reason: "company_mismatch" });
+    // And company A's installation names company B's.
+    expect(await w.post("issue_comment", comment({ repository: { id: 43, full_name: "example/b-repo" } }))).toMatchObject({ status: 202 });
+    expect(w.snapshot()).toBe(before);
+  });
+
+  it("another company's LEGACY task is ignored too, never handed to the legacy path", async () => {
+    const w = await world();
+    seed(w.db, { taskId: TASK_B, company: ORG_B, number: 9, repo: "example/b-repo", engine: "workflow" });
+    const before = w.snapshot();
+    const answer = await w.post("issue_comment", comment({ repository: { id: 43, full_name: "example/b-repo" }, issue: { number: 9, pull_request: { url: "https://api.github.com/x" } } }));
+    expect(answer).toEqual({ status: 202, body: { delivery: "IGNORED" } });
+    expect(w.legacy).not.toHaveBeenCalled();
+    expect(w.snapshot()).toBe(before);
+    expect(w.logs.at(-1)).toMatchObject({ reason: "company_mismatch" });
+  });
+
+  it("a core task with no company stamp is not the installation's, even for the install's implicit company", async () => {
+    const w = await world();
+    await w.bindings.claim(IMPLICIT_COMPANY_ID, 79, "acct-implicit", "operator");
+    seed(w.db, { taskId: TASK_B, company: IMPLICIT_COMPANY_ID, number: 9, repo: "example/i-repo", engine: "core" });
+    const task = w.db.get(taskRecordKey(TASK_B).pk, taskRecordKey(TASK_B).sk)!;
+    delete task["companyId"];
+    const before = w.snapshot();
+    const answer = await w.post("issue_comment", comment({ installation: { id: 79 }, repository: { id: 44, full_name: "example/i-repo" }, issue: { number: 9, pull_request: { url: "https://api.github.com/x" } } }));
+    expect(answer).toMatchObject({ status: 202, body: { delivery: "IGNORED" } });
+    expect(w.snapshot()).toBe(before);
+    expect(w.logs.at(-1)).toMatchObject({ reason: "company_mismatch" });
+  });
+
+  it("a head-index item that names another company is not believed, even inside this company's partition", async () => {
+    const w = await world();
+    w.db.set({ ...prHeadKey(ORG_A, "example/demo", "e".repeat(40)), entityType: "PR_HEAD", orgId: ORG_B, taskId: TASK_A, repositoryId: "demo", number: 7 });
+    const before = w.snapshot();
+    expect(await w.post("check_suite", checkSuite("completed", "e".repeat(40)))).toMatchObject({ status: 202 });
+    expect(w.snapshot()).toBe(before);
+    expect(w.logs.at(-1)).toMatchObject({ reason: "no_head" });
+  });
+
+  it("a check event is resolved only through the delivering company's own head index", async () => {
+    const w = await world();
+    const before = w.snapshot();
+    expect(await w.post("check_suite", checkSuite("completed", SHA, { installation: { id: 78 } }))).toMatchObject({ status: 202, body: { delivery: "IGNORED" } });
+    expect(w.snapshot()).toBe(before);
+    expect(w.logs.at(-1)).toMatchObject({ reason: "no_head" });
+    expect(await w.post("check_suite", checkSuite("completed"))).toMatchObject({ status: 200, body: { delivery: "ACCEPTED" } });
+    expect(w.row()).toMatchObject({ lastHintKind: "checks" });
+  });
+
+  it("wakes only the row of the task the delivery names", async () => {
+    const w = await world();
+    seed(w.db, { taskId: TASK_B, company: ORG_A, number: 8, sha: "c".repeat(40), repo: "example/demo", engine: "core" });
+    const other = JSON.stringify(w.row(TASK_B));
+    await w.post("issue_comment", comment());
+    expect(w.row()).toMatchObject({ nextAttemptAt: NOW, quiet: 0, lastHintKind: "comment", feedbackDueAt: NOW });
+    expect(JSON.stringify(w.row(TASK_B))).toBe(other);
+  });
+
+  it("leaves a legacy task to the legacy path, with the secret that verified", async () => {
+    const w = await world();
+    seed(w.db, { taskId: TASK_A, company: ORG_A, number: 7, engine: "workflow" });
+    expect((await w.post("issue_comment", comment())).status).toBe(200);
+    expect(w.legacy).toHaveBeenCalledTimes(1);
+    expect(w.legacy).toHaveBeenCalledWith(SECRET);
+    expect(w.writesSince()).toEqual([]);
+  });
+
+  it("an installation with no binding row (the install's old single company) is the legacy path's, not a core wake", async () => {
+    const db = new FakeDynamoDb();
+    const bindings = new GithubInstallationBindings(db, "state");
+    seed(db, { taskId: TASK_A, company: IMPLICIT_COMPANY_ID, number: 7, engine: "core" });
+    const legacy = vi.fn(async () => ({ status: "ACCEPTED" as const, deliveryId: "x" }));
+    const raw = JSON.stringify(comment());
+    const answer = await handleGithubWebhookRoute({ headers: { "x-github-event": "issue_comment", "x-github-delivery": "550e8400-e29b-41d4-a716-0000000000a1", "x-hub-signature-256": `sha256=${createHmac("sha256", SECRET).update(raw).digest("hex")}` },
+      body: raw, secret: async () => SECRET, isSecretMissing: () => false, now: () => NOW, log: () => undefined, legacy, core: { documentClient: db, tableName: "state", bindings } });
+    expect(answer.status).toBe(200);
+    expect(legacy).toHaveBeenCalledTimes(1);
+    expect(db.get(recoveryRowKey(TASK_A).pk, recoveryRowKey(TASK_A).sk)!["lastHintAt"]).toBeUndefined();
+  });
+
+  it("without installation bindings there is no core branch: every delivery goes to the legacy path", async () => {
+    const w = await world();
+    expect((await w.post("issue_comment", comment(), { core: false })).status).toBe(200);
+    expect(w.legacy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("what each event does to the tracking row", () => {
+  it.each([
+    ["pull_request closed", "pull_request", () => pullRequest("closed"), "pull_request", []],
+    ["pull_request synchronize", "pull_request", () => pullRequest("synchronize"), "pull_request", ["checksDueAt"]],
+    ["pull_request_review submitted", "pull_request_review", () => pullRequest("submitted", { review: { id: 1 } }), "review", ["feedbackDueAt"]],
+    ["pull_request_review_thread resolved", "pull_request_review_thread", () => pullRequest("resolved", { thread: { node_id: "t" } }), "comment", ["feedbackDueAt"]],
+    ["pull_request_review_thread unresolved", "pull_request_review_thread", () => pullRequest("unresolved", { thread: { node_id: "t" } }), "comment", ["feedbackDueAt"]],
+    ["pull_request_review_comment created", "pull_request_review_comment", () => pullRequest("created", { comment: { id: 1 } }), "comment", ["feedbackDueAt"]],
+    ["issue_comment edited", "issue_comment", () => comment({ action: "edited" }), "comment", ["feedbackDueAt"]],
+    ["check_suite completed", "check_suite", () => checkSuite("completed"), "checks", ["checksDueAt"]],
+    ["check_run completed", "check_run", () => ({ action: "completed", installation: { id: 77 }, repository: { id: 42, full_name: "example/demo" }, check_run: { head_sha: SHA } }), "checks", ["checksDueAt"]],
+    ["status success", "status", () => ({ sha: SHA, state: "success", installation: { id: 77 }, repository: { id: 42, full_name: "example/demo" } }), "checks", ["checksDueAt"]],
+  ] as const)("%s", async (_name, event, payload, kind, due) => {
+    const w = await world();
+    const answer = await w.post(event, payload());
+    expect(answer).toMatchObject({ status: 200, body: { delivery: "ACCEPTED" } });
+    const row = w.row();
+    expect(row).toMatchObject({ nextAttemptAt: NOW, quiet: 0, lastHintKind: kind, attempts: 0 });
+    for (const field of ["feedbackDueAt", "checksDueAt"]) expect(row[field] !== undefined, field).toBe((due as readonly string[]).includes(field));
+    // Nothing of the delivery is stored but numbers and one fixed word.
+    expect(Object.keys(row).sort()).toEqual(["attempts", "entityType", "kind", "lastHintAt", "lastHintKind", "nextAttemptAt", "pk", "quiet", "sk", "taskId", ...due].sort());
+  });
+
+  it("makes no GitHub call: the receiver has none to make", async () => {
+    // The route's inputs hold no GitHub client at all; the legacy path (which has one) is never reached for a core task.
+    const w = await world();
+    await w.post("issue_comment", comment());
+    expect(w.legacy).not.toHaveBeenCalled();
+  });
+});
+
+describe("hints are monotonic, coalesced and never dropped", () => {
+  it("a hint never moves a row's times backwards, and each is at least a millisecond after the last (a pass that read the row earlier keeps it)", async () => {
+    const w = await world();
+    for (let n = 0; n < 5; n += 1) await w.post("issue_comment", comment({ comment: { id: n } }));
+    expect(w.row().lastHintAt).toBe(NOW + 4);
+    w.state.now -= 60_000;
+    await w.post("issue_comment", comment({ comment: { id: 99 } }));
+    expect(w.row().lastHintAt).toBe(NOW + 5);
+    expect(w.row().feedbackDueAt).toBe(NOW);
+    expect(w.row().nextAttemptAt).toBe(NOW - 60_000);
+  });
+
+  it("a second comment within 20 seconds of the first is recorded, not dropped", async () => {
+    const w = await world();
+    await w.post("issue_comment", comment({ comment: { id: 1 } }));
+    const first = w.row();
+    w.state.now += 5_000;
+    await w.post("issue_comment", comment({ comment: { id: 2 } }));
+    expect(w.row().lastHintAt).toBeGreaterThan(first.lastHintAt as number);
+    expect(w.row().feedbackDueAt).toBe(NOW + 5_000);
+  });
+
+  it("any order of the same events leaves the same row (idempotent, out-of-order safe)", async () => {
+    const events: Array<[string, unknown]> = [["pull_request", pullRequest("closed")], ["pull_request", pullRequest("synchronize")], ["issue_comment", comment()], ["check_suite", checkSuite("completed")]];
+    const permutations = [[0, 1, 2, 3], [3, 2, 1, 0], [1, 3, 0, 2], [2, 0, 3, 1]];
+    const finals: string[] = [];
+    for (const order of permutations) {
+      const w = await world();
+      for (const index of order) { const [event, payload] = events[index]!; await w.post(event, payload); }
+      const { lastHintAt, ...others } = w.row() as Record<string, unknown>;
+      const { lastHintKind, ...rest } = others;
+      expect(lastHintKind).toBeDefined();
+      expect(lastHintAt).toBe(NOW + 3);
+      finals.push(JSON.stringify(Object.entries(rest).sort(([x], [y]) => x.localeCompare(y))));
+    }
+    expect(new Set(finals).size).toBe(1);
+  });
+
+  it("a burst of 50 events on one task leaves one awake row and does not touch its failure count", async () => {
+    const w = await world();
+    for (let n = 0; n < 50; n += 1) await w.post("issue_comment", comment({ comment: { id: n } }));
+    expect(w.row()).toMatchObject({ attempts: 0, nextAttemptAt: NOW, lastHintAt: NOW + 49 });
+  });
+
+  it("a hint does not skip a failing row's backoff, and still records its time", async () => {
+    const w = await world();
+    seed(w.db, { taskId: TASK_A, company: ORG_A, number: 7, sha: SHA, engine: "core", tracking: { attempts: 3, lastAttemptAt: NOW - 10_000, nextAttemptAt: NOW + 170_000 } });
+    await w.post("issue_comment", comment());
+    // 3 failures: a 180 s wait from the last attempt, 170 s from now: the hint leaves the row at its own time.
+    expect(w.row()).toMatchObject({ nextAttemptAt: NOW + 170_000, attempts: 3, lastHintAt: NOW, quiet: 0 });
+    // A failing row whose wait is over is made due now; one far in the future is lowered only to its wait.
+    seed(w.db, { taskId: TASK_A, company: ORG_A, number: 7, sha: SHA, engine: "core", tracking: { attempts: 3, lastAttemptAt: NOW - 400_000, nextAttemptAt: NOW + 900_000 } });
+    await w.post("issue_comment", comment({ comment: { id: 2 } }));
+    expect(w.row().nextAttemptAt).toBe(NOW);
+  });
+
+  it("two hints that land at once both land: a lost compare-and-set is retried", async () => {
+    const w = await world();
+    w.db.injectFault({ command: "UpdateCommand", match: (input) => (input.Key as { pk: string }).pk === "WORKFLOW_MERGE_RECOVERY", error: { name: "ConditionalCheckFailedException" }, times: 2 });
+    expect(await hintTrackingRow({ documentClient: w.db, tableName: "state" }, TASK_A, NOW, { kind: "comment", due: ["feedbackDueAt"] })).toBe("woken");
+    expect(w.row()).toMatchObject({ lastHintAt: NOW, feedbackDueAt: NOW });
+  });
+
+  it("a row that was woken by a concurrent hint every round reports coalesced, never an error", async () => {
+    const w = await world();
+    w.db.injectFault({ command: "UpdateCommand", match: (input) => (input.Key as { pk: string }).pk === "WORKFLOW_MERGE_RECOVERY", error: { name: "ConditionalCheckFailedException" }, times: 50 });
+    expect(await hintTrackingRow({ documentClient: w.db, tableName: "state" }, TASK_A, NOW, { kind: "comment", due: [] })).toBe("coalesced");
+  });
+
+  it("a row of another kind, or none, is never written", async () => {
+    const w = await world();
+    w.db.set({ ...recoveryRowKey(TASK_B), kind: "other", taskId: TASK_B });
+    const before = w.snapshot();
+    expect(await hintTrackingRow({ documentClient: w.db, tableName: "state" }, TASK_B, NOW, { kind: "comment", due: [] })).toBe("no_row");
+    expect(await hintTrackingRow({ documentClient: w.db, tableName: "state" }, "33333333-3333-4333-8333-333333333333", NOW, { kind: "comment", due: [] })).toBe("no_row");
+    expect(w.snapshot()).toBe(before);
+  });
+});
+
+describe("one tenant's flood cannot starve the others", () => {
+  it("an installation over its minute is THROTTLED with no effect, and another installation is not affected", async () => {
+    const w = await world({ perMinute: 3 });
+    seed(w.db, { taskId: TASK_B, company: ORG_B, number: 7, repo: "example/b-repo", engine: "core" });
+    for (let n = 0; n < 3; n += 1) expect((await w.post("issue_comment", comment({ comment: { id: n } }))).body).toMatchObject({ delivery: "ACCEPTED" });
+    const hinted = w.row().lastHintAt;
+    const over = await w.post("issue_comment", comment({ comment: { id: 10 } }));
+    expect(over).toEqual({ status: 202, body: { delivery: "THROTTLED" } });
+    expect(w.row().lastHintAt).toBe(hinted);
+    // Another container (no memory of the minute) is held by the table's own count.
+    resetGithubWebhookWindows();
+    expect(await w.post("issue_comment", comment({ comment: { id: 12 } }))).toEqual({ status: 202, body: { delivery: "THROTTLED" } });
+    expect(w.row().lastHintAt).toBe(hinted);
+    expect(w.logs.filter((entry) => entry.event === "github_webhook.rate_limited").map((entry) => entry.where)).toEqual(["memory", "table"]);
+    expect(w.db.find((item) => String(item.pk).startsWith("GITHUB_DELIVERY#")).length).toBe(3);
+    const other = await w.post("issue_comment", comment({ installation: { id: 78 }, repository: { id: 43, full_name: "example/b-repo" } }));
+    expect(other).toMatchObject({ status: 200, body: { delivery: "ACCEPTED" } });
+    // The next minute starts clean.
+    w.state.now += 61_000;
+    expect((await w.post("issue_comment", comment({ comment: { id: 11 } }))).body).toMatchObject({ delivery: "ACCEPTED" });
+  });
+
+  it("the default allowance is generous (600 a minute) and forged traffic creates no counter rows", async () => {
+    expect(GITHUB_WEBHOOK_PER_MINUTE).toBe(600);
+    const w = await world();
+    for (let n = 0; n < 20; n += 1) await w.post("issue_comment", comment(), { signWith: "forged-".padEnd(40, "f") });
+    expect(w.db.find((item) => String(item.pk).startsWith("GITHUB_RL#"))).toEqual([]);
+  });
+});
+
+describe("logs carry fixed words only", () => {
+  it("no line names the secret, a signature, a repository, a company or a person's words", async () => {
+    const w = await world();
+    const raw = JSON.stringify(comment({ comment: { id: 5, body: "private words of a reviewer" } }));
+    await w.post("issue_comment", undefined, { raw });
+    await w.post("issue_comment", undefined, { raw: raw.replace("private", "other"), signWith: "forged-".padEnd(40, "f") });
+    await w.post("issue_comment", comment({ installation: { id: 999 } }));
+    const text = JSON.stringify(w.logs);
+    for (const forbidden of [SECRET, "sha256=", "example/demo", ORG_A, ORG_B, "private words", "acct-a"]) expect(text).not.toContain(forbidden);
+    expect(w.logs.map((entry) => entry.event)).toEqual(expect.arrayContaining(["github_webhook.accepted", "github_webhook.signature_invalid", "github_webhook.ignored"]));
+  });
+});
+
+// Opus review (W0, b903585c3): three guards no test above failed without.
+describe("Opus review tests", () => {
+  it("one installation's flood in a container does not use up another installation's minute in that same container (the memory window is per installation)", async () => {
+    const w = await world({ perMinute: 3 });
+    seed(w.db, { taskId: TASK_B, company: ORG_B, number: 7, repo: "example/b-repo", engine: "core" });
+    for (let n = 0; n < 6; n += 1) await w.post("issue_comment", comment({ comment: { id: n } }));
+    expect(w.logs.filter((entry) => entry.event === "github_webhook.rate_limited").map((entry) => entry.where)).toEqual(["memory", "memory", "memory"]);
+    // No reset of the windows: the same container now serves the other installation.
+    const other = await w.post("issue_comment", comment({ installation: { id: 78 }, repository: { id: 43, full_name: "example/b-repo" } }));
+    expect(other).toMatchObject({ status: 200, body: { delivery: "ACCEPTED" } });
+    expect(w.row(TASK_B)).toMatchObject({ lastHintKind: "comment" });
+  });
+
+  it("a check event whose head names one task while the pull request's link names another wakes nothing", async () => {
+    const w = await world();
+    seed(w.db, { taskId: TASK_B, company: ORG_A, number: 8, repo: "example/demo", engine: "core" });
+    // The company's own head index says pull request 7 belongs to TASK_B, but pull request 7's link names TASK_A.
+    w.db.set({ ...prHeadKey(ORG_A, "example/demo", "e".repeat(40)), entityType: "PR_HEAD", orgId: ORG_A, taskId: TASK_B, repositoryId: "demo", number: 7 });
+    const before = w.snapshot();
+    expect(await w.post("check_suite", checkSuite("completed", "e".repeat(40)))).toEqual({ status: 202, body: { delivery: "IGNORED" } });
+    expect(w.snapshot()).toBe(before);
+    expect(w.logs.at(-1)).toMatchObject({ event: "github_webhook.ignored", reason: "no_head" });
+  });
+
+  it("a released task is ended: IGNORED with zero writes", async () => {
+    const w = await world();
+    w.db.set({ ...w.db.get(taskRecordKey(TASK_A).pk, taskRecordKey(TASK_A).sk)!, releasedAt: "2026-11-22T00:00:00.000Z" });
+    const before = w.snapshot();
+    expect(await w.post("issue_comment", comment())).toEqual({ status: 202, body: { delivery: "IGNORED" } });
+    expect(w.snapshot()).toBe(before);
+    expect(w.logs.at(-1)).toMatchObject({ reason: "task_ended" });
+  });
+});
