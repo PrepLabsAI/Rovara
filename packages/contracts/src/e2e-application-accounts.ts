@@ -224,15 +224,22 @@ export function deriveE2ESyntheticRuntimeAccountRef(input: { applicationId: stri
   return E2ERuntimeAccountRefSchema.parse({ applicationId: input.applicationId, profileId: input.accountProfileId, revision: 1,
     definitionDigest: sha({ schemaVersion: "e2e-synthetic-account/v1", applicationId: input.applicationId, profileId: input.accountProfileId, recipeDigest: input.recipeDigest }) });
 }
+/**
+ * Until when a registered definition is usable: its own expiry, or the later instant its account's pointer records when the definition was RENEWED. A renewal of an unchanged definition extends the expiry
+ * only (the pointer's `renewedUntil`); the definition, its revision and so the reference a plan is pinned to stay exactly as they were. Only a change of content writes a new revision.
+ */
+export function e2eAccountEffectiveExpiry(definition: Pick<E2EApplicationAccountDefinition, "expiresAt">, renewedUntil?: string): string {
+  return renewedUntil !== undefined && renewedUntil > definition.expiresAt ? renewedUntil : definition.expiresAt;
+}
 export function validateE2EApplicationAccountBinding(input: { contract: E2EApplicationProjectContract; definition: E2EApplicationAccountDefinition;
-  expectedRef: E2ERuntimeAccountRef; now: string }): E2ERuntimeAccountRef {
+  expectedRef: E2ERuntimeAccountRef; now: string; /** The instant the account's pointer says it was renewed until (see `e2eAccountEffectiveExpiry`). */ renewedUntil?: string }): E2ERuntimeAccountRef {
   const contract = E2EApplicationProjectContractSchema.parse(input.contract);
   const definition = E2EApplicationAccountDefinitionSchema.parse(input.definition);
   const reference = E2ERuntimeAccountRefSchema.parse(input.expectedRef);
   const profile = contract.accountProfiles.find((item) => item.profileId === definition.profileId);
   if (!profile || definition.contractDigest !== (profile.scope === "synthetic-test" ? e2eSyntheticAccountContractDigest(contract, profile.profileId) : sha(contract)) || definition.authProfileId !== profile.authProfileId
     || definition.seedProfileId !== profile.seedProfileId || definition.roleRef !== profile.roleRef
-    || definition.applicationId.trim() === "" || definition.tenantIdDigest !== sha(profile.tenantRef) || definition.expiresAt <= input.now
+    || definition.applicationId.trim() === "" || definition.tenantIdDigest !== sha(profile.tenantRef) || e2eAccountEffectiveExpiry(definition, input.renewedUntil) <= input.now
     || (profile.scope === "external-test" && (definition.connectionRef === null || definition.credentialHandleId === null))
     || (profile.scope === "synthetic-test" && definition.connectionRef !== null)
     || (profile.scope === "external-test" && !contract.service?.originBindings.some((origin) => origin.originRef === definition.connectionRef?.originRef))) {
@@ -247,13 +254,14 @@ export function validateE2EApplicationAccountBinding(input: { contract: E2EAppli
  * The ref of a registered definition: the definition must be the one the account's latest pointer names, and it is held to the current approved contract (its
  * contract digest, tenant, role and scope) and to its expiry at `now` (milliseconds). Every refusal is a throw; nothing is returned for a definition that is not current.
  */
-export function resolveE2ELatestAccountRef(input: { contract: E2EApplicationProjectContract; definition: E2EApplicationAccountDefinition; latest: E2EApplicationAccountLatest; now: number }): E2ERuntimeAccountRef {
+export function resolveE2ELatestAccountRef(input: { contract: E2EApplicationProjectContract; definition: E2EApplicationAccountDefinition; latest: E2EApplicationAccountLatest; now: number; renewedUntil?: string }): E2ERuntimeAccountRef {
   const definition = E2EApplicationAccountDefinitionSchema.parse(input.definition);
   const latest = E2EApplicationAccountLatestSchema.parse(input.latest);
   if (latest.revision !== definition.revision || latest.definitionDigest !== e2eApplicationAccountDefinitionDigest(definition)) {
     throw new Error("application account definition is not the latest registered revision of its account");
   }
-  return validateE2EApplicationAccountBinding({ contract: input.contract, definition, expectedRef: deriveE2EApplicationRuntimeAccountRef(definition), now: new Date(input.now).toISOString() });
+  return validateE2EApplicationAccountBinding({ contract: input.contract, definition, expectedRef: deriveE2EApplicationRuntimeAccountRef(definition), now: new Date(input.now).toISOString(),
+    ...(input.renewedUntil === undefined ? {} : { renewedUntil: input.renewedUntil }) });
 }
 
 export function bindE2EApplicationAccountTargets(input: { contract: E2EApplicationProjectContract; applicationId: string; baseTargets: readonly E2ETarget[] }): E2ETarget[] {
