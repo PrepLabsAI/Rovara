@@ -188,10 +188,13 @@ describe("scheduled jobs", () => {
   it("caps a run's budget by the function's time left, less the exit margin", async () => {
     const world = createFakeWorld();
     const budgets: number[] = [];
-    const app = appOver(world, { services: () => ({ ...ALL_SERVICES(), "merge-tracking": { pass: async (options) => { budgets.push(options.budgetMs); return {}; } } }) });
+    const app = appOver(world, { services: () => ({ ...ALL_SERVICES(), "merge-tracking": { pass: async (options) => { budgets.push(options.budgetMs); return {}; } }, "session-sweep": { pass: async (options) => { budgets.push(options.budgetMs); return {}; } } }) });
     await app.handleScheduledJob({ source: "agentx.core-job", job: "merge-tracking" }, { remainingMs: 30_000 });
+    // Merge tracking has its own, smaller exit margin (10 s): its sweep gets a 20 s pass of the 30 s function. Every other job keeps the 20 s margin.
+    await app.handleScheduledJob({ source: "agentx.core-job", job: "session-sweep" }, { remainingMs: 30_000 });
     // Less time left than the margin: no budget at all, so the company is deferred and its job is never called.
     expect(await app.handleScheduledJob({ source: "agentx.core-job", job: "merge-tracking" }, { remainingMs: 5_000 })).toEqual({ job: "merge-tracking", companies: [{ companyId: FAKE_COMPANY, outcome: "deferred" }] });
-    expect(budgets).toEqual([10_000]);
+    expect(await app.handleScheduledJob({ source: "agentx.core-job", job: "session-sweep" }, { remainingMs: 15_000 })).toEqual({ job: "session-sweep", companies: [{ companyId: FAKE_COMPANY, outcome: "deferred" }] });
+    expect(budgets).toEqual([20_000, 10_000]);
   });
 });

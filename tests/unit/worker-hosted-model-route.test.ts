@@ -151,7 +151,7 @@ describe("setupModelPrice on a hosted route (the ledger's price, not a name matc
 
   it("with the route it is priced, and it equals what the hosted meter charges per million tokens for that route", async () => {
     const price = setupModelPrice(STAGING_MODEL, STAGING_ROUTE);
-    expect(price).toEqual({ inputPerMTok: 1, outputPerMTok: 3.2 });
+    expect(price).toMatchObject({ inputPerMTok: 1, outputPerMTok: 3.2 });
     // The ledger: the identity the worker reports for the route, through the hosted meter's own price table (cap price and recorded price).
     const prices = createModelPrices({ providers: () => [], catalog: listPricesPerMillion });
     const identity = routeUsageIdentity(STAGING_ROUTE);

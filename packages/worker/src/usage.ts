@@ -105,6 +105,44 @@ const PRE_STREAM_REFUSAL_DETAILS = new Set([
   "your ChatGPT plan may not allow this model",
 ]);
 
+/**
+ * Reads a session's events for the calls that were MISSING their usage: an assistant call whose response stream began (so a gateway may have settled it) and that was not refused before the stream, yet reported no
+ * tokens and no cost. The ONE place this rule lives: the usage checkpointer counts these calls for the broker (`usageMissingCalls`), and a setup run's spend meter counts them as spend.
+ * Feed it every event of the session, in order. `observe` answers undefined for any event that is not an assistant message's end, and for that end whether the call is a missing-usage one.
+ */
+export function createMissingUsageDetector(): { observe(event: unknown): boolean | undefined } {
+  let streamStarted = false;
+  return {
+    observe(event) {
+      const value = event as { type?: unknown; assistantMessageEvent?: { type?: unknown }; message?: { role?: unknown; stopReason?: unknown; errorMessage?: string; status?: unknown; content?: { type?: unknown; text?: unknown; thinking?: unknown }[]; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } } } } | null | undefined;
+      // Pi emits message_start both for a provider start (unfinished stop reason)
+      // and for a first-event refusal (already error/aborted). Only the former is evidence.
+      if (value?.type === "message_start" && value.message?.role === "assistant" && ["pending", "stop", "length", "toolUse"].includes(String(value.message.stopReason))) streamStarted = true;
+      if (value?.type === "message_update" && value.message?.role === "assistant") {
+        const kind = value.assistantMessageEvent?.type;
+        if (typeof kind === "string" && (kind === "start" || /^(text|thinking|toolcall)_(start|delta|end)$/u.test(kind))) streamStarted = true;
+        return undefined;
+      }
+      if (value?.type !== "message_end" || value.message?.role !== "assistant") return undefined;
+      const message = value.message, u = message.usage;
+      const began = streamStarted || (Array.isArray(message.content) && message.content.some(c => c.type === "toolCall" || (typeof c.text === "string" && c.text.length > 0) || (typeof c.thinking === "string" && c.thinking.length > 0)));
+      streamStarted = false; // a retry is a separate attempt, with its own stream evidence
+      const failure = sanitizeModelCallEvent(event)?.modelCall;
+      const text = message.errorMessage;
+      const status = message.status ?? (failure?.outcome === "failed" ? failure.status : undefined)
+        ?? Number(typeof text === "string" ? (/^([4-5]\d\d)(?=[\s:]|$)/u.exec(text) ?? /^[A-Za-z][A-Za-z0-9 ._-]{0,40} API error \(([4-5]\d\d)\)/u.exec(text))?.[1] : undefined);
+      const refusal = !began && (message.stopReason === "error" || message.stopReason === "aborted") && (
+        (typeof status === "number" && status >= 300 && status <= 599)
+        || (failure?.outcome === "failed" && ["key-rejected", "limit-or-rate-limited", "model-not-found", "request-rejected"].includes(failure.class))
+        || (typeof text === "string" && PRE_STREAM_REFUSAL_DETAILS.has(/^[A-Za-z][A-Za-z0-9 ._-]{0,30} request failed; ([^\n]{1,200})$/u.exec(text)?.[1] ?? ""))
+        || budgetExhaustedFromMarker(text) !== undefined || modelNotAllowedFromMarker(text) !== undefined || text === "Retry cancelled" || text === "Model request refused: the conversation holds tool calls but declares no tools"
+      );
+      // Only a started response stream can be a missing-usage call.
+      return began && !refusal && (u === undefined || ![u.input, u.output, u.cacheRead, u.cacheWrite, u.cost?.total].some(n => typeof n === "number" && Number.isFinite(n) && n > 0));
+    },
+  };
+}
+
 export function createUsageCheckpointer(input: {
   enabled: boolean;
   intervalMs?: number;
@@ -120,7 +158,7 @@ export function createUsageCheckpointer(input: {
   const interval = input.intervalMs ?? USAGE_CHECKPOINT_MS;
   let reported: UsageStats | undefined = input.baseline;
   let checkpointed = false;
-  let streamStarted = false;
+  const detector = createMissingUsageDetector();
   let missingCalls = 0;
   let reportedMissingCalls = 0;
   let last = now();
@@ -142,31 +180,10 @@ export function createUsageCheckpointer(input: {
   return {
     get checkpointed() { return checkpointed; },
     observe(event) {
-      const value = event as { type?: unknown; assistantMessageEvent?: { type?: unknown }; message?: { role?: unknown; stopReason?: unknown; errorMessage?: string; status?: unknown; content?: { type?: unknown; text?: unknown; thinking?: unknown }[]; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } } } } | null | undefined;
-      // Pi emits message_start both for a provider start (unfinished stop reason)
-      // and for a first-event refusal (already error/aborted). Only the former is evidence.
-      if (value?.type === "message_start" && value.message?.role === "assistant" && ["pending", "stop", "length", "toolUse"].includes(String(value.message.stopReason))) streamStarted = true;
-      if (value?.type === "message_update" && value.message?.role === "assistant") {
-        const kind = value.assistantMessageEvent?.type;
-        if (typeof kind === "string" && (kind === "start" || /^(text|thinking|toolcall)_(start|delta|end)$/u.test(kind))) streamStarted = true;
-        return;
-      }
-      if (value?.type !== "message_end" || value.message?.role !== "assistant") return;
-      const message = value.message, u = message.usage;
-      const began = streamStarted || (Array.isArray(message.content) && message.content.some(c => c.type === "toolCall" || (typeof c.text === "string" && c.text.length > 0) || (typeof c.thinking === "string" && c.thinking.length > 0)));
-      streamStarted = false; // a retry is a separate attempt, with its own stream evidence
-      const failure = sanitizeModelCallEvent(event)?.modelCall;
-      const text = message.errorMessage;
-      const status = message.status ?? (failure?.outcome === "failed" ? failure.status : undefined)
-        ?? Number(typeof text === "string" ? (/^([4-5]\d\d)(?=[\s:]|$)/u.exec(text) ?? /^[A-Za-z][A-Za-z0-9 ._-]{0,40} API error \(([4-5]\d\d)\)/u.exec(text))?.[1] : undefined);
-      const refusal = !began && (message.stopReason === "error" || message.stopReason === "aborted") && (
-        (typeof status === "number" && status >= 300 && status <= 599)
-        || (failure?.outcome === "failed" && ["key-rejected", "limit-or-rate-limited", "model-not-found", "request-rejected"].includes(failure.class))
-        || (typeof text === "string" && PRE_STREAM_REFUSAL_DETAILS.has(/^[A-Za-z][A-Za-z0-9 ._-]{0,30} request failed; ([^\n]{1,200})$/u.exec(text)?.[1] ?? ""))
-        || budgetExhaustedFromMarker(text) !== undefined || modelNotAllowedFromMarker(text) !== undefined || text === "Retry cancelled" || text === "Model request refused: the conversation holds tool calls but declares no tools"
-      );
-      // Only a started response stream can contribute a missing-usage call.
-      if (began && !refusal && (u === undefined || ![u.input, u.output, u.cacheRead, u.cacheWrite, u.cost?.total].some(n => typeof n === "number" && Number.isFinite(n) && n > 0))) missingCalls += 1;
+      const missing = detector.observe(event);
+      // Only an assistant message's end goes on; only a started response stream can contribute a missing-usage call.
+      if (missing === undefined) return;
+      if (missing) missingCalls += 1;
       if (!input.enabled || now() - last < interval) return;
       report();
     },

@@ -1,7 +1,7 @@
 import { createPrFeedbackRoutes } from "../../packages/broker/src/core-host/pr-feedback-routes.js";
 import { randomUUID } from "node:crypto";
 import { expect, it, vi } from "vitest";
-import type { CodeHost } from "@agentx/contracts";
+import { mergeTrackingKey, type CodeHost } from "@agentx/contracts";
 import { feedbackWorld } from "../support/pr-feedback-world.js";
 import { createHarness } from "../support/task-flow-harness.js";
 import { collectPrFeedback } from "../../packages/broker/src/core/pr-feedback/collect.js";
@@ -14,22 +14,23 @@ import { toDocument } from "../../packages/broker/src/core/task-flow/records.js"
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
 import { CAPABILITY_HEADER, createCallbackHandler } from "../../packages/broker/src/services/callbacks.js";
 
-it("MT1: unread feedback permits merge observation but holds full reconciliation", async () => {
+it("MT1: unread feedback no longer holds tracking: the pull request is still read and its tracking item written (W1 a), and feedback is asked again in one poll", async () => {
   const w = await feedbackWorld();
   createPrFeedbackRoutes(w.h.deps, async () => ({}));
   w.read.mockRejectedValue(new Error("feedback unavailable"));
   const host = w.registry.get("code-host", "github") as CodeHost;
   const status = vi.spyOn(host, "changeRequestStatus");
   const observe = vi.spyOn(host, "mergeObservation");
-  const before = await readTask(w.h.deps, w.task.taskId);
   expect(await w.tracking.sweep()).toEqual({ attempted: 1 });
   expect(w.read).toHaveBeenCalledTimes(1);
   expect(observe).toHaveBeenCalledTimes(1);
-  expect(status).not.toHaveBeenCalled();
-  // Published-change verification precedes collection and may attach risk/tier facts.
-  expect((await readTask(w.h.deps, w.task.taskId))!.workflow).toMatchObject(before!.workflow!);
+  // Merge tracking finished its own read: the item Merge reads exists, whatever feedback did.
+  expect(status).toHaveBeenCalled();
+  const pr = w.task.workflow!.pullRequests![0]!;
+  expect(await w.h.store.get(mergeTrackingKey(w.task.taskId, pr.repositoryId, pr.number))).toBeDefined();
+  // No coding run was started, and the row keeps its normal pace (feedback is not a failure of tracking), marked as unfinished.
   expect(await workspaceOperations(w.h.deps, w.task.workspaceId)).toEqual([]);
-  expect(await w.h.store.get(recoveryRowKey(w.task.taskId))).toMatchObject({ attempts: 1, nextAttemptAt: w.clock.ms + 60_000 });
+  expect(await w.h.store.get(recoveryRowKey(w.task.taskId))).toMatchObject({ attempts: 0, readState: "feedback_incomplete", nextAttemptAt: w.clock.ms + 60_000 });
 });
 
 it("MT2: unread feedback still observes a merged PR and removes its terminal recovery row", async () => {
@@ -41,11 +42,9 @@ it("MT2: unread feedback still observes a merged PR and removes its terminal rec
   const observe = vi.spyOn(host, "mergeObservation").mockImplementation(async (...args) => ({
     ...await readObservation(...args), state: "merged", headRevision: w.task.workflow!.pullRequests![0]!.headSha!,
   }));
-  const status = vi.spyOn(host, "changeRequestStatus");
   expect(await w.tracking.sweep()).toEqual({ attempted: 1 });
   expect(w.read).toHaveBeenCalledTimes(1);
   expect(observe).toHaveBeenCalledTimes(1);
-  expect(status).not.toHaveBeenCalled();
   expect((await readTask(w.h.deps, w.task.taskId))!.workflow).toMatchObject({ stage: "MERGED", pullRequests: [{ state: "MERGED" }] });
   expect(await w.h.store.get(recoveryRowKey(w.task.taskId))).toBeUndefined();
 });

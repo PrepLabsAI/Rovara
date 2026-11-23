@@ -51,6 +51,13 @@ describe("hosted merge dependencies", () => {
     expect(await store.get(recoveryRowKey(TASK))).toMatchObject({ nextAttemptAt: 1_000, quiet: 0 });
   });
 
+  it("a person's Merge press on a branch that is behind makes a FAILING tracking row due now (never delayed by its backoff)", async () => {
+    const { store, deps } = build();
+    await store.put({ item: { ...recoveryRowKey(TASK), kind: "tracking", taskId: TASK, nextAttemptAt: 900_000, attempts: 3, lastAttemptAt: 1_000, quiet: 3 } });
+    await deps().host.requireSyncForMerge!({ taskId: TASK } as never);
+    expect(await store.get(recoveryRowKey(TASK))).toMatchObject({ nextAttemptAt: 1_000, quiet: 0 });
+  });
+
   it("builds nothing while the install has a company rules service (it is asked only at an approver's verdict)", () => {
     expect(() => build({ policyHook: true }).deps()).toThrow();
   });

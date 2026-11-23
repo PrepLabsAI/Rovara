@@ -22,6 +22,7 @@ import {
   environmentConnectorSecretPrefix,
   environmentE2eFeatureRuntimeCatalogId,
   environmentMetricsNamespace,
+  githubWebhookSecretName,
   environmentProjectSetupRuntimeCatalogId,
   environmentSettingsPrefix,
 } from "./environments.js";
@@ -30,6 +31,9 @@ import {
 export const TEST_SERVICES_SETTING_VARIABLE = "ROVARA_TEST_SERVICES";
 /** DEC 254zm: the variable the hosted functions read the TestServiceImages setting from (aws/hosted-test-services.ts). */
 export const TEST_SERVICE_IMAGES_SETTING_VARIABLE = "ROVARA_TEST_SERVICES_HOSTED_IMAGES";
+
+/** The variable the broker reads the dedicated GitHub webhook secret's name from (derived, DERIVED_BROKER_VARIABLES). */
+export const GITHUB_WEBHOOK_SECRET_VARIABLE = "GITHUB_WEBHOOK_SECRET_ID";
 
 /** The names the broker is given, as one variable. */
 export const BROKER_NAMES_VARIABLE = "AGENTX_NAMES";
@@ -266,6 +270,9 @@ export const DERIVED_BROKER_VARIABLES: readonly DerivedBrokerVariable[] = [
   { variable: "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID", kind: "text", value: environmentE2eFeatureRuntimeCatalogId, legacy: true },
   // Core switch-on blocker (2026-11-17): the channel adapters' secret prefix is the environment's own, so it is derived, making room for the gateway settings.
   { variable: "CHANNEL_ADAPTER_SECRET_PREFIX", kind: "text", value: environmentChannelAdapterSecretPrefix, legacy: true },
+  // Webhook lane W3: the dedicated GitHub webhook secret's NAME (a name only, never a value). The control-plane stack creates the secret under it, readable by the broker's role alone; the
+  // broker's webhook receiver reads it and falls back to the App secret's webhookSecret key ONLY while the dedicated secret has no value. Derived: the broker's 4 KB grows by nothing.
+  { variable: GITHUB_WEBHOOK_SECRET_VARIABLE, kind: "text", value: githubWebhookSecretName, legacy: true },
   // DEC 254h (room for GitHub sign-in): every named broker has the company reads on (infra/lib/developer-signin.ts, hosted wiring (d)); a named environment always deploys the
   // tasks, so the value is the same for every name, and the broker sets it itself. The legacy install, which is never packed, is given none, as before.
   { variable: "COMPANY_READS", kind: "text", value: () => "enabled", legacy: true },

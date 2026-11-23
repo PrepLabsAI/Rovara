@@ -187,13 +187,19 @@ export async function readState(deps: SetupAgentReadDeps, project: string, lates
   if (workspace?.["status"] === "CLOSED") return failed(cancelledWord.stop, cancelledWord.failure);
   const taskPointer = await deps.store.get(location.taskPointerKey());
   if (taskPointer?.["cancelledAt"] !== undefined) return failed(cancelledWord.stop, cancelledWord.failure);
-  const started = Date.parse(pointer.startedAt);
-  const now = deps.now();
-  if (Number.isFinite(started) && now - started > staleAfterMs(limits)) return failed("infrastructure", SETUP_AGENT_FAILURES.stale);
-  // L4-T5: a worker that has said nothing for 10 minutes is gone. Before its first word the machine is still being made, so the run gets an hour from its start.
-  const seen = typeof task.setupAgentSeenAt === "string" ? Date.parse(task.setupAgentSeenAt) : Number.NaN;
-  if (Number.isFinite(seen) ? now - seen > SETUP_RUN_SILENT_MS : Number.isFinite(started) && now - started > SETUP_RUN_FIRST_WORD_MS) return failed("infrastructure", SETUP_AGENT_FAILURES.stale);
+  if (setupRunGone({ startedAt: pointer.startedAt, seenAt: task.setupAgentSeenAt, now: deps.now(), limits })) return failed("infrastructure", SETUP_AGENT_FAILURES.stale);
   return { view: { status: "running", ...base }, pointer };
+}
+
+/**
+ * Whether a run reads as gone: past the longest a run may take, or (L4-T5) a worker that has said nothing for 10 minutes. Before its first word the machine is still being made, so the run gets an hour from its
+ * start. ONE rule for the page's view (`readState`) and for the broker's watchdog that ends the operation (`sweepLostRuns`, setup-run-hang): what the person reads and what the broker does never disagree.
+ */
+export function setupRunGone(input: { startedAt: string | undefined; seenAt: unknown; now: number; limits: SetupAgentLimits }): boolean {
+  const started = typeof input.startedAt === "string" ? Date.parse(input.startedAt) : Number.NaN;
+  if (Number.isFinite(started) && input.now - started > staleAfterMs(input.limits)) return true;
+  const seen = typeof input.seenAt === "string" ? Date.parse(input.seenAt) : Number.NaN;
+  return Number.isFinite(seen) ? input.now - seen > SETUP_RUN_SILENT_MS : Number.isFinite(started) && input.now - started > SETUP_RUN_FIRST_WORD_MS;
 }
 
 // ---- the task's end

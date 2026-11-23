@@ -310,7 +310,8 @@ import { readTaskLegacyProject, boundedCompanyReads, ownPartitionRow, recordInCo
 import { grantKeyFor, namedCompany, revisionKeyFor } from "./company-layout.js";
 import { refuseNamedCompanyName } from "./admin-name-collision.js";
 import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubRecoveryContinuation, readGithubWebhookEvent } from "./github-webhooks.js";
-import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
+import { handleGithubWebhookRoute } from "./github-webhook-route.js";
+import { GithubWebhookRefusal, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
 import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
 import { unsupportedThinkingLevels } from "@agentx/model-runtime/thinking-levels";
 import { executeGitHubTool, toGitHubCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
@@ -1337,55 +1338,26 @@ async function routeServiceRequest(dependencies: AwsBrokerDependencies, tasks: D
 // GitHub's webhook deliveries (#1315): verified by signature, with one retry on a freshly read secret.
 async function routeGithubWebhook(dependencies: AwsBrokerDependencies, request: BrokerHttpRequest): Promise<ReturnType<typeof json>> {
   if (request.method !== "POST") return json({ error: { code: "NOT_FOUND", message: "route not found" } }, request.requestId, 404);
-  if (request.body === undefined || dependencies.githubWebhookSecret === undefined) {
-    return json({ error: { code: "RUNTIME_UNAVAILABLE", message: "GitHub webhook handling is not configured" } }, request.requestId, 503);
-  }
-  const notConfigured = () => json({ error: { code: "RUNTIME_UNAVAILABLE", message: "GitHub webhook handling is not configured" } }, request.requestId, 503);
-  const readWebhookSecret = async (refresh: boolean): Promise<string | undefined> => {
-    try {
-      return await dependencies.githubWebhookSecret?.(refresh ? { refresh: true } : undefined);
-    } catch (error) {
-      if (isWebhookSecretMissing(error)) return undefined;
-      throw error;
-    }
-  };
-  try {
-    const secret = await readWebhookSecret(false);
-    if (secret === undefined) return notConfigured();
+  // Webhook lane W0: the route's front half (shape, secret, HMAC over the raw body, then the core branch) is aws/github-webhook-route.ts; the legacy handlers below run with the secret that verified.
+  const answer = await handleGithubWebhookRoute({
+    headers: request.headers, body: request.body, secret: dependencies.githubWebhookSecret, isSecretMissing: isWebhookSecretMissing, now: Date.now, log: brokerLogLine,
+    ...(dependencies.githubBindings === undefined ? {} : { core: { documentClient: dependencies.documentClient, tableName: dependencies.tableName, bindings: dependencies.githubBindings } }),
     // Guided onboarding PR 3: an `installation` event (uninstalled, suspended, unsuspended) marks the binding; it is verified by the same signature check first.
-    const deliver = (webhookSecret: string) => dependencies.githubBindings !== undefined && isGithubInstallationEvent(request.headers)
+    legacy: (webhookSecret) => dependencies.githubBindings !== undefined && isGithubInstallationEvent(request.headers)
       ? handleGithubInstallationWebhook({ rawBody: request.body ?? "", headers: request.headers, secret: webhookSecret, bindings: dependencies.githubBindings, log: brokerLogLine })
       : handleGithubWebhook({
-      documentClient: dependencies.documentClient,
-      tableName: dependencies.tableName,
-      rawBody: request.body ?? "",
-      headers: request.headers,
-      secret: webhookSecret,
-      ...(dependencies.githubBindings === undefined ? {} : { companyForInstallation: (id: number) => dependencies.githubBindings!.ownerOf(id) }),
-      authorizeRepository: (scope) => githubEventStillAuthorized(dependencies, { kind: "PULL_REQUEST", action: "authorize", ...scope, number: scope.pullRequestNumber }),
-      process: (workflowEvent, deliveryId) => processGithubWorkflowEvent(dependencies, workflowEvent, deliveryId),
-      now: () => new Date().toISOString(),
-    });
-    let result;
-    try {
-      result = await deliver(secret);
-    } catch (error) {
-      if (!(error instanceof GithubWebhookRefusal) || error.message !== GITHUB_WEBHOOK_SIGNATURE_INVALID) throw error;
-      // The secret may have been changed since this container read it. The signature is checked before a delivery is
-      // reserved, so verifying once more with a fresh copy has no side effect.
-      const renewed = await readWebhookSecret(true);
-      if (renewed === undefined) return notConfigured();
-      if (renewed === secret) throw error;
-      result = await deliver(renewed);
-    }
-    if (result.status === "IN_PROGRESS") return json({ delivery: result.status, deliveryId: result.deliveryId }, request.requestId, 503);
-    return json({ delivery: result.status, deliveryId: result.deliveryId }, request.requestId);
-  } catch (error) {
-    if (error instanceof GithubWebhookRefusal) return json({ error: { code: "FORBIDDEN", message: error.message } }, request.requestId, 403);
-    if (error instanceof GithubWebhookRetryableError) return json({ error: { code: "RUNTIME_UNAVAILABLE", message: "GitHub webhook processing will be retried" } }, request.requestId, 503);
-    if (error instanceof AgentXError && error.code === "RUNTIME_UNAVAILABLE") return json({ error: { code: error.code, message: "GitHub webhook processing will be retried" } }, request.requestId, 503);
-    throw error;
-  }
+        documentClient: dependencies.documentClient,
+        tableName: dependencies.tableName,
+        rawBody: request.body ?? "",
+        headers: request.headers,
+        secret: webhookSecret,
+        ...(dependencies.githubBindings === undefined ? {} : { companyForInstallation: (id: number) => dependencies.githubBindings!.ownerOf(id) }),
+        authorizeRepository: (scope) => githubEventStillAuthorized(dependencies, { kind: "PULL_REQUEST", action: "authorize", ...scope, number: scope.pullRequestNumber }),
+        process: (workflowEvent, deliveryId) => processGithubWorkflowEvent(dependencies, workflowEvent, deliveryId),
+        now: () => new Date().toISOString(),
+      }),
+  });
+  return json(answer.body, request.requestId, answer.status);
 }
 
 
@@ -15969,7 +15941,7 @@ const ec2Sessions = new SessionManager({
   },
   ...optionalPicker(machineSizePicker({ documentClient, tableName: process.env.STATE_TABLE_NAME ?? "" })),
 });
-const github = createGitHubAppCredentials(secretsManager);
+const github = createGitHubAppCredentials(secretsManager, brokerLogLine);
 /** Guided onboarding PR 4: Add to Slack (slack-company-install.ts), with the company layer only. Slack's side (the app's client secret, the code exchange, the token store's
  * writer) runs in DeveloperIdentity (slack-install-identity.ts), which this broker already invokes; the broker never reads the Slack app secret. */
 const slackInstallSlack = process.env.COMPANY_SIGNIN !== "enabled" || !process.env.DEVELOPER_IDENTITY_FUNCTION_ARN ? undefined

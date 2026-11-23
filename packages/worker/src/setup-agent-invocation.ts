@@ -92,7 +92,7 @@ export async function runSetupAgentInvocation(
   const events = new EventBatcher(dependencies.eventSink);
   const conversationId = invocation.payload.conversationId;
   const result = await runSetupAgent({
-    rootPath: canonicalRoot, operationId: invocation.operationId, basedOnRevision: invocation.projectRevision, limits: setup.limits, price,
+    rootPath: canonicalRoot, operationId: invocation.operationId, basedOnRevision: invocation.projectRevision, limits: setup.limits, price, cacheRetention: dependencies.model.cacheRetention,
     repositories: manifest.repositories, commits: setup.commits, evalImage: environment[EVAL_WORKER_IMAGE_VARIABLE],
     // L4-E12 (E2): the free dry run of the drafted eval, started without asking, never spending (scripted model replies, no bridge). It needs the worker's own pinned image and the fresh eval sandbox's walls; otherwise it gives nothing.
     evalDryRun: (report, signal) => runSetupEvalDryRun({
@@ -118,6 +118,8 @@ export async function runSetupAgentInvocation(
         openSession: () => createWorkspacePiSession(standInSessionInputOf({ rootPath: dependencies.rootPath, model: dependencies.model }), dependencies.piAdapter),
       },
       progress: async (message) => { await events.append("progress", { message }); },
+      // The run's model spend, booked through the same `usage` event every model session reports (the broker's usage booking counts a resent event once). Urgent: it leaves now, so a run that fails afterwards has still reported it.
+      reportUsage: async (payload) => { await events.append("usage", payload, { urgent: true }); },
       register: (control) => {
         const unregister = dependencies.cancellationController?.register(invocation.operationId, {
           abort: () => control.abort(), steer: (text: string) => control.steer(text), streaming: () => control.streaming(),

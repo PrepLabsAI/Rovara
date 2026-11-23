@@ -1,5 +1,6 @@
 // tests/contract/developer-signin-infrastructure.test.ts
 import { createHash } from "node:crypto";
+import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js";
 import { App, CfnParameter, Stack, aws_iam as iam } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -181,7 +182,8 @@ function withoutBrokerMemberConditionCheck(template: TemplateJson): TemplateJson
 
 describe("broker membership condition-check grant", () => {
   it("adds only the exact member-key statement to the broker; every other action, resource and principal stays pinned", () => {
-    const before = withoutBrokerMemberConditionCheck(namedRaw);
+    // Webhook lane W3: the webhook secret slot, its throttle and its alarm are asserted and taken out too (tests/support/webhook-secret-template.ts), so both pins below still hold.
+    const before = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(namedRaw));
     // The providers branch also adds this exact capability output. Keep a measured
     // combined pin, then remove only the asserted output to retain the upstream pin.
     expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("946f06d30e6b8150a1fe4086c119c5d6d22bf0b83c1981cf1e79b3ca4be6913b");
@@ -378,6 +380,8 @@ describe("developer sign-in infrastructure (named environments)", () => {
     expect(stages).toHaveLength(1);
     const [, stage] = stages[0]!;
     expect(stage.Properties.RouteSettings).toEqual({
+      // Webhook lane W3: the public GitHub webhook route shares this stage map (github-webhook-secret-infrastructure.test.ts checks it in both templates).
+      "POST /v1/github/webhooks": { ThrottlingBurstLimit: 100, ThrottlingRateLimit: 20, DetailedMetricsEnabled: true },
       "ANY /v1/auth/{proxy+}": { ThrottlingBurstLimit: 50, ThrottlingRateLimit: 20 },
       "ANY /v1/dev/{proxy+}": { ThrottlingBurstLimit: 50, ThrottlingRateLimit: 20 },
       "ANY /review/{proxy+}": { ThrottlingBurstLimit: 50, ThrottlingRateLimit: 20 },
@@ -390,6 +394,7 @@ describe("developer sign-in infrastructure (named environments)", () => {
     expect(dependsOn).toContain(routeId("ANY /v1/dev/{proxy+}"));
     expect(dependsOn).toContain(routeId("ANY /review/{proxy+}"));
     expect(dependsOn).toContain(routeId("ANY /v1/app/{proxy+}"));
+    expect(dependsOn).toContain(routeId("POST /v1/github/webhooks"));
   });
 
   it("keeps sign-in records in a retained, point-in-time recoverable table with a TTL", () => {
@@ -687,7 +692,8 @@ describe("task-token key and membership IAM", () => {
 
   it("changes only the named task key, alias, two env vars, public read and membership list item", () => {
     // ENV-ROOM 2 is checked in full by broker-names-parameter-infrastructure.test.ts; its shape is asserted and it is taken out first, so the digest still pins everything else.
-    const remainder = withoutBrokerNamesParameter(withoutBrokerMemberConditionCheck(named));
+    // Webhook lane W3: the webhook secret slot, its throttle and its alarm are asserted and taken out too (tests/support/webhook-secret-template.ts), so the digest below still holds.
+    const remainder = withoutWebhookSecretLane(withoutBrokerNamesParameter(withoutBrokerMemberConditionCheck(named)));
     withoutCoreModelAccessRoute(remainder);
     // Guided onboarding PR 7: the Linear app's webhook route (no authorizer; the broker verifies the HMAC). Its shape is asserted here, then it is taken out so the digest still pins everything else.
     expect(remainder.Resources["LinearWebhookRoute"]).toMatchObject({ Type: "AWS::ApiGatewayV2::Route", Properties: { RouteKey: "POST /v1/linear/webhooks", AuthorizationType: "NONE" } });

@@ -3,13 +3,16 @@ import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createExecutorRunLock, withExecutorRunLock } from "../support/executor-run-lock.js";
+import { createExecutorRunLock } from "../support/executor-run-lock.js";
 
 // F5: the real executor runs share the fixed forwarder port, so the files that run them take turns.
 describe("the executor run lock", () => {
   it("lets one holder at a time in, and runs the next when the first is done, even when the first fails", async () => {
+    // A private lock path, like the test below: the machine-wide lock is held for the length of every real executor run (several seconds of Chromium each, from any vitest run on the machine),
+    // so waiting for it made this test time out whenever one was running. The mechanism under test is the same.
+    const lock = createExecutorRunLock({ path: join(mkdtempSync(join(tmpdir(), "run-lock-")), "lock"), pollMs: 5 });
     const events: string[] = [];
-    const hold = (name: string, ms: number, fail = false) => withExecutorRunLock(async () => {
+    const hold = (name: string, ms: number, fail = false) => lock.withLock(async () => {
       events.push(`${name}:in`);
       await new Promise((done) => setTimeout(done, ms));
       events.push(`${name}:out`);

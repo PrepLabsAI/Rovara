@@ -2,7 +2,7 @@
 // plain message (at most 1,200 visible characters), and every blocked step carries its ways out as buttons. Every
 // value from a record, the model or a reviewer is redacted where it is free text, cut short and escaped here.
 import {
-  CI_FIX_ROUNDS_MAX, workflowFixRounds, isCiFixBlockReason, isBranchSyncBlockReason, WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE,
+  CI_FIX_ROUNDS_MAX, isPlanUnreadableBlockReason, workflowFixRounds, isCiFixBlockReason, isBranchSyncBlockReason, WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE,
   WORKFLOW_KEEP_PULL_REQUESTS_NOTE, WORKFLOW_RESOLVE_FINDINGS_MAX, openReviewFindings, redactText, workflowKeepPullRequestsOffered, sendBackProblems, workflowIsReviewOnly, workflowReviewsSawPartialDiff, workflowCheckResultBroken, workflowSelectedChecks, workflowSendBackOffered, workflowApplicationEvidenceCodes, workflowReadmitsApplicationRound, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { splitTextAtLines } from "@agentx/contracts";
@@ -125,6 +125,7 @@ const REWORDED_REASONS: ReadonlyMap<string, string> = new Map([
   ["No checks ran: this project has no required checks and the task selected no optional checks. Configure or select at least one check, then retry.", WORKFLOW_BLOCK_REASONS.noChecksConfigured],
   ...["failed", "interrupted", "cancelled"].map((status): [string, string] => [`PR feedback review operation ended ${status}`, WORKFLOW_BLOCK_REASONS.feedbackReviewFailed]),
   ["PR feedback review report was invalid, incomplete, or stale", WORKFLOW_BLOCK_REASONS.feedbackReviewFailed],
+  ["the plan couldn't be read", WORKFLOW_BLOCK_REASONS.planUnreadable],
 ]);
 
 /** Whether a pull request's feedback review failed, by the reason stored now or before its wording changed. */
@@ -855,7 +856,7 @@ function stageCopyOf(context: WorkflowMessageContext): { text: string; buttons: 
   if (context.publishFailure !== undefined && workflow.stage === "PULL_REQUEST") return publishFailed(context, exits, context.publishFailure);
   switch (`${workflow.stage}/${workflow.state}`) {
     case "PLAN/RUNNING": return plain(context.planGroundingHeld === true ? PLAN_GROUNDING_HOLD_LINE : planRunning(context));
-    case "PLAN/BLOCKED": return { text: workflow.blockReason === WORKFLOW_BLOCK_REASONS.planUnreadable
+    case "PLAN/BLOCKED": return { text: isPlanUnreadableBlockReason(workflow.blockReason)
       ? planUnreadableText(context)
       : stoppedByOwner(workflow.blockReason) ? plainBlockReason(workflow.blockReason)
       : `I couldn't finish the ${workflowDocumentName(workflow)}. ${plainBlockReason(workflow.blockReason)}`,

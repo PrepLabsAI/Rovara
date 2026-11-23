@@ -1,12 +1,12 @@
 // The GitHub App credentials as the broker and the plan evidence job build them: one definition, from the same environment
 // (GITHUB_APP_CREDENTIAL_REF, GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_SECRET_ARN) and the same secret.
 import { GetSecretValueCommand, type SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
-import { AgentXError, agentXError, companyScoped, GITHUB_DISCONNECTED_MESSAGE, IMPLICIT_COMPANY_ID, OrgIdSchema, REPOSITORY_ACCESS_STATES, type ClientRepositoriesResponse, type RepositoryAccessState } from "@agentx/contracts";
+import { AgentXError, agentXError, companyScoped, GITHUB_DISCONNECTED_MESSAGE, GITHUB_WEBHOOK_SECRET_VARIABLE, IMPLICIT_COMPANY_ID, OrgIdSchema, REPOSITORY_ACCESS_STATES, type ClientRepositoriesResponse, type RepositoryAccessState } from "@agentx/contracts";
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import { boundedCompanyReads } from "./company-check.js";
 import { isConditional } from "./broker-shared.js";
-import { appIdFromSecret, GitHubAppCredentialProvider, isWebhookSecretMissing, privateKeyFromSecret, webhookSecretFromSecret } from "../github-app.js";
+import { appIdFromSecret, GitHubAppCredentialProvider, isWebhookSecretMissing, privateKeyFromSecret, usableWebhookSecret, webhookSecretFromSecret, webhookSecretMissing } from "../github-app.js";
 import { requiredEnvironment } from "./lambda.js";
 
 export interface GitHubAppCredentials {
@@ -14,9 +14,11 @@ export interface GitHubAppCredentials {
   /** The secret's ARN, for the connector credential registry. */
   privateKeySecretArn: string;
   /**
-   * Reads the GitHub webhook HMAC key from the same secret. A copy with no valid key, or `refresh: true`, re-reads the
-   * secret (at most once per REREAD_INTERVAL_MS per container), so a key added or changed after the container started is
-   * picked up without a redeploy.
+   * The GitHub webhook HMAC key. Webhook lane W3: from the DEDICATED secret (GITHUB_WEBHOOK_SECRET_ID, readable by the broker's role alone) once it has a value; the App secret's
+   * `webhookSecret` key is the fallback ONLY while the dedicated secret has no value (not found), never on a throttle, an access or a network error, and never both at once: one source
+   * answers. A dedicated value that is not a usable key (too short, too long) is "not configured" (fail closed), not a reason to fall back.
+   * A copy with no valid key, or `refresh: true`, re-reads (at most once per REREAD_INTERVAL_MS per container), so a key added or changed after the container started is picked up
+   * without a redeploy. A failed or missing answer is remembered for the same interval, so a flood of requests while the secret is missing or erroring costs at most one read per interval.
    */
   webhookSecret: (options?: { refresh?: boolean }) => Promise<string>;
   /**
@@ -28,7 +30,7 @@ export interface GitHubAppCredentials {
 
 const REREAD_INTERVAL_MS = 30_000;
 
-export function createGitHubAppCredentials(secretsManager: Pick<SecretsManagerClient, "send">): GitHubAppCredentials {
+export function createGitHubAppCredentials(secretsManager: Pick<SecretsManagerClient, "send">, log?: (entry: Record<string, unknown>) => void): GitHubAppCredentials {
   const privateKeySecretArn = requiredEnvironment("GITHUB_APP_PRIVATE_KEY_SECRET_ARN");
   const appIdSetting = process.env.GITHUB_APP_ID ?? "";
   let appSecret: Promise<string> | undefined;
@@ -86,18 +88,77 @@ export function createGitHubAppCredentials(secretsManager: Pick<SecretsManagerCl
     appId: clientOptions.appId,
     getPrivateKey: clientOptions.getPrivateKey,
   });
-  const webhookSecret = async (options?: { refresh?: boolean }): Promise<string> => {
-    if (options?.refresh === true) return webhookSecretFromSecret(await reread());
-    try {
-      return webhookSecretFromSecret(await loadSecret());
-    } catch (error) {
-      if (isWebhookSecretMissing(error)) return webhookSecretFromSecret(await reread());
-      throw error;
-    }
-  };
+  const webhookSecret = webhookSecretReader({ secretsManager, dedicatedSecretId: (process.env[GITHUB_WEBHOOK_SECRET_VARIABLE] ?? "").trim(),
+    appSecret: { load: loadSecret, reread }, ...(log === undefined ? {} : { log }) });
   return { provider, privateKeySecretArn, webhookSecret, clientOptions };
 }
 
+/** What a failed Secrets Manager read of the dedicated webhook secret says: a class of failure, never the error's message (which may quote the request). */
+const WEBHOOK_SECRET_UNREADABLE = "GitHub webhook secret could not be read";
+
+/**
+ * Webhook lane W3: the broker's webhook HMAC key reader. See GitHubAppCredentials.webhookSecret. One answer per container: a value is kept until a refresh (spaced by
+ * REREAD_INTERVAL_MS), a missing or failed answer is kept for REREAD_INTERVAL_MS (the negative cache: unsigned traffic must not become Secrets Manager traffic).
+ */
+function webhookSecretReader(input: { secretsManager: Pick<SecretsManagerClient, "send">; dedicatedSecretId: string; appSecret: { load: () => Promise<string>; reread: () => Promise<string> }; log?: (entry: Record<string, unknown>) => void }): GitHubAppCredentials["webhookSecret"] {
+  type Answer = { at: number; value: string; error?: undefined } | { at: number; value?: undefined; error: unknown };
+  let answer: Answer | undefined;
+  let inFlight: Promise<string> | undefined;
+  /** The dedicated secret's usable value; undefined only when it has no value yet (not found). Anything else that is not a usable key throws. */
+  const readDedicated = async (): Promise<string | undefined> => {
+    let text: string | undefined;
+    try {
+      const response = await input.secretsManager.send(new GetSecretValueCommand({ SecretId: input.dedicatedSecretId }));
+      text = response.SecretString ?? (response.SecretBinary === undefined ? undefined : Buffer.from(response.SecretBinary).toString("utf8"));
+    } catch (error) {
+      // An empty slot (the stack creates it with no value) and a missing one both answer ResourceNotFoundException; only that is "not set yet".
+      if (error instanceof Error && error.name === "ResourceNotFoundException") return undefined;
+      throw agentXError("RUNTIME_UNAVAILABLE", WEBHOOK_SECRET_UNREADABLE);
+    }
+    const usable = text === undefined ? undefined : usableWebhookSecret(text);
+    if (usable === undefined) throw webhookSecretMissing();
+    return usable;
+  };
+  // Startup wiring check, told once per change and in fixed words only: which source answers (the controller reads this line after an install instead of reading a secret).
+  let reported: string | undefined;
+  const report = (source: "dedicated" | "app_secret" | "app_secret_dedicated_not_wired"): void => {
+    if (reported === source) return;
+    reported = source;
+    input.log?.({ event: "github_webhook.secret_source", source });
+  };
+  const resolve = async (refresh: boolean): Promise<string> => {
+    if (input.dedicatedSecretId !== "") {
+      const dedicated = await readDedicated();
+      if (dedicated !== undefined) { report("dedicated"); return dedicated; }
+    }
+    report(input.dedicatedSecretId === "" ? "app_secret_dedicated_not_wired" : "app_secret");
+    if (refresh) return webhookSecretFromSecret(await input.appSecret.reread());
+    try {
+      return webhookSecretFromSecret(await input.appSecret.load());
+    } catch (error) {
+      if (isWebhookSecretMissing(error)) return webhookSecretFromSecret(await input.appSecret.reread());
+      throw error;
+    }
+  };
+  const remember = (refresh: boolean): Promise<string> => {
+    const started = Date.now();
+    inFlight = resolve(refresh).then((value) => { answer = { at: started, value }; return value; }, (error: unknown) => { answer = { at: started, error }; throw error; })
+      .finally(() => { inFlight = undefined; });
+    return inFlight;
+  };
+  return async (options) => {
+    if (inFlight !== undefined) return inFlight;
+    const refresh = options?.refresh === true;
+    const age = answer === undefined ? undefined : Date.now() - answer.at;
+    // A value is served until a refresh is due; a missing or failed answer is served until the interval passes (a refresh does not shorten it).
+    const due = answer === undefined || (age !== undefined && age >= REREAD_INTERVAL_MS && (refresh || answer.value === undefined));
+    if (!due && answer !== undefined) {
+      if (answer.value !== undefined) return answer.value;
+      throw answer.error;
+    }
+    return remember(refresh);
+  };
+}
 
 // T5 lives in this existing module until the public port guard permits new AWS files.
 const bindingKey = (installationId: number) => ({ pk: `GITHUB_INSTALLATION#${installationId}`, sk: "BINDING" });
@@ -234,13 +295,16 @@ export class GithubInstallationBindings {
     });
   }
 
-  /** The owner and state of an installation: its binding's, or (no binding) the implicit company's before backfill and nobody's after. */
-  private async ownerAndState(installationId: number): Promise<{ owner: string | undefined; state: InstallationState }> {
+  /**
+   * The owner and state of an installation: its binding's, or (no binding) the implicit company's before backfill and nobody's after. `bound` says whether a binding row names the owner: an
+   * implicit owner (no row) is the install's old single company, which only the legacy webhook path serves (webhook lane W0).
+   */
+  async ownerAndState(installationId: number): Promise<{ owner: string | undefined; state: InstallationState; bound: boolean }> {
     return this.run(async (send) => {
       installationIdSchema.parse(installationId);
       const row = await this.binding(send, installationId);
-      if (row !== undefined) return { owner: row.companyId, state: stateOf(row) };
-      return { owner: await this.marker(send) ? undefined : IMPLICIT_COMPANY_ID, state: "active" as const };
+      if (row !== undefined) return { owner: row.companyId, state: stateOf(row), bound: true };
+      return { owner: await this.marker(send) ? undefined : IMPLICIT_COMPANY_ID, state: "active" as const, bound: false };
     });
   }
 

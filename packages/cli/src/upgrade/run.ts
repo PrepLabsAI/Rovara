@@ -2,7 +2,7 @@
 // target release's notes and every change, deploy in upgrade order (stopping at the first failure,
 // which leaves earlier stacks upgraded and is safe to re-run), then run doctor.
 import { GetTemplateCommand } from "@aws-sdk/client-cloudformation";
-import { agentXError, environmentStackName } from "@agentx/contracts";
+import { agentXError, environmentStackName, githubWebhookSecretName } from "@agentx/contracts";
 import { CONFIG_KEYS } from "../config/keys.js";
 import { progressLine, type Ask, type PreparedDeployment } from "../deploy/commands.js";
 import { deployEnvironment, keptOperatorParameters, templateParameterNames } from "../deploy/deploy-environment.js";
@@ -46,7 +46,7 @@ export interface UpgradeDependencies {
   ask: Ask;
   isInteractive(): boolean;
   /** The clients that point the GitHub App's webhook at the control plane: Secrets Manager (read and write) and GitHub. */
-  githubWebhook(settings: EnvironmentSettings): { secrets: Pick<InitSecrets, "get" | "put">; github: GitHubApi };
+  githubWebhook(settings: EnvironmentSettings): { secrets: Pick<InitSecrets, "get" | "put" | "hasValue">; github: GitHubApi };
   doctor(env: string): Promise<DoctorReport>;
   write: (line: string) => void;
   now: () => number;
@@ -165,7 +165,7 @@ async function setUpGithubWebhook(env: string, deps: UpgradeDependencies): Promi
     const controlPlane = await deps.stacks.describe(settings.stacks["control-plane"]);
     const outcome = await ensureGithubWebhook({
       appJwt: githubAppJwt({ appId: app.appId, privateKey: app.privateKey, nowSeconds: Math.floor(deps.now() / 1000) }),
-      api: github, secrets, secretId: secretName,
+      api: github, secrets, secretId: secretName, dedicatedSecretId: githubWebhookSecretName(env),
       webhookUrl: controlPlane?.outputs.GithubWebhookUrl ?? githubWebhookUrl(settings.controlPlaneUrl),
     });
     deps.write(`GitHub webhook: ${outcome.status}`);

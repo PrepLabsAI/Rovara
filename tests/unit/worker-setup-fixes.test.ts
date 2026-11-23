@@ -214,14 +214,14 @@ describe("F3: money", () => {
     w.input.limits = { ...SETUP_AGENT_LIMITS_DEFAULT, budgetCents: 50 };
     expect((await runSetupAgent(w.input)).setupRunSummary.stop).toBe("budget_used");
   });
-  it("prices what the next turn adds as a possible cache write (1.25 times input) when it decides to stop", async () => {
-    // Spent 15 cents (10,000 input at $10 and 1,000 output at $50). The next turn at most: 12,024 input tokens and 8,192 output tokens = 52.98 cents, so 53; with the quarter more on the 2,024 new tokens
-    // it is 53.49, so 54. 15 + 53 = 68 fits a 69-cent budget; 15 + 54 = 69 does not.
+  it("reserves the next turn at the dearest input rate (a cold cache writes the whole context again) when it decides to stop", async () => {
+    // Spent 15 cents (10,000 input at $10 and 1,000 output at $50). This price has no cache rates, so a write is priced at twice the input rate ($20). The next turn at most: 12,024 tokens at $20 and 8,192 output tokens
+    // at $50 = 65.008 cents, so 66. 15 + 66 = 81 does not fit an 81-cent budget; it fits 82.
     const w = await world({ usage: { input: 10_000, output: 1_000 }, cost: 0.01 });
-    w.input.limits = { ...SETUP_AGENT_LIMITS_DEFAULT, budgetCents: 69 };
+    w.input.limits = { ...SETUP_AGENT_LIMITS_DEFAULT, budgetCents: 81 };
     expect((await runSetupAgent(w.input)).setupRunSummary.stop).toBe("budget_used");
     const roomy = await world({ usage: { input: 10_000, output: 1_000 }, cost: 0.01 });
-    roomy.input.limits = { ...SETUP_AGENT_LIMITS_DEFAULT, budgetCents: 70 };
+    roomy.input.limits = { ...SETUP_AGENT_LIMITS_DEFAULT, budgetCents: 82 };
     expect((await runSetupAgent(roomy.input)).setupRunSummary.stop).not.toBe("budget_used");
   });
   it("counts the spend itself when the session reports a cost of 0 (a proxy-routed model)", async () => {
@@ -232,11 +232,11 @@ describe("F3: money", () => {
     expect(summary.stop).toBe("budget_used");
     expect(summary.spendCents).toBeGreaterThanOrEqual(300);
   });
-  it("prices a cache write at 1.25 times the input price", async () => {
-    // 100,000 cache-write tokens at $10 per million: $1.00 as input, $1.25 as a cache write.
+  it("prices a cache write with no known rate at twice the input price (never below what a 1 hour write costs)", async () => {
+    // 100,000 cache-write tokens at $10 per million: $1.00 as input, $2.00 as a cache write at the safe fallback.
     const w = await world({ usage: { input: 0, output: 0, cacheWrite: 100_000 }, cost: 0 });
     w.input.limits = { ...SETUP_AGENT_LIMITS_DEFAULT, budgetCents: 2_000 };
-    expect((await runSetupAgent(w.input)).setupRunSummary.spendCents).toBe(125);
+    expect((await runSetupAgent(w.input)).setupRunSummary.spendCents).toBe(200);
   });
   it("a turn with neither usage nor cost is unreadable spend, which is the budget used up", async () => {
     const w = await world({ usage: undefined, cost: 0 });

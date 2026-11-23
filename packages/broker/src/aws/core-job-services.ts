@@ -32,6 +32,7 @@ import { hostedEvidenceBlobs } from "../core-host/hosted-evidence.js";
 import { installCiFixDecider } from "../core/ci-fix/ci-fix.js";
 import { installBranchSyncDeciders } from "../core/branch-sync/branch-sync.js";
 import { registerMergeActionDecider } from "../core/merge/merge-tracking.js";
+import { withGithubRequestContext } from "../plugins/code-host/github/request-context.js";
 
 // One invocation shares recovery pages and ownership reads across all company passes. No cache survives a scheduled run.
 const recoveryPass = new AsyncLocalStorage<{
@@ -126,6 +127,23 @@ export function createHostedBrokerCoreServices(options: Omit<BrokerCoreServicesO
   return createBrokerCoreServices({ ...options, summaryCheck: rovaraCheckSource(), notification });
 }
 
+/** The sweep's events that count as a failed pass. */
+const SWEEP_FAILURE_EVENTS: ReadonlySet<string> = new Set(["sweep.read_failed", "sweep.row_failed", "sweep.settle_failed"]);
+/** The tier checks start only with at least this much of the pass left. */
+const TIER_PASS_MIN_LEFT_MS = 6_000;
+/** The sweep lines a deployed job logs, and the only fields of them it keeps (fixed words, numbers and class names: never a message, an id of GitHub's, a path or a token). */
+const SWEEP_LOG_EVENTS: ReadonlySet<string> = new Set([...SWEEP_FAILURE_EVENTS, "sweep.feedback_failed", "sweep.rows_deferred", "sweep.rate_reserve", "github.request"]);
+const SWEEP_LOG_FIELDS = ["component", "event", "taskId", "error", "method", "pathTemplate", "status", "ms", "page", "remaining", "limit", "resetAt", "outcome", "deferred"] as const;
+export function sweepLogEntryOf(entry: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (!SWEEP_LOG_EVENTS.has(String(entry["event"]))) return undefined;
+  const kept: Record<string, unknown> = {};
+  for (const name of SWEEP_LOG_FIELDS) {
+    const value = entry[name];
+    if (typeof value === "string" || typeof value === "number") kept[name] = value;
+  }
+  return kept;
+}
+
 /** Built once for one company's runtime. Each pass binds all internal store work to ONE allowance. */
 export function createBrokerCoreServices(options: BrokerCoreServicesOptions): JobServices {
   const { companyId, flow, registry } = options;
@@ -182,12 +200,14 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
     "merge-tracking": pass(async (store, deadlineMs) => {
       let failed = 0;
       const trackingLog = (entry: Record<string, unknown>) => {
-        if (entry["event"] === "sweep.read_failed" || entry["event"] === "sweep.row_failed") failed += 1;
-        log();
+        if (SWEEP_FAILURE_EVENTS.has(String(entry["event"]))) failed += 1;
+        // The pass logger says only that something happened; the sweep's own fixed-word lines (what ran, how long, what failed) go out as they are, field by field from a fixed list.
+        const fixed = sweepLogEntryOf(entry);
+        if (fixed === undefined) log(); else options.log?.({ ...fixed, companyId });
       };
       const trackingDeps = depsFor(recoveryStore(store, companyId));
       propagatePrFeedbackDecisions(flow.deps, trackingDeps);
-      const tracking = createMergeTrackingService({ flow: trackingDeps, registry, companyId, scan: mergeScan, people, settings, milestones: mergeMilestones(store), now, log: trackingLog,
+      const tracking = createMergeTrackingService({ flow: trackingDeps, registry, companyId, scan: mergeScan, people, settings, milestones: mergeMilestones(store), now, log: trackingLog, requestScope: withGithubRequestContext,
         ciMode: ci.ciMode,
         // L4-EVCI2: the customer's confirmed eval check, kept per company and project (core/ci-evidence/eval-check-setting.ts); nothing confirmed: a pass is what it was.
         ciEvidence: evalCheckEvidencePort({ store, companyId }),
@@ -195,7 +215,8 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
         ...(options.repository === undefined ? {} : { repository: options.repository }), ...(options.summaryCheck === undefined ? {} : { summaryCheck: options.summaryCheck }), ...(options.humanEdit === undefined ? {} : { humanEdit: options.humanEdit }),
       });
       const report = await tracking.sweep({ budgetMs: Math.max(0, deadlineMs - now()) });
-      const tierChecked = now() < deadlineMs ? await tracking.tierChecks() : 0;
+      // The model calls of the lighter flow's checks run only when a useful part of the pass is left (their writes need the bound too).
+      const tierChecked = deadlineMs - now() >= TIER_PASS_MIN_LEFT_MS ? await tracking.tierChecks() : 0;
       return { ...report, tierChecked, complete: mergeScan.complete && failed === 0, failed };
     }),
   };

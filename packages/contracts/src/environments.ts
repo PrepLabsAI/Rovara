@@ -62,6 +62,15 @@ export function environmentConnectorSecretPrefix(env: string): string {
   return `agentx/${checked(env)}/connectors/`;
 }
 
+/**
+ * The environment's DEDICATED GitHub webhook secret (a Secrets Manager secret the control-plane stack creates EMPTY; the owner puts the value with put-secret-value). Only the broker's
+ * role reads it. The broker derives the name (DERIVED_BROKER_VARIABLES, variable GITHUB_WEBHOOK_SECRET_ID), the stack creates the secret under it and the CLI looks for it by it,
+ * so the three cannot drift apart. Never a secret value: the name only.
+ */
+export function githubWebhookSecretName(env: string): string {
+  return `agentx/${checked(env)}/github-webhook-secret`;
+}
+
 /** Where a channel adapter's secrets live (`agentx/<env>/`, then `channel-adapter/<name>`): the broker derives it rather than being given it (ENV-ROOM). */
 export function environmentChannelAdapterSecretPrefix(env: string): string {
   return `agentx/${checked(env)}/`;

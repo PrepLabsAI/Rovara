@@ -5,6 +5,7 @@ import { Construct } from "constructs";
 import { SIGN_IN_CLIENTS_PK } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
 import { addBrokerName, addBrokerSetting, addDerivedBrokerVariable } from "./broker-names.js";
+import { addRouteSettings } from "./route-settings.js";
 import { packagedFunction } from "./control-plane.js";
 import { COMPANY_SELF_SERVE_VARIABLE, companySignInParameters, type CompanySignInParameters, type CompanySignInSwitch } from "./company-signin.js";
 
@@ -418,12 +419,9 @@ export class DeveloperSignIn extends Construct {
     // Public routes are stage-capped: bursts of 50, 20 requests a second on average,
     // across all callers. A developer signs in a few times a week, so this only bites a flood.
     const throttle = { ThrottlingBurstLimit: 50, ThrottlingRateLimit: 20 };
-    props.stage.routeSettings = { [SIGN_IN_ROUTE_KEY]: throttle, [DEV_ROUTE_KEY]: throttle, [FEEDBACK_REVIEW_ROUTE_KEY]: throttle, ...(coreAppRoute === undefined ? {} : { [CORE_APP_ROUTE_KEY]: throttle }) };
-    // Route settings must name routes that already exist.
-    props.stage.addDependency(authRoute);
-    props.stage.addDependency(devRoute);
-    props.stage.addDependency(feedbackReviewRoute);
-    if (coreAppRoute !== undefined) props.stage.addDependency(coreAppRoute);
+    // One owner for the stage's route settings (route-settings.ts): merged with what other constructs set (the public GitHub webhook route's throttle), never replaced.
+    addRouteSettings(props.stage, [authRoute, devRoute, feedbackReviewRoute, ...(coreAppRoute === undefined ? [] : [coreAppRoute])],
+      { [SIGN_IN_ROUTE_KEY]: throttle, [DEV_ROUTE_KEY]: throttle, [FEEDBACK_REVIEW_ROUTE_KEY]: throttle, ...(coreAppRoute === undefined ? {} : { [CORE_APP_ROUTE_KEY]: throttle }) });
 
     const broker = props.broker;
     // ENV-ROOM (broker-names.ts): in a named environment, the names packed and the constrained settings packed; the legacy template passes each whole, as before.

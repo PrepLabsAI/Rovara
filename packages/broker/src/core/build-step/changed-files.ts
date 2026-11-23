@@ -8,7 +8,7 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 //   - the risk and the description's list come from the CODE HOST, after the push: the files changed between the pull request's base and the pushed, checked head (`verifyPublishedChanges`);
 //   - without a verified list the risk is HIGH (`riskUntilVerified`), never lower, and says why.
 import { createHash } from "node:crypto";
-import { change, promptLocationsOf, when, type CodeHost, type HostScope, type WorkflowSnapshot } from "@agentx/contracts";
+import { change, hostRateLimitRetryAt, promptLocationsOf, when, type CodeHost, type HostScope, type WorkflowSnapshot } from "@agentx/contracts";
 import { codeHostForRecord } from "../../plugins/routing.js";
 import { flowIs } from "../task-flow/flow-guard.js";
 import { boundCommits, readHeadFacts, tierFilesOfRead } from "../merge/change-tier-read.js";
@@ -142,7 +142,7 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
     }
   } catch (error) {
     // A host that cannot answer (a rate limit included) leaves the risk high; the caller's pause logic sees the rate limit again on its own read.
-    if (error instanceof Error && error.name === "HostRateLimitError") throw error;
+    if (hostRateLimitRetryAt(error) !== undefined) throw error;
     log(deps, { event: "build_step.changed_files_unavailable", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
     return "unavailable";
   }

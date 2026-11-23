@@ -164,7 +164,9 @@ export /* the hosted Merge button reuses it (DEC 254zzz94) */ function workflowR
     return M.changing;
   }
   const card = workflow.feedbackReview?.status;
-  if (workflow.state !== "WAITING" || workflow.fixSource !== undefined || workflow.branchSync !== undefined || card === "PENDING" || card === "COLLECTING") return M.changing;
+  if (workflow.state !== "WAITING" || workflow.fixSource !== undefined || workflow.branchSync !== undefined || card === "COLLECTING") return M.changing;
+  // The review is done and the card waits for the owner's Keep or Fix: nothing is being changed, so it must not say so.
+  if (card === "PENDING") return M.waitingForDecision;
   return undefined;
 }
 

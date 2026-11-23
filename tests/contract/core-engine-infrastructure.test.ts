@@ -28,6 +28,7 @@ import { OPERATOR_PARAMETERS } from "../../packages/cli/src/deploy/parameters.js
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
 import { withoutBrokerMemberConditionCheck } from "../support/broker-member-condition-check-template.js";
+import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js";
 
 skipLambdaBundling();
 
@@ -642,7 +643,8 @@ describe("L1a broker environment derivation", () => {
     // The merged template adds both the exact first-gateway output and the narrow
     // SIGNIN-MEMBER-CONDITIONCHECK statement (DEC 254zzz282 B014-A). Assert each
     // addition before removing it; all historical pins still cover every other byte.
-    const beforeFirstGateway = structuredClone(legacy.toJSON()) as Json & { Outputs: Record<string, unknown> };
+    // Webhook lane W3: the webhook secret slot, its throttle and its alarm are asserted and taken out first (tests/support/webhook-secret-template.ts), so every pin below still holds.
+    const beforeFirstGateway = withoutWebhookSecretLane(structuredClone(legacy.toJSON()) as Json & { Outputs: Record<string, unknown> });
     expect(beforeFirstGateway.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     delete beforeFirstGateway.Outputs.ModelRunPriceVersion;
     expect(digest(beforeFirstGateway), "legacy without the first-gateway output retains the upstream member-check pin").toBe("8f8df2aeed3082d74b0fee456be77fb5e562b86eb2c047b79f3585aa439ec150");
@@ -653,7 +655,7 @@ describe("L1a broker environment derivation", () => {
     delete withoutCapabilityRoutes.Resources.ContextToolsListRoute;
     delete withoutCapabilityRoutes.Resources.DesignReviewPacketRoute;
     expect(digest(withoutCapabilityRoutes), "legacy with the two capability routes taken out").toBe("33220db5faf6815c6effbb6c57c7b495eb26d73fe7fdf6b21bb10433718659d4");
-    expect(digest(legacy.toJSON())).toBe("99c852b0d794c4b0d27ec6b804839c1c3592fa8eeacaaa55dbbedb90153d4665");
+    expect(digest(legacy.toJSON())).toBe("afabfefc20b37f896c80866a546f46932cb672434e1d9c40b395b3f46369cfec");
   });
 });
 import { createHash } from "node:crypto";

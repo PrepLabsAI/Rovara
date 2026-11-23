@@ -18,6 +18,7 @@ import { withoutSlackCompanyMode, withoutSlackCompanyService } from "../support/
 import { createHash } from "node:crypto";
 import { withoutBatchFAdditions } from "../support/batch-f-template.js";
 import { withoutBrokerMemberConditionCheck } from "../support/broker-member-condition-check-template.js";
+import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js";
 
 skipLambdaBundling();
 
@@ -292,7 +293,7 @@ describe("named environment templates", () => {
   for (const stack of stacks) {
     if (stack.stackName === "agentx-staging-control-plane") {
       it("removing only Batch F additions preserves code/next's agentx-staging-control-plane template", () => {
-        const beforeBatchF = withoutBatchFAdditions(normalizedTemplate(stack));
+        const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(normalizedTemplate(stack)));
         expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("ef7ec71baeba564d5fa957374727f876d1602a7a43ced9676ff93219402c04dd");
       }, 120_000);
     }
@@ -301,8 +302,9 @@ describe("named environment templates", () => {
       // SIGNIN-MEMBER-CONDITIONCHECK, DEC 254zzz282 B014-A: pin the new full synth
       // before the existing normalizers, then preserve every old policy/snapshot assertion.
       if (stack.stackName === "agentx-staging-control-plane") {
-        expect(createHash("sha256").update(JSON.stringify(template)).digest("hex")).toBe("2075dc4d2c1c19dff2e2489a9404fe36cb304d8d425b7be2ef20177c6c90ac91");
-        template = withoutBrokerMemberConditionCheck(template);
+        expect(createHash("sha256").update(JSON.stringify(template)).digest("hex")).toBe("0bb6dc778d9fc4ea234ed9739d5385cfd5101e4b2623e62a5d6ba94ac62208ee");
+        // Webhook lane W3: the webhook secret slot, its throttle and one alarm, pinned exactly in tests/support/webhook-secret-template.ts, then removed.
+        template = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(template));
       }
       const parity = stack.stackName === "agentx-staging-foundation" ? withoutNatEgressAddresses(withoutDnsFirewall(template))
         : stack.stackName === "agentx-staging-access" ? withoutSavedEnvAccess(withoutDnsFirewallAccess(template), "staging")

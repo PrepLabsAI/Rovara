@@ -168,8 +168,11 @@ const DOCUMENT_KINDS: ReadonlySet<DecisionKind> = new Set<DecisionKind>(["approv
 
 const APPROVABLE: ReadonlySet<DecisionKind> = new Set<DecisionKind>([
   "approve_plan", "approve_requirements", "approve_design", "merge", "approve_dependency", "approve_e2e_plan", "review_feedback", "autofix_ask",
-  "approve_spend", "approve_test_env", "confirm_env_change", "setup_host", "approve_fixture_set",
+  "approve_spend", "approve_test_env", "confirm_env_change", "approve_fixture_set",
 ]);
+
+/** Kinds whose card only opens a page, with the words of its open link. */
+const OPEN_ONLY_LABEL: Partial<Record<DecisionKind, string>> = { second_review_notice: "Open the settings", setup_host: "Open the setup" };
 
 const usd = (value: number): string => `$${value.toFixed(2)}`;
 const plural = (count: number, one: string, many: string): string => `${String(count)} ${count === 1 ? one : many}`;
@@ -371,8 +374,10 @@ function actionsOf(item: DecisionItem, cardId: string, risk: DecisionRisk): { ac
   if (item.kind === "choose_checks") return { actions: [{ ...open, label: "Choose checks" }], recommended: "open" };
   // A held spec is answered on the task page (its buttons are POSTs of that page): the card only opens it.
   if (item.kind === "spec_choice") return { actions: [{ ...open, label: "Choose" }], recommended: "open" };
-  // A notice that the second-opinion model stopped qualifying: the card only opens the settings page, where the choice is made and "I've seen it" is pressed.
-  if (item.kind === "second_review_notice") return { actions: [{ ...open, label: "Open the settings" }], recommended: "open" };
+  // Cards that only open a page, with no decide action. A notice that the second-opinion model stopped qualifying: the settings page, where the choice is made and "I've seen it" is pressed. A website a setup run
+  // asked for: the project's setup page, where the run page's own route decides it (owner or admin); the decisions performer has no handler for it, so the card carries no Approve or Reject.
+  const openOnly = OPEN_ONLY_LABEL[item.kind];
+  if (openOnly !== undefined) return { actions: [{ ...open, label: openOnly }], recommended: "open" };
   // Fix setup: Run setup agent, Fix with agent and Retry task checks are done on the pages the card opens (the setup page and the affected task's page); the card itself only decides the two things that need
   // the server's friction. "Mark as known failing" is the card's one approve (medium: the evidence is opened first, and the tests it marks are the broker's own record, never the request's); "Not now" puts
   // the card away until the cause comes back. Recommended is to look first.

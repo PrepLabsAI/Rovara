@@ -18,6 +18,8 @@ export interface InitSecrets extends SecretValueStore {
   put(name: string, value: string): Promise<void>;
   /** The secret's full ARN, or undefined when it does not exist. */
   arn(name: string): Promise<string | undefined>;
+  /** Whether the secret has a current value, from DescribeSecret (its version stages): the value is never read. A missing secret has none. */
+  hasValue(name: string): Promise<boolean>;
   /** The secret's full ARN, creating it with no value first when it does not exist. `get` reads a
    * secret with no value as missing; `put` gives it one. */
   reserve(name: string): Promise<string>;
@@ -35,8 +37,18 @@ export function secretsManagerInitSecrets(client: SecretsManagerClient): InitSec
       throw error;
     }
   };
+  const hasValue = async (name: string): Promise<boolean> => {
+    try {
+      const described = await client.send(new DescribeSecretCommand({ SecretId: name }));
+      return Object.values(described.VersionIdsToStages ?? {}).some((stages) => stages.includes("AWSCURRENT"));
+    } catch (error) {
+      if (errorName(error) === "ResourceNotFoundException") return false;
+      throw error;
+    }
+  };
   return {
     get: (name) => base.get(name),
+    hasValue,
     create: (name, value) => base.create(name, value),
     async put(name, value) {
       await client.send(new PutSecretValueCommand({ SecretId: name, SecretString: value }));

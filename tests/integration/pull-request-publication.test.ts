@@ -754,6 +754,7 @@ describe("PR feedback review after publication moved HEAD", () => {
     state: Awaited<ReturnType<typeof published>>,
     bundle: { headTreeSha?: string | undefined; candidateDigest?: string } = {},
     extra: Partial<Parameters<typeof runTaskInvocation>[1]> = {},
+    payloadExtra: Record<string, unknown> = {},
   ) => {
     const taskId = randomUUID();
     const { ref, bytes } = bundleFor(taskId, state.commit, "headTreeSha" in bundle ? bundle.headTreeSha : state.candidate.treeSha, bundle.candidateDigest ?? state.preDigest);
@@ -764,6 +765,7 @@ describe("PR feedback review after publication moved HEAD", () => {
         conversationId: randomUUID(), prompt: "review the pull request feedback", workflowMode: "FEEDBACK_REVIEW",
         workflowFeedbackReview: { taskId, workflowRevision: 3, candidateDigest: state.preDigest },
         workflowBase: [{ repositoryId: "demo", baseCommitSha: state.base }],
+        ...payloadExtra,
       },
     }, {
       rootPath: state.fixture.root, model: FAUX_MODEL, piAdapter: reviewer(),
@@ -777,6 +779,106 @@ describe("PR feedback review after publication moved HEAD", () => {
     const state = await published();
     const result = await review(state);
     expect(result).toMatchObject({ workflowMode: "FEEDBACK_REVIEW", workflowFeedbackReviewResult: { candidateDigest: state.preDigest, status: "COMPLETE" } });
+  });
+
+  /** A reviewer whose session really spent (real Pi stats shape), with an optional text for the model's one answer and an optional event the session emits instead of answering. */
+  const spendingReviewer = (spent: { input: number; output: number; cost: number }, options: { onPrompt?: (notify: (event: unknown) => void) => void; statsThrow?: boolean } = {}): PiSessionAdapter => ({
+    async create(input) {
+      let notify: ((event: unknown) => void) | undefined;
+      const sessionFile = join(input.sessionDirectory, "feedback-review.json");
+      return {
+        conversationId: randomUUID(), sessionFile,
+        async prompt() {
+          if (options.onPrompt !== undefined) { options.onPrompt((event) => notify?.(event)); return; }
+          notify?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify({ findings: [] }) }] } });
+        },
+        async abort() {},
+        getModel: () => ({ provider: "amazon-bedrock", modelId: "us.anthropic.claude-haiku-4-5" }),
+        getSessionStats: () => {
+          if (options.statsThrow === true) throw new Error("stats unreadable");
+          return { sessionFile, sessionId: "feedback-review", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0,
+            totalMessages: 2, tokens: { input: spent.input, output: spent.output, cacheRead: 0, cacheWrite: 0, total: spent.input + spent.output }, cost: spent.cost };
+        },
+        subscribe(listener) { notify = listener; return () => { notify = undefined; }; },
+        dispose() {},
+      };
+    },
+  });
+  const capture = () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    return { events, sink: async (batch: ReadonlyArray<{ type: string; payload: unknown }>) => { events.push(...batch.map((event) => ({ type: event.type, payload: event.payload as Record<string, unknown> }))); } };
+  };
+
+  // FEEDBACK-REVIEW-USAGE-FIX: the critic's spend must reach the broker's cost ledger, or the task's spend is unreadable and every paid move refuses (`run_unreported`).
+  it("reports the critic's spend as one end usage event, before the result, so the broker books it", async () => {
+    const state = await published();
+    const seen = capture();
+    const result = await review(state, {}, { piAdapter: spendingReviewer({ input: 1200, output: 340, cost: 0.0346 }), eventSink: seen.sink });
+    expect(result).toMatchObject({ workflowFeedbackReviewResult: { status: "COMPLETE" } });
+    const usages = seen.events.filter((event) => event.type === "usage");
+    expect(usages).toHaveLength(1);
+    expect(usages[0]!.payload).toMatchObject({ provider: "amazon-bedrock", modelId: "us.anthropic.claude-haiku-4-5", tokens: { input: 1200, output: 340 }, costUsd: 0.0346 });
+    expect(seen.events.findIndex((event) => event.type === "usage")).toBeLessThan(seen.events.findIndex((event) => event.type === "result"));
+  });
+
+  it("with checkpoints asked, a final end report follows the checkpoints and the two together tell the spend once", async () => {
+    const state = await published();
+    const seen = capture();
+    await review(state, {}, { piAdapter: spendingReviewer({ input: 900, output: 100, cost: 0.02 }), eventSink: seen.sink, modelCallLimits: { usageCheckpointMs: 0 } }, { usageCheckpoints: true });
+    const usages = seen.events.filter((event) => event.type === "usage").map((event) => event.payload);
+    const total = usages.reduce((sum, payload) => sum + Number(payload["costUsd"] ?? 0), 0);
+    // A checkpoint went while the session ran (the session's own events reached the checkpointer), then the end report with what was left.
+    expect(usages.filter((payload) => payload["checkpoint"] === true)).toHaveLength(1);
+    expect(usages.length).toBe(2);
+    expect(total).toBeCloseTo(0.02, 10);
+    expect(usages.filter((payload) => payload["final"] === true || payload["checkpoint"] !== true)).toHaveLength(1);
+  });
+
+  // Review test (Opus money review, 7d4e10f09): checkpoints go ONLY when the broker asked (`usageCheckpoints: true`), as for the REVIEW stage; unasked, the run sends its spend once, as one end report (kills O2).
+  it("without checkpoints asked, sends no checkpoint even with a zero interval: one end report tells the whole spend", async () => {
+    const state = await published();
+    const seen = capture();
+    await review(state, {}, { piAdapter: spendingReviewer({ input: 900, output: 100, cost: 0.02 }), eventSink: seen.sink, modelCallLimits: { usageCheckpointMs: 0 } });
+    const usages = seen.events.filter((event) => event.type === "usage").map((event) => event.payload);
+    expect(usages.filter((payload) => payload["checkpoint"] === true)).toHaveLength(0);
+    expect(usages).toHaveLength(1);
+    expect(usages[0]).toMatchObject({ costUsd: 0.02 });
+  });
+
+  it("a session that spent and then ended on an install pause still reports its usage before the error leaves (C1)", async () => {
+    const state = await published();
+    const seen = capture();
+    const paused = "Rovara's AI is paused on this install. Your work is safe; try again later or use your own AI source.";
+    const adapter = spendingReviewer({ input: 700, output: 50, cost: 0.011 }, { onPrompt: (notify) => notify({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: paused, content: [] } }) });
+    await expect(review(state, {}, { piAdapter: adapter, eventSink: seen.sink })).rejects.toMatchObject({ code: "MODEL_NOT_ALLOWED" });
+    const usages = seen.events.filter((event) => event.type === "usage");
+    expect(usages).toHaveLength(1);
+    expect(usages[0]!.payload).toMatchObject({ costUsd: 0.011 });
+    expect(seen.events.findIndex((event) => event.type === "usage")).toBeLessThan(seen.events.findIndex((event) => event.type === "error"));
+  });
+
+  it("a review whose session stats cannot be read is BLOCKED with no findings and sends no invented figure (C2)", async () => {
+    const state = await published();
+    const seen = capture();
+    const result = await review(state, {}, { piAdapter: spendingReviewer({ input: 1, output: 1, cost: 0 }, { statsThrow: true }), eventSink: seen.sink });
+    expect(result).toMatchObject({ workflowFeedbackReviewResult: { status: "BLOCKED" } });
+    expect(seen.events.filter((event) => event.type === "usage")).toHaveLength(0);
+  });
+
+  it("a failed review (an answer the check refuses twice) reports its usage as FAILED outcome spend", async () => {
+    const state = await published();
+    const seen = capture();
+    const adapter = spendingReviewer({ input: 10, output: 10, cost: 0.001 }, { onPrompt: (notify) => notify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "All fine." }] } }) });
+    const result = await review(state, {}, { piAdapter: adapter, eventSink: seen.sink });
+    expect(result).toMatchObject({ workflowFeedbackReviewResult: { status: "FAILED" } });
+    expect(seen.events.filter((event) => event.type === "usage")).toHaveLength(1);
+  });
+
+  it("a review that never opened a session (the candidate changed first) sends no usage: it spent nothing (e deferred)", async () => {
+    const state = await published();
+    const seen = capture();
+    await expect(review(state, { candidateDigest: "0".repeat(64) }, { piAdapter: spendingReviewer({ input: 1, output: 1, cost: 0.5 }), eventSink: seen.sink })).rejects.toBeDefined();
+    expect(seen.events.filter((event) => event.type === "usage")).toHaveLength(0);
   });
 
   it("starts the task sandbox before the review session and gives the session the sandbox's file tools (R56)", async () => {

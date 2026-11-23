@@ -8,7 +8,7 @@ import {
 } from "../../packages/contracts/src/index.js";
 import { modelNotAllowedMarker, budgetExhaustedMarker } from "../../packages/model-runtime/src/budget.js";
 import { runSetupAgent, type SetupRunInput, type SetupRunPorts } from "../../packages/worker/src/setup-agent-run.js";
-import { STANDIN_WRITER_MAX_OUTPUT_TOKENS, STANDIN_WRITER_SYSTEM_PROMPT, STANDIN_WRITER_TIMEOUT_MS, runStandInWriter, standInSessionInputOf, standInWriterPrompt } from "../../packages/worker/src/standin-writer.js";
+import { STANDIN_WRITER_MAX_OUTPUT_TOKENS, STANDIN_WRITER_SYSTEM_PROMPT, STANDIN_WRITER_TIMEOUT_MS, runStandInWriter, standInCeilingPrice, standInSessionInputOf, standInWriterPrompt } from "../../packages/worker/src/standin-writer.js";
 import { standInRequestOf } from "../../packages/worker/src/standin-shapes.js";
 import type { PiSessionHandle } from "../../packages/worker/src/pi-session.js";
 import type { RunNetwork } from "../../packages/worker/src/setup-network.js";
@@ -90,7 +90,7 @@ describe("the writer runs on the company's AI or not at all", () => {
 
 describe("the writer is paid inside the run's cap", () => {
   it("does not start when its ceiling does not fit in what is left (the cap holds however the model answers)", async () => {
-    const ceiling = standInWriterCeilingCents(PRICE);
+    const ceiling = standInWriterCeilingCents(standInCeilingPrice(PRICE));
     let opened = 0;
     const open = async () => { opened += 1; return writerSession().session; };
     expect(await runStandInWriter({ input: REQUEST, price: PRICE, remainingCents: ceiling - 1, openSession: open })).toMatchObject({ status: "skipped", reason: "no_room", spendCents: 0 });
@@ -107,7 +107,7 @@ describe("the writer is paid inside the run's cap", () => {
     const reportedMore = await runStandInWriter({ input: REQUEST, price: PRICE, remainingCents: 400, openSession: async () => writerSession({ usage: { input: 10, output: 10 }, cost: 0.37 }).session });
     expect(reportedMore).toMatchObject({ spendCents: 37 });
     const unreadable = await runStandInWriter({ input: REQUEST, price: PRICE, remainingCents: 400, openSession: async () => writerSession({ cost: Number.NaN }).session });
-    expect(unreadable).toMatchObject({ status: "written", spendCents: standInWriterCeilingCents(PRICE) });
+    expect(unreadable).toMatchObject({ status: "written", spendCents: standInWriterCeilingCents(standInCeilingPrice(PRICE)) });
   });
   it("makes ONE model call: a second reply ends it, and the session is always disposed", async () => {
     const two = writerSession({ twoReplies: true });
@@ -122,7 +122,7 @@ describe("the writer is paid inside the run's cap", () => {
   it("a failed first turn ends the call at once (the session's own retries make no second billed call) and counts the ceiling", async () => {
     const failing = writerSession({ failThenReply: true });
     const outcome = await runStandInWriter({ input: REQUEST, price: PRICE, remainingCents: 400, openSession: async () => failing.session });
-    expect(outcome).toMatchObject({ status: "skipped", reason: "failed", spendCents: standInWriterCeilingCents(PRICE) });
+    expect(outcome).toMatchObject({ status: "skipped", reason: "failed", spendCents: standInWriterCeilingCents(standInCeilingPrice(PRICE)) });
     expect(failing.aborted()).toBeGreaterThanOrEqual(1);
   });
   it("a Stop that came before the writer opened starts nothing; one that comes while it opens asks nothing and spends nothing", async () => {
@@ -141,7 +141,7 @@ describe("the writer is paid inside the run's cap", () => {
     expect(outcome).toMatchObject({ status: "skipped", reason: "failed" });
     expect(hung.aborted()).toBe(1);
     // A call that was cut off may have been billed for output nobody counted: the whole ceiling is counted, never about 0.
-    expect(outcome.spendCents).toBe(standInWriterCeilingCents(PRICE));
+    expect(outcome.spendCents).toBe(standInWriterCeilingCents(standInCeilingPrice(PRICE)));
     expect(STANDIN_WRITER_TIMEOUT_MS).toBeGreaterThan(60_000);
     const stopped = writerSession({ hang: true });
     let abort: (() => Promise<void>) | undefined;
@@ -150,7 +150,7 @@ describe("the writer is paid inside the run's cap", () => {
     expect(abort).toBeDefined();
     await abort!();
     expect(stopped.aborted()).toBeGreaterThanOrEqual(1);
-    expect(await running).toMatchObject({ spendCents: standInWriterCeilingCents(PRICE) });
+    expect(await running).toMatchObject({ spendCents: standInWriterCeilingCents(standInCeilingPrice(PRICE)) });
   });
   it("is deterministic per version: the same reply, in any key order, is the same set and digest", async () => {
     const a = await runStandInWriter({ input: REQUEST, price: PRICE, remainingCents: 400, openSession: async () => writerSession().session });
@@ -273,7 +273,7 @@ describe("the writer inside a setup run", () => {
     expect(result.setupRunSummary.spendCents).toBe(5);
   });
   it("the ceiling is below the whole default cap, so a default run has room for it", () => {
-    expect(standInWriterCeilingCents(PRICE)).toBeLessThan(SETUP_AGENT_LIMITS_DEFAULT.budgetCents / 4);
+    expect(standInWriterCeilingCents(standInCeilingPrice(PRICE))).toBeLessThan(SETUP_AGENT_LIMITS_DEFAULT.budgetCents / 4);
     expect(STANDIN_LIMITS.outputTokens).toBeLessThanOrEqual(10_000);
   });
 });

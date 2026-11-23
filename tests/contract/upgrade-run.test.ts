@@ -211,7 +211,7 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
     it("tells the owner which events to tick and where", async () => {
       const h = await harness({ github: { hookUrl: GITHUB_WEBHOOK_URL, events: ["pull_request"] } });
       await runUpgrade(options, h.deps);
-      expect(h.lines).toContain("GitHub webhook: tick these events on https://github.com/organizations/acme/settings/apps/agentx-acme-staging/permissions: pull_request_review, pull_request_review_comment, issue_comment");
+      expect(h.lines).toContain("GitHub webhook: tick these events on https://github.com/organizations/acme/settings/apps/agentx-acme-staging/permissions: pull_request_review, pull_request_review_comment, pull_request_review_thread, issue_comment, check_suite, check_run");
     });
 
     it("never prints the webhook secret, stored or generated", async () => {
@@ -225,6 +225,29 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
       expect(stored.webhookSecret).toMatch(/^[0-9a-f]{64}$/);
       expect(generated.lines.join("\n")).not.toContain(stored.webhookSecret);
       expect(JSON.stringify(result)).not.toContain(stored.webhookSecret);
+    });
+
+    // Webhook lane W3: the owner's dedicated secret. Once it has a value, `agentx upgrade` must never put the App secret's old key (or anything) into GitHub's hook, nor store a new key.
+    it("never overwrites GitHub's copy of the owner's dedicated webhook secret: the hook gets its URL only, and nothing is stored", async () => {
+      const OWNER_SET = "owner-set-dedicated-secret-".padEnd(48, "d");
+      const stale = await harness({ github: { hookUrl: "https://old.example.test/hook", events: [] } });
+      stale.githubSecrets.values.set("agentx/staging/github-webhook-secret", OWNER_SET);
+      const before = stale.githubSecrets.values.get(GITHUB_APP_SECRET);
+      await runUpgrade(options, stale.deps);
+      expect(stale.github.hookWrites).toEqual([{ url: GITHUB_WEBHOOK_URL }]);
+      expect(JSON.stringify(stale.github.hookWrites)).not.toContain(HAND_SET_WEBHOOK_SECRET);
+      expect(JSON.stringify(stale.github.hookWrites)).not.toContain(OWNER_SET);
+      expect(stale.githubSecrets.values.get(GITHUB_APP_SECRET)).toBe(before);
+      expect(stale.lines.join("\n")).not.toContain(OWNER_SET);
+      // A secret that has the old key, and a hook already pointing here: no write to GitHub at all.
+      const right = await harness({ github: { hookUrl: GITHUB_WEBHOOK_URL } });
+      right.githubSecrets.values.set("agentx/staging/github-webhook-secret", OWNER_SET);
+      await runUpgrade(options, right.deps);
+      expect(right.github.hookWrites).toEqual([]);
+      // Without a value in the dedicated secret, the old behaviour stands: the App secret's key is sent.
+      const old = await harness({ github: { hookUrl: GITHUB_WEBHOOK_URL } });
+      await runUpgrade(options, old.deps);
+      expect(old.github.hookWrites).toEqual([{ url: GITHUB_WEBHOOK_URL, secret: HAND_SET_WEBHOOK_SECRET }]);
     });
 
     it("does not print the secret when storing it fails", async () => {

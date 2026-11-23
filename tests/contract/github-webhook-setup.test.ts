@@ -15,9 +15,9 @@ describe("ensureGithubWebhook", () => {
     const outcome = await ensureGithubWebhook({
       appJwt: "jwt", api: fakeGitHubApi({ hookUrl: URL, events: ["pull_request", "issue_comment"] }), secrets, secretId: SECRET_ID, webhookUrl: URL,
     });
-    expect(outcome.missingEvents).toEqual(["pull_request_review", "pull_request_review_comment"]);
+    expect(outcome.missingEvents).toEqual(["pull_request_review", "pull_request_review_comment", "pull_request_review_thread", "check_suite", "check_run"]);
     expect(outcome.settingsUrl).toBe("https://github.com/organizations/acme/settings/apps/agentx-acme-staging/permissions");
-    expect(missingEventsLine(outcome)).toBe(`GitHub webhook: tick these events on ${outcome.settingsUrl}: pull_request_review, pull_request_review_comment`);
+    expect(missingEventsLine(outcome)).toBe(`GitHub webhook: tick these events on ${outcome.settingsUrl}: pull_request_review, pull_request_review_comment, pull_request_review_thread, check_suite, check_run`);
     const user = await ensureGithubWebhook({ appJwt: "jwt", api: fakeGitHubApi({ hookUrl: URL, ownerType: "User" }), secrets, secretId: SECRET_ID, webhookUrl: URL });
     expect(user.settingsUrl).toBe("https://github.com/settings/apps/agentx-acme-staging/permissions");
     expect(missingEventsLine(user)).toBeUndefined();
