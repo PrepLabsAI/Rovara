@@ -1916,8 +1916,9 @@ function feedbackToolAdapter(script: { calls: unknown[]; text?: string; prompts?
 }
 
 describe("PR-feedback review through the answer tool", () => {
-  async function structuredReview(fixture: Awaited<ReturnType<typeof feedbackReviewFixture>>, adapter: PiSessionAdapter, structuredAnswers?: boolean) {
+  async function structuredReview(fixture: Awaited<ReturnType<typeof feedbackReviewFixture>>, adapter: PiSessionAdapter, structuredAnswers?: boolean, extra: Partial<Parameters<typeof runWorkflowFeedbackReview>[0]> = {}) {
     return runWorkflowFeedbackReview({
+      ...extra,
       ruleFileBaseCommits: [], operationId: randomUUID(), taskId: fixture.taskId, workflowRevision: 7,
       taskRequirements: "Return a safe result for empty input.", candidateDigest: fixture.bundle.candidateDigest, rootPath: fixture.rootPath, model: FAUX_MODEL,
       candidate: fixture.candidate, repositories: fixture.repositories, bundles: [{ ref: fixture.bundleRef, bytes: fixture.bytes }],
@@ -1927,6 +1928,62 @@ describe("PR-feedback review through the answer tool", () => {
   const goodFinding = (digest: string) => implementFinding(digest, { summary: "Guard empty input.",
     fileChanges: [{ repositoryId: "app", path: "src.ts", operation: "MODIFY", change: "Return early for empty input." }],
     tests: [{ repositoryId: "app", path: "src.test.ts", operation: "ADD", behavior: "Empty input returns an empty result." }] });
+
+  // FEEDBACK-REVIEW-USAGE-FIX: the critic reports its session's spend exactly once, whatever the review's end.
+  it("reports the session's stats once to onUsage as the CRITIC: SUCCEEDED for a complete review", async () => {
+    const fixture = await feedbackReviewFixture();
+    const record = { prompts: [] as string[], refusals: [] as string[], toolNames: [] as string[] };
+    const seen: Array<{ role: string; outcome: string; input: number; model: string }> = [];
+    const review = await structuredReview(fixture, feedbackToolAdapter({ calls: [{ findings: [goodFinding(fixture.bundleRef.sha256)] }] }, record), undefined,
+      { onUsage: async (usage) => { seen.push({ role: usage.role, outcome: usage.outcome, input: usage.stats.tokens.input, model: usage.model.modelId }); } });
+    expect(review.report.status).toBe("COMPLETE");
+    expect(seen).toEqual([{ role: "CRITIC", outcome: "SUCCEEDED", input: 1, model: "read-only-critic-v1" }]);
+  });
+
+  it("reports a review whose answer is refused as FAILED spend", async () => {
+    const fixture = await feedbackReviewFixture();
+    const outcomes: string[] = [];
+    const failed = await structuredReview(fixture, feedbackToolAdapter({ calls: [], text: "All fine." }, { prompts: [], refusals: [], toolNames: [] }), undefined, { onUsage: async (usage) => { outcomes.push(usage.outcome); } });
+    expect(failed.report.status).toBe("FAILED");
+    expect(outcomes).toEqual(["FAILED"]);
+  });
+
+  it("a usage report that fails makes the review BLOCKED with no findings: unknown spend never drives a paid fix", async () => {
+    const fixture = await feedbackReviewFixture();
+    const record = { prompts: [] as string[], refusals: [] as string[], toolNames: [] as string[] };
+    const review = await structuredReview(fixture, feedbackToolAdapter({ calls: [{ findings: [goodFinding(fixture.bundleRef.sha256)] }] }, record), undefined,
+      { onUsage: async () => { throw new Error("the sink refused"); } });
+    expect(review.report).toMatchObject({ status: "BLOCKED", blockReason: "usage could not be reported", findings: [] });
+  });
+
+  // Review test (Opus money review, 7d4e10f09; C2): a review that timed out after its session spent is FAILED spend, never SUCCEEDED (kills O3).
+  it("reports a review that timed out as FAILED spend (only a COMPLETE review is SUCCEEDED)", async () => {
+    const fixture = await feedbackReviewFixture();
+    const base = feedbackReviewerAdapter("");
+    const piAdapter: PiSessionAdapter = { async create(input) {
+      const session = await base.create(input);
+      return { ...session, async prompt() { await new Promise<void>(() => undefined); } };
+    } };
+    const outcomes: string[] = [];
+    const review = await structuredReview(fixture, piAdapter, false, { timeoutMs: 20, onUsage: async (usage) => { outcomes.push(usage.outcome); } });
+    expect(review.report).toMatchObject({ status: "BLOCKED", blockReason: "review timed out" });
+    expect(outcomes).toEqual(["FAILED"]);
+  });
+
+  it("a failing usage report never replaces a fatal error that is leaving (an install pause)", async () => {
+    const fixture = await feedbackReviewFixture();
+    const paused = "Rovara's AI is paused on this install. Your work is safe; try again later or use your own AI source.";
+    const base = feedbackReviewerAdapter("");
+    const piAdapter: PiSessionAdapter = { async create(input) {
+      const session = await base.create(input);
+      let listener: ((event: unknown) => void) | undefined;
+      return { ...session, async prompt() { listener?.({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: paused, content: [] } }); },
+        subscribe(callback) { listener = callback; return () => { listener = undefined; }; } };
+    } };
+    const outcomes: string[] = [];
+    await expect(structuredReview(fixture, piAdapter, undefined, { onUsage: async (usage) => { outcomes.push(usage.outcome); throw new Error("the sink refused"); } })).rejects.toMatchObject({ code: "MODEL_NOT_ALLOWED" });
+    expect(outcomes).toEqual(["FAILED"]);
+  });
 
   it("takes a valid answer from the tool in one prompt, with the tool's instruction in the prompt", async () => {
     const fixture = await feedbackReviewFixture();

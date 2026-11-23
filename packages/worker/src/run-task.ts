@@ -1971,6 +1971,20 @@ async function runFeedbackReviewStage(stage: FeedbackReviewStageContext): Promis
       ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }), signal: stop.signal,
       ...(fileTools === undefined ? {} : { fileTools }),
       onProgress: message => { void events.append("progress", { message }).catch(() => undefined); },
+      // The critic's spend goes to the broker's cost ledger exactly as the REVIEW stage's reviewers' does (`finishReview`): a run that ended with no booked usage leaves the task's spend unreadable, and every paid move on it refuses.
+      usageCheckpoints: (reviewer) => createUsageCheckpointer({
+        enabled: invocation.payload.usageCheckpoints === true, ...(dependencies.modelCallLimits?.usageCheckpointMs === undefined ? {} : { intervalMs: dependencies.modelCallLimits.usageCheckpointMs }),
+        baseline: undefined, stats: () => reviewer.getSessionStats(), model: () => ({ ...reviewer.getModel(), ...(dependencies.model.cacheRetention === undefined ? {} : { cacheRetention: dependencies.model.cacheRetention }) }),
+        requested: dependencies.model, send: (payload) => { void events.append("usage", payload, { urgent: true }).catch(() => undefined); },
+      }),
+      onUsage: async ({ stats, model, outcome, checkpoints }) => {
+        const reviewerModel = { ...model, ...(dependencies.model.cacheRetention === undefined ? {} : { cacheRetention: dependencies.model.cacheRetention }) };
+        const redactedUsage = redactCredentials(createTaskUsageTelemetry(stats, reviewerModel, outcome));
+        const endReport = checkpoints?.endReport(stats, reviewerModel, outcome, dependencies.model) ?? usageForControlPlane(redactedUsage, dependencies.model);
+        if (endReport !== undefined) await events.append("usage", endReport);
+        // Best effort: the usage event is already sent, so a refused private copy must not make the review unreadable.
+        try { await dependencies.artifactSink({ name: reviewUsageArtifactName("CRITIC", undefined), mediaType: "application/json", content: JSON.stringify(redactedUsage, null, 2) }); } catch { /* the broker has the figures */ }
+      },
     });
     const workflowFeedbackReviewResult = {
       taskId: binding.taskId, workflowRevision: binding.workflowRevision, candidateDigest: binding.candidateDigest,

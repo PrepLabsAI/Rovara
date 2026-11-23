@@ -601,6 +601,8 @@ export const MERGE_NOT_READY_MESSAGES = {
   requiredMissing: `${CI_STATE_WORDS.required_missing}: the base branch requires a check that nothing has run on this code. Add it, or ask an admin to take it off the branch's required list.`,
   notOpen: "The pull request isn't open.",
   changing: "I'm still changing this pull request.",
+  /** The review of the pull request's comments is done and the owner has not decided yet: nothing is being changed. */
+  waitingForDecision: "Waiting for your decision on the review feedback.",
   repository: (repository: string, reason: string): string => `${repository}'s pull request isn't ready yet: ${reason}`,
   // Not in the plan's list; the plan has no word for these states.
   changesRequested: "A reviewer asked for changes on this pull request.",
