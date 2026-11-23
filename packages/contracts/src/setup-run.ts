@@ -254,6 +254,18 @@ export const PreparePinsSchema = z.array(z.object({ repository: z.string().min(1
   .refine((pins) => new Set(pins.map((pin) => pin.repository)).size === pins.length, "pinned repositories must be unique");
 export type PreparePins = z.infer<typeof PreparePinsSchema>;
 
+/**
+ * What a pinned preparation says when the commit the broker pinned is no longer a commit of the repository's default branch (the branch was rewritten; a branch that only moved ahead is read AT the pin, so it
+ * never gets here). The broker reads the sentence on a failed preparation to end a wiki build in its own words and to pin again on the next start, so both words are fixed here, shared by the worker and the broker.
+ * `PREPARE_PIN_MOVED_LEGACY_MARKER` is the older worker's sentence (any difference between the head and the pin), which a worker not yet upgraded still says.
+ */
+export const PREPARE_PIN_MOVED_MARKER = "is no longer on the default branch" as const;
+export const PREPARE_PIN_MOVED_LEGACY_MARKER = "is not at the commit the control plane pinned" as const;
+/** Whether a failed preparation's error says the commit it was pinned to is gone from the default branch. Pure; never throws. */
+export function isPinMovedError(error: unknown): boolean {
+  return typeof error === "string" && (error.includes(PREPARE_PIN_MOVED_MARKER) || error.includes(PREPARE_PIN_MOVED_LEGACY_MARKER));
+}
+
 /** A worker that lists this runs a setup run (`workflowMode: "SETUP_AGENT"`); the broker sends one only to such a worker. */
 export const SETUP_AGENT_FEATURE = "task.setupAgent.v1" as const;
 
