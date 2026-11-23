@@ -64,6 +64,29 @@ export type NpmrcReading = { ok: true; kept: string[]; githubScopes: string[]; d
 const unquote = (value: string): string => (/^(["']).*\1$/u.test(value) && value.length >= 2 ? value.slice(1, -1) : value);
 const hostOf = (url: string): string | undefined => { try { const parsed = new URL(url); return parsed.protocol === "https:" ? parsed.hostname.toLowerCase() : undefined; } catch { return undefined; } };
 
+type LineResult = { kind: "keep"; line: string } | { kind: "scope"; scope: string } | { kind: "drop" } | { kind: "refuse" };
+
+/** One `@scope:registry` line: GitHub Packages (the scope is ours to route), a public registry for a scope the company does not hold (kept), or refused. */
+function readScopeLine(scope: string, key: string, value: string, companyScopes: readonly string[]): LineResult {
+  const host = hostOf(value);
+  if (host === GITHUB_PACKAGES_HOST) return { kind: "scope", scope };
+  if (host !== undefined && PUBLIC_REGISTRY_HOSTS.has(host) && !companyScopes.includes(scope)) return { kind: "keep", line: `${key}=${value}` };
+  return { kind: "refuse" };
+}
+
+/** One line against the allow-list. */
+function readLine(key: string, value: string, hasValue: boolean, companyScopes: readonly string[]): LineResult {
+  if (key === AUTH_KEY) return { kind: "drop" };
+  const scope = SCOPE_KEY.exec(key)?.[1];
+  if (scope !== undefined) return readScopeLine(scope, key, value, companyScopes);
+  if (key === "registry") {
+    const host = hostOf(value);
+    return host !== undefined && PUBLIC_REGISTRY_HOSTS.has(host) ? { kind: "keep", line: `${key}=${value}` } : { kind: "refuse" };
+  }
+  if (SIMPLE_KEYS.has(key) && SIMPLE_VALUE.test(value)) return { kind: "keep", line: hasValue ? `${key}=${value}` : key };
+  return { kind: "refuse" };
+}
+
 /**
  * Reads a repository's `.npmrc` (text) against the allow-list. Every key must be one of: `@<scope>:registry` (to GitHub Packages, or to a public registry for a scope the company does not hold), `registry` (a public registry only), the GitHub
  * Packages `_authToken` line (dropped whatever its value, `${NPM_TOKEN}` included), or one of a few harmless switches. Anything else is refused and its KEY is named: `script-shell`, `node-options`, `globalconfig`, `userconfig`, `prefix`,
@@ -78,24 +101,11 @@ export function parseNpmrc(text: string, companyScopes: readonly string[]): Npmr
     if (line === "" || line.startsWith(";") || line.startsWith("#")) continue;
     const at = line.indexOf("=");
     const key = (at < 0 ? line : line.slice(0, at)).trim();
-    const value = at < 0 ? "" : unquote(line.slice(at + 1).trim());
-    const refused = { ok: false, key: nameableKey(key, at >= 0) } as const;
-    if (key === AUTH_KEY) { droppedAuth = true; continue; }
-    const scope = SCOPE_KEY.exec(key)?.[1];
-    if (scope !== undefined) {
-      const host = hostOf(value);
-      if (host === GITHUB_PACKAGES_HOST) githubScopes.push(scope);
-      else if (host !== undefined && PUBLIC_REGISTRY_HOSTS.has(host) && !companyScopes.includes(scope)) kept.push(`${key}=${value}`);
-      else return refused;
-    } else if (key === "registry") {
-      const host = hostOf(value);
-      if (host === undefined || !PUBLIC_REGISTRY_HOSTS.has(host)) return refused;
-      kept.push(`${key}=${value}`);
-    } else if (SIMPLE_KEYS.has(key) && SIMPLE_VALUE.test(value)) {
-      kept.push(at < 0 ? key : `${key}=${value}`);
-    } else {
-      return refused;
-    }
+    const read = readLine(key, at < 0 ? "" : unquote(line.slice(at + 1).trim()), at >= 0, companyScopes);
+    if (read.kind === "refuse") return { ok: false, key: nameableKey(key, at >= 0) };
+    if (read.kind === "keep") kept.push(read.line);
+    else if (read.kind === "scope") githubScopes.push(read.scope);
+    else droppedAuth = true;
   }
   return { ok: true, kept, githubScopes: [...new Set(githubScopes)], droppedAuth };
 }

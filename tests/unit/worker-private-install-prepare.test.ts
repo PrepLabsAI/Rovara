@@ -79,6 +79,43 @@ describe("the install step inside the preparation", () => {
     expect(onDisk).not.toContain(f.token);
   });
 
+  describe("the token is asked for right before the install, after the clone, whatever the clone took", () => {
+    const GRANT_LIFE_MS = 15 * 60_000;
+    const CLONE_MS = 20 * 60_000;
+
+    async function slowClone(provider: (clock: () => number, startedAt: number) => PrivateInstallOptions["provider"]) {
+      const f = await fixture();
+      let clock = 1_000_000;
+      const startedAt = clock;
+      const cloned: number[] = [];
+      const slow: RepositoryMaterializer = async (repository, destination, credential) => { await f.materializer(repository, destination, credential); clock += CLONE_MS; cloned.push(clock); };
+      const manifest = await prepareWorkspace({
+        rootPath: f.workspace, project: f.project, materializer: slow, registries: prepareRegistriesOfCompany([{ host: "npm.pkg.github.com", scopes: ["@acme"] }]),
+        registryCredentialProvider: () => Promise.resolve({ token: f.token }),
+        privateInstall: { ...f.privateInstall, now: () => clock, provider: provider(() => clock, startedAt) },
+        commandRunner: () => Promise.resolve({ exitCode: 0, stdout: "", stderr: "" }),
+      });
+      return { f, manifest, cloned, startedAt, grantEnds: startedAt + GRANT_LIFE_MS, clockNow: () => clock };
+    }
+
+    it("a clone longer than the grant's life still installs: the credential is asked for after the clone and is fresh when it is used", async () => {
+      const asked: number[] = [];
+      const run = await slowClone((clock) => () => { asked.push(clock()); return Promise.resolve({ token: canary(), expiresAt: new Date(clock() + GRANT_LIFE_MS).toISOString() }); });
+      expect(run.cloned[0]! - run.startedAt).toBeGreaterThan(GRANT_LIFE_MS);
+      expect(asked).toHaveLength(1);
+      expect(asked[0]!).toBeGreaterThanOrEqual(run.cloned[0]!);
+      expect(run.manifest.privateInstall?.map((entry) => entry.outcome)).toEqual(["installed"]);
+    });
+
+    it("control: a credential taken before the clone would be past its life when the install needs it, and is refused", async () => {
+      const early = canary();
+      const run = await slowClone((_clock, startedAt) => () => Promise.resolve({ token: early, expiresAt: new Date(startedAt + GRANT_LIFE_MS).toISOString() }));
+      expect(run.clockNow()).toBeGreaterThan(run.grantEnds);
+      expect(run.manifest.privateInstall?.map((entry) => entry.outcome)).toEqual(["refused_unsafe_token"]);
+      expect(run.f.events).toEqual([]);
+    });
+  });
+
   it("a read-only preparation (a pull request head) never installs private packages: no token asked, no container", async () => {
     const f = await fixture();
     await prepareWorkspace({
