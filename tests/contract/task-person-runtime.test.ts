@@ -163,13 +163,14 @@ describe("task person runtime factory", () => {
     await expect(runtime(admission, injected).checkTaskPerson(nativeTask(), nativeDeveloperId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
   });
 
-  it("projects only the approved Developer fields for an external principal", async () => {
+  // Real sign-in rows keep the id only in `pk` (no `developerId` attribute); fixtures here carry both shapes.
+  it.each([["the id only in the key (real rows)", false], ["an agreeing developerId attribute", true]])("projects only the approved Developer fields for an external principal, with %s", async (_shape, withAttribute) => {
     const issuer = "https://identity.example.com";
     const subject = "subject-123";
     const externalDeveloperId = ownerKeyForSubject(issuer, subject);
     const task = { ...nativeTask(), developerId: externalDeveloperId, provider: "oidc" } as DeveloperTaskRecord;
     const record = {
-      pk: `DEVELOPER#${externalDeveloperId}`, sk: "META", developerId: externalDeveloperId,
+      pk: `DEVELOPER#${externalDeveloperId}`, sk: "META", ...(withAttribute ? { developerId: externalDeveloperId } : {}),
       provider: "oidc", issuer, subject, slackUserId, revoked: false, displayName: "Maya", email: "ignored@example.com",
     };
     const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
@@ -177,6 +178,7 @@ describe("task person runtime factory", () => {
     const checkIdentity = vi.fn(async (dependencies: Parameters<typeof checkTaskPersonIdentity>[0], checkedTask: DeveloperTaskRecord, checkedDeveloperId: string) => {
       const projected = await dependencies.developerRecord(checkedDeveloperId);
       expect(projected).not.toHaveProperty("email");
+      expect(projected).toMatchObject({ developerId: externalDeveloperId });
       return checkTaskPersonIdentity(dependencies, checkedTask, checkedDeveloperId);
     });
     const checker = createTaskPersonRuntime({
@@ -197,6 +199,30 @@ describe("task person runtime factory", () => {
       projection: TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES,
     });
     expect(developerReads[0]?.[0].abortSignal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("refuses a developer row whose developerId attribute disagrees with its key (fail closed)", async () => {
+    const issuer = "https://identity.example.com";
+    const subject = "subject-123";
+    const externalDeveloperId = ownerKeyForSubject(issuer, subject);
+    const task = { ...nativeTask(), developerId: externalDeveloperId, provider: "oidc" } as DeveloperTaskRecord;
+    const record = {
+      pk: `DEVELOPER#${externalDeveloperId}`, sk: "META", developerId: "f".repeat(64),
+      provider: "oidc", issuer, subject, slackUserId, revoked: false, displayName: "Maya",
+    };
+    const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
+    const injected = ports({ task, developerRecord: record });
+    await expect(runtime(admission, injected).checkTaskPerson(task, externalDeveloperId)).rejects.toMatchObject({ code: "PROJECT_ACCESS_DENIED" });
+  });
+
+  it("refuses a developer row whose pk names another person", async () => {
+    const issuer = "https://identity.example.com";
+    const subject = "subject-123";
+    const externalDeveloperId = ownerKeyForSubject(issuer, subject);
+    const task = { ...nativeTask(), developerId: externalDeveloperId, provider: "oidc" } as DeveloperTaskRecord;
+    const record = { pk: `DEVELOPER#${"e".repeat(64)}`, sk: "META", provider: "oidc", issuer, subject, slackUserId, revoked: false, displayName: "Maya" };
+    const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
+    await expect(runtime(admission, ports({ task, developerRecord: record })).checkTaskPerson(task, externalDeveloperId)).rejects.toMatchObject({ code: "PROJECT_ACCESS_DENIED" });
   });
 
   it("refuses arbitrary row commands and Scan before any State read", async () => {
