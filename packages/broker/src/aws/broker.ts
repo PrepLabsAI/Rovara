@@ -1334,6 +1334,60 @@ async function routeServiceRequest(dependencies: AwsBrokerDependencies, tasks: D
   return await observeConnectorRoute(request.method, serviceUrl.pathname, () => routeWorkspaceRequest(dependencies, request, serviceUrl, identity));
 }
 
+// GitHub's webhook deliveries (#1315): verified by signature, with one retry on a freshly read secret.
+async function routeGithubWebhook(dependencies: AwsBrokerDependencies, request: BrokerHttpRequest): Promise<ReturnType<typeof json>> {
+  if (request.method !== "POST") return json({ error: { code: "NOT_FOUND", message: "route not found" } }, request.requestId, 404);
+  if (request.body === undefined || dependencies.githubWebhookSecret === undefined) {
+    return json({ error: { code: "RUNTIME_UNAVAILABLE", message: "GitHub webhook handling is not configured" } }, request.requestId, 503);
+  }
+  const notConfigured = () => json({ error: { code: "RUNTIME_UNAVAILABLE", message: "GitHub webhook handling is not configured" } }, request.requestId, 503);
+  const readWebhookSecret = async (refresh: boolean): Promise<string | undefined> => {
+    try {
+      return await dependencies.githubWebhookSecret?.(refresh ? { refresh: true } : undefined);
+    } catch (error) {
+      if (isWebhookSecretMissing(error)) return undefined;
+      throw error;
+    }
+  };
+  try {
+    const secret = await readWebhookSecret(false);
+    if (secret === undefined) return notConfigured();
+    // Guided onboarding PR 3: an `installation` event (uninstalled, suspended, unsuspended) marks the binding; it is verified by the same signature check first.
+    const deliver = (webhookSecret: string) => dependencies.githubBindings !== undefined && isGithubInstallationEvent(request.headers)
+      ? handleGithubInstallationWebhook({ rawBody: request.body ?? "", headers: request.headers, secret: webhookSecret, bindings: dependencies.githubBindings, log: brokerLogLine })
+      : handleGithubWebhook({
+      documentClient: dependencies.documentClient,
+      tableName: dependencies.tableName,
+      rawBody: request.body ?? "",
+      headers: request.headers,
+      secret: webhookSecret,
+      ...(dependencies.githubBindings === undefined ? {} : { companyForInstallation: (id: number) => dependencies.githubBindings!.ownerOf(id) }),
+      authorizeRepository: (scope) => githubEventStillAuthorized(dependencies, { kind: "PULL_REQUEST", action: "authorize", ...scope, number: scope.pullRequestNumber }),
+      process: (workflowEvent, deliveryId) => processGithubWorkflowEvent(dependencies, workflowEvent, deliveryId),
+      now: () => new Date().toISOString(),
+    });
+    let result;
+    try {
+      result = await deliver(secret);
+    } catch (error) {
+      if (!(error instanceof GithubWebhookRefusal) || error.message !== GITHUB_WEBHOOK_SIGNATURE_INVALID) throw error;
+      // The secret may have been changed since this container read it. The signature is checked before a delivery is
+      // reserved, so verifying once more with a fresh copy has no side effect.
+      const renewed = await readWebhookSecret(true);
+      if (renewed === undefined) return notConfigured();
+      if (renewed === secret) throw error;
+      result = await deliver(renewed);
+    }
+    if (result.status === "IN_PROGRESS") return json({ delivery: result.status, deliveryId: result.deliveryId }, request.requestId, 503);
+    return json({ delivery: result.status, deliveryId: result.deliveryId }, request.requestId);
+  } catch (error) {
+    if (error instanceof GithubWebhookRefusal) return json({ error: { code: "FORBIDDEN", message: error.message } }, request.requestId, 403);
+    if (error instanceof GithubWebhookRetryableError) return json({ error: { code: "RUNTIME_UNAVAILABLE", message: "GitHub webhook processing will be retried" } }, request.requestId, 503);
+    if (error instanceof AgentXError && error.code === "RUNTIME_UNAVAILABLE") return json({ error: { code: error.code, message: "GitHub webhook processing will be retried" } }, request.requestId, 503);
+    throw error;
+  }
+}
+
 
 function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBrokerDependencies) {
   // Spec 025: the broker actions the developer task routes call, built once per handler.
@@ -1607,58 +1661,7 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
         if (request.method !== "POST" || dependencies.linearWebhook === undefined) return json({ error: { code: "NOT_FOUND", message: "route not found" } }, request.requestId, 404);
         return linearWebhookResponse(await handleLinearAppWebhook(dependencies.linearWebhook, { rawBody: request.body, headers: request.headers }), request.requestId);
       }
-      if (url.pathname === "/v1/github/webhooks") {
-        if (request.method !== "POST") return json({ error: { code: "NOT_FOUND", message: "route not found" } }, request.requestId, 404);
-        if (request.body === undefined || dependencies.githubWebhookSecret === undefined) {
-          return json({ error: { code: "RUNTIME_UNAVAILABLE", message: "GitHub webhook handling is not configured" } }, request.requestId, 503);
-        }
-        const notConfigured = () => json({ error: { code: "RUNTIME_UNAVAILABLE", message: "GitHub webhook handling is not configured" } }, request.requestId, 503);
-        const readWebhookSecret = async (refresh: boolean): Promise<string | undefined> => {
-          try {
-            return await dependencies.githubWebhookSecret?.(refresh ? { refresh: true } : undefined);
-          } catch (error) {
-            if (isWebhookSecretMissing(error)) return undefined;
-            throw error;
-          }
-        };
-        try {
-          const secret = await readWebhookSecret(false);
-          if (secret === undefined) return notConfigured();
-          // Guided onboarding PR 3: an `installation` event (uninstalled, suspended, unsuspended) marks the binding; it is verified by the same signature check first.
-          const deliver = (webhookSecret: string) => dependencies.githubBindings !== undefined && isGithubInstallationEvent(request.headers)
-            ? handleGithubInstallationWebhook({ rawBody: request.body ?? "", headers: request.headers, secret: webhookSecret, bindings: dependencies.githubBindings, log: brokerLogLine })
-            : handleGithubWebhook({
-            documentClient: dependencies.documentClient,
-            tableName: dependencies.tableName,
-            rawBody: request.body ?? "",
-            headers: request.headers,
-            secret: webhookSecret,
-            ...(dependencies.githubBindings === undefined ? {} : { companyForInstallation: (id: number) => dependencies.githubBindings!.ownerOf(id) }),
-            authorizeRepository: (scope) => githubEventStillAuthorized(dependencies, { kind: "PULL_REQUEST", action: "authorize", ...scope, number: scope.pullRequestNumber }),
-            process: (workflowEvent, deliveryId) => processGithubWorkflowEvent(dependencies, workflowEvent, deliveryId),
-            now: () => new Date().toISOString(),
-          });
-          let result;
-          try {
-            result = await deliver(secret);
-          } catch (error) {
-            if (!(error instanceof GithubWebhookRefusal) || error.message !== GITHUB_WEBHOOK_SIGNATURE_INVALID) throw error;
-            // The secret may have been changed since this container read it. The signature is checked before a delivery is
-            // reserved, so verifying once more with a fresh copy has no side effect.
-            const renewed = await readWebhookSecret(true);
-            if (renewed === undefined) return notConfigured();
-            if (renewed === secret) throw error;
-            result = await deliver(renewed);
-          }
-          if (result.status === "IN_PROGRESS") return json({ delivery: result.status, deliveryId: result.deliveryId }, request.requestId, 503);
-          return json({ delivery: result.status, deliveryId: result.deliveryId }, request.requestId);
-        } catch (error) {
-          if (error instanceof GithubWebhookRefusal) return json({ error: { code: "FORBIDDEN", message: error.message } }, request.requestId, 403);
-          if (error instanceof GithubWebhookRetryableError) return json({ error: { code: "RUNTIME_UNAVAILABLE", message: "GitHub webhook processing will be retried" } }, request.requestId, 503);
-          if (error instanceof AgentXError && error.code === "RUNTIME_UNAVAILABLE") return json({ error: { code: error.code, message: "GitHub webhook processing will be retried" } }, request.requestId, 503);
-          throw error;
-        }
-      }
+      if (url.pathname === "/v1/github/webhooks") return await routeGithubWebhook(dependencies, request);
       // Spec 043: an eval runner's callbacks, authorized by the run's own capability.
       const evalCallback = isSwebenchCallbackPath(url.pathname);
       if (request.method === "POST" && evalCallback !== undefined) {
@@ -13375,6 +13378,461 @@ async function loadWorkflowCandidateSourceExport(
   return parsed;
 }
 
+type WorkflowTaskRecord = DeveloperTaskRecord & { workflow: WorkflowSnapshot };
+
+/** A publish's terminal result (#1343): the draft pull request it opened, checked against the candidate, and the dispatch of the next one. */
+async function completedPublishItems(dependencies: AwsBrokerDependencies, task: WorkflowTaskRecord, terminalStatus: OperationStatus, now: string, result: unknown): Promise<TransactItems> {
+  if (terminalStatus !== "SUCCEEDED" || task.workflow.stage !== "PULL_REQUEST" || task.workflow.state !== "READY" || task.workflow.candidate === undefined) return [];
+  const published = PullRequestResultSchema.safeParse(result);
+  if (!published.success) throw agentXError("CONFIG_INVALID", "workflow pull request result is invalid");
+  const project = await readTaskLegacyProject(await taskLegacyScope(dependencies, task), () => requireProject(dependencies, task.project, task.startingRevision));
+  const repository = project.definition.repositories.find((entry) => entry.name === published.data.repository);
+  if (repository === undefined) throw agentXError("CONFIG_INVALID", "published pull request repository is not part of the task's registered project revision");
+  const repositoryFullName = githubRepositoryFullName(repository.url);
+  if (!pullRequestMatchesRepository(published.data.url, repositoryFullName, published.data.number)) {
+    throw agentXError("CONFIG_INVALID", "published pull request URL does not match the task's registered repository");
+  }
+  const publishedRecord = await requirePullRequest(dependencies, task.workspaceId, published.data.repository, published.data.number);
+  if (publishedRecord.url !== published.data.url || publishedRecord.expectedHeadCommit !== published.data.commit) {
+    throw agentXError("STALE_FENCE", "published pull request head does not match the broker-verified publication");
+  }
+  const candidateRepository = task.workflow.candidate.repositories.find(entry => entry.repositoryId === published.data.repository);
+  const getFeedback = dependencies.githubPullRequests.getPullRequestFeedback;
+  if (candidateRepository === undefined || getFeedback === undefined) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "cannot verify the published pull request against the checked candidate");
+  }
+  const publishedFeedback = await getFeedback.call(dependencies.githubPullRequests, repository.url, published.data.number);
+  if (publishedFeedback.pullRequest.number !== published.data.number
+    || publishedFeedback.pullRequest.url !== published.data.url
+    || publishedFeedback.pullRequest.state !== "open"
+    || publishedFeedback.pullRequest.headCommit !== publishedRecord.expectedHeadCommit
+    || publishedFeedback.pullRequest.headTreeSha !== candidateRepository.treeSha) {
+    throw agentXError("STALE_FENCE", "published pull request does not contain the exact checked candidate tree");
+  }
+  const indexKey = githubWorkflowPullRequestKey(repositoryFullName, published.data.number);
+  const existingIndex = await getItem<GithubWorkflowPullRequestRecord>(dependencies, indexKey);
+  const indexRecord: GithubWorkflowPullRequestRecord = {
+    ...indexKey,
+    entityType: "GITHUB_WORKFLOW_PR",
+    repositoryFullName,
+    repositoryId: published.data.repository,
+    number: published.data.number,
+    url: published.data.url,
+    taskId: task.taskId,
+    workspaceId: task.workspaceId,
+    candidateDigest: task.workflow.candidate.digest,
+    createdAt: now,
+  };
+  if (existingIndex !== undefined && (existingIndex.taskId !== indexRecord.taskId
+    || existingIndex.candidateDigest !== indexRecord.candidateDigest
+    || existingIndex.url !== indexRecord.url)) {
+    throw agentXError("CONFIG_INVALID", "this pull request is already linked to another task or candidate");
+  }
+  const next = registerWorkflowPullRequest(task.workflow, {
+    repositoryId: published.data.repository,
+    number: published.data.number,
+    url: published.data.url,
+    headSha: publishedRecord.expectedHeadCommit,
+    headTreeSha: publishedFeedback.pullRequest.headTreeSha,
+    candidateDigest: task.workflow.candidate.digest,
+    required: true,
+  }, now);
+  return [{ Update: {
+    TableName: dependencies.tableName,
+    Key: taskKey(task.taskId),
+    UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+    ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :ready AND attribute_not_exists(closedAt)",
+    ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
+    ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": task.workflow.revision, ":stage": "PULL_REQUEST", ":ready": "READY" },
+  } }, ...(existingIndex === undefined ? [{ Put: {
+    TableName: dependencies.tableName,
+    Item: indexRecord,
+    ConditionExpression: "attribute_not_exists(pk)",
+  } }] : []),
+  // More repositories to go: the next draft pull request is due, as the first one was after the reviews.
+  ...(next.stage === "PULL_REQUEST" && next.state === "READY" && next.candidate !== undefined
+    ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, "PUBLISH", next.candidate.digest, now)] : []),
+  ...((task.workflow.pullRequests ?? []).length === 0 ? [mergeRecoveryItem(dependencies.tableName, task.taskId, now)] : [])];
+}
+
+/** A REVIEW run's terminal result (#1343): the next workflow, and the E2E authority checks that commit with it. */
+async function reviewRunOutcome(dependencies: AwsBrokerDependencies, operation: OperationRecord, task: WorkflowTaskRecord, terminalStatus: OperationStatus, now: string, result: unknown, terminalError: string | undefined): Promise<{ next: WorkflowSnapshot; e2eAuthorityChecks: Array<Record<string, unknown>> }> {
+  let next: WorkflowSnapshot;
+  let e2eAuthorityChecks: Array<Record<string, unknown>> = [];
+  if (terminalStatus !== "SUCCEEDED") {
+    // A review that stopped because its base rule files could not be verified says so; any other stop keeps the generic reason.
+    next = blockWorkflow(task.workflow, terminalError?.includes(WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE) === true ? WORKFLOW_BLOCK_REASONS.ruleFilesUnverified
+      : workflowRunEndedReason("REVIEW", terminalStatus), now);
+  } else {
+    const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
+    const repositories = Array.isArray(reported.workflowCandidateRepositories) ? reported.workflowCandidateRepositories : [];
+    const reviews = reported.workflowReviews;
+    let reviewFailure = "independent candidate review was invalid, incomplete, or stale";
+    try {
+      if (!Array.isArray(reviews)) throw new Error("review result has an invalid report collection");
+      const candidate = createCandidateManifest(repositories as CandidateRepository[]);
+      if (task.workflow.stage !== "REVIEW" || task.workflow.candidate?.digest !== candidate.digest) {
+        throw new Error("review result is stale, incomplete, or came from another operation");
+      }
+      if (task.workflow.e2e?.required === true) {
+        const currentRoundId = task.workflow.e2e.currentRoundId;
+        const checksOperations = (await queryAllItems(dependencies, `WORKSPACE#${task.workspaceId}`, "OPERATION#"))
+          .filter((item) => item.entityType === "OPERATION" && item.kind === "task" && item.workflowMode === "CHECKS")
+          .map((item) => item as unknown as OperationRecord)
+          .filter((item) => item.workflowE2EAdmission?.candidateDigest === candidate.digest
+            && item.workflowE2EAdmission.roundId === currentRoundId && item.workflowE2EEvidenceRef !== undefined)
+          .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+        const checksOperation = checksOperations[0];
+        const e2eDiagnostic: WorkflowE2EVerificationDiagnostic = {};
+        if (checksOperation === undefined || await verifyWorkflowE2EEvidence(dependencies, checksOperation, task, candidate, undefined, e2eDiagnostic) !== "PASS") {
+          throw new Error("current E2E evidence is not independently qualified for review");
+        }
+        e2eAuthorityChecks = e2eDiagnostic.authorityChecks ?? [];
+        if (e2eAuthorityChecks.length === 0) throw new Error("current E2E authority snapshot could not be fenced at review persistence");
+      }
+      // Validate every report's complete contract and provenance before deciding that a role is missing.
+      for (const review of reviews) {
+        if (review === null || typeof review !== "object" || (review as Record<string, unknown>).operationId !== operation.id) {
+          throw new Error("review result is stale, incomplete, or came from another operation");
+        }
+        submitWorkflowReview(task.workflow, review, now);
+      }
+      // Exactly one code review and one security review: two of one kind would leave the stage waiting for the other.
+      const roles = reviews.map((review) => (review as Record<string, unknown>).role).sort();
+      if (roles.length !== 2 || roles[0] !== "CRITIC" || roles[1] !== "SECURITY") {
+        reviewFailure = WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE;
+        throw new Error("review result does not hold one code review and one security review");
+      }
+      next = task.workflow;
+      for (const review of reviews) next = submitWorkflowReview(next, review, now);
+    } catch {
+      next = blockWorkflow(task.workflow, reviewFailure, now);
+    }
+  }
+  return { next, e2eAuthorityChecks };
+}
+
+/** A FEEDBACK_REVIEW run's terminal result (#1343): the next workflow, or undefined when the run no longer matches the task's current feedback review. */
+async function feedbackReviewRunOutcome(dependencies: AwsBrokerDependencies, operation: OperationRecord, task: WorkflowTaskRecord, terminalStatus: OperationStatus, now: string, result: unknown): Promise<WorkflowSnapshot | undefined> {
+  let next: WorkflowSnapshot;
+  const binding = operation.workflowFeedbackReview;
+  const current = task.workflow;
+  if (binding === undefined || current.stage !== "WAIT_FOR_MERGE" || current.state !== "RUNNING"
+    || current.revision !== binding.workflowRevision || current.taskId !== binding.taskId
+    || current.candidate?.digest !== binding.candidateDigest || current.feedbackReview?.status !== "COLLECTING") return undefined;
+  if (terminalStatus !== "SUCCEEDED") {
+    next = blockWorkflow(current, WORKFLOW_BLOCK_REASONS.feedbackReviewFailed, now);
+  } else {
+    try {
+      const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
+      const feedbackResult = reported.workflowFeedbackReviewResult;
+      if (feedbackResult === null || typeof feedbackResult !== "object" || Array.isArray(feedbackResult)) throw new Error("feedback review result is missing");
+      const resultRecord = feedbackResult as Record<string, unknown>;
+      if (resultRecord.taskId !== binding.taskId || resultRecord.workflowRevision !== binding.workflowRevision
+        || resultRecord.candidateDigest !== binding.candidateDigest || typeof resultRecord.outputDigest !== "string"
+        || typeof resultRecord.artifactName !== "string" || typeof resultRecord.status !== "string") throw new Error("feedback review result does not match its operation binding");
+      const artifacts = (await queryAllItems(dependencies, "WORKSPACE#" + operation.workspaceId, "ARTIFACT#"))
+        .filter(item => item.operationId === operation.id && item.name === resultRecord.artifactName);
+      if (artifacts.length !== 1 || typeof artifacts[0]?.objectKey !== "string") throw new Error("critic report artifact is missing or ambiguous");
+      const object = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: String(artifacts[0].objectKey) }));
+      const reportBytes = object.Body ? Buffer.from(await object.Body.transformToByteArray()) : Buffer.alloc(0);
+      if (reportBytes.byteLength > 1_000_000 || createHash("sha256").update(reportBytes).digest("hex") !== resultRecord.outputDigest) throw new Error("critic report bytes failed digest validation");
+      const report = WorkflowFeedbackReviewReportSchema.parse(JSON.parse(reportBytes.toString("utf8")));
+      const inputs = await readFeedbackBundlesForCritic(dependencies, operation, binding);
+      // The critic's input as this broker builds it; a run an earlier release started (no notes marker) may also have been
+      // given every note, or none (deploy skew), and only such a run.
+      const requirementsDigests = operation.feedbackNotesScoped === true ? inputs.acceptedRequirementsDigests.slice(0, 1) : inputs.acceptedRequirementsDigests;
+      const refs = current.feedbackReview.bundleRefs.map(ref => WorkflowFeedbackBundleRefSchema.parse(ref));
+      if (operation.workflowMode !== "FEEDBACK_REVIEW" || report.operationMode !== operation.workflowMode
+        || report.operationId !== operation.id || report.taskId !== current.taskId
+        || report.workflowRevision !== binding.workflowRevision || report.qualification !== "AI_GENERATED_ADVISORY"
+        || !requirementsDigests.includes(report.taskRequirementsDigest) || report.status !== resultRecord.status
+        || refs.length !== report.bundleDigests.length || !refs.every(ref => report.bundleDigests.includes(ref.sha256))
+        || refs.length !== report.candidateBindings.length || refs.some(ref => !report.candidateBindings.some(candidate =>
+          candidate.repositoryId === ref.repositoryId && candidate.number === ref.number && candidate.headSha === ref.headSha
+            && candidate.candidateDigest === ref.candidateDigest && candidate.commentSetDigest === ref.commentSetDigest && candidate.bundleDigest === ref.sha256))) {
+        throw new Error("critic report provenance does not match the exact collected inputs");
+      }
+      const { findings, ...metadata } = report;
+      void findings;
+      const reviewRef = WorkflowFeedbackReviewRefSchema.parse({ ...metadata, sha256: resultRecord.outputDigest, objectKey: String(artifacts[0].objectKey) });
+      next = completeWorkflowFeedbackReview(current, {
+        expectedRevision: binding.workflowRevision, taskId: binding.taskId, candidateDigest: binding.candidateDigest,
+        operationId: operation.id, bundleRefs: refs, reviewRef,
+      }, now);
+    } catch {
+      next = blockWorkflow(current, WORKFLOW_BLOCK_REASONS.feedbackReviewFailed, now);
+    }
+  }
+  return next;
+}
+
+/** What verifyCandidateRun reads: the handler's values and the work breakdown result it checked first. */
+type CandidateRunContext = {
+  dependencies: AwsBrokerDependencies; operation: OperationRecord; task: WorkflowTaskRecord; now: string; reported: Record<string, unknown>;
+  dependencyBinding: OperationRecord["workflowDependencies"]; dependencyResult: ReturnType<typeof WorkflowDependencyResultSchema.safeParse> | undefined;
+  dependencyResultValid: boolean; graphItemsComplete: boolean;
+};
+type CandidateRunOutcome = { next: WorkflowSnapshot; e2eAuthorityChecks: Array<Record<string, unknown>> };
+
+/** A succeeded IMPLEMENT or CHECKS run (#1343): its candidate, checks and E2E evidence are verified and recorded, or the workflow blocks with the reason. */
+async function verifyCandidateRun(context: CandidateRunContext): Promise<CandidateRunOutcome> {
+  const { dependencies, operation, task, now, reported, dependencyBinding, dependencyResult, dependencyResultValid, graphItemsComplete } = context;
+  let next: WorkflowSnapshot;
+  let e2eAuthorityChecks: Array<Record<string, unknown>> = [];
+  const repositories = Array.isArray(reported.workflowCandidateRepositories) ? reported.workflowCandidateRepositories : [];
+  const checkedRepositories = Array.isArray(reported.workflowCheckCandidateRepositories) ? reported.workflowCheckCandidateRepositories : [];
+  const checks = CheckReportSchema.safeParse(reported.checks);
+  const verifying = { ...blockWorkflow(task.workflow, "candidate checks are being recorded", now), stage: "VERIFY" as const };
+  let verificationFailure: string = WORKFLOW_BLOCK_REASONS.checksUnconfirmed;
+  // Why, for the log only: the owner reads the plain reason.
+  let verificationDetail: string | undefined;
+  // Review only: the tests the rerun found regressed, for the owner's message and a send-back.
+  let regressedChecks: string[] | undefined;
+  let failedE2ERound: { status: "FAILED"; candidateDigest: string; roundId: string; groupRunIds: string[]; admissionSha256: string; evidenceSha256: string } | undefined;
+  try {
+    if (dependencyBinding !== undefined && (!dependencyResultValid || !graphItemsComplete)) {
+      verificationFailure = "approved work breakdown result is missing, stale or incomplete";
+      throw new Error(verificationFailure);
+    }
+    if (dependencyBinding === undefined && task.workflow.workflowDependenciesApproval !== undefined && operation.workflowMode === "IMPLEMENT"
+      && task.workflow.stage === "IMPLEMENT") {
+      verificationFailure = "approved work breakdown was not carried into this implementation";
+      throw new Error(verificationFailure);
+    }
+    if (operation.workflowMode === "CHECKS" && task.workflow.stage !== "VERIFY") {
+      verificationFailure = WORKFLOW_BLOCK_REASONS.checkRetryStale;
+      throw new Error("verification retry stage changed");
+    }
+    if (!checks.success) {
+      verificationFailure = WORKFLOW_BLOCK_REASONS.checkReportUnreadable;
+      throw new Error("invalid check report");
+    }
+    // Review only: the approved plan and the project select no check, so "no checks ran" is the expected report. The
+    // candidate is still validated below exactly as for a checked task. A task with no stored policy is never this.
+    const reviewOnly = workflowIsReviewOnly(task.workflow.checkPolicy);
+    // Review only still stops on evidence AgentX saw itself: a rerun test that passed before fails now.
+    if (reviewOnly && checks.data.status === "regression") {
+      verificationFailure = WORKFLOW_BLOCK_REASONS.regressionFound;
+      verificationDetail = checks.data.status;
+      regressedChecks = regressedCheckLabels(checks.data.checks);
+      throw new Error("a rerun test regressed");
+    }
+    // Review only: no checks to run, or a rerun of the agent's own tests that stopped or errored, is no evidence either
+    // way (a regression that stands through a stop is reported as one); reviews decide.
+    if (checks.data.status === "not_verified" && !reviewOnly) {
+      verificationFailure = checks.data.notVerifiedReason === "no_checks" ? WORKFLOW_BLOCK_REASONS.noChecksConfigured : WORKFLOW_BLOCK_REASONS.checkRunnerFailed;
+      verificationDetail = checks.data.notVerifiedReason ?? checks.data.status;
+      throw new Error("checks were not verified");
+    }
+    const project = await readTaskLegacyProject(await taskLegacyScope(dependencies, task), () => requireProject(dependencies, task.project, task.startingRevision));
+    const expectedRepositoryIds = project.definition.repositories.map((repository) => repository.name).sort();
+    const candidateInput = repositories as CandidateRepository[];
+    const candidate = createCandidateManifest(candidateInput);
+    if (task.workflow.e2e?.required === true && operation.workflowMode === "IMPLEMENT") {
+      const sourceExport = await loadWorkflowCandidateSourceExport(dependencies, operation, candidate);
+      if (sourceExport === undefined) {
+        verificationFailure = WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON;
+        throw new Error(verificationFailure);
+      }
+    }
+    let e2eQualification: { candidateDigest: string; contractDigest: string; policyDigest: string; bundleDigest: string; executionPlanDigest: string;
+      roundId: string; groupRunIds: string[]; admissionSha256: string; evidenceSha256: string } | undefined;
+    if (operation.workflowMode === "CHECKS" && task.workflow.e2e?.required === true) {
+      if (isNonCandidateRound(operation.workflowE2EAdmission)) throw new Error("a baseline or replay round is never a candidate's CHECKS");
+      if (task.workflow.e2e.currentGroupRunIds.length === 0 || task.workflow.e2e.currentRoundId === undefined
+        || operation.workflowE2EAdmission === undefined || operation.workflowE2EEvidenceRef === undefined) {
+        verificationFailure = "the current candidate-bound E2E round or its private evidence is missing";
+        throw new Error(verificationFailure);
+      }
+      const e2eDiagnostic: WorkflowE2EVerificationDiagnostic = {};
+      // The operation's stored record is still RUNNING here; this callback is the one that ends it, as SUCCEEDED (a failed or stopped run never reaches verification).
+      const qualification = await verifyWorkflowE2EEvidence(dependencies, operation, task, candidate, undefined, e2eDiagnostic, { terminalStatus: "SUCCEEDED" });
+      e2eAuthorityChecks = e2eDiagnostic.authorityChecks ?? [];
+      if (e2eAuthorityChecks.length === 0) {
+        // An application round says why its authority could not be fenced (a requalified runtime, a moved source); the portable message is unchanged. A runtime that
+        // moved under the round is worded as the dispatch words it, so the owner's retry approves the plan again against it (or asks an administrator first), in one step.
+        const why = e2eDiagnostic.application === true ? e2eDiagnostic.reason?.slice(0, 240) : undefined;
+        // Evidence that could not be read or decoded, found before authority was judged at all, is not an authority failure and is not worded as one.
+        verificationFailure = e2eDiagnostic.application === true && e2eDiagnostic.authorityEvaluated !== true && why !== undefined ? `admitted E2E evidence is incomplete or unknown (${why})`
+          : e2eDiagnostic.runtimeChange === "requalified" && why !== undefined ? `${WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX}${why}`
+          : e2eDiagnostic.runtimeChange === "unusable" && why !== undefined ? `${WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX}${why}`
+          : e2eDiagnostic.runtimeChange === "accounts" && why !== undefined ? `${WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX}${why}`
+          : `current E2E authority snapshot could not be fenced at terminal persistence${why === undefined ? "" : ` (${why})`}`;
+        throw new Error(verificationFailure);
+      }
+      if (qualification !== "PASS") {
+        if (qualification === "FAILED" && operation.workflowE2EAdmission !== undefined && operation.workflowE2EEvidenceRef !== undefined) {
+          failedE2ERound = { status: "FAILED", candidateDigest: candidate.digest, roundId: operation.workflowE2EAdmission.roundId,
+            groupRunIds: [...operation.workflowE2EAdmission.groupRunIds], admissionSha256: operation.workflowE2EAdmission.admissionRef.sha256,
+            evidenceSha256: operation.workflowE2EEvidenceRef.sha256 };
+        }
+        verificationFailure = qualification === "FAILED" ? "one or more admitted E2E groups failed"
+          : `admitted E2E evidence is incomplete or unknown${e2eDiagnostic.reason === undefined ? "" : ` (${e2eDiagnostic.reason})`}`;
+        throw new Error(verificationFailure);
+      }
+      const admittedE2E = task.workflow.e2e;
+      const admissionRef = operation.workflowE2EAdmission;
+      const evidenceRef = operation.workflowE2EEvidenceRef;
+      if (!admittedE2E || !admissionRef || !evidenceRef) throw new Error("trusted E2E aggregate references are unavailable");
+      e2eQualification = { candidateDigest: candidate.digest, contractDigest: admittedE2E.contractDigest, policyDigest: admittedE2E.policyDigest,
+        bundleDigest: admittedE2E.bundleDigest, executionPlanDigest: admittedE2E.executionPlanDigest, roundId: admissionRef.roundId,
+        groupRunIds: [...admissionRef.groupRunIds], admissionSha256: admissionRef.admissionRef.sha256, evidenceSha256: evidenceRef.sha256 };
+    }
+    const checkedCandidate = createCandidateManifest(checkedRepositories as CandidateRepository[]);
+    if (dependencyBinding !== undefined && dependencyResult?.success === true && dependencyResult.data.candidateDigest !== candidate.digest) {
+      verificationFailure = "work breakdown result does not bind the final combined candidate";
+      throw new Error(verificationFailure);
+    }
+    if (dependencyBinding !== undefined && dependencyResult?.success === true) {
+      const finalProgress = dependencyResult.data.items.at(-1);
+      const actualFinalTree = candidate.repositories.length === 1 ? candidate.repositories[0]?.treeSha : undefined;
+      if (finalProgress?.state !== "IMPLEMENTED" || actualFinalTree === undefined || finalProgress.candidateTreeSha !== actualFinalTree) {
+        verificationFailure = "work breakdown final item does not bind the final combined candidate tree";
+        throw new Error(verificationFailure);
+      }
+    }
+    if (candidate.repositories.map((repository) => repository.repositoryId).sort().join("\n") !== expectedRepositoryIds.join("\n")) {
+      verificationFailure = WORKFLOW_BLOCK_REASONS.repositoriesIncomplete;
+      throw new Error("candidate repositories are incomplete");
+    }
+    // An approved fix to an open pull request that leaves every repository's code as the pull request holds it changed
+    // nothing: there is nothing to check again or push, so the thread must not say a fix was pushed. The comparison is
+    // with what each pull request holds, never with the latest candidate: after a fix that failed its checks and a
+    // Send back, the latest candidate is that failed fix.
+    const pullRequestTrees = workflowPullRequestTrees(task.workflow);
+    if (operation.workflowMode === "IMPLEMENT" && pullRequestTrees !== undefined
+      && candidate.repositories.every((repository) => pullRequestTrees.get(repository.repositoryId) === repository.treeSha)) {
+      verificationFailure = WORKFLOW_BLOCK_REASONS.fixChangedNothing;
+      throw new Error("the fix left the pull request's code as it was");
+    }
+    if (checkedCandidate.digest !== candidate.digest) {
+      verificationFailure = WORKFLOW_BLOCK_REASONS.codeChangedAfterChecks;
+      throw new Error("checked candidate is stale");
+    }
+    // Reviewers judge the change from the task's base, so every repository must say where it started.
+    if (candidate.repositories.some((repository) => repository.baseCommitSha === undefined)) {
+      verificationFailure = WORKFLOW_BLOCK_REASONS.startUnrecorded;
+      throw new Error("candidate has no base commit");
+    }
+    const pinnedBase = task.workflow.reviewBase;
+    // Before the first pin, the candidate must start where preparation checked out; the worker's own report of
+    // its base is never trusted on its own.
+    const expectedBase = pinnedBase ?? task.preparedBase;
+    if (expectedBase === undefined) {
+      verificationFailure = WORKFLOW_BLOCK_REASONS.startUnrecorded;
+      throw new Error("the task has no prepared base commit");
+    }
+    if (candidate.repositories.some((repository) =>
+      expectedBase.find((entry) => entry.repositoryId === repository.repositoryId)?.baseCommitSha !== repository.baseCommitSha)) {
+      verificationFailure = WORKFLOW_BLOCK_REASONS.startChanged;
+      throw new Error("candidate base commit differs from the task's base");
+    }
+    if (pinnedBase === undefined && dependencies.githubPullRequests.getCommitTree !== undefined) {
+      // Before pinning, confirm GitHub has each starting commit, so the base is real history and not a local commit.
+      try {
+        for (const repository of candidate.repositories) {
+          const url = project.definition.repositories.find((entry) => entry.name === repository.repositoryId)?.url;
+          if (url === undefined) throw new Error("candidate repository is not registered");
+          await dependencies.githubPullRequests.getCommitTree(url, repository.baseCommitSha as string);
+        }
+      } catch (error) {
+        verificationFailure = WORKFLOW_BLOCK_REASONS.startUnconfirmed;
+        throw error;
+      }
+    }
+    const selectedChecks = workflowSelectedChecks(task.workflow.checkPolicy);
+    // The worker reports the readiness commands it was sent (required, then proposed, then selected optional,
+    // in selectedChecks order) as `readiness:<index>`; agent-claimed entries never stand in for them, not even when
+    // no check was selected: then there are no results, a review-only task records none, and any other task stops
+    // (fails closed).
+    const byId = new Map(checks.data.checks.filter((entry) => entry.source === "project").map((entry) => [entry.id, entry]));
+    const results = selectedChecks.map((check, index) => {
+      const entry = byId.get(`readiness:${index}`);
+      const status = entry === undefined || entry.after === "not_run" || entry.after === "unknown" ? "UNKNOWN" as const : entry.after === "passed" ? "PASS" as const : "FAILED" as const;
+      // The worker's report of a program it could not start, which is all the check's output then holds.
+      const programNotFound = status === "FAILED" && entry?.output.trim() === `spawn ${check.command.executable} ENOENT`;
+      // Any other spawn error the worker reports as the check's whole output (EAGAIN, EACCES, ...), with no exit code:
+      // the process never started. (A check that ran and printed those words has its exit code.)
+      const neverStarted = status === "FAILED" && !programNotFound && entry?.exitCode == null && /^spawn \S+ E[A-Z]+$/u.test(entry?.output.trim() ?? "");
+      const broken = status === "FAILED" && entry !== undefined && (programNotFound || neverStarted || checkCommandCouldNotRun(check.command, entry.exitCode, entry.output));
+      return { checkId: check.id, status, ...(programNotFound ? { programNotFound: true as const } : {}), ...(broken ? { broken: true as const } : {}),
+        ...(neverStarted ? { neverStarted: true as const } : {}), ...(entry?.madeByRovara === true ? { madeByRovara: true as const } : {}) };
+    });
+    if (results.length === 0 && !reviewOnly) {
+      verificationFailure = WORKFLOW_BLOCK_REASONS.noCheckResults;
+      throw new Error("there are no selected check results");
+    }
+    next = recordWorkflowVerification(verifying, {
+      candidate,
+      checks: {
+        candidateDigest: candidate.digest,
+        producer: "agentx-worker-checks",
+        environmentId: task.workspaceId,
+        recordedAt: now,
+        results,
+        ...(reviewOnly ? { reviewOnly: true } : {}),
+      },
+      now,
+      ...(e2eQualification === undefined ? {} : { e2eQualification }),
+    });
+  } catch (error) {
+    console.log(JSON.stringify({ component: "broker", event: "workflow.verification_blocked", taskId: task.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown", reason: verificationFailure, ...(verificationDetail === undefined ? {} : { detail: verificationDetail }) }));
+    next = verificationFailure === WORKFLOW_BLOCK_REASONS.fixChangedNothing ? blockWorkflow(task.workflow, verificationFailure, now)
+      : blockWorkflow(verifying, verificationFailure, now, { ...(regressedChecks === undefined ? {} : { regressedChecks }),
+        ...(failedE2ERound === undefined ? {} : { failedE2ERound }) });
+  }
+  return { next, e2eAuthorityChecks };
+}
+
+/** An IMPLEMENT or CHECKS run's terminal result (#1343): a run that did not succeed blocks the workflow; one that did has its candidate verified. */
+async function implementOrChecksRunOutcome(dependencies: AwsBrokerDependencies, operation: OperationRecord, task: WorkflowTaskRecord, mode: "IMPLEMENT" | "CHECKS", terminalStatus: OperationStatus, now: string, result: unknown, terminalError: string | undefined): Promise<CandidateRunOutcome> {
+  const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
+  const dependencyBinding = operation.workflowDependencies;
+  const dependencyResult = dependencyBinding === undefined ? undefined : WorkflowDependencyResultSchema.safeParse(reported.workflowDependenciesResult);
+  const dependencyOrder = dependencyBinding === undefined ? [] : taskGraphOrder(dependencyBinding.graph);
+  const acknowledgedTerminal = dependencyBinding === undefined ? undefined : workflowDependencyAttemptTerminalProgress({
+    graph: dependencyBinding.graph, approval: dependencyBinding.approval, operationId: operation.id,
+    sequenceStart: dependencyBinding.sequenceStart, resumeProgress: dependencyBinding.resumeProgress,
+    history: task.workflow.workflowDependenciesProgress ?? [],
+  });
+  const dependencyResultValid = dependencyBinding !== undefined && dependencyResult?.success === true
+    && dependencyResult.data.taskId === dependencyBinding.graph.taskId
+    && dependencyResult.data.graphDigest === dependencyBinding.approval.graphDigest
+    && dependencyResult.data.runId === dependencyBinding.approval.runId
+    && dependencyResult.data.operationId === operation.id
+    && dependencyResult.data.workflowRevision === dependencyBinding.approval.workflowRevision
+    && task.workflow.workflowDependenciesApproval?.artifactDigest === dependencyBinding.approval.artifactDigest
+    && task.workflow.workflowDependenciesApproval.graphDigest === dependencyBinding.approval.graphDigest
+    && task.workflow.workflowDependenciesApproval.workflowRevision === dependencyBinding.approval.workflowRevision
+    && task.workflow.workflowDependenciesApproval.actorId === dependencyBinding.approval.actorId
+    && task.workflow.workflowDependenciesApproval.runId === dependencyBinding.approval.runId
+    && acknowledgedTerminal !== undefined
+    && dependencyResult.data.items.length === acknowledgedTerminal.length
+    && dependencyResult.data.items.every((item, index) => canonicalJson(item) === canonicalJson(acknowledgedTerminal[index]))
+    && dependencyResult.data.items.every((item, index) => item.itemId === dependencyOrder[index]
+      && item.sequence > 0
+      && (index === 0 || dependencyResult.data.items[index - 1]?.state === "IMPLEMENTED"
+        && dependencyResult.data.items[index - 1]?.candidateTreeSha === item.baseTreeSha));
+  const graphItemsComplete = dependencyBinding !== undefined && dependencyResult?.success === true
+    && dependencyResult.data.status === "SUCCEEDED"
+    && dependencyResult.data.items.length === dependencyBinding.graph.items.length
+    && dependencyResult.data.items.every((item) => item.state === "IMPLEMENTED");
+  if (terminalStatus === "SUCCEEDED") return await verifyCandidateRun({ dependencies, operation, task, now, reported, dependencyBinding, dependencyResult, dependencyResultValid, graphItemsComplete });
+  let next: WorkflowSnapshot;
+    next = blockWorkflow(task.workflow, terminalError?.includes(WORKFLOW_HISTORY_REWRITTEN_MESSAGE) === true ? WORKFLOW_HISTORY_REWRITTEN_MESSAGE
+      : terminalError?.includes(WORKFLOW_NO_CODE_CHANGE_MESSAGE) === true ? WORKFLOW_BLOCK_REASONS.noCodeChanged
+      : workflowRunEndedReason(mode, terminalStatus), now);
+    const progress = task.workflow.workflowDependenciesProgress ?? [];
+    const unfinished = progress.at(-1);
+    if (dependencyBinding !== undefined && unfinished?.operationId === operation.id && unfinished.state === "STARTED") {
+      const unknown = { ...unfinished, sequence: unfinished.sequence + 1, state: "UNKNOWN" as const, at: now, producer: "agentx-broker-terminal" };
+      delete unknown.candidateTreeSha;
+      next = WorkflowSnapshotSchema.parse({ ...next, workflowDependenciesProgress: [...progress, unknown] });
+    }
+  return { next, e2eAuthorityChecks: [] };
+}
+
 async function completedWorkflowItems(
   dependencies: AwsBrokerDependencies,
   operation: OperationRecord,
@@ -13409,79 +13867,7 @@ async function completedWorkflowItems(
       ...(preparedBase.success ? { ExpressionAttributeValues: { ":base": preparedBase.data } } : {}),
     } }];
   }
-  if (operation.kind === "publish") {
-    if (terminalStatus !== "SUCCEEDED" || task.workflow.stage !== "PULL_REQUEST" || task.workflow.state !== "READY" || task.workflow.candidate === undefined) return [];
-    const published = PullRequestResultSchema.safeParse(result);
-    if (!published.success) throw agentXError("CONFIG_INVALID", "workflow pull request result is invalid");
-    const project = await readTaskLegacyProject(await taskLegacyScope(dependencies, task), () => requireProject(dependencies, task.project, task.startingRevision));
-    const repository = project.definition.repositories.find((entry) => entry.name === published.data.repository);
-    if (repository === undefined) throw agentXError("CONFIG_INVALID", "published pull request repository is not part of the task's registered project revision");
-    const repositoryFullName = githubRepositoryFullName(repository.url);
-    if (!pullRequestMatchesRepository(published.data.url, repositoryFullName, published.data.number)) {
-      throw agentXError("CONFIG_INVALID", "published pull request URL does not match the task's registered repository");
-    }
-    const publishedRecord = await requirePullRequest(dependencies, task.workspaceId, published.data.repository, published.data.number);
-    if (publishedRecord.url !== published.data.url || publishedRecord.expectedHeadCommit !== published.data.commit) {
-      throw agentXError("STALE_FENCE", "published pull request head does not match the broker-verified publication");
-    }
-    const candidateRepository = task.workflow.candidate.repositories.find(entry => entry.repositoryId === published.data.repository);
-    const getFeedback = dependencies.githubPullRequests.getPullRequestFeedback;
-    if (candidateRepository === undefined || getFeedback === undefined) {
-      throw agentXError("RUNTIME_UNAVAILABLE", "cannot verify the published pull request against the checked candidate");
-    }
-    const publishedFeedback = await getFeedback.call(dependencies.githubPullRequests, repository.url, published.data.number);
-    if (publishedFeedback.pullRequest.number !== published.data.number
-      || publishedFeedback.pullRequest.url !== published.data.url
-      || publishedFeedback.pullRequest.state !== "open"
-      || publishedFeedback.pullRequest.headCommit !== publishedRecord.expectedHeadCommit
-      || publishedFeedback.pullRequest.headTreeSha !== candidateRepository.treeSha) {
-      throw agentXError("STALE_FENCE", "published pull request does not contain the exact checked candidate tree");
-    }
-    const indexKey = githubWorkflowPullRequestKey(repositoryFullName, published.data.number);
-    const existingIndex = await getItem<GithubWorkflowPullRequestRecord>(dependencies, indexKey);
-    const indexRecord: GithubWorkflowPullRequestRecord = {
-      ...indexKey,
-      entityType: "GITHUB_WORKFLOW_PR",
-      repositoryFullName,
-      repositoryId: published.data.repository,
-      number: published.data.number,
-      url: published.data.url,
-      taskId: task.taskId,
-      workspaceId: task.workspaceId,
-      candidateDigest: task.workflow.candidate.digest,
-      createdAt: now,
-    };
-    if (existingIndex !== undefined && (existingIndex.taskId !== indexRecord.taskId
-      || existingIndex.candidateDigest !== indexRecord.candidateDigest
-      || existingIndex.url !== indexRecord.url)) {
-      throw agentXError("CONFIG_INVALID", "this pull request is already linked to another task or candidate");
-    }
-    const next = registerWorkflowPullRequest(task.workflow, {
-      repositoryId: published.data.repository,
-      number: published.data.number,
-      url: published.data.url,
-      headSha: publishedRecord.expectedHeadCommit,
-      headTreeSha: publishedFeedback.pullRequest.headTreeSha,
-      candidateDigest: task.workflow.candidate.digest,
-      required: true,
-    }, now);
-    return [{ Update: {
-      TableName: dependencies.tableName,
-      Key: taskKey(task.taskId),
-      UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
-      ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :ready AND attribute_not_exists(closedAt)",
-      ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
-      ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": task.workflow.revision, ":stage": "PULL_REQUEST", ":ready": "READY" },
-    } }, ...(existingIndex === undefined ? [{ Put: {
-      TableName: dependencies.tableName,
-      Item: indexRecord,
-      ConditionExpression: "attribute_not_exists(pk)",
-    } }] : []),
-    // More repositories to go: the next draft pull request is due, as the first one was after the reviews.
-    ...(next.stage === "PULL_REQUEST" && next.state === "READY" && next.candidate !== undefined
-      ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, "PUBLISH", next.candidate.digest, now)] : []),
-    ...((task.workflow.pullRequests ?? []).length === 0 ? [mergeRecoveryItem(dependencies.tableName, task.taskId, now)] : [])];
-  }
+  if (operation.kind === "publish") return completedPublishItems(dependencies, task as WorkflowTaskRecord, terminalStatus, now, result);
   if (operation.kind === "maintain") return completedPullRequestUpdateItems(dependencies, operation, task as DeveloperTaskRecord & { workflow: WorkflowSnapshot }, terminalStatus, now, result, terminalError);
   if (operation.kind !== "task" || operation.workflowMode === undefined || task.workflow.state !== "RUNNING") return [];
   // M1.3 Task 3.7b: the candidate's completion refuses a baseline round (the unchanged code, for information only), whatever state the workflow is in. Its result moves nothing here:
@@ -13502,353 +13888,13 @@ async function completedWorkflowItems(
   let recordedReplies: ReturnType<typeof plannerRepliesItem> | undefined;
   let e2eAuthorityChecks: Array<Record<string, unknown>> = [];
   if (operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS") {
-    const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
-    const dependencyBinding = operation.workflowDependencies;
-    const dependencyResult = dependencyBinding === undefined ? undefined : WorkflowDependencyResultSchema.safeParse(reported.workflowDependenciesResult);
-    const dependencyOrder = dependencyBinding === undefined ? [] : taskGraphOrder(dependencyBinding.graph);
-    const acknowledgedTerminal = dependencyBinding === undefined ? undefined : workflowDependencyAttemptTerminalProgress({
-      graph: dependencyBinding.graph, approval: dependencyBinding.approval, operationId: operation.id,
-      sequenceStart: dependencyBinding.sequenceStart, resumeProgress: dependencyBinding.resumeProgress,
-      history: task.workflow.workflowDependenciesProgress ?? [],
-    });
-    const dependencyResultValid = dependencyBinding !== undefined && dependencyResult?.success === true
-      && dependencyResult.data.taskId === dependencyBinding.graph.taskId
-      && dependencyResult.data.graphDigest === dependencyBinding.approval.graphDigest
-      && dependencyResult.data.runId === dependencyBinding.approval.runId
-      && dependencyResult.data.operationId === operation.id
-      && dependencyResult.data.workflowRevision === dependencyBinding.approval.workflowRevision
-      && task.workflow.workflowDependenciesApproval?.artifactDigest === dependencyBinding.approval.artifactDigest
-      && task.workflow.workflowDependenciesApproval.graphDigest === dependencyBinding.approval.graphDigest
-      && task.workflow.workflowDependenciesApproval.workflowRevision === dependencyBinding.approval.workflowRevision
-      && task.workflow.workflowDependenciesApproval.actorId === dependencyBinding.approval.actorId
-      && task.workflow.workflowDependenciesApproval.runId === dependencyBinding.approval.runId
-      && acknowledgedTerminal !== undefined
-      && dependencyResult.data.items.length === acknowledgedTerminal.length
-      && dependencyResult.data.items.every((item, index) => canonicalJson(item) === canonicalJson(acknowledgedTerminal[index]))
-      && dependencyResult.data.items.every((item, index) => item.itemId === dependencyOrder[index]
-        && item.sequence > 0
-        && (index === 0 || dependencyResult.data.items[index - 1]?.state === "IMPLEMENTED"
-          && dependencyResult.data.items[index - 1]?.candidateTreeSha === item.baseTreeSha));
-    const graphItemsComplete = dependencyBinding !== undefined && dependencyResult?.success === true
-      && dependencyResult.data.status === "SUCCEEDED"
-      && dependencyResult.data.items.length === dependencyBinding.graph.items.length
-      && dependencyResult.data.items.every((item) => item.state === "IMPLEMENTED");
-    if (terminalStatus !== "SUCCEEDED") {
-      next = blockWorkflow(task.workflow, terminalError?.includes(WORKFLOW_HISTORY_REWRITTEN_MESSAGE) === true ? WORKFLOW_HISTORY_REWRITTEN_MESSAGE
-        : terminalError?.includes(WORKFLOW_NO_CODE_CHANGE_MESSAGE) === true ? WORKFLOW_BLOCK_REASONS.noCodeChanged
-        : workflowRunEndedReason(operation.workflowMode, terminalStatus), now);
-      const progress = task.workflow.workflowDependenciesProgress ?? [];
-      const unfinished = progress.at(-1);
-      if (dependencyBinding !== undefined && unfinished?.operationId === operation.id && unfinished.state === "STARTED") {
-        const unknown = { ...unfinished, sequence: unfinished.sequence + 1, state: "UNKNOWN" as const, at: now, producer: "agentx-broker-terminal" };
-        delete unknown.candidateTreeSha;
-        next = WorkflowSnapshotSchema.parse({ ...next, workflowDependenciesProgress: [...progress, unknown] });
-      }
-    } else {
-      const repositories = Array.isArray(reported.workflowCandidateRepositories) ? reported.workflowCandidateRepositories : [];
-      const checkedRepositories = Array.isArray(reported.workflowCheckCandidateRepositories) ? reported.workflowCheckCandidateRepositories : [];
-      const checks = CheckReportSchema.safeParse(reported.checks);
-      const verifying = { ...blockWorkflow(task.workflow, "candidate checks are being recorded", now), stage: "VERIFY" as const };
-      let verificationFailure: string = WORKFLOW_BLOCK_REASONS.checksUnconfirmed;
-      // Why, for the log only: the owner reads the plain reason.
-      let verificationDetail: string | undefined;
-      // Review only: the tests the rerun found regressed, for the owner's message and a send-back.
-      let regressedChecks: string[] | undefined;
-      let failedE2ERound: { status: "FAILED"; candidateDigest: string; roundId: string; groupRunIds: string[]; admissionSha256: string; evidenceSha256: string } | undefined;
-      try {
-        if (dependencyBinding !== undefined && (!dependencyResultValid || !graphItemsComplete)) {
-          verificationFailure = "approved work breakdown result is missing, stale or incomplete";
-          throw new Error(verificationFailure);
-        }
-        if (dependencyBinding === undefined && task.workflow.workflowDependenciesApproval !== undefined && operation.workflowMode === "IMPLEMENT"
-          && task.workflow.stage === "IMPLEMENT") {
-          verificationFailure = "approved work breakdown was not carried into this implementation";
-          throw new Error(verificationFailure);
-        }
-        if (operation.workflowMode === "CHECKS" && task.workflow.stage !== "VERIFY") {
-          verificationFailure = WORKFLOW_BLOCK_REASONS.checkRetryStale;
-          throw new Error("verification retry stage changed");
-        }
-        if (!checks.success) {
-          verificationFailure = WORKFLOW_BLOCK_REASONS.checkReportUnreadable;
-          throw new Error("invalid check report");
-        }
-        // Review only: the approved plan and the project select no check, so "no checks ran" is the expected report. The
-        // candidate is still validated below exactly as for a checked task. A task with no stored policy is never this.
-        const reviewOnly = workflowIsReviewOnly(task.workflow.checkPolicy);
-        // Review only still stops on evidence AgentX saw itself: a rerun test that passed before fails now.
-        if (reviewOnly && checks.data.status === "regression") {
-          verificationFailure = WORKFLOW_BLOCK_REASONS.regressionFound;
-          verificationDetail = checks.data.status;
-          regressedChecks = regressedCheckLabels(checks.data.checks);
-          throw new Error("a rerun test regressed");
-        }
-        // Review only: no checks to run, or a rerun of the agent's own tests that stopped or errored, is no evidence either
-        // way (a regression that stands through a stop is reported as one); reviews decide.
-        if (checks.data.status === "not_verified" && !reviewOnly) {
-          verificationFailure = checks.data.notVerifiedReason === "no_checks" ? WORKFLOW_BLOCK_REASONS.noChecksConfigured : WORKFLOW_BLOCK_REASONS.checkRunnerFailed;
-          verificationDetail = checks.data.notVerifiedReason ?? checks.data.status;
-          throw new Error("checks were not verified");
-        }
-        const project = await readTaskLegacyProject(await taskLegacyScope(dependencies, task), () => requireProject(dependencies, task.project, task.startingRevision));
-        const expectedRepositoryIds = project.definition.repositories.map((repository) => repository.name).sort();
-        const candidateInput = repositories as CandidateRepository[];
-        const candidate = createCandidateManifest(candidateInput);
-        if (task.workflow.e2e?.required === true && operation.workflowMode === "IMPLEMENT") {
-          const sourceExport = await loadWorkflowCandidateSourceExport(dependencies, operation, candidate);
-          if (sourceExport === undefined) {
-            verificationFailure = WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON;
-            throw new Error(verificationFailure);
-          }
-        }
-        let e2eQualification: { candidateDigest: string; contractDigest: string; policyDigest: string; bundleDigest: string; executionPlanDigest: string;
-          roundId: string; groupRunIds: string[]; admissionSha256: string; evidenceSha256: string } | undefined;
-        if (operation.workflowMode === "CHECKS" && task.workflow.e2e?.required === true) {
-          if (isNonCandidateRound(operation.workflowE2EAdmission)) throw new Error("a baseline or replay round is never a candidate's CHECKS");
-          if (task.workflow.e2e.currentGroupRunIds.length === 0 || task.workflow.e2e.currentRoundId === undefined
-            || operation.workflowE2EAdmission === undefined || operation.workflowE2EEvidenceRef === undefined) {
-            verificationFailure = "the current candidate-bound E2E round or its private evidence is missing";
-            throw new Error(verificationFailure);
-          }
-          const e2eDiagnostic: WorkflowE2EVerificationDiagnostic = {};
-          // The operation's stored record is still RUNNING here; this callback is the one that ends it, as SUCCEEDED (a failed or stopped run never reaches verification).
-          const qualification = await verifyWorkflowE2EEvidence(dependencies, operation, task, candidate, undefined, e2eDiagnostic, { terminalStatus: "SUCCEEDED" });
-          e2eAuthorityChecks = e2eDiagnostic.authorityChecks ?? [];
-          if (e2eAuthorityChecks.length === 0) {
-            // An application round says why its authority could not be fenced (a requalified runtime, a moved source); the portable message is unchanged. A runtime that
-            // moved under the round is worded as the dispatch words it, so the owner's retry approves the plan again against it (or asks an administrator first), in one step.
-            const why = e2eDiagnostic.application === true ? e2eDiagnostic.reason?.slice(0, 240) : undefined;
-            // Evidence that could not be read or decoded, found before authority was judged at all, is not an authority failure and is not worded as one.
-            verificationFailure = e2eDiagnostic.application === true && e2eDiagnostic.authorityEvaluated !== true && why !== undefined ? `admitted E2E evidence is incomplete or unknown (${why})`
-              : e2eDiagnostic.runtimeChange === "requalified" && why !== undefined ? `${WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX}${why}`
-              : e2eDiagnostic.runtimeChange === "unusable" && why !== undefined ? `${WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX}${why}`
-              : e2eDiagnostic.runtimeChange === "accounts" && why !== undefined ? `${WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX}${why}`
-              : `current E2E authority snapshot could not be fenced at terminal persistence${why === undefined ? "" : ` (${why})`}`;
-            throw new Error(verificationFailure);
-          }
-          if (qualification !== "PASS") {
-            if (qualification === "FAILED" && operation.workflowE2EAdmission !== undefined && operation.workflowE2EEvidenceRef !== undefined) {
-              failedE2ERound = { status: "FAILED", candidateDigest: candidate.digest, roundId: operation.workflowE2EAdmission.roundId,
-                groupRunIds: [...operation.workflowE2EAdmission.groupRunIds], admissionSha256: operation.workflowE2EAdmission.admissionRef.sha256,
-                evidenceSha256: operation.workflowE2EEvidenceRef.sha256 };
-            }
-            verificationFailure = qualification === "FAILED" ? "one or more admitted E2E groups failed"
-              : `admitted E2E evidence is incomplete or unknown${e2eDiagnostic.reason === undefined ? "" : ` (${e2eDiagnostic.reason})`}`;
-            throw new Error(verificationFailure);
-          }
-          const admittedE2E = task.workflow.e2e;
-          const admissionRef = operation.workflowE2EAdmission;
-          const evidenceRef = operation.workflowE2EEvidenceRef;
-          if (!admittedE2E || !admissionRef || !evidenceRef) throw new Error("trusted E2E aggregate references are unavailable");
-          e2eQualification = { candidateDigest: candidate.digest, contractDigest: admittedE2E.contractDigest, policyDigest: admittedE2E.policyDigest,
-            bundleDigest: admittedE2E.bundleDigest, executionPlanDigest: admittedE2E.executionPlanDigest, roundId: admissionRef.roundId,
-            groupRunIds: [...admissionRef.groupRunIds], admissionSha256: admissionRef.admissionRef.sha256, evidenceSha256: evidenceRef.sha256 };
-        }
-        const checkedCandidate = createCandidateManifest(checkedRepositories as CandidateRepository[]);
-        if (dependencyBinding !== undefined && dependencyResult?.success === true && dependencyResult.data.candidateDigest !== candidate.digest) {
-          verificationFailure = "work breakdown result does not bind the final combined candidate";
-          throw new Error(verificationFailure);
-        }
-        if (dependencyBinding !== undefined && dependencyResult?.success === true) {
-          const finalProgress = dependencyResult.data.items.at(-1);
-          const actualFinalTree = candidate.repositories.length === 1 ? candidate.repositories[0]?.treeSha : undefined;
-          if (finalProgress?.state !== "IMPLEMENTED" || actualFinalTree === undefined || finalProgress.candidateTreeSha !== actualFinalTree) {
-            verificationFailure = "work breakdown final item does not bind the final combined candidate tree";
-            throw new Error(verificationFailure);
-          }
-        }
-        if (candidate.repositories.map((repository) => repository.repositoryId).sort().join("\n") !== expectedRepositoryIds.join("\n")) {
-          verificationFailure = WORKFLOW_BLOCK_REASONS.repositoriesIncomplete;
-          throw new Error("candidate repositories are incomplete");
-        }
-        // An approved fix to an open pull request that leaves every repository's code as the pull request holds it changed
-        // nothing: there is nothing to check again or push, so the thread must not say a fix was pushed. The comparison is
-        // with what each pull request holds, never with the latest candidate: after a fix that failed its checks and a
-        // Send back, the latest candidate is that failed fix.
-        const pullRequestTrees = workflowPullRequestTrees(task.workflow);
-        if (operation.workflowMode === "IMPLEMENT" && pullRequestTrees !== undefined
-          && candidate.repositories.every((repository) => pullRequestTrees.get(repository.repositoryId) === repository.treeSha)) {
-          verificationFailure = WORKFLOW_BLOCK_REASONS.fixChangedNothing;
-          throw new Error("the fix left the pull request's code as it was");
-        }
-        if (checkedCandidate.digest !== candidate.digest) {
-          verificationFailure = WORKFLOW_BLOCK_REASONS.codeChangedAfterChecks;
-          throw new Error("checked candidate is stale");
-        }
-        // Reviewers judge the change from the task's base, so every repository must say where it started.
-        if (candidate.repositories.some((repository) => repository.baseCommitSha === undefined)) {
-          verificationFailure = WORKFLOW_BLOCK_REASONS.startUnrecorded;
-          throw new Error("candidate has no base commit");
-        }
-        const pinnedBase = task.workflow.reviewBase;
-        // Before the first pin, the candidate must start where preparation checked out; the worker's own report of
-        // its base is never trusted on its own.
-        const expectedBase = pinnedBase ?? task.preparedBase;
-        if (expectedBase === undefined) {
-          verificationFailure = WORKFLOW_BLOCK_REASONS.startUnrecorded;
-          throw new Error("the task has no prepared base commit");
-        }
-        if (candidate.repositories.some((repository) =>
-          expectedBase.find((entry) => entry.repositoryId === repository.repositoryId)?.baseCommitSha !== repository.baseCommitSha)) {
-          verificationFailure = WORKFLOW_BLOCK_REASONS.startChanged;
-          throw new Error("candidate base commit differs from the task's base");
-        }
-        if (pinnedBase === undefined && dependencies.githubPullRequests.getCommitTree !== undefined) {
-          // Before pinning, confirm GitHub has each starting commit, so the base is real history and not a local commit.
-          try {
-            for (const repository of candidate.repositories) {
-              const url = project.definition.repositories.find((entry) => entry.name === repository.repositoryId)?.url;
-              if (url === undefined) throw new Error("candidate repository is not registered");
-              await dependencies.githubPullRequests.getCommitTree(url, repository.baseCommitSha as string);
-            }
-          } catch (error) {
-            verificationFailure = WORKFLOW_BLOCK_REASONS.startUnconfirmed;
-            throw error;
-          }
-        }
-        const selectedChecks = workflowSelectedChecks(task.workflow.checkPolicy);
-        // The worker reports the readiness commands it was sent (required, then proposed, then selected optional,
-        // in selectedChecks order) as `readiness:<index>`; agent-claimed entries never stand in for them, not even when
-        // no check was selected: then there are no results, a review-only task records none, and any other task stops
-        // (fails closed).
-        const byId = new Map(checks.data.checks.filter((entry) => entry.source === "project").map((entry) => [entry.id, entry]));
-        const results = selectedChecks.map((check, index) => {
-          const entry = byId.get(`readiness:${index}`);
-          const status = entry === undefined || entry.after === "not_run" || entry.after === "unknown" ? "UNKNOWN" as const : entry.after === "passed" ? "PASS" as const : "FAILED" as const;
-          // The worker's report of a program it could not start, which is all the check's output then holds.
-          const programNotFound = status === "FAILED" && entry?.output.trim() === `spawn ${check.command.executable} ENOENT`;
-          // Any other spawn error the worker reports as the check's whole output (EAGAIN, EACCES, ...), with no exit code:
-          // the process never started. (A check that ran and printed those words has its exit code.)
-          const neverStarted = status === "FAILED" && !programNotFound && entry?.exitCode == null && /^spawn \S+ E[A-Z]+$/u.test(entry?.output.trim() ?? "");
-          const broken = status === "FAILED" && entry !== undefined && (programNotFound || neverStarted || checkCommandCouldNotRun(check.command, entry.exitCode, entry.output));
-          return { checkId: check.id, status, ...(programNotFound ? { programNotFound: true as const } : {}), ...(broken ? { broken: true as const } : {}),
-            ...(neverStarted ? { neverStarted: true as const } : {}), ...(entry?.madeByRovara === true ? { madeByRovara: true as const } : {}) };
-        });
-        if (results.length === 0 && !reviewOnly) {
-          verificationFailure = WORKFLOW_BLOCK_REASONS.noCheckResults;
-          throw new Error("there are no selected check results");
-        }
-        next = recordWorkflowVerification(verifying, {
-          candidate,
-          checks: {
-            candidateDigest: candidate.digest,
-            producer: "agentx-worker-checks",
-            environmentId: task.workspaceId,
-            recordedAt: now,
-            results,
-            ...(reviewOnly ? { reviewOnly: true } : {}),
-          },
-          now,
-          ...(e2eQualification === undefined ? {} : { e2eQualification }),
-        });
-      } catch (error) {
-        console.log(JSON.stringify({ component: "broker", event: "workflow.verification_blocked", taskId: task.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown", reason: verificationFailure, ...(verificationDetail === undefined ? {} : { detail: verificationDetail }) }));
-        next = verificationFailure === WORKFLOW_BLOCK_REASONS.fixChangedNothing ? blockWorkflow(task.workflow, verificationFailure, now)
-          : blockWorkflow(verifying, verificationFailure, now, { ...(regressedChecks === undefined ? {} : { regressedChecks }),
-            ...(failedE2ERound === undefined ? {} : { failedE2ERound }) });
-      }
-    }
+    ({ next, e2eAuthorityChecks } = await implementOrChecksRunOutcome(dependencies, operation, task as WorkflowTaskRecord, operation.workflowMode, terminalStatus, now, result, terminalError));
   } else if (operation.workflowMode === "REVIEW") {
-    if (terminalStatus !== "SUCCEEDED") {
-      // A review that stopped because its base rule files could not be verified says so; any other stop keeps the generic reason.
-      next = blockWorkflow(task.workflow, terminalError?.includes(WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE) === true ? WORKFLOW_BLOCK_REASONS.ruleFilesUnverified
-        : workflowRunEndedReason("REVIEW", terminalStatus), now);
-    } else {
-      const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
-      const repositories = Array.isArray(reported.workflowCandidateRepositories) ? reported.workflowCandidateRepositories : [];
-      const reviews = reported.workflowReviews;
-      let reviewFailure = "independent candidate review was invalid, incomplete, or stale";
-      try {
-        if (!Array.isArray(reviews)) throw new Error("review result has an invalid report collection");
-        const candidate = createCandidateManifest(repositories as CandidateRepository[]);
-        if (task.workflow.stage !== "REVIEW" || task.workflow.candidate?.digest !== candidate.digest) {
-          throw new Error("review result is stale, incomplete, or came from another operation");
-        }
-        if (task.workflow.e2e?.required === true) {
-          const currentRoundId = task.workflow.e2e.currentRoundId;
-          const checksOperations = (await queryAllItems(dependencies, `WORKSPACE#${task.workspaceId}`, "OPERATION#"))
-            .filter((item) => item.entityType === "OPERATION" && item.kind === "task" && item.workflowMode === "CHECKS")
-            .map((item) => item as unknown as OperationRecord)
-            .filter((item) => item.workflowE2EAdmission?.candidateDigest === candidate.digest
-              && item.workflowE2EAdmission.roundId === currentRoundId && item.workflowE2EEvidenceRef !== undefined)
-            .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
-          const checksOperation = checksOperations[0];
-          const e2eDiagnostic: WorkflowE2EVerificationDiagnostic = {};
-          if (checksOperation === undefined || await verifyWorkflowE2EEvidence(dependencies, checksOperation, task, candidate, undefined, e2eDiagnostic) !== "PASS") {
-            throw new Error("current E2E evidence is not independently qualified for review");
-          }
-          e2eAuthorityChecks = e2eDiagnostic.authorityChecks ?? [];
-          if (e2eAuthorityChecks.length === 0) throw new Error("current E2E authority snapshot could not be fenced at review persistence");
-        }
-        // Validate every report's complete contract and provenance before deciding that a role is missing.
-        for (const review of reviews) {
-          if (review === null || typeof review !== "object" || (review as Record<string, unknown>).operationId !== operation.id) {
-            throw new Error("review result is stale, incomplete, or came from another operation");
-          }
-          submitWorkflowReview(task.workflow, review, now);
-        }
-        // Exactly one code review and one security review: two of one kind would leave the stage waiting for the other.
-        const roles = reviews.map((review) => (review as Record<string, unknown>).role).sort();
-        if (roles.length !== 2 || roles[0] !== "CRITIC" || roles[1] !== "SECURITY") {
-          reviewFailure = WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE;
-          throw new Error("review result does not hold one code review and one security review");
-        }
-        next = task.workflow;
-        for (const review of reviews) next = submitWorkflowReview(next, review, now);
-      } catch {
-        next = blockWorkflow(task.workflow, reviewFailure, now);
-      }
-    }
+    ({ next, e2eAuthorityChecks } = await reviewRunOutcome(dependencies, operation, task as WorkflowTaskRecord, terminalStatus, now, result, terminalError));
   } else if (operation.workflowMode === "FEEDBACK_REVIEW") {
-    const binding = operation.workflowFeedbackReview;
-    const current = task.workflow;
-    if (binding === undefined || current.stage !== "WAIT_FOR_MERGE" || current.state !== "RUNNING"
-      || current.revision !== binding.workflowRevision || current.taskId !== binding.taskId
-      || current.candidate?.digest !== binding.candidateDigest || current.feedbackReview?.status !== "COLLECTING") return [];
-    if (terminalStatus !== "SUCCEEDED") {
-      next = blockWorkflow(current, WORKFLOW_BLOCK_REASONS.feedbackReviewFailed, now);
-    } else {
-      try {
-        const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
-        const feedbackResult = reported.workflowFeedbackReviewResult;
-        if (feedbackResult === null || typeof feedbackResult !== "object" || Array.isArray(feedbackResult)) throw new Error("feedback review result is missing");
-        const resultRecord = feedbackResult as Record<string, unknown>;
-        if (resultRecord.taskId !== binding.taskId || resultRecord.workflowRevision !== binding.workflowRevision
-          || resultRecord.candidateDigest !== binding.candidateDigest || typeof resultRecord.outputDigest !== "string"
-          || typeof resultRecord.artifactName !== "string" || typeof resultRecord.status !== "string") throw new Error("feedback review result does not match its operation binding");
-        const artifacts = (await queryAllItems(dependencies, "WORKSPACE#" + operation.workspaceId, "ARTIFACT#"))
-          .filter(item => item.operationId === operation.id && item.name === resultRecord.artifactName);
-        if (artifacts.length !== 1 || typeof artifacts[0]?.objectKey !== "string") throw new Error("critic report artifact is missing or ambiguous");
-        const object = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: String(artifacts[0].objectKey) }));
-        const reportBytes = object.Body ? Buffer.from(await object.Body.transformToByteArray()) : Buffer.alloc(0);
-        if (reportBytes.byteLength > 1_000_000 || createHash("sha256").update(reportBytes).digest("hex") !== resultRecord.outputDigest) throw new Error("critic report bytes failed digest validation");
-        const report = WorkflowFeedbackReviewReportSchema.parse(JSON.parse(reportBytes.toString("utf8")));
-        const inputs = await readFeedbackBundlesForCritic(dependencies, operation, binding);
-        // The critic's input as this broker builds it; a run an earlier release started (no notes marker) may also have been
-        // given every note, or none (deploy skew), and only such a run.
-        const requirementsDigests = operation.feedbackNotesScoped === true ? inputs.acceptedRequirementsDigests.slice(0, 1) : inputs.acceptedRequirementsDigests;
-        const refs = current.feedbackReview.bundleRefs.map(ref => WorkflowFeedbackBundleRefSchema.parse(ref));
-        if (operation.workflowMode !== "FEEDBACK_REVIEW" || report.operationMode !== operation.workflowMode
-          || report.operationId !== operation.id || report.taskId !== current.taskId
-          || report.workflowRevision !== binding.workflowRevision || report.qualification !== "AI_GENERATED_ADVISORY"
-          || !requirementsDigests.includes(report.taskRequirementsDigest) || report.status !== resultRecord.status
-          || refs.length !== report.bundleDigests.length || !refs.every(ref => report.bundleDigests.includes(ref.sha256))
-          || refs.length !== report.candidateBindings.length || refs.some(ref => !report.candidateBindings.some(candidate =>
-            candidate.repositoryId === ref.repositoryId && candidate.number === ref.number && candidate.headSha === ref.headSha
-              && candidate.candidateDigest === ref.candidateDigest && candidate.commentSetDigest === ref.commentSetDigest && candidate.bundleDigest === ref.sha256))) {
-          throw new Error("critic report provenance does not match the exact collected inputs");
-        }
-        const { findings, ...metadata } = report;
-        void findings;
-        const reviewRef = WorkflowFeedbackReviewRefSchema.parse({ ...metadata, sha256: resultRecord.outputDigest, objectKey: String(artifacts[0].objectKey) });
-        next = completeWorkflowFeedbackReview(current, {
-          expectedRevision: binding.workflowRevision, taskId: binding.taskId, candidateDigest: binding.candidateDigest,
-          operationId: operation.id, bundleRefs: refs, reviewRef,
-        }, now);
-      } catch {
-        next = blockWorkflow(current, WORKFLOW_BLOCK_REASONS.feedbackReviewFailed, now);
-      }
-    }
+    const reviewed = await feedbackReviewRunOutcome(dependencies, operation, task as WorkflowTaskRecord, terminalStatus, now, result);
+    if (reviewed === undefined) return [];
+    next = reviewed;
   } else if (task.workflow.stage !== "PLAN") {
     return [];
   } else if (terminalStatus === "SUCCEEDED") {
