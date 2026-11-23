@@ -21,6 +21,12 @@ const EVAL_STATE_WORDS = {
 const EVAL_STATE_CLASS = { waiting: "warn", confirmed: "ok", reapprove: "bad" } as const;
 const STATUS_WORDS = { none: "Rovara has not set this project up yet.", running: "Rovara is running the setup now.", ready: "Rovara finished and has a setup to use.", failed: "The setup run did not finish." } as const;
 
+/** A finished run that kept a partial setup because it stopped on websites: when one of its website asks is still open the page says so (the status line alone reads "finished" and never mentions it). */
+export const SETUP_OPEN_HOST_NOTE = "A website decision is still open: allow it, then run the setup again to include it.";
+export function openHostNote(view: Pick<SetupPageView, "status" | "summary" | "hostAsks">): string {
+  return view.status === "ready" && view.summary?.stop === "hosts_waiting" && view.hostAsks.some((ask) => ask.status === "open") ? `<p class="notice">${esc(SETUP_OPEN_HOST_NOTE)}</p>` : "";
+}
+
 export function renderSetupIndex(context: PageContext, projects: readonly string[]): string {
   const rows = projects.map((project) => `<li><a href="${esc(context.base)}/setup/${esc(project)}">${esc(project)}</a></li>`).join("");
   return layout({
@@ -130,7 +136,7 @@ export function renderSetupPage(context: PageContext, view: SetupPageView): stri
   const summary = view.summary === undefined ? "" : `<p class="muted">${esc(view.summary.commandsRun)} commands, ${esc(view.summary.elapsedMin)} minutes, about $${esc((view.summary.spendCents / 100).toFixed(2))}${view.summary.partial ? ", stopped before it finished (what it learned is kept)" : ""}.</p>`;
   return layout({
     title: `Set up ${view.project}`, nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
-    body: `<h1>Set up ${esc(view.project)}</h1><p>${esc(STATUS_WORDS[view.status])}${view.failure === undefined ? "" : ` ${esc(view.failure)}`}${view.stoppedBy === undefined ? "" : ` <span class="muted">Stopped by ${untrusted(view.stoppedBy)}.</span>`}</p>${summary}${control()}${apply()}${evalDiscovery()}${evalSpend()}${hosts()}${approved()}${proposal()}${journal()}${checkPanel}`
+    body: `<h1>Set up ${esc(view.project)}</h1><p>${esc(STATUS_WORDS[view.status])}${view.failure === undefined ? "" : ` ${esc(view.failure)}`}${view.stoppedBy === undefined ? "" : ` <span class="muted">Stopped by ${untrusted(view.stoppedBy)}.</span>`}</p>${openHostNote(view)}${summary}${control()}${apply()}${evalDiscovery()}${evalSpend()}${hosts()}${approved()}${proposal()}${journal()}${checkPanel}`
       + `<p><a href="${esc(context.base)}/setup">All projects</a></p>`,
   });
 }

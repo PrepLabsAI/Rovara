@@ -11,7 +11,7 @@
 //   - at the end the sandbox is removed (which kills every process in it) BEFORE the last tracked-files check, and that last verdict is what `finishSetupAgent` / `finishStoppedRun` use;
 //   - a repository with a nested repository or LFS files, or a project whose setup rewrites a tracked file, ends the run `changed_repository_files` with no proposal (the person is told, by the broker's fixed words).
 //   - hosts_waiting: when the agent has answered and a website it asked for still waits for an administrator, the run parks (no model call, so no spend; sandbox and workspace kept; the wall clock stopped) until an ask
-//     is answered, then goes on with one more prompt; 24 hours parked end it `hosts_waiting` with the partial proposal it had; a person's Stop ends the wait at once.
+//     is answered, then goes on with one more prompt; 2 hours parked end it `hosts_waiting` with the partial proposal it had; a person's Stop ends the wait at once.
 // NOT in this module (listed in the lane report): the in-run fresh Prove (the confirm card's Prove is the broker's own, on a workspace it prepares anew), and the test-environment
 // merge of the agent's findings.
 import { resolve } from "node:path";
@@ -129,6 +129,13 @@ export const SETUP_POLL_FAILURES_MAX = 5;
 
 /** F5: how long a run that a person stopped may take to finish and report what it had (killing the sandbox, the last look at the tracked files, reading the proposal). Past it the stop is reported with no proposal. */
 export const SETUP_STOP_FINISH_MS = 15_000;
+/** What the live view says when the websites the run needs ended it (the 2-hour wait ran out, or it asked about more websites than its limit): fixed words true for both, shown once. */
+export const SETUP_HOST_WAIT_ENDED_WORDS = "Rovara ended the setup run: it needs websites an administrator has not decided.";
+
+/** The live view's one line when the wait on a website ended the run (the 2-hour limit, or one host ask too many); a person's Stop gets none. Best effort: a progress line that cannot be sent changes nothing. */
+async function sayHostWaitEnd(ended: string | undefined, cancelled: boolean, ports: Pick<SetupRunPorts, "progress">): Promise<void> {
+  if (ended === "hosts_waiting" && !cancelled) await ports.progress(SETUP_HOST_WAIT_ENDED_WORDS).catch(() => undefined);
+}
 
 const pause = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms); });
 
@@ -411,7 +418,7 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
       fail: () => { failed = true; sessionFailed = true; }, after: sayModelEnd,
     });
     // ---- hosts_waiting: the agent has nothing else to do, and a website it asked for waits for an administrator. The run parks: no model call is made (so nothing is spent), the sandbox and the workspace are kept,
-    // the wall clock stops, and the run asks the broker now and then. When an ask is answered it goes on with one more prompt; 24 hours parked ends it `hosts_waiting` with the partial proposal it has. A person's
+    // the wall clock stops, and the run asks the broker now and then. When an ask is answered it goes on with one more prompt; 2 hours parked ends it `hosts_waiting` (the governor's own timer ends it, not this loop) with the partial proposal it has. A person's
     // Stop ends the wait at once. At most one parking per host-ask the limits allow, so a run cannot park for ever.
     let parkings = 0;
     while (!failed && governor.ended() === undefined && !cancelled && parkings <= limits.hostAsks && !asksForCodeChange(finalText)) {
@@ -440,6 +447,8 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
       }
       await sayModelEnd();
     }
+    // The wait on a website ended the run (the 2-hour limit, or one host ask too many): the live view says why, in fixed words. The words the person reads on the page are the broker's (`SETUP_AGENT_FAILURES.hosts_waiting`).
+    await sayHostWaitEnd(governor.ended(), cancelled, ports);
     if (tick !== undefined) clearInterval(tick);
     tick = undefined;
     // L4-T5: from here to the end nothing polls, yet a person's command may still run for up to an hour and the end has work to do. A bare "alive" tells the broker the worker is still here (it takes no

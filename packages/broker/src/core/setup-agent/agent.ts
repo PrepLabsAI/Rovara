@@ -38,7 +38,7 @@ export const SETUP_AGENT_FAILURES = {
   attempts_used: "Rovara used up its tries before the setup worked. It kept what it learned.",
   time_used: "Rovara ran out of time before the setup worked. It kept what it learned.",
   budget_used: "The setup run reached its spending limit before it finished. It kept what it learned.",
-  hosts_waiting: "The setup needs websites that nobody has allowed yet. Allow them, then run the setup again.",
+  hosts_waiting: `The setup run ended: it needs websites an administrator has not allowed yet (it waits at most ${SETUP_HOST_WAIT_MAX_HOURS} hours for a decision). Allow them, then run the setup again.`,
   stopped_by_person: "The setup run was stopped.",
   needs_code_change: "The setup needs a change in the code. Ask Rovara to make it as a normal task.",
   changed_repository_files: "The setup changed files that are tracked in the repository. Rovara did not keep that change.",
@@ -129,9 +129,13 @@ export interface SetupAgentView {
   standInWriter?: StandInWriterCard;
 }
 
-/** What a run may take at the longest: its wall clock, the longest wait on the owner, and an hour of grace for the end to be reported. Past it with no result the run reads as failed. */
+/** The longest wait on the owner that the broker's run-gone backstop allows for (24 hours, as before the park limit). This is NOT the park limit (`SETUP_HOST_WAIT_MAX_HOURS`, 2 hours): that limit is enforced by the worker ENDING the run
+ * (a recorded end the view then shows); the status view never turns a run into "failed" on a clock while its worker is still heard from, so this bound must not shrink with the park limit. */
+const RUN_GONE_BACKSTOP_WAIT_HOURS = 24;
+
+/** What a run may take at the longest before it reads as gone: its wall clock, the backstop wait above, and an hour of grace for the end to be reported. Past it with no result the run reads as failed. */
 function staleAfterMs(limits: SetupAgentLimits): number {
-  return (limits.wallClockMin + SETUP_HOST_WAIT_MAX_HOURS * 60 + 60) * 60_000;
+  return (limits.wallClockMin + RUN_GONE_BACKSTOP_WAIT_HOURS * 60 + 60) * 60_000;
 }
 
 /**

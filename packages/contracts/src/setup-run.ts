@@ -40,8 +40,8 @@ export const SETUP_AGENT_LIMITS_DEFAULT = { commands: 40, sameStepTries: 3, wall
 export const SETUP_AGENT_LIMITS_MAX = { commands: 120, sameStepTries: 5, wallClockMin: 120, budgetCents: 2_000, hostAsks: 10 } as const satisfies Record<SetupAgentLimitName, number>;
 /** Setup runs at once per project. Not a setting: it is 1. */
 export const SETUP_AGENT_CONCURRENT_RUNS = 1 as const;
-/** How long a run parks, waiting for an admin to answer a host ask, before it ends `hosts_waiting`. */
-export const SETUP_HOST_WAIT_MAX_HOURS = 24 as const;
+/** How long a run parks in all, waiting for an admin to answer a host ask, before it ends `hosts_waiting` (DEC 254zzz428: 2 hours, was 24). The worker's own timer ends it; the broker's run-gone bound counts the same hours. */
+export const SETUP_HOST_WAIT_MAX_HOURS = 2 as const;
 /** Blocked host names one run remembers (the DNS watch's bound). */
 export const SETUP_BLOCKED_HOSTS_MAX = 50 as const;
 /** Bytes of redacted output a journal entry keeps. */
@@ -94,7 +94,7 @@ export function effectiveSetupAgentLimits(project?: unknown, lock?: unknown): Se
 
 /**
  * Why a run stopped because a limit was used up, in fixed words. `attempts_used`: the commands limit, or the tries of one failing step. `time_used`: the wall clock. `budget_used`: the model spend.
- * `hosts_waiting`: the host asks limit, or a host ask that nobody answered in 24 hours with nothing else left to do.
+ * `hosts_waiting`: the host asks limit, or a host ask that nobody answered in `SETUP_HOST_WAIT_MAX_HOURS` (2 hours) with nothing else left to do.
  */
 export const SETUP_RUN_LIMIT_STOPS = ["attempts_used", "time_used", "budget_used", "hosts_waiting"] as const;
 export type SetupRunLimitStop = (typeof SETUP_RUN_LIMIT_STOPS)[number];

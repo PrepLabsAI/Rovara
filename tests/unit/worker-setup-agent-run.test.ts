@@ -158,7 +158,7 @@ describe("hosts_waiting: the run parks while a website waits for an administrato
     expect(result.setupRunSummary.stop).toBe("proposed");
   });
 
-  it("ends hosts_waiting after 24 hours parked, keeps the partial proposal the agent had given, and makes no further model call", async () => {
+  it("ends hosts_waiting after 2 hours parked, keeps the partial proposal the agent had given, and makes no further model call", async () => {
     const t = await parked((n, _w, clock) => { if (n === 3) clock.now += SETUP_HOST_WAIT_MAX_HOURS * HOUR + 1000; return { hosts: open }; });
     const result = await runSetupAgent(t.input);
     expect(result.setupRunSummary).toMatchObject({ stop: "hosts_waiting", partial: true });
@@ -167,7 +167,7 @@ describe("hosts_waiting: the run parks while a website waits for an administrato
     expect(t.w.stopped.network).toBe(true);
   });
 
-  it("does not end early: just under 24 hours parked it still waits", async () => {
+  it("does not end early: just under 2 hours parked it still waits", async () => {
     const t = await parked((n, _w, clock) => {
       if (n === 3) clock.now += SETUP_HOST_WAIT_MAX_HOURS * HOUR - 60_000;
       return { hosts: n < 6 ? open : [{ host: "registry.acme.dev", state: "approved" }] };
@@ -182,16 +182,16 @@ describe("hosts_waiting: the run parks while a website waits for an administrato
     const clock = { now: 0 };
     const governor = new SetupAgentGovernor({ limits: SETUP_AGENT_LIMITS_DEFAULT, now: () => clock.now, spendCents: () => 0, nextTurnCents: () => 0, setTimer: () => ({ cancel: () => undefined }) });
     governor.parkOnHosts();
-    clock.now += 20 * HOUR;
+    clock.now += 1.5 * HOUR;
     governor.resumeFromHosts();
     governor.parkOnHosts();
-    clock.now += 4 * HOUR - 1;
+    clock.now += 0.5 * HOUR - 1;
     expect(governor.check()).toBeUndefined();
     clock.now += 1;
     expect(governor.check()).toBe("hosts_waiting");
     const spent = new SetupAgentGovernor({ limits: SETUP_AGENT_LIMITS_DEFAULT, now: () => clock.now, spendCents: () => 0, nextTurnCents: () => 0, setTimer: () => ({ cancel: () => undefined }) });
     spent.parkOnHosts();
-    clock.now += 24 * HOUR;
+    clock.now += SETUP_HOST_WAIT_MAX_HOURS * HOUR;
     spent.resumeFromHosts();
     spent.parkOnHosts();
     expect(spent.ended()).toBe("hosts_waiting");
