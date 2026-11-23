@@ -457,7 +457,7 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
             },
           };
           const caller: TaskStartCaller = { principal: input.principal, client: input.client ?? "app", origin: "app" };
-          const started = await startTask(setupDeps, caller, { requestId: request.requestId, project: request.project, instructions: request.text, title: `Set up ${request.project}` }, { setupAgent: { limits: request.limits, seenTaskId: request.seenTaskId } });
+          const started = await startTask(setupDeps, caller, { requestId: request.requestId, project: request.project, instructions: request.text, title: `Set up ${request.project}` }, { setupAgent: { limits: request.limits, seenTaskId: request.seenTaskId, carryOver: request.carryOver } });
           return { taskId: started.task.taskId, duplicate: started.duplicate };
         },
         async cancel(request) { await cancelTask(flow, request.taskId); },

@@ -16,7 +16,7 @@
 // merge of the agent's findings.
 import { resolve } from "node:path";
 import {
-  AgentXError, isBudgetExhaustedMessage, SETUP_RUN_REFUSED_MESSAGES, STANDIN_WRITER_WORDS, SetupRunSummarySchema, agentXError, effectiveSetupAgentLimits, setupProposalAnswerOf, upkeepPauseReasonOfText, type SetupAgentLimits, type UpkeepPauseReason, type EvalDependencyList, type SetupEvalDiscoveryReport, type SetupJournalEntry, type SetupProposal,
+  AgentXError, isBudgetExhaustedMessage, SETUP_RUN_REFUSED_MESSAGES, STANDIN_WRITER_WORDS, SetupRunSummarySchema, agentXError, effectiveSetupAgentLimits, setupProposalAnswerOf, upkeepPauseReasonOfText, type SetupAgentLimits, type SetupCarryOver, type UpkeepPauseReason, type EvalDependencyList, type SetupEvalDiscoveryReport, type SetupJournalEntry, type SetupProposal,
   type SetupRunSummary,
 } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
@@ -97,6 +97,8 @@ export interface SetupRunInput {
   repositories: readonly SetupManifestRepository[];
   /** P1: the commits the broker recorded for these repositories (the invocation's `setupAgent.commits`). REQUIRED to be present and equal, or the run is refused before anything starts. */
   commits: SetupCommits;
+  /** DEC 254zzz431: what the project's last ended run found (a re-run). Shown to the model as data in the first prompt; absent: the prompt is as it always was. */
+  carryOver?: SetupCarryOver | undefined;
   /** The model's cache retention, named in the usage report (the session's own, as every other run reports it). */
   cacheRetention?: PiCacheRetention | undefined;
   /** Test seam: how long a stopped run may take to finish (default `SETUP_STOP_FINISH_MS`). */
@@ -394,7 +396,7 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
       if (words !== undefined) await ports.progress(words).catch(() => undefined);
     };
     try {
-      await promptBounded(setupAgentInstructions({ repositories, limits, ...(input.metaRepo === undefined ? {} : { metaRepo: input.metaRepo }) }));
+      await promptBounded(setupAgentInstructions({ repositories, limits, ...(input.metaRepo === undefined ? {} : { metaRepo: input.metaRepo }), ...(input.carryOver === undefined ? {} : { carryOver: input.carryOver }) }));
     } catch (error) {
       failed = true;
       sessionFailed = true;

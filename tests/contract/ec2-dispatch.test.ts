@@ -299,6 +299,27 @@ describe("ec2-ebs delivery", () => {
       log.mockRestore();
     });
 
+    it("gives a setup re-run's carry-over only to a worker that lists it; an older worker is sent the run as it always was (limits and commits kept), and a run with none is sent untouched", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const carryOver = { version: 1, fromRun: "task-1", endedAs: "time_used", proposal: "{}", journal: { total: 1, lines: ["#1 worked: npm ci"], hosts: [] } };
+      const commits = [{ repository: "demo", commit: "e".repeat(40) }];
+      const setupAgent = { limits: { commands: 40, sameStepTries: 3, wallClockMin: 45, budgetCents: 400, hostAsks: 5 }, commits };
+      const record = taskRecord({ workflowMode: "SETUP_AGENT", setupAgent: { ...setupAgent, carryOver } });
+      const base = ["task.workflowMode", "task.setupAgent.v1"];
+      const capable = delivery({ workerFeatures: async () => [...base, "task.setupAgent.carryOver.v1"] });
+      expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(capable.post).setupAgent).toEqual({ ...setupAgent, carryOver });
+      const older = delivery({ workerFeatures: async () => base });
+      expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(older.post).setupAgent).toEqual(setupAgent);
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({ event: "dispatch.setup_carry_over_omitted", reason: "worker-lacks-feature", operationId: record.operationId }));
+      const first = taskRecord({ workflowMode: "SETUP_AGENT", setupAgent });
+      const plain = delivery({ workerFeatures: async () => base });
+      expect(await plain.deliver(first, first.invocation)).toBe("DELIVERED");
+      expect(postedPayload(plain.post).setupAgent).toEqual(setupAgent);
+      log.mockRestore();
+    });
+
     it("gives the reviewer note only to a worker that lists it; an older worker still receives the candidate-bound review", async () => {
       const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
       const workflowBase = [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }];

@@ -7,6 +7,7 @@ import {
   E2E_REPLAY_CHECKS_FEATURE,
   GROUNDING_CHECKS_FEATURE,
   PLAN_DRY_RUN_FEATURE,
+  SETUP_CARRY_OVER_FEATURE,
   E2E_APPLICATION_ADMISSION_SCHEMA_V2,
   WORKER_INVOKE_AUTHORIZATION_SCHEME,
   WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED,
@@ -586,7 +587,19 @@ async function forWorkerFeatures(
       workspaceId: invocation.workspaceId,
     }));
   }
-  return sent;
+  return withoutSetupCarryOver(sent, features, reason);
+}
+
+/**
+ * DEC 254zzz431: a setup re-run's carry-over (`setupAgent.carryOver`) goes only to a worker whose /ping lists "task.setupAgent.carryOver.v1"; an older worker's strict payload would refuse the field, so it is sent the
+ * run without it and starts as it always did. The carry-over only informs the agent, so dropping it changes no limit and no rule.
+ */
+function withoutSetupCarryOver(invocation: WorkerInvocation, features: readonly string[], reason: string): WorkerInvocation {
+  if (invocation.kind !== "task" || invocation.payload.setupAgent?.carryOver === undefined || features.includes(SETUP_CARRY_OVER_FEATURE)) return invocation;
+  const { carryOver: _carryOver, ...setupAgent } = invocation.payload.setupAgent;
+  void _carryOver;
+  console.log(JSON.stringify({ component: "dispatcher", event: "dispatch.setup_carry_over_omitted", reason, operationId: invocation.operationId, workspaceId: invocation.workspaceId }));
+  return { ...invocation, payload: { ...invocation.payload, setupAgent } };
 }
 
 /** A coding run without the request to export the unchanged code, for a worker that does not list "task.workflowE2EBaselineSource": it would reject the field. The export reads the repository alone, so this feature is not withheld with the executor image. */

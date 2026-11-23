@@ -8,6 +8,7 @@ import type {
   JsonValue,
   Operation,
   SetupAgentLimits,
+  SetupCarryOver,
   SetupProposal,
   SetupRunEndWord,
   SetupRunSummary,
@@ -45,6 +46,8 @@ export type TaskRecord = Omit<DeveloperTaskRecord, "provider" | "charge"> & {
   wikiBuild?: WikiBuildWire;
   /** A setup run: the limits it started with. */
   setupAgentLimits?: SetupAgentLimits;
+  /** A re-run of a setup run (DEC 254zzz431): what the project's last ended run found, bounded, fixed when the run started (core/setup-agent/carry-over.ts). Absent on a first run. */
+  setupAgentCarryOver?: SetupCarryOver;
   /** A setup run: who pressed Stop and when. Written before the cancel, so the end can tell a person's stop from any other cancel. */
   setupAgentStop?: { by: string; at: string };
   /** L4-T5: when a setup run's worker last talked to the broker (noted at most once a minute). A run silent for 10 minutes reads as stopped. */

@@ -7,6 +7,7 @@ import { agentXError, orgProjectCatalogKey, projectRevisionKey, type AuditEvent,
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { setupAgentKey } from "../../packages/broker/src/core/setup-agent/keys.js";
+import { appendSetupJournal } from "../../packages/broker/src/core/setup-agent/journal.js";
 import { SETUP_AGENT_BUSY } from "../../packages/broker/src/core/setup-agent/agent.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
@@ -178,6 +179,39 @@ describe("hosted setup run: starting, re-running and stopping", () => {
     expect(setupEvents(world).map((event) => [event.action, event.actor.id, event.details?.["basis"]])).toEqual([["setup_run.started", "p-admin", "company-admin"], ["setup_run.rerun_started", "p-padmin", "project-admin"]]);
     expect(await world.store.get(projectRevisionKey(FAKE_COMPANY, "payments", 1))).toEqual(before);
     expect(await world.store.get(projectRevisionKey(FAKE_COMPANY, "payments", 2))).toBeUndefined();
+  });
+
+  it("a re-run after an ended run starts from what that run found (DEC 254zzz431): its partial proposal and a journal summary on the new task, the first run and another project's run carry nothing", async () => {
+    const { world, person, call } = await setupWorld();
+    const admin = person("p-admin", FAKE_COMPANY, "admin");
+    const first = await call(post(RUN, { requestId: randomUUID() }), admin);
+    const firstTask = first.body["taskId"] as string;
+    expect((await world.store.get(taskKey(firstTask)))?.["setupAgentCarryOver"]).toBeUndefined();
+    const proposal = { version: 2, basedOnRevision: 1, setup: [{ id: "setup-demo", value: { repo: "demo", commands: ["npm ci"] }, from: [{ kind: "inferred", repo: "demo", note: "worked when run" }], confidence: "high", risk: "low" }], notes: "" };
+    const now = new Date(world.clock.now).toISOString();
+    await world.store.update({ key: taskKey(firstTask), ops: [
+      { op: "set", path: ["setupAgentResult"], value: { status: "failed", stop: "time_used", failure: "x", proposal } },
+      { op: "set", path: ["agentRunEnd"], value: { state: "FAILED", at: now } },
+    ] } as never);
+    await appendSetupJournal({ store: world.store, now: () => world.clock.now }, { orgId: FAKE_COMPANY, project: "payments", taskId: firstTask }, [
+      { n: 1, source: "agent", command: "npm ci", exitCode: 0, durationMs: 900, timedOut: false, flagged: false, blockedHosts: [], tail: "", startedAt: now },
+      { n: 2, source: "agent", command: "npm test", exitCode: 1, durationMs: 900, timedOut: false, flagged: false, blockedHosts: [], tail: "boom\nmissing module x\n", startedAt: now },
+    ]);
+    // The other company's own "payments" run, ended with its own journal, is never read for this company's re-run.
+    const theirs = person("p-other", OTHER, "owner");
+    const theirStart = await call(post(RUN, { requestId: randomUUID() }), theirs);
+    const theirTask = theirStart.body["taskId"] as string;
+    await world.store.update({ key: taskKey(theirTask), ops: [{ op: "set", path: ["setupAgentResult"], value: { status: "failed", stop: "time_used", failure: "x" } }, { op: "set", path: ["agentRunEnd"], value: { state: "FAILED", at: now } }] } as never);
+    await appendSetupJournal({ store: world.store, now: () => world.clock.now }, { orgId: OTHER, project: "payments", taskId: theirTask }, [{ n: 1, source: "agent", command: "THEIR PRIVATE COMMAND", exitCode: 0, durationMs: 9, timedOut: false, flagged: false, blockedHosts: [], tail: "", startedAt: now }]);
+    const rerun = await call(post(RUN, { requestId: randomUUID() }), admin);
+    expect(rerun.status).toBe(202);
+    const carried = (await world.store.get(taskKey(rerun.body["taskId"] as string)))?.["setupAgentCarryOver"] as { fromRun: string; endedAs: string; proposal: string; journal: { total: number; lines: string[] } };
+    expect(carried).toMatchObject({ version: 1, fromRun: firstTask, endedAs: "time_used", journal: { total: 2, lines: ["#1 worked: npm ci", "#2 failed (exit 1): npm test | output ended: missing module x"] } });
+    expect(JSON.parse(carried.proposal)).toEqual(proposal);
+    expect(JSON.stringify(carried)).not.toContain("THEIR PRIVATE COMMAND");
+    // The body of the request names nothing: a client cannot supply or change what is carried.
+    const forged = await call(post(RUN, { requestId: randomUUID(), carryOver: { version: 1 } }), admin);
+    expect(forged.status).toBe(400);
   });
 
   it("refuses a start before writing anything when the company's new tasks are not on the core, or the install has no model gateway", async () => {

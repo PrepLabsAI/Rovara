@@ -46,6 +46,7 @@ export function renderSetupPage(context: PageContext, view: SetupPageView): stri
     const requestId = randomUUID();
     return `<form method="post" action="${action("start")}" class="row">${hidden("requestId", requestId)}${token("start", { requestId })}${button(view.status === "none" ? "Set this project up" : "Run the setup again", "primary")}</form>`
       + `<p class="muted">A run is limited to ${esc(view.limits.commands)} commands, ${esc(view.limits.wallClockMin)} minutes and about $${esc((view.limits.budgetCents / 100).toFixed(2))} of model use.</p>`
+      + (view.carriesOver === true ? `<p class="muted">A new run starts from what the last run found.</p>` : "")
       + (view.standInWriter === undefined ? "" : `<p class="muted">${esc(view.standInWriter)}</p>`);
   };
 
