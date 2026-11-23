@@ -18,7 +18,7 @@ import { evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/a
 import { planDocument } from "../support/plan-documents.js";
 import { sha, webApiRow } from "../support/e2e-application-plan-fixtures.js";
 import { createHarness, newRequestId } from "../support/task-flow-harness.js";
-import { startImplementation } from "../../packages/broker/src/core/build-step/start.js";
+import { startImplementation, uuidFrom } from "../../packages/broker/src/core/build-step/start.js";
 import { toDocument } from "../../packages/broker/src/core/task-flow/records.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { workspaceKeys } from "../../packages/broker/src/core/task-flow/workspace-location.js";
@@ -499,4 +499,14 @@ it.each([false, true])("admits a baseline through real hosted retention and crea
     expect(await w.h.store.get(taskKey(w.task.taskId))).toEqual(before[0]);
     expect((await w.h.store.get(w.location.workspaceKey))?.activeOperationId).toBe(admitted[0]!.id);
   }
+});
+
+// Opus review 83c2611d6: the core parity route recognises a replay of a committed e2e checks retry by uuidFrom(requestId) in verificationRetries
+// (parity-task-actions.ts replayedStep). Pin that the REAL application retry stores exactly that key; the parity test only uses a stub.
+it("review: the application retry stores the owner's request id as uuidFrom(requestId), the key the parity replay check reads", async () => {
+  const w = await admissionWorld(); w.workflow.state = "BLOCKED";
+  await w.h.store.update({ key: taskKey(w.task.taskId), ops: [change.set("workflow", toDocument(w.workflow))] });
+  const requestId = "0b6c5c1e-8a3f-4b52-9d7e-1f2a3b4c5d6e";
+  expect(await w.rounds.retry(w.task, { requestId, actorId: w.task.ownerKey })).toBe("STARTED");
+  expect((await readTask(w.h.deps, w.task.taskId))?.workflow?.verificationRetries?.map((retry) => retry.requestId)).toEqual([uuidFrom(requestId)]);
 });
