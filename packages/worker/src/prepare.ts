@@ -12,6 +12,7 @@ import {
 } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
+  PREPARE_PIN_MOVED_MARKER,
   StoredProjectDefinitionSchema,
   agentXError,
   redactText,
@@ -372,10 +373,16 @@ async function prepareWorkspaceOnce(options: PrepareWorkspaceOptions): Promise<P
           throw new Error(`repository path already exists and is not a Git checkout: ${repository.path}`);
         }
       }
-      const resolvedCommit = await resolveDefaultBranch(destination, repository.defaultBranch);
-      if (options.pins !== undefined && options.pins.find((pin) => pin.repository === repository.name)?.commit !== resolvedCommit) {
-        throw new Error(`the default branch of ${repository.name} is not at the commit the control plane pinned; try again`);
-      }
+      const pinRemote = options.pullRequestRemote?.(repository) ?? repository.url;
+      const resolvedCommit = await pinnedOrHead(destination, repository, options.pins, {
+        diagnostic: (message) => (options.onDiagnostic ?? logPreparationDiagnostic)(message),
+        fetch: async (fetchOptions, refspec) => {
+          assertCredentialFreeRemote(pinRemote);
+          // The repository's own address with the clone's credential, like every other network call of the worker (a hardened Git ignores the clone's `origin`).
+          const args = ["fetch", ...fetchOptions, "--", pinRemote, ...(refspec === undefined ? [] : [refspec])];
+          await session.retrying(() => runGitWithCredential({ directory: destination, args, cwd: destination, credential: session.credential, timeout: 300_000, maxBuffer: MAX_COMMAND_OUTPUT_BYTES, ...(options.gitRunner === undefined ? {} : { run: options.gitRunner }) }));
+        },
+      });
       const head = await gitHead(destination);
       let checkedOut: { pullRequest: number; headSha: string } | undefined;
       if (existing === "missing") {
@@ -533,9 +540,7 @@ async function prepareMetaRepository(
   // The commit is the broker's. It must be in the clone and on the default branch (the head the broker read, or an ancestor of the head the clone sees), or nothing is read.
   const head = await resolveDefaultBranch(destination, entry.defaultBranch);
   const commit = meta.commit;
-  const present = await runIsolatedGit(destination, ["cat-file", "-e", `${commit}^{commit}`], { timeout: 30_000, maxBuffer: 4_096 }).then(() => true, () => false);
-  const onBranch = present && (commit === head || await runIsolatedGit(destination, ["merge-base", "--is-ancestor", commit, head], { timeout: 30_000, maxBuffer: 4_096 }).then(() => true, () => false));
-  if (!onBranch) throw new Error("the meta repository does not hold the commit asked for on its default branch");
+  if (!(await commitIsOnBranch(destination, commit, head))) throw new Error("the meta repository does not hold the commit asked for on its default branch");
   const done = await materializeMetaKnowledge(destination, commit, meta);
   await assertContainedSymlinks(canonicalRoot, canonicalRoot, options.trustedRuntimeBackingOwner, options.venvLinkPolicy);
   return { name: entry.name, path: entry.path, defaultBranch: entry.defaultBranch, resolvedCommit: commit, files: done.files, bytes: done.bytes, skipped: done.skipped, completedAt: new Date().toISOString() };
@@ -656,6 +661,48 @@ async function cloneRepository(
   // way as every other read of a workspace repository's config.
   const remote = await withIsolatedRepository(destination, "read", {}, (repository) => repository.remoteUrl("origin"));
   assertCredentialFreeRemote(remote ?? "");
+}
+
+/** Whether `commit` is in the clone and is the branch head or one of its ancestors (a commit the branch holds). */
+async function commitIsOnBranch(directory: string, commit: string, head: string): Promise<boolean> {
+  if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(commit)) return false;
+  const present = await runIsolatedGit(directory, ["cat-file", "-e", `${commit}^{commit}`], { timeout: 30_000, maxBuffer: 4_096 }).then(() => true, () => false);
+  return present && (commit === head || await runIsolatedGit(directory, ["merge-base", "--is-ancestor", commit, head], { timeout: 30_000, maxBuffer: 4_096 }).then(() => true, () => false));
+}
+
+/** What the pin check may do beyond reading the clone: say what it found (the worker's log), and fetch from the repository's own address with the clone's credential. */
+interface PinCheckContext { diagnostic: (message: string) => void; fetch: (options: readonly string[], refspec?: string) => Promise<void> }
+
+/**
+ * The commit a repository is prepared at. With no pins (an ordinary task, a setup run) it is the default branch's head as the clone sees it. With pins it is exactly the commit the broker pinned: the head itself, or, when the branch moved
+ * ahead while the machine booted, the pin as an ancestor of the head (read AT the pin, so a branch that only moves forward never stops a start). A pin the clone does not hold yet (a shallow or single-branch clone, a branch that moved
+ * beyond the clone's depth) is unknown, not "moved away": it is fetched by its sha, and a shallow clone is deepened, before the answer is given. A repository with no pin, or a pin the branch really no longer holds (it was rewritten), is
+ * refused; the second with the sentence the broker reads (`PREPARE_PIN_MOVED_MARKER`). Every check says, in the log and in the error, the repository, the ref, the pinned and the resolved commit and the clone's mode, so a failure is decidable.
+ */
+async function pinnedOrHead(destination: string, repository: { name: string; defaultBranch: string }, pins: ReadonlyArray<{ repository: string; commit: string }> | undefined, context: PinCheckContext): Promise<string> {
+  const head = await resolveDefaultBranch(destination, repository.defaultBranch);
+  if (pins === undefined) return head;
+  const pinned = pins.find((pin) => pin.repository === repository.name)?.commit;
+  const ref = `origin/${repository.defaultBranch}`;
+  // The clone's own record of a depth-limited history (the isolated read of the repository does not carry it).
+  const shallow = (await pathKind(resolve(destination, ".git", "shallow"))) !== "missing";
+  const facts = `repository ${repository.name}, ref ${ref}, pinned ${pinned ?? "none"}, resolved ${head}, clone ${shallow ? "shallow" : "full"}`;
+  if (pinned === undefined) {
+    context.diagnostic(`pin check failed: no pin for the repository (${facts})`);
+    throw new Error(`the default branch of ${repository.name} is not at the commit the control plane pinned; try again (${facts})`);
+  }
+  if (pinned === head) { context.diagnostic(`pin check passed: head is the pin (${facts})`); return head; }
+  if (/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(pinned)) {
+    const held = async (): Promise<boolean> => await runIsolatedGit(destination, ["cat-file", "-e", `${pinned}^{commit}`], { timeout: 30_000, maxBuffer: 4_096 }).then(() => true, () => false);
+    if (!(await held())) await context.fetch(["--no-tags"], pinned).catch(() => undefined);
+    if (shallow) await context.fetch(["--no-tags", "--unshallow"]).catch(() => undefined);
+  }
+  if (!(await commitIsOnBranch(destination, pinned, head))) {
+    context.diagnostic(`pin check failed: the pin is not on the branch (${facts})`);
+    throw new Error(`the commit the control plane pinned for ${repository.name} ${PREPARE_PIN_MOVED_MARKER} (${repository.defaultBranch}); start again to pin the current head (${facts})`);
+  }
+  context.diagnostic(`pin check passed: the branch moved ahead, the pin is read (${facts})`);
+  return pinned;
 }
 
 async function resolveDefaultBranch(directory: string, branch: string): Promise<string> {

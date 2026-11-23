@@ -25,7 +25,7 @@ export interface LocalWikiMapOptions {
 export interface LocalWikiMap {
   routes(request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined>;
   /** The map the wiki build (W4) plans from: the kept one (what the owner saw) or a new one; `fresh` always reads the branches again. The same kept map as the route's. */
-  mapFor(project: string, repositories: ReadonlyArray<{ name: string; url: string; defaultBranch: string; host?: { kind: PluginKind } | undefined }>, options: { fresh: boolean }): Promise<WikiFileMap>;
+  mapFor(project: string, repositories: ReadonlyArray<{ name: string; url: string; defaultBranch: string; host?: { kind: PluginKind } | undefined }>, options: { fresh: boolean; remake?: boolean }): Promise<WikiFileMap>;
 }
 
 export function createLocalWikiMap(options: LocalWikiMapOptions): LocalWikiMap {
@@ -37,11 +37,11 @@ export function createLocalWikiMap(options: LocalWikiMapOptions): LocalWikiMap {
   };
   return {
     async mapFor(project, repositories, options) {
-      if (!options.fresh) {
+      if (!options.fresh && options.remake !== true) {
         const kept = service.read(companyId, project, repositories.map(repositoryKeyOf));
         if (kept !== undefined) return kept;
       }
-      return await service.make(companyId, project, repositories.map((repository) => ({ name: repository.name, url: repository.url, defaultBranch: repository.defaultBranch, host: hostOf(repository) })), { orgId: companyId });
+      return await service.make(companyId, project, repositories.map((repository) => ({ name: repository.name, url: repository.url, defaultBranch: repository.defaultBranch, host: hostOf(repository) })), { orgId: companyId }, options.remake === true ? { force: true } : undefined);
     },
     async routes(request, caller) {
       const match = ROUTE.exec(request.path.split("?")[0] ?? request.path);

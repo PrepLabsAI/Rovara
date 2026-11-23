@@ -18,6 +18,7 @@ import {
   type DocumentStore, type JsonValue, type OrgId, type TransactItem, type WikiBuildEndWord, type WikiBuildLimits, type WikiBuildPins, type WikiBuildRecord, type WikiBuildSummary, type WikiFileMap,
   type WikiPagePlan, type WikiPageSink, type UpkeepPauseReason,
 } from "@agentx/contracts";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { CitationFileReader } from "../citations/citation-check.js";
 import { checkWikiPage, storeCheckCache } from "./check.js";
@@ -97,6 +98,10 @@ export interface WikiBuildPointer {
    * for the project instead of a person's standing (`WikiPageLoopDeps.upkeepOn`), and the store's record says `nightly` with no starter. Only `prepareUnattendedWikiRefresh` sets it.
    */
   unattended?: true;
+  /** The task of the run this one re-started after that run's preparation found its pinned commit gone from the default branch (a rewrite): ONE automatic new snapshot per attempt, so a run that has this never starts another. */
+  resnapshotOf?: string;
+  /** The chips the person turned on with Build (only when the body had them): a new snapshot of a first build plans the same pages from them, never from the map's defaults. */
+  chipsOn?: string[];
 }
 
 /** The pointer's write for the build's start transaction: holds only while the pointer is the one the start read, so two starts cannot both win. */
@@ -210,8 +215,11 @@ export interface WikiBuildDeps extends WikiBuildReadDeps {
   modelAccessConfigured: boolean;
   /** Whether the company has an AI key connected, as the gateway says. "unknown": allowed (the gateway refuses at the first call and the run ends `needs_ai_key`). */
   aiKey(): Promise<"connected" | "missing" | "unknown">;
-  /** The project's latest file map (W0), or undefined when none was made. */
-  fileMap(project: string): Promise<WikiFileMap | undefined>;
+  /**
+   * The project's latest file map (W0), or undefined when none was made. `remake`: make a new one even when one was kept or made a moment ago (the last run was pinned to a commit the branch no longer holds, so a kept map
+   * would pin it again).
+   */
+  fileMap(project: string, options?: { remake?: boolean }): Promise<WikiFileMap | undefined>;
   /** The default branch's head of each repository of the project, as the code host says now. A repository that cannot be read is left out. */
   defaultBranchHeads(project: string): Promise<Array<{ repo: string; commit: string }>>;
   /** An archived project takes no new work. */
@@ -253,7 +261,7 @@ async function requireKey(deps: WikiBuildDeps): Promise<void> {
 async function launch(
   deps: WikiBuildDeps, personId: string, project: string, requestId: string,
   shape: {
-    pins: WikiBuildPins; plan: WikiPagePlan[]; keptFromEarlier: string[]; continuedFrom?: string; notes: string | undefined; notesBy?: string; buildKind: "first" | "refresh"; spentEarlierCents: number; unattended?: true;
+    pins: WikiBuildPins; plan: WikiPagePlan[]; keptFromEarlier: string[]; continuedFrom?: string; notes: string | undefined; notesBy?: string; buildKind: "first" | "refresh"; spentEarlierCents: number; unattended?: true; resnapshotOf?: string; chipsOn?: string[];
   }, seenTaskId: string | undefined,
 ): Promise<string> {
   const starter = deps.starter!;
@@ -265,6 +273,8 @@ async function launch(
     companySlot, orgId: deps.companyId, project, taskId, requestId, requestedBy: personId, startedAt, limits, pins: shape.pins, plan: shape.plan, keptFromEarlier: shape.keptFromEarlier,
     ...(shape.continuedFrom === undefined ? {} : { continuedFrom: shape.continuedFrom }), doneIds: [], pagesWritten: 0, claimsKept: 0, claimsDropped: 0, spentCents: 0, spentEarlierCents: shape.spentEarlierCents, payer, buildKind: shape.buildKind,
     ...(shape.unattended === true ? { unattended: true as const } : {}),
+    ...(shape.resnapshotOf === undefined ? {} : { resnapshotOf: shape.resnapshotOf }),
+    ...(shape.chipsOn === undefined ? {} : { chipsOn: shape.chipsOn }),
   });
   try {
     const started = await starter.start({
@@ -304,7 +314,8 @@ export async function startWikiBuild(
   if (before?.requestId === requestIdOf(parsed.data)) return { status: 200, view: await wikiBuildState(deps, project) };
   await deps.requireNewWork?.(project);
   if (before !== undefined && endWordOf(before, deps.now()) === undefined) throw agentXError("WORKSPACE_BUSY", WIKI_BUILD_WORDS.busy);
-  const map = await deps.fileMap(project);
+  // A run that ended because its pinned commit is gone from the branch is not planned again from the same kept map: the next Build reads the branches again and pins what it reads.
+  const map = await deps.fileMap(project, { remake: before !== undefined && endWordOf(before, deps.now()) === "code_moved" });
   if (map === undefined) throw agentXError("CONFIG_INVALID", WIKI_BUILD_WORDS.noMap);
   const pins = pinsOf(await deps.defaultBranchHeads(project), map);
   if (pins === undefined) throw agentXError("CONFIG_INVALID", WIKI_BUILD_WORDS.noRepositories);
@@ -314,7 +325,7 @@ export async function startWikiBuild(
   const refresh = options?.refresh;
   const plan = refresh === undefined ? planned : planned.filter((page) => refresh.include(page));
   if (refresh !== undefined && plan.length === 0) throw agentXError("CONFIG_INVALID", WIKI_CONTROLS_WORDS.nothingToRefresh);
-  await launch(deps, personId, project, parsed.data.requestId, { pins, plan, keptFromEarlier: [], notes, buildKind: before === undefined && refresh === undefined ? "first" : "refresh", spentEarlierCents: 0 }, before?.taskId);
+  await launch(deps, personId, project, parsed.data.requestId, { pins, plan, keptFromEarlier: [], notes, buildKind: before === undefined && refresh === undefined ? "first" : "refresh", spentEarlierCents: 0, ...(parsed.data.chipsOn === undefined ? {} : { chipsOn: parsed.data.chipsOn }) }, before?.taskId);
   await recordNow(deps, project);
   return { status: 202, view: await wikiBuildState(deps, project) };
 }
@@ -385,20 +396,71 @@ export async function continueWikiBuild(deps: WikiBuildDeps, personId: string, p
   const word = endWordOf(before, deps.now());
   if (word === undefined) throw agentXError("WORKSPACE_BUSY", WIKI_BUILD_WORDS.busy);
   if (word === "built" || remainingPages(before).length === 0) throw agentXError("CONFIG_INVALID", WIKI_BUILD_WORDS.nothingToContinue);
-  // The build cap holds across Stop and Continue: what earlier runs spent is carried, and a continue with no room for one more page under the limits as they are now is refused.
-  // A page that was out when the run ended reported no spend: it is charged at its reserve, so Stop and Continue cannot slip a page past the cap.
+  // A run that ended because its pinned commit is gone from the branch (a rewrite) is continued over a NEW snapshot: new pins, the same plan and the pages already finished.
+  await relaunch(deps, personId, project, before, parsed.data.requestId, { repin: word === "code_moved" });
+  await recordNow(deps, project);
+  return { status: 202, view: await wikiBuildState(deps, project) };
+}
+
+/** A run's plan over a NEW snapshot: the branches are read again (a new file map, bypassing the kept one) and pinned; a first build with nothing finished is planned again, any other keeps its plan over the repositories still pinned. */
+async function repinned(deps: WikiBuildDeps, project: string, before: WikiBuildPointer, limits: WikiBuildLimits, notes: string | undefined): Promise<{ pins: WikiBuildPins; plan: WikiPagePlan[] }> {
+  const map = await deps.fileMap(project, { remake: true });
+  if (map === undefined) throw agentXError("CONFIG_INVALID", WIKI_BUILD_WORDS.noMap);
+  const pins = pinsOf(await deps.defaultBranchHeads(project), map);
+  if (pins === undefined) throw agentXError("CONFIG_INVALID", WIKI_BUILD_WORDS.noRepositories);
+  const names = new Set(pins.map((pin) => pin.repo));
+  const untouched = before.buildKind === "first" && before.keptFromEarlier.length === 0 && before.doneIds.length === 0;
+  const plan = untouched ? planWikiPages({ map, repositories: [...names], pages: limits.pages, chipsOn: before.chipsOn, notes }).pages : before.plan.filter((page) => page.repo === undefined || names.has(page.repo));
+  if (plan.length === 0) throw agentXError("CONFIG_INVALID", WIKI_BUILD_WORDS.nothingToContinue);
+  return { pins, plan };
+}
+
+/**
+ * Starts the run that carries on from `before` (an ended run). The build cap holds across runs: what earlier runs spent is carried, and the limits are read as they are now ("Raise cap and continue"). A page that was out when
+ * the run ended reported no spend: it is charged at its reserve, so Stop and Continue cannot slip a page past the cap. `repin`: read the branches again (a NEW file map, bypassing the kept one) and pin what they hold now, over the
+ * same plan; a first build with nothing finished is planned again from the new map. Without it, the same commits as before. Returns the new run's task id.
+ */
+async function relaunch(
+  deps: WikiBuildDeps, personId: string, project: string, before: WikiBuildPointer, requestId: string, options: { repin: boolean; resnapshotOf?: string },
+): Promise<string> {
+  const limits = effectiveWikiBuildLimits(await deps.limitSetting?.(project), await deps.limitLock?.());
   const spentEarlierCents = buildSpendOf(before) + (before.granted === undefined ? 0 : before.limits.pageReserveCents);
-  if (!wikiPageFits(spentEarlierCents, effectiveWikiBuildLimits(await deps.limitSetting?.(project), await deps.limitLock?.()))) throw agentXError("BUDGET_EXCEEDED", WIKI_BUILD_WORDS.raiseCap);
+  if (!wikiPageFits(spentEarlierCents, limits)) throw agentXError("BUDGET_EXCEEDED", WIKI_BUILD_WORDS.raiseCap);
   const notesRow = await deps.store.get(wikiBuildNotesKey({ orgId: deps.companyId, project, taskId: before.taskId }));
   const ownNotes = notesRow?.["orgId"] === deps.companyId && notesRow["project"] === project;
   const notes = ownNotes ? cleanWikiNotes(notesRow["notes"]) : undefined;
   // The notes keep their author, so erasing that person removes every copy.
   const notesBy = ownNotes && typeof notesRow["by"] === "string" ? notesRow["by"] : undefined;
-  await launch(deps, personId, project, parsed.data.requestId, {
-    pins: before.pins, plan: before.plan, keptFromEarlier: [...new Set([...before.keptFromEarlier, ...before.doneIds])], continuedFrom: before.taskId, notes, ...(notesBy === undefined ? {} : { notesBy }), buildKind: before.buildKind === "refresh" ? "refresh" : "first", spentEarlierCents,
+  const { pins, plan } = options.repin ? await repinned(deps, project, before, limits, notes) : before;
+  return await launch(deps, personId, project, requestId, {
+    pins, plan, keptFromEarlier: [...new Set([...before.keptFromEarlier, ...before.doneIds])], continuedFrom: before.taskId, notes, ...(notesBy === undefined ? {} : { notesBy }), buildKind: before.buildKind === "refresh" ? "refresh" : "first", spentEarlierCents,
+    ...(options.resnapshotOf === undefined ? {} : { resnapshotOf: options.resnapshotOf }),
+    ...(before.chipsOn === undefined ? {} : { chipsOn: before.chipsOn }),
   }, before.taskId);
-  await recordNow(deps, project);
-  return { status: 202, view: await wikiBuildState(deps, project) };
+}
+
+/** The request id of the one automatic new snapshot of a run: derived from the run's task, so a repeat of the hook answers the first (and starts nothing more). */
+export function resnapshotRequestId(taskId: string): string {
+  const hex = createHash("sha256").update(`wiki-build-resnapshot:${taskId}`).digest("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
+/**
+ * A build run whose preparation found the commit it was pinned to gone from the default branch (a rewrite, a force-push) and so ended `code_moved`: takes ONE fresh snapshot (a new file map, bypassing the kept one) and starts the
+ * run again over the new pins, with no person asked. Exactly one per attempt: a run that is itself such a retry (`resnapshotOf`), a nightly run, a run that has not ended `code_moved`, and a newer run of the project start nothing.
+ * Never throws for a refusal (no key, archived, no room under the cap, no map): the run then stays ended `code_moved` and the next Build or Continue pins again. Returns the new run's task id.
+ */
+export async function resnapshotWikiBuild(deps: WikiBuildDeps, project: string, failedTaskId: string): Promise<string | undefined> {
+  if (deps.starter === undefined) return undefined;
+  const before = await readWikiBuildPointer(deps.store, deps.companyId, project);
+  if (before === undefined || before.taskId !== failedTaskId || before.end?.word !== "code_moved" || before.resnapshotOf !== undefined || before.unattended === true) return undefined;
+  try {
+    await requireKey(deps);
+    await deps.requireNewWork?.(project);
+    return await relaunch(deps, before.requestedBy, project, before, resnapshotRequestId(failedTaskId), { repin: true, resnapshotOf: failedTaskId });
+  } catch {
+    return undefined;
+  }
 }
 
 /** Stop the running build. Who pressed Stop is written BEFORE the cancel; every page already finished stays. */
@@ -475,7 +537,7 @@ export interface WikiPageLoopDeps {
 /** The store's stop reason for an end word. */
 const STOP_REASON: Readonly<Record<WikiBuildEndWord, WikiBuildRecord["stopReason"] | undefined>> = {
   built: undefined, budget_used: "cap", pages_used: "cap", time_used: "failed", stopped_by_person: "person", needs_ai_key: "no_ai_key", repo_unreadable: "repo_unreadable",
-  access_lost: "failed", infrastructure: "failed", upkeep_paused: "cap",
+  access_lost: "failed", infrastructure: "failed", code_moved: "failed", upkeep_paused: "cap",
 };
 
 /** The store's build record of a run, as it stands. Pure. */

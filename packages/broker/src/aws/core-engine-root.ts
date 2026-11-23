@@ -158,6 +158,7 @@ import { proposeLessonFromNote, type WikiNoteLessonInput, type WikiNoteLessonRes
 import type { HostedWikiMapWiring } from "../core-host/wiki-map-routes.js";
 import { ciDefinitionReaderOf } from "../core/ci-evidence/eval-check-card.js";
 import { createWikiBuildStarter } from "../core/wiki-build/starter.js";
+import { hostedWikiResnapshot } from "./wiki-resnapshot.js";
 import { projectCitationReader, wikiBuildCallbackWiring, wikiBuildEndedHook } from "../core/wiki-build/wiring.js";
 import { createPersonEraseRoute, type PersonEraseCaller } from "../core-host/person-erase-route.js";
 import { resumePersonErases, type PersonEraseDeps, type PersonEraseObjects } from "../core/people/erase.js";
@@ -1017,6 +1018,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         // L4-P2: the AI step of the night (the wiki refresh) over the SAME flow and its own Admission; it starts only where a dollar cap is really enforced and both locks are open. The file map is the night's own.
         const wikiMapForNight: HostedWikiMapWiring = { standing: setupRunStanding, hostFor: (repository) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }) };
         const modelConfigured = (): boolean => { try { return modelGateway() !== undefined; } catch { return false; } };
+        // A wiki build whose pinned commit is gone from the default branch (a rewrite) is started again ONCE over a new snapshot, with no person asked (the broker has the code host; the dispatcher wires nothing).
+        flow.deps.wikiBuildResnapshot = hostedWikiResnapshot({ flow: flow.deps, companyId, now: () => now().getTime(), map: wikiMapForNight, standing: setupRunStanding, modelAccessConfigured: modelConfigured });
         // L4-SR2: the automatic repair draft, only where the ceiling covers the company (nothing is built otherwise). Its start is behind the effective gate, the project's upkeep switch, an enforced cap with room and the access rule's marks.
         // L4-SR2b: the project's remaining room is the gateway's own answer (the SAME reader as the night's cap signal), read fresh at the draft's start and at every model token's mint; any doubt is no room.
         const upkeepRoom = (project: string): Promise<number | undefined> => upkeepRoomCentsOf(upkeepCapFor(companyId), project, now().getTime(), companyId);

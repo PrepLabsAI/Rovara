@@ -103,13 +103,14 @@ const isManage = (standing: SetupRunStanding): standing is Extract<SetupRunStand
 /** The file map as the build plans from it: the kept one (what the person saw), or a new one; `fresh` makes a new one (Refresh now reads the branches again). */
 function mapReader(input: HostedWikiBuildInput, repositories: ReadonlyArray<{ name: string; url: string; defaultBranch: string; host?: { kind: PluginKind } | undefined }>, fresh: () => boolean) {
   const service = wikiMapServiceOf(input.wiring.map, input.now, input.log);
-  return async (project: string): Promise<WikiFileMap | undefined> => {
-    if (!fresh()) {
+  return async (project: string, options?: { remake?: boolean }): Promise<WikiFileMap | undefined> => {
+    const remake = options?.remake === true;
+    if (!fresh() && !remake) {
       const kept = service.read(input.companyId, project, repositories.map(repositoryKeyOf));
       if (kept !== undefined) return kept;
     }
     const targets: FileMapRepository[] = repositories.map((repository) => ({ name: repository.name, url: repository.url, defaultBranch: repository.defaultBranch, host: hostOf(input.wiring.map, repository) }));
-    return await service.make(input.companyId, project, targets, { orgId: input.companyId });
+    return await service.make(input.companyId, project, targets, { orgId: input.companyId }, remake ? { force: true } : undefined);
   };
 }
 
