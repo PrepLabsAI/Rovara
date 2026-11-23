@@ -230,6 +230,8 @@ async function runJob(state: RunState, job: InstallJob, directory: InstallDirect
   const name = installContainerName(ctx.options.operationId, job.repo);
   let outcome: PrivateInstallOutcome = "failed_unknown";
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    // A container of this name left by a crashed or earlier run of the same operation would make `docker run` fail on the name: it is removed first, and one that cannot be confirmed gone stops the step like any other.
+    if (!await removeContainer(ctx.options.docker, name)) throw new RegistryTokenLeakError("Rovara could not confirm that an earlier package install container was gone, so the workspace was set aside and will be set up again from a fresh clone");
     const result = await runOnce(state, args);
     outcome = classifyInstallOutput(result);
     // A stop that did not stop: the container may still hold the token and write the workspace.

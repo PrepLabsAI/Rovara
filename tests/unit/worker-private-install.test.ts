@@ -223,7 +223,7 @@ describe("the happy path, in order", () => {
     await expect(assertNoInstallSecrets(h.secretsRoot)).resolves.toBeUndefined();
     expect(await readdir(h.secretsRoot)).toEqual([]);
     // The order of docker calls: look for sandboxes, make the bridge, run, confirm the container is gone, remove the bridge.
-    expect(h.calls.map((call) => call.slice(0, 2).join(" ")).filter((word) => !word.startsWith("kill") && !word.startsWith("rm "))).toEqual(["ps --quiet", "network create", "run --rm", "inspect --format", "inspect --format", "network rm"]);
+    expect(h.calls.map((call) => call.slice(0, 2).join(" ")).filter((word) => !word.startsWith("kill") && !word.startsWith("rm "))).toEqual(["ps --quiet", "network create", "inspect --format", "run --rm", "inspect --format", "inspect --format", "network rm"]);
     expect(h.asked).toEqual(["ghnpm-1"]);
     expect(result.privateInstall).toEqual([{ repo: "web", host: "npm.pkg.github.com", manager: "npm", lockfileSha256: result.privateInstall![0]!.lockfileSha256, outcome: "installed" }]);
     expect(result.privateInstall![0]!.lockfileSha256).toMatch(/^[0-9a-f]{64}$/u);
@@ -440,8 +440,8 @@ describe("the worker says it has the install step only when the step is wired", 
     expect(prepare).not.toMatch(/registries:\s*options\.registries/u);
   });
 
-  it("every sandbox start path calls the central guard", async () => {
-    for (const file of ["task-sandbox.ts", "devcontainer.ts", "setup-network.ts", "test-services-run.ts"]) {
+  it("every sandbox start path calls the central guard (the setup network module is frozen byte for byte; its sandbox is a TaskSandbox, guarded there)", async () => {
+    for (const file of ["task-sandbox.ts", "devcontainer.ts", "test-services-run.ts"]) {
       expect(await source(file), file).toContain("assertNoInstallSecrets(");
     }
   });

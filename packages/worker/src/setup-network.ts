@@ -27,7 +27,6 @@ import { resolve } from "node:path";
 import { agentXError } from "@agentx/contracts";
 import type { DockerCli } from "./swebench/containers.js";
 import { workspaceKey } from "./task-sandbox.js";
-import { assertNoInstallSecrets } from "./install-secrets.js";
 
 export const DOCKER_CALL_TIMEOUT_MS = 60_000;
 export const SETUP_NETWORK_LABEL = "agentx.setup-run";
@@ -109,8 +108,6 @@ export interface StartRunNetworkInput {
 
 /** Makes the run's network and starts its helper. Any failure removes what was made and is reported as one fixed sentence (the docker error is not repeated to the person). */
 export async function startRunNetwork(docker: DockerCli, input: StartRunNetworkInput): Promise<RunNetwork> {
-  // Private packages P2a: no setup helper or network starts while the install step's token file exists.
-  await assertNoInstallSecrets();
   const name = setupNetworkName(input.taskId);
   const helperName = `${name}-dns`;
   const call = (args: string[]) => docker.run(args, { timeoutMs: DOCKER_CALL_TIMEOUT_MS }).catch((error: unknown) => ({ exitCode: -1, stdout: "", stderr: error instanceof Error ? error.message : String(error) }));

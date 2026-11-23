@@ -29,6 +29,8 @@ import { assertFirewallInstalled, docker, listenOnAllAddresses, reachScript, sud
 import { APP_NODE_IMAGE } from "../support/linux-runtime.js";
 
 const run = promisify(execFile);
+/** Removes a tree the container made as uid 1000 (the runner cannot remove those itself). */
+const removeTree = async (path: string): Promise<void> => { await run("sudo", ["-n", "rm", "-rf", path]).catch(() => rm(path, { recursive: true, force: true })); };
 const canary = (): string => `ghp_${randomBytes(24).toString("base64url")}`;
 
 describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1")("the private package install container", () => {
@@ -47,12 +49,13 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
   /** A workspace root with one repository, a token folder holding the canary's files, and the install container's real arguments, with the node image standing in for the worker image (no tini there: `env` is the entrypoint) and a network of the test's choosing. */
   async function fixture(files: Record<string, string>, extra: Partial<InstallContainerInput> = {}, options: { token?: string; npmrc?: (token: string) => string; yarnrc?: (token: string) => string } = {}) {
     const root = await realpath(await mkdtemp(join(tmpdir(), "rovara-pi-linux-")));
-    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    cleanups.push(() => removeTree(root));
     const repository = join(root, "repo", "web");
     await mkdir(repository, { recursive: true });
     for (const [name, text] of Object.entries(files)) await writeFile(join(repository, name), text);
     for (const manager of ["npm", "yarn1"]) await mkdir(join(root, ".agentx-pkgcache", manager), { recursive: true });
-    await run("chown", ["-R", "1000:1000", root]).catch(() => run("sudo", ["-n", "chown", "-R", "1000:1000", root]));
+    // The container runs as uid 1000 and the runner as another user: the tree stays the runner's (it keeps making files in it) and is open to the container by mode, never by changing who owns it. The container makes node_modules as 1000, so removing those goes through `removeTree` (sudo).
+    await run("chmod", ["-R", "a+rwX", root]);
     const token = options.token ?? canary();
     const secrets = await mkdtemp(join(tmpdir(), "rovara-pi-secrets-"));
     cleanups.push(() => rm(secrets, { recursive: true, force: true }));
@@ -67,7 +70,9 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
   }
   /** The real arguments with the network replaced (the stand-in image has no `rvbp` network to join unless the test made it) and the init replaced by `env`. */
   const asRun = (args: readonly string[], network: string, command?: string[]): string[] => {
-    const swapped = args.map((entry, index) => (args[index - 1] === "--network" ? network : args[index - 1] === "--entrypoint" ? "/usr/bin/env" : entry));
+    // A name of its own per run: the production name is derived from the operation and the repository, so two runs of one fixture would clash.
+    const name = `rovara-pi-run-${randomBytes(4).toString("hex")}`;
+    const swapped = args.map((entry, index) => (args[index - 1] === "--network" ? network : args[index - 1] === "--entrypoint" ? "/usr/bin/env" : args[index - 1] === "--name" ? name : entry));
     return command === undefined ? swapped : [...swapped.slice(0, swapped.indexOf("--") + 1), ...command];
   };
 
@@ -115,7 +120,6 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     await mkdir(dependency, { recursive: true });
     await writeFile(join(dependency, "package.json"), JSON.stringify({ name: "dep", version: "1.0.0", scripts: { install: "echo ran > \"$INIT_CWD/ran-dep\"" } }));
     await run("tar", ["czf", join(repository, "dep-1.0.0.tgz"), "-C", join(root, "dep-src"), "package"]);
-    await run("chown", ["-R", "1000:1000", repository]).catch(() => run("sudo", ["-n", "chown", "-R", "1000:1000", repository]));
     // The lockfile is made by the same image, scripts off, with no network.
     const locked = await docker("run", "--rm", "--network", "none", "--user", "1000:1000", "--volume", `${repository}:${repository}`, "--workdir", repository, "--env", "HOME=/tmp", APP_NODE_IMAGE, "npm", "install", "--package-lock-only", "--ignore-scripts");
     expect(locked.code, locked.stderr).toBe(0);
@@ -125,7 +129,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     for (const marker of ["ran-root", "ran-dep", "env-dump"]) await expect(stat(join(repository, marker))).rejects.toThrow();
     expect((await stat(join(repository, "node_modules", "dep"))).isDirectory()).toBe(true);
     // Control: the same tree, scripts on, DOES run them.
-    await rm(join(repository, "node_modules"), { recursive: true, force: true });
+    await removeTree(join(repository, "node_modules"));
     const control = await docker("run", "--rm", "--network", "none", "--user", "1000:1000", "--volume", `${repository}:${repository}`, "--workdir", repository, "--env", "HOME=/tmp", APP_NODE_IMAGE, "npm", "ci");
     expect(control.code, control.stderr).toBe(0);
     expect((await stat(join(repository, "ran-dep"))).isFile()).toBe(true);
@@ -365,11 +369,11 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
         ...Object.entries(environment).flatMap(([name, value]) => ["--env", `${name}=${value}`]), APP_NODE_IMAGE, ...command, ...extra);
 
       // Control: the same command with no cache variables has nothing to install from and nowhere to download from.
-      await rm(join(f.repository, "node_modules"), { recursive: true, force: true });
+      await removeTree(join(f.repository, "node_modules"));
       const without = await sandbox({ npm_config_fetch_retries: "0" }, manager === "npm" ? [] : ["--network-timeout", "3000"]);
       expect(without.code, "the control must fail without the cache").not.toBe(0);
 
-      await rm(join(f.repository, "node_modules"), { recursive: true, force: true });
+      await removeTree(join(f.repository, "node_modules"));
       const requestsBefore = (await registry.requests()).length;
       const reinstalled = await sandbox(cacheEnvironment);
       expect(reinstalled.code, `${reinstalled.stdout}\n${reinstalled.stderr}`).toBe(0);
