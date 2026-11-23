@@ -16,7 +16,7 @@
   "packages/broker/src/aws/developer-task-notifier.ts": 4,
   "packages/broker/src/aws/developer-tasks.ts": 6,
   "packages/broker/src/aws/dispatcher.ts": 2,
-  "packages/broker/src/aws/e2e-runtime-readiness.ts": 1,
+  "packages/broker/src/aws/e2e-runtime-readiness.ts": 2,
   "packages/broker/src/aws/ec2-delivery.ts": 15,
   "packages/broker/src/aws/eval-batch-service.ts": 2,
   "packages/broker/src/aws/eval-batch-tick.ts": 1,
