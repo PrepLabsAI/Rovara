@@ -329,9 +329,12 @@ export async function readSetupApply(deps: Pick<SetupApplyDeps, "flow" | "store"
  * The owner drops a waiting proposal: the candidate is removed and the project is free to change again. Not an approval: it applies nothing. With `onlyRequestId` (L4-RD: Rovara's own failed draft) it drops the
  * waiting proposal ONLY if it is that request's: a person's candidate that replaced it is never touched.
  */
-export async function discardSetupApply(deps: Pick<SetupApplyDeps, "store" | "companyId" | "now">, project: string, by: string, onlyRequestId?: string): Promise<boolean> {
+export async function discardSetupApply(deps: Pick<SetupApplyDeps, "store" | "companyId" | "now">, project: string, by: string, onlyRequestId?: string, options: { mayDiscardBrowserTesting?: boolean } = {}): Promise<boolean> {
   const row = await waitingSetupApply(deps.store, deps.companyId, project);
   if (row === undefined || (onlyRequestId !== undefined && row.requestId !== onlyRequestId)) return false;
+  // Browser testing: dropping its waiting change is the same outcome as rejecting it, so it is the same person: a live company owner or admin, whoever asks and by whichever route. The caller says so after
+  // reading the person's standing now; a caller that does not is refused (a project's own administrator may drop a setup run's candidate, never this one).
+  if (row.browserTesting !== undefined && options.mayDiscardBrowserTesting !== true) throw agentXError("FORBIDDEN", BROWSER_TESTING_WORDS.notAllowed);
   const at = new Date(deps.now()).toISOString();
   const result = await deps.store.transact([
     { kind: "update", key: setupApplyKey(deps.companyId, project), ops: [change.set("state", "discarded"), change.set("decidedAt", at), change.set("decidedBy", by)], condition: onlyRequestId === undefined ? when.eq("state", "checking") : when.and(when.eq("state", "checking"), when.eq("requestId", onlyRequestId)) },
@@ -412,6 +415,7 @@ export async function setupCandidateRisk(store: Pick<DocumentStore, "get">, orgI
  * otherwise they are an update of their own.
  */
 export function withCandidateOps(items: readonly TransactItem[], key: DocumentKey, ops: readonly UpdateOp[]): TransactItem[] {
+  if (ops.length === 0) return [...items];
   const index = items.findIndex((item) => item.kind === "update" && item.key.pk === key.pk && item.key.sk === key.sk);
   if (index < 0) return [...items, { kind: "update", key, ops, condition: when.eq("entityType", "PROJECT") }];
   const found = items[index] as Extract<TransactItem, { kind: "update" }>;
@@ -439,12 +443,26 @@ async function requireBrowserApprovers(approval: SetupProposalApproval | undefin
  * The extra steps of an approval's own transaction: a host's other copy of the project's revisions (L4-SF c; it throws a `SubjectRefusal` when that copy has moved), and, for a browser testing candidate, the
  * approval's own writes read from its stored proposal. The candidate's row is one update however many want it (a transaction names a key once).
  */
-async function approvalExtraItems(approval: SetupProposalApproval | undefined, row: SetupApplyRow, approver: Principal, at: string): Promise<readonly TransactItem[]> {
+async function approvalExtraItems(approval: SetupProposalApproval | undefined, row: SetupApplyRow, approver: Principal, at: string, store: Pick<DocumentStore, "get">): Promise<readonly TransactItem[]> {
   const mirrored = approval?.registryMirror === undefined ? [] : await approval.registryMirror.itemsFor({ project: row.project, baseRevision: row.baseRevision, candidateRevision: row.candidateRevision }, at);
+  const candidateKey = projectRevisionKey(row.orgId, row.project, row.candidateRevision);
   const steps = approval?.browserTesting;
-  if (row.browserTesting === undefined || steps === undefined) return mirrored;
+  if (row.browserTesting === undefined || steps === undefined) return withCandidateOps(mirrored, candidateKey, await approvedBrowserTestingCarried(store, row));
   const browser = await steps.itemsFor(row, approver, at);
-  return [...withCandidateOps(mirrored, projectRevisionKey(row.orgId, row.project, row.candidateRevision), browser.candidateOps), ...browser.items];
+  return [...withCandidateOps(mirrored, candidateKey, browser.candidateOps), ...browser.items];
+}
+
+/**
+ * An ordinary setup candidate on top of an approved browser testing setup keeps the policy in its definition; the approval, the registrant and the runtime binding live on the revision's ROW, so they are carried
+ * to the new revision (the host's registry mirror, when it has one, sets the registrant and binding itself and keeps its values). Carried only while the candidate's policy is exactly the base's: a changed
+ * policy is not what was approved, and gets nothing. Without this the page would read "not set up", the 90-day renewal would stop, and the planning seam would lose the approved source.
+ */
+async function approvedBrowserTestingCarried(store: Pick<DocumentStore, "get">, row: Pick<SetupApplyRow, "project" | "orgId" | "baseRevision" | "candidateRevision">): Promise<UpdateOp[]> {
+  // Never makes the approval fail for a read (like the snapshot above): a fault here carries nothing, and the next browser testing change or renewal says what is missing.
+  const [base, candidate] = await Promise.all([store.get(projectRevisionKey(row.orgId, row.project, row.baseRevision)), store.get(projectRevisionKey(row.orgId, row.project, row.candidateRevision))]).catch(() => [undefined, undefined] as const);
+  const baseE2e = (base?.["definition"] as { e2e?: unknown } | undefined)?.e2e;
+  if (base === undefined || baseE2e === undefined || base["setupApproval"] === undefined || canonicalJson(baseE2e) !== canonicalJson((candidate?.["definition"] as { e2e?: unknown } | undefined)?.e2e)) return [];
+  return (["setupApproval", "runtimeBinding", "registeredBy"] as const).filter((field) => base[field] !== undefined).map((field) => change.set(field, base[field] as never));
 }
 
 /**
@@ -489,7 +507,7 @@ export function createSetupProposalSubject(options: { flow: Pick<TaskFlowDeps, "
       if (attempt.outcome === "approve") {
         // A host's other copy of the revisions moves in the same transaction (L4-SF c); a copy that has moved refuses the approval.
         // The host's other copy of the revisions, and (browser testing) the approval's own writes, joined without naming a key twice.
-        const extraItems = await approvalExtraItems(approval, row, approver, at);
+        const extraItems = await approvalExtraItems(approval, row, approver, at, flow.store);
         // L4-DR (DEC 254z c): what the setup was approved against, saved in the approval's own transaction (the files that decide whether it still works, by id, and the websites it allows). Read from the code host
         // BEFORE the transaction; one that cannot be read whole saves none, and the next re-check saves the baseline instead. It never makes the approval wait on, or fail for, the host.
         const snapshot = await snapshotOfApproved(flow, row, at);

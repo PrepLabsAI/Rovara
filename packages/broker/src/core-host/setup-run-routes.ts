@@ -202,6 +202,11 @@ async function standingOf(input: HostedSetupRunInput, project: string): Promise<
   return { access: "none" };
 }
 
+/** Whether this person is a live company owner or admin right now (the rule browser testing's changes need on every route). A read that fails is no. */
+async function isCompanyAdminNow(input: HostedSetupRunInput, project: string): Promise<boolean> {
+  try { return input.wiring.approval !== undefined && setupHostApproverAllows(await input.wiring.approval.standing(input.principal.personId, project)); } catch { return false; }
+}
+
 /** The audit record of one act, naming the person and why they were allowed. */
 function auditEvent(input: HostedSetupRunInput, action: string, eventId: string, project: string, basis: SetupRunBasis, details: Record<string, string | boolean>): AuditEvent {
   return {
@@ -509,7 +514,7 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
       if (tail === "discard") {
         const body = parsed(DiscardBodySchema, raw);
         await recorded(input, auditEvent(input, "setup_run.discard_requested", `setup_run.discard:${companyId}:${project}:${personId}:${body.requestId}`, project, basis, { requestId: body.requestId }));
-        return json(200, { discarded: await discardSetupApply(deps, project, personId) });
+        return json(200, { discarded: await discardSetupApply(deps, project, personId, undefined, { mayDiscardBrowserTesting: await isCompanyAdminNow(input, project) }) });
       }
       if (tail === "host-decide") return await decideHost(input, approval, project, raw);
       return await decide(input, approval, project, raw);

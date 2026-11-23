@@ -68,7 +68,7 @@ describe("OPUS R2: an approved browser testing setup survives a later ordinary s
     expect((await view(w)).state).toBe("on");
     // A setup run's ordinary candidate on top of revision 2 (its definition carries the approved e2e policy forward, as confirmSetupAgent does).
     const base = (await w.world.store.get(projectRevisionKey(FAKE_COMPANY, "payments", 2)))!["definition"] as Record<string, unknown>;
-    const definition = { ...base, revision: 3, setup: [{ cwd: "repo/demo", executable: "npm", args: ["install"], timeoutSeconds: 600 }] } as Record<string, unknown> & { setup: never; readiness: never };
+    const definition = { ...base, revision: 3, setup: [{ cwd: "repo/demo", executable: "npm", args: ["install"], timeoutSeconds: 600 }] } as unknown as Record<string, unknown> & { setup: never; readiness: never };
     await w.world.store.put({ item: { ...projectRevisionKey(FAKE_COMPANY, "payments", 3), entityType: "PROJECT", candidate: true, definition: JSON.parse(JSON.stringify(definition)) as JsonValue } });
     const workspaceId = uuid();
     await w.world.store.put({ item: { ...workspaceKey(FAKE_COMPANY, workspaceId), entityType: "WORKSPACE", id: workspaceId, companyId: FAKE_COMPANY, orgId: FAKE_COMPANY, status: "READY" } });

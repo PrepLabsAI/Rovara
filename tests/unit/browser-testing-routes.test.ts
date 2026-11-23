@@ -550,3 +550,48 @@ describe("the candidate row's attributes join the registry mirror's update (a tr
     expect(merged).toEqual([{ kind: "update", key, ops: [change.set("setupApproval", { decision: "approve" })], condition: { op: "eq", path: ["entityType"], value: "PROJECT" } }]);
   });
 });
+
+describe("the same people on every route, and an approved setup that survives an ordinary approval", () => {
+  const discard = (w: BrowserWorld, caller: Parameters<BrowserWorld["call"]>[1]) => w.call({ method: "POST", path: "/v1/app/projects/payments/setup-agent/discard", headers: {}, body: JSON.stringify({ requestId: uuid() }) }, caller);
+
+  it("dropping a waiting browser testing change through the ordinary setup route is a live company owner or admin only; a setup run's candidate is still a maintainer's to drop", async () => {
+    for (const [caller, status] of [["projectAdmin", 403], ["developer", 403], ["owner", 200], ["admin", 200]] as const) {
+      const w = await browserWorld({ snapshot: () => inferredSnapshot });
+      await checked(w);
+      const answer = await discard(w, w[caller]);
+      expect(answer.status, `${caller} ${answer.raw}`).toBe(status);
+      expect(await w.world.store.get(setupApplyKey(FAKE_COMPANY, "payments")), caller).toMatchObject({ state: status === 200 ? "discarded" : "checking" });
+    }
+    const w = await browserWorld({ snapshot: () => inferredSnapshot });
+    const definition = { ...projectDefinition("payments"), revision: 2 };
+    await w.world.store.put({ item: { ...projectRevisionKey(FAKE_COMPANY, "payments", 2), entityType: "PROJECT", candidate: true, definition: JSON.parse(JSON.stringify(definition)) as JsonValue } });
+    const at = new Date(w.world.clock.now).toISOString();
+    await w.world.store.put({ item: { ...setupApplyKey(FAKE_COMPANY, "payments"), entityType: "SETUP_APPLY", orgId: FAKE_COMPANY, project: "payments", taskId: "", requestId: uuid(), by: "p-pm", digest: "d".repeat(64), baseRevision: 1, candidateRevision: 2,
+      state: "checking", check: { workspaceId: uuid(), revision: 2, startedAt: at, startedBy: "p-pm" }, reply: {}, createdAt: at } });
+    expect((await discard(w, w.projectAdmin)).status).toBe(200);
+  });
+
+  it("an ordinary commands change approved on top carries the approval, the registrant and the binding while the policy is unchanged, and nothing when the policy differs", async () => {
+    for (const changePolicy of [false, true]) {
+      const w = await browserWorld({ snapshot: () => ACCOUNTS });
+      await checked(w);
+      await w.passCheck();
+      await w.call(browserPost("decision", await approveBody(w)), w.owner);
+      const base = (await w.world.store.get(projectRevisionKey(FAKE_COMPANY, "payments", 2)))!;
+      const definition = { ...(base["definition"] as Record<string, unknown>), revision: 3, setup: [{ cwd: "repo/demo", executable: "npm", args: ["install"], timeoutSeconds: 600 }],
+        ...(changePolicy ? { e2e: { ...(base["definition"] as { e2e: Record<string, unknown> }).e2e, policyRevision: 9 } } : {}) } as unknown as Record<string, unknown> & { setup: never; readiness: never };
+      await w.world.store.put({ item: { ...projectRevisionKey(FAKE_COMPANY, "payments", 3), entityType: "PROJECT", candidate: true, definition: JSON.parse(JSON.stringify(definition)) as JsonValue } });
+      const workspaceId = uuid();
+      await w.world.store.put({ item: { ...workspaceKey(FAKE_COMPANY, workspaceId), entityType: "WORKSPACE", id: workspaceId, companyId: FAKE_COMPANY, orgId: FAKE_COMPANY, status: "READY" } });
+      const digest = setupApplyDigest(definition.setup, definition.readiness);
+      const at = new Date(w.world.clock.now).toISOString();
+      await w.world.store.put({ item: { ...setupApplyKey(FAKE_COMPANY, "payments"), entityType: "SETUP_APPLY", orgId: FAKE_COMPANY, project: "payments", taskId: "", requestId: uuid(), by: "p-owner", digest, baseRevision: 2, candidateRevision: 3,
+        state: "checking", check: { workspaceId, revision: 3, startedAt: at, startedBy: "p-owner" }, reply: {}, createdAt: at } });
+      const decided = await w.call({ method: "POST", path: "/v1/app/projects/payments/setup-agent/decide", headers: {}, body: JSON.stringify({ requestId: setupDecisionRequestId(digest, 3), outcome: "approve", seen: { revision: 3, artifactDigest: digest } }) }, w.owner);
+      expect(decided.status, decided.raw).toBe(200);
+      const after = (await w.world.store.get(projectRevisionKey(FAKE_COMPANY, "payments", 3)))!;
+      if (changePolicy) { expect(after["setupApproval"]).toBeUndefined(); expect(after["registeredBy"]).toBeUndefined(); }
+      else expect(after).toMatchObject({ setupApproval: base["setupApproval"], registeredBy: base["registeredBy"], runtimeBinding: base["runtimeBinding"] });
+    }
+  });
+});

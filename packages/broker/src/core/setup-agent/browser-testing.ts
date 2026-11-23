@@ -303,7 +303,7 @@ export async function discardCandidate(deps: BrowserTestingDeps, project: string
   const waiting = await waitingSetupApply(deps.flow.store, deps.flow.companyId, project);
   if (waiting === undefined) return;
   if (waiting.browserTesting === undefined) throw anotherWaiting();
-  await discardSetupApply({ store: deps.flow.store, companyId: deps.flow.companyId, now: deps.now }, project, by);
+  await discardSetupApply({ store: deps.flow.store, companyId: deps.flow.companyId, now: deps.now }, project, by, undefined, { mayDiscardBrowserTesting: true });
 }
 
 /** Pause and resume: new plans skip browser checks while paused; every approved plan keeps its checks. Idempotent. */
