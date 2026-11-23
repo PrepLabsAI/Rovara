@@ -24,7 +24,7 @@ export interface RegistryExchangeContext {
   /** Verifies the grant's signature and expiry and returns what it is bound to. Throws FORBIDDEN. */
   inspectGrant(grant: string): { workspaceId: string; operationId: string; projectName?: string };
   /** The operation and its workspace, as stored (undefined fields: not there). Throws NOT_FOUND for a workspace or operation of another company. */
-  readOperation(workspaceId: string, operationId: string): Promise<{ kind: string; status: string; fence: number | undefined; projectName: string; projectRevision: number | undefined; requesterId?: string | undefined; workspace: { status: string; activeOperationId: string | null | undefined; fence: number | undefined } }>;
+  readOperation(workspaceId: string, operationId: string): Promise<{ kind: string; status: string; readOnly: boolean; fence: number | undefined; projectName: string; projectRevision: number | undefined; requesterId?: string | undefined; workspace: { status: string; activeOperationId: string | null | undefined; fence: number | undefined } }>;
   /** The CodeArtifact registries and approved websites of that project revision (this company's). */
   readProject(project: string, revision: number): Promise<{ registries: readonly ProjectRegistry[]; allowedDomains: readonly string[] } | undefined>;
   /** Counts one request against the operation, atomically: false once it has had REGISTRY_REQUESTS_MAX_PER_OPERATION. */
@@ -47,7 +47,7 @@ export async function exchangeRegistryCredentialCore(context: RegistryExchangeCo
   const claims = context.inspectGrant(input.grant);
   if (claims.workspaceId !== input.workspaceId || claims.operationId !== input.operationId) return notCovered();
   const operation = await context.readOperation(input.workspaceId, input.operationId);
-  if (operation.kind !== "prepare" || !LIVE_STATUSES.has(operation.status) || operation.workspace.status !== "PREPARING" || operation.workspace.activeOperationId !== input.operationId
+  if (operation.kind !== "prepare" || operation.readOnly || !LIVE_STATUSES.has(operation.status) || operation.workspace.status !== "PREPARING" || operation.workspace.activeOperationId !== input.operationId
     || operation.fence === undefined || operation.fence !== operation.workspace.fence) {
     throw agentXError("FORBIDDEN", "registry credentials are given to a running preparation only");
   }

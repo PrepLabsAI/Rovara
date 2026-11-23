@@ -18,6 +18,12 @@ import { OrgIdSchema, type OrgId } from "./browser-ids.js";
 
 /** The feature a worker lists when it can take the prepare payload's `registries` and run setup with a registry's config. Added to WORKER_INVOCATION_FEATURES. */
 export const PREPARE_REGISTRIES_FEATURE = "prepare.registries.v1" as const;
+/**
+ * The feature a worker lists ONLY when it installs a company's private packages in its own install step (PRIVATE-PACKAGES P2: tmpfs file outside the workspace, scripts off, no project command and no
+ * sandbox sees the token). A company's package token reaches no worker without it: a `prepare.registries.v1` worker alone hands the token to the project's own setup commands. Deliberately NOT in
+ * WORKER_INVOCATION_FEATURES or the worker's implemented features until P2 ships the step (fail closed: until then a company that set a token gets a refused preparation, never a token).
+ */
+export const PREPARE_COMPANY_REGISTRIES_FEATURE = "prepare.registries.companyInstallStep.v1" as const;
 
 export const REGISTRY_FORMATS = ["npm", "pypi", "maven"] as const;
 export type RegistryFormat = (typeof REGISTRY_FORMATS)[number];

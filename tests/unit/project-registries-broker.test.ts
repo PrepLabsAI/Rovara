@@ -365,12 +365,23 @@ describe("the registry credential route", () => {
     ["an operation that is no longer the workspace's own", { workspace: { activeOperationId: "77777777-7777-4777-8777-777777777777" } }],
     ["a workspace that is not preparing", { workspace: { status: "BUSY" } }],
     ["an operation of an older fence", { operation: { fence: 0 } }],
+    // Opus P1a review: a preparation that only reads was offered nothing, so the route gives it nothing either.
+    ["a preparation that only reads", { operation: { dispatch: { kind: "prepare", projectRevision: 1, payload: { readOnly: true } } } }],
+    // Opus P1a review: an operation record under this company's key that names another company.
+    ["an operation record that names another company", { operation: { companyId: OTHER_COMPANY } }],
   ])("refuses %s, and reads no token", async (_name, options) => {
     const w = world(options);
     const answer = await w.ask();
     expect(answer.statusCode, answer.body).toBeGreaterThanOrEqual(400);
     expect(w.company.tokenReads).toEqual([]);
     expect(answer.body).not.toContain(PAT);
+  });
+
+  it("refuses a grant for another workspace that reuses this operation's id (Opus P1a review: the workspace binding is checked on its own)", async () => {
+    const w = world();
+    const answer = await w.ask({ grantValue: w.grant({ workspaceId: WS2, operationId: OP }) });
+    expect(answer.statusCode, answer.body).toBeGreaterThanOrEqual(400);
+    expect(w.company.tokenReads).toEqual([]);
   });
 
   it("refuses everything on an install that serves no registry", async () => {

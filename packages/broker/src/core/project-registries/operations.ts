@@ -9,6 +9,10 @@ import { REGISTRY_REQUESTS_MAX_PER_OPERATION, exchangeRegistryCredentialCore, ty
 import type { ProjectRegistriesInstall } from "./prepare.js";
 
 const word = (value: unknown): string => (typeof value === "string" ? value : "");
+const readOnlyOf = (dispatch: unknown): boolean => {
+  const payload = typeof dispatch === "object" && dispatch !== null ? (dispatch as { payload?: unknown }).payload : undefined;
+  return typeof payload === "object" && payload !== null && (payload as { readOnly?: unknown }).readOnly === true;
+};
 const number = (value: unknown): number | undefined => (typeof value === "number" && Number.isInteger(value) ? value : undefined);
 
 export function registryExchangeContext(input: {
@@ -32,7 +36,8 @@ export function registryExchangeContext(input: {
       const requesterId = typeof requester === "object" && requester !== null && typeof (requester as { personId?: unknown }).personId === "string" ? (requester as { personId: string }).personId : undefined;
       return {
         ...(requesterId === undefined ? {} : { requesterId }),
-        kind: word(operation["kind"]), status: word(operation["status"]), fence: number(operation["fence"]),
+        // A preparation that only reads was offered no registry (prepare.ts), so it is given none here either.
+        kind: word(operation["kind"]), status: word(operation["status"]), readOnly: readOnlyOf(operation["dispatch"]), fence: number(operation["fence"]),
         projectName: word(workspace["projectName"]), projectRevision: number(workspace["projectRevision"]),
         workspace: { status: word(workspace["status"]), activeOperationId: typeof active === "string" ? active : null, fence: number(workspace["fence"]) },
       };

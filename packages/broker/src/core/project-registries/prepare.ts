@@ -4,7 +4,7 @@
 //   - a preparation that only reads (`readOnly`: a wiki build, a saved-image build) runs none of the project's code, so it carries none;
 //   - the registries are the project's CodeArtifact entries, and EVERY entry the project's COMPANY set (owner decision 254zzz434): each host's token covers the company's projects alike, so there is no
 //     per-project choice to miss. The company's entries come from the company store, for the company of the run's own records.
-import { AgentXError, PREPARE_REGISTRIES_FEATURE, REGISTRY_PROBLEM_MESSAGES, agentXError, prepareRegistriesOf, prepareRegistriesOfCompany, registryProblems, REGISTRIES_MAX, type BoundRegistryDomain, type Edition, type PrepareRegistries, type ProjectRegistry } from "@agentx/contracts";
+import { AgentXError, PREPARE_COMPANY_REGISTRIES_FEATURE, PREPARE_REGISTRIES_FEATURE, isPrivateRegistryHost, REGISTRY_PROBLEM_MESSAGES, agentXError, prepareRegistriesOf, prepareRegistriesOfCompany, registryProblems, REGISTRIES_MAX, type BoundRegistryDomain, type Edition, type PrepareRegistries, type ProjectRegistry } from "@agentx/contracts";
 import type { CodeArtifactMinter, CompanyRegistryStore } from "./mint.js";
 
 /** The feature message: a worker that does not list `prepare.registries.v1` is refused at delivery with this, the same sentence as an old worker meeting any new field. */
@@ -66,5 +66,9 @@ export async function registriesForPrepare(input: Parameters<typeof registriesPr
     if (error instanceof AgentXError) return error.message.replace(/^[A-Z_]+: /u, "");
     throw error;
   }
-  return answer.registries !== undefined && !input.features.includes(PREPARE_REGISTRIES_FEATURE) ? REGISTRY_FEATURE_MISSING : answer;
+  if (answer.registries === undefined) return answer;
+  if (!input.features.includes(PREPARE_REGISTRIES_FEATURE)) return REGISTRY_FEATURE_MISSING;
+  // A company's package token goes only to a worker that installs it in its own step (P2), never to one that would hand it to the project's setup commands.
+  if (answer.registries.some((entry) => isPrivateRegistryHost(new URL(entry.url).host)) && !input.features.includes(PREPARE_COMPANY_REGISTRIES_FEATURE)) return REGISTRY_FEATURE_MISSING;
+  return answer;
 }

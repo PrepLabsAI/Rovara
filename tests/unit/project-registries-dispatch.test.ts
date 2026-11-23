@@ -1,7 +1,7 @@
 // P1a: the prepare the dispatcher builds. Every project of a company that set a package token gets the company's registries in its PREPARE payload (where they are, never a credential) and nowhere else: not
 // in the agent's task step, not in the project the worker is sent, not in anything stored. The dispatcher never reads the token (the worker asks for it, at the route). FAKE tokens, built at run time.
 import { describe, expect, it, vi } from "vitest";
-import { PREPARE_REGISTRIES_FEATURE, type CompanyRegistryEntry, type ProjectDefinition, type ProjectRegistry, type WorkerInvocation } from "@agentx/contracts";
+import { PREPARE_COMPANY_REGISTRIES_FEATURE, PREPARE_REGISTRIES_FEATURE, type CompanyRegistryEntry, type ProjectDefinition, type ProjectRegistry, type WorkerInvocation } from "@agentx/contracts";
 import { OPERATION_SK_PREFIX, operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import type { OperationRecord, WorkspaceRecord } from "../../packages/broker/src/core/task-flow/records.js";
 import type { CompanyRegistryStore } from "../../packages/broker/src/core/project-registries/mint.js";
@@ -10,7 +10,7 @@ import { COMPANY, createHarness, newRequestId, definition, type Harness } from "
 
 const PAT = `${"gh"}${"p"}_${Buffer.from("dispatch-fake-material-".repeat(4)).toString("base64url").replace(/[^A-Za-z0-9]/g, "").slice(0, 36)}`;
 const ENTRY: CompanyRegistryEntry = { host: "npm.pkg.github.com", scopes: ["@acme"] };
-const FEATURES = ["task.workflowMode", "task.structuredPlans", PREPARE_REGISTRIES_FEATURE];
+const FEATURES = ["task.workflowMode", "task.structuredPlans", PREPARE_REGISTRIES_FEATURE, PREPARE_COMPANY_REGISTRIES_FEATURE];
 
 function build(options: { features?: string[]; serve?: boolean; entries?: CompanyRegistryEntry[]; failEntries?: boolean } = {}) {
   const tokenReads = vi.fn();
@@ -90,6 +90,16 @@ describe("the prepare payload", () => {
     const run = await startOf(h, definition);
     expect(run.delivered()).toEqual([]);
     expect(JSON.stringify(await run.operationOf())).toContain(REGISTRY_FEATURE_MISSING);
+  });
+
+  // Opus P1a review: the install-ordering guard. A worker that lists only `prepare.registries.v1` (today's worker, which hands the token to the project's own setup commands) never gets a
+  // company's registries: the preparation is refused until a worker with the P2 install step lists PREPARE_COMPANY_REGISTRIES_FEATURE.
+  it("is refused for a worker that takes registries but has no company install step (pre-P2), and nothing is delivered", async () => {
+    const { h, tokenReads } = build({ features: ["task.workflowMode", "task.structuredPlans", PREPARE_REGISTRIES_FEATURE] });
+    const run = await startOf(h, definition);
+    expect(run.delivered()).toEqual([]);
+    expect(JSON.stringify(await run.operationOf())).toContain(REGISTRY_FEATURE_MISSING);
+    expect(tokenReads).not.toHaveBeenCalled();
   });
 
   it("is not asked of an install with no company store, and a project that needs nothing still starts there", async () => {
