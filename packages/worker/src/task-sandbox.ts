@@ -16,6 +16,8 @@ import { createGatewayNameFiles, GATEWAY_RESOLVER_DIRECTORY } from "./gateway-na
 export { GATEWAY_RESOLVER_DIRECTORY } from "./gateway-name-files.js";
 import { isolateSandboxPort } from "./sandbox-port-isolation.js";
 import { modelHostAddHostArgs, type ModelHostBlock } from "./model-helper-block.js";
+import { assertNoInstallSecrets } from "./install-secrets.js";
+import { packageCacheEnvironment } from "./package-cache.js";
 
 /**
  * Ruling R56: on an EC2 worker, code the task controls (the agent's shell, project setup and readiness commands, project
@@ -96,7 +98,7 @@ export const SANDBOX_PYTHON_USER_BASE_DIRECTORY = ".agentx-python";
  */
 export function sandboxCommandOptions(rootPath: string): ContainerCommandOptions {
   const base = join(resolve(rootPath), SANDBOX_PYTHON_USER_BASE_DIRECTORY);
-  return { target: "sandbox", unsetEnvironment: SANDBOX_UNSET_ENVIRONMENT, defaultEnvironment: { PYTHONUSERBASE: base }, pathSuffix: [join(base, "bin")] };
+  return { target: "sandbox", unsetEnvironment: SANDBOX_UNSET_ENVIRONMENT, defaultEnvironment: { PYTHONUSERBASE: base, ...packageCacheEnvironment(rootPath) }, pathSuffix: [join(base, "bin")] };
 }
 /**
  * The environment variable that names a network the sandboxes join, made and walled by whoever starts the worker (`rovara up`, lane
@@ -345,6 +347,8 @@ export interface TaskSandboxOptions {
   modelBlock?: { block: ModelHostBlock; role?: "working" | "check"; attach?(container: string): Promise<void>; teardown?(): Promise<void> };
   /** Where the sandbox reports what it does not fail on; default: one JSON line on the worker's log. */
   log?: (event: Record<string, unknown>) => void;
+  /** Tests only: the folder the install step's token file lives in (default `/run/rovara-install`). No sandbox starts while anything is in it (install-secrets.ts). */
+  installSecretsRoot?: string;
 }
 
 /**
@@ -499,6 +503,8 @@ export class TaskSandbox {
   }
 
   private async startContainer(): Promise<void> {
+    // Private packages P2a: no sandbox of any kind starts while the install step's token file exists.
+    await assertNoInstallSecrets(this.options.installSecretsRoot);
     const image = this.options.image ?? (this.options.environment ?? process.env)[TASK_SANDBOX_IMAGE_ENVIRONMENT];
     if (image === undefined || image === "") {
       throw agentXError("RUNTIME_UNAVAILABLE", `AgentX has no task sandbox image (${TASK_SANDBOX_IMAGE_ENVIRONMENT}), so it did not run the task's commands`);

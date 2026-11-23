@@ -35,6 +35,7 @@ import { daemonProxyFromEnvironment, gatewayEgressFor, sandboxNetworkFromEnviron
 import type { CommandResult } from "./readiness.js";
 import { createDockerCli, type DockerCli } from "./swebench/containers.js";
 import { hiddenWorkspaceDirectories, isMaskVolumeName } from "./workspace-state.js";
+import { assertNoInstallSecrets } from "./install-secrets.js";
 
 const execFile = promisify(execFileCallback);
 const UP_TIMEOUT_MS = 20 * 60_000;
@@ -260,7 +261,9 @@ export function preparedDevcontainerTarget(
  * Creates the devcontainer, or starts the existing one (on a resumed instance its containers are
  * stopped), and runs its lifecycle commands. Idempotent.
  */
-export async function ensureDevcontainer(cli: DevcontainerCli, target: DevcontainerTarget, options: { environment?: NodeJS.ProcessEnv } = {}): Promise<DevcontainerUpResult> {
+export async function ensureDevcontainer(cli: DevcontainerCli, target: DevcontainerTarget, options: { environment?: NodeJS.ProcessEnv; installSecretsRoot?: string } = {}): Promise<DevcontainerUpResult> {
+  // Private packages P2a: no container of the project starts while the install step's token file exists.
+  await assertNoInstallSecrets(options.installSecretsRoot);
   const environment = options.environment ?? process.env;
   // On a laptop the worker reaches Docker only through the socket guard, which serves an image that is ready to run and no build (devcontainer-policy.ts localDevcontainerRefusal).
   const local = environment["AGENTX_RUNTIME"] !== "ec2" && sandboxNetworkFromEnvironment(environment) !== undefined;
