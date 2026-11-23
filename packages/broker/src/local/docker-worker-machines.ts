@@ -143,6 +143,7 @@ const RESERVED_ENVIRONMENT = new Set([
   "AGENTX_TEST_SERVICES_NOT_PULLED",
   "AGENTX_TEST_SERVICES_OWNER_IMAGES",
   "AGENTX_WORKER_IMAGE",
+  "AGENTX_ENVIRONMENT_KIND",
   "AGENTX_RUNTIME",
   "AGENTX_WORKER_PROCESS_SCOPE",
   // Port lane P6 (item B1): the build systems' detector modules are the operator's; a spec (a project) cannot name code for the worker to load.
@@ -682,6 +683,7 @@ export class DockerWorkerMachines implements WorkerMachines {
     }
     return {
       ...environment,
+      AGENTX_ENVIRONMENT_KIND: "local",
       AGENTX_WORKSPACE_ROOT: workspaceDirectory,
       AGENTX_WORKSPACE_ID: workspaceIdFor(spec.companyId, spec.machineKey),
       AGENTX_INVOKE_PUBLIC_KEY: this.#options.signer.publicKey(),

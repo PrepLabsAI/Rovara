@@ -22,6 +22,7 @@ import {
   type Shard,
   type ShardResult,
   shardsForFiles,
+  shardHeapMb,
 } from "../../scripts/lint-shards.js";
 
 // `eslint .` with the type-aware rules keeps one TypeScript program over the whole repository, and every file's lint state, in one heap.
@@ -76,8 +77,19 @@ describe("the lint shards: which files they lint", () => {
     expect([..."abcdefghijklmnopqrstuvwxyz"].filter((letter) => !named.has(letter))).toEqual([]);
   });
 
+  it("give tests-unit-c (the browser-round core-* tests) a 6144 MB heap, never less than the run's own heap", () => {
+    const c = planShards().find((shard) => shard.name === "tests-unit-c")!;
+    expect(c.heapMb).toBe(6144);
+    expect(eslintArguments("eslint", c, DEFAULT_HEAP_MB)[0]).toBe("--max-old-space-size=6144");
+    expect(eslintArguments("eslint", c, 8192)[0]).toBe("--max-old-space-size=8192");
+    const other = planShards().find((shard) => shard.name === "tests-unit-e")!;
+    expect(eslintArguments("eslint", other, DEFAULT_HEAP_MB)[0]).toBe(`--max-old-space-size=${DEFAULT_HEAP_MB}`);
+    expect(shardsForFiles(["tests/unit/core-engine.test.ts"])[0]?.heapMb).toBe(6144);
+    expect(Math.max(...planShards().map((shard) => shardHeapMb(shard, DEFAULT_HEAP_MB)))).toBeLessThan(8192);
+  });
+
   it("keep the folders of tests/unit in a shard of their own", () => {
-    expect(SHARD_DIRECTORIES.find((shard) => shard.name === "tests-unit-folders")?.directories).toEqual(["tests/unit/context-sources", "tests/unit/contracts", "tests/unit/intake", "tests/unit/knowledge", "tests/unit/knowledge-wiring", "tests/unit/lessons", "tests/unit/lessons-by-area", "tests/unit/support", "tests/unit/task-log"]);
+    expect(SHARD_DIRECTORIES.find((shard) => shard.name === "tests-unit-folders")?.directories).toEqual(["tests/unit/context-sources", "tests/unit/contracts", "tests/unit/cx-a", "tests/unit/intake", "tests/unit/knowledge", "tests/unit/knowledge-wiring", "tests/unit/lessons", "tests/unit/lessons-by-area", "tests/unit/support", "tests/unit/task-log"]);
   });
 
   it("lint, together, exactly the files that `eslint .` lints, each file in exactly one shard", () => {
@@ -169,7 +181,7 @@ describe("the lint shards: one config, one command", () => {
   it("pass eslint only the heap cap, the targets and ignore patterns: no rule, config or plugin override on the command line", () => {
     for (const shard of shards) {
       const args = eslintArguments("node_modules/eslint/bin/eslint.js", shard, DEFAULT_HEAP_MB);
-      expect(args.slice(0, 2)).toEqual([`--max-old-space-size=${DEFAULT_HEAP_MB}`, "node_modules/eslint/bin/eslint.js"]);
+      expect(args.slice(0, 2)).toEqual([`--max-old-space-size=${shardHeapMb(shard, DEFAULT_HEAP_MB)}`, "node_modules/eslint/bin/eslint.js"]);
       const flags = args.slice(2).filter((arg) => arg.startsWith("-"));
       expect(flags.every((flag) => flag === "--ignore-pattern" || flag === "--no-error-on-unmatched-pattern"), `${shard.name}: ${flags.join(" ")}`).toBe(true);
       expect(args.slice(-shard.targets.length)).toEqual([...shard.targets]);

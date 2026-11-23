@@ -1,3 +1,4 @@
+import type { DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
 // L4-U5d: the hosted wiring. Over the real broker core root (aws/core-engine-root.ts: the deployed membership and project-grant reads, `hostedTaskAccess`, the core runtime and the core entry the Slack paths ask), a Slack
 // thread's later message reaches the task as input when the deployment wires its chat threads, and only for the task's owner of the thread's own company. Without chat threads the entry takes no thread input.
 // Mutants are listed in briefs/lead4/L4-U5d-MUTANTS-20261118.md with the test that kills each.
@@ -53,6 +54,8 @@ async function world(options: { chatThreads?: boolean } = {}) {
     return { Item: rows.get(`${input.TableName}|${input.Key.pk}|${input.Key.sk}`) };
   } };
   const root = createBrokerCoreRoot({
+    // This fixture isolates the existing root behavior; core-task-people-hosted/identity tests exercise creation's real identity proof.
+    taskRules: () => ({ taskPeopleStart: async () => [] }) as unknown as DeveloperTaskRouteDependencies,
     env: {}, documentClient: client, stateTableName: STATE, signInTableName: SIGN_IN, callbackSigningKey: secret.toString(), repositoryGrantKey: secret,
     codeModules: () => ({}) as never, repositoryCredential: async () => { throw new Error("unused"); }, origin: () => "https://api.example", log: () => undefined,
     now: () => new Date(fake.clock.now), ciReporting: { honest: true, ciMode: async () => "sandbox_only" as const },

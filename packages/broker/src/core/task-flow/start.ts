@@ -1,3 +1,4 @@
+import { prepareTaskStartShare } from "./share.js";
 import { parsePreviewV2 } from "@agentx/contracts";
 import { captureStartQuote } from "../cost/run-usage.js";
 // Lane L6a, task flow core: starting a task (Cloud's `aws/developer-tasks/start.ts`, rewritten onto the W0 ports).
@@ -29,6 +30,7 @@ import {
   type TransactItem,
 } from "@agentx/contracts";
 import { taskOwnerKey } from "../../developer/task-records.js";
+import { prepareWatchItem } from "./prepare-watch.js";
 import { buildOperation } from "./accept.js";
 import { recordAudit, releaseAdmission, stageAdmission, stageAudit } from "./admission.js";
 import { taskWorkflowCheckPolicy } from "./check-policy.js";
@@ -120,11 +122,19 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
     throw error;
   };
 
-  // Access first, from the identity adapter's own answer; it is asked again at every step that spends.
+  // Access comes from the identity adapter's read-only answer; it is asked again at every step that spends.
+  // Refuse before readiness (and its in-use mark); the refusal audit records the access denial without revealing readiness.
   const verdict = await deps.access.checkStart(principal, request.project, run?.setupAgent !== undefined ? "setup_agent" : run?.wikiBuild !== undefined ? "wiki_build" : undefined, origin.data);
   if (!verdict.allowed) return refused(agentXError(verdict.code, verdict.message));
+
+  // Hosted signed-price readiness can throw here: no in-use mark, refusal
+  // audit, admission or task write may precede it. Ordinary model refusals
+  // still use the existing audited refusal path.
+  if (deps.startModelCheck !== undefined) {
+    const modelRefusal = await deps.startModelCheck();
+    if (modelRefusal !== undefined) return refused(modelRefusal);
+  }
   if (request.agent !== undefined || request.input !== undefined) return refused(agentXError("CONFIG_INVALID", "agents are not set up in this deployment"));
-  if (request.shareToChannel === true || request.shareMode !== undefined || request.channel !== undefined) return refused(agentXError("CONFIG_INVALID", "sharing a task to a channel is not set up in this deployment"));
 
   const project = await deps.projects.latest(request.project);
   if (project === undefined) return refused(agentXError("PROJECT_NOT_FOUND", `project \`${request.project}\` doesn't exist`));
@@ -132,7 +142,10 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
   if (project.archived === true) return refused(agentXError("PROJECT_ARCHIVED", `project \`${request.project}\` is archived; unarchive it to start new work`));
   const policy = developerTaskPolicy(project.definition);
   if (!policy.enabled) return refused(agentXError("FORBIDDEN", "tasks from AI tools are turned off for this project"));
-  if (policy.share === "required") return refused(agentXError("FORBIDDEN", "this project requires tasks to be shared to a channel; sharing is not set up on the core yet"));
+  let share;
+  try {
+    share = await prepareTaskStartShare(deps, caller, request.project, policy.share === "required", request);
+  } catch (error) { return refused(shareStartError(error)); }
   // Every repository of the project must live on a code host this install registered, before the budget, the limits and any write.
   if (deps.codeHosts !== undefined) {
     try {
@@ -151,12 +164,6 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
 
   // An external check nothing in this release runs is refused here, with the clear sentence, before the budget, the limits and any machine (lane P2, review M2).
   if (unrunnableExternalCheck(project.definition.repositories) !== undefined) return refused(agentXError("CONFIG_INVALID", UNRUNNABLE_EXTERNAL_CHECK_MESSAGE));
-
-  // DEC 254n (1): a company whose own engine model the gateway does not offer it now (or whose list cannot be read) starts nothing: refused here, before the limits, the admission and any machine.
-  if (deps.startModelCheck !== undefined) {
-    const modelRefusal = await deps.startModelCheck();
-    if (modelRefusal !== undefined) return refused(modelRefusal);
-  }
 
   const understandFirst = asWorkflow && (deps.understandFirst ?? ROVARA_CODE_V2_FOR_NEW_ORGS);
   // A workflow with no Quick or Full path is Understand's to choose on version 1.1.0; anywhere else the explicit path is required.
@@ -233,8 +240,9 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
   }
   const task: TaskRecord = {
     ...taskKey(taskId), entityType: "DEVELOPER_TASK", companyId: deps.companyId, taskId, developerId, provider: principal.provider, developerName: principal.displayName,
+    ...trustedSlackLink(caller),
     ...(startComparison === undefined ? {} : { startComparison }),
-    origin: origin.data, client, project: request.project, title, workspaceId, ownerKey, conversationId, startingRevision: revision, charge, shared: false,
+    origin: origin.data, client, project: request.project, title, workspaceId, ownerKey, conversationId, startingRevision: revision, charge, shared: share !== undefined, ...(share === undefined ? {} : { share }),
     // A workflow task quotes the request in each plan's "why".
     ...(asWorkflow ? { requestText } : {}),
     // A task intake started from a ticket says so, so its request is shown as the ticket's words and not as the owner's.
@@ -272,8 +280,9 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
     { kind: "put", item: toDocument(workspace), condition: when.absent() },
     { kind: "put", item: { ...legacyWorkspaceKey(workspaceId), entityType: "WORKSPACE_COMPANY_POINTER", workspaceId, companyId: workspace.companyId }, condition: when.absent() },
     ...prepare.items,
+    prepareWatchItem(deps.companyId, receivedAt, workspaceId, prepareOperationId, taskId),
     { kind: "put", item: toDocument(taskItem), condition: when.absent() },
-    { kind: "put", item: { ...taskIndexKey(developerId, receivedAt, taskId), entityType: "DEVELOPER_TASK_INDEX", taskId, orgId: deps.companyId, project: request.project, title, client, status: "STARTING", shared: false, startingRevision: revision, workspaceId, createdAt: receivedAt, updatedAt: receivedAt }, condition: when.absent() },
+    { kind: "put", item: { ...taskIndexKey(developerId, receivedAt, taskId), entityType: "DEVELOPER_TASK_INDEX", taskId, orgId: deps.companyId, project: request.project, title, client, status: "STARTING", shared: share !== undefined, startingRevision: revision, workspaceId, createdAt: receivedAt, updatedAt: receivedAt }, condition: when.absent() },
     { kind: "put", item: toDocument(pointer), condition: when.absent() },
     { kind: "put", item: { ...conversationKey(deps.companyId, workspaceId, conversationId), entityType: "CONVERSATION", id: conversationId, workspaceId, createdAt: receivedAt, updatedAt: receivedAt }, condition: when.absent() },
     { kind: "put", item: { ...idempotencyKey, entityType: "IDEMPOTENCY", taskId, payloadHash }, condition: when.absent() },
@@ -337,4 +346,13 @@ function limitError(full: "member" | "organization", limits: { member: number; o
   return full === "member"
     ? agentXError("WORKSPACE_LIMIT", `you have reached the limit of ${limits.member} open workspaces per person; close a task to start another`)
     : agentXError("WORKSPACE_LIMIT", `this install has reached its limit of ${limits.organization} open workspaces; close a task, or ask an admin`);
+}
+
+function shareStartError(error: unknown): AgentXError {
+  if (error instanceof AgentXError) return error;
+  throw error;
+}
+
+function trustedSlackLink(caller: TaskStartCaller): Pick<TaskRecord, "slackUserId"> {
+  return caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId };
 }

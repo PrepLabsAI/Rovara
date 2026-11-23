@@ -126,6 +126,14 @@ describe("the chat thread: one message when the task pauses at Build", () => {
     expect((w.attempts[0] as { data: { text: string } }).data.text).toBe(setupPausedMessage(STEP, "https://app.example.test/p/payments/setup"));
   });
 
+  it("still tells the thread a person must act when milestone lines are muted", async () => {
+    const w = await ThreadWorld.make({ milestones: false });
+    await seed(w.store, { taskId: ThreadWorld.TASK, state: "broken" });
+    await w.handler.on(paused());
+    expect(w.attempts).toHaveLength(1);
+    expect((w.attempts[0] as ChannelEvent & { data: { text: string } }).data.text).toBe(setupPausedMessage(STEP));
+  });
+
   it("never tells another company's thread, a closed task, or a task of another company's record", async () => {
     const foreign = await ThreadWorld.make({ companyOf: async () => OTHER });
     await seed(foreign.store, { taskId: ThreadWorld.TASK, state: "broken" });

@@ -1,7 +1,10 @@
 import "./broker-environment-init.js"; import { companyMembershipFromDynamo, resolveAdminCompany, resolveCompany } from "./company-check.js"; // ENV-ROOM: the init first (broker-environment-init.ts; kept first by tests/contract/broker-environment-first.test.ts)
+import { coreKeepPullRequests } from "./slack-core-feedback.js";
+import type { TaskRecord as CoreApplicationTaskRecord } from "../core/task-flow/records.js";
 import { coreContextWorkerRouteOf } from "./dev-route-scopes.js";
+import { isServerReadRequest } from "./developer-routes.js";
 import { createHostedBrokerCoreServices } from "./core-job-services.js"; import { codeSettingsReader, companyCodeSettingsReader } from "./project-code-settings.js"; import { hostedPolicySource } from "./core-policy-source.js";
-import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js"; import { coreCopyRefusalWords } from "./core-copy-refusal.js";
+import { guardCoreProjectSource, planCoreProjectWrites, planCanonicalProjectIdentity, coreProjectSnapshotFence } from "./core-project-backfill.js"; import { coreCopyRefusalWords } from "./core-copy-refusal.js";
 import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
 import { createSlackLinkCodes, createSlackPersonResolver, slackBindingCompany, slackCompanyPerson, slackCompanyProject, type SlackCompanyDependencies, type SlackWorkspaceAccess } from "./slack-person.js";
 import { latestRevisionRowFor } from "./company-layout.js";
@@ -291,7 +294,7 @@ import type { AuthenticatedIdentity } from "../auth.js";
 import { adminReader, queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
 import { outcomeMetric } from "./admin-change-audit.js";
 import { pressAdminChange, routeAdminChange, type AdminChangeDependencies } from "./admin-changes.js";
-import type { AdminChangeHandlers, PlanDependencies } from "./admin-change-plans.js";
+import type { AdminChangeHandlers, PlanDependencies, ReviewedChannelBinding } from "./admin-change-plans.js";
 import { ZodError, z } from "zod";
 import { healthProbes } from "./health-probes.js";
 import { recordPrepareFailureEvent } from "./operation-events.js";
@@ -600,6 +603,7 @@ interface CodeBuildRecord {
 }
 
 interface AwsBrokerDependencies {
+  core?: BrokerCoreRoot;
   /** DEC 254zzz79 (3): the gateway's settings and the task-token signer, for the Slack service's model access (slack-model-access.ts). Absent: every company thread's model access is `unavailable`. */
   slackModelAccess?: { env: NodeJS.ProcessEnv; taskTokens: () => { signer: TokenSigner; issuer: string } | undefined };
   workspaces?: SlackWorkspaceAccess;
@@ -817,8 +821,9 @@ function adminCompanyReader(dependencies: AwsBrokerDependencies): CompanyMembers
 function adminChangeHandlers(dependencies: AwsBrokerDependencies): AdminChangeHandlers {
   return {
     requireAdministrator: (identity, project) => requireAdministrator(dependencies, identity, project),
-    bindChannel: async (identity, teamId, channelId, project) => putSlackBinding(dependencies, identity, teamId, channelId, { projectName: project }),
-    unbindChannel: async (identity, teamId, channelId) => deleteSlackBinding(dependencies, identity, teamId, channelId),
+    readChannelBinding: (teamId, channelId) => getSlackBinding(dependencies, teamId, channelId),
+    bindChannel: async (identity, teamId, channelId, project, reviewed) => putSlackBinding(dependencies, identity, teamId, channelId, { projectName: project }, reviewed),
+    unbindChannel: async (identity, teamId, channelId, reviewed) => deleteSlackBinding(dependencies, identity, teamId, channelId, reviewed),
     checkRevision: async (identity, definitionValue, runtimeBindingValue, options) => {
       if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
       let definition: ProjectDefinition;
@@ -1049,7 +1054,7 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
 
 export function createAwsBrokerHandler(input: AwsBrokerInput) {
   const { core, ...brokerInput } = input;
-  const dependencies = brokerDependencies(brokerInput);
+  const dependencies = brokerDependencies({ ...brokerInput, ...(core === undefined ? {} : { core }) });
   if (Buffer.byteLength(dependencies.callbackSigningKey, "utf8") < 32) {
     throw new Error("CALLBACK_SIGNING_KEY must contain at least 32 bytes");
   }
@@ -1724,11 +1729,12 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
       if (url.pathname.startsWith("/v1/dev/")) {
         if (!dependencies.developer && dependencies.linking) return json(await routeLinkingRequest(linkingRouteDependencies(dependencies, dependencies.linking), request, url), request.requestId);
         if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
-        return json(await routeDeveloperRequest({ ...(dependencies.developer.companies === undefined ? {} : { companies: dependencies.developer.companies }), ...(core?.lessons === undefined ? {} : { lessons: core.lessons }), ...(core?.lessonsSlackSwitch === undefined ? {} : { lessonsSlackSwitch: core.lessonsSlackSwitch }), ...(core?.knowledgeSwitch === undefined ? {} : { knowledgeSwitch: core.knowledgeSwitch }), ...(core?.knowledge === undefined ? {} : { knowledge: core.knowledge }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
+        const developer = dependencies.developer;
+        return await developerRouteResponse(request, url, () => routeDeveloperRequest({ serverReadSender: { send: (command, options) => dependencies.documentClient.send(command as never, options) }, ...(developer.companies === undefined ? {} : { companies: developer.companies }), ...(core?.lessons === undefined ? {} : { lessons: core.lessons }), ...(core?.lessonsSlackSwitch === undefined ? {} : { lessonsSlackSwitch: core.lessonsSlackSwitch }), ...(core?.knowledgeSwitch === undefined ? {} : { knowledgeSwitch: core.knowledgeSwitch }), ...(core?.knowledge === undefined ? {} : { knowledge: core.knowledge }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks,
           ...channelLinkRouteDependencies(dependencies),
           ...clientProjectRouteDependencies(dependencies),
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
-          ...workflowApplicationRouteDependencies(dependencies) }, request, url), request.requestId);
+          ...workflowApplicationRouteDependencies(dependencies) }, request, url));
       }
 
       const identity = identityFromJwtClaims(request.jwtClaims, {
@@ -2507,10 +2513,7 @@ async function registerProject(
     const accounts = await planAccounts();
     let corePlan: Awaited<ReturnType<typeof planCoreProjectWrites>>;
     try {
-      // A named company's record IS its own-partition row (no legacy source to copy from).
-      corePlan = ownCompany !== undefined ? { status: "existing", writes: [] } : await planCoreProjectWrites({ tableName: dependencies.tableName, documentClient: companyBudget.client }, record);
-      if (corePlan.status === "unknown_company") brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
-      if (snapshot.newest !== undefined) corePlan.writes = guardCoreProjectSource(dependencies, snapshot.newest, corePlan.writes);
+      corePlan = await planRegistrationCoreWrites({ tableName: dependencies.tableName, documentClient: companyBudget.client }, ownCompany, record, snapshot);
     }
     catch { throw agentXError("PROJECT_REVISION_MISMATCH", await coreCopyRefusalWords({ tableName: dependencies.tableName, documentClient: companyBudget.client }, record.companyId, definition.name)); }
 
@@ -2536,13 +2539,14 @@ async function registerProject(
         TableName: dependencies.tableName,
         Key: ownCompany !== undefined ? orgProjectCatalogKey(ownCompany, definition.name) : projectCatalogKey(definition.name),
         UpdateExpression: ownCompany !== undefined
-          ? "SET entityType = :entity, #name = :name, companyId = :company, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)"
-          : "SET entityType = :entity, #name = :name, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
+          ? "SET entityType = :entity, #name = :name, companyId = :company, incarnationRevision = :incarnation, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)"
+          : "SET entityType = :entity, #name = :name, incarnationRevision = :incarnation, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
         ConditionExpression: snapshot.catalog === undefined ? "attribute_not_exists(pk)"
           : snapshot.catalog.latestRevision === undefined ? "attribute_not_exists(latestRevision)"
             : "latestRevision = :observed AND latestRevision < :revision",
         ExpressionAttributeNames: { "#name": "name" },
         ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": definition.name, ":revision": latestRevision, ":now": now,
+          ":incarnation": corePlan.incarnationRevision,
           ...(ownCompany === undefined ? {} : { ":company": ownCompany }),
           ...(snapshot.catalog?.latestRevision === undefined ? {} : { ":observed": snapshot.catalog.latestRevision }) },
       } }] : []),
@@ -2583,6 +2587,24 @@ async function registerProject(
     }
   }
   throw agentXError("PROJECT_REVISION_MISMATCH", "project revision registration exceeded its bounded catalog retries");
+}
+
+/** The identity and source fences join the registration transaction, in their original order. */
+async function planRegistrationCoreWrites(
+  deps: Parameters<typeof planCanonicalProjectIdentity>[0],
+  company: OrgId | undefined,
+  record: RegisteredProjectRecord,
+  snapshot: Awaited<ReturnType<typeof readNamedCompanyCatalogSnapshot>>,
+): ReturnType<typeof planCoreProjectWrites> {
+  // A named company's record IS its own-partition row (no legacy source to copy from).
+  const identity = company === undefined ? undefined : await planCanonicalProjectIdentity(deps, company, record.definition.name, snapshot.newestRevision > 0 || snapshot.catalog !== undefined);
+  const plan = identity !== undefined ? { status: "ready" as const, writes: identity.writes, incarnationRevision: identity.revision } : await planCoreProjectWrites(deps, record);
+  if (plan.status === "unknown_company") brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
+  if (snapshot.newest !== undefined) {
+    if (company === undefined) plan.writes = guardCoreProjectSource(deps, snapshot.newest, plan.writes);
+    else plan.writes.push({ ConditionCheck: { TableName: deps.tableName, Key: revisionKeyFor(company, record.definition.name, snapshot.newestRevision), ...coreProjectSnapshotFence(snapshot.newest) } });
+  }
+  return plan;
 }
 
 async function readProjectCatalogSnapshot(dependencies: AwsBrokerDependencies, projectName: string, task?: { companyId?: unknown }): Promise<{ catalog: { entityType?: string; name?: string; latestRevision?: number } | undefined; newestRevision: number; newest?: RegisteredProjectRecord }> {
@@ -2655,16 +2677,19 @@ async function repairNamedCompanyCatalogPointer(dependencies: AwsBrokerDependenc
   const stored = await getItem<Record<string, unknown>>(dependencies, revisionKeyFor(company, projectName, revision));
   if (stored === undefined || stored.candidate === true) return;
   const snapshot = await readNamedCompanyCatalogSnapshot(dependencies, company, projectName, { waitingCandidate: "allow" });
+  let identity: Awaited<ReturnType<typeof planCanonicalProjectIdentity>>;
+  try { identity = await planCanonicalProjectIdentity(dependencies, company, projectName, true); }
+  catch { throw agentXError("PROJECT_REVISION_MISMATCH", "project identity is unavailable; verified operator migration is required"); }
   if ((snapshot.catalog?.latestRevision ?? 0) >= revision) return;
   try {
-    await dependencies.documentClient.send(new UpdateCommand({
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [...identity.writes, { Update: {
       TableName: dependencies.tableName, Key: orgProjectCatalogKey(company, projectName),
-      UpdateExpression: "SET entityType = :entity, #name = :name, companyId = :company, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
+      UpdateExpression: "SET entityType = :entity, #name = :name, companyId = :company, incarnationRevision = :incarnation, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
       ConditionExpression: snapshot.catalog === undefined ? "attribute_not_exists(pk)" : snapshot.catalog.latestRevision === undefined ? "attribute_not_exists(latestRevision)" : "latestRevision = :observed",
       ExpressionAttributeNames: { "#name": "name" },
-      ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": projectName, ":company": company, ":revision": revision, ":now": new Date().toISOString(),
+      ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": projectName, ":company": company, ":incarnation": identity.revision, ":revision": revision, ":now": new Date().toISOString(),
         ...(snapshot.catalog?.latestRevision === undefined ? {} : { ":observed": snapshot.catalog.latestRevision }) },
-    }));
+    } }] }));
   } catch (error) {
     if (!isConditional(error)) throw error;
     throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog pointer changed without revision history advancing");
@@ -3407,12 +3432,27 @@ function displayName(value: string | undefined): string | undefined {
   } catch { return undefined; }
 }
 
+/** DP-E1-R2: reject reread drift and fence the final write, including reviewed absence.
+ * Only the internal confirmation path supplies this value; direct binding routes keep their contract.
+ */
+function reviewedBindingCondition(reviewed: ReviewedChannelBinding | undefined, current: SlackChannelBinding | undefined) {
+  if (reviewed === undefined) return {};
+  if (reviewed === null ? current !== undefined : current?.projectName !== reviewed.projectName || current.updatedAt !== reviewed.updatedAt) {
+    throw agentXError("CHANGE_STALE", "The channel binding changed after review; ask for the change again to review its current binding.");
+  }
+  return reviewed === null
+    ? { ConditionExpression: "attribute_not_exists(pk)" }
+    : { ConditionExpression: "projectName = :reviewedProject AND updatedAt = :reviewedAt",
+      ExpressionAttributeValues: { ":reviewedProject": reviewed.projectName, ":reviewedAt": reviewed.updatedAt } };
+}
+
 async function putSlackBinding(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
   teamIdValue: string,
   channelIdValue: string,
   value: unknown,
+  reviewed?: ReviewedChannelBinding,
 ): Promise<{ binding: SlackChannelBinding; latestRevision: number }> {
   const input = object(value, "Slack channel binding");
   // Older CLIs still send projectRevision; the binding follows the project's latest revision instead.
@@ -3432,11 +3472,18 @@ async function putSlackBinding(
   if (existing && existing.projectName !== binding.projectName) {
     await requireAdministrator(dependencies, identity, existing.projectName);
   }
+  const condition = reviewedBindingCondition(reviewed, existing);
   const latest = await requireLatestProject(dependencies, binding.projectName);
-  await dependencies.documentClient.send(new PutCommand({
-    TableName: dependencies.tableName,
-    Item: { ...slackChannelBindingKeyFor(named, binding.teamId, binding.channelId), ...channelBindingAttributes(channelBindingFromSlack(binding)), updatedBy: identity.ownerKey },
-  }));
+  try {
+    await dependencies.documentClient.send(new PutCommand({
+      TableName: dependencies.tableName,
+      Item: { ...slackChannelBindingKeyFor(named, binding.teamId, binding.channelId), ...channelBindingAttributes(channelBindingFromSlack(binding)), updatedBy: identity.ownerKey },
+      ...condition,
+    }));
+  } catch (error) {
+    if (reviewed === undefined || !isConditional(error)) throw error;
+    throw agentXError("CHANGE_STALE", "The channel binding changed after review; ask for the change again to review its current binding.");
+  }
   return { binding, latestRevision: latest.definition.revision };
 }
 
@@ -3445,17 +3492,25 @@ async function deleteSlackBinding(
   identity: AuthenticatedIdentity,
   teamIdValue: string,
   channelIdValue: string,
+  reviewed?: ReviewedChannelBinding,
 ): Promise<{ deleted: true; binding: SlackChannelBinding }> {
   const teamId = SlackTeamIdSchema.parse(decodeURIComponent(teamIdValue));
   const channelId = SlackChannelIdSchema.parse(decodeURIComponent(channelIdValue));
   const binding = await getSlackBinding(dependencies, teamId, channelId);
+  const condition = reviewedBindingCondition(reviewed, binding);
   if (!binding) throw agentXError("NOT_FOUND", "Slack channel binding not found");
   await requireAdministrator(dependencies, identity, binding.projectName);
   // DEC 254zzz80 (R2-F1): the row the read found: a NAMED company's own (its binding carries companyId), else the legacy one.
-  await dependencies.documentClient.send(new DeleteCommand({
-    TableName: dependencies.tableName,
-    Key: slackChannelBindingKeyFor((binding as { companyId?: string }).companyId, teamId, channelId),
-  }));
+  try {
+    await dependencies.documentClient.send(new DeleteCommand({
+      TableName: dependencies.tableName,
+      Key: slackChannelBindingKeyFor((binding as { companyId?: string }).companyId, teamId, channelId),
+      ...condition,
+    }));
+  } catch (error) {
+    if (reviewed === undefined || !isConditional(error)) throw error;
+    throw agentXError("CHANGE_STALE", "The channel binding changed after review; ask for the change again to review its current binding.");
+  }
   return { deleted: true, binding };
 }
 
@@ -7066,6 +7121,12 @@ export function isSlackWorkflowKeepPullRequestsEvent(event: unknown): event is S
 
 /** Keep the pull request as it is, through the same route an AI tool uses. */
 async function keepSlackWorkflowPullRequests(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowKeepPullRequestsEvent) {
+  const core = await coreKeepPullRequests(dependencies, dependencies.developer?.coreTasks, event, async () => {
+    const thread = SlackThreadSchema.parse(event.thread);
+    if (!await slackWorkspaceEnabled(dependencies, thread)) throw agentXError("FORBIDDEN", "Slack workspace is not enabled for developer tasks");
+    return await companySlackCaller(dependencies, thread, SlackRequesterSchema.shape.userId.parse(event.userId));
+  });
+  if (core !== undefined) return core;
   const { taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "keep the pull request as it is");
   const routeDeps = slackWorkflowRouteDependencies(dependencies, tasks, developer, caller);
   const body = JSON.stringify({ requestId, expectedRevision: event.expectedRevision });
@@ -9510,6 +9571,18 @@ function sameE2ESourceSnapshot(left: E2ESourceSnapshot, right: E2ESourceSnapshot
   });
 }
 
+async function coreApplicationTask(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord) {
+  const core = dependencies.core;
+  const companyId = storedCompanyOf(task);
+  if (core === undefined || companyId === undefined) return undefined;
+  const registry = await core.app.registry();
+  if (await core.app.engineOfTask(registry.require("storage"), task.taskId, "flow") !== "core") return undefined;
+  const flow = (await core.app.runtimeFor(companyId)).flow.deps;
+  const stored = await flow.store.get({ pk: `DEVTASK#${task.taskId}`, sk: "META" }) as unknown as CoreApplicationTaskRecord | undefined;
+  if (stored?.companyId !== companyId || stored.workflow === undefined || flow.applicationE2E === undefined) throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
+  return { task: { ...stored, workflow: stored.workflow }, seams: flow.applicationE2E };
+}
+
 /** Builds task projections only after reloading and independently qualifying the stored current CHECKS evidence. */
 async function workflowE2EPresentation(
   dependencies: AwsBrokerDependencies,
@@ -9519,6 +9592,8 @@ async function workflowE2EPresentation(
   /** A CHECKS operation whose terminal state is being written by the caller and is not yet in its stored record. */
   ending?: { operationId: string; status: "SUCCEEDED" | "FAILED" },
 ): Promise<NonNullable<DeveloperTaskView["e2ePresentation"]> | undefined> {
+  const core = await coreApplicationTask(dependencies, task);
+  if (core !== undefined) return (await core.seams.results.read(core.task, actor))?.presentation;
   return (await workflowE2EPresentationDetailed(dependencies, task, operations, actor, ending))?.presentation;
 }
 
@@ -9657,6 +9732,8 @@ export async function loadWorkflowE2EScenarioResults(
   operations: readonly unknown[],
   actor: "owner" | "viewer" = "viewer",
 ): Promise<E2EScenarioResults | undefined> {
+  const core = await coreApplicationTask(dependencies, task);
+  if (core !== undefined) return (await core.seams.results.read(core.task, actor))?.scenarioResults;
   if (task.closedAt !== undefined) return (await workflowE2EPresentationDetailed(dependencies, task, operations, actor))?.scenarioResults;
   const stored = await loadStoredScenarioResults({ s3: dependencies.s3, artifactBucketName: dependencies.artifactBucketName }, task);
   // M1.3 Task 3.7b: the baseline round has a record of its own and runs before the candidate's, so it shows as soon as it is recorded, or known not to have run, whether or not the
@@ -9672,6 +9749,8 @@ export async function loadWorkflowE2EArtifact(
   task: DeveloperTaskRecord,
   sha256: string,
 ): Promise<{ contentType: "image/jpeg"; bytes: Uint8Array } | undefined> {
+  const core = await coreApplicationTask(dependencies, task);
+  if (core !== undefined) return core.seams.results.artifact(core.task, sha256);
   const baseline = await readWorkflowE2EBaseline(dependencies, task).catch(() => undefined);
   return loadStoredWorkflowE2EArtifact({ s3: dependencies.s3, artifactBucketName: dependencies.artifactBucketName }, task, sha256, baseline === undefined ? {} : { baseline });
 }
@@ -11197,19 +11276,19 @@ async function refreshTaskFeedbackForOwnerDecision(dependencies: AwsBrokerDepend
 }
 
 /** Reconcile every PR webhook against GitHub; comments and delivery order never grant authority. */
+function requireGithubFeedbackReader(deps: AwsBrokerDependencies, mergeOnly: boolean): void {
+  const reader = mergeOnly ? deps.githubPullRequests.getPullRequestMergeObservation : deps.githubPullRequests.getPullRequestFeedback;
+  if (reader === undefined) throw agentXError("RUNTIME_UNAVAILABLE", mergeOnly ? "current GitHub merge observation is not configured" : "current GitHub feedback collection is not configured");
+}
+
 export async function processGithubWorkflowEvent(
   dependencies: AwsBrokerDependencies,
   event: ReceivedGithubWebhook["event"],
   deliveryId: string,
   options?: { observationMode: "merge"; budget: GithubMergeReadBudget; release: "queue" },
 ): Promise<void> {
-  const getFeedback = options === undefined
-    ? dependencies.githubPullRequests.getPullRequestFeedback
-    : dependencies.githubPullRequests.getPullRequestMergeObservation;
-  if (getFeedback === undefined) throw agentXError("RUNTIME_UNAVAILABLE", options === undefined
-    ? "current GitHub feedback collection is not configured"
-    : "current GitHub merge observation is not configured");
-  await reconcileTaskPullRequestFeedback({
+  requireGithubFeedbackReader(dependencies, options !== undefined);
+  const reconciled = await reconcileTaskPullRequestFeedback({
     documentClient: dependencies.documentClient, tableName: dependencies.tableName,
     repositoryFullName: event.fullName, number: event.number, deliveryId,
     ...(event.headSha === undefined ? {} : { expectedHeadSha: event.headSha }),
@@ -11300,6 +11379,7 @@ export async function processGithubWorkflowEvent(
     measure: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
     now: new Date().toISOString(),
   });
+  if (!reconciled) return;
   const linked = await getItem<GithubWorkflowPullRequestRecord>(dependencies, githubWorkflowPullRequestKey(event.fullName, event.number));
   // A merge that finished the task gives back its slot and workspace (again for a redelivery, which changes nothing).
   if (linked !== undefined && options?.release !== "queue") await releaseIfFinished(dependencies, linked.taskId);
@@ -11343,12 +11423,18 @@ async function mergeRecoveryReleaseConfirmed(dependencies: AwsBrokerDependencies
 }
 
 /** Reconciles one recovery row using one exact reverse-linked PR and the bounded merge-only GitHub reader. */
+function recoveryPullRequestUrl(pullRequest: { url: string; number: number }): RegExpExecArray | undefined {
+  const parsed = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)$/.exec(pullRequest.url);
+  return parsed === null || Number(parsed[2]) !== pullRequest.number ? undefined : parsed;
+}
+
 export async function reconcileWorkflowMergeRecoveryTask(
   dependencies: AwsBrokerDependencies,
   taskId: string,
   budget: GithubMergeReadBudget,
 ): Promise<MergeRecoveryResult> {
   const retry = (): MergeRecoveryResult => ({ kind: "RETRY", retryAt: Date.now() + MERGE_RECOVERY_RETRY_MS, scope: "task" });
+  if (await ownerOfTaskId(dependencies, taskId, "flow") === "core") return retry();
   const task = await stronglyRead<DeveloperTaskRecord>(dependencies, taskKey(taskId));
   if (task === undefined) return { kind: "MISSING" };
   if (task.closedAt !== undefined || task.releasedAt !== undefined) {
@@ -11357,8 +11443,8 @@ export async function reconcileWorkflowMergeRecoveryTask(
   const pullRequests = task.workflow?.pullRequests ?? [];
   let selected: { fullName: string; number: number } | undefined;
   for (const pullRequest of pullRequests) {
-    const parsed = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)$/.exec(pullRequest.url);
-    if (parsed === null || Number(parsed[2]) !== pullRequest.number) continue;
+    const parsed = recoveryPullRequestUrl(pullRequest);
+    if (parsed === undefined) continue;
     const linked = await stronglyRead<GithubWorkflowPullRequestRecord>(dependencies, githubWorkflowPullRequestKey(parsed[1]!, pullRequest.number));
     if (linked?.taskId === task.taskId && linked.workspaceId === task.workspaceId && linked.repositoryId === pullRequest.repositoryId
       && linked.number === pullRequest.number && linked.url === pullRequest.url && linked.candidateDigest === pullRequest.candidateDigest) {
@@ -15945,7 +16031,7 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
     // D17: kept for the Lambda's lifetime; an unknown kid refetches at most once a minute.
     verifyAccessToken: developerTokenVerifier({
       issuer,
-      keys: developerKeysThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+      keys: developerKeysThroughLambda((payload, options) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }), options)),
       now: Date.now,
     }),
   }), inviteTaskPerson);
@@ -16003,6 +16089,7 @@ function buildBrokerHandler(callbackSigningKey: string) {
   );
   // Lane E2 step 6: the core engine's root. Every new task of a member company starts on it (#1275).
   const coreRoot = createBrokerCoreRoot({
+    applicationSource: (repositoryUrl, commit) => githubCredentials.captureE2ESourceSnapshot(repositoryUrl, commit),
     env: process.env,
     documentClient,
     stateTableName: requiredEnvironment("STATE_TABLE_NAME"),
@@ -16012,14 +16099,14 @@ function buildBrokerHandler(callbackSigningKey: string) {
     repositoryCredential: (credentialRef, repositoryUrl, access) => githubCredentials.resolve(credentialRef, repositoryUrl, access),
     checkTaskPerson: async (task, developerId, admission) => {
       if (signIn === undefined) throw new Error("task person proof is unavailable");
-      const deps = developerTaskRouteDependencies({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), developer: signIn, now: Date.now },
+      const deps = developerTaskRouteDependencies({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), developer: signIn, now: Date.now, ...slackCompany },
         { developerId, sessionId: "core", name: "", amr: "oidc" }, undefined, null);
       return await deps.checkTaskPerson!(task, developerId, admission);
     },
     // Cloud #188 item 3: a core task's People, readers, events and plan comments use the old task routes' own dependencies for this person (built as the People proof above is), in their live company.
     taskRules: (person, companyId) => {
       if (signIn === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "task people are unavailable in this deployment");
-      return { ...developerTaskRouteDependencies({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), developer: signIn, now: Date.now },
+      return { ...developerTaskRouteDependencies({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), developer: signIn, now: Date.now, ...(slackCompany === undefined ? {} : { workspaces: slackCompany.workspaces, companies: slackCompany.companies }) },
         { developerId: person.developerId, sessionId: "core", name: person.name, amr: "oidc" }, undefined, null), companyId };
     },
     // Lane L1b: the core's code host is the same GitHub App, company-scoped (aws/core-code-host.ts): a company's own projects' repositories only, its installation binding at every mint.
@@ -16039,7 +16126,7 @@ function buildBrokerHandler(callbackSigningKey: string) {
     // tracker (this company's only). A project with none saved reads the defaults, as before. The laptop's rules are fixed instead (local/app/app.ts:395 and local/app/tracking.ts:34).
     codeSettings: codeSettingsReader({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }),
     services: (companyId, flow, registry, wiring) => createHostedBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!,
-      settings: companyCodeSettingsReader({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }, companyId), ...(wiring.humanEdit === undefined ? {} : { humanEdit: wiring.humanEdit }), ...(wiring.threadMoments === true ? { threadMoments: true } : {}),
+      settings: companyCodeSettingsReader({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }, companyId), ...(wiring.humanEdit === undefined ? {} : { humanEdit: wiring.humanEdit }), ...(wiring.threadMoments === true ? { threadMoments: true } : {}), ...(wiring.threadRefresh === undefined ? {} : { threadRefresh: wiring.threadRefresh }),
       // The email seams travel with the upkeep notice's (#959); L4-AK1H: a queued admin notice (unusual team knowledge reading) is told only to someone who is an admin now (the core root answers once built; before that: no one).
       notification: { ...(wiring.notification ?? {}), ...(wiring.upkeep === undefined ? {} : { upkeep: wiring.upkeep }), adminNotice: async (orgId, developerId) => (await builtCoreRoot?.adminNotice?.(orgId, developerId)) === true },
     }),
@@ -16257,4 +16344,22 @@ function withClientGithubBindings(dependencies: AwsBrokerDependencies): AwsBroke
   const companies = dependencies.companies ?? (dependencies.developer ?? dependencies.linking)?.companies;
   if (bindings === undefined || dependencies.githubBindings !== undefined || companies === undefined) return dependencies;
   return { ...dependencies, githubBindings: bindings, companies };
+}
+
+/** The two dedicated read contracts have no transport request ID in their domain body. */
+function serverReadJson(value: unknown, statusCode = 200) {
+  return { statusCode, headers: { "content-type": "application/json", "cache-control": "private, no-store" }, body: JSON.stringify(value) };
+}
+
+/** Keep the dedicated read contracts' domain bodies and failures at the transport boundary. */
+async function developerRouteResponse(request: AdaptedHttpRequest, url: URL, work: () => Promise<unknown>) {
+  const selectedRead = isServerReadRequest(request.method, url.pathname);
+  try {
+    const value = await work();
+    return selectedRead ? serverReadJson(value) : json(value, request.requestId);
+  } catch (error) {
+    if (!selectedRead) throw error;
+    if (error instanceof AgentXError) return serverReadJson({ error: { code: error.code, message: stripCode(error.message, error.code) } }, error.statusCode);
+    return serverReadJson({ error: { code: "RUNTIME_UNAVAILABLE", message: request.method === "GET" ? "Start status is unavailable." : "GitHub disconnect preview is unavailable." } }, 503);
+  }
 }

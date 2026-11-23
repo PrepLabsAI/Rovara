@@ -111,6 +111,8 @@ export const DeveloperTaskViewSchema = z.object({
   title: z.string(),
   project: z.string(),
   status: DeveloperTaskStatusSchema,
+  /** Present only while waiting to start a task or step. Own active prepare/worker startup is authoritative; anything else is unknown. Older servers omit it (clients read that as unknown). Named limits require a real admission queue, which does not exist today. */
+  startupReason: z.enum(["own-machine-starting", "unknown"]).optional(),
   /** Web task channel (Q7): the task's own person, the sign-in id it was started under and its name (the owner a client shows without guessing from People). Absent from older servers and for a task with no sign-in owner. */
   owner: z.object({ developerId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/), name: z.string().min(1).max(80) }).strict().optional(),
   /** UX2 slice 2: where the task stands in the one status model (state, reason, next step), the words every surface shows instead of `status`. Absent from older servers. */

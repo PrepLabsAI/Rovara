@@ -1,3 +1,4 @@
+import { createPrFeedbackRoutes } from "../../core-host/pr-feedback-routes.js";
 import { readTaskMoney } from "../../core/cost/task-money.js";
 // Lane L9-wire: the owner's HTTP routes on `rovara up`: the ones the CLI, the MCP tools and the editor call with the session token. Authentication happens before this (the identity
 // adapter vouches for the principal); nothing here reads who is acting from a body.
@@ -59,6 +60,14 @@ function bodyOf(request: BrokerRequest): unknown {
   try { return JSON.parse(request.body) as unknown; } catch { throw agentXError("CONFIG_INVALID", "the request body is not JSON"); }
 }
 
+async function refuseFeedbackApproval(flow: TaskFlow, request: BrokerRequest, caller: TaskCaller, taskId: string, action: string | undefined): Promise<undefined> {
+  if (action !== "workflow/feedback-decision") throw agentXError("NOT_FOUND", "route not found");
+  // A machine bearer can dismiss feedback, but paid approval belongs to the local review page.
+  if (request.method !== "POST" || (bodyOf(request) as { decision?: unknown } | null)?.decision !== "APPROVE") return undefined;
+  await loadOwnedTask(flow.deps, caller, taskId);
+  throw agentXError("FORBIDDEN", APPROVE_ON_THE_PAGE);
+}
+
 export const SECOND_REVIEW_ON_THE_PAGE = "The second review's model, mode and evidence are changed on its local page, by you, in a page session opened within the last ten minutes. Run `rovara open second-review` to open it; an assistant cannot change them for you, and neither can this token.";
 export const SECOND_REVIEW_PATH = "/v1/dev/second-review";
 export const MODEL_SELECTION_ON_THE_PAGE = "The model each step uses is changed on its local page, by you, in a page session opened within the last ten minutes. Run `rovara open models` to open it; an assistant cannot change it for you, and neither can this token.";
@@ -67,7 +76,7 @@ export const MODEL_SELECTION_PATH = "/v1/dev/model-selection";
 export const SECOND_REVIEW_EVIDENCE_PATH = /^\/v1\/admin\/second-review\/(replay|verdict)$/u;
 export const ATTACH_ON_THE_PAGE = "Saying where a task's plan is posted is done on the task's page, in your browser (run `rovara open <task>`): it lets a comment there decide the plan, so a tool with the API token cannot do it.";
 export const DESIGN_REVIEW_ON_THE_PAGE = "A cost choice, the answers to the design review's questions, and picking a paused review up again are your own acts on the task's page, in your browser (run `rovara open <task>`): a tool with the API token can read the review but cannot make them.";
-const TASK = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})(?:\/(plan|close|cancel|thread|workflow\/decision|workflow\/retry|workflow\/send-back|workflow\/review-findings|continue|design-review|design-review\/(?:choice|answers|resume)|diagnosis))?$/u;
+const TASK = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})(?:\/(plan|close|cancel|thread|workflow\/decision|workflow\/feedback-decision|workflow\/retry|workflow\/send-back|workflow\/review-findings|continue|design-review|design-review\/(?:choice|answers|resume)|diagnosis))?$/u;
 /** Fix with agent: `GET /v1/app/diagnoses/<id>` reads one (the hosted product's route). Starting one is the owner's act on the task's page, so a tool that holds the API token is told to open it; the deeper look and "Apply this change" are not on this install. */
 const DIAGNOSES = /^\/v1\/app\/diagnoses(?:\/(dgn_[0-9a-z]{20})(?:\/(deep|propose))?)?$/u;
 
@@ -75,7 +84,7 @@ const DIAGNOSES = /^\/v1\/app\/diagnoses(?:\/(dgn_[0-9a-z]{20})(?:\/(deep|propos
  * routes the MCP tools and the CLI call that have no core feature in Code yet (they wait on features not built yet: custom agents, approvals of connected systems, sharing and task people,
  * opening a pull request by hand, review of a candidate, PR feedback, parallel parts, a task's budget). Answered in plain words instead of the older handler's "route not found".
  */
-const NOT_ON_THIS_INSTALL = /^\/v1\/app\/(?:agents|approvals)(?:\/|$)|^\/v1\/dev\/tasks\/[0-9a-f-]{36}\/(?:share|people|pull-requests|workflow\/(?:review|publish-retry|keep-pull-requests|feedback|feedback-decision|feedback-retry))(?:\/|$)/u;
+const NOT_ON_THIS_INSTALL = /^\/v1\/app\/(?:agents|approvals)(?:\/|$)|^\/v1\/dev\/tasks\/[0-9a-f-]{36}\/(?:share|people|pull-requests|workflow\/(?:review|publish-retry|feedback))(?:\/|$)/u;
 export const NOT_ON_THIS_INSTALL_MESSAGE = "That is not on this install yet: Rovara on this computer does not do it. It comes with a later release.";
 
 /** `GET /v1/auth/.well-known/agentx-configuration`: what a client asks before it signs in. Open, like `/healthz`. */
@@ -111,7 +120,7 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
     const result = await (action === "stop" ? sessionControl.stop(caller.principal, companyId, task.sessionId, { requestId }) : sessionControl.retry(caller.principal, companyId, task.sessionId, { requestId }));
     if (result.status === "refused") throw agentXError(result.reason === "not_found" ? "NOT_FOUND" : result.reason === "forbidden" ? "FORBIDDEN" : "CONFIG_INVALID", result.message);
   };
-  return async (request, caller) => {
+  const ownerRoutes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => {
     const path = request.path.split("?")[0] ?? request.path;
     const isOurs = NOT_ON_THIS_INSTALL.test(path) || path === SECOND_REVIEW_PATH || path === MODEL_SELECTION_PATH || SECOND_REVIEW_EVIDENCE_PATH.test(path) || DIAGNOSES.test(path) || path === "/v1/dev/projects" || path === "/v1/admin/projects" || path === "/v1/dev/tasks" || TASK.test(path) || path === "/v1/local/pages/open";
     if (!isOurs) return undefined;
@@ -290,6 +299,7 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
           await loadOwnedTask(flow.deps, caller, taskId);
           throw agentXError("FORBIDDEN", APPROVE_ON_THE_PAGE);
         }
+        return await refuseFeedbackApproval(flow, request, caller, taskId, action);
       }
       throw agentXError("NOT_FOUND", "route not found");
     } catch (error) {
@@ -297,6 +307,8 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
       throw error;
     }
   };
+  const feedbackRoutes = createPrFeedbackRoutes(flow.deps, viewOf);
+  return async (request, caller) => (await ownerRoutes(request, caller)) ?? feedbackRoutes(request, caller);
 }
 
 // 64 hex, as the client's summary asks; the same hash the sessions name this person by.

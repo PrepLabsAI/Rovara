@@ -62,7 +62,7 @@ export function createOfferedModelsView(input: { reader: OfferedModelsReader; co
 }
 
 /** The route of a model the gateway offers: its agent route (Anthropic Messages), the model's own name as the alias and as the catalog entry its limits and usage are read from. */
-export const gatewayRouteOf = (name: string): InvocationModelRoute => ({ alias: name, api: "anthropic-messages", catalog: name });
+export const gatewayRouteOf = (name: string, entry?: OfferedAgentModel): InvocationModelRoute => ({ alias: name, api: "anthropic-messages", catalog: name, ...(entry?.identity === undefined ? {} : { identity: entry.identity }) });
 
 /**
  * The per-step rule's seams over the gateway's list. A model is servable, callable and routable only if its name is on the list now; the install's own model is the deployment's default (it is
@@ -78,7 +78,7 @@ export function gatewayModelSelectionSeams(input: { offered: OfferedModelsView; 
     async servable() { return (await input.offered.list()).map((entry) => agentModelIdentity(entry.model)); },
     async canServe(model) { try { return (await onList(model)) !== undefined; } catch { return false; } },
     async installModel() { return agentModelIdentity(await input.defaultModel()); },
-    async route(model) { try { const name = await onList(model); return name === undefined ? undefined : gatewayRouteOf(name); } catch { return undefined; } },
+    async route(model) { try { const name = await onList(model); return name === undefined ? undefined : gatewayRouteOf(name, (await input.offered.list()).find(entry => entry.model === name)); } catch { return undefined; } },
   };
 }
 

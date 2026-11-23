@@ -17,6 +17,7 @@ import { coreTaskEntryFrom, type CoreTaskEntry } from "../../packages/broker/src
 import { createCoreTaskRuleRoutes } from "../../packages/broker/src/aws/core-task-rule-routes.js";
 import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { MAYA, OMAR, bearerFor, createDeveloperTaskBroker, grantProject, type Developer } from "../support/developer-task-broker.js";
+import { pagePlan, pageTask } from "../support/page-tasks.js";
 import { loadSlackBroker } from "../support/slack-broker.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 
@@ -77,7 +78,7 @@ async function ruleWorld(options: { rules?: boolean } = {}) {
   const members = new Map<string, CompanyMembership>([...principals.values()].map((caller) => [caller.principal.personId + caller.principal.companyId, { companyId: caller.principal.companyId, role: "member" }]));
   const late: { harness?: Awaited<ReturnType<typeof createDeveloperTaskBroker>> } = {};
   const rules = createCoreTaskRuleRoutes((person, companyId) => ({
-    ...developerTaskRouteDependencies({ documentClient: late.harness!.db, tableName: late.harness!.brokerInput.tableName, developer: (late.harness!.brokerInput as unknown as { developer: never }).developer, now: Date.now },
+    ...developerTaskRouteDependencies({ tasks: late.harness!.actions, documentClient: late.harness!.db, tableName: late.harness!.brokerInput.tableName, developer: (late.harness!.brokerInput as unknown as { developer: never }).developer, now: Date.now },
       { developerId: person.developerId, sessionId: "core", name: person.name, amr: "oidc" }, undefined, null),
     companyId,
   }));
@@ -111,7 +112,7 @@ async function ruleWorld(options: { rules?: boolean } = {}) {
     return JSON.parse(JSON.stringify(answer).replaceAll(id, task.taskId)) as typeof answer;
   };
   const rows = () => JSON.stringify(db.find((item) => String(item.pk).includes(task.taskId)));
-  return { world, app, db, dev, missing, rows, task, owner };
+  return { world, app, db, dev, missing, rows, task, owner, objects: harness.s3.objects };
 }
 
 describe("readers on a core task (spec 067's rule)", () => {
@@ -189,6 +190,39 @@ describe("the events timeline of a core task (the core's log and decisions)", ()
 });
 
 describe("plan comments and People on a core task (the old routes' own functions and rules)", () => {
+  it("the authenticated core POST creates a criterion thread and refuses foreign or viewer writes", async () => {
+    const h = await ruleWorld();
+    const page = pageTask();
+    const source = page.addVersion("plan", pagePlan());
+    const task = (await h.world.store.get(taskKey(h.task.taskId)))!;
+    if (typeof task["ownerKey"] !== "string") throw new Error("task owner missing");
+    const artifact = { ...source, objectKey: `private/${task["ownerKey"]}/${h.task.workspaceId}/plan-v1.json` };
+    const row = { ...task, workflow: { ...page.workflow(), taskId: h.task.taskId, ownerId: task["ownerKey"], artifacts: [artifact] } };
+    h.db.set(row);
+    await h.world.store.put({ item: JSON.parse(JSON.stringify(row)) as StoredDocument });
+    // The real dependency factory reads the broker's artifact store.
+    const text = page.objects.get(source.objectKey)!;
+    // The harness uses its S3 fake; the root/runtime reader has separate proof in core-task-web-routes-root.test.ts.
+    h.objects.set(artifact.objectKey, text);
+    const path = `/v1/dev/tasks/${h.task.taskId}/comments`;
+    const first = await h.dev(MAYA, "POST", path, { requestId: "root", document: "plan", text: "Put the banner above", anchor: "claim:2.1" });
+    expect(first).toMatchObject({ status: 200, body: { comment: { anchor: "claim:2.1" } } });
+    const root = first.body["comment"] as { commentId: string };
+    expect(await h.dev(MAYA, "POST", path, { requestId: "reply", document: "plan", text: "Keep the button visible", replyTo: root.commentId })).toMatchObject({ status: 200, body: { comment: { replyTo: root.commentId, anchor: "claim:2.1" } } });
+    const fresh = await h.dev(MAYA, "GET", path);
+    const comments = fresh.body["comments"] as Array<{ replyTo?: string; anchor?: string }>;
+    expect(comments.find((comment) => comment.replyTo === root.commentId)).toMatchObject({ anchor: "claim:2.1" });
+    await h.dev(MAYA, "PUT", `/v1/dev/tasks/${h.task.taskId}/readers/${TESS.developerId}`, { requestId: randomUUID(), role: "viewer" });
+    const before = h.rows();
+    for (const who of [OMAR, SAM, TESS]) {
+      const body = { requestId: "refused", document: "plan", text: "Must refuse", replyTo: root.commentId };
+      const response = await h.dev(who, "POST", path, body);
+      expect(response.status).toBe(404);
+      expect(response).toEqual(await h.missing(who, "POST", "/comments", body));
+    }
+    expect(h.rows()).toBe(before);
+  });
+
   it("the owner lists the plan comments; a member with no part and another company's caller read no such task", async () => {
     const h = await ruleWorld();
     const path = `/v1/dev/tasks/${h.task.taskId}/comments`;

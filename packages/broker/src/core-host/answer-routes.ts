@@ -43,15 +43,17 @@ export interface HostedAnswersInput {
   wiring: HostedAnswersWiring;
   now: () => number;
   log?: ((entry: Record<string, unknown>) => void) | undefined;
+  tasks?: AnswerServiceDeps["tasks"] | undefined;
 }
 
 const ANSWERS_PATH = /^\/v1\/app\/projects\/([^/]+)\/answers$/u;
+const HISTORY_PATH = /^\/v1\/app\/projects\/([^/]+)\/tasks\/([^/]+)\/answers$/u;
 /** J5: the asker's "Not right" on one answer (a second POST row: `.../answers/{answerId}/not-right`). */
 const NOT_RIGHT_PATH = /^\/v1\/app\/projects\/([^/]+)\/answers\/([^/]+)\/not-right$/u;
 
 /** Whether this method and path is the answer route or "Not right". */
 export function isAnswersPath(path: string, method: string): boolean {
-  return method === "POST" && (ANSWERS_PATH.test(path) || NOT_RIGHT_PATH.test(path));
+  return method === "GET" ? HISTORY_PATH.test(path) : method === "POST" && (ANSWERS_PATH.test(path) || NOT_RIGHT_PATH.test(path));
 }
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify(value) });
@@ -61,7 +63,7 @@ const errorAnswer = (error: AgentXError): BrokerResponse => json(error.statusCod
  * The answer service of one member company on the deployed core: that company's own store, wiki and code, the person's live role on the project (any role asks), and the company's answers model through the
  * gateway when one is wired. The HTTP route and the Slack door (`answerForSlackThread`, dev-routes.ts) both make it here, so there is ONE rule for who may ask.
  */
-export function hostedAnswerService(input: { companyId: OrgId; store: DocumentStore; wiring: HostedAnswersWiring; now: () => number; log?: ((entry: Record<string, unknown>) => void) | undefined }): AnswerService {
+export function hostedAnswerService(input: { companyId: OrgId; store: DocumentStore; wiring: HostedAnswersWiring; now: () => number; log?: ((entry: Record<string, unknown>) => void) | undefined; tasks?: AnswerServiceDeps["tasks"] | undefined }): AnswerService {
   return createAnswerService({
     companyId: input.companyId, store: input.store, wiki: createWikiStore({ store: input.store, companyId: input.companyId, now: input.now }), now: input.now, log: input.log,
     access: {
@@ -76,11 +78,24 @@ export function hostedAnswerService(input: { companyId: OrgId; store: DocumentSt
     },
     model: input.wiring.model?.(input.companyId),
     briefing: input.wiring.briefing?.(input.companyId),
+    tasks: input.tasks,
   });
 }
 
 /** One request on the answer path (`isAnswersPath`), after the dev routes checked the company from membership. Always answers. */
 export async function routeHostedAnswers(input: HostedAnswersInput): Promise<BrokerResponse> {
+  const history = input.request.method === "GET" ? HISTORY_PATH.exec(input.path) : null;
+  if (history !== null) {
+    try {
+      const project = decodeURIComponent(history[1]!);
+      const taskId = decodeURIComponent(history[2]!);
+      return json(200, await hostedAnswerService(input).history({ personId: input.personId, project, taskId }));
+    } catch { return errorAnswer(agentXError("RUNTIME_UNAVAILABLE", ANSWER_WORDS.unavailable)); }
+  }
+  return routeHostedQuestion(input);
+}
+
+async function routeHostedQuestion(input: HostedAnswersInput): Promise<BrokerResponse> {
   const notRight = input.request.method === "POST" ? NOT_RIGHT_PATH.exec(input.path) : null;
   if (notRight !== null) return await routeNotRight(input, notRight[1]!, notRight[2]!);
   let failureLogged = false;

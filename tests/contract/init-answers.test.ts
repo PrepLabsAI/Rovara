@@ -14,6 +14,7 @@ const WEBHOOK = "https://api.opsgenie.com/v1/json/amazonsns?apiKey=0f9e8d7c-SECR
 const base = { env: "staging", region: "us-east-1", account: "123456789012", releaseVersion: "1.2.3", processEnv: {}, now: () => T0 };
 
 const everyFlag: InitFlags = {
+  modelGatewayUrl: "https://gateway.example", agentModel: "claude-sonnet-4-6",
   engine: "templates", identity: "cognito",
   orchestratorModel: "us.anthropic.claude-sonnet-4-6", classifierModel: "us.anthropic.claude-haiku-4-5-20251001-v1:0", workerModel: "us.anthropic.claude-sonnet-4-6",
   permissionBoundary: "", operatorPrincipal: "",
@@ -32,7 +33,7 @@ function withExplicitUndefined<K extends keyof InitFlags>(flags: InitFlags, key:
 // Advanced question, then (on yes) every Advanced setting.
 const FORM_QUESTIONS = [
   "Your email, for your AgentX admin user and alerts", "GitHub organization or user that will own the AgentX GitHub App", "Install name",
-  "App name for GitHub and Slack (unique on GitHub)", "Change the advanced settings?",
+  "App name for GitHub and Slack (unique on GitHub)", "Signed-price model gateway URL", "Core agent model", "Change the advanced settings?",
   "Deploy engine", "Sign-in", "How will developers sign in to AgentX from their AI tools?", "Model provider", "Orchestrator model",
   "Action-gate classifier model", "Worker model", "Permission boundary policy ARN (Enter for AgentX's default boundary)",
   "IAM principal allowed to assume the AgentX operator role (Enter for this account)", "Monthly AWS budget for this environment, in US dollars (0 for none; empty for the estimate plus 20%, $260)",
@@ -362,7 +363,8 @@ describe("resuming with flags", () => {
 describe("the questions an export bundle already answered (FR-026)", () => {
   const secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:team/openrouter-AbCdEf";
   const fixed = {
-    schemaVersion: 1 as const, env: "staging", region: "us-east-1", account: "123456789012", engine: "templates" as const, releaseVersion: "1.2.3",
+    schemaVersion: 1 as const, env: "staging", region: "us-east-1", account: "123456789012", engine: "templates" as const,
+      coreEngine: { modelGatewayUrl: "https://gateway.example", agentModel: "claude-sonnet-4-6" }, releaseVersion: "1.2.3",
     identity: { mode: "oidc" as const, issuer: "https://idp.example.com", audience: "api://agentx", adminClaim: "groups", adminValues: ["admins"] },
     models: { orchestrator: "zai.glm-4.7", classifier: "c", worker: "w", providers: { worker: "openrouter" as const }, openRouter: { secretArn } },
     permissionsBoundaryArn: "arn:aws:iam::123456789012:policy/team-boundary",
@@ -404,4 +406,14 @@ describe("spec 048 FR-026: app names", () => {
     const collected = await collectInitAnswers({ env: "staging", region: "us-east-1", account: "123456789012", releaseVersion: "1.2.3", flags: {}, prompter, processEnv: {}, now: () => 0 });
     expect(collected.answers.slack.appName).toBe("Our AgentX");
   });
+});
+
+it("keeps gateway/model install answers through collection and saved answers", async () => {
+  const coreEngine = { modelGatewayUrl: "https://gateway.example", agentModel: "claude-sonnet-4-6" };
+  const flags = { ...everyFlag, modelGatewayUrl: coreEngine.modelGatewayUrl, agentModel: coreEngine.agentModel };
+  const collected = await collectInitAnswers({ ...base, flags, prompter: unattendedPrompter() });
+  expect(collected.answers.coreEngine).toEqual(coreEngine);
+  const store = new MemoryParameterStore();
+  await persistInitAnswers({ store, secrets: memoryInitSecrets(), collected });
+  expect((await readInstallAnswers(store, "staging"))?.coreEngine).toEqual(coreEngine);
 });

@@ -12,8 +12,9 @@
 // A TARGET is a conversation on a channel the person chose (`NotifyTarget`), or their email (`EMAIL_TARGET`) when they chose it and it can be sent (`prefs.ts`). The event id is derived from the batch it carries,
 // so a retry of the same batch is the same event and the adapter drops a repeat (the channel protocol: `event.id` is stable across retries); an email is claimed on the rows before it is sent, so it goes at most
 // once. That is at most once, not exactly once: when the transport took an email but its answer was lost, or giving a failed claim back fails, that email is not sent again. A message holds the task's title, its
-// status sentence (fixed words) and a link supplied by the surface that serves the task page. Never task content beyond that, never a secret. Logs carry fixed codes and counts only.
+// status sentence (fixed words) and a link supplied by the surface that serves the task page. Chat may also carry the safe captured E2E summary, after recipient checks. Logs carry fixed codes and counts only.
 import { createHash } from "node:crypto";
+import { applicationNoticeText } from "../e2e/application-notices.js";
 import {
   OrgIdSchema, DOCUMENT_STORE_LIMITS, EmailError, INDEX_EXPIRY_ATTRIBUTE, NOTIFY_BATCH_MINUTES, NOTIFY_ITEMS_MAX, UPKEEP_NOTICE_WORDS, agentSessionKey, change, defaultNotifyChannel, effectiveNotify, hideEmailAddresses, isPlainEmailAddress, isRealtimeNotice,
   sessionTaskStatus, taskStatusText, upkeepMonthOf, upkeepSubjectId, upkeepSubjectOf, when,
@@ -277,6 +278,8 @@ export async function queueSetupBroken(
 // ---- deliver
 
 export interface AttentionDeliveryDependencies {
+  /** Captured E2E blocks for the task; read only for a currently allowed chat recipient. */
+  e2e?: (session: AgentSessionRecord) => Promise<unknown[] | undefined>;
   store: DocumentStore;
   /** Where the adapters are: `registry.get("channel", id)` for the chats; the `email` point's one sender (Code's default says it cannot send). */
   registry: Pick<RegistryView, "get" | "names">;
@@ -439,6 +442,18 @@ function emailSenderOf(registry: Pick<RegistryView, "get" | "names">): EmailSend
 export interface AttentionBudget { deadlineMs?: number | undefined; companyId?: OrgId; maxItems?: number; scan?: { cursor: string | undefined } }
 export interface AttentionOutcome { complete?: boolean; people: number; sent: number; emails: number; dropped: number; failed: number; gaveUp: number; unreachable: number; held: number }
 
+async function withApplicationNoticeSummaries(deps: AttentionDeliveryDependencies, owed: ReadonlyArray<{ row: PendingRow }>, allowedSessions: ReadonlyMap<string, AgentSessionRecord>, text: string, maxLength: number): Promise<string> {
+  if (deps.e2e === undefined) return text;
+  const summaries: string[] = [];
+  for (const sessionId of new Set(owed.map(({ row }) => row.sessionId))) {
+    const session = allowedSessions.get(sessionId);
+    if (session === undefined) continue;
+    const summary = applicationNoticeText(await deps.e2e(session).catch(() => undefined));
+    if (summary !== "") summaries.push(summary);
+  }
+  return summaries.length > 0 ? `${text}\n${summaries.join("\n")}`.slice(0, maxLength) : text;
+}
+
 /**
  * The sweep's delivery. The queue is read in pages (at most `ATTENTION_READ_MAX` rows; rows past their expiry are left out). People still inside their batching window are set aside BEFORE the
  * `PEOPLE_PER_SWEEP_MAX` people of this sweep are chosen, and those are taken oldest-waiting first, so nobody's rows are starved by others'. Rows a person's quiet hours or digest hold (`holdOf`) stay
@@ -508,6 +523,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
     visitedPeople += 1;
     const { orgId, developerId } = rows[0]!;
     const current: Array<{ row: PendingRow; line: Line }> = [];
+    const allowedSessions = new Map<string, AgentSessionRecord>();
     const stale: PendingRow[] = [];
     const carded = new Set<string>();
     for (const row of rows) {
@@ -547,6 +563,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
       if (session === undefined || access === undefined || kind !== row.kind || (session.endedAt !== undefined && kind !== "done" && kind !== "failed")) { stale.push(row); continue; }
       if (kind === "needs_you" && deps.planCarded !== undefined && await deps.planCarded(session).catch(() => false)) carded.add(row.sessionId);
       else if (kind === "needs_you" && deps.setupPausedTold !== undefined && await deps.setupPausedTold(session).catch(() => false)) carded.add(row.sessionId);
+      allowedSessions.set(row.sessionId, session);
       const link = deps.link?.(session);
       current.push({ row, line: { title: oneLine(access.owner ? session.title : hideEmailAddresses(session.title), TITLE_MAX) || "A task", status: oneLine(taskStatusText(sessionTaskStatus(session.summary)), 200), link, kind } });
     }
@@ -625,7 +642,8 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
         }
       } else {
         const maxLength = adapter!.capabilities.maxTextLength;
-        const text = digest ? digestText(shown, more, maxLength, deps.footer) : allDone ? doneText(shown, maxLength, deps.footer) : allNotice ? noticeText(shown, more, maxLength, deps.footer) : attentionText(shown, more, maxLength, deps.footer);
+        let text = digest ? digestText(shown, more, maxLength, deps.footer) : allDone ? doneText(shown, maxLength, deps.footer) : allNotice ? noticeText(shown, more, maxLength, deps.footer) : attentionText(shown, more, maxLength, deps.footer);
+        text = await withApplicationNoticeSummaries(deps, owed, allowedSessions, text, maxLength);
         const base = { version: 1 as const, id: batchEventId(orgId, developerId, tkey, owed.map(({ row }) => ({ sk: row.key.sk, at: row.at }))), channel: target!.channel, conversation: target!.conversation, createdAt: new Date(nowMs).toISOString() };
         const event = (allDone && !digest ? { ...base, type: "done", data: { text } } : allFailed && !digest ? { ...base, type: "error", data: { code: "task_failed", text } } : { ...base, type: "progress", data: { text } }) as ChannelEvent;
         let timer: ReturnType<typeof setTimeout> | undefined;

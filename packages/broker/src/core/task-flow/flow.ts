@@ -1,3 +1,6 @@
+import { previewTaskClose } from "./close-inspection.js";
+import { resumeAcceptedClose } from "./close-recovery.js";
+import type { TaskCloseAction } from "@agentx/contracts";
 // Lane L6a, task flow core: the flow as one object, built from the plug-in registry or from ports given directly.
 import {
   IMPLICIT_COMPANY_ID,
@@ -31,10 +34,11 @@ export const TASK_FLOW_INDEXES: readonly IndexDefinition[] = [
 
 export interface TaskFlow {
   readonly deps: TaskFlowDeps;
+  previewClose(caller: TaskCaller, taskId: string, action: TaskCloseAction): ReturnType<typeof previewTaskClose>;
   start(caller: TaskStartCaller, request: unknown): ReturnType<typeof startTask>;
   get(caller: TaskCaller, taskId: string): ReturnType<typeof getTask>;
   list(caller: TaskCaller, options?: { limit?: number; cursor?: string }): ReturnType<typeof listTasks>;
-  close(caller: TaskCaller, taskId: string): ReturnType<typeof closeTask>;
+  close(caller: TaskCaller, taskId: string, input?: unknown): ReturnType<typeof closeTask>;
   /** The callback layer's entry for a worker's terminal result. */
   recordResult(result: OperationResult): ReturnType<typeof recordOperationResult>;
   /** One pass of the dispatch consumer: receives messages and hands their operations to worker machines. */
@@ -50,6 +54,7 @@ export interface TaskFlow {
 export function createTaskFlow(deps: TaskFlowDeps): TaskFlow {
   // The steps after the plan are part of the flow: an install that does not give its own gets the build step. (Set on the object given, so every holder of it sees the same flow.)
   deps.buildSteps ??= createBuildSteps();
+  deps.resumeAcceptedClose ??= async (operation) => { await resumeAcceptedClose(deps, operation); };
   for (const index of TASK_FLOW_INDEXES) {
     const kept = deps.store.indexes.find((candidate) => candidate.name === index.name);
     if (kept === undefined || kept.partitionAttribute !== index.partitionAttribute || kept.sortAttribute !== index.sortAttribute) throw new Error(`the document store must keep the ${index.name} index`);
@@ -59,10 +64,11 @@ export function createTaskFlow(deps: TaskFlowDeps): TaskFlow {
   if (deps.lighterFlow === true && deps.tierReviewCall === undefined) throw new Error("the lighter flow needs the reviewer call (tierReviewCall): a small change never skips its planning steps without a review");
   return {
     deps,
+    previewClose: (caller, taskId, action) => previewTaskClose(deps, caller, taskId, action),
     start: (caller, request) => startTask(deps, caller, request),
     get: (caller, taskId) => getTask(deps, caller, taskId),
     list: (caller, options) => listTasks(deps, caller, options),
-    close: (caller, taskId) => closeTask(deps, caller, taskId),
+    close: (caller, taskId, input) => closeTask(deps, caller, taskId, input),
     recordResult: (result) => recordOperationResult(deps, result),
     dispatchOnce: (options) => runDispatchOnce(deps, options),
     sweepOnce: (options) => runDueDispatches(deps, options),

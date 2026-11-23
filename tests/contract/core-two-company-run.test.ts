@@ -1,9 +1,10 @@
+import type { DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
 import { createConfiguredModelRuntime } from "../../packages/model-runtime/src/index.js";
 import { operationModelProxy } from "../../packages/worker/src/design-review-sessions.js";
 // L6 composition contract: real broker root, registry, dispatch host, callbacks, actions and jobs over fake adapters.
 // ANSWER-2: the real worker proxy and model runtime carry each broker answer through to a fake gateway transport.
 import { randomUUID } from "node:crypto";
-import { expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { IMPLICIT_COMPANY_ID, LEARNED_CONTEXT_FEATURE, ROVARA_CODE_AGENT_ID, WorkflowSnapshotSchema, change, companyScoped, createCandidateManifest, createWorkflowSnapshot, orgProjectCatalogKey, projectRevisionKey, runCostKey, sessionBindingKey, type OrgId, type WorkerMachines, type StoredDocument, type WorkerInvocation } from "@agentx/contracts";
@@ -12,6 +13,8 @@ import { createBrokerCoreServices } from "../../packages/broker/src/aws/core-job
 import { createCoreDispatchHost } from "../../packages/broker/src/aws/worker-machines/core-dispatch-host.js";
 import { workspaceCompanyReader } from "../../packages/broker/src/aws/worker-machines/workspace-company.js";
 import { taskKey, workspaceKey, operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { startTask } from "../../packages/broker/src/core/task-flow/start.js";
+import { coreInUseKey } from "../../packages/broker/src/core-host/engine-stamp.js";
 import { createFakeWorld } from "../support/core-host-fakes.js";
 import { DocumentLessonStore } from "../../packages/broker/src/lessons/document-store.js";
 import { lessonRecord } from "../unit/lessons/lesson-helpers.js";
@@ -26,6 +29,9 @@ import { createAdminBroker } from "../support/admin-broker.js";
 import { createFakeOfferedModels } from "../support/offered-models-fake.js";
 import { companyEngineModelKey } from "../../packages/broker/src/core-host/company-engine-model.js";
 import type { OfferedModelsReader } from "../../packages/broker/src/core-host/gateway-model-selection.js";
+import { runPriceFor } from "../support/hosted-run-price.js";
+
+afterEach(() => { vi.unstubAllGlobals(); });
 
 const adapters = vi.hoisted(() => ({ modules: [] as unknown[] }));
 vi.mock("../../packages/broker/src/core-host/code-modules.js", async (original) => ({ ...await original<object>(), codeAdapterModules: () => adapters.modules }));
@@ -39,9 +45,25 @@ const gateway = "https://gateway.example";
 const plain = (value: unknown): StoredDocument => JSON.parse(JSON.stringify(value)) as StoredDocument;
 const project = { name: "payments", revision: 1, setup: [], readiness: [], orchestratorInstructions: "Delegate work.", repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "app" }] };
 
-async function world(options: { noSigner?: boolean; offeredModels?: OfferedModelsReader } = {}) {
+async function world(options: { noSigner?: boolean; offeredModels?: OfferedModelsReader; priceState?: "missing" | "expired" | "wrong-company" | "wrong-model" | "unavailable" } = {}) {
   const w = createFakeWorld();
   w.clock.now = Date.now();
+  // Hosted tokens need a company/model-bound price from the signed gateway read.
+  // Fake only its transport; unknown companies, models and endpoints stay refused.
+  vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    const companyId = [A, B].find(id => url.pathname === `/v1/service/companies/${id}/rate-quote`);
+    const model = url.searchParams.get("model");
+    if (url.origin !== gateway || companyId === undefined || url.searchParams.get("runPrice") !== "1"
+      || (model !== MODEL && model !== "zai.glm-5")) return Response.json({}, { status: 404 });
+    if (options.priceState === "unavailable") throw new Error("gateway transport unavailable");
+    if (options.priceState === "missing") return Response.json({});
+    return Response.json({ runPrice: { ...runPriceFor(model, w.clock.now), companyId, catalogModel: model,
+      ...(options.priceState === "expired" ? { expiresAt: w.clock.now } : {}),
+      ...(options.priceState === "wrong-company" ? { companyId: B } : {}),
+      ...(options.priceState === "wrong-model" ? { model: "foreign" } : {}),
+    } });
+  });
   adapters.modules = w.modules.filter((module) => ["storage", "queue", "worker-machines", "object-storage", "code-host", "check-runner", "secrets"].includes(module.point));
   const members = new Map([[personA, A], [personB, B], [personC, C]]);
   const client = { async send(command: unknown) {
@@ -58,6 +80,8 @@ async function world(options: { noSigner?: boolean; offeredModels?: OfferedModel
   } };
   const key = makeKey("t".repeat(16));
   const root = createBrokerCoreRoot({
+    // This fixture isolates the existing root behavior; core-task-people-hosted/identity tests exercise creation's real identity proof.
+    taskRules: () => ({ taskPeopleStart: async () => [] }) as unknown as DeveloperTaskRouteDependencies,
     env: { ROVARA_CORE_MODEL_GATEWAY_URL: gateway, ROVARA_CORE_AGENT_MODEL: MODEL, ROVARA_CORE_LESSONS: "on" },
     documentClient: client, stateTableName: "state", signInTableName: "signin", callbackSigningKey: SIGNING, repositoryGrantKey: Buffer.alloc(32, 1),
     repositoryCredential: async () => ({ token: "fake" }), codeModules: () => ({}) as never,
@@ -105,6 +129,58 @@ async function world(options: { noSigner?: boolean; offeredModels?: OfferedModel
   return { w, root, caller, start, dispatchOnce, invocation, callback, client };
 }
 
+// Removing the price check, or running it after the in-use mark/a refusal audit,
+// must fail these checks against the real hosted start and its document store.
+it.each(["missing", "expired", "wrong-company", "wrong-model", "unavailable"] as const)("refuses a hosted start with %s signed prices before any write or spend", async priceState => {
+  const h = await world({ priceState });
+  const flow = (await h.root.app.runtimeFor(A)).flow;
+  const writes = [vi.spyOn(h.w.store, "put"), vi.spyOn(h.w.store, "update"), vi.spyOn(h.w.store, "delete"), vi.spyOn(h.w.store, "transact")];
+  const audit = [vi.spyOn(flow.deps.audit, "record"), vi.spyOn(flow.deps.audit, "stage")];
+  const answer = await h.start(personA);
+  expect(answer?.statusCode).toBe(503);
+  expect(JSON.parse(answer!.body)).toMatchObject({ error: { code: "RUNTIME_UNAVAILABLE", message: expect.stringMatching(/signed.price.*gateway.*ready/iu) as string } });
+  for (const write of [...writes, ...audit]) expect(write).not.toHaveBeenCalled();
+  expect(await h.w.store.get(coreInUseKey(A))).toBeUndefined();
+  expect((await flow.list({ principal: { companyId: A, personId: personA, displayName: "Member", roles: ["member"], provider: "hosted" }, origin: "app" })).tasks).toEqual([]);
+  expect(h.w.spend).toEqual([]);
+  expect(h.w.machines.answered).toEqual([]);
+  expect(await (await h.w.queues.queue("task-dispatch")).receive()).toEqual([]);
+});
+
+it.each(["missing", "unavailable"] as const)("refuses unauthorized hosted starts before reading %s gateway readiness or writing", async priceState => {
+  const h = await world({ priceState });
+  const flow = (await h.root.app.runtimeFor(A)).flow;
+  const writes = [vi.spyOn(h.w.store, "put"), vi.spyOn(h.w.store, "delete"), vi.spyOn(h.w.store, "transact")];
+  const update = vi.spyOn(h.w.store, "update");
+  const record = vi.spyOn(flow.deps.audit, "record");
+  const stage = vi.spyOn(flow.deps.audit, "stage");
+  const readiness = vi.spyOn(flow.deps, "startModelCheck");
+  await expect(startTask(flow.deps, { principal: { companyId: A, personId: personA, displayName: "Member", roles: ["member"], provider: "hosted" }, origin: "app" },
+    { requestId: randomUUID(), project: "missing", instructions: "Set up the project" })).rejects.toMatchObject({ code: "FORBIDDEN", message: expect.stringContaining("You do not have access to this project.") as string });
+  expect(readiness).not.toHaveBeenCalled();
+  for (const write of writes) expect(write).not.toHaveBeenCalled();
+  expect(record).toHaveBeenCalledTimes(1);
+  expect(record.mock.calls[0]?.[0]).toMatchObject({ action: "task.start_refused", details: { code: "FORBIDDEN" } });
+  expect(stage).not.toHaveBeenCalled();
+  expect(update).toHaveBeenCalledTimes(1);
+  expect(update.mock.calls[0]?.[0].key.pk).toBe(`ORG#${A}#AUDIT`);
+  expect(await h.w.store.get(coreInUseKey(A))).toBeUndefined();
+  expect(h.w.spend).toEqual([]);
+  expect(await (await h.w.queues.queue("task-dispatch")).receive()).toEqual([]);
+});
+
+it("starts normally when the signed-price gateway becomes ready, without caching a refusal", async () => {
+  const state: Parameters<typeof world>[0] = { priceState: "missing" };
+  const h = await world(state);
+  expect((await h.start(personA))?.statusCode).toBe(503);
+  delete state.priceState;
+  const answer = await h.start(personA);
+  expect(answer?.statusCode, answer?.body).toBe(200);
+  const { task: { taskId } } = z.object({ task: z.object({ taskId: z.string() }) }).parse(JSON.parse(answer!.body));
+  expect(await h.w.store.get(coreInUseKey(A))).toMatchObject({ orgId: A });
+  expect(await h.w.store.get(taskKey(taskId))).toMatchObject({ companyId: A, taskId });
+});
+
 it("runs two companies through start, dispatch, callbacks, broker model access, review and one shared merge scan; every company's new task starts on the core", async () => {
   const h = await world();
   const broker = await createAdminBroker({ core: h.root });
@@ -133,7 +209,7 @@ it("runs two companies through start, dispatch, callbacks, broker model access, 
     const body = z.object({ baseUrl: z.string(), apiKey: z.string() }).parse(JSON.parse(access.body));
     expect(body.baseUrl).toBe(gateway);
     const claims: unknown = JSON.parse(Buffer.from(body.apiKey.split(".")[1]!, "base64url").toString());
-    expect(claims).toMatchObject({ cid: companyId, ws: workspaceId, op: job.operationId, mdl: [MODEL] });
+    expect(claims).toMatchObject({ cid: companyId, ws: workspaceId, op: job.operationId, mdl: [MODEL], runPrice: { companyId, model: MODEL, catalogModel: MODEL } });
     const sent: Array<{ url: string; claims: Record<string, unknown> }> = [];
     const proxy = operationModelProxy({ payload: job.payload, proxyUrl: companyId === A ? "https://old-proxy.example" : undefined, controlPlaneUrl: "https://broker.example", capability: job.callbackCapability,
       fetch: async () => { const answer = await get(); return new Response(answer.body, { status: answer.statusCode }); } });
@@ -250,7 +326,7 @@ it("wires hosted close cost, session bindings and after-merge independently for 
     const runtime = await h.root.app.runtimeFor(companyId);
     expect(runtime.services["after-merge"]).toMatchObject({ companyId });
     expect(await runtime.flow.deps.sessionBindings!.read(companyId, sessionId)).toMatchObject([{ kind: "linear_issue", issueId }]);
-    await runtime.flow.deps.onTaskClosed!({ taskId, project: "payments", workflow: { path: "FULL" } } as never, closedAt);
+    await runtime.flow.deps.onTaskClosed!({ taskId, companyId, project: "payments", workflow: { path: "FULL" } } as never, closedAt);
     expect(await h.w.store.get(runCostKey(companyId, "payments", ROVARA_CODE_AGENT_ID, "FULL", closedAt, taskId))).toMatchObject({ entityType: "RUN_COST", orgId: companyId, costUsd: 2.5 });
   }
   const a = await h.root.app.runtimeFor(A);
@@ -301,7 +377,7 @@ it("DEC 254n (1): A's own engine model is A's step route and A's task token mode
     const access = await broker.handler({ version: "2.0", routeKey: "GET /v1/internal/model-access", rawPath: "/v1/internal/model-access", rawQueryString: "", headers: { "x-agentx-callback-capability": job.callbackCapability }, requestContext: { requestId: randomUUID(), http: { method: "GET" } } });
     expect(access.statusCode, access.body).toBe(200);
     const body = z.object({ apiKey: z.string() }).parse(JSON.parse(access.body));
-    expect(JSON.parse(Buffer.from(body.apiKey.split(".")[1]!, "base64url").toString())).toMatchObject({ cid: companyId, mdl: [model] });
+    expect(JSON.parse(Buffer.from(body.apiKey.split(".")[1]!, "base64url").toString())).toMatchObject({ cid: companyId, mdl: [model], runPrice: { companyId, model, catalogModel: model } });
   }
   // B has no model of its own: the gateway was asked only for A, at A's start.
   expect(offered.asked).toEqual([A]);

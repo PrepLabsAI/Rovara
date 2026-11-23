@@ -8,12 +8,13 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  EVAL_ROUND_ARTIFACT, WORKER_INVOCATION_FEATURES, canonicalPlanJson, captureEvalRoundEvidence, type JsonValue, type ObjectStorage, type OrgId, type TaskGraphV1, type WorkflowArtifact, type WorkflowSnapshot,
+  EVAL_ROUND_ARTIFACT, WORKER_INVOCATION_FEATURES, canonicalPlanJson, captureEvalRoundEvidence, createWorkflowSnapshot, decideWorkflow, submitWorkflowArtifact, type JsonValue, type ObjectStorage, type OrgId, type TaskGraphV1, type WorkflowArtifact, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { approvedCodingPlan, reviewPlanOf } from "../../packages/broker/src/core/build-step/plan-input.js";
 import { WORKSPACE_DIFF_ARTIFACT, artifactRowKey, reportedChangedFiles } from "../../packages/broker/src/core/build-step/changed-files.js";
 import { evalRequestForChecks } from "../../packages/broker/src/core/proof/eval-round-reader.js";
 import { earlierPlans } from "../../packages/broker/src/core/plan/context.js";
+import { workflowDocumentTextReader } from "../../packages/broker/src/core/plan/document.js";
 import { PLAN_UNREADABLE, approvedGraphOf, breakdownForApproval } from "../../packages/broker/src/core/work-breakdown/plan-graph.js";
 import { planContextOf, readWorkspace } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { operationKey, taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -22,6 +23,7 @@ import { artifactObjectKey } from "../../packages/broker/src/services/callbacks.
 import { createCompanyArtifactReader } from "../../packages/broker/src/core-host/company-artifact-reader.js";
 import { createHarness, newRequestId } from "../support/task-flow-harness.js";
 import { planDocument } from "../support/plan-documents.js";
+import { createApplicationApproval } from "../../packages/broker/src/core/e2e/application-approval.js";
 import { COMPANY_B_ID } from "../../packages/testing/src/isolation/two-company.js";
 
 const OTHER_COMPANY = COMPANY_B_ID as OrgId;
@@ -134,7 +136,47 @@ const approved = (artifact: WorkflowArtifact) => ({ artifacts: [artifact], decis
 const PLAN_TEXT = "# The plan\n\nChange one file.\n";
 const settle = async <T>(run: () => Promise<T>): Promise<{ value: T } | { error: string }> => run().then((value) => ({ value }), (error: unknown) => ({ error: typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : (error as Error).name }));
 
+describe("the core text reader used by thread documents and closeout", () => {
+  it.each([false, true])("reads only accessible task artifacts (fallback: %s)", async (fallback) => {
+    const w = await world();
+    const { own, foreign } = await documents(w, "markdown", "plan.md", PLAN_TEXT);
+    const read = workflowDocumentTextReader(fallback ? {} : w.h.deps, w.hosted());
+    expect(await read(own.objectKey)).toBe(PLAN_TEXT);
+    const reads = [...w.stored.asked];
+    expect(await read(foreign.objectKey)).toBeUndefined();
+    expect(w.stored.asked).toEqual(reads);
+  });
+
+  it("a refusal by the configured reader never retries against the fallback", async () => {
+    const w = await world();
+    const { own } = await documents(w, "markdown", "plan.md", PLAN_TEXT);
+    const read = workflowDocumentTextReader({ artifacts: { get: async () => undefined } }, w.hosted());
+    expect(await read(own.objectKey)).toBeUndefined();
+    expect(w.stored.asked).toEqual([]);
+  });
+});
+
 describe("every other reader of the flow's artifacts, with the hosted reader", () => {
+  it("application approval reads its own canonical plan through the sanctioned reader; foreign, missing, changed and unreadable plans refuse approval", async () => {
+    const w = await world();
+    const { own, foreign } = await documents(w, "structured", "plan.json", canonicalPlanJson(planDocument()));
+    const approve = (artifact: WorkflowArtifact, artifacts = w.hosted()) => {
+      const initial = createWorkflowSnapshot({ taskId: w.task.taskId, ownerId: w.task.ownerKey, now: artifact.createdAt });
+      const before = submitWorkflowArtifact(initial, { expectedRevision: initial.revision, now: artifact.createdAt, artifact });
+      const after = decideWorkflow(before, { requestId: newRequestId(), expectedRevision: before.revision, decision: "APPROVE", artifactDigest: artifact.sha256, reason: "Approved." },
+        { actorId: before.ownerId, role: "TASK_OWNER" }, { now: artifact.createdAt, allowedSkipStages: [] });
+      return createApplicationApproval({ artifacts, projects: w.h.deps.projects })({ task: { ...w.task, workflow: before }, before, after, artifact, at: artifact.createdAt });
+    };
+    expect((await approve(own)).workflow.stage).toBe("IMPLEMENT");
+    await expect(approve(foreign)).rejects.toThrow("nothing was approved");
+    w.stored.objects.delete(own.objectKey);
+    await expect(approve(own)).rejects.toThrow("nothing was approved");
+    w.stored.objects.set(own.objectKey, bytesOf("changed"));
+    await expect(approve(own)).rejects.toThrow("nothing was approved");
+    w.stored.state.down = true;
+    await expect(approve(own)).rejects.toThrow("nothing was approved");
+  });
+
   it("approvedCodingPlan and reviewPlanOf (the coding step, the reviewers, the PR body, setup offers, mocks): the own plan reads; another company's pointer is today's refusal", async () => {
     const w = await world();
     const { own, foreign } = await documents(w, "markdown", "plan.md", PLAN_TEXT);
@@ -210,6 +252,7 @@ describe("every other reader of the flow's artifacts, with the hosted reader", (
 
 /** Every source file under core/ (and the proof reader's neighbours) that reads the flow's `artifacts`, and how it behaves on a hosted root. A new reader fails this test until it is classified here and in briefs/lead4/L4-ART-SCOPE.md. */
 const READERS: Record<string, string> = {
+  "core/answers/task-context.ts": "ON: authorized task Answers reads its latest document through the company-bound flow reader, additionally held to the task owner/workspace prefix; answer-task-frame.test.ts pins scope and digest",
   "core/build-step/autofix.ts": "ON: the plan's dry-run results refine an unclear check fault (autofix is on by default on hosted; counts bound it)",
   "core/build-step/changed-files.ts": "ON: the approved plan's mocks flag unplanned mock sources in the PR risk; reportedChangedFiles is the laptop page's (no hosted caller)",
   "core/build-step/plan-input.ts": "ON: the coding step's and reviewers' approved plan (today hosted refuses WORKSPACE_NOT_READY / shows no plan)",
@@ -221,9 +264,13 @@ const READERS: Record<string, string> = {
   "core/design-review/resolve-run.ts": "DORMANT on hosted: no design review is wired",
   "core/design-review/round-start.ts": "DORMANT on hosted: no design review is wired",
   "core/design-review/steps.ts": "DORMANT on hosted: no design review is wired",
+  "core/e2e/application-approval.ts": "ON: required-E2E approval reads the canonical plan through loadPlanDocument and the company-bound reader; unreadable or foreign plans refuse approval",
   "core/plan/check.ts": "DORMANT on hosted: the plan check runs only for a task with the Rovara Code program (understandFirst), which no hosted root sets",
   "core/plan/context.ts": "ON: a structured planning run's earlier documents (a revision, a Full task's design from its requirements)",
-  "core/plan/document.ts": "ON: every approval surface reads the structured plan through it (hosted approvals of a structured plan were refused as unreadable)",
+  "core/plan/document.ts": "ON: every approval surface reads the structured plan through it; thread document/Canvas/closeout reads use its text reader over the same company-checked flow reader or fallback",
+  "core/pr-feedback/inputs.ts": "ON: owner-approved task requirements and scoped owner notes for the read-only PR critic",
+  "core/pr-feedback/review.ts": "ON: exact operation-folder critic report, bounded and digest checked before settlement",
+  "core/pr-feedback/validate.ts": "ON: company/task-owned immutable report and bundle validation for feedback selection and worker approval",
   "core/proof/eval-round-reader.ts": "ON: the eval request (first pass reads nothing; later passes read the saved rounds, bounded and operation-folder checked)",
   "core/setup-agent/plan-update.ts": "ON: at merge, the approved plan's setup changes become the setup-update offer (wrapper of approvedCodingPlan)",
   "core/sessions/ask-context-load.ts": "NOT the flow's reader: takes its own `artifacts` (not wired on a hosted root here; the hosted ask surface is separate)",
@@ -253,10 +300,12 @@ describe("the readers of the flow's artifacts are a known set", () => {
     expect(files).toEqual(Object.keys(READERS).sort());
   });
 
-  it("no file outside core/ reads the flow's artifacts except the laptop page's (a hosted consumer would need classifying)", () => {
+  it("only the classified laptop page and core-root comment adapter read the flow reader outside core/", () => {
     const root = join(process.cwd(), "packages/broker/src");
     const outside = sourcesUnder(root).map((path) => relative(root, path)).filter((path) => !path.startsWith("core/"))
       .filter((path) => /\b(?:flow|deps\.flow|flow\.deps)\.artifacts\b|\bdeps\.artifacts\b/u.test(readFileSync(join(root, path), "utf8"))).sort();
-    expect(outside).toEqual(["local/app/page-data.ts"]);
+    // The core root forwards its company-bound reader to comment target validation.
+    // core-task-web-routes-root.test.ts proves the real factory; document prefix/digest checks are retained.
+    expect(outside).toEqual(["aws/core-engine-root.ts", "core-host/dev-routes.ts", "local/app/page-data.ts", "local/app/project-answers.ts"]);
   });
 });

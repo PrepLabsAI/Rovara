@@ -44,6 +44,7 @@ function waitingWorkflow(): WorkflowSnapshot {
 }
 
 interface WorldOptions {
+  e2e?: (taskId: string, taskPageUrl?: string) => Promise<unknown[] | undefined>;
   risk?: DecisionRisk;
   /** The approvers take a decision made in the chat (default yes). */
   chatApprovers?: boolean;
@@ -86,7 +87,7 @@ async function world(options: WorldOptions = {}) {
   await redeemChannelLinkCode(deps, STRANGER_ID, (await issueChannelLinkCode(deps, STRANGER_ACTOR)).code);
   await recordTaskThread(deps, { sessionId: SESSION, conversation: CONVERSATION, personId: OWNER_ID, actor: ACTOR });
   const handler = channelThreadHandler({
-    store, registry, now, ...(options.companyOf === undefined ? {} : { companyOf: options.companyOf }), ...(options.isMember === undefined ? {} : { isMember: options.isMember }),
+    store, registry, now, ...(options.e2e === undefined ? {} : { e2e: options.e2e }), ...(options.companyOf === undefined ? {} : { companyOf: options.companyOf }), ...(options.isMember === undefined ? {} : { isMember: options.isMember }),
     ...(options.milestones === undefined ? {} : { milestones: options.milestones }), ...(options.taskUrl === false ? {} : { taskUrl: () => PAGE }), footer: "Open it with `rovara open`.",
     ...(options.withGate === false ? {} : { plan: { gate } }),
   });
@@ -280,6 +281,26 @@ describe("the milestone lines", () => {
     expect(await threadFollows({ store: w.store })(OTHER, SESSION)).toBe(false);
   });
 
+  it.each(["orgId", "companyId"] as const)("xcompany C1: a foreign task's %s never reaches this company's thread or writes a notice", async (field) => {
+    const w = await world({ withGate: false, companyOf: () => ORG, isMember: () => true });
+    const key = workflowTaskKey(TASK);
+    const task = (await w.store.get(key))!;
+    const withoutOrg = { ...task };
+    delete withoutOrg["orgId"];
+    await w.store.put({ item: { ...withoutOrg, [field]: OTHER } });
+    const ownTask = "11111111-1111-4111-8111-111111111111";
+    await w.store.put({ item: { ...task, ...workflowTaskKey(ownTask) } });
+    const before = await w.store.scanPage({ limit: 100 });
+    for (const kind of ["plan_ready", "pr_ready", "merged"] as const) await w.handler.on(milestone(kind, { pullRequests: [PR] }));
+    expect(before.cursor).toBeUndefined();
+    expect(w.deliveries).toEqual([]);
+    expect(await w.store.scanPage({ limit: 100 })).toEqual(before);
+    // Same store, same reachable thread and same milestone: this company's task is served.
+    await w.handler.on(milestone("merged", { taskId: ownTask }));
+    expect(w.deliveries).toHaveLength(1);
+    expect(w.deliveries[0]?.type).toBe("done");
+  });
+
   it("nothing crosses companies: another company's thread, a failing company rule and a member who is not served get nothing", async () => {
     for (const options of [{ companyOf: () => OTHER }, { companyOf: () => undefined }, { companyOf: (): never => { throw new Error("down"); } }, { companyOf: () => ORG, isMember: () => false }, { companyOf: () => ORG, isMember: (): never => { throw new Error("down"); } }] as WorldOptions[]) {
       const w = await world({ ...options, withGate: false });
@@ -451,5 +472,53 @@ describe("the plan card's feature line in the chat", () => {
     expect(event!.data.text).not.toContain("canary");
     expect(event!.data.actions?.map((action) => action.decision)).toEqual(["APPROVE", "REQUEST_CHANGES"]);
     vi.restoreAllMocks();
+  });
+});
+
+
+describe("E2E thread projection", () => {
+  const PR = { repository: "acme/web", number: 17, url: "https://git.example.test/acme/web/pull/17" };
+  const e2e = async () => [{ type: "section", text: { type: "mrkdwn", text: "5 passed · 0 failed\nBaseline: 2 of 5 failed" } }];
+  it("includes the captured results once in the existing ready notice", async () => {
+    const w = await world({ withGate: false, e2e });
+    await w.handler.on(milestone("pr_ready", { pullRequests: [PR] }));
+    await w.handler.on(milestone("pr_ready", { pullRequests: [PR] }));
+    expect(w.deliveries).toHaveLength(1);
+    expect(JSON.stringify(w.deliveries)).toContain("5 passed");
+    expect(JSON.stringify(w.deliveries)).toContain("Baseline: 2 of 5 failed");
+  });
+  it("does not load private projections for a recipient whose live membership was removed", async () => {
+    let reads = 0;
+    const w = await world({ withGate: false, isMember: () => false, e2e: async () => { reads += 1; return e2e(); } });
+    await w.handler.on(milestone("pr_ready", { pullRequests: [PR] }));
+    expect(w.deliveries).toHaveLength(0);
+    expect(reads).toBe(0);
+  });
+  it("keeps a ready notice with long captured results within the chat's text limit", async () => {
+    const long = async () => [{ type: "section", text: { type: "mrkdwn", text: "r".repeat(5_900) } }];
+    const w = await world({ withGate: false, e2e: long });
+    await w.handler.on(milestone("pr_ready", { pullRequests: [PR] }));
+    expect(w.deliveries).toHaveLength(1);
+    const text = (w.deliveries[0] as { data: { text: string } }).data.text;
+    expect(text.startsWith("A pull request is ready for review")).toBe(true);
+    expect(text.length).toBe(FAKE_CHANNEL_CAPABILITIES.maxTextLength);
+  });
+  it("an unavailable results reader still sends the ordinary pull request card", async () => {
+    const w = await world({ withGate: false, e2e: async () => { throw new Error("results reader unavailable"); } });
+    await w.handler.on(milestone("pr_ready", { pullRequests: [PR] }));
+    expect(w.deliveries).toHaveLength(1);
+    expect(w.deliveries[0]).toMatchObject({ type: "pr", data: { url: PR.url, action: "opened" } });
+  });
+});
+
+describe("done while milestone lines are muted", () => {
+  it("still runs the thread closeout and posts no done line", async () => {
+    const w = await world({ withGate: false, milestones: false });
+    const closeout = vi.fn(async () => "closed out");
+    const handler = channelThreadHandler({ store: w.store, registry: { get: () => w.adapter } as never, now, milestones: false, closeout });
+    await handler.on(milestone("merged"));
+    expect(closeout).toHaveBeenCalledTimes(1);
+    expect(closeout).toHaveBeenCalledWith(TASK, expect.anything());
+    expect(w.deliveries).toEqual([]);
   });
 });

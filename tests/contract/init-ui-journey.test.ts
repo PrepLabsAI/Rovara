@@ -1,3 +1,4 @@
+import { installGatewayFixture } from "../support/install-gateway.js";
 // tests/contract/init-ui-journey.test.ts
 // Spec 048 FR-001, FR-002, FR-006 and FR-070: the five phases, every step's plain name and usual
 // time, where the install is, and the terminal's one line per step.
@@ -6,6 +7,8 @@ import { initSteps } from "../../packages/cli/src/init/commands.js";
 import { INIT_STEP_IDS } from "../../packages/cli/src/init/install-state.js";
 import { INSTALL_STEP_ORDER, JOURNEY_PHASE_IDS, journeyOf, needsYouMinutes, PHASE_TITLES, phaseSeconds, totalMinutes, usualText, type JourneyStepView } from "../../packages/cli/src/init/ui/journey.js";
 import { fakeGitHubApi, fakeSlackApi } from "../support/init-fakes.js";
+
+installGatewayFixture();
 
 const T = 1_790_000_000_000;
 const pending = (): JourneyStepView[] => INSTALL_STEP_ORDER.map((id) => ({ id, status: "pending" as const }));

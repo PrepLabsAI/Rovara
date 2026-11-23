@@ -1,3 +1,4 @@
+import { installGatewayFixture } from "../support/install-gateway.js";
 // The install page in the cloud: the setup table both sides share (setup-store.ts), the job's relay
 // (relay.ts), the page's handler (setup-handler.ts), and a whole install run through them with
 // `agentx init --setup-table`. Nothing here reaches AWS, GitHub or Slack.
@@ -14,6 +15,8 @@ import { FINISH, harness, SIGNIN } from "../support/init-ui-harness.js";
 import { FAKE_SLACK_CLIENT, fakeSlackApi, TEST_BOT_TOKEN, TEST_SIGNING_SECRET } from "../support/init-fakes.js";
 import { accessToken, ADMIN_EMAIL } from "../support/setup-fakes.js";
 import { SETUP_ORIGIN, setupPageOperator } from "../support/setup-page-operator.js";
+
+installGatewayFixture();
 
 const TOKEN = "setup-page-token-0123456789abcdef";
 const until = async (check: () => boolean | Promise<boolean>) => {
@@ -254,7 +257,7 @@ describe("agentx init --setup-table", () => {
     const running = operator.run();
     const code = await h.run(
       [
-        "--setup-table", "agentx-setup", "--setup-url", SETUP_ORIGIN, "--admin-email", ADMIN_EMAIL, "--github-account", "acme",
+        "--model-gateway-url", "https://gateway.example", "--agent-model", "claude-sonnet-4-6", "--setup-table", "agentx-setup", "--setup-url", SETUP_ORIGIN, "--admin-email", ADMIN_EMAIL, "--github-account", "acme",
       ],
       {
         setupStore: () => store, setupRelayTiming: FAST, slack,
@@ -291,7 +294,7 @@ describe("agentx init --setup-table", () => {
     const h = await harness();
     expect(await h.run(["--setup-table", "agentx-setup"])).toBe(2);
     expect(h.printed()).toContain("--setup-table and --setup-url go together");
-    expect(await h.run(["--setup-table", "agentx-setup", "--setup-url", SETUP_ORIGIN, "--yes"])).toBe(2);
+    expect(await h.run(["--model-gateway-url", "https://gateway.example", "--agent-model", "claude-sonnet-4-6", "--setup-table", "agentx-setup", "--setup-url", SETUP_ORIGIN, "--yes"])).toBe(2);
     expect(h.printed()).toContain("--setup-table asks every question on the setup page; leave out --no-ui and --yes");
   });
 });

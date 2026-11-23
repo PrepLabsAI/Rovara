@@ -279,8 +279,8 @@ async function githubCall(fetchFn: typeof fetch, url: string, init: RequestInit)
 /**
  * DEC 254h: sign-in with GitHub (an OAuth app). Authorize with PKCE S256 (the verifier is this sign-in's own single-use nonce, so a code is only
  * redeemable by the request that asked for it), exchange the code server side with the client secret, then read the user (subject = GitHub's
- * stable numeric id, never the login) and their emails. Only the primary AND verified email is used; none such: no email (the person can still
- * join with an invite secret). GitHub's access token is used for those two reads and then dropped: it is never stored, logged or returned.
+ * stable numeric id, never the login) and their emails. Only the primary AND verified email is used; none such: no email (existing members can still
+ * sign in, but a new invite requires the current verified email). GitHub's access token is used for those two reads and then dropped: it is never stored, logged or returned.
  */
 export function githubSignInProvider(input: { clientId: string; clientSecret: () => Promise<string>; fetch: typeof fetch; now: () => number }): SignInProvider {
   const challenge = (verifier: string) => createHash("sha256").update(verifier).digest("base64url");
@@ -311,7 +311,7 @@ export function githubSignInProvider(input: { clientId: string; clientSecret: ()
         || typeof profile.login !== "string" || !/^[A-Za-z0-9-]{1,39}$/.test(profile.login)) {
         return { ok: false, reason: "GitHub's answer names no GitHub user; run agentx login again" };
       }
-      // A failed or unreadable email list is no email (never a guess): the person can still sign in, and join only with an invite secret.
+      // A failed or unreadable email list is no email (never a guess): existing members can still sign in, but a new invite needs a verified email.
       const emails = await githubCall(input.fetch, `${GITHUB_API}/user/emails?per_page=${GITHUB_EMAILS_MAX}`, { headers });
       const rows = emails.status === 200 && Array.isArray(emails.body) ? emails.body.slice(0, GITHUB_EMAILS_MAX) : [];
       const chosen = rows.filter((row): row is { email: string } => typeof row === "object" && row !== null && (row as { primary?: unknown }).primary === true

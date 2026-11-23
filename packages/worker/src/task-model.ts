@@ -68,13 +68,13 @@ export async function resolveTaskSessionModel(
   /** Ruling R29: where an install with a model proxy sends every request but a ChatGPT plan's own. */
   baseProxy?: ModelProxyOptions,
   authorizeFallback?: (reason:ChatGptFallbackReason|"unavailable")=>Promise<unknown>,
-): Promise<{ model: WorkspaceModelConfiguration; piAdapter?: PiSessionAdapter }> {
+): Promise<{ model: WorkspaceModelConfiguration; piAdapter?: PiSessionAdapter; meteredProxy?: ModelProxyOptions }> {
   // Task 27: a route is never dropped. A worker with no proxy to send it through ends the task rather than use the default model.
   if (payload.modelRoute !== undefined && baseProxy === undefined) {
     throw agentXError("RUNTIME_UNAVAILABLE", "this task names a model route, but this worker has no model proxy to send it through");
   }
   const proxy = payload.modelRoute === undefined || baseProxy === undefined ? baseProxy : { ...baseProxy, route: payload.modelRoute };
-  const proxied = proxy === undefined ? {} : { piAdapter: createProxyPiSessionAdapter(proxy) };
+  const proxied = proxy === undefined ? {} : { piAdapter: createProxyPiSessionAdapter(proxy), meteredProxy: proxy };
   // What the task runs on when its ChatGPT plan is not (or no longer) serving it: the route's model, else the install's default.
   const defaultModel = () => payload.modelRoute === undefined ? resolveTaskModel(payload.model, environment) : routedTaskModel(payload.modelRoute, payload.model, environment);
   const authorizedChoice=async(reason:ChatGptFallbackReason|"unavailable")=>{
@@ -87,7 +87,7 @@ export async function resolveTaskSessionModel(
   try {
     await chatGptToken();
   } catch (error) {
-    if(payload.modelPolicy!==undefined){const choice=await authorizedChoice("unavailable");return {model:choice.model,...(choice.proxy===undefined?{}:{piAdapter:createProxyPiSessionAdapter(choice.proxy)})};}
+    if(payload.modelPolicy!==undefined){const choice=await authorizedChoice("unavailable");return {model:choice.model,...(choice.proxy===undefined?{}:{piAdapter:createProxyPiSessionAdapter(choice.proxy),meteredProxy:choice.proxy})};}
     const effective = defaultModel();
     console.info(JSON.stringify({ event: "model_fallback", role: "worker", reason: "chatgpt_unavailable", errorName: error instanceof Error ? error.name : "unknown",
       requested: { provider: payload.chatgpt.model.provider, modelId: payload.chatgpt.model.modelId }, effective: { provider: effective.provider, modelId: effective.modelId } }));

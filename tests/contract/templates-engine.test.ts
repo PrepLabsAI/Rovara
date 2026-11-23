@@ -1,3 +1,9 @@
+import { installGatewayFixture, brokerTemplate } from "../support/install-gateway.js";
+import { App } from "aws-cdk-lib";
+import { Template } from "aws-cdk-lib/assertions";
+import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
+import { environmentNaming } from "../../infra/lib/naming.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -5,11 +11,13 @@ import { join } from "node:path";
 import type { CloudFormationClient } from "@aws-sdk/client-cloudformation";
 import type { S3Client } from "@aws-sdk/client-s3";
 import { AgentXError, type ReleaseManifest } from "@agentx/contracts";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { PROTECTED_PARTS, type DeployEvent, type DeployRequest } from "../../packages/cli/src/deploy/deployer.js";
 import type { DeployPart } from "../../packages/cli/src/deploy/parameters.js";
 import type { LoadedRelease } from "../../packages/cli/src/deploy/release.js";
 import { templatesDeployer } from "../../packages/cli/src/deploy/templates-engine.js";
+
+skipLambdaBundling();
 
 // ---- fakes -------------------------------------------------------------------------------------
 
@@ -108,10 +116,12 @@ function makeRelease(templateText?: (part: DeployPart, region: string, env: stri
     manifest,
     dir: releaseDir,
     regions: () => ["us-east-1"],
-    template: templateText ?? ((part, region, env) => JSON.stringify({ part, region, env })),
+    template: templateText ?? ((part, region, env) => JSON.stringify({ part, region, env, ...(part === "control-plane" ? { Outputs: { ModelRunPriceVersion: { Value: "1" } } } : {}) })),
     packagePath: (assetId) => join(releaseDir, `${assetId}.zip`),
   };
 }
+
+installGatewayFixture();
 
 const NOW = 1_700_000_000_123;
 const CHANGE_SET = "agentx-1-2-3-1700000000";
@@ -139,12 +149,12 @@ function request(part: DeployPart, extra: Partial<DeployRequest> = {}): DeployRe
   return {
     part,
     stackName: `agentx-staging-${part}`,
-    parameters: { PermissionsBoundaryArn: "" },
     ...(part === "access" ? {} : { roleArn: ROLE }),
     terminationProtection: PROTECTED_PARTS.has(part),
     onEvent: (event) => events.push(event),
     events,
     ...extra,
+    parameters: { ...(part === "control-plane" ? { CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6" } : { PermissionsBoundaryArn: "" }), ...extra.parameters },
   };
 }
 
@@ -604,9 +614,9 @@ describe("templates engine", () => {
   });
 
   it("surfaces an S3 error other than not-found instead of treating the package as missing", async () => {
-    const fake = fakeClients({ HeadObject: [awsError("Forbidden", "Forbidden", 403)] });
+    const fake = fakeClients({ DescribeStacks: [protectedStack("UPDATE_COMPLETE")], HeadObject: [awsError("Forbidden", "Forbidden", 403)] });
     await expect(deployer(fake).deploy(request("control-plane"))).rejects.toThrow("Forbidden");
-    expect(fake.names()).toEqual(["s3:HeadObject"]);
+    expect(fake.names()).toEqual(["cloudFormation:DescribeStacks", "s3:HeadObject"]);
   });
 
   it.each([NO_CHANGES_REASON, "No updates are to be performed."])("treats a change set with no changes as success and deletes it (%s)", async (reason) => {
@@ -1024,7 +1034,7 @@ describe("templates engine", () => {
     const tampered = join(releaseDir, "tampered.zip");
     await writeFile(tampered, "changed after load");
     const release = { ...makeRelease(), packagePath: () => tampered };
-    const fake = fakeClients({ HeadObject: [notFound()] });
+    const fake = fakeClients({ DescribeStacks: [protectedStack("UPDATE_COMPLETE")], HeadObject: [notFound()] });
     await expect(deployer(fake, { release }).deploy(request("control-plane"))).rejects.toThrow(
       `release file packages/${CONTROL_PLANE_ASSET}.zip does not match release.json`,
     );
@@ -1129,4 +1139,102 @@ describe("templates engine", () => {
       await expect(engine.outputs("agentx-staging-slack")).rejects.toThrow("not allowed");
     });
   });
+});
+
+// The final engine parameters are checked, including hosts carried forward by upgrades.
+it("blocks a control-plane install on an old gateway before any AWS mutation", async () => {
+  const transport = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ ok: true }));
+  try {
+    const clients = fakeClients({ DescribeStacks: [stackAbsent("agentx-staging-control-plane")] });
+    const engine = templatesDeployer({ clients: clients.clients, release: makeRelease(), env: "test", region: "us-east-1", artifactBucket: () => "unused" });
+    await expect(engine.deploy(request("control-plane", { parameters: { CoreModelGatewayHost: "gateway.example" } }))).rejects.toThrow("gateway must serve run prices");
+    expect(clients.names()).toEqual(["cloudFormation:DescribeStacks"]);
+  } finally { transport.mockRestore(); }
+});
+
+it("stops before uploads or a change set when the deployed stack read fails", async () => {
+  const transport = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ runPrice: { version: 1, admissionVersion: 1, snapshotVersion: 7 } }));
+  const readError = awsError("Throttling", "DescribeStacks throttled", 429);
+  try {
+    const release = makeRelease(() => JSON.stringify({
+      Parameters: { CoreModelGatewayHost: { Type: "String" }, CoreAgentModel: { Type: "String" } },
+      Resources: {}, Outputs: { ModelRunPriceVersion: { Value: "1" } },
+    }));
+    const clients = fakeClients({ HeadObject: [notFound()], PutObject: [{}], DescribeStacks: [readError] });
+    const engine = templatesDeployer({ clients: clients.clients, release, env: "test", region: "us-east-1", artifactBucket: () => "unused" });
+    const error = await engine.deploy(request("control-plane", { parameters: { CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6" } })).then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expect(clients.names()).toEqual(["cloudFormation:DescribeStacks"]);
+    expect(clients.inputs("CreateChangeSet")).toEqual([]);
+    expect(clients.inputs("PutObject")).toEqual([]);
+    expect(transport).not.toHaveBeenCalled();
+    expect(error).toBe(readError);
+  } finally { transport.mockRestore(); }
+});
+
+it("preserves the selected broker artifact without rewriting model constraints", async () => {
+  const text = brokerTemplate();
+  const fake = fakeClients({ HeadObject: [{ Metadata: { sha256: sha256(zipBytes[CONTROL_PLANE_ASSET]!) } }], PutObject: [{}],
+    DescribeStacks: [protectedStack("UPDATE_COMPLETE"), protectedStack("UPDATE_COMPLETE")], CreateChangeSet: [{}],
+    DescribeChangeSet: [{ Status: "FAILED", StatusReason: NO_CHANGES_REASON }], DeleteChangeSet: [{}] });
+  await deployer(fake, { release: makeRelease(() => text) }).deploy(request("control-plane"));
+  expect(String(fake.inputs("PutObject")[0]!.Body)).toBe(text);
+});
+
+it("never advertises a price-serving broker for an older release", async () => {
+  const transport = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ runPrice: { version: 1, admissionVersion: 1, snapshotVersion: 1 } }));
+  try {
+    const fake = fakeClients({ DescribeStacks: [protectedStack("UPDATE_COMPLETE")] });
+    await expect(deployer(fake, { release: makeRelease(() => "{}") }).deploy(request("control-plane", { parameters: { CoreModelGatewayHost: "gateway.example" } }))).rejects.toThrow("release must contain a price-serving broker");
+    expect(fake.inputs("PutObject")).toEqual([]);
+  } finally { transport.mockRestore(); }
+});
+
+
+// A fresh install supplies its gateway/model before the first control-plane write.
+it.each(["CREATE", "UPDATE"] as const)("installs a configured broker directly on %s", async (operation) => {
+  const source = Template.fromStack(new ControlPlaneStack(new App(), "FirstGatewayControlPlane", { naming: environmentNaming("staging") })).toJSON() as {
+    Outputs: Record<string, { Value: unknown }>;
+  };
+  const parameters = { CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6" };
+  const uploadedOutputs = (): Array<{ OutputKey: string; OutputValue: string }> => {
+    const uploaded = JSON.parse(String(fake.inputs("PutObject")[0]!.Body)) as typeof source;
+    return Object.entries(uploaded.Outputs).flatMap(([OutputKey, { Value }]) => typeof Value === "string" ? [{ OutputKey, OutputValue: Value }] : []);
+  };
+  const fake = fakeClients({
+    HeadObject: [{ Metadata: { sha256: sha256(zipBytes[CONTROL_PLANE_ASSET]!) } }], PutObject: [{}],
+    DescribeStacks: [operation === "CREATE" ? stackAbsent("agentx-staging-control-plane") : protectedStack("UPDATE_COMPLETE"),
+      { Stacks: [{ StackStatus: operation === "CREATE" ? "CREATE_COMPLETE" : "UPDATE_COMPLETE", EnableTerminationProtection: true, get Outputs() { return uploadedOutputs(); } }] }],
+    CreateChangeSet: [{}], DescribeChangeSet: [ready(), executed()], ExecuteChangeSet: [{}],
+  });
+  const outputs = await deployer(fake, { release: makeRelease(() => JSON.stringify(source)) }).deploy(request("control-plane", { parameters }));
+  expect(fake.inputs("CreateChangeSet")[0]).toMatchObject({ ChangeSetType: operation,
+    Parameters: Object.entries(parameters).map(([ParameterKey, ParameterValue]) => ({ ParameterKey, ParameterValue })) });
+  expect(outputs.ModelRunPriceVersion).toBe("1");
+});
+
+it.each(["unchanged", "changed-host", "first-host", "changed-model", "first-model"] as const)("templates engine compares proposed and deployed gateway settings (%s)", async (change) => {
+  const parameters = { CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6" };
+  const previous = { ...parameters };
+  if (change === "changed-host") previous.CoreModelGatewayHost = "old.example";
+  if (change === "first-host") previous.CoreModelGatewayHost = "";
+  if (change === "changed-model") previous.CoreAgentModel = "claude-haiku-5-5";
+  if (change === "first-model") previous.CoreAgentModel = "";
+  const current = { Stacks: [{ StackStatus: "UPDATE_COMPLETE", EnableTerminationProtection: true,
+    Outputs: [{ OutputKey: "ModelRunPriceVersion", OutputValue: "1" }],
+    Parameters: Object.entries(previous).map(([ParameterKey, ParameterValue]) => ({ ParameterKey, ParameterValue })) }] };
+  const fake = fakeClients({ DescribeStacks: [current, protectedStack("UPDATE_COMPLETE", { ModelRunPriceVersion: "1" })],
+    HeadObject: [{ Metadata: { sha256: sha256(zipBytes[CONTROL_PLANE_ASSET]!) } }], PutObject: [{}], CreateChangeSet: [{}],
+    DescribeChangeSet: [{ Status: "FAILED", StatusReason: NO_CHANGES_REASON }], DeleteChangeSet: [{}] });
+  const text = JSON.stringify({ Parameters: {}, Resources: {}, Outputs: { ModelRunPriceVersion: { Value: "1" } } });
+  const transport = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("private upstream detail"));
+  try {
+    const run = deployer(fake, { release: makeRelease(() => text) }).deploy(request("control-plane", { parameters }));
+    await expect(run).rejects.toThrow("gateway must serve run prices");
+    expect(fake.inputs("PutObject")).toEqual([]);
+    expect(fake.inputs("CreateChangeSet")).toEqual([]);
+    expect(transport).toHaveBeenCalledTimes(1);
+  } finally { transport.mockRestore(); }
 });

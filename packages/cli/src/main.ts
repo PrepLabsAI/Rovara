@@ -1397,6 +1397,8 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--openai-secret-arn <arn>", "a Secrets Manager secret you made yourself holding the raw OpenAI API key; init then asks for no key")
     .option("--orchestrator-model <id>", "Provider model id for the Slack orchestrator", DEFAULT_ORCHESTRATOR_MODEL)
     .option("--classifier-model <id>", "Provider model id for the gate classifier", DEFAULT_CLASSIFIER_MODEL)
+    .option("--model-gateway-url <origin>", "Required signed-price model gateway HTTPS origin")
+    .option("--agent-model <id>", "Required core agent model offered by the gateway")
     .option("--worker-model <id>", "Provider model id for the runtime worker", DEFAULT_WORKER_MODEL)
     .option("--alert-email <address>", "email address AgentX sends alerts to")
     .option("--alert-webhook-file <path>", "file holding a PagerDuty or Opsgenie integration address (kept secret)")
@@ -1509,6 +1511,8 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
           dir: options.export,
           region: options.region,
           releaseDir: options.release,
+          ...(options.modelGatewayUrl === undefined ? {} : { modelGatewayUrl: options.modelGatewayUrl }),
+          ...(options.agentModel === undefined ? {} : { agentModel: options.agentModel }),
           identity: options.identity,
           orchestratorModel: exportModel("orchestrator", options.orchestratorProvider),
           classifierModel: exportModel("classifier", options.classifierProvider),
@@ -1682,6 +1686,7 @@ function parsePort(value: string): number {
 }
 
 interface InitCommandOptions extends SignInCommandOptions {
+  modelGatewayUrl?: string; agentModel?: string;
   region?: string; account?: string; release?: string; engine?: "templates" | "cdk"; source?: string;
   resume: boolean; yes: boolean; browser: boolean; fromBundle?: string; stopAfter?: string;
   /** --ui / --no-ui. Undefined when neither was given (resolveUiMode decides). */
@@ -1708,6 +1713,15 @@ interface InitCommandOptions extends SignInCommandOptions {
   asanaClientId?: string; asanaClientSecretFile?: string; asanaClientSecretEnv?: string; asanaBotEmail?: string; asanaProject?: string;
 }
 
+function validateInitSetupOptions(options: InitCommandOptions): void {
+  if ((options.setupTable === undefined) !== (options.setupUrl === undefined)) {
+    throw agentXError("CONFIG_INVALID", "--setup-table and --setup-url go together");
+  }
+  if (options.setupTable !== undefined && (options.ui === false || options.yes)) {
+    throw agentXError("CONFIG_INVALID", "--setup-table asks every question on the setup page; leave out --no-ui and --yes");
+  }
+}
+
 /** `agentx init`'s options, built from only what was typed: a commander default (the models,
  * --identity, --no-alerts's true) must never silently answer a question init would otherwise ask. */
 function initOptions(globals: GlobalOptions, options: InitCommandOptions, command: Command): InitOptions {
@@ -1730,6 +1744,7 @@ function initOptions(globals: GlobalOptions, options: InitCommandOptions, comman
   });
   const typed = <T>(name: string, value: T): T | undefined => (command.getOptionValueSource(name) === "cli" ? value : undefined);
   const flags = definedEntries<InitFlags>({
+    modelGatewayUrl: options.modelGatewayUrl, agentModel: options.agentModel,
     engine: options.engine,
     identity: typed("identity", options.identity),
     oidcIssuer: options.oidcIssuer, oidcAudience: options.oidcAudience, oidcClientId: options.oidcClientId,
@@ -1758,12 +1773,7 @@ function initOptions(globals: GlobalOptions, options: InitCommandOptions, comman
   if (preMadeGiven && (appId === undefined || installationId === undefined || keySource === undefined)) {
     throw agentXError("CONFIG_INVALID", "--github-app-id, --github-installation-id and --github-private-key-file (or --github-private-key-env) go together");
   }
-  if ((options.setupTable === undefined) !== (options.setupUrl === undefined)) {
-    throw agentXError("CONFIG_INVALID", "--setup-table and --setup-url go together");
-  }
-  if (options.setupTable !== undefined && (options.ui === false || options.yes)) {
-    throw agentXError("CONFIG_INVALID", "--setup-table asks every question on the setup page; leave out --no-ui and --yes");
-  }
+  validateInitSetupOptions(options);
   const signin = signInFlags(options);
   const secretFlags = definedEntries<SecretFlags>({
     slackBotToken: secretSource(options.slackBotTokenFile, options.slackBotTokenEnv),

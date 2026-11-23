@@ -1,3 +1,5 @@
+import { runPriceFor } from "../support/hosted-run-price.js";
+import { signedRunPriceResponse } from "../support/signed-run-price-fetch.js";
 // Lead 4 L4-HW2: the hosted lessons' learning port (core-host/hosted-learning.ts) over the gateway's learning route. An injected fetch stands in for the gateway; nothing reaches a network and no key exists.
 // What is proved: the token names ONLY the learning step and the port's own company; the company is never a call's argument; every "unknown" (no gateway, no signer, a non-Claude agent model, no project, another
 // company's workspace) is a refusal with nothing sent; a gateway pause is a fixed code and nothing is echoed; two companies never share a token.
@@ -37,7 +39,7 @@ const refusal = (status: number, type: string, reason?: string) =>
 interface Seen { url: string; init: RequestInit }
 function recording(answer: (n: number) => Response | Promise<Response> = () => reply()) {
   const seen: Seen[] = [];
-  const fetchImpl = vi.fn(async (url: unknown, init?: RequestInit) => { seen.push({ url: String(url), init: init ?? {} }); return answer(seen.length - 1); }) as unknown as typeof fetch;
+  const fetchImpl = vi.fn(async (url: unknown, init?: RequestInit) => { const quote = signedRunPriceResponse(String(url), [ORG_A, ORG_B], [MODEL, CORE_LEARNING_MODEL_DEFAULT], NOW, GATEWAY); if (quote !== undefined) return quote; if (String(url).includes("/rate-quote?")) return Response.json({ state: "unavailable" }); seen.push({ url: String(url), init: init ?? {} }); return answer(seen.length - 1); }) as unknown as typeof fetch;
   return { seen, fetchImpl };
 }
 const tokenOf = (seen: Seen) => (seen.init.headers as Record<string, string>)["x-api-key"]!;
@@ -53,19 +55,18 @@ const refusedWith = async (action: Promise<unknown>) => {
 };
 
 describe("the per-call cap is Code's (the gateway reads no budget)", () => {
-  it("worst case = every prompt byte as one input token + every output token, from the catalog's list prices, rounded up (claude-sonnet-5: $2 in, $10 out, $2.5 cache write per million)", () => {
-    expect(worstCaseUsd(MODEL, { system: "a".repeat(1_000), user: "b".repeat(9_000), maxOutputTokens: 1_800 })).toBeCloseTo(((10_000 + 256) * 2.5 + 1_800 * 10) / 1_000_000, 6);
-    // Multi-byte text counts by bytes, never fewer.
-    expect(worstCaseUsd(MODEL, { system: "", user: "é".repeat(100), maxOutputTokens: 1 })).toBeCloseTo(((200 + 256) * 2.5 + 10) / 1_000_000, 6);
-    expect(worstCaseUsd("claude-not-a-model-9", { system: "", user: "x", maxOutputTokens: 10 })).toBeUndefined();
-    expect(worstCaseUsd(MODEL, { system: "", user: "x", maxOutputTokens: 0 })).toBeUndefined();
+  const exact = { ...runPriceFor(MODEL, NOW), companyId: ORG_A };
+  it("bounds the serialized request at the signed gateway rates, including JSON escapes and framing", () => {
+    // 1100 serialized bytes + 256 framing tokens; max(input=10, cacheWrite=30, cacheRead=2); 1800 output at 40.
+    expect(worstCaseUsd(exact, { system: "a".repeat(1_000), user: "x", maxOutputTokens: 1_800 })).toBe(0.11268);
+    expect(worstCaseUsd(exact, { system: "", user: "x", maxOutputTokens: 0 })).toBeUndefined();
   });
 
   it("quote answers the worst case, or why not: another company's workspace, a call above its cap, a model nobody priced", async () => {
     const r = recording();
     const port = factory(r.fetchImpl)(ORG_A)!;
     const request = { ...call(ORG_A), maxHoldUsd: 0.15 };
-    expect(await port.model.quote!(request)).toEqual({ ok: true, usd: worstCaseUsd(MODEL, request) });
+    expect(await port.model.quote!(request)).toEqual({ ok: true, usd: worstCaseUsd(exact, request) });
     expect(await port.model.quote!({ ...request, maxHoldUsd: 0.000001 })).toEqual({ ok: false, code: "cost_too_high" });
     expect(await port.model.quote!({ ...request, user: "x".repeat(200_000) })).toEqual({ ok: false, code: "cost_too_high" });
     expect(await port.model.quote!({ ...request, workspaceId: ORG_B })).toEqual({ ok: false, code: "no_provider" });
@@ -202,5 +203,38 @@ describe("the learning model", () => {
     const error = await port.model.complete(call(ORG_A)).then(() => undefined, (caught: unknown) => caught);
     expect((error as Error).message).toBe("The learning model could not be chosen.");
     expect(r.seen).toEqual([]);
+  });
+});
+
+
+describe("learning signs the gateway price it bounded", () => {
+  it.each([undefined, { estimated: true }, { companyId: ORG_B }, { model: "claude-other-5" }, { expiresAt: NOW }])("refuses unavailable price authority before inference (%j)", async change => {
+    let posts = 0;
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      if (init?.method === "POST") { posts++; return reply(); }
+      return Response.json({ runPrice: change === undefined ? undefined : { ...runPriceFor(MODEL, NOW), companyId: ORG_A, ...change } });
+    };
+    const port = factory(fetchImpl)(ORG_A)!;
+    expect(await port.model.quote!(call(ORG_A))).toEqual({ ok: false, code: "no_suitable_model" });
+    expect((await refusedWith(port.model.complete(call(ORG_A)))).code).toBe("no_suitable_model");
+    expect(posts).toBe(0);
+  });
+
+  it("rechecks a changed quote against the cap, and uses exactly one price read per completion", async () => {
+    let reads = 0;
+    const seen: Seen[] = [];
+    const fetchImpl: typeof fetch = async (url, init) => {
+      if (init?.method === "GET") return Response.json({ runPrice: { ...runPriceFor(MODEL, NOW), companyId: ORG_A, outputUsdPerMillion: ++reads === 1 ? 40 : 400 } });
+      seen.push({ url: typeof url === "string" ? url : url instanceof URL ? url.href : url.url, init: init ?? {} }); return reply();
+    };
+    const port = factory(fetchImpl)(ORG_A)!;
+    expect((await port.model.quote!(call(ORG_A))).ok).toBe(true);
+    expect((await refusedWith(port.model.complete(call(ORG_A)))).code).toBe("cost_too_high");
+    expect(reads).toBe(2);
+    expect(seen).toEqual([]);
+    reads = 0;
+    await port.model.complete(call(ORG_A));
+    expect(reads).toBe(1);
+    expect(claimsOf(tokenOf(seen[0]!)).runPrice).toMatchObject({ companyId: ORG_A, model: MODEL, outputUsdPerMillion: 40 });
   });
 });

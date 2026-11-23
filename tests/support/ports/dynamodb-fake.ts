@@ -472,6 +472,7 @@ export class FakeDynamoDb implements DynamoDbSender {
   readonly indexes: readonly IndexDefinition[];
   readonly ttlAttribute: string | undefined;
   readonly #items = new Map<string, Item>();
+  readonly #transactionTables = new Map<string, FakeDynamoDb>();
   readonly #listeners: ((record: DynamoStreamRecord) => void)[] = [];
   readonly #faults: Fault[] = [];
   #unprocessed = 0;
@@ -486,6 +487,11 @@ export class FakeDynamoDb implements DynamoDbSender {
     this.ttlAttribute = options.ttlAttribute;
     this.#pageBytes = options.pageBytes ?? 1_048_576;
     this.#sequence = options.firstSequence ?? 9_999_999_990n;
+  }
+
+  /** Separate physical tables participating in one atomic wire transaction. */
+  joinTransactions(...tables: FakeDynamoDb[]): void {
+    for (const table of [this, ...tables]) for (const peer of [this, ...tables]) table.#transactionTables.set(peer.tableName, peer);
   }
 
   /** Every stream record, at commit, in commit order. */
@@ -705,55 +711,56 @@ export class FakeDynamoDb implements DynamoDbSender {
   #transact(input: TransactWriteItemsCommand["input"]): unknown {
     const steps = input.TransactItems ?? [];
     if (steps.length === 0 || steps.length > 100) throw validation("Member must have length less than or equal to 100");
-    type Planned = { id: string; key: Item; kind: "put" | "update" | "delete" | "check"; item?: Item; plan?: UpdatePlan; condition?: Cond | undefined };
+    type Planned = { table: FakeDynamoDb; id: string; key: Item; kind: "put" | "update" | "delete" | "check"; item?: Item; plan?: UpdatePlan; condition?: Cond | undefined };
     const planned: Planned[] = [];
     let bytes = 0;
     for (const step of steps) {
       const action = step.Put ?? step.Update ?? step.Delete ?? step.ConditionCheck;
       if (action === undefined || [step.Put, step.Update, step.Delete, step.ConditionCheck].filter((entry) => entry !== undefined).length !== 1) throw validation("A TransactWriteItem has exactly one action");
-      this.#table(action.TableName);
+      const table = action.TableName === this.tableName ? this : this.#transactionTables.get(action.TableName ?? "");
+      if (table === undefined) { this.#table(action.TableName); throw validation("unknown transaction table"); }
       const scope = new Placeholders(action.ExpressionAttributeNames, action.ExpressionAttributeValues);
       const condition = action.ConditionExpression === undefined ? undefined : parseCondition(action.ConditionExpression, scope);
       if (step.Put !== undefined) {
         scope.assertAllUsed();
-        this.#checkItem(step.Put.Item ?? {});
+        table.#checkItem(step.Put.Item ?? {});
         bytes += itemSize(step.Put.Item ?? {});
-        planned.push({ id: this.#id(step.Put.Item ?? {}), key: { pk: step.Put.Item!.pk!, sk: step.Put.Item!.sk! }, kind: "put", item: step.Put.Item!, condition });
+        planned.push({ table, id: this.#id(step.Put.Item ?? {}), key: { pk: step.Put.Item!.pk!, sk: step.Put.Item!.sk! }, kind: "put", item: step.Put.Item!, condition });
       } else if (step.Update !== undefined) {
         const plan = parseUpdate(step.Update.UpdateExpression ?? "", scope);
         scope.assertAllUsed();
         checkUpdatePlan(plan);
-        planned.push({ id: this.#keyId(step.Update.Key), key: step.Update.Key!, kind: "update", plan, condition });
+        planned.push({ table, id: this.#keyId(step.Update.Key), key: step.Update.Key!, kind: "update", plan, condition });
       } else if (step.Delete !== undefined) {
         scope.assertAllUsed();
-        planned.push({ id: this.#keyId(step.Delete.Key), key: step.Delete.Key!, kind: "delete", condition });
+        planned.push({ table, id: this.#keyId(step.Delete.Key), key: step.Delete.Key!, kind: "delete", condition });
       } else {
         if (condition === undefined) throw validation("A ConditionCheck needs a ConditionExpression");
         scope.assertAllUsed();
-        planned.push({ id: this.#keyId(step.ConditionCheck!.Key), key: step.ConditionCheck!.Key!, kind: "check", condition });
+        planned.push({ table, id: this.#keyId(step.ConditionCheck!.Key), key: step.ConditionCheck!.Key!, kind: "check", condition });
       }
     }
-    if (new Set(planned.map((entry) => entry.id)).size !== planned.length) throw validation("Transaction request cannot include multiple operations on one item");
+    if (new Set(planned.map((entry) => `${entry.table.tableName}\u0000${entry.id}`)).size !== planned.length) throw validation("Transaction request cannot include multiple operations on one item");
     if (bytes > 4 * 1_024 * 1_024) throw validation("Transaction size has exceeded the maximum allowed size");
     const reasons: CancellationReason[] = [];
-    const results: { id: string; old: Item | undefined; next: Item | undefined; write: boolean }[] = [];
+    const results: { table: FakeDynamoDb; id: string; old: Item | undefined; next: Item | undefined; write: boolean }[] = [];
     for (const entry of planned) {
-      const old = this.#items.get(entry.id);
+      const old = entry.table.#items.get(entry.id);
       if (entry.condition !== undefined && !evalCondition(old, entry.condition)) {
         reasons.push({ Code: "ConditionalCheckFailed", Message: "The conditional request failed" });
-        results.push({ id: entry.id, old, next: old, write: false });
+        results.push({ table: entry.table, id: entry.id, old, next: old, write: false });
         continue;
       }
       try {
         const next = entry.kind === "put" ? entry.item! : entry.kind === "update" ? applyUpdate(old, structuredClone(entry.key), entry.plan!) : entry.kind === "delete" ? undefined : old;
-        if (next !== undefined && entry.kind !== "check") this.#checkItem(next);
+        if (next !== undefined && entry.kind !== "check") entry.table.#checkItem(next);
         reasons.push({ Code: "None" });
-        results.push({ id: entry.id, old, next, write: entry.kind !== "check" });
+        results.push({ table: entry.table, id: entry.id, old, next, write: entry.kind !== "check" });
       } catch (error) {
         // (The SDK's exception base class resets the prototype, so a validation error is known by its name.)
         if (!(error instanceof ItemError) && (error as Error).name !== "ValidationException") throw error;
         reasons.push({ Code: "ValidationError", Message: (error as Error).message });
-        results.push({ id: entry.id, old, next: old, write: false });
+        results.push({ table: entry.table, id: entry.id, old, next: old, write: false });
       }
     }
     if (reasons.some((reason) => reason.Code !== "None")) {
@@ -761,9 +768,9 @@ export class FakeDynamoDb implements DynamoDbSender {
     }
     for (const result of results) {
       if (!result.write) continue;
-      if (result.next === undefined) this.#items.delete(result.id);
-      else this.#items.set(result.id, structuredClone(result.next));
-      this.#emit(result.old, result.next, false);
+      if (result.next === undefined) result.table.#items.delete(result.id);
+      else result.table.#items.set(result.id, structuredClone(result.next));
+      result.table.#emit(result.old, result.next, false);
     }
     return { $metadata: {} };
   }

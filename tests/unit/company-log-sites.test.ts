@@ -27,7 +27,7 @@ import ts from "typescript";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { expectLinearScaling } from "./../support/scaling.js";
-const MAX_FILES = 1600, MAX_BYTES = 20 * 1024 * 1024, MAX_MS = 30_000; // files: 1200 -> 1600 when the batch of 2026-11-16 put 1205 sources under the roots
+const MAX_FILES = 1700, MAX_BYTES = 20 * 1024 * 1024, MAX_MS = 30_000; // Code train 6 holds 1612 sources (room for the next lanes); byte/time bounds and fail-closed scanning stay fixed.
 const roots = ["packages/broker/src", "packages/aws-adapters/src", "packages/local-adapters/src"];
 function scan(sources: readonly { path: string; source: string }[], clock = () => performance.now(), began = clock()): Record<string, number> {
   let bytes = 0;
@@ -129,9 +129,9 @@ it("two real dispatch flows capture only the consumer company and no foreign can
   for (const [own, other] of [[A, B], [B, A]] as const) {
     const h = createHarness(); h.deps.companyId = own; const lines: Record<string, unknown>[] = [];
     h.deps.log = (line) => { lines.push(line); };
-    await (await h.queues.queue("task-dispatch")).enqueue({ body: { v: 1, companyId: other, workspaceId: `canary-${other}`, operationId: `canary-${other}` } });
+    const sent = await (await h.queues.queue("task-dispatch")).enqueue({ body: { v: 1, companyId: other, workspaceId: `canary-${other}`, operationId: `canary-${other}` } });
     expect((await runDispatchOnce(h.deps)).foreign).toBe(1);
-    expect(lines).toEqual([{ companyId: own, component: "task-flow", event: "task_flow.dispatch_foreign" }]);
+    expect(lines).toEqual([{ companyId: own, component: "task-flow", event: "task_flow.dispatch_foreign" }, { companyId: own, component: "task-flow", event: "task_flow.dispatch_delivery", operationId: null, attempt: null, stateAtReceipt: "unread", decision: "defer-foreign", messageId: sent.messageId, receiveCount: 1 }]);
     expect(JSON.stringify(lines)).not.toContain(other);
   }
 });

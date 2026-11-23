@@ -280,6 +280,12 @@ export const WikiAnswerRecordWriteSchema = z.object({
   outcome: z.enum(["answered", "partly", "dont_know"]),
   sources: z.array(WikiCitationSchema).max(8),
   pagesRead: z.array(WikiPageIdSchema).max(20),
+  taskId: WikiTaskIdSchema.optional(),
+  threadId: z.string().regex(/^[A-Za-z0-9_.:-]{1,100}$/u).optional(),
+  /** Task-state sources are never code evidence for wiki corrections. n preserves mixed-source numbering. */
+  taskSources: z.array(z.object({ n: z.number().int().min(1).max(8), kind: z.literal("task_state"), taskId: WikiTaskIdSchema, quote: z.string().min(20).max(600) }).strict()).max(8).optional(),
+  /** The positions of code sources when task-state sources occur between them. */
+  codeSourceNumbers: z.array(z.number().int().min(1).max(8)).max(8).optional(),
 }).strict();
 export type WikiAnswerRecordWrite = z.infer<typeof WikiAnswerRecordWriteSchema>;
 /** `notRight`: the asker pressed "Not right" on this answer (J5; the one change a record gets after it is written). */
@@ -470,9 +476,10 @@ export interface WikiStore {
   readAnswer(project: string, answerId: string): Promise<WikiAnswerRecord | undefined>;
   /**
    * The project's answer records that have not expired, in key order (J5: the gap list is read from them), at most `scanMax` of them; `more` is true when there were more rows than that. Records carry their asker's id:
-   * the caller must never show it.
+   * the caller must never show it. Without a scope, task-private records are excluded;
+   * a task scope selects only that task's records written by the given asker.
    */
-  listAnswers(project: string, scanMax: number): Promise<{ records: WikiAnswerRecord[]; more: boolean }>;
+  listAnswers(project: string, scanMax: number, scope?: { taskId: string; askedBy: string }): Promise<{ records: WikiAnswerRecord[]; more: boolean }>;
   /** The asker presses "Not right" (J5): sets the record's `notRight` once. `marked` the first time, `already` after, undefined when there is no such record, it has expired, or it is not this person's. */
   markAnswerNotRight(project: string, answerId: string, personId: string): Promise<"marked" | "already" | undefined>;
   /** Deletes up to `limit` (default and most `WIKI_ANSWER_SWEEP_MAX`) answer records of the project whose time is past. Answers how many went. */

@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { GetCommand, QueryCommand, TransactWriteCommand, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
-import { BUILT_IN_SIGN_IN_METHODS, SlackThreadSchema, agentXError, cleanDisplayName, redactAndCap, slackThreadUrl } from "@agentx/contracts";
+import { AgentXError, BUILT_IN_SIGN_IN_METHODS, SlackThreadSchema, agentXError, cleanDisplayName, redactAndCap, slackThreadUrl } from "@agentx/contracts";
 import type { DeveloperCaller } from "../aws/developer-routes.js";
-import type { ProjectAccessSubject, TaskPersonIdentity } from "./task-person-identity.js";
+import { isHostedTaskProvider, type ProjectAccessSubject, type TaskPersonIdentity } from "./task-person-identity.js";
 import type { TaskPeopleDisplayAdmission } from "./task-people-display-budget.js";
 import {
   isSlackTaskPerson, parseTaskPeopleEntry, parseTaskPersonIdentity, taskPeopleEntryOf, taskPersonIdentitySuffix, taskPersonKindOf,
@@ -608,10 +608,18 @@ export async function resolveTaskPeopleAccess(
   };
 }
 
+/** The no-checker exception is confined to the hosted creator's unchanged, sole-owner list. */
+function hostedCreatorOnly(task: DeveloperTaskRecord, people: TaskPeople): boolean {
+  const creator = people.people[0];
+  return isHostedTaskProvider(task.provider) && people.people.length === 1
+    && creator?.role === "owner" && creator.developerId === task.developerId;
+}
+
 /**
  * Fresh effective owners for a system successor/final delivery. Missing PEOPLE preserves legacy
  * work. Definite proof loss is ownerless; proof transport or malformed proof remains UNKNOWN and
- * must be parked by the caller without rewriting the sidecar.
+ * must be parked by the caller without rewriting the sidecar. With no checker, DEC 254zzz393
+ * preserves hosted creator-only dispatch, bound to this revision and the creator actor key.
  */
 export async function resolveTaskDispatchPeople(
   deps: Pick<TaskPeopleDependencies, "documentClient" | "tableName" | "checkTaskPerson">,
@@ -620,7 +628,12 @@ export async function resolveTaskDispatchPeople(
   const people = await loadPeople(deps, task.taskId);
   if (people === undefined) return undefined;
   if (people.orphaned) return { peopleRevision: people.revision, ownerActorIds: [], status: "OWNERLESS" };
-  if (deps.checkTaskPerson === undefined) return { peopleRevision: people.revision, ownerActorIds: [], status: "UNKNOWN" };
+  if (deps.checkTaskPerson === undefined) {
+    if (hostedCreatorOnly(task, people)) {
+      return { peopleRevision: people.revision, ownerActorIds: [taskOwnerKey(task.developerId, task.taskId)], status: "ALLOWED" };
+    }
+    return { peopleRevision: people.revision, ownerActorIds: [], status: "UNKNOWN" };
+  }
   const owners: string[] = [];
   let unknown = false;
   for (const person of people.people) {
@@ -636,6 +649,19 @@ export async function resolveTaskDispatchPeople(
   return { peopleRevision: people.revision, ownerActorIds: [], status: unknown ? "UNKNOWN" : "OWNERLESS" };
 }
 
+/** Only a task's own reader gets their specific proof refusal on the People view. Shared access checks always mask it. */
+async function checkHostedPeopleViewCaller(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, caller: DeveloperCaller,
+  admission?: TaskPeopleDisplayAdmission): Promise<void> {
+  if (!isHostedTaskProvider(task.provider)) return;
+  const people = await loadPeople(deps, task.taskId);
+  const entry = people?.people.find(person => person.developerId === caller.developerId);
+  if (people === undefined ? caller.developerId !== task.developerId : entry === undefined || entry.role === "denied") return;
+  try { await checkedFresh(deps, task, caller.developerId, admission); } catch (error) {
+    if (error instanceof AgentXError) throw error;
+    return denied();
+  }
+}
+
 export async function getTaskPeople(deps: TaskPeopleDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskPeopleView> {
   const optional = deps.createTaskPeopleDisplayAdmission?.();
   if (optional === undefined) return getUnsharedTaskPeople(deps, caller, taskId);
@@ -644,6 +670,7 @@ export async function getTaskPeople(deps: TaskPeopleDependencies, caller: Develo
     admission.assertOpen();
     const task = await loadTask(deps, taskId);
     admission.assertOpen();
+    await checkHostedPeopleViewCaller(deps, task, caller, admission);
     const people = await currentPeopleForCaller(deps, task, caller, false, admission);
     await authorizedRead(deps, task, people, caller, admission);
     // C3: a task with no Slack share has no channel directory to list; its People are exactly its registered people, each proved on its own path.
@@ -663,15 +690,17 @@ export async function getTaskPeople(deps: TaskPeopleDependencies, caller: Develo
  * needs the admission and its complete channel directory, exactly as before.
  */
 async function getUnsharedTaskPeople(deps: TaskPeopleDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskPeopleView> {
-  // One answer for every refusal here (a missing task, a shared one, a person without access), exactly the answer before C3, so it tells
-  // nobody whether a task exists or is shared.
+  // Hosted tasks preserve the proof/authorization refusal. Legacy/no-task display capability keeps its existing answer.
+  let task: DeveloperTaskRecord | undefined;
   try {
-    const task = await loadTask(deps, taskId);
+    task = await loadTask(deps, taskId);
     if (task.share !== undefined) return unavailable();
+    await checkHostedPeopleViewCaller(deps, task, caller);
     const people = await currentPeopleForCaller(deps, task, caller, false);
     await authorizedRead(deps, task, people, caller);
     return await viewOf(deps, task, people, caller, []);
-  } catch {
+  } catch (error) {
+    if (isHostedTaskProvider(task?.provider)) throw error;
     return unavailable();
   }
 }
@@ -869,4 +898,32 @@ export async function taskOwnershipHandOverSteps(
   }
   preflight([{ Put: { TableName: deps.tableName, Item: { ...peopleKey(task.taskId), ...next } } }, ...items]);
   return { items, steps: items.length };
+}
+
+/** Get-only authority for a stable, already initialized People list. Never reconciles. */
+export async function resolveTaskPeopleReadAccess(
+  deps: { get(key: { pk: string; sk: string }): Promise<unknown>; checkTaskPerson: CheckTaskPerson },
+  task: DeveloperTaskRecord,
+  developerId: string,
+): Promise<{ role: TaskRole; people: TaskPeople; proofs: TaskPersonCheck[] }> {
+  const raw = await deps.get(peopleKey(task.taskId));
+  const people = parsePeople(raw);
+  if (people === undefined || !isRecord(raw) || raw.pk !== taskPk(task.taskId)) return unavailable();
+  const owners = people.people.filter(person => person.role === "owner");
+  if (people.orphaned) return denied();
+  if (owners.length === 0) return unavailable();
+  const proofs: TaskPersonCheck[] = [];
+  for (const owner of owners) {
+    const proof = await checkedFresh(deps, task, owner.developerId);
+    proofs.push(proof);
+    if (taskPersonKindOf(proof.identity) !== "web") return unavailable();
+    if (!proof.eligible || !taskPersonPresent(proof)) return unavailable();
+  }
+  const proof = await checkedFresh(deps, task, developerId);
+  if (taskPersonKindOf(proof.identity) !== "web") return unavailable();
+  const explicit = people.people.find(person => person.developerId === developerId);
+  const role = effectiveRoleFromProof(task, explicit, proof);
+  if (role === null || !taskPersonPresent(proof)) return denied();
+  if (!isDeepStrictEqual(raw, await deps.get(peopleKey(task.taskId)))) return unavailable();
+  return { role, people, proofs: [...proofs, proof] };
 }

@@ -185,7 +185,7 @@ describe("GitHub sign-in (DEC 254h)", () => {
     expect((await w.access((await githubSignIn(w, "octo-verified")).access)).body).toMatchObject({ companyId: X });
   });
 
-  it("an unverified or non-primary email spends nothing; an invite secret admits without an email", async () => {
+  it("an unverified or non-primary email spends nothing; a GitHub identity without verified email cannot redeem an invite", async () => {
     const w = world();
     const owner = await w.setup();
     await w.operator({ kind: "company-preapprove", companyId: X, email: "unverified@example.test", role: "member", expiresInHours: 24 });
@@ -193,13 +193,15 @@ describe("GitHub sign-in (DEC 254h)", () => {
     expect((await githubSignIn(w, "octo-unverified", { company: X })).refused).toBe("not invited");
     expect(w.db.get(membershipKey(gid(1002)).pk, membershipKey(gid(1002)).sk)).toBeUndefined();
     expect(w.db.get(companyScoped(X, "PREAPPROVAL"), emailIndexKey("side@example.test").pk)).toMatchObject({ status: "live" });
-    // The owner (signed in again into X) mints a link secret; the email-less GitHub person joins with it.
+    // The owner (signed in again into X) mints a link secret; the email-less GitHub person is refused.
     void owner;
     const ownerIn = await w.signIn("owner");
     const minted = await w.call("POST", "/v1/dev/company/preapprovals", ownerIn.access, { email: "link@example.test", role: "member", expiresInHours: 24 });
     const secret = (minted.body as { invite: { secret: string } }).invite.secret;
     const joined = await githubSignIn(w, "octo-noemail", { company: X, invite: secret });
-    expect((await w.access(joined.access)).body).toMatchObject({ developerId: gid(1003), companyId: X, joinedByInvite: true });
+    expect(joined.refused).toBe("This sign-in has no verified email. Sign in with the invited email.");
+    expect(w.db.get(membershipKey(gid(1003)).pk, membershipKey(gid(1003)).sk)).toBeUndefined();
+    expect(w.db.get(companyScoped(X, "PREAPPROVAL"), emailIndexKey("link@example.test").pk)).toMatchObject({ status: "live" });
   });
 
   it("a company with its own issuer never takes GitHub: not offered, and refused before any invite is spent", async () => {

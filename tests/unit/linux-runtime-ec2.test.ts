@@ -48,7 +48,7 @@ describe("the steps, read from ci.yml", () => {
     const plan = linuxRuntimeSteps(WORKFLOW);
     const setup = plan.steps.findIndex((step) => step.run.includes("scripts/executor-smoke.ts"));
     const checks = plan.steps.filter((step) => step.run.startsWith("npx vitest run"));
-    expect(checks.length).toBe(10);
+    expect(checks.length).toBe(8);
     for (const check of checks) expect(check.afterStep, check.name).toBe(setup);
     expect(plan.steps.slice(0, setup + 1).every((step) => step.afterStep === undefined)).toBe(true);
     const gated = "      - name: setup\n        id: s1\n        run: echo setup\n      - name: check\n        if: (success() || failure()) && steps.s1.outcome == 'success'\n        run: echo check\n";

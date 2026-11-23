@@ -27,6 +27,7 @@ import {
   type DeveloperTaskFailureCategory,
   type DeveloperTaskShare,
   type DeveloperTaskStatus,
+  type DeveloperTaskView,
   type Operation,
   type RunEstimate,
   type WorkflowSnapshot,
@@ -267,7 +268,7 @@ export function taskOwnerKey(developerId: string, taskId: string): string {
   return createHash("sha256").update(DEVELOPER_TASK_OWNER_ISSUER).update("\0").update(taskOwnerSubject(developerId, taskId)).digest("hex");
 }
 
-export interface OperationFacts { id: string; kind: string; status: string; error?: string | undefined; createdAt: string; updatedAt?: string | undefined; fence?: number | undefined }
+export interface OperationFacts { id: string; kind: string; status: string; workflowMode?: string | undefined; error?: string | undefined; createdAt: string; updatedAt?: string | undefined; fence?: number | undefined }
 
 const LIVE = new Set(["ACCEPTED", "DISPATCHING", "RUNNING", "CANCEL_REQUESTED"]);
 
@@ -332,7 +333,8 @@ export function deriveTaskStatus(input: {
   operations: readonly OperationFacts[];
 }): DerivedStatus {
   const closing = input.workspaceStatus === "CLOSING" || input.operations.some((operation) => operation.kind === "close" && LIVE.has(operation.status));
-  const current = currentOperation(input.operations);
+  // Plan checks and design-review rounds are advisory; their outcome never replaces the task's last real run.
+  const current = currentOperation(input.operations.filter((operation) => operation.workflowMode !== "PLAN_CRITIQUE"));
   const withCurrent = current === undefined ? {} : { current };
   if (input.closedAt !== undefined || input.workspaceStatus === "CLOSED") return { status: "CLOSED", closing: false, ...withCurrent };
   if (input.pointer?.cancelledAt !== undefined && current === undefined) return { status: "CANCELLED", closing };
@@ -347,6 +349,20 @@ export function deriveTaskStatus(input: {
     status, closing, current,
     ...(status === "FAILED" || status === "INTERRUPTED" ? { failure: failureOf(current.kind, status, current.error) } : {}),
   };
+}
+
+/** No admission queue exists: only this workspace's active prepare/resume can explain its startup. */
+export function taskStartupView(
+  derived: Pick<DerivedStatus, "status" | "closing">,
+  workspace: { status: string; activeOperationId: string | null } | undefined,
+  operations: readonly OperationFacts[],
+): Pick<DeveloperTaskView, "startupReason"> {
+  if (derived.status !== "STARTING") return {};
+  if (derived.closing) return {};
+  const active = operations.find((operation) => operation.id === workspace?.activeOperationId);
+  const ownMachineStarting = ["PREPARING:prepare", "RESUMING:resume"].includes(`${workspace?.status}:${active?.kind}`)
+    && ["ACCEPTED", "DISPATCHING", "RUNNING"].includes(active?.status ?? "");
+  return { startupReason: ownMachineStarting ? "own-machine-starting" : "unknown" };
 }
 
 export interface StoredEvent { sequence: number; type: string; timestamp: string; payload: unknown }

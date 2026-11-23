@@ -130,7 +130,12 @@ export const AgentXErrorCodeSchema = z.enum([
   // L4-GH (409): the GitHub account a person tries to connect to themselves is another member's of the company; the person already has a different GitHub account connected. Appended: no code changes meaning.
   "GITHUB_ACCOUNT_TAKEN",
   "GITHUB_ACCOUNT_LINK_EXISTS",
+  // Confirmed owner move, but its response could not be read. A 409 for older clients: re-read; never resend blindly.
+  "COMMITTED_REFRESH_NEEDED",
 ]);
+
+/** A confirmed write whose current task view could not be read; never a pre-commit refusal. */
+export const COMMITTED_REFRESH_NEEDED_MESSAGE = "The change was applied. Refresh to read the current task before acting again.";
 
 export const CSRF_STALE_MESSAGE = "Your sign-in changed in another tab. Trying again.";
 

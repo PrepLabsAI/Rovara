@@ -148,6 +148,8 @@ export const factKey = (repository: string | undefined, path: string): string =>
 export interface HeadFacts {
   /** The text of files at the head (keyed by `factKey`), so the heading and fence a changed line sits in is known even when the hunk does not show it. */
   text?: ReadonlyMap<string, string> | undefined;
+  /** Derived document decisions for this exact patch; host readers keep these instead of retaining file bodies. */
+  documents?: ReadonlyMap<string, DocumentFacts> | undefined;
   /** Paths (normalized, keyed by `factKey`) that an instruction file at the head imports or links: a document an instruction file reads is an instruction. */
   instructionImports?: ReadonlySet<string> | undefined;
   /** False when the instruction files could not be read: no document can then be cleared as plain docs. */
@@ -425,6 +427,23 @@ function documentChangesLink(patch: string, headText: string | undefined): boole
     }
   }
   return false;
+}
+
+/** Internal classifier facts; the patch digest prevents reuse when the base changes at the same head. */
+export interface DocumentFacts {
+  patchDigest: string;
+  problem: ReturnType<typeof docsContentProblem>;
+  changesLink: boolean;
+}
+export function documentFactsOf(patch: string, headText: string | undefined, headKnown = true): DocumentFacts {
+  return { patchDigest: createHash("sha256").update(patch).digest("hex"), problem: docsContentProblem(patch, headText, headKnown), changesLink: documentChangesLink(patch, headText) };
+}
+
+function documentFactsFor(file: TierFile, head: HeadFacts | undefined): DocumentFacts {
+  const known = head?.documents?.get(factKey(file.repository, file.path));
+  const patch = file.patch ?? "";
+  if (known?.patchDigest === createHash("sha256").update(patch).digest("hex")) return known;
+  return documentFactsOf(patch, head?.text?.get(factKey(file.repository, file.path)), head !== undefined);
 }
 
 // ---- dependencies in manifests and lock files
@@ -778,6 +797,7 @@ function readFile(file: TierFile, head: HeadFacts | undefined, promptLocations?:
     return reading;
   }
 
+  const documentFacts = () => documentFactsFor(file, head);
   // The docs route is an allowlist on content: plain prose only, in a repository that builds no documentation site, in a document no instruction file reads (`prose`), and not a rewrite. Anything else is not docs.
   let routed = false;
   if (prose && patch !== undefined) {
@@ -786,7 +806,7 @@ function readFile(file: TierFile, head: HeadFacts | undefined, promptLocations?:
     if (patch.added.some((line) => SECRET_LIKE.test(line))) reading.risky.push(here("secret_like_text"));
     if (patch.added.some((line) => hasMixedScriptWord(line))) reading.risky.push(here("confusable_text"));
     reading.addedBytes = patch.added.reduce((total, line) => total + Buffer.byteLength(line) + 1, 0);
-    const problem = docsContentProblem(file.patch!, head?.text?.get(factKey(file.repository, file.path)), head !== undefined);
+    const problem = documentFacts().problem;
     if (problem?.problem === "executes") reading.risky.push(here("docs_executes"));
     else if (problem?.problem === "include") reading.standard.push(here("docs_include"));
     else if (problem?.problem === "not_plain") reading.standard.push(here("docs_not_plain"));
@@ -802,10 +822,10 @@ function readFile(file: TierFile, head: HeadFacts | undefined, promptLocations?:
     if (patch === undefined) {
       // A document whose text cannot be read cannot be cleared of a changed link or command: at least install_link (and it is already risky unless it is a pure rename).
       if (!pureRename) reading.kinds.add("install_link");
-    } else if (documentChangesLink(file.patch!, head?.text?.get(factKey(file.repository, file.path)))) reading.kinds.add("install_link");
+    } else if (documentFacts().changesLink) reading.kinds.add("install_link");
     return reading;
   }
-  if (prose && patch !== undefined && documentChangesLink(file.patch!, head?.text?.get(factKey(file.repository, file.path)))) reading.kinds.add("install_link");
+  if (prose && patch !== undefined && documentFacts().changesLink) reading.kinds.add("install_link");
   // A document that is not on the docs route is read as one (its size is the docs rule's, not a count of code).
   const proseOffRoute = prose && patch !== undefined;
 

@@ -2,6 +2,7 @@
 // own path, the company's own key, its own meter row folded into the company cap, its own monthly limit) is Cloud lane L4-E; the hosted adapter that speaks to it is core-host/gateway-answers.ts. With no gateway
 // configured the hosted wiring passes none, and the service answers the fixed "answers are not set up here yet" outcome (never a dead button).
 import { AnswerModelRefused, type AnswerModel, type AnswerModelReply, type AnswerModelSession, type AnswerModelTurn } from "./ports.js";
+import { rethrowRovaraAiPause } from "@agentx/contracts";
 
 export type AnswersGatewayRefusal = "not_set_up" | "over_budget" | "paused" | "unavailable";
 
@@ -22,7 +23,10 @@ export class AnswersGatewayError extends Error {
   }
 }
 
-const refusalOf = (error: unknown): AnswerModelRefused => new AnswerModelRefused(error instanceof AnswersGatewayError ? error.reason : "unavailable");
+const refusalOf = (error: unknown): AnswerModelRefused => {
+  rethrowRovaraAiPause(error);
+  return new AnswerModelRefused(error instanceof AnswersGatewayError ? error.reason : "unavailable");
+};
 
 /** The model of one company's answers through the gateway. The dollar ceiling is reserved once when an answer opens it, every turn is a call inside that reservation, and the reservation is settled once. */
 export function createGatewayAnswerModel(gateway: AnswersGateway, companyId: string): AnswerModel {

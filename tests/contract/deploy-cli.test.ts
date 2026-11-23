@@ -1,3 +1,4 @@
+import { installGatewayFixture, readyCoreEngine, brokerTemplate } from "../support/install-gateway.js";
 // `agentx deploy` and `agentx init --export`: executeCli end to end, with every AWS-facing piece
 // injected through CliDependencies.deploy (main.ts follows the same pattern env commands use). No
 // AWS is ever touched by any test here.
@@ -20,6 +21,8 @@ import { executeCli } from "../../packages/cli/src/main.js";
 import { writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import { allStackOutputs } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
+
+installGatewayFixture();
 
 const ENV = "staging";
 const REGION = "us-east-1";
@@ -61,8 +64,9 @@ async function emptyReleaseDir(): Promise<string> {
   await mkdir(join(dir, "templates", REGION), { recursive: true });
   for (const part of ["access", "foundation", "identity", "control-plane", "runtime", "slack"]) {
     const file = `templates/${REGION}/${part}.template.json`;
-    await writeFile(join(dir, file), "{}");
-    templates.push({ region: REGION, part, file, sha256: sha256("{}") });
+    const content = part === "control-plane" ? brokerTemplate() : "{}";
+    await writeFile(join(dir, file), content);
+    templates.push({ region: REGION, part, file, sha256: sha256(content) });
   }
   await writeFile(
     join(dir, "release.json"),
@@ -88,7 +92,7 @@ async function fullReleaseDir(): Promise<string> {
   const templates = [];
   await mkdir(join(dir, "templates", REGION), { recursive: true });
   for (const part of parts) {
-    const content = "{}";
+    const content = part === "control-plane" ? brokerTemplate() : "{}";
     const file = `templates/${REGION}/${part}.template.json`;
     await writeFile(join(dir, file), content);
     templates.push({ region: REGION, part, file, sha256: sha256(content) });
@@ -116,6 +120,7 @@ function answersJson(overrides: Record<string, unknown> = {}): Record<string, un
     env: ENV,
     region: REGION,
     account: ACCOUNT,
+    coreEngine: readyCoreEngine,
     models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "us.anthropic.claude-haiku-4-5-20251001-v1:0", worker: "us.anthropic.claude-sonnet-4-6" },
     identity: { mode: "cognito" },
     github: { account: "acme", appId: "123", installationId: "456", privateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf" },
@@ -230,6 +235,7 @@ function scriptedOutputs(): Record<string, StackOutputs> {
       ClientId: "client123",
     },
     [stackName("control-plane")]: {
+      ModelRunPriceVersion: "1",
       ApiEndpoint: `https://abc.execute-api.${REGION}.amazonaws.com`,
       SlackOrchestratorTaskRoleArn: `arn:aws:iam::${ACCOUNT}:role/agentx-staging-control-plane-SlackTask`,
       SlackRequestQueueUrl: `https://sqs.${REGION}.amazonaws.com/${ACCOUNT}/q.fifo`,
@@ -308,7 +314,7 @@ function cleanCdkRunner(scripted: Record<string, StackOutputs>, declared: Partia
         runner.synthDirs.push(outDir);
         const artifacts: Record<string, unknown> = {};
         for (const [part, id] of Object.entries(CDK_CONSTRUCT_IDS) as Array<[DeployPart, string]>) {
-          await writeFile(join(outDir, `${id}.template.json`), JSON.stringify({ Parameters: Object.fromEntries((declared[part] ?? []).map((name) => [name, { Type: "String" }])) }));
+          await writeFile(join(outDir, `${id}.template.json`), JSON.stringify({ Outputs: { ModelRunPriceVersion: { Value: "1" } }, Parameters: Object.fromEntries((declared[part] ?? []).map((name) => [name, { Type: "String" }])) }));
           artifacts[id] = { type: "aws:cloudformation:stack", properties: { templateFile: `${id}.template.json`, stackName: stackName(part) } };
         }
         await writeFile(join(outDir, "manifest.json"), JSON.stringify({ version: "54.0.0", artifacts }));
@@ -333,7 +339,7 @@ describe("agentx init --export", () => {
     const io = capture();
 
     const code = await executeCli(
-      ["--env", ENV, "init", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir],
+      ["--env", ENV, "init", "--model-gateway-url", "https://gateway.example", "--agent-model", "claude-sonnet-4-6", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir],
       { ...io, deploy: { identity: exportIdentity, store: emptyReadOnlyStore } },
     );
 
@@ -366,7 +372,7 @@ describe("agentx init --export", () => {
     const io = capture();
 
     const code = await executeCli(
-      ["init", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir],
+      ["init", "--model-gateway-url", "https://gateway.example", "--agent-model", "claude-sonnet-4-6", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir],
       { ...io, deploy: { identity: throwingIdentity, store: throwingStore } },
     );
 
@@ -385,7 +391,7 @@ describe("agentx init --export", () => {
     store.values.set("/agentx/production/settings", "{}");
 
     const code = await executeCli(
-      ["--env", "production", "init", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir],
+      ["--env", "production", "init", "--model-gateway-url", "https://gateway.example", "--agent-model", "claude-sonnet-4-6", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir],
       { ...io, deploy: { identity: exportIdentity, store } },
     );
 
@@ -402,7 +408,7 @@ describe("agentx init --export", () => {
     const io = capture();
 
     const code = await executeCli(
-      ["--env", ENV, "init", "--export", exportDir, "--region", REGION, "--release", releaseDir],
+      ["--env", ENV, "init", "--model-gateway-url", "https://gateway.example", "--agent-model", "claude-sonnet-4-6", "--export", exportDir, "--region", REGION, "--release", releaseDir],
       { ...io, deploy: { identity, store: emptyReadOnlyStore } },
     );
 
@@ -427,7 +433,7 @@ describe("agentx init --export", () => {
       const io = capture();
 
       const code = await executeCli(
-        ["--env", ENV, "init", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir, "--identity", "oidc", ...flags],
+        ["--env", ENV, "init", "--model-gateway-url", "https://gateway.example", "--agent-model", "claude-sonnet-4-6", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir, "--identity", "oidc", ...flags],
         { ...io, deploy: { identity: throwingIdentity, store: emptyReadOnlyStore } },
       );
 
@@ -444,7 +450,7 @@ describe("agentx init --export", () => {
     const io = capture();
 
     const code = await executeCli(
-      ["--env", ENV, "init", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir, "--identity", "oidc", ...flags],
+      ["--env", ENV, "init", "--model-gateway-url", "https://gateway.example", "--agent-model", "claude-sonnet-4-6", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir, "--identity", "oidc", ...flags],
       { ...io, deploy: { identity: throwingIdentity, store: emptyReadOnlyStore } },
     );
 
@@ -458,7 +464,7 @@ describe("agentx init --export", () => {
     const io = capture();
 
     const code = await executeCli(
-      ["--env", ENV, "init", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir, "--identity", "oidc", ...Object.entries(OIDC_FLAGS).flat()],
+      ["--env", ENV, "init", "--model-gateway-url", "https://gateway.example", "--agent-model", "claude-sonnet-4-6", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir, "--identity", "oidc", ...Object.entries(OIDC_FLAGS).flat()],
       { ...io, deploy: { identity: exportIdentity, store: emptyReadOnlyStore } },
     );
 
@@ -473,7 +479,7 @@ describe("agentx init --export", () => {
     store.values.set("/agentx/production/settings", "{}");
 
     const code = await executeCli(
-      ["--env", "production", "init", "--export", exportDir, "--region", REGION, "--account", "999999999999", "--release", releaseDir],
+      ["--env", "production", "init", "--model-gateway-url", "https://gateway.example", "--agent-model", "claude-sonnet-4-6", "--export", exportDir, "--region", REGION, "--account", "999999999999", "--release", releaseDir],
       { ...io, deploy: { identity: exportIdentity, store } },
     );
 
@@ -489,7 +495,7 @@ describe("agentx init --export", () => {
     const io = capture();
 
     const code = await executeCli(
-      ["--env", ENV, "init", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir],
+      ["--env", ENV, "init", "--model-gateway-url", "https://gateway.example", "--agent-model", "claude-sonnet-4-6", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir],
       { ...io, deploy: { identity: exportIdentity, store: { ...emptyReadOnlyStore, get: async () => { throw missing; } } } },
     );
 
@@ -505,7 +511,7 @@ describe("agentx init --export", () => {
     const io = capture();
 
     const code = await executeCli(
-      ["--env", ENV, "init", "--export", exportDir, "--region", REGION, "--release", releaseDir],
+      ["--env", ENV, "init", "--model-gateway-url", "https://gateway.example", "--agent-model", "claude-sonnet-4-6", "--export", exportDir, "--region", REGION, "--release", releaseDir],
       { ...io, deploy: { identity: { async get() { throw missing; } }, store: emptyReadOnlyStore } },
     );
 
@@ -520,7 +526,7 @@ describe("agentx init --export", () => {
     const io = capture();
 
     const code = await executeCli(
-      ["--env", ENV, "init", "--export", exportDir, "--region", "eu-west-1", "--account", ACCOUNT, "--release", releaseDir],
+      ["--env", ENV, "init", "--model-gateway-url", "https://gateway.example", "--agent-model", "claude-sonnet-4-6", "--export", exportDir, "--region", "eu-west-1", "--account", ACCOUNT, "--release", releaseDir],
       { ...io, deploy: { identity: exportIdentity, store: emptyReadOnlyStore } },
     );
 
@@ -536,7 +542,7 @@ describe("agentx init --export", () => {
     const io = capture();
 
     const code = await executeCli(
-      ["--env", ENV, "init", "--export", exportDir, "--region", "not-a-region", "--account", ACCOUNT, "--release", releaseDir],
+      ["--env", ENV, "init", "--model-gateway-url", "https://gateway.example", "--agent-model", "claude-sonnet-4-6", "--export", exportDir, "--region", "not-a-region", "--account", ACCOUNT, "--release", releaseDir],
       { ...io, deploy: { identity: throwingIdentity, store: emptyReadOnlyStore } },
     );
 
@@ -551,7 +557,7 @@ describe("agentx init --export", () => {
     const io = capture();
 
     const code = await executeCli(
-      ["--env", ENV, "init", "--export", exportDir, "--region", REGION, "--account", "not-an-account", "--release", releaseDir],
+      ["--env", ENV, "init", "--model-gateway-url", "https://gateway.example", "--agent-model", "claude-sonnet-4-6", "--export", exportDir, "--region", REGION, "--account", "not-an-account", "--release", releaseDir],
       { ...io, deploy: { identity: throwingIdentity, store: emptyReadOnlyStore } },
     );
 
@@ -760,6 +766,26 @@ describe("agentx deploy", () => {
     expect(sent).toEqual(expect.arrayContaining(["SlackTeamId", "DeveloperSignInSlack"]));
     expect(sent).not.toContain("DeveloperSignInSlackSince");
     expect(sent).not.toContain("DeveloperOidcIssuer");
+  });
+
+  it("installs with required gateway settings while applying an ordinary parameter", async () => {
+    const releaseDir = await emptyReleaseDir();
+    const answersPath = await writeAnswers({ slackAppPostedMessages: "ignore" });
+    const deployer = progressFakeDeployer(scriptedOutputs());
+    const io = capture();
+
+    // A fresh install reads no deployed parameters; its answers supply the pair.
+    const code = await executeCli(
+      ["deploy", "--mode", "install", "--release", releaseDir, "--answers", answersPath, "--yes"],
+      { ...io, deploy: safeDeployDeps({ identity: fakeIdentity, store: new MemoryParameterStore(), secrets: memorySecrets(), deployer }) },
+    );
+
+    expect(code).toBe(0);
+    expect(deployer.calls.map((request) => request.part)).toEqual(["access", "foundation", "identity", "control-plane", "runtime", "slack"]);
+    const parameters = deployer.calls.find((request) => request.part === "control-plane")!.parameters;
+    expect(parameters.SlackAppPostedMessages).toBe("ignore");
+    expect(parameters).toMatchObject({ CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6" });
+    expect(io.out.join("")).toContain(`Installed environment ${ENV}`);
   });
 
   it("prints progress and never a parameter value", async () => {
@@ -1091,7 +1117,7 @@ async function releaseDirDeclaringBudget(): Promise<string> {
   await mkdir(join(dir, "templates", REGION), { recursive: true });
   const templates = [];
   for (const part of ["access", "foundation", "identity", "control-plane", "runtime", "slack"]) {
-    const body = part === "control-plane" ? JSON.stringify({ Parameters: { BudgetMonthlyUsd: {}, BudgetScope: {} } }) : "{}";
+    const body = part === "control-plane" ? JSON.stringify({ Parameters: { BudgetMonthlyUsd: {}, BudgetScope: {}, CoreModelGatewayHost: {}, CoreAgentModel: {} }, Outputs: { ModelRunPriceVersion: { Value: "1" } } }) : "{}";
     const file = `templates/${REGION}/${part}.template.json`;
     await writeFile(join(dir, file), body);
     templates.push({ region: REGION, part, file, sha256: sha256(body) });
@@ -1128,7 +1154,7 @@ describe("agentx deploy --mode upgrade keeps the deployed budget", () => {
         store, deployer,
         secrets: { get: async () => signingKey, create: async () => undefined },
         identity: { get: async () => ({ account: ACCOUNT, arn: `arn:aws:iam::${ACCOUNT}:user/alice` }) },
-        stackParameters: async (name) => { reads.push(name); return name === stackName("control-plane") ? { BudgetMonthlyUsd: "250", BudgetScope: "tag" } : undefined; },
+        stackParameters: async (name) => { reads.push(name); return name === stackName("control-plane") ? { BudgetMonthlyUsd: "250", BudgetScope: "tag", CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6" } : undefined; },
       },
       { stderr: { write: () => undefined } },
     );

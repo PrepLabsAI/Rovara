@@ -352,3 +352,16 @@ describe("hosted Merge button: one merge, one answer per request", () => {
     expect((await h.call("GET", undefined, { person: DEVELOPER })).body).toMatchObject({ mayMerge: false, ready: false });
   });
 });
+
+// The hosted GET must expose the core's waiting reason for a CI stop or a branch update.
+it.each([
+  { workflow: { stage: "WAIT_FOR_MERGE", state: "BLOCKED", blockReason: "CI still fails after 3 fix rounds" }, want: M.checks },
+  { workflow: { stage: "IMPLEMENT", state: "READY", fixSource: "ci" }, want: M.changing },
+  { workflow: { stage: "WAIT_FOR_MERGE", state: "READY", branchSync: { repositoryId: "app", number: 1, expectedHeadCommit: "a".repeat(40), reason: "behind" } }, want: M.changing },
+])("hosted readiness returns its waiting reason: $want", async ({ workflow, want }) => {
+  const w = await hosted();
+  await w.world.setWorkflow(workflow);
+  const answer = await w.call("GET");
+  expect(answer.status).toBe(200);
+  expect(answer.body).toMatchObject({ ready: false, message: want });
+});

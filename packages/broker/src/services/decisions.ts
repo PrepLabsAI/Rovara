@@ -7,6 +7,9 @@
 //
 // Who decides as the task's owner is the host's rule: `workflowSubject` carries it (`ownerProvider`, `collaboratorsMayDecide`, `actorFor`); the defaults are one owner who decides everything. A host adds its own
 // kinds of decision (a test environment, a setup run) with `subjects`.
+import { SubjectRefusal } from "../core/decisions/approval-gate.js";
+import { SPEND_UNKNOWN } from "../core/task-flow/owner-round.js";
+import type { TaskRecord } from "../core/task-flow/records.js";
 import { WorkflowArtifactSchema, type Approvers, type AuditSink, type DocumentStore, type IdentityProvider, type ObjectStorage, type TransactItem, type WorkflowSnapshot } from "@agentx/contracts";
 import { textReaderOf } from "../core/build-step/plan-input.js";
 import { createDecisionGate, type DecisionGate, type DecisionGatePolicy, type DecisionSubject } from "../core/decisions/approval-gate.js";
@@ -69,6 +72,7 @@ export function createDecisionService(options: DecisionServiceOptions): Decision
   };
   const workflowSubject = createWorkflowDocumentSubject({
     store,
+    ...(flow.applicationE2E === undefined ? {} : { applicationPlanning: flow.applicationE2E.planning }),
     ...(options.workflowSubject ?? {}),
     // The tier of the plan waiting now, read from the plan itself (the files it names, the claims nothing proves): a plan nobody could grade is never graded low, but a plan that names its files
     // and its proof is not high just for being a plan.
@@ -88,7 +92,10 @@ export function createDecisionService(options: DecisionServiceOptions): Decision
     // A plan with a work breakdown (spec 059) is approved WITH its graph: every surface that approves binds the graph in the stored document the approval's digest names.
     breakdown: ({ task, workflow, artifactDigest }) => breakdownForApproval(flow, { taskId: String(task["taskId"]), project: String(task["project"]), startingRevision: Number(task["startingRevision"]) }, workflow, artifactDigest),
     // A design with an open blocker is approved only with a one-line reason.
-    checkDecision: ({ workflow, attempt }) => checkDesignApproval(workflow, attempt),
+    checkDecision: async ({ task, workflow, attempt }) => {
+      checkDesignApproval(workflow, attempt);
+      if (attempt.outcome === "approve" && currentDocumentType(workflow) === "plan") await checkPlanRunLimit(flow, task as unknown as TaskRecord);
+    },
     onDecided: ({ taskId, task, before, after, attempt, at, approver, risk }) => withWorkEvents(task, before, after, decided({ taskId, before, after, attempt, at, approver, risk })),
   });
   const innerGate = createDecisionGate({
@@ -111,4 +118,20 @@ export function createDecisionService(options: DecisionServiceOptions): Decision
     },
   };
   return { gate, actions: createDecisionActions({ gate, companyId: options.companyId }) };
+}
+
+
+/** Approving a coding plan starts paid work. Every surface uses the same live cap and spend, never a limit supplied in the approval body. */
+async function checkPlanRunLimit(flow: TaskFlowDeps, task: TaskRecord): Promise<void> {
+  if (flow.taskCapUsd === undefined) return;
+  let cap: number | undefined;
+  let spent: number | undefined;
+  try {
+    cap = await flow.taskCapUsd(task);
+    spent = await flow.taskSpendUsd?.(task.taskId);
+  } catch {
+    throw new SubjectRefusal("invalid_outcome", SPEND_UNKNOWN);
+  }
+  if (cap === undefined || spent === undefined || !Number.isFinite(cap) || cap < 0 || !Number.isFinite(spent) || spent < 0) throw new SubjectRefusal("invalid_outcome", SPEND_UNKNOWN);
+  if (spent >= cap) throw new SubjectRefusal("invalid_outcome", "This task has used its run limit, so Rovara will not start more work on it. Start a new task.");
 }

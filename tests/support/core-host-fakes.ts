@@ -62,6 +62,9 @@ function folderObjects(): ObjectStorage {
 }
 
 export interface FakeWorldOptions {
+  /** Share the hosted broker's real port adapters over its fake external table/bucket. */
+  store?: DocumentStore;
+  objects?: ObjectStorage;
   machines?: FakeWorkerMachinesOptions;
   admission?: Admission;
   /** Leave these points out (to test the registry's refusal). */
@@ -73,7 +76,7 @@ export interface FakeWorldOptions {
 export function createFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
   const clock = { now: Date.parse("2026-11-15T10:00:00.000Z"), advance(seconds: number) { clock.now += seconds * 1_000; } };
   const now = () => new Date(clock.now);
-  const store = new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES, ttlAttribute: "indexExpiresAt", nowSeconds: () => Math.floor(clock.now / 1_000) });
+  const store = options.store ?? new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES, ttlAttribute: "indexExpiresAt", nowSeconds: () => Math.floor(clock.now / 1_000) });
   const queues = new MemoryQueueService({ now: () => clock.now });
   const machines = new FakeWorkerMachines({ startingChecks: 0, features: [...WORKER_INVOCATION_FEATURES], now, ...options.machines });
   const hostModel = new FakeHostModel({ url: "https://github.com/example/demo.git", id: "1", fullName: "example/demo" });
@@ -96,7 +99,7 @@ export function createFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     coreAdapter({ point: "audit-sink", name: "deployed", owner: "fake", create: () => recordingAudit(audit) }),
     coreAdapter({ point: "approvers", name: "deployed", owner: "fake", create: () => createLocalOwnerApprovers({ now }) }),
     coreAdapter({ point: "identity", name: "deployed", owner: "fake", create: () => createLocalOwnerIdentity({ companyId: IMPLICIT_COMPANY_ID }) }),
-    coreAdapter({ point: "object-storage", name: "s3", owner: "fake", create: () => folderObjects() }),
+    coreAdapter({ point: "object-storage", name: "s3", owner: "fake", create: () => options.objects ?? folderObjects() }),
     coreAdapter({ point: "code-host", name: host.kind, owner: "fake", create: () => host }),
     coreAdapter({ point: "check-runner", name: "fake-checks", owner: "fake", create: () => ({ kind: "fake-checks", create: () => new FakeCheckRunner(hostModel) }) }),
     coreAdapter({ point: "model-keys", name: "secrets-manager", owner: "fake", create: () => createMemoryModelKeyStore({}) }),

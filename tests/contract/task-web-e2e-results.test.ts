@@ -1,3 +1,5 @@
+import { agentXError } from "@agentx/contracts";
+import { createTaskWebApi } from "../../packages/broker/src/aws/task-web-api.js";
 import { describe, expect, it } from "vitest";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import type { AdaptedHttpRequest } from "../../packages/broker/src/aws/lambda.js";
@@ -38,4 +40,16 @@ describe("the results section of the task page", () => {
     expect(hostile.body).not.toContain("<img src=x");
     expect(hostile.body).not.toContain("<b>a</b>");
   });
+});
+
+
+it.each(["TASK_NOT_FOUND", "TASK_ACCESS_DENIED", "FORBIDDEN", "NOT_FOUND"] as const)("screenshots hide %s as the same 404 as a missing digest", async (code) => {
+  const unused = async (): Promise<never> => { throw new Error("no lifecycle or data operation may run"); };
+  const api = createTaskWebApi({ origin: "https://agentx.example.test", authenticateSession: async () => caller,
+    taskState: unused, listComments: unused, createComment: unused, editComment: unused, deleteComment: unused, setSuggestion: unused, decide: unused,
+    readE2EArtifact: async () => { throw agentXError(code, "no task here that you can see"); } });
+  const path = `/review/${taskId}/task/api/e2e/artifacts/${"a".repeat(64)}`;
+  const answer = await api({ method: "GET", path, requestId: "r", headers: { cookie: `__Host-agentx_review_session=${sessionId}` } }, new URL(path, "https://agentx.example.test"));
+  expect(answer.statusCode).toBe(404);
+  expect(JSON.parse(answer.body)).toEqual({ error: "not_found" });
 });

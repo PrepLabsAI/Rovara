@@ -162,6 +162,55 @@ beforeAll(() => {
   legacy = controlPlane(buildAgentXApp(), "AgentXControlPlane");
 }, 300_000);
 
+// DEC 254zzz284: the only new authority is the broker's membership transaction fence.
+function withoutBrokerMemberConditionCheck(template: TemplateJson): TemplateJson {
+  const copy = structuredClone(template);
+  const policy = companyImportPolicies(copy)[0]![1];
+  const document = policy.Properties.PolicyDocument as { Statement: Statement[] };
+  const table = ofType(copy, "AWS::DynamoDB::Table").find(([id]) => withoutHash(id) === "DeveloperSignInTable")![0];
+  const expected = {
+    Action: "dynamodb:ConditionCheckItem", Effect: "Allow", Resource: { "Fn::GetAtt": [table, "Arn"] },
+    Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["COMPANY_MEMBER#*"] }, Null: { "dynamodb:LeadingKeys": "false" } },
+  };
+  const added = document.Statement.filter((statement) => JSON.stringify(statement.Condition ?? {}).includes("COMPANY_MEMBER#") && actionsOf(statement).includes("dynamodb:ConditionCheckItem"));
+  expect(policy.Properties.Roles).toEqual([{ Ref: ofType(copy, "AWS::IAM::Role").find(([id]) => withoutHash(id) === "BrokerServiceRole")![0] }]);
+  expect(added).toEqual([expected]);
+  document.Statement = document.Statement.filter((statement) => !added.includes(statement));
+  return copy;
+}
+
+describe("broker membership condition-check grant", () => {
+  it("adds only the exact member-key statement to the broker; every other action, resource and principal stays pinned", () => {
+    const before = withoutBrokerMemberConditionCheck(namedRaw);
+    // The providers branch also adds this exact capability output. Keep a measured
+    // combined pin, then remove only the asserted output to retain the upstream pin.
+    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("946f06d30e6b8150a1fe4086c119c5d6d22bf0b83c1981cf1e79b3ca4be6913b");
+    expect(before.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
+    delete before.Outputs.ModelRunPriceVersion;
+    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("06108dfc29ca5002c166873dc011428a489f0d524e6c3e197828d805d0052bc7");
+    const afterTuples = accessTuples(namedRaw);
+    const beforeTuples = accessTuples(before);
+    const broker = "role:BrokerServiceRole";
+    const table = "table:DeveloperSignInTable";
+    for (const [keys, allowed] of [
+      [["COMPANY_MEMBER#caller"], true], [["COMPANY_MEMBER#target"], true],
+      [["COMPANY_MEMBER#caller", "COMPANY_MEMBER#target"], true],
+      [["ORG#other"], false], [["COMPANY_MEMBER#caller", "ORG#other"], false], [[], false],
+    ] as Array<[string[], boolean]>) {
+      const context = { "dynamodb:LeadingKeys": keys };
+      expect(probe(afterTuples, broker, "dynamodb:ConditionCheckItem", table, context)).toBe(allowed);
+      expect(probe(beforeTuples, broker, "dynamodb:ConditionCheckItem", table, context)).toBe(false);
+    }
+    for (const action of ["Scan", "Query", "PutItem", "UpdateItem", "DeleteItem"]) {
+      expect(probe(afterTuples, broker, `dynamodb:${action}`, table, { "dynamodb:LeadingKeys": ["COMPANY_MEMBER#caller"] })).toBe(false);
+    }
+    // Preserve the previously authorized developer fence; this is NOT a full-role denial.
+    expect(probe(afterTuples, broker, "dynamodb:ConditionCheckItem", table, { "dynamodb:LeadingKeys": ["DEVELOPER#creator"] })).toBe(true);
+    expect(probe(afterTuples, broker, "dynamodb:ConditionCheckItem", table, {})).toBe(false);
+    expect(probe(afterTuples, broker, "dynamodb:ConditionCheckItem", "table:Sibling", { "dynamodb:LeadingKeys": ["COMPANY_MEMBER#caller"] })).toBe(false);
+  });
+});
+
 describe("developer sign-in infrastructure (named environments)", () => {
   it("declares the sign-in parameters, with sign-in off by default (R8)", () => {
     const p = named.Parameters;
@@ -292,9 +341,9 @@ describe("developer sign-in infrastructure (named environments)", () => {
   it("gives the broker only session, developer, email-index, sign-in client and membership reads on the sign-in table", () => {
     const [tableId] = ofType(named, "AWS::DynamoDB::Table").find(([logicalId]) => logicalId.startsWith("DeveloperSignInTable"))!;
     const tableStatements = statementsOfRole(named, "BrokerServiceRole").filter((statement) => touches(statement, "dynamodb") && reaches(named, statement, tableId, SAMPLE_TABLE_ARN));
-    // The two company import reads (DEC 254zzz(2)) are asserted exactly in "gives the broker exactly the install company import's two reads" below.
+    // Two import reads plus the independently pinned membership check live in the second inline policy.
     const importStatements = new Set(companyImportStatements(named).map((statement) => JSON.stringify(statement)));
-    expect(tableStatements.filter((statement) => importStatements.has(JSON.stringify(statement)))).toHaveLength(2);
+    expect(tableStatements.filter((statement) => importStatements.has(JSON.stringify(statement)))).toHaveLength(3);
     tableStatements.splice(0, tableStatements.length, ...tableStatements.filter((statement) => !importStatements.has(JSON.stringify(statement))));
     expect(tableStatements).toHaveLength(2);
     const reads = tableStatements.filter((statement) => actionsOf(statement).includes("dynamodb:GetItem"));
@@ -638,7 +687,7 @@ describe("task-token key and membership IAM", () => {
 
   it("changes only the named task key, alias, two env vars, public read and membership list item", () => {
     // ENV-ROOM 2 is checked in full by broker-names-parameter-infrastructure.test.ts; its shape is asserted and it is taken out first, so the digest still pins everything else.
-    const remainder = withoutBrokerNamesParameter(structuredClone(named));
+    const remainder = withoutBrokerNamesParameter(withoutBrokerMemberConditionCheck(named));
     withoutCoreModelAccessRoute(remainder);
     // Guided onboarding PR 7: the Linear app's webhook route (no authorizer; the broker verifies the HMAC). Its shape is asserted here, then it is taken out so the digest still pins everything else.
     expect(remainder.Resources["LinearWebhookRoute"]).toMatchObject({ Type: "AWS::ApiGatewayV2::Route", Properties: { RouteKey: "POST /v1/linear/webhooks", AuthorizationType: "NONE" } });
@@ -737,7 +786,14 @@ describe("task-token key and membership IAM", () => {
     // Owner DEC 254zzz73 (rule D, a removal): re-pinned for the step-up's removal ONLY: the StepUpEmailSender parameter, the sign-in function's STEP_UP_EMAIL_FROM and DEVELOPER_PASSKEYS variables,
     // its ses:SendEmail statement and its PASSKEYS# Query/DeleteItem statement. The named-templates snapshot diff of the same change is those 68 lines deleted and nothing added, and the
     // effective-tuple pin below drops exactly those three tuples. The old value was ed3d1dc0a51d0607302a7b61ad15bc4613a4fbe86e8031beadbcc58a2b125668.
-    expect(createHash("sha256").update(text).digest("hex")).toBe("7a0c1f8f959f8a5d4546e251f9df1eecf5b8fc63c0de796f45b9c4feda58c5f4");
+    // b28 first-gateway fix: every current broker advertises its capability before a gateway
+    // is configured. Pin the complete new template AND prove this exact output is its only delta.
+    expect(remainder.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
+    expect(createHash("sha256").update(text).digest("hex")).toBe("45381fa27ed39c910005a077c4c7afd1314354136ba6ccbf00ee9e90b6f173de");
+    const beforeFirstGateway = structuredClone(remainder);
+    delete beforeFirstGateway.Outputs.ModelRunPriceVersion;
+    const beforeText = JSON.stringify(beforeFirstGateway).replace(/[a-f0-9]{64}/g, "<asset-hash>");
+    expect(createHash("sha256").update(beforeText).digest("hex")).toBe("7a0c1f8f959f8a5d4546e251f9df1eecf5b8fc63c0de796f45b9c4feda58c5f4");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {
@@ -787,7 +843,7 @@ describe("task-token key and membership IAM", () => {
       for (const s of statementsOfRole(template, "BrokerServiceRole").filter((s) => touches(s, "dynamodb") && s.Condition?.["ForAllValues:StringLike"] !== undefined)) {
         const keys = leadingKeysOf(s);
         expect(keys).not.toContain("ORG#*");
-        if (keys.includes("COMPANY_MEMBER#*")) expect(actionsOf(s)).toEqual(["dynamodb:GetItem"]);
+        if (keys.includes("COMPANY_MEMBER#*")) expect(["dynamodb:GetItem", "dynamodb:ConditionCheckItem"]).toContain(s.Action);
       }
     }
   });
@@ -1644,7 +1700,8 @@ const BROKER_ARN_ESTIMATE = 144;
 // states:StartExecution statements (-68 each) and dropping the two inert stream actions from the State statement (-50). Was 6114 / 7492.
 // DEC 254zzz(2): +710 for BrokerCompanyImportReads (6026 before): the broker's second role policy, counted here with every other inline document. The DefaultPolicy estimate below is unchanged.
 // DEC 254zzz29/254zzz32: +84 for ORG#<id>#SIGNIN_ISSUER (+45) and ORG#<id>#EMAIL#* (+39) in BrokerCompanyImportReads' GetItem keys (6736 before). DefaultPolicy unchanged.
-const BROKER_RESOLVED_INLINE_SIZE = 6820; // All inline documents after realistic ARN expansion.
+// DEC 254zzz284: +328 in the existing second inline policy; DefaultPolicy reserve unchanged.
+const BROKER_RESOLVED_INLINE_SIZE = 7148; // All inline documents after realistic ARN expansion.
 const BROKER_INLINE_ESTIMATE = 7453; // This replaces the R3R4 pin.
 const BROKER_INLINE_TARGET = 8500;
 const RESERVED = {
@@ -1830,7 +1887,9 @@ const lessonsReflectTuples: AccessTuple[] = [
 ];
 // L4-HARD (c): the ChatGPT key's Deny: the four actions, denied to every principal but the broker's role (the same shape as the sibling keys' Deny tuples in beforeTuples).
 const chatGptKeyDenyTuples: AccessTuple[] = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey*", "kms:ReEncrypt*"].map((action) => ["*", "Deny", action, "key:ChatGptConnectionKey", "{\"ArnNotEquals\":{\"aws:PrincipalArn\":[\"role:BrokerServiceRole\"]}}"] as AccessTuple);
-const pinnedTuples: AccessTuple[] = [...beforeTuples, ...chatGptKeyDenyTuples, ...hostedWiringTuples, ...githubSignInTuples, ...companySignInAuditTuples, ...attentionEmailTuples, ...companyImportTuples,
+const pinnedTuples: AccessTuple[] = [
+  ["role:BrokerServiceRole", "Allow", "dynamodb:ConditionCheckItem", "table:DeveloperSignInTable", "{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"COMPANY_MEMBER#*\"]},\"Null\":{\"dynamodb:LeadingKeys\":[\"false\"]}}"] as AccessTuple,
+  ...beforeTuples, ...chatGptKeyDenyTuples, ...hostedWiringTuples, ...githubSignInTuples, ...companySignInAuditTuples, ...attentionEmailTuples, ...companyImportTuples,
   ["role:DeveloperTaskNotifierFunctionServiceRole", "Allow", "lambda:InvokeFunction", "function:Broker", "{}"] as AccessTuple,
   // DEC 254v(c): the dispatcher reads the callback signing key's one secret, under the core switch's condition (core-engine.ts). The broker, the eval tick and the reconciler read it through the secret's own policy, which adds no tuple here.
   ["role:DispatcherServiceRole", "Allow", "secretsmanager:GetSecretValue", "secret:CallbackSigningKeySecret", "{}"] as AccessTuple,
@@ -2026,7 +2085,7 @@ describe("install company import reads (DEC 254zzz(2))", () => {
   const signInTableOf = (template: TemplateJson) => ofType(template, "AWS::DynamoDB::Table").find(([id]) => id.startsWith("DeveloperSignInTable"))![0];
 
   it("gives the broker exactly the install company import's two reads, in its own role policy (the legacy deployment too since #1129)", () => {
-    const policies = companyImportPolicies(named);
+    const policies = companyImportPolicies(withoutBrokerMemberConditionCheck(named));
     expect(policies).toHaveLength(1);
     const [[, policy]] = policies as [[string, Resource]];
     expect(policy.Properties.Roles).toEqual([{ Ref: brokerOf(named) }]);
@@ -2047,7 +2106,7 @@ describe("install company import reads (DEC 254zzz(2))", () => {
     // Nothing else changed in the broker's other policy for this: the DefaultPolicy has no ORG# key family.
     expect(JSON.stringify(brokerDefaultStatements(named))).not.toContain("ORG#");
     // #1129: the legacy (production) template has the same policy, always (the operator imports before switching company sign-in on), on its own broker and table.
-    const legacyPolicies = companyImportPolicies(legacy);
+    const legacyPolicies = companyImportPolicies(withoutBrokerMemberConditionCheck(legacy));
     expect(legacyPolicies).toHaveLength(1);
     expect(legacyPolicies[0]![1].Properties.Roles).toEqual([{ Ref: brokerOf(legacy) }]);
     expect(JSON.stringify(statementsIn(legacyPolicies[0]![1].Properties.PolicyDocument)).replaceAll(signInTableOf(legacy), "T"))
@@ -2164,7 +2223,7 @@ describe("company sign-in issuer read (DEC 254zzz29)", () => {
   const signInTableArn = () => ({ "Fn::GetAtt": [ofType(named, "AWS::DynamoDB::Table").find(([id]) => id.startsWith("DeveloperSignInTable"))![0], "Arn"] });
 
   it("adds exactly ORG#<id>#SIGNIN_ISSUER and ORG#<id>#EMAIL#* to the broker's one GetItem statement on the sign-in table, with the Null guard, named environments only", () => {
-    const [[, policy]] = companyImportPolicies(named) as [[string, Resource]];
+    const [[, policy]] = companyImportPolicies(withoutBrokerMemberConditionCheck(named)) as [[string, Resource]];
     expect(policy.Properties.PolicyDocument).toEqual({
       Version: "2012-10-17",
       Statement: [
@@ -2237,7 +2296,7 @@ describe("company sign-in issuer read (DEC 254zzz29)", () => {
 
   it("rule D: taking the new keys out gives back exactly the old policy, the old tuples and the old pinned remainder", () => {
     const before = withoutIssuerKey(named);
-    const [[, policy]] = companyImportPolicies(before) as [[string, Resource]];
+    const [[, policy]] = companyImportPolicies(withoutBrokerMemberConditionCheck(before)) as [[string, Resource]];
     // The policy exactly as #966 left it.
     expect(policy.Properties.PolicyDocument).toEqual({
       Version: "2012-10-17",

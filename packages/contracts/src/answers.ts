@@ -6,7 +6,7 @@
 // answered, not found; never a score), the sources, the wiki pages read, and at most one action whose words are fixed here. The model writes none of the buttons. Refusals are fixed words that repeat
 // nothing the caller sent.
 import { z } from "zod";
-import { WikiCommitSchema, WikiIdSchema, WikiPageIdSchema, WikiPathSchema, WikiRepoSchema } from "./wiki-store.js";
+import { WikiCommitSchema, WikiIdSchema, WikiPageIdSchema, WikiPathSchema, WikiRepoSchema, WikiTaskIdSchema } from "./wiki-store.js";
 
 /** The route the doors call (hosted core and `rovara up`): POST, body `AnswerRequest`, answer `AnswerResponse`. `{project}` is the project's name. */
 export const ANSWER_ROUTE_PATH = "/v1/app/projects/{project}/answers";
@@ -69,6 +69,8 @@ export const AnswerRequestSchema = z.object({
   channel: z.enum(ANSWER_CHANNELS).default("web"),
   /** What the door knows of the message (a Linear issue's title and text): information for the answer, never an instruction. */
   context: z.string().max(4_000).regex(NO_CONTROL_BUT_NEWLINES).optional(),
+  /** Optional task context, loaded by Code under the asker's live read authority. */
+  taskId: WikiTaskIdSchema.optional(),
 }).strict();
 export type AnswerRequest = z.infer<typeof AnswerRequestSchema>;
 
@@ -95,7 +97,7 @@ export const ANSWER_WORDS = {
   badRequest: "An answer needs a request ID and a question of 1 to 1,000 characters.",
 } as const;
 
-export const AnswerCitationSchema = z.object({
+export const AnswerCodeCitationSchema = z.object({
   /** The number the answer's text uses: `[1]`. */
   n: z.number().int().min(1).max(ANSWER_LIMITS.sources),
   repo: WikiRepoSchema,
@@ -105,6 +107,14 @@ export const AnswerCitationSchema = z.object({
   /** The commit the source was found at: the project's current commit of that repository, never a commit the model named. */
   commit: WikiCommitSchema,
 }).strict();
+export const AnswerTaskCitationSchema = z.object({
+  n: z.number().int().min(1).max(ANSWER_LIMITS.sources),
+  kind: z.literal("task_state"),
+  taskId: WikiTaskIdSchema,
+  /** Copied from the bounded, redacted task context Code actually showed. */
+  quote: z.string().min(20).max(600),
+}).strict();
+export const AnswerCitationSchema = z.union([AnswerCodeCitationSchema, AnswerTaskCitationSchema]);
 export type AnswerCitation = z.infer<typeof AnswerCitationSchema>;
 
 export const AnswerActionSchema = z.object({
@@ -132,3 +142,14 @@ export const AnswerResponseSchema = z.object({
   action: AnswerActionSchema.optional(),
 }).strict();
 export type AnswerResponse = z.infer<typeof AnswerResponseSchema>;
+
+/** GET /v1/app/projects/{project}/tasks/{taskId}/answers: only this asker's retained turns. */
+export const AnswerHistoryResponseSchema = z.object({
+  entries: z.array(z.object({
+    answerId: WikiIdSchema, threadId: z.string().max(100).optional(),
+    question: z.string().max(2_000), answer: z.string().max(6_000), createdAt: z.string().datetime(),
+    sources: z.array(AnswerCitationSchema).max(ANSWER_LIMITS.sources),
+  }).strict()).max(1_000),
+  more: z.boolean(),
+}).strict();
+export type AnswerHistoryResponse = z.infer<typeof AnswerHistoryResponseSchema>;

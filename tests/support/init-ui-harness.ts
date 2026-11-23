@@ -1,3 +1,4 @@
+import { brokerTemplate, readyCoreEngine } from "./install-gateway.js";
 // SC-003: the shared harness for `agentx init --ui`: a full install driven entirely from the page.
 // Moved out of init-ui-cli.test.ts (Task 17) so the whole-journey copy-lint tests can reuse it
 // without duplicating the server and fake setup. The wizard server and the GitHub manifest listener
@@ -19,7 +20,7 @@ import {
   allStackOutputs, browserThatCreatesGitHubApp, fakeGitHubApi, fakeSlackApi, HOLDER, memoryInitSecrets, passingChecks, scriptedDeployer,
   settingsScript, slackIngressFetch, T0, TEST_BOT_TOKEN, TEST_SIGNING_SECRET,
 } from "./init-fakes.js";
-import { fakeWizardOperator } from "./wizard-browser.js";
+import { fakeWizardOperator, runWithWizardErrors } from "./wizard-browser.js";
 import { SIGN_IN_PARAMETERS, fakeCloudFormation } from "./fake-cloudformation.js";
 import { MemoryParameterStore } from "./memory-parameter-store.js";
 import { ADMIN_EMAIL, FOUNDATION_OUTPUTS, bindSetupSourceProvider, fakeAlerts, fakeControlPlane, fakeRepositories, fakeSlackChannels, setupServices, turn } from "./setup-fakes.js";
@@ -36,8 +37,9 @@ export async function releaseDir(regions: readonly string[] = ["us-east-1"]): Pr
     await mkdir(join(dir, "templates", region), { recursive: true });
     for (const part of ["access", "foundation", "identity", "control-plane", "runtime", "slack"]) {
       const file = `templates/${region}/${part}.template.json`;
-      await writeFile(join(dir, file), "{}");
-      templates.push({ region, part, file, sha256: sha256("{}") });
+      const content = part === "control-plane" ? brokerTemplate() : "{}";
+      await writeFile(join(dir, file), content);
+      templates.push({ region, part, file, sha256: sha256(content) });
     }
   }
   await writeFile(join(dir, "release.json"), JSON.stringify({
@@ -52,7 +54,7 @@ export async function releaseDir(regions: readonly string[] = ["us-east-1"]): Pr
 // it): repository; project name; use the proposed commands; channel; the three connector offers;
 // "did the test alarm arrive?".
 /** The settings form: your email (the admin user), the owner, and alerts to the ops address. */
-export const SETTINGS = JSON.stringify({ email: ADMIN_EMAIL, githubAccount: "acme", alertEmail: "ops@example.com" });
+export const SETTINGS = JSON.stringify({ ...readyCoreEngine, email: ADMIN_EMAIL, githubAccount: "acme", alertEmail: "ops@example.com" });
 export const FIRST_RUN = [SETTINGS, "create"];
 /** The same settings answered in the terminal, in the form's order, then the plan's confirm. */
 export const TERMINAL_FIRST_RUN = [...settingsScript({ email: ADMIN_EMAIL, owner: "acme", advanced: { alertEmail: "ops@example.com" } }), true];
@@ -129,12 +131,12 @@ export async function harness() {
     setup,
   };
   const run = (argv: string[], overrides: Partial<InitCliDependencies> = {}) =>
-    executeCli(["--env", "staging", "init", "--release", release, "--region", "us-east-1", ...argv], {
+    runWithWizardErrors(overrides.openBrowser, () => executeCli(["--env", "staging", "init", "--release", release, "--region", "us-east-1", ...argv], {
       stdout: { write: (text: string) => out.push(text) },
       stderr: { write: (text: string) => err.push(text) },
       environments: { home },
       init: { ...base, ...overrides },
-    });
+    }));
   /** Runs `--ui` with an operator who answers `script` on the page and types nothing. */
   const runUi = async (script: (string | boolean)[], argv: string[] = []) => {
     const operator = fakeWizardOperator(script);

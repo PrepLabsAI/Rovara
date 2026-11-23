@@ -270,7 +270,8 @@ function begin(input: MergeActionInput, reason: BranchSyncReason): MergeActionRe
     throw error;
   }
   return {
-    slot: reason === "conflict" ? "conflict" : "sync", workflow: next, syncs: bumpSyncs(item.syncs, input.now), steps: [], milestones: [],
+    slot: reason === "conflict" ? "conflict" : "sync", workflow: next, syncs: bumpSyncs(item.syncs, input.now), steps: [],
+    milestones: [{ n: next.revision, milestone: { ...milestone(context, at, `Updating the branch with ${redactText(item.baseBranch).replace(/[\p{Cc}\p{Cf}]/gu, " ").slice(0, 80)}.`), kind: "fixing" } }],
     dispatch: { kind: "SYNC", workflowRevision: next.revision, candidateDigest: next.candidate?.digest ?? WORKFLOW_NO_CANDIDATE_DIGEST, at },
   };
 }

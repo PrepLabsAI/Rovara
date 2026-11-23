@@ -1,3 +1,4 @@
+import type { ModelProxyOptions } from "@agentx/model-runtime";
 import { runFinalCheckEval, type EvalFinalCheckPorts } from "./verification/eval-final-check.js";
 import { withEvalChangedPromptClassifier } from "./verification/eval-changed-prompt.js";
 import { withEvalPinnedCandidate } from "./verification/eval-plan-source.js";
@@ -187,6 +188,8 @@ export interface TaskInvocationDependencies {
   workflowE2EOnOwnedContainerRunning?: (receipt: Readonly<{ containerId: string; requestId: string; sourceDigest: string; observedAt: string; inspectBytes: Uint8Array }>) => Promise<void>;
   authorizeFeedbackApproval?: FeedbackApprovalAuthorizer;
   piAdapter?: PiSessionAdapter;
+  /** Actual selected proxy transport, never inferred from invocation data. */
+  meteredProxy?: ModelProxyOptions | undefined;
   /** SR-1: the models (each with its session) the second reviewer may try; absent when the invocation names none. */
   /** DR5: the packet source and the per-slot models of a design-review operation (PLAN_CRITIQUE with a `designReview` binding). */
   designReview?: DesignReviewDependencies;
@@ -346,11 +349,11 @@ async function runTask(
   }
   // SH14 (the broker sends this mode only while `su` is on, and only to a worker that lists "task.setupAgent.v1"): the setup run that runs commands has its own module; nothing below applies to it.
   if (invocation.payload.workflowMode === "SETUP_AGENT") {
-    return runSetupAgentInvocation(invocation, { rootPath: dependencies.rootPath, model: dependencies.model, piAdapter: dependencies.piAdapter, eventSink: dependencies.eventSink, cancellationController: dependencies.cancellationController, setupAgent: dependencies.setupAgent, docker: dependencies.docker, taskShell: dependencies.taskShell }, manifest, canonicalRoot);
+    return runSetupAgentInvocation(invocation, { rootPath: dependencies.rootPath, model: dependencies.model, piAdapter: dependencies.piAdapter, meteredProxy: dependencies.meteredProxy, eventSink: dependencies.eventSink, cancellationController: dependencies.cancellationController, setupAgent: dependencies.setupAgent, docker: dependencies.docker, taskShell: dependencies.taskShell }, manifest, canonicalRoot);
   }
   // W3b (the broker sends this mode only to a worker that lists "task.wikiBuild.v1"): the wiki build run reads the pinned commits with read-only tools; nothing below applies to it.
   if (invocation.payload.workflowMode === "WIKI_BUILD") {
-    return runWikiBuildInvocation(invocation, { rootPath: dependencies.rootPath, model: dependencies.model, piAdapter: dependencies.piAdapter, eventSink: dependencies.eventSink, cancellationController: dependencies.cancellationController, wikiBuild: dependencies.wikiBuild, taskShell: dependencies.taskShell }, manifest, canonicalRoot);
+    return runWikiBuildInvocation(invocation, { rootPath: dependencies.rootPath, model: dependencies.model, piAdapter: dependencies.piAdapter, meteredProxy: dependencies.meteredProxy, eventSink: dependencies.eventSink, cancellationController: dependencies.cancellationController, wikiBuild: dependencies.wikiBuild, taskShell: dependencies.taskShell }, manifest, canonicalRoot);
   }
   // A run that looks at a pull request: the workspace must hold the head commit the step was told about, or the step does not run, and nothing is started
   // for it (Task 22 review, M5).

@@ -307,7 +307,7 @@ export async function ciFixDecider(input: MergeActionInput): Promise<MergeAction
     steps: [ciEvidenceItem({ orgId: context.orgId, taskId: context.taskId, revision: next.revision, block: ciOutputBlock(evidence), now: input.now, ttlAttribute: context.ttlAttribute })],
     dispatch: { kind: "IMPLEMENT", workflowRevision: next.revision, candidateDigest: next.candidate?.digest ?? WORKFLOW_NO_CANDIDATE_DIGEST, at },
     milestones: milestonesOf(milestone(context, "fixing", at,
-      counted ? `CI is failing on ${names(evidence.map((check) => check.name))}, so Rovara is fixing it (round ${String(round)} of ${String(cap)}).`
+      counted ? `Fixing failing checks, round ${String(round)} of ${String(cap)}: ${names(evidence.map((check) => check.name))}.`
         : `CI is still failing on ${names(evidence.map((check) => check.name))}, so Rovara is trying once more because you asked.`), next.revision),
   };
 }

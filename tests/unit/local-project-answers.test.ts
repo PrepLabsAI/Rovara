@@ -62,3 +62,17 @@ describe("the local answer route", () => {
     expect((await wiki.readIndex("mixed")).map((entry) => entry.pageId)).toEqual(["billing"]);
   });
 });
+
+it("the local owner gets task context and their persisted task history through the real routes", async () => {
+  const store = new MemoryDocumentStore();
+  const taskId = "11111111-1111-4111-8111-111111111111";
+  await store.put({ item: { pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", companyId: IMPLICIT_COMPANY_ID, project: "app", taskId, title: "Local repair", requestText: "Repair the local checkout", developerId: "owner" } });
+  const model = scriptedModel([answer([{ text: "The task is starting.", cites: [{ kind: "task_state", quote: "No document has been written yet." }] }])]);
+  const options = { flow: { store, companyId: IMPLICIT_COMPANY_ID, projects: { latest: async () => ({ definition: { name: "app", repositories: [] } }) }, access: { canAct: async () => true } } as never, registry, store, model, now: () => T0 };
+  const routes = createLocalProjectAnswers(options);
+  const result = await routes.routes(request("POST", undefined, { requestId: "local-task-ask", question: "What is this task doing?", taskId }), owner);
+  expect((JSON.parse(result!.body) as Record<string, unknown>)["outcome"]).toBe("answered");
+  expect(model.turns[0]!.transcript).toContain("Repair the local checkout");
+  const history = await routes.routes(request("GET", `/v1/app/projects/app/tasks/${taskId}/answers`), owner);
+  expect((JSON.parse(history!.body) as Record<string, unknown>)["entries"]).toHaveLength(1);
+});

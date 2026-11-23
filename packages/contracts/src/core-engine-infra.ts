@@ -1,3 +1,4 @@
+import { GatewayModelIdentitySchema } from "./gateway-model-identity.js";
 /**
  * Engine host (migration plan v3.2 lane E2): the deployment half of the core engine, as plain data for the CDK app (infra/lib/core-engine.ts), the CLI and the broker. The app cannot read the
  * broker's job table (packages/broker/src/core-host/jobs.ts), so the schedules are listed here and tests/contract/core-engine-infrastructure.test.ts holds the two equal.
@@ -51,11 +52,11 @@ export const CORE_MODEL_GATEWAY_HOST_MAX_LENGTH = 56;
  * DEC 254g: the core engine's agent model is ANY model the model gateway offers (an Anthropic engine name for Claude, or a Bedrock id for every other model), not a list Code holds.
  * The gateway is the authority: `agentx config set coreEngine.agentModel` checks a non-Claude id against the gateway's LIVE offered-models answer before any deploy, and at run time the
  * gateway refuses an id it does not offer (the step then fails as "model not offered"). This pattern is only the stack's own last check of a WELL-FORMED id: lowercase letters, digits
- * and `. _ : -` (the packed settings' own characters, BROKER_SETTING_VALUE), starting with a letter or digit. No slash (so no URL, path or ARN), no `@`, space, quote, comma or `=` (so no
+ * and `. _ : -`, starting with a letter or digit; OpenRouter also uses exactly one slash in `vendor/model`. No URL, ARN, `@`, space, quote, comma or `=` (so no
  * credentials and no packing separator).
  */
-export const CORE_AGENT_MODEL_PATTERN = "^([a-z0-9][a-z0-9._:-]{0,63})?$";
-export const CORE_AGENT_MODEL_MAX_LENGTH = 64;
+export const CORE_AGENT_MODEL_PATTERN = "^([a-z0-9][a-z0-9._:-]{0,63}|[a-z0-9][a-z0-9._-]{0,62}/[a-z0-9][a-z0-9._-]{0,62})?$";
+export const CORE_AGENT_MODEL_MAX_LENGTH = 127;
 /** A Claude model keeps its own rule: exactly its Anthropic engine name (`claude-...`, as the gateway's agent route names it), never a Bedrock `us.anthropic....` id. */
 export const CORE_CLAUDE_AGENT_MODEL = /^claude-[a-z0-9][a-z0-9.-]{0,31}$/u;
 /**
@@ -64,6 +65,7 @@ export const CORE_CLAUDE_AGENT_MODEL = /^claude-[a-z0-9][a-z0-9.-]{0,31}$/u;
  */
 export function isCoreAgentModelId(value: string): boolean {
   if (typeof value !== "string" || value === "" || value.length > CORE_AGENT_MODEL_MAX_LENGTH || !new RegExp(CORE_AGENT_MODEL_PATTERN, "u").test(value)) return false;
+  if (value.includes("/")) return GatewayModelIdentitySchema.shape.modelId.safeParse(value).success;
   return /claude|anthropic/u.test(value) ? CORE_CLAUDE_AGENT_MODEL.test(value) : true;
 }
 /**

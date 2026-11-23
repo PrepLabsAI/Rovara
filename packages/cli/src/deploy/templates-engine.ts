@@ -1,3 +1,5 @@
+import { deploymentFailureReason } from "./cx-b/deployment-failure.js";
+import { assertGatewayRunPrices, assertBrokerArtifactRunPrices } from "./gateway-price-preflight.js";
 // The templates deploy engine: deploys a release's pre-synthesized templates with the AWS SDK. Code
 // packages and templates go to the access stack's artifact bucket; each stack is deployed as a
 // CloudFormation change set through the service role (the access stack, which creates that role and
@@ -182,7 +184,7 @@ export function templatesDeployer(input: {
   /** Uploads the template and returns where CreateChangeSet finds it; the access stack's goes inline. */
   async function templateSource(request: DeployRequest, emit: (event: DeployEvent) => void): Promise<{ TemplateURL: string } | { TemplateBody: string }> {
     assertReleaseCoversRegion(release, region);
-    const text = release.template(request.part, region, env);
+    const text = installTemplate(request);
     if (request.part === "access") {
       if (Buffer.byteLength(text, "utf8") > MAX_INLINE_TEMPLATE_BYTES) throw new Error("the access template is too large to deploy inline");
       return { TemplateBody: text };
@@ -193,6 +195,15 @@ export function templatesDeployer(input: {
     emit({ kind: "uploading", what: `template ${key}` });
     await clients.s3.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: text, ContentType: "application/json" }));
     return { TemplateURL: `https://${bucket}.s3.${region}.${s3HostSuffix}/${key}` };
+  }
+
+  /** Only a template built from a price-serving broker may advertise that capability. Older
+   * releases remain unchanged and cannot be relabelled by a newer CLI. No install switch exists. */
+  function installTemplate(request: DeployRequest): string {
+    const text = release.template(request.part, region, env);
+    if (request.part !== "control-plane") return text;
+    assertBrokerArtifactRunPrices(text);
+    return text;
   }
 
   /** CREATE for a missing stack or one awaiting its first change set; UPDATE when it can be updated; otherwise refuses (CONFIG_INVALID) saying what to do. */
@@ -212,7 +223,19 @@ export function templatesDeployer(input: {
     return "UPDATE";
   }
 
+  /** Cache the parameter read used to scope the gateway probe, including an absent stack. */
+  async function gatewayPreflight(request: DeployRequest): Promise<{ stack: Stack | undefined } | undefined> {
+    if (request.part !== "control-plane") return;
+    installTemplate(request);
+    const host = request.parameters.CoreModelGatewayHost;
+    if (!host || !request.parameters.CoreAgentModel) throw agentXError("CONFIG_INVALID", "coreEngine gateway and agent model must be configured before worker activation");
+    const stack = await describeStack(request.stackName);
+    await assertGatewayRunPrices(`https://${host}`);
+    return { stack };
+  }
+
   async function deploy(request: DeployRequest): Promise<StackOutputs> {
+    const gatewayRead = await gatewayPreflight(request);
     const { stackName } = request;
     const emit = (event: DeployEvent) => request.onEvent?.(event);
     const startedAt = now();
@@ -363,11 +386,7 @@ export function templatesDeployer(input: {
         nextToken = page.NextToken;
         if (nextToken === undefined || pages >= MAX_EVENT_PAGES) break;
       }
-      const rootCause = ours
-        .filter((event) => (event.ResourceStatus ?? "").endsWith("_FAILED") && event.ResourceStatusReason !== undefined)
-        .filter((event) => !/cancelled/i.test(event.ResourceStatusReason ?? ""))
-        .at(-1);
-      return rootCause?.ResourceStatusReason ?? stack.StackStatusReason ?? "no failed resource reported a reason";
+      return deploymentFailureReason(ours, stack);
     }
 
     /** Turns termination protection on when the request asks for it and the stack does not have it yet. */
@@ -377,7 +396,7 @@ export function templatesDeployer(input: {
     }
 
     const source = await templateSource(request, emit);
-    const current = await describeStack(stackName);
+    const current = gatewayRead === undefined ? await describeStack(stackName) : gatewayRead.stack;
     const type = changeSetType(stackName, current);
 
     await cloudFormation.send(

@@ -1,3 +1,4 @@
+import type { DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
 // EVAL-PLAN-CORE-WIRING (DEC 253c, 253j(1), 253k): the deployed (AWS) core callback layer answers a CHECKS run's `eval-plan` callback from the trusted eval plan source, with the
 // approver's CURRENT role from the hosted members reader (live `COMPANY_MEMBER#` membership in this company, the broker's project grant). The gateway's word for the approver's roles is
 // never the role, and a stored approval of a person who is no longer a member gives no grant. Real broker root, registry and callbacks over fakes; the gateway is a fake fetch.
@@ -24,6 +25,7 @@ import { documentOf } from "../../packages/broker/src/core/test-env/deps.js";
 import { testEnvLatestKey, testEnvRevisionKey } from "../../packages/broker/src/core/test-env/environment.js";
 import { createFakeWorld } from "../support/core-host-fakes.js";
 import { makeKey, signerOf } from "./policy-hook-fixture.js";
+import { signedRunPriceResponse } from "../support/signed-run-price-fetch.js";
 
 const adapters = vi.hoisted(() => ({ modules: [] as unknown[] }));
 vi.mock("../../packages/broker/src/core-host/code-modules.js", async (original) => ({ ...await original<object>(), codeAdapterModules: () => adapters.modules }));
@@ -75,6 +77,8 @@ async function world() {
   const gatewayRoles: { roles: string[] } = { roles: ["member"] };
   const authorityAsks: Array<{ company: string; project: string }> = [];
   vi.stubGlobal("fetch", vi.fn(async (url: string | URL, init?: RequestInit) => {
+    const price = signedRunPriceResponse(String(url), [A, B], ["claude-sonnet-4-6"], w.clock.now);
+    if (price !== undefined) return price;
     if (String(url) !== `${GATEWAY}${EVAL_AUTHORITY_PATH}`) throw new Error("unexpected fetch");
     const asked = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as { company: string; project: string; approver: { personId: string; provider: string } };
     authorityAsks.push({ company: asked.company, project: asked.project });
@@ -83,6 +87,8 @@ async function world() {
   }));
   const key = makeKey("t".repeat(16));
   const root = createBrokerCoreRoot({
+    // This fixture isolates the existing root behavior; core-task-people-hosted/identity tests exercise creation's real identity proof.
+    taskRules: () => ({ taskPeopleStart: async () => [] }) as unknown as DeveloperTaskRouteDependencies,
     env: { ROVARA_CORE_MODEL_GATEWAY_URL: GATEWAY, ROVARA_CORE_AGENT_MODEL: "claude-sonnet-4-6" },
     documentClient: client, stateTableName: "state", signInTableName: "signin", callbackSigningKey: SIGNING, repositoryGrantKey: Buffer.alloc(32, 1),
     repositoryCredential: async () => ({ token: "fake" }), codeModules: () => ({}) as never,

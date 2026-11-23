@@ -19,7 +19,7 @@ describe("the core task rule routes' own guards", () => {
     const depsFor = vi.fn((): DeveloperTaskRouteDependencies => { throw new Error("never built"); });
     const routes = createCoreTaskRuleRoutes(depsFor);
     const store = { query: vi.fn(async () => ({ items: [] })) };
-    for (const rest of ["people", "readers", "events", "comments"]) {
+    for (const rest of ["people", "readers", "events", "comments", "diff"]) {
       for (const handed of [task(B), task(A, "22222222-2222-4222-8222-222222222222"), { ...task(A), companyId: undefined }]) {
         await expect(routes.route({ request: request("GET", rest), path: `/v1/dev/tasks/${TASK}/${rest}`, person: { developerId: OWNER, name: "Maya" }, companyId: A, task: handed, store }), rest).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
       }

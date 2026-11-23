@@ -5,6 +5,7 @@
 // admin-ended sessions and channel by name).
 // Nothing here logs or echoes a secret, a code, a token or a caught error's message.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import type { CompanyJoin } from "./company-membership.js";
 import type { CompanySignInAuditInput, CompanySignInCause, CompanySignInMethod } from "./company-signin-audit.js";
 import {
   AGENTX_CLI_CLIENT_ID,
@@ -64,10 +65,10 @@ import {
 import { adaptHttpApiEvent, ownerKeyForSubject, type HttpApiV2Event } from "../aws/lambda.js";
 import { SESSION_MAX_AGE_SECONDS } from "../aws/web-session.js";
 import { mergeSurvivor } from "../aws/install-company.js";
-import { ProviderNotConfiguredError, ProviderUnavailableError, slackWorkspaceHint, type ProviderResult, type SignInProvider } from "./providers.js";
+import { ProviderNotConfiguredError, ProviderUnavailableError, slackWorkspaceHint, type ProviderIdentity, type ProviderResult, type SignInProvider } from "./providers.js";
 import type { SlackDirectory } from "./slack-directory.js";
 import { createSignInLinks } from "./sign-in-links.js";
-import { endedByAdmin, startedBeforeMethodOn, type AuthRequestRecord, type CodeGrant, type DeveloperSignInStore, type SessionRecord } from "./store.js";
+import { endedByAdmin, startedBeforeMethodOn, type AuthRequestRecord, type CodeGrant, type DeveloperRecord, type DeveloperSignInStore, type SessionRecord } from "./store.js";
 import { issueAccessToken, pkceChallengeMatches, type TokenSigner, type PublicSigningJwk, type SigningKeyPurpose } from "./tokens.js";
 import type { CompanySignInStore } from "./company-membership.js";
 import type { CompanyInviteStore } from "./company-invites.js";
@@ -214,6 +215,14 @@ const INVALID_CODE = ["invalid_grant", "the sign-in code is invalid, used or exp
 const SIGN_IN_ENDED = ["invalid_grant", "your Rovara sign-in has ended; start signing in again"] as const;
 /** DEC 254b (a): a member of a company with its own sign-in tried the install's. Fixed words, nothing echoed. */
 const COMPANY_OWN_SIGNIN = "your company signs in with its own sign-in method";
+
+/** Fixed invite guidance; the existing audit vocabulary records email proof failures as not invited. */
+function joinRefusal(reason: Extract<CompanyJoin, { ok: false }>["reason"], byInvite: boolean): { cause: CompanySignInCause; params: Record<string, string> } {
+  if (reason === "invite_email_mismatch") return { cause: "not_invited", params: { error: "access_denied", error_description: "This invite is for another email", invite_error: "mismatch" } };
+  if (reason === "invite_email_unverified") return { cause: "not_invited", params: { error: "access_denied", error_description: "This sign-in has no verified email. Sign in with the invited email.", invite_error: "unverified" } };
+  const text = byInvite ? "not invited" : { not_invited: "not invited", member_elsewhere: "already a member of another company", member_revoked: "access ended by a company admin" }[reason];
+  return { cause: reason, params: { error: "access_denied", error_description: text } };
+}
 
 export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependencies) {
   const { config, store } = deps;
@@ -613,6 +622,13 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     return response;
   }
 
+  /** A merged Slack sign-in refreshes only its own workspace hint; a failed hint never gates sign-in. */
+  async function rememberMergedWorkspace(merged: boolean, method: DeveloperSignInMethod, identity: ProviderIdentity, signedInId: string, signedInRecord: DeveloperRecord | undefined): Promise<void> {
+    if (merged && method === "slack" && identity.slackTeam !== undefined && signedInRecord?.mergedInto !== undefined) {
+      try { await store.rememberMergedSlackWorkspace(signedInId, signedInRecord.mergedInto, identity.slackTeam); } catch { /* ignored: hint only */ }
+    }
+  }
+
   async function runSignIn(method: DeveloperSignInMethod, request: AuthRequestRecord, code: string | null, outcome: SignInOutcome): Promise<HttpResult> {
     const client = (params: Record<string, string>) => toClient(request.clientRedirectUri, { ...params, state: request.clientState });
     if (request.browserReturnTo !== undefined && !REVIEW_RETURN_TO.test(request.browserReturnTo)) return page(400, "Invalid review link", ["Open the review from Slack and sign in again."]);
@@ -654,8 +670,9 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     let developerId = signedInId;
     outcome.developerId = developerId;
     let existing = await store.getDeveloper(developerId);
+    const signedInRecord = existing;
     // DEC 254b: with Code's company layer on, a sign-in an operator merged into another (`mergedInto`) is seated as its survivor: the session, the
-    // membership and every check are the survivor's, and neither record is rewritten by this sign-in. The walk is #820's: at most 8 hops, no
+    // membership and every check are the survivor's. Only the signed-in Slack identity's workspace metadata may be refreshed. The walk is #820's: at most 8 hops, no
     // loops, and a revoked or unreadable record anywhere refuses.
     let merged = false;
     if (deps.company !== undefined && existing !== undefined && (existing as { mergedInto?: unknown }).mergedInto !== undefined) {
@@ -713,12 +730,13 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         deps.log({ event: "signin.refused", reason: "company_own_signin", developerId });
         return request.browserReturnTo === undefined ? client({ error: "access_denied", error_description: COMPANY_OWN_SIGNIN }) : browserReturn(request.browserReturnTo, false);
       }
-      // DEC 254h: a sign-in carrying an invite link's secret joins by that secret alone (any method, with or without an email), never by email.
+      // DEC 254zzz218: the current provider's verified identity email is mandatory for invite redemption; future methods must use this same guarded path.
       const byInvite = request.inviteHash !== undefined;
+      const inviteProof = identity.email === undefined ? {} : { verifiedEmail: identity.email };
       const joined = candidate === undefined || !OrgIdSchema.safeParse(candidate).success || (request.companyId !== undefined && request.companyId !== candidate) || !clientAllowed
         || (byInvite && request.companyId === undefined)
         ? { ok: false as const, reason: "not_invited" as const }
-        : byInvite ? await deps.company.joinByInvite({ personId: developerId, companyId: candidate, inviteHash: request.inviteHash! })
+        : byInvite ? await deps.company.joinByInvite({ personId: developerId, companyId: candidate, inviteHash: request.inviteHash!, ...inviteProof })
           : await deps.company.join({ personId: developerId, companyId: candidate, ...(identity.email === undefined ? {} : { email: identity.email }) });
       if (joined.ok) outcome.companyId = joined.membership.companyId;
       else if (joined.attributedCompanyId !== undefined) outcome.companyId = joined.attributedCompanyId;
@@ -726,11 +744,10 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       companyless = !joined.ok && joined.reason === "not_invited" && request.companyId === undefined && request.browserReturnTo === undefined
         && await companylessMayMint(developerId, method, registered);
       if (!joined.ok && !companyless) {
-        outcome.cause = joined.reason;
-        // DEC 254h: with an invite secret, every failure (unknown, used, expired, withdrawn, wrong company, a member elsewhere, a removed member) is the one answer.
-        const text = byInvite ? "not invited" : { not_invited: "not invited", member_elsewhere: "already a member of another company", member_revoked: "access ended by a company admin" }[joined.reason];
+        const refusal = joinRefusal(joined.reason, byInvite);
+        outcome.cause = refusal.cause;
         deps.log({ event: "signin.refused", reason: joined.reason, developerId });
-        return request.browserReturnTo === undefined ? client({ error: "access_denied", error_description: text }) : browserReturn(request.browserReturnTo, false);
+        return request.browserReturnTo === undefined ? client(refusal.params) : browserReturn(request.browserReturnTo, false);
       }
       if (joined.ok) companyId = joined.membership.companyId;
       installMethod = installMethod && joined.ok && companyId === candidate;
@@ -750,7 +767,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     }
     // DEC 254w: a Slack user the person connected stays their Slack link whatever this sign-in's method or lookup says.
     if (existing?.linkedSlackUserId !== undefined) slackUserId = existing.linkedSlackUserId;
-    // A merged sign-in rewrites neither its own record nor the survivor's.
+    // A merged sign-in updates only its own verified Slack workspace, keeping the survivor and all profile/index fields intact.
+    await rememberMergedWorkspace(merged, method, identity, signedInId, signedInRecord);
     if (!merged) await store.upsertDeveloper({
       developerId, provider: method, issuer: identity.issuer, subject: identity.subject, displayName: identity.displayName,
       ...(identity.email === undefined ? {} : { email: identity.email }),

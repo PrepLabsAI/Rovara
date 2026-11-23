@@ -1,3 +1,4 @@
+import type { DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
 // L4-HW1: the hosted core root starts workflow tasks on workflow 1.1.0 (Understand first, the plan check program), as the laptop's root does (local/app/app.ts `understandFirst: true`).
 // The real broker root, registry and dev routes over fakes. Proved here, on the hosted root itself:
 //   - a workflow start with no Quick/Full path is accepted (it was refused with WORKFLOW_PATH_REQUIRED) and is a 1.1.0 task with Understand queued first and the Rovara Code program (plan check) attached;
@@ -23,6 +24,7 @@ import { commitWorkflow } from "../../packages/broker/src/core/task-flow/stage-m
 import { workflowDependenciesAllowed } from "../../packages/broker/src/core/work-breakdown/parallel-parts.js";
 import { createFakeWorld } from "../support/core-host-fakes.js";
 import { makeKey, signerOf } from "./policy-hook-fixture.js";
+import { signedRunPriceResponse } from "../support/signed-run-price-fetch.js";
 
 const adapters = vi.hoisted(() => ({ modules: [] as unknown[] }));
 vi.mock("../../packages/broker/src/core-host/code-modules.js", async (original) => ({ ...await original<object>(), codeAdapterModules: () => adapters.modules }));
@@ -43,6 +45,7 @@ const ANSWERS = [{ questionId: "q1", optionId: "a" }, { questionId: "q2", text: 
 async function world() {
   const w = createFakeWorld();
   w.clock.now = Date.now();
+  vi.stubGlobal("fetch", async (input: string | URL | Request) => signedRunPriceResponse(input, [A, B], ["claude-sonnet-4-6"], w.clock.now) ?? Response.json({}, { status: 404 }));
   adapters.modules = w.modules.filter((module) => ["storage", "queue", "worker-machines", "object-storage", "code-host", "check-runner", "secrets"].includes(module.point));
   // The sign-in table's live memberships; the project grants are the defaults ("developer").
   const members = new Map<string, { companyId: OrgId; role: "owner" | "admin" | "member" }>([[personA, { companyId: A, role: "owner" }], [personB, { companyId: B, role: "owner" }], [commenterA, { companyId: A, role: "member" }]]);
@@ -61,6 +64,8 @@ async function world() {
   const key = makeKey("t".repeat(16));
   /** A root over the shared fake store; `understandFirst` left out is the production wiring (nothing is passed). */
   const rootWith = (understandFirst?: boolean) => createBrokerCoreRoot({
+    // This fixture isolates the existing root behavior; core-task-people-hosted/identity tests exercise creation's real identity proof.
+    taskRules: () => ({ taskPeopleStart: async () => [] }) as unknown as DeveloperTaskRouteDependencies,
     env: { ROVARA_CORE_MODEL_GATEWAY_URL: GATEWAY, ROVARA_CORE_AGENT_MODEL: "claude-sonnet-4-6" },
     documentClient: client, stateTableName: "state", signInTableName: "signin", callbackSigningKey: SIGNING, repositoryGrantKey: Buffer.alloc(32, 1),
     repositoryCredential: async () => ({ token: "fake" }), codeModules: () => ({}) as never,

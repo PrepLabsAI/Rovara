@@ -1,4 +1,5 @@
-import { UPKEEP_ORIGIN, ROVARA_CODE_AGENT_ID, isSystemOwnerId, systemOwnerIdOf, ModelRouteSchema, WorkOriginSchema, OperationSchema, SecondReviewerSchema, PAYER_UNRESOLVED, resolvePayer, agentXError } from "@agentx/contracts";
+import { UPKEEP_ORIGIN, isSystemOwnerId, systemOwnerIdOf, ModelRouteSchema, WorkOriginSchema, OperationSchema, SecondReviewerSchema, PAYER_UNRESOLVED, agentXError } from "@agentx/contracts";
+import { resolveTaskPayer } from "./cx-a/task-payer.js";
 import { upkeepIsOn } from "../upkeep/settings.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import type { TaskTokenDescriber } from "./token.js";
@@ -21,7 +22,7 @@ export function createTaskTokenDescriber(deps: TaskFlowDeps, reviewers?: Pick<Ta
       const resolved = await taskPayerOf(deps, { operation, workspace, task });
       if (resolved === undefined) return undefined;
       const { person, origin, payer, repairDraft } = resolved;
-      return { companyId: operation.companyId, project: workspace.projectName, ...(person === undefined ? {} : { person }), payer, taskId: task.taskId, step: repairDraft ? "repair_draft" : step, ...(origin === undefined ? {} : { origin }), models: [model.data.alias] };
+      return { companyId: operation.companyId, project: workspace.projectName, ...(person === undefined ? {} : { person }), payer, taskId: task.taskId, step: repairDraft ? "repair_draft" : step, ...(origin === undefined ? {} : { origin }), models: [model.data.alias], ...(model.data.identity === undefined ? {} : { identity: model.data.identity }) };
     },
   };
 }
@@ -49,23 +50,6 @@ export async function taskPayerOf(deps: Pick<TaskFlowDeps, "store" | "companyId"
     })();
     if (!open) return undefined;
   }
-  // No project AI setting means projectPays=false. This core runs only Rovara Code
-  // (createTaskFlowRunStarter rejects other agents). Chain payer and Linear
-  // assigner facts remain unavailable; never infer them from the session.
-  let payer;
-  try {
-    // A wiki build (W3b) is paid by the PROJECT (its monthly limit), never the person who pressed Build, whatever surface started it (DEC 254zh review fix 3). The task record's purpose, written by the start, decides.
-    if (task.purpose === "wiki_build" || repairDraft) {
-      // A repair draft (L4-SR2) is paid by the project too, and counted by the gateway under the project's upkeep cap through the origin; its step is named for what it is, so the spend reads as `repair_draft`.
-      payer = { kind: "project" as const, project: workspace.projectName };
-    } else if (origin.data === undefined) {
-      // Old records have no origin. The checked starter pays; do not infer or persist a start surface.
-      if (person === undefined) throw agentXError("CALLBACK_FORBIDDEN", PAYER_UNRESOLVED);
-      payer = { kind: "member" as const, developerId: person };
-    } else {
-      payer = resolvePayer({ origin: origin.data, project: workspace.projectName, projectPays: false, agentId: ROVARA_CODE_AGENT_ID, ...(person === undefined ? {} : { startedBy: { developerId: person } }) });
-    }
-  }
-  catch { throw agentXError("CALLBACK_FORBIDDEN", PAYER_UNRESOLVED); }
+  const payer = resolveTaskPayer({ operation, workspace, task }, person, origin.data, repairDraft);
   return { person, origin: origin.data, payer, repairDraft };
 }

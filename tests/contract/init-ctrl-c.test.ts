@@ -1,3 +1,4 @@
+import { installGatewayFixture } from "../support/install-gateway.js";
 // Issue #235: Ctrl-C at a question of `agentx init --no-ui` is a stop the person chose, not an
 // internal error: one plain line that says how to continue, and a non-zero exit.
 import { createHash } from "node:crypto";
@@ -10,6 +11,8 @@ import { executeCli } from "../../packages/cli/src/main.js";
 import type { Prompter } from "../../packages/cli/src/init/prompts.js";
 import type { CliInvocation } from "../../packages/cli/src/init/cli-command.js";
 import { INSTALLED_CLI_INVOCATION, NPX_CLI_INVOCATION } from "../support/init-fakes.js";
+
+installGatewayFixture();
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });

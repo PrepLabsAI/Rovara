@@ -1,6 +1,7 @@
+import type { DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
 // Regression for the original hosted stopgap: the real root now advertises the repaired routes.
 import { randomUUID } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { orgProjectCatalogKey, projectRevisionKey, type OrgId, type StoredDocument } from "@agentx/contracts";
 import { createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
@@ -10,6 +11,9 @@ import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
 import { acceptStep, readWorkspace, type StepInput } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { createFakeWorld } from "../support/core-host-fakes.js";
 import { makeKey, signerOf } from "./policy-hook-fixture.js";
+import { signedRunPriceResponse } from "../support/signed-run-price-fetch.js";
+
+afterEach(() => { vi.unstubAllGlobals(); });
 
 const adapters = vi.hoisted(() => ({ modules: [] as unknown[] }));
 vi.mock("../../packages/broker/src/core-host/code-modules.js", async (original) => ({ ...await original<object>(), codeAdapterModules: () => adapters.modules }));
@@ -26,6 +30,7 @@ const SOURCE_STAGES = ["UNDERSTAND", "PLAN", "PLAN_CRITIQUE", "REVIEW"] as const
 async function hostedRoot() {
   const w = createFakeWorld();
   w.clock.now = Date.now();
+  vi.stubGlobal("fetch", async (input: string | URL | Request) => signedRunPriceResponse(input, [A], ["claude-sonnet-4-6"], w.clock.now) ?? Response.json({}, { status: 404 }));
   adapters.modules = w.modules.filter((module) => ["storage", "queue", "worker-machines", "object-storage", "code-host", "check-runner", "secrets"].includes(module.point));
   const client = { async send(command: unknown) {
     if (!(command instanceof GetCommand)) throw new Error("only fake point reads");
@@ -36,6 +41,8 @@ async function hostedRoot() {
   } };
   const key = makeKey("t".repeat(16));
   const root = createBrokerCoreRoot({
+    // This fixture isolates the existing root behavior; core-task-people-hosted/identity tests exercise creation's real identity proof.
+    taskRules: () => ({ taskPeopleStart: async () => [] }) as unknown as DeveloperTaskRouteDependencies,
     env: { ROVARA_CORE_MODEL_GATEWAY_URL: "https://gateway.example", ROVARA_CORE_AGENT_MODEL: "claude-sonnet-4-6", ROVARA_CORE_LESSONS: "on" },
     documentClient: client, stateTableName: "state", signInTableName: "signin", callbackSigningKey: "k".repeat(32), repositoryGrantKey: Buffer.alloc(32, 1),
     repositoryCredential: async () => ({ token: "fake" }), codeModules: () => ({}) as never,

@@ -128,6 +128,8 @@ describe("the health route's grants (A13)", () => {
     const allowed = new Set([
       "packages/contracts/src/admin.ts", "packages/broker/src/aws/activity-index.ts", "packages/broker/src/aws/admin-reads.ts", "infra/lib/control-plane.ts",
       "packages/broker/src/aws/developer-task-notifier.ts", "packages/broker/src/aws/broker.ts",
+      // Permanent project identity NEVER expires: these guards refuse/fence an expiry field rather than writing a TTL.
+      "packages/broker/src/core/project-incarnation.ts", "packages/broker/src/aws/core-project-backfill.ts",
       // The workflow dispatch row's one definition, shared by the broker and the developer task routes.
       "packages/broker/src/aws/broker-shared.ts",
       "packages/contracts/src/admin-changes.ts", "packages/broker/src/aws/admin-changes.ts",
@@ -158,6 +160,8 @@ describe("the health route's grants (A13)", () => {
       // L6b: the notice batch rows (pending and sent), the run cost estimate history and the cost ledger's entry and once-markers, the approval proofs and their used/spent markers, the decision records, and the task sessions' events, requests, messages and ended summaries.
       "packages/broker/src/core/notify/attention.ts", "packages/broker/src/core/cost/estimate.ts", "packages/broker/src/core/cost/ledger.ts", "packages/broker/src/core/cost/run-usage.ts",
       "packages/broker/src/core/decisions/approval-gate.ts", "packages/broker/src/core/decisions/store.ts",
+      // D-CORE reuses the existing session REQUEST/event retention in the atomic close plan.
+      "packages/broker/src/core/sessions/close-acceptance.ts",
       "packages/broker/src/core/sessions/read.ts", "packages/broker/src/core/sessions/summary.ts", "packages/broker/src/core/sessions/control.ts", "packages/broker/src/core/sessions/store.ts",
       // L6a: the workflow dispatch row (RETENTION_SECONDS) and its record type, the same row broker-shared.ts defines for the AWS broker.
       "packages/broker/src/core/task-flow/dispatch-rows.ts", "packages/broker/src/core/task-flow/records.ts",

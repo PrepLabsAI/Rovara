@@ -24,6 +24,8 @@ export interface DevRoute {
 }
 
 export const DEV_ROUTES: readonly DevRoute[] = [
+  { method: "GET", path: "/v1/dev/tasks/start-requests/{requestId}", requires: "tasks:read" },
+  { method: "POST", path: "/v1/dev/company/connections/impact", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/start-estimates", requires: "tasks:read" },
   { method: "GET", path: "/v1/dev/projects/{project}/machine-size", requires: "tasks:read" },
   { method: "POST", path: "/v1/dev/projects/{project}/machine-size", requires: "full" },
@@ -95,6 +97,8 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/tasks/{taskId}/continue", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/cancel", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/close", requires: "tasks:act" },
+  { method: "GET", path: "/v1/dev/tasks/{taskId}/close", requires: "tasks:read" },
+  // CORE-PARITY: manual publication, workflow review and share below are mounted by core-host/dev-routes.
   { method: "POST", path: "/v1/dev/tasks/{taskId}/pull-requests", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/people/role", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/people/take-ownership", requires: "tasks:act" },
@@ -282,6 +286,7 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/app/sessions/{sessionId}/answers", requires: "tasks:act" },
   { method: "POST", path: "/v1/app/sessions/{sessionId}/revise-plan", requires: "tasks:act" },
   { method: "POST", path: "/v1/app/sessions/{sessionId}/close", requires: "tasks:act" },
+  { method: "GET", path: "/v1/app/sessions/{sessionId}/close", requires: "tasks:read" },
   // Decision cards: the list and every act on a card (the performer checks the person's live authority).
   { method: "GET", path: "/v1/app/decisions", requires: "decisions:decide" },
   { method: "POST", path: "/v1/app/decisions/{kind}/{subject}/approve", requires: "decisions:decide" },
@@ -361,6 +366,7 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/app/projects/{project}/code/suggest", requires: "full" },
   // Lead 4 J1: the smart Just answer (core-host/answer-routes.ts): full access only, then any live role on the project. It spends on the company's own key through the gateway's answers purpose.
   { method: "POST", path: "/v1/app/projects/{project}/answers", requires: "full" },
+  { method: "GET", path: "/v1/app/projects/{project}/tasks/{taskId}/answers", requires: "full" },
   // Lead 4 J5: answers feed the wiki. "Not right" is the asker's own press (core-host/answer-routes.ts); the gap list is read from the answer records, maintainers only (core-host/wiki-corrections-routes.ts). Additive.
   { method: "POST", path: "/v1/app/projects/{project}/answers/{answerId}/not-right", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/wiki/gaps", requires: "full" },

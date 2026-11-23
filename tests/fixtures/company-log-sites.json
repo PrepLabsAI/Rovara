@@ -22,7 +22,7 @@
   "packages/broker/src/aws/eval-batch-tick.ts": 1,
   "packages/broker/src/aws/eval-batch.ts": 1,
   "packages/broker/src/aws/failed-preparation.ts": 1,
-  "packages/broker/src/aws/github-webhooks.ts": 1,
+  "packages/broker/src/aws/github-webhooks.ts": 2,
   "packages/broker/src/aws/operation-events.ts": 1,
   "packages/broker/src/aws/outbox-failure.ts": 3,
   "packages/broker/src/aws/outbox-publisher.ts": 2,
@@ -91,6 +91,6 @@
   "packages/broker/src/local/app/automation.ts": 1,
   "packages/broker/src/local/runtime.ts": 6,
   "packages/broker/src/plugins/channel/slack/plugin.ts": 1,
-  "packages/broker/src/ports/transactional-outbox.ts": 1,
+  "packages/broker/src/ports/transactional-outbox.ts": 2,
   "packages/broker/src/services/merge-tracking.ts": 1
 }

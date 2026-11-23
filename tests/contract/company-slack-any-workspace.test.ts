@@ -1,9 +1,10 @@
 // DEC 254e: with Code's company layer on, Slack is the shared sign-in method for every company: any Slack workspace may sign in, the company comes
 // only from live membership (or an invite), never from the workspace. And (DEC 254b, the import lane) a merged sign-in is seated as its survivor.
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, SLACK_OIDC_ISSUER } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, SLACK_OIDC_ISSUER, companyInviteCodeHash } from "@agentx/contracts";
 import { membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
+import { inviteLinkKey } from "../../packages/broker/src/developer/company-membership.js";
 import { TEAM } from "../support/developer-fakes.js";
 import { B, OWN_SIGNIN, person, sharedSignInWorld, X } from "../support/company-shared-signin-world.js";
 
@@ -55,6 +56,21 @@ describe("Slack from any workspace (DEC 254e)", () => {
     expect((await w.signIn("U0INSTALL", { slackTeam: TEAM, company: B })).refused).toBe(OWN_SIGNIN);
   });
 
+  it("a Slack invite uses only the trusted install workspace's current verified email", async () => {
+    const w = world();
+    await w.setup();
+    const owner = await w.signIn("owner");
+    const made = await w.call("POST", "/v1/dev/company/preapprovals", owner.access, { email: "install@example.test", role: "member", expiresInHours: 24 });
+    const secret = (made.body as { invite: { secret: string } }).invite.secret;
+    const key = inviteLinkKey(X, companyInviteCodeHash(secret));
+    const mismatch = await w.signIn("U0MERGED1", { slackTeam: TEAM, company: X, invite: secret });
+    expect(mismatch.refused).toBe("This invite is for another email");
+    expect(w.db.get(key.pk, key.sk)).toMatchObject({ status: "live" });
+    const joined = await w.signIn("U0INSTALL", { slackTeam: TEAM, company: X, invite: secret });
+    expect((await w.access(joined.access)).body).toMatchObject({ companyId: X, companyRole: "member", joinedByInvite: true });
+    expect(w.db.get(key.pk, key.sk)).toMatchObject({ status: "used", usedBy: slackId("U0INSTALL") });
+  });
+
   it("a company with its own issuer keeps it: Slack from another workspace is refused before the invite is spent", async () => {
     const w = world();
     await w.setup();
@@ -81,7 +97,7 @@ describe("a merged sign-in is seated as its survivor (company layer on)", () => 
     w.db.set({ pk: `DEVELOPER#${from}`, sk: "META", entityType: "DEVELOPER", developerId: from, provider: "slack", issuer: SLACK_OIDC_ISSUER, subject: "U0MERGED1", displayName: "Merged",
       revoked: false, firstSignInAt: "2026-10-01T00:00:00.000Z", lastSignInAt: "2026-10-01T00:00:00.000Z", mergedInto: into, ...extra });
 
-  it("a merged Slack id signs in as the survivor, in the survivor's company, and neither record is rewritten", async () => {
+  it("a merged Slack id signs in as the survivor, in the survivor's company, and only its workspace metadata is updated", async () => {
     const w = world();
     await w.setup();
     const merged = slackId("U0MERGED1");
@@ -90,7 +106,11 @@ describe("a merged sign-in is seated as its survivor (company layer on)", () => 
     const signed = await w.signIn("U0MERGED1", { slackTeam: TEAM });
     expect(signed.refused).toBeUndefined();
     expect((await w.access(signed.access)).body).toMatchObject({ developerId: person("owner"), companyId: X, companyRole: "owner" });
-    expect(JSON.stringify([w.db.get(`DEVELOPER#${merged}`, "META"), w.db.get(`DEVELOPER#${person("owner")}`, "META")])).toBe(before);
+    const kept = { ...w.db.get(`DEVELOPER#${merged}`, "META")! };
+    expect(kept.slackTeamId).toBe(TEAM);
+    delete kept.slackTeamId;
+    delete kept.slackTeamName;
+    expect(JSON.stringify([kept, w.db.get(`DEVELOPER#${person("owner")}`, "META")])).toBe(before);
     expect(w.db.find((row) => row.entityType === "SESSION" && row.developerId === merged)).toEqual([]);
     expect((await w.refresh(signed.refresh!)).status).toBe(200);
   });

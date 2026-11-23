@@ -32,7 +32,7 @@ export interface TaskMessageView { messageId: string; kind: "comment" | "steer";
 export interface TaskMessagesResponse { messages: TaskMessageView[]; next?: string }
 export interface TaskMessageSendResponse { message: TaskMessageView }
 export interface TaskDiffResponse { repository: string; number: number; page: number; files: Array<{ path: string; additions: number; deletions: number; patch: string }>; more: boolean }
-export interface PlanCommentView { commentId: string; document: CommentDocument; author: { developerId: string; name: string }; text: string; at: string; rev: number; resolved: boolean }
+export interface PlanCommentView { commentId: string; document: CommentDocument; author: { developerId: string; name: string }; text: string; at: string; rev: number; resolved: boolean; anchor?: string; replyTo?: string }
 export interface PlanCommentsResponse { comments: PlanCommentView[] }
 export interface PlanCommentCreateResponse { comment: PlanCommentView }
 
@@ -110,7 +110,11 @@ function shownName(name: string): string {
 
 function planCommentView(comment: TaskComment): PlanCommentView {
   // `resolved`: the comment was sent with a decision, so the planner has handled it and it can no longer change.
-  return { commentId: comment.commentId, document: comment.document, author: authorOf(comment), text: redactText(comment.text), at: comment.createdAt, rev: comment.rev, resolved: comment.lockedBy !== undefined };
+  const anchor = anchorOfTarget(comment.target);
+  return {
+    commentId: comment.commentId, document: comment.document, author: authorOf(comment), text: redactText(comment.text), at: comment.createdAt, rev: comment.rev, resolved: comment.lockedBy !== undefined,
+    ...(anchor === undefined ? {} : { anchor }), ...(comment.parentId === undefined ? {} : { replyTo: comment.parentId }),
+  };
 }
 
 const liveComments = (comments: readonly TaskComment[]): TaskComment[] => comments.filter((comment) => comment.deletedAt === undefined);
@@ -129,6 +133,15 @@ export async function listCorePlanComments(deps: RouteDeps, caller: DeveloperCal
   if (!rowInCompany(task as unknown as Record<string, unknown>, deps.companyId)) throw agentXError("TASK_NOT_FOUND", NOT_FOUND_TASK);
   const access = await resolveCoreTaskAccess(deps, caller, task, "read");
   return { comments: liveComments(await listTaskComments(deps, access.task.taskId)).map(planCommentView) };
+}
+
+/** The existing comment POST for a task already read by the core in the caller's company. */
+export async function createCorePlanComment(deps: RouteDeps, caller: DeveloperCaller, task: TaskAccess["task"], value: unknown): Promise<PlanCommentCreateResponse> {
+  if (!rowInCompany(task as unknown as Record<string, unknown>, deps.companyId)) throw agentXError("TASK_NOT_FOUND", NOT_FOUND_TASK);
+  const actor: PageActor = { ...await resolveCoreTaskAccess(deps, caller, task, "comment"), caller };
+  const input = parseInput(CreateCommentSchema, value, "comment");
+  const comment = await postComment(deps, actor, { requestId: input.requestId, document: input.document, text: input.text, ...(input.anchor === undefined ? {} : { anchor: input.anchor }), ...(input.replyTo === undefined ? {} : { parentId: input.replyTo }) });
+  return { comment: planCommentView(comment) };
 }
 
 function latestVersionOf(task: TaskAccess["task"], document: CommentDocument): number {
@@ -347,19 +360,34 @@ export async function readTaskDiff(deps: RouteDeps, caller: DeveloperCaller, tas
   const { task } = await accessFor(deps, caller, taskId, "read");
   const opened = (await deps.actions.pullRequests(task.workspaceId)).find((pullRequest) => pullRequest.repository === query.data.repository && pullRequest.number === query.data.number);
   if (opened === undefined) throw agentXError("NOT_FOUND", "no such pull request on this task");
+  return readDiffPage(deps, query.data, opened);
+}
+
+/** The same diff for a core task: live read authority, then only a PR the workflow recorded. */
+export async function readCoreTaskDiff(deps: RouteDeps, caller: DeveloperCaller, task: TaskAccess["task"], url: URL): Promise<TaskDiffResponse> {
+  if (!rowInCompany(task as unknown as Record<string, unknown>, deps.companyId)) throw agentXError("TASK_NOT_FOUND", NOT_FOUND_TASK);
+  await resolveCoreTaskAccess(deps, caller, task, "read");
+  const query = DiffQuerySchema.safeParse({ repository: url.searchParams.get("repository") ?? undefined, number: whole(url.searchParams.get("number")), page: url.searchParams.has("page") ? whole(url.searchParams.get("page")) : 1 });
+  if (!query.success) throw agentXError("CONFIG_INVALID", "the diff request is invalid");
+  const opened = task.workflow?.pullRequests?.find((pr) => pr.repositoryId === query.data.repository && pr.number === query.data.number);
+  if (opened === undefined) throw agentXError("NOT_FOUND", "no such pull request on this task");
+  return readDiffPage(deps, query.data, opened);
+}
+
+async function readDiffPage(deps: RouteDeps, query: z.infer<typeof DiffQuerySchema>, opened: { url: string; number: number }): Promise<TaskDiffResponse> {
   const repositoryUrl = githubRepositoryUrl(opened.url, opened.number);
   if (repositoryUrl === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "this pull request's diff cannot be read");
   if (deps.readPullRequestDiff === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "pull request diffs are not available on this install");
   let read: DiffPageRead;
   try {
-    const parsed = DiffReadSchema.safeParse(await deps.readPullRequestDiff(repositoryUrl, opened.number, query.data.page));
+    const parsed = DiffReadSchema.safeParse(await deps.readPullRequestDiff(repositoryUrl, opened.number, query.page));
     if (!parsed.success) throw new Error("unreadable");
     read = { files: parsed.data.files.map((file) => ({ filename: file.filename, additions: file.additions, deletions: file.deletions, ...(file.patch === undefined ? {} : { patch: file.patch }) })), more: parsed.data.more };
   } catch {
     throw agentXError("RUNTIME_UNAVAILABLE", "this pull request's diff cannot be read");
   }
   return {
-    repository: query.data.repository, number: query.data.number, page: query.data.page, more: read.more,
+    repository: query.repository, number: query.number, page: query.page, more: read.more,
     files: read.files.map((file) => ({
       path: file.filename, additions: file.additions, deletions: file.deletions,
       patch: file.patch === undefined ? "" : file.patch.length > DIFF_PATCH_MAX_CHARS ? DIFF_PATCH_TOO_LONG : file.patch,

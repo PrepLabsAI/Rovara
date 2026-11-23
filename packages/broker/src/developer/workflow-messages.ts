@@ -2,7 +2,7 @@
 // plain message (at most 1,200 visible characters), and every blocked step carries its ways out as buttons. Every
 // value from a record, the model or a reviewer is redacted where it is free text, cut short and escaped here.
 import {
-  WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE,
+  CI_FIX_ROUNDS_MAX, workflowFixRounds, isCiFixBlockReason, isBranchSyncBlockReason, WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE,
   WORKFLOW_KEEP_PULL_REQUESTS_NOTE, WORKFLOW_RESOLVE_FINDINGS_MAX, openReviewFindings, redactText, workflowKeepPullRequestsOffered, sendBackProblems, workflowIsReviewOnly, workflowReviewsSawPartialDiff, workflowCheckResultBroken, workflowSelectedChecks, workflowSendBackOffered, workflowApplicationEvidenceCodes, workflowReadmitsApplicationRound, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { splitTextAtLines } from "@agentx/contracts";
@@ -139,10 +139,16 @@ const STOPPED_BY_OWNER = /^(planning|implementation|verification retry|independe
 /** Whether a step's block reason is a stop the owner asked for, which `plainBlockReason` words as a whole sentence of its own. */
 const stoppedByOwner = (blockReason: string | undefined): boolean => blockReason !== undefined && STOPPED_BY_OWNER.test(blockReason);
 
+function visibleBlockReason(reason: string): string | undefined {
+  if (isE2EPlanCorrectionBlockReason(reason)) return reason;
+  return isCiFixBlockReason(reason) || isBranchSyncBlockReason(reason) ? redactText(reason).replace(/[\p{Cc}\p{Cf}]/gu, " ").slice(0, 500) : undefined;
+}
+
 /** The broker's own reason a step stopped, in words the owner can act on; any other reason is internal. */
 export function plainBlockReason(blockReason: string | undefined): string {
   if (blockReason === undefined) return GENERIC_REASON;
-  if (isE2EPlanCorrectionBlockReason(blockReason)) return slackText(blockReason);
+  const visible = visibleBlockReason(blockReason);
+  if (visible !== undefined) return slackText(visible);
   const reworded = REWORDED_REASONS.get(blockReason);
   if (reworded !== undefined) return slackText(reworded);
   // PLANINC-2: a stop the owner asked for (cancelled, or interrupted when the stop could not be delivered) says so and what to do; only a failed run is unexpected.
@@ -764,6 +770,11 @@ function withAutoFix(context: WorkflowMessageContext, copy: { text: string; butt
   return lines.length === 0 ? copy : { ...copy, text: `${copy.text}\n${lines.map(slackText).join("\n")}` };
 }
 
+function ciFixStarting(workflow: WorkflowSnapshot): string | undefined {
+  if (workflow.stage !== "IMPLEMENT" || workflow.fixSource !== "ci" || (workflow.state !== "READY" && workflow.state !== "RUNNING")) return undefined;
+  return `Fixing failing checks, round ${String(workflowFixRounds(workflow).ci)} of ${String(CI_FIX_ROUNDS_MAX)}: ${(workflow.fixProblems ?? []).slice(0, 3).map((name) => slackText(redactText(name).replace(/[\p{Cc}\p{Cf}]/gu, " ").slice(0, 60))).join(", ") || "a check"}. Checks and reviews run again after.`;
+}
+
 function implementRunning(context: WorkflowMessageContext): string {
   const { workflow } = context;
   const decision = leadingDecision(workflow);
@@ -826,6 +837,11 @@ function planRunning(context: WorkflowMessageContext): string {
 }
 
 function copyOf(context: WorkflowMessageContext): { text: string; buttons: Button[] } | undefined {
+  const fixing = ciFixStarting(context.workflow);
+  return fixing === undefined ? stageCopyOf(context) : { text: fixing, buttons: [] };
+}
+
+function stageCopyOf(context: WorkflowMessageContext): { text: string; buttons: Button[] } | undefined {
   const { workflow } = context;
   const exits = exitButtons(context);
   const plain = (text: string | undefined) => (text === undefined ? undefined : { text, buttons: [] as Button[] });
@@ -922,6 +938,8 @@ export function workflowMessageKey(workflow: WorkflowSnapshot, options: { planAu
       .map((pullRequest) => `${pullRequest.repositoryId}#${pullRequest.number}@${pullRequest.headSha ?? pullRequest.candidateDigest}=${pullRequest.state === "MERGED" ? "merged" : pullRequest.state === "CLOSED" ? "closed" : "open"}`)
       .join(",")}`;
   }
+  // READY and RUNNING are the same fix-start notice; accepting the run increments the revision once.
+  if (ciFixStarting(workflow) !== undefined) return `revision:${workflow.revision - (workflow.state === "RUNNING" ? 1 : 0)}`;
   // Pushing a fix to the pull requests already open says the same as getting ready to: said once per checked code.
   if (workflow.stage === "PULL_REQUEST" && (workflow.state === "READY" || workflow.state === "RUNNING")) return `opening:${workflow.candidate?.digest ?? workflow.revision}`;
   return `revision:${workflow.revision}`;

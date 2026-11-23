@@ -1,13 +1,16 @@
+import { installGatewayFixture, brokerTemplate } from "../support/install-gateway.js";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AgentXError } from "@agentx/contracts";
 import type { DeployEvent } from "../../packages/cli/src/deploy/deployer.js";
 import { CDK_CONSTRUCT_IDS, assertCdkBootstrapped, assertSourceAtRelease, buildSource, cdkDeployer, type CommandRunner } from "../../packages/cli/src/deploy/cdk-engine.js";
 import { sourceReleaseVersion, synthDeclaredParameters } from "../../packages/cli/src/deploy/cdk-source.js";
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
+
+installGatewayFixture();
 
 const SECRET = "s3cr3t-value-that-must-not-leak-0000000000000";
 
@@ -43,8 +46,8 @@ describe("cdk engine", () => {
   it("deploys one stack exclusively with its parameters and role, and returns its outputs", async () => {
     const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
     const runner = recordingRunner(dir, { "agentx-staging-control-plane": { ApiEndpoint: "https://x" } });
-    const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
-    const out = await deployer.deploy({ part: "control-plane", stackName: "agentx-staging-control-plane", parameters: { CallbackSigningKey: SECRET, OidcIssuer: "https://i" }, roleArn: "arn:aws:iam::123456789012:role/agentx-staging-cloudformation", terminationProtection: false });
+    const deployer = cdkDeployer({ brokerTemplate, runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
+    const out = await deployer.deploy({ part: "control-plane", stackName: "agentx-staging-control-plane", parameters: { CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6", CallbackSigningKey: SECRET, OidcIssuer: "https://i" }, roleArn: "arn:aws:iam::123456789012:role/agentx-staging-cloudformation", terminationProtection: false });
     expect(out).toEqual({ ApiEndpoint: "https://x" });
     const call = runner.calls[0]!;
     expect(call.command).toBe("npx");
@@ -62,17 +65,17 @@ describe("cdk engine", () => {
     // (agentx-staging-control-plane), so every parameter would be silently dropped.
     const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
     const runner = recordingRunner(dir, { "agentx-staging-control-plane": {} });
-    const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
+    const deployer = cdkDeployer({ brokerTemplate, runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
     await deployer.deploy({
       part: "control-plane",
       stackName: "agentx-staging-control-plane",
-      parameters: { CallbackSigningKey: SECRET, PermissionsBoundaryArn: "arn:aws:iam::1:policy/b", OperatorPrincipalArn: "arn:aws:iam::1:role/o" },
+      parameters: { CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6", CallbackSigningKey: SECRET, PermissionsBoundaryArn: "arn:aws:iam::1:policy/b", OperatorPrincipalArn: "arn:aws:iam::1:role/o" },
       roleArn: "arn:aws:iam::1:role/r",
       terminationProtection: false,
     });
     const { args } = runner.calls[0]!;
     const values = args.flatMap((arg, index) => (args[index - 1] === "--parameters" ? [arg] : []));
-    expect(values).toHaveLength(3);
+    expect(values).toHaveLength(5);
     for (const value of values) expect(value.slice(0, value.indexOf(":"))).toBe("agentx-staging-control-plane");
   });
 
@@ -107,7 +110,7 @@ describe("cdk engine", () => {
   it("passes agentxIdentity=oidc when the environment brings its own provider", async () => {
     const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
     const runner = recordingRunner(dir, { "agentx-staging-runtime": {} });
-    await cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "oidc", outputsDir: dir, outputs: async () => undefined })
+    await cdkDeployer({ brokerTemplate, runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "oidc", outputsDir: dir, outputs: async () => undefined })
       .deploy({ part: "runtime", stackName: "agentx-staging-runtime", parameters: {}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: true });
     expect(runner.calls[0]!.args).toContain("agentxIdentity=oidc");
   });
@@ -176,11 +179,11 @@ describe("cdk engine", () => {
     const SPACEY_SECRET = 'sp ace"quote\\back';
     const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
     const runner = recordingRunner(dir, { "agentx-staging-control-plane": { ApiEndpoint: "https://x" } });
-    const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
+    const deployer = cdkDeployer({ brokerTemplate, runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
     await deployer.deploy({
       part: "control-plane",
       stackName: "agentx-staging-control-plane",
-      parameters: { CallbackSigningKey: SPACEY_SECRET },
+      parameters: { CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6", CallbackSigningKey: SPACEY_SECRET },
       roleArn: "arn:aws:iam::1:role/r",
       terminationProtection: false,
     });
@@ -194,12 +197,12 @@ describe("cdk engine", () => {
   it("emits deploying then deployed in order", async () => {
     const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
     const runner = recordingRunner(dir, { "agentx-staging-control-plane": { ApiEndpoint: "https://x" } });
-    const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
+    const deployer = cdkDeployer({ brokerTemplate, runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
     const events: DeployEvent[] = [];
     await deployer.deploy({
       part: "control-plane",
       stackName: "agentx-staging-control-plane",
-      parameters: {},
+      parameters: { CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6" },
       roleArn: "arn:aws:iam::1:role/r",
       terminationProtection: false,
       onEvent: (event) => events.push(event),
@@ -217,13 +220,13 @@ describe("cdk engine", () => {
         throw new Error("cdk deploy failed");
       },
     };
-    const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
+    const deployer = cdkDeployer({ brokerTemplate, runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
     const events: DeployEvent[] = [];
     await expect(
       deployer.deploy({
         part: "control-plane",
         stackName: "agentx-staging-control-plane",
-        parameters: {},
+        parameters: { CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6" },
         roleArn: "arn:aws:iam::1:role/r",
         terminationProtection: false,
         onEvent: (event) => events.push(event),
@@ -261,7 +264,7 @@ describe("cdk engine", () => {
       const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
       const runner = recordingRunner(dir, {});
       const asked: string[] = [];
-      const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async (stackName) => { asked.push(stackName); return {}; } });
+      const deployer = cdkDeployer({ brokerTemplate, runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async (stackName) => { asked.push(stackName); return {}; } });
       await expect(
         deployer.deploy({ part: "runtime", stackName: "agentx-staging-runtime", parameters: {}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false }),
       ).resolves.toEqual({});
@@ -271,9 +274,9 @@ describe("cdk engine", () => {
     it("throws naming the stacks actually written when the outputs file has no entry for the requested stack", async () => {
       const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
       const runner = recordingRunner(dir, { "agentx-staging-other-stack": { ApiEndpoint: "https://x" } });
-      const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
+      const deployer = cdkDeployer({ brokerTemplate, runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
       await expect(
-        deployer.deploy({ part: "control-plane", stackName: "agentx-staging-control-plane", parameters: {}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false }),
+        deployer.deploy({ part: "control-plane", stackName: "agentx-staging-control-plane", parameters: { CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6",}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false }),
       ).rejects.toThrow(/cdk deploy wrote no outputs for agentx-staging-control-plane to .*control-plane\.json \(stacks written: agentx-staging-other-stack\)/);
     });
 
@@ -282,9 +285,9 @@ describe("cdk engine", () => {
       const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
       const runner = recordingRunner(dir, { "agentx-staging-other-stack": { ApiEndpoint: "https://x" } });
       const asked: string[] = [];
-      const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async (stackName) => { asked.push(stackName); return { ApiEndpoint: "https://old" }; } });
+      const deployer = cdkDeployer({ brokerTemplate, runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async (stackName) => { asked.push(stackName); return { ApiEndpoint: "https://old" }; } });
       await expect(
-        deployer.deploy({ part: "control-plane", stackName: "agentx-staging-control-plane", parameters: {}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false }),
+        deployer.deploy({ part: "control-plane", stackName: "agentx-staging-control-plane", parameters: { CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6",}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false }),
       ).rejects.toThrow(/cdk deploy wrote no outputs for agentx-staging-control-plane to .*control-plane\.json \(stacks written: agentx-staging-other-stack\)$/);
       expect(asked).toEqual([]);
     });
@@ -293,16 +296,16 @@ describe("cdk engine", () => {
       // A correct deploy of a stack with outputs writes them to the file: these are the old ones.
       const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
       const runner = recordingRunner(dir, {});
-      const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => ({ ApiEndpoint: "https://old" }) });
+      const deployer = cdkDeployer({ brokerTemplate, runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => ({ ApiEndpoint: "https://old" }) });
       await expect(
-        deployer.deploy({ part: "control-plane", stackName: "agentx-staging-control-plane", parameters: {}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false }),
+        deployer.deploy({ part: "control-plane", stackName: "agentx-staging-control-plane", parameters: { CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6",}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false }),
       ).rejects.toThrow(/cdk deploy wrote no outputs for agentx-staging-control-plane to .*control-plane\.json \(stacks written: none\)$/);
     });
 
     it("says the deploy succeeded when reading a no-outputs stack from CloudFormation fails (review M7)", async () => {
       const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
       const runner = recordingRunner(dir, {});
-      const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => { throw new Error("Rate exceeded"); } });
+      const deployer = cdkDeployer({ brokerTemplate, runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => { throw new Error("Rate exceeded"); } });
       await expect(
         deployer.deploy({ part: "runtime", stackName: "agentx-staging-runtime", parameters: {}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false }),
       ).rejects.toThrow("cdk deploy of agentx-staging-runtime succeeded, but its outputs could not be read from CloudFormation: Rate exceeded");
@@ -311,7 +314,7 @@ describe("cdk engine", () => {
     it("throws when the outputs file names no stacks and CloudFormation reports no such stack", async () => {
       const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
       const runner = recordingRunner(dir, {});
-      const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
+      const deployer = cdkDeployer({ brokerTemplate, runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
       await expect(
         deployer.deploy({ part: "runtime", stackName: "agentx-staging-runtime", parameters: {}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false }),
       ).rejects.toThrow(/cdk deploy wrote no outputs for agentx-staging-runtime to .*runtime\.json \(stacks written: none\), and CloudFormation reports no such stack/);
@@ -322,9 +325,9 @@ describe("cdk engine", () => {
       const outputsFile = join(dir, "control-plane.json");
       await writeFile(outputsFile, JSON.stringify({ "agentx-staging-control-plane": { ApiEndpoint: "https://stale" } }));
       const runner: CommandRunner = { run: async () => ({ stdout: "" }) }; // never rewrites the outputs file
-      const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
+      const deployer = cdkDeployer({ brokerTemplate, runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
       await expect(
-        deployer.deploy({ part: "control-plane", stackName: "agentx-staging-control-plane", parameters: {}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false }),
+        deployer.deploy({ part: "control-plane", stackName: "agentx-staging-control-plane", parameters: { CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6",}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false }),
       ).rejects.toThrow(/cdk deploy wrote no outputs file/);
       await expect(readFile(outputsFile, "utf8")).rejects.toThrow();
     });
@@ -332,9 +335,9 @@ describe("cdk engine", () => {
     it("throws a clear message, with cause, when the outputs file is missing entirely", async () => {
       const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
       const runner: CommandRunner = { run: async () => ({ stdout: "" }) };
-      const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
+      const deployer = cdkDeployer({ brokerTemplate, runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
       const error: unknown = await deployer
-        .deploy({ part: "control-plane", stackName: "agentx-staging-control-plane", parameters: {}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false })
+        .deploy({ part: "control-plane", stackName: "agentx-staging-control-plane", parameters: { CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6",}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false })
         .then(
           () => undefined,
           (caught: unknown) => caught,
@@ -353,9 +356,9 @@ describe("cdk engine", () => {
           return { stdout: "" };
         },
       };
-      const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
+      const deployer = cdkDeployer({ brokerTemplate, runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
       const error: unknown = await deployer
-        .deploy({ part: "control-plane", stackName: "agentx-staging-control-plane", parameters: {}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false })
+        .deploy({ part: "control-plane", stackName: "agentx-staging-control-plane", parameters: { CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6",}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false })
         .then(
           () => undefined,
           (caught: unknown) => caught,
@@ -495,4 +498,46 @@ describe("the cdk source (issue 152)", () => {
       .rejects.toThrow(/cdk synth of \/src wrote no readable manifest\.json \(/);
     await expect(readFile(join(outDir, "manifest.json"))).rejects.toThrow();
   });
+});
+
+it("blocks a CDK engine install on an old gateway before running a command", async () => {
+  const transport = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ ok: true }));
+  try {
+    const runner = recordingRunner("/unused", {});
+    const deployer = cdkDeployer({ brokerTemplate, runner, source: "/unused", env: "test", region: "us-east-1", identityMode: "cognito", outputsDir: "/unused", outputs: async () => undefined });
+    await expect(deployer.deploy({ part: "control-plane", stackName: "engine", parameters: { CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6" }, terminationProtection: true })).rejects.toThrow("gateway must serve run prices");
+    expect(runner.calls).toEqual([]);
+  } finally { transport.mockRestore(); }
+});
+
+it("synthesizes provider additions from the final control-plane gateway setting automatically", async () => {
+  const transport = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ runPrice: { version: 1, admissionVersion: 1, snapshotVersion: 1 } }));
+  try {
+    const dir = await mkdtemp(join(tmpdir(), "providers-fast-cdk-"));
+    const runner = recordingRunner(dir, { "agentx-staging-control-plane": {} });
+    const deployer = cdkDeployer({ brokerTemplate, runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
+    await deployer.deploy({ part: "control-plane", stackName: "agentx-staging-control-plane", parameters: { CoreModelGatewayHost: "gateway.example", CoreAgentModel: "openai/gpt-5-mini" }, terminationProtection: true });
+    expect(runner.calls[0]!.args).toContain("CoreModelGatewayHost=gateway.example");
+    expect(runner.calls[0]!.args).toContain("agentx-staging-control-plane:CoreAgentModel=openai/gpt-5-mini");
+  } finally { transport.mockRestore(); }
+});
+
+it.each(["unchanged", "changed-host", "first-host", "changed-model", "first-model"] as const)("CDK engine compares proposed and deployed gateway settings (%s)", async (change) => {
+  const parameters = { CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6" };
+  const previous = { ...parameters };
+  if (change === "changed-host") previous.CoreModelGatewayHost = "old.example";
+  if (change === "first-host") previous.CoreModelGatewayHost = "";
+  if (change === "changed-model") previous.CoreAgentModel = "claude-haiku-5-5";
+  if (change === "first-model") previous.CoreAgentModel = "";
+  const dir = await mkdtemp(join(tmpdir(), "b28-review1-cdk-"));
+  const runner = recordingRunner(dir, { "agentx-staging-control-plane": { ModelRunPriceVersion: "1" } });
+  const transport = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("private upstream detail"));
+  try {
+    const deployer = cdkDeployer({ brokerTemplate, runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir,
+      outputs: async () => ({}), deployedParameters: async () => previous });
+    const run = deployer.deploy({ part: "control-plane", stackName: "agentx-staging-control-plane", parameters, terminationProtection: true });
+    await expect(run).rejects.toThrow("gateway must serve run prices");
+    expect(runner.calls).toEqual([]);
+    expect(transport).toHaveBeenCalledTimes(1);
+  } finally { transport.mockRestore(); }
 });

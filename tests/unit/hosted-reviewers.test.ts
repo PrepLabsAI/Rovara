@@ -396,7 +396,8 @@ describe("hosted reviewer grants", () => {
 
 it("(c) continues the same bound session and refuses another task/kind, close and session expiry before spend", async () => {
   for (const kind of ["second_review", "design_review"] as const) {
-    const claims = taskTokenClaimsFor({ ...claimVector(), stp: kind, mdl: [primary], reviewer: { kind, slot: kind, ceilingUsd: 1 } })!;
+    const fixture = claimVector(); delete fixture.runPrice;
+    const claims = taskTokenClaimsFor({ ...fixture, stp: kind, mdl: [primary], reviewer: { kind, slot: kind, ceilingUsd: 1 } })!;
     const expected = { cid: claims.cid, pid: claims.pid, tid: claims.tid, ws: claims.ws, op: claims.op, kind, slot: kind, model: primary };
     let active = claims, now = claims.iat;
     let session: { jti: string; bind: string; endsAt: number; closed: boolean } | undefined;

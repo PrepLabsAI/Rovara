@@ -55,7 +55,7 @@ export function questionOf(text: string): string | undefined {
 const REFUSAL_WORDS = { rate: ANSWER_WORDS.rate, limit_reached: ANSWER_WORDS.limitReached, unavailable: ANSWER_WORDS.unavailable } as const;
 
 /** One line of code place, safe inside a Slack code span. */
-const place = (source: AnswerResponse["sources"][number]): string => `${source.repo}/${source.path}:${String(source.line)}${source.lineEnd === undefined ? "" : `-${String(source.lineEnd)}`}`.replace(/[`\n\r]/gu, "'");
+const place = (source: AnswerResponse["sources"][number]): string => "kind" in source ? "Task state" : `${source.repo}/${source.path}:${String(source.line)}${source.lineEnd === undefined ? "" : `-${String(source.lineEnd)}`}`.replace(/[`\n\r]/gu, "'");
 
 /**
  * Words made plain for Slack: only Slack's three control characters are escaped, so a `<` never starts a mention, a channel notice, a channel link or a link with a label that hides where it goes. (The Slack

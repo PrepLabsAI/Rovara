@@ -47,3 +47,18 @@ describe("a plan decision and the stored plan", () => {
     expect(ok.decisions.at(-1)).toMatchObject({ decision: "APPROVE", answerOverrides: [{ decisionId: "d1", optionId: "b" }] });
   });
 });
+
+// Regression: the dispatch transaction must see the same E2E-bound workflow that the owner approved.
+it("commits the application obligation before producing dispatch items", async () => {
+  let dispatchedRequired: boolean | undefined;
+  const after = await decide({
+    applicationPlanning: {
+      context: async () => undefined,
+      approve: async (input) => ({ workflow: { ...input.after, e2e: { required: true, contractDigest: PLAN, policyDigest: PLAN,
+        bundleDigest: PLAN, executionPlanDigest: PLAN, currentGroupRunIds: [], resultRefs: [] } }, items: [] }),
+    },
+    onDecided: ({ after }) => { dispatchedRequired = after.e2e?.required; return []; },
+  }, {});
+  expect(after.e2e?.required).toBe(true);
+  expect(dispatchedRequired).toBe(true);
+});

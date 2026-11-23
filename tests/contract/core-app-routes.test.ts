@@ -45,7 +45,7 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/sessions", "tasks:read"], ["GET", "/v1/app/sessions/s1", "tasks:read"],
     ["POST", "/v1/app/sessions/s1/follow", "tasks:read"], ["DELETE", "/v1/app/sessions/s1/follow", "tasks:read"], ["POST", "/v1/app/sessions/s1/unfollow", "tasks:read"], ["POST", "/v1/app/sessions/s1/presence", "tasks:read"],
     ["POST", "/v1/app/sessions/s1/stop", "tasks:act"], ["POST", "/v1/app/sessions/s1/retry", "tasks:act"], ["POST", "/v1/app/sessions/s1/messages", "tasks:act"],
-    ["POST", "/v1/app/sessions/s1/answers", "tasks:act"], ["POST", "/v1/app/sessions/s1/revise-plan", "tasks:act"], ["POST", "/v1/app/sessions/s1/close", "tasks:act"],
+    ["POST", "/v1/app/sessions/s1/answers", "tasks:act"], ["POST", "/v1/app/sessions/s1/revise-plan", "tasks:act"], ["POST", "/v1/app/sessions/s1/close", "tasks:act"], ["GET", "/v1/app/sessions/s1/close", "tasks:read"],
     ["GET", "/v1/app/decisions", "decisions:decide"], ["POST", "/v1/app/decisions/plan/t1/approve", "decisions:decide"], ["POST", "/v1/app/decisions/plan/t1/reject", "decisions:decide"],
     ["POST", "/v1/app/decisions/plan/t1/request-changes", "decisions:decide"], ["POST", "/v1/app/decisions/plan/t1/evidence-opened", "decisions:decide"],
     ["GET", "/v1/app/projects/payments/how-we-work", "full"], ["GET", "/v1/app/projects/payments/playbook", "full"],
@@ -402,4 +402,64 @@ it("inventories the four exact context worker routes without person authority", 
     expect(contextAppRouteOf(row.method, row.path)).toBeUndefined();
     expect(contextDevRouteOf(row.method, row.path)).toBeUndefined();
   }
+});
+
+
+it("the existing PR feedback action paths retain their production scopes", () => {
+  const id = "11111111-1111-4111-8111-111111111111";
+  for (const [action, scope] of [["feedback-decision", "decisions:decide"], ["feedback-retry", "tasks:act"], ["keep-pull-requests", "tasks:act"]] as const) {
+    const path = `/v1/dev/tasks/${id}/workflow/${action}`;
+    expect(contextDevRouteOf("POST", path)?.requires).toBe(scope);
+    expect(contextDevRouteOf("DELETE", path)).toBeUndefined();
+  }
+});
+
+// CORE-PARITY: these existing MCP routes must remain admitted by the production scope table.
+describe("core parity dev-route scopes", () => {
+  it.each([
+    ["POST", "workflow/decision", "decisions:decide"],
+    ["POST", "workflow/retry", "tasks:act"],
+    ["POST", "workflow/review", "tasks:act"],
+    ["POST", "workflow/publish-retry", "tasks:act"],
+    ["POST", "close", "tasks:act"],
+    ["POST", "pull-requests", "tasks:act"],
+    ["POST", "share", "tasks:share"],
+    ["GET", "plan", "tasks:read"],
+    ["GET", "diff", "tasks:read"],
+  ])("keeps %s %s scoped to %s", (method, rest, requires) => {
+    expect(contextDevRouteOf(method, `/v1/dev/tasks/11111111-1111-4111-8111-111111111111/${rest}`)?.requires).toBe(requires);
+  });
+});
+
+// The retained plan-comment POST must stay admitted by the production scope registry.
+it("core plan comments use the existing developer tasks:act scope", async () => {
+  const { devRouteOf } = await import("../../packages/broker/src/aws/dev-route-scopes.js");
+  const path = "/v1/dev/tasks/11111111-1111-4111-8111-111111111111/comments";
+  expect(devRouteOf("POST", path)).toMatchObject({ requires: "tasks:act" });
+  expect(devRouteOf("GET", path)).toMatchObject({ requires: "tasks:read" });
+  expect(devRouteOf("DELETE", path)).toBeUndefined();
+});
+
+// The server-read routes belong to the outer DEV dispatcher, with no APP aliases.
+describe("dedicated server-read route registration", () => {
+  it("registers only the approved methods/scopes and no script-token APP alias", async () => {
+    const { devRouteOf, appRouteOf } = await import("../../packages/broker/src/aws/dev-route-scopes.js");
+    expect(devRouteOf("GET", "/v1/dev/tasks/start-requests/original")).toMatchObject({ requires: "tasks:read" });
+    expect(devRouteOf("POST", "/v1/dev/company/connections/impact")).toMatchObject({ requires: "full" });
+    expect(devRouteOf("DELETE", "/v1/dev/company/connections/impact")).toBeUndefined();
+    expect(appRouteOf("GET", "/v1/app/task-start-requests/original")).toBeUndefined();
+    expect(appRouteOf("POST", "/v1/app/github/disconnect-preview")).toBeUndefined();
+  });
+  it("reaches the outer broker and preserves the original operation ID", async () => {
+    const { serverReadWorld } = await import("../support/server-read-world.js");
+    const w = await serverReadWorld();
+    const r = await w.start(); expect(r.status).toBe(200); expect(r.body.requestId).toBe(w.requestId);
+    w.addInstallation(); const impact = await w.impact();
+    expect(impact.status).toBe(200); expect(impact.body).not.toHaveProperty("requestId");
+  });
+});
+
+it("task Ask history is a full-access GET route, distinct from asking", () => {
+  expect(appRouteOf("GET", "/v1/app/projects/alpha/tasks/11111111-1111-4111-8111-111111111111/answers")).toMatchObject({ requires: "full" });
+  expect(appRouteOf("POST", "/v1/app/projects/alpha/tasks/11111111-1111-4111-8111-111111111111/answers")).toBeUndefined();
 });

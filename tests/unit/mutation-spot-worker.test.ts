@@ -1,4 +1,4 @@
-import "./mutation-spot-offline.js";
+import { useLoopbackOnlyGuard } from "./mutation-spot-offline.js";
 import { createHash } from "node:crypto";
 import { chmod, link, mkdir, readdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -7,6 +7,8 @@ import { setCandidateWriteHookForTests } from "../../packages/worker/src/candida
 import { runMutationSpotCheck, type MutationSpotOptions } from "../../packages/worker/src/verification/mutation-spot-check.js";
 import { createMutationCopy, snapshotCandidate, writeScratchMutant } from "../../packages/worker/src/verification/mutation-restore.js";
 import { fixture, report } from "./mutation-spot-support.js";
+
+useLoopbackOnlyGuard();
 
 const roots: string[] = [];
 afterEach(async () => { setCandidateWriteHookForTests(undefined); vi.useRealTimers(); await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });

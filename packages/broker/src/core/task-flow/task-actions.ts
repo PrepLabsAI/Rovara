@@ -1,5 +1,6 @@
 // Task actions (owner decision 198): the owner's moves on a task already running that Code did not have, as one service over the task flow's deps. The laptop's routes (`local/app/routes.ts`) and Cloud's call the
-// same functions, so a task of the shared engine can offer them. Each answers the task's view, or throws the refusal (an `AgentXError`) before anything is written.
+// same functions, so a task of the shared engine can offer them. Each answers the task's view. Refusals precede writes; a confirmed send-back/findings move whose view fails answers COMMITTED_REFRESH_NEEDED.
+import { reviewTaskOnRequest } from "./manual-review.js";
 import { continueTask } from "./continue.js";
 import type { TaskCaller, TaskFlowDeps } from "./deps.js";
 import type { FindingAcceptMethod } from "./finding-accept.js";
@@ -10,6 +11,7 @@ import { sendBackToCoding } from "./send-back.js";
 
 export function createTaskActions(deps: TaskFlowDeps, options: TaskActionsOptions = {}) {
   return {
+    review: (caller: TaskCaller, taskId: string, request: unknown): Promise<TaskView> => reviewTaskOnRequest(deps, options, caller, taskId, request),
     /** More instructions for a task that ended its run: a new round on the same task and workspace (`POST /v1/dev/tasks/{id}/continue`). */
     continue: (caller: TaskCaller, taskId: string, request: unknown): Promise<TaskView> => continueTask(deps, options, caller, taskId, request),
     /** Send the change back to coding with the owner's instructions (`POST /v1/dev/tasks/{id}/workflow/send-back`). */

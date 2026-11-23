@@ -1221,11 +1221,10 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     name: "agentx_close_task",
     title: "Close an AgentX task",
     description:
-      "Closes one of your tasks and releases its workspace, so it stops counting against your limit of open tasks. AgentX checks for work not in a pull request and refuses by default. Set discard_unpublished=true only when you explicitly want to permanently discard all unpublished changes in this task's isolated workspace. This does not run coding tools or publish changes; it records your authorization, checks the workspace, and deletes only that workspace. Answers at once while closing: check agentx_get_task for CLOSED.",
+      "Closes one of your tasks and releases its workspace, so it stops counting against your limit of open tasks. Guarded close and discarding unpublished work are not available yet. Answers at once while closing: check agentx_get_task for CLOSED.",
     inputSchema: {
       task_id: taskIdInput,
       request_id: requestIdInput,
-      discard_unpublished: z.boolean().optional().describe("Set true only when you, the task owner, explicitly authorize discarding unpublished changes in this task's isolated workspace."),
     },
     outputSchema: { ...TaskShape, closed: z.boolean() },
     async handler(context, input) {
@@ -1233,8 +1232,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       // R22: no wait. A repeated request_id returns the same close and its outcome.
       // A fresh ID when left out: closing again after publishing is a new request, and a repeat
       // on a closing task returns that close (Task 12).
-      const discardUnpublished = input.discard_unpublished === true;
-      const answer = await context.client.closeTask(taskId, (input.request_id as string | undefined) ?? context.newRequestId(), discardUnpublished);
+      const answer = await context.client.closeTask(taskId, (input.request_id as string | undefined) ?? context.newRequestId(), false);
       const unpublished = answer.unpublished ?? answer.task.unpublished;
       const task = unpublished === undefined ? answer.task : { ...answer.task, unpublished };
       // AgentX's own words, when it gives them, say why the task is not closed yet and what next.
@@ -1245,7 +1243,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
         : answer.message !== undefined
           ? `Task ${taskId}: ${plainText(answer.message, "AgentX has not closed it yet; check with agentx_get_task")}`
           : unpublished !== undefined
-            ? `Task ${taskId} was not closed: unpublished work in ${unpublished.map((entry) => `${entry.repository} (${entry.reasons.join(", ")})`).join("; ")}. Open a pull request with agentx_open_pull_request first, or continue the task with instructions to discard the changes, then close it again.`
+            ? `Task ${taskId} was not closed: unpublished work in ${unpublished.map((entry) => `${entry.repository} (${entry.reasons.join(", ")})`).join("; ")}. Open a pull request with agentx_open_pull_request first, then close it again.`
             : `Closing task ${taskId}: AgentX is checking the workspace for unpublished work. Check with agentx_get_task; it shows CLOSED when done.`;
       return { structured: { ...taskOutput(task), closed: answer.closed }, text };
     },

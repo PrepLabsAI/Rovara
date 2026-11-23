@@ -208,6 +208,7 @@ export interface DispatcherCoreInputs {
   env: NodeJS.ProcessEnv;
   /** The callback signing key, read from Secrets Manager by the dispatcher (aws/callback-signing-key.ts); never part of `env`. Blank: the host is not configured. */
   callbackSigningKey: string;
+  deliveryAccess?: TaskFlowDeps["deliveryAccess"];
   /** The State table, as the dispatcher's document client reads it (whose a workspace is, its binding). */
   documentClient: Parameters<typeof workspaceCompanyReader>[0];
   /** The AWS clients the core's adapters speak (made by the dispatcher only when the core is first needed). */
@@ -300,6 +301,7 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
       // DEC 254n (1): each step's route is the company's own engine model when it set one, else the install's (the same answer as before); an unreadable setting dispatches nothing.
       const modelAccess = flow.modelAccess === null || flow.modelAccess === undefined ? flow.modelAccess : companyEngineModelRoute({ store: registry.require("storage"), companyId, install: flow.modelAccess });
       const flowOptions: Partial<RegistryTaskFlowOptions> = {
+        deliveryAccess: inputs.deliveryAccess ?? (async () => { throw agentXError("RUNTIME_UNAVAILABLE", "final delivery authority is unavailable"); }),
         ...(standingInstructions === null || standingInstructions === undefined ? {} : { standingInstructions }),
         ...(modelAccess === null || modelAccess === undefined ? {} : { modelAccess }),
         // The gateway's origin goes to a hosted worker with an eval request (the worker has no setting of its own), only where the gateway is configured (the same checked origin the model route uses); otherwise nothing is sent.

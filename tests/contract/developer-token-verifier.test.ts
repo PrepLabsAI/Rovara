@@ -147,3 +147,21 @@ describe("the broker's developer token check (D17)", () => {
     expect(h.fetches).toHaveLength(2);
   });
 });
+
+
+describe("selected server-read key refresh", () => {
+  it("passes the same request cancellation/accounting capability to a cold key read and keeps the existing cache", async () => {
+    const { serverReadContext } = await import("../../packages/broker/src/aws/server-read-context.js");
+    const signer = localSigner(); const jwk = await signer.publicJwk();
+    const seen: unknown[] = [];
+    const verify = developerTokenVerifier({ issuer: ISSUER, now: () => T0, keys: async (read) => { seen.push(read); return [jwk]; } });
+    const { token } = await issueAccessToken(signer, { issuer: ISSUER, subject: SUB, amr: "slack", env: "staging", sessionId: "s-1", now: T0 });
+    const scope = serverReadContext({ send: async () => ({}) });
+    try {
+      await verify(`Bearer ${token}`, undefined, scope);
+      expect(seen).toEqual([scope]);
+      await verify(`Bearer ${token}`, undefined, scope);
+      expect(seen).toHaveLength(1);
+    } finally { await scope.close(); }
+  });
+});

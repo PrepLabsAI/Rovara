@@ -13,7 +13,7 @@ import { App, Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import {
-  BOUNDARY_SERVICES, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_MODEL_GATEWAY_URL_VARIABLE, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, OUTBOX_PENDING_INDEX, CORE_DISPATCH_MAX_RECEIVES, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, HEALTH_ALARM_SUFFIXES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
+  CORE_DISPATCHER_TIMEOUT_SECONDS, CORE_DISPATCH_CLAIM_STALE_MS, WORKER_POST_TIMEOUT_MS, OUTBOX_RELAY_OWNERSHIP_MS, BOUNDARY_SERVICES, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_MODEL_GATEWAY_URL_VARIABLE, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, OUTBOX_PENDING_INDEX, CORE_DISPATCH_MAX_RECEIVES, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, HEALTH_ALARM_SUFFIXES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
   SERVICE_ROLE_SERVICES, coreAttentionEmailFunctionName, coreDispatchDeadLetterName, coreDispatchQueueName,
 } from "@agentx/contracts";
 import { CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PATTERN, CORE_ANSWERS_MODEL_VARIABLE, CORE_CLAUDE_AGENT_MODEL, CORE_LEARNING_MODEL_MAX_LENGTH, CORE_LEARNING_MODEL_PATTERN, CORE_LEARNING_MODEL_VARIABLE, isCoreLearningModelId } from "@agentx/contracts";
@@ -27,6 +27,7 @@ import { configKey } from "../../packages/cli/src/config/keys.js";
 import { OPERATOR_PARAMETERS } from "../../packages/cli/src/deploy/parameters.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
+import { withoutBrokerMemberConditionCheck } from "../support/broker-member-condition-check-template.js";
 
 skipLambdaBundling();
 
@@ -63,7 +64,7 @@ function packedSettings(variables: Record<string, unknown>): Map<string, unknown
 describe("the model gateway settings (stack parameters CoreModelGatewayHost and CoreAgentModel)", () => {
   it("are declared empty by default, with the contracts' pattern and length", () => {
     expect(json.Parameters.CoreModelGatewayHost).toMatchObject({ Default: "", AllowedPattern: CORE_MODEL_GATEWAY_HOST_PATTERN, MaxLength: CORE_MODEL_GATEWAY_HOST_MAX_LENGTH });
-    expect(json.Parameters.CoreAgentModel).toMatchObject({ Default: "", AllowedPattern: CORE_AGENT_MODEL_PATTERN, MaxLength: CORE_AGENT_MODEL_MAX_LENGTH });
+    expect(json.Parameters.CoreAgentModel).toMatchObject({ Default: "", AllowedPattern: "^([a-z0-9][a-z0-9._:-]{0,63})?$", MaxLength: 64 });
   });
 
   it("are packed for BOTH the broker and the dispatcher (gw, am), never as variables of their own", () => {
@@ -94,6 +95,19 @@ describe("the model gateway settings (stack parameters CoreModelGatewayHost and 
     const legacyBroker = Object.entries(legacyJson.Resources).find(([id, resource]) => /^Broker[0-9A-F]{8}$/u.test(id) && resource.Type === "AWS::Lambda::Function")!;
     expect(unpackedBrokerVariables((legacyBroker[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables, legacyJson as never).CHANNEL_ADAPTER_SECRET_PREFIX).toBe("agentx/production/");
   });
+});
+
+it("advertises current broker capability even before a gateway, without changing unconfigured model constraints", () => {
+  for (const template of [named.toJSON(), inApp, legacy.toJSON()]) {
+    expect((template as { Outputs: Record<string, unknown> }).Outputs.ModelRunPriceVersion).toMatchObject({ Value: "1" });
+  }
+  for (const context of [{ CoreModelGatewayHost: "gateway.example" }, { agentxEnv: "staging", CoreModelGatewayHost: "gateway.example" }]) {
+    const stack = buildAgentXApp(context).node.children.find((child): child is Stack => Stack.isStack(child) && child.node.id === "AgentXControlPlane")!;
+    const template = Template.fromStack(stack).toJSON() as Json & { Outputs: Record<string, unknown> };
+    expect(template.Parameters.CoreAgentModel).toMatchObject({ Default: "", AllowedPattern: CORE_AGENT_MODEL_PATTERN, MaxLength: CORE_AGENT_MODEL_MAX_LENGTH });
+    expect(template.Outputs.ModelRunPriceVersion).toMatchObject({ Value: "1" });
+    expect(new RegExp(template.Parameters.CoreAgentModel!.AllowedPattern!, "u").test("openai/gpt-5-mini")).toBe(true);
+  }
 });
 
 // L4-AM (DEC 254zzn(2)): the hosted answers model, a stack parameter of its own, for the BROKER only.
@@ -225,6 +239,16 @@ describe("the core dispatch queue", () => {
 
   it("is encrypted with SQS-managed keys, holds a message two minutes while a step starts, and keeps dead letters 14 days", () => {
     expect(queue[1].Properties).toMatchObject({ SqsManagedSseEnabled: true, VisibilityTimeout: 120 });
+    // Real synthesized values, not another copy of either infrastructure timeout.
+    expect(CORE_DISPATCH_CLAIM_STALE_MS).toBeGreaterThan(Number(queue[1].Properties.VisibilityTimeout) * 1_000 + WORKER_POST_TIMEOUT_MS);
+    for (const template of [named, legacy]) {
+      const broker = resources(template, "AWS::Lambda::Function").find(([id]) => /^Broker[0-9A-F]{8}$/u.test(id))![1];
+      expect(OUTBOX_RELAY_OWNERSHIP_MS).toBeGreaterThan(Number(broker.Properties.Timeout) * 1_000);
+      const dispatcher = resources(template, "AWS::Lambda::Function").find(([id]) => /^Dispatcher[0-9A-F]{8}$/u.test(id))![1];
+      expect(dispatcher.Properties.Timeout).toBe(CORE_DISPATCHER_TIMEOUT_SECONDS);
+      expect(CORE_DISPATCHER_TIMEOUT_SECONDS).toBe(60);
+      expect(CORE_DISPATCH_CLAIM_STALE_MS).toBeGreaterThan(Number(dispatcher.Properties.Timeout) * 1_000);
+    }
     expect(deadLetters[1].Properties).toMatchObject({ SqsManagedSseEnabled: true, MessageRetentionPeriod: 14 * 24 * 60 * 60 });
   });
 
@@ -598,7 +622,7 @@ describe("L1a broker environment derivation", () => {
   });
 
   // DEC 254za: re-pinned for the callback signing key's secret (the legacy template carries it too).
-  it("keeps the entire legacy template byte-identical (apart from normalized bundled asset hashes)", () => {
+  it("keeps the legacy template byte-identical apart from the exact broker capability output, member check and normalized asset hashes", () => {
     // Machine size stack (#877 + #887 + DEC 254zr): re-pinned. Measured against code/next a38f1ab0d, the legacy template differs in exactly three places: (1) the provisioner's RunInstances
     // condition gains StringEquals ec2:InstanceType (ten types); (2) ResolveWorkerAmi's Resource becomes the arm64 parameter plus the public x86_64 AL2023 parameter; (3) the provisioner state
     // machine's definition (new states SizeChosen, the *Sized and X86 launches, SizedLaunchFailed, SizeUnavailable; Start, LaunchConfiguration, RunInstance*, RecordInstance carry the size).
@@ -615,12 +639,21 @@ describe("L1a broker environment derivation", () => {
     // LEGACY-WORKER-CAPABILITY-ROUTES: the legacy template gains the ContextToolsListRoute and DesignReviewPacketRoute resources (named environments already had them).
     // #1275: and loses the core engine switch (the CoreEngine and CoreAllowedCompanies parameters, their packed sw/ac pieces and the dispatcher's ROVARA_CORE_ENGINE, the CoreEngineIsOn
     // condition: schedules ENABLED, the dispatcher's core mapping enabled, its core policy and callback key unconditional).
-    // Rule D proof: with exactly the two routes taken out, the switch removal's own pin 33220db5... holds (before the routes: f15083c4..., before the switch removal).
-    const withoutCapabilityRoutes = structuredClone(legacy.toJSON()) as Json;
+    // The merged template adds both the exact first-gateway output and the narrow
+    // SIGNIN-MEMBER-CONDITIONCHECK statement (DEC 254zzz282 B014-A). Assert each
+    // addition before removing it; all historical pins still cover every other byte.
+    const beforeFirstGateway = structuredClone(legacy.toJSON()) as Json & { Outputs: Record<string, unknown> };
+    expect(beforeFirstGateway.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
+    delete beforeFirstGateway.Outputs.ModelRunPriceVersion;
+    expect(digest(beforeFirstGateway), "legacy without the first-gateway output retains the upstream member-check pin").toBe("8f8df2aeed3082d74b0fee456be77fb5e562b86eb2c047b79f3585aa439ec150");
+    const beforeMemberCheck = withoutBrokerMemberConditionCheck(beforeFirstGateway);
+    expect(digest(beforeMemberCheck), "legacy without the first-gateway output and broker member check").toBe("512fbc833e978fd35b1ccd570e0833ccda983f1a4a000b75afa5ac7992529d62");
+    // Rule D proof: removing exactly the two capability routes retains the switch-removal pin.
+    const withoutCapabilityRoutes = structuredClone(beforeMemberCheck);
     delete withoutCapabilityRoutes.Resources.ContextToolsListRoute;
     delete withoutCapabilityRoutes.Resources.DesignReviewPacketRoute;
     expect(digest(withoutCapabilityRoutes), "legacy with the two capability routes taken out").toBe("33220db5faf6815c6effbb6c57c7b495eb26d73fe7fdf6b21bb10433718659d4");
-    expect(digest(legacy.toJSON())).toBe("512fbc833e978fd35b1ccd570e0833ccda983f1a4a000b75afa5ac7992529d62");
+    expect(digest(legacy.toJSON())).toBe("99c852b0d794c4b0d27ec6b804839c1c3592fa8eeacaaa55dbbedb90153d4665");
   });
 });
 import { createHash } from "node:crypto";

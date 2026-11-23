@@ -76,7 +76,7 @@ export async function readE2EAdmissionChunk(stores: UploadStores, readers: Round
   const task = await readers.task(reference.taskId);
   const startedFor = (record: StartedRoundRecord | undefined, extra: boolean): boolean => record !== undefined && record.state === "STARTED" && record.operationId === operation.id
     && record.roundId === reference.roundId && record.admissionSha256 === reference.admissionRef.sha256 && extra;
-  const open = task !== undefined && task.workspaceId === operation.workspaceId && task.closedAt === undefined;
+  const open = task !== undefined && task.taskId === reference.taskId && task.workspaceId === operation.workspaceId && task.closedAt === undefined;
   if (reference.purpose === "replay") {
     // An audit replay is not the workflow's round (the workflow has moved past its checks): it is read on what the replay's own record says.
     const record = task === undefined || reference.sourceRoundId === undefined || reference.attempt === undefined ? undefined : await readers.replay(task.taskId, { sourceRoundId: reference.sourceRoundId, attempt: reference.attempt });
@@ -94,7 +94,7 @@ export async function readE2EAdmissionChunk(stores: UploadStores, readers: Round
     // A baseline round is not the workflow's current round: it is read on what the baseline's own record says, for this plan, base commit and attempt.
     const record = task === undefined ? undefined : await readers.baseline(task);
     if (!open || !startedFor(record, record?.baseCommitSha === reference.baseCommitSha && record?.attempt === reference.attempt)) throw agentXError("STALE_FENCE", "the baseline round is no longer the one that was started");
-  } else if (task?.workspaceId !== operation.workspaceId || task.workflow?.stage !== "VERIFY" || task.workflow.state !== "RUNNING" || task.workflow.revision !== reference.workflowRevision
+  } else if (!open || task?.workspaceId !== operation.workspaceId || task.workflow?.stage !== "VERIFY" || task.workflow.state !== "RUNNING" || task.workflow.revision !== reference.workflowRevision
     || task.workflow.candidate?.digest !== reference.candidateDigest || task.workflow.e2e?.currentRoundId !== reference.roundId
     || canonicalJson(task.workflow.e2e.currentGroupRunIds) !== canonicalJson(reference.groupRunIds)) {
     throw agentXError("STALE_FENCE", "E2E CHECKS admission is no longer current");

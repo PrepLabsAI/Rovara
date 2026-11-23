@@ -9,7 +9,7 @@ import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
 import { machineSizePicker, optionalPicker } from "./worker-machines/machine-size-pick.js";
 import { GetCommand, QueryCommand, DynamoDBDocumentClient, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { randomUUID } from "node:crypto";
-import { CORE_DISPATCH_QUEUE_URL_VARIABLE, Ec2RuntimeBindingSchema, ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, SlackTeamIdSchema, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, agentXError, projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey, workspaceSessionKey, type SlackChannelBinding, type WorkerInvocation, SLACK_CHANNEL, channelBindingPartition, channelBindingSortPrefix } from "@agentx/contracts";
+import { WORKER_POST_TIMEOUT_MS, CORE_DISPATCH_QUEUE_URL_VARIABLE, Ec2RuntimeBindingSchema, ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, SlackTeamIdSchema, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, agentXError, projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey, workspaceSessionKey, type SlackChannelBinding, type WorkerInvocation, SLACK_CHANNEL, channelBindingPartition, channelBindingSortPrefix } from "@agentx/contracts";
 import { requiredEnvironment, type DurableOutboxRecord, type Ec2OutboxRecord } from "./lambda.js";
 import type { Ec2Delivery } from "./ec2-delivery.js";
 import { failOutboxOperation } from "./outbox-failure.js";
@@ -18,7 +18,7 @@ import { createWorkflowE2EAdmissionAgentStepsReader, createWorkflowE2EAdmissionM
 import { appendOperationEvent } from "./operation-events.js";
 import { ProjectSetupSessionManager, SessionManager, workspaceBinding } from "./sessions.js";
 import { admitProjectSetupRuntime, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "./project-setup-runtime-catalog.js";
-import { guardTaskDispatch, isTaskDispatchGuardRetryError } from "./task-dispatch-access.js";
+import { guardTaskDispatch, isTaskDispatchGuardRetryError } from "./task-dispatch-access.js"; import type { TaskDispatchCandidate, TaskDispatchAccessDependencies } from "./task-dispatch-access.js";
 import { createTaskAuthorityAdmission } from "./task-authority-admission.js";
 import { createTaskPersonRuntime, ownCompanyAuthorityRows, taskPersonLatestRevisionQuery, taskPersonNamedLatestRevision, taskPersonRevisionFromResponse, withTaskPersonMembershipRead, type TaskPersonDeveloperRecordProjection, type TaskPersonRuntimePorts } from "./task-person-runtime.js";
 import { taskPersonProofThroughLambda } from "./task-person-proof-transport.js";
@@ -472,7 +472,7 @@ export function taskPersonRuntimePorts(input: {
   };
 }
 
-export const createTaskDispatchGuard = (workspaces?: Pick<SlackWorkspaceBindings, "requireCompany">) => (record: DurableOutboxRecord, context?: { remainingTimeMs: () => number }) => {
+export const createTaskDispatchGuard = (workspaces?: Pick<SlackWorkspaceBindings, "requireCompany">, core?: TaskDispatchAccessDependencies["core"]) => (record: TaskDispatchCandidate, context?: { remainingTimeMs: () => number }) => {
   const stateTableName = tableName ?? requiredEnvironment("STATE_TABLE_NAME");
   const admission = createTaskAuthorityAdmission({ now: () => Date.now(), lambdaRemainingMs: context?.remainingTimeMs() ?? 60_000 });
   const proofArn = process.env.TASK_PERSON_PROOF_FUNCTION_ARN;
@@ -496,7 +496,7 @@ export const createTaskDispatchGuard = (workspaces?: Pick<SlackWorkspaceBindings
   return guardTaskDispatch({
     documentClient: taskAuthorityDocumentClient,
     tableName: stateTableName,
-    admission,
+    admission, ...(core === undefined ? {} : { core }),
     ...(context === undefined ? {} : { remainingTimeMs: context.remainingTimeMs }),
     ...(checkTaskPerson === undefined ? {} : { checkTaskPerson }),
     ...(personRuntime === undefined ? {} : { stateAuthorityWitnessForOwnerActor: (task, ownerActorId) => personRuntime.stateAuthorityWitnessForOwnerActor(task, ownerActorId) }),
@@ -580,8 +580,8 @@ async function guardProjectSetupDispatch(record: DurableOutboxRecord): Promise<"
   if (!catalogId || !stateTable) return "PARKED";
   return createProjectSetupDispatchGuard({ documentClient, tableName: stateTable, runtimeCatalogId: catalogId })(record);
 }
-/** A worker answers /invocations as soon as it has journaled the operation. */
-const WORKER_POST_TIMEOUT_MS = 10_000;
+// The worker POST timeout is shared with claim freshness (contracts/dispatch-timing.ts).
+
 /** Asking a worker what it parses (spec 053); one that does not answer gets no optional field. */
 const WORKER_PING_TIMEOUT_MS = 3_000;
 /** A /ping answer is a few fields and a feature list; a longer one is not read. */
@@ -779,7 +779,7 @@ export const handler = withCoreDispatch(workflowHandler, {
       const sqs = new SQSClient(awsClientConfiguration);
       const queueUrl = process.env[CORE_DISPATCH_QUEUE_URL_VARIABLE] ?? "";
       return createDispatcherCoreHost({
-        env: process.env, callbackSigningKey,
+        env: process.env, callbackSigningKey, deliveryAccess: async (deps, operation, workspace) => createTaskDispatchGuard(undefined, { companyId: deps.companyId, workspacePk: workspace.pk, ttlAttribute: deps.store.ttlAttribute })({ id: operation.id, operationId: operation.id, workspaceId: operation.workspaceId, invocation: { kind: operation.dispatch.kind, fence: operation.fence } }),
         documentClient,
         clients: { dynamo: new DynamoDBClient(awsClientConfiguration), sqs, s3: new S3Client(awsClientConfiguration) },
         machines: { sessions: dispatcherSessions, stopInstance: dispatcherStopInstance, sign: signWithInvokeKey, post: postToWorker, ping: pingWorker },

@@ -1,3 +1,4 @@
+import { installGatewayFixture } from "../support/install-gateway.js";
 // Switch-over gap 3: `agentx upgrade --answers-from-deployed <file>` writes the answers
 // `agentx deploy --mode upgrade --answers` reads, from the deployed environment and its settings,
 // for either engine, deploying nothing. Round-trip: the file loads through loadDeployAnswers and
@@ -16,6 +17,8 @@ import { SETTINGS } from "../support/doctor-fakes.js";
 import { allStackOutputs, fakeRelease, memoryInitSecrets, scriptedDeployer } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
+installGatewayFixture();
+
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
 async function answersPath(): Promise<string> {
@@ -29,7 +32,8 @@ const CDK_SETTINGS: EnvironmentSettings = {
   ...SETTINGS, engine: "cdk", version: "1.2.3",
   access: { artifactBucket: "agentx-staging-access-artifactbucket-abc", cloudFormationRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-cloudformation", operatorRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-operator", pullThroughPrefix: "agentx-staging" },
 };
-const CONTROL_PLANE = { GitHubAppId: "", GitHubAppPrivateKeySecretArn: KEY_ARN, GitHubAppCredentialRef: "github-agentx-sdlc", CallbackSigningKey: "****", BudgetMonthlyUsd: "260", BudgetScope: "account", SlackAppPostedMessages: "accept" };
+const CONTROL_PLANE = {
+  CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6", GitHubAppId: "", GitHubAppPrivateKeySecretArn: KEY_ARN, GitHubAppCredentialRef: "github-agentx-sdlc", CallbackSigningKey: "****", BudgetMonthlyUsd: "260", BudgetScope: "account", SlackAppPostedMessages: "accept" };
 const IMAGES = { worker: `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-staging/worker@sha256:${"d".repeat(64)}`, slack: `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-staging/slack@sha256:${"e".repeat(64)}` };
 
 function reader(controlPlane: Record<string, string>, access: Record<string, string> = { OperatorPrincipalArn: "" }): StackReader & { described: string[] } {
@@ -116,8 +120,7 @@ describe("agentx upgrade --answers-from-deployed (switch-over gap 3)", () => {
         const loaded = await loadDeployAnswers(file, { mode: "upgrade" });
         const own = await upgradeAnswers({ settings: CDK_SETTINGS, stacks: reader(controlPlane), images: IMAGES });
         // The install schema stays strict: an empty deployed id round-trips only as an upgrade.
-        if (deployedAppId === "") await expect(loadDeployAnswers(file)).rejects.toThrow("github.appId");
-        else expect(await loadDeployAnswers(file)).toEqual(loaded);
+        await expect(loadDeployAnswers(file)).rejects.toThrow("coreEngine");
 
         const deployWith = async (answers: DeployAnswers) => {
           const store = new MemoryParameterStore();

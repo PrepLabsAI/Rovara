@@ -9,6 +9,7 @@ import type { DeveloperTaskActions } from "../../packages/broker/src/aws/develop
 import type { StreamRecord } from "../../packages/broker/src/developer/notifications.js";
 import type { TaskShare } from "../../packages/broker/src/developer/task-records.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
+import type { BrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
 import { localSigner } from "./developer-fakes.js";
 import type { FakeDynamoDb, FakeDynamoDbOptions } from "./fake-dynamodb.js";
 import { SLACK_CHANNEL, SLACK_TEAM, call, createBroker, loadSlackBroker, orchestratorPrincipal, registerSlackProject, type Handler } from "./slack-broker.js";
@@ -28,20 +29,27 @@ export function memoryS3() {
   const objects = new Map<string, string>();
   // Bytes that are not valid UTF-8 (a JPEG, say) cannot live in the string map without being changed; they are kept as they are, here.
   const binary = new Map<string, Buffer>();
-  const send = vi.fn(async (command: { constructor: { name: string }; input: { Key?: string; Body?: unknown; Range?: string; IfNoneMatch?: string } }) => {
+  const metadata = new Map<string, { ContentType?: string; Metadata?: Record<string, string> }>();
+  const send = vi.fn(async (command: { constructor: { name: string }; input: { Key?: string; Body?: unknown; Range?: string; IfNoneMatch?: string; ContentType?: string; Metadata?: Record<string, string> } }) => {
     const key = command.input.Key ?? "";
     if (command.constructor.name === "PutObjectCommand") {
       // S3's conditional write: an object that is already there is not replaced.
       if (command.input.IfNoneMatch === "*" && (objects.has(key) || binary.has(key))) throw Object.assign(new Error("At least one of the pre-conditions you specified did not hold"), { name: "PreconditionFailed" });
       const body = command.input.Body;
+      metadata.set(key, { ...(command.input.ContentType === undefined ? {} : { ContentType: command.input.ContentType }), ...(command.input.Metadata === undefined ? {} : { Metadata: command.input.Metadata }) });
       if (body instanceof Uint8Array && !Buffer.from(Buffer.from(body).toString("utf8"), "utf8").equals(Buffer.from(body))) {
         objects.delete(key);
         binary.set(key, Buffer.from(body));
         return {};
       }
       binary.delete(key);
-      objects.set(key, String(body));
+      objects.set(key, body instanceof Uint8Array ? Buffer.from(body).toString("utf8") : String(body));
       return {};
+    }
+    if (command.constructor.name === "HeadObjectCommand") {
+      const bytes = binary.get(key) ?? (objects.has(key) ? Buffer.from(objects.get(key)!, "utf8") : undefined);
+      if (bytes === undefined) throw Object.assign(new Error("No object"), { name: "NoSuchKey" });
+      return { ContentLength: bytes.byteLength, ...metadata.get(key) };
     }
     if (command.constructor.name === "GetObjectCommand") {
       const text = objects.get(key);
@@ -50,12 +58,12 @@ export function memoryS3() {
       const range = /^bytes=0-(\d+)$/.exec(command.input.Range ?? "");
       const bytes = typeof body === "string" ? Buffer.from(body, "utf8") : body;
       const served = range ? bytes.subarray(0, Number(range[1]) + 1) : bytes;
-      return { ContentLength: served.byteLength, Body: {
+      return { ...metadata.get(key), ContentLength: served.byteLength, Body: {
         transformToByteArray: async () => Uint8Array.from(served),
         transformToString: async (encoding = "utf8") => served.toString(encoding as BufferEncoding),
       } };
     }
-    if (command.constructor.name === "DeleteObjectCommand") { objects.delete(key); binary.delete(key); return {}; }
+    if (command.constructor.name === "DeleteObjectCommand") { objects.delete(key); binary.delete(key); metadata.delete(key); return {}; }
     throw new Error(`memoryS3 does not handle ${command.constructor.name}`);
   });
   return { send, objects, binary };
@@ -120,6 +128,8 @@ export async function createDeveloperTaskBroker(options: {
   linkingOnly?: boolean;
   /** Passed to createBroker as its `extra` broker input. */
   brokerExtra?: Record<string, unknown>;
+  /** Compose the real hosted core over this harness's table and object store, before any request. */
+  coreRoot?: (ports: { db: FakeDynamoDb; s3: ReturnType<typeof memoryS3>; callbackSigningKey: string }) => BrokerCoreRoot;
   /** The fake table's realism (all on by default); see FakeDynamoDbOptions. An opt-out needs a comment saying why. */
   realism?: FakeDynamoDbOptions["realism"];
   /** "eventual": a read without ConsistentRead may see an item's previous version once after a write. */
@@ -136,7 +146,7 @@ export async function createDeveloperTaskBroker(options: {
     ...options.developerExtra,
   };
   const s3 = memoryS3();
-  const { db, handler, deleteEc2Session, brokerInput } = createBroker({
+  const { db, handler: initialHandler, deleteEc2Session, brokerInput } = createBroker({
     s3,
     ...(options.memberLimit === undefined ? {} : { memberLimit: options.memberLimit }),
     ...(options.organizationLimit === undefined ? {} : { organizationLimit: options.organizationLimit }),
@@ -144,6 +154,11 @@ export async function createDeveloperTaskBroker(options: {
     ...(options.realism === undefined ? {} : { realism: options.realism }),
     ...(options.consistency === undefined ? {} : { consistency: options.consistency }),
     ...(options.brokerExtra === undefined && options.linkingOnly !== true ? {} : { extra: { ...options.brokerExtra, ...(options.linkingOnly === true ? { linking: developer } : {}) } }),
+  });
+  const core = options.coreRoot?.({ db, s3, callbackSigningKey: brokerInput.callbackSigningKey });
+  const withCoreRoutes = core === undefined ? undefined : (await import("../../packages/broker/src/aws/core-engine-root.js")).withCoreRoutes;
+  const handler = core === undefined ? initialHandler : (module as unknown as { createAwsBrokerHandler(input: unknown): typeof initialHandler }).createAwsBrokerHandler({
+    ...brokerInput, core, developer: withCoreRoutes!(developer, core),
   });
   const actions = module.createDeveloperTaskActions(brokerInput as never);
   for (const who of [MAYA, OMAR]) {

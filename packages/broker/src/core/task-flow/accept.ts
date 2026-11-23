@@ -1,3 +1,4 @@
+import type { E2EWorkflowAdmissionRef } from "@agentx/contracts";
 // Lane L6a, task flow core: accepting an operation. An operation is one job for a workspace's worker (a preparation, one step of the
 // workflow). Accepting it writes the operation record and stages its dispatch message with the caller's own change, in one transaction
 // (the transactional outbox), so an operation exists if and only if its message does.
@@ -26,6 +27,7 @@ export interface AcceptInput {
   maintenance?: MaintenanceExpectation;
   /** An ordered coding run's binding (spec 059): the graph, the approval and the checkpoints it resumes from. Kept on the operation record; every checkpoint and the result are read against it. */
   workflowDependencies?: WorkflowDependencyInvocation;
+  workflowE2EAdmission?: E2EWorkflowAdmissionRef;
   /** A line for the operation's timeline, written with it as its first event (the worker's own events follow it). */
   firstEvent?: string;
   /** A REVIEW operation's second-review plan (or the fixed reason none could run), recorded on the operation. */
@@ -38,6 +40,11 @@ export interface AcceptInput {
   recordRequest?: boolean;
 }
 
+/** Keep the server admission on both acceptance inputs and stored operations without expanding ordinary operations. */
+export function applicationAdmissionFields(input: Pick<AcceptInput, "workflowE2EAdmission">) {
+  return input.workflowE2EAdmission === undefined ? {} : { workflowE2EAdmission: input.workflowE2EAdmission };
+}
+
 /** The dispatch message's body. Small and secret-free: the dispatcher reads the operation and builds the invocation itself. */
 export interface DispatchMessage {
   v: 1;
@@ -48,6 +55,13 @@ export interface DispatchMessage {
 
 /** An operation's events are kept this long (the same as the callback's own events). */
 const FIRST_EVENT_KEEP_SECONDS = 14 * 86_400;
+
+function feedbackOperationBindings(dispatch: DispatchSpec): Pick<OperationRecord, "workflowFeedbackReview" | "workflowFeedbackApproval"> {
+  return {
+    ...(dispatch.payload["workflowFeedbackReview"] === undefined ? {} : { workflowFeedbackReview: dispatch.payload["workflowFeedbackReview"] as unknown as NonNullable<OperationRecord["workflowFeedbackReview"]> }),
+    ...(dispatch.payload["workflowFeedbackApproval"] === undefined ? {} : { workflowFeedbackApproval: dispatch.payload["workflowFeedbackApproval"] as unknown as NonNullable<OperationRecord["workflowFeedbackApproval"]> }),
+  };
+}
 
 export function buildOperation(deps: TaskFlowDeps, input: AcceptInput): { operation: OperationRecord; items: TransactItem[] } {
   const location = keysOfWorkspace(deps, input.workspace);
@@ -72,11 +86,13 @@ export function buildOperation(deps: TaskFlowDeps, input: AcceptInput): { operat
     createdAt: now,
     updatedAt: now,
     dispatch: input.dispatch,
+    ...feedbackOperationBindings(input.dispatch),
     ...(input.workflowRevision === undefined ? {} : { workflowRevision: input.workflowRevision }),
     ...(input.requester === undefined ? {} : { requester: input.requester }),
     ...(input.publication === undefined ? {} : { publication: input.publication }),
     ...(input.maintenance === undefined ? {} : { maintenance: input.maintenance }),
     ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }),
+    ...applicationAdmissionFields(input),
     ...(input.secondReviewPlan === undefined ? {} : { secondReviewPlan: input.secondReviewPlan }),
     ...(input.designReview === undefined ? {} : { designReview: input.designReview }),
     ...(input.modelSourceId === undefined ? {} : { modelSourceId: input.modelSourceId }),

@@ -1,3 +1,13 @@
+import type { E2ESourceSnapshot } from "@agentx/contracts";
+import { hostedAuthorityStore } from "./core-e2e-authority-store.js";
+import { wireHostedApplicationE2E } from "./core-application-e2e.js";
+import { createStoreProjectSource } from "../core/task-flow/project-source.js";
+import { developerTaskPolicy } from "@agentx/contracts";
+import { prepareCoreShare } from "./core-task-sharing.js";
+import { runPriceReader } from "../core-host/run-price-http.js";
+import { withFeedbackMergeReads } from "../core/pr-feedback/service.js";
+import { accessRetryRoute } from "./core-access-retry.js";
+import { sweepCoreIdleSlack } from "./core-idle-slack.js";
 import { isContextSourceStage } from "@agentx/contracts";
 import { createHostedDesignReview } from "../core-host/hosted-design-review.js";
 import { DESIGN_REVIEW_PACKET_PATH, storedBindingOf } from "../core/design-review/packet-route.js";
@@ -37,7 +47,7 @@ import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
   HostedSavedEnvRegistryAuthSchema,
   DEFAULT_CODE_SETTINGS,
-  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, LESSONS_REFLECT_QUEUE, IMPLICIT_COMPANY_ID, evalStandInsOn, codeRepositoriesOf, OrgRoleSchema, agentXError, WIKI_BUILD_WORDS,
+  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, LESSONS_REFLECT_QUEUE, IMPLICIT_COMPANY_ID, evalStandInsOn, codeRepositoriesOf, OrgRoleSchema, AgentXError, agentXError, WIKI_BUILD_WORDS,
   when, isSystemOwnerId, type PolicySource, type AdapterRegistry, type HostedPolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
 import { wakeMergeTracking } from "../services/merge-tracking.js";
@@ -90,7 +100,7 @@ import { projectPageUrl } from "../core/decisions/open-path.js";
 import { createCoreTaskRuleRoutes } from "./core-task-rule-routes.js";
 import type { DeveloperTaskRouteDependencies } from "./developer-tasks.js";
 import { recordChatThread } from "../core-host/chat-thread-record.js";
-import { hostedChannelView, hostedThreadHandler, hostedThreadNotification } from "../core-host/thread-notification.js";
+import { hostedChannelView, hostedThreadHandler, hostedThreadNotification, hostedWorkflowThreadRefresh } from "../core-host/thread-notification.js";
 import { addChatThreadInput } from "../core-host/chat-thread-input.js";
 import { readSetupBrokenNotice } from "../core/setup-agent/repair-view.js";
 import { admissionEnforcesCost } from "../core/automation/run-seam.js";
@@ -110,6 +120,7 @@ import type { RegistryTaskFlowOptions, TaskFlow } from "../core/task-flow/flow.j
 import { workspaceKeys } from "../core/task-flow/workspace-location.js";
 import { createCompanyArtifactReader } from "../core-host/company-artifact-reader.js";
 import { hostedKeepEvidence } from "../core-host/hosted-evidence.js";
+import { hostedPlanEvidence } from "../core-host/hosted-plan-evidence.js";
 import { sessionBindingsOf } from "../core/sessions/bindings.js";
 import { createLocalAfterMerge } from "../local/app/after-merge.js";
 import { hostedAutonomy, reviewerRoomUsd } from "../core-host/reviewer-authority.js";
@@ -154,7 +165,7 @@ import { evalHealthRunDeps, evalHealthRunsAvailable, kickEvalHealth } from "../c
 import { MODEL_ACCESS_PATH } from "../core/model-gateway/route.js";
 import { CallbackCapabilities } from "../callbacks.js";
 import type { TokenSigner } from "../developer/tokens.js";
-import { coreModelGatewayWiring, gatewayModelKeysModules, taskTokensFromEnvironment } from "../core-host/gateway-model-access.js";
+import { coreModelGatewayWiring, gatewayModelAccessFromEnvironment, gatewayModelKeysModules, taskTokensFromEnvironment } from "../core-host/gateway-model-access.js";
 import { hostedAnswersModel } from "../core-host/gateway-answers.js";
 import type { HostedLearningContext } from "../core-host/hosted-learning.js";
 import { hostedStartRoute } from "../core/answers/model-start-router.js";
@@ -200,6 +211,8 @@ export interface BrokerCoreRootInputs {
   documentClient: DynamoSender;
   stateTableName: string;
   signInTableName: string | undefined;
+  /** Existing trusted source capture for application planning at the prepared commit. */
+  applicationSource?: (repositoryUrl: string, commit: string) => Promise<E2ESourceSnapshot>;
   callbackSigningKey: string;
   /** The key the broker's repository grant exchange verifies with (aws/broker.ts derives it from the callback signing key). */
   repositoryGrantKey: Buffer;
@@ -478,6 +491,14 @@ export function wikiProjectRoleFrom(people: { membershipOf: (personId: string) =
 // L4-P1/L4-P2: the gate every hosted runtime carries (core-host/system-runs.ts). Re-exported: tests/unit/system-runs-hosted-gate.test.ts holds the function and the call on the broker AND on the dispatcher.
 export { hostedSystemRunsFor };
 
+/** Both read and action callers must see a People proof denial as a missing task. */
+async function taskAccessOrHidden<T>(resolve: () => Promise<T>): Promise<T | undefined> {
+  try { return await resolve(); } catch (error) {
+    if (error instanceof AgentXError && error.code === "TASK_ACCESS_DENIED") return undefined;
+    throw error;
+  }
+}
+
 export function hostedTaskAccess(inputs: {
   membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>;
   /** The person's grant; `checkedCompany` is the company whose live membership the caller just checked (review L3: the grant is read there, membership is not read again). */
@@ -508,7 +529,7 @@ export function hostedTaskAccess(inputs: {
     return membership !== undefined && membership.companyId === inputs.companyId ? membership : undefined;
   };
   /** The caller's live access to the task, for the roles asked (owners only for every act; owners, commenters and viewers for a read). Undefined: none. Every check re-reads the live proof. */
-  const resolve = async (principal: Principal, task: { developerId: string; project: string; taskId?: string }, roles: readonly string[]) => {
+  const resolve = (principal: Principal, task: { developerId: string; project: string; taskId?: string }, roles: readonly string[]) => taskAccessOrHidden(async () => {
     if (principal.companyId !== inputs.companyId || await liveMember(principal.personId) === undefined) return undefined;
     if (task.taskId === undefined || inputs.storage === undefined) return principal.personId === task.developerId ? { revision: undefined, ownerIds: [] as readonly string[] } : undefined;
     const store = await inputs.storage();
@@ -522,7 +543,7 @@ export function hostedTaskAccess(inputs: {
     }
     if (people.orphaned || !roles.includes(people.role) || !await inputs.projectGrant(principal.personId, task.project, inputs.companyId)) return undefined;
     return { revision: people.peopleRevision, ownerIds: people.ownerActorIds };
-  };
+  });
   const owner = (principal: Principal, task: { developerId: string; project: string; taskId?: string }) => resolve(principal, task, ["owner"]);
   return {
     async checkStart(principal, project, purpose, origin) {
@@ -599,7 +620,7 @@ export function deployedCallerFromMembership(membershipOf: (personId: string) =>
     const membership = await membershipOf(caller.developerId);
     if (membership === undefined) return undefined;
     const principal: Principal = { companyId: membership.companyId, personId: caller.developerId, displayName: caller.name, roles: [membership.role], provider: HOSTED_IDENTITY_PROVIDER };
-    return { principal, ...(caller.clientId === undefined ? {} : { client: caller.clientId }), ...(caller.amr === undefined ? {} : { amr: caller.amr }), ...(caller.webApp === true ? { webApp: true as const } : {}) };
+    return { principal, ...(caller.clientId === undefined ? {} : { client: caller.clientId }), ...(caller.amr === undefined ? {} : { amr: caller.amr }), ...(caller.webApp === true ? { webApp: true as const } : {}), ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }) };
   };
 }
 
@@ -733,9 +754,23 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const engineOffered: EngineModelOfferedReader | undefined = inputs.offeredModels !== undefined ? (companyId) => inputs.offeredModels!.offered(companyId) : adminOfferedModelsFromEnvironment(env, inputs.taskTokens ?? (() => undefined));
   const modelFlowOptions = (registry: AdapterRegistry, companyId: OrgId): Partial<RegistryTaskFlowOptions> => {
     const gateway = modelGateway()!.flowOptions;
+    const gatewayUrl = gatewayModelAccessFromEnvironment(env)!.gatewayUrl;
     const store = registry.require("storage");
-    const modelAccess = companyEngineModelRoute({ store, companyId, install: gateway.modelAccess });
-    return { ...modelChoices.flowOptionsFor(registry, companyId, { ...gateway, modelAccess }), startModelCheck: companyEngineModelStartCheck({ store, companyId, offered: engineOffered }) };
+    const modelAccess = companyEngineModelRoute({ store, companyId, offered: engineOffered, install: gateway.modelAccess });
+    const modelCheck = companyEngineModelStartCheck({ store, companyId, offered: engineOffered });
+    return { ...modelChoices.flowOptionsFor(registry, companyId, { ...gateway, modelAccess }), startModelCheck: async () => {
+      // Read THIS company's effective model and signed price on every start. A
+      // readiness fault throws before the start can mark in-use or audit a refusal.
+      try {
+        const route = await modelAccess.route();
+        const tokens = inputs.taskTokens?.();
+        const price = route === undefined || tokens === undefined ? undefined : await runPriceReader({ gatewayUrl, ...tokens, now: () => now().getTime() })(companyId, route.alias);
+        if (price === undefined) throw new Error("unavailable");
+      } catch {
+        throw agentXError("RUNTIME_UNAVAILABLE", "The signed-price model gateway is not ready. Restore the gateway's signed run prices for this company's engine model, then retry.");
+      }
+      return modelCheck();
+    } };
   };
   const lessonsSwitch: ReturnType<typeof readCoreLessonsSwitch> = readCoreLessonsSwitch(env);
   // The weekly lessons summary's pilot list, resolved ONCE so the sender (createCoreLessons) and the settings API (createLessonsApi) can never disagree about which companies default to on.
@@ -812,7 +847,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     alsoNamedBy: [lessonsSwitch.value, systemRunsFlag.value],
     modules: () => [...codeAdapterModules(inputs.codeModules({ storage: async () => (await app.registry()).require("storage") })), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey, runStopWired: runStopWiredFrom(env), projectTaskCap, taskOwner, ...(chatApproval === undefined ? {} : { chat: chatApproval }) }), ...gatewayModelKeysModules(env), ...(attention === undefined ? [] : [attentionEmailModule(attention.sender)]), ...evalReservationModules(env, inputs.taskTokens), ...companyInstructionsModules(env, inputs.taskTokens), ...savedEnvImageModules(env, inputs.savedEnvSessions ?? savedEnvRoleSessionsFromEnvironment(env)), ...(inputs.extraModules?.() ?? [])],
     context: () => ({ installCompanyId: IMPLICIT_COMPANY_ID, now, env, clients: {}, log }),
-    ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
+    wrapStorage: (store) => hostedAuthorityStore(inputs.wrapStorage?.(store) ?? store, inputs),
     beforeSeal: (registry) => {
       const settings = hookSettings;
       if (settings === undefined) return;
@@ -823,9 +858,15 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       // The per-run stop and the usage flush on Stop and close (core-money-stop): a stopped run whose usage did not arrive keeps its task's whole hold, marked estimated.
       // L2b: every core step on the gateway's agent model (the token's description reads the same route).
       // Configured without the task-token signer: refused here, so no task starts. The money stop is wired in every case.
-      flowOptions: { captureStartComparison: async ({ project, inputText }) => {
+      flowOptions: { ...(inputs.taskRules === undefined ? {} : { taskSharing: { prepare: async (caller, project, wanted) => {
+        const latest = await createStoreProjectSource(registry.require("storage"), companyId).latest(project);
+        if (latest === undefined) throw agentXError("CONFIG_INVALID", "this task's project is no longer registered; ask an admin");
+        if (!wanted.shareToChannel && developerTaskPolicy(latest.definition).share !== "required") return undefined;
+        const person = { developerId: caller.principal.personId, name: caller.principal.displayName };
+        return prepareCoreShare(inputs.taskRules!(person, companyId), { ...person, sessionId: "core", amr: "oidc", ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }) }, project, developerTaskPolicy(latest.definition), wanted);
+      } } }), captureStartComparison: async ({ project, inputText }) => {
         const store = registry.require("storage");
-        const context = await hostedPreviewContext({ store, companyId, project, now, rateQuote: previewRates, workflowVersion: inputs.understandFirst === false ? "1.0.0" : "1.1.0", settings: admissionSettings, projectTaskCap, defaultRoute: async () => { const gateway = modelGateway(); return gateway === undefined ? undefined : companyEngineModelRoute({ store, companyId, install: gateway.flowOptions.modelAccess }).route(); } });
+        const context = await hostedPreviewContext({ store, companyId, project, now, rateQuote: previewRates, workflowVersion: inputs.understandFirst === false ? "1.0.0" : "1.1.0", settings: admissionSettings, projectTaskCap, defaultRoute: async () => { const gateway = modelGateway(); return gateway === undefined ? undefined : companyEngineModelRoute({ store, companyId, offered: engineOffered, install: gateway.flowOptions.modelAccess }).route(); } });
         return startEstimates({ store }, { orgId: companyId, project, request: { quoteVersion: 2, ...(inputText.length <= 4000 ? { inputText } : {}) }, asOf: now().toISOString(), context });
       }, understandFirst: inputs.understandFirst ?? true, limits: async () => {
         const fallback = { member: Number(env.SLACK_MEMBER_WORKSPACE_LIMIT ?? "3"), organization: Number(env.SLACK_ORGANIZATION_WORKSPACE_LIMIT ?? "20") };
@@ -839,6 +880,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       // L2-4 + core-task-web-routes (#1045): every person's start (web, Slack, API, intake) gets its session in its own start transaction, as on a laptop, so Retry, Close and the log reach it;
       // a task started from a ticket also gets the ticket binding there. A system owner's start gets nothing added.
       startExtras: ticketSessionStartExtras(companyId, { chatThreads: inputs.chatThreads !== undefined }),
+      // People is initialized lazily by its owner view. Starting work must not require the optional person-proof runtime.
       moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }),
       // L6a: a finished task teaches this company's estimate from the same company-scoped usage ledger as hosted spend.
       onTaskClosed: async (task, closedAt) => {
@@ -850,12 +892,13 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         });
         log({ component: "cost", event: "cost.run_recorded", outcome });
         try { await recordClosedRunUsage({ store }, task, closedAt); }
-        catch (error) { log({ component: "cost", event: "cost.run_usage_not_recorded", error: error instanceof Error ? error.name : "unknown" }); }
+        catch (error) { log({ component: "cost", event: "cost.run_usage_not_recorded", error: error instanceof Error ? error.name : "unknown" }); throw error; }
       },
       // L6a: a task started from Linear keeps the session binding available to merge tracking, within this company's store partition.
       sessionBindings: { read: (_orgId, sessionId) => sessionBindingsOf(registry.require("storage"), companyId, sessionId) },
       // L4-ART: the flow's reader of the documents workers and the engine saved (the approved plan, a diff, the eval rounds): the registry's object storage held to THIS company's own workspaces (an
       // outside key, another company's workspace or another owner's key reads as "not there"). Without it each reader of the flow gives its "no reader" answer (core/proof/eval-round-reader.ts: no eval request).
+      feedbackArtifacts: registry.require("object-storage"),
       artifacts: createCompanyArtifactReader({ blobs: registry.require("object-storage"), store: registry.require("storage"), companyId, refused: (reason) => log({ event: "core_engine.artifact_read_refused", companyId, reason }) }),
       // L4-HW3: a starting task copies the project's How we work and the company's rules onto its workspace (the broker has the code host and the company-instructions point; the dispatcher has neither and
       // builds every step's block from that copy).
@@ -877,6 +920,22 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       log,
       ciReporting: inputs.ciReporting === undefined ? policyCiReporting(policySource) : inputs.ciReporting,
       services: (flow, wiring) => {
+        wireHostedApplicationE2E({ ...inputs, flow: flow.deps, companyId, objects: registry.require("object-storage"), runtimeCatalogId: env["AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID"] ?? "", capture: inputs.applicationSource });
+        flow.deps.afterPlanStored = hostedPlanEvidence(flow.deps, registry.require("object-storage"));
+        const runWatch = flow.sweepRunsOnce.bind(flow);
+        const idleScan = { cursor: undefined as string | undefined };
+        flow.sweepRunsOnce = async (options) => {
+          const report = await runWatch(options);
+          const idle = await sweepCoreIdleSlack({ flow: flow.deps, documentClient: inputs.documentClient, threadsTableName: env.SLACK_THREADS_TABLE_NAME,
+            scan: idleScan, companyOf: async (where) => inputs.chatThreads?.companyOf(where),
+            postNote: async (conversation, text, operationId) => {
+              const adapter = inputs.chatThreads?.adapterFor(companyId, conversation.channel);
+              if (adapter === undefined) throw new Error("thread transport unavailable");
+              await adapter.deliver({ version: 1, id: `idle-cancel-${operationId}`, channel: conversation.channel, conversation, createdAt: now().toISOString(), type: "progress", data: { text } });
+            } });
+          report.failed += idle.failed;
+          return report;
+        };
         flow.deps.secondReview = createHostedReviewers({ flow: flow.deps, registry, companyId, offered: engineOffered, taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task) }).secondReview;
         createHostedDesignReview({ flow: flow.deps, registry, companyId, offered: engineOffered,
           taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task),
@@ -983,7 +1042,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
               ...(inputs.chatThreads === undefined ? {} : hostedThreadNotification({ threads: inputs.chatThreads, registry, companyId, store: registry.require("storage"), now: () => now().getTime(), origin: originOf, threadsTold: lessons !== undefined })),
               ...(attention === undefined ? {} : { address: attention.addressFor(flow.deps.store), emailLinks: attention.links, remember: attention.rememberFor(flow.deps.store) }),
             } }),
-            ...(inputs.chatThreads === undefined ? {} : { threadMoments: lessons !== undefined }),
+            ...(inputs.chatThreads === undefined ? {} : { threadMoments: lessons !== undefined, threadRefresh: hostedWorkflowThreadRefresh({ threads: inputs.chatThreads, registry, companyId, deps: flow.deps, now: () => now().getTime(), clock: now, origin: originOf,
+              isMember: async (orgId, personId) => (await membershipOf(personId))?.companyId === orgId, log: (event, fields) => log({ component: "channel_thread", event, companyId, ...fields }) }) }),
             ...(lessons === undefined ? {} : { humanEdit: lessons.host.noteHumanEdit }), upkeep: { administers: upkeep.administers, setupRead: (orgId, project) => (orgId === companyId ? readSetupBrokenNotice({ flow: flow.deps, store: flow.deps.store, companyId, now: () => now().getTime() }, project) : Promise.resolve(undefined)), setupLink: (project) => projectPageUrl(originOf(), project) } }) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }),
           // L6a: the project setting is off by default; the service is bound to this runtime's company.
           "after-merge": afterMerge,
@@ -1047,18 +1107,18 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         const healthDeps = healthRuns ? evalHealthRunDeps({ registry, environment: env, companyId: runtime.companyId, now: () => now().getTime(), members: setupApproval.evalMembers, flow: runtime.flow.deps, modelGatewayConfigured }) : undefined;
         return {
           origin: inputs.origin,
-          startEstimates: (project) => hostedPreviewContext({ store: runtime.flow.deps.store, companyId: runtime.companyId, project, now, rateQuote: previewRates, workflowVersion: inputs.understandFirst === false ? "1.0.0" : "1.1.0", settings: admissionSettings, projectTaskCap, defaultRoute: async () => { const gateway = modelGateway(); return gateway === undefined ? undefined : companyEngineModelRoute({ store: runtime.flow.deps.store, companyId: runtime.companyId, install: gateway.flowOptions.modelAccess }).route(); } }),
+          startEstimates: (project) => hostedPreviewContext({ store: runtime.flow.deps.store, companyId: runtime.companyId, project, now, rateQuote: previewRates, workflowVersion: inputs.understandFirst === false ? "1.0.0" : "1.1.0", settings: admissionSettings, projectTaskCap, defaultRoute: async () => { const gateway = modelGateway(); return gateway === undefined ? undefined : companyEngineModelRoute({ store: runtime.flow.deps.store, companyId: runtime.companyId, offered: engineOffered, install: gateway.flowOptions.modelAccess }).route(); } }),
           sessionCapSeconds: hostedSessionCapSeconds(),
           scriptTokens: {}, ...(attention === undefined ? {} : { unsubscribeKey: attention.unsubscribeKey }),
           ...(modelChoices.choiceFor(runtime.companyId) === undefined ? {} : { modelChoice: modelChoices.choiceFor(runtime.companyId)! }),
           taskActions: { roundCap: async (task) => hostedRoundCap(registry, runtime.companyId, now, admissionSettings, projectTaskCap, task) },
           // Cloud #188 item 3: a core task's People, readers, events and plan comments, with the old task routes' own rules.
-          ...(inputs.taskRules === undefined ? {} : { taskRules: createCoreTaskRuleRoutes(inputs.taskRules) }),
+          ...(inputs.taskRules === undefined ? {} : { taskRules: createCoreTaskRuleRoutes(inputs.taskRules, runtime.flow.deps.artifacts) }),
           canReadProject: (personId, project) => projectGrant(personId, project),
           // DEC 254zzz94: the Merge button, over the root's own grant reader, the project's pinned repositories on the registry's code host, and the project's merge method (Code's default: squash).
           merge: {
             projectGrantRole: (personId, project, companyId) => projectGrantRole(personId, project, companyId),
-            merge: (audit) => hostedMergeDependencies({ runtime, registry, audit, settings: inputs.codeSettings, defaults: DEFAULT_CODE_SETTINGS, now: () => now().getTime(), policyHook: hookSettings !== undefined || hookProblem }),
+            merge: (audit) => withFeedbackMergeReads(hostedMergeDependencies({ runtime, registry, audit, settings: inputs.codeSettings, defaults: DEFAULT_CODE_SETTINGS, now: () => now().getTime(), policyHook: hookSettings !== undefined || hookProblem }), runtime.flow.deps, registry),
             afterMerge: (taskId) => wakeMergeTracking(runtime.flow.deps.store, taskId, now().getTime()),
           },
           // DEC 254z-amend3: the project's test environment state, with the install's switches (and the host's "not available here" marker, broker-environment-init.ts) and the owner starter list as the catalog.
@@ -1301,7 +1361,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   if (coreTasks !== undefined && !settingsBlocked) {
     const entry = coreTasks;
     coreTasks = {
-      route: (request, caller) => entry.route(request, caller),
+      route: accessRetryRoute(entry, { caller: deployedCallerFromMembership(membershipOf), flowFor: async (companyId) => (await app.runtimeFor(companyId)).flow.deps }),
       // L4-U5d: the chat thread's own methods are the entry's (this wrapper once dropped them, so a hosted start never remembered its thread and a later message had nowhere to go).
       ...(entry.recordThread === undefined ? {} : { recordThread: (caller: CoreEntryCaller, input: Parameters<NonNullable<CoreTaskEntry["recordThread"]>>[1]) => entry.recordThread!(caller, input) }),
       ...(entry.threadInput === undefined ? {} : { threadInput: (caller: CoreEntryCaller, input: Parameters<NonNullable<CoreTaskEntry["threadInput"]>>[1]) => entry.threadInput!(caller, input) }),
@@ -1336,7 +1396,10 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         const grants = new RepositoryGrantService(inputs.repositoryGrantKey, inputs.repositoryCredential);
         return createCallbackService({
           ...(saved === undefined || !saved.session.config.enabled ? {} : { savedEnv: { deps: saved, inspectGrant: (grant: string) => grants.inspect(grant), registryAuthSchema: HostedSavedEnvRegistryAuthSchema } }),
-          ...(gateway === undefined ? {} : { modelGateway: gateway }),
+          ...(gateway === undefined ? {} : { modelGateway: { ...gateway, runPrice: async (model: string) => {
+            const tokens = inputs.taskTokens?.();
+            return tokens === undefined ? undefined : runPriceReader({ gatewayUrl: gateway.gatewayUrl, ...tokens, now: () => now().getTime() })(companyId, model);
+          } } }),
           authorizeDesignReviewPacket: async (claims) => withinTaskTokenDeadline(async (deadline) => {
             const { task, operation, workspace } = await readTaskTokenRecords(runtime.flow.deps, claims, deadline);
             if ((workspace.orgId !== undefined && workspace.orgId !== companyId) || typeof task.developerId !== "string" || task.developerId === ""
@@ -1346,6 +1409,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             deadline.check();
           }),
           flow: runtime.flow.deps,
+          ...(runtime.flow.deps.applicationE2E === undefined ? {} : { e2e: { records: runtime.flow.deps.applicationE2E.rounds.records } }),
           blobs: registry.require("object-storage"),
           // The grants the dispatcher issued for this company's workers (the same key derivation), exchanged here for a credential.
           grants: new RepositoryGrantService(inputs.repositoryGrantKey, inputs.repositoryCredential),

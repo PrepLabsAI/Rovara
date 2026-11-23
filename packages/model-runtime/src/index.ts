@@ -17,7 +17,7 @@ export * from "./e2e-environment-guard.js";
 export * from "./e2e-route-derive.js";
 export { classifyProviderFailure, isNetworkCode, signalPattern, BEDROCK_SIGNAL_PATTERN, KEYED_SIGNAL_PATTERN, MODEL_NOT_ENABLED_SIGNAL, MODEL_NOT_OFFERED_SIGNAL } from "./provider-failure.js";
 export type { ProviderFailureFacts } from "./provider-failure.js";
-import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, agentXError, isClaudeAgentModel, isKeyedModelProvider, type InvocationModelRoute, type KeyedModelProvider, type ModelIdentifier, type ThinkingLevel } from "@agentx/contracts";
+import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, ROVARA_AI_PAUSED_MESSAGE, isRovaraAiPaused, agentXError, isClaudeAgentModel, isKeyedModelProvider, type RunPrice, type InvocationModelRoute, type KeyedModelProvider, type ModelIdentifier, type ThinkingLevel } from "@agentx/contracts";
 import { InMemoryCredentialStore, createAssistantMessageEventStream, type Api, type Model, type SimpleStreamOptions, type TranscriptContext, type AssistantMessage, type AssistantMessageEventStream, type OpenAICompletionsCompat } from "@earendil-works/pi-ai";
 import { streamSimple as openAICompletionsStream } from "@earendil-works/pi-ai/api/openai-completions";
 import { streamSimple as anthropicMessagesStream } from "@earendil-works/pi-ai/api/anthropic-messages";
@@ -55,6 +55,10 @@ export interface ModelRuntimeOptions {
 }
 
 export interface ModelProxyOptions {
+  /** The same model-access answer used for this proxy's URL/key; internal worker preflight only. */
+  runPrice?: () => Promise<RunPrice | undefined>;
+  /** Set only by the local worker launcher path, never task payloads. */
+  localCatalogPricing?: boolean;
   /** The proxy's origin, without a path: Pi adds /v1/messages. */
   baseUrl: string;
   apiKey: string | (() => Promise<string>);
@@ -83,7 +87,7 @@ export function routedThinkingLevel<L extends string>(route: InvocationModelRout
  * usage records know), or `rovara-route` and the catalog name for a model the installed catalogs do not know.
  */
 export function routeUsageIdentity(route: InvocationModelRoute): ModelIdentifier {
-  return catalogModelByName(route.catalog)?.identity ?? { provider: ROUTE_PROVIDER, modelId: route.catalog };
+  return route.identity === undefined ? catalogModelByName(route.catalog)?.identity ?? { provider: ROUTE_PROVIDER, modelId: route.catalog } : { provider: route.identity.provider, modelId: route.identity.modelId };
 }
 
 /** Why a ChatGPT task stopped using its plan (#342). */
@@ -292,7 +296,7 @@ const UNLISTED_ROUTED_MODEL = { reasoning: false, input: ["text"] as ("text" | "
  * record names the catalog entry, so a price list and the spend reports see the model and not the company's alias.
  */
 async function createRoutedModelRuntime(selected: ModelIdentifier & { thinkingLevel?: string }, options: ModelRuntimeOptions, proxy: ModelProxyOptions, route: InvocationModelRoute): Promise<ModelRuntime> {
-  const catalog = catalogModelByName(route.catalog)?.model;
+  const catalog = route.identity === undefined ? catalogModelByName(route.catalog)?.model : catalogModel(route.identity);
   const runtime = await ModelRuntime.create({ refreshOnCreate: false, modelsPath: null, credentials: new InMemoryCredentialStore() });
   const requestKey = typeof proxy.apiKey === "function" ? () => (proxy.apiKey as () => Promise<string>).call(proxy) : undefined;
   const initialKey = requestKey === undefined ? proxy.apiKey as string : await requestKey().catch((error: unknown) => {
@@ -355,6 +359,11 @@ function eventModel(data: { model?: unknown; message?: { model?: unknown }; resp
 /** A routed call that holds tool calls or results and declares no tools (tool-history.ts). Never sent. */
 class ToolDeclarationsMissing extends Error {}
 
+async function installPauseOf(response: Response, routed: boolean, chatgpt: boolean): Promise<boolean> {
+  if (response.status !== 403 || !routed || chatgpt) return false;
+  return isRovaraAiPaused(response.status, (await response.clone().text().catch(() => "")).slice(0, 65_536));
+}
+
 function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, context: TranscriptContext, options: SimpleStreamOptions | undefined, routing: Record<string, unknown> | undefined, transport: typeof fetch = fetch, onUsage = (record: Record<string, unknown>) => console.info(JSON.stringify(record)), plan?: ChatGptPlan, proxyKey?: (model: Model<Api>) => Promise<string>,
   /** A routed model (Task 27): its API, which picks the client, and the catalog identity its usage is reported under. */
   route?: { api: InvocationModelRoute["api"]; identity: ModelIdentifier }) {
@@ -370,10 +379,13 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
   let notEnabled = false;
   // Set when the model gateway answered 400 because it does not offer the routed model (DEC 254g).
   let notOffered = false;
+  let installPaused = false;
+  const errorText = (ordinary: string): string => installPaused ? ROVARA_AI_PAUSED_MESSAGE : ordinary;
   let returnedModel: string | undefined;
   let returnedProvider: string | undefined;
   const observedFetch: typeof fetch = async (input, init) => {
     const response = await transport(input, init);
+    installPaused = await installPauseOf(response, route !== undefined, plan !== undefined);
     if (!response.ok) failureStatus = response.status;
     // The proxy's body is read for a 422 only (never a stream), classified and dropped.
     if (response.status === 422) exhausted = budgetScopeOfProxyBody(422, (await response.clone().text().catch(() => "")).slice(0, 65_536)) ?? exhausted;
@@ -460,7 +472,7 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
           return await fallBack(plan.fallback, refusal);
         }
         started = true;
-        if (event.type === "error") event.error.errorMessage = safeError(provider, event.reason === "aborted", failureStatus, chatgpt, exhausted, route !== undefined, notEnabled, notOffered);
+        if (event.type === "error") event.error.errorMessage = errorText(safeError(provider, event.reason === "aborted", failureStatus, chatgpt, exhausted, route !== undefined, notEnabled, notOffered));
         if (event.type === "done" || event.type === "error") {
           const message = event.type === "done" ? event.message : event.error;
           // Pi retains the response in the transcript. This record also identifies the serving model
@@ -480,7 +492,7 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
     } catch (error) {
       const aborted = options?.signal?.aborted === true;
       const message: AssistantMessage = { role: "assistant", api: model.api, provider, model: model.id,
-        content: [], timestamp: Date.now(), stopReason: aborted ? "aborted" : "error", errorMessage: error instanceof ToolDeclarationsMissing ? TOOL_DECLARATIONS_MISSING_WORDS : error instanceof ModelNotAllowedError && !aborted ? modelNotAllowedMarker(error.text) : safeError(provider, aborted, failureStatus, chatgpt, exhausted ?? (error instanceof ModelBudgetExhaustedError ? error.scope : undefined), route !== undefined, notEnabled, notOffered),
+        content: [], timestamp: Date.now(), stopReason: aborted ? "aborted" : "error", errorMessage: errorText(error instanceof ToolDeclarationsMissing ? TOOL_DECLARATIONS_MISSING_WORDS : error instanceof ModelNotAllowedError && !aborted ? modelNotAllowedMarker(error.text) : safeError(provider, aborted, failureStatus, chatgpt, exhausted ?? (error instanceof ModelBudgetExhaustedError ? error.scope : undefined), route !== undefined, notEnabled, notOffered)),
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
       };
       output.push({ type: "error", reason: aborted ? "aborted" : "error", error: message });

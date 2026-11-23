@@ -3,7 +3,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment -- vitest's expect.* matchers are typed any */
 import { describe, expect, it } from "vitest";
 import {
-  IMPLICIT_COMPANY_ID, openAgentSessionKey, sessionTaskStatus, type AgentSessionRecord, type AuditSink, type DocumentChange, type OrgId, type Principal, type SessionId,
+  IMPLICIT_COMPANY_ID, agentSessionKey, agentXError, change, openAgentSessionKey, sessionTaskStatus, type AgentSessionRecord, type AuditSink, type DocumentChange, type OrgId, type Principal, type SessionId,
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createLocalOwnerIdentity, createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
@@ -165,6 +165,23 @@ describe("stop, retry and tell", () => {
     const control = createSessionControl({ store: w.store, audit, host: real, now: () => clock.now, refresh: (orgId, sessionId) => refreshSessionSummary(w.deps, orgId, sessionId), log: () => undefined });
     return { ...w, control, calls };
   }
+
+  it("close binds the authorized session header before the host plans, refusing later owner drift", async () => {
+    const w = world(); await w.create();
+    let resumed = 0;
+    const receipt = agentSessionKey(ORG, SESSION, `REQUEST#${REQ(90)}`);
+    const control = createSessionControl({ store: w.store, audit: createNoopAuditSink(), host: {
+      async cancelTask() {}, async retryWorkflow() {},
+      async planCloseTask() {
+        // Another actor changes ownership after control's access read, before the host's own snapshot.
+        await w.store.update({ key: agentSessionKey(ORG, SESSION, "META"), ops: [change.set("owner", { developerId: "other", name: "Other" })] });
+        return { items: [{ kind: "put", item: { ...receipt, action: "close" } }], repeated: false,
+          async onConflict() { throw agentXError("CHANGE_STALE", "the close preview changed"); }, async resume() { resumed++; } };
+      },
+    } });
+    await expect(control.close(OWNER, ORG, SESSION, { requestId: REQ(90), expectedPreviewDigest: "a".repeat(64) })).rejects.toMatchObject({ code: "CHANGE_STALE", statusCode: 409 });
+    expect(await w.store.get(receipt)).toBeUndefined(); expect(resumed).toBe(0);
+  });
 
   it("the owner stops a session: the task flow cancels, the event and the request are recorded, and a repeat writes nothing", async () => {
     const audits: string[] = [];

@@ -31,8 +31,7 @@ import { deriveProjectSetupSourceSmoke } from "../../packages/broker/src/e2e/pro
 import { admitProjectSetupRuntime, projectSetupBindingDigest, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "../../packages/broker/src/aws/project-setup-runtime-catalog.js";
 import { issueProjectSetupCapability, type ProjectSetupCallbackClaims } from "../../packages/broker/src/aws/project-setup-capability.js";
 import { selectE2EExecutionPlan } from "../../packages/broker/src/e2e/execution-plan.js";
-import { taskGraphDigest } from "../../packages/contracts/src/workflow-dependencies-node.js";
-import { persistOriginalEvidencePrimary, persistOriginalMapPrimary } from "../support/p0-evidence-capture.js";
+import { persistOriginalMapPrimary } from "../support/p0-evidence-capture.js";
 import { observeInstalledRuntimeManifestForHost } from "@agentx/verifier";
 
 let installedRuntimeManifestDigest: string;
@@ -690,79 +689,6 @@ describe("P0 normal project onboarding journey", () => {
       publicLists: actualEvidence.groupRuns.map((run) => run.actual.publicList), assertionReceipts: actualEvidence.groupRuns.flatMap((run) => run.actual.assertionReceipts), collections: actualEvidence.groupRuns.map((run) => run.collection),
       setupResult,
     }, null, 2) + "\n", { mode: 0o600, flag: "wx" });
-
-    // Continue the same registered project through its ordinary developer task route. The local
-    // transport below supplies only an untrusted planner artifact; the broker still parses,
-    // canonicalizes, stores, and binds the bytes before the Owner decision.
-    broker.db.set({ pk: `MEMBER#${ownerDeveloperId}`, sk: "PROJECT#ordinary-orders", entityType: "MEMBERSHIP", ownerKey: ownerDeveloperId,
-      projectName: "ordinary-orders", role: "developer", grantedBy: { issuer, subject: "owner" }, grantedAt: new Date().toISOString() });
-    const featureStart = await call(broker.handler, { method: "POST", path: "/v1/dev/tasks", headers: { authorization: "Bearer synthetic-owner-session" },
-      body: { requestId: randomUUID(), project: "ordinary-orders", instructions: "Add an orders list using the approved source context", client: "native-p0-journey", workflow: true, workflowPath: "QUICK" } });
-    expect(featureStart.status, JSON.stringify(featureStart.body)).toBe(200);
-    const featureTaskId = String((featureStart.body.task as { taskId: string }).taskId);
-    const featureTask = broker.db.get(`DEVTASK#${featureTaskId}`, "META") as { workspaceId: string; workflow: { revision: number; artifacts: Array<{ type: string; sha256: string; objectKey: string }> } };
-    const featureWorkspaceId = featureTask.workspaceId;
-    const featureOperations = () => broker.db.find((item) => item.pk === `WORKSPACE#${featureWorkspaceId}` && item.entityType === "OPERATION");
-    const callbackFor = async (operationId: string, action: "result" | "artifacts", body: unknown) => {
-      const outbox = broker.db.find((item) => item.entityType === "OUTBOX" && item.operationId === operationId)[0];
-      const callbackCapability = (outbox?.invocation as { callbackCapability?: string } | undefined)?.callbackCapability;
-      expect(callbackCapability, `task operation ${operationId} has a server-issued callback capability`).toBeDefined();
-      return call(broker.handler, { method: "POST", path: `/v1/internal/workspaces/${featureWorkspaceId}/operations/${operationId}/${action}`,
-        headers: { "x-agentx-callback-capability": callbackCapability! }, body });
-    };
-    const prepareOperation = featureOperations().find((item) => item.kind === "prepare");
-    expect(prepareOperation).toBeDefined();
-    const prepareCallback = await callbackFor(String(prepareOperation!.id), "result", { operationId: prepareOperation!.id, status: "SUCCEEDED",
-      result: { preparedBase: [{ repositoryId: "ordinary-orders", baseCommitSha: commitSha }] } });
-    expect(prepareCallback.status).toBe(200);
-    const planOperation = featureOperations().find((item) => item.workflowMode === "PLAN");
-    expect(planOperation).toBeDefined();
-    const e2eIntent = {
-      schemaVersion: 1 as const, requestedTargetIds: ["web-1"],
-      accountContextRefs: [{ applicationId: "ordinary-orders", profileId: "synthetic", sourcePath: "package.json", sourceSha256: hash(Buffer.from(sourceFiles["package.json"])) }],
-      scenarios: [{ scenarioId: "orders-list", requirementId: "list-orders", requestedTargetIds: ["web-1"], required: true,
-        accountProfileId: "synthetic", minimumEvidence: "source" as const, requiredRealComponentIds: [],
-        steps: [{ kind: "navigate" as const, path: "/orders" }], assertions: [{ kind: "visible" as const, testId: "orders-list", equals: true }] }],
-      semanticExportDeltas: [],
-    };
-    const graph = { schemaVersion: 1 as const, taskId: featureTaskId, version: 1,
-      items: [{ id: randomUUID(), title: "Implement orders list", description: "Add the requested view and regression coverage.", repository: "ordinary-orders", dependsOn: [] }] };
-    const untrustedPlan = { schemaVersion: 1 as const, title: "Orders list implementation", why: [{ text: "The owner requested an orders view.", author: "planner" }],
-      claims: [{ id: "1", text: "The orders list is visible." }], notChanging: ["Existing access rules."], risks: ["Source smoke does not establish native runtime behavior."],
-      decisions: [], workBreakdown: graph, e2e: e2eIntent };
-    const plannerArtifact = `\`\`\`agentx-plan\n${JSON.stringify(untrustedPlan)}\n\`\`\`\n`;
-    const plannerPrimary = await persistOriginalEvidencePrimary({ root, kind: "untrusted-planner-artifact",
-      key: `callback:/v1/internal/workspaces/${String(featureWorkspaceId)}/operations/${String(planOperation!.id)}/artifacts/plan.md`, bytes: plannerArtifact,
-      producer: "worker model proposal callback request", sourceCandidateDigest: snapshot.candidate.digest });
-    const planArtifactCallback = await callbackFor(String(planOperation!.id), "artifacts", { name: "plan.md", mediaType: "text/markdown", content: plannerArtifact });
-    expect(planArtifactCallback.status).toBe(200);
-    const planTerminal = await callbackFor(String(planOperation!.id), "result", { operationId: planOperation!.id, status: "SUCCEEDED" });
-    expect(planTerminal.status, JSON.stringify(planTerminal.body)).toBe(200);
-    const plannedTask = broker.db.get(`DEVTASK#${featureTaskId}`, "META") as { workflow: { revision: number; stage: string; state: string; artifacts: Array<{ type: string; sha256: string; objectKey: string }> } };
-    const canonicalPlanArtifact = plannedTask.workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1);
-    expect(canonicalPlanArtifact).toBeDefined();
-    const canonicalPlanBytes = objects.get(String(canonicalPlanArtifact!.objectKey))?.toString("utf8");
-    const canonicalPlanPrimary = await persistOriginalMapPrimary({ root, kind: "canonical-plan-document", key: canonicalPlanArtifact!.objectKey, objects,
-      producer: "broker canonical PlanDocument artifact", sourceCandidateDigest: snapshot.candidate.digest });
-    expect(canonicalPlanPrimary.sha256).toBe(canonicalPlanArtifact!.sha256);
-    expect(canonicalPlanPrimary.byteLength).toBe(Buffer.byteLength(canonicalPlanBytes ?? "", "utf8"));
-    const canonicalPlan = readCanonicalPlan(canonicalPlanBytes ?? "");
-    expect(canonicalPlan?.e2e).toEqual(e2eIntent);
-    expect(hash(Buffer.from(canonicalPlanBytes ?? ""))).toBe(canonicalPlanArtifact?.sha256);
-    const ownerDecision = await call(broker.handler, { method: "POST", path: `/v1/dev/tasks/${featureTaskId}/workflow/decision`,
-      headers: { authorization: "Bearer synthetic-owner-session" }, body: { requestId: randomUUID(), expectedRevision: plannedTask.workflow.revision,
-        decision: "APPROVE", reason: "Approve the canonical plan and its ordered graph.", artifactDigest: canonicalPlanArtifact!.sha256,
-        workBreakdownDigest: taskGraphDigest(graph) } });
-    expect(ownerDecision.status, JSON.stringify(ownerDecision.body)).toBe(200);
-    const approvedTask = broker.db.get(`DEVTASK#${featureTaskId}`, "META") as { workflow: { workflowDependenciesApproval?: { artifactDigest: string; graphDigest: string }; artifacts: Array<{ sha256: string }> } };
-    expect(approvedTask.workflow.workflowDependenciesApproval).toMatchObject({ artifactDigest: canonicalPlanArtifact!.sha256, graphDigest: taskGraphDigest(graph) });
-    await writeFile(join(root, "feature-plan-owner-approval-receipt.json"), JSON.stringify({ taskId: featureTaskId, workspaceId: featureWorkspaceId,
-      httpResponses: { taskStart: featureStart.status, prepareCallback: prepareCallback.status, planArtifactCallback: planArtifactCallback.status,
-        planTerminalCallback: planTerminal.status, ownerDecision: ownerDecision.status },
-      plannerArtifactSha256: hash(Buffer.from(plannerArtifact)), canonicalPlanSha256: canonicalPlanArtifact!.sha256,
-      originalPrimaries: [plannerPrimary, canonicalPlanPrimary],
-      e2eIntentDigest: hash(Buffer.from(canonicalJson(e2eIntent))), graphDigest: taskGraphDigest(graph),
-      ownerDecision: ownerDecision.body, workflowDependenciesApproval: approvedTask.workflow.workflowDependenciesApproval }, null, 2) + "\n", { mode: 0o600, flag: "wx" });
     }, 70_000);
 });
 

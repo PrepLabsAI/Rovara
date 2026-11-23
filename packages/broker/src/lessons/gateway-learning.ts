@@ -7,7 +7,7 @@
 // Answers: 200 with text is the result. A refusal whose `error.type` is `lessons_paused` is a LearningRefusal with the code the gateway names in `x-rovara-lessons-pause` (one of
 // LESSONS_PAUSE_CODES; any other value reads as `model_failed`). 429 (`budget_held`, `busy`), 502, 503 and anything else are ordinary failures, in fixed words. Nothing the gateway or the
 // model sent is echoed into an error, and no token is ever logged.
-import { LessonsPauseCodeSchema } from "@agentx/contracts";
+import { LessonsPauseCodeSchema, ROVARA_AI_PAUSED_MESSAGE, isRovaraAiPaused } from "@agentx/contracts";
 import { LearningRefusal } from "./pause.js";
 import type { LearningSpend, PipelineModel } from "./ports.js";
 
@@ -57,6 +57,10 @@ async function boundedText(response: Response): Promise<string> {
 
 const parse = (text: string): unknown => { try { return JSON.parse(text) as unknown; } catch { return undefined; } };
 
+function refuseInstallPause(status: number, body: unknown): void {
+  if (isRovaraAiPaused(status, body)) throw new LearningRefusal("no_provider", ROVARA_AI_PAUSED_MESSAGE);
+}
+
 /** The learning model over the gateway's learning route. */
 export function createGatewayLearningModel(options: GatewayLearningOptions): PipelineModel {
   const url = addressOf(options.gatewayUrl);
@@ -86,6 +90,7 @@ export function createGatewayLearningModel(options: GatewayLearningOptions): Pip
         clearTimeout(timer);
       }
       const body = parse(text) as { error?: { type?: unknown }; content?: unknown; model?: unknown } | undefined;
+      refuseInstallPause(response.status, body);
       if (response.status >= 300 && response.status < 400) throw new Error(LEARNING_CALL_FAILED);
       if (!response.ok) {
         if (body?.error?.type === "lessons_paused") {

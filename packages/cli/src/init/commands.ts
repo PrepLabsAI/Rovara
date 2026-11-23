@@ -1,3 +1,5 @@
+import { assertDeployGatewayReady, templateParameterNames } from "../deploy/deploy-environment.js";
+import { initDeployAnswers } from "./deploy-steps.js";
 // agentx init (FR-015 to FR-020): find the release and region, read any install already under way,
 // ask and check and confirm on a first run, then run the steps. Every AWS, GitHub, Slack, browser
 // and clock dependency is overridable through InitCliDependencies (main.ts's CliDependencies.init).
@@ -344,6 +346,19 @@ interface InitSession {
   failureShown?: boolean;
   /** The command this CLI runs as, for the "Continue later with" command on a failure screen. */
   invocation: CliInvocation;
+}
+
+// Readiness must finish before even the environment lock is written. Use the deployment step's
+// failure action here too, so a failed build/synth can be prepared again on the open page.
+async function retryInitReadiness(check: () => Promise<void>, onFailure: (error: unknown) => Promise<"retry" | "stop">): Promise<void> {
+  for (;;) {
+    try {
+      await check();
+      return;
+    } catch (error) {
+      if (await onFailure(error) === "stop") throw error;
+    }
+  }
 }
 
 export async function runInit(options: InitOptions, deps: InitCliDependencies, services: { stderr: Writer; home: string }): Promise<InitResult> {
@@ -939,7 +954,16 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   // which is taken once for the whole run; the deploy steps pass lockHeld. The secrets are stored
   // before the answers, and before any step, so every stack that takes OpenRouterSecretArn gets it.
   const firstRun = collected;
+  const checkGateway = async () => {
+    const prepared = await context.deployment();
+    await assertDeployGatewayReady({
+      mode: "install", engine: finalAnswers.engine,
+      answers: initDeployAnswers(finalAnswers, emptyProgress(env, now()), []),
+      release, deployer: prepared.deployer, store, secrets, holder: caller.arn,
+    }, new Set(["control-plane"]), (part) => prepared.declaredParameters?.(part) ?? templateParameterNames(release, part, env));
+  };
   const saveAnswers = async () => {
+    await checkGateway();
     if (firstRun !== undefined) {
       if ((await readInstallAnswers(store, env)) !== undefined) {
         throw agentXError("CONFIG_INVALID", `another agentx init started installing environment ${env} while this one was asking its questions; nothing was saved. Run agentx init again to continue that install`);
@@ -1040,8 +1064,26 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     ...(options.cloud === undefined ? {} : { setupPageUrl: options.cloud.url, githubWaitMs: CLOUD_GITHUB_WAIT_MS }),
   };
 
+  // Spec 048 FR-060: shared by readiness preparation and the locked deployment steps. The
+  // terminal path still stops at its first failure without asking a follow-up question.
+  const onStepFailure = async ({ id, title, error }: { id: InitStepId; title: string; error: unknown }): Promise<"retry" | "stop"> => {
+    const wizard = session.wizard;
+    if (wizard === undefined) return "stop";
+    // Plan ruling 8: a stop already chosen inside a step gets no second failure question.
+    if (isOperatorStop(error)) return "stop";
+    wizard.showFailure(failureScreen({ env, region, stepTitle: title, stepId: id, error, ...(wizard.logPath === undefined ? {} : { logPath: wizard.logPath }) }));
+    const action = await askFailureAction(activePrompter, { retry: isRetryableStep(id) });
+    if (action === "retry") {
+      wizard.clearFailure();
+      return "retry";
+    }
+    session.failureShown = true;
+    return "stop";
+  };
+
   session.startSteps?.();
   try {
+    await retryInitReadiness(checkGateway, (error) => onStepFailure({ id: "access", title: STEP_PLAN.access.title, error }));
     const result = await runInitSteps({
       env, region, store, holder: caller.arn, context, now,
       steps: runSteps,
@@ -1063,24 +1105,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
           { defaultValue: false },
         ),
       }),
-      // Spec 048 FR-060: on the page only. The terminal path keeps throwing a step's error as before.
-      ...(session.wizard === undefined ? {} : {
-        onStepFailure: async ({ id, title, error }: { id: InitStepId; title: string; error: unknown }) => {
-          const wizard = session.wizard;
-          if (wizard === undefined) return "stop";
-          // Plan ruling 8: a stop the person already chose inside the step (declining a "check
-          // again" question, say) is not a failure; show no screen and no second question for it.
-          if (isOperatorStop(error)) return "stop";
-          wizard.showFailure(failureScreen({ env, region, stepTitle: title, stepId: id, error, ...(wizard.logPath === undefined ? {} : { logPath: wizard.logPath }) }));
-          const action = await askFailureAction(activePrompter, { retry: isRetryableStep(id) });
-          if (action === "retry") {
-            wizard.clearFailure();
-            return "retry";
-          }
-          session.failureShown = true;
-          return "stop";
-        },
-      }),
+      onStepFailure,
     });
     // A run --stop-after cut short is not installed, so it has no ready text.
     if (options.stopAfter !== undefined && result.status === "complete") {

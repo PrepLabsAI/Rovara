@@ -1,4 +1,6 @@
+import { validateFeedbackApproval } from "../pr-feedback/fix-context.js";
 import { workspaceKeys } from "./workspace-location.js";
+import { acceptedCloseForRun, closeDeliveryReceipt, readAcceptedClose, retireCloseDelivery } from "./close-recovery-state.js";
 // Lane L6a, task flow core: dispatching operations to worker machines. The consumer of the dispatch queue: for each message it finds the
 // operation, makes sure the workspace's machine is running and ready, builds the worker's invocation (with a repository grant and a callback
 // capability issued now, not when the operation was accepted, so a delivery that waits for a machine never carries an expired one) and hands it to
@@ -7,6 +9,7 @@ import { workspaceKeys } from "./workspace-location.js";
 // At least once, and idempotent: the queue may deliver a message twice, a crash can follow the delivery, and `deliver` is idempotent on the
 // operation id. The consumer therefore only moves an operation forward and never undoes a state a result has set.
 import {
+  CORE_DISPATCH_CLAIM_STALE_MS,
   AGENTX_PROTOCOL_VERSION,
   IMPLICIT_COMPANY_ID,
   OrgIdSchema,
@@ -51,10 +54,37 @@ import { chooseStepModel, heldStepModel, type OperationModelChoice, type StepMod
 const CAPABILITY_SECONDS = 32_400;
 /** A queued cancel is tried this many times on a machine that is not ready. */
 const CANCEL_DELIVERY_ATTEMPTS = 5;
+const CLOSE_DELIVERY_ATTEMPTS = 5;
 /** After this many deliveries of one message the operation is given up on: the machine never became usable. */
 export const DISPATCH_ATTEMPTS_MAX = 20;
 /** The reason a run is ended with when its machine never became usable (merge of "the start was tried until its budget ran out"). */
 export const DISPATCH_EXHAUSTED_ERROR = "the worker machine did not become ready in time";
+const claimTimeField = (operation: OperationRecord): "deliveredAt" | "updatedAt" => operation.deliveredAt === undefined ? "updatedAt" : "deliveredAt";
+const staleDispatch = (deps: TaskFlowDeps, operation: OperationRecord): boolean =>
+  Date.parse(operation[claimTimeField(operation)]!) < Date.parse(iso(deps)) - CORE_DISPATCH_CLAIM_STALE_MS;
+
+const workerHasClaim = (deps: TaskFlowDeps, operation: OperationRecord): boolean =>
+  operation.status === "RUNNING" || (operation.status === "DISPATCHING" && !staleDispatch(deps, operation));
+
+/** Keep the same message beyond freshness. The hosted batch cannot enqueue,
+ * and must report this record as a batch failure so Lambda does not delete it. */
+async function settleWorkerDuplicate(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessage, operation: OperationRecord, delivery: DeliveryLog): Promise<Outcome> {
+  if (operation.status === "DISPATCHING") {
+    delivery.decision = "dispatch-fault";
+    const remaining = Date.parse(operation[claimTimeField(operation)]!) + CORE_DISPATCH_CLAIM_STALE_MS - Date.parse(iso(deps));
+    if (!Number.isFinite(remaining)) {
+      log(deps, { event: "task_flow.dispatch_claim_invalid", operationId: operation.id });
+      throw new Error("invalid dispatch claim timestamp");
+    }
+    const seconds = Math.min(43_200, Math.max(1, Math.ceil(remaining / 1_000) + 1));
+    if (!(await queue.changeVisibility(message.receiptHandle, seconds))) throw new Error("dispatch deferral not retained");
+    delivery.decision = "defer-fresh-duplicate";
+    return "retried";
+  }
+  await queue.ack(message.receiptHandle);
+  return "dropped";
+}
+
 const BASE_ACCESS_ACTIONS = ["artifacts", "events", "result"] as const;
 
 export interface DispatchReport {
@@ -86,62 +116,123 @@ export async function runDispatchOnce(deps: TaskFlowDeps, options: { maxMessages
   for (const message of messages) {
     report.received += 1;
     let outcome: keyof Omit<DispatchReport, "received">;
+    const delivery: DeliveryLog = { operationId: null, attempt: null, stateAtReceipt: "unread", decision: "dispatch" };
     try {
-      outcome = await handleDispatch(deps, queue, message);
+      outcome = await handleDispatch(deps, queue, message, delivery);
     } catch {
       // A fault we did not model (the store is unreachable): the message comes back after its visibility timeout.
       if (OrgIdSchema.safeParse(deps.companyId).success) log(deps, { event: "task_flow.dispatch_fault", error: "dispatch_failed" });
       outcome = "retried";
+    } finally {
+      if (OrgIdSchema.safeParse(deps.companyId).success) log(deps, { event: "task_flow.dispatch_delivery", ...delivery, messageId: message.messageId, receiveCount: message.receiveCount });
     }
     report[outcome] += 1;
   }
   return report;
 }
 
+interface DeliveryLog {
+  operationId: string | null;
+  /** Existing operation fence: the workspace's writer attempt, not a POST or SQS counter. */
+  attempt: number | null;
+  stateAtReceipt: string;
+  decision: string;
+}
+
 type Outcome = keyof Omit<DispatchReport, "received">;
 
-async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessage): Promise<Outcome> {
+async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessage, delivery: DeliveryLog): Promise<Outcome> {
   if (!OrgIdSchema.safeParse(deps.companyId).success) { await queue.changeVisibility(message.receiptHandle, 30); return "foreign"; }
   const body = parseMessage(message.body);
   if (body === undefined) {
+    delivery.decision = "drop-malformed";
     await queue.deadLetter(message.receiptHandle, "malformed");
     return "dropped";
   }
   if (!OrgIdSchema.safeParse(body.companyId).success || body.companyId !== deps.companyId || (Object.hasOwn(message.attributes, "companyId") && message.attributes.companyId !== body.companyId)) {
+    delivery.decision = "defer-foreign";
     await queue.changeVisibility(message.receiptHandle, 30);
     log(deps, { event: "task_flow.dispatch_foreign" });
     return "foreign";
   }
+  delivery.operationId = body.operationId;
   const operation = await readOperation(deps, body.workspaceId, body.operationId);
   if (operation === undefined || operation.companyId !== deps.companyId) {
     // The operation commits with its message, so a message with none is not ours or is corrupt: set it aside for a person to look at.
+    delivery.decision = "drop-missing";
     await queue.deadLetter(message.receiptHandle, "operation_missing");
     return "dropped";
   }
+  delivery.attempt = operation.fence;
+  delivery.stateAtReceipt = operation.status;
+  delivery.decision = operation.status === "RUNNING" ? "ack-running" : operation.status === "DISPATCHING" ? staleDispatch(deps, operation) ? "recover-stale" : "defer-fresh-duplicate" : "dispatch";
+  // Broker-owned accepted close work stays retryable until every effect and receipt completes.
+  // Never route it through worker dispatch, which would interrupt a CLOSING workspace and acknowledge away recovery.
+  if (operation.closeAcceptance !== undefined) return resumeCloseDelivery(deps, queue, message, operation);
+  return handleWorkerDispatch(deps, queue, message, operation, delivery);
+}
+
+/** Each queue delivery is bounded; the pending durable outbox survives redrive and recreates it. */
+async function resumeCloseDelivery(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessage, operation: OperationRecord): Promise<Outcome> {
+  try { await deps.resumeAcceptedClose?.(operation); }
+  catch { return retryCloseDelivery(deps, queue, message, operation); }
+  const fresh = await readAcceptedClose(deps, operation.workspaceId, operation.id);
+  if (fresh?.closeAcceptance.phase !== "complete") return retryCloseDelivery(deps, queue, message, operation);
+  await queue.ack(message.receiptHandle);
+  await closeDeliveryReceipt(deps, fresh);
+  return "delivered";
+}
+
+async function retryCloseDelivery(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessage, operation: OperationRecord): Promise<Outcome> {
+  if (message.receiveCount >= CLOSE_DELIVERY_ATTEMPTS) {
+    await retireCloseDelivery(deps, operation);
+    await queue.deadLetter(message.receiptHandle, "accepted_close_pending");
+    return "dropped";
+  }
+  await queue.changeVisibility(message.receiptHandle, 30);
+  return "retried";
+}
+
+async function feedbackApprovalCurrent(deps: TaskFlowDeps, operation: OperationRecord): Promise<boolean> {
+  if (operation.workflowFeedbackApproval === undefined) return true;
+  try {
+    await validateFeedbackApproval(deps, operation, operation.workflowFeedbackApproval);
+    return true;
+  } catch { return false; }
+}
+
+/** A queued cancel handed to the worker that runs the operation (moved unchanged out of handleWorkerDispatch, train 5, complexity ratchet). */
+async function deliverQueuedCancel(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessage, operation: OperationRecord, cancelId: string): Promise<Outcome> {
+  const workspace = operation.status === "CANCEL_REQUESTED" && operation.machineId !== undefined ? await readWorkspace(deps, operation.workspaceId) : undefined;
+  if (workspace === undefined || operation.machineId === undefined) { await queue.ack(message.receiptHandle); return "dropped"; }
+  try {
+    await deps.machines.deliver(operation.machineId, cancelInvocation(deps, workspace, operation, cancelId));
+  } catch (error) {
+    if (error instanceof MachineError && error.retryable && message.receiveCount < CANCEL_DELIVERY_ATTEMPTS) { await queue.changeVisibility(message.receiptHandle, 1); return "retried"; }
+    log(deps, { event: "task_flow.cancel_not_delivered", error: error instanceof MachineError ? error.code : error instanceof Error ? error.name : "unknown" });
+    await queue.ack(message.receiptHandle);
+    return "failed";
+  }
+  await queue.ack(message.receiptHandle);
+  return "delivered";
+}
+
+async function handleWorkerDispatch(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessage, operation: OperationRecord, delivery: DeliveryLog): Promise<Outcome> {
   // A queued cancel (money-stop.ts: a Stop, a close or a spend stop on a deployed install, whose broker never reaches a worker itself): handed to the worker that runs the operation, while it
   // is still being stopped. A machine not ready is tried again a few times; anything else drops the message (the broker's wait then ends the run, keeping its hold).
   const cancelId = queuedCancelOf(message.body);
-  if (cancelId !== undefined) {
-    const workspace = operation.status === "CANCEL_REQUESTED" && operation.machineId !== undefined ? await readWorkspace(deps, operation.workspaceId) : undefined;
-    if (workspace === undefined || operation.machineId === undefined) { await queue.ack(message.receiptHandle); return "dropped"; }
-    try {
-      await deps.machines.deliver(operation.machineId, cancelInvocation(deps, workspace, operation, cancelId));
-    } catch (error) {
-      if (error instanceof MachineError && error.retryable && message.receiveCount < CANCEL_DELIVERY_ATTEMPTS) { await queue.changeVisibility(message.receiptHandle, 1); return "retried"; }
-      log(deps, { event: "task_flow.cancel_not_delivered", error: error instanceof MachineError ? error.code : error instanceof Error ? error.name : "unknown" });
-      await queue.ack(message.receiptHandle);
-      return "failed";
-    }
-    await queue.ack(message.receiptHandle);
-    return "delivered";
-  }
-  // Already ended, or a cancel is in flight: nothing to deliver.
-  // A redelivered message for a job the worker already reports running is a repeat: the worker has it.
-  if (isTerminalStatus(operation.status) || operation.status === "CANCEL_REQUESTED" || operation.status === "RUNNING") {
+  if (cancelId !== undefined) return deliverQueuedCancel(deps, queue, message, operation, cancelId);
+  const receiveCount = message.receiveCount;
+  if (await acceptedCloseForRun(deps, operation) !== undefined) {
     await queue.ack(message.receiptHandle);
     return "dropped";
   }
-  const retryLater = async (seconds: number = retryDelay(message.receiveCount)): Promise<Outcome> => {
+  // Already ended, or a cancel is in flight: nothing to deliver.
+  // A redelivered message for a job the worker already reports running is a repeat: the worker has it.
+  if (isTerminalStatus(operation.status) || operation.status === "CANCEL_REQUESTED" || workerHasClaim(deps, operation)) {
+    return settleWorkerDuplicate(deps, queue, message, operation, delivery);
+  }
+  const retryLater = async (seconds: number = retryDelay(receiveCount)): Promise<Outcome> => {
     await queue.changeVisibility(message.receiptHandle, seconds);
     return "retried";
   };
@@ -156,24 +247,18 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     // The workspace has moved on (closed, or taken by a newer hold): this job is no longer wanted.
     return endAndAck("INTERRUPTED", "the workspace no longer waits for this job");
   }
+  if (await deps.deliveryAccess?.(deps, operation, workspace) === "PARKED") {
+    await queue.ack(message.receiptHandle);
+    return "dropped";
+  }
+  if (!await feedbackApprovalCurrent(deps, operation)) return endAndAck("FAILED", "The feedback approval changed or could not be verified. Refresh the task before retrying.");
   // Standing instructions (the company's rules and the project's How we work): read now, before admission and before any machine is started, since a refusal needs no machine and a code host that is down must
   // not wake one on every try. The playbook is read at the commit the task pinned when it started. A refusal that waiting will not mend ends the step with its sentence; a read that may pass is tried again, and when
   // the tries run out the step ends with the true cause (the rules could not be read), never "the machine did not become ready".
-  let standing: StandingInstructionsPayload | undefined;
-  if (operation.dispatch.kind === "task" && deps.standingInstructions !== undefined) {
-    try {
-      standing = await deps.standingInstructions.forOperation({
-        project: workspace.projectName, mode: operation.dispatch.payload["workflowMode"] as PlaybookMode | undefined, ...(workspace.playbookCommit === undefined ? {} : { playbookCommit: workspace.playbookCommit }),
-        ...(workspace.standingPin === undefined ? {} : { pinned: workspace.standingPin }),
-      });
-    } catch (error) {
-      const sentence = error instanceof AgentXError ? error.message.replace(/^[A-Z_]+: /u, "") : undefined;
-      if (sentence !== undefined && error instanceof AgentXError && (error.code === "CONFIG_INVALID" || error.code === "PROCESS_UNAVAILABLE")) return endAndAck("FAILED", sentence);
-      if (sentence !== undefined && error instanceof AgentXError && error.code === "RUNTIME_UNAVAILABLE") return message.receiveCount >= DISPATCH_ATTEMPTS_MAX ? endAndAck("FAILED", sentence) : retryLater();
-      throw error;
-    }
-  }
-  if (message.receiveCount > DISPATCH_ATTEMPTS_MAX) return endAndAck("FAILED", DISPATCH_EXHAUSTED_ERROR);
+  const rules = await dispatchStanding(deps, operation, workspace, receiveCount);
+  if (rules.error !== undefined) return rules.retry ? retryLater() : endAndAck("FAILED", rules.error);
+  const standing = rules.standing;
+  if (receiveCount > DISPATCH_ATTEMPTS_MAX) return endAndAck("FAILED", DISPATCH_EXHAUSTED_ERROR);
 
   // The model of this step (the install's per-step rule), before any machine is started for it: a step no model can serve ends here, with the reason in words, and costs nothing.
   const stepModel = await chooseStepModel(deps, operation);
@@ -230,7 +315,7 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
       await releaseAdmission(deps, workspace.machineReservationId);
     }
     // The workspace must still be ours to give the machine to; if a close got in first, the machine it could not see is stopped here.
-    if (!(await rememberMachine(deps, workspace, handle, reservationId))) return abandon(deps, queue, message, operation, handle.machineId, reservationId);
+    if (!(await rememberMachine(deps, workspace, handle, reservationId))) return abandon(deps, queue, message, operation, handle.machineId, reservationId, delivery);
     const health = await deps.machines.health(handle.machineId);
     if (health.state === "terminated") {
       // The machine is gone for good (reaped): forget it; the next try starts another, admitted on its own.
@@ -248,6 +333,10 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     if (missing.length > 0) return endAndAck("FAILED", testServicesMissingWords(missing) ?? "this worker is too old to run this step; upgrade it");
     // A block is never dropped: a worker that cannot place it is refused the step (the rules were read above, before any machine was asked for).
     if (standing !== undefined && !health.features.includes(STANDING_INSTRUCTIONS_FEATURE)) return endAndAck("FAILED", "this worker is too old to run this step; upgrade it");
+    if (await deps.deliveryAccess?.(deps, operation, workspace) === "PARKED") {
+      await queue.ack(message.receiptHandle);
+      return "dropped";
+    }
     // The claim: in one transaction, the workspace is still held by this operation at its fence and is not closing, and the operation is handed over.
     // Nothing is issued to the worker (no grant, no capability) before it applies.
     let sent = stepModel?.ok === true ? stepModel : undefined;
@@ -260,7 +349,7 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
         claimed = await claimDispatch(deps, operation, handle.machineId);
       }
     }
-    if (!claimed) return abandon(deps, queue, message, operation, handle.machineId, reservationId ?? workspace.machineReservationId);
+    if (!claimed) return abandon(deps, queue, message, operation, handle.machineId, reservationId ?? workspace.machineReservationId, delivery);
     const invocation = await buildInvocation(deps, operation, workspace, health.features, standing, sent);
     if (typeof invocation === "string") return endAndAck("FAILED", invocation);
     await deps.machines.deliver(handle.machineId, invocation);
@@ -293,7 +382,7 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
  * The job is no longer wanted by the time the machine was ready (the task was closed, or the workspace moved on). A machine this call started for a
  * workspace that is closed is stopped here, since the close could not see it; the allowance taken for it goes back. The operation is ended if it is not.
  */
-async function abandon(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessage, operation: OperationRecord, machineId: string | undefined, reservationId: string | undefined): Promise<Outcome> {
+async function abandon(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessage, operation: OperationRecord, machineId: string | undefined, reservationId: string | undefined, delivery: DeliveryLog): Promise<Outcome> {
   const workspace = await readWorkspace(deps, operation.workspaceId);
   const closed = workspace === undefined || workspace.status === "CLOSED" || workspace.status === "CLOSING";
   if (closed) {
@@ -302,9 +391,8 @@ async function abandon(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessag
   }
   // The worker may have taken the job and reported it running between our read and the claim: it is theirs, not ours to end.
   const fresh = await readOperation(deps, operation.workspaceId, operation.id);
-  if (!closed && fresh !== undefined && fresh.status === "RUNNING") {
-    await queue.ack(message.receiptHandle);
-    return "dropped";
+  if (!closed && fresh !== undefined && workerHasClaim(deps, fresh)) {
+    return settleWorkerDuplicate(deps, queue, message, fresh, delivery);
   }
   if (!(await endOperation(deps, operation, "INTERRUPTED", "the workspace no longer waits for this job"))) {
     await queue.changeVisibility(message.receiptHandle, retryDelay(message.receiveCount));
@@ -487,11 +575,13 @@ async function forgetMachine(deps: TaskFlowDeps, workspaceId: string, machineId:
 async function claimDispatch(deps: TaskFlowDeps, operation: OperationRecord, machineId: string, modelChoice?: OperationModelChoice): Promise<boolean> {
   const now = iso(deps);
   const location = await workspaceKeys(deps, operation.workspaceId);
+  const timeField = claimTimeField(operation);
+  const staleClaim = when.and(when.eq("status", "DISPATCHING"), when.eq(timeField, operation[timeField]!), when.lt(timeField, new Date(Date.parse(now) - CORE_DISPATCH_CLAIM_STALE_MS).toISOString()));
   const claimed = await deps.store.transact([
     // The operation is watched from the hand-over on (`sweepLostRuns`): the machine it runs on may be lost with no result ever coming back.
     runWatchItem(deps, operation, machineId, now),
     { kind: "check", key: location.workspaceKey, condition: when.and(when.eq("fence", operation.fence), when.eq("activeOperationId", operation.id), when.not(when.or(when.eq("status", "CLOSED"), when.eq("status", "CLOSING")))) },
-    { kind: "update", key: location.operationKey(operation.id), ops: [change.set("status", "DISPATCHING"), change.set("machineId", machineId), change.set("deliveredAt", now), change.set("updatedAt", now), ...(modelChoice === undefined ? [] : [change.set("modelChoice", modelChoice as unknown as JsonValue)])], condition: when.and(when.or(when.eq("status", "ACCEPTED"), when.eq("status", "DISPATCHING")), ...(modelChoice === undefined ? [] : [when.notExists("modelChoice")])) },
+    { kind: "update", key: location.operationKey(operation.id), ops: [change.set("status", "DISPATCHING"), change.set("machineId", machineId), change.set("deliveredAt", now), change.set("updatedAt", now), ...(modelChoice === undefined ? [] : [change.set("modelChoice", modelChoice as unknown as JsonValue)])], condition: when.and(when.eq("fence", operation.fence), when.or(when.eq("status", "ACCEPTED"), staleClaim), ...(modelChoice === undefined ? [] : [when.notExists("modelChoice")])) },
   ]);
   return claimed.applied;
 }
@@ -506,4 +596,23 @@ async function endOperation(deps: TaskFlowDeps, operation: OperationRecord, stat
   }
   const fresh = await readOperation(deps, operation.workspaceId, operation.id);
   return fresh !== undefined && isTerminalStatus(fresh.status);
+}
+
+
+async function dispatchStanding(deps: TaskFlowDeps, operation: OperationRecord, workspace: WorkspaceRecord, receiveCount: number): Promise<{ standing?: StandingInstructionsPayload; error?: string; retry?: boolean }> {
+  let standing: StandingInstructionsPayload | undefined;
+  if (operation.dispatch.kind === "task" && deps.standingInstructions !== undefined) {
+    try {
+      standing = await deps.standingInstructions.forOperation({
+        project: workspace.projectName, mode: operation.dispatch.payload["workflowMode"] as PlaybookMode | undefined, ...(workspace.playbookCommit === undefined ? {} : { playbookCommit: workspace.playbookCommit }),
+        ...(workspace.standingPin === undefined ? {} : { pinned: workspace.standingPin }),
+      });
+    } catch (error) {
+      const sentence = error instanceof AgentXError ? error.message.replace(/^[A-Z_]+: /u, "") : undefined;
+      if (sentence !== undefined && error instanceof AgentXError && (error.code === "CONFIG_INVALID" || error.code === "PROCESS_UNAVAILABLE")) return { error: sentence };
+      if (sentence !== undefined && error instanceof AgentXError && error.code === "RUNTIME_UNAVAILABLE") return { error: sentence, retry: receiveCount < DISPATCH_ATTEMPTS_MAX };
+      throw error;
+    }
+  }
+  return standing === undefined ? {} : { standing };
 }

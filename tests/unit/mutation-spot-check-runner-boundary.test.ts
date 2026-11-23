@@ -1,4 +1,4 @@
-import "./mutation-spot-offline.js";
+import { useLoopbackOnlyGuard } from "./mutation-spot-offline.js";
 // Q1 proof through the REAL runner: abort joins the SIGTERM-resistant child before returning.
 // Writes before SIGKILL stay in the disposable copy; the candidate is never restored or reused.
 import { readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -10,6 +10,8 @@ import { snapshotCandidate } from "../../packages/worker/src/verification/mutati
 import { runMutationSpotCheck } from "../../packages/worker/src/verification/mutation-spot-check.js";
 import { fixture, report } from "./mutation-spot-support.js";
 import { processAlive } from "../support/process-liveness.js";
+
+useLoopbackOnlyGuard();
 
 // The existing worker image carries deployment markers that intentionally refuse local child
 // execution. These fixtures test the explicitly local runner, including when hosted in that image.

@@ -7,10 +7,13 @@ import { expectLinearScalingAsync } from "../support/scaling.js";
 const v = claimVector();
 const operation = { workspaceId: v.ws, operationId: v.op, fence: 1 };
 const description = (): TaskTokenDescription => ({ companyId: v.cid, project: v.pid, person: v.per!, payer: v.pay, taskId: v.tid, step: v.stp, origin: "app", models: v.mdl });
-const setup = () => { const world = signingWorld(); return { ...world, deps: { signer: world.signer, issuer: v.iss, now: () => v.iat * 1000, describer: { describe: async () => description() } } }; };
+const setup = (priced = false) => { const world = signingWorld(); return { ...world, deps: { signer: world.signer, issuer: v.iss, now: () => v.iat * 1000, describer: { describe: async () => description() }, ...(priced ? { runPrice: async () => v.runPrice } : {}) } }; };
 describe("task token mint", () => {
   it("mints the vector with the exact header, fresh jti, lifetime and skew", async () => {
-    const w = setup(); const a = await mintTaskToken(w.deps, operation); const b = await mintTaskToken(w.deps, operation);
+    expect(v.runPrice).toBeDefined();
+    const w = setup(true); const a = await mintTaskToken(w.deps, operation); const b = await mintTaskToken(w.deps, operation);
+    expect(a.runPrice).toEqual(v.runPrice);
+    expect(w.reference(await w.signed(v))).toEqual(v);
     const actual = w.reference(a.token)!; expect(actual.jti).toMatch(/^[0-9a-f-]{36}$/u);
     expect({ ...actual, jti: v.jti }).toEqual(v);
     expect(w.reference(a.token)?.jti).not.toBe(w.reference(b.token)?.jti);
@@ -21,6 +24,7 @@ describe("task token mint", () => {
     const w = setup(); const old = description(); delete old.origin; delete old.person;
     const result = await mintTaskToken({ ...w.deps, describer: { describe: async () => old } }, operation);
     expect(w.reference(result.token)).not.toHaveProperty("src"); expect(w.reference(result.token)).not.toHaveProperty("per");
+    expect(w.reference(result.token)).not.toHaveProperty("runPrice");
   });
   it.each([
     { companyId: undefined }, { person: "bad" }, { payer: { kind: "other" } }, { step: "Build" }, { origin: "unknown" }, { models: [] }, { models: ["a".repeat(129)] },
@@ -68,6 +72,7 @@ describe("task token mint", () => {
 it.each([false, true])("signs the largest fitting input and refuses the next larger one (compact=%s)", async compact => {
   const w = setup(); const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "rovara-task+jwt", kid: w.published.kid })).toString("base64url");
   const d = description(); const fixture = { ...v };
+  delete fixture.runPrice;
   if (compact) { delete d.person; delete fixture.per; d.payer = { kind: "project", project: v.pid }; fixture.pay = d.payer; }
   const deps = { ...w.deps, describer: { describe: async () => d } };
   let issuer = v.iss;

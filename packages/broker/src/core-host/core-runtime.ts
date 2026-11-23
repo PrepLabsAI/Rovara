@@ -6,7 +6,7 @@
 // The other core services (merge tracking, the session sweep, notices) are joined on a laptop by the local root (`local/app/app.ts`), which carries laptop rules (fixed code settings, a sole
 // owner). A deployed install needs the same joins with its own settings and people; each is a `CoreService` the deployment supplies, and `serviceGaps` names the ones missing so the switch cannot
 // be turned on for an area whose service is not wired (an area that is off is not asked: its missing service costs only its own jobs).
-import { agentXError, type AdapterRegistry, type OrgId } from "@agentx/contracts";
+import { agentXError, type AdapterRegistry, type DocumentStore, type OrgId } from "@agentx/contracts";
 import { RepositoryGrantService } from "../repository-access.js";
 import { createStoreProjectSource } from "../core/task-flow/project-source.js";
 import { createTaskFlowFromRegistry, type RegistryTaskFlowOptions, type TaskFlow } from "../core/task-flow/flow.js";
@@ -58,6 +58,7 @@ export interface CoreServiceWiring {
   humanEdit?: HumanEditSink | undefined;
   /** HW5: write the chat thread's moments (the plan waits for review, the task was closed) when a session that follows a thread changes. Needs the company's milestones; absent: none are written. */
   threadMoments?: boolean | undefined;
+  threadRefresh?: ((orgId: OrgId, sessionId: string, store: DocumentStore) => Promise<void>) | undefined;
 }
 
 export interface CoreRuntimeOptions {
@@ -139,15 +140,23 @@ export function createCoreRuntime(options: CoreRuntimeOptions): CoreRuntime {
     now: options.now,
     log: options.log,
     startExtras,
+    // Shared by flow.start and hosted setup/wiki starts over flow.deps. The
+    // signed-price check must finish before even the company's in-use write.
+    startModelCheck: async () => {
+      const refusal = await options.flowOptions?.startModelCheck?.();
+      if (refusal !== undefined) return refusal;
+      await ensureCoreInUse(store, companyId);
+      return undefined;
+    },
     // The work events of the cost report's wait split and send-backs (slice A4, `core/work-events/flow-events.ts`): on for every core runtime unless the deployment turns them off.
     workEvents: options.flowOptions?.workEvents !== false,
   });
-  // The company's in-use mark is written before its first core start (off the start's transaction), so the root's jobs always find every company that holds core tasks.
+  // The start's model check writes the in-use mark before its transaction, so
+  // the root's jobs find every company that holds core tasks.
   const flow: TaskFlow = {
     ...base,
     async start(caller, request) {
       if (engineForNewTask(options.flags, companyId) !== "core") throw agentXError("RUNTIME_UNAVAILABLE", CORE_START_REFUSED_WORDS);
-      await ensureCoreInUse(store, companyId);
       return await base.start(caller, request);
     },
   };

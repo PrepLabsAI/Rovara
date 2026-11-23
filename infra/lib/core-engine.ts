@@ -23,7 +23,7 @@
 import { CfnCondition, CfnParameter, Duration, Fn, Stack, Token, aws_cloudwatch as cloudwatch, aws_iam as iam, aws_lambda as lambda, aws_scheduler as scheduler, aws_sqs as sqs, type aws_cloudwatch_actions as cloudwatchActions } from "aws-cdk-lib";
 import { Construct } from "constructs";
 import {
-  CORE_AGENT_MODEL_CHOICE_DEFAULT, CORE_AGENT_MODEL_CHOICE_VALUES, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PATTERN, CORE_LEARNING_MODEL_MAX_LENGTH, CORE_LEARNING_MODEL_PATTERN, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN,
+  CORE_DISPATCH_VISIBILITY_SECONDS, CORE_AGENT_MODEL_CHOICE_DEFAULT, CORE_AGENT_MODEL_CHOICE_VALUES, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PATTERN, CORE_LEARNING_MODEL_MAX_LENGTH, CORE_LEARNING_MODEL_PATTERN, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN,
   TEST_SERVICES_PARAMETER_DEFAULT, TEST_SERVICES_PARAMETER_VALUES, TEST_SERVICE_IMAGES_PARAMETER_DEFAULT, TEST_SERVICE_IMAGES_PARAMETER_VALUES, SAVED_ENVIRONMENTS_PARAMETER, SAVED_ENVIRONMENTS_PARAMETER_DEFAULT, SAVED_ENVIRONMENTS_PARAMETER_VALUES, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_MAX_RECEIVES, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
   coreDispatchDeadLetterName, coreDispatchQueueName, coreLessonsReflectDeadLetterName, coreLessonsReflectQueueName, LESSONS_REFLECT_MAX_RECEIVES, LESSONS_REFLECT_VISIBILITY_SECONDS, SYSTEM_RUNS_DEFAULT, SYSTEM_RUNS_PARAMETER_PATTERN, UPKEEP_NIGHT_JOB, type CoreJobSchedule,
 } from "@agentx/contracts";
@@ -54,7 +54,7 @@ export const CORE_BROKER_REFLECT_QUEUE_ACTIONS = ["sqs:SendMessage", "sqs:Receiv
 export const CORE_BROKER_REFLECT_DEAD_LETTER_ACTIONS = ["sqs:GetQueueAttributes"] as const;
 
 /** The queue's visibility timeout, as the DispatchQueue's; the core extends it per message while a step starts. */
-export const CORE_DISPATCH_VISIBILITY_TIMEOUT = Duration.minutes(2);
+export const CORE_DISPATCH_VISIBILITY_TIMEOUT = Duration.seconds(CORE_DISPATCH_VISIBILITY_SECONDS);
 
 /** The health route reads this alarm by name (HEALTH_ALARM_SUFFIXES). */
 export const CORE_DISPATCH_DEAD_LETTERS_ALARM = "CoreDispatchDeadLetters";
@@ -122,7 +122,10 @@ export class CoreEngine extends Construct {
     // (OPERATOR_PARAMETERS); packed, because the broker's 4 KB has no room for two more variables (a host has no separator; the broker reads `https://<host>`). Both empty (the
     // default): the core refuses the switch by name, as before.
     this.modelGatewayHost = new CfnParameter(stack, "CoreModelGatewayHost", { type: "String", default: "", maxLength: CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, allowedPattern: CORE_MODEL_GATEWAY_HOST_PATTERN, description: "Core engine model gateway host, reached over https (no scheme, path or credentials); empty (the default) leaves the core refused" });
-    this.agentModel = new CfnParameter(stack, "CoreAgentModel", { type: "String", default: "", maxLength: CORE_AGENT_MODEL_MAX_LENGTH, allowedPattern: CORE_AGENT_MODEL_PATTERN, description: "Core engine agent model, any model the model gateway offers by its exact id, such as claude-sonnet-4-6 or zai.glm-5; empty (the default) leaves the core refused" });
+    // The deploy engines derive this context from the existing install setting, never a launch switch.
+    // Preserve the exact historical parameter when no gateway is configured.
+    const gatewayConfigured = Boolean(stack.node.tryGetContext("CoreModelGatewayHost"));
+    this.agentModel = new CfnParameter(stack, "CoreAgentModel", { type: "String", default: "", maxLength: gatewayConfigured ? CORE_AGENT_MODEL_MAX_LENGTH : 64, allowedPattern: gatewayConfigured ? CORE_AGENT_MODEL_PATTERN : "^([a-z0-9][a-z0-9._:-]{0,63})?$", description: "Core engine agent model, any model the model gateway offers by its exact id, such as claude-sonnet-4-6 or zai.glm-5; empty (the default) leaves the core refused" });
     for (const [key, value] of [["coreModelGateway", this.modelGatewayHost.valueAsString], ["coreAgentModel", this.agentModel.valueAsString]] as const) {
       addBrokerSetting(broker, props.naming, key, value);
       addPackedSetting(dispatcher, key, value);

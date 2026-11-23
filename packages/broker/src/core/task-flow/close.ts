@@ -1,3 +1,4 @@
+import { acceptTaskClose, closeHasDigest } from "./close-acceptance.js";
 import { workspaceKeys } from "./workspace-location.js";
 // Lane L6a, task flow core: closing a task, minimally: the task is closed, its workspace is closed under a new fence (so a late callback is
 // refused), a job still running is ended as interrupted, the workspace slot is given back once, and the machine is terminated. Cloud's
@@ -76,7 +77,13 @@ export async function finishClose(deps: TaskFlowDeps, task: TaskRecord, parts: P
   try { await deps.onTaskClosed?.(task, now); } catch (error) { log(deps, { event: "task_flow.run_cost_not_recorded", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }); }
 }
 
-export async function closeTask(deps: TaskFlowDeps, caller: TaskCaller, taskId: string): Promise<TaskView> {
+export async function closeTask(deps: TaskFlowDeps, caller: TaskCaller, taskId: string, input?: unknown): Promise<TaskView> {
+  if (closeHasDigest(input)) {
+    await acceptTaskClose(deps, caller, taskId, input);
+    const task = await readTask(deps, taskId);
+    if (task === undefined) throw agentXError("TASK_NOT_FOUND", "no such task");
+    return taskViewOf(deps, task);
+  }
   return closeLoadedTask(deps, await loadOwnedTask(deps, caller, taskId), caller.principal.personId);
 }
 
@@ -85,6 +92,7 @@ export async function closeTask(deps: TaskFlowDeps, caller: TaskCaller, taskId: 
  * the one the start named. It does the same as `closeTask`, with no caller to check: the flow has just read the task's own record.
  */
 export async function closeLoadedTask(deps: TaskFlowDeps, loaded: TaskRecord, actorId: string): Promise<TaskView> {
+  assertLegacyClose(loaded);
   const taskId = loaded.taskId;
   let task = loaded;
   // A deployed install (money-stop.ts): a model run still going sends its usage before the close ends it. Without `moneyStop` nothing is read or written here.
@@ -92,7 +100,7 @@ export async function closeLoadedTask(deps: TaskFlowDeps, loaded: TaskRecord, ac
   for (let attempt = 1; task.closedAt === undefined && attempt <= CLOSE_ATTEMPTS; attempt += 1) {
     const now = iso(deps);
     const parts = await closeParts(deps, task, now, { type: "person", id: actorId });
-    const items: TransactItem[] = [{ kind: "update", key: taskKey(task.taskId), ops: parts.taskOps, condition: when.notExists("closedAt") }, ...parts.items];
+    const items: TransactItem[] = [{ kind: "update", key: taskKey(task.taskId), ops: parts.taskOps, condition: when.and(when.notExists("closedAt"), when.notExists("closeOperationId")) }, ...parts.items];
     let applied;
     try {
       applied = await deps.store.transact(items);
@@ -103,6 +111,7 @@ export async function closeLoadedTask(deps: TaskFlowDeps, loaded: TaskRecord, ac
     if (applied.applied) await finishClose(deps, task, parts, now);
     const fresh = await readTask(deps, taskId);
     if (fresh === undefined) throw agentXError("TASK_NOT_FOUND", "no such task");
+    assertLegacyClose(fresh);
     task = fresh;
   }
   if (task.closedAt === undefined) throw agentXError("WORKSPACE_BUSY", "Rovara could not close the task just now; try again");
@@ -125,4 +134,8 @@ async function stopMachines(deps: TaskFlowDeps, machineIds: ReadonlyArray<string
     }
   }
   for (const reservationId of new Set(reservationIds)) await releaseAdmission(deps, reservationId);
+}
+
+function assertLegacyClose(task: TaskRecord): void {
+  if (task.closeOperationId !== undefined) throw agentXError("IDEMPOTENCY_CONFLICT", "this task already has an accepted close");
 }

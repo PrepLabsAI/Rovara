@@ -1,3 +1,6 @@
+import { assertCurrentPublicationFence, publicationTaskCheck } from "../core/e2e/publication-fence.js";
+import { feedbackCallback } from "../core/pr-feedback/callbacks.js";
+import { publicationGateCallback } from "../core/build-step/publication-gates.js";
 import { locateWorkspace, workspaceKeys } from "../core/task-flow/workspace-location.js";
 // The callback endpoints a worker posts to (`/v1/internal/workspaces/<w>/operations/<o>/<action>`), for the three every job has: its events, its artifacts and
 // its terminal result. The capability the flow issued at delivery (HMAC, one workspace, one operation, one fence, a list of actions) is checked first; the ids in the address must be the
@@ -29,6 +32,7 @@ import { recordWorkItemProgress } from "../core/work-breakdown/progress.js";
 import type { StepOutcome } from "../core/task-flow/outcome.js";
 import { fromDocument, type OperationRecord, type TaskPointerRecord, type WorkspaceRecord } from "../core/task-flow/records.js";
 import { isTerminalStatus, recordOperationResult } from "../core/task-flow/results.js";
+import { acceptedCloseForRun } from "../core/task-flow/close-recovery-state.js";
 import { isSpendStopCode, requestSpendStop } from "../core/task-flow/money-stop.js";
 import { iso } from "../core/task-flow/support.js";
 import { parseKnowledgeCommit } from "../core/meta-repo/prepare-meta.js";
@@ -131,13 +135,19 @@ async function operationOf(deps: CallbackDeps, workspaceId: string, operationId:
 }
 
 /** The actions this install answers; any other the worker can make is "not available". */
-const SERVED_ACTIONS: ReadonlySet<string> = new Set(["events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "browser-evidence", "browser-evidence-sign-in", "pull-request", "pull-request-update", "setup-agent", "wiki-build", EVAL_PLAN_DELIVERY_ACTION, EVAL_HEALTH_RESULT_PATH]);
+const PUBLICATION_CALLBACKS = { codebuild: publicationGateCallback, "pull-request": openPullRequest };
+const SERVED_ACTIONS: ReadonlySet<string> = new Set(["codebuild", "feedback-bundles", "feedback-approval", "events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "browser-evidence", "browser-evidence-sign-in", "pull-request", "pull-request-update", "setup-agent", "wiki-build", EVAL_PLAN_DELIVERY_ACTION, EVAL_HEALTH_RESULT_PATH]);
 export const TERMINAL_OUTPUT_REFUSAL = "terminal operations cannot publish more output";
 
 /**
  * A worker's artifact, kept once. The first save of a name by an operation fixes its bytes: the same bytes again are the same artifact (a retried post), other bytes are refused. So what
  * the workflow's digest names cannot be rewritten by a later post, even though the worker's capability is still good.
  */
+function artifactByteLimit(operation: OperationRecord, name: string): number {
+  if (operation.workflowMode === "FEEDBACK_REVIEW" && /^workflow-feedback-review-[a-f0-9]{64}\.json$/u.test(name)) return 1_000_000;
+  return name === DESIGN_REVIEW_ARTIFACT && operation.designReview !== undefined ? DESIGN_REVIEW_RESULT_MAX_BYTES : PLAN_MAX_BYTES;
+}
+
 async function recordArtifact(deps: CallbackDeps, operation: OperationRecord, body: Record<string, unknown>): Promise<{ artifactId: string }> {
   const { name, mediaType, content } = body;
   if (typeof name !== "string" || !ARTIFACT_NAME.test(name) || typeof mediaType !== "string" || mediaType.length > 120 || typeof content !== "string") {
@@ -145,7 +155,7 @@ async function recordArtifact(deps: CallbackDeps, operation: OperationRecord, bo
   }
   const bytes = new TextEncoder().encode(content);
   // A design review's result holds every reviewer's answer; it is bigger than a plan (the broker reads it back with the same bound, `DESIGN_REVIEW_RESULT_MAX_BYTES`).
-  if (bytes.byteLength > (name === DESIGN_REVIEW_ARTIFACT && operation.designReview !== undefined ? DESIGN_REVIEW_RESULT_MAX_BYTES : PLAN_MAX_BYTES)) throw agentXError("CONFIG_INVALID", "the artifact is too large");
+  if (bytes.byteLength > artifactByteLimit(operation, name)) throw agentXError("CONFIG_INVALID", "the artifact is too large");
   const id = randomUUID();
   const objectKey = artifactObjectKey(operation.workspaceId, operation.id, name);
   const sha256 = createHash("sha256").update(bytes).digest("hex");
@@ -212,6 +222,26 @@ async function bookTerminalUsage(deps: CallbackDeps, operation: OperationRecord,
   return parsed.every((event) => event.type === USAGE_EVENT) ? { accepted: parsed.length } : undefined;
 }
 
+function resultStatus(body: Record<string, unknown>): "SUCCEEDED" | "FAILED" | "CANCELLED" {
+  const status = body["status"];
+  if (status !== "SUCCEEDED" && status !== "FAILED" && status !== "CANCELLED") throw agentXError("CONFIG_INVALID", "a result needs a status");
+  return status;
+}
+
+/** A close's original run retains only its own accounting capability. */
+async function closeAccountingCallback(deps: CallbackDeps, operation: OperationRecord, action: string, body: Record<string, unknown>) {
+  if (action === "events") {
+    const booked = await bookTerminalUsage(deps, operation, body);
+    if (booked !== undefined) return json(200, booked);
+  }
+  if (action === "result") {
+    const status = resultStatus(body);
+    const recorded = await recordOperationResult(deps.flow, { workspaceId: operation.workspaceId, operationId: operation.id, fence: operation.fence, status });
+    return json(200, { ok: true, duplicate: recorded.duplicate });
+  }
+  throw agentXError("CALLBACK_FORBIDDEN", TERMINAL_OUTPUT_REFUSAL);
+}
+
 async function recordEvents(deps: CallbackDeps, operation: OperationRecord, body: Record<string, unknown>): Promise<{ accepted: number }> {
   const parsed = parseEvents(body);
   // The usage the batch reports is booked first: an acknowledged batch is a booked one.
@@ -248,6 +278,10 @@ async function readArtifactText(deps: CallbackDeps, operation: OperationRecord, 
  * What a finished job meant, read from what the worker saved and checked here, never taken from the worker's word. An unreadable answer is no outcome: the flow then blocks the step with
  * a plain reason and the owner can retry it.
  */
+function isReviewResult(operation: OperationRecord): boolean {
+  return operation.workflowMode === "REVIEW" || operation.workflowMode === "FEEDBACK_REVIEW";
+}
+
 export async function readOutcome(deps: CallbackDeps, operation: OperationRecord, result: unknown): Promise<StepOutcome | undefined> {
   if (operation.kind === "prepare") {
     const base = WorkflowReviewBaseSchema.safeParse((result as { preparedBase?: unknown } | undefined)?.preparedBase);
@@ -288,9 +322,23 @@ export async function readOutcome(deps: CallbackDeps, operation: OperationRecord
   }
   // The steps after the plan: what the worker reported is handed to the build step as it was reported; the build step reads it against its schemas and the task's own record.
   if (operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS") return { kind: "built", result: result ?? {} };
-  if (operation.workflowMode === "REVIEW") return { kind: "reviewed", result: result ?? {} };
+  if (isReviewResult(operation)) return { kind: "reviewed", result: result ?? {} };
   if (operation.kind === "publish" || operation.kind === "maintain") return { kind: "published", result: result ?? {} };
   return { kind: "ended" };
+}
+
+async function assertPushAuthority(deps: CallbackDeps, operation: OperationRecord, access: "clone" | "push"): Promise<void> {
+  if (access !== "push" || (operation.publication === undefined && operation.maintenance === undefined)) return;
+  {
+    const pointer = fromDocument<TaskPointerRecord>(await deps.flow.store.get((await workspaceKeys(deps.flow, operation.workspaceId)).taskPointerKey()));
+    const task = pointer === undefined ? undefined : await readTask(deps.flow, pointer.taskId);
+    const expected = operation.publication ?? operation.maintenance!;
+    if (task === undefined || task.companyId !== deps.flow.companyId || task.workspaceId !== operation.workspaceId
+      || (task.workflow === undefined && (operation.publication === undefined || operation.publication.candidateDigest !== undefined))
+      || (operation.publication !== undefined && operation.publication.candidateDigest === undefined && task.workflow !== undefined)) throw agentXError("STALE_FENCE", "the publication task is unavailable");
+    const items = task.workflow === undefined ? [] : await assertCurrentPublicationFence(deps.flow, { ...task, workflow: task.workflow }, expected, expected.repository);
+    if (!(await deps.flow.store.transact([...items, publicationTaskCheck(task)])).applied) throw agentXError("STALE_FENCE", "publication authority changed before credential release");
+  }
 }
 
 /**
@@ -302,13 +350,26 @@ async function exchangeCredential(deps: CallbackDeps, request: BrokerRequest, wo
   if (grant === undefined || grant === "") throw agentXError("FORBIDDEN", "a repository grant is required");
   const operation = await operationOf(deps, workspaceId, operationId);
   if (operation.status === "SUCCEEDED" || operation.status === "FAILED" || operation.status === "CANCELLED" || operation.status === "INTERRUPTED") throw agentXError("FORBIDDEN", "this operation has ended");
+  if (await acceptedCloseForRun(deps.flow, operation) !== undefined) throw agentXError("FORBIDDEN", "this operation is closing");
   const body = bodyOf(request);
   const { credentialRef, repositoryUrl, access } = body;
   if (typeof credentialRef !== "string" || typeof repositoryUrl !== "string" || (access !== "clone" && access !== "push")) throw agentXError("CONFIG_INVALID", "name the credential, the repository and the access");
+  await assertPushAuthority(deps, operation, access);
   return deps.grants.exchange(grant, { workspaceId, operationId, credentialRef, repositoryUrl, access });
 }
 
 const uploadStores = (deps: CallbackDeps): UploadStores => ({ store: deps.flow.store, objects: deps.blobs, ...(deps.flow.now === undefined ? {} : { now: deps.flow.now }), ...(deps.flow.newId === undefined ? {} : { newId: deps.flow.newId }) });
+
+async function terminalCallback(deps: CallbackDeps, operation: OperationRecord, action: string, request: BrokerRequest): Promise<BrokerResponse | undefined> {
+  if (action === "result" || !isTerminalStatus(operation.status)) return undefined;
+  const booked = action === "events" ? await bookTerminalUsage(deps, operation, bodyOf(request)) : undefined;
+  if (booked !== undefined) return json(200, booked);
+  throw agentXError("CALLBACK_FORBIDDEN", TERMINAL_OUTPUT_REFUSAL);
+}
+
+function isFeedbackAction(action: string): action is "feedback-bundles" | "feedback-approval" {
+  return action === "feedback-bundles" || action === "feedback-approval";
+}
 
 export function createCallbackHandler(deps: CallbackDeps): (request: BrokerRequest) => Promise<BrokerResponse> {
   const capabilities = new CallbackCapabilities(Buffer.from(deps.flow.callbackSigningKey));
@@ -347,11 +408,9 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       if (action === EVAL_HEALTH_RESULT_PATH && request.body !== undefined && Buffer.byteLength(request.body, "utf8") > EVAL_HEALTH_RESULT_MAX_BYTES) throw agentXError("CONFIG_INVALID", "the eval health result is too large");
       const operation = await operationOf(deps, workspaceId, operationId);
       if (operation.fence !== capability.fence) throw agentXError("STALE_FENCE", "callback no longer owns the workspace");
-      if (action !== "result" && isTerminalStatus(operation.status)) {
-        const booked = action === "events" ? await bookTerminalUsage(deps, operation, bodyOf(request)) : undefined;
-        if (booked !== undefined) return json(200, booked);
-        throw agentXError("CALLBACK_FORBIDDEN", TERMINAL_OUTPUT_REFUSAL);
-      }
+      if (await acceptedCloseForRun(deps.flow, operation) !== undefined) return await closeAccountingCallback(deps, operation, action, bodyOf(request));
+      const terminal = await terminalCallback(deps, operation, action, request);
+      if (terminal !== undefined) return terminal;
       if (savedEnvWorkerRouteOf(request.method, bare) !== undefined && deps.savedEnv !== undefined) {
         const saved = deps.savedEnv;
         const common = { companyId: deps.flow.companyId, store: deps.flow.store, inspectGrant: saved.inspectGrant, log: () => undefined };
@@ -368,6 +427,7 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
         savedResult = "ok";
         return { ...json(200, answer), headers: { "content-type": "application/json", "cache-control": "no-store" } };
       }
+      if (isFeedbackAction(action)) return json(200, await feedbackCallback(deps.flow, operation, action, bodyOf(request)));
       if (isCodingRunUpload(action)) return json(200, await handleCodingRunUpload(action, uploadStores(deps), operation, bodyOf(request)));
       if (action === "e2e-admission" || action === "e2e-evidence") {
         if (deps.e2e === undefined) throw agentXError("NOT_FOUND", "this callback is not available on this install");
@@ -413,7 +473,8 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
         if (job?.success !== true || typeof project !== "string" || project === "" || posted["requestId"] !== job.data.requestId || posted["claimId"] !== job.data.claimId) throw agentXError("CALLBACK_FORBIDDEN", "the eval health result is taken only from the run's own preparation");
         return json(200, await recordEvalHealthResult(deps.evalHealth!, project, posted));
       }
-      if (action === "pull-request") return json(200, await openPullRequest(deps.flow, operation, bodyOf(request)));
+      const publicationCallback = PUBLICATION_CALLBACKS[action as keyof typeof PUBLICATION_CALLBACKS];
+      if (publicationCallback !== undefined) return json(200, await publicationCallback(deps.flow, operation, bodyOf(request)));
       if (action === "pull-request-update") return json(200, await updatePullRequest(deps.flow, operation, bodyOf(request)));
       if (action === "setup-agent") {
         const run = deps.setupAgent!;
@@ -431,8 +492,7 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
         return json(200, recorded);
       }
       if (action === "artifacts") return json(200, await recordArtifact(deps, operation, body));
-      const status = body["status"];
-      if (status !== "SUCCEEDED" && status !== "FAILED" && status !== "CANCELLED") throw agentXError("CONFIG_INVALID", "a result needs a status");
+      const status = resultStatus(body);
       const error = typeof body["error"] === "string" ? body["error"] : undefined;
       // A coding run that left the code as it was reports what it found with its failure, so a failed coding run's result is handed over too (the build step reads only what it needs of it).
       const outcome = status === "SUCCEEDED" ? await readOutcome(deps, operation, body["result"])

@@ -1,6 +1,6 @@
 // DEC 254zzz80 (R2-F1): one place picks a project-revision or project-grant key. A named company uses its own partition; the built-in company and no company keep the legacy keys.
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, projectMetaKey } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import {
   grantKeyFor, grantsPkFor, latestRevisionRowFor, namedCompany, namedCompanyLatestRevisionRow, projectMemberRowKeyFor, projectMembersPkFor, revisionKeyFor, revisionPkFor,
@@ -54,4 +54,13 @@ describe("company-layout keys", () => {
     expect(((await latestRevisionRowFor(db, "S", IMPLICIT_COMPANY_ID, "p"))?.definition as { revision: number }).revision).toBe(9);
     expect(((await latestRevisionRowFor(db, "S", undefined, "p"))?.definition as { revision: number }).revision).toBe(9);
   });
+});
+
+it("lifecycle revision readers still hide a named company's retired project", async () => {
+  const db = new FakeDynamoDb();
+  db.set({ pk: `ORG#${A}#PROJECT#p`, sk: "REV#000000000001", entityType: "PROJECT", definition: definition("p", 1) });
+  db.set({ pk: `ORG#${A}#PROJECT_CATALOG`, sk: "PROJECT#p", latestRevision: 1 });
+  db.set({ ...projectMetaKey(A, "p"), entityType: "PROJECT_META", companyId: A, project: "p", incarnationRevision: 2, status: "deleted" });
+  expect(await namedCompanyLatestRevisionRow(db, "S", A, "p")).toBeUndefined();
+  expect(await latestRevisionRowFor(db, "S", A, "p")).toBeUndefined();
 });

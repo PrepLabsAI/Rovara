@@ -1,3 +1,4 @@
+import { readTask } from "../core/task-flow/reads.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 // Deployed job composition. No provider or policy store lives here.
 import { OrgIdSchema, POLICY_ORIGINS, policyDataObject, createDefaultPolicySource, DEFAULT_CODE_SETTINGS, type OrgId, type AdapterRegistry, type PolicySource, type DocumentStore, type StoredDocument } from "@agentx/contracts";
@@ -19,6 +20,7 @@ import type { CodeSettingsReader, HumanEditSink } from "../core/merge/seams.js";
 import type { SummaryCheckSource } from "../core/merge/summary-check.js";
 import type { RepositoryResolver } from "../core/merge/host-port.js";
 import type { SessionChangeHook, SummaryDependencies } from "../core/sessions/summary.js";
+import { settleSteerDeliveriesFor } from "../core/sessions/steer.js";
 import { threadFollows } from "../core/channel/thread-notices.js";
 import { ticketMomentsOnChange } from "../core/ticket-updates/moments.js";
 import type { AttentionDeliveryDependencies } from "../core/notify/attention.js";
@@ -26,6 +28,9 @@ import { boundedCorePass } from "./core-job-pass.js";
 import { evalCheckEvidencePort } from "../core/ci-evidence/eval-check-setting.js";
 import { createTaskRepositoryEdgesSeam } from "../core/merge/repository-edges.js";
 import { hostedEvidenceBlobs } from "../core-host/hosted-evidence.js";
+import { installCiFixDecider } from "../core/ci-fix/ci-fix.js";
+import { installBranchSyncDeciders } from "../core/branch-sync/branch-sync.js";
+import { registerMergeActionDecider } from "../core/merge/merge-tracking.js";
 
 // One invocation shares recovery pages and ownership reads across all company passes. No cache survives a scheduled run.
 const recoveryPass = new AsyncLocalStorage<{
@@ -98,6 +103,7 @@ export interface BrokerCoreServicesOptions {
   notification?: Pick<AttentionDeliveryDependencies, "companyOf" | "access" | "address" | "link" | "thread" | "emailLinks" | "upkeep" | "adminNotice" | "planCarded" | "setupPausedTold" | "doneToldInThread"> & Pick<NoticeServiceOptions, "remember"> & { registry?: AttentionDeliveryDependencies["registry"] | undefined };
   /** HW5: write the chat thread's moments (the plan waits for review, the task was closed) when a session that follows a thread changes, on the company's milestones. Needs `flow.deps.milestones` (lessons built); else none. */
   threadMoments?: boolean;
+  threadRefresh?: (orgId: OrgId, sessionId: string, store: DocumentStore) => Promise<void>;
   now?: () => Date;
   log?: (entry: Record<string, unknown>) => void;
 }
@@ -109,7 +115,14 @@ type JobServices = Record<"merge-tracking" | "session-sweep" | "notify-deliver",
  * pull request description carries none either), and the old `/review/<task>/task` page is for the first workflow's tasks only. The company's own code host writes it (aws/core-code-host.ts keeps the company rules).
  */
 export function createHostedBrokerCoreServices(options: Omit<BrokerCoreServicesOptions, "summaryCheck">): JobServices {
-  return createBrokerCoreServices({ ...options, summaryCheck: rovaraCheckSource() });
+  const { flow, companyId } = options;
+  const notification: BrokerCoreServicesOptions["notification"] & Pick<NoticeServiceOptions, "e2e"> = { ...options.notification,
+    e2e: async (session) => {
+      if (session.subject.kind !== "task") return undefined;
+      const task = await readTask(flow.deps, session.subject.taskId);
+      return task?.companyId !== companyId || task.workflow === undefined ? undefined : flow.deps.applicationE2E?.results.notice({ ...task, workflow: task.workflow });
+    } };
+  return createBrokerCoreServices({ ...options, summaryCheck: rovaraCheckSource(), notification });
 }
 
 /** Built once for one company's runtime. Each pass binds all internal store work to ONE allowance. */
@@ -118,6 +131,10 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
   if (!OrgIdSchema.safeParse(companyId).success || flow.deps.companyId !== companyId) throw new Error("the core job company does not match its flow");
   const ci = checkedCiReporting({ honest: true, ciMode: options.ciMode });
   if (ci === undefined) throw new Error("the core jobs need a CI mode reader");
+  // The same action slots as the laptop: existing paid IMPLEMENT/SYNC paths and round limits.
+  // Installers are process-idempotent; deciders take the company from each pass's context.
+  installCiFixDecider(registerMergeActionDecider);
+  installBranchSyncDeciders(registerMergeActionDecider);
   const clock = options.now ?? (() => new Date());
   const now = () => clock().getTime();
   // Existing helpers may log error class names supplied by adapters. Deployed job evidence uses fixed words only.
@@ -147,7 +164,11 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
       // registered). A company with no milestones (no lessons) writes none. A ticket's own moments are not written here (`ticketBindings: false`): only a thread's.
       const moments: readonly SessionChangeHook[] = options.threadMoments === true && deps.milestones !== undefined
         ? [ticketMomentsOnChange({ store, milestones: deps.milestones, now, follows: threadFollows({ store }), ticketBindings: false, companyId, log: () => log() })] : [];
-      const sessions = createSessionService({ store, ...summary, notices: noticesFor(store), onChange: moments, now: clock, log });
+      const afterRefresh: SummaryDependencies["afterRefresh"] = async (orgId, sessionId) => {
+        await settleSteerDeliveriesFor({ store, now: clock, log }, orgId, sessionId);
+        await options.threadRefresh?.(orgId, sessionId, store);
+      };
+      const sessions = createSessionService({ store, ...summary, afterRefresh, notices: noticesFor(store), onChange: moments, now: clock, log });
       return { ...await sessions.sweep({ companyId, scan: sessionScan, maxItems: 100, budgetMs: Math.max(0, deadlineMs - now()) }) };
     }),
     "notify-deliver": pass(async (store, deadlineMs) => {

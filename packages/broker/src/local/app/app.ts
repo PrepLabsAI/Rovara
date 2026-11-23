@@ -488,7 +488,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       });
       log({ component: "cost", event: "cost.run_recorded", outcome });
       try { await recordClosedRunUsage({ store }, task, closedAt); }
-      catch (error) { log({ component: "cost", event: "cost.run_usage_not_recorded", error: error instanceof Error ? error.name : "unknown" }); }
+      catch (error) { log({ component: "cost", event: "cost.run_usage_not_recorded", error: error instanceof Error ? error.name : "unknown" }); throw error; }
     },
     // Every step runs on the install's one model, so the plan check says the model that wrote the plan checked it.
     installModel: async () => { const choice = await chosen(); return choice === undefined ? undefined : { provider: choice.provider, modelId: choice.model }; },
@@ -510,7 +510,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       linesOf: (task: TaskRecord, digest: string) => evidence.browserEvidenceLinesOf(task, digest, {}),
     } }),
     // Lane L10: the approved plan is read back for the coding step and the reviewers; Rovara's own fixing reads what the task has cost (nothing priced counts as nothing spent).
-    artifacts: blobs,
+    artifacts: blobs, feedbackArtifacts: blobs,
     taskSpendUsd: async (taskId) => costUsdOf(await ledger.taskCost(companyId, taskId)),
     // L4-TA6: automatic fixing is held to the task's live run limit, the same `taskLimitUsd` the round cap above and the model proxy enforce (nothing when `ROVARA_RUN_LIMIT=0` turns the limit off: then no limit is enforced and its own cap is the only one).
     ...(options.runLimit === false ? {} : { taskCapUsd: async (task: TaskRecord) => taskLimitUsd(task) }),

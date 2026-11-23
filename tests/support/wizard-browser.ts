@@ -5,9 +5,18 @@
 import { WIZARD_TOKEN_HEADER, WIZARD_TOKEN_QUERY, type AnswerReply, type WizardSnapshot } from "../../packages/cli/src/init/ui/protocol.js";
 import type { ScriptedAnswer } from "./init-fakes.js";
 
-/** A run that asks more than this many questions is a loop, not an install: the driver gives up so
- * the test fails on its own timeout rather than answering forever. */
+/** A run that asks more than this many questions is a loop, not an install. */
 const MAX_QUESTIONS = 80;
+
+type BrowserOpener = (url: string) => Promise<unknown>;
+const driverFailures = new WeakMap<BrowserOpener, Promise<never>>();
+
+/** Race a test install against its browser driver: an exhausted script must fail the test while
+ * the install is still waiting for its answer, rather than waiting for the test timeout. */
+export function runWithWizardErrors<T>(openBrowser: BrowserOpener | undefined, run: () => Promise<T>): Promise<T> {
+  const failed = openBrowser === undefined ? undefined : driverFailures.get(openBrowser);
+  return failed === undefined ? run() : Promise.race([run(), failed]);
+}
 
 export interface WizardOperator {
   /** The `openBrowser` seam `agentx init` calls; a property, so it can be passed on unbound. */
@@ -68,6 +77,10 @@ export function fakeWizardOperator(
   const fieldErrors: string[] = [];
   let driving: Promise<void> = Promise.resolve();
   let failure: unknown;
+  let failDriver: (error: unknown) => void = () => undefined;
+  const failed = new Promise<never>((_resolve, reject) => { failDriver = reject; });
+  // Direct protocol tests may use settled() instead of runWithWizardErrors().
+  void failed.catch(() => undefined);
   const clicked: string[] = [];
   /** What a person's browser does with a link the page offers: GitHub's form page is played back
    * as GitHub (a redirect to the callback with a code and the page's state); anything else is
@@ -123,34 +136,40 @@ export function fakeWizardOperator(
       if (!reply.ok) fieldErrors.push(reply.error);
     };
 
-    const response = await fetch(`${origin}/events`, { headers });
+    const controller = new AbortController();
+    const response = await fetch(`${origin}/events`, { headers, signal: controller.signal });
     if (!response.ok) throw new Error(`the wizard answered HTTP ${response.status} for /events`);
     const reader = (response.body as ReadableStream<Uint8Array>).getReader();
     const decoder = new TextDecoder();
     let buffered = "";
-    for (;;) {
-      // The run ending closes the listener under the reader; that is how this loop is meant to stop.
-      const chunk = await reader.read().then((value) => value, () => undefined);
-      if (chunk === undefined || chunk.done) return;
-      buffered += decoder.decode(chunk.value, { stream: true });
-      let split = buffered.indexOf("\n\n");
-      for (; split !== -1; split = buffered.indexOf("\n\n")) {
-        const frame = buffered.slice(0, split);
-        buffered = buffered.slice(split + 2);
-        const name = /^event: (.+)$/m.exec(frame)?.[1];
-        const data = /^data: (.*)$/m.exec(frame)?.[1];
-        if (name === "closed") return;
-        if (name === "log" && data !== undefined) log.push(JSON.parse(data) as string);
-        if ((name === "snapshot" || name === "state") && data !== undefined) {
-          const parsed = JSON.parse(data) as WizardSnapshot;
-          if (name === "snapshot") log = [...parsed.log];
-          await onState(parsed);
+    try {
+      for (;;) {
+        // The run ending closes the listener under the reader; that is how this loop is meant to stop.
+        const chunk = await reader.read().then((value) => value, () => undefined);
+        if (chunk === undefined || chunk.done) return;
+        buffered += decoder.decode(chunk.value, { stream: true });
+        let split = buffered.indexOf("\n\n");
+        for (; split !== -1; split = buffered.indexOf("\n\n")) {
+          const frame = buffered.slice(0, split);
+          buffered = buffered.slice(split + 2);
+          const name = /^event: (.+)$/m.exec(frame)?.[1];
+          const data = /^data: (.*)$/m.exec(frame)?.[1];
+          if (name === "closed") return;
+          if (name === "log" && data !== undefined) log.push(JSON.parse(data) as string);
+          if ((name === "snapshot" || name === "state") && data !== undefined) {
+            const parsed = JSON.parse(data) as WizardSnapshot;
+            if (name === "snapshot") log = [...parsed.log];
+            await onState(parsed);
+          }
         }
       }
+    } finally {
+      controller.abort();
+      await reader.cancel().catch(() => undefined);
     }
   };
 
-  return {
+  const operator: WizardOperator = {
     opened,
     clicked,
     asked,
@@ -165,9 +184,11 @@ export function fakeWizardOperator(
       opened.push(url);
       if (url.includes("/github/start")) { await visit(url); return true; }
       if (url.startsWith("http://127.0.0.1:") && new URL(url).searchParams.has(WIZARD_TOKEN_QUERY)) {
-        driving = drive(url).catch((error: unknown) => { failure = error; });
+        driving = drive(url).catch((error: unknown) => { failure = error; failDriver(error); });
       }
       return true;
     },
   };
+  driverFailures.set(operator.open, failed);
+  return operator;
 }

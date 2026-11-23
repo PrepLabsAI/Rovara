@@ -1,11 +1,12 @@
 // Setup agent (design setup-test-health 3.3, task SH9): the setup sandbox gets its own DNS forwarder. It passes every query on to the real resolver, hands the answer back unchanged, and
 // remembers (at most 50 names per run) the names the resolver refused: NXDOMAIN or REFUSED. A command's output is never read for host names; only the questions the sandbox itself asked
 // the resolver, with the answer the resolver gave. These tests use real sockets on 127.0.0.1 and a fake upstream resolver; no Docker.
-import { createSocket } from "node:dgram";
-import { connect, createServer } from "node:net";
+import { createSocket, type RemoteInfo } from "node:dgram";
+import { connect, createServer, type Socket } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { SETUP_BLOCKED_HOSTS_MAX } from "../../packages/contracts/src/setup-run.js";
 import { SetupDnsWatch, parseDnsPacket } from "../../packages/worker/src/setup-dns-watch.js";
+import { bindDnsTestUpstream } from "../support/setup-dns-test-upstream.js";
 
 const TYPE = { A: 1, AAAA: 28, MX: 15, TXT: 16, PTR: 12, HTTPS: 65 } as const;
 const RCODE = { ok: 0, servfail: 2, nxdomain: 3, refused: 5 } as const;
@@ -34,7 +35,6 @@ interface FakeUpstream { port: number; seen: string[]; tcpConnects: () => number
 /** A resolver that answers by a table: name -> rcode (anything not in the table is NOERROR). `silent` names get no answer at all. */
 async function upstream(rcodes: Record<string, number>, options: { silent?: string[]; truncate?: string[]; wrongId?: string[]; wrongQuestion?: string[]; bigTcp?: string[] } = {}): Promise<FakeUpstream> {
   const seen: string[] = [];
-  const udp = createSocket("udp4");
   const handle = (request: Buffer): Buffer | undefined => {
     const parsed = parseDnsPacket(request);
     if (parsed === undefined) return undefined;
@@ -46,15 +46,13 @@ async function upstream(rcodes: Record<string, number>, options: { silent?: stri
     if (options.wrongQuestion?.includes(parsed.name)) reply = answer(query("other.example.org", parsed.type, parsed.id), rcodes[parsed.name] ?? RCODE.ok);
     return reply;
   };
-  udp.on("message", (message, remote) => {
+  const onMessage = (udp: ReturnType<typeof createSocket>) => (message: Buffer, remote: RemoteInfo) => {
     const reply = handle(message);
     if (reply !== undefined && reply.length > 4_096) return;
     if (reply !== undefined) udp.send(reply, remote.port, remote.address);
-  });
-  await new Promise<void>((resolve) => udp.bind(0, "127.0.0.1", resolve));
-  const port = udp.address().port;
+  };
   let tcpConnects = 0;
-  const tcp = createServer((socket) => {
+  const onConnection = (socket: Socket) => {
     tcpConnects += 1;
     let buffered = Buffer.alloc(0);
     socket.on("data", (chunk) => {
@@ -67,9 +65,13 @@ async function upstream(rcodes: Record<string, number>, options: { silent?: stri
       }
     });
     socket.on("error", () => undefined);
+  };
+  const { port, close } = await bindDnsTestUpstream(() => {
+    const udp = createSocket("udp4");
+    udp.on("message", onMessage(udp));
+    return { udp, tcp: createServer(onConnection) };
   });
-  await new Promise<void>((resolve) => tcp.listen(port, "127.0.0.1", resolve));
-  return { port, seen, tcpConnects: () => tcpConnects, close: () => Promise.all([new Promise<void>((resolve) => udp.close(() => resolve())), new Promise<void>((resolve) => tcp.close(() => resolve()))]).then(() => undefined) };
+  return { port, seen, tcpConnects: () => tcpConnects, close };
 }
 
 /** Asks the forwarder over UDP and returns the reply (undefined when none comes in `waitMs`). */

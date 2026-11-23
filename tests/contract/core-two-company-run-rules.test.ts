@@ -1,3 +1,4 @@
+import type { DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
 // Batch b18 Low 2: core-two-company-run and core-admin-stop-company mock the company-instructions point empty. This is the ONE two-company contract run WITHOUT that mock:
 // the real root, the real company-rules adapter and a stubbed gateway fetch. Company A's start never reads company B's rules, and a wrong-company answer stops the start (fails closed).
 import { randomUUID } from "node:crypto";
@@ -12,6 +13,7 @@ import { createFakeWorld } from "../support/core-host-fakes.js";
 import { taskKeySigner } from "../../packages/broker/src/core-host/gateway-model-access.js";
 import { COMPANY_INSTRUCTIONS_PATH } from "../../packages/broker/src/core-host/company-instructions-http.js";
 import { makeKey, signerOf } from "../unit/policy-hook-fixture.js";
+import { signedRunPriceResponse } from "../support/signed-run-price-fetch.js";
 
 const adapters = vi.hoisted(() => ({ modules: [] as unknown[] }));
 // Only the code adapters are replaced (as in the other two-company runs); company-instructions-http.js is NOT mocked.
@@ -43,6 +45,8 @@ async function world() {
   } };
   const key = makeKey("t".repeat(16));
   const root = createBrokerCoreRoot({
+    // This fixture isolates the existing root behavior; core-task-people-hosted/identity tests exercise creation's real identity proof.
+    taskRules: () => ({ taskPeopleStart: async () => [] }) as unknown as DeveloperTaskRouteDependencies,
     env: { ROVARA_CORE_MODEL_GATEWAY_URL: gateway, ROVARA_CORE_AGENT_MODEL: MODEL, ROVARA_CORE_LESSONS: "on" },
     documentClient: client, stateTableName: "state", signInTableName: "signin", callbackSigningKey: SIGNING, repositoryGrantKey: Buffer.alloc(32, 1),
     repositoryCredential: async () => ({ token: "fake" }), codeModules: () => ({}) as never,
@@ -67,6 +71,8 @@ const cidOf = (init: RequestInit | undefined): string => (JSON.parse(Buffer.from
 const asked: string[] = [];
 function stubGateway(answerFor: (company: string) => string = (company) => company): void {
   vi.stubGlobal("fetch", vi.fn(async (url: unknown, init?: RequestInit) => {
+    const price = signedRunPriceResponse(String(url), [A, B], [MODEL]);
+    if (price !== undefined) return price;
     if (String(url) !== `${gateway}${COMPANY_INSTRUCTIONS_PATH}`) throw new Error(`unexpected fetch ${String(url)}`);
     const company = cidOf(init);
     asked.push(company);

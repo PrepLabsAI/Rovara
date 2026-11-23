@@ -71,6 +71,14 @@ const HEX64 = /^[a-f0-9]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_CHANNELS = 50;
 
+/** DEC 254zzz382: hosted sign-in adapter, never a concrete method or an alias for one.
+ * Closed, deliberately pinned by core-task-people-identity.test.ts. Keep in sync with the hosted sign-in surface.
+ */
+export const HOSTED_TASK_SIGN_IN_METHODS = ["slack", "oidc", "github", "cloud", "saml"] as const;
+export const isHostedTaskSignInMethod = (value: unknown): value is DeveloperSignInMethod => HOSTED_TASK_SIGN_IN_METHODS.some(method => method === value);
+export const isHostedTaskProvider = (value: unknown): boolean => value === "rovara-sign-in";
+const taskProvider = (value: unknown) => isHostedTaskProvider(value) || DeveloperSignInMethodSchema.safeParse(value).success;
+
 const refuse = (): never => { throw agentXError("PROJECT_ACCESS_DENIED", "task person identity could not be verified"); };
 const unavailable = (): never => { throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable"); };
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -117,7 +125,7 @@ async function currentTask(deps: TaskPersonIdentityDependencies, taskId: string)
   const item = await getItem(deps, taskPk(taskId), "META");
   // C2: a task started with any built-in sign-in method (GitHub, Cloud, SAML too) has a task person; before, only Slack and OIDC did.
   if (item?.pk !== taskPk(taskId) || item.sk !== "META" || item.entityType !== "DEVELOPER_TASK" || item.taskId !== taskId
-    || typeof item.project !== "string" || !HEX64.test(String(item.developerId)) || !DeveloperSignInMethodSchema.safeParse(item.provider).success) return refuse();
+    || typeof item.project !== "string" || !HEX64.test(String(item.developerId)) || !taskProvider(item.provider)) return refuse();
   return item as unknown as DeveloperTaskRecord;
 }
 
@@ -417,6 +425,48 @@ export async function checkTaskPersonIdentity(
   if (!HEX64.test(developerId)) return refuse();
   const stored = await currentTask(deps, task.taskId);
   if (stored.project !== task.project || stored.developerId !== task.developerId || stored.provider !== task.provider || stored.slackUserId !== task.slackUserId) return refuse();
+  return checkTaskPersonAgainstStored(deps, stored, developerId, task);
+}
+
+/** Internal creation proof: only core start supplies this not-yet-written, server-built task. No route accepts a task record. */
+export async function checkNewTaskCreatorIdentity(deps: TaskPersonIdentityDependencies, task: DeveloperTaskRecord) {
+  if (!taskProvider(task.provider)) return refuse();
+  return checkTaskPersonAgainstStored(deps, task, task.developerId);
+}
+
+async function taskCreatorIdentity(deps: TaskPersonIdentityDependencies, stored: DeveloperTaskRecord, developerId: string): Promise<TaskPersonIdentity> {
+  // A record-backed task creator: oidc linked to Slack when the task stored a Slack user id (as before), else a `web` identity (C1, plan 3 item 3).
+  // DEC 254n (2): a GitHub creator is record-backed like an OIDC one, so a GitHub task that stored a Slack user id is a Slack-linked (`slack`) identity checked
+  // through Slack, exactly as on code/next. C2: a Cloud or SAML task creator is always a `web` identity of its own method; a Slack id on such a task is not a link.
+  let record: DeveloperRecord | undefined;
+  try {
+    record = await deps.developerRecord(developerId);
+  } catch {
+    return unavailable();
+  }
+  if (record === undefined || (isHostedTaskProvider(stored.provider) ? !isHostedTaskSignInMethod(record.provider) : record.provider !== stored.provider) || record.developerId !== developerId || typeof record.issuer !== "string"
+    || typeof record.subject !== "string" || ownerKeyForSubject(record.issuer, record.subject) !== developerId) return refuse();
+  const method = record.provider;
+  const linked = recordMethod(method) && stored.slackUserId !== undefined;
+  if (linked && !SlackUserIdSchema.safeParse(stored.slackUserId).success) return refuse();
+  if (method === "slack") {
+    return { developerId, slackUserId: record.subject, name: safeName(record.displayName, record.subject), method, issuer: record.issuer, subject: record.subject };
+  } else if (linked) {
+    if (!SlackUserIdSchema.safeParse(record.slackUserId).success) return refuse();
+    return {
+      developerId, slackUserId: record.slackUserId!, name: safeName(record.displayName, record.slackUserId!),
+      method, issuer: record.issuer, subject: record.subject,
+    };
+  } else {
+    // C2: no Slack-id equality for a `web` identity (plan 4.1 rule 2); a later Slack link on the sign-in does not change the identity's kind.
+    return {
+      developerId, name: typeof record.displayName === "string" ? safeName(record.displayName, TASK_PERSON_UNNAMED) : TASK_PERSON_UNNAMED,
+      method, issuer: record.issuer, subject: record.subject,
+    };
+  }
+}
+
+async function checkTaskPersonAgainstStored(deps: TaskPersonIdentityDependencies, stored: DeveloperTaskRecord, developerId: string, task = stored) {
   let identity = await registryBySubject(deps, stored.taskId, developerId);
   if (identity === undefined) {
     const caller = deps.trustedCaller;
@@ -429,32 +479,7 @@ export async function checkTaskPersonIdentity(
       if (!SlackUserIdSchema.safeParse(stored.slackUserId).success || developerId !== developerIdForSlackUser(stored.slackUserId!)) return refuse();
       identity = nativeIdentity(stored.slackUserId!, safeName(stored.developerName, stored.slackUserId!));
     } else {
-      // A record-backed task creator: oidc linked to Slack when the task stored a Slack user id (as before), else a `web` identity (C1, plan 3 item 3).
-      // DEC 254n (2): a GitHub creator is record-backed like an OIDC one, so a GitHub task that stored a Slack user id is a Slack-linked (`slack`) identity checked
-      // through Slack, exactly as on code/next. C2: a Cloud or SAML task creator is always a `web` identity of its own method; a Slack id on such a task is not a link.
-      const linked = recordMethod(stored.provider) && stored.slackUserId !== undefined;
-      if (linked && !SlackUserIdSchema.safeParse(stored.slackUserId).success) return refuse();
-      let record: DeveloperRecord | undefined;
-      try {
-        record = await deps.developerRecord(developerId);
-      } catch {
-        return unavailable();
-      }
-      if (record === undefined || record.provider !== stored.provider || record.developerId !== developerId || typeof record.issuer !== "string"
-        || typeof record.subject !== "string" || ownerKeyForSubject(record.issuer, record.subject) !== developerId) return refuse();
-      if (linked) {
-        if (!SlackUserIdSchema.safeParse(record.slackUserId).success) return refuse();
-        identity = {
-          developerId, slackUserId: record.slackUserId!, name: safeName(record.displayName, record.slackUserId!),
-          method: stored.provider, issuer: record.issuer, subject: record.subject,
-        };
-      } else {
-        // C2: no Slack-id equality for a `web` identity (plan 4.1 rule 2); a later Slack link on the sign-in does not change the identity's kind.
-        identity = {
-          developerId, name: typeof record.displayName === "string" ? safeName(record.displayName, TASK_PERSON_UNNAMED) : TASK_PERSON_UNNAMED,
-          method: stored.provider, issuer: record.issuer, subject: record.subject,
-        };
-      }
+      identity = await taskCreatorIdentity(deps, stored, developerId);
     }
   }
   // The one place a check branches on identity kind. `slack` keeps today's proof, byte for byte (D2); `web` has the web proof (C2, D1),
@@ -471,6 +496,12 @@ export async function checkTaskPersonIdentity(
   if (deps.slackUnavailable !== undefined) throw deps.slackUnavailable;
   const status = await storedIdentityStatus(deps, identity);
   const subject = { developerId, slackUserId: identity.slackUserId };
+  if (isHostedTaskProvider(stored.provider) && identity.method === "slack") {
+    const record = await deps.developerRecord(developerId);
+    if (record === undefined || record.provider !== "slack" || record.developerId !== developerId || record.issuer !== identity.issuer
+      || record.subject !== identity.subject || typeof record.revoked !== "boolean") return refuse();
+    if (record.revoked) return { subject, identity, eligible: false, channelMember: false };
+  }
   if (status === "ineligible") return { subject, identity, eligible: false, channelMember: false };
   const proof = await qualifyCurrent(deps, stored, subject);
   return proof.eligible

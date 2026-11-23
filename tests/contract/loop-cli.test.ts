@@ -1,5 +1,6 @@
 // rovara loop (#355): the commands that set a repository up and show where its loops stand.
-import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
+import * as fs from "node:fs";
+import { mkdtemp, mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -11,7 +12,7 @@ const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
 
 async function setUp() {
-  const root = await mkdtemp(join(tmpdir(), "rovara-loop-cli-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "rovara-loop-cli-")));
   dirs.push(root);
   const home = join(root, "home");
   const checkout = join(root, "checkout");
@@ -43,7 +44,8 @@ describe("rovara loop's setup commands (#355)", () => {
     expect(h.err.join("")).toContain(".rovara/loop.yaml is missing");
     await h.run(["loop", "init", h.checkout]);
     expect(await h.run(["loop", "add", h.checkout])).toBe(0);
-    expect(await h.store.repos()).toEqual([{ repo: "acme/payments", path: h.checkout }]);
+    expect((await h.store.repos()).map((repo) => ({ ...repo, path: fs.realpathSync(repo.path) })))
+      .toEqual([{ repo: "acme/payments", path: fs.realpathSync(h.checkout) }]);
     expect(await h.run(["loop", "add", h.checkout])).toBe(0);
     expect(await h.store.repos()).toHaveLength(1);
   });
