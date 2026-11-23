@@ -30,6 +30,7 @@ import { budgetExhaustedFromMarker } from "@agentx/model-runtime";
 import { checkTrackedFiles, finishSetupAgent, setupAgentShell, setupAgentSessionParts, type SetupAgentRepository, type SetupCommandRecord, type TrackedFilesVerdict } from "./setup-agent.js";
 import { SetupAgentGovernor, centsFromDollars, finishStoppedRun, governorSessionListener } from "./setup-agent-journal.js";
 import { asksForCodeChange, setupAgentInstructions } from "./setup-agent-prompt.js";
+import { askAgainAboutCommands } from "./setup-draft.js";
 import { createPersonCommandRunner } from "./setup-command-runner.js";
 import type { PiSessionHandle } from "./pi-session.js";
 import type { RunNetwork } from "./setup-network.js";
@@ -404,6 +405,11 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
       if (paused !== undefined) { upkeepPause ??= paused; governor.stop("infrastructure"); }
     }
     await sayModelEnd();
+    // A command the reader will not keep (a package manager's `run` with more than one script name, `npm run lint npm test`) is told to the agent once, in fixed words, so it answers again with the commands apart.
+    await askAgainAboutCommands({
+      over: () => failed || cancelled || governor.ended() !== undefined, text: () => finalText, restore: (text) => { finalText = text; }, ask: promptBounded,
+      fail: () => { failed = true; sessionFailed = true; }, after: sayModelEnd,
+    });
     // ---- hosts_waiting: the agent has nothing else to do, and a website it asked for waits for an administrator. The run parks: no model call is made (so nothing is spent), the sandbox and the workspace are kept,
     // the wall clock stops, and the run asks the broker now and then. When an ask is answered it goes on with one more prompt; 24 hours parked ends it `hosts_waiting` with the partial proposal it has. A person's
     // Stop ends the wait at once. At most one parking per host-ask the limits allow, so a run cannot park for ever.

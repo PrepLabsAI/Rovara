@@ -9,7 +9,7 @@
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  DEVCONTAINER_PATH_PATTERN, SETUP_COMMANDS_MAX, SETUP_PROPOSAL_INFO_STRING, SETUP_SECRETS_MAX, sanitizeSetupProposal, setupProposalAnswerOf, type SetupProposal,
+  DEVCONTAINER_PATH_PATTERN, MALFORMED_RUN_REASON, SETUP_COMMANDS_MAX, SETUP_PROPOSAL_INFO_STRING, SETUP_SECRETS_MAX, isObject, malformedRunReason, sanitizeSetupProposal, setupProposalAnswerOf, type SetupProposal,
 } from "@agentx/contracts";
 import { scanRepositories, type SetupScan } from "./setup-scan.js";
 import { dropUntrackedCitations, isTracked, trackedScanOf, type TrackedPaths } from "./setup-citations.js";
@@ -25,7 +25,7 @@ export function setupProposalFormatLines(meta: string | undefined): string[] {
     "EVERY item you propose must say where it came from, in `from`: a list of places you read. A place is { \"kind\": \"file\" | \"ci\" | \"readme\" | \"manifest\" | \"inferred\", \"repo\": <a repository name above>, \"path\": <path inside that repository>, \"line\": <line number>, \"quote\": <the few words on that line> }. Rovara re-reads each place from GitHub and checks the quote is there; an item whose place does not check out is shown to the person as unverified. Use \"inferred\" only when no file says it, and then give a \"note\" saying what you concluded it from. An item with no `from` is thrown away. Write `line` and `quote` exactly as the file has them. The quote is required: an item with no quote is never shown as checked. It must contain the proposed command, repository URL or domain in full (at least 8 characters), copied from that line, and an item with several commands needs a place and quote for each. Do not name a commit.",
     "",
     "Rules:",
-    `- setup: one entry per repository: { "repo", "commands": [...] }, the commands that install what it needs (for example \`npm ci\`), in order, at most ${String(SETUP_COMMANDS_MAX)}. tests: the same, for the commands that check the repository works (for example \`npm test\`). One program per command: no \`&&\`, \`|\` or \`;\`; if a step needs several, name the script or Makefile target that does them.`,
+    `- setup: one entry per repository: { "repo", "commands": [...] }, the commands that install what it needs (for example \`npm ci\`), in order, at most ${String(SETUP_COMMANDS_MAX)}. tests: the same, for the commands that check the repository works (for example \`npm test\`). Each command is ONE entry in the list, written as the repository says: never put two commands in one entry with only a space between them (\`npm run lint npm test\` is wrong: a package manager's \`run\` takes one script name; write \`npm run lint\` and \`npm test\` as two entries, or \`npm run lint && npm test\` as one). Arguments for a script go after \`--\` (\`npm run test -- --watch=false\`). No \`|\` or \`;\`; if a step needs several, name the script or Makefile target that does them.`,
     "- Write every command EXACTLY as the repository says to run it. Do not rewrite, shorten or tidy a command, and do not invent one the files do not support. If the README says to run something that downloads a script and runs it (`curl ... | sh`), list it as written; Rovara flags it for the person and never proposes it as a command.",
     "- repositories: other repositories this project's code lives in that are not listed above, as { \"name\", \"url\" (https), \"defaultBranch\" }, only when a file (the README, a config) names them.",
     "- checks: { \"name\", \"repo\", \"command\" } for the checks CI runs that a change must pass (lint, typecheck). testEnvironment: { \"hint\" } for what the tests need around them (a database, a service, a seed file), in one sentence.",
@@ -67,6 +67,40 @@ export function setupProposalInstructions(repositories: ReadonlyArray<SetupDraft
     "",
     ...setupProposalFormatLines(meta),
   ].join("\n");
+}
+
+/** What the agent is told when its answer holds a command Rovara will not keep (a package manager's `run` with more than one script name). Fixed words; the commands are the agent's own, cut short. */
+export function setupMalformedCommandPrompt(commands: readonly string[]): string {
+  const shown = commands.slice(0, 5).map((command) => `\`${command.slice(0, 120)}\``).join(", ");
+  return `${MALFORMED_RUN_REASON} Rovara will not keep: ${shown}. Answer again with exactly one block labelled ${SETUP_PROPOSAL_INFO_STRING} holding the whole corrected JSON proposal, with each such command written as separate entries or joined with &&, and nothing after it.`;
+}
+
+/** The commands of an answer's setup, tests, checks and browser start command that Rovara will not keep for being a package manager's `run` with more than one script name (in the order the answer has them). */
+export function malformedCommandsOf(answer: unknown): string[] {
+  if (!isObject(answer)) return [];
+  const listOf = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+  const browser = answer["browserEvidence"];
+  const candidates = [
+    ...(["setup", "tests"] as const).flatMap((key) => listOf(answer[key]).flatMap((entry) => (isObject(entry) ? listOf(entry["commands"]) : []))),
+    ...listOf(answer["checks"]).map((entry) => (isObject(entry) ? entry["command"] : undefined)),
+    isObject(browser) ? browser["startCommand"] : undefined,
+  ];
+  return [...new Set(candidates.filter((command): command is string => typeof command === "string" && malformedRunReason(command) !== undefined))];
+}
+
+/**
+ * The setup run's one more question after its first answer: when the answer holds a command Rovara will not keep, the agent is told (fixed words) and answers again. An answer to it that holds no proposal block is not the
+ * proposal: the first answer stands (the reader still flags its command). `over` says the run has ended or failed, so nothing is asked; `after` is what the run does after any model turn.
+ */
+export async function askAgainAboutCommands(io: {
+  over: () => boolean; text: () => string; restore: (text: string) => void; ask: (text: string) => Promise<void>; fail: () => void; after: () => Promise<void>;
+}): Promise<void> {
+  const unusable = io.over() ? [] : malformedCommandsOf(setupProposalAnswerOf(io.text()));
+  if (unusable.length === 0) return;
+  const first = io.text();
+  try { await io.ask(setupMalformedCommandPrompt(unusable)); } catch { io.fail(); }
+  if (setupProposalAnswerOf(io.text()) === undefined) io.restore(first);
+  await io.after();
 }
 
 /** What a retry says when the answer could not be read. Fixed words; the problems are the reader's own, never the model's text. */

@@ -107,7 +107,7 @@ export async function recordClosedRunUsage(deps: { store: DocumentStore }, task:
   const complete = calls.every((c) => c.granularity === "call" && c.status === "final" && c.usage.state === "available" && c.source.state === "available" && c.price.state === "available");
   const sample: RunUsageSampleV1 = {
     version: 1, companyId: task.companyId, project: task.project, taskId: task.taskId, purpose: task.purpose === undefined ? { state: "unavailable", reason: "not_applicable" } : available(task.purpose), agentId: task.agentId ?? ROVARA_CODE_AGENT_ID,
-    path: estimatePathOf(task), outcome: operations.some((op) => op.stopReason !== undefined) || /cap|budget|spend|money/iu.test(task.workflow?.blockReason ?? "") ? "cap_stopped" : task.workflow?.stage === "MERGED" ? "completed" : operations.some((op) => op.status === "FAILED") ? "failed" : "cancelled",
+    path: estimatePathOf(task), outcome: closedRunOutcome(task, owned, operations),
     workflowVersion: task.workflow?.definitionVersion === undefined ? unknown : available(task.workflow.definitionVersion), optionsVersion: task.usageStartQuote?.inputs.optionsVersion ?? unknown,
     settledAmounts, calls: [...new Map(calls.map((call) => [call.callId, call])).values()], callCount: calls.length > 0 && calls.every((c) => c.granularity === "call") ? available(new Set(calls.map((call) => call.callId)).size) : unknown,
     // No expected-call/forwarding proof yet: even a fully reported ledger cannot prove no call is missing.
@@ -117,6 +117,30 @@ export async function recordClosedRunUsage(deps: { store: DocumentStore }, task:
   const parsed = RunUsageSampleV1Schema.parse(sample);
   if (old.success && JSON.stringify({ ...old.data, revision: 0 }) === JSON.stringify({ ...parsed, revision: 0 })) return;
   await recordRunUsage(deps, parsed);
+}
+
+/** How a closed run ended, for its RUN_USAGE label: a spent cap first, then (for a setup run) how the broker stored its end, then the merge stage. */
+function closedRunOutcome(task: UsageTask, stored: Record<string, unknown>, operations: ReadonlyArray<{ status: string; stopReason?: string | undefined }>): RunUsageSampleV1["outcome"] {
+  if (operations.some((op) => op.stopReason !== undefined) || /cap|budget|spend|money/iu.test(task.workflow?.blockReason ?? "")) return "cap_stopped";
+  if ((task.purpose ?? stored["purpose"]) === "setup_agent") return setupRunOutcome(stored, operations);
+  if (task.workflow?.stage === "MERGED") return "completed";
+  return operations.some((op) => op.status === "FAILED") ? "failed" : "cancelled";
+}
+
+/**
+ * The outcome label of a setup run (a task with no merge stage, so "MERGED" can never say it finished). Read from the task's own stored end, never from the worker's say-so: a run that ended with a proposal is
+ * "completed", a person's Stop is "cancelled", a run that used up its budget is "cap_stopped", and any other end (a fault, a machine that could not go on, an end with no readable result) is "failed". Only the label:
+ * what the run cost is booked elsewhere and is not read here.
+ */
+function setupRunOutcome(stored: Record<string, unknown>, operations: ReadonlyArray<{ status: string }>): RunUsageSampleV1["outcome"] {
+  const result = stored["setupAgentResult"];
+  const end = typeof result === "object" && result !== null ? (result as { status?: unknown; stop?: unknown }) : undefined;
+  if (end?.stop === "budget_used") return "cap_stopped";
+  if (end?.status === "ready") return "completed";
+  if (end?.stop === "stopped_by_person") return "cancelled";
+  if (end !== undefined) return "failed";
+  // No stored end yet: a person's Stop is on the task before the cancel; otherwise the run did not finish on its own.
+  return stored["setupAgentStop"] !== undefined && !operations.some((op) => op.status === "FAILED") ? "cancelled" : "failed";
 }
 
 export function accuracyByPath(samples: readonly RunUsageSampleV1[]): Record<string, { samples: number; quoted: number; validated: number; covered: number; exceeded: number; coverage: LearningField<number>; meanErrorMicros: LearningField<number> }> {

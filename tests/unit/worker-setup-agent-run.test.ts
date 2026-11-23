@@ -43,7 +43,7 @@ interface World {
 
 async function world(options: {
   script?: (parts: { bash: BashOperations; world: World; n: number; emit: (event: unknown) => void }) => Promise<void>;
-  final?: string; hostOutcome?: string; poll?: (n: number) => unknown; files?: TrackedFilesVerdict[]; blocked?: string[]; limits?: Partial<typeof SETUP_AGENT_LIMITS_DEFAULT>; repositories?: SetupRunInput["repositories"];
+  final?: string | ((n: number) => string); hostOutcome?: string; poll?: (n: number) => unknown; files?: TrackedFilesVerdict[]; blocked?: string[]; limits?: Partial<typeof SETUP_AGENT_LIMITS_DEFAULT>; repositories?: SetupRunInput["repositories"];
 } = {}) {
   const rootPath = await mkdtemp(join(tmpdir(), "setup-run-"));
   roots.push(rootPath);
@@ -63,7 +63,7 @@ async function world(options: {
   w.base = base;
   const listeners: Array<(event: unknown) => void> = [];
   const session: PiSessionHandle = {
-    conversationId: "c", sessionFile: "f", prompt: async (text?: string) => { w.prompts.push(String(text)); w.order.push("prompt"); await options.script?.({ bash: sessionBash!, world: w, n: w.prompts.length, emit: (event) => { for (const l of listeners) l(event); } }); for (const l of listeners) l({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: options.final ?? block(ANSWER) }], usage: { input: 1000 } } }); },
+    conversationId: "c", sessionFile: "f", prompt: async (text?: string) => { w.prompts.push(String(text)); w.order.push("prompt"); await options.script?.({ bash: sessionBash!, world: w, n: w.prompts.length, emit: (event) => { for (const l of listeners) l(event); } }); for (const l of listeners) l({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: typeof options.final === "function" ? options.final(w.prompts.length) : (options.final ?? block(ANSWER)) }], usage: { input: 1000 } } }); },
     steer: async (text) => { w.steered.push(text); }, isStreaming: () => true, abort: async () => { w.order.push("abort"); },
     getModel: () => ({ provider: "p", modelId: "m" }), getSessionStats: () => ({ cost: 0.05 }) as never, subscribe: (l) => { listeners.push(l); return () => undefined; }, dispose: () => { w.order.push("session.dispose"); },
   };
@@ -582,5 +582,37 @@ describe("L4-SR2: the gateway's upkeep pause", () => {
     }
     const ordinary = await world();
     expect((await runSetupAgent(ordinary.input)).setupRunSummary).not.toHaveProperty("pause");
+  });
+});
+
+// A glued package-manager run (`npm run lint npm test`) in the agent's answer is told to it once, in fixed words, and the corrected answer is the one read.
+describe("a command the reader will not keep is told to the agent once", () => {
+  const BAD = { ...ANSWER, tests: [{ ...ANSWER.tests[0]!, commands: ["npm run lint npm test"] }] };
+  const names = (t: { w: World }) => t.w.prompts.filter((text) => text.includes("Rovara will not keep"));
+  it("answers again once with the commands apart, and the second answer is the proposal", async () => {
+    const t = await world({ final: (n) => block(n === 1 ? BAD : ANSWER) });
+    const result = await runSetupAgent(t.input);
+    expect(names(t)).toHaveLength(1);
+    expect(t.w.prompts).toHaveLength(2);
+    expect(result.setupProposal?.tests[0]?.value.commands).toEqual(["npm test"]);
+    expect(result.setupProposal?.flaggedCommands).toEqual([]);
+  });
+  it("a second answer that is still glued is flagged, not asked for again", async () => {
+    const t = await world({ final: block(BAD) });
+    const result = await runSetupAgent(t.input);
+    expect(names(t)).toHaveLength(1);
+    expect(result.setupProposal?.tests).toEqual([]);
+    expect(result.setupProposal?.flaggedCommands.map((item) => item.command)).toEqual(["npm run lint npm test"]);
+  });
+  it("a second answer with no proposal block does not replace the first", async () => {
+    const t = await world({ final: (n) => (n === 1 ? block(BAD) : "sorry, here you go") });
+    const result = await runSetupAgent(t.input);
+    expect(result.setupProposal?.flaggedCommands).toHaveLength(1);
+    expect(result.setupProposal?.setup[0]?.value.commands).toEqual(["npm ci"]);
+  });
+  it("an answer with well-formed commands is never asked about again (mutant: always ask)", async () => {
+    const t = await world();
+    await runSetupAgent(t.input);
+    expect(t.w.prompts).toHaveLength(1);
   });
 });

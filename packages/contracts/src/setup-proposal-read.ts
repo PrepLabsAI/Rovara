@@ -8,7 +8,8 @@
 //   - the risk of an item is `setupItemRisk`, never the model's;
 //   - texts are redacted and cut; a quote is a single line of at most 200 characters, and is dropped altogether from secrets, sources and intake (a quote of `KEY=value` is a leak);
 //   - a command with a control or format character is left out; a command that can run is written as the executor will run it; a command that fetches code and runs it is
-//     NEVER an item: it is listed in `flaggedCommands`, whatever the model said (`remoteCodeReason` decides, and the model may only add caution);
+//     NEVER an item: it is listed in `flaggedCommands`, whatever the model said (`remoteCodeReason` decides, and the model may only add caution); so is an `npm|yarn|pnpm run` with more than one
+//     script name (`malformedRunReason`: `npm run lint npm test`), with a fixed reason;
 //   - a secret is a NAME; a name that looks like a token is left out; a domain is one the project settings accept; a dev container is a devcontainer.json inside a known repository.
 import { isAllowedDomain } from "./app-projects.js";
 import { FILE_PROVENANCE_KINDS, PROVENANCE_NOTE_MAX, PROVENANCE_QUOTE_MAX, PROVENANCE_PER_ITEM_MAX, ProvenanceSchema, type Provenance, type ProposalRisk } from "./provenance.js";
@@ -20,7 +21,7 @@ import {
   DEVCONTAINER_PATH_PATTERN, SETUP_COMMANDS_MAX, SETUP_DEVCONTAINER_MAX_BYTES, SETUP_INTAKE_CHANNELS, SETUP_ITEM_LIMITS, SETUP_KNOWLEDGE_ACTIVATIONS, SETUP_KNOWLEDGE_KINDS, SETUP_PROPOSAL_VERSION, SETUP_SOURCE_FOUND_IN,
   SETUP_SPEC_FORMATS, SetupBrowserEvidenceValueSchema, SetupProposalSchema, SetupRepositoryValueSchema, clampSetupCommandTimeout, setupItemRisk, type SetupItemKind, type SetupProposal,
 } from "./setup-proposal.js";
-import { isObject, oneLineText, readCommand, readCommands, remoteCodeReason, secretNameOf, utf8Bytes } from "./setup-draft.js";
+import { isObject, malformedRunReason, oneLineText, readCommand, readCommands, remoteCodeReason, secretNameOf, utf8Bytes } from "./setup-draft.js";
 
 /** The label a worker puts on the fenced block that carries its answer. */
 export const SETUP_PROPOSAL_INFO_STRING = "agentx-setup-proposal";
@@ -199,7 +200,7 @@ export function sanitizeSetupProposal(raw: unknown, context: SetupProposalContex
     const read = readCommands(value);
     const kept: string[] = [];
     for (const command of read.commands) {
-      const reason = remoteCodeReason(command) ?? (extraFlags.has(command) ? "Rovara flagged this command." : undefined);
+      const reason = remoteCodeReason(command) ?? malformedRunReason(command) ?? (extraFlags.has(command) ? "Rovara flagged this command." : undefined);
       if (reason !== undefined) { if (!flagged.has(command)) flagged.set(command, { reason, from }); continue; }
       kept.push(command);
     }
@@ -245,7 +246,7 @@ export function sanitizeSetupProposal(raw: unknown, context: SetupProposalContex
     const name = oneLineText(entry["name"], 80);
     const command = typeof entry["command"] === "string" ? readCommand(entry["command"]) : undefined;
     if (repo === undefined || name === "" || command?.kind !== "kept") return undefined;
-    const reason = remoteCodeReason(command.text) ?? (modelFlags.has(command.text) ? "Rovara flagged this command." : undefined);
+    const reason = remoteCodeReason(command.text) ?? malformedRunReason(command.text) ?? (modelFlags.has(command.text) ? "Rovara flagged this command." : undefined);
     if (reason !== undefined) { if (!flagged.has(command.text)) flagged.set(command.text, { reason, from }); return undefined; }
     return { key: `${repo}:${name.toLowerCase()}`, value: { name, repo, command: command.text } };
   });
@@ -276,7 +277,7 @@ export function sanitizeSetupProposal(raw: unknown, context: SetupProposalContex
     const command = written === undefined ? undefined : readCommand(written);
     // A command that changes under the redactor holds a secret-shaped value: it is no start command.
     if (written === undefined || command?.kind !== "kept" || redactText(written) !== written) return undefined;
-    const reason = remoteCodeReason(command.text) ?? (modelFlags.has(command.text) ? "Rovara flagged this command." : undefined);
+    const reason = remoteCodeReason(command.text) ?? malformedRunReason(command.text) ?? (modelFlags.has(command.text) ? "Rovara flagged this command." : undefined);
     if (reason !== undefined) { if (!flagged.has(command.text)) flagged.set(command.text, { reason, from }); return undefined; }
     const value = SetupBrowserEvidenceValueSchema.safeParse({
       startCommand: command.text, port: entry["port"], routes: entry["routes"],
