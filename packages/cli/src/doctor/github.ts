@@ -2,6 +2,7 @@
 // memory and is never written anywhere.
 import { appSettingsUrl, GITHUB_WEBHOOK_EVENTS, githubAppJwt, githubAppSecretName, githubWebhookUrl, parseAppSecret } from "../init/github-app.js";
 import { storedWebhookSecret } from "../github/webhook-setup.js";
+import { githubWebhookSecretName } from "@agentx/contracts";
 import { plainMessage } from "../output.js";
 import { check, type DoctorCheck, type DoctorContext } from "./checks.js";
 import { jsonObject } from "./secrets.js";
@@ -121,9 +122,13 @@ export async function githubWebhookChecks(context: DoctorContext): Promise<Docto
   } catch (error) {
     checks.push(check("github", "GitHub webhook", "warn", `could not read the App's webhook settings from GitHub: ${plainMessage(error)}`, "run agentx doctor again in a minute"));
   }
-  checks.push(storedWebhookSecret(jsonObject(raw) ?? {}) === undefined
-    ? check("github", "GitHub webhook secret", "warn", `${secretName} holds no webhook secret, so GitHub's deliveries cannot be verified`, `${upgradeFix} stores a webhook secret and gives it to GitHub`)
-    : check("github", "GitHub webhook secret", "ok", "stored"));
+  // Webhook lane W3: once the owner's dedicated webhook secret has a value it is the one the broker verifies with; DescribeSecret says so, the value is never read.
+  const dedicatedName = githubWebhookSecretName(env);
+  checks.push(await services.secrets.hasValue?.(dedicatedName) === true
+    ? check("github", "GitHub webhook secret", "ok", `${dedicatedName} has a value (never read here); GitHub must hold the same one`)
+    : storedWebhookSecret(jsonObject(raw) ?? {}) === undefined
+      ? check("github", "GitHub webhook secret", "warn", `${secretName} holds no webhook secret, so GitHub's deliveries cannot be verified`, `${upgradeFix} stores a webhook secret and gives it to GitHub`)
+      : check("github", "GitHub webhook secret", "ok", "stored (in the App's secret; put a value in " + dedicatedName + " to move it)"));
   // Without the App's settings page (GitHub could not be asked above) the warning already says to try again.
   if (settingsPage !== undefined) {
     checks.push(await deliveriesCheck(context, jwt, settingsPage, { url: hookUrl, expected: expectedUrl, fix: `${upgradeFix} points the App's webhook at the control plane` }));

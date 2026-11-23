@@ -2,6 +2,7 @@
 // (DeletionPolicy Retain or RetainExceptOnCreate), recorded in SSM before any stack is deleted, so
 // a re-run after the stacks are gone still knows them. Also the plan shown before confirming, the
 // typed confirmation, and the vendor steps printed at the end.
+import { deflateRawSync, inflateRawSync } from "node:zlib";
 import { z } from "zod";
 import { agentXError, EnvironmentNameSchema, environmentSettingsPrefix, environmentStackName, STACK_PARTS, type StackPart } from "@agentx/contracts";
 import type { ParameterStore } from "../environments/parameter-store.js";
@@ -42,22 +43,38 @@ export function inventoryParameterName(env: string): string {
   return `${environmentSettingsPrefix(env)}destroy/inventory`;
 }
 
+/** The stored value is plain JSON while that fits SSM's standard tier (4096 bytes); once it would not, the same JSON is stored deflated
+ * and base64-encoded behind this prefix. The parameter's name, tier and content (the full physical IDs, ARNs included) are unchanged: only
+ * the bytes shrink, so a worst-case 20-character environment name stays well inside the limit as retained resources are added. */
+export const COMPRESSED_INVENTORY_PREFIX = "z1:";
+const MAX_INVENTORY_JSON_BYTES = 1_048_576;
+
+export function encodeInventory(json: string): string {
+  return Buffer.byteLength(json) <= SSM_STANDARD_VALUE_LIMIT ? json : `${COMPRESSED_INVENTORY_PREFIX}${deflateRawSync(json, { level: 9 }).toString("base64")}`;
+}
+
+/** The inventory's JSON text from a stored value (plain, as every earlier release wrote it, or compressed); undefined when it is neither. */
+export function decodeInventory(value: string): string | undefined {
+  if (!value.startsWith(COMPRESSED_INVENTORY_PREFIX)) return value;
+  try { return inflateRawSync(Buffer.from(value.slice(COMPRESSED_INVENTORY_PREFIX.length), "base64"), { maxOutputLength: MAX_INVENTORY_JSON_BYTES }).toString("utf8"); } catch { return undefined; }
+}
+
 export async function readInventory(store: ParameterStore, env: string): Promise<Inventory | undefined> {
   const stored = await store.get(inventoryParameterName(env));
   if (stored === undefined) return undefined;
   let json: unknown;
-  try { json = JSON.parse(stored.value); } catch { json = undefined; }
+  try { json = JSON.parse(decodeInventory(stored.value) ?? ""); } catch { json = undefined; }
   const parsed = InventorySchema.safeParse(json);
   if (!parsed.success || parsed.data.env !== env) throw agentXError("CONFIG_INVALID", `${inventoryParameterName(env)} is not an agentx destroy inventory for ${env}; delete it only if you are sure nothing of ${env} is left, then run agentx destroy again`);
   return parsed.data;
 }
 
 export async function writeInventory(store: ParameterStore, inventory: Inventory): Promise<void> {
-  const json = JSON.stringify(InventorySchema.parse(inventory));
-  if (Buffer.byteLength(json) > SSM_STANDARD_VALUE_LIMIT) {
-    throw agentXError("CONFIG_INVALID", `the list of resources environment ${inventory.env}'s stacks keep is larger than SSM's ${SSM_STANDARD_VALUE_LIMIT}-byte limit; report this as an AgentX bug, and tear the environment down with docs/teardown.md meanwhile`);
+  const value = encodeInventory(JSON.stringify(InventorySchema.parse(inventory)));
+  if (Buffer.byteLength(value) > SSM_STANDARD_VALUE_LIMIT) {
+    throw agentXError("CONFIG_INVALID", `the list of resources environment ${inventory.env}'s stacks keep is larger than SSM's ${SSM_STANDARD_VALUE_LIMIT}-byte limit even compressed; report this as an AgentX bug, and tear the environment down with docs/teardown.md meanwhile`);
   }
-  await store.put(inventoryParameterName(inventory.env), json);
+  await store.put(inventoryParameterName(inventory.env), value);
 }
 
 export function mergeInventory(stored: Inventory | undefined, found: Omit<Inventory, "schemaVersion">): Inventory {

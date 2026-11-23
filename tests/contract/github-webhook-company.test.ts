@@ -61,8 +61,10 @@ it("the real broker refuses a webhook bound to another company exactly like an u
       headers: { "x-github-delivery": ID, "x-github-event": "pull_request", "x-hub-signature-256": `sha256=${createHmac("sha256", "fixture-only").update(body).digest("hex")}` },
       requestContext: { requestId: "golden", http: { method: "POST" } } });
   };
+  // Webhook lane W0: a signed delivery that maps to nothing of this installation's company is 202 IGNORED (nothing written), the same for another company's installation and an unknown one.
   const other = await invoke(77);
-  expect(other.statusCode).toBe(403);
+  expect(other.statusCode).toBe(202);
+  expect(JSON.parse(other.body)).toMatchObject({ delivery: "IGNORED" });
   expect(other).toEqual(await invoke(78));
   expect(JSON.stringify(other)).not.toMatch(/org_|shared-account/);
   expect(db.get(`GITHUB_DELIVERY#${ID}`, "META")).toBeUndefined();

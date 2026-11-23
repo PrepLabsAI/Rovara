@@ -610,7 +610,7 @@ describe("agentx init", () => {
       init: {
         releaseVersion: null,
         deploy: { identity: { get: unexpected }, store: { get: unexpected, put: unexpected, delete: unexpected, list: unexpected }, secrets: { get: unexpected, create: unexpected } },
-        initSecrets: { get: unexpected, create: unexpected, put: unexpected, arn: unexpected, reserve: unexpected },
+        initSecrets: { get: unexpected, create: unexpected, put: unexpected, arn: unexpected, hasValue: unexpected, reserve: unexpected },
         checks: passingChecks({ converse: unexpected, ec2Quota: unexpected, elasticIps: unexpected }),
         stackStatus: { status: unexpected },
         fetch: unexpected,

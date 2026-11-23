@@ -248,6 +248,9 @@ describe("the health route's grants (A13)", () => {
       // L4-HW5b (#1047), owner DEC 254zzz45: the hosted chat decision's CHANNEL_CLAIM row, one per pressed button event, kept EVENT_DEDUPE_SECONDS so a replayed press is a no-op, then expired.
       // The hosted twin of the core/channel rows above; not a durable record (the decision itself is stored by the approval gate, with no expiry).
       "packages/broker/src/core-host/chat-decision.ts",
+      // Webhook lane W0: the GitHub delivery rows (GITHUB_DELIVERY#, kept 7 days: GitHub lets an operator redeliver for 3), the replay-guard rows (GITHUB_BODY#<sha256>) and the per-installation minute counters
+      // (GITHUB_RL#), each a numeric epoch-SECONDS expiry, then expired. Not durable records: a delivery's effect is stored on the task, and these rows only say "seen".
+      "packages/broker/src/aws/github-core-webhooks.ts", "packages/broker/src/aws/github-webhooks.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);

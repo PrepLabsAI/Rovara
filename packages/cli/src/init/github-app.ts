@@ -5,7 +5,7 @@
 // as the key (webhookSecret) and is never printed either.
 import { createSign, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
-import { agentXError, environmentStackName } from "@agentx/contracts";
+import { agentXError, environmentStackName, githubWebhookSecretName } from "@agentx/contracts";
 import { activeHintLine, ensureGithubWebhook, missingEventsLine, storedWebhookSecret } from "../github/webhook-setup.js";
 import type { InitContext, ManifestHost, OpenManifestHost } from "./context.js";
 import { checkPrivateKeyPem, secretFromSource } from "./prompts.js";
@@ -132,8 +132,13 @@ export function githubAppJwt(input: { appId: string; privateKey: string; nowSeco
   return `${unsigned}.${createSign("RSA-SHA256").update(unsigned).sign(input.privateKey).toString("base64url")}`;
 }
 
-/** The events AgentX handles for a pull request (the broker refuses any other). */
-export const GITHUB_WEBHOOK_EVENTS = ["pull_request", "pull_request_review", "pull_request_review_comment", "issue_comment"] as const;
+/**
+ * The events Rovara subscribes to for pull request tracking (webhook lane W3: the pull request, review, review-thread and comment events (PR feedback reads whether a thread is resolved), and the check events that say a pull request's checks
+ * finished). The App's settings page lists them as checkboxes; GitHub's API cannot tick them, so the CLI only reports the ones the App lacks.
+ */
+export const GITHUB_WEBHOOK_EVENTS = ["pull_request", "pull_request_review", "pull_request_review_comment", "pull_request_review_thread", "issue_comment", "check_suite", "check_run"] as const;
+/** Needs the App's optional "Commit statuses" read permission, so it is never reported as missing: the owner ticks it only when the repository's CI reports through commit statuses. */
+export const GITHUB_WEBHOOK_OPTIONAL_EVENTS = ["status"] as const;
 
 /** Where the control plane receives GitHub's deliveries, from its API endpoint. */
 export const githubWebhookUrl = (apiEndpoint: string) => `${apiEndpoint.replace(/\/+$/, "")}/v1/github/webhooks`;
@@ -149,8 +154,8 @@ export interface GitHubApi {
    * code the endpoint answered (0 when it gave none). Nothing else is kept: never a payload or a header.
    */
   listHookDeliveries(jwt: string): Promise<Array<{ deliveredAt: string; status: string; statusCode: number }>>;
-  /** Points the App's webhook at url and sets the secret GitHub signs deliveries with. */
-  setHookConfig(jwt: string, hook: { url: string; secret: string }): Promise<void>;
+  /** Points the App's webhook at url and, when `secret` is given, sets the secret GitHub signs deliveries with. With no `secret` the request carries none, so GitHub keeps the one it has. */
+  setHookConfig(jwt: string, hook: { url: string; secret?: string }): Promise<void>;
   listInstallations(jwt: string): Promise<Array<{ id: number; account: { login: string } }>>;
   /** expiresAt is epoch milliseconds. */
   installationToken(jwt: string, installationId: string): Promise<{ token: string; expiresAt: number }>;
@@ -227,7 +232,7 @@ export function githubRestApi(fetchImplementation: typeof fetch): GitHubApi {
           : []);
     },
     async setHookConfig(jwt, hook) {
-      await call("webhook update", "/app/hook/config", { method: "PATCH", token: jwt, body: { url: hook.url, content_type: "json", secret: hook.secret, insecure_ssl: "0" } });
+      await call("webhook update", "/app/hook/config", { method: "PATCH", token: jwt, body: { url: hook.url, content_type: "json", ...(hook.secret === undefined ? {} : { secret: hook.secret }), insecure_ssl: "0" } });
     },
     async listInstallations(jwt) {
       return (await call("installation list", "/app/installations?per_page=100", { token: jwt })) as Awaited<ReturnType<GitHubApi["listInstallations"]>>;
@@ -429,7 +434,7 @@ async function runGitHubAppStep(context: InitContext, progress: ProgressHandle, 
 
   // Every origin of the app (manifest, --github-app-id, an earlier run's) ends here: the webhook secret is stored and GitHub's
   // hook is pointed at the control plane. A secret that is already stored, including the one GitHub made, is kept.
-  const webhook = await ensureGithubWebhook({ appJwt: jwtFor(app.appId, privateKey), api, secrets: context.secrets, secretId: name, webhookUrl: await webhookUrl() });
+  const webhook = await ensureGithubWebhook({ appJwt: jwtFor(app.appId, privateKey), api, secrets: context.secrets, secretId: name, dedicatedSecretId: githubWebhookSecretName(context.env), webhookUrl: await webhookUrl() });
   context.write(`GitHub webhook: ${webhook.status}`);
   for (const line of [activeHintLine(webhook), missingEventsLine(webhook)]) if (line !== undefined) context.write(line);
 

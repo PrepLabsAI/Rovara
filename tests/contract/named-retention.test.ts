@@ -35,8 +35,8 @@ describe("retained resources in a named environment", () => {
     const expected: Record<string, string[]> = {
       "agentx-staging-access": ["ArtifactBucket AWS::S3::Bucket"],
       "agentx-staging-control-plane": [
-        // DEC 254za (#872): the callback signing key's own secret, kept like the Slack secret (its name is checked below).
-        "Artifacts AWS::S3::Bucket", "CallbackSigningKeySecret AWS::SecretsManager::Secret", "DeveloperSignInTable AWS::DynamoDB::Table", "SlackSecret AWS::SecretsManager::Secret", "SlackThreadSessions AWS::S3::Bucket",
+        // DEC 254za (#872): the callback signing key's own secret, kept like the Slack secret (its name is checked below). Webhook lane W3: the GitHub webhook secret slot, kept the same way (its name is checked below).
+        "Artifacts AWS::S3::Bucket", "CallbackSigningKeySecret AWS::SecretsManager::Secret", "DeveloperSignInTable AWS::DynamoDB::Table", "GithubWebhookSecret AWS::SecretsManager::Secret", "SlackSecret AWS::SecretsManager::Secret", "SlackThreadSessions AWS::S3::Bucket",
         "SlackThreads AWS::DynamoDB::Table", "State AWS::DynamoDB::Table", "TurnRecords AWS::DynamoDB::Table",
       ],
       // Batch 13 (#906, DEC 254zm): the five test-service starter copy repositories, kept so a pinned copy outlives a replacement (their names are checked below).
@@ -60,6 +60,9 @@ describe("retained resources in a named environment", () => {
     // DEC 254za: the one retained secret #872 adds is exactly agentx/<env>/callback-key.
     const callbackSecrets = Object.entries(named["agentx-staging-control-plane"]!).filter(([id]) => id.startsWith("CallbackSigningKeySecret") && !id.includes("Policy"));
     expect(callbackSecrets.map(([, resource]) => resource.Properties?.Name)).toEqual(["agentx/staging/callback-key"]);
+    // Webhook lane W3: the one retained secret it adds is exactly agentx/<env>/github-webhook-secret (the inventory's size test counts it).
+    const webhookSecrets = Object.entries(named["agentx-staging-control-plane"]!).filter(([id]) => id.startsWith("GithubWebhookSecret") && !id.includes("Policy"));
+    expect(webhookSecrets.map(([, resource]) => resource.Properties?.Name)).toEqual(["agentx/staging/github-webhook-secret"]);
     // Batch 13 (#906): exactly the five starter copy repositories, outside the environment's pull-through prefix.
     const mirrors = Object.entries(named["agentx-staging-foundation"]!).filter(([id]) => id.startsWith("Ec2WorkersTestServiceMirrorRepository"));
     expect(mirrors.map(([, resource]) => resource.Properties?.RepositoryName).sort()).toEqual([
@@ -85,7 +88,7 @@ describe("retained resources in a named environment", () => {
     expect(retained).toEqual([
       // Spec 064: developer records and session history outlive the stack, as in named environments.
       // DEC 254za (#872): the callback signing key's own secret (agentx/production/callback-key, checked below), Retain like the Slack secret.
-      "AgentXControlPlane Artifacts AWS::S3::Bucket", "AgentXControlPlane CallbackSigningKeySecret AWS::SecretsManager::Secret", "AgentXControlPlane DeveloperSignInTable AWS::DynamoDB::Table", "AgentXControlPlane SlackSecret AWS::SecretsManager::Secret", "AgentXControlPlane SlackThreadSessions AWS::S3::Bucket",
+      "AgentXControlPlane Artifacts AWS::S3::Bucket", "AgentXControlPlane CallbackSigningKeySecret AWS::SecretsManager::Secret", "AgentXControlPlane DeveloperSignInTable AWS::DynamoDB::Table", "AgentXControlPlane GithubWebhookSecret AWS::SecretsManager::Secret", "AgentXControlPlane SlackSecret AWS::SecretsManager::Secret", "AgentXControlPlane SlackThreadSessions AWS::S3::Bucket",
       "AgentXControlPlane SlackThreads AWS::DynamoDB::Table", "AgentXControlPlane State AWS::DynamoDB::Table", "AgentXControlPlane TurnRecords AWS::DynamoDB::Table",
       // #1159: the test-service starter copies, kept on delete as in named environments (test-service-mirror.ts).
       ...[0, 1, 2, 3, 4].map((index) => `AgentXProductionFoundation Ec2WorkersTestServiceMirrorRepository${String(index)} AWS::ECR::Repository`),

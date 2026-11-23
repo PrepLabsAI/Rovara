@@ -11,7 +11,7 @@ import { readEnvironmentSettings } from "../../packages/cli/src/environments/set
 import type { CliInvocation } from "../../packages/cli/src/init/cli-command.js";
 import type { InitFlags } from "../../packages/cli/src/init/answers.js";
 import type { InitContext, InitSecrets } from "../../packages/cli/src/init/context.js";
-import type { GitHubApi } from "../../packages/cli/src/init/github-app.js";
+import { GITHUB_WEBHOOK_EVENTS, type GitHubApi } from "../../packages/cli/src/init/github-app.js";
 import { emptyProgress, type InitAnswers, type InstallProgress } from "../../packages/cli/src/init/install-state.js";
 import type { PrerequisiteChecks } from "../../packages/cli/src/init/prerequisites.js";
 import type { Prompter } from "../../packages/cli/src/init/prompts.js";
@@ -165,6 +165,7 @@ export function memoryInitSecrets(initial: Record<string, string> = {}, options:
       if (!exists(name)) throw Object.assign(new Error(`Secrets Manager can't find ${name}`), { name: "ResourceNotFoundException" }); values.set(name, value);
     },
     async arn(name) { return exists(name) ? arnOf(name) : undefined; },
+    async hasValue(name) { return values.has(name); },
     async reserve(name) { if (!exists(name)) reserved.add(name); return arnOf(name); },
   };
 }
@@ -306,9 +307,9 @@ export const TEST_PRIVATE_KEY = TEST_KEYS.privateKey.trim();
 export const TEST_PUBLIC_KEY = TEST_KEYS.publicKey;
 
 /** A GitHub that converts any code into an app owned by `owner`, installs it after `installAfterPolls` polls, and reports repository counts in turn. Installation tokens expire at `tokenExpiresAt` (default T0 plus one hour). */
-export function fakeGitHubApi(input: { owner?: string; ownerType?: string; installAfterPolls?: number; repositoryCounts?: number[]; installationId?: number; tokenExpiresAt?: number; hookUrl?: string; events?: string[]; webhookSecret?: string; deliveries?: Array<{ deliveredAt: string; status: string; statusCode: number }> } = {}): GitHubApi & { conversions: string[]; polls: () => number; tokens: () => number; hookWrites: Array<{ url: string; secret: string }> } {
+export function fakeGitHubApi(input: { owner?: string; ownerType?: string; installAfterPolls?: number; repositoryCounts?: number[]; installationId?: number; tokenExpiresAt?: number; hookUrl?: string; events?: string[]; webhookSecret?: string; deliveries?: Array<{ deliveredAt: string; status: string; statusCode: number }> } = {}): GitHubApi & { conversions: string[]; polls: () => number; tokens: () => number; hookWrites: Array<{ url: string; secret?: string }> } {
   const conversions: string[] = [];
-  const hookWrites: Array<{ url: string; secret: string }> = [];
+  const hookWrites: Array<{ url: string; secret?: string }> = [];
   let hook: { url?: string; contentType?: string; insecureSsl?: string } = input.hookUrl === undefined ? {} : { url: input.hookUrl, contentType: "json", insecureSsl: "0" };
   let polls = 0;
   let tokens = 0;
@@ -320,7 +321,7 @@ export function fakeGitHubApi(input: { owner?: string; ownerType?: string; insta
     polls: () => polls,
     tokens: () => tokens,
     async convertManifest(code) { conversions.push(code); return { id: 424242, slug: "agentx-acme-staging", pem: TEST_PRIVATE_KEY, owner, ...(input.webhookSecret === undefined ? {} : { webhook_secret: input.webhookSecret }) }; },
-    async getApp() { return { slug: "agentx-acme-staging", owner, events: input.events ?? ["pull_request", "pull_request_review", "pull_request_review_comment", "issue_comment"] }; },
+    async getApp() { return { slug: "agentx-acme-staging", owner, events: input.events ?? [...GITHUB_WEBHOOK_EVENTS] }; },
     async getHookConfig() { return hook; },
     // By default one delivery an hour before T0 that GitHub's endpoint accepted.
     async listHookDeliveries() { return input.deliveries ?? [{ deliveredAt: new Date(T0 - 60 * 60 * 1000).toISOString(), status: "OK", statusCode: 202 }]; },

@@ -27,7 +27,7 @@ export interface DoctorCheck { group: DoctorGroup; name: string; status: CheckSt
 export type DoctorStack = StackDescription;
 
 export interface DoctorServices {
-  secrets: Pick<InitSecrets, "get">;
+  secrets: Pick<InitSecrets, "get"> & Partial<Pick<InitSecrets, "hasValue">>;
   stacks: { describe(stackName: string): Promise<DoctorStack | undefined> };
   /** The release manifest for a version: the local release cache, else the published release.json;
    * undefined when neither can be read. */

@@ -109,6 +109,18 @@ describe("GitHub App step", () => {
     expect(JSON.stringify(progress.value())).not.toContain(GITHUB_WEBHOOK_SECRET);
   });
 
+  // Webhook lane W3: a re-run of init against an environment whose owner already set the dedicated webhook secret must not overwrite GitHub's copy of it.
+  it("sends GitHub no secret, and stores none, once the environment's dedicated webhook secret has a value", async () => {
+    const OWNER_SET = "owner-set-dedicated-secret-".padEnd(48, "d");
+    const api = fakeGitHubApi({ webhookSecret: GITHUB_WEBHOOK_SECRET, hookUrl: WEBHOOK_URL });
+    const context = initContext({ openBrowser: browserThatCreatesGitHubApp([]) });
+    homes.push(context.home);
+    await context.secrets.create("agentx/staging/github-webhook-secret", OWNER_SET);
+    await githubAppStep(api).run(context, progressHandle());
+    expect(api.hookWrites).toEqual([]);
+    expect(context.lines.join("\n")).not.toContain(OWNER_SET);
+  });
+
   it("an App given by ID gets a generated webhook secret and its hook configured", async () => {
     const api = fakeGitHubApi({ installationId: 555, events: ["pull_request"] });
     const context = initContext({
@@ -126,7 +138,7 @@ describe("GitHub App step", () => {
     // An App made beforehand may have no webhook, and GitHub's API cannot switch it on.
     expect(context.lines).toContain("GitHub webhook: turn on Active at https://github.com/organizations/acme/settings/apps/agentx-acme-staging if it is off");
     // The App made beforehand may not listen for the events: say which and where, never the secret.
-    expect(context.lines).toContain("GitHub webhook: tick these events on https://github.com/organizations/acme/settings/apps/agentx-acme-staging/permissions: pull_request_review, pull_request_review_comment, issue_comment");
+    expect(context.lines).toContain("GitHub webhook: tick these events on https://github.com/organizations/acme/settings/apps/agentx-acme-staging/permissions: pull_request_review, pull_request_review_comment, pull_request_review_thread, issue_comment, check_suite, check_run");
     expect(context.lines.join("\n")).not.toContain(stored.webhookSecret);
   });
 

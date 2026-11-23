@@ -35,6 +35,9 @@ const CORE = [
   "ROVARA_SAVED_ENV_REPO_PREFIX", "ROVARA_TEST_SERVICES", "ROVARA_TEST_SERVICES_HOSTED_IMAGES", "TASK_TOKEN_KEY_ARN",
 ];
 
+/** Webhook lane W3: the dedicated GitHub webhook secret's NAME, derived by the broker (nothing in its 4 KB variables); production's slot is agentx/production/github-webhook-secret. */
+const WEBHOOK = ["GITHUB_WEBHOOK_SECRET_ID"];
+
 // AWS's documentation placeholder account and API id (the port guard refuses real ones; the shapes are what is pinned).
 const REGION = "us-east-1", ACCOUNT = "123456789012";
 type Json = Record<string, unknown>;
@@ -115,9 +118,10 @@ describe("production's broker, packed (#1149)", () => {
       const { env, reads, parameterName } = await bootedBroker(template, { CompanySignIn: companySignIn, CompanySelfServe: companySignIn });
       expect(parameterName).toBe("/agentx/production/broker-names");
       expect(reads).toEqual(["/agentx/production/broker-names"]);
-      expect(Object.keys(env).sort()).toEqual([...BEFORE, ...PACKING, ...CORE, ...SLACK_COMPANY].sort());
+      expect(Object.keys(env).sort()).toEqual([...BEFORE, ...PACKING, ...CORE, ...SLACK_COMPANY, ...WEBHOOK].sort());
       expect(env.SLACK_COMPANY_WORKSPACES).toBe("disabled");
       expect(env.AGENTX_INSTALL_LAYOUT).toBe("legacy");
+      expect(env.GITHUB_WEBHOOK_SECRET_ID).toBe("agentx/production/github-webhook-secret");
       expect(env.AGENTX_ENV).toBe("production");
       expect(env.COMPANY_SIGNIN).toBe(companySignIn);
       // What a named environment would derive differently stays production's own: the alarm prefix is passed whole, and the roles keep their ARNs (no /agentx/production/ path).

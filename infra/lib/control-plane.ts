@@ -38,6 +38,7 @@ import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { ChannelAdapters } from "./channel-adapters.js";
 import { CoreEngine, TEST_SERVICES_PARAMETER, TEST_SERVICE_IMAGES_PARAMETER } from "./core-engine.js";
 import { CompanySecrets } from "./company-secrets.js";
+import { addGithubWebhookSecret, GITHUB_WEBHOOK_ROUTE, guardGithubWebhookRoute } from "./github-webhook.js";
 import { SavedEnvImages } from "./saved-env-images.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
 import { TaskPersonProof } from "./task-person-proof.js";
@@ -240,6 +241,8 @@ export class ControlPlaneStack extends Stack {
     addBrokerName(broker, naming, "artifactBucket", artifacts.bucketName, artifacts.bucketName);
     addDerivedBrokerVariable(broker, naming, "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID", projectSetupRuntimeCatalogId);
     addDerivedBrokerVariable(broker, naming, "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID", e2eFeatureRuntimeCatalogId);
+    // Webhook lane W3: the dedicated GitHub webhook secret slot, readable by the broker's role alone (infra/lib/github-webhook.ts).
+    addGithubWebhookSecret(this, { naming, broker });
     const connectorSecretsArn = this.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `${naming.connectorSecretPrefix}*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME });
     if (naming.env !== undefined) {
       // The two grantReadWriteData statements' action/resource cross product, less dynamodb:GetRecords and dynamodb:GetShardIterator (ENV-ROOM 2, IAM room for the names
@@ -877,9 +880,9 @@ export class ControlPlaneStack extends Stack {
       authorizationType: "NONE",
     });
     // GitHub signs webhook bodies itself; the broker verifies its HMAC and linked repository scope.
-    new apigwv2.CfnRoute(this, "GithubWebhookRoute", {
+    const githubWebhookRoute = new apigwv2.CfnRoute(this, "GithubWebhookRoute", {
       apiId: api.ref,
-      routeKey: "POST /v1/github/webhooks",
+      routeKey: GITHUB_WEBHOOK_ROUTE,
       target: `integrations/${integration.ref}`,
       authorizationType: "NONE",
     });
@@ -938,6 +941,8 @@ export class ControlPlaneStack extends Stack {
       stageName: "$default",
       autoDeploy: true,
     });
+    // Webhook lane W3: the public GitHub webhook route's throttle and its alarm (infra/lib/github-webhook.ts).
+    guardGithubWebhookRoute(this, naming, api.ref, defaultStage, githubWebhookRoute, notifyOperator);
     broker.addPermission("ApiInvoke", {
       principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
       sourceArn: `arn:${this.partition}:execute-api:${this.region}:${this.account}:${api.ref}/*/*/*`,
