@@ -131,17 +131,25 @@ export async function routeHostedBrowserTesting(input: HostedBrowserTestingInput
       };
       try { await input.audit.record(event); } catch { throw agentXError("AUDIT_UNAVAILABLE", BROWSER_TESTING_WORDS.auditUnavailable); }
     };
-    if (action === "refresh") { const body = parseBody(RefreshBodySchema, raw); await record("refresh", body.requestId); await refreshDraft(deps, project, personId, body); }
-    else if (action === "draft") { const body = parseBody(ChoicesBodySchema, raw); await record("choices", body.requestId); await saveChoices(deps, project, personId, body); }
-    else if (action === "check") { const body = parseBody(CheckBodySchema, raw); await record("check", body.requestId); await checkDraft(deps, project, personId, body); }
-    else if (action === "discard") { const body = parseBody(SimpleBodySchema, raw); await record("discard", body.requestId); await discardCandidate(deps, project, personId); }
-    else if (action === "pause" || action === "resume") { const body = parseBody(SimpleBodySchema, raw); await record(action, body.requestId); await setPaused(deps, project, personId, action === "pause", body.requestId); }
-    else if (action === "decision") return json(200, { ...(await decide(input, deps, project, parseBody(DecisionBodySchema, raw))), view: await read() });
-    else throw agentXError("NOT_FOUND", "route not found");
+    if (action === "decision") return json(200, { ...(await decide(input, deps, project, parseBody(DecisionBodySchema, raw))), view: await read() });
+    await applyChange(deps, { personId, project, action, raw, record });
     return json(200, await read());
   } catch (error) {
     if (error instanceof AgentXError) return errorAnswer(error);
     return errorAnswer(unavailable());
+  }
+}
+
+/** One of the changes that is not the decision: the audit record first, then the change. */
+async function applyChange(deps: BrowserTestingDeps, input: { personId: string; project: string; action: string | undefined; raw: unknown; record: (name: string, requestId: string) => Promise<void> }): Promise<void> {
+  const { personId, project, raw, record } = input;
+  switch (input.action) {
+    case "refresh": { const body = parseBody(RefreshBodySchema, raw); await record("refresh", body.requestId); return await refreshDraft(deps, project, personId, body); }
+    case "draft": { const body = parseBody(ChoicesBodySchema, raw); await record("choices", body.requestId); return await saveChoices(deps, project, personId, body); }
+    case "check": { const body = parseBody(CheckBodySchema, raw); await record("check", body.requestId); return await checkDraft(deps, project, personId, body); }
+    case "discard": { const body = parseBody(SimpleBodySchema, raw); await record("discard", body.requestId); return await discardCandidate(deps, project, personId); }
+    case "pause": case "resume": { const body = parseBody(SimpleBodySchema, raw); await record(input.action, body.requestId); return await setPaused(deps, project, personId, input.action === "pause", body.requestId); }
+    default: throw agentXError("NOT_FOUND", "route not found");
   }
 }
 

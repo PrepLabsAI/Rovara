@@ -326,7 +326,12 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
   next = await withApplicationDisplay(deps, { ...task, workflow }, operation, next);
   await commitAndContinue(deps, task, next, now, undefined, [], e2eFences);
   // Browser testing: a passed browser check renews the project's near-expiry test accounts. After the verdict is committed (its fence reads those rows), best effort, and never part of the verdict.
-  if (passedRound) await deps.applicationE2E?.accountRenewal?.afterPassedRound({ ...task, workflow }).catch(() => undefined);
+  await renewAfterPassedRound(deps, { ...task, workflow }, passedRound);
+}
+
+/** Browser testing: after a PASSED round's verdict is committed, the project's near-expiry test accounts are renewed. Best effort; it never changes a verdict. */
+async function renewAfterPassedRound(deps: TaskFlowDeps, task: TaskRecord & { workflow: WorkflowSnapshot }, passed: boolean): Promise<void> {
+  await Promise.resolve(passed ? deps.applicationE2E?.accountRenewal?.afterPassedRound(task) : undefined).catch(() => undefined);
 }
 
 /** What a passing candidate round records on the workflow: the digests the approval fixed and the round's own references. */

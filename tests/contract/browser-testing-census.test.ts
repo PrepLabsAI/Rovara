@@ -70,7 +70,8 @@ describe("accounts are renewed only after a PASSED browser check, after its verd
     const results = read("core/build-step/results.ts");
     expect(results).toContain("passedRound = e2eQualification !== undefined;");
     const commit = results.indexOf("await commitAndContinue(deps, task, next, now, undefined, [], e2eFences);\n  // Browser testing");
-    const renew = results.indexOf("if (passedRound) await deps.applicationE2E?.accountRenewal?.afterPassedRound(");
+    const renew = results.indexOf("await renewAfterPassedRound(deps, { ...task, workflow }, passedRound);");
+    expect(results).toContain("passed ? deps.applicationE2E?.accountRenewal?.afterPassedRound(task) : undefined");
     expect(commit).toBeGreaterThan(0);
     expect(renew).toBeGreaterThan(commit);
   });

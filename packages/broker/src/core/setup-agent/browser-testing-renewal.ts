@@ -1,17 +1,19 @@
 // Browser testing: keeping the project's test accounts usable, and recording how sign-in went.
 //
 // RENEWAL (owner decision 421, MUST). A synthetic account definition expires 90 days after it is written (contracts `E2E_SYNTHETIC_ACCOUNT_TTL_DAYS`), and until now only registering a setup again renewed one. A project
-// approved through this page writes its accounts once, so without this every company's browser checks would stop signing in on day 90. Renewal writes the SAME definition as the next revision (the same contract,
-// profile, role, tenant and scope, a new expiry) under the approval that is already in force: it needs no new approval, and it never writes a changed one. It runs
+// approved through this page writes its accounts once, so without this every company's browser checks would stop signing in on day 90. Renewal extends the SAME definition (the same contract,
+// profile, role, tenant and scope, a new expiry) under the approval that is already in force: it needs no new approval, and it never carries a changed one. It runs
 //   - after every passed browser check (`afterPassedRound`),
 //   - on a planning read of the project (`forPlanning`), when a definition has `E2E_SYNTHETIC_ACCOUNT_RENEWAL_DAYS` or fewer days left, or has lapsed.
+// A renewal EXTENDS THE EXPIRY ONLY: it records `renewedUntil` on the account's pointer and writes no definition and no revision, so the account reference a plan is pinned to (revision and digest) does not move and
+// no plan needs approving again. Only a change of CONTENT (the registration of an approved changed setup) writes a new revision, and that still refuses a plan pinned to the old one.
 // It reads the contract from the APPROVED stored proposal, never from the repository as it is now: a repository that changed since the approval is a change that waits for approval, and renewal never carries it.
 // A renewal that cannot be written is a served fault (the page says so, and the task that skipped its browser check says the same), not a quiet skip.
 import {
-  E2E_SYNTHETIC_ACCOUNT_RENEWAL_DAYS, E2EApplicationAccountDefinitionSchema, Ec2RuntimeBindingSchema, canonicalJson, change, inspectE2ERepository, projectPk, projectRevisionKey, queryAll, readE2EApplicationProjectContract, when,
+  E2E_SYNTHETIC_ACCOUNT_RENEWAL_DAYS, E2E_SYNTHETIC_ACCOUNT_TTL_DAYS, E2EApplicationAccountDefinitionSchema, Ec2RuntimeBindingSchema, change, createE2ESyntheticAccountDefinition, e2eAccountEffectiveExpiry, e2eApplicationAccountDefinitionDigest, inspectE2ERepository, projectPk, projectRevisionKey, queryAll, readE2EApplicationProjectContract, when,
   type DocumentStore, type E2ESourceSnapshot, type ObjectStorage, type OrgId, type TransactItem,
 } from "@agentx/contracts";
-import { accountDefinitionRow, accountLatestRow, e2eAccountDefinitionKey, e2eAccountLatestKey, planSyntheticAccountWrites } from "../../e2e/application-account-registry.js";
+import { e2eAccountDefinitionKey, e2eAccountLatestKey } from "../../e2e/application-account-registry.js";
 import { readAccountRegistryEntries } from "../e2e/account-registry.js";
 import { BROWSER_TESTING_WORDS, browserSignInKey, browserStateKey } from "./browser-testing-state.js";
 import { readApproved } from "./browser-testing-proposal.js";
@@ -34,7 +36,8 @@ export async function accountsNeedRenewal(deps: Pick<BrowserRenewalDeps, "store"
     if (applicationId === undefined || profileId === undefined || typeof pointer["revision"] !== "number") return true;
     const definition = E2EApplicationAccountDefinitionSchema.safeParse(stripKeys(await deps.store.get(e2eAccountDefinitionKey(deps.companyId, project, applicationId, profileId, pointer["revision"]))));
     // A definition that cannot be read is not renewed here (repairing it is an approval's job), and it is not "needing renewal" either.
-    if (definition.success && Date.parse(definition.data.expiresAt) - deps.now() <= withinMs) return true;
+    const renewedUntil = typeof pointer["renewedUntil"] === "string" ? pointer["renewedUntil"] : undefined;
+    if (definition.success && Date.parse(e2eAccountEffectiveExpiry(definition.data, renewedUntil)) - deps.now() <= withinMs) return true;
   }
   return false;
 }
@@ -46,20 +49,16 @@ function stripKeys(row: Record<string, unknown> | undefined): unknown {
   return body;
 }
 
-/** Whether a renewed definition is the registered one with only its revision and expiry moved. */
-const sameButForTerm = (left: unknown, right: unknown): boolean => {
-  const bare = (value: unknown) => { const { revision: _revision, expiresAt: _expiresAt, ...rest } = (value ?? {}) as Record<string, unknown>; void _revision; void _expiresAt; return canonicalJson(rest); };
-  return bare(left) === bare(right);
-};
-
 /**
- * The renewal writes for the project's accounts, read against the APPROVED snapshot's contracts: for each synthetic account whose definition is the one the approved contract implies and is near its expiry
- * (or lapsed), the next revision of the same definition. Anything else (an account never written, an unreadable one, a definition that differs from what the approved contract implies) is left alone: writing
- * it would be a change, and a change needs an approval.
+ * The renewal writes for the project's accounts, read against the APPROVED snapshot's contracts: for each synthetic account whose registered definition IS the one the approved contract implies, and that is near
+ * its expiry (or lapsed), one conditional update of its pointer that extends the expiry (`renewedUntil`). Nothing else is written: no definition, no revision. Anything else (an account never written, an
+ * unreadable one, a definition that differs from what the approved contract implies) is left alone: that would be a change, and a change needs an approval.
  */
-export async function planAccountRenewals(deps: Pick<BrowserRenewalDeps, "store" | "companyId" | "now">, project: string, snapshot: E2ESourceSnapshot, proposalSha256: string): Promise<{ items: TransactItem[]; accounts: number }> {
+export async function planAccountRenewals(deps: Pick<BrowserRenewalDeps, "store" | "companyId" | "now">, project: string, snapshot: E2ESourceSnapshot, _proposalSha256: string): Promise<{ items: TransactItem[]; accounts: number }> {
+  void _proposalSha256;
   const items: TransactItem[] = [];
-  let accounts = 0;
+  const now = deps.now();
+  const until = new Date(now + E2E_SYNTHETIC_ACCOUNT_TTL_DAYS * DAY_MS).toISOString();
   const inspection = inspectE2ERepository(snapshot, snapshot.candidate).inspection;
   for (const application of inspection.applications) {
     let contract: ReturnType<typeof readE2EApplicationProjectContract>;
@@ -67,24 +66,18 @@ export async function planAccountRenewals(deps: Pick<BrowserRenewalDeps, "store"
     if (contract === null) continue;
     const pairs = contract.accountProfiles.filter((profile) => profile.scope === "synthetic-test").map((profile) => ({ applicationId: application.applicationId, profileId: profile.profileId }));
     const read = await readAccountRegistryEntries({ store: deps.store }, deps.companyId, project, pairs);
-    // No `setup` and no `repairs`: the plan can only renew what is there or write a changed definition, and a changed one is skipped below.
-    const writes = planSyntheticAccountWrites({ contract, applicationId: application.applicationId, prior: read.entries, now: deps.now() });
-    for (const write of writes) {
-      if (write.previousRevision === null || write.repair === true || write.touch === true) continue;
-      const previous = read.entries.find((entry) => entry.definition.applicationId === write.definition.applicationId && entry.definition.profileId === write.definition.profileId);
-      if (previous === undefined || previous.latest.revision !== write.previousRevision || !sameButForTerm(write.definition, previous.definition)) continue;
-      const pointer = await deps.store.get(e2eAccountLatestKey(deps.companyId, project, write.definition.applicationId, write.definition.profileId));
-      const approvedAt = typeof pointer?.["setupApprovedAt"] === "string" ? pointer["setupApprovedAt"] : undefined;
-      const sha = typeof pointer?.["setupProposalSha256"] === "string" ? pointer["setupProposalSha256"] : proposalSha256;
-      items.push(
-        { kind: "put", item: accountDefinitionRow(deps.companyId, project, write.definition) as never, condition: when.absent() },
-        { kind: "put", item: accountLatestRow(deps.companyId, project, write.definition.applicationId, write.definition.profileId, write.latest, approvedAt === undefined ? undefined : { approvedAt, proposalSha256: sha }) as never,
-          condition: when.eq("revision", write.previousRevision) },
-      );
-      accounts += 1;
+    for (const entry of read.entries) {
+      const { applicationId, profileId } = entry.definition;
+      // The definition the approved contract implies for this very revision, with the registered expiry: the same digest means the same definition.
+      const implied = { ...createE2ESyntheticAccountDefinition({ contract, applicationId, profileId, revision: entry.definition.revision, now }), expiresAt: entry.definition.expiresAt };
+      const same = entry.latest.revision === entry.definition.revision && entry.latest.definitionDigest === e2eApplicationAccountDefinitionDigest(implied);
+      const expiry = Date.parse(e2eAccountEffectiveExpiry(entry.definition, entry.renewedUntil));
+      if (!same || expiry - now > E2E_SYNTHETIC_ACCOUNT_RENEWAL_DAYS * DAY_MS) continue;
+      items.push({ kind: "update", key: e2eAccountLatestKey(deps.companyId, project, applicationId, profileId), ops: [change.set("renewedUntil", until)],
+        condition: when.and(when.eq("revision", entry.latest.revision), when.eq("definitionDigest", entry.latest.definitionDigest), entry.renewedUntil === undefined ? when.notExists("renewedUntil") : when.eq("renewedUntil", entry.renewedUntil)) });
     }
   }
-  return { items, accounts };
+  return { items, accounts: items.length };
 }
 
 async function recordFault(deps: BrowserRenewalDeps, project: string, failed: boolean): Promise<void> {

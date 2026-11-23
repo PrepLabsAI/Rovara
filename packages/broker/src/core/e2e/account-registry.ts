@@ -67,7 +67,7 @@ export function accountRegistryFences(input: { orgId: OrgId; projectId: string; 
 
 function writeItems(orgId: OrgId, projectId: string, write: E2EAccountRegistryWrite, setup: { approvedAt: string; proposalSha256: string }): TransactItem[] {
   const { definition, latest, previousRevision } = write;
-  const row = accountLatestRow(orgId, projectId, definition.applicationId, definition.profileId, latest, { approvedAt: write.setupApprovedAt ?? setup.approvedAt, proposalSha256: setup.proposalSha256 });
+  const row = accountLatestRow(orgId, projectId, definition.applicationId, definition.profileId, latest, { approvedAt: write.setupApprovedAt ?? setup.approvedAt, proposalSha256: setup.proposalSha256 }, write.renewedUntil);
   const pointer: TransactItem = { kind: "put", item: asDocument(row),
     ...(write.repair === true ? {} : { condition: previousRevision === null ? when.absent() : when.eq("revision", previousRevision) }) };
   // A raised pointer writes no definition: the one it names is already there.

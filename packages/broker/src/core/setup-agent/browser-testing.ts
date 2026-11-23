@@ -104,6 +104,73 @@ function summaryOfPolicy(found: BrowserFound, policy: unknown): BrowserSummary {
 
 const userKindIds = (found: BrowserFound): string[] => found.applications.flatMap((application) => application.userKinds.map((kind) => kind.profileId));
 
+interface ViewScope { deps: BrowserTestingDeps; orgId: OrgId; project: string; revision: number; latestRow: Record<string, unknown> | undefined; repository: BrowserRepository | undefined }
+
+/** What is in force: the latest revision holds a policy and the approval that was proved for it; read back from the stored proposal. `unreadable` when the approval is there but its proposal is not. */
+async function approvedOf(scope: ViewScope, approvalRaw: Record<string, unknown> | undefined, personId: string): Promise<{ approved: BrowserTestingView["approved"]; unreadable: boolean }> {
+  const ref = scope.latestRow?.["setupApproval"] as { proposalRef?: unknown; proposalSha256?: unknown; candidateDigest?: unknown; decision?: unknown } | undefined;
+  const registeredBy = scope.latestRow?.["registeredBy"];
+  if (ref?.decision !== "approve" || typeof ref.proposalRef !== "string" || typeof ref.proposalSha256 !== "string" || typeof ref.candidateDigest !== "string" || scope.repository === undefined) return { approved: null, unreadable: false };
+  const read = typeof registeredBy === "string" ? await readApproved(scope.deps.objects, { proposalRef: ref.proposalRef, proposalSha256: ref.proposalSha256, candidateDigest: ref.candidateDigest }, scope.repository, registeredBy) : undefined;
+  const fact = approvalRaw?.["revision"] === scope.revision ? approvalRaw : undefined;
+  const text = (value: unknown): string | null => (typeof value === "string" ? value : null);
+  return { unreadable: read === undefined, approved: {
+    revision: scope.revision, approvedAt: text(fact?.["approvedAt"]), approvedBy: text(fact?.["approvedBy"]), decidedByYou: fact?.["approvedBy"] === personId,
+    summary: read === undefined ? null : summaryOfPolicy(read.found, read.policy),
+  } };
+}
+
+/** The waiting browser testing change, rendered from its STORED proposal (what was checked), never from the draft. */
+async function candidateOf(scope: ViewScope, waiting: SetupApplyRow & { checkState: { status: string; failedStep?: string; checkedAt?: string } }, canDecide: boolean): Promise<BrowserTestingView["candidate"]> {
+  const registeredBy = (await scope.deps.flow.store.get(projectRevisionKey(scope.orgId, scope.project, waiting.baseRevision)))?.["registeredBy"];
+  const stored = typeof registeredBy === "string" && scope.repository !== undefined ? await readApproved(scope.deps.objects, waiting.browserTesting!, scope.repository, registeredBy) : undefined;
+  const ready = waiting.checkState.status === "ready";
+  return {
+    status: waiting.checkState.status === "failed" ? "failed" : ready ? "ready" : "checking",
+    ...(waiting.checkState.failedStep === undefined ? {} : { failedStep: waiting.checkState.failedStep }),
+    ...(waiting.checkState.checkedAt === undefined ? {} : { checkedAt: waiting.checkState.checkedAt }),
+    revision: waiting.candidateRevision, summary: stored === undefined ? null : summaryOfPolicy(stored.found, stored.policy),
+    approval: ready ? { requestId: `setup-${waiting.digest.slice(0, 40)}-${String(waiting.candidateRevision)}`, revision: waiting.candidateRevision, artifactDigest: waiting.digest } : null,
+    canApprove: ready && canDecide,
+  };
+}
+
+/** A newer repository read or choice beside the approved setup. */
+function newerChangeOf(draft: BrowserDraftRow | undefined, approved: BrowserTestingView["approved"], revision: number): BrowserTestingView["newerChange"] {
+  const summary = approved?.summary;
+  if (summary == null || draft === undefined || draft.baseRevision > revision) return null;
+  const sameFacts = canonicalJson(draft.found) === canonicalJson(summary.found);
+  const sameChoices = canonicalJson(draft.proof) === canonicalJson(summary.proof) && draft.runTimeoutMs === summary.runTimeoutMs;
+  if (sameFacts && sameChoices) return null;
+  const was = new Set(userKindIds(summary.found)), now = new Set(userKindIds(draft.found));
+  return { kind: sameFacts ? "choices" : "repo", found: draft.found, newUserKinds: [...now].filter((id) => !was.has(id)), removedUserKinds: [...was].filter((id) => !now.has(id)), proof: draft.proof, runTimeoutMs: draft.runTimeoutMs };
+}
+
+/** The latest real browser check's result for each kind of user. */
+async function signInsOf(flow: TaskFlowDeps, orgId: OrgId, project: string): Promise<Map<string, { status: "ok" | "refused"; checkedAt: string }>> {
+  const signIns = new Map<string, { status: "ok" | "refused"; checkedAt: string }>();
+  for (const item of await queryAll(flow.store, { pk: projectPk(orgId, project), sk: { op: "beginsWith", prefix: BROWSER_SIGNIN_SK_PREFIX } })) {
+    const parsed = BrowserSignInRowSchema.safeParse(item);
+    if (parsed.success) signIns.set(parsed.data.profileId, { status: parsed.data.status, checkedAt: parsed.data.checkedAt });
+  }
+  return signIns;
+}
+
+/** The served faults, in the order the page reads them. */
+function faultsOf(input: { renewalFault: string | undefined; sandboxAvailable: boolean; unreadable: boolean }): string[] {
+  return [input.renewalFault, input.sandboxAvailable ? undefined : "sandbox-unavailable", input.unreadable ? "approved-setup-unreadable" : undefined].filter((fault) => fault !== undefined);
+}
+
+function draftViewOf(draft: BrowserDraftRow | undefined, flags: { locked: boolean; stale: boolean }): BrowserTestingView["draft"] {
+  return draft === undefined ? null : { revision: draft.draftRevision, foundAt: draft.foundAt, found: draft.found, proof: draft.proof, runTimeoutMs: draft.runTimeoutMs, ...flags };
+}
+
+function viewStateOf(parts: { approved: BrowserTestingView["approved"]; paused: boolean; candidate: BrowserTestingView["candidate"]; draft: BrowserDraftRow | undefined }): BrowserTestingView["state"] {
+  if (parts.approved !== null) return parts.paused ? "paused" : "on";
+  if (parts.candidate !== null) return parts.candidate.status === "failed" ? "check-failed" : parts.candidate.status === "ready" ? "waiting" : "checking";
+  return parts.draft !== undefined ? "draft" : "not-set-up";
+}
+
 /** What the page reads. Every fact comes from a stored row or a stored, re-verified proposal; nothing is computed from the repository here. */
 export async function browserTestingView(deps: BrowserTestingDeps, input: { project: string; canManage: boolean; viewerRole: string; personId: string; canDecide: boolean }): Promise<BrowserTestingView> {
   const { flow } = deps;
@@ -111,82 +178,27 @@ export async function browserTestingView(deps: BrowserTestingDeps, input: { proj
   const { project } = input;
   const latest = await flow.projects.latest(project);
   if (latest === undefined) throw agentXError("NOT_FOUND", BROWSER_TESTING_WORDS.projectNotFound);
-  const latestRow = await flow.store.get(projectRevisionKey(orgId, project, latest.definition.revision));
-  const repository = latest.definition.repositories.length === 1 ? repositoryOf(latest.definition) : undefined;
+  const revision = latest.definition.revision;
+  const scope: ViewScope = { deps, orgId, project, revision, latestRow: await flow.store.get(projectRevisionKey(orgId, project, revision)), repository: latest.definition.repositories.length === 1 ? repositoryOf(latest.definition) : undefined };
   const [draftRaw, applyRow, stateRaw, approvalRaw] = await Promise.all([
     flow.store.get(browserDraftKey(orgId, project)), readSetupApply({ flow, store: flow.store, companyId: orgId, now: deps.now }, project),
     flow.store.get(browserStateKey(orgId, project)), flow.store.get(browserApprovalKey(orgId, project)),
   ]);
   const state = BrowserStateRowSchema.safeParse(stateRaw ?? {});
-  const paused = state.success && state.data.paused === true;
-  const faults: string[] = [];
-  if (state.success && state.data.renewalFault !== undefined) faults.push(state.data.renewalFault.code);
   const sandboxAvailable = await deps.sandboxAvailable(project).catch(() => false);
-  if (!sandboxAvailable) faults.push("sandbox-unavailable");
-
-  // What is in force: the latest revision holds a policy and the approval that was proved for it.
-  const approvalRef = latestRow?.["setupApproval"] as { proposalRef?: unknown; proposalSha256?: unknown; candidateDigest?: unknown; decision?: unknown } | undefined;
-  const hasPolicy = latest.definition.e2e !== undefined;
-  let approved: BrowserTestingView["approved"] = null;
-  if (hasPolicy && approvalRef?.decision === "approve" && typeof approvalRef.proposalRef === "string" && typeof approvalRef.proposalSha256 === "string" && typeof approvalRef.candidateDigest === "string" && repository !== undefined) {
-    const read = typeof latestRow?.["registeredBy"] === "string"
-      ? await readApproved(deps.objects, { proposalRef: approvalRef.proposalRef, proposalSha256: approvalRef.proposalSha256, candidateDigest: approvalRef.candidateDigest }, repository, latestRow["registeredBy"]) : undefined;
-    const fact = approvalRaw?.["revision"] === latest.definition.revision ? approvalRaw : undefined;
-    if (read === undefined) faults.push("approved-setup-unreadable");
-    approved = {
-      revision: latest.definition.revision, approvedAt: typeof fact?.["approvedAt"] === "string" ? fact["approvedAt"] : null, approvedBy: typeof fact?.["approvedBy"] === "string" ? fact["approvedBy"] : null,
-      decidedByYou: fact?.["approvedBy"] === input.personId, summary: read === undefined ? null : summaryOfPolicy(read.found, read.policy),
-    };
-  }
-
+  const { approved, unreadable } = latest.definition.e2e === undefined ? { approved: null, unreadable: false } : await approvedOf(scope, approvalRaw, input.personId);
+  const faults = faultsOf({ renewalFault: state.success ? state.data.renewalFault?.code : undefined, sandboxAvailable, unreadable });
   const draft = draftOf(draftRaw);
   const waiting = applyRow !== undefined && applyRow.state === "checking" ? applyRow : undefined;
-  const waitingBrowser = waiting?.browserTesting === undefined ? undefined : waiting;
-  const setupWaiting = waiting !== undefined && waitingBrowser === undefined;
-
-  let candidate: BrowserTestingView["candidate"] = null;
-  if (waitingBrowser !== undefined && repository !== undefined) {
-    const facts = waitingBrowser.browserTesting!;
-    const registeredBy = (await flow.store.get(projectRevisionKey(orgId, project, waitingBrowser.baseRevision)))?.["registeredBy"];
-    const stored = typeof registeredBy === "string" ? await readApproved(deps.objects, facts, repository, registeredBy) : undefined;
-    const ready = waitingBrowser.checkState.status === "ready";
-    candidate = {
-      status: waitingBrowser.checkState.status === "failed" ? "failed" : ready ? "ready" : "checking",
-      ...(waitingBrowser.checkState.failedStep === undefined ? {} : { failedStep: waitingBrowser.checkState.failedStep }),
-      ...(waitingBrowser.checkState.checkedAt === undefined ? {} : { checkedAt: waitingBrowser.checkState.checkedAt }),
-      revision: waitingBrowser.candidateRevision, summary: stored === undefined ? null : summaryOfPolicy(stored.found, stored.policy),
-      approval: ready ? { requestId: `setup-${waitingBrowser.digest.slice(0, 40)}-${String(waitingBrowser.candidateRevision)}`, revision: waitingBrowser.candidateRevision, artifactDigest: waitingBrowser.digest } : null,
-      canApprove: ready && input.canDecide,
-    };
-  }
-
-  let newerChange: BrowserTestingView["newerChange"] = null;
-  if (approved?.summary != null && draft !== undefined && draft.baseRevision <= latest.definition.revision) {
-    const sameFacts = canonicalJson(draft.found) === canonicalJson(approved.summary.found);
-    const sameChoices = canonicalJson(draft.proof) === canonicalJson(approved.summary.proof) && draft.runTimeoutMs === approved.summary.runTimeoutMs;
-    if (!sameFacts || !sameChoices) {
-      const was = new Set(userKindIds(approved.summary.found)), now = new Set(userKindIds(draft.found));
-      newerChange = { kind: sameFacts ? "choices" : "repo", found: draft.found, newUserKinds: [...now].filter((id) => !was.has(id)), removedUserKinds: [...was].filter((id) => !now.has(id)), proof: draft.proof, runTimeoutMs: draft.runTimeoutMs };
-    }
-  }
-
+  const candidate = waiting?.browserTesting === undefined ? null : await candidateOf(scope, waiting, input.canDecide);
   const shownFound = candidate?.summary?.found ?? approved?.summary?.found ?? draft?.found ?? null;
-  const signIns = new Map<string, { status: "ok" | "refused"; checkedAt: string }>();
-  for (const item of await queryAll(flow.store, { pk: projectPk(orgId, project), sk: { op: "beginsWith", prefix: BROWSER_SIGNIN_SK_PREFIX } })) {
-    const parsed = BrowserSignInRowSchema.safeParse(item);
-    if (parsed.success) signIns.set(parsed.data.profileId, { status: parsed.data.status, checkedAt: parsed.data.checkedAt });
-  }
+  const signIns = await signInsOf(flow, orgId, project);
   const accounts = (shownFound?.applications ?? []).flatMap((application) => application.userKinds).map((kind) => ({ ...kind, lastSignIn: approved === null ? null : signIns.get(kind.profileId) ?? null }));
-
-  const viewState: BrowserTestingView["state"] = approved !== null ? (paused ? "paused" : "on")
-    : candidate !== null ? (candidate.status === "failed" ? "check-failed" : candidate.status === "ready" ? "waiting" : "checking") : draft !== undefined ? "draft" : "not-set-up";
+  const paused = state.success && state.data.paused === true;
   return {
-    project, canManage: input.canManage, viewerRole: input.viewerRole, state: viewState, paused, sandboxAvailable, faults, setupWaiting,
-    draft: draft === undefined ? null : {
-      revision: draft.draftRevision, foundAt: draft.foundAt, found: draft.found, proof: draft.proof, runTimeoutMs: draft.runTimeoutMs,
-      locked: waiting !== undefined, stale: draft.baseRevision !== latest.definition.revision && approved === null,
-    },
-    candidate, approved, newerChange, accounts,
+    project, canManage: input.canManage, viewerRole: input.viewerRole, state: viewStateOf({ approved, paused, candidate, draft }), paused, sandboxAvailable, faults, setupWaiting: waiting !== undefined && waiting.browserTesting === undefined,
+    draft: draftViewOf(draft, { locked: waiting !== undefined, stale: draft !== undefined && draft.baseRevision !== revision && approved === null }),
+    candidate, approved, newerChange: newerChangeOf(draft, approved, revision), accounts,
   };
 }
 
@@ -246,21 +258,28 @@ export async function saveChoices(deps: BrowserTestingDeps, project: string, by:
   if (!result.applied) throw (await waitingSetupApply(flow.store, orgId, project)) !== undefined ? anotherWaiting() : stale();
 }
 
+/** What may be checked now: the draft the person looked at, the project's latest revision, and the registrant the proposal is issued under. Refuses, in fixed words, whatever stands in the way. */
+async function readyToCheck(deps: BrowserTestingDeps, project: string, expectedDraftRevision: number): Promise<{ draft: BrowserDraftRow; definition: Awaited<ReturnType<typeof latestOf>>["definition"]; registeredBy: string }> {
+  const { flow } = deps;
+  const draft = draftOf(await flow.store.get(browserDraftKey(flow.companyId, project)));
+  if (draft === undefined) throw agentXError("CHANGE_STALE", BROWSER_TESTING_WORDS.noDraft);
+  if (draft.draftRevision !== expectedDraftRevision) throw stale();
+  const { definition, row } = await latestOf(deps, project);
+  if (draft.baseRevision !== definition.revision) throw stale();
+  if ((await waitingSetupApply(flow.store, flow.companyId, project)) !== undefined) throw anotherWaiting();
+  if (draft.found.problem !== null) throw agentXError("CONFIG_INVALID", draft.found.problem === "too-many-user-kinds" ? BROWSER_TESTING_WORDS.tooManyKinds : BROWSER_TESTING_WORDS.needsInput);
+  const registeredBy = row["registeredBy"];
+  if (typeof registeredBy !== "string" || registeredBy === "" || row["runtimeBinding"] === undefined || !(await deps.sandboxAvailable(project).catch(() => false))) throw agentXError("RUNTIME_UNAVAILABLE", BROWSER_TESTING_WORDS.sandboxUnavailable);
+  return { draft, definition, registeredBy };
+}
+
 /** Stores the candidate and starts the commands check on it. What is checked, and what the owner will approve, is the stored proposal made from the draft's own stored files. */
 export async function checkDraft(deps: BrowserTestingDeps, project: string, by: string, body: z.infer<typeof CheckBodySchema>): Promise<void> {
   const { flow } = deps;
   const orgId = flow.companyId;
   const replay = await flow.store.get(setupApplyKey(orgId, project));
   if (replay !== undefined && replay["requestId"] === body.requestId && replay["by"] === by && replay["browserTesting"] !== undefined) return;
-  const draft = draftOf(await flow.store.get(browserDraftKey(orgId, project)));
-  if (draft === undefined) throw agentXError("CHANGE_STALE", BROWSER_TESTING_WORDS.noDraft);
-  if (draft.draftRevision !== body.expectedDraftRevision) throw stale();
-  const { definition, row } = await latestOf(deps, project);
-  if (draft.baseRevision !== definition.revision) throw stale();
-  if ((await waitingSetupApply(flow.store, orgId, project)) !== undefined) throw anotherWaiting();
-  if (draft.found.problem !== null) throw agentXError("CONFIG_INVALID", draft.found.problem === "too-many-user-kinds" ? BROWSER_TESTING_WORDS.tooManyKinds : BROWSER_TESTING_WORDS.needsInput);
-  const registeredBy = row["registeredBy"];
-  if (typeof registeredBy !== "string" || registeredBy === "" || row["runtimeBinding"] === undefined || !(await deps.sandboxAvailable(project).catch(() => false))) throw agentXError("RUNTIME_UNAVAILABLE", BROWSER_TESTING_WORDS.sandboxUnavailable);
+  const { draft, definition, registeredBy } = await readyToCheck(deps, project, body.expectedDraftRevision);
   const repository = repositoryOf(definition);
   const read = await readSource(deps.objects, draft.sourceRef, draft.sourceSha256, repository);
   if (read === undefined || read.candidateDigest !== draft.candidateDigest) throw stale();

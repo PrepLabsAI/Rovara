@@ -84,30 +84,31 @@ const userKindsOf = (snapshot: E2ESourceSnapshot, applicationId: string): { kind
   return { kinds: kinds.slice(0, BROWSER_USER_KINDS_MAX), contract: true, tooMany: kinds.length > BROWSER_USER_KINDS_MAX };
 };
 
+/** One web or API application of the proposal as the page shows it (the user kinds it declares, how it starts, the sign-in snippet when the repository declares nothing), or undefined for one Rovara cannot start. */
+function foundApplication(snapshot: E2ESourceSnapshot, proposal: E2ESetupProposal, application: E2ESetupProposal["applications"][number]): { found: BrowserFoundApplication; tooMany: boolean } | undefined {
+  const recipe = application.recipe;
+  if (recipe === null || recipe.launch.kind !== "service" || (application.kind !== "web" && application.kind !== "api")) return undefined;
+  const launch = recipe.launch;
+  const users = userKindsOf(snapshot, application.applicationId);
+  const signInDeclared = users.kinds.some((kind) => kind.signInPath !== null);
+  const packagePath = application.sourcePaths.find((path) => /(^|\/)package\.json$/iu.test(path));
+  const targetIds = proposal.targets.filter((target) => target.applicationId === application.applicationId && (target.kind === "web" || target.kind === "api")).map((target) => target.targetId);
+  const offerSnippet = !signInDeclared && !users.contract && packagePath !== undefined;
+  return { tooMany: users.tooMany, found: {
+    applicationId: application.applicationId,
+    recipeSource: e2eApplicationRecipeOrigin(snapshot, application.applicationId) === "project-contract" ? "repo" : "inferred",
+    build: recipe.build.map(commandLine), start: commandLine(launch.start), healthPath: launch.health.path, healthStatus: launch.health.expectedStatus,
+    userKinds: users.kinds, signInDeclared,
+    snippet: offerSnippet ? signInSnippetFor({ applicationId: application.applicationId, packagePath, recipe, targetIds }) : null,
+  } };
+}
+
 /** The facts the page shows, read from the proposal and the files it came from. Pure. */
 export function foundFacts(snapshot: E2ESourceSnapshot, proposal: E2ESetupProposal): BrowserFound {
-  const applications: BrowserFoundApplication[] = [];
-  let tooMany = false;
-  for (const application of proposal.applications) {
-    if ((application.kind !== "web" && application.kind !== "api") || application.recipe === null || application.recipe.launch.kind !== "service") continue;
-    const recipe = application.recipe;
-    const launch = recipe.launch as Extract<E2EAppRecipe["launch"], { kind: "service" }>;
-    const users = userKindsOf(snapshot, application.applicationId);
-    tooMany ||= users.tooMany;
-    const signInDeclared = users.kinds.some((kind) => kind.signInPath !== null);
-    const packagePath = application.sourcePaths.find((path) => /(^|\/)package\.json$/iu.test(path));
-    const targetIds = proposal.targets.filter((target) => target.applicationId === application.applicationId && (target.kind === "web" || target.kind === "api")).map((target) => target.targetId);
-    applications.push({
-      applicationId: application.applicationId,
-      recipeSource: e2eApplicationRecipeOrigin(snapshot, application.applicationId) === "project-contract" ? "repo" : "inferred",
-      build: recipe.build.map(commandLine), start: commandLine(launch.start), healthPath: launch.health.path, healthStatus: launch.health.expectedStatus,
-      userKinds: users.kinds, signInDeclared,
-      snippet: signInDeclared || users.contract || packagePath === undefined ? null : signInSnippetFor({ applicationId: application.applicationId, packagePath, recipe, targetIds }),
-    });
-    if (applications.length >= 4) break;
-  }
-  const problem = tooMany ? "too-many-user-kinds" : applications.length === 0 ? "no-application" : proposal.state === "needs-input" ? "needs-input" : null;
-  return BrowserFoundSchema.parse({ applications, problem });
+  const found = proposal.applications.map((application) => foundApplication(snapshot, proposal, application)).filter((item) => item !== undefined).slice(0, 4);
+  const tooMany = found.some((item) => item.tooMany);
+  const problem = tooMany ? "too-many-user-kinds" : found.length === 0 ? "no-application" : proposal.state === "needs-input" ? "needs-input" : null;
+  return BrowserFoundSchema.parse({ applications: found.map((item) => item.found), problem });
 }
 
 // ---- the stored objects
