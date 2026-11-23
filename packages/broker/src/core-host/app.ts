@@ -138,7 +138,7 @@ export function createCoreHostApp(options: CoreHostAppOptions): CoreHostApp {
       const job = jobs.find((entry) => entry.name === event.job);
       if (job === undefined) return { skipped: "unknown_job" };
       const configured = options.jobBudgetMs ?? 50_000;
-      const budgetMs = Math.max(0, run?.remainingMs === undefined ? configured : Math.min(configured, run.remainingMs - JOB_EXIT_MARGIN_MS));
+      const budgetMs = Math.max(0, run?.remainingMs === undefined ? configured : Math.min(configured, run.remainingMs - (job.exitMarginMs ?? JOB_EXIT_MARGIN_MS)));
       // Each company's job is given what is left of the run's budget when its turn comes.
       const companies = await runPerCompany(await companiesFor(job.area), async (companyId, leftMs) => {
         const asked = nowMs();

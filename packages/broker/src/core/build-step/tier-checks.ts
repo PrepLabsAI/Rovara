@@ -9,7 +9,7 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 //     nothing that must be fixed. A failed or unanswered review is recorded for the head and never asked again for it (no shopping for a clean review); a new push gets a new review.
 // The record is written under `flowIs` (the record read), re-applied to the newer record when another writer got in first, so a yes is never lost to a race. It reads the record, never the switch: a task that
 // skipped steps owes these checks whether or not the lighter flow is still on.
-import { change, promptLocationsOf, when, type FlowQuickCheck, type FlowTierKind, type HostScope, type WorkflowFlow, type WorkflowSnapshot } from "@agentx/contracts";
+import { change, hostRateLimitRetryAt, promptLocationsOf, when, type FlowQuickCheck, type FlowTierKind, type HostScope, type WorkflowFlow, type WorkflowSnapshot } from "@agentx/contracts";
 import { codeHostForRecord } from "../../plugins/routing.js";
 import {
   DOCS_ROUTE_LINES_MAX, capReasons, higherLevel, raiseTier, tierGrowthPhrase, type TierReason, plannedPathsExceeded, planningLevelOf, recordGrowth, recordTier, recordTierReview, skippedPlanning, tierFromDiff, tierGrowthSentence, tierRank, tierReviewRecorded, type ChangeTier, type TierFile, type TierLevel,
@@ -349,7 +349,7 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
     log(deps, { event: "tier_checks.done", taskId: task.taskId, level: draft?.tier?.level, floor: floor === undefined ? "not_asked" : floor.answered === true ? (floor.raised ? "yes" : "no") : "failed_closed", grown: grown === undefined ? "none" : grown.result.completed ? "ran" : "did_not_run", reviewer: call === undefined ? "missing" : "wired" });
     return "checked";
   } catch (error) {
-    if (error instanceof Error && error.name === "HostRateLimitError") throw error;
+    if (hostRateLimitRetryAt(error) !== undefined) throw error;
     log(deps, { event: "tier_checks.unavailable", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
     return "unavailable";
   }
