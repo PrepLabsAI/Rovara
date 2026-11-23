@@ -20,7 +20,7 @@ import { storeLinkedChangeRequests } from "../core/merge/linked.js";
 import { createIdentityMergePeople } from "../core/merge/people.js";
 import { readTask } from "../core/task-flow/reads.js";
 import { pullRequestRecordOf } from "../core/build-step/records.js";
-import { createMilestoneService, createRepositoryResolver, mergeTaskOf, sessionTimeline, wakeMergeTracking } from "../services/merge-tracking.js";
+import { createMilestoneService, createRepositoryResolver, mergeTaskOf, sessionTimeline, wakeMergeTrackingForPerson } from "../services/merge-tracking.js";
 import { createTaskRepositoryEdgesSeam } from "../core/merge/repository-edges.js";
 import { hostedEvidenceBlobs } from "../core-host/hosted-evidence.js";
 import { personPressOf } from "../core/policy-hook/approvers.js";
@@ -52,7 +52,7 @@ export function hostedMergeDependencies(input: { runtime: CoreRuntime; registry:
       scope: (orgId) => ({ orgId }),
       loadTask: async (taskId) => { const record = await readTask(flow, taskId); return record === undefined ? undefined : mergeTaskOf(record, companyId); },
       recordedBase: async (workspaceId, repositoryId, number) => (await pullRequestRecordOf(flow, workspaceId, repositoryId, number))?.baseBranch,
-      requireSyncForMerge: async (task) => { await wakeMergeTracking(store, task.taskId, now()); },
+      requireSyncForMerge: async (task) => { await wakeMergeTrackingForPerson(store, task.taskId, now()); },
     },
     approvers,
     // The request's own sink when the route gives it (it names the client the press came through), else the flow's.

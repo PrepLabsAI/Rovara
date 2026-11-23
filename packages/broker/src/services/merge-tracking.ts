@@ -22,7 +22,7 @@ import { collectTrackedFeedback } from "../core/pr-feedback/service.js";
 // Nothing here names a provider; the code host is whatever the repository's record names, and a host that cannot read a merge (`mergeObservation`) is simply never seen merged.
 import {
   IMPLICIT_COMPANY_ID, OrgIdSchema, companyScoped, blockWorkflow, INDEX_EXPIRY_ATTRIBUTE, TRACKING_GATE_SECONDS, TRACKING_HEARTBEAT_MINUTES, change, hostRateLimitRetryAt, observeWorkflowPullRequest, queryAll, when,
-  type OrgId, type ReadBudget, type RegistryView, type TransactItem, type WorkflowSnapshot,
+  type Condition, type OrgId, type ReadBudget, type RegistryView, type TransactItem, type UpdateOp, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { SWEEP_INTERVAL_MS, type MergeRecoveryResult } from "../core/merge/budget.js";
 import type { RepositoryResolver } from "../core/merge/host-port.js";
@@ -61,6 +61,17 @@ export const TRACKING_FAILURE_MAX_MS = TRACKING_HEARTBEAT_MINUTES * 60_000;
 export const SWEEP_MAX_ROWS = 10;
 export const SWEEP_MAX_REQUESTS = 256;
 export const SWEEP_MAX_MS = 20_000;
+/** The sweep's reads end this long before the pass deadline (a smaller share of a short pass), so its settle writes always fit. */
+export const SETTLE_RESERVE_MS = 3_000;
+export const SETTLE_RESERVE_SHARE = 0.15;
+/** One row's time is split in phases that never take each other's time: verify takes this share of it, feedback takes `FEEDBACK_SHARE` of what is left, reconcile takes the rest. */
+export const VERIFY_SHARE = 0.45;
+export const FEEDBACK_SHARE = 0.4;
+/** The sweep owns the GitHub requests of a background pass only: it stops while less than this share of the rate limit (and never fewer than the minimum) is left, so a person's own action has requests to use. */
+export const RATE_RESERVE_SHARE = 0.05;
+export const RATE_RESERVE_MIN = 200;
+/** Owned due rows of one page read before the fairness order picks `SWEEP_MAX_ROWS` of them. */
+export const DUE_CANDIDATES_MAX = 3 * SWEEP_MAX_ROWS;
 /** One task's lighter-flow checks: their own allowance of requests, and at most this much of a pass's time (the reviewer calls are bounded on their own). */
 export const TIER_CHECKS_MAX_REQUESTS = 256;
 export const TIER_CHECKS_MAX_MS = 4 * 60_000;
@@ -73,6 +84,14 @@ export const MERGED_OUTSIDE = "The pull request was merged with commits Rovara d
 export const CLOSED_OUTSIDE = "The pull request was closed on the code host with commits Rovara did not check. Look at it there, then close this task.";
 
 type Log = (entry: Record<string, unknown>) => void;
+
+/** What a row's last pass could not finish, kept on its recovery row for whoever looks: the pull request's files were not all read from the code host, or its feedback was not collected. Cleared by a pass that finished. */
+type ReadState = "github_read_incomplete" | "feedback_incomplete";
+/** A due row of the recovery index, as one sweep reads it. */
+interface DueRow { taskId: string; attempts: number; quiet: number; nextAttemptAt: number; lastAttemptAt: number; lastHintAt: number }
+interface RowOutcome { result: MergeRecoveryResult; readState?: ReadState }
+/** Fairness: the fewest failed attempts first, then the longest since the last attempt (round robin), then the earliest due. */
+const dueOrder = (left: DueRow, right: DueRow): number => left.attempts - right.attempts || left.lastAttemptAt - right.lastAttemptAt || left.nextAttemptAt - right.nextAttemptAt || (left.taskId < right.taskId ? -1 : left.taskId > right.taskId ? 1 : 0);
 
 // ---- the session timeline and the milestone hook
 
@@ -106,13 +125,39 @@ export function mergeTaskOf(record: TaskRecord, companyId: OrgId): (MergeTask & 
   };
 }
 
+/** The number a recovery row holds in `name`, or `fallback`. */
+const numberOf = (row: Record<string, unknown> | undefined, name: string, fallback = 0): number => typeof row?.[name] === "number" ? row[name] : fallback;
+
 /**
- * DEC 254zzz94/104: makes a task's tracking row due now (as the service's `wake`), for a caller that has no service at hand: the hosted Merge button, right after a merge, so the next sweep records the
- * merge in the task's workflow (MERGED, with its milestone), and when the merge core asks for a branch to be brought up to date. Does nothing for a task with no tracking row. Best effort.
+ * Makes a tracking row due sooner (the service's `wake`), for a caller that has no service at hand: the hosted Merge button, right after a merge, so the next sweep records the merge in the task's workflow (MERGED,
+ * with its milestone), and when the merge core asks for a branch to be brought up to date; and a webhook, which only nudges. Does nothing for a task with no tracking row. Best effort.
+ *
+ * A wake records WHEN it came (`lastHintAt`, never moved back), so a sweep that is reading the row right now cannot overwrite it. It only LOWERS `nextAttemptAt`, and a row that is failing (`attempts` above 0) is never made due
+ * before its failure wait is over (its last attempt plus the failures times one gate, up to the heartbeat): a busy pull request's events cannot make a stalling read run every few seconds. A caller that acts for a person (a
+ * Merge press) passes `bypassBackoff`.
  */
-export async function wakeMergeTracking(store: Pick<TaskFlowDeps["store"], "update">, taskId: string, now: number): Promise<void> {
-  await store.update({ key: recoveryRowKey(taskId), ops: [change.set("nextAttemptAt", now), change.set("quiet", 0)], condition: when.and(when.present(), when.eq("kind", "tracking")) }).catch(() => undefined);
+export async function wakeMergeTracking(store: Pick<TaskFlowDeps["store"], "get" | "update">, taskId: string, now: number, options: { pollMs?: number; bypassBackoff?: boolean } = {}): Promise<void> {
+  const key = recoveryRowKey(taskId);
+  try {
+    const row = await store.get(key);
+    if (row === undefined || row["kind"] !== "tracking") return;
+    const attempts = numberOf(row, "attempts");
+    const lastAttemptAt = numberOf(row, "lastAttemptAt", typeof row["updatedAt"] === "string" ? Date.parse(row["updatedAt"]) || 0 : 0);
+    const failureWait = attempts > 0 && options.bypassBackoff !== true ? lastAttemptAt + Math.min((options.pollMs ?? TRACKING_POLL_MS) * attempts, TRACKING_FAILURE_MAX_MS) : 0;
+    const nextAttemptAt = Math.min(numberOf(row, "nextAttemptAt", Number.MAX_SAFE_INTEGER), Math.max(now, failureWait));
+    await store.update({ key, ops: [change.set("nextAttemptAt", nextAttemptAt), change.set("quiet", 0), change.set("lastHintAt", Math.max(numberOf(row, "lastHintAt"), now))], condition: when.and(when.present(), when.eq("kind", "tracking")) });
+  } catch { /* best effort: the sweep finds the row on its own time */ }
 }
+
+/** A wake for a person's own action (the Merge press, a branch the press found behind): never delayed by a failing row's wait. Only background wakes (a webhook) respect it. */
+export const wakeMergeTrackingForPerson = (store: Pick<TaskFlowDeps["store"], "get" | "update">, taskId: string, now: number): Promise<void> =>
+  wakeMergeTracking(store, taskId, now, { bypassBackoff: true });
+
+const budgetExhausted = (): Error => {
+  const exhausted = new Error("the sweep used its request allowance");
+  exhausted.name = "GithubBudgetExhaustedError";
+  return exhausted;
+};
 
 /** A budget for one sweep: a request allowance and a deadline shared by everything it reads. `stop` ends its timer. */
 export function createReadBudget(now: () => number, limits: { requests: number; ms: number } = { requests: SWEEP_MAX_REQUESTS, ms: SWEEP_MAX_MS }): { budget: ReadBudget; stop: () => void } {
@@ -128,14 +173,39 @@ export function createReadBudget(now: () => number, limits: { requests: number; 
       beforeRequest: () => {
         if (controller.signal.aborted || now() >= startedAt + limits.ms || requests >= limits.requests) {
           controller.abort();
-          const exhausted = new Error("the sweep used its request allowance");
-          exhausted.name = "GithubBudgetExhaustedError";
-          throw exhausted;
+          throw budgetExhausted();
         }
         requests += 1;
       },
     },
   };
+}
+
+/**
+ * One phase of one row (verify, feedback or reconcile): its OWN timer and signal, so a phase that stalls ends at its own time (the signal also ends the GitHub requests in flight, through the request context) and never takes
+ * the time of the phase after it. It shares only the request count of its `parent`, and ends with the parent.
+ */
+export function createPhaseBudget(now: () => number, parent: ReadBudget, ms: number): { budget: ReadBudget; stop: () => void } {
+  const own = new AbortController();
+  const startedAt = now();
+  const timer = setTimeout(() => own.abort(), Math.max(1, ms));
+  timer.unref();
+  const signal = AbortSignal.any([parent.signal, own.signal]);
+  return {
+    stop: () => clearTimeout(timer),
+    budget: {
+      signal,
+      beforeRequest: () => {
+        if (signal.aborted || now() >= startedAt + ms) { own.abort(); throw budgetExhausted(); }
+        parent.beforeRequest();
+      },
+    },
+  };
+}
+
+/** What a host wraps around each phase so the GitHub requests made inside it end with the phase, are logged with their timing and report the rate limit (the GitHub plugin's request context). Default: nothing. */
+export interface SweepRequestScope {
+  <T>(context: { signal: AbortSignal; log: (entry: Record<string, unknown>) => void; onRateLimit: (state: { remaining: number; limit: number; resetAt: number }) => void }, work: () => Promise<T>): Promise<T>;
 }
 
 /** The repository of a task's project, on the code host its record names (and the runner that reads that host's build logs, when one is registered). */
@@ -181,6 +251,8 @@ export interface MergeTrackingServiceOptions {
   /** Milliseconds since the epoch. The host's clock, so a test can move it. */
   now: () => number;
   log?: Log;
+  /** Wraps each phase of a row (`SweepRequestScope`): the host passes the GitHub plugin's request context. Absent: the phases still have their own budgets and signals, but no request is timed, logged or ended by the signal. */
+  requestScope?: SweepRequestScope;
   /** Overrides, for tests: the rows' first wait and the quiet cap. */
   pollMs?: number;
   quietMaxMs?: number;
@@ -342,56 +414,79 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
   let sweeping: Promise<{ attempted: number }> | undefined;
 
   const scan = options.scan ?? { cursor: undefined as string | undefined, complete: false };
-  const dueRows = async (deadline: number): Promise<Array<{ taskId: string; attempts: number; quiet: number }>> => {
-    const due: Array<{ taskId: string; attempts: number; quiet: number }> = [];
+  /** A due row as the sweep reads it from the recovery index (fields of the row only; its task's ownership is checked before it is counted). */
+  const dueRowOf = (row: Record<string, unknown>): DueRow | undefined => {
+    if (row["kind"] !== "tracking" || typeof row["taskId"] !== "string" || typeof row["nextAttemptAt"] !== "number" || row["nextAttemptAt"] > now()) return undefined;
+    return { taskId: row["taskId"], attempts: numberOf(row, "attempts"), quiet: numberOf(row, "quiet"), nextAttemptAt: row["nextAttemptAt"], lastAttemptAt: numberOf(row, "lastAttemptAt"), lastHintAt: numberOf(row, "lastHintAt") };
+  };
+  /**
+   * The due rows of this pass: the owned due rows of the pages read (at most `DUE_CANDIDATES_MAX`), the fewest failed attempts first and, among those, the one tried longest ago (round robin), and of those the first
+   * `SWEEP_MAX_ROWS`. A pull request that keeps failing waits behind every healthy one, and a lower key never decides who is read.
+   */
+  const dueRows = async (deadline: number): Promise<DueRow[]> => {
+    const due: DueRow[] = [];
     let read = 0;
     do {
-      if (now() >= deadline || read >= 1000 || due.length >= SWEEP_MAX_ROWS) break;
+      if (now() >= deadline || read >= 1000 || due.length >= DUE_CANDIDATES_MAX) break;
       const page = await store.query({ pk: "WORKFLOW_MERGE_RECOVERY", sk: { op: "beginsWith", prefix: "TASK#" }, limit: Math.min(100, 1000 - read), ...(scan.cursor === undefined ? {} : { cursor: scan.cursor }) });
       for (const row of page.items) {
         if (now() >= deadline || read >= 1000) break;
         read += 1;
-        if (row["kind"] !== "tracking" || typeof row["taskId"] !== "string" || typeof row["nextAttemptAt"] !== "number" || row["nextAttemptAt"] > now()) continue;
+        const candidate = dueRowOf(row);
         // Shared recovery index: establish ownership BEFORE reading tracking state, calling a host, or settling/deleting a row.
-        if (await loadTask(row["taskId"]) === undefined) continue;
-        due.push({ taskId: row["taskId"], attempts: typeof row["attempts"] === "number" ? row["attempts"] : 0, quiet: typeof row["quiet"] === "number" ? row["quiet"] : 0 });
-        if (due.length >= SWEEP_MAX_ROWS) break;
+        if (candidate === undefined || await loadTask(candidate.taskId) === undefined) continue;
+        due.push(candidate);
+        if (due.length >= DUE_CANDIDATES_MAX) break;
       }
-      // A full due batch may end inside this page: revisit it next pass, never skip unprocessed due rows.
-      if (due.length < SWEEP_MAX_ROWS) scan.cursor = page.cursor;
+      // A full candidate batch may end inside this page: revisit it next pass, never skip unprocessed due rows.
+      if (due.length < DUE_CANDIDATES_MAX) scan.cursor = page.cursor;
       else break;
+      // The page's due rows are what the order picks from: the pass's own reads (each owned row costs a read of its task) stay bounded, so the next page is read only when this one had none.
       if (due.length > 0) break;
     } while (scan.cursor !== undefined);
     scan.complete = scan.cursor === undefined && due.length < SWEEP_MAX_ROWS && now() < deadline;
-    return due;
+    return due.sort(dueOrder).slice(0, SWEEP_MAX_ROWS);
   };
 
-  const settle = async (row: { taskId: string; attempts: number; quiet: number }, result: MergeRecoveryResult, changed: boolean): Promise<void> => {
-    const key = recoveryRowKey(row.taskId);
-    const at = now();
-    const set = (fields: Record<string, number | string>, remove: string[] = []) => store.update({
-      key, ops: [...Object.entries(fields).map(([name, value]) => change.set(name, value)), ...remove.map((name) => change.remove(name))], condition: when.present(),
-    }).catch(() => undefined);
-    switch (result.kind) {
-      case "OBSERVED": {
-        // Quiet rows wait longer (60 s, doubling to the cap); anything that changed, or a hint of the pass that says when the answer will, starts again.
-        const quiet = changed ? 0 : row.quiet + 1;
-        const wait = Math.min(quietMaxMs, pollMs * 2 ** Math.min(quiet, 10));
-        const hinted = result.nextAt === undefined ? at + wait : Math.min(at + wait, Math.max(at + pollMs, result.nextAt));
-        await set({ nextAttemptAt: hinted, attempts: 0, quiet, updatedAt: new Date(at).toISOString(), lastObservedAt: at });
-        return;
-      }
-      case "RETRY": {
-        const attempts = row.attempts + 1;
-        if (result.scope === "github-global") { cooldownUntil = Math.max(cooldownUntil ?? 0, result.retryAt); await remember(cooldownUntil); }
-        await set({ nextAttemptAt: Math.max(result.retryAt, at + Math.min(pollMs * attempts, TRACKING_FAILURE_MAX_MS)), attempts, updatedAt: new Date(at).toISOString() });
-        return;
-      }
-      case "TERMINAL": case "MISSING":
-        // The task is over (merged, closed, gone): no more passes. The row goes; the task's history stays on the task.
-        await store.delete({ key, condition: when.present() }).catch(() => undefined);
-        return;
+  /** One write to a row of the recovery index: true when it applied, false when its condition failed, undefined when it threw (logged, never swallowed). */
+  const writeRow = async (taskId: string, ops: UpdateOp[], condition: Condition): Promise<boolean | undefined> => {
+    try {
+      return (await store.update({ key: recoveryRowKey(taskId), ops, condition })).applied;
+    } catch (error) {
+      log({ component: "merge_tracking", event: "sweep.settle_failed", taskId, error: error instanceof Error ? error.name : "unknown" });
+      return undefined;
     }
+  };
+
+  /** What a finished row writes back: the wait for the next pass and the row's read state. Every outcome moves `lastAttemptAt`; a failed pass advances `attempts`. */
+  const settleFields = (row: DueRow, result: Exclude<MergeRecoveryResult, { kind: "TERMINAL" | "MISSING" }>, changed: boolean, at: number): Record<string, number | string> => {
+    if (result.kind === "OBSERVED") {
+      // Quiet rows wait longer (60 s, doubling to the cap); anything that changed, or a hint of the pass that says when the answer will, starts again.
+      const quiet = changed ? 0 : row.quiet + 1;
+      const wait = Math.min(quietMaxMs, pollMs * 2 ** Math.min(quiet, 10));
+      const hinted = result.nextAt === undefined ? at + wait : Math.min(at + wait, Math.max(at + pollMs, result.nextAt));
+      return { nextAttemptAt: hinted, attempts: 0, quiet, updatedAt: new Date(at).toISOString(), lastObservedAt: at, lastAttemptAt: at };
+    }
+    const attempts = row.attempts + 1;
+    return { nextAttemptAt: Math.max(result.retryAt, at + Math.min(pollMs * attempts, TRACKING_FAILURE_MAX_MS)), attempts, updatedAt: new Date(at).toISOString(), lastAttemptAt: at };
+  };
+
+  const settle = async (row: DueRow, result: MergeRecoveryResult, changed: boolean, readState?: ReadState): Promise<void> => {
+    const key = recoveryRowKey(row.taskId);
+    if (result.kind === "TERMINAL" || result.kind === "MISSING") {
+      // The task is over (merged, closed, gone): no more passes. The row goes; the task's history stays on the task.
+      try { await store.delete({ key, condition: when.present() }); } catch (error) { log({ component: "merge_tracking", event: "sweep.settle_failed", taskId: row.taskId, error: error instanceof Error ? error.name : "unknown" }); }
+      return;
+    }
+    const at = now();
+    if (result.kind === "RETRY" && result.scope === "github-global") { cooldownUntil = Math.max(cooldownUntil ?? 0, result.retryAt); await remember(cooldownUntil); }
+    const fields = settleFields(row, result, changed, at);
+    const ops = (values: Record<string, number | string>): UpdateOp[] => [...Object.entries(values).map(([name, value]) => change.set(name, value)), ...(readState === undefined ? [change.remove("readState")] : [change.set("readState", readState)])];
+    // A hint (a wake) that came after the pass chose this row is merged, never overwritten: the write applies only while the row's `lastHintAt` is the one the pass saw.
+    const applied = await writeRow(row.taskId, ops(fields), when.and(when.present(), when.or(when.notExists("lastHintAt"), when.lte("lastHintAt", row.lastHintAt))));
+    if (applied !== false) return;
+    // Hinted during the pass: keep the hint's due time (a pass that saw no change is due again now; a failing one keeps its wait), and the failure facts.
+    await writeRow(row.taskId, ops(result.kind === "OBSERVED" ? { ...fields, nextAttemptAt: at, quiet: 0 } : fields), when.present());
   };
 
   /**
@@ -460,9 +555,72 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
   const verificationResult = (unverified: boolean, result: MergeRecoveryResult): MergeRecoveryResult =>
     unverified && result.kind === "OBSERVED" ? { kind: "RETRY", retryAt: now() + pollMs, scope: "task" } : result;
 
+  /** The rate limit as the sweep's requests saw it: the latest time GitHub's window resets, once less than the reserve was left. */
+  const rateWatch = { resetAt: undefined as number | undefined };
+  const onRateLimit = (state: { remaining: number; limit: number; resetAt: number }): void => {
+    if (state.remaining < Math.max(RATE_RESERVE_MIN, Math.ceil(state.limit * RATE_RESERVE_SHARE)) && state.resetAt > now()) rateWatch.resetAt = Math.max(rateWatch.resetAt ?? 0, state.resetAt);
+  };
+
+  /** Runs one phase of a row on its own budget: a share of the row's time left, its own signal, the host's request scope around it. */
+  const inPhase = async <T>(parent: ReadBudget, rowEnd: number, share: number, work: (budget: ReadBudget) => Promise<T>): Promise<T> => {
+    const { budget, stop } = createPhaseBudget(now, parent, Math.floor(Math.max(1, rowEnd - now()) * share));
+    try {
+      const run = () => work(budget);
+      return await (options.requestScope === undefined ? run() : options.requestScope({ signal: budget.signal, log: (entry) => log(entry), onRateLimit }, run));
+    } finally { stop(); }
+  };
+
+  /** Collects the row's PR feedback. Feedback never gates merge tracking: a failure (a host's rate limit excepted) is logged and answers "not finished", and feedback catches up on a later pass. */
+  const feedbackUnfinished = async (taskId: string, budget: ReadBudget): Promise<boolean> => {
+    try {
+      const task = await readTask(flow, taskId);
+      return task !== undefined && await collectTrackedFeedback({ flow, registry, repository: resolver, now }, task, budget) === "retry";
+    } catch (error) {
+      if (hostRateLimitRetryAt(error) !== undefined) throw error;
+      log({ component: "merge_tracking", event: "sweep.feedback_failed", taskId, error: error instanceof Error ? error.name : "unknown" });
+      return true;
+    }
+  };
+
+  /** One row: verify, then feedback, then reconcile, each in its own phase (a phase that stalls cannot take the time of the next), so the tracking item is written even when the first two did not finish. */
+  const trackRow = async (taskId: string, taskBudget: ReadBudget, requests: number, rowEnd: number): Promise<RowOutcome> => {
+    const task = await readTask(flow, taskId);
+    // The changed files are read from the code host once for the code the pull requests hold (review H3): until then the risk is high. A host that cannot answer now is asked again soon.
+    const verifyBudget = rowBudget(taskBudget, Math.floor(requests / 2));
+    const unverified = task !== undefined && await inPhase(verifyBudget, rowEnd, VERIFY_SHARE, (budget) => verifyPublishedChanges(flow, task, budget.beforeRequest)) === "unavailable";
+    // A task whose planning steps were skipped owes the lighter flow's checks on its current head. They take model calls, so they run in a pass of their own with an allowance of their own (`tierChecks`), never inside this sweep.
+    if (task?.workflow !== undefined && skippedPlanning(task.workflow.flow)) await markTierDue(taskId);
+    const unfinished = await inPhase(taskBudget, rowEnd, FEEDBACK_SHARE, (budget) => feedbackUnfinished(taskId, budget));
+    const reconciled = verificationResult(unverified, await inPhase(taskBudget, rowEnd, 1, (budget) => reconcileTrackingTask(deps, taskId, budget)));
+    // Feedback that did not finish asks for another look in one poll; it is not a failure of the pull request's tracking (no growing wait).
+    const result: MergeRecoveryResult = unfinished && reconciled.kind === "OBSERVED" ? { kind: "OBSERVED", nextAt: Math.min(now() + pollMs, reconciled.nextAt ?? Number.MAX_SAFE_INTEGER) } : reconciled;
+    return { result, ...(unverified ? { readState: "github_read_incomplete" as const } : unfinished ? { readState: "feedback_incomplete" as const } : {}) };
+  };
+
+  const attemptRow = async (row: DueRow, taskBudget: ReadBudget, requests: number, rowEnd: number): Promise<RowOutcome> => {
+    try {
+      return await trackRow(row.taskId, taskBudget, requests, rowEnd);
+    } catch (error) {
+      const limitedUntil = hostRateLimitRetryAt(error);
+      if (limitedUntil === undefined) log({ component: "merge_tracking", event: "sweep.row_failed", taskId: row.taskId, error: error instanceof Error ? error.name : "unknown" });
+      return { result: limitedUntil !== undefined ? { kind: "RETRY", retryAt: limitedUntil, scope: "github-global" } : { kind: "RETRY", retryAt: now() + pollMs, scope: "task" } };
+    }
+  };
+
+  /** Stops the background sweep until GitHub's window resets when its requests saw the reserve used (a person's own actions share the installation's limit). */
+  const pauseForRateReserve = async (): Promise<boolean> => {
+    if (rateWatch.resetAt === undefined) return false;
+    cooldownUntil = Math.max(cooldownUntil ?? 0, rateWatch.resetAt);
+    log({ component: "merge_tracking", event: "sweep.rate_reserve", resetAt: cooldownUntil });
+    rateWatch.resetAt = undefined;
+    await remember(cooldownUntil);
+    return true;
+  };
+
   const runSweep = async (budgetMs: number): Promise<{ attempted: number }> => {
     if (!Number.isFinite(budgetMs) || budgetMs <= 0) return { attempted: 0 };
-    const deadline = now() + Math.min(budgetMs, SWEEP_MAX_MS);
+    const total = Math.min(budgetMs, SWEEP_MAX_MS);
+    const deadline = now() + total;
     scan.complete = false;
     if (!cooldownRead) {
       cooldownRead = true;
@@ -472,7 +630,8 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     if (cooldownUntil !== undefined && now() < cooldownUntil) return { attempted: 0 };
     if (cooldownUntil !== undefined) await remember(undefined);
     cooldownUntil = undefined;
-    let rows: Awaited<ReturnType<typeof dueRows>>;
+    rateWatch.resetAt = undefined;
+    let rows: DueRow[];
     try {
       rows = await dueRows(deadline);
     } catch (error) {
@@ -480,52 +639,35 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
       return { attempted: 0 };
     }
     if (rows.length === 0) return { attempted: 0 };
-    const left = deadline - now();
+    // Reads end before the pass does: the settle writes (the row's attempts, wait and read state) always have time.
+    const readsEnd = deadline - Math.min(SETTLE_RESERVE_MS, Math.floor(total * SETTLE_RESERVE_SHARE));
+    const left = readsEnd - now();
     if (left <= 0) return { attempted: 0 };
     const { budget, stop } = createReadBudget(now, { requests: SWEEP_MAX_REQUESTS, ms: left });
     let attempted = 0;
+    let reached = 0;
     try {
       for (const row of rows) {
         // A code host that said "slow down" in this sweep pauses the rest of it.
-        if (cooldownUntil !== undefined || budget.signal.aborted || now() >= deadline) { scan.complete = false; break; }
+        if (cooldownUntil !== undefined || budget.signal.aborted || now() >= readsEnd) { scan.complete = false; break; }
+        reached += 1;
         if (await loadTask(row.taskId) === undefined) continue;
         attempted += 1;
         const versionBefore = await trackingVersions(row.taskId);
-        let result: MergeRecoveryResult;
-        let unverified = false;
-        // A row owns a bounded share; verification gets half, leaving the rest for reconciliation.
+        // A row owns a bounded share of the requests and an equal share of the time left (a row that stalls cannot take the time of the rows after it).
         const requests = Math.floor(SWEEP_MAX_REQUESTS / rows.length);
-        const taskBudget = rowBudget(budget, requests);
-        const verifyBudget = rowBudget(taskBudget, Math.floor(requests / 2));
-        try {
-          // The changed files are read from the code host once for the code the pull requests hold (review H3): until then the risk is high. A host that cannot answer now is asked again soon.
-          const task = await readTask(flow, row.taskId);
-          if (task !== undefined) unverified = (await verifyPublishedChanges(flow, task, verifyBudget.beforeRequest)) === "unavailable";
-          // A task whose planning steps were skipped owes the lighter flow's checks on its current head. They take model calls, so they run in a pass of their own with an allowance of their own (`tierChecks`), never inside this sweep.
-          if (task?.workflow !== undefined && skippedPlanning(task.workflow.flow)) await markTierDue(row.taskId);
-          result = await reconcileWithFeedback(row.taskId, taskBudget);
-          result = verificationResult(unverified, result);
-        } catch (error) {
-          const limitedUntil = hostRateLimitRetryAt(error);
-          result = limitedUntil !== undefined ? { kind: "RETRY", retryAt: limitedUntil, scope: "github-global" } : { kind: "RETRY", retryAt: now() + pollMs, scope: "task" };
-          if (limitedUntil === undefined) log({ component: "merge_tracking", event: "sweep.row_failed", taskId: row.taskId, error: error instanceof Error ? error.name : "unknown" });
-        }
+        const rowEnd = now() + Math.floor((readsEnd - now()) / (rows.length - reached + 1));
+        const outcome = await attemptRow(row, rowBudget(budget, requests), requests, rowEnd);
         // Did the pass change anything? Its tracking item's version moves whenever it wrote.
-        await settle(row, result, await trackingVersions(row.taskId) !== versionBefore);
-        if (result.kind === "RETRY" && result.scope === "github-global") break;
+        await settle(row, outcome.result, await trackingVersions(row.taskId) !== versionBefore, outcome.readState);
+        if (outcome.result.kind === "RETRY" && outcome.result.scope === "github-global") break;
+        if (await pauseForRateReserve()) { scan.complete = false; break; }
       }
     } finally {
       stop();
     }
+    if (reached < rows.length) log({ component: "merge_tracking", event: "sweep.rows_deferred", deferred: rows.length - reached });
     return { attempted };
-  };
-
-  const reconcileWithFeedback = async (taskId: string, budget: ReadBudget): Promise<MergeRecoveryResult> => {
-    const task = await readTask(flow, taskId);
-    const feedback = task === undefined ? "unchanged" : await collectTrackedFeedback({ flow, registry, repository: resolver, now }, task, budget);
-    if (feedback !== "retry") return reconcileTrackingTask(deps, taskId, budget);
-    const observed = await observeMerge(taskId, budget);
-    return observed.kind === "TERMINAL" ? observed : { kind: "RETRY", retryAt: now() + pollMs, scope: "task" };
   };
 
   /** The versions of the task's tracking items and its workflow, as one string: it changes whenever a pass wrote something. */
@@ -543,9 +685,7 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
       sweeping ??= runSweep(sweepOptions?.budgetMs ?? SWEEP_MAX_MS).finally(() => { sweeping = undefined; });
       return sweeping;
     },
-    async wake(taskId) {
-      await store.update({ key: recoveryRowKey(taskId), ops: [change.set("nextAttemptAt", now()), change.set("quiet", 0)], condition: when.and(when.present(), when.eq("kind", "tracking")) }).catch(() => undefined);
-    },
+    wake: (taskId) => wakeMergeTracking(store, taskId, now(), { pollMs }),
     pauseUntil(retryAt) { cooldownUntil = Math.max(cooldownUntil ?? 0, retryAt); void remember(cooldownUntil); },
     pausedUntil: () => (cooldownUntil !== undefined && now() < cooldownUntil ? cooldownUntil : undefined),
     async idle() { await sweeping?.catch(() => undefined); await tierRunning?.catch(() => undefined); },

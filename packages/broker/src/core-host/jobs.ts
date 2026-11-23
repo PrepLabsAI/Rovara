@@ -15,6 +15,8 @@ export interface CoreJob {
   name: string;
   area: CoreArea;
   trigger: JobTrigger;
+  /** What a scheduled run leaves of its function's time for its own end, when this job needs less than `JOB_EXIT_MARGIN_MS`. */
+  exitMarginMs?: number;
   run(runtime: CoreRuntime, budgetMs: number): Promise<Record<string, unknown>>;
 }
 
@@ -32,8 +34,8 @@ export const CORE_JOBS: readonly CoreJob[] = [
   { name: "dispatch-sweep", area: "flow", trigger: { kind: "schedule", rate: "rate(1 minute)" }, run: async (runtime) => ({ ...(await runtime.flow.sweepOnce()) }) },
   // The run-lost watchdog: an operation whose worker machine is lost or unhealthy past the grace period ends INTERRUPTED (the laptop runs it with the sweep).
   { name: "run-watch", area: "flow", trigger: { kind: "schedule", rate: "rate(1 minute)" }, run: async (runtime) => ({ ...(await runtime.flow.sweepRunsOnce()) }) },
-  // Merge tracking's sweep.
-  { name: "merge-tracking", area: "merge", trigger: { kind: "schedule", rate: "rate(1 minute)" }, run: service("merge-tracking") },
+  // Merge tracking's sweep. Its own exit margin (10 s of the 30 s function) gives the sweep a 20 s pass: reads, then its settle writes.
+  { name: "merge-tracking", area: "merge", trigger: { kind: "schedule", rate: "rate(1 minute)" }, exitMarginMs: 10_000, run: service("merge-tracking") },
   { name: "session-sweep", area: "flow", trigger: { kind: "schedule", rate: "rate(5 minutes)" }, run: service("session-sweep") },
   { name: "notify-deliver", area: "flow", trigger: { kind: "schedule", rate: "rate(5 minutes)" }, run: service("notify-deliver") },
   // A hold whose caller died is closed by the admission adapter's own sweep, on a schedule.

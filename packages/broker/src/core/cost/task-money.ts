@@ -3,6 +3,7 @@ import { costPartition } from "./ledger.js";
 import { workspaceKey } from "../task-flow/keys.js";
 import { workspaceOperations } from "../task-flow/reads.js";
 import type { TaskRecord } from "../task-flow/records.js";
+import { hostedPayerOf } from "./task-payer.js";
 
 const available = <T>(value: T): MoneyField<T> => ({ state: "available", value });
 const unknown = (reason: "not_measured" | "unreadable" | "restricted" = "not_measured"): MoneyField<never> => ({ state: "unavailable", reason });
@@ -12,7 +13,7 @@ const natural = (v: unknown): v is number => typeof v === "number" && Number.isS
  * has no authenticated gateway coverage/headroom feed yet: hosted money remains partial.
  */
 export async function readTaskMoney(input: {
-  store: DocumentStore; companyId: string; task: Pick<TaskRecord, "taskId" | "companyId" | "workspaceId" | "updatedAt" | "createdAt" | "closedAt" | "workflow"> & { status?: string };
+  store: DocumentStore; companyId: string; task: Pick<TaskRecord, "taskId" | "companyId" | "workspaceId" | "updatedAt" | "createdAt" | "closedAt" | "workflow"> & Partial<Pick<TaskRecord, "developerId" | "developerName" | "project" | "origin" | "purpose" | "charge">> & { status?: string };
   hosted?: boolean; revealPayer?: boolean; taskMaximumMicros?: number;
 }): Promise<TaskMoneyV1> {
   const { task, store, companyId } = input;
@@ -101,6 +102,8 @@ export async function readTaskMoney(input: {
       const payers = base.allocations.flatMap(a => a.payer.state === "available" ? [a.payer.value] : []);
       base.payer = payers.every(p => JSON.stringify(p) === JSON.stringify(payers[0])) ? available(payers[0]!) : available({ kind: "mixed", name: "Multiple payers" });
     }
+    // No receipt names a payer (the hosted broker stores none): the task's own member, when the gateway would charge exactly that member for every run (task-payer.ts). A receipt, when there is one, always wins.
+    base.payer = hostedPayerOf(input, base.payer, base.allocations.length, operations);
     base.state = provenEmpty ? "current" : hasAmount ? "partial" : "unavailable";
     if (provenEmpty) { base.coverage.expectedCalls = available(0); base.stop.coverage = "complete"; }
     base.finality = provenEmpty && terminal ? "final" : hasAmount ? "provisional" : "unavailable";

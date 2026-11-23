@@ -6,6 +6,7 @@ import { DeploymentEnvironmentSchema, EVAL_WRAPPER_BRANCH_PATTERN, GitBranchName
 import type { RepositoryAccess, RepositoryCredential } from "../../../repository-access.js";
 import type { ReadBudget as GithubMergeReadBudget } from "@agentx/contracts"; // L7a: the port's read allowance, not an aws/ module (same shape)
 import { isAllowedLogAddress, logTail, readLogEnd } from "../../../github-job-log.js";
+import { instrumentGithubFetch, markGithubFetchInstrumented } from "./request-context.js";
 import { checkAgentTokenPermissions, type GitHubAgentTokenPermissions } from "../../../agents/github-agent-tools.js";
 import {
   mergeRequiredChecks, parseMergeableState, parseRepositoryPermission, parseReview, parseRollupContext, requestedReviewerCount, requestedReviewerIds, requiredChecksFromProtection, requiredChecksFromRules, statusRecord,
@@ -450,7 +451,11 @@ export class GitHubAppCredentialProvider {
 
   constructor(private readonly options: GitHubAppCredentialProviderOptions) {
     if (typeof options.appId === "string" && !GITHUB_APP_ID.test(options.appId)) throw new Error("GitHub App ID must be numeric");
-    this.fetchImplementation = options.fetchImplementation ?? fetch;
+    // W1: every request carries the sweep's phase signal, a deadline, a timing line and the neutral rate-limit error (inside a sweep only; `request-context.ts`).
+    this.fetchImplementation = instrumentGithubFetch(options.fetchImplementation ?? fetch, {
+      now: options.now ?? Date.now,
+      rateLimitError: (response, at) => { const retryAt = mergeRateLimitRetryAt(response, at); return retryAt === undefined ? undefined : new GithubMergeRateLimitError(retryAt); },
+    });
     this.now = options.now ?? Date.now;
   }
 
@@ -809,7 +814,7 @@ export class GitHubAppCredentialProvider {
       if (retryAt !== undefined) throw new GithubMergeRateLimitError(retryAt);
       return response;
     }) as typeof fetch;
-    return new GitHubAppCredentialProvider({ ...this.options, fetchImplementation: boundedFetch, now: this.now });
+    return new GitHubAppCredentialProvider({ ...this.options, fetchImplementation: markGithubFetchInstrumented(boundedFetch), now: this.now });
   }
 
   /** A bounded, stable merge-state read that cannot reuse or populate the singleton provider's caches. */

@@ -108,7 +108,14 @@ describe("mergeReadiness", () => {
   it("holds while the task is changing, blocked, closed, or a second review waits", () => {
     expect(refused({ workflow: { stage: "WAIT_FOR_MERGE", state: "RUNNING" } })).toBe(M.changing);
     expect(refused({ workflow: { stage: "WAIT_FOR_MERGE", state: "WAITING", fixSource: {} } })).toBe(M.changing);
-    expect(refused({ workflow: { stage: "WAIT_FOR_MERGE", state: "WAITING", feedbackReview: { status: "PENDING" } } })).toBe(M.changing);
+    // FEEDBACK-REVIEW-USAGE-FIX: a review that is DONE and waits for the owner's Keep or Fix is not "still changing"; a review or a fix really in progress still is.
+    expect(refused({ workflow: { stage: "WAIT_FOR_MERGE", state: "WAITING", feedbackReview: { status: "PENDING" } } })).toBe(M.waitingForDecision);
+    expect(M.waitingForDecision).toBe("Waiting for your decision on the review feedback.");
+    expect(refused({ workflow: { stage: "WAIT_FOR_MERGE", state: "WAITING", feedbackReview: { status: "COLLECTING" } } })).toBe(M.changing);
+    expect(refused({ workflow: { stage: "WAIT_FOR_MERGE", state: "WAITING", feedbackReview: { status: "PENDING" }, fixSource: {} } })).toBe(M.changing);
+    expect(refused({ workflow: { stage: "WAIT_FOR_MERGE", state: "WAITING", feedbackReview: { status: "PENDING" }, branchSync: {} } })).toBe(M.changing);
+    expect(refused({ workflow: { stage: "WAIT_FOR_MERGE", state: "RUNNING", feedbackReview: { status: "PENDING" } } })).toBe(M.changing);
+    expect(refused({ workflow: { stage: "WAIT_FOR_MERGE", state: "BLOCKED", blockReason: "x", feedbackReview: { status: "PENDING" } } })).toBe(M.changing);
     expect(refused({ workflow: { stage: "REVIEW", state: "WAITING" } })).toBe(M.changing);
     expect(refused({ workflow: { stage: "MERGED", state: "COMPLETE" } })).toBe(M.taskClosed);
     expect(refused({ secondReviewWait: "A second review is waiting for you." })).toBe("A second review is waiting for you.");

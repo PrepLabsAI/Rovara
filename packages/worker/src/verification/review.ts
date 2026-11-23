@@ -89,6 +89,35 @@ const outputError = (check: string, rule: string) => new FeedbackReviewerOutputE
 const TESTS_RULE = "A fix that changes code in a repository that has tests must name at least one test file and the behavior it checks. "
   + "A fix that changes only documentation (.md, .mdx or .rst files, README, LICENSE or CHANGELOG text files, or text files under docs/; never code or build files), or a fix in a repository with no test files, may give tests as an empty list.";
 
+/**
+ * Reports what a feedback review's session spent, once, to `input.onUsage` (the same hand-off the REVIEW stage's reviewers use). True when the spend could NOT be reported: the stats could not be read or the report
+ * failed. A session that was never made spent nothing and reports nothing. Nothing here throws, so it can never replace the error that is leaving the review (an install pause, unverified rule files).
+ */
+async function reportFeedbackReviewUsage(
+  input: { onUsage?: ((usage: { role: "CRITIC"; stats: ReturnType<PiSessionHandle["getSessionStats"]>; model: WorkspaceModelConfiguration; outcome: "SUCCEEDED" | "FAILED"; checkpoints?: UsageCheckpointer }) => Promise<void>) | undefined },
+  session: { getSessionStats(): ReturnType<PiSessionHandle["getSessionStats"]> } | undefined,
+  model: WorkspaceModelConfiguration,
+  checkpoints: UsageCheckpointer | undefined,
+  end: { fatal: boolean; status: WorkflowFeedbackReviewReport["status"] },
+): Promise<boolean> {
+  if (session === undefined || input.onUsage === undefined) return false;
+  try {
+    const stats = session.getSessionStats();
+    await input.onUsage({ role: "CRITIC", stats, model, outcome: !end.fatal && end.status === "COMPLETE" ? "SUCCEEDED" : "FAILED", ...(checkpoints === undefined ? {} : { checkpoints }) });
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/** A review whose spend could not be reported is BLOCKED with no findings (unknown spend never drives a paid fix); a cancelled one stays cancelled. */
+function settleUnreportedUsage(
+  review: { status: WorkflowFeedbackReviewReport["status"]; findings: WorkflowFeedbackFinding[]; blockReason: string | undefined },
+  unreported: boolean,
+): { status: WorkflowFeedbackReviewReport["status"]; findings: WorkflowFeedbackFinding[]; blockReason: string | undefined } {
+  return unreported && review.status !== "INTERRUPTED" ? { status: "BLOCKED", findings: [], blockReason: "usage could not be reported" } : review;
+}
+
 export interface WorkflowFeedbackReviewExecution {
   report: WorkflowFeedbackReviewReport;
   /** SHA-256 of the exact JSON bytes written to the private artifact sink. */
@@ -139,6 +168,13 @@ export async function runWorkflowFeedbackReview(input: {
   onProgress?: (message: string) => void;
   /** Structured answers: the reviewer answers through a tool Pi checks, the text parse being the fallback. Default: on, unless ROVARA_STRUCTURED_ANSWERS=0. */
   structuredAnswers?: boolean;
+  /**
+   * What the reviewer's session spent, reported once when it has ended (a result, a refused answer, a cancel or a fatal pause alike), exactly as the REVIEW stage's reviewers do (`runWorkflowReviews`).
+   * A review whose spend cannot be reported or read is BLOCKED with no findings: unknown spend never drives a paid fix. Absent: nothing is reported.
+   */
+  onUsage?: (usage: { role: "CRITIC"; stats: ReturnType<PiSessionHandle["getSessionStats"]>; model: WorkspaceModelConfiguration; outcome: "SUCCEEDED" | "FAILED"; checkpoints?: UsageCheckpointer }) => Promise<void>;
+  /** Per-run dollar stop: the checkpoints of the reviewer's session (usage.ts `createUsageCheckpointer`), handed back to `onUsage` for its end report. Absent: none. */
+  usageCheckpoints?: (session: PiSessionHandle) => UsageCheckpointer;
 }): Promise<WorkflowFeedbackReviewExecution> {
   // Refused up front: the session's own refusal below would be reported as a failed review, not as a task that did not start.
   assertFileToolsContained(input.fileTools === undefined ? {} : { fileTools: input.fileTools });
@@ -174,6 +210,9 @@ export async function runWorkflowFeedbackReview(input: {
   let unsubscribe: (() => void) | undefined;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let abortListener: (() => void) | undefined;
+  let checkpoints: UsageCheckpointer | undefined;
+  let fatalEnd = false;
+  let usageUnreported: boolean;
   let finalAnswer: string | undefined;
   let rejectedAnswer = false;
   const recordedCandidate = createCandidateManifest(await readCandidateRepositories(withCandidateBase(input.repositories, input.candidate)));
@@ -221,7 +260,9 @@ export async function runWorkflowFeedbackReview(input: {
       version = actualModel.modelId;
       let response: string | undefined;
       let installPause: AgentXError | undefined;
+      checkpoints = input.usageCheckpoints?.(session);
       unsubscribe = session.subscribe((event: unknown) => {
+        checkpoints?.observe(event);
         const record = event as { type?: unknown; payload?: { type?: unknown }; message?: unknown };
         if (record.type === "message_end" || record.payload?.type === "message_end") {
           response = assistantText(record.message ?? (event as { message?: unknown }).message);
@@ -286,7 +327,7 @@ export async function runWorkflowFeedbackReview(input: {
   } catch (error) {
     // A base whose rule files cannot be verified ends the run; it is never reported as a review that could not start.
     const fatal = reviewFatalError(error);
-    if (fatal !== undefined) throw fatal;
+    if (fatal !== undefined) { fatalEnd = true; throw fatal; }
     status = input.signal?.aborted ? "INTERRUPTED" : "BLOCKED";
     findings = [];
     blockReason = input.signal?.aborted ? "review was cancelled" : "review could not verify the exact candidate";
@@ -294,8 +335,11 @@ export async function runWorkflowFeedbackReview(input: {
     if (timeout !== undefined) clearTimeout(timeout);
     if (abortListener !== undefined) input.signal?.removeEventListener("abort", abortListener);
     unsubscribe?.();
+    // The spend is read and reported HERE, before the session goes and before a fatal error leaves (an install pause or unverified rule files after model calls): a rethrow must not lose it.
+    usageUnreported = await reportFeedbackReviewUsage(input, session, { provider, modelId: version }, checkpoints, { fatal: fatalEnd, status });
     session?.dispose();
   }
+  ({ status, findings, blockReason } = settleUnreportedUsage({ status, findings, blockReason }, usageUnreported));
   if (rejectedAnswer && finalAnswer !== undefined) {
     // The reviewer's own words never reach the report or a message; a rejected answer is kept privately, redacted like
     // other stored model output, so a failed review can be looked into. Best effort: the report below still matters most.
