@@ -81,10 +81,12 @@ function checkBrokerSlackPoster(template: TemplateJson, env: string, baseline: {
   if (policies.length !== 1) throw new Error("one resource policy on the Slack adapter secret");
   if (!isDeepStrictEqual(policies[0]![1].Properties.ResourcePolicy, brokerSlackSecretPolicyDocument(roleId))) throw new Error("the Slack adapter secret's policy is not exactly the approved statement");
   if (Object.keys(policies[0]![1].Properties).sort().join() !== "ResourcePolicy,SecretId") throw new Error("the resource policy has properties beyond the policy and the secret");
-  // Through policies, the broker reaches exactly two secrets: the callback key (before this change) and this one (GetSecretValue only).
+  // Through policies, the broker reaches exactly three secrets: the callback key (before this change), this one (GetSecretValue only) and, since webhook lane W3, the GitHub webhook secret
+  // (an empty slot the owner fills; GetSecretValue only, checked in github-webhook-secret-infrastructure.test.ts).
   const access = brokerSecretPolicyAccess(template);
   const callbackKey = ofType(template, "AWS::SecretsManager::Secret").filter(([, secret]) => secret.Properties.Name === `agentx/${env}/callback-key`).map(([id]) => id);
-  if (JSON.stringify(Object.keys(access).sort()) !== JSON.stringify([...callbackKey, secrets[0]![0]].sort())) throw new Error(`the broker reaches secrets by policy beyond the callback key and the Slack adapter's: ${Object.keys(access).join(", ")}`);
+  const githubWebhook = ofType(template, "AWS::SecretsManager::Secret").filter(([, secret]) => secret.Properties.Name === `agentx/${env}/github-webhook-secret`).map(([id]) => id);
+  if (JSON.stringify(Object.keys(access).sort()) !== JSON.stringify([...callbackKey, ...githubWebhook, secrets[0]![0]].sort())) throw new Error(`the broker reaches secrets by policy beyond the callback key, the GitHub webhook secret and the Slack adapter's: ${Object.keys(access).join(", ")}`);
   if (JSON.stringify(access[secrets[0]![0]]) !== JSON.stringify(["secretsmanager:GetSecretValue"])) throw new Error("the broker's access to the Slack adapter secret is not GetSecretValue alone");
   // The broker's identity policy is exactly what it was: no new Secrets Manager or KMS statement.
   if (JSON.stringify(brokerIdentitySecretStatements(template)) !== baseline.identitySecretStatements) throw new Error("the broker's identity policy changed in Secrets Manager or KMS actions");
@@ -207,12 +209,16 @@ describe("the broker's Slack poster and its read of the Slack adapter secret (L4
       ["M7 the principal is another role", (t) => { statementOf(t).Principal = { AWS: { "Fn::GetAtt": [idOf(t, "DispatcherServiceRole", "AWS::IAM::Role"), "Arn"] } }; }],
       ["M8 a second statement allows another role to read it", (t) => { (slackPolicy(t).Properties.ResourcePolicy as { Statement: unknown[] }).Statement.push({ ...statementOf(t), Sid: "Other", Principal: { AWS: { "Fn::GetAtt": [idOf(t, "DispatcherServiceRole", "AWS::IAM::Role"), "Arn"] } } }); }],
       ["M9 the policy is on another secret (the GitHub key's / the callback key's neighbour)", (t) => {
-        const other = ofType(t, "AWS::SecretsManager::Secret").find(([, secret]) => secret.Properties.Name !== "agentx/staging/channel-adapter/slack" && secret.Properties.Name !== "agentx/staging/callback-key");
+        const other = ofType(t, "AWS::SecretsManager::Secret").find(([, secret]) => secret.Properties.Name !== "agentx/staging/channel-adapter/slack" && secret.Properties.Name !== "agentx/staging/callback-key"
+          // Webhook lane W3: the GitHub webhook secret is the broker's third, approved secret (the broker is already in its policy).
+          && secret.Properties.Name !== "agentx/staging/github-webhook-secret");
         if (other === undefined) throw new Error("fixture: no other secret in the template");
         slackPolicy(t).Properties.SecretId = { Ref: other[0] };
       }],
       ["M10 the broker is added to a second secret's policy", (t) => {
-        const other = ofType(t, "AWS::SecretsManager::Secret").find(([, secret]) => secret.Properties.Name !== "agentx/staging/channel-adapter/slack" && secret.Properties.Name !== "agentx/staging/callback-key");
+        const other = ofType(t, "AWS::SecretsManager::Secret").find(([, secret]) => secret.Properties.Name !== "agentx/staging/channel-adapter/slack" && secret.Properties.Name !== "agentx/staging/callback-key"
+          // Webhook lane W3: the GitHub webhook secret is the broker's third, approved secret.
+          && secret.Properties.Name !== "agentx/staging/github-webhook-secret");
         if (other === undefined) throw new Error("fixture: no other secret in the template");
         t.Resources.ExtraPolicy = { Type: "AWS::SecretsManager::ResourcePolicy", Properties: { SecretId: { Ref: other[0] }, ResourcePolicy: structuredClone(slackPolicy(t).Properties.ResourcePolicy) } };
       }],

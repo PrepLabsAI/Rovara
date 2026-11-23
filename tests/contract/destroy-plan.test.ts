@@ -177,6 +177,8 @@ describe("destroy: the inventory of what the stacks retain", () => {
     const first = mergeInventory(undefined, { env: "staging", resources: [{ part: "foundation", logicalId: "Key", type: "AWS::KMS::Key", physicalId: "k-1" }], launchTemplateId: "lt-0123456789abcdef0", slackAppId: "A0APP" });
     await writeInventory(store, first);
     expect(store.values.has(inventoryParameterName("staging"))).toBe(true);
+    // A small inventory stays plain JSON (the compressed form is only for one that would not fit SSM's 4096 bytes).
+    expect(store.values.get(inventoryParameterName("staging"))?.startsWith("{")).toBe(true);
     const stored = await readInventory(store, "staging");
     const second = mergeInventory(stored, { env: "staging", resources: [{ part: "foundation", logicalId: "Key", type: "AWS::KMS::Key", physicalId: "k-1" }, { part: "identity", logicalId: "Pool", type: "AWS::Cognito::UserPool", physicalId: "us-east-1_X" }] });
     expect(second.resources).toHaveLength(2);

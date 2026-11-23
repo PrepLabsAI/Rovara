@@ -15941,7 +15941,7 @@ const ec2Sessions = new SessionManager({
   },
   ...optionalPicker(machineSizePicker({ documentClient, tableName: process.env.STATE_TABLE_NAME ?? "" })),
 });
-const github = createGitHubAppCredentials(secretsManager);
+const github = createGitHubAppCredentials(secretsManager, brokerLogLine);
 /** Guided onboarding PR 4: Add to Slack (slack-company-install.ts), with the company layer only. Slack's side (the app's client secret, the code exchange, the token store's
  * writer) runs in DeveloperIdentity (slack-install-identity.ts), which this broker already invokes; the broker never reads the Slack app secret. */
 const slackInstallSlack = process.env.COMPANY_SIGNIN !== "enabled" || !process.env.DEVELOPER_IDENTITY_FUNCTION_ARN ? undefined

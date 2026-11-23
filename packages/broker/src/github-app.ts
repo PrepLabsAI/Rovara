@@ -1341,18 +1341,29 @@ export function isWebhookSecretMissing(error: unknown): boolean {
   return isAgentXError(error) && error.code === "RUNTIME_UNAVAILABLE" && error.message.endsWith(GITHUB_WEBHOOK_SECRET_MISSING);
 }
 
+/** The refusal for "no usable webhook secret", from either source (the dedicated secret or the App secret's key). Names no secret and quotes no value. */
+export function webhookSecretMissing(): AgentXError {
+  return agentXError("RUNTIME_UNAVAILABLE", GITHUB_WEBHOOK_SECRET_MISSING);
+}
+
+/** The webhook HMAC key a secret's text may be: 32 characters to 4,096 bytes after trimming (what the broker has always accepted). */
+export function usableWebhookSecret(text: string): string | undefined {
+  const trimmed = text.trim();
+  return trimmed.length >= 32 && Buffer.byteLength(trimmed, "utf8") <= 4_096 ? trimmed : undefined;
+}
+
 /** Reads the optional webhook HMAC secret from the same protected App secret JSON object. */
 export function webhookSecretFromSecret(secret: string): string {
   try {
     const value = JSON.parse(secret.trim()) as unknown;
     if (value && typeof value === "object" && "webhookSecret" in value && typeof value.webhookSecret === "string") {
-      const webhookSecret = value.webhookSecret.trim();
-      if (webhookSecret.length >= 32 && Buffer.byteLength(webhookSecret, "utf8") <= 4_096) return webhookSecret;
+      const webhookSecret = usableWebhookSecret(value.webhookSecret);
+      if (webhookSecret !== undefined) return webhookSecret;
     }
   } catch {
     // Do not include secret material in errors.
   }
-  throw agentXError("RUNTIME_UNAVAILABLE", GITHUB_WEBHOOK_SECRET_MISSING);
+  throw webhookSecretMissing();
 }
 
 export function parseGitHubRepository(repositoryUrl: string): { owner: string; name: string } {
