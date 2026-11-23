@@ -11,7 +11,7 @@ import { SLACK_OIDC_ISSUER, type TaskPersonProofRequest, type TaskPersonProofRes
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { companyMembershipFromDynamo } from "../../packages/broker/src/aws/company-check.js";
-import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
+import { developerTaskRouteDependencies, webOnlyTaskPersonReader } from "../../packages/broker/src/aws/developer-routes.js";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import {
   checkTaskPersonIdentity,
@@ -264,13 +264,17 @@ describe("People lifecycle with web identities (real proof wired in)", () => {
 
 describe("the route wiring (developerTaskRouteDependencies)", () => {
   const SIGNIN = "signin";
-  function routeWorld(options: { slackTeamId?: string; membershipCompany?: string; grantRole?: string; channelPolicy?: boolean; projectCompany?: string; membership?: Record<string, unknown> | null; noCompanies?: true } = {}) {
+  function routeWorld(options: { slackTeamId?: string; membershipCompany?: string; grantRole?: string; channelPolicy?: boolean; projectCompany?: string; membership?: Record<string, unknown> | null; noCompanies?: true; recordShape?: "key" | "attribute" | "mismatch" } = {}) {
     const db = new FakeDynamoDb();
     const meta = task();
     db.set(meta as unknown as Record<string, unknown>);
     db.set(webRow());
     db.set(subjectRow(P_GALE, GALE_ID));
-    db.set({ pk: `DEVELOPER#${GALE_ID}`, sk: "META", ...galeRecord() });
+    // "key" is the real stored shape: no `developerId` attribute (the id lives only in the key); "mismatch" disagrees with the key.
+    const { developerId: _id, ...galeWithoutId } = galeRecord();
+    void _id;
+    const shape = options.recordShape ?? "attribute";
+    db.set({ pk: `DEVELOPER#${GALE_ID}`, sk: "META", ...(shape === "key" ? galeWithoutId : galeRecord({ developerId: shape === "mismatch" ? OLA_ID : GALE_ID })) });
     const membershipRow = { pk: `COMPANY_MEMBER#${GALE_ID}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: GALE_ID, companyId: options.membershipCompany ?? COMPANY_A, role: "member", joinedAt: CREATED };
     if (options.membership !== null) db.set({ ...membershipRow, ...(options.membership ?? {}) });
     // DEC 254zzz80: the project in its company's own partition.
@@ -289,6 +293,38 @@ describe("the route wiring (developerTaskRouteDependencies)", () => {
   it.each([["developer"], ["administrator"]])("accepts a live %s grant", async (role) => {
     const { deps, meta } = routeWorld({ grantRole: role });
     await expect(deps.checkTaskPerson!(meta, GALE_ID)).resolves.toMatchObject({ eligible: true, channelMember: true });
+  });
+
+  it("accepts the stored sign-in shape: the id only in the row's key, no developerId attribute", async () => {
+    const { deps, meta, db } = routeWorld({ recordShape: "key" });
+    expect(db.get(`DEVELOPER#${GALE_ID}`, "META")).not.toHaveProperty("developerId");
+    await expect(deps.checkTaskPerson!(meta, GALE_ID)).resolves.toMatchObject({ eligible: true, channelMember: true });
+  });
+
+  it("refuses a sign-in row whose developerId attribute disagrees with its key", async () => {
+    const { deps, meta } = routeWorld({ recordShape: "mismatch" });
+    await expect(deps.checkTaskPerson!(meta, GALE_ID)).rejects.toMatchObject({ code: "PROJECT_ACCESS_DENIED" });
+  });
+
+  it.each([["key"], ["attribute"]] as const)("still finds no web proof in another company (record shape=%s)", async (recordShape) => {
+    const { deps, meta } = routeWorld({ recordShape, membershipCompany: COMPANY_B });
+    await expect(deps.checkTaskPerson!(meta, GALE_ID)).resolves.toMatchObject({ eligible: false, channelMember: false });
+  });
+
+  describe("the web-only reader (task start route)", () => {
+    const readerFor = (w: ReturnType<typeof routeWorld>) => webOnlyTaskPersonReader({ documentClient: w.db, tableName: "state", developer: { signInTableName: SIGNIN, issuer: "https://code.example.test", companies: companyMembershipFromDynamo(w.db, SIGNIN) }, now: () => T0, tasks: {} } as never);
+    it.each([["key"], ["attribute"]] as const)("accepts the owner with record shape=%s", async (recordShape) => {
+      const w = routeWorld({ recordShape });
+      await expect(readerFor(w)(w.meta, GALE_ID)).resolves.toMatchObject({ eligible: true });
+    });
+    it("refuses a row whose developerId attribute disagrees with its key", async () => {
+      const w = routeWorld({ recordShape: "mismatch" });
+      await expect(readerFor(w)(w.meta, GALE_ID)).rejects.toMatchObject({ code: "PROJECT_ACCESS_DENIED" });
+    });
+    it("finds no proof in another company", async () => {
+      const w = routeWorld({ recordShape: "key", membershipCompany: COMPANY_B });
+      await expect(readerFor(w)(w.meta, GALE_ID)).resolves.toMatchObject({ eligible: false });
+    });
   });
 
   it.each([

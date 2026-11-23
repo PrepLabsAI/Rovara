@@ -20,7 +20,7 @@ import {
 import { evaluateProjectAuthority, readProjectAuthority, type BoundedProjectReadAdmission, type ProjectAuthorityReader, type ProjectAuthorityRevision, type ProjectAuthorityWitness } from "../developer/task-project-access.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
 import { taskOwnerKey } from "../developer/task-records.js";
-import { META, type DeveloperRecord } from "../developer/store.js";
+import { META, developerRecordKeyedBy, type DeveloperRecord } from "../developer/store.js";
 import type { TaskAuthorityAdmission } from "./task-authority-admission.js";
 import { membershipKey, ownPartitionRow, recordInCompany, strictLiveMembership } from "./company-check.js";
 import { namedCompany, revisionPkFor } from "./company-layout.js";
@@ -30,8 +30,8 @@ export const TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES = [
   "pk", "sk", "developerId", "provider", "issuer", "subject", "slackUserId", "revoked", "displayName",
 ] as const;
 
-export type TaskPersonDeveloperRecordProjection = { pk: string; sk: string } & Pick<DeveloperRecord,
-  "developerId" | "provider" | "issuer" | "subject" | "slackUserId" | "revoked" | "displayName">;
+export type TaskPersonDeveloperRecordProjection = { pk: string; sk: string; developerId?: string } & Pick<DeveloperRecord,
+  "provider" | "issuer" | "subject" | "slackUserId" | "revoked" | "displayName">;
 
 export interface TaskPersonRuntimePorts extends TaskPersonRuntimeWebPorts {
   /** Reads only a task-partition META, PERSON_SUBJECT#<developerId>, or PERSON#<UUID> row. */
@@ -58,10 +58,11 @@ const refused = () => agentXError("PROJECT_ACCESS_DENIED", "task person identity
 
 function projectedDeveloperRecord(record: TaskPersonDeveloperRecordProjection | undefined, developerId: string): DeveloperRecord | undefined {
   if (record === undefined) return undefined;
-  if (record.pk !== `DEVELOPER#${developerId}` || record.sk !== META || record.developerId !== developerId) return undefined;
+  const keyed = record.pk !== `DEVELOPER#${developerId}` || record.sk !== META ? undefined : developerRecordKeyedBy(record, developerId); // id from the key (real rows have no `developerId` attribute); a disagreeing attribute refuses
+  if (keyed === undefined) return undefined;
   // Keep the runtime value limited even when an injected adapter returns a structurally wider row.
   return {
-    pk: record.pk, sk: record.sk, developerId: record.developerId,
+    pk: record.pk, sk: record.sk, developerId: keyed.developerId,
     ...(record.provider === undefined ? {} : { provider: record.provider }),
     ...(record.issuer === undefined ? {} : { issuer: record.issuer }),
     ...(record.subject === undefined ? {} : { subject: record.subject }),
