@@ -7,7 +7,7 @@ import { runCollected } from "../../packages/worker/src/collected-process.js";
 const exec: ContainerExec = (command, options) => runCollected(command[0]!, command.slice(1), options);
 const run = async (command: string, pipefail: boolean, timeout = 20) => {
   const out: string[] = [];
-  const result = await containerBashOperations(exec).exec(command, tmpdir(), { onData: (d) => out.push(d.toString()), timeout, ...(pipefail ? { pipefail: true } : {}) } as never);
+  const result = await containerBashOperations(exec).exec(command, tmpdir(), { onData: (d: Buffer) => out.push(d.toString()), timeout, ...(pipefail ? { pipefail: true } : {}) });
   return { exitCode: result.exitCode, out: out.join("") };
 };
 
