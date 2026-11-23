@@ -287,6 +287,23 @@ describe("reconciler: stuck transitions", () => {
 
 });
 
+describe("REVIEW: reconciler and a retained (bound-close) deletion", () => {
+  it("REVIEW R-C (probe): a DELETING session with closeDestroy whose recorded executionArn is still the provisioner's (the retained deleter's ARN is never recorded): the run must not abort", async () => {
+    const provisionerArn = "arn:aws:states:us-east-1:111122223333:execution:provisioner:ws-x-gen-1";
+    const { db, state, reconcile, deleteVolume } = setup({ executions: { [provisionerArn]: "SUCCEEDED" } });
+    const generation = { sessionGeneration: 1, instanceId: "i-0123456789abcdef0", volumeId: "vol-0123456789abcdef0", dataGeneration: randomUUID() };
+    const retention = { inspectionOperationId: randomUUID(), inspectionFence: 2, retentionId: randomUUID(), contentDigest: "a".repeat(64), generation };
+    const closeDestroy = { schemaVersion: 1, acceptedOperationId: randomUUID(), retention, effectId: "e1", machineIds: ["m"] };
+    const workspaceId = seedSession(db, "DELETING", { executionArn: provisionerArn, instanceId: generation.instanceId, volumeId: generation.volumeId, workspaceDataIdentity: generation, closeDestroy, closeRetention: { schemaVersion: 1, operationId: retention.inspectionOperationId, fence: 2, generation, retained: retention, acceptedOperationId: closeDestroy.acceptedOperationId } });
+    state.instances = [];
+    state.volumes = [{ volumeId: generation.volumeId, state: "available", workspaceId, createdAt: minutesAgo(120), quarantined: false }];
+    let error: unknown;
+    try { await reconcile(); } catch (caught) { error = caught; }
+    console.log("R-C deleteVolume calls:", JSON.stringify(deleteVolume.mock.calls), "error:", error instanceof Error ? error.message : error, "session:", sessionOf(db, workspaceId)["state"]);
+    expect(error).toBeUndefined();
+  });
+});
+
 describe("reconciler: volumes", () => {
   it("deletes a closed workspace's volume after an hour, quarantines unclaimed ones, and never touches claimed or new ones", async () => {
     const { db, state, reconcile, deleteVolume, quarantine, emit } = setup();

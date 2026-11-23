@@ -228,6 +228,24 @@ describe("idle reaper and a retained session", () => {
     }
   });
 
+  it("REVIEW R-A: a same-instance retention that a successor step superseded on the worker but whose record was never lifted (the post-delivery noteRuntime failed) is not work: once the workspace is idle it is idle-stopped, the volume and record kept", async () => {
+    const w = retainedIdle(false, { activeOperationId: null });
+    const tick = await w.real();
+    expect(tick.claimed).toEqual([w.workspaceId]);
+    expect(sessionOf(w.db, w.workspaceId)).toMatchObject({ state: "STOPPED", volumeId: "vol-0123456789abcdef0", closeRetention: w.closeRetention });
+  });
+
+  it("REVIEW R-B (probe): a preparation that captured its target and never got a retained reply (dead-lettered) holds a READY instance: the reaper never stops it", async () => {
+    const w = retainedIdle(false);
+    const row = sessionOf(w.db, w.workspaceId) as Record<string, unknown> & { closeRetention: Record<string, unknown> };
+    const { retained: _dropped, ...intent } = row.closeRetention;
+    w.db.set({ ...row, closeRetention: intent });
+    const op = w.db.get(`WORKSPACE#${w.workspaceId}`, `OPERATION#${intent["operationId"] as string}`)!;
+    w.db.set({ ...op, status: "RUNNING", closePreflight: { schemaVersion: 1, target: intent["generation"] } });
+    const tick = await w.real();
+    expect(tick.claimed).toEqual([w.workspaceId]);
+  });
+
   it("the busy rule: an operation that is not the retained preflight is work; the retained preflight itself is not", () => {
     expect(holdsActiveOperation(undefined)).toBe(false);
     expect(holdsActiveOperation({ activeOperationId: null })).toBe(false);
