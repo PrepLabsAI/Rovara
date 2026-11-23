@@ -278,7 +278,7 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
       onEntry: (entry) => { pendingEntries.push(entry); if (entry.source === "person" && personSeq !== undefined) seqOfEntry.set(entry.n, personSeq); },
     });
     stopForStall = () => { governor.stop("infrastructure"); };
-    const shell = setupAgentShell({ base, hooks: governor, checkFiles: lastFiles });
+    const shell = setupAgentShell({ base, hooks: governor, checkFiles: lastFiles, pipefail: true });
     const runner = createPersonCommandRunner({
       base, cwd: resolve(input.rootPath), checkFiles: lastFiles, alive: () => governor.ended() === undefined,
       maxTimeoutSeconds: () => governor.secondsLeft(), onEnded: (word) => governor.onEnded(word),

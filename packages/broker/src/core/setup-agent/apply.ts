@@ -117,6 +117,9 @@ export async function waitingSetupWords(deps: Pick<SetupApplyDeps, "flow" | "sto
 
 const pathOf = (definition: { repositories: ReadonlyArray<{ name: string; path: string }> }, repo: string): string | undefined => definition.repositories.find((repository) => repository.name === repo)?.path;
 
+/** Lane F: the limit a proposal's command gets: the one its item recorded, else today's (900 s for setup, 1,800 s for tests). */
+const timeoutOf = (kind: string, recorded: number | undefined): number => recorded ?? (kind === "setup" ? SETUP_TIMEOUT : TEST_TIMEOUT);
+
 export interface CandidateCommands { setup?: ProjectCommand[]; readiness?: ProjectCommand[]; used: string[]; unchecked: string[]; left: Array<{ id: string; reason: SetupConfirmLeftOut }> }
 
 /**
@@ -140,13 +143,13 @@ export function commandsFromProposal(
     if (verdict === "unverified") { left.push({ id: item.id, reason: "unverified" }); continue; }
     // With no choice made, only what the code host confirmed is used. A person's choice may add an item that could not be checked against a file (it is listed as unchecked), never one that failed.
     if (only === undefined && verdict !== "verified") continue;
-    const value = item.proposed.value as { repo: string; commands: string[] };
+    const value = item.proposed.value as { repo: string; commands: string[]; timeoutSeconds?: number };
     const cwd = pathOf(definition, value.repo);
     if (cwd === undefined) { left.push({ id: item.id, reason: "invalid_command" }); continue; }
     let kept = 0;
     for (const line of value.commands) {
       let command: ProjectCommand;
-      try { command = parseCommandLine(line, cwd, item.kind === "setup" ? SETUP_TIMEOUT : TEST_TIMEOUT); } catch { left.push({ id: item.id, reason: "invalid_command" }); continue; }
+      try { command = parseCommandLine(line, cwd, timeoutOf(item.kind, value.timeoutSeconds)); } catch { left.push({ id: item.id, reason: "invalid_command" }); continue; }
       if (refusedCommand(command)) { left.push({ id: item.id, reason: "refused_command" }); continue; }
       const target = item.kind === "setup" ? setup : readiness;
       if (target.length >= (item.kind === "setup" ? 20 : 32)) { left.push({ id: item.id, reason: "too_many" }); continue; }

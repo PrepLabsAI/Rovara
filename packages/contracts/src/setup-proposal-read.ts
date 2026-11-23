@@ -18,7 +18,7 @@ import { IntakeSystemSchema } from "./intake.js";
 import { redactText } from "./redaction.js";
 import {
   DEVCONTAINER_PATH_PATTERN, SETUP_COMMANDS_MAX, SETUP_DEVCONTAINER_MAX_BYTES, SETUP_INTAKE_CHANNELS, SETUP_ITEM_LIMITS, SETUP_KNOWLEDGE_ACTIVATIONS, SETUP_KNOWLEDGE_KINDS, SETUP_PROPOSAL_VERSION, SETUP_SOURCE_FOUND_IN,
-  SETUP_SPEC_FORMATS, SetupBrowserEvidenceValueSchema, SetupProposalSchema, SetupRepositoryValueSchema, setupItemRisk, type SetupItemKind, type SetupProposal,
+  SETUP_SPEC_FORMATS, SetupBrowserEvidenceValueSchema, SetupProposalSchema, SetupRepositoryValueSchema, clampSetupCommandTimeout, setupItemRisk, type SetupItemKind, type SetupProposal,
 } from "./setup-proposal.js";
 import { isObject, oneLineText, readCommand, readCommands, remoteCodeReason, secretNameOf, utf8Bytes } from "./setup-draft.js";
 
@@ -227,12 +227,16 @@ export function sanitizeSetupProposal(raw: unknown, context: SetupProposalContex
     return SetupRepositoryValueSchema.safeParse(value).success ? { key: normalizedUrl(url), value } : undefined;
   });
 
-  const commandItems = (kind: "setup" | "tests") => reader.collect<{ repo: string; commands: string[] }>(raw[kind], kind, SETUP_ITEM_LIMITS[kind], (entry, from) => {
+  const commandItems = (kind: "setup" | "tests") => reader.collect<{ repo: string; commands: string[]; timeoutSeconds?: number }>(raw[kind], kind, SETUP_ITEM_LIMITS[kind], (entry, from) => {
     const repo = reader.knownRepo(entry["repo"]);
     if (repo === undefined) return undefined;
     const commands = commandsOf(entry["commands"], from, modelFlags);
-    return commands.length === 0 ? undefined : { key: repo, value: { repo, commands } };
-  }, (existing, incoming) => ({ repo: existing.repo, commands: [...new Set([...existing.commands, ...incoming.commands])].slice(0, SETUP_COMMANDS_MAX) }));
+    const timeoutSeconds = clampSetupCommandTimeout(entry["timeoutSeconds"]);
+    return commands.length === 0 ? undefined : { key: repo, value: { repo, commands, ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }) } };
+  }, (existing, incoming) => {
+    const timeoutSeconds = Math.max(existing.timeoutSeconds ?? 0, incoming.timeoutSeconds ?? 0);
+    return { repo: existing.repo, commands: [...new Set([...existing.commands, ...incoming.commands])].slice(0, SETUP_COMMANDS_MAX), ...(timeoutSeconds === 0 ? {} : { timeoutSeconds }) };
+  });
   const setup = commandItems("setup");
   const tests = commandItems("tests");
 

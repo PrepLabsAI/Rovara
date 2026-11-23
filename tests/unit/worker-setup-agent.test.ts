@@ -5,10 +5,11 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { REMOTE_CODE_REASON, SETUP_AGENT_LIMITS_DEFAULT } from "../../packages/contracts/src/index.js";
 import {
-  SETUP_AGENT_TOOLS, SETUP_COMMAND_DEFAULT_TIMEOUT_SECONDS, SETUP_COMMAND_MAX_TIMEOUT_SECONDS, SETUP_COMMAND_REFUSED_TEXT, assertSetupSandboxExecArgs, assertSetupSandboxRunArgs, checkTrackedFiles, commandTail, createSetupSandbox, defaultSetupGit,
+  SETUP_AGENT_TOOLS, SETUP_COMMAND_DEFAULT_TIMEOUT_SECONDS, SETUP_COMMAND_MAX_TIMEOUT_SECONDS, SETUP_COMMAND_MIN_TIMEOUT_SECONDS, SETUP_COMMAND_REFUSED_TEXT, assertSetupSandboxExecArgs, assertSetupSandboxRunArgs, checkTrackedFiles, commandTail, createSetupSandbox, defaultSetupGit,
   SETUP_OUTPUT_CUT_TEXT, credentialShapedVariables, finishSetupAgent, guardedSetupDocker, setupAgentSessionParts, setupAgentShell, type SetupAgentHooks, type SetupCommandRecord, type SetupGit, type TrackedFilesVerdict,
 } from "../../packages/worker/src/setup-agent.js";
 import { SETUP_AGENT_NEEDS_CODE_CHANGE_MARKER, asksForCodeChange, setupAgentInstructions } from "../../packages/worker/src/setup-agent-prompt.js";
@@ -433,14 +434,47 @@ describe("the agent's shell", () => {
     return shell.operations.exec(command, "/w", { onData: (data) => out.push(data.toString()), ...(timeout === undefined ? {} : { timeout }) }).then((result) => ({ result, out: out.join("") }));
   };
 
-  it("gives every command a time limit: the default when none is named, the model's when lower, never above the most", async () => {
+  it("gives every command a time limit: the default when none is named, the model's when above the floor, never below the floor or above the most", async () => {
     const b = base();
     const shell = setupAgentShell({ base: b.operations });
     await exec(shell, "a");
-    await exec(shell, "b", 60);
+    await exec(shell, "b", 1_200);
     await exec(shell, "c", 999_999);
-    expect(b.calls.map((call) => call.timeout)).toEqual([SETUP_COMMAND_DEFAULT_TIMEOUT_SECONDS, 60, SETUP_COMMAND_MAX_TIMEOUT_SECONDS]);
+    expect(b.calls.map((call) => call.timeout)).toEqual([SETUP_COMMAND_DEFAULT_TIMEOUT_SECONDS, 1_200, SETUP_COMMAND_MAX_TIMEOUT_SECONDS]);
   });
+  it("raises a model-chosen limit below 600 s to 600 s (the 185 s and 125 s test timeouts were the model's own choice)", async () => {
+    expect(SETUP_COMMAND_MIN_TIMEOUT_SECONDS).toBe(600);
+    expect(SETUP_COMMAND_MAX_TIMEOUT_SECONDS).toBe(3_600);
+    const b = base();
+    const shell = setupAgentShell({ base: b.operations });
+    for (const asked of [1, 60, 125, 185, 599]) await exec(shell, `test ${String(asked)}`, asked);
+    await exec(shell, "exactly the floor", 600);
+    await exec(shell, "above the floor", 601);
+    expect(b.calls.map((call) => call.timeout)).toEqual([600, 600, 600, 600, 600, 600, 601]);
+  });
+  it("never gives a command more than the wall clock that is left, even below the floor", async () => {
+    const b = base();
+    let left = 300;
+    const shell = setupAgentShell({ base: b.operations, hooks: { maxTimeoutSeconds: () => left } });
+    await exec(shell, "a", 60);
+    left = 650.9;
+    await exec(shell, "b", 60);
+    left = 0;
+    await exec(shell, "c", 60);
+    expect(b.calls.map((call) => call.timeout)).toEqual([300, 600, 1]);
+  });
+  it("asks the sandbox for pipefail on the agent's commands only, and hands it the command exactly as the model wrote it (the container's shell sets the option: devcontainer.test.ts)", async () => {
+    const seen: Array<{ command: string; pipefail: unknown }> = [];
+    const base: BashOperations = { exec: (command, _cwd, options) => { seen.push({ command, pipefail: (options as { pipefail?: unknown }).pipefail }); return Promise.resolve({ exitCode: 0 }); } };
+    const records: SetupCommandRecord[] = [];
+    const agent = setupAgentShell({ base, pipefail: true, hooks: { afterCommand: (record) => { records.push(record); } } });
+    const person = setupAgentShell({ base });
+    await exec(agent, "false | cat");
+    await exec(person, "false | cat");
+    expect(seen).toEqual([{ command: "false | cat", pipefail: true }, { command: "false | cat", pipefail: false }]);
+    expect(records.map((record) => record.command)).toEqual(["false | cat"]);
+  });
+
   it("records each command: redacted command, flag, exit, time, bounded redacted tail; the output still reaches the model", async () => {
     const records: SetupCommandRecord[] = [];
     const token = fakeGithubToken();
@@ -540,6 +574,16 @@ describe("the prompt", () => {
     expect(text()).toContain("nothing: read the README");
     expect(text({ failingStep: "setup_failed" })).toContain("the step that failed is \"setup_failed\"");
     expect(text()).not.toContain("This is a repair");
+  });
+  it("tells the agent to prefer a narrower test command when the full suite is slow, to record the time limit it needs, and why", () => {
+    const prompt = text();
+    expect(prompt).toMatch(/narrower test command/u);
+    expect(prompt).toMatch(/single package|one package/u);
+    expect(prompt).toMatch(/notes/u);
+    expect(prompt).toContain("timeoutSeconds");
+    expect(prompt).toContain(String(SETUP_COMMAND_MIN_TIMEOUT_SECONDS));
+    expect(prompt).toContain(String(SETUP_COMMAND_MAX_TIMEOUT_SECONDS));
+    expect(prompt).toMatch(/do not ask for a shorter time limit/iu);
   });
   it("reads the code-change marker only at the start of the answer", () => {
     expect(asksForCodeChange(`  ${SETUP_AGENT_NEEDS_CODE_CHANGE_MARKER} the lock file is broken\n\`\`\``)).toBe(true);

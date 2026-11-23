@@ -16,7 +16,7 @@ import { gatewayWorkerDirectory } from "./gateway-name-files.js";
 //   - the answer is read by the draft's reader (`readSetupProposalAnswer`): bounded, redacted, cited, secrets by name only. Repository text and command output are data.
 import { isIP } from "node:net";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { agentXError, isCredentialKey, redactText, remoteCodeReason, type SetupProposal, type SetupRunEndWord } from "@agentx/contracts";
+import { SETUP_COMMAND_MAX_TIMEOUT_SECONDS as MAX_TIMEOUT_SECONDS, SETUP_COMMAND_MIN_TIMEOUT_SECONDS as MIN_TIMEOUT_SECONDS, agentXError, isCredentialKey, redactText, remoteCodeReason, type SetupProposal, type SetupRunEndWord } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { snapshotTree, withIsolatedGit } from "./isolated-git.js";
 import { runIsolatedGit } from "./isolated-repository.js";
@@ -35,7 +35,12 @@ export const SETUP_AGENT_TOOLS = ["read", "bash", "grep", "find", "ls"] as const
 /** One command's longest run when the model names no time limit, in seconds. The wall clock of the whole run is the governor's (SH8). */
 export const SETUP_COMMAND_DEFAULT_TIMEOUT_SECONDS = 1_800;
 /** The most a model may ask for one command, in seconds. */
-export const SETUP_COMMAND_MAX_TIMEOUT_SECONDS = 3_600;
+export const SETUP_COMMAND_MAX_TIMEOUT_SECONDS = MAX_TIMEOUT_SECONDS;
+/**
+ * The least a model may ask for one command, in seconds (lane F). A shorter ask is raised to this, unless less of the run's wall clock is left. The 185 s and 125 s timeouts that killed two customers' test runs
+ * were the model's own choice; Rovara's limit was never that low.
+ */
+export const SETUP_COMMAND_MIN_TIMEOUT_SECONDS = MIN_TIMEOUT_SECONDS;
 /** Bytes of redacted output a command record keeps (the journal's tail). */
 export const SETUP_COMMAND_TAIL_BYTES = 4_096;
 /** What a refused command prints, in fixed words. */
@@ -325,6 +330,8 @@ export interface SetupAgentShellInput {
   /** Called after each command, and decides whether tracked files are still untouched. Absent: not checked (a test of the rest). */
   checkFiles?: () => Promise<TrackedFilesVerdict>;
   now?: () => number;
+  /** Lane F: run each command under `set -o pipefail`, which the container's shell sets (devcontainer.ts `containerBashOperations`, on the `pipefail` exec option). Only the AGENT's shell asks for it; a person's command runs, is journaled and is reported exactly as typed. Default: off. */
+  pipefail?: boolean;
 }
 
 /** The last `bytes` bytes of `text`, cut on a character boundary, redacted, and plain (control characters other than newline and tab become `?`). */
@@ -350,8 +357,8 @@ export function setupAgentShell(input: SetupAgentShellInput): SetupAgentShell {
       if (ended !== undefined) return refuse();
       const decision = await input.hooks?.beforeCommand?.(command, flagged);
       if (decision?.allow === false) return refuse();
-      // A time limit always: the model's, up to the most, else the default.
-      const requested = options.timeout !== undefined && options.timeout > 0 ? options.timeout : SETUP_COMMAND_DEFAULT_TIMEOUT_SECONDS;
+      // A time limit always: the model's, from the least up to the most, else the default; never more than the wall clock that is left (that cap is the governor's and wins over the least).
+      const requested = options.timeout !== undefined && options.timeout > 0 ? Math.max(options.timeout, SETUP_COMMAND_MIN_TIMEOUT_SECONDS) : SETUP_COMMAND_DEFAULT_TIMEOUT_SECONDS;
       const left = input.hooks?.maxTimeoutSeconds?.();
       const timeout = Math.max(1, Math.min(requested, SETUP_COMMAND_MAX_TIMEOUT_SECONDS, left === undefined || !Number.isFinite(left) ? Infinity : Math.floor(left)));
       let captured = "";
@@ -362,6 +369,7 @@ export function setupAgentShell(input: SetupAgentShellInput): SetupAgentShell {
       try {
         const result = await input.base.exec(command, cwd, {
           ...options,
+          ...{ pipefail: input.pipefail === true },
           timeout,
           // What the command prints is kept here and the model is shown only its last 4 KiB (below), never the stream: a turn's input is bounded by the margin the governor prices (`SETUP_NEXT_TURN_MARGIN_TOKENS`).
           // Pi's own cap on a tool's output (2,000 lines or 50 KB) still applies on top, and is the larger of the two.
