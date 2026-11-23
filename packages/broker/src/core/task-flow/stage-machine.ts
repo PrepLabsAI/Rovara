@@ -9,6 +9,7 @@ import { workspaceKeys, locateWorkspace } from "./workspace-location.js";
 // A step is: [task.workflow := next (if revision = r)] + [workspace := BUSY under a new fence] + [the operation and its staged message]
 // + [whatever else must commit with it, such as resolving the dispatch row]. If the transaction does not apply, nothing happened.
 import { createHash } from "node:crypto";
+import { RUN_PRICE_REFUSED_MESSAGE } from "@agentx/model-runtime/provider-failure";
 import {
   AgentXError,
   agentXError,
@@ -520,8 +521,10 @@ export async function queueFirstRun(deps: TaskFlowDeps, task: TaskRecord): Promi
  * the first one's) and does nothing. Never throws for a task that moved on.
  */
 async function pauseInstallTask(deps: TaskFlowDeps, task: TaskRecord, operation: OperationRecord, ended: { status: string; error?: string | undefined }): Promise<boolean> {
-  if (ended.status !== "FAILED" || ended.error !== `MODEL_NOT_ALLOWED: ${ROVARA_AI_PAUSED_MESSAGE}` || task.workflow === undefined || operation.workflowRevision !== task.workflow.revision) return false;
-  await blockStoppedStep(deps, task.taskId, operation, ROVARA_AI_PAUSED_MESSAGE);
+  // Two fixed gateway stops end the step with their own plain words, and the step waits for Retry: the install pause, and a run whose price authorization no longer fits the call (a Retry mints a fresh one).
+  const reason = ended.error === `MODEL_NOT_ALLOWED: ${ROVARA_AI_PAUSED_MESSAGE}` ? ROVARA_AI_PAUSED_MESSAGE : ended.error === `MODEL_NOT_ALLOWED: ${RUN_PRICE_REFUSED_MESSAGE}` ? RUN_PRICE_REFUSED_MESSAGE : undefined;
+  if (ended.status !== "FAILED" || reason === undefined || task.workflow === undefined || operation.workflowRevision !== task.workflow.revision) return false;
+  await blockStoppedStep(deps, task.taskId, operation, reason);
   return true;
 }
 

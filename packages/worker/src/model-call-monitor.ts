@@ -1,5 +1,5 @@
 import { MODEL_PROVIDERS, canonicalModelName, editionFromEnvironment, modelNotEnabledSentence, type Edition, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
-import { MODEL_NOT_ENABLED_SIGNAL, MODEL_NOT_OFFERED_DETAIL, MODEL_NOT_OFFERED_SIGNAL, classifyProviderFailure } from "@agentx/model-runtime";
+import { MODEL_NOT_ENABLED_SIGNAL, MODEL_NOT_OFFERED_DETAIL, MODEL_NOT_OFFERED_SIGNAL, RUN_PRICE_REFUSED_MESSAGE, RUN_PRICE_REFUSED_SIGNAL, classifyProviderFailure } from "@agentx/model-runtime";
 import type { WorkerLogSink } from "./worker-log.js";
 
 /**
@@ -122,6 +122,19 @@ function keyedFacts(provider: ModelProvider, message: Record<string, unknown>): 
 }
 
 /**
+ * A routed call the model gateway refused in model-runtime's own fixed sentence, whichever provider the message names: DEC 254g (the gateway does not offer the model: `model-not-found ModelNotOffered`, 400) and
+ * the run price refusal (the run's price authorization no longer fits the call: `request-rejected RunPriceRefused`, 409, a stop with its own stable signal and no new class). Matched whole, never copied.
+ */
+function fixedSentenceFailure(message: Record<string, unknown>, attempt: number, provider: ModelProvider | undefined, durationMs: number | undefined): ModelCallNotePayload | undefined {
+  const text = typeof message.errorMessage === "string" ? message.errorMessage : undefined;
+  const common = { attempt, ...(provider === undefined ? {} : { provider }) };
+  const tail = durationMs === undefined ? {} : { durationMs };
+  if (text === RUN_PRICE_REFUSED_MESSAGE) return { modelCall: { outcome: "failed", class: "request-rejected", signal: RUN_PRICE_REFUSED_SIGNAL, ...common, status: 409, ...tail } };
+  if (text !== undefined && TRANSPORT_FAILURE.exec(text.slice(0, 4_000))?.[1] === MODEL_NOT_OFFERED_DETAIL) return { modelCall: { outcome: "failed", class: "model-not-found", signal: MODEL_NOT_OFFERED_SIGNAL, ...common, status: 400, ...tail } };
+  return undefined;
+}
+
+/**
  * `event` (a Pi session event) as a model-call note, or `undefined` when it is not one. `attempt` is the model call this event belongs to (1 for the first), which the
  * monitor counts. It reads only fixed fields: a `message_end`'s role, stop reason, provider, duration and diagnostic tokens, and a retry event's numbers. It never reads
  * `errorMessage`, `finalError`, message content or reasoning.
@@ -139,10 +152,8 @@ export function sanitizeModelCallEvent(event: unknown, attempt = 1): ModelCallNo
     }
     if (message.stopReason !== "error") return undefined;
     const facts: { signal?: string; status?: number; requestId?: string; classifyStatus?: number; chatgpt?: true } = failureFacts(message);
-    // DEC 254g: a routed call (provider `rovara-route`) the model gateway refused because it does not offer the model: model-runtime's own fixed sentence, whichever provider the message names.
-    if (typeof message.errorMessage === "string" && TRANSPORT_FAILURE.exec(message.errorMessage.slice(0, 4_000))?.[1] === MODEL_NOT_OFFERED_DETAIL) {
-      return { modelCall: { outcome: "failed", class: "model-not-found", signal: MODEL_NOT_OFFERED_SIGNAL, attempt: at, ...(provider === undefined ? {} : { provider }), status: 400, ...(durationMs === undefined ? {} : { durationMs }) } };
-    }
+    const fixed = fixedSentenceFailure(message, at, provider, durationMs);
+    if (fixed !== undefined) return fixed;
     // Bedrock's own SDK errors carry diagnostics, which decide. A Bedrock model called through the model proxy has none (the proxy answers like a keyed provider: a status and a JSON body), so it is read like one.
     if (provider !== undefined && (provider !== "amazon-bedrock" || (facts.signal === undefined && facts.status === undefined))) {
       const keyed = keyedFacts(provider, message);

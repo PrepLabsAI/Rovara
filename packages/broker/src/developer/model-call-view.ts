@@ -5,7 +5,7 @@
 // (the same allow-list a model check uses), the provider's request id, an attempt count, a delay and a duration. It never reads the provider's message, the model's thinking, the
 // final error text, any prompt or any other free text, so none of them can reach a person through this view. Anything it cannot read as one of these shapes is not shown.
 import { E2E_MODEL_FAILURE_CLASSES, E2E_MODEL_FAILURE_SIGNAL_PATTERN, MODEL_PROVIDERS, type DeveloperTaskEvent, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
-import { classifyProviderFailure } from "@agentx/model-runtime/provider-failure";
+import { RUN_PRICE_REFUSED_MESSAGE, RUN_PRICE_REFUSED_SIGNAL, classifyProviderFailure } from "@agentx/model-runtime/provider-failure";
 
 type View = Pick<DeveloperTaskEvent, "kind" | "text">;
 
@@ -116,6 +116,16 @@ function retryFinished(success: boolean, attempt: number | undefined): View {
   return { kind: "progress", text: `The model call retries ran out${suffix}. The step will fail; retry it from the task.` };
 }
 
+/** A failed `modelCall` note: the gateway's run price refusal (the worker's stable signal on HTTP 409) is a stop with its own plain sentence, never "unknown cause"; any other failure is read by its class. */
+function failedCall(call: Record<string, unknown>): View {
+  if (call.signal === RUN_PRICE_REFUSED_SIGNAL && call.status === 409) return { kind: "error", text: RUN_PRICE_REFUSED_MESSAGE };
+  // The class the worker named, and a signal only when this provider's own list agrees with that class.
+  const derived = classify(providerOf(call.provider), signalOf(call.signal));
+  const cls = classOf(call.class) ?? derived.cls;
+  const known = derived.cls === cls ? derived.signal : undefined;
+  return { kind: "error", text: failureText({ cls, signal: known, requestId: requestId(call.requestId), attempt: attemptOf(count(call.attempt), count(call.maxAttempts)), durationMs: millis(call.durationMs, MAX_DURATION_MS), outOfCredits: call.status === 402, chatgpt: call.chatgpt === true }) };
+}
+
 /** The new worker's sanitized `modelCall` payload. Every field is re-checked here, so a worker (or an old row) cannot put text through it. */
 function modelCall(value: unknown): View | undefined {
   const call = record(value);
@@ -125,13 +135,7 @@ function modelCall(value: unknown): View | undefined {
   const which = attemptOf(attempt, max);
   const durationMs = millis(call.durationMs, MAX_DURATION_MS);
   switch (call.outcome) {
-    case "failed": {
-      // The class the worker named, and a signal only when this provider's own list agrees with that class.
-      const derived = classify(providerOf(call.provider), signalOf(call.signal));
-      const cls = classOf(call.class) ?? derived.cls;
-      const known = derived.cls === cls ? derived.signal : undefined;
-      return { kind: "error", text: failureText({ cls, signal: known, requestId: requestId(call.requestId), attempt: which, durationMs, outOfCredits: call.status === 402, chatgpt: call.chatgpt === true }) };
-    }
+    case "failed": return failedCall(call);
     case "retrying":
       return retryStart(attempt, max, millis(call.delayMs, MAX_DELAY_MS));
     case "retry-finished":
