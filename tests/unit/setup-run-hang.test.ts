@@ -281,3 +281,39 @@ describe("review (lead 4 Opus): prod run 3, a provider error with no retry while
     expect(t.progress).not.toContain(PARKED);
   });
 });
+
+describe("merge review (Sonnet): every hang end books the session's usage exactly once, in the finally", () => {
+  const outcomesOf = (sent: Array<Record<string, unknown>>) => sent.map((x) => x["outcome"]);
+  it("stall end: one report, FAILED", async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    const t = await rig({ prompt: never, abort: never, ports: { modelStallMs: 60, stallTickMs: 10, abortConfirmMs: 40, reportUsage: async (payload) => { sent.push(payload); } } });
+    await runSetupAgent(t.input);
+    expect(outcomesOf(sent)).toEqual(["FAILED"]);
+  });
+  it("stall end after an errored turn with a retry that never starts: one report, FAILED", async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    const t = await rig({ prompt: async (emit) => { emit(turnEnd({ stopReason: "error", content: [], errorMessage: "Model source request failed" })); emit({ type: "auto_retry_start", attempt: 1 }); await never(); }, abort: never, ports: { modelStallMs: 60, stallTickMs: 10, abortConfirmMs: 40, reportUsage: async (payload) => { sent.push(payload); } } });
+    await runSetupAgent(t.input);
+    expect(outcomesOf(sent).filter((o) => o !== undefined)).toEqual(["FAILED"]);
+  });
+  it("wall-clock end with an unconfirmed abort: one report, SUCCEEDED (a limit is not a model failure)", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const sent: Array<Record<string, unknown>> = [];
+    const t = await rig({ prompt: never, abort: never, limits: { wallClockMin: 1 }, ports: { tickMs: 1_000, modelStallMs: 3_600_000, abortConfirmMs: 30_000, reportUsage: async (payload) => { sent.push(payload); } } });
+    t.input.ports.now = () => Date.now();
+    const running = runSetupAgent(t.input);
+    await vi.advanceTimersByTimeAsync(61_000);
+    await vi.advanceTimersByTimeAsync(31_000);
+    await running;
+    expect(outcomesOf(sent)).toEqual(["SUCCEEDED"]);
+  });
+  it("a person's Stop with an unconfirmed abort: one report, CANCELLED", async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    const t = await rig({ prompt: never, abort: never, ports: { modelStallMs: 3_600_000, abortConfirmMs: 50, reportUsage: async (payload) => { sent.push(payload); } } });
+    const running = runSetupAgent(t.input);
+    await vi.waitFor(() => { expect(t.control()).toBeDefined(); });
+    await t.control()!.abort();
+    await running;
+    expect(outcomesOf(sent)).toEqual(["CANCELLED"]);
+  });
+});
