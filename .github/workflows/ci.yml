@@ -537,12 +537,13 @@ jobs:
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
         run: npx vitest run tests/linux/e2e-midstep-carriers.test.ts
       # The M1.4 paths with an AI navigation step (scripted model), through the worker's own checks: what the executor and the worker leave. The verdicts are Task 4.4's.
+      # Include the M1 and M1.3 core browser journeys in this native-config step too; the default test config excludes them. Run the files serially on the shared Docker host.
       - name: Native M1.4 journeys
         if: (success() || failure()) && steps.runtime_setup.outcome == 'success'
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
-        run: npx vitest run --config vitest.native-p0.config.ts tests/e2e/m1-4-journeys.test.ts
+        run: npx vitest run --config vitest.native-p0.config.ts --no-file-parallelism tests/e2e/m1-web-journey.test.ts tests/e2e/m1-3-journeys.test.ts tests/e2e/m1-4-journeys.test.ts
       # L4-NETG / NETG2 / NETG3: the EC2 worker's sandbox-egress boot stage on REAL Docker. It restarts Docker (twice), sets the daemon's default name server and proxy, and walls docker0 and the old agentx-task
       # bridge, so it runs ALONE, last, after every other Docker step (never beside another test file), and its afterAll takes back the firewall rules it added.
       - name: Sandbox egress gateway (boot stage on real Docker)

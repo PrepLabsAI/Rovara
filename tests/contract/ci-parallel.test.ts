@@ -283,7 +283,7 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     expect(agent.name).toMatch(/Agent steps/);
     expect(agent.env).toEqual({ ROVARA_DOCKER: "1", ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:ci" });
     const journeys = job.steps.find((candidate) => (candidate.run ?? "").includes("tests/e2e/m1-4-journeys.test.ts"))!;
-    expect(journeys.run).toBe("npx vitest run --config vitest.native-p0.config.ts tests/e2e/m1-4-journeys.test.ts");
+    expect(journeys.run).toBe("npx vitest run --config vitest.native-p0.config.ts --no-file-parallelism tests/e2e/m1-web-journey.test.ts tests/e2e/m1-3-journeys.test.ts tests/e2e/m1-4-journeys.test.ts");
     expect(journeys.env).toEqual({ ROVARA_DOCKER: "1", ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:ci" });
     const model = job.steps.find((candidate) => (candidate.run ?? "").includes("tests/linux/e2e-model-channel.test.ts") && candidate !== generic)!;
     expect(model.run).toBe("npx vitest run tests/linux/e2e-model-channel.test.ts");
