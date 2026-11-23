@@ -2635,7 +2635,7 @@ async function readProjectCatalogSnapshot(dependencies: AwsBrokerDependencies, p
 export const NAMED_COMPANY_CANDIDATE_WAITING = "a setup change for this project is waiting for approval; approve or decline it before registering another revision";
 
 /** Why a named company's registration may not carry the admin setup approval (DEC 254zzz80). */
-export const NAMED_COMPANY_SETUP_APPROVAL_REFUSED = "a company's project takes its setup through the project's setup flow, not a setup approval sent with registration";
+export const NAMED_COMPANY_SETUP_APPROVAL_REFUSED = "a company's browser testing is set up on the project's Browser testing page, and the rest of its setup goes through the project's setup flow, not through a setup approval sent with registration";
 
 /**
  * DEC 254zzz80: registerProject's snapshot for a named company, from its own partition: the catalog row (`orgProjectCatalogKey`; a row written by the core may leave its name and

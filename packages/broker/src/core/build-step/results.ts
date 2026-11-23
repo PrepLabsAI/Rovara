@@ -177,6 +177,7 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
   let regressedChecks: string[] | undefined;
   let failedE2ERound: NonNullable<NonNullable<WorkflowSnapshot["e2e"]>["failedRound"]> | undefined;
   let e2eFences: TransactItem[] = [];
+  let passedRound = false;
   let next: WorkflowSnapshot;
   // Ordered work (spec 059): the run's result must be the approved run's, item by item, before any of its code is believed.
   const judged = mode === "IMPLEMENT" ? judgeGraphResult(operation, workflow, reported) : undefined;
@@ -302,6 +303,8 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
       ...(e2eQualification === undefined ? {} : { e2eQualification }),
       ...(flakyFact === undefined ? {} : { flakyOnChange: flakyFact }),
     });
+    // The verdict is a recorded pass of this round's browser checks (not merely a round that passed before something else stopped the step).
+    passedRound = e2eQualification !== undefined;
     // Other code than the task held before: every review that already ran has seen code change after it (the catch counters' third number).
     if (workflow.candidate !== undefined && workflow.candidate.digest !== candidate.digest) {
       const changed = recordCodeChanged(next.flow);
@@ -322,6 +325,8 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
   // The rows the E2E verdict stands on ride in the same transaction: if any of them moved after it was judged, the verdict is not recorded.
   next = await withApplicationDisplay(deps, { ...task, workflow }, operation, next);
   await commitAndContinue(deps, task, next, now, undefined, [], e2eFences);
+  // Browser testing: a passed browser check renews the project's near-expiry test accounts. After the verdict is committed (its fence reads those rows), best effort, and never part of the verdict.
+  if (passedRound) await deps.applicationE2E?.accountRenewal?.afterPassedRound({ ...task, workflow }).catch(() => undefined);
 }
 
 /** What a passing candidate round records on the workflow: the digests the approval fixed and the round's own references. */

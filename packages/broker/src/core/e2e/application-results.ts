@@ -16,6 +16,8 @@ export interface ApplicationResultsDeps extends E2EVerificationDeps {
   operations(task: ApplicationTask): Promise<readonly OperationRecord[]>;
   /** Bound verifier port; hosted composition uses the production verifier by default. */
   verify?: typeof verifyWorkflowE2EEvidence;
+  /** Browser testing: told what a finished round says about each kind of user (signed in, or refused), to keep the page's per-account result. Best effort: a failure changes nothing. */
+  signIns?: (task: ApplicationTask, scenarios: ReadonlyArray<{ accountLabel: string; status: string; reason?: string | undefined }>) => Promise<void>;
 }
 
 function currentOperation(task: ApplicationTask, operation: OperationRecord): boolean {
@@ -70,6 +72,7 @@ export function createApplicationResults(deps: ApplicationResultsDeps): Applicat
         const result = await detailed(deps, task, operation, "viewer", status);
         if (result === undefined) return undefined;
         const rows = result.display;
+        if (rows !== undefined && deps.signIns !== undefined) await deps.signIns(task, rows.scenarios).catch(() => undefined);
         const base = await baseline(task);
         const stored = await storeWorkflowE2EArtifacts(deps, task, rows?.artifacts ?? []).catch(() => new Set<string>());
         const scenarioResults = rows === undefined || rows.scenarios.length === 0 ? undefined

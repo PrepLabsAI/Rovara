@@ -107,6 +107,13 @@ export const WEB_API_BASE_PROBE_COUNT = 11;
 /** The agent probes of Task 4.5. A runtime descriptor lists the `agent` step only for a qualification that holds all three. */
 export const WEB_API_AGENT_PROBE_IDS = Object.freeze(WEB_API_REQUIRED_PROBES.filter((probe) => probe.agent !== undefined).map((probe) => probe.probeId));
 const probeIdSchema = z.enum(WEB_API_REQUIRED_PROBE_IDS);
+/**
+ * The probes whose pass shows the sandbox cannot reach outside the run: the app and the browser are refused a public address, the app is refused the host on its own bridge, and the build container
+ * is refused the cloud metadata address and a private one. Browser testing is offered as "not your live site" only on a runtime whose registered probe manifest lists ALL of them (a row is registered
+ * only when the registrar re-judged each probe, so the manifest is the record that they passed). Not covered by any of them: a private-range address that is not the gateway, dialled from the APP
+ * network (a database in the customer's network); add a probe for it here and to the qualification, and a runtime qualified before it must be qualified again.
+ */
+export const SANDBOX_EGRESS_PROBE_IDS: readonly string[] = Object.freeze(["web-egress-denial-v1", "api-egress-denial-v1", "app-host-denial-v1", "build-imds-denial-v1", "build-lateral-denial-v1"]);
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 
