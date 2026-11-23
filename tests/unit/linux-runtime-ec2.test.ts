@@ -44,7 +44,7 @@ describe("the steps, read from ci.yml", () => {
   });
 
   it("acknowledges exactly the manual JSON artifact archive and refuses changed actions, paths, conditions or options", () => {
-    const archive = { name: "Upload close retention Linux mutations", uses: "actions/upload-artifact@v4", if: "always() && github.event_name == 'workflow_dispatch'", with: { name: "close-retention-linux-mutants", path: "linux-mutants.json", "if-no-files-found": "error" } };
+    const archive = { name: "Upload close retention Linux mutations", uses: "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", if: "always() && github.event_name == 'workflow_dispatch'", with: { name: "close-retention-linux-mutants", path: "linux-mutants.json", "if-no-files-found": "error" } };
     const yaml = (step: unknown) => JSON.stringify({ jobs: { "linux-runtime": { steps: [step] } } });
     expect(linuxRuntimeSteps(yaml(archive))).toEqual({ steps: [], replaced: [], skipped: [archive.name] });
     for (const change of [{ uses: "actions/upload-artifact@v3" }, { name: "other archive" }, { if: "always()" }, { with: { ...archive.with, path: "**/*" } }, { with: { ...archive.with, name: "other" } }, { with: { ...archive.with, "if-no-files-found": "ignore" } }]) {

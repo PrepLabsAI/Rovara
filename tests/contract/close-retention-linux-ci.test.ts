@@ -27,7 +27,16 @@ it("prepares a local worker digest and runs the complete mutation grid only on t
   expect(job.steps.indexOf(grid)).toBeLessThan(job.steps.indexOf(step("Sandbox egress gateway (boot stage on real Docker)")));
   const archive = step("Upload close retention Linux mutations");
   expect(archive.if).toBe("always() && github.event_name == 'workflow_dispatch'");
-  expect(archive.uses).toBe("actions/upload-artifact@v4");
+  expect(archive.uses).toBe("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02");
+  const resume = step("Close retention Linux resume proofs (manual only)");
+  expect(resume.if).toBe(grid.if);
+  expect(resume.run).toContain('if [ "${GITHUB_EVENT_NAME:-}" = workflow_dispatch ]; then');
+  expect(resume.run).toContain("CODE_CI_LINUX=1 node_modules/.bin/vitest run tests/linux/worker-close-retention-resume.test.ts");
+  expect(job.steps.indexOf(prepare)).toBeLessThan(job.steps.indexOf(resume));
+  expect(job.steps.indexOf(resume)).toBeLessThan(job.steps.indexOf(grid));
+  const skipped = spawnSync("bash", ["-euc", resume.run!], { env: { ...process.env, GITHUB_EVENT_NAME: "pull_request" }, encoding: "utf8" });
+  expect(skipped.status, skipped.stderr).toBe(0);
+  expect(skipped.stdout).toBe("");
   expect(archive.with).toEqual({ name: "close-retention-linux-mutants", path: "linux-mutants.json", "if-no-files-found": "error" });
 });
 

@@ -501,6 +501,12 @@ jobs:
             python3 tests/unit/linux-mutation-grid.test.py
             CODE_CI_LINUX=1 python3 scripts/linux-mutation-grid.py --prepare-image
           fi
+      - name: Close retention Linux resume proofs (manual only)
+        if: (success() || failure()) && steps.runtime_setup.outcome == 'success'
+        run: |
+          if [ "${GITHUB_EVENT_NAME:-}" = workflow_dispatch ]; then
+            CODE_CI_LINUX=1 node_modules/.bin/vitest run tests/linux/worker-close-retention-resume.test.ts --no-file-parallelism --maxWorkers=1
+          fi
       - name: Close retention Linux mutation grid (manual only)
         if: (success() || failure()) && steps.runtime_setup.outcome == 'success'
         run: |
@@ -509,7 +515,7 @@ jobs:
           fi
       - name: Upload close retention Linux mutations
         if: always() && github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: close-retention-linux-mutants
           path: linux-mutants.json

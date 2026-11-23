@@ -21,10 +21,11 @@ interface Workflow {
 
 const workflow = async () => YAML.parse(await readFile(".github/workflows/ci.yml", "utf8")) as Workflow;
 
-// The only steps of `linux-runtime` that are not vitest checks: the close-retention Linux mutation grid, which runs on a manual (workflow_dispatch) run only.
+// The only steps of `linux-runtime` that are not vitest checks: the close-retention Linux resume proofs and mutation grid, which run on a manual (workflow_dispatch) run only.
 // An EXACT allow-list by step name: any other step that is not a vitest check still fails the strict comparison below.
 const MANUAL_ONLY_LINUX_STEPS = [
   "Prepare close retention worker digest (manual only)",
+  "Close retention Linux resume proofs (manual only)",
   "Close retention Linux mutation grid (manual only)",
   "Upload close retention Linux mutations",
 ] as const;
@@ -272,11 +273,11 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     }
   });
 
-  it("lets exactly the three named manual-only close-retention steps sit among the Linux checks, and no other non-vitest step", async () => {
+  it("lets exactly the four named manual-only close-retention steps sit among the Linux checks, and no other non-vitest step", async () => {
     const job = (await workflow()).jobs["linux-runtime"]!;
     const firstTest = job.steps.findIndex((step) => (step.run ?? "").startsWith("npx vitest run"));
-    // The three listed steps pass (the real ci.yml has them, once each, and the strict list of vitest checks is unchanged).
-    expect(job.steps.filter((step) => (MANUAL_ONLY_LINUX_STEPS as readonly (string | undefined)[]).includes(step.name))).toHaveLength(3);
+    // The four listed steps pass (the real ci.yml has them, once each, and the strict list of vitest checks is unchanged).
+    expect(job.steps.filter((step) => (MANUAL_ONLY_LINUX_STEPS as readonly (string | undefined)[]).includes(step.name))).toHaveLength(4);
     expect(linuxRuntimeChecks(job, firstTest).map((step) => step.name)).toEqual(LINUX_CHECK_NAMES);
     const withExtra = (extra: Job["steps"][number], at = job.steps.length - 1): Job => ({ ...job, steps: [...job.steps.slice(0, at), extra, ...job.steps.slice(at)] });
     // An unlisted new non-vitest step is caught: unnamed, differently named, a near-miss of a listed name, and a vitest-less step that borrows a vitest check's name.
@@ -286,7 +287,7 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     expect(() => linuxRuntimeChecks(withExtra({ name: "Upload close retention Linux mutations 2", uses: "actions/upload-artifact@v4" }), firstTest)).toThrow();
     // A listed name cannot be used twice, and a listed step cannot be dropped silently.
     expect(() => linuxRuntimeChecks(withExtra({ name: MANUAL_ONLY_LINUX_STEPS[0], run: "echo hi" }), firstTest)).toThrow();
-    expect(() => linuxRuntimeChecks({ ...job, steps: job.steps.filter((step) => step.name !== MANUAL_ONLY_LINUX_STEPS[2]) }, firstTest)).toThrow();
+    expect(() => linuxRuntimeChecks({ ...job, steps: job.steps.filter((step) => step.name !== MANUAL_ONLY_LINUX_STEPS[3]) }, firstTest)).toThrow();
   });
 
   it("runs the Docker 25 DNS regression test once, in its own step under the same gate as the other Linux tests, and keeps it out of the generic step", async () => {

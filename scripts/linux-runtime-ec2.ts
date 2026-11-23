@@ -87,7 +87,7 @@ export interface WorkflowSteps { steps: Step[]; replaced: string[]; skipped: str
 
 function isRetentionArchive(raw: Record<string, unknown>): boolean {
   return JSON.stringify([raw.uses, raw.name, raw.if, raw.with]) === JSON.stringify([
-    "actions/upload-artifact@v4", "Upload close retention Linux mutations", "always() && github.event_name == 'workflow_dispatch'",
+    "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", "Upload close retention Linux mutations", "always() && github.event_name == 'workflow_dispatch'",
     { name: "close-retention-linux-mutants", path: "linux-mutants.json", "if-no-files-found": "error" },
   ]);
 }
