@@ -89,7 +89,7 @@ export const WORKFLOW_BLOCK_REASONS = {
   noCheckResults: "No required or selected optional checks ran. Configure or select at least one check, then retry.",
   planNotSaved: "The planning run finished without saving a document. Retry planning.",
   /** The saved plan is a structured document that could not be read back. */
-  planUnreadable: "the plan couldn't be read",
+  planUnreadable: "The plan couldn't be read.",
   /** Plan 6 Task 8: the plan check's answer had no block Rovara could read. */
   planCheckUnreadable: "Rovara couldn't read the plan check's answer.",
   /** Plan 6 Task 8: the plan check or the revision after it could not be started, however often it was tried. */
@@ -118,6 +118,12 @@ export const WORKFLOW_BLOCK_REASONS = {
   /** Rovara Code version 2: Understand chose the Full path, but a Full start would not be admitted on the budgets that are left. */
   understandFullNotAdmitted: "I chose the Full path for this task, but there isn't enough AI budget left to start a Full plan. Raise the budget, then retry.",
 } as const;
+
+/** The wording of `WORKFLOW_BLOCK_REASONS.planUnreadable` before it became a sentence; a task blocked then still holds it. */
+const PLAN_UNREADABLE_LEGACY_REASON = "the plan couldn't be read";
+/** Whether a block reason says the plan could not be read, in its present wording or the one stored before. */
+export const isPlanUnreadableBlockReason = (reason: string | undefined): boolean =>
+  reason === WORKFLOW_BLOCK_REASONS.planUnreadable || reason === PLAN_UNREADABLE_LEGACY_REASON;
 
 /** At most this many regressed tests are kept on a blocked workflow, each cut to WORKFLOW_REGRESSED_CHECK_MAX characters. */
 export const WORKFLOW_REGRESSED_CHECKS_MAX = 8;

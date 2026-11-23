@@ -514,12 +514,51 @@ export const PLAN_PARTS_SENTENCE = "A coding plan must name three things: what c
 /** Whether a planner's prompt asks for the three parts of a version 2 coding plan. */
 export const asksForPlanParts = (prompt: string): boolean => prompt.includes(PLAN_PARTS_SENTENCE);
 
-const FILE_EXTENSIONS = "[cm]?[jt]sx?|py|go|rs|java|kt|rb|php|cs|swift|json|ya?ml|toml|md|sql|css|scss|html|sh|tf|proto|graphql|xml|ini|lock|gradle|cpp|hpp";
+const FILE_EXTENSIONS = [
+  "[cm]?[jt]sx?", "py", "go", "rs", "java", "kt", "rb", "php", "cs", "swift", "json", "ya?ml", "toml", "md", "sql", "css", "scss", "html", "sh", "tf", "proto", "graphql", "xml", "ini", "lock", "gradle", "cpp", "hpp",
+  "txt", "csv", "tsv", "svg", "png", "jpe?g", "gif", "webp", "ico", "pdf", "env", "conf", "cfg", "cc", "hh", "mm", "mdx", "rst", "log", "vue", "svelte", "astro", "sbt", "scala", "clj", "exs?", "erl", "hs", "lua",
+  "dart", "pl", "pm", "ps1", "bat", "cmd", "zig", "nim", "mli?", "fsx?", "groovy", "parquet", "ipynb", "lockb", "sum", "mod",
+].join("|");
 /**
- * A file named in words: a name with a known extension, alone or at the end of a path (`charge.ts`, `src/charge.ts`, `./run.sh`), or a well-known extensionless name. A word pair with a
- * slash (`and/or`, `client/server`), a fraction and a link are not files: a name must start a word, so the middle of `https://example.com/a.json` is not one.
+ * A file named in words with a known extension, alone or at the end of a path (`charge.ts`, `src/charge.ts`, `./run.sh`), or a well-known extensionless name. A word pair with a slash
+ * (`and/or`, `client/server`), a fraction and a link are not files: a name must start a word, so the middle of `https://example.com/a.json` is not one. The extension is read in any
+ * case (`fit.R`); a one-letter extension (`main.c`) is read by `namesFileGenerally`, which also reads the extensions that are not listed.
  */
-const FILE_NAMED = new RegExp(`(?:^|[\\s("'\`])(?:\\.{0,2}/)?(?:[\\w@.-]+/)*[\\w@-][\\w@.-]*\\.(?:${FILE_EXTENSIONS})(?![\\w-])|\\b(?:Dockerfile|Makefile|Procfile|Jenkinsfile)\\b`, "u");
+const FILE_NAMED = new RegExp(`(?:^|[\\s("'\`])(?:\\.{0,2}/)?(?:[\\w@.-]+/)*[\\w@-][\\w@.-]*\\.(?:${FILE_EXTENSIONS})(?![\\w-])|\\b(?:Dockerfile|Makefile|Procfile|Jenkinsfile)\\b`, "iu");
+/** The last part of the web address of a site: a name that ends in one is a domain (`example.com`), not a file, unless a folder comes before it. */
+const DOMAIN_ENDINGS: ReadonlySet<string> = new Set([
+  "com", "org", "net", "io", "dev", "ai", "app", "co", "us", "uk", "de", "fr", "edu", "gov", "info", "biz", "me", "xyz", "cloud", "ly", "tv", "gg", "in", "jp", "cn", "ru", "br", "au", "ca", "nl", "se", "es", "it",
+  "ch", "eu", "so", "to", "fm", "cc", "ws", "site", "online", "tech", "store", "page", "pro", "mobi", "ng", "id",
+]);
+/** A file name with an extension of one letter that a file may have (`main.c`, `util.h`, `x.m`, `fit.r`): read in any case, and only after a name of two letters or more (`p.m.` is a time). */
+const ONE_LETTER_EXTENSIONS = /^[chmr]$/iu;
+/** The words a file name is looked for between: spaces, quotes, brackets, commas and the like (a colon and a slash stay in, so a link is one word). */
+const WORD_BREAKS = /[\s"'`()<>[\]{},;]+/u;
+/**
+ * Any `name.ext` word of a claim, whatever its extension: a name, then a dot, then a lower-case extension of letters and digits that starts with a letter (`stop-proof-1.txt`, `notes.adoc`,
+ * `report.final.csv`, `src/x/y.zig`). Not a file: a version (`v1.2`, `1.2.3`, `1.2rc1`: its extension starts with a digit), a link (`https://...`), an address (`a@b.co`), an abbreviation
+ * (`e.g.`, `i.e.`: an extension of one letter, outside a folder), a sentence's last word and a full stop run together with the next sentence (`end.Then`: the extension is lower-case),
+ * a domain (`example.com`, `api.github.com`: it ends in a site ending, outside a folder).
+ */
+function namesFileGenerally(text: string): boolean {
+  return text.split(WORD_BREAKS).some((word) => {
+    if (word.length < 3 || word.includes("://")) return false;
+    const parts = word.replace(/[.:!?]+$/u, "").replace(/:\d+(?::\d+)?$/u, "").split("/");
+    const folder = parts.length > 1;
+    const last = parts[parts.length - 1] ?? "";
+    const match = (folder || !last.includes("@")) ? /^([\w@-][\w@.-]*)\.([a-z][a-z0-9]*|[chmr])$/iu.exec(last) : null;
+    return match !== null && isFileEnding(match[1]!, match[2]!, folder);
+  });
+}
+
+/** Whether a name and the ending after its last dot read as a file: the rules `namesFileGenerally` lists, for one word. */
+function isFileEnding(name: string, ending: string, folder: boolean): boolean {
+  if (ONE_LETTER_EXTENSIONS.test(ending)) return name.length >= 2;
+  if (ending.length > 10 || ending !== ending.toLowerCase()) return false;
+  if (ending.length === 1) return folder;
+  return folder || !DOMAIN_ENDINGS.has(ending);
+}
+
 /** A word that names a test. */
 const TEST_WORD = "tests?|tested|testing|coverage|asserts?|asserted|assertions?";
 /** A file that is a test: `charge.test.ts`, `charge.spec.ts`, `charge_test.go`. */
@@ -530,8 +569,11 @@ const NEGATED_TEST = new RegExp(`\\b${NEGATION}(?![\\w'])(?:[^\\w']+[\\w']+){0,3
 const TEST_NAMED = new RegExp(`\\b(?:${TEST_WORD})\\b`, "iu");
 
 /** Product names that end in .js and are not files. */
-const NOT_FILES = /\b(?:Node|Next|Nuxt|Vue|React|Express|Three|D3)\.js\b/giu;
-const namesFile = (text: string): boolean => FILE_NAMED.test(text.replace(NOT_FILES, " "));
+const NOT_FILES = /\b(?:Node|Next|Nuxt|Vue|React|Express|Three|D3|Angular|Backbone|Chart|Alpine|Ember|Meteor|Nest|Fastify|Koa|Mocha|Lodash)\.js\b/giu;
+const namesFile = (text: string): boolean => {
+  const words = text.replace(NOT_FILES, " ");
+  return FILE_NAMED.test(words) || namesFileGenerally(words);
+};
 /** A sentence of a claim that names a test and doesn't say there is none. */
 const namesTest = (text: string): boolean =>
   TEST_FILE.test(text) || text.split(/(?<=[.!?;])\s+|\n/u).some((sentence) => TEST_NAMED.test(sentence) && !NEGATED_TEST.test(sentence.trim()));
