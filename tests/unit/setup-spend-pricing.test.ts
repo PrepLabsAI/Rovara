@@ -216,6 +216,27 @@ describe("the run's own spend and its stop", () => {
     expect((await runSetupAgent(began.input)).setupRunSummary.spendCents).toBeGreaterThanOrEqual(84);
   });
 
+  // The three prod setup runs on glm-5 (real gateway price $1.00 in / $3.20 out per million; the run price the worker is signed is the POOLED bound over every long-context band: input $2.00, output $6.40, cache write
+  // $4.00). They used no cache. The old arithmetic charged every input token at the cache write rate ($4.00): 382 / 382 / 339 cents, exactly 4.00x the real $0.957 / $0.956 / $0.849. Per-class pricing removes that 2x
+  // (the input is no longer raised to the write rate), but the pooled long-context input rate still doubles it: 192 / 192 / 170 cents, 2.0x. PRICE-BANDS (a follow-up: pick the band from the call's real input size) brings it to ~1.0x.
+  it.each([
+    ["run 1", 952_110, 1_480, 192, 0.9569, 382],
+    ["run 2", 951_498, 1_249, 192, 0.9555, 382],
+    ["run 3", 844_840, 1_221, 170, 0.8487, 339],
+  ])("prod glm-5 %s at the pooled signed price shows %i + %i tokens as %i cents, 2.0x the real $%s (until PRICE-BANDS)", async (_name, input, output, cents, realUsd, oldCents) => {
+    const pooled: ModelPrice = { inputPerMTok: 2, outputPerMTok: 6.4, cacheReadPerMTok: 2, cacheWritePerMTok: 4 };
+    const w = await world({ turns: [{ usage: { input, output } }], price: pooled, budgetCents: 5_000 });
+    const shown = (await runSetupAgent(w.input)).setupRunSummary.spendCents;
+    expect(shown).toBe(cents);
+    expect(shown / (realUsd * 100)).toBeGreaterThan(1.95);
+    expect(shown / (realUsd * 100)).toBeLessThan(2.05);
+    // At the real rates the same tokens are the gateway's figure within a cent.
+    const real = await world({ turns: [{ usage: { input, output } }], price: { inputPerMTok: 1, outputPerMTok: 3.2 }, budgetCents: 5_000 });
+    expect(Math.abs((await runSetupAgent(real.input)).setupRunSummary.spendCents - realUsd * 100)).toBeLessThan(1);
+    // The old count at $4.00 in / $6.40 out: 4.00x.
+    expect(Math.ceil((input * 4 + output * 6.4) / 10_000)).toBe(oldCents);
+  });
+
   it("a turn of cache reads only, with a cache read rate of 0 and no output, is known spend of 0, not an unreadable one", async () => {
     const free: ModelPrice = { inputPerMTok: 3, outputPerMTok: 15, cacheReadPerMTok: 0, cacheWritePerMTok: 6 };
     const w = await world({ turns: [{ usage: { cacheRead: 50_000 } }], price: free });
