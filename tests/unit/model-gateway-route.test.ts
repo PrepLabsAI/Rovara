@@ -31,8 +31,10 @@ describe("model access route", () => {
   it("golden: feature off retains the exact response bytes", async () => {
     const w = await world(false);
     expect(await w.call()).toEqual({ statusCode: 404, headers: { "content-type": "application/json" }, body: '{"error":{"code":"NOT_FOUND","message":"route not found"}}' });
+    // Deliberate change (core callback route fix): `e2e-admission` and `e2e-evidence` used to answer 404 "route not found" because the route pattern had no digits, so a worker's browser-round callbacks never
+    // reached the callback service. They are routed like every other served action now: without a capability, the same 409 as the rest.
     for (const action of ["events", "artifacts", "heartbeat", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "pull-request", "pull-request-update", "setup-agent", "model-access"]) {
-      expect(await w.call("", `/v1/internal/workspaces/${v.ws}/operations/${v.op}/${action}`, "POST"), action).toEqual(action.startsWith("e2e-") ? { statusCode: 404, headers: { "content-type": "application/json" }, body: '{"error":{"code":"NOT_FOUND","message":"route not found"}}' } : { statusCode: 409, headers: { "content-type": "application/json" }, body: '{"error":{"code":"CALLBACK_FORBIDDEN","message":"callback capability is required"}}' });
+      expect(await w.call("", `/v1/internal/workspaces/${v.ws}/operations/${v.op}/${action}`, "POST"), action).toEqual({ statusCode: 409, headers: { "content-type": "application/json" }, body: '{"error":{"code":"CALLBACK_FORBIDDEN","message":"callback capability is required"}}' });
     }
     for (const [path, method] of [["/v1/internal/design-review/packet", "GET"], ["/v1/internal/context-tools", "GET"], ["/v1/internal/context-tools/call", "POST"], ["/v1/internal/mcp", "POST"]] as const) {
       // The packet route answers a refused credential with 403 (packet-route.ts); the other three keep the shared mapping's 409.

@@ -24,6 +24,7 @@ import { ciImage } from "./ci-images.js";
 import { call } from "./slack-broker.js";
 import { collectOnThisHost } from "./linux-web-api-probes.js";
 import { planAnswer, planDocument } from "./plan-documents.js";
+import { planningContextUnavailableMessage } from "./planning-context-error.js";
 import { FAUX_MODEL, fauxModelRuntime } from "./faux-model.js";
 import { PROFILE, shaCanonical, webApiRow, binding as runtimeBinding } from "./e2e-application-plan-fixtures.js";
 import type { buildFeatureE2EPlanningContext } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
@@ -32,7 +33,7 @@ import { vi } from "vitest";
 import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
 import * as dynamo from "@aws-sdk/client-dynamodb";
 import { FakeDynamoDb as WireDynamo } from "./ports/dynamodb-fake.js";
-import { ProjectDefinitionSchema, canonicalJson, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, ProjectDefinitionSchema, canonicalJson, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
 import { DynamoDocumentStore } from "../../packages/aws-adapters/src/dynamodb/document-store.js";
 import { S3ObjectStorage } from "../../packages/aws-adapters/src/s3/index.js";
 import { developerTaskRouteDependencies, type DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
@@ -48,6 +49,7 @@ import { createNoticeService, createSessionService } from "../../packages/broker
 import { createTaskFactsSource } from "../../packages/broker/src/local/app/facts.js";
 import { recordTaskThread } from "../../packages/broker/src/core/channel/threads.js";
 import { createFakeWorld, FAKE_COMPANY, type FakeWorld } from "./core-host-fakes.js";
+import { createPriceTableMetering } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createDeveloperTaskBroker, MAYA, OMAR, type memoryS3 } from "./developer-task-broker.js";
 import type { FakeDynamoDb } from "./fake-dynamodb.js";
 
@@ -56,6 +58,12 @@ vi.mock("../../packages/broker/src/core-host/code-modules.js", async (original) 
 vi.mock("../../packages/broker/src/core-host/hosted-modules.js", async (original) => ({ ...await original<object>(), hostedSecurityModules: () => [] }));
 
 export const JOURNEY_COMPANY = FAKE_COMPANY as OrgId;
+/** The price-table entry that prices the fixture planner's usage report (the fake world's table is empty, and an unpriced usage leaves the task's spend unknown). */
+const PLANNER_PROVIDER = "anthropic";
+const PLANNER_MODEL_ID = "journey-planner";
+const PLANNER_MODEL_KEY = `${PLANNER_PROVIDER}/${PLANNER_MODEL_ID}`;
+/** What the fixture's models cost: the planner's report, and the scripted coding model's, whose unpriced usage would stop the run as unknown spend. */
+const PRICE = { inputMicrosPerMillionTokens: 3_000_000, outputMicrosPerMillionTokens: 15_000_000 } as const;
 export const FOREIGN_COMPANY = "org_corehost00000000000b" as OrgId;
 /** The shared internal ports used by parallel parts, never a public API or a substitute verdict. */
 export type JourneyApplicationPorts = ApplicationE2ESeams;
@@ -124,13 +132,13 @@ export async function createCoreBrowserBroker(options: CoreBrowserBrokerOptions 
       world = createFakeWorld({ store, objects });
       world.clock.now = Date.now();
       const identity = createHostedIdentity({ membershipOf: membershipWithRoleFromDynamo(db, "signin"), displayNameOf: hostedDisplayNameOf(db, "signin") });
-      adapters.modules = world.modules.map((module) => module.point === "identity" ? { ...module, create: () => identity } : module.point === "approvers" ? { ...module, create: () => createHostedApprovers({ store, identity, key: approvalProofKeyOf(callbackSigningKey), now: () => new Date(world!.clock.now) }) } : module);
+      adapters.modules = world.modules.map((module) => module.point === "identity" ? { ...module, create: () => identity } : module.point === "metering" ? { ...module, create: () => createPriceTableMetering({ currency: "USD", models: { [PLANNER_MODEL_KEY]: PRICE, [`${FAUX_MODEL.provider}/${FAUX_MODEL.modelId}`]: PRICE } }) } : module.point === "approvers" ? { ...module, create: () => createHostedApprovers({ store, identity, key: approvalProofKeyOf(callbackSigningKey), now: () => new Date(world!.clock.now) }) } : module);
       core = createBrokerCoreRoot({ env: { AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID: typeof options.brokerExtra?.["e2eFeatureRuntimeCatalogId"] === "string" ? options.brokerExtra["e2eFeatureRuntimeCatalogId"] : "catalog" }, documentClient: db, stateTableName: "state", signInTableName: "signin", callbackSigningKey,
         ...(options.brokerExtra?.["projectSetupSource"] === undefined ? {} : { applicationSource: async (repositoryUrl, ref) => (options.brokerExtra!["projectSetupSource"] as { capture(input: { repositoryUrl: string; ref: string }): Promise<E2ESourceSnapshot> }).capture({ repositoryUrl, ref }) }),
         repositoryGrantKey: Buffer.alloc(32, 4), repositoryCredential: async () => ({ token: "synthetic-local-host-token" }),
         codeModules: () => ({}) as never, origin: () => "https://api.example.test", log: () => undefined, now: () => new Date(world!.clock.now),
         taskRules: (person, companyId) => ({ ...developerTaskRouteDependencies({ documentClient: db, tableName: "state", developer: signIn!, companies: companyMembershipFromDynamo(db, "signin"), now: Date.now }, { developerId: person.developerId, sessionId: "core", name: person.name, amr: "oidc" }, undefined, null), companyId }),
-        understandFirst: false, ciReporting: { honest: true, ciMode: async () => "sandbox_only" as const },
+        ciReporting: { honest: true, ciMode: async () => "sandbox_only" as const },
         chatThreads: { channels: ["examplechat"], companyOf: ({ tenant }) => tenant === "journey-team" ? JOURNEY_COMPANY : undefined, adapterFor: (company, name) => company === JOURNEY_COMPANY && name === "examplechat" ? channel : undefined },
         services: (companyId, flow, registry, wiring) => {
           const clock = () => new Date(world!.clock.now);
@@ -190,7 +198,14 @@ export async function takeCoreInvocation(harness: Awaited<ReturnType<typeof crea
     }
     harness.world.clock.advance(5);
   }
-  throw new Error(`core did not dispatch ${mode}; no fixture lifecycle rows were inserted`);
+  // Say what the core did instead (no fixture lifecycle rows are ever inserted to make a step appear): where the workflow is, and what its operations are.
+  const task = harness.db.find((row) => row.entityType === "DEVELOPER_TASK" && row.workspaceId === workspaceId)[0] as { workflow?: { stage?: string; state?: string; blockReason?: string }; planUnreadable?: { errors?: unknown } } | undefined;
+  const operations = harness.db.find((row) => row.entityType === "OPERATION" && row.workspaceId === workspaceId).map((row) => `${String(row.workflowMode ?? row.kind)}:${String(row.status)}`).join(", ");
+  const lastOperation = harness.db.find((row) => row.entityType === "OPERATION" && row.workspaceId === workspaceId).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))).at(-1);
+  const lastPrompt = (lastOperation?.dispatch as { payload?: { prompt?: unknown } } | undefined)?.payload?.prompt;
+  const lastAsked = typeof lastPrompt === "string" ? lastPrompt.slice(-900) : undefined;
+  throw new Error(`core did not dispatch ${mode}; no fixture lifecycle rows were inserted. The workflow is at ${String(task?.workflow?.stage)}/${String(task?.workflow?.state)}${task?.workflow?.blockReason === undefined ? "" : ` (${task.workflow.blockReason})`}`
+    + `${task?.planUnreadable === undefined ? "" : `; the last plan was unreadable: ${JSON.stringify(task.planUnreadable.errors)}`}; operations: ${operations}${lastAsked === undefined ? "" : `; the last operation was asked: ${lastAsked}`}`);
 }
 
 const EXECUTOR_IMAGE = process.env.ROVARA_EXECUTOR_IMAGE ?? "rovara-e2e-executor:ci";
@@ -224,6 +239,36 @@ export type JourneyInput = Readonly<{ fixtureRoot: string; planningFiles: readon
   apiRuntime?: boolean;
   plan(context: PlanningContext): { title: string; claims: Array<{ id: string; text: string }>; plannerIntent: object } | Promise<{ title: string; claims: Array<{ id: string; text: string }>; plannerIntent: object }> }>;
 
+
+/**
+ * PRODUCT GAP (B), ruled separately: the hosted core reads a project from its COMPANY partition (`projectRevisionKey(company, ...)`, aws/core-application-e2e.ts), but the only code that writes
+ * `definition.e2e` is `registerProject`, which refuses an e2e policy for a named company (aws/broker.ts, NAMED_COMPANY_SETUP_APPROVAL_REFUSED) and, for the admin this harness signs in as (no developer
+ * id, so no company), writes the LEGACY layout (`PROJECT#name`, the legacy catalog row, and the account registry under the implicit company). No product path puts a policy where the core reads it.
+ * Until one exists, this seeds the company partition directly with what the legacy registration just stored: the revision (with its e2e policy, setup approval and runtime binding), the catalog
+ * pointer, and the synthetic-account rows. It writes through the core's own store, so the core reads exactly what a company registration would leave. Delete this when (B) lands and register normally.
+ */
+async function seedCompanyPartitionFromLegacyRegistration(harness: Awaited<ReturnType<typeof createCoreBrowserBroker>>, project: string, revision: number): Promise<void> {
+  const store = harness.runtime.flow.deps.store;
+  const legacy = harness.db.get(`PROJECT#${project}`, `REV#${String(revision).padStart(12, "0")}`);
+  if (legacy === undefined || (legacy.definition as { e2e?: unknown } | undefined)?.e2e === undefined) throw new Error("the legacy registration did not store the e2e revision");
+  await store.put({ item: { ...legacy, ...projectRevisionKey(JOURNEY_COMPANY, project, revision) } });
+  await store.put({ item: { ...orgProjectCatalogKey(JOURNEY_COMPANY, project), entityType: "PROJECT_CATALOG", latestRevision: revision } });
+  const legacyAccountsPk = projectPk(IMPLICIT_COMPANY_ID, project);
+  for (const row of harness.db.find((candidate) => candidate.pk === legacyAccountsPk && String(candidate.sk).startsWith("E2E_ACCOUNT"))) await store.put({ item: { ...row, pk: projectPk(JOURNEY_COMPANY, project) } as never });
+}
+
+/** A version 2 coding plan must name the files it changes and how it is tested, or the broker asks the planner again (plan/process.ts). The journeys' claims are about the scenarios, so the first one also names both. */
+const withFilesAndTest = (claims: Array<{ id: string; text: string }>): Array<{ id: string; text: string }> =>
+  claims.map((claim, index) => index === 0 ? { ...claim, text: `${claim.text} The change is in server.mjs and public/index.html, and tests/orders.test.ts covers it.` } : claim);
+
+/**
+ * The plan self-check (plan/process.ts) sends back a coding plan with a claim or a "Not changing" entry that no scenario or check proves. The journeys' claims are about their scenarios, so the plan
+ * says its first scenario proves every claim and the one "Not changing" entry the plan document carries (`nc1`).
+ */
+const scenarioProvesOf = (claims: Array<{ id: string }>, intent: object): Record<string, string[]> => {
+  const scenarios = (intent as { scenarios?: Array<{ scenarioId: string }> }).scenarios ?? [];
+  return scenarios[0] === undefined ? {} : { [scenarios[0].scenarioId]: [...claims.map((claim) => claim.id), "nc1"] };
+};
 
 export async function startCoreBrowserJourney(journeyInput: JourneyInput, roots: string[]) {
     const input = journeyInput;
@@ -259,6 +304,10 @@ export async function startCoreBrowserJourney(journeyInput: JourneyInput, roots:
 
     // The broker, with the project registered and its setup approved on the qualified web profile (one admin proposal, approval and registration, as `agentx admin` makes them).
     const harness = await createCoreBrowserBroker({ brokerExtra: { projectSetupSource: { capture: async () => snapshot }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog" } });
+    // Collecting a candidate confirms its starting commit with the code host (build-step/results.ts confirmStartingCommits). The fake host knows no commit of this journey's real local repository,
+    // so it answers the journey's base commit with its tree (what the real host does) and refuses every other commit exactly as before.
+    const hostTree = harness.world.host.tree.bind(harness.world.host);
+    harness.world.host.tree = async (repository, revision, scope) => revision === baseCommit ? baseTree : hostTree(repository, revision, scope);
     const projectRow = () => harness.db.find((row) => row.pk === projectPk(JOURNEY_COMPANY, "payments") && row.entityType === "PROJECT" && (row.definition as { name?: string } | undefined)?.name === "payments")[0]!;
     const projectRuntimeBinding = projectRow().runtimeBinding as typeof runtimeBinding;
     const webRowKey = e2eRegisteredRuntimeKey("catalog", PROFILE, "web");
@@ -287,6 +336,7 @@ export async function startCoreBrowserJourney(journeyInput: JourneyInput, roots:
       runtimeBinding: projectRow().runtimeBinding, setupApproval: { proposalRef, proposalSha256, decision: "approve" } } });
     expect(registration.status, JSON.stringify(registration.body)).toBe(201);
     const policy = E2EPolicySchema.parse(proposalResponse.body.policy);
+    await seedCompanyPartitionFromLegacyRegistration(harness, "payments", definition.revision + 1);
 
     // Plan and approve one web scenario for the owner account: open the page, ask for the stock status of an order, and the page must show what the inventory service says.
     const start = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: input.instructions, client: "m1-3-journeys", workflow: true, workflowPath: "QUICK" });
@@ -307,16 +357,34 @@ export async function startCoreBrowserJourney(journeyInput: JourneyInput, roots:
     const preparation = await takeCoreInvocation(harness, workspaceId, "prepare");
     await callback(preparation.invocation, "result", { operationId: preparation.invocation.operationId, status: "SUCCEEDED", result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: baseCommit }] } });
     harness.world.machines.finish(preparation.machineId, preparation.invocation.operationId);
+    // Every Understand, planning and plan-check step is a model run. Approving the plan starts paid work, which the hosted flow allows only while it can read the task's spend (a run that ended with
+    // no usage booked leaves the spend unknown and the approval refused), so each of the fixture's model runs books one priced report through the real events callback, as the worker does.
+    const bookUsage = (invocation: WorkerInvocation) => callback(invocation, "events", { events: [{ type: "usage", timestamp: new Date(harness.world.clock.now).toISOString(),
+      payload: { schemaVersion: 1, outcome: "SUCCEEDED", provider: PLANNER_PROVIDER, modelId: PLANNER_MODEL_ID, cacheRetention: "short", tokens: { input: 1000, output: 200, cacheRead: 0, cacheWrite: 0, total: 1200 }, cacheReadRatio: 0, costUsd: null } }] });
+    // The hosted default starts a workflow task on workflow 1.1.0: Understand first, and only then the structured PLAN run that is offered the application planning context (a task on the rollback
+    // path, `understandFirst: false`, plans in Markdown and is never offered it). The Understand run answers with its assessment, saved as `intent.json`.
+    const understanding = await takeCoreInvocation(harness, workspaceId, "UNDERSTAND");
+    await bookUsage(understanding.invocation);
+    await callback(understanding.invocation, "artifacts", { name: "intent.json", mediaType: "application/json", content: JSON.stringify({ kind: "ready", path: "QUICK", restatement: input.instructions.slice(0, 400), assumptions: [] }) });
+    await callback(understanding.invocation, "result", { operationId: understanding.invocation.operationId, status: "SUCCEEDED", result: { workflowMode: "UNDERSTAND" } });
+    harness.world.machines.finish(understanding.machineId, understanding.invocation.operationId);
     const planning = await takeCoreInvocation(harness, workspaceId, "PLAN");
     const task = harness.db.get(taskKey.pk, taskKey.sk) as unknown as Parameters<JourneyApplicationPorts["planning"]["context"]>[0];
     const seams = harness.runtime.flow.deps.applicationE2E;
     if (seams === undefined) throw new Error("The production root must compose hosted applicationE2E; native fixtures never supply a fake admission/authority");
     const context = await seams.planning.context(task);
-    if (context?.status !== "available") throw new Error("core did not offer application planning context");
+    if (context?.status !== "available") throw new Error(planningContextUnavailableMessage(context));
     const planned = await input.plan(context);
-    await callback(planning.invocation, "artifacts", { name: "plan.md", mediaType: "text/plain", content: planAnswer(planDocument({ title: planned.title, claims: planned.claims, e2e: planned.plannerIntent as never })) });
+    await bookUsage(planning.invocation);
+    await callback(planning.invocation, "artifacts", { name: "plan.md", mediaType: "text/markdown; charset=utf-8", content: planAnswer(planDocument({ title: planned.title, claims: withFilesAndTest(planned.claims), e2e: planned.plannerIntent as never, scenarioProves: scenarioProvesOf(planned.claims, planned.plannerIntent) })) });
     await callback(planning.invocation, "result", { operationId: planning.invocation.operationId, status: "SUCCEEDED", result: { workflowMode: "PLAN" } });
     harness.world.machines.finish(planning.machineId, planning.invocation.operationId);
+    // Workflow 1.1.0 has the plan checked by a read-only critic before the owner sees it (the plan check, plan/check.ts). It answers with its verdict block; "ok" sends the plan on to the owner.
+    const critique = await takeCoreInvocation(harness, workspaceId, "PLAN_CRITIQUE");
+    await bookUsage(critique.invocation);
+    await callback(critique.invocation, "artifacts", { name: "plan-critique.md", mediaType: "text/markdown; charset=utf-8", content: `I read the plan against the code.\n\n\`\`\`rovara-plan-critique\n${JSON.stringify({ verdict: "ok", points: [] })}\n\`\`\`\n` });
+    await callback(critique.invocation, "result", { operationId: critique.invocation.operationId, status: "SUCCEEDED", result: { workflowMode: "PLAN_CRITIQUE" } });
+    harness.world.machines.finish(critique.machineId, critique.invocation.operationId);
     const workflowNow = () => (harness.db.get(taskKey.pk, taskKey.sk) as { workflow: { revision: number; stage: string; state: string; blockReason?: string; artifacts: Array<{ sha256: string }>;
       candidate?: { digest: string }; e2e?: Record<string, unknown> } }).workflow;
     await flushJourneyNotices(harness);
@@ -412,8 +480,8 @@ export async function startCoreBrowserJourney(journeyInput: JourneyInput, roots:
       const authorization = `${WORKER_INVOKE_AUTHORIZATION_SCHEME} ${workerInvokeToken(payload, cryptoSign("sha256", Buffer.from(payload, "ascii"), workerKeys.privateKey))}`;
       // The machine adapter is external infrastructure. The server, runner, collectors and callbacks are production code.
       const response = await handleWorkerRequest(new Request("http://worker/invocations", { method: "POST", headers: { authorization, "content-type": "application/json" }, body }), workerState);
-      expect(response.status).toBe(202);
-      for (let attempt = 0; attempt < 6000; attempt += 1) {
+      expect(response.status, `worker refused ${workflowMode}: ${await response.clone().text()}`).toBe(200); // the worker server answers 200 with {accepted:true} (packages/worker/src/server.ts); 202 was a stale expectation
+      for (let attempt = 0; attempt < Number(process.env.JOURNEY_WAIT_ATTEMPTS ?? 6000); attempt += 1) {
         const operation = harness.db.get(workspacePk, `OPERATION#${invocation.operationId}`);
         if (["SUCCEEDED", "FAILED", "CANCELLED"].includes(String(operation?.status))) {
           harness.world.machines.finish(next.machineId, invocation.operationId);
@@ -421,7 +489,9 @@ export async function startCoreBrowserJourney(journeyInput: JourneyInput, roots:
         }
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
-      throw new Error(`core ${workflowMode} worker did not post a terminal result`);
+      const journalFiles = await readdir(join(root, "worker-journal")).catch(() => [] as string[]);
+      const journalText = journalFiles.length === 0 ? "none" : (await readFile(join(root, "worker-journal", journalFiles[0]!), "utf8").catch(() => "unreadable")).slice(0, 700);
+      throw new Error(`core ${workflowMode} worker did not post a terminal result; the operation is ${String(harness.db.get(workspacePk, `OPERATION#${invocation.operationId}`)?.status)}; the worker's journal: ${journalText}`);
     }
     async function writePreparationManifest(projectRevision: number) {
       await writeFile(join(workerWorkspace, ".agentx", "preparation-manifest.json"), `${JSON.stringify({ schemaVersion: 2, projectName: "payments", projectRevision,

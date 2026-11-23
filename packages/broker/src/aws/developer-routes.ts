@@ -129,7 +129,7 @@ import { CompanyRecord, companyKey } from "../developer/company-membership.js";
 import { INSTALL_COMPANY_PROJECTS_MAX, InstallCompanyRefused, installCompanyCatalog, installCompanyGrants, installCompanyLatestDefinition, installCompanyOf, installUsesCompanyLayout, mergeSurvivor } from "./install-company.js";
 import { installCompanyBindings } from "./slack-install-company.js";
 import { slackWorkspaceHint } from "../developer/providers.js";
-import { META, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
+import { META, developerRecordKeyedBy, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
 import type { ChatGptConnections } from "../chatgpt/connections.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
 import type { DeveloperTaskActions } from "./developer-task-actions.js"; import type { ClientProjectNaming } from "./company-project-names.js";
@@ -2030,7 +2030,7 @@ export function developerTaskRouteDependencies(
   // own rows (the reviewed reader every sign-in uses); the grant is the project's in the TASK'S company, by grant only (no channel list, no Slack id).
   const developerRecord = async (targetDeveloperId: string): Promise<DeveloperRecord | undefined> => {
     const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: { pk: `DEVELOPER#${targetDeveloperId}`, sk: META }, ConsistentRead: true })) as { Item?: DeveloperRecord };
-    return response.Item;
+    return developerRecordKeyedBy(response.Item, targetDeveloperId); // the id lives only in the row's key (real rows have no `developerId` attribute); a disagreeing attribute refuses
   };
   const definitionReads = new Map<string, ReturnType<typeof latestDefinition>>();
   const webProof: Pick<TaskPersonIdentityDependencies, "companyMembership" | "projectGrant" | "projectMemberIds"> = {
@@ -2875,7 +2875,7 @@ async function routeServerRead(deps: DeveloperRouteDependencies, request: Adapte
 }
 
 /** Selected web-only local proof; never constructs the Slack adapter or memoizes project authority. */
-function webOnlyTaskPersonReader(deps: DeveloperRouteDependencies): NonNullable<TaskPeopleDependencies["checkTaskPerson"]> {
+export function webOnlyTaskPersonReader(deps: DeveloperRouteDependencies): NonNullable<TaskPeopleDependencies["checkTaskPerson"]> {
   const local = { ...deps };
   delete local.workspaces; // Every selected proof read must use the counted local client.
   const noSlack = async (): Promise<never> => { throw agentXError("RUNTIME_UNAVAILABLE", "Start status is unavailable."); };
@@ -2886,7 +2886,7 @@ function webOnlyTaskPersonReader(deps: DeveloperRouteDependencies): NonNullable<
       const key = { pk: `DEVELOPER#${id}`, sk: META };
       const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: key, ConsistentRead: true })) as { Item?: DeveloperRecord & { pk?: unknown; sk?: unknown } };
       if (response.Item !== undefined && (response.Item.pk !== key.pk || response.Item.sk !== key.sk)) return noSlack();
-      return response.Item;
+      return developerRecordKeyedBy(response.Item, id);
     },
     companyMembership: async id => {
       const key = membershipKey(id);

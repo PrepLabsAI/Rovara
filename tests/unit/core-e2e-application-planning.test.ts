@@ -1,12 +1,17 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { createWorkflowSnapshot, type ProjectDefinition } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, canonicalPlanJson, createWorkflowSnapshot, projectRevisionKey, type OrgId, type ProjectDefinition, type WorkerInvocation } from "@agentx/contracts";
+import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createApplicationPlanningContext, type ApplicationPlanningPorts } from "../../packages/broker/src/core/e2e/application-planning.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 import { processPlanAnswer } from "../../packages/broker/src/core/plan/process.js";
 import type { OperationRecord } from "../../packages/broker/src/core/task-flow/records.js";
-import { structuredPlanContextOf } from "../../packages/broker/src/core/plan/context.js";
+import { APPLICATION_PLAN_FEATURE as DISPATCH_APPLICATION_PLAN_FEATURE, structuredPlanContextOf, structuredPlanDispatch } from "../../packages/broker/src/core/plan/context.js";
 import type { ApplicationTask } from "../../packages/broker/src/core/e2e/application-seams.js";
-import { createHarness, definition } from "../support/task-flow-harness.js";
+import { COMPANY, createHarness, newRequestId, definition, type Harness } from "../support/task-flow-harness.js";
+import { workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
+import type { WorkspaceRecord } from "../../packages/broker/src/core/task-flow/records.js";
 import { NOW, planFixture, sha, webApiRow } from "../support/e2e-application-plan-fixtures.js";
 
 function fixture() {
@@ -154,4 +159,173 @@ it("keeps the prior canonical plan in the next planning context", async () => {
   h.deps.artifacts = { get: async () => bytes };
   const workflow = { ...w.task.workflow, artifacts: [artifact] };
   expect((await structuredPlanContextOf(h.deps, w.task, workflow))?.previous).toMatchObject({ kind: "plan", version: 1, plan: { title: document.title } });
+});
+
+// The core reads a task's project from its COMPANY partition (aws/core-application-e2e.ts reads `projectRevisionKey(companyId, ...)`). The legacy registration route writes `PROJECT#name`, which the core never reads:
+// a policy stored only there is invisible to planning (no context, so no browser round), and a policy in the company partition is offered. This is the boundary the native journeys' fixture had to cross.
+describe("the partition the core reads a project's e2e policy from", () => {
+  const COMPANY = "org_corehost00000000000a" as OrgId;
+  async function portsOver(rows: Array<{ company: string; revision: number; withPolicy: boolean }>) {
+    const { ports, task, project } = fixture();
+    const store = new MemoryDocumentStore();
+    for (const row of rows) {
+      const definition = { ...project.definition, revision: row.revision, ...(row.withPolicy ? {} : { e2e: undefined }) };
+      const key = row.company === "legacy" ? { pk: "PROJECT#payments", sk: `REV#${String(row.revision).padStart(12, "0")}` } : projectRevisionKey(row.company, "payments", row.revision);
+      await store.put({ item: { ...key, entityType: "PROJECT", definition: JSON.parse(JSON.stringify(definition)) as never, registeredBy: project.registeredBy, setupApproval: project.setupApproval } });
+    }
+    const reading = (company: OrgId) => async (input: { project: string; startingRevision: number }) => {
+      const row = await store.get(projectRevisionKey(company, input.project, input.startingRevision));
+      return row === undefined ? undefined : { definition: row["definition"] as ProjectDefinition, registeredBy: row["registeredBy"] as string, setupApproval: row["setupApproval"] as typeof project.setupApproval };
+    };
+    return { task, ports: { ...ports, project: reading(COMPANY) } satisfies ApplicationPlanningPorts };
+  }
+  it("offers a policy stored in the company partition", async () => {
+    const { ports, task } = await portsOver([{ company: COMPANY, revision: 1, withPolicy: true }]);
+    expect(await createApplicationPlanningContext(ports)(task)).toMatchObject({ status: "available" });
+  });
+  it("sees no policy that exists only in the legacy partition (the task pins the company's revision, which has none)", async () => {
+    const { ports, task } = await portsOver([{ company: COMPANY, revision: 1, withPolicy: false }, { company: "legacy", revision: 2, withPolicy: true }]);
+    expect(await createApplicationPlanningContext(ports)(task)).toBeUndefined();
+  });
+  it("does not find the implicit company's rows either: the pinned revision is read by the task's own company", async () => {
+    const { ports, task } = await portsOver([{ company: IMPLICIT_COMPANY_ID, revision: 1, withPolicy: true }]);
+    expect(await createApplicationPlanningContext(ports)(task)).toMatchObject({ status: "unknown" });
+  });
+});
+
+// The core must negotiate the application plan: a planning run that is offered the application planning context is also told, in its payload, that the version 2 intent is allowed (`workflowE2EPlanVersion: 2`),
+// and the step needs a worker that parses it. Without the flag the broker (plan/process.ts) and the worker both refuse the v2 plan the planner was asked to write. Only a project whose pinned revision has an
+// e2e policy and a ready runtime is offered the context, so every other project's dispatch must stay exactly as it was.
+describe("the core's planning runs negotiate the application plan", () => {
+  const APPLICATION_PLAN_FEATURE = "task.workflowE2EApplicationPlan";
+  const read = (invocation: WorkerInvocation) => (invocation as unknown as { payload: Record<string, unknown> }).payload;
+  const drain = async (h: Harness, rounds = 12) => { for (let round = 0; round < rounds; round += 1) { if ((await h.flow.dispatchOnce({ maxMessages: 10 })).received === 0) return; h.clock.advance(70); } };
+
+  /** A workflow task on the core's 1.1.0 path (Understand first), through preparation and Understand, with its first PLAN run dispatched. */
+  async function planning(options: { policy: boolean; readyRuntime?: boolean; features?: readonly string[] }) {
+    const w = fixture();
+    const objects = new Map<string, Uint8Array>();
+    const h = createHarness({ understandFirst: true, machines: { startingChecks: 0, features: [...(options.features ?? WORKER_INVOCATION_FEATURES)] } });
+    const registered = options.policy ? w.project.definition : { ...w.project.definition, e2e: undefined };
+    await h.registerProject(JSON.parse(JSON.stringify(registered)) as ProjectDefinition);
+    h.deps.artifacts = { get: async (key) => objects.get(key) };
+    h.deps.applicationE2E = { planning: { context: createApplicationPlanningContext({ ...w.ports, project: async (task) => task.project === "payments" ? { ...w.project, definition: registered } : undefined,
+      ...(options.readyRuntime === false ? { readyRuntimes: async () => [] } : {}) }), approve: async () => { throw new Error("not approving"); } } } as never;
+    const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "Add an orders CSV export", workflow: true });
+    await drain(h);
+    const workspace = (await h.store.get(workspaceKey(COMPANY, started.task.workspaceId))) as unknown as WorkspaceRecord;
+    const machineId = workspace.machine!.machineId;
+    const last = () => h.machines.delivered(machineId).at(-1)!;
+    let fence = 1;
+    const finish = async (invocation: WorkerInvocation, outcome: Record<string, unknown>) => {
+      h.machines.finish(machineId, invocation.operationId);
+      await h.flow.recordResult({ workspaceId: workspace.id, operationId: invocation.operationId, fence, status: "SUCCEEDED", outcome } as never);
+      fence += 1;
+      await drain(h);
+    };
+    await finish(last(), { kind: "prepared", base: [{ repositoryId: "demo", baseCommitSha: w.fx.snapshot.commitSha }] });
+    await finish(last(), { kind: "understood", assessment: { kind: "ready", path: "QUICK", restatement: "Add an orders CSV export", assumptions: [] } });
+    const operations = async () => (await h.store.query({ pk: workspaceKey(COMPANY, workspace.id).pk, sk: { op: "beginsWith", prefix: "OPERATION#" } })).items as unknown as OperationRecord[];
+    return { h, w, last, finish, objects, operations, taskId: started.task.taskId, workspace, machineId, fence: () => fence };
+  }
+  const v2Intent = (w: ReturnType<typeof fixture>) => { const { portableOperationRefs: _p, mockFixtureRefs: _m, ...intent } = w.fx.intent; void _p; void _m; return intent; };
+
+  it("a project with an e2e policy and a ready runtime: the first PLAN run carries the version, needs the feature, parses, and the broker takes a v2 plan from it", async () => {
+    const p = await planning({ policy: true });
+    const invocation = p.last();
+    expect(read(invocation)).toMatchObject({ workflowMode: "PLAN", planFormat: "structured", workflowE2EPlanVersion: 2 });
+    expect(WorkerInvocationSchema.safeParse(invocation).success).toBe(true);
+    const operation = (await p.operations()).find((entry) => entry.id === invocation.operationId)!;
+    expect(operation.dispatch.requires).toEqual(expect.arrayContaining(["task.workflowMode", "task.structuredPlans", APPLICATION_PLAN_FEATURE]));
+    // The broker accepts the v2 intent from the very operation record that was dispatched.
+    p.h.deps.planSelfCheck = false;
+    const task = (await readTask(p.h.deps, p.taskId))!;
+    const objects = new Map<string, string>();
+    const claims = [{ id: "1", text: "The export is added in server.mjs and tests/orders.test.ts covers it." }];
+    const answer = { content: planAnswer(planDocument({ claims, e2e: v2Intent(p.w) })), artifact: { id: "application-plan", createdAt: new Date().toISOString() } };
+    const result = await processPlanAnswer(p.h.deps, { put: async (key: string, bytes: Uint8Array) => { objects.set(key, Buffer.from(bytes).toString("utf8")); } }, { task, workflow: task.workflow!, operation, answer });
+    expect(result.kind === "plan_unreadable" ? result.errors : result.kind).toBe("planned");
+  });
+
+  it("a worker that cannot parse the application plan is refused the step, never sent a run it would reject", async () => {
+    const p = await planning({ policy: true, features: WORKER_INVOCATION_FEATURES.filter((feature) => feature !== APPLICATION_PLAN_FEATURE) });
+    const operations = await p.operations();
+    expect(operations.filter((entry) => entry.workflowMode === "PLAN").at(-1)).toMatchObject({ kind: "task", status: "FAILED", error: "this worker is too old to run this step; upgrade it" });
+  });
+
+  it("a project without an e2e policy: the PLAN run is exactly what it was (structured, no version, no extra feature)", async () => {
+    const p = await planning({ policy: false });
+    const invocation = p.last();
+    expect(Object.keys(read(invocation)).sort()).toEqual(["conversationId", "planFormat", "prompt", "workflowMode"]);
+    const operation = (await p.operations()).find((entry) => entry.id === invocation.operationId)!;
+    expect(operation.dispatch.requires).toEqual(["task.workflowMode", "task.structuredPlans"]);
+    // Nothing offered the version, so the broker still refuses a v2 plan from this run.
+    p.h.deps.planSelfCheck = false;
+    const task = (await readTask(p.h.deps, p.taskId))!;
+    const claims = [{ id: "1", text: "The export is added in server.mjs and tests/orders.test.ts covers it." }];
+    const answer = { content: planAnswer(planDocument({ claims, e2e: v2Intent(p.w) })), artifact: { id: "application-plan", createdAt: new Date().toISOString() } };
+    expect((await processPlanAnswer(p.h.deps, { put: async () => undefined }, { task, workflow: task.workflow!, operation, answer })).kind).toBe("plan_unreadable");
+  });
+
+  it("a policy with no ready runtime offers no executable kind, so no version is sent", async () => {
+    const p = await planning({ policy: true, readyRuntime: false });
+    expect(read(p.last())).not.toHaveProperty("workflowE2EPlanVersion");
+    const operation = (await p.operations()).find((entry) => entry.id === p.last().operationId)!;
+    expect(operation.dispatch.requires).not.toContain(APPLICATION_PLAN_FEATURE);
+  });
+
+  it("the planner's automatic second run (REPLAN) is offered the same version, and a project without a policy still is not", async () => {
+    for (const policy of [true, false]) {
+      const p = await planning({ policy });
+      await p.finish(p.last(), { kind: "plan_again", prompt: "The plan lacked its checks; write them.", selfCheck: { artifactType: "plan", version: 1, used: 1 } });
+      expect(read(p.last())).toMatchObject({ workflowMode: "PLAN", planFormat: "structured" });
+      expect("workflowE2EPlanVersion" in read(p.last())).toBe(policy);
+    }
+  });
+
+  it("the plan check's revision run (a blocking point sends the plan back) is offered the same version", async () => {
+    for (const policy of [true, false]) {
+      const p = await planning({ policy });
+      const text = canonicalPlanJson(planDocument());
+      const artifact = { id: "plan-1", type: "plan" as const, version: 1, sha256: createHash("sha256").update(text, "utf8").digest("hex"), producer: "agentx-worker-untrusted" as const, objectKey: `tasks/${p.taskId}/plan-1.json`, createdAt: new Date(p.h.clock.now).toISOString(), format: "structured" as const };
+      p.objects.set(artifact.objectKey, new TextEncoder().encode(text));
+      await p.finish(p.last(), { kind: "planned", artifact });
+      // The plan check runs on its own (PLAN_CRITIQUE); its saved answer holds one blocking point, so the flow sends the plan back to the planner by a row of its own.
+      expect((await readTask(p.h.deps, p.taskId))!.workflow).toMatchObject({ stage: "PLAN_CRITIQUE", state: "RUNNING" });
+      const critic = p.last();
+      expect(read(critic)).toMatchObject({ workflowMode: "PLAN_CRITIQUE" });
+      const answer = `I read the plan.\n\n\`\`\`rovara-plan-critique\n${JSON.stringify({ verdict: "revise", points: [{ id: "p1", severity: "blocking", text: "The plan never says where the export is tested." }] })}\n\`\`\`\n`;
+      const answerKey = `tasks/${p.taskId}/plan-critique.md`;
+      p.objects.set(answerKey, new TextEncoder().encode(answer));
+      await p.h.store.put({ item: { pk: workspaceKey(COMPANY, p.workspace.id).pk, sk: `ARTIFACT#${critic.operationId}#1`, entityType: "ARTIFACT", name: "plan-critique.md", objectKey: answerKey, sha256: createHash("sha256").update(answer, "utf8").digest("hex") } });
+      await p.finish(critic, { kind: "ended" });
+      p.h.clock.advance(70);
+      await drain(p.h);
+      const revision = p.last();
+      expect(revision.operationId).not.toBe(critic.operationId);
+      expect(read(revision)).toMatchObject({ workflowMode: "PLAN", planFormat: "structured" });
+      expect("workflowE2EPlanVersion" in read(revision)).toBe(policy);
+    }
+  });
+});
+
+// Review tests (lead 4 Opus, 34f76e6d8): the shared dispatch helper keeps every other planning run's shape exactly: a Markdown (non-structured) run needs only the workflow mode, and a FULL-path
+// structured run still names its review phase, with or without the application plan.
+describe("structuredPlanDispatch keeps every other planning run's shape", () => {
+  const rules = (e2ePlanningContext?: unknown) => ({ rules: { ...(e2ePlanningContext === undefined ? {} : { e2ePlanningContext }) } }) as never;
+  const offered = { status: "available", executableKinds: ["web"] };
+  it("a Markdown planning run (no structured context): only the workflow mode, no payload", () => {
+    expect(structuredPlanDispatch(undefined, { path: "FULL", reviewPhase: "DESIGN" })).toEqual({ requires: ["task.workflowMode"] });
+    expect(structuredPlanDispatch(undefined, { path: "QUICK", reviewPhase: undefined })).toEqual({ requires: ["task.workflowMode"] });
+  });
+  it("a FULL-path structured run names its review phase; a QUICK one does not", () => {
+    expect(structuredPlanDispatch(rules(), { path: "FULL", reviewPhase: "DESIGN" })).toEqual({ payload: { planFormat: "structured", workflowPhase: "DESIGN" }, requires: ["task.workflowMode", "task.structuredPlans"] });
+    expect(structuredPlanDispatch(rules(), { path: "QUICK", reviewPhase: "DESIGN" })).toEqual({ payload: { planFormat: "structured" }, requires: ["task.workflowMode", "task.structuredPlans"] });
+  });
+  it("a FULL-path run offered the application plan keeps its phase beside the version", () => {
+    expect(structuredPlanDispatch(rules(offered), { path: "FULL", reviewPhase: "IMPLEMENTATION_PLAN" })).toEqual({
+      payload: { planFormat: "structured", workflowE2EPlanVersion: 2, workflowPhase: "IMPLEMENTATION_PLAN" }, requires: ["task.workflowMode", "task.structuredPlans", DISPATCH_APPLICATION_PLAN_FEATURE] });
+    expect(structuredPlanDispatch(rules({ status: "available", executableKinds: [] }), { path: "FULL", reviewPhase: "DESIGN" })).toEqual({ payload: { planFormat: "structured", workflowPhase: "DESIGN" }, requires: ["task.workflowMode", "task.structuredPlans"] });
+    expect(structuredPlanDispatch(rules({ status: "unknown", reason: "no policy", executableKinds: ["web"] }), { path: "QUICK", reviewPhase: undefined })).toEqual({ payload: { planFormat: "structured" }, requires: ["task.workflowMode", "task.structuredPlans"] });
+  });
 });

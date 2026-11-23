@@ -1,3 +1,4 @@
+import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import type { DocumentStore } from "@agentx/contracts";
 import { expect, it, vi } from "vitest";
 import { sweepOpenSessions } from "../../packages/broker/src/core/sessions/sweep.js";
@@ -243,4 +244,55 @@ it("thread refresh cannot read past the company session pass deadline", async ()
   await services["session-sweep"].pass({ budgetMs: 1000 });
   expect(attempted).toBe(true);
   expect(permitted).toBe(false);
+});
+
+import { feedbackWorld } from "../support/pr-feedback-world.js";
+import { composeHostedPrFeedbackRoutes, servesPrFeedbackDecisions } from "../../packages/broker/src/core-host/pr-feedback-routes.js";
+import * as trackingModule from "../../packages/broker/src/services/merge-tracking.js";
+import * as edgesModule from "../../packages/broker/src/core/merge/repository-edges.js";
+
+it.each([false, true])("cold hosted job propagates only a served base (%s) to its exact bounded tracking object", async served => {
+  const w = await feedbackWorld();
+  w.h.deps.access.ownerActing = async () => ({ actorId: w.task.ownerKey });
+  w.h.deps.taskCapUsd = async () => 10;
+  w.h.deps.taskSpendUsd = async () => 0;
+  const { createBrokerCoreServices } = await import("../../packages/broker/src/aws/core-job-services.js");
+  const services = createBrokerCoreServices({ companyId: w.h.deps.companyId, flow: w.h.flow, registry: w.registry, ciMode: async () => "their_ci_watch" as const, people: w.people, repository: w.deps.repository, now: () => new Date(w.clock.ms) });
+  if (served) composeHostedPrFeedbackRoutes(w.h.deps);
+  const tracking = vi.spyOn(trackingModule, "createMergeTrackingService");
+  const edges = vi.spyOn(edgesModule, "createTaskRepositoryEdgesSeam");
+  await services["merge-tracking"].pass({ budgetMs: 1000 });
+  const deps = tracking.mock.calls.at(-1)![0].flow;
+  const sibling = edges.mock.calls.at(-1)![0].flow;
+  expect(deps).not.toBe(w.h.deps);
+  expect(deps.store).not.toBe(w.h.deps.store);
+  expect(servesPrFeedbackDecisions(deps)).toBe(served);
+  expect(servesPrFeedbackDecisions(sibling as TaskFlowDeps)).toBe(false);
+  expect(w.read).toHaveBeenCalledTimes(served ? 1 : 0);
+  const task = await w.h.store.get(w.task);
+  expect(task?.["workflow"]).toMatchObject(served ? { feedbackReview: { status: "COLLECTING" } } : { revision: w.task.workflow!.revision });
+});
+
+it("a cold hosted job with a missing spend seam never recovers a collecting paid review", async () => {
+  const { collectPrFeedback } = await import("../../packages/broker/src/core/pr-feedback/collect.js");
+  const { readTask } = await import("../../packages/broker/src/core/task-flow/reads.js");
+  const { dispatchRowKey, dispatchPartition } = await import("../../packages/broker/src/core/task-flow/keys.js");
+  const { createBrokerCoreServices } = await import("../../packages/broker/src/aws/core-job-services.js");
+  const w = await feedbackWorld();
+  await collectPrFeedback(w.deps, w.task, w.budget);
+  const before = (await readTask(w.h.deps, w.task.taskId))!;
+  expect(before.workflow!.feedbackReview?.status).toBe("COLLECTING");
+  await w.h.store.delete({ key: dispatchRowKey(w.h.deps.companyId, before.taskId, before.workflow!.revision) });
+  w.h.deps.access.ownerActing = async () => ({ actorId: w.task.ownerKey });
+  w.h.deps.taskCapUsd = async () => 10;
+  delete w.h.deps.taskSpendUsd;
+  composeHostedPrFeedbackRoutes(w.h.deps);
+  expect(servesPrFeedbackDecisions(w.h.deps)).toBe(false);
+  w.read.mockClear(); w.put.mockClear();
+  const admit = vi.spyOn(w.h.deps.admission, "admit");
+  const services = createBrokerCoreServices({ companyId: w.h.deps.companyId, flow: w.h.flow, registry: w.registry, people: w.people, repository: w.deps.repository, ciMode: async () => "their_ci_watch" as const, now: () => new Date(w.clock.ms) });
+  expect(await services["merge-tracking"].pass({ budgetMs: 1000 })).toMatchObject({ attempted: 1 });
+  expect((await w.h.store.query({ pk: dispatchPartition(w.h.deps.companyId) })).items).toEqual([]);
+  expect((await readTask(w.h.deps, w.task.taskId))!.workflow).toMatchObject(before.workflow!);
+  expect(w.read).not.toHaveBeenCalled(); expect(w.put).not.toHaveBeenCalled(); expect(admit).not.toHaveBeenCalled();
 });

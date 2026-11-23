@@ -90,7 +90,7 @@ describe.runIf(dockerReady)("M1 native core web journeys", () => {
       await writePreparationManifest(Number((harness.db.get(taskKey.pk, taskKey.sk) as { startingRevision?: number }).startingRevision ?? 1));
       const implemented = await runOperation("IMPLEMENT");
       expect(implemented.operation.status, JSON.stringify(implemented.operation)).toBe("SUCCEEDED");
-      expect(workflowNow(), JSON.stringify(workflowNow())).toMatchObject({ stage: "VERIFY", state: "WAITING" });
+      expect(workflowNow(), JSON.stringify(workflowNow())).toMatchObject({ stage: "VERIFY" }); expect(["WAITING", "RUNNING"], "the round is queued, or the core already started it").toContain(workflowNow().state);
       await completeReadiness();
       const checks = await runOperation("CHECKS");
       expect(checks.operation.status, JSON.stringify({ operation: checks.operation, workflow: workflowNow() })).toBe("SUCCEEDED");
@@ -158,7 +158,7 @@ describe.runIf(dockerReady)("M1 native core web journeys", () => {
     await writePreparationManifest(Number((harness.db.get(taskKey.pk, taskKey.sk) as { startingRevision?: number }).startingRevision ?? 1));
     const first = await runOperation("IMPLEMENT");
     expect(first.operation.status, JSON.stringify(first.operation)).toBe("SUCCEEDED");
-    expect(workflowNow(), JSON.stringify(workflowNow())).toMatchObject({ stage: "VERIFY", state: "WAITING" });
+    expect(workflowNow(), JSON.stringify(workflowNow())).toMatchObject({ stage: "VERIFY" }); expect(["WAITING", "RUNNING"], "the round is queued, or the core already started it").toContain(workflowNow().state);
     const firstCandidateDigest = workflowNow().candidate!.digest;
     const sourceOf = (candidateDigest: string) => harness.db.find((item) => item.entityType === "OPERATION" && item.workflowMode === "IMPLEMENT"
       && (item.candidateSourceRef as { candidateDigest?: string } | undefined)?.candidateDigest === candidateDigest)[0];
@@ -200,7 +200,7 @@ describe.runIf(dockerReady)("M1 native core web journeys", () => {
     faux.setResponses([implementation(candidates.fixed), fauxAssistantMessage("I removed the extra order from the export.")]);
     const second = await runOperation("IMPLEMENT");
     expect(second.operation.status, JSON.stringify(second.operation)).toBe("SUCCEEDED");
-    expect(workflowNow(), JSON.stringify(workflowNow())).toMatchObject({ stage: "VERIFY", state: "WAITING" });
+    expect(workflowNow(), JSON.stringify(workflowNow())).toMatchObject({ stage: "VERIFY" }); expect(["WAITING", "RUNNING"], "the round is queued, or the core already started it").toContain(workflowNow().state);
     const secondCandidateDigest = workflowNow().candidate!.digest;
     expect(secondCandidateDigest).not.toBe(firstCandidateDigest);
     expect(git(repository, "show", "HEAD:server.mjs")).not.toContain("defects/extra-order.json");

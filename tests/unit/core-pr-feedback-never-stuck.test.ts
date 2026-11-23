@@ -508,3 +508,64 @@ it("queued failure with a missing workspace settles nothing and does not throw",
   await expect(failQueuedReview(w.h.deps, task, "Workspace unavailable")).resolves.toBe(false);
   expect((await readTask(w.h.deps, task.taskId))!.workflow).toEqual(task.workflow);
 });
+
+// STOP-NON-DESTRUCTIVE: the broker's adapter cannot ping a READY worker and refuses (`unavailable`); a Stop now leaves the session STOPPING, so the hold meets that refusal before
+// the stop and, when the stop did nothing, after it. Neither is a failure of the pass: the hold waits and confirms only on stopped / terminated.
+it("a terminal cancellation hold treats the broker's READY-health refusal as not yet stopped: it stops the machine, keeps the hold, and releases only when stopped", async () => {
+  const { vi } = await import("vitest");
+  const { MachineError } = await import("@agentx/contracts");
+  const { recoverCriticHold } = await import("../../packages/broker/src/core/pr-feedback/quiesce.js");
+  const { readWorkspace } = await import("../../packages/broker/src/core/task-flow/stage-machine.js");
+  const w = await feedbackWorld();
+  await collectPrFeedback(w.deps, w.task, w.budget);
+  let task = (await readTask(w.h.deps, w.task.taskId))!;
+  await createBuildSteps().runRow(w.h.deps, { taskId: task.taskId, workflowRevision: task.workflow!.revision, kind: "REVIEW" });
+  task = (await readTask(w.h.deps, task.taskId))!;
+  const operation = (await workspaceOperations(w.h.deps, task.workspaceId))[0]!;
+  await w.h.store.update({ key: { pk: `WORKSPACE#${task.workspaceId}`, sk: "META" }, ops: [change.set("fence", operation.fence + 1)] });
+  await w.h.store.update({ key: operation, ops: [change.set("status", "INTERRUPTED"), change.set("machineId", "critic-stop")] });
+  const stop = vi.spyOn(w.h.machines, "stop").mockResolvedValue();
+  const refused = () => { throw new MachineError("unavailable", "live worker health is unavailable on the broker"); };
+  const stopped = { state: "stopped" as const, activeOperations: 0, features: [], checkedAt: new Date(w.clock.ms).toISOString() };
+  // Pass 1: the broker refuses before and after the stop (the session was READY and the stop is only a request): the hold stays.
+  const health = vi.spyOn(w.h.machines, "health").mockImplementation(async () => refused());
+  await expect(recoverCriticHold(w.h.deps, task)).resolves.toBeUndefined();
+  expect(stop).toHaveBeenCalledOnce();
+  expect((await readWorkspace(w.h.deps, task.workspaceId))!.activeOperationId).toBe(operation.id);
+  // Pass 2: the session is STOPPING: not confirmed, no second stop.
+  health.mockResolvedValue({ ...stopped, state: "stopping" });
+  await recoverCriticHold(w.h.deps, task);
+  expect(stop).toHaveBeenCalledOnce();
+  expect((await readWorkspace(w.h.deps, task.workspaceId))!.activeOperationId).toBe(operation.id);
+  // Pass 3: the reaper marked it STOPPED: the hold is released.
+  health.mockResolvedValue(stopped);
+  await recoverCriticHold(w.h.deps, task);
+  expect((await readWorkspace(w.h.deps, task.workspaceId))!.activeOperationId).toBeNull();
+});
+
+it("a pending critic cancellation does not throw on the broker's health refusal after its stop, and confirms only once the machine reads stopped", async () => {
+  const { vi } = await import("vitest");
+  const { MachineError } = await import("@agentx/contracts");
+  const { quiesceCritic } = await import("../../packages/broker/src/core/pr-feedback/quiesce.js");
+  const w = await feedbackWorld();
+  await collectPrFeedback(w.deps, w.task, w.budget);
+  let task = (await readTask(w.h.deps, w.task.taskId))!;
+  await createBuildSteps().runRow(w.h.deps, { taskId: task.taskId, workflowRevision: task.workflow!.revision, kind: "REVIEW" });
+  task = (await readTask(w.h.deps, task.taskId))!;
+  const operation = (await workspaceOperations(w.h.deps, task.workspaceId))[0]!;
+  await w.h.store.update({ key: operation, ops: [change.set("machineId", "critic-machine")] });
+  const withMachine = (await workspaceOperations(w.h.deps, task.workspaceId))[0]!;
+  const stop = vi.spyOn(w.h.machines, "stop").mockResolvedValue();
+  const checkedAt = new Date(w.clock.ms).toISOString();
+  const health = vi.spyOn(w.h.machines, "health").mockImplementation(async () => { throw new MachineError("unavailable", "live worker health is unavailable on the broker"); });
+  expect((await quiesceCritic(w.h.deps, task, withMachine)).confirmed).toBe(false);
+  expect(stop).toHaveBeenCalledOnce();
+  health.mockResolvedValue({ state: "stopping", activeOperations: 0, features: [], checkedAt });
+  const claimed = (await workspaceOperations(w.h.deps, task.workspaceId))[0]!;
+  expect((await quiesceCritic(w.h.deps, task, claimed)).confirmed).toBe(false);
+  health.mockResolvedValue({ state: "stopped", activeOperations: 0, features: [], checkedAt });
+  expect((await quiesceCritic(w.h.deps, task, claimed)).confirmed).toBe(true);
+  // Only the refusal is tolerated: any other failure is the pass's.
+  health.mockRejectedValue(new MachineError("rejected", "no"));
+  await expect(quiesceCritic(w.h.deps, task, claimed)).rejects.toMatchObject({ code: "rejected" });
+});

@@ -351,7 +351,8 @@ export async function startChecksRerun(deps: TaskFlowDeps, row: RowRef, retry: {
   // The task's pinned environment: a verification run whose first commands are the environment's checks is told its selection, budget and dependencies.
   const testPlan = await testPlanFor(deps, task, "CHECKS", readiness);
   if (typeof testPlan === "string") {
-    await commitWorkflow(deps, task, blockWorkflow(workflow, testPlan, receivedAt));
+    // The block keeps the retry's record, so a replay of this request id is recognised as a replay (the refusal wrote a block and no operation).
+    await commitWorkflow(deps, task, { ...blockWorkflow(workflow, testPlan, receivedAt), verificationRetries: next.verificationRetries });
     return settled(deps, row, "STALE");
   }
   const evalRequest = await evalRequestForChecks(deps, task, workflow);

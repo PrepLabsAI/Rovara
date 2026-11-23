@@ -1,3 +1,4 @@
+import { hostedPrFeedbackRoutes } from "./pr-feedback-routes.js";
 import { taskOwnerView } from "../developer/task-owner-view.js";
 // Switch-on lane L11: the decision cards, the session levels and how we work on the deployed core's developer routes (`core-host/dev-routes.ts`, `CoreDevWiring`), from the company's OWN records.
 //
@@ -498,10 +499,11 @@ export interface DeployedDevWiringInputs {
 }
 
 /** Lane L11's part of one company's `CoreDevWiring`: the session levels always, the decision cards with the point's proof issuer, how we work with a code host and the settings. */
-export function deployedDevWiringParts(inputs: DeployedDevWiringInputs): Pick<CoreDevWiring, "members" | "decisions" | "workflowDecision" | "playbook"> {
+export function deployedDevWiringParts(inputs: DeployedDevWiringInputs): Pick<CoreDevWiring, "members" | "decisions" | "workflowDecision" | "playbook" | "prFeedback"> {
   const playbook = deployedPlaybook({ runtime: inputs.runtime, registry: inputs.registry, codeSettings: inputs.codeSettings });
   const decisions = inputs.decisionProofs === undefined ? undefined : deployedDecisionCards({ runtime: inputs.runtime, registry: inputs.registry, people: inputs.people, proofs: inputs.decisionProofs, ...(inputs.env === undefined ? {} : { env: inputs.env }), involvedTaskIds: (caller) => involvedTaskIds(inputs.runtime.flow.deps, caller.principal), ...(inputs.log === undefined ? {} : { log: inputs.log }) });
   return {
+    prFeedback: hostedPrFeedbackRoutes(inputs.runtime.flow.deps),
     members: deployedSessionMembers(inputs.runtime.companyId, inputs.people),
     ...(decisions === undefined ? {} : { decisions, workflowDecision: decisions.decideWorkflow }),
     ...(playbook === undefined ? {} : { playbook }),

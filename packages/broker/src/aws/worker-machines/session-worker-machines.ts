@@ -1,8 +1,9 @@
 // Engine host (migration plan v3.2 lane E2, step 4): the EC2 workspace sessions of Code's AWS deployment on the core's `WorkerMachines` port. Ported from the monolith's adapter.
 //
 // A machine is one ec2-ebs workspace's compute, exactly as the deployed broker runs it today: `start` is `SessionManager.ensureSession` (which starts the session provisioner state machine: the
-// launch template, the boot user data from session-steps, the workspace volume), `stop` ends the instance and keeps the volume (what the idle reaper does), `terminate` is
-// `SessionManager.deleteSession` (the deleter: instance and volume), `health` reads the SESSION item and the worker's /ping, and `deliver` signs the same invoke token the dispatcher signs today
+// launch template, the boot user data from session-steps, the workspace volume), `stop` ends the instance and keeps the volume (what the idle reaper does; on the broker it asks the reaper
+// to, with `SessionManager.requestStop`), `terminate` is `SessionManager.deleteSession` (the deleter: instance AND volume; only a Close, a setup check and the saved-environment sweep reach it),
+// `health` reads the SESSION item and the worker's /ping, and `deliver` signs the same invoke token the dispatcher signs today
 // (ec2-delivery.ts) and posts it to the same worker port. The adapter never calls RunInstances itself and never writes user data, an instance profile, a network or a metadata setting: everything
 // a worker can do is still fixed by the provisioner and the launch template (no new worker power).
 //
@@ -52,9 +53,9 @@ export interface SessionWorkerPing {
 export interface SessionWorkerMachinesDependencies {
   /** The one company this adapter serves. */
   companyId: OrgId;
-  /** Broker restriction: stop uses the deleter (also removes the volume); live health and dispatch refuse. Absent preserves dispatcher behavior. */
+  /** Broker restriction: the broker cannot end an instance, so stop asks the session's reaper to (the volume is kept); live health and dispatch refuse. Absent preserves dispatcher behavior. */
   brokerOnly?: boolean;
-  sessions: Pick<SessionManager, "get" | "ensureSession" | "deleteSession" | "claimStop" | "markStopped">;
+  sessions: Pick<SessionManager, "get" | "ensureSession" | "deleteSession" | "claimStop" | "requestStop" | "markStopped">;
   /** The company a workspace belongs to (its record's company), or undefined when there is no such workspace. Read on every call, never cached. */
   companyOfWorkspace: (workspaceId: string) => Promise<OrgId | undefined>;
   /** Where the workspace's worker runs (the install's own subnets and launch template on Code's deployment; never a binding a company writes). Asked only for a workspace of this adapter's company. */
@@ -149,7 +150,6 @@ export class SessionWorkerMachines implements WorkerMachines {
     // Checked at run time, not only by the type: an adapter bound to no company (or to a malformed one) would compare every workspace against nothing.
     if (!OrgIdSchema.safeParse(dependencies.companyId).success) throw new MachineError("rejected", "the company id is not valid");
     this.#deps = dependencies;
-    if (dependencies.brokerOnly === true) this.capabilities = { ...this.capabilities, persistentVolume: false };
   }
 
   get companyId(): OrgId {
@@ -181,27 +181,17 @@ export class SessionWorkerMachines implements WorkerMachines {
   }
 
   async stop(machineId: string): Promise<void> {
-    // The broker has StartExecution on the deleter, not EC2 terminate. Cancellation destroys compute and volume.
-    if (this.#deps.brokerOnly === true) return this.terminate(machineId);
     const owned = await this.#ownedSession(machineId);
     if (owned === undefined) return;
-    let session = owned.session;
-    if (session.state === "PROVISIONING") throw new MachineError("unavailable", "the machine is starting; stop it once it is ready");
-    if (session.state === "READY") {
-      // The reaper's claim: only while nothing touched the session since it was read and the workspace runs no operation, so a dispatch always wins.
-      if (!(await this.#deps.sessions.claimStop(session))) {
-        const again = await this.#deps.sessions.get(owned.workspaceId);
-        if (again?.state === "READY") throw new MachineError("unavailable", "the machine is in use; try again");
-        if (again === undefined || again.state !== "STOPPING") return;
-        session = again;
-      } else {
-        session = { ...session, state: "STOPPING" };
-      }
+    if (owned.session.state === "PROVISIONING") throw new MachineError("unavailable", "the machine is starting; stop it once it is ready");
+    if (this.#deps.brokerOnly !== true) return this.#stopSession(owned);
+    // The broker has no EC2 terminate: it marks the session STOPPING (only while the workspace still runs the operation being cancelled) and the reaper ends the instance, keeping the volume.
+    // Never `terminate`: that deletes the volume, and only a Close may.
+    try {
+      await this.#deps.sessions.requestStop(owned.workspaceId);
+    } catch (error) {
+      throw asMachineError(error);
     }
-    if (session.state !== "STOPPING") return;
-    // A STOPPING session is finished here when its instance is gone, else by the reaper's next tick (the instance is ended either way).
-    const gone = session.instanceId === undefined ? true : (await this.#deps.stopInstance(session.instanceId)).gone;
-    if (gone) await this.#deps.sessions.markStopped(owned.workspaceId, session.generation);
   }
 
   async terminate(machineId: string): Promise<void> {
@@ -282,6 +272,26 @@ export class SessionWorkerMachines implements WorkerMachines {
 
   // ---- internals ----
 
+  /** The dispatcher's stop: claim a READY session (the reaper's claim), end its instance and, once it is gone, mark it STOPPED. The volume is kept. */
+  async #stopSession(owned: { workspaceId: string; session: WorkspaceSession }): Promise<void> {
+    let session = owned.session;
+    if (session.state === "READY") {
+      // The reaper's claim: only while nothing touched the session since it was read and the workspace runs no operation, so a dispatch always wins.
+      if (!(await this.#deps.sessions.claimStop(session))) {
+        const again = await this.#deps.sessions.get(owned.workspaceId);
+        if (again?.state === "READY") throw new MachineError("unavailable", "the machine is in use; try again");
+        if (again === undefined || again.state !== "STOPPING") return;
+        session = again;
+      } else {
+        session = { ...session, state: "STOPPING" };
+      }
+    }
+    if (session.state !== "STOPPING") return;
+    // A STOPPING session is finished here when its instance is gone, else by the reaper's next tick (the instance is ended either way).
+    const gone = session.instanceId === undefined ? true : (await this.#deps.stopInstance(session.instanceId)).gone;
+    if (gone) await this.#deps.sessions.markStopped(owned.workspaceId, session.generation);
+  }
+
   #now(): number {
     return this.#deps.now?.() ?? Date.now();
   }
@@ -332,7 +342,6 @@ export class SessionWorkerFleet implements WorkerMachines {
 
   constructor(dependencies: SessionWorkerFleetDependencies) {
     this.#deps = dependencies;
-    if (dependencies.brokerOnly === true) this.capabilities = { ...this.capabilities, persistentVolume: false };
   }
 
   /** The adapter of one company. A value that is not a company id is refused (never bound to a guess). */

@@ -1,6 +1,6 @@
 // Collection reads the host, never event text, and starts no machine or model.
 import {
-  ChangeRequestFeedbackSchema, WorkflowSnapshotSchema, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleSchema,
+  ChangeRequestFeedbackSchema, WorkflowSnapshotSchema, WORKFLOW_FEEDBACK_AUTO_REVIEW_ROUNDS_MAX, workflowFeedbackReviewRounds, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleSchema,
   collectWorkflowFeedbackBundles, hostRateLimitRetryAt, when,
   type ChangeRequestFeedback, type ObjectStorage, type ReadBudget, type WorkflowFeedbackBundle, type WorkflowFeedbackThreadObservation, type WorkflowSnapshot,
 } from "@agentx/contracts";
@@ -167,6 +167,9 @@ export async function collectPrFeedback(deps: PrFeedbackCollectionDeps, task: Ta
     const { bundles, observations, reopened } = await readCurrentFeedback(deps, task, budget);
     if (await noNewFeedback(deps, task, bundles, reopened)) return rememberThreads(deps, task, observations);
     if (feedbackUnchanged(workflow, bundles, reopened)) return "unchanged";
+    // DEC 254zzz398 (1): Rovara starts at most three review rounds on its own for one task, counted from the task's own records. The fourth is refused before anything is saved, dispatched or asked of Admission:
+    // no paid run and no change to the card. The owner can still Retry a failed review or Keep (`decide.ts`, `keep.ts`: neither is an automatic round).
+    if (workflowFeedbackReviewRounds(workflow) >= WORKFLOW_FEEDBACK_AUTO_REVIEW_ROUNDS_MAX) return "unchanged";
     const totalBytes = bundles.reduce((total, bundle) => total + prepareFeedbackBundle(task, bundle).bytes.byteLength, 0);
     if (totalBytes > FEEDBACK_INPUTS_MAX_BYTES) throw new Error("feedback bundle set exceeds its byte bound");
     const refs = [];

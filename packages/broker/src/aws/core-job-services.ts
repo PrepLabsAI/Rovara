@@ -1,4 +1,5 @@
 import { readTask } from "../core/task-flow/reads.js";
+import { propagatePrFeedbackDecisions } from "../core-host/pr-feedback-routes.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 // Deployed job composition. No provider or policy store lives here.
 import { OrgIdSchema, POLICY_ORIGINS, policyDataObject, createDefaultPolicySource, DEFAULT_CODE_SETTINGS, type OrgId, type AdapterRegistry, type PolicySource, type DocumentStore, type StoredDocument } from "@agentx/contracts";
@@ -184,7 +185,9 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
         if (entry["event"] === "sweep.read_failed" || entry["event"] === "sweep.row_failed") failed += 1;
         log();
       };
-      const tracking = createMergeTrackingService({ flow: depsFor(recoveryStore(store, companyId)), registry, companyId, scan: mergeScan, people, settings, milestones: mergeMilestones(store), now, log: trackingLog,
+      const trackingDeps = depsFor(recoveryStore(store, companyId));
+      propagatePrFeedbackDecisions(flow.deps, trackingDeps);
+      const tracking = createMergeTrackingService({ flow: trackingDeps, registry, companyId, scan: mergeScan, people, settings, milestones: mergeMilestones(store), now, log: trackingLog,
         ciMode: ci.ciMode,
         // L4-EVCI2: the customer's confirmed eval check, kept per company and project (core/ci-evidence/eval-check-setting.ts); nothing confirmed: a pass is what it was.
         ciEvidence: evalCheckEvidencePort({ store, companyId }),

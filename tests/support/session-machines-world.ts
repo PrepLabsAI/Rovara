@@ -4,6 +4,7 @@
 import { generateKeyPairSync, randomUUID, sign as signBytes } from "node:crypto";
 import { AGENTX_PROTOCOL_VERSION, WorkerInvocationSchema, type Ec2RuntimeBinding, type OrgId, type WorkerInvocation } from "@agentx/contracts";
 import { SessionManager, type ProvisioningInput, type DeletionInput } from "../../packages/broker/src/aws/sessions.js";
+import { createReaperHandler, type ReaperReport } from "../../packages/broker/src/aws/session-reaper.js";
 import { createSessionStepsHandler } from "../../packages/broker/src/aws/session-steps.js";
 import { SessionWorkerFleet, type SessionWorkerMachines, type SessionWorkerMachinesDependencies, type SessionWorkerPing } from "../../packages/broker/src/aws/worker-machines/session-worker-machines.js";
 import { workspaceCompanyReader } from "../../packages/broker/src/aws/worker-machines/workspace-company.js";
@@ -63,6 +64,8 @@ export interface SessionMachinesWorld {
   sign(message: Uint8Array): Promise<Uint8Array>;
   /** What the worker does when it ends a job (its terminal callback). */
   finish(instanceId: string, operationId: string): void;
+  /** One idle-reaper tick over this world (the real handler): READY sessions are never idle here, a STOPPING session's instance is ended and, once gone, it is marked STOPPED with its volume kept. */
+  reap(): Promise<ReaperReport>;
   provisionerHolds: boolean;
 }
 
@@ -209,6 +212,25 @@ export function createSessionMachinesWorld(options: { startedAt?: number } = {})
     },
     async settle() {
       while (pending.length > 0) await pending.shift();
+    },
+    reap() {
+      return createReaperHandler({
+        sessions,
+        activeOperation: async () => false,
+        ping: async () => "Healthy",
+        async terminate(instanceId) {
+          const instance = instances.get(instanceId);
+          if (instance !== undefined) instance.running = false;
+        },
+        async progress(instanceId) {
+          const running = instances.get(instanceId)?.running === true;
+          return { instanceGone: !running, instanceLive: running, volumeAvailable: true };
+        },
+        binding: async () => BINDING,
+        emit: () => undefined,
+        now: () => new Date(clock),
+        log: () => undefined,
+      })();
     },
     finish(instanceId, operationId) {
       instances.get(instanceId)?.active.delete(operationId);

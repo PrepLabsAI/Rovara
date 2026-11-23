@@ -351,7 +351,7 @@ import { createHostedLessonsPeople } from "./hosted-lessons-people.js"; import {
 import { hostedLessonsLearning } from "../core-host/hosted-learning.js";
 import { CORE_MODEL_ACCESS_PATH, brokerCoreModuleDeps, createBrokerCoreRoot, outboxCompaniesOf, taskTokensFromEnvironment, withCoreRoutes, type BrokerCoreRoot } from "./core-engine-root.js";
 import { isCoreJobEvent } from "../core-host/jobs.js";
-import type { DeveloperRecord } from "../developer/store.js";
+import { developerRecordKeyedBy, isExactNativeSlackOwner, type DeveloperRecord } from "../developer/store.js";
 import { decisionComments, ownerAnswersFor, pageCommentsPrompt, promptComments, readDecisionDetail } from "../developer/owner-answers.js";
 import { isPageRefusal, plannerRepliesItem, writeCommentAnswer, writePlannerReplies, type SlackRequestQueue } from "../developer/page-comments.js";
 import { loadWorkflowDocument, readObjectText as readStoredText, shortenMarkdown } from "../developer/plan-artifacts.js";
@@ -6957,8 +6957,8 @@ async function ownedSlackWorkflowTask(dependencies: AwsBrokerDependencies, event
         Key: { pk: `DEVELOPER#${stored.developerId}`, sk: "META" },
         ConsistentRead: true,
       }))).Item as DeveloperRecord | undefined;
-      exactNativeOwner = record?.developerId === stored.developerId && record.provider === "slack"
-        && record.slackUserId === userId && record.revoked === false;
+      // The sign-in row keeps its id only in its key: the owner match derives it from the key (isExactNativeSlackOwner).
+      exactNativeOwner = isExactNativeSlackOwner(record, stored.developerId, userId);
     }
     if (exactNativeOwner) {
       throw agentXError("TASK_NOT_FOUND", "this task cannot be changed from Slack");
@@ -15169,7 +15169,7 @@ function channelConversationDependencies(dependencies: AwsBrokerDependencies): C
       const signInTableName = (dependencies.developer ?? dependencies.linking)?.signInTableName;
       if (signInTableName === undefined) return undefined;
       const response = await dependencies.documentClient.send(new GetCommand({ TableName: signInTableName, Key: { pk: `DEVELOPER#${developerId}`, sk: "META" }, ConsistentRead: true }));
-      const item = response.Item as Partial<DeveloperRecord> | undefined;
+      const item = developerRecordKeyedBy(response.Item as Partial<DeveloperRecord> | undefined, developerId);
       if (item === undefined || typeof item.developerId !== "string" || (item.provider !== "slack" && item.provider !== "oidc") || typeof item.displayName !== "string") return undefined;
       return {
         developerId: item.developerId, provider: item.provider, displayName: item.displayName, revoked: item.revoked === true,

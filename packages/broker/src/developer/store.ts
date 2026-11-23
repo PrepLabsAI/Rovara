@@ -88,6 +88,30 @@ interface CancellationReason { Code?: string }
 
 export const META = "META";
 
+/**
+ * A stored sign-in record (`DEVELOPER#<id>` / `META`) keeps its id only in the key: `upsertDeveloper` never writes a `developerId` attribute, so most real rows
+ * lack it. Every reader that proves identity takes the id from the KEY it asked for. A row whose `pk` names another person, or whose `developerId` attribute is
+ * present and disagrees with the key, is refused (undefined: the callers treat an absent record as unverifiable).
+ */
+export function developerRecordKeyedBy<T extends object>(item: T | undefined, developerId: string): (T & { developerId: string }) | undefined {
+  if (item === undefined) return undefined;
+  const row = item as { pk?: unknown; developerId?: unknown };
+  if (row.pk !== undefined && row.pk !== `DEVELOPER#${developerId}`) return undefined;
+  if (row.developerId !== undefined && row.developerId !== developerId) return undefined;
+  return { ...item, developerId };
+}
+
+/**
+ * The task's stored creator is the exact native Slack owner: their sign-in row (`DEVELOPER#<id>` / `META`) is a live `slack` row for this Slack user.
+ * The row keeps its id only in its key (real rows have no `developerId` attribute), so the id is derived from the key; a present attribute that disagrees
+ * with the key refuses (fail closed).
+ */
+export function isExactNativeSlackOwner(record: DeveloperRecord | undefined, creatorId: string, slackUserId: string): boolean {
+  const keyed = developerRecordKeyedBy(record, creatorId);
+  return keyed !== undefined && keyed.developerId === creatorId && keyed.provider === "slack" && keyed.slackUserId === slackUserId && keyed.revoked === false;
+}
+
+
 /** E8: the email index's key, the SHA-256 of the trimmed, lowercased email, so no email is stored as a key. */
 export function emailIndexKey(email: string, companyId?: string): { pk: string; sk: "META" } {
   const key = `EMAIL#${sha256Hex(email.trim().toLowerCase())}`;

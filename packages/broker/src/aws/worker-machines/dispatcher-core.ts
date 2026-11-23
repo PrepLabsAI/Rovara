@@ -1,3 +1,5 @@
+import { hostedAutofixDayBudgetHasRoom } from "../../core-host/autofix-day-budget.js";
+import { readHostedAdmissionSettings } from "../../core-host/hosted-modules.js";
 // Engine host (migration plan v3.2 lane E2, step 4): the dispatcher's half of the core engine.
 //
 // The dispatcher Lambda reads two queues: the spec 056 DispatchQueue (the old workflow's tasks, until it is removed: #1274) and the core's dispatch queue through an event source mapping of its
@@ -197,7 +199,7 @@ export function refusingTaskAccess(): TaskAccess {
  * (`dispatcherStopInstance`). The dispatch consumer never stops a machine; only a cancel does, on the broker.
  */
 export interface DispatcherMachineOps {
-  sessions: Pick<SessionManager, "get" | "ensureSession" | "deleteSession" | "claimStop" | "markStopped">;
+  sessions: Pick<SessionManager, "get" | "ensureSession" | "deleteSession" | "claimStop" | "requestStop" | "markStopped">;
   stopInstance: SessionWorkerMachinesDependencies["stopInstance"];
   sign: SessionWorkerMachinesDependencies["sign"];
   post: SessionWorkerMachinesDependencies["post"];
@@ -263,6 +265,7 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
     throw Object.assign(new Error(DISPATCHER_CORE_NOT_CONFIGURED), { name: "DispatcherCoreNotConfigured" });
   }
   const now = inputs.now ?? (() => new Date());
+  const admissionSettings = readHostedAdmissionSettings(env);
   // Where a core workspace's worker runs: the install's own workers (the foundation's subnets and launch template, as the broker places a sign-in client's project, spec 065b), never a
   // binding a company could write. Built once; a malformed value refuses here, before anything runs.
   let placement: ReturnType<typeof workerBindingFromPairs>;
@@ -312,6 +315,7 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
         // Lead 4 A1: the project wiki, for this company only (its own store, its own id); it gives nothing unless the project's "Give the wiki to agents" switch is on.
         wiki: createWikiForStep({ store: registry.require("storage"), companyId, now: () => now().getTime() }),
         // L4-TSU: what a task has cost, for automatic fixing's per-task dollar cap (the broker's own reader: this company's cost ledger, fresh each time, unknown throws and is never "nothing spent").
+        autofixDayBudgetHasRoom: hostedAutofixDayBudgetHasRoom({ store: registry.require("storage"), companyId, settings: "settings" in admissionSettings ? admissionSettings.settings : undefined, now }),
         taskSpendUsd: createCompanyTaskSpend({ store: registry.require("storage"), companyId, refused: (reason) => inputs.log({ event: "dispatch.task_spend_refused", companyId, reason }) }),
         // Lead 4 W4: told when a wiki build's task ended, so the wiki's build record says how it ended (this company's store only).
         wikiBuildEnded: wikiBuildEndedHook({ store: registry.require("storage"), companyId, now: () => now().getTime() }),

@@ -9,7 +9,7 @@ import { taskSessionId } from "../../packages/broker/src/core/sessions/create.js
 import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
 import { createFakeWorld, FAKE_COMPANY } from "../support/core-host-fakes.js";
 
-async function world() {
+async function world(milestones?: boolean | (() => boolean)) {
   const fake = createFakeWorld();
   const taskId = randomUUID();
   const sessionId = taskSessionId(taskId);
@@ -24,7 +24,7 @@ async function world() {
   await put(workflow);
   await recordTaskThread({ store: fake.store, orgId: FAKE_COMPANY, now: () => fake.clock.now }, { sessionId, personId: "dev-a", actor: { channel: SLACK_CHANNEL, tenant: "T0123456789", userId: "U0123456789" }, conversation: { channel: SLACK_CHANNEL, tenant: "T0123456789", space: "C0123456789", thread: "1700000000.000001" } });
   const threads = hostedSlackThreads({ workspaces: { requireCompany: async () => FAKE_COMPANY, tokenForCompany: async () => undefined } });
-  const refresh = workflowThreadRefresh({ messageOf: (message) => threads.messageOf!(message), store: fake.store, companyId: FAKE_COMPANY, now: () => fake.clock.now,
+  const refresh = workflowThreadRefresh({ messageOf: (message) => threads.messageOf!(message), store: fake.store, companyId: FAKE_COMPANY, now: () => fake.clock.now, ...(milestones === undefined ? {} : { milestones }),
     taskUrl: () => "https://app.example/app/sessions/" + sessionId, registry: { get: (() => adapter) as never }, companyOf: async () => company, isMember: async () => member });
   return { fake, workflow, put, events, refresh: () => refresh(FAKE_COMPANY, sessionId, taskId), member: (value: boolean) => { member = value; }, company: (value: string) => { company = value; }, fails: (value: boolean) => { fails = value; } };
 }
@@ -38,6 +38,18 @@ describe("core workflow thread notices", () => {
     const event = w.events[0]!;
     if (event.type !== "message") throw new Error("not a workflow notice");
     expect(event.data.text).toContain(workflowMessage({ taskId: "irrelevant", workflow: w.workflow })!.text);
+  });
+  it("sends no workflow milestone line while the host's milestone switch is off, and sends it once the switch is on (R8)", async () => {
+    let on = false;
+    const w = await world(() => on);
+    await w.refresh(); await w.refresh();
+    expect(w.events).toEqual([]);
+    on = true;
+    await w.refresh();
+    expect(w.events).toHaveLength(1);
+    const literal = await world(false);
+    await literal.refresh();
+    expect(literal.events).toEqual([]);
   });
   it("refuses foreign tenants and removed members without consuming the notice", async () => {
     const w = await world();

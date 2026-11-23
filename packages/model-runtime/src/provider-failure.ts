@@ -94,3 +94,29 @@ export function classifyProviderFailure(facts: ProviderFailureFacts): E2EModelFa
   }
   return { class: "unknown", signal };
 }
+
+// ---- the gateway's refusal of a run whose price authorization no longer fits the call
+
+/** The hosted model gateway's 409 code: the run's signed price grant (`runPrice`) no longer matches the call (AI source, price or call shape changed). */
+export const RUN_PRICE_REFUSED_CODE = "run_price_authorization_required";
+/**
+ * The plain words of that stop, for the step's error and its block reason. It is a STOP, never a retry: the same grant is refused again, so the step waits for the person's Retry, which starts a
+ * new run and mints a fresh price authorization (broker `handleModelAccess`). Pi's retry list does not match these words.
+ */
+export const RUN_PRICE_REFUSED_MESSAGE = "The AI price authorization changed. Start the step again to re-authorize.";
+/** The stable token the model-call note carries for it (letters only, so it passes the failure-signal allow-list). */
+export const RUN_PRICE_REFUSED_SIGNAL = "RunPriceRefused";
+
+/**
+ * Whether a gateway answer is the run price refusal: HTTP 409 and `{ error: { type | code: "run_price_authorization_required" } }` (the gateway's default body and its Bedrock-shaped body both carry the
+ * code as `error.type`). Matched whole, never kept; any other status, code or shape is not it.
+ */
+export function runPriceRefusedBody(status: number, body: string): boolean {
+  if (status !== 409) return false;
+  let parsed: unknown;
+  try { parsed = JSON.parse(body); } catch { return false; }
+  const error = parsed !== null && typeof parsed === "object" ? (parsed as { error?: unknown }).error : undefined;
+  if (error === null || typeof error !== "object") return false;
+  const { type, code } = error as { type?: unknown; code?: unknown };
+  return type === RUN_PRICE_REFUSED_CODE || code === RUN_PRICE_REFUSED_CODE;
+}

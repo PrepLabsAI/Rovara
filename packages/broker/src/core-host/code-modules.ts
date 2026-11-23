@@ -131,7 +131,7 @@ export function codeAdapterModules(deps: CodeModuleDeps): CoreAdapterModule[] {
       create: () => {
         const given = deps.workerMachines!;
         requireFunctions("workerMachines", given, ["companyOfWorkspace", "binding", "stopInstance", "sign", "post", "ping"]);
-        requireFunctions("workerMachines.sessions", given.sessions, ["get", "ensureSession", "deleteSession", "claimStop", "markStopped"]);
+        requireFunctions("workerMachines.sessions", given.sessions, ["get", "ensureSession", "deleteSession", "claimStop", "requestStop", "markStopped"]);
         return new SessionWorkerFleet(given);
       },
     })]),

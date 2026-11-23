@@ -51,7 +51,8 @@ import type { RepositoryCredential, RepositoryGrantService } from "../repository
 
 import { handleModelAccess, MODEL_ACCESS_PATH, type ModelGateway } from "../core/model-gateway/route.js";
 
-const ROUTE = /^\/v1\/internal\/workspaces\/([0-9a-f-]{36})\/operations\/([0-9a-f-]{36})\/([a-z-]+)$/u;
+/** A worker callback's path; the action is lower-case letters, digits and hyphens (`e2e-admission` has a digit). */
+export const ROUTE = /^\/v1\/internal\/workspaces\/([0-9a-f-]{36})\/operations\/([0-9a-f-]{36})\/([a-z0-9-]+)$/u;
 import { savedEnvLeaseContext, savedEnvLoginContext } from "../core/test-env/saved-env-operations.js";
 import { savedEnvPushLoginCore, savedEnvResultCore, savedEnvFallbackCore, type SavedEnvLeaseContext } from "../core/test-env/saved-env-lease.js";
 import { exchangeSavedEnvLoginCore } from "../core/test-env/saved-env-login.js";
@@ -136,7 +137,7 @@ async function operationOf(deps: CallbackDeps, workspaceId: string, operationId:
 
 /** The actions this install answers; any other the worker can make is "not available". */
 const PUBLICATION_CALLBACKS = { codebuild: publicationGateCallback, "pull-request": openPullRequest };
-const SERVED_ACTIONS: ReadonlySet<string> = new Set(["codebuild", "feedback-bundles", "feedback-approval", "events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "browser-evidence", "browser-evidence-sign-in", "pull-request", "pull-request-update", "setup-agent", "wiki-build", EVAL_PLAN_DELIVERY_ACTION, EVAL_HEALTH_RESULT_PATH]);
+export const SERVED_ACTIONS: ReadonlySet<string> = new Set(["codebuild", "feedback-bundles", "feedback-approval", "events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "browser-evidence", "browser-evidence-sign-in", "pull-request", "pull-request-update", "setup-agent", "wiki-build", EVAL_PLAN_DELIVERY_ACTION, EVAL_HEALTH_RESULT_PATH]);
 export const TERMINAL_OUTPUT_REFUSAL = "terminal operations cannot publish more output";
 
 /**

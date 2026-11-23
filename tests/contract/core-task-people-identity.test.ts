@@ -13,11 +13,14 @@ import { taskPeopleDisplayAdmission } from "../../packages/broker/src/developer/
 import { prepareTaskPeopleStart } from "../../packages/broker/src/developer/task-people-start.js";
 import { getTaskPeople, type TaskPeopleDependencies } from "../../packages/broker/src/developer/task-people.js";
 import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
-import type { DeveloperRecord } from "../../packages/broker/src/developer/store.js";
+import { developerRecordKeyedBy, type DeveloperRecord } from "../../packages/broker/src/developer/store.js";
 import { createHarness, newRequestId } from "../support/task-flow-harness.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
-async function world(method: DeveloperSignInMethod = "cloud", linked = false, initialize = false) {
+/** "attribute": the record carries `developerId` (the old fixture shape). "key": the REAL stored shape, the id only in `pk`. */
+type RecordShape = "attribute" | "key";
+
+async function world(method: DeveloperSignInMethod = "cloud", linked = false, initialize = false, shape: RecordShape = "attribute") {
   const h = createHarness();
   await h.registerProject();
   const issuer = method === "slack" ? SLACK_OIDC_ISSUER : "https://signin.example.test";
@@ -28,9 +31,15 @@ async function world(method: DeveloperSignInMethod = "cloud", linked = false, in
   const db = new FakeDynamoDb();
   const record: DeveloperRecord = { developerId, provider: method, issuer, subject, displayName: "Owner", revoked: false, firstSignInAt: new Date(h.clock.now).toISOString(), lastSignInAt: new Date(h.clock.now).toISOString(), ...(linked || method === "slack" ? { slackUserId: "U0OWNER01" } : {}) };
   const documentClient = { send: (command: unknown) => db.send(command as never) };
+  const storedRow = (): DeveloperRecord | undefined => {
+    const { developerId: _kept, ...withoutId } = record;
+    void _kept;
+    return { pk: `DEVELOPER#${developerId}`, sk: "META", entityType: "DEVELOPER", ...(shape === "key" ? withoutId : record) } as unknown as DeveloperRecord;
+  };
   const identity: TaskPersonIdentityDependencies = {
     documentClient, tableName: "state", now: () => h.clock.now, uuid: randomUUID, slackTeamId: "T0TEAM001",
-    developerRecord: async () => record,
+    // The reader every route wires: the stored row keyed by its id (real rows have no `developerId` attribute), the id taken from the key.
+    developerRecord: async id => developerRecordKeyedBy(storedRow(), id),
     companyMembership: async () => ({ companyId: h.deps.companyId }), projectGrant: async () => true,
     projectChannelIds: async () => [], targetProjectAccess: async () => {},
     taskPersonProof: async request => ({ ok: true, user: { id: request.slackUserId, teamId: "T0TEAM001", name: "Owner" }, memberOf: [] }),
@@ -43,13 +52,13 @@ async function world(method: DeveloperSignInMethod = "cloud", linked = false, in
   for (const row of (await h.store.query({ pk: task.pk })).items) db.set(row);
   db.set(task as unknown as Record<string, unknown>);
   const webCaller = { developerId, sessionId: "core", name: "Owner", amr: method };
-  return { h, db, task, record, identity, people, webCaller, developerId };
+  return { h, db, task, record, identity, people, webCaller, developerId, storedRow };
 }
 
 describe("People on a task made by real core start", () => {
 
-  it.each([false, true])("dispatches a real core start with no People runtime (People opened first=%s)", async openedFirst => {
-    const w = await world();
+  it.each([["attribute", false], ["attribute", true], ["key", false], ["key", true]] as const)("dispatches a real core start with no People runtime (record shape=%s, People opened first=%s)", async (shape, openedFirst) => {
+    const w = await world("cloud", false, false, shape);
     if (openedFirst) await getTaskPeople(w.people, w.webCaller, w.task.taskId);
     w.h.deps.deliveryAccess = async (_deps, operation, workspace) => {
       for (const pk of [w.task.pk, workspace.pk]) {
@@ -339,5 +348,73 @@ describe("People on a task made by real core start", () => {
     const proof = await checkTaskPersonIdentity(w.identity, w.task, w.developerId);
     expect(proof.identity.slackUserId).toBe("U0OWNER01");
     expect(proof.eligible).toBe(false);
+  });
+});
+
+describe("People identity on a sign-in row shaped like the stored data (the id only in the key)", () => {
+  const rowKey = (developerId: string) => `DEVELOPER#${developerId}`;
+  const viewOf = async (w: Awaited<ReturnType<typeof world>>) => {
+    const path = `/v1/dev/tasks/${w.task.taskId}/people`;
+    const routes = createCoreTaskRuleRoutes(() => w.people as unknown as DeveloperTaskRouteDependencies);
+    return routes.route({ request: { method: "GET", path, headers: {} }, path, person: { developerId: w.developerId, name: "Owner" }, companyId: w.h.deps.companyId, task: w.task as unknown as Record<string, unknown>, store: w.h.store });
+  };
+
+  it.each(["attribute", "key"] as const)("the owner opens People: exactly one entry, the creator, role owner (record shape=%s)", async shape => {
+    const w = await world("cloud", false, true, shape);
+    expect(w.storedRow()).toMatchObject({ pk: rowKey(w.developerId) });
+    if (shape === "key") expect(w.storedRow()).not.toHaveProperty("developerId");
+    const answer = await viewOf(w);
+    expect(answer.statusCode).toBe(200);
+    const view = (JSON.parse(answer.body) as { view: { people: unknown[] } }).view;
+    expect(view.people).toHaveLength(1);
+    expect(view).toMatchObject({ canManage: true, people: [{ you: true, role: "owner", method: "cloud" }] });
+    expect(w.db.get(w.task.pk, "PEOPLE")).toMatchObject({ revision: 1, people: [{ developerId: w.developerId, role: "owner" }] });
+  });
+
+  it("People init refuses nothing for the key-only row and the next step still dispatches after People is opened", async () => {
+    const w = await world("cloud", false, false, "key");
+    const view = await getTaskPeople(w.people, w.webCaller, w.task.taskId);
+    expect(view.people).toHaveLength(1);
+    expect(w.db.get(w.task.pk, "PEOPLE")).toMatchObject({ people: [{ developerId: w.developerId, role: "owner" }] });
+    w.h.deps.deliveryAccess = async (_deps, operation, workspace) => {
+      for (const pk of [w.task.pk, workspace.pk]) for (const row of (await w.h.store.query({ pk })).items) w.db.set(row);
+      return guardTaskDispatch({ documentClient: w.db, tableName: "state", core: { companyId: w.h.deps.companyId, workspacePk: workspace.pk } }, {
+        id: "dispatch-key-only", workspaceId: workspace.id, operationId: operation.id, invocation: { kind: operation.dispatch.kind, fence: operation.fence },
+      });
+    };
+    let delivered = 0;
+    for (let i = 0; i < 12; i++) { delivered += (await w.h.flow.dispatchOnce({ maxMessages: 10 })).delivered; w.h.clock.advance(70); }
+    expect(delivered).toBe(1);
+  });
+
+  it("refuses when the developerId attribute disagrees with the key", async () => {
+    const w = await world("cloud", false, false, "attribute");
+    const other = ownerKeyForSubject(w.record.issuer, "someone-else");
+    w.identity.developerRecord = async id => developerRecordKeyedBy({ pk: rowKey(id), sk: "META", ...w.record, developerId: other } as unknown as DeveloperRecord, id);
+    await expect(getTaskPeople(w.people, w.webCaller, w.task.taskId)).rejects.toMatchObject({ code: "PROJECT_ACCESS_DENIED" });
+    expect(w.db.get(w.task.pk, "PEOPLE")).toBeUndefined();
+  });
+
+  it("refuses when the row read is another person's (pk names someone else)", async () => {
+    const w = await world("cloud", false, false, "key");
+    const other = ownerKeyForSubject(w.record.issuer, "someone-else");
+    w.identity.developerRecord = async id => developerRecordKeyedBy({ ...(w.storedRow() as object), pk: rowKey(other) } as unknown as DeveloperRecord, id);
+    await expect(getTaskPeople(w.people, w.webCaller, w.task.taskId)).rejects.toMatchObject({ code: "PROJECT_ACCESS_DENIED" });
+  });
+
+  it("still refuses a different person than the task's creator", async () => {
+    const w = await world("cloud", false, false, "key");
+    const stranger = ownerKeyForSubject(w.record.issuer, "stranger");
+    w.identity.developerRecord = async id => developerRecordKeyedBy({ pk: rowKey(id), sk: "META", ...w.record, developerId: undefined, issuer: w.record.issuer, subject: "stranger" } as unknown as DeveloperRecord, id);
+    await expect(w.identity.developerRecord(stranger)).resolves.toMatchObject({ developerId: stranger });
+    await expect(checkTaskPersonIdentity(w.identity, w.task, stranger)).rejects.toMatchObject({ code: "PROJECT_ACCESS_DENIED" });
+  });
+
+  it("still refuses when the company differs", async () => {
+    const w = await world("cloud", false, false, "key");
+    w.identity.companyMembership = async () => ({ companyId: "org_zzzzzzzzzzzzzzzzzzzz" });
+    const proof = await checkTaskPersonIdentity(w.identity, w.task, w.developerId).catch((error: unknown) => error);
+    if (proof instanceof Error) expect(proof).toMatchObject({ code: "PROJECT_ACCESS_DENIED" });
+    else expect(proof).toMatchObject({ eligible: false });
   });
 });

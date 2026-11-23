@@ -19,7 +19,7 @@ import { createTransactionalOutbox } from "../../packages/broker/src/ports/trans
 import { createStoreProjectSource } from "../../packages/broker/src/core/task-flow/project-source.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { operationKey, taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { costPartition } from "../../packages/broker/src/core/cost/ledger.js";
+import { companyDayKey, costPartition } from "../../packages/broker/src/core/cost/ledger.js";
 import { TASK_SPEND_UNKNOWN } from "../../packages/broker/src/core-host/company-task-spend.js";
 import { hostedTaskCapUsd } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { readFileSync } from "node:fs";
@@ -338,6 +338,23 @@ describe("the core on the dispatcher", () => {
     const refusals = logs.filter((entry) => entry["event"] === "dispatch.task_spend_refused");
     expect(refusals.map((entry) => entry["reason"])).toEqual(["run_unreported", "unpriced_usage"]);
     expect(JSON.stringify(refusals)).not.toContain(task);
+  });
+
+  it("wires the real dollar day gate on the dispatcher without an opt-in", async () => {
+    const made = inputs(env({ ROVARA_CORE_COMPANY_DAY_CAP_USD: "25" }));
+    const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
+    const built = createDispatcherCoreHost({ ...made.inputs, flow: () => ({ standingInstructions: null, modelAccess: null, learned: null }), extraModules: createFakeWorld().modules.filter((module) => owed.has(module.point)) });
+    const a = await built.app.runtimeFor(COMPANY_A);
+    expect(typeof a.flow.deps.autofixDayBudgetHasRoom).toBe("function");
+    const taskId = "44444444-4444-4444-8444-444444444444";
+    await a.flow.deps.store.put({ item: { ...taskKey(taskId), companyId: COMPANY_A, taskId, project: "demo" } });
+    expect(await a.flow.deps.autofixDayBudgetHasRoom!({ companyId: COMPANY_A, taskId, project: "demo" } as never, 26)).toBe(false);
+    expect(await a.flow.deps.autofixDayBudgetHasRoom!({ companyId: COMPANY_A, taskId, project: "demo" } as never, 3)).toBe(true);
+    // Review test (lead 4 Opus, e48d7b1b1): the dispatcher's reader counts TODAY's load on the host's own clock (a reader on another day would see an empty day and say "room").
+    const today = made.inputs.now!().toISOString().slice(0, 10);
+    await a.flow.deps.store.put({ item: { ...companyDayKey(COMPANY_A, today), loadMicros: 23_000_000, uncountedEntries: 0 } });
+    expect(await a.flow.deps.autofixDayBudgetHasRoom!({ companyId: COMPANY_A, taskId, project: "demo" } as never, 3)).toBe(false);
+    expect(await a.flow.deps.autofixDayBudgetHasRoom!({ companyId: COMPANY_A, taskId, project: "demo" } as never, 2)).toBe(true);
   });
 
   it("L4-TA6: each company's runtime on the dispatcher carries its own taskCapUsd (the live cap automatic fixing is held to) from the host's input, and nothing when the host gives none; the deployed dispatcher gives it", async () => {

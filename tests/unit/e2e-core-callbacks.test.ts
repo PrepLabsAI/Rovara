@@ -3,6 +3,7 @@ import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID, type DocumentStore, type E2EWorkflowAdmissionRef, type ObjectStorage } from "@agentx/contracts";
+import { S3ObjectStorage } from "../../packages/aws-adapters/src/s3/index.js";
 import { createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { operationKey, workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -352,5 +353,30 @@ describe("the evidence upload", () => {
     await w.seed({ fence: 2 });
     await rejects(handleE2EEvidenceUpload(w.stores, { ...(await w.operation()), fence: 1 }, { stage: "finalize", groupRunId: runIds[0], uploadId: started.uploadId, sha256: started.digest }), "STALE_FENCE");
     expect((await w.operation() as unknown as Record<string, unknown>)["workflowE2EGroupRunIds"]).toBeUndefined();
+  });
+});
+
+// The deployed object storage is S3, which refuses an object whose metadata names are not lower-case letters, digits and . _ - (S3 lower-cases names). The in-memory stores accept anything, which hid a camelCase name
+// (`groupRunId`) that made every group evidence upload a 500 on the hosted install. This runs the whole upload through the REAL S3 adapter's own put validation, then stores in the in-memory store.
+const throughS3Rules = (inner: ObjectStorage): ObjectStorage => {
+  const s3 = new S3ObjectStorage({ client: { send: async () => ({}) }, bucket: "artifacts" });
+  return {
+    put: async (key, bytes, meta) => { await s3.put(key, bytes, meta); return inner.put(key, bytes, meta); },
+    get: inner.get.bind(inner), stat: inner.stat.bind(inner), delete: inner.delete.bind(inner), deletePrefix: inner.deletePrefix.bind(inner),
+  };
+};
+
+describe("the evidence upload on the real object storage's rules", () => {
+  it("writes only metadata the S3 adapter accepts, for every group's evidence and the aggregate", async () => {
+    const w = await world({ objectsOf: throughS3Rules });
+    const e = evidenceOf(w);
+    await uploadEvidence(w, bytesOf(e.envelope(0)), runIds[0]);
+    await uploadEvidence(w, bytesOf(e.envelope(1)), runIds[1]);
+    const done = await uploadEvidence(w, bytesOf(e.aggregate()), undefined);
+    expect(done.answer).toMatchObject({ sha256: done.digest });
+  });
+  it("the S3 adapter does refuse a camelCase metadata name (so the check above can fail)", async () => {
+    const s3 = new S3ObjectStorage({ client: { send: async () => ({}) }, bucket: "artifacts" });
+    await expect(s3.put("k", new Uint8Array([1]), { contentType: "application/json", metadata: { groupRunId: "x" }, retention: "task-document" })).rejects.toMatchObject({ name: "ObjectMetaError" });
   });
 });
