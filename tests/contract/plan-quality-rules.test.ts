@@ -453,3 +453,43 @@ describe("fix round 1: a waived check list is shown, and only coding plans are j
     for (const kind of ["requirements", "design"] as const) expect(planQualityFindings(planDocument(), { kind })).toEqual([]);
   });
 });
+
+describe("CHECK-AND-WORDING: a line count must not depend on a trailing newline", () => {
+  const lint = (executable: string, args: string[]) => quality(withChecks([check("proposed-1", "notes.txt has one line", executable, args)], { "proposed-1": ["1.1"] })).filter((finding) => finding.code === "check-command-lint");
+
+  it("flags wc -l on a file (an operand, a < redirect, or cat feeding it), the form that failed on a one-line file with no newline", () => {
+    expect(lint("sh", ["-c", "test 1 -eq $(wc -l < notes.txt)"])).toMatchObject([{ lint: "wc-line-count" }]);
+    expect(lint("sh", ["-c", "n=$(wc -l notes.txt); test \"${n%% *}\" -eq 1"])).toMatchObject([{ lint: "wc-line-count" }]);
+    expect(lint("sh", ["-c", "cat notes.txt | wc -l | grep -qx 1"])).toMatchObject([{ lint: "wc-line-count" }]);
+    expect(lint("wc", ["-l", "notes.txt"])).toMatchObject([{ lint: "wc-line-count" }]);
+    expect(lint("wc", ["--lines", "notes.txt"])).toMatchObject([{ lint: "wc-line-count" }]);
+  });
+
+  it("does not flag counting the lines another command printed, nor the robust awk form", () => {
+    expect(lint("sh", ["-c", "git diff --name-only | wc -l | grep -qx 1"])).toEqual([]);
+    expect(lint("awk", ["END{exit NR==1?0:1}", "notes.txt"])).toEqual([]);
+    expect(lint("wc", ["-c", "notes.txt"])).toMatchObject([{ lint: "exit-ignores-match" }]);
+  });
+
+  it("tells the planner and the owner what is wrong and what to use", () => {
+    const [finding] = lint("wc", ["-l", "notes.txt"]);
+    expect(finding?.plannerLine).toContain("awk");
+    expect(finding?.plannerLine).toContain("wc -l");
+    expect(finding?.ownerSentence).toContain("one line short");
+  });
+
+  it("the awk form the guidance gives passes a one-line file with no trailing newline, with or without one; wc -l reads the same file as 0 lines", () => {
+    const folder = mkdtempSync(join(tmpdir(), "line-count-"));
+    const bare = join(folder, "bare.txt");
+    const ended = join(folder, "ended.txt");
+    const two = join(folder, "two.txt");
+    writeFileSync(bare, "hello");
+    writeFileSync(ended, "hello\n");
+    writeFileSync(two, "a\nb");
+    const awk = (file: string): number => { try { execFileSync("awk", ["END{exit NR==1?0:1}", file], { stdio: "ignore" }); return 0; } catch (error) { return (error as { status: number }).status; } };
+    expect(execFileSync("sh", ["-c", "wc -l < \"$1\"", "sh", bare]).toString().trim()).toBe("0");
+    expect(awk(bare)).toBe(0);
+    expect(awk(ended)).toBe(0);
+    expect(awk(two)).toBe(1);
+  });
+});

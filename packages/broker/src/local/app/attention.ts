@@ -2,7 +2,7 @@
 // One reader for the task page and for the session views (the sessions' "step" and status), so they cannot say different things. A name from CI or a worker is redacted and flattened to one line; no sentence here is
 // a worker's or a person's.
 import {
-  CI_FIX_ROUNDS_MAX, CI_STATE_WORDS, CONFLICT_ROUNDS_MAX, WORKFLOW_BLOCK_REASONS, redactText, workflowFixRounds,
+  CI_FIX_ROUNDS_MAX, CI_STATE_WORDS, blockReasonSentence, CONFLICT_ROUNDS_MAX, WORKFLOW_BLOCK_REASONS, redactText, workflowFixRounds,
   type MergeTrackingItem, type TaskStatus, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import type { AttentionView } from "../../core/local-pages/views.js";
@@ -67,7 +67,7 @@ export async function attentionOf(deps: Pick<TaskFlowDeps, "store" | "companyId"
     const ask = AutoFixAskSchema.safeParse(task.autofixAsk);
     const current = ask.success && ask.data.workflowRevision === workflow.revision ? ask.data : undefined;
     const lines = [
-      ...(workflow.blockReason === undefined ? [] : [line(workflow.blockReason, 400)]),
+      ...(workflow.blockReason === undefined ? [] : [blockReasonSentence(line(workflow.blockReason, 400))]),
       ...(current === undefined ? [] : [`Why I'm asking you: ${autoFixAskReasonSentence(current.reason, current.capUsd)}`, ...current.codes.slice(0, 5).map((code) => autoFixCodeSentence(code))]),
     ];
     if (lines.length > 0) view.ask = { lines, retry: retryableBlock(workflow) };
