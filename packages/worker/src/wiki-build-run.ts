@@ -14,7 +14,7 @@ import { resolve } from "node:path";
 import { AgentXError, isBudgetExhaustedMessage, WIKI_BUILD_TOOLS, agentXError, upkeepPauseReasonOfText, type UpkeepPauseReason, type WikiBuildPins, type WikiBuildLimits } from "@agentx/contracts";
 import { ModelBudgetExhaustedError, budgetExhaustedFromMarker } from "@agentx/model-runtime";
 import { assistantOutcome, failedTurn } from "./session-events.js";
-import { SETUP_NEXT_TURN_MARGIN_TOKENS, dearestInputPerMTok, tokensOfUsage, turnCostUsd, type ModelPrice } from "./setup-agent-price.js";
+import { SETUP_NEXT_TURN_MARGIN_TOKENS, dearestInputPerMTok, priceForInputTokens, tokensOfUsage, turnCostUsd, type ModelPrice } from "./setup-agent-price.js";
 import { SETUP_AGENT_MAX_OUTPUT_TOKENS, centsFromDollars, estimateNextTurnCents } from "./setup-agent-journal.js";
 import type { PiSessionHandle } from "./pi-session.js";
 
@@ -189,10 +189,12 @@ async function writePage(input: WikiRunInput, job: PageJob, baseCents: number, p
     if (unreadable || (turns > 0 && (reported ?? 0) === 0 && (own ?? 0) === 0)) return undefined;
     return reported === undefined ? own : own === undefined ? reported : Math.max(reported, own);
   };
-  const nextTurn = (): number => estimateNextTurnCents({
+  const nextTurn = (): number => {
     // The whole last context, its output, the margin and the tool results since, all at the dearest input rate (a cold cache writes it again; the write rate already holds the write premium), and the output cap.
-    inputTokens: lastInputTokens + lastOutputTokens + SETUP_NEXT_TURN_MARGIN_TOKENS + toolRuns * WIKI_TOOL_RESULT_MAX_TOKENS, maxOutputTokens: SETUP_AGENT_MAX_OUTPUT_TOKENS, inputPerMTok: dearestInputPerMTok(price), outputPerMTok: price.outputPerMTok,
-  });
+    // Inside the price's base band the next call is bounded at the base rates, else at the pooled ones.
+    const inputTokens = lastInputTokens + lastOutputTokens + SETUP_NEXT_TURN_MARGIN_TOKENS + toolRuns * WIKI_TOOL_RESULT_MAX_TOKENS;
+    return estimateNextTurnCents({ inputTokens, maxOutputTokens: SETUP_AGENT_MAX_OUTPUT_TOKENS, inputPerMTok: dearestInputPerMTok(price, inputTokens), outputPerMTok: priceForInputTokens(price, inputTokens).outputPerMTok });
+  };
   /** The run's spend now: what earlier pages cost plus this session's. Undefined when it cannot be read. */
   const spendNow = (): number | undefined => { const own = sessionSpend(); return own === undefined ? undefined : baseCents + own; };
   const check = (): void => {

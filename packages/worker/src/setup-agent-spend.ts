@@ -2,7 +2,7 @@
 //   - `SetupSpendMeter`: the run's OWN count of its spend, from each assistant turn's tokens, every token class at its own rate (`turnCostUsd`), and the next-turn reserve the governor keeps in hand.
 //   - `createSetupUsageReporter`: books the run's model sessions (the setup session, and the stand-in writer's) through the worker's usual `usage` event, so the broker's usage booking puts the cost on the task.
 import { SETUP_AGENT_MAX_OUTPUT_TOKENS, estimateNextTurnCents } from "./setup-agent-journal.js";
-import { SETUP_NEXT_TURN_MARGIN_TOKENS, dearestInputPerMTok, tokensOfUsage, turnCostUsd, type ModelPrice } from "./setup-agent-price.js";
+import { SETUP_NEXT_TURN_MARGIN_TOKENS, dearestInputPerMTok, priceForInputTokens, tokensOfUsage, turnCostUsd, type ModelPrice } from "./setup-agent-price.js";
 import { createMissingUsageDetector, createTaskUsageTelemetry, createUsageCheckpointer, spentNothing, usageForControlPlane, type PiCacheRetention, type TaskUsageOutcome, type UsageCheckpointer, type UsageStats } from "./usage.js";
 import { redactCredentials } from "./events.js";
 import type { PiSessionHandle } from "./pi-session.js";
@@ -31,9 +31,11 @@ export class SetupSpendMeter {
    * waited for a website, so the context is written again; the write rate already holds the write premium), and the full output cap as output. A single call's bound, recomputed each time, not a running sum.
    */
   reserveCents(): number {
+    const inputTokens = this.lastInputTokens + this.lastOutputTokens + SETUP_NEXT_TURN_MARGIN_TOKENS;
+    // The next call is bounded at the size above: inside the base band it is bounded at the base rates, else at the pooled ones.
     return estimateNextTurnCents({
-      inputTokens: this.lastInputTokens + this.lastOutputTokens + SETUP_NEXT_TURN_MARGIN_TOKENS, inputPerMTok: dearestInputPerMTok(this.price),
-      maxOutputTokens: SETUP_AGENT_MAX_OUTPUT_TOKENS, outputPerMTok: this.price.outputPerMTok,
+      inputTokens, inputPerMTok: dearestInputPerMTok(this.price, inputTokens),
+      maxOutputTokens: SETUP_AGENT_MAX_OUTPUT_TOKENS, outputPerMTok: priceForInputTokens(this.price, inputTokens).outputPerMTok,
     });
   }
 
