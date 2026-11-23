@@ -72,6 +72,7 @@ export function createDecisionService(options: DecisionServiceOptions): Decision
   };
   const workflowSubject = createWorkflowDocumentSubject({
     store,
+    ...(flow.applicationE2E === undefined ? {} : { applicationPlanning: flow.applicationE2E.planning }),
     ...(options.workflowSubject ?? {}),
     // The tier of the plan waiting now, read from the plan itself (the files it names, the claims nothing proves): a plan nobody could grade is never graded low, but a plan that names its files
     // and its proof is not high just for being a plan.

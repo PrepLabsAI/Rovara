@@ -55,6 +55,7 @@ export function candidateIsOnPullRequest(workflow: WorkflowSnapshot): boolean {
 
 /** A blocked VERIFY or REVIEW is looked at by Rovara's own fixing right away (a row, committed with the block); anything else is for the owner. */
 export function autofixRowFor(deps: TaskFlowDeps, taskId: string, next: WorkflowSnapshot, now: string, cause?: "run-lost" | "dispatch-exhausted"): TransactItem[] {
+  if (next.stage === "VERIFY" && next.e2e?.required === true && next.e2e.failedRound === undefined) return [];
   return next.state === "BLOCKED" && (next.stage === "VERIFY" || next.stage === "REVIEW") ? [dispatchRowItem(deps, taskId, next.revision, "AUTOFIX", now, now, cause)] : [];
 }
 
@@ -69,13 +70,14 @@ export function causeOfEnd(ended: Ended): "run-lost" | "dispatch-exhausted" | un
  * the result was read changes nothing.
  */
 export async function commitAndContinue(deps: TaskFlowDeps, task: TaskRecord, next: WorkflowSnapshot, now: string, cause?: "run-lost" | "dispatch-exhausted", taskOps: readonly UpdateOp[] = [], fences: readonly TransactItem[] = []): Promise<void> {
-  const following = next.stage === "REVIEW" && next.state === "WAITING" ? [dispatchRowItem(deps, task.taskId, next.revision, "REVIEW", now)]
+  const following = next.stage === "VERIFY" && next.state === "WAITING" && next.e2e?.required === true ? [dispatchRowItem(deps, task.taskId, next.revision, "CHECKS", now)]
+    : next.stage === "REVIEW" && next.state === "WAITING" ? [dispatchRowItem(deps, task.taskId, next.revision, "REVIEW", now)]
     : next.stage === "PULL_REQUEST" && next.state === "READY" ? [dispatchRowItem(deps, task.taskId, next.revision, "PUBLISH", now)]
     : autofixRowFor(deps, task.taskId, next, now, cause);
   const committed = await commitWorkflow(deps, task, next, [...fences, ...following], taskOps);
   const row = following[0];
   if (!committed || row === undefined || row.kind !== "put") return;
-  const kind = row.item["kind"] as "REVIEW" | "PUBLISH" | "AUTOFIX";
+  const kind = row.item["kind"] as "CHECKS" | "REVIEW" | "PUBLISH" | "AUTOFIX";
   await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind }).catch((error: unknown) => log(deps, { event: "build_step.start_failed", taskId: task.taskId, kind, error: error instanceof Error ? error.name : "unknown" }));
 }
 
@@ -104,6 +106,36 @@ async function confirmStartingCommits(deps: TaskFlowDeps, task: TaskRecord, cand
     const host = codeHostForRecord(deps.codeHosts, definition);
     await host.tree({ url: definition.url }, repository.baseCommitSha as string, { orgId: deps.companyId });
   }
+}
+
+function checkedStartingBase(task: TaskRecord, workflow: WorkflowSnapshot, candidate: ReturnType<typeof createCandidateManifest>) {
+  if (candidate.repositories.some((repository) => repository.baseCommitSha === undefined)) return { ok: false as const, reason: WORKFLOW_BLOCK_REASONS.startUnrecorded, detail: "candidate has no base commit" };
+  const base = workflow.reviewBase ?? task.preparedBase;
+  if (base === undefined) return { ok: false as const, reason: WORKFLOW_BLOCK_REASONS.startUnrecorded, detail: "the task has no prepared base commit" };
+  if (candidate.repositories.some((repository) => base.find((entry) => entry.repositoryId === repository.repositoryId)?.baseCommitSha !== repository.baseCommitSha)) {
+    return { ok: false as const, reason: WORKFLOW_BLOCK_REASONS.startChanged, detail: "candidate base commit differs from the task's base" };
+  }
+  return { ok: true as const, base };
+}
+
+function requiredApplicationVerifierAvailable(deps: TaskFlowDeps, workflow: WorkflowSnapshot): boolean {
+  return workflow.e2e?.required !== true || (deps.e2e !== undefined && deps.applicationE2E !== undefined);
+}
+
+async function queueApplicationChecks(deps: TaskFlowDeps, task: TaskRecord, workflow: WorkflowSnapshot, candidate: ReturnType<typeof createCandidateManifest>, reviewBase: NonNullable<WorkflowSnapshot["reviewBase"]>, now: string): Promise<boolean> {
+  if (workflow.e2e?.required !== true) return false;
+  const { qualifiedRound: _qualified, failedRound: _failed, displayRef: _display, currentRoundId: _round, ...e2e } = workflow.e2e;
+  void _qualified; void _failed; void _display; void _round;
+  const next = WorkflowSnapshotSchema.parse({ ...workflow, revision: workflow.revision + 1, stage: "VERIFY", state: "WAITING", updatedAt: now,
+    candidate, reviewBase, e2e: { ...e2e, currentGroupRunIds: [] } });
+  await commitAndContinue(deps, task, next, now);
+  return true;
+}
+
+async function withApplicationDisplay(deps: TaskFlowDeps, task: TaskRecord & { workflow: WorkflowSnapshot }, operation: OperationRecord, next: WorkflowSnapshot): Promise<WorkflowSnapshot> {
+  if (operation.workflowMode !== "CHECKS" || deps.applicationE2E === undefined || next.e2e === undefined) return next;
+  const displayRef = await deps.applicationE2E.results.project(task, operation, "SUCCEEDED");
+  return displayRef === undefined ? next : WorkflowSnapshotSchema.parse({ ...next, e2e: { ...next.e2e, displayRef } });
 }
 
 /**
@@ -180,6 +212,9 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
     if (candidate.repositories.map((repository) => repository.repositoryId).sort().join("\n") !== expectedRepositories.join("\n")) { failure = WORKFLOW_BLOCK_REASONS.repositoriesIncomplete; throw new Error("candidate repositories are incomplete"); }
     // The browser and API checks: the committed source of this code must be on file, and a candidate's round must be verified by the broker before the checks can pass.
     let e2eQualification: ReturnType<typeof qualificationOf> | undefined;
+    if (!requiredApplicationVerifierAvailable(deps, workflow)) {
+      failure = "Required application checks are unavailable in this install."; throw new Error(failure);
+    }
     if (workflow.e2e?.required === true && deps.e2e !== undefined) {
       if (mode === "IMPLEMENT") {
         const ref = (operation as OperationRecord & { candidateSourceRef?: CandidateSourceRef }).candidateSourceRef;
@@ -230,13 +265,10 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
     }
     if (checkedCandidate.digest !== candidate.digest) { failure = WORKFLOW_BLOCK_REASONS.codeChangedAfterChecks; throw new Error("checked candidate is stale"); }
     // Reviewers judge the change from the task's base, so every repository must say where it started, and it must be where preparation checked out.
-    if (candidate.repositories.some((repository) => repository.baseCommitSha === undefined)) { failure = WORKFLOW_BLOCK_REASONS.startUnrecorded; throw new Error("candidate has no base commit"); }
     const pinnedBase = workflow.reviewBase;
-    const expectedBase = pinnedBase ?? task.preparedBase;
-    if (expectedBase === undefined) { failure = WORKFLOW_BLOCK_REASONS.startUnrecorded; throw new Error("the task has no prepared base commit"); }
-    if (candidate.repositories.some((repository) => expectedBase.find((entry) => entry.repositoryId === repository.repositoryId)?.baseCommitSha !== repository.baseCommitSha)) {
-      failure = WORKFLOW_BLOCK_REASONS.startChanged; throw new Error("candidate base commit differs from the task's base");
-    }
+    const starting = checkedStartingBase(task, workflow, candidate);
+    if (!starting.ok) { failure = starting.reason; throw new Error(starting.detail); }
+    const expectedBase = starting.base;
     // Before the first pin, the code host has each starting commit, so the base is real history and not a local commit.
     if (pinnedBase === undefined) {
       try { await confirmStartingCommits(deps, task, candidate); } catch (error) { failure = WORKFLOW_BLOCK_REASONS.startUnconfirmed; throw error; }
@@ -262,6 +294,7 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
       }
     }
     if (results.length === 0 && !reviewOnly) { failure = WORKFLOW_BLOCK_REASONS.noCheckResults; throw new Error("there are no selected check results"); }
+    if (mode === "IMPLEMENT" && await queueApplicationChecks(deps, task, workflow, candidate, expectedBase, now)) return;
     next = recordWorkflowVerification(verifying, {
       candidate,
       checks: { candidateDigest: candidate.digest, producer: "agentx-worker-checks", environmentId: task.workspaceId, recordedAt: now, results, ...(reviewOnly ? { reviewOnly: true } : {}) },
@@ -287,7 +320,8 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
     }
   }
   // The rows the E2E verdict stands on ride in the same transaction: if any of them moved after it was judged, the verdict is not recorded.
-  await commitAndContinue(deps, task, next, now, undefined, [], next.state === "BLOCKED" ? [] : e2eFences);
+  next = await withApplicationDisplay(deps, { ...task, workflow }, operation, next);
+  await commitAndContinue(deps, task, next, now, undefined, [], e2eFences);
 }
 
 /** What a passing candidate round records on the workflow: the digests the approval fixed and the round's own references. */

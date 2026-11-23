@@ -1,4 +1,6 @@
 import "./broker-environment-init.js"; import { companyMembershipFromDynamo, resolveAdminCompany, resolveCompany } from "./company-check.js"; // ENV-ROOM: the init first (broker-environment-init.ts; kept first by tests/contract/broker-environment-first.test.ts)
+import { coreKeepPullRequests } from "./slack-core-feedback.js";
+import type { TaskRecord as CoreApplicationTaskRecord } from "../core/task-flow/records.js";
 import { coreContextWorkerRouteOf } from "./dev-route-scopes.js";
 import { isServerReadRequest } from "./developer-routes.js";
 import { createHostedBrokerCoreServices } from "./core-job-services.js"; import { codeSettingsReader, companyCodeSettingsReader } from "./project-code-settings.js"; import { hostedPolicySource } from "./core-policy-source.js";
@@ -601,6 +603,7 @@ interface CodeBuildRecord {
 }
 
 interface AwsBrokerDependencies {
+  core?: BrokerCoreRoot;
   /** DEC 254zzz79 (3): the gateway's settings and the task-token signer, for the Slack service's model access (slack-model-access.ts). Absent: every company thread's model access is `unavailable`. */
   slackModelAccess?: { env: NodeJS.ProcessEnv; taskTokens: () => { signer: TokenSigner; issuer: string } | undefined };
   workspaces?: SlackWorkspaceAccess;
@@ -1051,7 +1054,7 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
 
 export function createAwsBrokerHandler(input: AwsBrokerInput) {
   const { core, ...brokerInput } = input;
-  const dependencies = brokerDependencies(brokerInput);
+  const dependencies = brokerDependencies({ ...brokerInput, ...(core === undefined ? {} : { core }) });
   if (Buffer.byteLength(dependencies.callbackSigningKey, "utf8") < 32) {
     throw new Error("CALLBACK_SIGNING_KEY must contain at least 32 bytes");
   }
@@ -7115,6 +7118,12 @@ export function isSlackWorkflowKeepPullRequestsEvent(event: unknown): event is S
 
 /** Keep the pull request as it is, through the same route an AI tool uses. */
 async function keepSlackWorkflowPullRequests(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowKeepPullRequestsEvent) {
+  const core = await coreKeepPullRequests(dependencies, dependencies.developer?.coreTasks, event, async () => {
+    const thread = SlackThreadSchema.parse(event.thread);
+    if (!await slackWorkspaceEnabled(dependencies, thread)) throw agentXError("FORBIDDEN", "Slack workspace is not enabled for developer tasks");
+    return await companySlackCaller(dependencies, thread, SlackRequesterSchema.shape.userId.parse(event.userId));
+  });
+  if (core !== undefined) return core;
   const { taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "keep the pull request as it is");
   const routeDeps = slackWorkflowRouteDependencies(dependencies, tasks, developer, caller);
   const body = JSON.stringify({ requestId, expectedRevision: event.expectedRevision });
@@ -9559,6 +9568,18 @@ function sameE2ESourceSnapshot(left: E2ESourceSnapshot, right: E2ESourceSnapshot
   });
 }
 
+async function coreApplicationTask(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord) {
+  const core = dependencies.core;
+  const companyId = storedCompanyOf(task);
+  if (core === undefined || companyId === undefined) return undefined;
+  const registry = await core.app.registry();
+  if (await core.app.engineOfTask(registry.require("storage"), task.taskId, "flow") !== "core") return undefined;
+  const flow = (await core.app.runtimeFor(companyId)).flow.deps;
+  const stored = await flow.store.get({ pk: `DEVTASK#${task.taskId}`, sk: "META" }) as unknown as CoreApplicationTaskRecord | undefined;
+  if (stored?.companyId !== companyId || stored.workflow === undefined || flow.applicationE2E === undefined) throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
+  return { task: { ...stored, workflow: stored.workflow }, seams: flow.applicationE2E };
+}
+
 /** Builds task projections only after reloading and independently qualifying the stored current CHECKS evidence. */
 async function workflowE2EPresentation(
   dependencies: AwsBrokerDependencies,
@@ -9568,6 +9589,8 @@ async function workflowE2EPresentation(
   /** A CHECKS operation whose terminal state is being written by the caller and is not yet in its stored record. */
   ending?: { operationId: string; status: "SUCCEEDED" | "FAILED" },
 ): Promise<NonNullable<DeveloperTaskView["e2ePresentation"]> | undefined> {
+  const core = await coreApplicationTask(dependencies, task);
+  if (core !== undefined) return (await core.seams.results.read(core.task, actor))?.presentation;
   return (await workflowE2EPresentationDetailed(dependencies, task, operations, actor, ending))?.presentation;
 }
 
@@ -9706,6 +9729,8 @@ export async function loadWorkflowE2EScenarioResults(
   operations: readonly unknown[],
   actor: "owner" | "viewer" = "viewer",
 ): Promise<E2EScenarioResults | undefined> {
+  const core = await coreApplicationTask(dependencies, task);
+  if (core !== undefined) return (await core.seams.results.read(core.task, actor))?.scenarioResults;
   if (task.closedAt !== undefined) return (await workflowE2EPresentationDetailed(dependencies, task, operations, actor))?.scenarioResults;
   const stored = await loadStoredScenarioResults({ s3: dependencies.s3, artifactBucketName: dependencies.artifactBucketName }, task);
   // M1.3 Task 3.7b: the baseline round has a record of its own and runs before the candidate's, so it shows as soon as it is recorded, or known not to have run, whether or not the
@@ -9721,6 +9746,8 @@ export async function loadWorkflowE2EArtifact(
   task: DeveloperTaskRecord,
   sha256: string,
 ): Promise<{ contentType: "image/jpeg"; bytes: Uint8Array } | undefined> {
+  const core = await coreApplicationTask(dependencies, task);
+  if (core !== undefined) return core.seams.results.artifact(core.task, sha256);
   const baseline = await readWorkflowE2EBaseline(dependencies, task).catch(() => undefined);
   return loadStoredWorkflowE2EArtifact({ s3: dependencies.s3, artifactBucketName: dependencies.artifactBucketName }, task, sha256, baseline === undefined ? {} : { baseline });
 }
@@ -16016,6 +16043,7 @@ function buildBrokerHandler(callbackSigningKey: string) {
   );
   // Lane E2 step 6: the core engine's root. Every new task of a member company starts on it (#1275).
   const coreRoot = createBrokerCoreRoot({
+    applicationSource: (repositoryUrl, commit) => githubCredentials.captureE2ESourceSnapshot(repositoryUrl, commit),
     env: process.env,
     documentClient,
     stateTableName: requiredEnvironment("STATE_TABLE_NAME"),

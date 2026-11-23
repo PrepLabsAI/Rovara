@@ -294,7 +294,8 @@ describe("the stored records equal what the DynamoDB versions write", () => {
     expect(newStart).toMatchObject({ kind: "update", key: oldStart.Key });
     const setBy = (item: TransactItem): Record<string, unknown> => Object.fromEntries((item as unknown as { ops: Array<{ path: string[]; value: unknown }> }).ops.map((op): [string, unknown] => [op.path[0]!, op.value]));
     const values = oldStart.ExpressionAttributeValues;
-    expect(setBy(newStart)).toEqual({ state: values[":started"], baseCommitSha: values[":base"], operationId: values[":operation"], roundId: values[":round"], admissionSha256: values[":admission"],
+    // Restating the existing kind avoids a hosted retention pre-read; every other persisted field stays legacy-compatible.
+    expect(setBy(newStart)).toEqual({ entityType: old.sent[0]!.Item["entityType"], state: values[":started"], baseCommitSha: values[":base"], operationId: values[":operation"], roundId: values[":round"], admissionSha256: values[":admission"],
       startedAt: values[":startedAt"], deadlineAt: values[":deadline"], [INDEX_EXPIRY_ATTRIBUTE]: values[":expires"] });
 
     const oldReplay = capture();

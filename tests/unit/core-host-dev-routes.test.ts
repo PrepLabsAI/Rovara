@@ -1448,3 +1448,9 @@ describe("dedicated server-read route registration", () => {
     expect(impact.status).toBe(200); expect(impact.body).not.toHaveProperty("requestId");
   });
 });
+
+it("dispatches only GET task Ask history through the app scope table", () => {
+  const path = "/v1/app/projects/alpha/tasks/11111111-1111-4111-8111-111111111111/answers";
+  expect(contextAppRouteOf("GET", path)).toMatchObject({ requires: "full" });
+  expect(contextAppRouteOf("POST", path)).toBeUndefined();
+});

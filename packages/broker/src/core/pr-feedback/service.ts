@@ -1,3 +1,4 @@
+import { servesPrFeedbackDecisions } from "../../core-host/pr-feedback-routes.js";
 // Tracking supplies the same host-neutral ports on local and deployed installs.
 import type { ReadBudget, RegistryView } from "@agentx/contracts";
 import { isCoreFeedbackTask } from "./ownership.js";
@@ -12,6 +13,7 @@ import { readTask } from "../task-flow/reads.js";
 import { createReadBudget, createRepositoryResolver } from "../../services/merge-tracking.js";
 
 export async function collectTrackedFeedback(deps: Omit<PrFeedbackCollectionDeps, "blobs"> & { registry: RegistryView }, task: TaskRecord, budget: ReadBudget): Promise<"unchanged" | "collected" | "retry"> {
+  if (!servesPrFeedbackDecisions(deps.flow)) return "unchanged";
   if (!await isCoreFeedbackTask(deps.flow, task)) return "unchanged";
   await recoverPrFeedback(deps.flow, task);
   // Once tracking has identified an outside push, keep its cheap status reads running.

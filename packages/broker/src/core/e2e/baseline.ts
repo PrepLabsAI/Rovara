@@ -57,7 +57,7 @@ export function baselineStartItem(task: TaskForBaseline,
   // The AI-navigated scenarios the round leaves out ride on the record; a round that leaves none out writes the record exactly as it was.
   const skipped = started.skippedAiScenarios === undefined || started.skippedAiScenarios.length === 0 ? undefined : SkippedAiScenariosSchema.parse(started.skippedAiScenarios);
   return { kind: "update", key: keyOf(task.taskId, contractDigest),
-    ops: [change.set("state", "STARTED"), change.set("baseCommitSha", started.baseCommitSha), change.set("operationId", started.operationId), change.set("roundId", started.roundId),
+    ops: [change.set("entityType", "WORKFLOW_E2E_BASELINE"), change.set("state", "STARTED"), change.set("baseCommitSha", started.baseCommitSha), change.set("operationId", started.operationId), change.set("roundId", started.roundId),
       change.set("admissionSha256", started.admissionSha256), change.set("startedAt", started.startedAt), change.set("deadlineAt", started.deadlineAt),
       change.set(INDEX_EXPIRY_ATTRIBUTE, expiryOf(started.startedAt)), ...(skipped === undefined ? [] : [change.set("skippedAiScenarios", skipped)])],
     condition: when.and(when.present(), when.eq("state", "REQUESTED"), when.eq("attempt", E2E_BASELINE_ATTEMPT), when.eq("contractDigest", contractDigest)) };

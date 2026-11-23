@@ -96,7 +96,7 @@ describe("outcomes", () => {
     const forged = { ...refundCite, commit: OLD };
     const result = await w.service({ model: scriptedModel([answer([{ text: goodSentence.text, cites: [forged] }], { points_at_change: true, title: "Fix refunds‮ now", label: "Delete everything", button: { label: "Delete everything", url: "https://evil.example" }, sources: ["https://evil.example"] })]) }).ask({ personId: ADA, project: "alpha", body: body() });
     expect(result.action).toEqual({ kind: "quick_task", label: ANSWER_WORDS.taskButton, title: "Fix refunds now" });
-    expect(result.sources[0]!.commit).toBe(HEAD);
+    expect(result.sources[0]).toHaveProperty("commit", HEAD);
     expect(JSON.stringify(result)).not.toContain("evil.example");
     expect(JSON.stringify(result)).not.toContain("Delete everything");
   });
@@ -262,7 +262,7 @@ describe("the check after the model answers", () => {
       { text: "Another repo.", cites: [{ repo: "billing", path: "src/refund.ts", line: 3, quote: "export const MAX_REFUND_DAYS = 30;" }] },
     ]);
     expect(result.text).toContain("Forged commit. [2]");
-    expect(result.sources.map((source) => source.commit)).toEqual([HEAD, HEAD]);
+    expect(result.sources.map((source) => "repo" in source ? source.commit : undefined)).toEqual([HEAD, HEAD]);
     expect(result.text).not.toContain("Another repo.");
     expect(code.calls.reads.every((read) => read.commit === HEAD && read.repo === "web")).toBe(true);
   });

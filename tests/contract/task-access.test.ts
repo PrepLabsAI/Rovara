@@ -1,6 +1,6 @@
 // Who may read, comment, suggest, decide and ask on a task page: one access rule and one table of roles and actions.
-import { describe, expect, it } from "vitest";
-import { TASK_ACTION_ROLES, can, resolveTaskAccess } from "../../packages/broker/src/developer/task-access.js";
+import { describe, expect, it, vi } from "vitest";
+import { TASK_ACTION_ROLES, can, resolveTaskAccess, resolveTaskReadAccess } from "../../packages/broker/src/developer/task-access.js";
 import { getTaskDocumentView } from "../../packages/broker/src/aws/developer-tasks.js";
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import { OMAR, PRIYA, SAM, pagePlan, pageTask } from "../support/page-tasks.js";
@@ -13,6 +13,77 @@ const refusal = async (promise: Promise<unknown>) => {
   }
   throw new Error("expected a refusal");
 };
+
+describe("resolveTaskReadAccess", () => {
+  it("reads a workflow task through its existing access checks without calling the core GET", async () => {
+    const fixture = pageTask();
+    const route = vi.fn(async () => ({ statusCode: 200, headers: {}, body: "{}" }));
+    fixture.deps.coreTasks = { route };
+
+    await expect(resolveTaskReadAccess(fixture.deps, SAM, fixture.taskId)).resolves.toMatchObject({
+      role: "commenter", task: { taskId: fixture.taskId },
+    });
+    expect(route).not.toHaveBeenCalled();
+
+    fixture.deps.checkAccess = async () => { throw Object.assign(new Error("denied"), { code: "PROJECT_ACCESS_DENIED" }); };
+    await expect(resolveTaskReadAccess(fixture.deps, SAM, fixture.taskId)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    expect(route).not.toHaveBeenCalled();
+  });
+
+  it("refuses a malformed task ID before looking up its engine or task", async () => {
+    const fixture = pageTask();
+    const send = vi.spyOn(fixture.deps.documentClient, "send");
+    try {
+      await expect(resolveTaskReadAccess(fixture.deps, PRIYA, "not-a-task-id")).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      send.mockRestore();
+    }
+  });
+
+  it.each([undefined, 403, 404, 500])("refuses core reads with response %s before reading the task record", async (statusCode) => {
+    const fixture = pageTask();
+    fixture.db.set({ pk: `TASK_ENGINE#${fixture.taskId}`, sk: "STAMP", coreEngine: {
+      engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "", stampedAt: "2026-11-22T00:00:00.000Z",
+    } });
+    if (statusCode !== undefined) fixture.deps.coreTasks = { route: async () => ({ statusCode, headers: {}, body: "{}" }) };
+    const send = vi.spyOn(fixture.deps.documentClient, "send");
+    try {
+      await expect(resolveTaskReadAccess(fixture.deps, PRIYA, fixture.taskId)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+      // The engine lookup is allowed; a refused core GET must not read the private task record.
+      expect(send.mock.calls.some(([command]) => typeof command === "object" && command !== null && "input" in command && JSON.stringify(command.input).includes(`DEVTASK#${fixture.taskId}`))).toBe(false);
+    } finally { send.mockRestore(); }
+  });
+
+  it("refuses a missing stored core task with the same not-found contract after a successful GET", async () => {
+    const fixture = pageTask();
+    fixture.db.set({ pk: `TASK_ENGINE#${fixture.taskId}`, sk: "STAMP", coreEngine: {
+      engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "", stampedAt: "2026-11-22T00:00:00.000Z",
+    } });
+    fixture.deps.coreTasks = { route: async () => ({ statusCode: 200, headers: {}, body: "{}" }) };
+    fixture.db.delete(`DEVTASK#${fixture.taskId}`, "META");
+    await expect(resolveTaskReadAccess(fixture.deps, PRIYA, fixture.taskId)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+  });
+
+  it("reads a valid core task through its authenticated GET and retains the owner's role", async () => {
+    const fixture = pageTask();
+    fixture.db.set({
+      pk: `TASK_ENGINE#${fixture.taskId}`, sk: "STAMP",
+      coreEngine: {
+        engine: "core", areas: { flow: "core", build: "core", merge: "core" },
+        flags: "", stampedAt: "2026-11-22T00:00:00.000Z",
+      },
+    });
+    const route = vi.fn(async () => ({ statusCode: 200, headers: {}, body: "{}" }));
+    fixture.deps.coreTasks = { route };
+
+    await expect(resolveTaskReadAccess(fixture.deps, PRIYA, fixture.taskId)).resolves.toMatchObject({
+      role: "owner", task: { taskId: fixture.taskId, developerId: PRIYA.developerId },
+    });
+    expect(route).toHaveBeenCalledExactlyOnceWith({ method: "GET", path: `/v1/dev/tasks/${fixture.taskId}`, headers: {} }, PRIYA);
+    await expect(resolveTaskAccess(fixture.deps, PRIYA, fixture.taskId, "publish")).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+  });
+});
 
 describe("resolveTaskAccess", () => {
   it("the owner, a channel member who can use the project, and everyone else", async () => {

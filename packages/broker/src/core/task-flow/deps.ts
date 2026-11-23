@@ -48,6 +48,7 @@ import type { ModelSelectionService } from "../model-selection/service.js";
 import type { UsableModels } from "../model-selection/usable-models.js";
 import type { ProofContext } from "../proof/proof-section.js";
 import type { E2EVerificationDeps } from "../e2e/authority.js";
+import type { ApplicationE2ESeams } from "../e2e/application-seams.js";
 import type { KnowledgeContext, LearnedContext, RovaraSkillFile, WikiContext } from "@agentx/contracts";
 import type { LessonsUsedSection } from "../proof/pull-request-body.js";
 
@@ -378,6 +379,8 @@ export interface TaskFlowDeps {
    * Absent: a task that needs the checks cannot have a round verified, so it stays at the checks and never passes them.
    */
   e2e?: E2EVerificationDeps;
+  /** Internal application-round ports, composed as one group; signature only until the hosted wiring is integrated. */
+  applicationE2E?: ApplicationE2ESeams;
   /** Lane L10: the steps after the plan is approved. `createTaskFlow` fills it with the build step when absent. */
   buildSteps?: BuildSteps;
   /**

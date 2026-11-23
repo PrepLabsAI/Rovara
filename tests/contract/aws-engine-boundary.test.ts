@@ -1,3 +1,4 @@
+import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { legacyWorkspaceKey } from "../../packages/broker/src/core/task-flow/legacy-keys.js";
 // Lane E2 (plan v3.2), step 6 part: the AWS entry points go by a task's stored engine. A workflow task (no stamp) keeps today's AWS readers; a core task is answered by the core's
 // own handlers (the core host's dev routes, company-aware) or refused exactly like a missing task, and no AWS reader returns its record, workspace or operations. A mixed stamp has one
@@ -532,6 +533,48 @@ describe("the AWS readers see only workflow rows", () => {
       else expect(listed).toEqual(empty);
       expect(JSON.stringify(listed.body)).not.toContain("Add a /health endpoint");
     }
+  });
+
+  it("Slack Keep returns the served core response without falling through to the legacy owner path", async () => {
+    const w = await coreWorld();
+    const expected = { task: { taskId: w.task.taskId } };
+    const calls: unknown[] = [];
+    w.coreTasks.route = async (request, caller) => {
+      calls.push({ path: request.path, body: JSON.parse(request.body!) as unknown, developerId: caller.developerId });
+      return { statusCode: 200, headers: {}, body: JSON.stringify(expected) };
+    };
+    const requestId = randomUUID();
+    const answer = await w.handler({ source: "agentx.slack-ingress", action: "workflow-keep-pull-requests", taskId: w.task.taskId,
+      userId: MAYA.slackUserId, thread: { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000100" },
+      requestId, expectedRevision: w.task.workflow!.revision });
+    expect(JSON.parse(answer.body)).toEqual({ ...expected, requestId: "slack-ingress" });
+    expect(calls).toEqual([{ path: `/v1/dev/tasks/${w.task.taskId}/workflow/keep-pull-requests`,
+      body: { requestId, expectedRevision: w.task.workflow!.revision }, developerId: developerIdForSlackUser(MAYA.slackUserId!) }]);
+  });
+
+  it("Slack Keep refuses a disabled workspace before the core route", async () => {
+    const w = await coreWorld();
+    const route = vi.spyOn(w.coreTasks, "route");
+    const answer = await w.handler({ source: "agentx.slack-ingress", action: "workflow-keep-pull-requests", taskId: w.task.taskId,
+      userId: MAYA.slackUserId, thread: { teamId: "T0WRONG000", channelId: SLACK_CHANNEL, threadTs: "1695500000.000100" },
+      requestId: randomUUID(), expectedRevision: w.task.workflow!.revision });
+    expect(JSON.parse(answer.body)).toMatchObject({ refused: true, message: "Only the task owner can do that." });
+    expect(route).not.toHaveBeenCalled();
+  });
+
+  it("Slack Keep on hosted without decision routes says not available yet and starts no paid work", async () => {
+    const w = await coreWorld();
+    w.principals.set(developerIdForSlackUser(MAYA.slackUserId!), w.principals.get(MAYA.developerId)!);
+    const runtime = await w.app.runtimeFor(FAKE_COMPANY);
+    const admission = vi.spyOn(runtime.flow.deps.admission, "admit");
+    const before = await readCoreTask(runtime.flow.deps, w.task.taskId);
+    const answer = await w.handler({ source: "agentx.slack-ingress", action: "workflow-keep-pull-requests", taskId: w.task.taskId,
+      userId: MAYA.slackUserId, thread: { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000100" },
+      requestId: randomUUID(), expectedRevision: w.task.workflow!.revision });
+    expect(JSON.parse(answer.body)).toEqual({ refused: true, message: "This action is not available on this install yet.", requestId: "slack-ingress" });
+    expect(admission).not.toHaveBeenCalled();
+    expect(await readCoreTask(runtime.flow.deps, w.task.taskId)).toEqual(before);
+    expect(w.db.find(row => row.entityType === "WORKFLOW_DISPATCH")).toEqual([]);
   });
 
   it("a Slack thread note on a core task's thread is refused, even where the workflow would take it from a legacy commenter, and nothing is written", async () => {

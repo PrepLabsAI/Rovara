@@ -1,3 +1,6 @@
+import type { E2ESourceSnapshot } from "@agentx/contracts";
+import { hostedAuthorityStore } from "./core-e2e-authority-store.js";
+import { wireHostedApplicationE2E } from "./core-application-e2e.js";
 import { createStoreProjectSource } from "../core/task-flow/project-source.js";
 import { developerTaskPolicy } from "@agentx/contracts";
 import { prepareCoreShare } from "./core-task-sharing.js";
@@ -208,6 +211,8 @@ export interface BrokerCoreRootInputs {
   documentClient: DynamoSender;
   stateTableName: string;
   signInTableName: string | undefined;
+  /** Existing trusted source capture for application planning at the prepared commit. */
+  applicationSource?: (repositoryUrl: string, commit: string) => Promise<E2ESourceSnapshot>;
   callbackSigningKey: string;
   /** The key the broker's repository grant exchange verifies with (aws/broker.ts derives it from the callback signing key). */
   repositoryGrantKey: Buffer;
@@ -842,7 +847,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     alsoNamedBy: [lessonsSwitch.value, systemRunsFlag.value],
     modules: () => [...codeAdapterModules(inputs.codeModules({ storage: async () => (await app.registry()).require("storage") })), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey, runStopWired: runStopWiredFrom(env), projectTaskCap, taskOwner, ...(chatApproval === undefined ? {} : { chat: chatApproval }) }), ...gatewayModelKeysModules(env), ...(attention === undefined ? [] : [attentionEmailModule(attention.sender)]), ...evalReservationModules(env, inputs.taskTokens), ...companyInstructionsModules(env, inputs.taskTokens), ...savedEnvImageModules(env, inputs.savedEnvSessions ?? savedEnvRoleSessionsFromEnvironment(env)), ...(inputs.extraModules?.() ?? [])],
     context: () => ({ installCompanyId: IMPLICIT_COMPANY_ID, now, env, clients: {}, log }),
-    ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
+    wrapStorage: (store) => hostedAuthorityStore(inputs.wrapStorage?.(store) ?? store, inputs),
     beforeSeal: (registry) => {
       const settings = hookSettings;
       if (settings === undefined) return;
@@ -915,6 +920,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       log,
       ciReporting: inputs.ciReporting === undefined ? policyCiReporting(policySource) : inputs.ciReporting,
       services: (flow, wiring) => {
+        wireHostedApplicationE2E({ ...inputs, flow: flow.deps, companyId, objects: registry.require("object-storage"), runtimeCatalogId: env["AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID"] ?? "", capture: inputs.applicationSource });
         flow.deps.afterPlanStored = hostedPlanEvidence(flow.deps, registry.require("object-storage"));
         const runWatch = flow.sweepRunsOnce.bind(flow);
         const idleScan = { cursor: undefined as string | undefined };
@@ -1403,6 +1409,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             deadline.check();
           }),
           flow: runtime.flow.deps,
+          ...(runtime.flow.deps.applicationE2E === undefined ? {} : { e2e: { records: runtime.flow.deps.applicationE2E.rounds.records } }),
           blobs: registry.require("object-storage"),
           // The grants the dispatcher issued for this company's workers (the same key derivation), exchanged here for a credential.
           grants: new RepositoryGrantService(inputs.repositoryGrantKey, inputs.repositoryCredential),

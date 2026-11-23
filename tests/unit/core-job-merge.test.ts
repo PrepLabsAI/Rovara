@@ -1,3 +1,4 @@
+import { createPrFeedbackRoutes } from "../../packages/broker/src/core-host/pr-feedback-routes.js";
 import { expect, it, vi } from "vitest";
 import { IMPLICIT_COMPANY_ID, change, companyScoped } from "@agentx/contracts";
 import { host, ORG } from "../support/service-host.js";
@@ -123,6 +124,7 @@ it("never runs tier checks for a task whose record belongs to another company", 
 it("mounts collection before tracking can mark a core pull request ready", async () => {
   const { feedbackWorld } = await import("../support/pr-feedback-world.js");
   const w = await feedbackWorld();
+  createPrFeedbackRoutes(w.h.deps, async () => ({}));
   const tracking = createMergeTrackingService({ flow: w.h.deps, registry: w.registry, companyId: ORG,
     milestones: createMilestoneService({ store: w.h.store, now: () => w.clock.ms }), people: w.people,
     settings: fixedCodeSettings(), repository: w.deps.repository, now: () => w.clock.ms });
@@ -153,6 +155,7 @@ it.each(["new-comments", "unreadable"])("a direct merge load checks %s before re
   const { feedbackWorld } = await import("../support/pr-feedback-world.js");
   const { withFeedbackMergeReads } = await import("../../packages/broker/src/core/pr-feedback/service.js");
   const w = await feedbackWorld();
+  createPrFeedbackRoutes(w.h.deps, async () => ({}));
   const merge = withFeedbackMergeReads(w.world.deps, w.h.deps, w.registry);
   if (kind === "unreadable") w.read.mockRejectedValue(new Error("host unavailable"));
   const loading = merge.host.loadTask(w.task.taskId);
@@ -176,6 +179,7 @@ it("the tracking feedback adapter leaves an unstamped task to its existing owner
   const { collectTrackedFeedback } = await import("../../packages/broker/src/core/pr-feedback/service.js");
   const { engineStampKey } = await import("../../packages/broker/src/core-host/engine-stamp.js");
   const w = await feedbackWorld();
+  createPrFeedbackRoutes(w.h.deps, async () => ({}));
   await w.h.store.delete({ key: engineStampKey(w.task.taskId) });
   await expect(collectTrackedFeedback({ ...w.deps, registry: w.registry }, w.task, w.budget)).resolves.toBe("unchanged");
   expect(w.read).not.toHaveBeenCalled();
@@ -184,6 +188,7 @@ it("the tracking feedback adapter leaves an unstamped task to its existing owner
 it("unchanged empty feedback still permits normal tracking reads", async () => {
   const { feedbackWorld } = await import("../support/pr-feedback-world.js");
   const w = await feedbackWorld();
+  createPrFeedbackRoutes(w.h.deps, async () => ({}));
   w.feedback.comments = [];
   const home = (await w.world.host.repository("web", 1, "app", ORG))!;
   const status = vi.spyOn(home.codeHost, "changeRequestStatus");
@@ -200,6 +205,7 @@ import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
 
 it("outside push: tracking still reads PR status (reconcileTrackingTask runs)", async () => {
   const w = await feedbackWorld();
+  createPrFeedbackRoutes(w.h.deps, async () => ({}));
   // Establish the existing tracking observation before a person pushes.
   w.feedback.comments = [];
   await w.tracking.sweep({ budgetMs: 1000 });
@@ -237,6 +243,7 @@ it.each(["control", "pushed"])("outside push %s: owner can still dismiss a pendi
 it("outside push: direct merge load", async () => {
   const { withFeedbackMergeReads } = await import("../../packages/broker/src/core/pr-feedback/service.js");
   const w = await feedbackWorld();
+  createPrFeedbackRoutes(w.h.deps, async () => ({}));
   w.feedback.changeRequest.headRevision = "e".repeat(40);
   const merge = withFeedbackMergeReads(w.world.deps, w.h.deps, w.registry);
   await expect(merge.host.loadTask(w.task.taskId)).resolves.toBeDefined();

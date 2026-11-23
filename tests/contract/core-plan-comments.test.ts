@@ -10,7 +10,7 @@ import { createHarness } from "../support/task-flow-harness.js";
 import { dispatchRowKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
 import { toDocument, type WorkspaceRecord } from "../../packages/broker/src/core/task-flow/records.js";
-import { commitWorkflow, runDispatchRow, runDueDispatches } from "../../packages/broker/src/core/task-flow/stage-machine.js";
+import { acceptStep, commitWorkflow, runDispatchRow, runDueDispatches } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { startCriticRevision } from "../../packages/broker/src/core/plan/check.js";
 import { dispatchRowItem } from "../../packages/broker/src/core/task-flow/dispatch-rows.js";
 import { OMAR, PRIYA, SAM, pagePlan, pageTask } from "../support/page-tasks.js";
@@ -234,6 +234,42 @@ async function criticRevisionFixture() {
 }
 
 describe("critic revision comment acceptance races", () => {
+  it("refuses a prompt whose appended comment section crosses the worker limit before a write", async () => {
+    const w = await criticRevisionFixture();
+    const task = (await readTask(w.h.deps, w.page.taskId))!;
+    const workspace = await w.h.store.get(workspaceKey(COMPANY, task.workspaceId)) as unknown as WorkspaceRecord;
+    const transact = vi.spyOn(w.h.store, "transact");
+    await expect(acceptStep(w.h.deps, { task, workspace, requestId: randomUUID(), prompt: "x".repeat(65_536), workflowMode: "PLAN", workflow: { current: task.workflow!, next: { ...task.workflow!, revision: task.workflow!.revision + 1, state: "RUNNING" } } })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    expect(transact).not.toHaveBeenCalled();
+  });
+
+  it.each(["unchanged", "duplicate", "busy", "fence", "starting"] as const)("classifies a rejected acceptance after %s without losing its authority", async (race) => {
+    const w = await criticRevisionFixture();
+    const transact = w.h.store.transact.bind(w.h.store);
+    let injected = false;
+    const intercept = vi.spyOn(w.h.store, "transact").mockImplementation(async (items) => {
+      if (!injected && items.some((item) => item.kind === "check" && item.key.sk === "COMMENTS")) {
+        injected = true;
+        if (race === "duplicate") {
+          const request = items.find((item) => item.kind === "put" && item.item["entityType"] === "IDEMPOTENCY");
+          if (request?.kind !== "put") throw new Error("request marker missing");
+          await w.h.store.put({ item: request.item });
+        } else if (race !== "unchanged") {
+          const task = (await readTask(w.h.deps, w.page.taskId))!;
+          const key = workspaceKey(COMPANY, task.workspaceId);
+          const row = (await w.h.store.get(key))!;
+          await w.h.store.put({ item: { ...row, ...(race === "busy" ? { activeOperationId: randomUUID() } : race === "fence" ? { fence: Number(row["fence"]) + 1 } : { status: "STARTING" }) } });
+        }
+        return { applied: false, reason: "condition_failed", failed: [0] };
+      }
+      return transact(items);
+    });
+    try {
+      expect(await startCriticRevision(w.h.deps, w.row)).toBe(race === "unchanged" ? "STALE" : race === "duplicate" ? "DUPLICATE" : "WAITING");
+      expect(injected).toBe(true);
+    } finally { intercept.mockRestore(); }
+  });
+
   it("control: a committed critic replan starts with the current comments", async () => {
     const w = await criticRevisionFixture();
     await createPageComment(w.page.deps, PRIYA, w.page.taskId, { ...w.page.input(), text: "CONTROL_CURRENT_TEXT" });
@@ -243,7 +279,7 @@ describe("critic revision comment acceptance races", () => {
     expect(w.promptOf()).toContain("CONTROL_CURRENT_TEXT");
   });
 
-  it.each(["superseded", "closed", "workspace closed"] as const)("a changed comment cannot retry a %s workflow", async (state) => {
+  it.each(["superseded", "closed", "close accepted", "workspace closed"] as const)("a changed comment cannot retry a %s workflow", async (state) => {
     const w = await criticRevisionFixture();
     const transact = w.h.store.transact.bind(w.h.store);
     let injected = false;
@@ -255,6 +291,7 @@ describe("critic revision comment acceptance races", () => {
         const task = (await readTask(w.h.deps, w.page.taskId))!;
         if (state === "superseded") await w.h.store.put({ item: toDocument({ ...task, workflow: { ...task.workflow, revision: task.workflow!.revision + 1 } }) });
         else if (state === "closed") await w.h.store.put({ item: toDocument({ ...task, closedAt: w.h.deps.now!().toISOString() }) });
+        else if (state === "close accepted") await w.h.store.put({ item: toDocument({ ...task, closeOperationId: randomUUID() }) });
         else {
           const key = workspaceKey(COMPANY, task.workspaceId);
           await w.h.store.put({ item: { ...(await w.h.store.get(key))!, status: "CLOSED" } });

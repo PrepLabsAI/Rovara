@@ -67,6 +67,36 @@ it("refuses an unscoped notification transport with fixed words", async () => {
   await expect(services["notify-deliver"].pass({ budgetMs: 1000 })).rejects.toThrow(new Error("the core job could not finish"));
 });
 
+it("hosted job delivery keeps E2E results company-bound while composing the inbox service", async () => {
+  const { host, ORG, SESSION, OWNER_ID, CONVERSATION } = await import("../support/service-host.js");
+  const { createHostedBrokerCoreServices } = await import("../../packages/broker/src/aws/core-job-services.js");
+  const { taskKey } = await import("../../packages/broker/src/core/task-flow/keys.js");
+  const { change, agentSessionKey } = await import("@agentx/contracts");
+  for (const kind of ["task", "chain"] as const) for (const companyId of [ORG, B]) {
+    const w = await host();
+    w.clock.ms = Date.now(); // The fixture store expires notification rows against the real clock.
+    const notice = vi.fn(async () => [{ type: "section", text: { type: "mrkdwn", text: "Recorded E2E result" } }]);
+    w.h.deps.applicationE2E = { results: { notice } } as never;
+    const deliver = vi.spyOn(w.chat, "deliver");
+    await w.sessions.refresh(ORG, SESSION);
+    w.state.facts.workflow = { stage: "PLAN_REVIEW", state: "WAITING" };
+    await w.sessions.refresh(ORG, SESSION);
+    expect((await w.h.store.query({ pk: "NOTIFY_PENDING" })).items).toHaveLength(1);
+    await w.h.store.update({ key: taskKey(w.state.facts.taskId), ops: [change.set("companyId", companyId)] });
+    if (kind === "chain") await w.h.store.update({ key: agentSessionKey(ORG, SESSION, "META"), ops: [
+      change.set("kind", "chain"), change.set("subject", { kind: "chain", chainRunId: "crn_00000000000000000000" }),
+    ] });
+    const get = vi.spyOn(w.h.store, "get");
+    const services = createHostedBrokerCoreServices({ companyId: ORG, flow: w.h.flow, registry: w.registry, ciMode: async () => "their_ci_fix" as const, people: w.people,
+      notification: { companyOf: async () => ORG, access: async () => ({ owner: true }), thread: async () => ({ personId: OWNER_ID, conversation: CONVERSATION }) }, now: () => new Date(w.clock.ms) });
+    expect(await services["notify-deliver"].pass({ budgetMs: 1000 })).toMatchObject({ sent: 1 });
+    expect(notice).toHaveBeenCalledTimes(kind === "task" && companyId === ORG ? 1 : 0);
+    expect(JSON.stringify(deliver.mock.calls).includes("Recorded E2E result")).toBe(kind === "task" && companyId === ORG);
+    expect(get.mock.calls.some(([key]) => key.pk === "DEVTASK#undefined")).toBe(false);
+    get.mockRestore();
+  }
+});
+
 it("runs the deployed session defaults over a real flow task and cost ledger", async () => {
   const { randomUUID } = await import("node:crypto");
   const { createHarness, COMPANY } = await import("../support/task-flow-harness.js");
@@ -172,6 +202,17 @@ it("shares one recovery-index read across company passes in a scheduled invocati
   expect(query.mock.calls.filter(([input]) => input.pk === "WORKFLOW_MERGE_RECOVERY")).toHaveLength(1);
 });
 
+it("delivers pending attention when no application summary reader is installed", async () => {
+  const { host, ORG, SESSION, OWNER_ID, CONVERSATION } = await import("../support/service-host.js");
+  const w = await host(); w.clock.ms = Date.now();
+  await w.sessions.refresh(ORG, SESSION);
+  w.state.facts.workflow = { stage: "PLAN_REVIEW", state: "WAITING" }; await w.sessions.refresh(ORG, SESSION);
+  const deliver = vi.spyOn(w.chat, "deliver");
+  const result = await deliverAttention({ store: w.h.store, registry: w.registry, now: () => w.clock.ms, companyOf: async () => ORG,
+    access: async () => ({ owner: true }), thread: async () => ({ personId: OWNER_ID, conversation: CONVERSATION }) }, { companyId: ORG, deadlineMs: w.clock.ms + 10000 });
+  expect(result.sent).toBe(1); expect(deliver).toHaveBeenCalled();
+});
+
 it("retries thread refreshes from the real company session pass even when the summary is unchanged", async () => {
   const { host, ORG } = await import("../support/service-host.js");
   const { createBrokerCoreServices } = await import("../../packages/broker/src/aws/core-job-services.js");
@@ -183,4 +224,23 @@ it("retries thread refreshes from the real company session pass even when the su
   await services["session-sweep"].pass({ budgetMs: 1000 });
   expect(threadRefresh).toHaveBeenCalledTimes(2);
   expect(threadRefresh.mock.calls.every(([org]) => org === ORG)).toBe(true);
+});
+
+it("thread refresh cannot read past the company session pass deadline", async () => {
+  const { agentSessionKey } = await import("@agentx/contracts");
+  const { host, ORG, SESSION } = await import("../support/service-host.js");
+  const { createBrokerCoreServices } = await import("../../packages/broker/src/aws/core-job-services.js");
+  const w = await host();
+  let attempted = false, permitted = false;
+  const services = createBrokerCoreServices({ companyId: ORG, flow: w.h.flow, registry: w.registry, ciMode: async () => "their_ci_fix" as const, people: w.people,
+    summary: { facts: w.sessions.deps.facts, cost: w.sessions.deps.cost }, now: () => new Date(w.clock.ms),
+    threadRefresh: async (_orgId, _sessionId, store) => {
+      w.clock.ms += 1001;
+      attempted = true;
+      await store.get(agentSessionKey(ORG, SESSION, "META"));
+      permitted = true;
+    } });
+  await services["session-sweep"].pass({ budgetMs: 1000 });
+  expect(attempted).toBe(true);
+  expect(permitted).toBe(false);
 });

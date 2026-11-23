@@ -9,6 +9,8 @@ import type { TaskRecord } from "../task-flow/records.js";
 import { EARLIER_PLAN_MAX_BYTES, planDocumentKindOf } from "./answer.js";
 import type { StructuredPlanContext, StructuredPlanInput } from "./prompts.js";
 
+import type { ApplicationE2ESeams } from "../e2e/application-seams.js";
+
 const ORDER: readonly PlanDocumentKind[] = ["requirements", "design", "plan"];
 
 /** Every earlier structured document of this task, oldest first, with its artifact: a document that cannot be read back or fails its digest is skipped. */
@@ -32,11 +34,22 @@ function answersOf(workflow: Pick<WorkflowSnapshot, "decisions">, sha256: string
   return { chosen, changed: (plan.decisions ?? []).some((entry) => (picked.get(entry.id) ?? entry.recommended) !== entry.recommended) };
 }
 
+function previousPlanContext(workflow: WorkflowSnapshot, base: Awaited<ReturnType<typeof earlierPlans>>[number] | undefined, sentBack: boolean): StructuredPlanContext | undefined {
+
+  if (base !== undefined) {
+    const answers = answersOf(workflow, base.sha256, base.plan);
+    // A document sent back mentions the answers only when the owner changed one; one that was approved always says how its decisions were settled.
+    const chosen = sentBack ? (answers.changed ? answers.chosen : undefined) : answers.chosen;
+    return { kind: base.kind, version: base.version, plan: base.plan, ...(chosen === undefined ? {} : { chosen }) };
+  }
+  return undefined;
+}
+
 /**
  * The rules and the document for a structured planning run, or undefined when the install asks for Markdown plans. `previous` is the document the owner asked to change (the same kind), else the last
  * approved document of an earlier phase.
  */
-export async function structuredPlanContextOf(deps: TaskFlowDeps, task: TaskRecord, workflow: WorkflowSnapshot): Promise<{ rules: StructuredPlanInput; previous?: StructuredPlanContext | undefined } | undefined> {
+export async function structuredPlanContextOf(deps: Omit<TaskFlowDeps, "applicationE2E"> & { applicationE2E?: Pick<ApplicationE2ESeams, "planning"> }, task: TaskRecord, workflow: WorkflowSnapshot): Promise<{ rules: StructuredPlanInput; previous?: StructuredPlanContext | undefined } | undefined> {
   if (deps.planFormat === "markdown") return undefined;
   const kind = planDocumentKindOf(workflow);
   const project = await deps.projects.revision(task.project, task.startingRevision);
@@ -44,16 +57,12 @@ export async function structuredPlanContextOf(deps: TaskFlowDeps, task: TaskReco
   const same = earlier.filter((entry) => entry.kind === kind).at(-1);
   const before = workflow.path === "FULL" ? earlier.filter((entry) => ORDER.indexOf(entry.kind) < ORDER.indexOf(kind)).at(-1) : undefined;
   const base = same ?? before;
-  let previous: StructuredPlanContext | undefined;
-  if (base !== undefined) {
-    const answers = answersOf(workflow, base.sha256, base.plan);
-    // A document sent back mentions the answers only when the owner changed one; one that was approved always says how its decisions were settled.
-    const chosen = base === same ? (answers.changed ? answers.chosen : undefined) : answers.chosen;
-    previous = { kind: base.kind, version: base.version, plan: base.plan, ...(chosen === undefined ? {} : { chosen }) };
-  }
+  const previous = previousPlanContext(workflow, base, base === same);
   const policy = workflow.checkPolicy;
+  const e2ePlanningContext = kind === "plan" ? await deps.applicationE2E?.planning.context({ ...task, workflow }) : undefined;
   return {
     rules: {
+      ...(e2ePlanningContext === undefined ? {} : { e2ePlanningContext }),
       kind, path: workflow.path, rovaraV2: workflow.definitionVersion === "1.1.0", retired: [...retiredClaimIds(earlier.map((entry) => entry.plan))],
       ...(policy === undefined || project === undefined ? {} : { checks: { repositoryPaths: project.definition.repositories.map((repository) => repository.path), required: policy.required } }),
     },

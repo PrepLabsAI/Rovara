@@ -7,6 +7,8 @@ import { planUnreadablePrompt } from "../../packages/broker/src/core/plan/proces
 import { structuredPlanIntro, structuredPlanRules } from "../../packages/broker/src/core/plan/prompts.js";
 import { planAnswer, planDocument, testedPlanDocument } from "../support/plan-documents.js";
 
+import { planFixture } from "../support/e2e-application-plan-fixtures.js";
+
 const repositories = [{ name: "demo", path: "repo/demo" }];
 const task = { taskId: "11111111-1111-4111-8111-111111111111", requestText: "Retry failed payments", developerName: "Priya" };
 const base = { kind: "plan" as const, workflow: { definitionVersion: "1.1.0" as const }, task, repositories, earlier: [] as PlanDocument[] };
@@ -132,5 +134,34 @@ describe("the cited code is attached only to the plan it was read for", () => {
     expect(await attachPlanEvidence(deps, task, { artifactId: "a1", artifactSha256: "b".repeat(64), bundle, prefix: "private/o/w/plan-documents/a1" })).toBe("gone");
     expect(await attachPlanEvidence(deps, task, { artifactId: "a1", artifactSha256: "a".repeat(64), bundle, prefix: "private/o/w/plan-documents/a1" })).toBe("attached");
     expect(await attachPlanEvidence(deps, task, { artifactId: "a1", artifactSha256: "a".repeat(64), bundle, prefix: "private/o/w/plan-documents/a1" })).toBe("already");
+  });
+});
+
+// Regression: accepting v2 without the server's offer would let a worker widen the plan contract.
+describe("application intent negotiation", () => {
+  const intent = planFixture({}).intent;
+  it("refuses unnegotiated v2, and preserves omitted optional members when offered", () => {
+    const { portableOperationRefs: _portable, mockFixtureRefs: _mocks, ...omitted } = intent;
+    void _portable; void _mocks;
+    const content = planAnswer(planDocument({ e2e: omitted }));
+    const input = { ...base, workflow: { definitionVersion: "1.0.0" as const }, content };
+    expect(readPlanAnswer(input)).toMatchObject({ ok: false, errors: [expect.stringContaining("not offered")] });
+    const read = readPlanAnswer({ ...input, applicationPlanNegotiated: true });
+    expect(read.ok).toBe(true);
+    if (!read.ok) throw new Error("expected a readable offered plan");
+    const stored = JSON.parse(read.canonical) as { e2e: Record<string, unknown> };
+    expect(stored.e2e).not.toHaveProperty("portableOperationRefs");
+    expect(stored.e2e).not.toHaveProperty("mockFixtureRefs");
+  });
+  it("includes source-backed v2 instructions only for an executable application context", async () => {
+    const { buildFeatureE2EPlanningContext } = await import("../../packages/broker/src/e2e/feature-plan-planning-context.js");
+    const { webApiRow } = await import("../support/e2e-application-plan-fixtures.js");
+    const fx = planFixture({});
+    const context = buildFeatureE2EPlanningContext(fx.policy, fx.snapshot, { origin: "prepared-commit", preparedCommitSha: fx.snapshot.commitSha,
+      readyRuntimes: [{ kind: "web", profileId: webApiRow("web").profileId, supportedSteps: webApiRow("web").capabilities.supportedSteps, supportedAssertions: webApiRow("web").capabilities.supportedAssertions }], accountRegistry: fx.registry });
+    const prompt = structuredPlanRules({ kind: "plan", path: "QUICK", rovaraV2: false, e2ePlanningContext: context });
+    expect(prompt).toContain("Application E2E plan guidance (schemaVersion 2)");
+    expect(prompt).toContain(fx.snapshot.commitSha);
+    expect(structuredPlanRules({ kind: "requirements", path: "FULL", rovaraV2: false, e2ePlanningContext: context })).not.toContain(fx.snapshot.commitSha);
   });
 });

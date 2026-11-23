@@ -17,6 +17,7 @@
 // told again sends nothing, and the event id is made from the claim, so an adapter drops a resend that raced. The host's `milestones` option turns the three lines off (default on); the plan card is the approval, not a milestone, and
 // stays on while the host gives a gate. Nothing here is a reason for the work to fail: a handler that throws is told again, up to the hook's limit.
 import { createHash } from "node:crypto";
+import { applicationNoticeText } from "../e2e/application-notices.js";
 import {
   EVAL_CI_LINE_PATTERN, INDEX_EXPIRY_ATTRIBUTE, SESSION_RETENTION_DAYS, change, orgScoped, when,
   type AgentSessionRecord, type ChannelEvent, type CodeMilestone, type CodeMilestoneKind, type DocumentKey, type DocumentStore, type OrgId, type RegistryView, type WorkflowSnapshot,
@@ -48,6 +49,8 @@ const CLAIM_RENEW_MS = CLAIM_LEASE_MS / 3;
 const PULL_REQUESTS_MAX = 3;
 
 export interface ThreadNoticeDeps {
+  /** Safe snapshot blocks, loaded only after live thread recipient checks. */
+  e2e?: (taskId: string, taskPageUrl?: string) => Promise<unknown[] | undefined>;
   store: DocumentStore;
   /** The chat adapters (`registry.get("channel", name)`). */
   registry: Pick<RegistryView, "get">;
@@ -281,9 +284,10 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
         // L4-EVCI: the customer's own eval result, when it had landed by the time the pull request was marked ready: the same one line as in the description (fixed words, numbers and a plain https address; a line that is
         // not exactly Rovara's own words is not sent). The typed pull request card has no place for either line, so a ready line that carries one is the plain progress text (which keeps the verdict heading).
         const evalLine = milestone.evalLine !== undefined && EVAL_CI_LINE_PATTERN.test(milestone.evalLine) ? milestone.evalLine : undefined;
-        await send(orgId, sessionId, key, () => tell(links.length === 1 && trust === undefined && evalLine === undefined
+        const e2e = applicationNoticeText(await deps.e2e?.(taskId, deps.taskUrl?.(taskId, taskWhere)).catch(() => undefined));
+        await send(orgId, sessionId, key, () => tell(links.length === 1 && trust === undefined && evalLine === undefined && e2e === ""
           ? { ...base(key), type: "pr", data: { url: links[0]!, title, action: "opened", ...(milestone.verdict === undefined ? {} : { verdict: milestone.verdict }) } }
-          : { ...base(key), type: "progress", data: { text: `A pull request is ready for review for "${title}".${milestone.verdict === undefined ? "" : ` ${milestone.verdict}.`}${links.map((link) => `\n${link}`).join("")}${evalLine === undefined ? "" : `\n${evalLine}`}${trust === undefined ? "" : `\n${trust}`}` } }));
+          : { ...base(key), type: "progress", data: { text: `A pull request is ready for review for "${title}".${milestone.verdict === undefined ? "" : ` ${milestone.verdict}.`}${links.map((link) => `\n${link}`).join("")}${evalLine === undefined ? "" : `\n${evalLine}`}${trust === undefined ? "" : `\n${trust}`}${e2e === "" ? "" : `\n${e2e}`}`.slice(0, adapter.capabilities.maxTextLength) } }));
         return;
       }
 

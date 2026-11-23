@@ -8,7 +8,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  EVAL_ROUND_ARTIFACT, WORKER_INVOCATION_FEATURES, canonicalPlanJson, captureEvalRoundEvidence, type JsonValue, type ObjectStorage, type OrgId, type TaskGraphV1, type WorkflowArtifact, type WorkflowSnapshot,
+  EVAL_ROUND_ARTIFACT, WORKER_INVOCATION_FEATURES, canonicalPlanJson, captureEvalRoundEvidence, createWorkflowSnapshot, decideWorkflow, submitWorkflowArtifact, type JsonValue, type ObjectStorage, type OrgId, type TaskGraphV1, type WorkflowArtifact, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { approvedCodingPlan, reviewPlanOf } from "../../packages/broker/src/core/build-step/plan-input.js";
 import { WORKSPACE_DIFF_ARTIFACT, artifactRowKey, reportedChangedFiles } from "../../packages/broker/src/core/build-step/changed-files.js";
@@ -23,6 +23,7 @@ import { artifactObjectKey } from "../../packages/broker/src/services/callbacks.
 import { createCompanyArtifactReader } from "../../packages/broker/src/core-host/company-artifact-reader.js";
 import { createHarness, newRequestId } from "../support/task-flow-harness.js";
 import { planDocument } from "../support/plan-documents.js";
+import { createApplicationApproval } from "../../packages/broker/src/core/e2e/application-approval.js";
 import { COMPANY_B_ID } from "../../packages/testing/src/isolation/two-company.js";
 
 const OTHER_COMPANY = COMPANY_B_ID as OrgId;
@@ -156,6 +157,26 @@ describe("the core text reader used by thread documents and closeout", () => {
 });
 
 describe("every other reader of the flow's artifacts, with the hosted reader", () => {
+  it("application approval reads its own canonical plan through the sanctioned reader; foreign, missing, changed and unreadable plans refuse approval", async () => {
+    const w = await world();
+    const { own, foreign } = await documents(w, "structured", "plan.json", canonicalPlanJson(planDocument()));
+    const approve = (artifact: WorkflowArtifact, artifacts = w.hosted()) => {
+      const initial = createWorkflowSnapshot({ taskId: w.task.taskId, ownerId: w.task.ownerKey, now: artifact.createdAt });
+      const before = submitWorkflowArtifact(initial, { expectedRevision: initial.revision, now: artifact.createdAt, artifact });
+      const after = decideWorkflow(before, { requestId: newRequestId(), expectedRevision: before.revision, decision: "APPROVE", artifactDigest: artifact.sha256, reason: "Approved." },
+        { actorId: before.ownerId, role: "TASK_OWNER" }, { now: artifact.createdAt, allowedSkipStages: [] });
+      return createApplicationApproval({ artifacts, projects: w.h.deps.projects })({ task: { ...w.task, workflow: before }, before, after, artifact, at: artifact.createdAt });
+    };
+    expect((await approve(own)).workflow.stage).toBe("IMPLEMENT");
+    await expect(approve(foreign)).rejects.toThrow("nothing was approved");
+    w.stored.objects.delete(own.objectKey);
+    await expect(approve(own)).rejects.toThrow("nothing was approved");
+    w.stored.objects.set(own.objectKey, bytesOf("changed"));
+    await expect(approve(own)).rejects.toThrow("nothing was approved");
+    w.stored.state.down = true;
+    await expect(approve(own)).rejects.toThrow("nothing was approved");
+  });
+
   it("approvedCodingPlan and reviewPlanOf (the coding step, the reviewers, the PR body, setup offers, mocks): the own plan reads; another company's pointer is today's refusal", async () => {
     const w = await world();
     const { own, foreign } = await documents(w, "markdown", "plan.md", PLAN_TEXT);
@@ -231,6 +252,7 @@ describe("every other reader of the flow's artifacts, with the hosted reader", (
 
 /** Every source file under core/ (and the proof reader's neighbours) that reads the flow's `artifacts`, and how it behaves on a hosted root. A new reader fails this test until it is classified here and in briefs/lead4/L4-ART-SCOPE.md. */
 const READERS: Record<string, string> = {
+  "core/answers/task-context.ts": "ON: authorized task Answers reads its latest document through the company-bound flow reader, additionally held to the task owner/workspace prefix; answer-task-frame.test.ts pins scope and digest",
   "core/build-step/autofix.ts": "ON: the plan's dry-run results refine an unclear check fault (autofix is on by default on hosted; counts bound it)",
   "core/build-step/changed-files.ts": "ON: the approved plan's mocks flag unplanned mock sources in the PR risk; reportedChangedFiles is the laptop page's (no hosted caller)",
   "core/build-step/plan-input.ts": "ON: the coding step's and reviewers' approved plan (today hosted refuses WORKSPACE_NOT_READY / shows no plan)",
@@ -242,6 +264,7 @@ const READERS: Record<string, string> = {
   "core/design-review/resolve-run.ts": "DORMANT on hosted: no design review is wired",
   "core/design-review/round-start.ts": "DORMANT on hosted: no design review is wired",
   "core/design-review/steps.ts": "DORMANT on hosted: no design review is wired",
+  "core/e2e/application-approval.ts": "ON: required-E2E approval reads the canonical plan through loadPlanDocument and the company-bound reader; unreadable or foreign plans refuse approval",
   "core/plan/check.ts": "DORMANT on hosted: the plan check runs only for a task with the Rovara Code program (understandFirst), which no hosted root sets",
   "core/plan/context.ts": "ON: a structured planning run's earlier documents (a revision, a Full task's design from its requirements)",
   "core/plan/document.ts": "ON: every approval surface reads the structured plan through it; thread document/Canvas/closeout reads use its text reader over the same company-checked flow reader or fallback",
@@ -283,6 +306,6 @@ describe("the readers of the flow's artifacts are a known set", () => {
       .filter((path) => /\b(?:flow|deps\.flow|flow\.deps)\.artifacts\b|\bdeps\.artifacts\b/u.test(readFileSync(join(root, path), "utf8"))).sort();
     // The core root forwards its company-bound reader to comment target validation.
     // core-task-web-routes-root.test.ts proves the real factory; document prefix/digest checks are retained.
-    expect(outside).toEqual(["aws/core-engine-root.ts", "local/app/page-data.ts"]);
+    expect(outside).toEqual(["aws/core-engine-root.ts", "core-host/dev-routes.ts", "local/app/page-data.ts", "local/app/project-answers.ts"]);
   });
 });

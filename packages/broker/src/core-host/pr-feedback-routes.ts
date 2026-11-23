@@ -5,6 +5,13 @@ import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { decidePrFeedback, retryPrFeedback } from "../core/pr-feedback/decide.js";
 import { keepPrFeedback } from "../core/pr-feedback/keep.js";
 
+// The handler registration is the capability: scoped to this flow in this process,
+// never inferred from host mode, company settings or a persisted feature switch.
+const servedFlows = new WeakSet<TaskFlowDeps>();
+export function servesPrFeedbackDecisions(deps: TaskFlowDeps): boolean {
+  return servedFlows.has(deps);
+}
+
 const ACTION = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})\/workflow\/(feedback-decision|feedback-retry|keep-pull-requests)$/u;
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
 function bodyOf(request: BrokerRequest): unknown {
@@ -19,6 +26,7 @@ async function act(deps: TaskFlowDeps, caller: TaskCaller, taskId: string, actio
 }
 
 export function createPrFeedbackRoutes(deps: TaskFlowDeps, view: (caller: TaskCaller, taskId: string) => Promise<Record<string, unknown>>) {
+  servedFlows.add(deps);
   return async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => {
     const match = ACTION.exec(request.path.split("?")[0]!);
     if (match === null || request.method !== "POST") return undefined;

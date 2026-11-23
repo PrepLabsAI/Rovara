@@ -40,7 +40,7 @@ export const PROGRAM_DIRECTORY = "node_modules/.cache/lint-shards";
  * of one shard). Anything in no group (a file in tests/contract or tests/unit that starts with a digit, a file in a folder of tests/unit that no shard names (the three there now are in tests-unit-folders; a big new one gets a shard of its own), a new directory, files
  * at the root) is linted by the last shard.
  */
-export const SHARD_DIRECTORIES: readonly { name: string; directories: readonly string[] }[] = [
+export const SHARD_DIRECTORIES: readonly { name: string; directories: readonly string[]; heapMb?: number }[] = [
   { name: "tests-contract-a-d", directories: ["tests/contract/a*.ts", "tests/contract/b*.ts", "tests/contract/c*.ts", "tests/contract/d*.ts"] },
   { name: "tests-contract-e-j", directories: ["tests/contract/e*.ts", "tests/contract/f*.ts", "tests/contract/g*.ts", "tests/contract/h*.ts", "tests/contract/i*.ts", "tests/contract/j*.ts"] },
   { name: "tests-contract-l-p", directories: ["tests/contract/l*.ts", "tests/contract/m*.ts", "tests/contract/n*.ts", "tests/contract/o*.ts", "tests/contract/p*.ts"] },
@@ -48,7 +48,8 @@ export const SHARD_DIRECTORIES: readonly { name: string; directories: readonly s
   { name: "tests-contract-t-z", directories: ["tests/contract/t*.ts", "tests/contract/u*.ts", "tests/contract/v*.ts", "tests/contract/w*.ts"] },
   // Batch 13: a-d-f outgrew the 4 GB heap on CI (the batch's new core-host, citation and wiki test files), so it is split in two.
   { name: "tests-unit-a-b-d-f", directories: ["tests/unit/a*.ts", "tests/unit/b*.ts", "tests/unit/d*.ts", "tests/unit/f*.ts"] },
-  { name: "tests-unit-c", directories: ["tests/unit/c*.ts"] },
+  // Code train 6: the browser-round core-* tests took tests-unit-c past the 4 GB default; one letter stays one shard (the alphabet rule), so it gets a bigger heap.
+  { name: "tests-unit-c", directories: ["tests/unit/c*.ts"], heapMb: 6144 },
   { name: "tests-unit-e", directories: ["tests/unit/e*.ts"] },
   { name: "tests-unit-g-q", directories: ["tests/unit/g*.ts", "tests/unit/h*.ts", "tests/unit/i*.ts", "tests/unit/j*.ts", "tests/unit/k*.ts", "tests/unit/l*.ts", "tests/unit/m*.ts", "tests/unit/n*.ts", "tests/unit/o*.ts", "tests/unit/p*.ts", "tests/unit/q*.ts"] },
   { name: "tests-unit-r-v", directories: ["tests/unit/r*.ts", "tests/unit/s*.ts", "tests/unit/t*.ts", "tests/unit/u*.ts", "tests/unit/v*.ts"] },
@@ -75,6 +76,8 @@ export interface Shard {
   include: readonly string[];
   /** The TypeScript program's exclude patterns, relative to the repository root, besides the ones tsconfig.lint.json has. */
   exclude: readonly string[];
+  /** A larger heap for this shard than the run's --heap (never smaller): see shardHeapMb. */
+  heapMb?: number;
 }
 
 const isGlob = (path: string): boolean => path.endsWith(".ts");
@@ -92,6 +95,7 @@ export function planShards(): Shard[] {
       ignore: [],
       include: group.directories.map(programPattern),
       exclude: [],
+      ...(group.heapMb === undefined ? {} : { heapMb: group.heapMb }),
     })),
     { name: REST, targets: ["."], ignore: named.map(everything), include: ["**/*.ts"], exclude: named.map(everything) },
   ];
@@ -153,8 +157,13 @@ export function writeShardTsconfig(shard: Shard, root: string): string {
  * A glob that matches no file (every file of a letter was renamed) lints nothing instead of failing eslint with "No files matching
  * the pattern"; that cannot hide a file, because tests/contract/lint-shards.test.ts compares the shards' files with `eslint .`.
  */
+/** The heap one shard's eslint gets: the run's --heap, or the shard's own larger heap. */
+export function shardHeapMb(shard: Shard, heapMb: number): number {
+  return Math.max(heapMb, shard.heapMb ?? 0);
+}
+
 export function eslintArguments(eslintBin: string, shard: Shard, heapMb: number): string[] {
-  return [`--max-old-space-size=${heapMb}`, eslintBin, "--no-error-on-unmatched-pattern", ...shard.ignore.flatMap((pattern) => ["--ignore-pattern", pattern]), ...shard.targets];
+  return [`--max-old-space-size=${shardHeapMb(shard, heapMb)}`, eslintBin, "--no-error-on-unmatched-pattern", ...shard.ignore.flatMap((pattern) => ["--ignore-pattern", pattern]), ...shard.targets];
 }
 
 /**

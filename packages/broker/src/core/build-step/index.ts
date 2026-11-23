@@ -28,6 +28,10 @@ export function createBuildSteps(): BuildSteps {
   return {
     async runRow(deps, row) {
       switch (row.kind) {
+        case "CHECKS": {
+          if (deps.applicationE2E === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "application admission is unavailable");
+          return deps.applicationE2E.rounds.runRow(row);
+        }
         case "IMPLEMENT": return startImplementation(deps, row);
         case "REVIEW": {
           const task = await readTask(deps, row.taskId);

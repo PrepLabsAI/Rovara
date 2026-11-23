@@ -137,3 +137,32 @@ it("classifies an initial authentication store fault as unavailable, without exp
   const result = await w.start();
   expect(result.status).toBe(503); expect(result.body).toEqual({ error: { code: "RUNTIME_UNAVAILABLE", message: "Start status is unavailable." } });
 });
+
+it("ordinary developer errors retain their transport request ID", async () => {
+  const { serverReadWorld } = await import("../support/server-read-world.js");
+  const w = await serverReadWorld();
+  const answer = await w.call("GET", "/v1/dev/tasks/not-a-uuid");
+  expect(answer.status).toBe(404);
+  expect(answer.body).toMatchObject({ requestId: "transport-different", error: { code: "TASK_NOT_FOUND" } });
+});
+
+it("an unexpected read-context construction failure cannot publish private error details", async () => {
+  const { serverReadWorld } = await import("../support/server-read-world.js");
+  const w = await serverReadWorld();
+  const context = await import("../../packages/broker/src/aws/server-read-context.js");
+  const fault = vi.spyOn(context, "serverReadContext").mockImplementation(() => { throw new Error("PRIVATE_CONTEXT_CONSTRUCTION_FAULT"); });
+  try {
+    const answer = await w.start();
+    expect(answer.status).toBe(503);
+    expect(answer.body).toEqual({ error: { code: "RUNTIME_UNAVAILABLE", message: "Start status is unavailable." } });
+    expect(JSON.stringify(answer.body)).not.toContain("PRIVATE_CONTEXT_CONSTRUCTION_FAULT");
+  } finally { fault.mockRestore(); }
+});
+
+it("ordinary successful developer reads retain the transport response wrapper", async () => {
+  const { serverReadWorld } = await import("../support/server-read-world.js");
+  const w = await serverReadWorld();
+  const answer = await w.call("GET", "/v1/dev/projects");
+  expect(answer.status).toBe(200);
+  expect(answer.body).toMatchObject({ requestId: "transport-different", projects: expect.any(Array) as unknown });
+});

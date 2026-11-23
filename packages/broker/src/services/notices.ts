@@ -10,7 +10,7 @@ import { readTaskThread } from "../core/channel/threads.js";
 import { deliverAttention, queueAdminNotice, queueAttention, type AdminNoticeKind, type AttentionBudget, type PeopleOf, type AttentionDeliveryDependencies, type AttentionOutcome } from "../core/notify/attention.js";
 import type { SessionChange } from "../core/sessions/summary.js";
 
-type DeliveryOptions = Pick<AttentionDeliveryDependencies, "link" | "maxTargets" | "footer" | "thread" | "companyOf" | "access" | "address" | "urgent" | "emailLinks" | "doneToldInThread" | "planCarded" | "setupPausedTold" | "upkeep" | "adminNotice">;
+type DeliveryOptions = Pick<AttentionDeliveryDependencies, "link" | "maxTargets" | "footer" | "thread" | "companyOf" | "access" | "address" | "urgent" | "emailLinks" | "doneToldInThread" | "planCarded" | "setupPausedTold" | "upkeep" | "adminNotice" | "e2e">;
 
 export interface NoticeServiceOptions extends DeliveryOptions {
   store: DocumentStore;

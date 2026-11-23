@@ -64,9 +64,12 @@ export interface KeptSentence {
   sources: number[];
 }
 
+type CodeSource = Omit<Extract<AnswerCitation, { repo: string }>, "n"> & { quote: string };
+type TaskSource = Omit<Extract<AnswerCitation, { kind: "task_state" }>, "n">;
+
 export interface AnswerCheck {
   kept: KeptSentence[];
-  sources: Array<Omit<AnswerCitation, "n"> & { quote: string }>;
+  sources: Array<CodeSource | TaskSource>;
   /** How many sentences the model wrote (after the bound) and how many were removed, with fixed reasons. */
   written: number;
   dropped: SentenceDropReason[];
@@ -87,27 +90,50 @@ export const refusingSecrets = (read: CitationFileReader): CitationFileReader =>
   return holdsPrivateKey(text) ? undefined : redactedLines(text);
 };
 
-export async function checkAnswer(input: { final: FinalAnswer; heads: ReadonlyMap<string, string>; read: CitationFileReader; now?: (() => number) | undefined }): Promise<AnswerCheck> {
+export async function checkAnswer(input: { final: FinalAnswer; heads: ReadonlyMap<string, string>; read: CitationFileReader; now?: (() => number) | undefined; task?: { taskId: string; shown: string } | undefined }): Promise<AnswerCheck> {
   const sentences = input.final.sentences.slice(0, ANSWER_LIMITS.sentences).map((sentence) => ({ ...sentence, text: plainLine(sentence.text, SENTENCE_CHARS) }));
   const claims: ClaimToCheck[] = sentences.map((sentence) => ({
     sentence: sentence.text,
     // The commit is the bound one, whatever the model wrote; a repository with no bound commit gets one that never matches.
-    citations: sentence.cites.slice(0, ANSWER_LIMITS.citationsPerSentence).map((cite): CitationRef => ({ repo: cite.repo, path: cite.path, commit: input.heads.get(cite.repo) ?? "unbound", line: cite.line, quote: cite.quote })),
+    citations: sentence.cites.slice(0, ANSWER_LIMITS.citationsPerSentence).filter((cite) => "repo" in cite).map((cite): CitationRef => ({ repo: cite.repo, path: cite.path, commit: input.heads.get(cite.repo) ?? "unbound", line: cite.line, quote: cite.quote })),
   }));
   const checked = await checkClaims(refusingSecrets(input.read), claims, { mode: "prose", commits: input.heads, ...(input.now === undefined ? {} : { now: input.now }) });
   const sources: AnswerCheck["sources"] = [];
   const kept: KeptSentence[] = [];
   const dropped: SentenceDropReason[] = [];
   const droppedPlaces: AnswerCheck["droppedPlaces"] = [];
+  const result: AnswerCheck = { kept, sources, dropped, droppedPlaces, written: sentences.length, complete: checked.complete };
   checked.claims.forEach((claim, index) => {
-    if (!claim.kept && claim.dropped === "source_not_found") for (const cite of claims[index]!.citations) if (!droppedPlaces.some((place) => place.repo === cite.repo && place.path === cite.path)) droppedPlaces.push({ repo: cite.repo, path: cite.path });
+    const sentence = sentences[index]!;
+    if (sentence.cites.some((cite) => "kind" in cite)) keepTaskSentence(sentence, input.task, result);
+    else keepCodeSentence(claim, claims[index]!, result);
+  });
+  return { kept, sources, written: sentences.length, dropped, droppedPlaces, complete: checked.complete };
+}
+
+
+function keepTaskSentence(sentence: FinalAnswer["sentences"][number], task: { taskId: string; shown: string } | undefined, result: AnswerCheck): void {
+  const taskCites = sentence.cites.filter((cite) => "kind" in cite);
+  // Only exact data shown is evidence. Never combine task and code citations in one sentence.
+  if (task === undefined || taskCites.length !== sentence.cites.length || taskCites.some((cite) => cite.quote.trim().length < 20 || !task.shown.includes(cite.quote))) { result.dropped.push("source_not_found"); return; }
+  if (!numbersInQuotes(sentence.text, taskCites.map((cite) => cite.quote))) { result.dropped.push("numbers_not_in_quote"); return; }
+  const next = taskCites.filter((cite, at) => taskCites.findIndex((other) => other.quote === cite.quote) === at);
+  const fresh = next.filter((cite) => !result.sources.some((source) => "kind" in source && source.quote === cite.quote));
+  if (result.sources.length + fresh.length > ANSWER_LIMITS.sources) { result.dropped.push("over_source_limit"); return; }
+  result.sources.push(...fresh.map((cite) => ({ kind: "task_state" as const, taskId: task.taskId, quote: cite.quote })));
+  result.kept.push({ text: neutralizeSourceMarkers(sentence.text), sources: next.map((cite) => result.sources.findIndex((source) => "kind" in source && source.quote === cite.quote)) });
+}
+
+function keepCodeSentence(claim: Awaited<ReturnType<typeof checkClaims>>["claims"][number], ownClaim: ClaimToCheck, result: AnswerCheck): void {
+  const { sources, kept, dropped, droppedPlaces } = result;
+    if (!claim.kept && claim.dropped === "source_not_found") for (const cite of ownClaim.citations) if (!droppedPlaces.some((place) => place.repo === cite.repo && place.path === cite.path)) droppedPlaces.push({ repo: cite.repo, path: cite.path });
     if (!claim.kept) { dropped.push(claim.dropped === "uncited" || claim.dropped === "source_not_found" || claim.dropped === "unreadable" || claim.dropped === "code_name_not_in_quote" ? claim.dropped : "other"); return; }
-    const mine = claims[index]!.citations;
+    const mine = ownClaim.citations;
     if (!numbersInQuotes(claim.sentence, mine.map((citation) => citation.quote ?? ""))) { dropped.push("numbers_not_in_quote"); return; }
     const own: number[] = [];
     const added: number[] = [];
     for (const citation of mine) {
-      let at = sources.findIndex((source) => source.repo === citation.repo && source.path === citation.path && source.line === citation.line);
+      let at = sources.findIndex((source) => "repo" in source && source.repo === citation.repo && source.path === citation.path && source.line === citation.line);
       if (at === -1) {
         if (sources.length >= ANSWER_LIMITS.sources) { for (const done of added.reverse()) sources.splice(done, 1); dropped.push("over_source_limit"); return; }
         sources.push({ repo: citation.repo, path: citation.path, line: citation.line!, commit: citation.commit, quote: citation.quote ?? "" });
@@ -117,6 +143,4 @@ export async function checkAnswer(input: { final: FinalAnswer; heads: ReadonlyMa
       own.push(at);
     }
     kept.push({ text: neutralizeSourceMarkers(claim.sentence), sources: [...new Set(own)] });
-  });
-  return { kept, sources, written: sentences.length, dropped, droppedPlaces, complete: checked.complete };
 }

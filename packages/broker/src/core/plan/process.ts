@@ -40,6 +40,10 @@ export interface PlanAnswerSource {
   artifact: { id: string; createdAt: string };
 }
 
+function applicationPlanWasNegotiated(operation: OperationRecord): boolean {
+  return operation.workflowMode === "PLAN" && operation.dispatch.payload["workflowE2EPlanVersion"] === 2;
+}
+
 /** The answer of a planning run, turned into the outcome the flow acts on. Never throws for an answer that cannot be read: that is an outcome. */
 export async function processPlanAnswer(
   deps: TaskFlowDeps, blobs: Parameters<typeof putOnce>[0],
@@ -65,6 +69,7 @@ export async function processPlanAnswer(
   const withCi = workflow.definitionVersion === "1.1.0" && kind === "plan" && workflow.checkPolicy !== undefined ? await answerWithCiChecks(deps, project.definition.repositories, answer.content) : answer.content;
   const read = readPlanAnswer({
     content: answer.content, ...(withCi === answer.content ? {} : { parsedContent: withCi }), kind, workflow, task,
+    applicationPlanNegotiated: applicationPlanWasNegotiated(input.operation),
     repositories: project.definition.repositories.map((repository) => ({ name: repository.name, path: repository.path })), earlier,
   });
   if (!read.ok) return unreadable(read.errors);

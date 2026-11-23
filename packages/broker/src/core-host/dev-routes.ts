@@ -102,6 +102,12 @@ import { isSystemRunsPath, routeHostedSystemRuns } from "./system-runs-routes.js
 import { isHostedMergePath, routeHostedMerge, type HostedMergeWiring } from "./hosted-merge-routes.js";
 import { isTicketUpdatesPath, routeHostedTicketUpdates, type HostedTicketUpdatesWiring } from "./ticket-updates-routes.js";
 
+async function applicationReadProjection(runtime: CoreRuntime, record: TaskRecord, personId: string) {
+  if (record.workflow === undefined) return {};
+  const e2e = await runtime.flow.deps.applicationE2E?.results.read({ ...record, workflow: record.workflow }, personId === record.developerId ? "owner" : "viewer");
+  return e2e === undefined ? {} : { e2ePresentation: e2e.presentation };
+}
+
 /** The paths this module owns. Anything else is the old broker's. */
 const SESSIONS = /^\/v1\/app\/sessions(?:\/|$)/u;
 const TASK_READ = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})$/u;
@@ -599,7 +605,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           await observeHostedBlockedTask(target.runtime.flow.deps, record, target.wiring.testEnvironment?.env);
           const testing = await hostedTestingView(target.runtime.flow.deps, target.blobs, record, target.wiring.testEnvironment?.env);
           const view = await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller, membership), maySeeTaskMoney(target, record, caller, membership));
-          return json(200, { task: { ...view, ...(testing === undefined ? {} : { testing }) } });
+          return json(200, { task: { ...view, ...(testing === undefined ? {} : { testing }), ...await applicationReadProjection(target.runtime, record, caller.principal.personId) } });
         }
         const parity = parityTaskRoute(path, request.method);
         if (parity !== undefined) return await routeParityTask({
@@ -797,7 +803,12 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
         if (isAnswersPath(path, request.method)) {
           // Lead 4 J1: the member company's own store and code; the caller's live standing on the project is read inside (any project role asks).
           if (target.wiring.answers === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return await routeHostedAnswers({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.answers, now: () => nowOf(target), log: options.log });
+          return await routeHostedAnswers({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.answers, now: () => nowOf(target), log: options.log,
+            tasks: { artifacts: target.runtime.flow.deps.artifacts, read: async (_personId, taskId) => loadReadableTask(target.runtime.flow.deps, taskCaller, taskId).catch(async (error: unknown) => {
+              if (!(error instanceof AgentXError) || error.code !== "TASK_NOT_FOUND") throw error;
+              return sharedReaderTask(target, companyId, caller, taskId);
+            }) },
+          });
         }
         if (isAgentDirectoryPath(path, request.method)) {
           // Lead 4 L4-MF3: the company-wide agent directory. The live role from membership (read for this request) decides inside: only a company owner or administrator reads it.

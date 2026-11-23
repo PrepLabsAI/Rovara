@@ -32,7 +32,7 @@ export interface PlanAnswerInput {
   repositories: ReadonlyArray<{ name: string; path: string }>;
   /** Every earlier structured document of this task, oldest first: the claim numbers they dropped may not come back. */
   earlier: readonly PlanDocument[];
-  /** Whether this planning run was asked for (and its worker parses) the schema-v2 application plan. Code never offers it, so a plan that holds one is unreadable. */
+  /** Whether the server-created operation offered the schema-v2 application plan. Never taken from the worker answer or callback request. */
   applicationPlanNegotiated?: boolean;
   /** The text Rovara parses and the text the plan's parts are read from can differ (a coding plan with the project's CI checks added). Absent: `content`. */
   parsedContent?: string;

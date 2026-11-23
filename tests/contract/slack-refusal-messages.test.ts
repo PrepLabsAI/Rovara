@@ -29,3 +29,9 @@ describe("what a Slack press hears when the test accounts or an outside service'
   });
 
 });
+
+
+it("only the exact unavailable core action refusal gets the not available yet message", () => {
+  expect(slackRefusalMessage("NOT_FOUND", OUT_OF_DATE, "That is not on the core engine on this install yet.")).toBe("This action is not available on this install yet.");
+  expect(slackRefusalMessage("NOT_FOUND", OUT_OF_DATE, "unrelated missing object")).toBeUndefined();
+});

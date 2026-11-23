@@ -6,7 +6,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkerInvocation } from "@agentx/contracts";
 import { PENDING_CANCEL_TTL_MS, WorkerCancellationController } from "../../packages/worker/src/cancel.js";
 import { executeWorkerCancelInvocation } from "../../packages/worker/src/cancel-invocation.js";
@@ -58,7 +58,7 @@ describe("a cancel for an operation the worker has taken but that has not regist
 });
 
 describe("the stop and the operation's own delivery reach the worker at the same moment (review I1)", () => {
-  it("when the operation's accept wins the race, the stop does not claim the operation never ran: it is applied when the operation registers", async () => {
+  it.each([0, 125])("when the operation's accept wins the race (journal delay %i ms), the stop does not claim the operation never ran: it is applied when the operation registers", async (journalDelayMs) => {
     const store = await journal();
     const controller = new WorkerCancellationController();
     const target = randomUUID();
@@ -67,20 +67,24 @@ describe("the stop and the operation's own delivery reach the worker at the same
     let raced = false;
     store.get = async (operationId: string) => {
       const found = await read(operationId);
-      if (!raced && operationId === target && found === undefined) { raced = true; await store.accept(taskInvocation(target)); await store.transition(target, "RUNNING"); }
+      if (!raced && operationId === target && found === undefined) {
+        raced = true;
+        await new Promise((resolve) => setTimeout(resolve, journalDelayMs));
+        await store.accept(taskInvocation(target));
+        await store.transition(target, "RUNNING");
+      }
       return found;
     };
     let aborted = 0;
     const answer = executeWorkerCancelInvocation(cancelOf(target), controller, store, { waitMs: 5_000, pollMs: 10 });
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    // The cancel has NOT answered (it would have been CANCELLED while the operation runs); the stop is waiting for the operation.
     let settled = false;
     void answer.then(() => { settled = true; }, () => { settled = true; });
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    // Journal I/O may take longer under gate load. Observe the remembered stop before registering the operation.
+    await vi.waitFor(() => expect(controller.isCancelled(target)).toBe(true), { timeout: 5_000, interval: 10 });
+    // The cancel has NOT answered (it would have been CANCELLED while the operation runs); the stop is waiting for the operation.
     expect(settled).toBe(false);
-    expect(controller.isCancelled(target)).toBe(true);
     controller.register(target, { abort: async () => { aborted += 1; } });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await vi.waitFor(() => expect(aborted).toBe(1), { timeout: 5_000, interval: 10 });
     await store.transition(target, "CANCELLED", "operation cancelled");
     await expect(answer).resolves.toEqual({ status: "CANCELLED", remainingProcesses: 0 });
     expect(aborted).toBe(1);

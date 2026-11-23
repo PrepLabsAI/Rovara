@@ -19,6 +19,8 @@ import { workflowWriteOps } from "../task-flow/flow-guard.js";
 import { approvalEntryOf, surfaceOfMethod } from "../task-log/entries.js";
 import { taskLogItems } from "../task-log/store.js";
 
+import type { ApplicationE2ESeams, ApplicationTask } from "../e2e/application-seams.js";
+
 export const WORKFLOW_DOCUMENT_KIND = "workflow-document";
 /** What a refused decision says when the structured plan it names cannot be read back. */
 export const PLAN_UNREADABLE_REFUSAL = "the plan could not be read back, so it was not approved; refresh and try again";
@@ -44,6 +46,8 @@ export interface WorkflowDecisionDetails {
 
 export interface WorkflowSubjectOptions {
   store: Pick<DocumentStore, "get">;
+  /** Binds required E2E and authority fences before onDecided creates IMPLEMENT dispatch items. */
+  applicationPlanning?: ApplicationE2ESeams["planning"];
   /**
    * The risk tier of the document waiting now. It decides which proofs may approve it (high: the local session only). It is a function of the plan's own facts (`planRiskOf`), which the caller reads from
    * the checked document. NOT supplying it means "high": a request nobody could grade is never graded low.
@@ -110,6 +114,26 @@ function defaultActorFor(ownerProvider: string, collaboratorsMayDecide: boolean)
 /** A stable 64-hex id for a person who is not the owner, for an engine that knows only hex ids. Not used by the default mapping. */
 export function hexActorId(approver: Pick<Principal, "provider" | "personId">): string {
   return createHash("sha256").update(`${approver.provider}\u0000${approver.personId}`).digest("hex");
+}
+
+function decisionLogItems(task: Record<string, unknown>, taskId: string, workflow: WorkflowSnapshot, attempt: DecisionAttempt, approver: Principal, at: string): TransactItem[] {
+  const taskOrg = task["orgId"] ?? task["companyId"];
+  // The log never stands in the way of the decision: an entry that cannot be made is left out.
+  let logged: TransactItem[];
+  try {
+    const entry = typeof taskOrg !== "string" ? undefined : approvalEntryOf({
+      requestId: attempt.requestId, at, what: currentDocumentType(workflow), outcome: attempt.outcome === "approve" ? "approved" : attempt.outcome === "reject" ? "rejected" : "changes_requested",
+      artifactDigest: attempt.seen.artifactDigest, revision: attempt.seen.revision, by: approver.displayName ?? "A team member", surface: surfaceOfMethod(attempt.credentials[0]?.method),
+    });
+    logged = entry === undefined ? [] : taskLogItems({ orgId: taskOrg as OrgId, taskId, entries: [entry] });
+  } catch { logged = []; }
+  return logged;
+}
+
+async function approveApplicationPlan(options: WorkflowSubjectOptions, attempt: DecisionAttempt, task: Record<string, unknown>, before: WorkflowSnapshot, after: WorkflowSnapshot, artifact: WorkflowArtifact | undefined, at: string) {
+  return attempt.outcome === "approve" && artifact !== undefined && options.applicationPlanning !== undefined
+    ? options.applicationPlanning.approve({ task: { ...task, workflow: before } as ApplicationTask, before, after, artifact, at })
+    : undefined;
 }
 
 export function createWorkflowDocumentSubject(options: WorkflowSubjectOptions): DecisionSubject {
@@ -226,23 +250,16 @@ export function createWorkflowDocumentSubject(options: WorkflowSubjectOptions): 
       // The engine answers an unchanged snapshot for a repeat of a decision it already holds; nothing is left to write.
       if (after.revision === workflow.revision) throw new SubjectRefusal("invalid_outcome", "The workflow already holds this decision.");
       const taskId = loaded.request.subject.id;
+      const application = await approveApplicationPlan(options, attempt, task, workflow, after, decidedArtifact, at);
+      if (application !== undefined) after = application.workflow;
       const decidedExtra = options.onDecided === undefined ? [] : await options.onDecided({ taskId, task, before: workflow, after, attempt, approver, at, risk: loaded.request.risk });
       // The live access fences of every approver the engine accepted (the People revision): a change of who may act between the check and the commit refuses the decision.
       const fences = new Map<string, TransactItem>();
       for (const item of actors.flatMap((entry) => entry?.items ?? [])) fences.set(JSON.stringify(item), item);
-      const extra = [...decidedExtra, ...fences.values()];
+      const extra = [...(application?.items ?? []), ...decidedExtra, ...fences.values()];
       // The decision is in the task log in the same transaction: what was decided on (its code), who decided and from where. The approver is the one the Approvers seam verified, and the surface is the
       // method the proof came through, never a field of the request.
-      const taskOrg = task["orgId"] ?? task["companyId"];
-      // The log never stands in the way of the decision: an entry that cannot be made is left out.
-      let logged: TransactItem[];
-      try {
-        const entry = typeof taskOrg !== "string" ? undefined : approvalEntryOf({
-          requestId: attempt.requestId, at, what: currentDocumentType(workflow), outcome: attempt.outcome === "approve" ? "approved" : attempt.outcome === "reject" ? "rejected" : "changes_requested",
-          artifactDigest: attempt.seen.artifactDigest, revision: attempt.seen.revision, by: approver.displayName ?? "A team member", surface: surfaceOfMethod(attempt.credentials[0]?.method),
-        });
-        logged = entry === undefined ? [] : taskLogItems({ orgId: taskOrg as OrgId, taskId, entries: [entry] });
-      } catch { logged = []; }
+      const logged = decisionLogItems(task, taskId, workflow, attempt, approver, at);
       return {
         ops: [...workflowWriteOps(workflow, after).ops, change.set("updatedAt", at)],
         extra: [...extra, ...logged],

@@ -41,6 +41,8 @@ export interface Toolbox {
   readonly claimsSeen: ReadonlyMap<string, WikiClaimSeen>;
   /** Whether any wiki text was shown (a hit or a page); false means the wiki gave nothing and the code had to carry the answer. */
   readonly wikiShown: boolean;
+  /** Drops presentation from a discarded attempt, retaining the whole-question lookup budget. */
+  resetPresentation(): void;
 }
 
 export interface ToolboxOptions {
@@ -176,5 +178,10 @@ export function createToolbox(options: ToolboxOptions): Toolbox {
     get pagesRead() { return pagesRead; },
     get claimsSeen() { return claimsSeen; },
     get wikiShown() { return wikiShown; },
+    resetPresentation() {
+      pagesRead.clear();
+      claimsSeen.clear();
+      wikiShown = false;
+    },
   };
 }

@@ -108,6 +108,12 @@ describe("the admission read", () => {
     await stale({ ...cur, workflow: { ...cur.workflow!, e2e: { currentRoundId: roundId, currentGroupRunIds: [runIds[0]!] } } });
   });
 
+  it("refuses late candidate admission reads after task closure or a task identity mismatch", async () => {
+    const w = await world();
+    await rejects(read(w, readers({ task: currentTask({ closedAt: "2026-11-21T10:00:00.000Z" }) }), 0), "STALE_FENCE");
+    await rejects(read(w, readers({ task: currentTask({ taskId: randomUUID() }) }), 0), "STALE_FENCE");
+  });
+
   it("reads a baseline round on its own started record, for this operation, base commit and attempt, while the task is open", async () => {
     const base = "a".repeat(40);
     const w = await world({ ref: { kind: "application", purpose: "baseline", baseCommitSha: base, attempt: 1 } });

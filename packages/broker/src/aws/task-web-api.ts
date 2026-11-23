@@ -156,8 +156,6 @@ function refusalResponse(error: unknown): WebResponse {
   return json(503, { error: "unavailable", message: "AgentX couldn't do that right now. Try again shortly." });
 }
 
-const FORBIDDEN = { error: "forbidden", message: "You don't have access to this task." };
-
 /**
  * A screenshot behind a row of the task's results. The session was checked by the caller of this; the reader's right to the task is checked again here, by the dependency, on
  * every request. Anyone who may not read the task is told 403 (for a task that does not exist as well, so the answer confirms nothing); a digest the task's current display does
@@ -171,7 +169,7 @@ async function e2eArtifactResponse(deps: TaskWebApiDependencies, caller: Develop
     found = await deps.readE2EArtifact(caller, taskId, sha256);
   } catch (error) {
     const { code } = (error ?? {}) as { code?: unknown };
-    return typeof code === "string" && HIDDEN.has(code) ? json(403, FORBIDDEN) : json(503, { error: "unavailable", message: "AgentX couldn't do that right now. Try again shortly." });
+    return typeof code === "string" && HIDDEN.has(code) ? json(404, { error: "not_found" }) : json(503, { error: "unavailable", message: "AgentX couldn't do that right now. Try again shortly." });
   }
   if (found === undefined) return json(404, { error: "not_found" });
   const { pragma: _pragma, ...headers } = PRIVATE_HEADERS;
