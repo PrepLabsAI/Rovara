@@ -1,7 +1,7 @@
 // Structured plans: what a structured planning prompt is given besides the request, read from the task's own records: the earlier documents of the task (the claim numbers they dropped
 // may not come back; the one the owner asked to change, or the approved one this builds on, is handed over as data) and the project's checks. A document that cannot be read (missing, or no longer
 // matching its digest) is left out; the run then plans without it.
-import { retiredClaimIds, type PlanDocument, type PlanDocumentKind, type PlanOwnerAnswers, type WorkflowSnapshot } from "@agentx/contracts";
+import { retiredClaimIds, type JsonValue, type PlanDocument, type PlanDocumentKind, type PlanOwnerAnswers, type WorkflowSnapshot } from "@agentx/contracts";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
 import { textReaderOf } from "../build-step/plan-input.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
@@ -10,6 +10,7 @@ import { EARLIER_PLAN_MAX_BYTES, planDocumentKindOf } from "./answer.js";
 import type { StructuredPlanContext, StructuredPlanInput } from "./prompts.js";
 
 import type { ApplicationE2ESeams } from "../e2e/application-seams.js";
+import { offersApplicationE2EPlan } from "../../e2e/feature-plan-executable-kinds.js";
 
 const ORDER: readonly PlanDocumentKind[] = ["requirements", "design", "plan"];
 
@@ -67,5 +68,23 @@ export async function structuredPlanContextOf(deps: Omit<TaskFlowDeps, "applicat
       ...(policy === undefined || project === undefined ? {} : { checks: { repositoryPaths: project.definition.repositories.map((repository) => repository.path), required: policy.required } }),
     },
     ...(previous === undefined ? {} : { previous }),
+  };
+}
+
+/** The worker feature that parses the version 2 application intent (the legacy delivery drops the version for a worker without it; the core never drops: the step is refused, as for every feature). */
+export const APPLICATION_PLAN_FEATURE = "task.workflowE2EApplicationPlan";
+
+/**
+ * What a structured planning run is dispatched with: the payload that tells the worker (and, from the stored operation, the broker) how to read the answer, and the worker features the step needs.
+ * A run that was offered the application planning context (a pinned project revision with an e2e policy, and a target whose runtime is ready: executable kinds) is also told the version 2 application
+ * intent is allowed (`workflowE2EPlanVersion: 2`), exactly when the planner's prompt asks for it (`offersApplicationE2EPlan`, the legacy path's own test). Without that flag the worker and
+ * `processPlanAnswer` refuse the v2 plan the planner was asked to write. Every other project's dispatch is what it always was.
+ */
+export function structuredPlanDispatch(structured: Awaited<ReturnType<typeof structuredPlanContextOf>>, workflow: Pick<WorkflowSnapshot, "path" | "reviewPhase">): { payload?: Record<string, JsonValue>; requires: string[] } {
+  if (structured === undefined) return { requires: ["task.workflowMode"] };
+  const application = offersApplicationE2EPlan(structured.rules.e2ePlanningContext);
+  return {
+    payload: { planFormat: "structured", ...(application ? { workflowE2EPlanVersion: 2 } : {}), ...(workflow.path === "FULL" && workflow.reviewPhase !== undefined ? { workflowPhase: workflow.reviewPhase } : {}) },
+    requires: ["task.workflowMode", "task.structuredPlans", ...(application ? [APPLICATION_PLAN_FEATURE] : [])],
   };
 }

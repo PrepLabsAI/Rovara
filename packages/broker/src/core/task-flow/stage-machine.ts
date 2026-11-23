@@ -53,7 +53,7 @@ import type { TaskFlowDeps } from "./deps.js";
 import { dispatchRowItem, dueDispatchRows, rescheduleRowItem, resolveRowItem } from "./dispatch-rows.js"; import { questionEntriesOf } from "../task-log/entries.js"; import { taskLogItems } from "../task-log/store.js";
 import { dispatchRowKey, taskKey } from "./keys.js";
 import { commentsForPlanningStep } from "../plan/comments.js";
-import { structuredPlanContextOf } from "../plan/context.js";
+import { structuredPlanContextOf, structuredPlanDispatch } from "../plan/context.js";
 import { planUnreadablePrompt } from "../plan/process.js";
 import { readTask } from "./reads.js";
 import { fromDocument, READING_DISPATCH_KINDS, toDocument, type DispatchRowRecord, type DispatchSpec, type MaintenanceExpectation, type OperationRecord, type PublicationExpectation, type TaskPointerRecord, type TaskRecord, type WorkspaceRecord } from "./records.js";
@@ -357,7 +357,7 @@ export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRe
   let mode: "UNDERSTAND" | "PLAN";
   let requestId: string;
   /** A structured planning run says so in its payload, so the worker reads its answer as a plan document and the broker reads the same. */
-  let planPayload: Record<string, JsonValue> | undefined;
+  let dispatched: ReturnType<typeof structuredPlanDispatch> | undefined;
   try {
     if (row.kind === "UNDERSTAND") {
       if (workflow.stage !== "UNDERSTAND" || workflow.state !== "READY") return stale();
@@ -379,7 +379,7 @@ export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRe
         ...(feedback.length === 0 ? {} : { feedback }),
         ...(structured === undefined ? {} : { structured }),
       });
-      planPayload = structured === undefined ? undefined : { planFormat: "structured", ...(workflow.path === "FULL" && workflow.reviewPhase !== undefined ? { workflowPhase: workflow.reviewPhase } : {}) };
+      dispatched = structuredPlanDispatch(structured, workflow);
       mode = "PLAN";
       requestId = workflowRequestId("agentx-auto-plan-revision", task.taskId, workflow.revision, createHash("sha256").update(planPrompt, "utf8").digest("hex"));
     } else {
@@ -399,7 +399,7 @@ export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRe
         // Retry planning after an answer Rovara could not read: the planner is told what was wrong with it.
         ...(structured === undefined || task.planUnreadable === undefined ? {} : { revision: planUnreadablePrompt(task.planUnreadable.errors) }),
       });
-      planPayload = structured === undefined ? undefined : { planFormat: "structured", ...(workflow.path === "FULL" && workflow.reviewPhase !== undefined ? { workflowPhase: workflow.reviewPhase } : {}) };
+      dispatched = structuredPlanDispatch(structured, workflow);
       const designInstructions = deps.designReview?.planInstructions(workflow);
       if (designInstructions !== undefined) prompt = `${prompt}\n\n${designInstructions}`;
       mode = "PLAN";
@@ -413,7 +413,7 @@ export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRe
   if (workspace.status === "PREPARING") return "WAITING";
   const accepted = await acceptStepWithNotes(deps, {
     task, workspace, requestId, prompt, workflowMode: mode, workflow: { current: workflow, next }, extra: [resolve()],
-    requires: ["task.workflowMode", ...(planPayload === undefined ? [] : ["task.structuredPlans"])], ...(planPayload === undefined ? {} : { payload: planPayload }),
+    requires: dispatched?.requires ?? ["task.workflowMode"], ...(dispatched?.payload === undefined ? {} : { payload: dispatched.payload }),
   });
   if (accepted.result === "DUPLICATE") await deps.store.transact([resolve()]);
   return accepted.result;

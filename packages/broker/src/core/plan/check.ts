@@ -24,7 +24,7 @@ import { acceptStep, blockTaskWorkflow, commitWorkflow, planFeedbackOf, runDispa
 import { DEFAULT_PROMPTS, iso, log } from "../task-flow/support.js";
 import { planDocumentKindOf } from "./answer.js";
 import { retriesPlanCheck } from "./check-retry.js";
-import { earlierPlans, structuredPlanContextOf } from "./context.js";
+import { earlierPlans, structuredPlanContextOf, structuredPlanDispatch } from "./context.js";
 
 /** The file the critic's answer is saved as. */
 export const PLAN_CRITIQUE_ARTIFACT_NAME = "plan-critique.md";
@@ -116,10 +116,10 @@ export async function startCriticRevision(deps: TaskFlowDeps, row: RowRef): Prom
     structured: { rules: structured.rules, previous: { kind: current.kind, version: current.version, plan: current.plan } },
     revision: `${PLAN_REVISION_REQUEST}\n\n${planCriticBlock(points)}`,
   });
+  const dispatch = structuredPlanDispatch(structured, workflow);
   const accepted = await acceptStep(deps, {
     task, workspace, requestId: workflowRequestId("agentx-plan-revision", task.taskId, workflow.revision), prompt, workflowMode: "PLAN", workflow: { current: workflow, next },
-    requires: ["task.workflowMode", "task.structuredPlans"],
-    payload: { planFormat: "structured", ...(workflow.path === "FULL" && workflow.reviewPhase !== undefined ? { workflowPhase: workflow.reviewPhase } : {}) },
+    requires: dispatch.requires, ...(dispatch.payload === undefined ? {} : { payload: dispatch.payload }),
   });
   return settled(deps, row, accepted.result);
 }

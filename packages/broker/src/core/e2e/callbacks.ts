@@ -299,7 +299,7 @@ async function evidenceUploadStep(stores: UploadStores, operation: ChecksOperati
     if (existingObject !== undefined && !sameBytes(existingObject)) throw agentXError("CALLBACK_FORBIDDEN", "content-addressed E2E group evidence conflicts with an existing object");
     if (existingObject === undefined) {
       try {
-        await stores.objects.put(groupRef.evidenceRef.key, bytes, { contentType: "application/json", metadata: { sha256: body.sha256, operation: operation.id, groupRunId }, retention: E2E_OBJECT_RETENTION });
+        await stores.objects.put(groupRef.evidenceRef.key, bytes, { contentType: "application/json", metadata: { sha256: body.sha256, operation: operation.id, "group-run-id": groupRunId }, retention: E2E_OBJECT_RETENTION });
       } catch (error) { if (!(error instanceof ObjectConflictError)) throw error; }
     }
     if (!sameBytes(await stores.objects.get(groupRef.evidenceRef.key, transferLimit))) throw agentXError("RUNTIME_UNAVAILABLE", "stored E2E group evidence could not be read back exactly");
