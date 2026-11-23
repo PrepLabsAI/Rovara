@@ -39,6 +39,7 @@ import { EVAL_DRAFT_REFUSAL_WORDS, produceEvalDiscoveryReport } from "./verifica
 import { dryRunEvalWrappers } from "./verification/eval-wrapper-dryrun.js";
 import type { EvalDiscovery } from "./verification/eval-discovery.js";
 import { runStandInWriter } from "./standin-writer.js";
+import { SETUP_HANG_WORDS, createSetupWatchdog, SETUP_ABORT_CONFIRM_MS } from "./setup-agent-watchdog.js";
 
 /** What the preparation manifest says about a repository (the broker's own record of the default branch's head). */
 export interface SetupManifestRepository { name: string; path: string; resolvedCommit: string; checkedOut?: unknown }
@@ -72,6 +73,10 @@ export interface SetupRunPorts {
   aliveMs?: number;
   /** How often a parked run (waiting for an administrator) talks to the broker. Default 15 s. */
   parkTickMs?: number;
+  /** Test seams of the watchdog (setup-agent-watchdog.ts): the longest silence of a model call, the wait for an abort to be confirmed, the clock's tick. */
+  modelStallMs?: number;
+  abortConfirmMs?: number;
+  stallTickMs?: number;
   /**
    * L4-E7, the stand-in writer: a separate agent step at the END of a run that proposed (never a stopped or failed one), on the company's own AI, inside the run's cap. `input` reads the shapes it writes for (the tables from the
    * schema reading, the outside services' answer shapes from the contract finder: shapes only, never a row); `openSession` opens its tool-less model session. Absent: no writer, the run is as it was.
@@ -236,6 +241,9 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
   const seqOfEntry = new Map<number, number>();
 
   const network = await ports.startNetwork();
+  // The bound that does not depend on the session: a model call that stops answering ends the run, and a session that does not confirm its abort is no longer waited for.
+  let stopForStall: () => void = () => undefined;
+  const watchdog = createSetupWatchdog({ now, stallMs: ports.modelStallMs, abortConfirmMs: ports.abortConfirmMs, tickMs: ports.stallTickMs, onStall: () => { stopForStall(); } });
   let sandbox: TaskSandbox | undefined;
   let tick: ReturnType<typeof setInterval> | undefined;
   /** L4-T5: the bare "alive" beat after the talk stops (see below). */
@@ -264,9 +272,10 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
       nextTurnCents: () => spend.reserveCents(),
       // The names the helper saw refused since the last entry: from the helper's file, never from any output.
       takeBlockedHosts: () => { const fresh = blocked.filter((name) => !delivered.includes(name)); delivered = [...delivered, ...fresh]; return fresh; },
-      onStop: () => { void session?.abort().catch(() => undefined); },
+      onStop: () => { watchdog.noteStop(); void session?.abort().catch(() => undefined); },
       onEntry: (entry) => { pendingEntries.push(entry); if (entry.source === "person" && personSeq !== undefined) seqOfEntry.set(entry.n, personSeq); },
     });
+    stopForStall = () => { governor.stop("infrastructure"); };
     const shell = setupAgentShell({ base, hooks: governor, checkFiles: lastFiles });
     const runner = createPersonCommandRunner({
       base, cwd: resolve(input.rootPath), checkFiles: lastFiles, alive: () => governor.ended() === undefined,
@@ -275,9 +284,16 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
       tellAgent: async (text) => (session?.steer === undefined || session.isStreaming?.() !== true ? false : (await session.steer(text), true)),
       report: async (done) => { await ports.callback({ kind: "command_done", seq: done.seq, ...(done.journalN === undefined ? {} : { journalN: done.journalN }) }); personSeq = undefined; },
     });
-    session = await ports.openSession(setupAgentSessionParts({ sandbox, shell }));
-    usage.open(session);
+    const opened = await ports.openSession(setupAgentSessionParts({ sandbox, shell }));
+    session = opened;
+    usage.open(opened);
+    /** Set when the last model turn ended in an error the session's own retries could not cure; a later good turn clears it. */
+    let lastTurnFailed = false;
+    /** Set when a prompt did not return after the run was stopped: it is no longer waited for. */
+    let abandoned = false;
+    const promptBounded = async (text: string): Promise<void> => { if (await watchdog.prompt(() => opened.prompt(text)) === "abandoned") abandoned = true; };
     unsubscribe = session.subscribe((event) => {
+      watchdog.observe(event);
       // The turn is counted first (every token class at its own rate; a failed call that began, with no usage, at the reserve): `SetupSpendMeter.observe`.
       spend.observe(event);
       const message = (event as { type?: unknown; message?: { role?: unknown; content?: unknown; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } } }).message;
@@ -286,6 +302,7 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
         // A spent budget on the proxy (the model call itself was refused for it) is the budget limit, in the run's own words.
         const outcome = assistantOutcome(event);
         const failure = failedTurn(outcome);
+        lastTurnFailed = outcome?.stopReason === "error";
         // L4-SR2: the gateway's upkeep cap refused a call of an unattended repair draft (HTTP 422 `upkeep_paused`, read from its fixed sentence). The run ends and says why; the broker only takes the word from an unattended draft.
         const paused = upkeepPauseReasonOfText(outcome?.errorMessage) ?? upkeepPauseReasonOfText(failure?.message);
         if (paused !== undefined) { upkeepPause ??= paused; governor.stop("infrastructure"); void session?.abort().catch(() => undefined); }
@@ -298,7 +315,7 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
       governorSessionListener(governor)(event);
     });
     unregister = ports.register({
-      abort: async () => { cancelled = true; dryRunStop.abort(); governor.stop("infrastructure"); await session?.abort(); await abortWriter?.().catch(() => undefined); },
+      abort: async () => { cancelled = true; dryRunStop.abort(); governor.stop("infrastructure"); await withinMs(session?.abort() ?? Promise.resolve(), ports.abortConfirmMs ?? SETUP_ABORT_CONFIRM_MS); await withinMs(abortWriter?.() ?? Promise.resolve(), ports.abortConfirmMs ?? SETUP_ABORT_CONFIRM_MS); },
       steer: async (text) => (session?.steer === undefined || session.isStreaming?.() !== true ? false : (await session.steer(text), true)),
       streaming: () => session?.isStreaming?.() === true,
     });
@@ -367,14 +384,24 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
 
     await ports.progress("The setup run started.");
     let failed = false;
+    /** Says why the run ended when the model, not a limit, ended it: fixed words on the live view, never the provider's. A stall and an abort that was not confirmed are the hangs this ends. */
+    const sayModelEnd = async (): Promise<void> => {
+      const words = watchdog.stalled() ? SETUP_HANG_WORDS.stalled : abandoned ? SETUP_HANG_WORDS.notStopped : lastTurnFailed && governor.ended() === undefined ? SETUP_HANG_WORDS.modelFailed : undefined;
+      // A model call that failed past its retries ends the run (never "no answer" read as done); what it had is kept like any stopped run's.
+      if (words === SETUP_HANG_WORDS.modelFailed) governor.stop("infrastructure");
+      // The usage report (booked in the `finally`) names the outcome: a model call that failed past its retries, or stopped answering, is a FAILED session, not a succeeded one.
+      if (words === SETUP_HANG_WORDS.modelFailed || words === SETUP_HANG_WORDS.stalled) sessionFailed = true;
+      if (words !== undefined) await ports.progress(words).catch(() => undefined);
+    };
     try {
-      await session.prompt(setupAgentInstructions({ repositories, limits, ...(input.metaRepo === undefined ? {} : { metaRepo: input.metaRepo }) }));
+      await promptBounded(setupAgentInstructions({ repositories, limits, ...(input.metaRepo === undefined ? {} : { metaRepo: input.metaRepo }) }));
     } catch (error) {
       failed = true;
       sessionFailed = true;
       const paused = upkeepPauseReasonOfText(error instanceof Error ? error.message : undefined);
       if (paused !== undefined) { upkeepPause ??= paused; governor.stop("infrastructure"); }
     }
+    await sayModelEnd();
     // ---- hosts_waiting: the agent has nothing else to do, and a website it asked for waits for an administrator. The run parks: no model call is made (so nothing is spent), the sandbox and the workspace are kept,
     // the wall clock stops, and the run asks the broker now and then. When an ask is answered it goes on with one more prompt; 24 hours parked ends it `hosts_waiting` with the partial proposal it has. A person's
     // Stop ends the wait at once. At most one parking per host-ask the limits allow, so a run cannot park for ever.
@@ -398,11 +425,12 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
       const refused = waitingOn.filter((host) => askStates.get(host) === "refused");
       for (const host of allowed) told.add(host);
       try {
-        await session.prompt(hostAnswerNote(allowed, refused));
+        await promptBounded(hostAnswerNote(allowed, refused));
       } catch {
         failed = true;
         sessionFailed = true;
       }
+      await sayModelEnd();
     }
     if (tick !== undefined) clearInterval(tick);
     tick = undefined;
@@ -502,6 +530,7 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
   } finally {
     if (tick !== undefined) clearInterval(tick);
     if (alive !== undefined) clearInterval(alive);
+    watchdog.dispose();
     unsubscribe?.();
     unregister?.();
     // The model sessions' spend is booked while the session can still be read, whatever way the run ended.

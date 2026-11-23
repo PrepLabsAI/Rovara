@@ -140,7 +140,7 @@ export async function runStandInWriter(run: StandInWriterRun): Promise<StandInWr
     const limit = new Promise<"timeout">((resolve) => { timer = setTimeout(() => { resolve("timeout"); }, run.timeoutMs ?? STANDIN_WRITER_TIMEOUT_MS); timer.unref?.(); });
     const done = session.prompt(standInWriterPrompt(input)).then(() => "done" as const);
     // A call that takes too long is aborted; its late result or failure is ignored.
-    if ((await Promise.race([done, limit])) === "timeout") { verdict ??= "failed"; void done.catch(() => undefined); await cutOff(); }
+    if ((await Promise.race([done, limit])) === "timeout") { verdict ??= "failed"; void done.catch(() => undefined); await Promise.race([cutOff(), new Promise<void>((resolve) => { setTimeout(resolve, 30_000).unref?.(); })]); }
   } catch (error) {
     verdict ??= isModelNotAllowed(error) ? "no_ai" : "failed";
   } finally {
