@@ -83,10 +83,19 @@ export function tokensOfUsage(usage: { input?: number; output?: number; cacheRea
   return { input: usage?.input ?? 0, output: usage?.output ?? 0, cacheRead: usage?.cacheRead ?? 0, cacheWrite: usage?.cacheWrite ?? 0 };
 }
 
-/** What one turn costs in dollars: every token class at its own rate. */
+/**
+ * CACHE-RATES: the gateway settles each call in whole micro-dollars, rounded UP, and at least one (`roundedCost`, `Math.max(1, usageCost)`). A count that adds exact fractions is below the sum of the settles by up to a micro a call
+ * (staging 2026-11-23: a 15-call Haiku run counted 98,408 micros against 98,416 settled). Rates here are dollars per million tokens, so tokens x rate IS micro-dollars. `MICRO_NOISE` keeps a product that is a whole number of
+ * micros up to float error (90 x 1.1 is 99.00000000000001) from being pushed a whole micro up; real fractions are at least a millionth of a micro apart (a rate is whole micros per million).
+ */
+const MICRO_NOISE = 1e-7;
+
+/** What one turn costs in dollars: every token class at its own rate, rounded up to a whole micro like the gateway's settle of the same call. */
 export function turnCostUsd(price: ModelPrice, tokens: TurnTokens): number {
   const rates = priceRatesOf(priceForInputTokens(price, tokens.input + tokens.cacheRead + tokens.cacheWrite));
-  return (tokens.input * rates.input + tokens.output * rates.output + tokens.cacheRead * rates.cacheRead + tokens.cacheWrite * rates.cacheWrite) / 1_000_000;
+  const micros = tokens.input * rates.input + tokens.output * rates.output + tokens.cacheRead * rates.cacheRead + tokens.cacheWrite * rates.cacheWrite;
+  if (!(tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite > 0)) return micros / 1_000_000;
+  return Math.max(1, Math.ceil(micros - MICRO_NOISE)) / 1_000_000;
 }
 
 /**
