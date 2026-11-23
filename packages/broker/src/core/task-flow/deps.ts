@@ -332,6 +332,8 @@ export interface TaskFlowDeps {
    * count limits alone bound the rounds, and a Cloud install that cannot read it fills this with a function that throws, which asks the owner instead; the hosted roots fill it with `core-host/company-task-spend.ts`, which never answers undefined: anything not known to be complete, including a run whose usage is not booked yet, throws).
    */
   autofix?: { enabled?: boolean; capUsd?: number; roundEstimateUsd?: number };
+  /** DEC 350: fresh company-day dollar room for this fitted automatic round, including its own current-day hold once. A refusal or unreadable result asks the owner. Absent only on installs without a day allowance (laptop). Does not authorize or reserve model calls. */
+  autofixDayBudgetHasRoom?: (task: TaskRecord, roundEstimateUsd: number) => Promise<boolean>;
   taskSpendUsd?: (taskId: string) => Promise<number | undefined>;
   /**
    * L4-TA6: the cap this task is held to RIGHT NOW, in dollars: the very value the install's own money checks enforce (hosted: `taskCapOf`, the install's task cap lowered to the project's own per-task limit, the figure

@@ -5,7 +5,7 @@
 // review or a pull request: the only moves are the two below (and an ask), each of which holds the policy's limits again itself.
 //
 // What Code does not have, and so what the facts leave out: the original-code (baseline) round (an unclear check fault is asked about rather than waited on; the plan's dry run of its proposed checks on the unchanged code tells the code's fault from the rest when it was recorded),
-// the browser and API checks, and Cloud's day budgets (the room is always "yes").
+// the browser and API checks. Hosted rounds read the company-day dollar allowance; individual gateway calls keep their own price, hold and receipt.
 //
 // Decision 70(c): after a merge of the base into an open pull request (the block `baseMergedRecheck`, an AUTOFIX row with cause `base-merged`) the checks re-run by themselves, once per candidate and
 // three times per task per day, only where Rovara may act (the autonomy is read again; `suggest` asks), the pull request still holds the merged head, and the company's allowance of such starts per
@@ -17,7 +17,7 @@ import {
 import { codeHostForRecord } from "../../plugins/routing.js";
 import { loadPlanSelfCheck } from "../../developer/plan-self-check.js";
 import { textReaderOf } from "./plan-input.js";
-import { AutoFixAskSchema, autoFixRetryReason, autoFixSendBackReason } from "../../developer/autofix-messages.js";
+import { AutoFixAskSchema, autoFixRetryReason, autoFixSendBackReason, type AutoFixRecordedAskReason } from "../../developer/autofix-messages.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { dispatchRowItem, rescheduleRowItem, resolveRowItem } from "../task-flow/dispatch-rows.js";
 import { dispatchRowKey, taskKey } from "../task-flow/keys.js";
@@ -75,7 +75,7 @@ async function needsYou(deps: TaskFlowDeps, task: TaskRecord, workflow: Workflow
   }
 }
 
-async function writeAsk(deps: TaskFlowDeps, taskId: string, revision: number, reason: AutoFixAskReason, codes: readonly AutoFixCode[], at: string): Promise<boolean> {
+async function writeAsk(deps: TaskFlowDeps, taskId: string, revision: number, reason: AutoFixRecordedAskReason, codes: readonly AutoFixCode[], at: string): Promise<boolean> {
   const ask = AutoFixAskSchema.parse({ workflowRevision: revision, reason, codes: [...codes].slice(0, 30), at });
   // Only while the task is still blocked at the revision the fixing looked at: the owner may have acted first, and then there is nothing left to ask about.
   const written = await deps.store.update({
@@ -129,6 +129,19 @@ export function fitRoundEstimateUsd(estimateUsd: number, spentUsd: number, capUs
   return fittedMicros / 1e6;
 }
 
+type DayRoom = "room" | "full" | "unreadable";
+
+/** The policy only knows "no room"; when the allowance could not be read the owner is told that instead of "the day is full". */
+function recordedAskReason(reason: AutoFixAskReason, dayRoom: DayRoom): AutoFixRecordedAskReason {
+  return reason === "day-budget" && dayRoom === "unreadable" ? "day-budget-unreadable" : reason;
+}
+
+/** A reader failure never authorizes a round: it is "unreadable", which the policy sees as no room and the owner is told apart from a full day. Laptop installs have no company-day allowance. */
+async function autofixDayRoom(deps: TaskFlowDeps, task: TaskRecord, estimateUsd: number): Promise<DayRoom> {
+  if (deps.autofixDayBudgetHasRoom === undefined) return "room";
+  try { return (await deps.autofixDayBudgetHasRoom(task, estimateUsd)) === true ? "room" : "full"; } catch { return "unreadable"; }
+}
+
 /** Looks at one blocked VERIFY or REVIEW once, and acts or asks. Never throws for a task that moved on. */
 export async function runAutofix(deps: TaskFlowDeps, row: { taskId: string; workflowRevision: number }): Promise<StepStart> {
   const done = async (result: AutofixOutcome): Promise<StepStart> => {
@@ -150,25 +163,27 @@ export async function runAutofix(deps: TaskFlowDeps, row: { taskId: string; work
   const spentUsd = wholeTaskSpendUsd(spent ?? Number.NaN);
   // L4-TA6b: the round is estimated at what fits under the cap (at most the usual estimate), so a small cap still gets one bounded round instead of always asking.
   const spend: WorkflowAutoSpend = { spentUsd, roundEstimateUsd: fitRoundEstimateUsd(config.roundEstimateUsd ?? AUTOFIX_ROUND_ESTIMATE_USD, spentUsd, capUsd), capUsd };
+  const dayRoom = await autofixDayRoom(deps, task, spend.roundEstimateUsd);
+  const dayBudgetHasRoom = dayRoom === "room";
   const nowMs = (deps.now?.() ?? new Date()).getTime();
   // How the block came about when no finished run wrote it (the row says so): a lost run is the infrastructure's, one automatic retry, never a send back to coding; a merged base is rechecked at once.
   const row_ = fromDocument<DispatchRowRecord>(await deps.store.get(dispatchRowKey(deps.companyId, row.taskId, row.workflowRevision)));
   const cause = row_?.cause;
   const facts: AutoFixFacts = cause === undefined ? {} : { blockCause: cause };
-  let first = autoFixDecision(workflow, facts, { enabled: true, spend, dayBudgetHasRoom: true, baselineRequests: 1, nowMs });
+  let first = autoFixDecision(workflow, facts, { enabled: true, spend, dayBudgetHasRoom, baselineRequests: 1, nowMs });
   // An unclear check fault is told from the code's own by what the plan's dry run found: a proposed check that already failed (or could not run) on the unchanged code is not the change's fault. The dry run is
   // recorded beside the plan the owner approved (Cloud's `proposedCheckOriginals`); a task without one leaves the fault unclear.
   if (first.action !== "NONE" && first.codes.includes("check-failed-cause-unknown")) {
     const originals = await proposedCheckOriginals(deps, workflow);
     if (Object.keys(originals).length > 0) {
       facts.checkOriginal = originals;
-      first = autoFixDecision(workflow, facts, { enabled: true, spend, dayBudgetHasRoom: true, baselineRequests: 1, nowMs });
+      first = autoFixDecision(workflow, facts, { enabled: true, spend, dayBudgetHasRoom, baselineRequests: 1, nowMs });
     }
   }
   // There is no original-code round in Code, so an unclear fault is the owner's to settle.
   const decision: AutoFixDecision = first.action === "WAIT_FOR_BASELINE" || first.action === "REQUEST_BASELINE" ? { action: "ASK", reason: "unclear-fault", codes: first.codes } : first;
   const at = iso(deps);
-  const ask = async (reason: AutoFixAskReason, codes: readonly AutoFixCode[]): Promise<StepStart> => {
+  const ask = async (reason: AutoFixRecordedAskReason, codes: readonly AutoFixCode[]): Promise<StepStart> => {
     const written = await writeAsk(deps, task.taskId, workflow.revision, reason, codes, at);
     // Decision 70(c): a merged base's checks Rovara does not re-run by itself wait for the owner: the milestone feed says so (it said "re-checking" when the row was written, never "needs you" while Rovara acts).
     if (written && cause === "base-merged") await needsYou(deps, task, workflow);
@@ -193,7 +208,7 @@ export async function runAutofix(deps: TaskFlowDeps, row: { taskId: string; work
     }
     switch (decision.action) {
       case "NONE": return await done("NONE");
-      case "ASK": return await ask(decision.reason, decision.codes);
+      case "ASK": return await ask(recordedAskReason(decision.reason, dayRoom), decision.codes);
       case "SEND_BACK": {
         const next = returnWorkflowToImplementationAutomatically(workflow, { expectedRevision: workflow.revision, reason: autoFixSendBackReason(decision.codes), spend, now: at });
         // The send back and the coding that follows it are one commit; the row of the block goes with it.
