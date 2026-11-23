@@ -35,7 +35,8 @@ export interface ReaperReport {
 export interface ReaperDependencies {
   sessions: Pick<SessionManager, "listByState" | "claimStop" | "markStopped" | "ensureSession">;
   /** Whether the workspace has an operation in progress. */
-  activeOperation: (workspaceId: string) => Promise<boolean>;
+  /** Whether the workspace is held by work. `retainedOperationId`: the completed close preflight of a retention on the session, which holds the workspace but is not work. */
+  activeOperation: (workspaceId: string, retainedOperationId?: string) => Promise<boolean>;
   /** GET /ping; resolves to the reported status, rejects when unreachable. */
   ping: (url: string) => Promise<string | undefined>;
   terminate: (instanceId: string) => Promise<void>;
@@ -64,7 +65,7 @@ export function createReaperHandler(dependencies: ReaperDependencies) {
       // Never reaped while the broker sees work, or while the worker reports work the broker does not.
       let busy: boolean;
       try {
-        busy = await dependencies.activeOperation(session.workspaceId);
+        busy = await dependencies.activeOperation(session.workspaceId, session.closeRetention?.operationId);
       } catch (error) {
         if (!(error instanceof Error && "code" in error && error.code === "NOT_FOUND")) throw error;
         // A broken discovery pointer is busy for safety, but must not block other sessions.
@@ -91,6 +92,15 @@ export function createReaperHandler(dependencies: ReaperDependencies) {
     dependencies.emit({ SessionsStopped: report.stopped.length, SessionsStopping: report.stillStopping.length });
     return report;
   };
+}
+
+/**
+ * Whether the workspace's record says work holds it. A retention's own completed close preflight holds the workspace while a person decides, but it is not work: the session is idle-stopped under it
+ * (the instance ends; the volume and the retention record are kept), so a retained session costs no instance-hours while it waits.
+ */
+export function holdsActiveOperation(workspace: Record<string, unknown> | undefined, retainedOperationId?: string): boolean {
+  const id = workspace?.["activeOperationId"];
+  return typeof id === "string" && id !== retainedOperationId;
 }
 
 /** One STOPPING session: its instance is ended while it lives, and once it is gone and the volume detached the session is STOPPED (the volume is kept). */
@@ -160,9 +170,8 @@ export const handler = createReaperHandler({
     },
     ...optionalPicker(machineSizePicker({ documentClient, tableName })),
   }),
-  async activeOperation(workspaceId) {
-    const item = (await readWorkspaceMeta(documentClient, tableName, workspaceId))?.item;
-    return typeof item?.activeOperationId === "string";
+  async activeOperation(workspaceId, retainedOperationId) {
+    return holdsActiveOperation((await readWorkspaceMeta(documentClient, tableName, workspaceId))?.item, retainedOperationId);
   },
   async ping(url) {
     const response = await fetch(url, { signal: AbortSignal.timeout(PING_TIMEOUT_MS) });

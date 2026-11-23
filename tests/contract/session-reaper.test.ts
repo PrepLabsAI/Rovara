@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { Ec2RuntimeBinding } from "../../packages/contracts/src/session.js";
 import { SessionManager } from "../../packages/broker/src/aws/sessions.js";
-import { createReaperHandler, type ReaperDependencies, type StopProgress } from "../../packages/broker/src/aws/session-reaper.js";
+import { createReaperHandler, holdsActiveOperation, type ReaperDependencies, type StopProgress } from "../../packages/broker/src/aws/session-reaper.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const NOW = new Date("2026-09-27T12:00:00.000Z");
@@ -149,5 +149,90 @@ describe("idle reaper", () => {
     // The claim's terminate failed; the next tick saw the instance live and sent it again.
     expect(terminate).toHaveBeenCalledTimes(2);
     expect(sessionOf(db, workspaceId)).toMatchObject({ state: "STOPPING" });
+  });
+});
+
+// CLOSE-RETENTION: a RETAINED session is idle-stopped after the normal idle window like any other: the instance ends, the VOLUME and the RETENTION record are kept, so a Close stays refused (the retained
+// sentence) until it is previewed and bound. Work resumes by a Continue or a new step, which wakes it on the same volume. The deployed reaper's busy rule is `holdsActiveOperation`.
+describe("idle reaper and a retained session", () => {
+  const OLD_INSTANCE = "i-0aaaaaaaaaaaaaaaa";
+  /** A READY session idle 6 minutes with a retention record; `woken` = a new instance since the retention (the record is stale), else the retention's own instance and its completed preflight as the workspace's holder. */
+  function retainedIdle(woken: boolean, extra: { activeOperationId?: string | null; accepted?: boolean } = {}) {
+    const w = setup();
+    const workspaceId = seedReady(w.db, { idleMinutes: 6 });
+    const preflight = randomUUID();
+    const generation = { sessionGeneration: 1, instanceId: woken ? OLD_INSTANCE : "i-0123456789abcdef0", volumeId: "vol-0123456789abcdef0", dataGeneration: randomUUID() };
+    const retained = { inspectionOperationId: preflight, inspectionFence: 2, retentionId: randomUUID(), contentDigest: "a".repeat(64), generation };
+    const closeRetention = { schemaVersion: 1, operationId: preflight, fence: 2, generation, retained, ...(extra.accepted === true ? { acceptedOperationId: randomUUID() } : {}) };
+    w.db.set({ ...sessionOf(w.db, workspaceId), ...(woken ? { generation: 2 } : {}), closeRetention, workspaceDataIdentity: generation });
+    const holder = extra.activeOperationId !== undefined ? extra.activeOperationId : woken ? null : preflight;
+    w.db.set({ ...w.db.get(`WORKSPACE#${workspaceId}`, "META")!, fence: 2, ...(holder === null ? { activeOperationId: null } : { activeOperationId: holder }) });
+    w.db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${preflight}`, status: "SUCCEEDED", kind: "close", fence: 2, workspaceId, closePreflight: { schemaVersion: 1 } });
+    const real = createReaperHandler({
+      sessions: w.sessions, ping: async () => "Healthy", terminate: w.terminate, progress: async () => ({ instanceGone: true, instanceLive: false, volumeAvailable: true }), binding: async () => binding, emit: w.emit, now: () => NOW, log: () => undefined,
+      activeOperation: async (id, retainedOperationId) => holdsActiveOperation(w.db.get(`WORKSPACE#${id}`, "META"), retainedOperationId),
+    });
+    return { ...w, workspaceId, closeRetention, real };
+  }
+
+  it("a woken-but-idle retained session (a new instance, the old retention record, no step): after the idle window it is STOPPED, the volume and the retention are kept", async () => {
+    const w = retainedIdle(true);
+    const tick = await w.real();
+    expect(tick.claimed).toEqual([w.workspaceId]);
+    expect(w.terminate).toHaveBeenCalledExactlyOnceWith("i-0123456789abcdef0");
+    expect(tick.stopped).toEqual([w.workspaceId]);
+    expect(sessionOf(w.db, w.workspaceId)).toMatchObject({ state: "STOPPED", volumeId: "vol-0123456789abcdef0", closeRetention: w.closeRetention });
+    expect(sessionOf(w.db, w.workspaceId)).not.toHaveProperty("instanceId");
+  });
+
+  it("a retained session whose completed preflight still holds the workspace is idle-stopped too (the preflight is not 'work')", async () => {
+    const w = retainedIdle(false);
+    const tick = await w.real();
+    expect(tick.claimed).toEqual([w.workspaceId]);
+    expect(tick.stopped).toEqual([w.workspaceId]);
+    expect(sessionOf(w.db, w.workspaceId)).toMatchObject({ state: "STOPPED", volumeId: "vol-0123456789abcdef0", closeRetention: w.closeRetention });
+  });
+
+  it("a retention is stale when EITHER the instance or the generation moved on (a new generation with the same instance id, a new instance in the same generation): both are woken sessions, both are idle-stopped", async () => {
+    for (const [sessionGeneration, instanceId] of [[2, "i-0123456789abcdef0"], [1, OLD_INSTANCE]] as const) {
+      const w = retainedIdle(false);
+      const row = sessionOf(w.db, w.workspaceId), retention = row["closeRetention"] as { generation: Record<string, unknown> };
+      // The session is on generation 2 (or on its own instance); the record names generation 1 and the instance it names here.
+      w.db.set({ ...row, generation: sessionGeneration === 2 ? 2 : 1, closeRetention: { ...retention, generation: { ...retention.generation, sessionGeneration: 1, instanceId } } });
+      w.db.set({ ...w.db.get(`WORKSPACE#${w.workspaceId}`, "META")!, activeOperationId: null });
+      expect((await w.real()).claimed).toEqual([w.workspaceId]);
+    }
+  });
+
+  it("a woken session is stopped whether or not its old preflight is still on record (the record of a dead instance guards nothing)", async () => {
+    const w = retainedIdle(true);
+    w.db.delete(`WORKSPACE#${w.workspaceId}`, `OPERATION#${(w.closeRetention as { operationId: string }).operationId}`);
+    expect((await w.real()).claimed).toEqual([w.workspaceId]);
+  });
+
+  it("a step that holds the workspace is work: a retained session is never stopped under it", async () => {
+    for (const woken of [true, false]) {
+      const w = retainedIdle(woken, { activeOperationId: randomUUID() });
+      expect((await w.real()).skippedBusy).toEqual([w.workspaceId]);
+      expect(w.terminate).not.toHaveBeenCalled();
+      expect(sessionOf(w.db, w.workspaceId)).toMatchObject({ state: "READY" });
+    }
+  });
+
+  it("an ACCEPTED close owns the session: it is never stopped by the idle rule", async () => {
+    for (const woken of [true, false]) {
+      const w = retainedIdle(woken, { accepted: true });
+      expect((await w.real()).claimed).toEqual([]);
+      expect(w.terminate).not.toHaveBeenCalled();
+      expect(sessionOf(w.db, w.workspaceId)).toMatchObject({ state: "READY" });
+    }
+  });
+
+  it("the busy rule: an operation that is not the retained preflight is work; the retained preflight itself is not", () => {
+    expect(holdsActiveOperation(undefined)).toBe(false);
+    expect(holdsActiveOperation({ activeOperationId: null })).toBe(false);
+    expect(holdsActiveOperation({ activeOperationId: "op-1" })).toBe(true);
+    expect(holdsActiveOperation({ activeOperationId: "op-1" }, "op-1")).toBe(false);
+    expect(holdsActiveOperation({ activeOperationId: "op-2" }, "op-1")).toBe(true);
   });
 });

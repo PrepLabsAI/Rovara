@@ -393,7 +393,9 @@ export class SessionManager {
   async claimStop(seen: WorkspaceSession): Promise<boolean> {
     if (seen.closeRetention !== undefined && (seen.closeRetention.retained === undefined || seen.closeRetention.acceptedOperationId !== undefined)) return false;
     const workspace = await readWorkspaceMeta(this.dependencies.documentClient, this.dependencies.tableName, seen.workspaceId);
-    const claim = this.update(seen.workspaceId, { retention: seen.closeRetention, set: { state: "STOPPING" }, when: { state: "READY", generation: seen.generation } });
+    // A woken session carries the retention of its OLD instance: it holds no work then, so the plain idle rule applies, and only the retention record and the volume are guarded.
+    const stale = staleRetention(seen);
+    const claim = this.update(seen.workspaceId, { ...retentionOf(seen), set: { state: "STOPPING" }, when: { state: "READY", generation: seen.generation } });
     return this.conditional({ transaction: [
       { Update: {
         ...claim,
@@ -404,9 +406,9 @@ export class SessionManager {
         TableName: this.dependencies.tableName,
         Key: workspace?.key ?? { pk: `WORKSPACE#${seen.workspaceId}`, sk: "META" },
         // Terminal transitions remove activeOperationId; some records store it as null instead.
-        ...idleWorkspaceCondition(seen),
+        ...idleWorkspaceCondition(stale ? { ...seen, closeRetention: undefined } : seen),
       } },
-      ...idleInspectionCheck(seen, this.dependencies.tableName, workspace?.key.pk),
+      ...(stale ? [] : idleInspectionCheck(seen, this.dependencies.tableName, workspace?.key.pk)),
     ] });
   }
 
@@ -416,7 +418,7 @@ export class SessionManager {
    */
   async markLost(seen: WorkspaceSession): Promise<boolean> {
     const lost = this.update(seen.workspaceId, {
-      retention: seen.closeRetention,
+      ...retentionOf(seen),
       set: { state: "STOPPED" },
       remove: ["instanceId", "privateIp", "pingFailures"],
       when: { state: "READY", generation: seen.generation },
@@ -431,14 +433,14 @@ export class SessionManager {
   /** Counts one more failed health probe of a READY session; returns the new count, or 0 if it moved on. */
   async recordPingFailure(seen: WorkspaceSession): Promise<number> {
     const counted = await this.conditional(this.update(seen.workspaceId, {
-      addPingFailure: true, retention: seen.closeRetention,
+      addPingFailure: true, ...retentionOf(seen),
       when: { state: "READY", generation: seen.generation },
     }));
     return counted ? (await this.get(seen.workspaceId))?.pingFailures ?? 0 : 0;
   }
 
   async clearPingFailures(seen: WorkspaceSession): Promise<void> {
-    await this.conditional(this.update(seen.workspaceId, { retention: seen.closeRetention, remove: ["pingFailures"], when: { state: "READY", generation: seen.generation } }));
+    await this.conditional(this.update(seen.workspaceId, { ...retentionOf(seen), remove: ["pingFailures"], when: { state: "READY", generation: seen.generation } }));
   }
 
   /** STOPPING → STOPPED once the instance is gone and the volume detached. Returns the session after. */
@@ -447,7 +449,7 @@ export class SessionManager {
     const moved = await this.conditional(this.update(workspaceId, {
       set: { state: "STOPPED" },
       remove: ["instanceId", "privateIp"],
-      when: { state: "STOPPING", generation }, retention: seen?.closeRetention,
+      when: { state: "STOPPING", generation }, ...(seen === undefined ? {} : retentionOf(seen)),
     }));
     const session = await this.get(workspaceId);
     if (!moved && !(session?.state === "STOPPED" && session.generation === generation)) {
@@ -798,6 +800,16 @@ function retainedReadySession(session: WorkspaceSession | undefined): EnsureSess
   if (session?.closeRetention?.acceptedOperationId !== undefined || session?.closeDestroy !== undefined) throw agentXError("WORKSPACE_BUSY", "accepted Close owns this workspace");
   if (session?.closeRetention !== undefined && session.state === "READY") return { ready: true, generation: session.generation, privateIp: session.privateIp! };
   return undefined;
+}
+
+/** The retention record names an instance or a generation that is no longer the session's: the session was woken (a new instance on the same volume) and no step has lifted the record yet. */
+function staleRetention(session: WorkspaceSession): boolean {
+  const retention = session.closeRetention;
+  return retention !== undefined && (retention.generation.instanceId !== session.instanceId || retention.generation.sessionGeneration !== session.generation);
+}
+/** How a write on this session guards its retention: a live retention by its instance and volume, a stale one (see above) by the record and the volume. */
+function retentionOf(session: WorkspaceSession): Pick<NonNullable<Parameters<SessionManager["update"]>[1]>, "retention" | "retainedBy"> {
+  return staleRetention(session) ? { retention: session.closeRetention, retainedBy: "wake" } : { retention: session.closeRetention };
 }
 
 function retainedLifecycleGuard(retention: WorkspaceSession["closeRetention"], retainedBy?: "wake" | "provisioning"): { condition: string; values: Record<string, unknown> } {
