@@ -46,7 +46,7 @@ async function stageCandidates(root: string) {
   return { fixed, defective };
 }
 
-// Manual native proof is enabled; CI registration awaits a passing controller Linux run.
+// Runs on CI in the linux-runtime job's "Native M1.4 journeys" step (native-p0 config), and natively by hand.
 describe.runIf(dockerReady)("M1 native core web journeys", () => {
   const roots: string[] = [];
   afterAll(async () => { for (const dir of roots.splice(0)) await rm(dir, { recursive: true, force: true }); }, 120_000);

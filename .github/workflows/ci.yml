@@ -540,6 +540,8 @@ jobs:
       # Include the M1 and M1.3 core browser journeys in this native-config step too; the default test config excludes them. Run the files serially on the shared Docker host.
       - name: Native M1.4 journeys
         if: (success() || failure()) && steps.runtime_setup.outcome == 'success'
+        # A hang here must not starve the sandbox egress gateway step that runs last in this job.
+        timeout-minutes: 35
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
