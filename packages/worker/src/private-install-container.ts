@@ -111,47 +111,68 @@ const FLAGS: ReadonlyMap<string, number> = new Map([
   ["--ulimit", 1], ["--log-driver", 1], ["--tmpfs", 1], ["--volume", 1], ["--env", 1], ["--workdir", 1], ["--entrypoint", 1],
 ]);
 
-/**
- * Whether `args` are exactly the install container's shape for `expected`, value by value. Anything else (an extra flag or env, a different network, the host network, a missing `--log-driver none` or `--read-only`, an extra mount, the Docker
- * socket, a changed command) throws RUNTIME_UNAVAILABLE with a fixed sentence (no argument is repeated: it could be a secret).
- */
-export function assertInstallContainerArgs(args: readonly string[], expected: InstallContainerInput): void {
-  const refuse = (): never => { throw agentXError("RUNTIME_UNAVAILABLE", REFUSED); };
-  const root = resolve(expected.rootPath);
-  if (!isAbsolute(root) || root === "/" || args[0] !== "run") return refuse();
-  const seen = new Map<string, string[]>();
+type Seen = Map<string, string[]>;
+
+/** The flags before the image, each of a known kind with its value; undefined when one is not known or has no value. `rest` is what follows them. */
+function readFlags(args: readonly string[]): { seen: Seen; rest: string[] } | undefined {
+  const seen: Seen = new Map();
   let index = 1;
   for (; index < args.length; index += 1) {
     const token = args[index] ?? "";
     if (!token.startsWith("-")) break;
     const arity = FLAGS.get(token);
-    if (arity === undefined) return refuse();
     const value = arity === 0 ? "" : args[index + 1];
-    if (value === undefined) return refuse();
+    if (arity === undefined || value === undefined) return undefined;
     index += arity;
     seen.set(token, [...(seen.get(token) ?? []), value]);
   }
-  const rest = args.slice(index);
-  if (rest[0] !== expected.image || rest[1] !== "--" || args.some((argument) => argument.includes("docker.sock"))) return refuse();
-  if (JSON.stringify(rest.slice(2)) !== JSON.stringify(installCommand(expected.manager))) return refuse();
-  const only = (flag: string): string | undefined => (seen.get(flag)?.length === 1 ? seen.get(flag)![0] : undefined);
-  const same = (flag: string, value: string): boolean => only(flag) === value;
-  const sameSet = (flag: string, values: readonly string[]): boolean => {
-    const got = seen.get(flag) ?? [];
-    return got.length === values.length && values.every((value) => got.includes(value));
-  };
-  const key = installRepositoryKey(expected.operationId, expected.repository);
-  const cache = cacheDirectory(root, expected.manager);
-  const volumes = [`${expected.repositoryDirectory}:${expected.repositoryDirectory}:rw`, `${cache}:${cache}:rw`, `${expected.secretsDirectory}:${INSTALL_MOUNT_PATH}:ro`,
-    ...(expected.derivedNpmrc === true ? [`${join(expected.secretsDirectory, `${key}.npmrc`)}:${join(expected.repositoryDirectory, ".npmrc")}:ro`] : [])];
-  const label = hash("install-label", expected.operationId).slice(0, 16);
-  const shape = same("--name", installContainerName(expected.operationId, expected.repository)) && NAME.test(only("--name") ?? "") && same("--network", installNetworkName(expected.operationId))
+  return { seen, rest: args.slice(index) };
+}
+
+const only = (seen: Seen, flag: string): string | undefined => (seen.get(flag)?.length === 1 ? seen.get(flag)![0] : undefined);
+const sameSet = (seen: Seen, flag: string, values: readonly string[]): boolean => {
+  const got = seen.get(flag) ?? [];
+  return got.length === values.length && values.every((value) => got.includes(value));
+};
+
+/** The security shape: the name and network of this operation, the user, the read-only root, no capability, no new privileges, the limits, the init. */
+function shapeIsRight(seen: Seen, expected: InstallContainerInput): boolean {
+  const same = (flag: string, value: string): boolean => only(seen, flag) === value;
+  return same("--name", installContainerName(expected.operationId, expected.repository)) && NAME.test(only(seen, "--name") ?? "") && same("--network", installNetworkName(expected.operationId))
     && same("--user", TASK_SANDBOX_USER) && seen.has("--rm") && seen.has("--read-only") && same("--cap-drop", "ALL") && same("--security-opt", "no-new-privileges")
     && same("--pids-limit", INSTALL_PIDS_LIMIT) && same("--ulimit", "core=0") && same("--log-driver", "none")
     && same("--workdir", expected.repositoryDirectory) && same("--entrypoint", SANDBOX_INIT);
-  const mounts = sameSet("--tmpfs", [`${INSTALL_HOME}:${TMPFS_OPTIONS}`, `/tmp:${TMPFS_OPTIONS}`]) && sameSet("--volume", volumes)
-    && sameSet("--label", [`${INSTALL_LABEL}=${label}`, `${INSTALL_WORKSPACE_LABEL}=${expected.workspace}`]) && sameSet("--env", installEnvironment(root, expected.manager));
-  const limits = (seen.get("--memory") ?? []).every((value) => /^[1-9][0-9]{2,6}m$/u.test(value)) && JSON.stringify(seen.get("--memory")) === JSON.stringify(seen.get("--memory-swap"))
-    && (seen.get("--cpus") ?? []).every((value) => /^[1-9][0-9]{0,3}$/u.test(value)) && (seen.get("--cpus")?.length ?? 0) <= 1 && (seen.get("--memory")?.length ?? 0) <= 1;
-  if (!shape || !mounts || !limits) return refuse();
+}
+
+/** The mounts, labels and environment: exactly the expected sets. */
+function mountsAreRight(seen: Seen, expected: InstallContainerInput): boolean {
+  const root = resolve(expected.rootPath);
+  const cache = cacheDirectory(root, expected.manager);
+  const key = installRepositoryKey(expected.operationId, expected.repository);
+  const volumes = [`${expected.repositoryDirectory}:${expected.repositoryDirectory}:rw`, `${cache}:${cache}:rw`, `${expected.secretsDirectory}:${INSTALL_MOUNT_PATH}:ro`,
+    ...(expected.derivedNpmrc === true ? [`${join(expected.secretsDirectory, `${key}.npmrc`)}:${join(expected.repositoryDirectory, ".npmrc")}:ro`] : [])];
+  const label = hash("install-label", expected.operationId).slice(0, 16);
+  return sameSet(seen, "--tmpfs", [`${INSTALL_HOME}:${TMPFS_OPTIONS}`, `/tmp:${TMPFS_OPTIONS}`]) && sameSet(seen, "--volume", volumes)
+    && sameSet(seen, "--label", [`${INSTALL_LABEL}=${label}`, `${INSTALL_WORKSPACE_LABEL}=${expected.workspace}`]) && sameSet(seen, "--env", installEnvironment(root, expected.manager));
+}
+
+/** The optional limits: at most one of each, of the shape the sandbox's own limits have, memory and swap equal. */
+function limitsAreRight(seen: Seen): boolean {
+  const memory = seen.get("--memory") ?? [];
+  const cpus = seen.get("--cpus") ?? [];
+  return memory.length <= 1 && cpus.length <= 1 && memory.every((value) => /^[1-9][0-9]{2,6}m$/u.test(value)) && JSON.stringify(seen.get("--memory")) === JSON.stringify(seen.get("--memory-swap"))
+    && cpus.every((value) => /^[1-9][0-9]{0,3}$/u.test(value));
+}
+
+/**
+ * Whether `args` are exactly the install container's shape for `expected`, value by value. Anything else (an extra flag or env, a different network, the host network, a missing `--log-driver none` or `--read-only`, an extra mount, the Docker
+ * socket, a changed command) throws RUNTIME_UNAVAILABLE with a fixed sentence (no argument is repeated: it could be a secret).
+ */
+export function assertInstallContainerArgs(args: readonly string[], expected: InstallContainerInput): void {
+  const root = resolve(expected.rootPath);
+  const read = isAbsolute(root) && root !== "/" && args[0] === "run" ? readFlags(args) : undefined;
+  const tail = read?.rest ?? [];
+  const sound = read !== undefined && tail[0] === expected.image && tail[1] === "--" && !args.some((argument) => argument.includes("docker.sock"))
+    && JSON.stringify(tail.slice(2)) === JSON.stringify(installCommand(expected.manager));
+  if (!sound || !shapeIsRight(read.seen, expected) || !mountsAreRight(read.seen, expected) || !limitsAreRight(read.seen)) throw agentXError("RUNTIME_UNAVAILABLE", REFUSED);
 }
