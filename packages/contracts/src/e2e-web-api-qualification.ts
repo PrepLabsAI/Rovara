@@ -3,6 +3,7 @@ import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
 import { RuntimeInstallChallengeSchema, RuntimeInstallManifestSchema, runtimeInstallChallengeDigest, type RuntimeInstallChallenge } from "./runtime-installation.js";
 import { ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema } from "./session.js";
+import type { E2ERegisteredRuntime } from "./e2e-runtime-registration.js";
 
 /** How long a web/API challenge lives: eleven probe runs, including two builds, take far longer than the five minutes a P0 challenge gets. */
 export const WEB_API_CHALLENGE_LIFETIME_MS = 60 * 60_000;
@@ -99,21 +100,38 @@ const requiredProbes: RequiredProbe[] = [
   // app started, stayed up while the executor drove it with the channel open, and the in-request checks ran. The `model-proxy` leg proves the name leads nowhere but the run's sinkhole.
   { probeId: "web-agent-app-isolation-v1", assetDigest: "5d4d05074d74c0c91267e60a0ef095a47203380c9b1899a88591f6e612960c5a", kind: "web", expectedOutcome: "PASS", cause: null, bundleDigest: "33716f10c5b021ec2845cc4e1fd8ab9d097ab897a066f2e8f23338d958dfd572", scenarioDigest: "efa380e5702e62cbbbd35acaff53f0a5766114368fa65183513485a43389d506",
     buildCommandDigest: null, agent: { receipts: 2, verifiedReceipts: 2, downloads: 1, caseReasons: [] } },
+  // Browser testing, egress gate: the APP network is refused every private-network address. The app starts behind a guard that dials the metadata and resolver link-local addresses, a link-local
+  // address, and an address in each of 10/8, 172.16/12, 192.168/16 and 100.64/10, and starts only when EVERY attempt times out or has no route (a connection or a refusal means something answered).
+  // It runs the API state scenario, so it shares that scenario and bundle with `app-host-denial-v1`; the asset's start command is what differs, and the asset digest pins it. It is last, so a
+  // qualification from before it (fourteen probes) keeps its positions and is merely missing it.
+  { probeId: "app-private-denial-v1", assetDigest: "c31293bad96ee7a260de6761ef913b64c644d3e8351e65287ec3e5efd801eafe", kind: "api", expectedOutcome: "PASS", cause: null, bundleDigest: "033b193aaa1ab0ed459770bf2a91141b33b5c247d6e23ec713630a0f95b74dc4", scenarioDigest: "fd333864038602a5788fbca3324f27f3e2d38cee12b4c8de3b5a0385fc4097dc", buildCommandDigest: null },
 ];
 export const WEB_API_REQUIRED_PROBES: readonly RequiredProbe[] = Object.freeze(requiredProbes.map((probe) => Object.freeze(probe)));
 export const WEB_API_REQUIRED_PROBE_IDS = WEB_API_REQUIRED_PROBES.map((probe) => probe.probeId) as [string, ...string[]];
 /** The probes M1.3 qualified runners with, in order: a qualification record from before the agent probes carries exactly these. */
 export const WEB_API_BASE_PROBE_COUNT = 11;
+/** The probes a qualification held before the private-network probe (the eleven base probes and the three agent probes): a record of that time stays valid and is merely missing the last one. */
+export const WEB_API_BEFORE_PRIVATE_NETWORK_PROBE_COUNT = 14;
 /** The agent probes of Task 4.5. A runtime descriptor lists the `agent` step only for a qualification that holds all three. */
 export const WEB_API_AGENT_PROBE_IDS = Object.freeze(WEB_API_REQUIRED_PROBES.filter((probe) => probe.agent !== undefined).map((probe) => probe.probeId));
 const probeIdSchema = z.enum(WEB_API_REQUIRED_PROBE_IDS);
 /**
- * The probes whose pass shows the sandbox cannot reach outside the run: the app and the browser are refused a public address, the app is refused the host on its own bridge, and the build container
- * is refused the cloud metadata address and a private one. Browser testing is offered as "not your live site" only on a runtime whose registered probe manifest lists ALL of them (a row is registered
- * only when the registrar re-judged each probe, so the manifest is the record that they passed). Not covered by any of them: a private-range address that is not the gateway, dialled from the APP
- * network (a database in the customer's network); add a probe for it here and to the qualification, and a runtime qualified before it must be qualified again.
+ * The probes whose pass shows the sandbox cannot reach outside the run: the app and the browser are refused a public address, the app is refused the host on its own bridge and every private-network
+ * address (the metadata and resolver link-local addresses, link-local, 10/8, 172.16/12, 192.168/16 and 100.64/10), and the build container is refused the cloud metadata address and a private one.
+ * A browser check runs only on a runtime whose registered probe manifests list ALL of them (a row is registered only when the registrar re-judged each probe, so the manifest is the record that they
+ * passed). A qualification from before a probe was added lacks it, and so is not a runtime a browser check may use until it is qualified again.
  */
-export const SANDBOX_EGRESS_PROBE_IDS: readonly string[] = Object.freeze(["web-egress-denial-v1", "api-egress-denial-v1", "app-host-denial-v1", "build-imds-denial-v1", "build-lateral-denial-v1"]);
+export const SANDBOX_EGRESS_PROBE_IDS: readonly string[] = Object.freeze(["web-egress-denial-v1", "api-egress-denial-v1", "app-host-denial-v1", "app-private-denial-v1", "build-imds-denial-v1", "build-lateral-denial-v1"]);
+
+/**
+ * Whether a registered row's probe manifest lists every probe of `SANDBOX_EGRESS_PROBE_IDS`. The walls are the runtime's, not one kind's (the app network, the build network and the host firewall serve
+ * the web and the API rows alike), so the registrar lists these probes on BOTH rows of a qualification (`e2eWebApiRuntimeRecords`) besides the probes of the row's own kind. A row written before a probe
+ * was added lacks it and proves nothing until the runtime is qualified again.
+ */
+export function webApiRuntimeRowProvesSandbox(row: Pick<E2ERegisteredRuntime, "probeManifest">): boolean {
+  const listed = new Set([...row.probeManifest.positiveProbeIds, ...row.probeManifest.negativeProbeIds]);
+  return SANDBOX_EGRESS_PROBE_IDS.every((probeId) => listed.has(probeId));
+}
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 
@@ -270,11 +288,11 @@ export const WebApiRuntimeInstallProposalSchema = z.object({
   profileId: z.literal(WEB_API_RUNTIME_PROFILE_ID), scope: z.literal(WEB_API_RUNTIME_SCOPE),
   challenge: RuntimeInstallChallengeSchema, createdAt: z.string().datetime(), manifest: RuntimeInstallManifestSchema,
   runnerEnvironment: ProjectSetupRunnerEnvironmentSchema, runnerToolchain: ProjectSetupRunnerToolchainSchema,
-  // A record from before the agent probes (M1.3 and M1.4 up to Task 4.4) carries the eleven base probes and no more; a record of Task 4.5 or later carries all fourteen. Nothing between.
+  // A record from before the agent probes (M1.3 and M1.4 up to Task 4.4) carries the eleven base probes and no more; one of Task 4.5 up to the private-network probe carries fourteen; the current one carries all of them. Nothing between.
   probes: z.array(ProbeRecordSchema).min(WEB_API_BASE_PROBE_COUNT).max(WEB_API_REQUIRED_PROBES.length),
 }).strict().superRefine((proposal, context) => {
-  if (proposal.probes.length !== WEB_API_BASE_PROBE_COUNT && proposal.probes.length !== WEB_API_REQUIRED_PROBES.length) {
-    context.addIssue({ code: "custom", path: ["probes"], message: `a qualification holds the ${WEB_API_BASE_PROBE_COUNT} base probes or all ${WEB_API_REQUIRED_PROBES.length}, never part of the agent probes` });
+  if (proposal.probes.length !== WEB_API_BASE_PROBE_COUNT && proposal.probes.length !== WEB_API_BEFORE_PRIVATE_NETWORK_PROBE_COUNT && proposal.probes.length !== WEB_API_REQUIRED_PROBES.length) {
+    context.addIssue({ code: "custom", path: ["probes"], message: `a qualification holds the ${WEB_API_BASE_PROBE_COUNT} base probes, ${WEB_API_BEFORE_PRIVATE_NETWORK_PROBE_COUNT} or all ${WEB_API_REQUIRED_PROBES.length}, never part of a group` });
   }
   if (proposal.challenge.profileId !== WEB_API_RUNTIME_PROFILE_ID) context.addIssue({ code: "custom", path: ["challenge", "profileId"], message: "challenge profile must be the web/API runtime profile" });
   if (Date.parse(proposal.createdAt) < Date.parse(proposal.challenge.issuedAt) || Date.parse(proposal.createdAt) >= Date.parse(proposal.challenge.expiresAt)) {

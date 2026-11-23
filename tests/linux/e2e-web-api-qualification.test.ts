@@ -26,7 +26,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     // Only the worker identity and the installed-manifest read are replaced: this CI host is not the EC2 worker and has no installed root.
     // The manifest still hashes the probe assets and the qualification app in this checkout, so a changed file fails against its pinned digest.
     const fake = fakeLinuxEnvironment(now);
-    // A web/API challenge lives an hour, which fourteen container runs fit inside.
+    // A web/API challenge lives an hour, which fifteen container runs fit inside.
     const challenge = webApiChallenge(now);
     const { runRoot, evidenceRoot } = await linuxProbeScratch();
     const outputRoot = (await linuxProbeScratch()).evidenceRoot;
@@ -57,6 +57,8 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     expect(byId.get("build-lateral-denial-v1")).toMatchObject({ runUnavailableReason: "build-failed", buildExitCode: 7 });
     // The app of this probe only starts, so the run only passes, when its connection to the host timed out.
     expect(byId.get("app-host-denial-v1")).toMatchObject({ collectorStatus: "PASS", runUnavailableReason: null });
+    // The app of this probe only starts, so the run only passes, when every private-network address it dialled (metadata, resolvers, 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10) was blocked.
+    expect(byId.get("app-private-denial-v1")).toMatchObject({ collectorStatus: "PASS", runUnavailableReason: null });
     // Chromium ran with its own sandbox on: the retained attestation (re-judged by the registrar below) shows every renderer behind its own filter and namespaces.
     expect(byId.get("chromium-sandbox-v1")).toMatchObject({ collectorStatus: "PASS", runUnavailableReason: null });
     // Task 4.5: the scripted model finds the button, a model that does nothing leaves the case UNKNOWN agent-no-download, and the app started behind the guard that found no path to the model.

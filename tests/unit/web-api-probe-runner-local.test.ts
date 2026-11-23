@@ -61,8 +61,8 @@ describe.runIf(enabled)("production probe runner around the real executor (local
     const admin: AuthenticatedIdentity = { issuer: "test", subject: "admin", ownerKey: "admin", isAdministrator: true, claims: {} };
     const registry = createFakeRuntimeRegistry(Date.now()); registry.seedChallenge(challenge);
     await expect(registerRuntimeInstallation(registry.deps, admin, { proposal, proposalSha256: webApiRuntimeInstallProposalSha256(proposal) })).resolves.toMatchObject({ featureRevisions: { web: 1, api: 1 } });
-    // All fourteen probes were run and accepted, so the registered web row lists AI navigation and its model channel; the API row never does.
-    expect(proposal.probes).toHaveLength(14);
+    // All fifteen probes were run and accepted, so the registered web row lists AI navigation and its model channel; the API row never does.
+    expect(proposal.probes).toHaveLength(15);
     const rows = (registry.transactions[0]! as Array<{ Put?: { Item?: Record<string, unknown> } }>).flatMap((write) => (write.Put?.Item?.entityType === "E2E_FEATURE_VERIFIER" ? [write.Put.Item as { capabilities: { kind: string; supportedSteps: string[] } }] : []));
     expect(rows.find((row) => row.capabilities.kind === "web")!.capabilities).toMatchObject({ supportedSteps: ["navigate", "fill", "click", "choose-file", "agent"], modelChannel: "rovara-e2e-model-channel/v1" });
     expect(rows.find((row) => row.capabilities.kind === "api")!.capabilities.supportedSteps).not.toContain("agent");

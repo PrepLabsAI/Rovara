@@ -5,6 +5,8 @@ import {
   E2ERuntimeReadinessSchema,
   Ec2RuntimeBindingSchema,
   resolveE2ERuntimeReadiness,
+  SANDBOX_EGRESS_PROBE_IDS,
+  webApiRuntimeRowProvesSandbox,
   type E2EAssertion,
   type E2EEvidenceScope,
   type E2EReadyRuntimeProfile,
@@ -96,7 +98,13 @@ export function admitE2ERegisteredRuntime(recordInput: unknown, expected: Expect
 
 type RuntimeRowReader = (key: { pk: string; sk: string }) => Promise<unknown>;
 
-/** Reads the `#web` and `#api` rows of a profile and admits each; a throttled or failed read is logged and fails closed to "not READY". */
+/**
+ * Reads the `#web` and `#api` rows of a profile and admits each; a throttled or failed read is logged and fails closed to "not READY".
+ *
+ * This is the one reader every path that starts or plans a browser or API check goes through (the proposal's targets, planning, plan approval, the round's admission), so the egress
+ * gate sits here: a row is READY only when its probe manifest lists every probe of `SANDBOX_EGRESS_PROBE_IDS`. A runtime qualified before a probe was added lacks it and is not READY
+ * for any check until it is qualified again; nothing else reads these rows, so a task with no browser or API check is not touched.
+ */
 async function readAdmittedWebApiRuntimes(input: { runtimeCatalogId: string; profileId: string; now: number; read: RuntimeRowReader;
   binding?: Ec2RuntimeBinding; /** Rethrow a failed read instead of treating the row as not READY, for a caller that must tell the two apart. */ strict?: boolean }): Promise<Array<{ kind: "web" | "api"; runtime: E2ERegisteredRuntime }>> {
   const admittedRows: Array<{ kind: "web" | "api"; runtime: E2ERegisteredRuntime }> = [];
@@ -117,7 +125,18 @@ async function readAdmittedWebApiRuntimes(input: { runtimeCatalogId: string; pro
       binding: input.binding ?? binding as Ec2RuntimeBinding, capabilityDigest, now: input.now, kind });
     if (runtime !== undefined) admittedRows.push({ kind, runtime });
   }
-  return admittedRows;
+  return onlyProvenRuntimes(admittedRows, input);
+}
+
+/** The egress gate: the rows that list every egress probe. A row that does not is said (the ids only, never a row), so an operator can tell "qualify the runtime again" from "there is no runtime". */
+function onlyProvenRuntimes(rows: Array<{ kind: "web" | "api"; runtime: E2ERegisteredRuntime }>, input: { runtimeCatalogId: string; profileId: string }): Array<{ kind: "web" | "api"; runtime: E2ERegisteredRuntime }> {
+  const proven = rows.filter(({ runtime }) => webApiRuntimeRowProvesSandbox(runtime));
+  rows.filter((row) => !proven.includes(row)).forEach(({ kind, runtime }) => {
+    const listed = new Set([...runtime.probeManifest.positiveProbeIds, ...runtime.probeManifest.negativeProbeIds]);
+    console.warn(JSON.stringify({ component: "broker", level: "warn", event: "e2e-runtime-sandbox-unproven", kind, profileId: input.profileId, runtimeCatalogId: input.runtimeCatalogId,
+      missingProbeIds: SANDBOX_EGRESS_PROBE_IDS.filter((probeId) => !listed.has(probeId)) }));
+  });
+  return proven;
 }
 
 /**

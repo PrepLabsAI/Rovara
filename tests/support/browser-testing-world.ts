@@ -58,6 +58,8 @@ export interface BrowserWorldOptions {
   snapshot: () => E2ESourceSnapshot;
   /** Whether the sandbox is available (a test flips it). */
   sandbox?: { available: boolean };
+  /** Asks the real runtime seam instead (the registered runtime rows of the world's own store): what the core's wiring does. Wins over `sandbox`. */
+  sandboxFrom?: (store: DocumentStore, companyId: OrgId, project: string) => Promise<boolean>;
   /** The audit sink refuses (a test sets it). */
   audit?: { failing: boolean };
 }
@@ -118,7 +120,7 @@ export async function browserWorld(options: BrowserWorldOptions) {
       setupRun: { standing, modelAccessConfigured: () => true, approval: approvalFor(runtime.companyId) } satisfies HostedSetupRunWiring,
       browserTesting: {
         standing, approval: approvalFor(runtime.companyId), objects,
-        capture: async () => options.snapshot(), readyProfiles: async () => READY, sandboxAvailable: async () => sandbox.available,
+        capture: async () => options.snapshot(), readyProfiles: async () => READY, sandboxAvailable: async (companyId, project) => (options.sandboxFrom === undefined ? sandbox.available : options.sandboxFrom(world.store, companyId, project)),
       },
       auditFor: (_caller, inner) => ({ stage: (event) => inner.stage(event), record: async (event) => sink.record(event) }),
     }),

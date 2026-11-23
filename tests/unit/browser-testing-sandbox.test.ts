@@ -17,8 +17,8 @@ function rowWith(probeIds: readonly string[], overrides: Record<string, unknown>
 }
 
 describe("which probes make the sandbox claim true", () => {
-  it("names five probes, every one of them a probe the install qualification already requires", () => {
-    expect([...SANDBOX_EGRESS_PROBE_IDS].sort()).toEqual(["api-egress-denial-v1", "app-host-denial-v1", "build-imds-denial-v1", "build-lateral-denial-v1", "web-egress-denial-v1"]);
+  it("names six probes, every one of them a probe the install qualification requires", () => {
+    expect([...SANDBOX_EGRESS_PROBE_IDS].sort()).toEqual(["api-egress-denial-v1", "app-host-denial-v1", "app-private-denial-v1", "build-imds-denial-v1", "build-lateral-denial-v1", "web-egress-denial-v1"]);
     for (const id of SANDBOX_EGRESS_PROBE_IDS) expect(WEB_API_REQUIRED_PROBE_IDS).toContain(id);
   });
 
@@ -26,7 +26,7 @@ describe("which probes make the sandbox claim true", () => {
     expect(runtimeProvesSandbox(rowWith([...SANDBOX_EGRESS_PROBE_IDS]))).toBe(true);
     expect(runtimeProvesSandbox(rowWith(["web-csv-positive-v1", "web-csv-negative-v1", ...SANDBOX_EGRESS_PROBE_IDS]))).toBe(true);
     for (const missing of SANDBOX_EGRESS_PROBE_IDS) expect(runtimeProvesSandbox(rowWith(SANDBOX_EGRESS_PROBE_IDS.filter((id) => id !== missing))), missing).toBe(false);
-    expect(runtimeProvesSandbox(webApiRow("web"))).toBe(false);
+    expect(runtimeProvesSandbox(rowWith(["web-csv-positive-v1", "web-csv-negative-v1", "web-egress-denial-v1"]))).toBe(false);
   });
 });
 
@@ -46,7 +46,7 @@ describe("whether the sandbox is available for a project", () => {
   });
 
   it("is NOT available when the runtime did not list the probes, when the row is expired or parked, when it is another binding's, or when there is none", async () => {
-    expect(await sandboxAvailableFor((await company([{ kind: "web", row: webApiRow("web") }])).input, 1)).toBe(false);
+    expect(await sandboxAvailableFor((await company([{ kind: "web", row: rowWith(["web-csv-positive-v1", "web-csv-negative-v1", "web-egress-denial-v1"]) }])).input, 1)).toBe(false);
     expect(await sandboxAvailableFor((await company([{ kind: "web", row: rowWith([...SANDBOX_EGRESS_PROBE_IDS], { expiresAt: new Date(NOW - 1000).toISOString(), qualifiedAt: new Date(NOW - 60_000).toISOString() }) }])).input, 1)).toBe(false);
     expect(await sandboxAvailableFor((await company([{ kind: "web", row: rowWith([...SANDBOX_EGRESS_PROBE_IDS], { state: "PARKED" }) }])).input, 1)).toBe(false);
     expect(await sandboxAvailableFor((await company([])).input, 1)).toBe(false);
