@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import type { OrgId } from "@agentx/contracts";
 import { createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
-import { costPartition } from "../../packages/broker/src/core/cost/ledger.js";
+import { companyDayKey, costPartition } from "../../packages/broker/src/core/cost/ledger.js";
 import { taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { TASK_SPEND_UNKNOWN } from "../../packages/broker/src/core-host/company-task-spend.js";
 import { taskKeySigner } from "../../packages/broker/src/core-host/gateway-model-access.js";
@@ -112,5 +112,54 @@ describe("the laptop's own taskSpendUsd is unchanged", () => {
     // L4-TA6: and its live cap is the run limit (`taskLimitUsd`, the round cap's own figure), set only while the run limit is held.
     expect(app).toContain("...(options.runLimit === false ? {} : { taskCapUsd: async (task: TaskRecord) => taskLimitUsd(task) }),");
     expect(autofix).toContain("const capUsd = await autofixCapUsd(deps, task, config.capUsd);");
+  });
+});
+
+// Removing either hosted wiring must refuse this check rather than assume room.
+describe("the broker's automatic-fix day allowance", () => {
+  it("is company-bound and reads the fitted round against fresh dollar load", async () => {
+    const w = await world({ ROVARA_CORE_COMPANY_DAY_CAP_USD: "25" });
+    const a = (await w.root.app.runtimeFor(A)).flow.deps;
+    await w.total(A, 1_000_000);
+    const task = { companyId: A, taskId: TASK, project: "demo" };
+    const room = a.autofixDayBudgetHasRoom;
+    expect(typeof room).toBe("function");
+    expect(await room!(task as never, 3)).toBe(true);
+    const day = new Date(w.w.clock.now).toISOString().slice(0, 10);
+    await w.w.store.put({ item: { ...companyDayKey(A, day), loadMicros: 22_000_001, uncountedEntries: 0 } });
+    expect(await room!(task as never, 3)).toBe(false);
+    expect(await room!(task as never, 2.999999)).toBe(true);
+    expect(await room!({ ...task, companyId: B } as never, 1)).toBe(false);
+  });
+});
+
+// Stack regression: losing either hosted composition line must fail independently of the dollar reader.
+describe("the stacked broker keeps required application checks and creator authority", () => {
+  it("wires every application seam on both company runtimes alongside the dollar reader", async () => {
+    const w = await world();
+    for (const company of [A, B]) {
+      const flow = (await w.root.app.runtimeFor(company)).flow.deps;
+      const application = flow.applicationE2E;
+      expect(application).toBeDefined();
+      expect(typeof application?.planning.context).toBe("function");
+      expect(typeof application?.planning.approve).toBe("function");
+      expect(typeof application?.rounds.selection).toBe("function");
+      expect(typeof application?.rounds.runRow).toBe("function");
+      expect(typeof application?.rounds.retry).toBe("function");
+      expect(application?.rounds.records).toBeDefined();
+      expect(application?.rounds.verification).toBe(flow.e2e);
+      expect(typeof application?.results.project).toBe("function");
+      expect(typeof application?.publication).toBe("function");
+      expect(flow.autofixDayBudgetHasRoom).toBeTypeOf("function");
+    }
+  });
+
+  it("keeps sign-in authority rows condition-only in the composed hosted store", async () => {
+    const w = await world();
+    const store = (await w.root.app.runtimeFor(A)).flow.deps.store;
+    const key = { pk: "DEVELOPER#maya", sk: "META" };
+    await expect(store.transact([{ kind: "put", item: { ...key, entityType: "DEVELOPER", revoked: false } }]))
+      .rejects.toMatchObject({ code: "invalid_request" });
+    expect(await w.w.store.get(key)).toBeUndefined();
   });
 });

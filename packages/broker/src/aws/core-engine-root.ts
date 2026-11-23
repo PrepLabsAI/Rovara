@@ -1,3 +1,4 @@
+import { hostedAutofixDayBudgetHasRoom } from "../core-host/autofix-day-budget.js";
 import type { E2ESourceSnapshot } from "@agentx/contracts";
 import { hostedAuthorityStore } from "./core-e2e-authority-store.js";
 import { wireHostedApplicationE2E } from "./core-application-e2e.js";
@@ -355,7 +356,8 @@ export interface BrokerCoreRoot {
 }
 
 const WORKSPACE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
-const CORE_CALLBACK = /^\/v1\/internal\/workspaces\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/operations\/[0-9a-f-]{36}\/[a-z-]+$/u;
+/** A worker callback's path. The action is lower-case letters, digits and hyphens: `e2e-admission` and `e2e-evidence` have a digit, and a route that refused it sent those callbacks to the old routes. */
+export const CORE_CALLBACK = /^\/v1\/internal\/workspaces\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/operations\/[0-9a-f-]{36}\/[a-z0-9-]+$/u;
 const callbackAnswer = (statusCode: number, code: string, message: string): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: { code, message } }) });
 const CORE_SETTINGS_REFUSAL_WORDS = "The core engine settings are not readable.";
 
@@ -877,6 +879,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       // L4-TSU: what a task has cost, for automatic fixing's per-task dollar cap: the settled figure in THIS company's cost ledger, read fresh each time; anything not known to be complete throws (an ask, never "nothing spent").
       taskSpendUsd: createCompanyTaskSpend({ store: registry.require("storage"), companyId, refused: (reason) => log({ event: "core_engine.task_spend_refused", companyId, reason }) }),
       // L4-TA6: and the cap it is held to: the task's LIVE cap, the value Admission and the run stop enforce (the install's cap lowered to the project's own limit), never autofix's larger default; unknown throws and asks.
+      autofixDayBudgetHasRoom: hostedAutofixDayBudgetHasRoom({ store: registry.require("storage"), companyId, settings: admissionSettings, now }),
       taskCapUsd: hostedTaskCapUsd({ store: registry.require("storage"), companyId, settings: admissionSettings, projectTaskCap }),
       // L2-4 + core-task-web-routes (#1045): every person's start (web, Slack, API, intake) gets its session in its own start transaction, as on a laptop, so Retry, Close and the log reach it;
       // a task started from a ticket also gets the ticket binding there. A system owner's start gets nothing added.

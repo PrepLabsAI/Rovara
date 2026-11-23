@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { AUTO_FIX_ASK_REASONS, AUTO_FIX_CODES, workflowAutoFixCounts, type AutoFixAskReason, type AutoFixCode, type WorkflowSnapshot } from "@agentx/contracts";
+import { AUTO_FIX_ASK_REASONS, AUTO_FIX_CODES, workflowAutoFixCounts, type AutoFixCode, type WorkflowSnapshot } from "@agentx/contracts";
 import { E2E_OWNER_SENTENCES } from "../e2e/owner-sentences.js";
 
 /**
@@ -21,9 +21,13 @@ export const AUTOFIX_CARD_HOLD_MS = 10 * 60_000;
  * Why Rovara asked instead of acting, kept on the task beside the blocked revision it is for so the Slack card and the page can say it. `capUsd` is the cap that was hit (spend-cap).
  * `groups` is EVERY UNKNOWN group of the round (not only the first) with its own result on the original code, when the fault was unclear.
  */
+/** The policy's reasons plus the one the broker alone knows: the company-day allowance could not be read, so Rovara asks instead of fixing (the policy only ever sees "no room"). */
+export const AUTOFIX_RECORDED_ASK_REASONS = [...AUTO_FIX_ASK_REASONS, "day-budget-unreadable"] as const;
+export type AutoFixRecordedAskReason = (typeof AUTOFIX_RECORDED_ASK_REASONS)[number];
+
 export const AutoFixAskSchema = z.object({
   workflowRevision: z.number().int().positive(),
-  reason: z.enum(AUTO_FIX_ASK_REASONS),
+  reason: z.enum(AUTOFIX_RECORDED_ASK_REASONS),
   codes: z.array(z.enum(AUTO_FIX_CODES)).max(30),
   capUsd: z.number().nonnegative().finite().optional(),
   groups: z.array(z.object({ id: z.string().regex(/^[A-Za-z0-9._-]{1,80}$/), original: z.enum(AUTO_FIX_GROUP_RESULTS) }).strict()).max(AUTOFIX_ASK_GROUPS_MAX).optional(),
@@ -101,7 +105,7 @@ export function autoFixCodeSentence(code: AutoFixCode): string {
 }
 
 /** Why Rovara asked, in a sentence that names the limit, the cap or the budget it hit. */
-export function autoFixAskReasonSentence(reason: AutoFixAskReason, _capUsd?: number, failedOnOriginal = true): string {
+export function autoFixAskReasonSentence(reason: AutoFixRecordedAskReason, _capUsd?: number, failedOnOriginal = true): string {
   switch (reason) {
     case "needs-a-person": return "Only a person can fix this; new code or a retry would not.";
     case "original-code-also-fails": return failedOnOriginal ? "The same checks also fail on the original code, so new code may not fix it." : "The original code could not be checked, so I can't tell whether new code would fix it.";
@@ -116,7 +120,8 @@ export function autoFixAskReasonSentence(reason: AutoFixAskReason, _capUsd?: num
     case "retry-limit": return "I already retried this once for this code, which is my limit.";
     case "total-limit": return "I reached my limit of 6 automatic actions on this task.";
     case "spend-cap": return "The automatic-fix limit was reached.";
-    case "day-budget": return "The project's daily AI budget has no room for another automatic round today.";
+    case "day-budget": return "The company's daily AI allowance has no room for another automatic round today.";
+    case "day-budget-unreadable": return "Couldn't check today's AI budget, so Rovara is asking instead of fixing automatically.";
     case "history-full": return "This task's decision history is full.";
     case "inputs-missing": return "I could not read what this task has spent so far, or its spending limit, so I did not act.";
   }

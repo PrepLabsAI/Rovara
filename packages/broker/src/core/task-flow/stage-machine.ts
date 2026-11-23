@@ -9,6 +9,7 @@ import { workspaceKeys, locateWorkspace } from "./workspace-location.js";
 // A step is: [task.workflow := next (if revision = r)] + [workspace := BUSY under a new fence] + [the operation and its staged message]
 // + [whatever else must commit with it, such as resolving the dispatch row]. If the transaction does not apply, nothing happened.
 import { createHash } from "node:crypto";
+import { RUN_PRICE_REFUSED_MESSAGE } from "@agentx/model-runtime/provider-failure";
 import {
   AgentXError,
   agentXError,
@@ -53,7 +54,7 @@ import type { TaskFlowDeps } from "./deps.js";
 import { dispatchRowItem, dueDispatchRows, rescheduleRowItem, resolveRowItem } from "./dispatch-rows.js"; import { questionEntriesOf } from "../task-log/entries.js"; import { taskLogItems } from "../task-log/store.js";
 import { dispatchRowKey, taskKey } from "./keys.js";
 import { commentsForPlanningStep } from "../plan/comments.js";
-import { structuredPlanContextOf } from "../plan/context.js";
+import { structuredPlanContextOf, structuredPlanDispatch } from "../plan/context.js";
 import { planUnreadablePrompt } from "../plan/process.js";
 import { readTask } from "./reads.js";
 import { fromDocument, READING_DISPATCH_KINDS, toDocument, type DispatchRowRecord, type DispatchSpec, type MaintenanceExpectation, type OperationRecord, type PublicationExpectation, type TaskPointerRecord, type TaskRecord, type WorkspaceRecord } from "./records.js";
@@ -357,7 +358,7 @@ export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRe
   let mode: "UNDERSTAND" | "PLAN";
   let requestId: string;
   /** A structured planning run says so in its payload, so the worker reads its answer as a plan document and the broker reads the same. */
-  let planPayload: Record<string, JsonValue> | undefined;
+  let dispatched: ReturnType<typeof structuredPlanDispatch> | undefined;
   try {
     if (row.kind === "UNDERSTAND") {
       if (workflow.stage !== "UNDERSTAND" || workflow.state !== "READY") return stale();
@@ -379,7 +380,7 @@ export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRe
         ...(feedback.length === 0 ? {} : { feedback }),
         ...(structured === undefined ? {} : { structured }),
       });
-      planPayload = structured === undefined ? undefined : { planFormat: "structured", ...(workflow.path === "FULL" && workflow.reviewPhase !== undefined ? { workflowPhase: workflow.reviewPhase } : {}) };
+      dispatched = structuredPlanDispatch(structured, workflow);
       mode = "PLAN";
       requestId = workflowRequestId("agentx-auto-plan-revision", task.taskId, workflow.revision, createHash("sha256").update(planPrompt, "utf8").digest("hex"));
     } else {
@@ -399,7 +400,7 @@ export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRe
         // Retry planning after an answer Rovara could not read: the planner is told what was wrong with it.
         ...(structured === undefined || task.planUnreadable === undefined ? {} : { revision: planUnreadablePrompt(task.planUnreadable.errors) }),
       });
-      planPayload = structured === undefined ? undefined : { planFormat: "structured", ...(workflow.path === "FULL" && workflow.reviewPhase !== undefined ? { workflowPhase: workflow.reviewPhase } : {}) };
+      dispatched = structuredPlanDispatch(structured, workflow);
       const designInstructions = deps.designReview?.planInstructions(workflow);
       if (designInstructions !== undefined) prompt = `${prompt}\n\n${designInstructions}`;
       mode = "PLAN";
@@ -413,7 +414,7 @@ export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRe
   if (workspace.status === "PREPARING") return "WAITING";
   const accepted = await acceptStepWithNotes(deps, {
     task, workspace, requestId, prompt, workflowMode: mode, workflow: { current: workflow, next }, extra: [resolve()],
-    requires: ["task.workflowMode", ...(planPayload === undefined ? [] : ["task.structuredPlans"])], ...(planPayload === undefined ? {} : { payload: planPayload }),
+    requires: dispatched?.requires ?? ["task.workflowMode"], ...(dispatched?.payload === undefined ? {} : { payload: dispatched.payload }),
   });
   if (accepted.result === "DUPLICATE") await deps.store.transact([resolve()]);
   return accepted.result;
@@ -520,8 +521,10 @@ export async function queueFirstRun(deps: TaskFlowDeps, task: TaskRecord): Promi
  * the first one's) and does nothing. Never throws for a task that moved on.
  */
 async function pauseInstallTask(deps: TaskFlowDeps, task: TaskRecord, operation: OperationRecord, ended: { status: string; error?: string | undefined }): Promise<boolean> {
-  if (ended.status !== "FAILED" || ended.error !== `MODEL_NOT_ALLOWED: ${ROVARA_AI_PAUSED_MESSAGE}` || task.workflow === undefined || operation.workflowRevision !== task.workflow.revision) return false;
-  await blockStoppedStep(deps, task.taskId, operation, ROVARA_AI_PAUSED_MESSAGE);
+  // Two fixed gateway stops end the step with their own plain words, and the step waits for Retry: the install pause, and a run whose price authorization no longer fits the call (a Retry mints a fresh one).
+  const reason = ended.error === `MODEL_NOT_ALLOWED: ${ROVARA_AI_PAUSED_MESSAGE}` ? ROVARA_AI_PAUSED_MESSAGE : ended.error === `MODEL_NOT_ALLOWED: ${RUN_PRICE_REFUSED_MESSAGE}` ? RUN_PRICE_REFUSED_MESSAGE : undefined;
+  if (ended.status !== "FAILED" || reason === undefined || task.workflow === undefined || operation.workflowRevision !== task.workflow.revision) return false;
+  await blockStoppedStep(deps, task.taskId, operation, reason);
   return true;
 }
 

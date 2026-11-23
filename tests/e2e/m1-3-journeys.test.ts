@@ -177,7 +177,7 @@ describe.runIf(dockerReady)("M1.3 native core journeys", () => {
         faux.setResponses([fauxAssistantMessage([fauxToolCall("bash", { command: `cp -R "${dir}/." repo/demo/` })]), fauxAssistantMessage(message)]);
         const done = await runOperation("IMPLEMENT");
         expect(done.operation.status, JSON.stringify(done.operation)).toBe("SUCCEEDED");
-        expect(workflowNow(), JSON.stringify(workflowNow())).toMatchObject({ stage: "VERIFY", state: "WAITING" });
+        expect(workflowNow(), JSON.stringify(workflowNow())).toMatchObject({ stage: "VERIFY" }); expect(["WAITING", "RUNNING"], "the round is queued, or the core already started it").toContain(workflowNow().state);
         await completeReadiness();
       };
       const purposeOf = (run: Awaited<ReturnType<typeof runOperation>>) => (run.invocation as { payload: { workflowE2EAdmission?: { purpose?: string } } }).payload.workflowE2EAdmission?.purpose;
@@ -360,7 +360,7 @@ describe.runIf(dockerReady)("M1.3 native core journeys", () => {
     await writePreparationManifest(Number((harness.db.get(taskKey.pk, taskKey.sk) as { startingRevision?: number }).startingRevision ?? 1));
     const implemented = await runOperation("IMPLEMENT");
     expect(implemented.operation.status, JSON.stringify(implemented.operation)).toBe("SUCCEEDED");
-    expect(workflowNow(), JSON.stringify(workflowNow())).toMatchObject({ stage: "VERIFY", state: "WAITING" });
+    expect(workflowNow(), JSON.stringify(workflowNow())).toMatchObject({ stage: "VERIFY" }); expect(["WAITING", "RUNNING"], "the round is queued, or the core already started it").toContain(workflowNow().state);
     await completeReadiness();
     const checks = await runOperation("CHECKS");
     expect(checks.operation.status, JSON.stringify({ operation: checks.operation, workflow: workflowNow() })).toBe("SUCCEEDED");

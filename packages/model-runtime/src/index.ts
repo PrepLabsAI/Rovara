@@ -15,7 +15,8 @@ export { createE2EProviderInvoke } from "./e2e-provider-invoke.js";
 export type { E2EProviderInvoke, E2EProviderInvokeDependencies } from "./e2e-provider-invoke.js";
 export * from "./e2e-environment-guard.js";
 export * from "./e2e-route-derive.js";
-export { classifyProviderFailure, isNetworkCode, signalPattern, BEDROCK_SIGNAL_PATTERN, KEYED_SIGNAL_PATTERN, MODEL_NOT_ENABLED_SIGNAL, MODEL_NOT_OFFERED_SIGNAL } from "./provider-failure.js";
+export { classifyProviderFailure, isNetworkCode, signalPattern, BEDROCK_SIGNAL_PATTERN, KEYED_SIGNAL_PATTERN, MODEL_NOT_ENABLED_SIGNAL, MODEL_NOT_OFFERED_SIGNAL, RUN_PRICE_REFUSED_CODE, RUN_PRICE_REFUSED_MESSAGE, RUN_PRICE_REFUSED_SIGNAL, runPriceRefusedBody } from "./provider-failure.js";
+import { RUN_PRICE_REFUSED_MESSAGE, runPriceRefusedBody } from "./provider-failure.js";
 export type { ProviderFailureFacts } from "./provider-failure.js";
 import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, ROVARA_AI_PAUSED_MESSAGE, isRovaraAiPaused, agentXError, isClaudeAgentModel, isKeyedModelProvider, type RunPrice, type InvocationModelRoute, type KeyedModelProvider, type ModelIdentifier, type ThinkingLevel } from "@agentx/contracts";
 import { InMemoryCredentialStore, createAssistantMessageEventStream, type Api, type Model, type SimpleStreamOptions, type TranscriptContext, type AssistantMessage, type AssistantMessageEventStream, type OpenAICompletionsCompat } from "@earendil-works/pi-ai";
@@ -380,7 +381,9 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
   // Set when the model gateway answered 400 because it does not offer the routed model (DEC 254g).
   let notOffered = false;
   let installPaused = false;
-  const errorText = (ordinary: string): string => installPaused ? ROVARA_AI_PAUSED_MESSAGE : ordinary;
+  // Set when the model gateway answered 409 `run_price_authorization_required`: the run's price authorization no longer fits the call. A stop, never a retry (see observedFetch).
+  let runPriceRefused = false;
+  const errorText = (ordinary: string): string => installPaused ? ROVARA_AI_PAUSED_MESSAGE : runPriceRefused ? RUN_PRICE_REFUSED_MESSAGE : ordinary;
   let returnedModel: string | undefined;
   let returnedProvider: string | undefined;
   const observedFetch: typeof fetch = async (input, init) => {
@@ -395,6 +398,14 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
     if (response.status === 403 && proxyKey !== undefined && plan === undefined) notEnabled = modelNotEnabledBody((await response.clone().text().catch(() => "")).slice(0, 65_536)) || notEnabled;
     // DEC 254g: the model gateway is the authority on which models it offers. Its 400 for a model it does not offer is read (matched against its fixed words, never kept) so the step fails as "model not offered".
     if (response.status === 400 && route?.api === "anthropic-messages" && plan === undefined) notOffered = gatewayModelNotOfferedBody((await response.clone().text().catch(() => "")).slice(0, 65_536)) || notOffered;
+    // The gateway's 409 for a run whose price authorization no longer fits the call is a STOP: the same grant is refused again. The body is matched (never kept) on the hosted gateway route only. The
+    // answer is handed on with `x-should-retry: false` so the Anthropic client does not retry it, and its error text is the fixed sentence, which Pi's retry list does not match: one call, no retry.
+    runPriceRefused = response.status === 409 && route !== undefined && plan === undefined && runPriceRefusedBody(409, (await response.clone().text().catch(() => "")).slice(0, 65_536));
+    if (runPriceRefused) {
+      const headers = new Headers(response.headers);
+      headers.set("x-should-retry", "false");
+      return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+    }
     if (!response.ok || !response.body) return response;
     // Observe only the serving model and router provider identifiers; never record request/response bodies.
     const decoder = new TextDecoder();
