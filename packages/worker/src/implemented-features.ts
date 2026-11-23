@@ -1,4 +1,4 @@
-import { PREPARE_EVAL_HEALTH_FEATURE, DESIGN_REVIEW_WORKER_FEATURE, ROVARA_SKILLS_FEATURE, EVAL_PROMPT_LOCATIONS_FEATURE, KNOWLEDGE_CONTEXT_FEATURE, WIKI_AGENT_FEATURE, EVAL_FILES_FEATURE, GENERAL_FAKES_FEATURE, TASK_FLAKY_RERUN_FEATURE, NIGHTLY_RUN_FEATURE, SECOND_REVIEWER_FEATURE, SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, STANDING_INSTRUCTIONS_FEATURE, WIKI_BUILD_FEATURE, TEST_ENV_BASELINE_FEATURE, USAGE_CHECKPOINTS_FEATURE, TEST_ENV_MULTI_REPO_FEATURE, type WorkerInvocationFeature } from "@agentx/contracts";
+import { PREPARE_COMPANY_REGISTRIES_FEATURE, PREPARE_EVAL_HEALTH_FEATURE, DESIGN_REVIEW_WORKER_FEATURE, ROVARA_SKILLS_FEATURE, EVAL_PROMPT_LOCATIONS_FEATURE, KNOWLEDGE_CONTEXT_FEATURE, WIKI_AGENT_FEATURE, EVAL_FILES_FEATURE, GENERAL_FAKES_FEATURE, TASK_FLAKY_RERUN_FEATURE, NIGHTLY_RUN_FEATURE, SECOND_REVIEWER_FEATURE, SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, STANDING_INSTRUCTIONS_FEATURE, WIKI_BUILD_FEATURE, TEST_ENV_BASELINE_FEATURE, USAGE_CHECKPOINTS_FEATURE, TEST_ENV_MULTI_REPO_FEATURE, type WorkerInvocationFeature } from "@agentx/contracts";
 
 /**
  * The optional invocation fields this worker implements, listed by hand and advertised on /ping. WORKER_INVOCATION_FEATURES
@@ -88,6 +88,8 @@ export const WORKER_IMPLEMENTED_FEATURES = [
   "task.testEnvCoveragePath.v1",
   // N9 (INTG2): the prepare invocation's `registries` (a project's private package registries for the setup and readiness commands; registry-config.ts).
   "prepare.registries.v1",
+  // Private packages P2a: the company's package token is used by the Rovara install container only (private-install.ts, wired in prepare.ts and main.ts); no project command or agent sees it. Listed only with that step wired (a test pins the wiring).
+  PREPARE_COMPANY_REGISTRIES_FEATURE,
   // L4-NETG follow-up: the prepare invocation's `egressS3Allow` (the project's exact S3 hosts, published for the host's egress gateway; sandbox-egress-allow.ts).
   "prepare.egressS3.v1",
   // Saved environments (SH25): the prepare invocation's `savedEnv` (a project's saved image to start from; saved-env/use.ts). Any problem with the image sets up fresh.

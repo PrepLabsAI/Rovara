@@ -392,6 +392,8 @@ else
   log 'verifier unavailable; worker continues with /tmp'
   args+=(--env TMPDIR=/tmp)
 fi
+t=/run/rovara-install; mountpoint -q $t || { mkdir -p $t; o=size=4m,mode=0700,uid=1000,gid=1000,nosuid,nodev,noexec; mount -t tmpfs -o $o,noswap tmpfs $t || mount -t tmpfs -o $o tmpfs $t; } 2>/dev/null
+! mountpoint -q $t || args+=(--volume $t:$t)
 t=/run/agentx-test-services; ! mountpoint -q $t || args+=(--volume $t:$t --env AGENTX_TEST_SERVICES_RUN_DIR=$t)
 t=/var/lib/rovara-egress; [[ ! -d $t ]] || args+=(--volume $t:$t)
 # L4-NETG2: the host resolvers a gateway-mode stage wrote (the daemon default name server is the egress gateway there, which this host-network container cannot reach). Before the image, which stays the last docker argument.

@@ -9,6 +9,7 @@ import { createWorkerCallbackSinks } from "./callback-client.js";
 import { createRepositoryCredentialProvider } from "./repository-credentials.js";
 import { createRegistryCredentialProvider } from "./registry-credentials.js";
 import { removeLeftoverRegistryConfigs } from "./registry-config.js";
+import { privateInstallOptionsFor, rememberRegistryTokens, removeLeftoverPrivateInstall } from "./private-install.js";
 import { runTaskInvocation } from "./run-task.js";
 import { publishWorkspace } from "./publish.js";
 import { maintainPullRequest } from "./maintain-pull-request.js";
@@ -85,6 +86,11 @@ if (taskShellSelection().kind === "sandbox") {
     (removed) => { if (removed.containers + removed.networks > 0) console.log(JSON.stringify({ component: "worker", event: "setup-run.leftovers.removed", ...removed })); },
     (error: unknown) => { console.error(`could not remove leftover setup runs: ${error instanceof Error ? error.message : String(error)}`); },
   );
+  // Private packages P2a: the install step's token folder, containers and bridge (a crash skips their removal). A folder that cannot be cleared keeps every sandbox from starting (install-secrets.ts).
+  await removeLeftoverPrivateInstall(await setupWorkspaceKey(rootPath), createDockerCli()).then(
+    (removed) => { if (removed.files + removed.containers + removed.networks > 0) console.log(JSON.stringify({ component: "worker", event: "private-install.leftovers.removed", ...removed })); },
+    (error: unknown) => { console.error(`could not remove leftover private package installs: ${error instanceof Error ? error.message : String(error)}`); },
+  );
   // Test services (TS-RN-3 rule 3): a killed worker's run networks and helpers (labelled, this workspace's only) go before any task starts, and the catalog images are pulled ahead. Does nothing on a worker with no test services configuration.
   await testServicesAtWorkerBoot({ rootPath });
   // The empty volumes a dev container's start mounted over the worker's folders go with their container; any no container uses are removed.
@@ -131,6 +137,8 @@ const state = createWorkerServerState(
         const controlPlaneUrl = requiredEnvironment("AGENTX_CONTROL_PLANE_URL");
         // The clone credential is fetched by the preparation alone; its values are remembered for a rebuild's secret scan.
         const cloneCredentials = rememberCredentials(createRepositoryCredentialProvider({ controlPlaneUrl, invocation }));
+        // The package registry's token is remembered the same way, for the saved-image build's secret scan (it is gone from the machine by then).
+        const registryTokens = rememberRegistryTokens(createRegistryCredentialProvider({ controlPlaneUrl, invocation }));
         // Test services (Prove): a candidate check that carries a dependency plan reports its usage record in the result, under the contract's key `testServicesUsage`.
         const testServicesUsage = collectTestServicesUsage();
         // L4-NETG follow-up: the project's exact S3 hosts for the host's egress gateway (gateway-mode workers only), before any setup command runs in a sandbox.
@@ -152,7 +160,9 @@ const state = createWorkerServerState(
           // N9 (INTG2): the project's private package registries, for the setup and readiness commands.
           // Saved environments (SH25): start from the project's saved image; any problem sets up fresh.
           ...(invocation.payload.savedEnv === undefined ? {} : { savedEnv: savedEnvOptionsOf(invocation.payload.savedEnv, createSavedEnvLoginProvider({ controlPlaneUrl, invocation }), undefined, createSavedEnvFallbackReporter({ controlPlaneUrl, invocation })) }),
-          ...(invocation.payload.registries === undefined ? {} : { registries: invocation.payload.registries, registryCredentialProvider: createRegistryCredentialProvider({ controlPlaneUrl, invocation }) }),
+          ...(invocation.payload.registries === undefined ? {} : { registries: invocation.payload.registries, registryCredentialProvider: registryTokens.provider }),
+          // Private packages P2a: the install container for the company's package registry, before any setup command or sandbox (private-install.ts). A read-only preparation installs only for a saved-environment rebuild.
+          privateInstall: privateInstallOptionsFor({ operationId: invocation.operationId, provider: registryTokens.provider, savedEnvBuild: invocation.payload.savedEnvBuild !== undefined }),
           ...(invocation.payload.testServices === undefined ? {} : { testServices: { dependencies: invocation.payload.testServices.dependencies, operationId: invocation.operationId, cancellation: cancellationController, onUsageRecord: testServicesUsage.collect, fixtureSet: createWorkerCallbackSinks({ controlPlaneUrl, invocation }).fixtureSet } }),
         });
         // Saved project images: a rebuild job builds the project's image from this read-only, pinned preparation (saved-env/rebuild.ts) and posts the result to the broker's lease route.
@@ -161,7 +171,7 @@ const state = createWorkerServerState(
             rootPath, controlPlaneUrl, invocation, manifest, docker: createDockerCli(),
             // The workspace root is shared by everything on this machine: any other running operation means the build would not be in a workspace of its own.
             otherOperations: async () => (anotherOperationActive(state, invocation.operationId) ? [{ id: "another-operation", rootPath }] : []),
-            cloneCredentialValues: () => cloneCredentials.values(),
+            cloneCredentialValues: () => [...cloneCredentials.values(), ...registryTokens.values()],
           });
         }
         if (invocation.payload.setupProve !== undefined) {
