@@ -141,3 +141,14 @@ it("a provisioning step never touches a session an accepted close or a destroy o
     expect(await w.sessions.get(w.workspaceId)).toEqual(before);
   }
 });
+
+it("F1: the bound close's deleter starts under its own name and its execution is recorded on the session, so the reconciler sees it RUNNING (the provisioner's finished ARN is never the one it reads)", async () => {
+  const w = await fixture();
+  const row = w.db.get(`WORKSPACE#${w.workspaceId}`, "SESSION")!;
+  const closeDestroy = { schemaVersion: 1, acceptedOperationId: randomUUID(), retention: w.retained.retained, effectId: "terminate-1", machineIds: ["machine-1"] };
+  w.db.set({ ...row, state: "DELETING", executionArn: "arn:aws:states:us-east-1:111122223333:execution:p:the-provisioners-finished-one", closeDestroy });
+  expect(await w.sessions.deleteRetainedSession(w.workspaceId, closeDestroy as never)).toBe(false);
+  const recorded = w.db.get(`WORKSPACE#${w.workspaceId}`, "SESSION")!["executionArn"];
+  expect(recorded).toBe("arn:aws:states:us-east-1:111122223333:execution:p:x");
+  expect(recorded).not.toContain("the-provisioners-finished-one");
+});

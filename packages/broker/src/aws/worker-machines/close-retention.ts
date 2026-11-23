@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { CloseRetentionReplySchema, CloseRetentionSchema, CLOSE_RETENTION_FEATURE, OrgIdSchema, SessionCloseDestroySchema, canonicalRetentionValue, change, when, workspaceSessionKey, type CloseRetention, type CloseRetentionPayload, type DocumentStore, type OrgId, type TransactItem, type WorkerInvocation, type WorkerMachines, type WorkspaceSession } from "@agentx/contracts";
+import { CloseRetentionReplySchema, CloseRetentionSchema, CLOSE_RETENTION_FEATURE, OrgIdSchema, retentionSuperseded, SessionCloseDestroySchema, canonicalRetentionValue, change, when, workspaceSessionKey, type CloseRetention, type CloseRetentionPayload, type DocumentStore, type OrgId, type TransactItem, type WorkerInvocation, type WorkerMachines, type WorkspaceSession } from "@agentx/contracts";
 import type { CloseInspectionProvider, RetainedCloseInspection } from "../../core/task-flow/close-inspection.js";
 import { taskKey } from "../../core/task-flow/keys.js";
 import { readWorkspace } from "../../core/task-flow/stage-machine.js";
@@ -55,7 +55,7 @@ export function createDispatcherCloseInspection(deps: HostedCloseDeps): CloseIns
     return reply.status === "verified" && reply.verified && reply.queryId === queryId && equal(reply.retention, retention);
   };
   const provider: CloseInspectionProvider = {
-    availability: async workspaceId => closeAvailability(await sessionFor(workspaceId)),
+    availability: async workspaceId => closeAvailability(await sessionFor(workspaceId), await readWorkspace({ store, companyId }, workspaceId)),
     wake: async workspaceId => {
       const session = await sessionFor(workspaceId);
       if (session === undefined) return "gone";
@@ -90,11 +90,12 @@ export function createDispatcherCloseInspection(deps: HostedCloseDeps): CloseIns
       const generation = operation.closePreflight.target ?? health.workspaceDataIdentity;
       if (generation === undefined || !health.features.includes(CLOSE_RETENTION_FEATURE) || !sameMachine(session, generation)) throw new Error("retention generation unavailable");
       const intent = { schemaVersion: 1 as const, operationId: input.operationId, fence: input.fence, generation };
-      if (session.closeRetention !== undefined && !equal({ ...session.closeRetention, retained: undefined }, intent)) throw new Error("another retention owns the session");
+      // A record of ANOTHER preflight is replaced (atomically, by the claim below) only when it is from an EARLIER fence and not an accepted close's: its step superseded it, so it guards nothing; the same preflight's own intent is resumed.
+      if (session.closeRetention !== undefined && !equal({ ...session.closeRetention, retained: undefined }, intent) && (session.closeRetention.operationId === input.operationId || session.closeRetention.fence >= input.fence || session.closeRetention.acceptedOperationId !== undefined)) throw new Error("another retention owns the session");
       const claimed = await store.transact([
         { kind: "check", key: location.workspaceKey, condition: when.and(when.eq("companyId", companyId), when.eq("activeOperationId", input.operationId), when.eq("fence", input.fence), when.notExists("legacyCloseClaim")) },
         { kind: "update", key: location.operationKey(input.operationId), condition: when.and(when.eq("companyId", companyId), when.eq("status", "RUNNING"), when.eq("closePreflight", toDocument(operation.closePreflight))), ops: [change.set("closePreflight.target", toDocument(generation))] },
-        { kind: "update", key: workspaceSessionKey(input.workspaceId), condition: when.and(sessionIdentity(session), session.closeRetention === undefined ? when.notExists("closeRetention") : when.eq("closeRetention", toDocument(session.closeRetention)), when.notExists("closeDestroy")), ops: [change.set("closeRetention", toDocument(session.closeRetention ?? intent)), change.set("workspaceDataIdentity", toDocument(generation))] },
+        { kind: "update", key: workspaceSessionKey(input.workspaceId), condition: when.and(sessionIdentity(session), session.closeRetention === undefined ? when.notExists("closeRetention") : when.eq("closeRetention", toDocument(session.closeRetention)), when.notExists("closeDestroy")), ops: [change.set("closeRetention", toDocument(session.closeRetention?.operationId === input.operationId ? session.closeRetention : intent)), change.set("workspaceDataIdentity", toDocument(generation))] },
       ]);
       if (!claimed.applied) throw new Error("retention preparation moved");
       const reply = await command(input.workspaceId, input.operationId, input.fence, { schemaVersion: 1, action: "retain", target: generation });
@@ -132,11 +133,13 @@ export function createDispatcherCloseInspection(deps: HostedCloseDeps): CloseIns
  * What a check of a workspace needs, read from its session item alone: a READY machine is checkable when its worker is known to retain (an old worker is never); a STOPPED or STOPPING one has no instance,
  * so its preparation starts it first (the new instance runs the install's current worker); anything else (failed, starting for a step, deleted, absent) cannot be checked.
  */
-export function closeAvailability(session: object | undefined): "ready" | "wake" | "unsupported" {
-  const { state, workerFeatures, closeRetention, closeDestroy } = (session ?? {}) as { state?: unknown; workerFeatures?: unknown; closeRetention?: unknown; closeDestroy?: unknown };
+export function closeAvailability(session: object | undefined, workspace?: { activeOperationId?: unknown; fence?: unknown }): "ready" | "wake" | "unsupported" {
+  const { state, workerFeatures, closeRetention, closeDestroy } = (session ?? {}) as { state?: unknown; workerFeatures?: unknown; closeRetention?: { operationId: string; fence: number; acceptedOperationId?: unknown }; closeDestroy?: unknown };
   // A session the retention protocol already owns cannot have a second check layered on it (its preparation refuses "another retention owns the session"): such a close is never promised a check. (Work CAN resume
   // on it: a Continue or a new step wakes a retained STOPPED session on its volume and lifts the retention; only a Close's check is not layered on a retention.)
-  if (closeRetention !== undefined || closeDestroy !== undefined) return "unsupported";
+  // ... unless a step has superseded the record (the workspace is no longer held by its preflight): then it guards nothing, and the check replaces it.
+  if (closeDestroy !== undefined || closeRetention?.acceptedOperationId !== undefined) return "unsupported";
+  if (closeRetention !== undefined && !retentionSuperseded(closeRetention, workspace)) return "unsupported";
   if (state === "STOPPED" || state === "STOPPING") return "wake";
   if (state !== "READY") return "unsupported";
   return Array.isArray(workerFeatures) && workerFeatures.includes(CLOSE_RETENTION_FEATURE) ? "ready" : "unsupported";
@@ -160,7 +163,7 @@ async function destroyClaimItems(store: DocumentStore, companyId: OrgId, operati
 export function createBrokerCloseInspection(verify: (event: CloseVerificationEvent) => Promise<boolean>, companyId: OrgId, store: DocumentStore): CloseInspectionProvider {
   const unavailable = async (): Promise<never> => { throw new Error("retention preparation runs only on the dispatcher"); };
   return { raiseFence: unavailable, inspectWorkspaceForClose: unavailable, acceptanceItems: retentionAcceptanceItems,
-    availability: async workspaceId => closeAvailability(await store.get(workspaceSessionKey(workspaceId))),
+    availability: async workspaceId => closeAvailability(await store.get(workspaceSessionKey(workspaceId)), await readWorkspace({ store, companyId }, workspaceId)),
     ready: async workspaceId => {
       const session = await store.get(workspaceSessionKey(workspaceId));
       return session?.["state"] === "READY" && Array.isArray(session["workerFeatures"]) && session["workerFeatures"].includes(CLOSE_RETENTION_FEATURE);

@@ -73,7 +73,7 @@ export interface ReconcilerReport {
 }
 
 export interface ReconcilerDependencies {
-  sessions: Pick<SessionManager, "get" | "listByState" | "markLost" | "recordPingFailure" | "clearPingFailures" | "requeueParked" | "claimStop" | "markFailed" | "markDeleted" | "ensureSession">;
+  sessions: Pick<SessionManager, "get" | "listByState" | "markLost" | "recordPingFailure" | "clearPingFailures" | "requeueParked" | "claimStop" | "markFailed" | "markDeleted" | "ensureSession" | "validateDeletion">;
   /** This environment's ec2-ebs instances that are not yet terminated. */
   instances: () => Promise<InstanceView[]>;
   /** This environment's ec2-ebs workspace volumes. */
@@ -164,21 +164,8 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
     // Issue 202: each live worker's answer to this run's ping, for the stuck-cancel sweep.
     const workers = new Map<string, StuckCancelWorker>();
     for (const session of sessions.values()) {
-      switch (session.state) {
-        case "READY": {
-          const worker = await reconcileReady(dependencies, session, instanceById, report, log, now, qualifiedAmi);
-          if (worker !== undefined) workers.set(session.workspaceId, worker);
-          break;
-        }
-        case "PROVISIONING":
-          await reconcileProvisioning(dependencies, session, report, log);
-          break;
-        case "DELETING":
-          await reconcileDeleting(dependencies, session, instanceById, report, log);
-          break;
-        default:
-          break;
-      }
+      const worker = await repairSession(dependencies, session, { instanceById, report, log, now, qualifiedAmi });
+      if (worker !== undefined) workers.set(session.workspaceId, worker);
     }
 
     // Issue 195: after the session repairs above (a lost READY worker's operation is already failed),
@@ -424,6 +411,28 @@ async function reconcileProvisioning(
   log({ event: "reconciler.provisioning_stuck", workspaceId: session.workspaceId, generation: session.generation, executionStatus: status });
 }
 
+/**
+ * One session's repair. A failure is logged by name and returns nothing: it never stops the other sessions, the stuck-cancel sweep or the volume sweep (the next run tries it again).
+ */
+async function repairSession(
+  dependencies: ReconcilerDependencies,
+  session: WorkspaceSession,
+  run: { instanceById: Map<string, InstanceView>; report: ReconcilerReport; log: (entry: Record<string, unknown>) => void; now: number; qualifiedAmi: string | undefined },
+): Promise<StuckCancelWorker | undefined> {
+  const { instanceById, report, log } = run;
+  try {
+    switch (session.state) {
+      case "READY": return await reconcileReady(dependencies, session, instanceById, report, log, run.now, run.qualifiedAmi);
+      case "PROVISIONING": await reconcileProvisioning(dependencies, session, report, log); return undefined;
+      case "DELETING": await reconcileDeleting(dependencies, session, instanceById, report, log); return undefined;
+      default: return undefined;
+    }
+  } catch (error) {
+    log({ event: "reconciler.session_failed", workspaceId: session.workspaceId, state: session.state, errorName: error instanceof Error ? error.name : "unknown", code: (error as { code?: unknown }).code });
+    return undefined;
+  }
+}
+
 async function reconcileDeleting(
   dependencies: ReconcilerDependencies,
   session: WorkspaceSession,
@@ -435,6 +444,8 @@ async function reconcileDeleting(
     const status = await dependencies.executionStatus(session.executionArn);
     if (status === "RUNNING" || status === "PENDING_REDRIVE") return;
   }
+  // A bound close's destruction is finished here only under its own authorization, checked before any physical effect (the deleter's first step does the same), and it is completed with that same record.
+  if (session.closeDestroy !== undefined) await dependencies.sessions.validateDeletion(session.workspaceId, session.closeDestroy);
   // The deleter cannot run again under its name (unique for 90 days), so finish here.
   const instance = session.instanceId === undefined ? undefined : instances.get(session.instanceId);
   if (instance !== undefined && !GONE.has(instance.state)) {
@@ -453,7 +464,7 @@ async function reconcileDeleting(
       await dependencies.deleteVolume(volume.volumeId);
     }
   }
-  await dependencies.sessions.markDeleted(session.workspaceId);
+  await dependencies.sessions.markDeleted(session.workspaceId, session.closeDestroy);
   report.stuckDeleting.push(session.workspaceId);
   log({ event: "reconciler.deletion_finished", workspaceId: session.workspaceId });
 }

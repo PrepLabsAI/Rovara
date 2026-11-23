@@ -2,7 +2,8 @@
 // inspected is proven by the retention lane's Linux grid and by the real calls after install. What these tests pin is the DECISION: one durable check per fence, a stopped or stopping machine is checked
 // (never closed on a guess), a check that cannot run says so, a check that never finishes gives the workspace back, and nothing here deletes anything.
 import { describe, expect, it, vi } from "vitest";
-import { change } from "@agentx/contracts";
+import { change, workspaceSessionKey } from "@agentx/contracts";
+import { randomUUID } from "node:crypto";
 import type { Queue, ReceivedMessage } from "@agentx/contracts";
 import { createBrokerCloseInspection } from "../../packages/broker/src/aws/worker-machines/close-retention.js";
 import { closeCheckPort, requestCloseCheck } from "../../packages/broker/src/core/task-flow/close-check.js";
@@ -86,12 +87,26 @@ describe("a close of a machine-backed task with no preview asks for ONE check, a
   });
 
   it("a retained session that was stopped is never promised a Close check (a Continue resumes it; the check is not layered on a retention): never woken by the Close, never deleted", async () => {
-    const w = await guardWorld({ machine: "backed", session: { state: "STOPPED", generation: 2, extra: { closeRetention: { schemaVersion: 1 } } }, check: closeCheckPort });
+    const w = await guardWorld({ machine: "backed", session: { state: "STOPPED", generation: 2 }, check: closeCheckPort });
+    // The record's completed preflight holds the workspace (nothing has moved since the check): it is a live retention.
+    const holder = randomUUID(), fence = (await w.workspace())!.fence;
+    await w.h.store.put({ item: { pk: w.wk.pk, sk: `OPERATION#${holder}`, entityType: "OPERATION", companyId: w.h.deps.companyId, id: holder, workspaceId: w.task.workspaceId, kind: "close", status: "SUCCEEDED", fence, closePreflight: { schemaVersion: 1 } } });
+    await w.h.store.update({ key: w.wk, ops: [change.set("activeOperationId", holder)] });
+    await w.h.store.update({ key: workspaceSessionKey(w.task.workspaceId), ops: [change.set("closeRetention", { schemaVersion: 1, operationId: holder, fence })] });
     w.h.deps.closeInspection = createBrokerCloseInspection(async () => false, w.h.deps.companyId, w.h.store);
     const spies = w.writes(), before = await w.rows();
     expect(await refusal(w.close())).toBe(CLOSE_CANNOT_CHECK_WORDS);
     for (const spy of spies) expect(spy).not.toHaveBeenCalled();
     expect(await w.rows()).toEqual(before);
+    for (const effect of [w.terminate, w.stop, w.start]) expect(effect).not.toHaveBeenCalled();
+  });
+
+  it("a retention a step has superseded (its preflight no longer holds the workspace; the lift never landed) does not make Close say 'can't check' for ever: the check is requested and replaces it", async () => {
+    const w = await guardWorld({ machine: "backed", session: { state: "STOPPED", generation: 2 }, check: closeCheckPort });
+    await w.h.store.update({ key: workspaceSessionKey(w.task.workspaceId), ops: [change.set("closeRetention", { schemaVersion: 1, operationId: randomUUID(), fence: (await w.workspace())!.fence })] });
+    w.h.deps.closeInspection = createBrokerCloseInspection(async () => false, w.h.deps.companyId, w.h.store);
+    expect(await refusal(w.close())).toBe(CLOSE_CHECKING_WORDS);
+    expect((await w.workspace())!.activeOperationId).not.toBeNull();
     for (const effect of [w.terminate, w.stop, w.start]) expect(effect).not.toHaveBeenCalled();
   });
 

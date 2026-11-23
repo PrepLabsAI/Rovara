@@ -1,4 +1,4 @@
-import { SessionCloseDestroySchema, canonicalRetentionValue, type SessionCloseDestroy } from "@agentx/contracts";
+import { SessionCloseDestroySchema, canonicalRetentionValue, retentionSuperseded, type SessionCloseDestroy } from "@agentx/contracts";
 import { readWorkspaceMeta } from "./worker-machines/workspace-company.js";
 import {
   GetCommand,
@@ -332,7 +332,7 @@ export class SessionManager {
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
       const target = await this.stopTarget(workspaceId);
       if (target === undefined) return false;
-      const claim = this.update(workspaceId, { set: { state: "STOPPING" }, when: { state: "READY", generation: target.generation } });
+      const claim = this.update(workspaceId, { ...retentionOf(target.session), set: { state: "STOPPING" }, when: { state: "READY", generation: target.generation } });
       try {
         await this.dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
           { Update: claim },
@@ -354,16 +354,19 @@ export class SessionManager {
   }
 
   /** The READY session a Stop may claim and the operation the workspace runs now; undefined when there is nothing to stop (see `requestStop`). Throws WORKSPACE_BUSY while PROVISIONING. */
-  private async stopTarget(workspaceId: string): Promise<{ generation: number; operationId: string; workspaceKey: { pk: string; sk: string } } | undefined> {
+  private async stopTarget(workspaceId: string): Promise<{ generation: number; operationId: string; workspaceKey: { pk: string; sk: string }; session: WorkspaceSession } | undefined> {
     const session = await this.get(workspaceId);
     if (session?.state === "PROVISIONING") throw agentXError("WORKSPACE_BUSY", "workspace compute is starting; stop it once it is ready");
     if (session?.state !== "READY") return undefined;
-    // A session held for a Close's retention (or being destroyed by an accepted Close) is never stopped by a Stop: the preparation holds the workspace and owns the instance until the person decides.
-    if (session.closeRetention !== undefined || session.closeDestroy !== undefined) return undefined;
+    // A Close that was accepted, or a destroy under way, owns the session: a Stop never touches it.
+    if (session.closeDestroy !== undefined || session.closeRetention?.acceptedOperationId !== undefined) return undefined;
     const workspace = await readWorkspaceMeta(this.dependencies.documentClient, this.dependencies.tableName, workspaceId);
+    // A retention that still holds the workspace (its preflight is the holder, on its instance) keeps the instance until the person decides. One a step has since superseded (the lift after the hand-over was
+    // dropped) or that names a dead instance holds nothing: a Stop ends the instance of the step that runs, as for any session, and keeps the volume and the record.
+    if (session.closeRetention !== undefined && !staleRetention(session) && !retentionSuperseded(session.closeRetention, workspace?.item)) return undefined;
     const operationId = workspace?.item.activeOperationId;
     if (workspace === undefined || typeof operationId !== "string" || operationId === "") return undefined;
-    return { generation: session.generation, operationId, workspaceKey: workspace.key };
+    return { generation: session.generation, operationId, workspaceKey: workspace.key, session };
   }
 
   /** Every session in `state`, from the sparse state index. */
@@ -391,10 +394,12 @@ export class SessionManager {
    * checked in one transaction, so a dispatch racing the reap always wins.
    */
   async claimStop(seen: WorkspaceSession): Promise<boolean> {
-    if (seen.closeRetention !== undefined && (seen.closeRetention.retained === undefined || seen.closeRetention.acceptedOperationId !== undefined)) return false;
+    // An accepted close owns the session. A retention the worker never confirmed (no `retained`: the check gave up) is stopped like any other: the instance ends after the idle window, the volume and the record stay.
+    if (seen.closeRetention?.acceptedOperationId !== undefined) return false;
     const workspace = await readWorkspaceMeta(this.dependencies.documentClient, this.dependencies.tableName, seen.workspaceId);
-    // A woken session carries the retention of its OLD instance: it holds no work then, so the plain idle rule applies, and only the retention record and the volume are guarded.
-    const stale = staleRetention(seen);
+    // A woken session carries the retention of its OLD instance, and one a step superseded names a preflight that no longer holds the workspace: neither holds work then, so the plain idle rule applies, and only
+    // the retention record and the volume are guarded.
+    const stale = staleRetention(seen) || (seen.closeRetention !== undefined && retentionSuperseded(seen.closeRetention, workspace?.item));
     const claim = this.update(seen.workspaceId, { ...retentionOf(seen), set: { state: "STOPPING" }, when: { state: "READY", generation: seen.generation } });
     return this.conditional({ transaction: [
       { Update: {
@@ -482,7 +487,13 @@ export class SessionManager {
     if (session.state === "DELETED") return session.closeDestroyCompleted === true;
     if (session.state !== "DELETING" || !this.sameDestroyGeneration(session, target)) return false;
     const name = `close-${createHash("sha256").update(canonicalRetentionValue({ workspaceId, target })).digest("hex").slice(0, 64)}`;
-    await this.start("deleter", name, { workspaceId, instanceId: target.retention.generation.instanceId, volumeId: target.retention.generation.volumeId, closeDestroy: target });
+    const executionArn = await this.start("deleter", name, { workspaceId, instanceId: target.retention.generation.instanceId, volumeId: target.retention.generation.volumeId, closeDestroy: target });
+    // The deleter's own execution is recorded (the plain deleter records its own too): the reconciler must see it RUNNING, not the provisioner's finished one, or it would delete beside it.
+    await this.conditional({ update: {
+      TableName: this.dependencies.tableName, Key: workspaceSessionKey(workspaceId),
+      UpdateExpression: "SET executionArn = :arn", ConditionExpression: "#state = :deleting AND closeDestroy = :target",
+      ExpressionAttributeNames: { "#state": "state" }, ExpressionAttributeValues: { ":arn": executionArn, ":deleting": "DELETING", ":target": target },
+    } });
     return false;
   }
 
@@ -829,7 +840,8 @@ function idleWorkspaceCondition(seen: WorkspaceSession): Pick<UpdateCommandInput
     ExpressionAttributeNames: { "#workspaceStatus": "status" }, ExpressionAttributeValues: { ":retainedReady": "READY", ":retainedOperation": seen.closeRetention.operationId, ":retainedFence": seen.closeRetention.fence } };
 }
 function idleInspectionCheck(seen: WorkspaceSession, tableName: string, pk: string | undefined): Array<Record<string, unknown>> {
-  if (seen.closeRetention === undefined) return [];
+  // An unconfirmed retention (no `retained`) has no completed preflight to check.
+  if (seen.closeRetention?.retained === undefined) return [];
   return [{ ConditionCheck: { TableName: tableName, Key: { pk: pk ?? `WORKSPACE#${seen.workspaceId}`, sk: `OPERATION#${seen.closeRetention.operationId}` },
     ConditionExpression: "#status = :completed AND #kind = :close AND fence = :fence AND workspaceId = :workspace AND closePreflight.schemaVersion = :version",
     ExpressionAttributeNames: { "#status": "status", "#kind": "kind" }, ExpressionAttributeValues: { ":completed": "SUCCEEDED", ":close": "close", ":fence": seen.closeRetention.fence, ":workspace": seen.workspaceId, ":version": 1 } } }];

@@ -238,7 +238,8 @@ describe("idle reaper and a retained session", () => {
   it("REVIEW R-B (probe): a preparation that captured its target and never got a retained reply (dead-lettered) holds a READY instance: the reaper never stops it", async () => {
     const w = retainedIdle(false);
     const row = sessionOf(w.db, w.workspaceId) as Record<string, unknown> & { closeRetention: Record<string, unknown> };
-    const { retained: _dropped, ...intent } = row.closeRetention;
+    const intent = { ...row.closeRetention };
+    delete intent["retained"];
     w.db.set({ ...row, closeRetention: intent });
     const op = w.db.get(`WORKSPACE#${w.workspaceId}`, `OPERATION#${intent["operationId"] as string}`)!;
     w.db.set({ ...op, status: "RUNNING", closePreflight: { schemaVersion: 1, target: intent["generation"] } });

@@ -299,8 +299,59 @@ describe("REVIEW: reconciler and a retained (bound-close) deletion", () => {
     state.volumes = [{ volumeId: generation.volumeId, state: "available", workspaceId, createdAt: minutesAgo(120), quarantined: false }];
     let error: unknown;
     try { await reconcile(); } catch (caught) { error = caught; }
-    console.log("R-C deleteVolume calls:", JSON.stringify(deleteVolume.mock.calls), "error:", error instanceof Error ? error.message : error, "session:", sessionOf(db, workspaceId)["state"]);
     expect(error).toBeUndefined();
+    // Under its own authorization the retained deletion is finished once, and completed with that same record.
+    expect(deleteVolume).toHaveBeenCalledExactlyOnceWith(generation.volumeId);
+    expect(sessionOf(db, workspaceId)).toMatchObject({ state: "DELETED", closeDestroyCompleted: true });
+  });
+
+  /** A DELETING session an accepted close destroys: its authorization, the instance and volume it names. */
+  function retainedDeleting(db: FakeDynamoDb, state: ReturnType<typeof setup>["state"], fields: Record<string, unknown> = {}) {
+    const generation = { sessionGeneration: 1, instanceId: `i-${hex()}`, volumeId: `vol-${hex()}`, dataGeneration: randomUUID() };
+    const retention = { inspectionOperationId: randomUUID(), inspectionFence: 2, retentionId: randomUUID(), contentDigest: "a".repeat(64), generation };
+    const closeDestroy = { schemaVersion: 1, acceptedOperationId: randomUUID(), retention, effectId: "e1", machineIds: ["m"] };
+    const workspaceId = seedSession(db, "DELETING", { instanceId: generation.instanceId, volumeId: generation.volumeId, workspaceDataIdentity: generation, closeDestroy, closeRetention: { schemaVersion: 1, operationId: retention.inspectionOperationId, fence: 2, generation, retained: retention, acceptedOperationId: closeDestroy.acceptedOperationId }, ...fields });
+    state.volumes.push({ volumeId: generation.volumeId, state: "available", workspaceId, createdAt: minutesAgo(120), quarantined: false });
+    return { workspaceId, generation, closeDestroy };
+  }
+
+  it("F1: while the retained deleter's own execution is RUNNING the reconciler leaves the session alone: no second delete beside it", async () => {
+    const deleterArn = "arn:aws:states:us-east-1:111122223333:execution:deleter:close-1";
+    const { db, state, reconcile, deleteVolume, terminate } = setup({ executions: { [deleterArn]: "RUNNING" } });
+    const { workspaceId } = retainedDeleting(db, state, { executionArn: deleterArn });
+    await reconcile();
+    expect(deleteVolume).not.toHaveBeenCalled();
+    expect(terminate).not.toHaveBeenCalled();
+    expect(sessionOf(db, workspaceId)).toMatchObject({ state: "DELETING" });
+  });
+
+  it("F1: a retained deletion whose authorization no longer holds is refused BEFORE any physical effect, and the run goes on to repair the others", async () => {
+    const provisionerArn = "arn:aws:states:us-east-1:111122223333:execution:provisioner:x";
+    const { db, state, reconcile, deleteVolume } = setup({ executions: { [provisionerArn]: "SUCCEEDED" } });
+    const broken = retainedDeleting(db, state, { executionArn: provisionerArn });
+    // The session's identity moved (another generation): validateDeletion refuses, so nothing is deleted for it.
+    db.set({ ...sessionOf(db, broken.workspaceId), generation: 9 });
+    const plainArn = "arn:aws:states:us-east-1:111122223333:execution:deleter:plain";
+    state.executions[plainArn] = "SUCCEEDED";
+    const plain = seedSession(db, "DELETING", { executionArn: plainArn, volumeId: "vol-0123456789abcdef0", instanceId: "i-0123456789abcdef0" });
+    state.instances = [];
+    state.volumes.push({ volumeId: "vol-0123456789abcdef0", state: "available", workspaceId: plain, createdAt: minutesAgo(120), quarantined: false });
+    await expect(reconcile()).resolves.toBeDefined();
+    expect(deleteVolume).not.toHaveBeenCalledWith(broken.generation.volumeId);
+    expect(sessionOf(db, broken.workspaceId)).toMatchObject({ state: "DELETING" });
+    // Whatever order the sessions come in, the plain one was finished too.
+    expect(sessionOf(db, plain)).toMatchObject({ state: "DELETED" });
+  });
+
+  it("F1: a session that throws is logged by name and never aborts the run: later sessions, the stuck-cancel sweep and the volume sweep still run", async () => {
+    const logs: Array<Record<string, unknown>> = [];
+    const sweepStuckCancels = vi.fn(async () => ({ retried: [], ended: [], interrupted: [], failed: [], unretried: [] }));
+    const { db, state, reconcile } = setup({ log: (entry) => { logs.push(entry); }, sweepStuckCancels });
+    const broken = retainedDeleting(db, state);
+    db.set({ ...sessionOf(db, broken.workspaceId), generation: 9 });
+    await expect(reconcile()).resolves.toBeDefined();
+    expect(logs).toContainEqual(expect.objectContaining({ event: "reconciler.session_failed", workspaceId: broken.workspaceId, state: "DELETING", code: "STALE_FENCE" }));
+    expect(sweepStuckCancels).toHaveBeenCalled();
   });
 });
 

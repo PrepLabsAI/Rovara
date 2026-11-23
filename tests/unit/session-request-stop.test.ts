@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { COMPANY_A, createSessionMachinesWorld, type SessionMachinesWorld } from "../support/session-machines-world.js";
 
-const OP = "op-running-1";
+const OP = "7a1f0c52-3d4e-4b8a-9c11-2f6e5d4c3b21";
 
 /** A READY session whose workspace runs operation OP. */
 async function readyWithOperation(fields: Record<string, unknown> = { activeOperationId: OP }) {
@@ -71,14 +71,16 @@ describe("requestStop: READY to STOPPING, only while the workspace still runs th
 
   // CLOSE-RETENTION (the binding rebase item of STOP-NON-DESTRUCTIVE): a session held for a Close's retention is never claimed by a Stop, and no deleter path reaches it, in any state.
   /** The session item with a valid retention (or destroy) record on the volume it holds. */
-  const retain = (world: SessionMachinesWorld, workspaceId: string, field: "closeRetention" | "closeDestroy", state?: string) => {
+  const retain = (world: SessionMachinesWorld, workspaceId: string, field: "closeRetention" | "closeDestroy", state?: string, holds: boolean = true) => {
     const row = world.db.get(`WORKSPACE#${workspaceId}`, "SESSION")!;
     const generation = { sessionGeneration: Number(row["generation"]), instanceId: String(row["instanceId"]), volumeId: String(row["volumeId"]), dataGeneration: randomUUID() };
     const retained = { inspectionOperationId: randomUUID(), inspectionFence: 2, retentionId: randomUUID(), contentDigest: "a".repeat(64), generation };
     const record = field === "closeRetention"
-      ? { schemaVersion: 1, operationId: randomUUID(), fence: 2, generation, retained }
+      ? { schemaVersion: 1, operationId: holds ? OP : randomUUID(), fence: 2, generation, retained }
       : { schemaVersion: 1, acceptedOperationId: randomUUID(), retention: retained, effectId: "terminate-1", machineIds: ["machine-1"] };
     // A STOPPED session has no instance or address (the schema says so).
+    // The retention's preflight is the operation the workspace is held by (a live retention), or another one (a step took the workspace since).
+    world.db.set({ ...world.db.get(`WORKSPACE#${workspaceId}`, "META")!, fence: 2 });
     const item: Record<string, unknown> = { ...row, ...(state === undefined ? {} : { state }), [field]: record };
     if (state === "STOPPED") { delete item["instanceId"]; delete item["privateIp"]; }
     world.db.set(item);
@@ -94,6 +96,22 @@ describe("requestStop: READY to STOPPING, only while the workspace still runs th
       expect(deleterRuns(world)).toEqual([]);
     });
   }
+
+  it("T7u a retention a step has superseded (the workspace is held by another operation than its preflight, the lift never landed) does not shield the instance from a Stop: the claim is made, the record and the volume are kept", async () => {
+    const { world, workspaceId } = await readyWithOperation();
+    retain(world, workspaceId, "closeRetention", undefined, false);
+    const before = world.db.get(`WORKSPACE#${workspaceId}`, "SESSION")!;
+    expect(await world.sessions.requestStop(workspaceId)).toBe(true);
+    expect(world.db.get(`WORKSPACE#${workspaceId}`, "SESSION")).toMatchObject({ state: "STOPPING", closeRetention: before["closeRetention"], volumeId: before["volumeId"] });
+    expect(deleterRuns(world)).toEqual([]);
+  });
+  it("T7v ... but never one an ACCEPTED close owns, superseded or not", async () => {
+    const { world, workspaceId } = await readyWithOperation();
+    retain(world, workspaceId, "closeRetention", undefined, false);
+    const row = world.db.get(`WORKSPACE#${workspaceId}`, "SESSION")!;
+    world.db.set({ ...row, closeRetention: { ...(row["closeRetention"] as object), acceptedOperationId: randomUUID() } });
+    expect(await world.sessions.requestStop(workspaceId)).toBe(false);
+  });
 
   it("T7s a retained session is never deleted from STOPPING, STOPPED or READY by the plain deleter: WORKSPACE_BUSY, no deleter execution, the volume stays", async () => {
     for (const state of ["READY", "STOPPING", "STOPPED"] as const) {

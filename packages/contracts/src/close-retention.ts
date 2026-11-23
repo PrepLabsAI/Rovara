@@ -68,3 +68,11 @@ export function retentionInvocationDigest(invocation: RetentionSignedInvocation)
 export function needsRetentionBinding(invocation: RetentionSignedInvocation): boolean {
   return invocation.supersedesRetention !== undefined || (invocation.kind === "close" && CloseRetentionPayloadSchema.safeParse(invocation.payload).success);
 }
+
+/**
+ * A retention record whose close preflight no longer holds the workspace: a step (or anything else) took the workspace since, so the work it describes may have changed and a superseding step has
+ * marked it on the worker. Such a record guards nothing the idle rule, a Stop or a new check must respect; it is replaced by the next check. Unknown (no workspace record) is not superseded.
+ */
+export function retentionSuperseded(retention: { operationId: string; fence: number }, workspace: { activeOperationId?: unknown; fence?: unknown } | undefined): boolean {
+  return workspace !== undefined && (workspace.activeOperationId !== retention.operationId || workspace.fence !== retention.fence);
+}

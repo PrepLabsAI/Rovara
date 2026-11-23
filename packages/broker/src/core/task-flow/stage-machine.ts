@@ -738,5 +738,5 @@ function workspaceAdmitsStep(workspace: WorkspaceRecord, successor: StepSuccesso
   return workspace.legacyCloseClaim === undefined && workspace.status === "READY" && (workspace.activeOperationId === null || successor !== undefined);
 }
 function successorFields(successor: StepSuccessor): Pick<OperationRecord, "supersedesRetention"> {
-  return successor === undefined ? {} : { supersedesRetention: successor.retention };
+  return successor?.retention === undefined ? {} : { supersedesRetention: successor.retention };
 }

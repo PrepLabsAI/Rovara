@@ -97,3 +97,68 @@ describe("and a Close afterwards is still refused until it is previewed and boun
     expect(w.terminate).not.toHaveBeenCalled();
   });
 });
+
+// An UNCONFIRMED retention: the check captured its target but the worker never answered `retained` (it said `unavailable`, or died), so the preparation gave up and its preflight still holds the workspace. While the
+// instance runs, the idle rule ends it after the window (volume and record kept); once it is gone a Continue / Retry / new step takes the workspace over and re-runs nothing it cannot: the next Close re-checks.
+describe("an unconfirmed retention (the worker never confirmed it)", () => {
+  async function unconfirmed(sessionState: "STOPPED" | "FAILED" | "READY" = "STOPPED", extra: Record<string, unknown> = {}) {
+    const w = await finishedAndIdleStopped(sessionState);
+    const row = await w.session();
+    const intent = { ...(row["closeRetention"] as Record<string, unknown>) };
+    delete intent["retained"];
+    await w.h.store.put({ item: { ...row, closeRetention: intent as never, ...extra } });
+    const holder = textField((await w.h.store.get(w.wk))!, "activeOperationId");
+    await w.h.store.update({ key: operationKey(w.h.deps.companyId, w.task.workspaceId, holder), ops: [change.set("status", "RUNNING"), change.remove("result")] });
+    return { ...w, holder, intent };
+  }
+  const opOf = async (w: Awaited<ReturnType<typeof unconfirmed>>, id: string) => (await w.h.store.get(operationKey(w.h.deps.companyId, w.task.workspaceId, id)))!;
+
+  for (const state of ["STOPPED", "FAILED"] as const) {
+    it(`a ${state} session continues: the dead preflight is INTERRUPTED and the unconfirmed record dropped in the step's own transaction; the step supersedes nothing (nothing was retained)`, async () => {
+      const w = await unconfirmed(state);
+      await createTaskActions(w.h.deps).continue(w.h.owner, w.task.taskId, { requestId: randomUUID(), instructions: "more work" });
+      expect((await opOf(w, w.holder))["status"]).toBe("INTERRUPTED");
+      const session = await w.session();
+      expect(session).not.toHaveProperty("closeRetention");
+      expect(session).toMatchObject({ state, volumeId: w.retained.generation.volumeId });
+      const steps = (await operations(w)).filter((item) => item["kind"] === "task");
+      expect(steps).toHaveLength(1);
+      expect(steps[0]).not.toHaveProperty("supersedesRetention");
+      expect(w.terminate).not.toHaveBeenCalled();
+    });
+  }
+
+  it("a new step (Retry and the workflow steps) takes over the same way", async () => {
+    const w = await unconfirmed();
+    const task = (await readTask(w.h.deps, w.task.taskId))!;
+    const started = await acceptStep(w.h.deps, { task, workspace: await workspaceOf(w), requestId: randomUUID(), prompt: "retry" });
+    expect(started.result).toBe("STARTED");
+    expect(await w.session()).not.toHaveProperty("closeRetention");
+  });
+
+  it("while the instance RUNS (READY) nothing is taken over: the idle rule ends it first; Continue is refused and nothing is written", async () => {
+    const w = await unconfirmed("READY");
+    const before = [await w.session(), await w.h.store.get(w.wk), await opOf(w, w.holder)];
+    await expect(createTaskActions(w.h.deps).continue(w.h.owner, w.task.taskId, { requestId: randomUUID(), instructions: "no" })).rejects.toMatchObject({ code: "TASK_BUSY" });
+    expect([await w.session(), await w.h.store.get(w.wk), await opOf(w, w.holder)]).toEqual(before);
+  });
+
+  it("an accepted close, a destroy, or a record of ANOTHER preflight is never taken over", async () => {
+    for (const extra of [{ closeDestroy: { schemaVersion: 1 } }, { acceptedMark: true }, { otherRecord: true }]) {
+      const w = await unconfirmed("STOPPED");
+      const row = await w.session();
+      const record = row["closeRetention"] as Record<string, unknown>;
+      const changed = "otherRecord" in extra ? { closeRetention: { ...record, operationId: randomUUID() } } : "acceptedMark" in extra ? { closeRetention: { ...record, acceptedOperationId: randomUUID() } } : extra;
+      await w.h.store.put({ item: { ...row, ...changed } });
+      await expect(createTaskActions(w.h.deps).continue(w.h.owner, w.task.taskId, { requestId: randomUUID(), instructions: "no" })).rejects.toBeInstanceOf(AgentXError);
+      expect((await opOf(w, w.holder))["status"]).toBe("RUNNING");
+    }
+  });
+
+  it("Close says 'can't check' until a Continue re-runs the check: an unbound Close is refused with the retained sentence and nothing is terminated", async () => {
+    const w = await unconfirmed("STOPPED");
+    const error = await w.h.flow.close(w.h.owner, w.task.taskId).then(() => undefined, (caught: unknown) => caught);
+    expect((error as AgentXError).message).toContain(retainedCloseWords(w.task.taskId));
+    expect(w.terminate).not.toHaveBeenCalled();
+  });
+});
