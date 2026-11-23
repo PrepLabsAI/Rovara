@@ -27,7 +27,7 @@ it.each([
 
 import { createOwnerRoutes } from "../../packages/broker/src/local/app/routes.js";
 import { reviewedFeedbackWorld } from "../support/pr-feedback-world.js";
-import { dispatchRowKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { dispatchPartition, dispatchRowKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { readTask, workspaceOperations } from "../../packages/broker/src/core/task-flow/reads.js";
 import { toDocument } from "../../packages/broker/src/core/task-flow/records.js";
 import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
@@ -335,4 +335,245 @@ it.each([
   expect(response?.statusCode).toBe(status);
   expect(JSON.parse(response!.body) as unknown).toEqual({ error: { code, message } });
   for (const effect of effects) expect(effect).not.toHaveBeenCalled();
+});
+
+import { hostedFeedbackWorld, type FeedbackRouteBody } from "../support/hosted-pr-feedback-world.js";
+
+it("failed review Keep binds proposalDigest from the matching full task read when feedback omits it", async () => {
+  const w = await hostedFeedbackWorld("BLOCKED");
+  const read = await w.send("GET", "/workflow/feedback");
+  expect(read?.statusCode).toBe(200);
+  const feedback = (JSON.parse(read!.body) as FeedbackRouteBody).review;
+  expect(feedback).not.toHaveProperty("proposalDigest");
+  expect(feedback).not.toHaveProperty("decision");
+  const full = (JSON.parse((await w.send("GET"))!.body) as FeedbackRouteBody).task;
+  const ref = full.workflow.feedbackReview!.reviewRef!;
+  expect(feedback.reviewDigest).toBe(ref.sha256);
+  expect(feedback.revision).toBe(full.workflow.revision);
+  const response = await w.send("POST", "/workflow/feedback-decision", { ...w.request, proposalDigest: ref.proposalDigest, decision: "DISMISS", selectedFindingIds: [], ownerNote: WORKFLOW_KEEP_PULL_REQUESTS_NOTE });
+  expect(response?.statusCode).toBe(200);
+  expect(w.admit).not.toHaveBeenCalled();
+});
+
+it("failed review Keep succeeds with a missing report blob", async () => {
+  const w = await hostedFeedbackWorld("BLOCKED");
+  w.objects.delete(w.task.workflow!.feedbackReview!.reviewRef!.objectKey);
+  expect((await w.send("GET", "/workflow/feedback"))?.statusCode).toBe(200);
+  expect((await w.send("POST", "/workflow/feedback-decision", { ...w.request, decision: "DISMISS", selectedFindingIds: [], ownerNote: WORKFLOW_KEEP_PULL_REQUESTS_NOTE }))?.statusCode).toBe(200);
+  expect(w.admit).not.toHaveBeenCalled();
+});
+
+it("failed review Keep records DISMISS and exits to watching without paid work", async () => {
+  const w = await hostedFeedbackWorld("BLOCKED");
+  const start = vi.spyOn(w.h.deps.machines, "start"), queue = vi.spyOn(w.h.deps.queues, "queue");
+  w.read.mockClear();
+  const body = { ...w.request, decision: "DISMISS", selectedFindingIds: [], ownerNote: WORKFLOW_KEEP_PULL_REQUESTS_NOTE };
+  for (let n = 0; n < 2; n++) expect((await w.send("POST", "/workflow/feedback-decision", body))?.statusCode).toBe(200);
+  const task = (await readTask(w.h.deps, w.task.taskId))!;
+  expect(task.workflow).toMatchObject({ state: "WAITING", stage: "WAIT_FOR_MERGE", revision: w.request.expectedRevision + 1, feedbackReview: { status: "DISMISSED", reviewRef: w.task.workflow!.feedbackReview!.reviewRef }, feedbackDecisions: [expect.objectContaining({ requestId: body.requestId, decision: body.decision, reviewDigest: body.reviewDigest, proposalDigest: body.proposalDigest, bundleDigests: body.bundleDigests, selectedFindingIds: [], ownerNote: body.ownerNote, workflowRevision: body.expectedRevision, actorId: w.task.ownerKey })] });
+  expect(w.admit).not.toHaveBeenCalled();
+  expect(w.held.size).toBe(0);
+  expect(start).not.toHaveBeenCalled(); expect(queue).not.toHaveBeenCalled();
+  expect((await w.h.store.query({ pk: dispatchPartition(w.h.deps.companyId) })).items).toEqual([]);
+  expect(w.read).toHaveBeenCalledOnce(); // DISMISS refreshes the code host; it starts no paid work.
+  expect(task.workflow!.candidate).toEqual(w.task.workflow!.candidate);
+  expect(task.workflow!.verification).toEqual(w.task.workflow!.verification);
+  expect(task.workflow!.reviews).toEqual(w.task.workflow!.reviews);
+});
+
+it("lost failed review Keep response reconciles the original decision through the full task read", async () => {
+  const w = await hostedFeedbackWorld("BLOCKED");
+  const body = { ...w.request, decision: "DISMISS", selectedFindingIds: [], ownerNote: WORKFLOW_KEEP_PULL_REQUESTS_NOTE };
+  await w.send("POST", "/workflow/feedback-decision", body);
+  const full = (JSON.parse((await w.send("GET"))!.body) as FeedbackRouteBody).task;
+  expect(full.workflow.feedbackDecisions).toEqual([expect.objectContaining({ requestId: body.requestId, actorId: w.task.ownerKey, workflowRevision: body.expectedRevision, decision: "DISMISS", reviewDigest: body.reviewDigest, proposalDigest: body.proposalDigest, bundleDigests: body.bundleDigests, selectedFindingIds: [], ownerNote: body.ownerNote })]);
+  expect(w.admit).not.toHaveBeenCalled();
+});
+
+it("started retry returns { task, started: true }", async () => {
+  const w = await hostedFeedbackWorld("BLOCKED");
+  const response = await w.send("POST", "/workflow/feedback-retry", { reviewDigest: w.request.reviewDigest });
+  expect(response?.statusCode).toBe(200);
+  const body = (JSON.parse(response!.body) as FeedbackRouteBody);
+  expect(Object.keys(body).sort()).toEqual(["started", "task"]);
+  expect(body.started).toBe(true);
+  expect(body.task.taskId).toBe(w.task.taskId);
+});
+
+it("duplicate/non-starting retry returns { task, started: false }", async () => {
+  const w = await hostedFeedbackWorld("BLOCKED");
+  const body = { reviewDigest: w.request.reviewDigest };
+  expect((await w.send("POST", "/workflow/feedback-retry", body))?.statusCode).toBe(200);
+  const response = await w.send("POST", "/workflow/feedback-retry", body);
+  expect(response?.statusCode).toBe(200);
+  expect(Object.keys((JSON.parse(response!.body) as FeedbackRouteBody)).sort()).toEqual(["started", "task"]);
+  expect((JSON.parse(response!.body) as FeedbackRouteBody).started).toBe(false);
+  expect(w.admit).toHaveBeenCalledOnce();
+});
+
+import { rewriteFeedbackReport } from "../support/pr-feedback-world.js";
+
+it.each(["revision", "review", "proposal", "bundles", "actor"])("failed hosted Keep refuses a mismatched %s binding with no effect", async field => {
+  const w = await hostedFeedbackWorld("BLOCKED");
+  const body = { ...w.request, decision: "DISMISS", selectedFindingIds: [], ownerNote: WORKFLOW_KEEP_PULL_REQUESTS_NOTE };
+  if (field === "revision") body.expectedRevision--;
+  if (field === "review") body.reviewDigest = "0".repeat(64);
+  if (field === "proposal") body.proposalDigest = "0".repeat(64);
+  if (field === "bundles") body.bundleDigests = ["0".repeat(64)];
+  if (field === "actor") w.h.deps.access.ownerActing = async () => undefined;
+  const before = await readTask(w.h.deps, w.task.taskId);
+  const transact = vi.spyOn(w.h.store, "transact");
+  expect((await w.send("POST", "/workflow/feedback-decision", body))?.statusCode).toBe(field === "actor" ? 404 : 400);
+  expect(transact).not.toHaveBeenCalled();
+  expect(await readTask(w.h.deps, w.task.taskId)).toEqual(before);
+  expect(w.admit).not.toHaveBeenCalled();
+});
+
+it.each(["workflow", "report-task", "report-key", "bundle-key", "bundle-set", "comment-set"])("hosted feedback rejects corrupt stored %s before reading evidence", async kind => {
+  const w = await hostedFeedbackWorld("BLOCKED");
+  const task = w.task;
+  if (kind === "workflow") task.workflow!.revision = -1;
+  if (kind === "report-task") {
+    task.workflow!.taskId = "99999999-9999-4999-8999-999999999999";
+    task.workflow!.feedbackReview!.reviewRef!.taskId = "99999999-9999-4999-8999-999999999999";
+    for (const ref of task.workflow!.feedbackReview!.bundleRefs) ref.taskId = "99999999-9999-4999-8999-999999999999";
+  }
+  if (kind === "report-key") task.workflow!.feedbackReview!.reviewRef!.objectKey = `private/other/${task.workspaceId}/feedback-reviews/${w.request.reviewDigest}.json`;
+  if (kind === "bundle-key") task.workflow!.feedbackReview!.bundleRefs[0]!.objectKey = `private/other/${task.workspaceId}/feedback-bundles/${task.taskId}/${w.request.bundleDigests[0]}.json`;
+  if (kind === "bundle-set") task.workflow!.feedbackReview!.reviewRef!.bundleDigests = ["0".repeat(64)];
+  if (kind === "comment-set") task.workflow!.feedbackReview!.reviewRef!.findingRefs = [{ id: "foreign", bundleDigest: w.request.bundleDigests[0]!, commentIds: ["missing"], priority: "SHOULD_FIX", assessment: "ACTIONABLE", recommended: true }];
+  await w.h.store.put({ item: toDocument(task) });
+  const get = vi.spyOn(w.h.deps.feedbackArtifacts!, "get");
+  const response = await w.send("GET", "/workflow/feedback");
+  expect(response?.statusCode).toBe(503);
+  expect(get).not.toHaveBeenCalled();
+});
+
+it("complete hosted feedback preserves priority order, report order, comments and check replacements", async () => {
+  const w = await hostedFeedbackWorld();
+  w.task.workflow!.checkPolicy = { required: [], optional: [], selectedOptionalIds: [], proposed: [] };
+  await rewriteFeedbackReport(w, report => {
+    report.findings = [{ ...report.findings[0]!, id: "z", priority: "OPTIONAL", recommended: false, fixProposal: { ...report.findings[0]!.fixProposal!, tests: [], replacementChecks: [{ label: "Retry", cwd: "repo/app", executable: "npm", args: ["test"] }] } }, { ...report.findings[0]!, id: "a", priority: "MUST_FIX" }];
+  });
+  const response = await w.send("GET", "/workflow/feedback");
+  expect(response?.statusCode).toBe(200);
+  const review = (JSON.parse(response!.body) as FeedbackRouteBody).review;
+  expect(review).not.toHaveProperty("activeOperation");
+  expect(review).not.toHaveProperty("decision");
+  expect(review.reportOrder).toEqual(["z", "a"]);
+  expect(review.findings.map((f: { id: string }) => f.id)).toEqual(["a", "z"]);
+  expect(review.recommendedFindingIds).toEqual(["a"]);
+  expect(review.findings[0]!.comments[0]!.body).toBe("Handle this failure.");
+  expect(review.findings[1]!.checkChanges.added).toMatchObject([{ label: "Retry", command: { executable: "npm", args: ["test"] } }]);
+});
+
+it("a lost dismissal still reads its original receipt when a later round is active", async () => {
+  const w = await hostedFeedbackWorld("BLOCKED");
+  const body = { ...w.request, decision: "DISMISS", selectedFindingIds: [], ownerNote: WORKFLOW_KEEP_PULL_REQUESTS_NOTE };
+  await w.send("POST", "/workflow/feedback-decision", body);
+  const current = (await readTask(w.h.deps, w.task.taskId))!;
+  current.workflow!.feedbackReview = { status: "COLLECTING", bundleRefs: current.workflow!.feedbackReview!.bundleRefs, threadObservations: [] };
+  current.workflow!.revision++;
+  await w.h.store.put({ item: toDocument(current) });
+  const full = (JSON.parse((await w.send("GET"))!.body) as FeedbackRouteBody).task;
+  expect(full.workflow.feedbackReview!.status).toBe("COLLECTING");
+  expect(full.workflow.feedbackDecisions![0]!).toMatchObject({ requestId: body.requestId, workflowRevision: body.expectedRevision, actorId: w.task.ownerKey, reviewDigest: body.reviewDigest, proposalDigest: body.proposalDigest, bundleDigests: body.bundleDigests, decision: "DISMISS", selectedFindingIds: [], ownerNote: body.ownerNote });
+  expect((await w.send("GET", "/workflow/feedback"))?.statusCode).toBe(404);
+  w.h.deps.access.canAct = async () => false;
+  expect((await w.send("GET"))?.statusCode).toBe(404);
+});
+
+it.each(["no-workflow", "no-feedback", "no-decision", "retired", "corrupt-stamp"])("hosted feedback %s answers missing without evidence reads", async kind => {
+  const w = await hostedFeedbackWorld("BLOCKED");
+  if (kind === "no-workflow") delete w.task.workflow;
+  if (kind === "no-feedback") delete w.task.workflow!.feedbackReview;
+  if (kind === "no-decision") w.task.workflow!.feedbackReview!.status = "APPROVED";
+  if (kind === "retired") await w.h.store.delete({ key: engineStampKey(w.task.taskId) });
+  if (kind === "corrupt-stamp") await w.h.store.put({ item: { ...engineStampKey(w.task.taskId), entityType: "TASK_ENGINE", orgId: w.h.deps.companyId, taskId: w.task.taskId, coreEngine: { engine: "core" } } });
+  await w.h.store.put({ item: toDocument(w.task) });
+  const get = vi.spyOn(w.h.deps.feedbackArtifacts!, "get");
+  expect((await w.send("GET", "/workflow/feedback"))?.statusCode).toBe(404);
+  expect(get).not.toHaveBeenCalled();
+});
+
+import { locateWorkspace } from "../../packages/broker/src/core/task-flow/workspace-location.js";
+import { workspaceKey, operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
+it("complete hosted feedback selects the company-scoped active operation and ignores a decoy", async () => {
+  const w = await hostedFeedbackWorld();
+  const companyId = "org_aaaaaaaaaaaaaaaaaaaa";
+  w.h.deps.companyId = companyId;
+  w.task.companyId = companyId;
+  w.runtime.companyId = companyId;
+  w.membership.companyId = companyId;
+  w.caller.principal.companyId = companyId;
+  await w.h.store.put({ item: toDocument(w.task) });
+  const stamp = (await w.h.store.get(engineStampKey(w.task.taskId)))!;
+  await w.h.store.put({ item: { ...stamp, orgId: companyId } });
+  const original = (await w.h.store.get({ pk: `WORKSPACE#${w.task.workspaceId}`, sk: "META" }))!;
+  await w.h.store.put({ item: { ...original, ...workspaceKey(companyId, w.task.workspaceId), companyId, orgId: companyId, activeOperationId: w.operation.id } });
+  const decoy = "00000000-0000-4000-8000-000000000000";
+  await w.h.store.put({ item: { ...toDocument(w.operation), ...operationKey(companyId, w.task.workspaceId, decoy), id: decoy, companyId, status: "FAILED", workflowMode: "PLAN" } });
+  await w.h.store.put({ item: { ...toDocument(w.operation), ...operationKey(companyId, w.task.workspaceId, w.operation.id), companyId, status: "RUNNING", workflowMode: "IMPLEMENT" } });
+  const get = vi.spyOn(w.h.store, "get");
+  const response = await w.send("GET", "/workflow/feedback");
+  expect(response?.statusCode).toBe(200);
+  expect((JSON.parse(response!.body) as FeedbackRouteBody).review).toMatchObject({ activeOperation: { status: "RUNNING", workflowMode: "IMPLEMENT" }, nextAction: "Implementation is in progress." });
+  expect(get.mock.calls.some(([key]) => key.pk === `WORKSPACE#${w.task.workspaceId}`)).toBe(false);
+});
+
+import { createPrFeedbackRoutes } from "../../packages/broker/src/core-host/pr-feedback-routes.js";
+it("the direct feedback adapter leaves unsupported methods and paths unowned before any reads", async () => {
+  const w = await hostedFeedbackWorld();
+  const routes = createPrFeedbackRoutes(w.h.deps, async () => ({ taskId: w.task.taskId }));
+  const base = `/v1/dev/tasks/${w.task.taskId}/workflow/`;
+  const get = vi.spyOn(w.h.store, "get");
+  for (const [method, path] of [["POST", base + "feedback"], ["PUT", base + "feedback"], ["GET", base + "feedback-decision"], ["GET", base + "feedback/extra"], ["GET", "/v1/dev/tasks/not-an-id/workflow/feedback"]]) {
+    await expect(routes({ method: method!, path: path!, headers: {}, body: "{" }, w.h.owner)).resolves.toBeUndefined();
+  }
+  expect(get).not.toHaveBeenCalled();
+  expect(w.admit).not.toHaveBeenCalled();
+  expect((await routes({ method: "GET", path: base + "feedback", headers: {} }, w.h.owner))?.statusCode).toBe(200);
+});
+
+it("complete feedback exposes only a decision for the current report", async () => {
+  const w = await hostedFeedbackWorld();
+  const body = { ...w.request, decision: "DISMISS", selectedFindingIds: [], ownerNote: WORKFLOW_KEEP_PULL_REQUESTS_NOTE };
+  expect((await w.send("POST", "/workflow/feedback-decision", body))?.statusCode).toBe(200);
+  const decided = (JSON.parse((await w.send("GET", "/workflow/feedback"))!.body) as FeedbackRouteBody).review;
+  expect(decided).toMatchObject({ decision: { decision: "DISMISS", selectedFindingIds: [], ownerNote: body.ownerNote } });
+  w.task = (await readTask(w.h.deps, w.task.taskId))!;
+  w.task.workflow!.feedbackReview!.status = "PENDING";
+  await rewriteFeedbackReport(w, report => { report.findings[0]!.rationale += " A new review round."; });
+  const next = (JSON.parse((await w.send("GET", "/workflow/feedback"))!.body) as FeedbackRouteBody).review;
+  expect(next).not.toHaveProperty("decision");
+  expect(w.task.workflow!.feedbackDecisions).toHaveLength(1);
+});
+
+it.each(["safe", "stale", "active-worker"])("hosted Keep after a checked failed fix handles %s without paid work", async kind => {
+  const w = await hostedFeedbackWorld();
+  expect((await w.send("POST", "/workflow/feedback-decision", w.request))?.statusCode).toBe(200);
+  const task = (await readTask(w.h.deps, w.task.taskId))!;
+  await w.h.store.delete({ key: dispatchRowKey(w.h.deps.companyId, task.taskId, task.workflow!.revision) });
+  task.workflow = blockWorkflow(task.workflow, WORKFLOW_BLOCK_REASONS.fixChangedNothing, new Date(w.clock.ms).toISOString());
+  await w.h.store.put({ item: toDocument(task) });
+  if (kind === "active-worker") {
+    const workspace = (await locateWorkspace(w.h.deps, task.workspaceId))!.workspace;
+    await w.h.store.put({ item: { ...workspace, activeOperationId: "33333333-3333-4333-8333-333333333333" } });
+  }
+  w.admit.mockClear();
+  const start = vi.spyOn(w.h.deps.machines, "start"), queue = vi.spyOn(w.h.deps.queues, "queue");
+  const body = { requestId: "88888888-8888-4888-8888-888888888888", expectedRevision: task.workflow.revision - (kind === "stale" ? 1 : 0) };
+  const response = await w.send("POST", "/workflow/keep-pull-requests", body);
+  if (kind === "safe") {
+    expect(response?.statusCode).toBe(200);
+    expect((await readTask(w.h.deps, task.taskId))!.workflow).toMatchObject({ state: "WAITING", stage: "WAIT_FOR_MERGE", feedbackReview: { status: "DISMISSED" }, revision: task.workflow.revision + 1 });
+    expect((await w.send("POST", "/workflow/keep-pull-requests", body))?.statusCode).toBe(200);
+    expect((await readTask(w.h.deps, task.taskId))!.workflow!.revision).toBe(task.workflow.revision + 1);
+  } else {
+    expect(response?.statusCode).toBeGreaterThanOrEqual(400);
+    expect((await readTask(w.h.deps, task.taskId))!.workflow).toEqual(task.workflow);
+  }
+  expect(w.admit).not.toHaveBeenCalled(); expect(w.held.size).toBe(0);
+  expect(start).not.toHaveBeenCalled(); expect(queue).not.toHaveBeenCalled();
+  expect((await w.h.store.query({ pk: dispatchPartition(w.h.deps.companyId) })).items).toEqual([]);
 });

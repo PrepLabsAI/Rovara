@@ -6,8 +6,8 @@ import { companyScoped } from "@agentx/contracts";
 import { createBrokerCoreRoot, type BrokerCoreRootInputs } from "../../packages/broker/src/aws/core-engine-root.js";
 import { hostedPolicySource } from "../../packages/broker/src/aws/core-policy-source.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
-const captured = vi.hoisted<{ options: unknown }>(() => ({ options: undefined }));
-vi.mock("../../packages/broker/src/core-host/app.js", () => ({ createCoreHostApp(options: unknown) { captured.options = options; return { serving: false }; } }));
+const captured = vi.hoisted<{ options: unknown; registry?: AdapterRegistry }>(() => ({ options: undefined }));
+vi.mock("../../packages/broker/src/core-host/app.js", () => ({ createCoreHostApp(options: unknown) { captured.options = options; return { serving: false, registry: async () => captured.registry }; } }));
 const A = "org_aaaaaaaaaaaaaaaaaaaa", B = "org_bbbbbbbbbbbbbbbbbbbb";
 const inputs = (extra: Partial<BrokerCoreRootInputs> = {}): BrokerCoreRootInputs => ({ env: {}, documentClient: { send: async () => { throw new Error("unused"); } }, stateTableName: "state", signInTableName: undefined, callbackSigningKey: "a".repeat(32), repositoryGrantKey: Buffer.alloc(32), repositoryCredential: async () => { throw new Error("unused"); }, codeModules: () => { throw new Error("unused"); }, origin: () => "", log: () => undefined, ...extra });
 // The registry is only asked for its store by the money stop (core-money-stop, merged with L3 in the batch of 2026-11-16); nothing here reads it.
@@ -56,4 +56,46 @@ it("wires plan evidence for the company even when no lessons service is configur
   const flow = { deps: { companyId: A, store: { get: async () => undefined }, admission: {} }, sweepRunsOnce: async () => ({ failed: 0 }) } as never;
   runtimeOptions().services!(flow, { ciMode: async () => "sandbox_only" });
   expect((flow as { deps: { afterPlanStored?: unknown } }).deps.afterPlanStored).toBeTypeOf("function");
+});
+
+import { feedbackWorld } from "../support/pr-feedback-world.js";
+import { servesPrFeedbackDecisions, hostedPrFeedbackRoutes } from "../../packages/broker/src/core-host/pr-feedback-routes.js";
+
+it("the deployed root composes the base feedback handler before its first job or HTTP mount", async () => {
+  const w = await feedbackWorld();
+  w.h.deps.access.ownerActing = async () => ({ actorId: w.task.ownerKey });
+  w.h.deps.taskCapUsd = async () => 10;
+  w.h.deps.taskSpendUsd = async () => 0;
+  createBrokerCoreRoot(inputs({ services: () => ({}) }));
+  expect(servesPrFeedbackDecisions(w.h.deps)).toBe(false);
+  (captured.options as CoreHostAppOptions).runtime(registry, w.h.deps.companyId, {} as never).services!(w.h.flow, { ciMode: async () => "sandbox_only" });
+  expect(servesPrFeedbackDecisions(w.h.deps)).toBe(true);
+  expect(hostedPrFeedbackRoutes(w.h.deps)).toBeTypeOf("function");
+});
+
+import * as devRoutesModule from "../../packages/broker/src/core-host/dev-routes.js";
+
+it.each(["unserved", "served", "unreadable"])("the deployed root Merge wiring uses the same feedback base (%s)", async state => {
+  const w = await feedbackWorld();
+  w.h.deps.access.ownerActing = async () => ({ actorId: w.task.ownerKey });
+  w.h.deps.taskCapUsd = async () => 10;
+  if (state !== "unserved") w.h.deps.taskSpendUsd = async () => 0;
+  w.registry.register("storage", "test", w.h.store);
+  w.registry.register("metering", "test", { record: async () => ({ cost: null, source: "unknown" as const }), price: async () => null });
+  w.registry.register("identity", "test", {} as never);
+  w.registry.register("approvers", "test", w.world.deps.approvers);
+  w.registry.register("audit-sink", "test", w.h.deps.audit);
+  captured.registry = w.registry;
+  const routes = vi.spyOn(devRoutesModule, "createCoreDevRoutes");
+  createBrokerCoreRoot(inputs({ services: () => ({}), now: () => new Date(w.clock.ms) }));
+  const options = routes.mock.calls.at(-1)![0];
+  (captured.options as CoreHostAppOptions).runtime(w.registry, w.h.deps.companyId, {} as never).services!(w.h.flow, { ciMode: async () => "sandbox_only" });
+  const wiring = await options.wiring({ companyId: w.h.deps.companyId, flow: w.h.flow, services: {}, ciReporting: { honest: true, ciMode: async () => "sandbox_only" } });
+  expect(wiring.prFeedback).toBe(hostedPrFeedbackRoutes(w.h.deps));
+  if (state === "unreadable") w.read.mockRejectedValue(new Error("unreadable"));
+  const merge = wiring.merge!.merge(w.h.deps.audit);
+  if (state === "unreadable") await expect(merge.host.loadTask(w.task.taskId)).rejects.toMatchObject({ code: "MERGE_NOT_READY" });
+  else await merge.host.loadTask(w.task.taskId);
+  expect(w.read).toHaveBeenCalledTimes(state === "unserved" ? 0 : 1);
+  routes.mockRestore();
 });

@@ -1,3 +1,5 @@
+import { feedbackOwner } from "../core/pr-feedback/decide.js";
+import { isPrFeedbackPath, type createPrFeedbackRoutes } from "./pr-feedback-routes.js";
 import { committedResponse } from "../core/task-flow/committed-response.js";
 import type { WorkflowDecisionRequest } from "@agentx/contracts";
 import { parityTaskRoute, routeParityTask } from "./parity-task-routes.js";
@@ -182,6 +184,7 @@ export interface CompanyMembership {
 
 /** What the deployment wires for one company. Each part is optional; a missing one answers `NOT_ON_THE_CORE_YET`. */
 export interface CoreDevWiring {
+  prFeedback?: ReturnType<typeof createPrFeedbackRoutes> | undefined;
   startEstimates?: (project: string) => Promise<PreviewContext>;
   /** The session levels from the company's own records (lanes ID and T). Without it the session routes are not served (the laptop's default is the sole owner). */
   members?: SessionMembers;
@@ -316,7 +319,7 @@ function owns(path: string, method: string, query: string): boolean {
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
   if (isSetupRunPath(path, method) || isSetupCheckPath(path, method) || isWikiMapPath(path, method) || isReportPath(path, method)) return true;
   if (isKnownFailingPath(path, method) || isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method) || isEvalCheckPath(path, method) || isAgentDirectoryPath(path, method) || isSystemRunsPath(path, method) || isTicketUpdatesPath(path, method)) return true;
-  return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path) || parityTaskRoute(path, method) !== undefined;
+  return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path) || parityTaskRoute(path, method) !== undefined || isPrFeedbackPath(path, method);
 }
 /** Neither decisions surface relies on sign-in time or methods (DEC 254zzz73). */
 function decisionCallerOf(caller: DeployedCaller, companyId: string): DeployedDecisionCaller {
@@ -418,16 +421,46 @@ interface Mounted {
 }
 
 /** Figures belong to the stored task owner or a live company admin. A co-owner's
- * right to act does not disclose another person's money. Scope budgets stay private. */
+ * right to act does not disclose another person's money (a live co-owner of THIS task reads that task's own `money` alone: `isLiveCoOwner`, `taskViewFor`; ruling (a) of 2026-11-23, DEC 254zzz398). Scope budgets stay private. */
 function maySeeTaskMoney(target: Mounted, task: TaskRecord, caller: DeployedCaller, membership: CompanyMembership): boolean {
   return caller.scriptToken === undefined && caller.principal.companyId === target.runtime.companyId && membership.companyId === target.runtime.companyId && task.companyId === target.runtime.companyId
     && (membership.role === "owner" || membership.role === "admin" || membership.role === "member" && taskOwnerView(task)?.developerId === caller.principal.personId);
 }
-async function moneyOf(target: Mounted, task: TaskRecord, caller: DeployedCaller, membership: CompanyMembership, knownCap?: { limitUsd: number }): Promise<TaskMoneyV1 | undefined> {
-  if (!maySeeTaskMoney(target, task, caller, membership)) return undefined;
+/** The company's live owner rule for THIS task and this person (the owner moves' own rule: the person it runs for, or a People co-owner read now): their own owner key, or none. A throw (People unreadable) is none. */
+async function liveOwnerKey(target: Mounted, task: TaskRecord, caller: DeployedCaller, membership: CompanyMembership): Promise<string | undefined> {
+  const access = target.runtime.flow.deps.access;
+  if (access.ownerActing === undefined || caller.scriptToken !== undefined || caller.principal.companyId !== target.runtime.companyId || membership.companyId !== target.runtime.companyId || task.companyId !== target.runtime.companyId) return undefined;
+  try {
+    return (await access.ownerActing(caller.principal, { taskId: task.taskId, developerId: task.developerId, project: task.project, ownerKey: task.workflow?.ownerId ?? task.ownerKey }))?.actorId;
+  } catch {
+    return undefined;
+  }
+}
+async function isLiveCoOwner(target: Mounted, task: TaskRecord, caller: DeployedCaller, membership: CompanyMembership): Promise<boolean> {
+  return await liveOwnerKey(target, task, caller, membership) !== undefined;
+}
+/** DEC 254zzz398 (b): each served feedback decision says whether THE READER made it (`decidedByYou`), computed here as the decision's actor === the reader's own owner key; the key is never added to a view. A reader with no owner key (a script token, no live owner rule) did not decide. */
+async function withDecidedByYou(view: Record<string, unknown>, target: Mounted, task: TaskRecord, caller: DeployedCaller, membership: CompanyMembership): Promise<Record<string, unknown>> {
+  const workflow = view["workflow"] as { feedbackDecisions?: Array<Record<string, unknown>> } | undefined;
+  if (workflow?.feedbackDecisions === undefined || workflow.feedbackDecisions.length === 0) return view;
+  const mine = await liveOwnerKey(target, task, caller, membership);
+  return { ...view, workflow: { ...workflow, feedbackDecisions: workflow.feedbackDecisions.map(decision => ({ ...decision, decidedByYou: mine !== undefined && decision["actorId"] === mine })) } };
+}
+/** Who reads this task's spend, limit and payer (`TaskMoneyV1`): whoever sees the task's money, or a live co-owner of THIS task. Nobody else, and never another task's or the company's. */
+async function maySeeTaskSpend(target: Mounted, task: TaskRecord, caller: DeployedCaller, membership: CompanyMembership): Promise<boolean> {
+  return maySeeTaskMoney(target, task, caller, membership) || await isLiveCoOwner(target, task, caller, membership);
+}
+async function moneyOf(target: Mounted, task: TaskRecord, knownCap?: { limitUsd: number }): Promise<TaskMoneyV1> {
   const cap = knownCap ?? await target.wiring.taskActions?.roundCap?.(task).catch(() => undefined);
   const maximum = cap === undefined ? undefined : Math.round(cap.limitUsd * 1_000_000);
   return readTaskMoney({ store: target.runtime.flow.deps.store, companyId: target.runtime.companyId, task, hosted: true, revealPayer: true, ...(maximum === undefined ? {} : { taskMaximumMicros: maximum }) });
+}
+/** The developer task view with the caller's share of its figures: the owner's (money, run estimate, design review money), a live co-owner's (the task's `money` alone) or none. */
+async function taskViewFor(target: Mounted, record: TaskRecord, caller: DeployedCaller, membership: CompanyMembership): Promise<Record<string, unknown>> {
+  const view = await taskViewOf(target.runtime.flow.deps, record);
+  if (maySeeTaskMoney(target, record, caller, membership)) return withDecidedByYou(await developerTaskView(record, view, target.blobs, undefined, await moneyOf(target, record), true), target, record, caller, membership);
+  const base = await developerTaskView(record, view, target.blobs, undefined, undefined, false);
+  return withDecidedByYou(await isLiveCoOwner(target, record, caller, membership) ? { ...base, money: await moneyOf(target, record) } : base, target, record, caller, membership);
 }
 
 export interface CoreDevRoutes {
@@ -468,6 +501,34 @@ async function performTaskAction(target: Mounted, caller: TaskCaller, taskId: st
   const handlers = { "workflow/send-back": target.actions!.sendBack, "workflow/review-findings": (who: TaskCaller, id: string, value: unknown) => target.actions!.resolveFindings(who, id, value, "api-token"), "workflow/review": target.actions!.review, continue: target.actions!.continue };
   await handlers[action as keyof typeof handlers](caller, taskId, body);
   return undefined;
+}
+
+function feedbackOrParity(path: string, method: string): boolean {
+  return isPrFeedbackPath(path, method) || parityTaskRoute(path, method) !== undefined;
+}
+function mutationView(target: Mounted, caller: DeployedCaller, membership: CompanyMembership) {
+  return async (record: TaskRecord) => taskViewFor(target, record, caller, membership);
+}
+async function feedbackAnswer(target: Mounted, request: BrokerRequest, taskCaller: TaskCaller, caller: DeployedCaller, membership: CompanyMembership) {
+  if (target.wiring.prFeedback === undefined) return undefined;
+  if (request.method === "POST") await feedbackOwner(target.runtime.flow.deps, taskCaller, request.path.split("/")[4]!);
+  // A decision, Keep or retry made with a tool's token (the CLI or an AI tool: any client that is not the Rovara web app) is audited "made via tool" (DEC 254zzz334, 375), as a plan approval from a tool is.
+  return await target.wiring.prFeedback(request, taskCaller, async (_who, taskId) => {
+    const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, taskId);
+    return mutationView(target, caller, membership)(record);
+  }, caller.webApp === true ? undefined : "tool");
+}
+
+function taskSurfaceAnswer(target: Mounted, request: BrokerRequest, taskCaller: TaskCaller, caller: DeployedCaller, membership: CompanyMembership): Promise<BrokerResponse | undefined> | undefined {
+  const path = request.path.split("?")[0]!;
+  if (isPrFeedbackPath(path, request.method)) return feedbackAnswer(target, request, taskCaller, caller, membership);
+  const parity = parityTaskRoute(path, request.method);
+  if (parity === undefined) return undefined;
+  return routeParityTask({
+    flow: target.runtime.flow, blobs: target.blobs, wiring: target.wiring, caller: taskCaller,
+    decisionCaller: decisionCallerOf(caller, membership.companyId),
+    view: mutationView(target, caller, membership),
+  }, parity, request);
 }
 
 export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoutes {
@@ -519,12 +580,12 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
         if (roundCap === undefined) return undefined;
         const taskCaller = taskCallerOf(caller);
         const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, taskId);
-        if (!maySeeTaskMoney(target, record, caller, membership)) return undefined;
+        if (!await maySeeTaskSpend(target, record, caller, membership)) return undefined;
         const cap = await roundCap(record);
         if (cap === undefined || typeof cap.limitUsd !== "number" || !Number.isFinite(cap.limitUsd) || cap.limitUsd < 0) return undefined;
         const spent = cap.spentUsd;
-        const money = await moneyOf(target, record, caller, membership, cap);
-        return { ...(money === undefined ? {} : { money }), runLimitUsd: cap.limitUsd, ...(typeof spent === "number" && Number.isFinite(spent) && spent >= 0 ? { costUsd: spent } : {}) };
+        const money = await moneyOf(target, record, cap);
+        return { money, runLimitUsd: cap.limitUsd, ...(typeof spent === "number" && Number.isFinite(spent) && spent >= 0 ? { costUsd: spent } : {}) };
       } catch {
         return undefined;
       }
@@ -570,7 +631,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
       if (caller.scriptToken !== undefined && TASK_ANSWERS.test(path)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
       // A script token reaches task reads or the two scoped wiki reads; never sessions, decisions, playbooks or token management.
       // An owner's move on a task is never a script token's, and its answer must not tell a token which task ids exist: it reads like a missing task (the boundary's own answer).
-      if (caller.scriptToken !== undefined && (parityTaskRoute(path, request.method) !== undefined || TASK_ACTION.test(path) || TASK_CANCEL.test(path) || TASK_PAGE_FINDINGS.test(path) || isHostedMergePath(path, request.method) || coreTaskRuleOf(path, request.method) !== undefined)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
+      if (caller.scriptToken !== undefined && (feedbackOrParity(path, request.method) || TASK_ACTION.test(path) || TASK_CANCEL.test(path) || TASK_PAGE_FINDINGS.test(path) || isHostedMergePath(path, request.method) || coreTaskRuleOf(path, request.method) !== undefined)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
       if (caller.scriptToken !== undefined && !TASK_READ.test(path) && scriptTokenRoute(request.method, path)?.permission !== "wiki") return errorAnswer(agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS));
       const target: Mounted = await mount(companyId);
       const taskCaller = taskCallerOf(caller);
@@ -586,7 +647,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           // same request id answers the first task. The answer is the developer task view, as the old start's.
           const started = await target.runtime.flow.start({ ...taskCaller, origin: caller.client === undefined ? "cli" : "app" }, bodyOf(request));
           const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, started.task.taskId);
-          return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller, membership), maySeeTaskMoney(target, record, caller, membership)) });
+          return json(200, { task: await taskViewFor(target, record, caller, membership) });
         }
         const task = TASK_READ.exec(path);
         if (task !== null) {
@@ -604,15 +665,11 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
             : await loadOwnedTask(target.runtime.flow.deps, taskCaller, task[1]!);
           await observeHostedBlockedTask(target.runtime.flow.deps, record, target.wiring.testEnvironment?.env);
           const testing = await hostedTestingView(target.runtime.flow.deps, target.blobs, record, target.wiring.testEnvironment?.env);
-          const view = await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller, membership), maySeeTaskMoney(target, record, caller, membership));
+          const view = await taskViewFor(target, record, caller, membership);
           return json(200, { task: { ...view, ...(testing === undefined ? {} : { testing }), ...await applicationReadProjection(target.runtime, record, caller.principal.personId) } });
         }
-        const parity = parityTaskRoute(path, request.method);
-        if (parity !== undefined) return await routeParityTask({
-          flow: target.runtime.flow, blobs: target.blobs, wiring: target.wiring, caller: taskCaller,
-          decisionCaller: decisionCallerOf(caller, companyId),
-          view: async (record) => developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller, membership), maySeeTaskMoney(target, record, caller, membership)),
-        }, parity, request);
+        const taskSurface = taskSurfaceAnswer(target, request, taskCaller, caller, membership);
+        if (taskSurface !== undefined) return await taskSurface;
         const evidence = TASK_EVIDENCE.exec(path);
         if (evidence !== null) {
           // Exactly the task read's rule (the flow's owned read: the company, then the company's access rule; another company's task, or none, answers the same "not found"), then the pack kept for
@@ -629,7 +686,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           // The task's owner, or a live owner or admin of the task's company (the role is membership's, read for this request; the task's company is checked against it). Anyone who may not
           // read the task gets the missing task's answer whatever they sent; a reader who may not stop gets fixed words. One request id is one stop.
           const stopped = await stopTaskOnRequest(target.runtime.flow.deps, { ...taskCaller, companyRole: membership.role }, cancel[1]!, () => jsonBodyOf(request));
-          return json(200, { task: await developerTaskView(stopped.task, await taskViewOf(target.runtime.flow.deps, stopped.task), target.blobs, undefined, await moneyOf(target, stopped.task, caller, membership), maySeeTaskMoney(target, stopped.task, caller, membership)) });
+          return json(200, { task: await taskViewFor(target, stopped.task, caller, membership) });
         }
         const action = TASK_ACTION.exec(path);
         if (action !== null) {
@@ -644,7 +701,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           const publication = await performTaskAction(target, taskCaller, taskId, action[2]!, body);
           return await committedResponse(async () => {
             const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, taskId);
-            return json(200, { ...publicationAnswer(publication), task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller, membership), maySeeTaskMoney(target, record, caller, membership)) });
+            return json(200, { ...publicationAnswer(publication), task: await taskViewFor(target, record, caller, membership) });
           });
         }
         const rule = coreTaskRuleOf(path, request.method);
@@ -673,7 +730,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           await target.actions.resolveFindings({ ...taskCaller, webApp: true }, taskId, body, "page");
           return await committedResponse(async () => {
             const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, taskId);
-            return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller, membership), maySeeTaskMoney(target, record, caller, membership)) });
+            return json(200, { task: await taskViewFor(target, record, caller, membership) });
           });
         }
         if (isHostedMergePath(path, request.method)) {
@@ -691,7 +748,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           // Only the task's owner (People owners count; a company admin who is not one does not). Anyone who may not read the task gets the missing task's answer whatever they sent; a
           // reader who is not its owner gets fixed words. One request id is one answer, and the round asked is checked.
           const answered = await answerTaskOnRequest(target.runtime.flow.deps, taskCaller, answers[1]!, () => jsonBodyOf(request));
-          return json(200, { task: await developerTaskView(answered.task, await taskViewOf(target.runtime.flow.deps, answered.task), target.blobs, undefined, await moneyOf(target, answered.task, caller, membership), maySeeTaskMoney(target, answered.task, caller, membership)) });
+          return json(200, { task: await taskViewFor(target, answered.task, caller, membership) });
         }
         if (DECISIONS.test(path)) {
           if (target.wiring.decisions === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);

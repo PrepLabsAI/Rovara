@@ -95,3 +95,31 @@ it("an unserved flow never re-queues the paid review of a card an earlier instal
   expect(w.read).not.toHaveBeenCalled();
   expect(admission).not.toHaveBeenCalled();
 });
+
+import { composeHostedPrFeedbackRoutes, propagatePrFeedbackDecisions, servesPrFeedbackDecisions } from "../../packages/broker/src/core-host/pr-feedback-routes.js";
+
+it.each(["unserved", "served", "unreadable"])("the hosted Merge press consumer is %s before any browser request", async state => {
+  const w = await feedbackWorld();
+  w.h.deps.access.ownerActing = async () => ({ actorId: w.task.ownerKey });
+  w.h.deps.taskCapUsd = async () => 10;
+  w.h.deps.taskSpendUsd = async () => 0;
+  if (state !== "unserved") composeHostedPrFeedbackRoutes(w.h.deps);
+  if (state === "unreadable") w.read.mockRejectedValue(new Error("unreadable"));
+  const merge = withFeedbackMergeReads(w.world.deps, w.h.deps, w.registry);
+  if (state === "unreadable") await expect(merge.host.loadTask(w.task.taskId)).rejects.toMatchObject({ code: "MERGE_NOT_READY" });
+  else await merge.host.loadTask(w.task.taskId);
+  expect(w.read).toHaveBeenCalledTimes(state === "unserved" ? 0 : 1);
+  const task = (await readTask(w.h.deps, w.task.taskId))!;
+  expect(task.workflow!.feedbackReview?.status).toBe(state === "served" ? "COLLECTING" : undefined);
+});
+
+it("propagation grants only the actual job object and never a sibling or unserved recovery", async () => {
+  const w = await feedbackWorld();
+  const base = { ...w.h.deps }, job = { ...w.h.deps }, sibling = { ...w.h.deps };
+  propagatePrFeedbackDecisions(base, job);
+  expect(servesPrFeedbackDecisions(job)).toBe(false);
+  createPrFeedbackRoutes(base, async () => ({}));
+  propagatePrFeedbackDecisions(base, job);
+  expect(servesPrFeedbackDecisions(job)).toBe(true);
+  expect(servesPrFeedbackDecisions(sibling)).toBe(false);
+});

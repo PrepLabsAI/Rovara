@@ -1,6 +1,7 @@
 import type { E2ESourceSnapshot } from "@agentx/contracts";
 import { hostedAuthorityStore } from "./core-e2e-authority-store.js";
 import { wireHostedApplicationE2E } from "./core-application-e2e.js";
+import { composeHostedPrFeedbackRoutes } from "../core-host/pr-feedback-routes.js";
 import { createStoreProjectSource } from "../core/task-flow/project-source.js";
 import { developerTaskPolicy } from "@agentx/contracts";
 import { prepareCoreShare } from "./core-task-sharing.js";
@@ -921,6 +922,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       ciReporting: inputs.ciReporting === undefined ? policyCiReporting(policySource) : inputs.ciReporting,
       services: (flow, wiring) => {
         wireHostedApplicationE2E({ ...inputs, flow: flow.deps, companyId, objects: registry.require("object-storage"), runtimeCatalogId: env["AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID"] ?? "", capture: inputs.applicationSource });
+        composeHostedPrFeedbackRoutes(flow.deps);
         flow.deps.afterPlanStored = hostedPlanEvidence(flow.deps, registry.require("object-storage"));
         const runWatch = flow.sweepRunsOnce.bind(flow);
         const idleScan = { cursor: undefined as string | undefined };
