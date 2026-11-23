@@ -38,6 +38,58 @@ export interface RegistryExchangeContext {
 
 const notCovered = (): never => { throw agentXError("FORBIDDEN", "registry credential grant does not cover this request"); };
 
+type StoredOperation = Awaited<ReturnType<RegistryExchangeContext["readOperation"]>>;
+type InstalledCompany = NonNullable<ProjectRegistriesInstall["company"]>;
+/** What the broker offers for the one registry the worker named; everything but the request's name comes from the broker's own records. */
+interface OfferedRegistry { registry: string; kind: string; host: string; scope: string | undefined; mint: () => Promise<RegistryCredential> }
+
+/** Who may exchange: only this workspace's running preparation, at the workspace's own fence. */
+function requireRunningPrepare(operation: StoredOperation, operationId: string): void {
+  if (operation.kind !== "prepare" || operation.readOnly || !LIVE_STATUSES.has(operation.status) || operation.workspace.status !== "PREPARING" || operation.workspace.activeOperationId !== operationId
+    || operation.fence === undefined || operation.fence !== operation.workspace.fence) {
+    throw agentXError("FORBIDDEN", "registry credentials are given to a running preparation only");
+  }
+}
+
+/** The edition rule and the company's domain binding are checked again for a project's own CodeArtifact entry. */
+function offerOwnRegistry(context: RegistryExchangeContext, install: ProjectRegistriesInstall, project: { allowedDomains: readonly string[] }, own: ProjectRegistry): OfferedRegistry {
+  const problem = registryProblems({ edition: install.edition, registries: [own], allowedDomains: project.allowedDomains, orgId: context.companyId, boundDomains: install.boundDomains ?? [] })[0];
+  if (problem !== undefined) throw agentXError("FORBIDDEN", REGISTRY_PROBLEM_MESSAGES[problem.code]);
+  return { registry: own.name, kind: own.kind, host: registryHostOf(own), scope: own.scope, mint: () => mintCodeArtifactCredential(own, install.codeArtifact, context.now) };
+}
+
+/** An entry the project's company set, named by `companyRegistryNames`; undefined when the company has no such entry. */
+async function offerCompanyRegistry(context: RegistryExchangeContext, company: InstalledCompany, name: string): Promise<OfferedRegistry | undefined> {
+  let entries: Awaited<ReturnType<InstalledCompany["entries"]>>;
+  try { entries = await company.entries(context.companyId); } catch { throw agentXError("RUNTIME_UNAVAILABLE", REGISTRY_UNAVAILABLE_MESSAGE(name)); }
+  const item = companyRegistryNames(entries).find((candidate) => candidate.name === name);
+  if (item === undefined) return undefined;
+  return { registry: item.name, kind: "npm", host: item.host, scope: item.scope, mint: () => companyRegistryCredential(company, context.companyId, item.host, item.name) };
+}
+
+/** The registry the worker named, if the broker itself offered it for this preparation: the project's own entry first, then the company's. */
+async function findOffered(context: RegistryExchangeContext, install: ProjectRegistriesInstall, project: { registries: readonly ProjectRegistry[]; allowedDomains: readonly string[] }, name: string): Promise<OfferedRegistry | undefined> {
+  const own = project.registries.find((candidate) => candidate.name === name);
+  if (own !== undefined) return offerOwnRegistry(context, install, project, own);
+  if (install.company !== undefined) return offerCompanyRegistry(context, install.company, name);
+  return undefined;
+}
+
+/** Records the use before the credential leaves; a use that cannot be recorded is refused. */
+async function auditUse(context: RegistryExchangeContext, offered: OfferedRegistry, operation: StoredOperation, ids: { workspaceId: string; operationId: string }): Promise<void> {
+  try {
+    await context.audit.record({
+      eventId: (context.newId ?? randomUUID)(), companyId: context.companyId, at: (context.now ?? (() => new Date()))().toISOString(),
+      actor: operation.requesterId === undefined ? { type: "system", id: "prepare" } : { type: "person", id: operation.requesterId },
+      action: "registry_secret.used",
+      details: { registry: offered.registry, host: offered.host, ...(offered.scope === undefined ? {} : { scope: offered.scope }), project: operation.projectName, workspaceId: ids.workspaceId, operationId: ids.operationId },
+    });
+  } catch {
+    // Nothing leaves that was not recorded.
+    throw agentXError("RUNTIME_UNAVAILABLE", REGISTRY_UNAVAILABLE_MESSAGE(offered.registry));
+  }
+}
+
 export async function exchangeRegistryCredentialCore(context: RegistryExchangeContext, input: { grant: string | undefined; workspaceId: string; operationId: string; body: unknown }): Promise<{ credential: RegistryCredential }> {
   const install = context.install;
   if (install === undefined) throw agentXError("FORBIDDEN", REGISTRIES_NOT_AVAILABLE);
@@ -47,42 +99,17 @@ export async function exchangeRegistryCredentialCore(context: RegistryExchangeCo
   const claims = context.inspectGrant(input.grant);
   if (claims.workspaceId !== input.workspaceId || claims.operationId !== input.operationId) return notCovered();
   const operation = await context.readOperation(input.workspaceId, input.operationId);
-  if (operation.kind !== "prepare" || operation.readOnly || !LIVE_STATUSES.has(operation.status) || operation.workspace.status !== "PREPARING" || operation.workspace.activeOperationId !== input.operationId
-    || operation.fence === undefined || operation.fence !== operation.workspace.fence) {
-    throw agentXError("FORBIDDEN", "registry credentials are given to a running preparation only");
-  }
+  requireRunningPrepare(operation, input.operationId);
   // The grant was issued for this workspace's project; a grant that names another project covers nothing here.
   if (claims.projectName !== undefined && claims.projectName !== operation.projectName) return notCovered();
   if (operation.projectRevision === undefined) return notCovered();
   const project = await context.readProject(operation.projectName, operation.projectRevision);
   if (project === undefined) return notCovered();
-  const own = project.registries.find((candidate) => candidate.name === request.data.registry);
-  let offered: { registry: string; kind: string; host: string; scope: string | undefined; mint: () => Promise<RegistryCredential> } | undefined;
-  if (own !== undefined) {
-    const problem = registryProblems({ edition: install.edition, registries: [own], allowedDomains: project.allowedDomains, orgId: context.companyId, boundDomains: install.boundDomains ?? [] })[0];
-    if (problem !== undefined) throw agentXError("FORBIDDEN", REGISTRY_PROBLEM_MESSAGES[problem.code]);
-    offered = { registry: own.name, kind: own.kind, host: registryHostOf(own), scope: own.scope, mint: () => mintCodeArtifactCredential(own, install.codeArtifact, context.now) };
-  } else if (install.company !== undefined) {
-    let entries: Awaited<ReturnType<NonNullable<typeof install.company>["entries"]>>;
-    try { entries = await install.company.entries(context.companyId); } catch { throw agentXError("RUNTIME_UNAVAILABLE", REGISTRY_UNAVAILABLE_MESSAGE(request.data.registry)); }
-    const item = companyRegistryNames(entries).find((candidate) => candidate.name === request.data.registry);
-    const company = install.company;
-    if (item !== undefined) offered = { registry: item.name, kind: "npm", host: item.host, scope: item.scope, mint: () => companyRegistryCredential(company, context.companyId, item.host, item.name) };
-  }
+  const offered = await findOffered(context, install, project, request.data.registry);
   if (offered === undefined) return notCovered();
   if (!(await context.countRequest(input.workspaceId, input.operationId))) throw agentXError("FORBIDDEN", "registry credentials were already given for this preparation");
   const credential = await offered.mint();
-  try {
-    await context.audit.record({
-      eventId: (context.newId ?? randomUUID)(), companyId: context.companyId, at: (context.now ?? (() => new Date()))().toISOString(),
-      actor: operation.requesterId === undefined ? { type: "system", id: "prepare" } : { type: "person", id: operation.requesterId },
-      action: "registry_secret.used",
-      details: { registry: offered.registry, host: offered.host, ...(offered.scope === undefined ? {} : { scope: offered.scope }), project: operation.projectName, workspaceId: input.workspaceId, operationId: input.operationId },
-    });
-  } catch {
-    // Nothing leaves that was not recorded.
-    throw agentXError("RUNTIME_UNAVAILABLE", REGISTRY_UNAVAILABLE_MESSAGE(offered.registry));
-  }
+  await auditUse(context, offered, operation, input);
   // The line names the registry and its kind; the credential, its name and its value are never in it.
   context.log?.({ component: "callbacks", event: "registry.credential_issued", registry: offered.registry, kind: offered.kind, workspaceId: input.workspaceId, operationId: input.operationId, ...(credential.expiresAt === undefined ? {} : { expiresAt: credential.expiresAt }) });
   return { credential };
