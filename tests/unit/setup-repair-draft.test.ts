@@ -12,7 +12,7 @@ import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
-  IMPLICIT_COMPANY_ID, SYSTEM_OWNER_PROVIDER, WORKER_INVOCATION_FEATURES, agentXError, change, orgProjectCatalogKey, projectMetaKey, projectRevisionKey, queryAll, systemOwnerIdOf, when,
+  IMPLICIT_COMPANY_ID, SYSTEM_OWNER_PROVIDER, WORKER_INVOCATION_FEATURES, agentXError, change, effectiveSetupAgentLimits, orgProjectCatalogKey, projectMetaKey, projectRevisionKey, queryAll, setupLimitsKey, systemOwnerIdOf, when,
   type Admission, type DocumentStore, type OrgId, type Principal, type ProjectDefinition,
 } from "@agentx/contracts";
 import { createSetupProposalSubject, setupApplyKey } from "../../packages/broker/src/core/setup-agent/apply.js";
@@ -821,6 +821,16 @@ async function hostedRig(options: { consent?: boolean; upkeep?: boolean; enforce
 const taskRow = async (h: Hosted, taskId: string) => (await h.w.h.store.get(taskKey(taskId)))!;
 
 describe("L4-SR2 hosted: the real starter, rule and gate", () => {
+  it("SETUP-LIMITS: holds Rovara's own repair draft to the limits the owner saved for the project (cut to the company's cap), and to the defaults for a project that saved none", async () => {
+    const h = await hostedRig();
+    const orgId = h.w.h.deps.companyId;
+    const deps = h.hosted.depsFor("payments");
+    expect(effectiveSetupAgentLimits(await deps.limitSetting!("payments"))).toMatchObject({ budgetCents: 400, commands: 40 });
+    await h.w.h.store.put({ item: { ...setupLimitsKey(orgId, "payments"), entityType: "SETUP_LIMITS", orgId, project: "payments", revision: 1, limits: { budgetCents: 150, commands: 12 } } });
+    expect(effectiveSetupAgentLimits(await deps.limitSetting!("payments"))).toMatchObject({ budgetCents: 150, commands: 12, wallClockMin: 45 });
+    expect(effectiveSetupAgentLimits(await h.hosted.depsFor("billing").limitSetting!("billing"))).toMatchObject({ budgetCents: 400, commands: 40 });
+  });
+
   it("every lock open: a broken setup starts ONE run as the project's system owner (origin nightly, purpose setup_agent, the pointer naming the system owner), audited first, paid by the project, and it stops at the person's approval", async () => {
     const h = await hostedRig();
     const orgId = h.w.h.deps.companyId;
