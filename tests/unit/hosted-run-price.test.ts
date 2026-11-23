@@ -18,10 +18,10 @@ function proxy(runPrice: unknown, fetcher?: typeof fetch) {
     fetch: fetcher ?? (async () => Response.json(answer(runPrice))) })!;
 }
 describe("hosted run price authority", () => {
-  it("gets the governor's bounds through the exact access source used by the adapter, above catalog rates", async () => {
+  it("gets the gateway's per-class rates (not one flattened input rate) through the exact access source used by the adapter, above catalog rates", async () => {
     const read = vi.fn(async () => Response.json(answer(price)));
     const selected = proxy(price, read);
-    expect(await invocationModelPrice({ provider: "rovara-route", modelId: route.alias }, route, selected)).toEqual({ inputPerMTok: 30, outputPerMTok: 40 });
+    expect(await invocationModelPrice({ provider: "rovara-route", modelId: route.alias }, route, selected)).toEqual({ inputPerMTok: 10, outputPerMTok: 40, cacheReadPerMTok: 2, cacheWritePerMTok: 30 });
     const request = { ...selected };
     expect(await (request.apiKey as () => Promise<string>).call(request)).toBe("fixture-key");
     expect(request.baseUrl).toBe("https://gateway.example");
