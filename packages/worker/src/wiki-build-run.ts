@@ -14,7 +14,7 @@ import { resolve } from "node:path";
 import { AgentXError, isBudgetExhaustedMessage, WIKI_BUILD_TOOLS, agentXError, upkeepPauseReasonOfText, type UpkeepPauseReason, type WikiBuildPins, type WikiBuildLimits } from "@agentx/contracts";
 import { ModelBudgetExhaustedError, budgetExhaustedFromMarker } from "@agentx/model-runtime";
 import { assistantOutcome, failedTurn } from "./session-events.js";
-import { SETUP_NEXT_TURN_MARGIN_TOKENS, type ModelPrice } from "./setup-agent-price.js";
+import { SETUP_NEXT_TURN_MARGIN_TOKENS, dearestInputPerMTok, tokensOfUsage, turnCostUsd, type ModelPrice } from "./setup-agent-price.js";
 import { SETUP_AGENT_MAX_OUTPUT_TOKENS, centsFromDollars, estimateNextTurnCents } from "./setup-agent-journal.js";
 import type { PiSessionHandle } from "./pi-session.js";
 
@@ -51,8 +51,6 @@ export interface WikiRunInput {
 
 export interface WikiRunResult { workflowMode: "WIKI_BUILD"; pagesAttempted: number; spentCents: number; end?: string }
 
-/** A cache write costs 1.25 times the input price: the extra quarter, on top of the input price already counted for it. */
-const CACHE_WRITE_EXTRA = 0.25;
 const COMMIT = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const PAGE_TIMEOUT_MS = 15 * 60_000;
 /**
@@ -192,8 +190,8 @@ async function writePage(input: WikiRunInput, job: PageJob, baseCents: number, p
     return reported === undefined ? own : own === undefined ? reported : Math.max(reported, own);
   };
   const nextTurn = (): number => estimateNextTurnCents({
-    inputTokens: lastInputTokens + lastOutputTokens + SETUP_NEXT_TURN_MARGIN_TOKENS + toolRuns * WIKI_TOOL_RESULT_MAX_TOKENS
-      + CACHE_WRITE_EXTRA * (lastOutputTokens + SETUP_NEXT_TURN_MARGIN_TOKENS + toolRuns * WIKI_TOOL_RESULT_MAX_TOKENS), maxOutputTokens: SETUP_AGENT_MAX_OUTPUT_TOKENS, ...price,
+    // The whole last context, its output, the margin and the tool results since, all at the dearest input rate (a cold cache writes it again; the write rate already holds the write premium), and the output cap.
+    inputTokens: lastInputTokens + lastOutputTokens + SETUP_NEXT_TURN_MARGIN_TOKENS + toolRuns * WIKI_TOOL_RESULT_MAX_TOKENS, maxOutputTokens: SETUP_AGENT_MAX_OUTPUT_TOKENS, inputPerMTok: dearestInputPerMTok(price), outputPerMTok: price.outputPerMTok,
   });
   /** The run's spend now: what earlier pages cost plus this session's. Undefined when it cannot be read. */
   const spendNow = (): number | undefined => { const own = sessionSpend(); return own === undefined ? undefined : baseCents + own; };
@@ -224,7 +222,8 @@ async function writePage(input: WikiRunInput, job: PageJob, baseCents: number, p
         lastReportedCents = Math.max(lastReportedCents, reportedNow);
         if (used > 0) lastInputTokens = used;
         lastOutputTokens = produced;
-        ownUsd += ((used + written * CACHE_WRITE_EXTRA) * price.inputPerMTok + produced * price.outputPerMTok) / 1_000_000;
+        // Every token class at its own rate (the same pricing as the setup run).
+        ownUsd += turnCostUsd(price, tokensOfUsage(message.usage));
         const outcome = assistantOutcome(event);
         const failure = failedTurn(outcome);
         const paused = upkeepPauseReasonOfText(outcome?.errorMessage) ?? upkeepPauseReasonOfText(failure?.message);

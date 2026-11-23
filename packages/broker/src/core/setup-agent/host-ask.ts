@@ -98,6 +98,23 @@ export async function listHostAsks(table: Table, orgId: OrgId, project: string, 
   return out.sort((a, b) => b.askedAt.localeCompare(a.askedAt));
 }
 
+/**
+ * The open asks of a whole company, newest first, from the company's index (one read). The index row is only a pointer: each ask is read again from its own row, so an ask that was decided, refused and
+ * expired, or damaged (a skip, never a guess) is not listed, and another company's rows are never read (the partition is the company's).
+ */
+export async function listOpenHostAsksOfCompany(table: Table, orgId: OrgId): Promise<SetupHostAsk[]> {
+  const rows = await queryAll(table.store, { pk: indexPartition(orgId), limit: 100 });
+  const nowMs = table.now();
+  const found = await Promise.all(rows.slice(0, SETUP_HOST_INDEX_MAX).map(async (row): Promise<SetupHostAsk | undefined> => {
+    if (rowExpired(row, nowMs)) return undefined;
+    const indexed = AskRowSchema.safeParse(row["ask"]);
+    if (!indexed.success || indexed.data.orgId !== orgId || row["project"] !== indexed.data.project || row["host"] !== indexed.data.host) return undefined;
+    const live = await readAsk(table, orgId, indexed.data.project, indexed.data.host).catch(() => undefined);
+    return live !== undefined && live.state === "open" && live.askedAt === indexed.data.askedAt && !rowExpired(live, nowMs) ? live : undefined;
+  }));
+  return found.filter((ask): ask is SetupHostAsk => ask !== undefined).sort((a, b) => b.askedAt.localeCompare(a.askedAt));
+}
+
 /** The hosts the owner approved for a project, for the install's machines to read when they start. An approval is a record: it reaches no machine that is already running. */
 export async function approvedHostsOf(table: Table, orgId: OrgId, project: string): Promise<string[]> {
   return (await listHostAsks(table, orgId, project, ["approved"])).map((ask) => ask.host).sort();

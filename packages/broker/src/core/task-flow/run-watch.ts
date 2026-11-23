@@ -15,11 +15,14 @@ import { sweepHistoricalPreparations } from "./prepare-recovery.js";
 import { sweepPreparations } from "./prepare-watch.js";
 import { iso, log } from "./support.js";
 import { endUnflushed, spendStopOverdue, spendStopReason, type SpendStopCode } from "./money-stop.js";
+import { endSilentSetupRun } from "./setup-run-watch.js";
 
 /** How long a machine stays lost or unhealthy before the operation on it is ended: a machine restarting or a health check failing once is not a lost run. */
 export const RUN_LOST_GRACE_SECONDS = 120;
 /** The words the task page and the owner read for such an end. */
 export const RUN_LOST_MESSAGE = "the worker machine running this step was lost";
+
+export { SETUP_RUN_SILENT_MESSAGE } from "./setup-run-watch.js";
 
 /** The machine states in which the worker that was running the operation is not there to finish it. */
 const LOST_STATES: ReadonlySet<MachineState> = new Set<MachineState>(["terminated", "stopped", "stopping", "unhealthy"]);
@@ -82,12 +85,15 @@ async function settleRow(deps: TaskFlowDeps, row: RunWatchRecord, graceMs: numbe
   }
   // A cancel asked for ends the operation on its own path.
   if (!RUNNING_STATUSES.has(operation.status)) return "waiting";
+  // A setup run whose worker is on a machine that is still up but went silent is ended here too (setup-run-watch.ts).
+  const silent = await endSilentSetupRun(deps, row, operation);
+  if (silent !== undefined) return silent;
   const health = await deps.machines.health(row.machineId).catch(() => undefined);
   // A health check that fails says nothing about the machine: no clock starts and none stops.
   if (health === undefined) return "waiting";
   const key = runWatchKey(deps.companyId, row.workspaceId, row.operationId);
   if (!LOST_STATES.has(health.state)) {
-    if (row.unhealthySince !== undefined) await deps.store.update({ key, ops: [change.remove("unhealthySince")], condition: when.eq("unhealthySince", row.unhealthySince) });
+    await clearUnhealthySince(deps, key, row);
     return "waiting";
   }
   const now = iso(deps);
@@ -110,6 +116,11 @@ async function settleRow(deps: TaskFlowDeps, row: RunWatchRecord, graceMs: numbe
   await deps.store.delete({ key });
   // It ended some other way between the read and the write (a result got in first): the row goes, and the sweep ended nothing.
   return after.status === "INTERRUPTED" && after.error === RUN_LOST_MESSAGE ? "interrupted" : "cleared";
+}
+
+/** The machine is well again: the clock of its bad spell stops, and a new bad spell starts it from nothing. */
+async function clearUnhealthySince(deps: TaskFlowDeps, key: ReturnType<typeof runWatchKey>, row: RunWatchRecord): Promise<void> {
+  if (row.unhealthySince !== undefined) await deps.store.update({ key, ops: [change.remove("unhealthySince")], condition: when.eq("unhealthySince", row.unhealthySince) });
 }
 
 function matchingWatchedRun(operation: OperationRecord | undefined, row: RunWatchRecord, companyId: string): operation is OperationRecord {

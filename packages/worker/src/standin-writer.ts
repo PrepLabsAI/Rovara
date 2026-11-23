@@ -12,7 +12,8 @@
 //   - ONE TURN: the session has no tool, so it makes one model call; a second assistant message ends it.
 import { STANDIN_LIMITS, STANDIN_SKIP_WORDS, StandInWriterInputSchema, parseStandInWriterOutput, standInWriterCeilingCents, type StandInSkipReason, type StandInWriterInput, type StandInWriterSet } from "@agentx/contracts";
 import { budgetExhaustedFromMarker } from "@agentx/model-runtime";
-import { SETUP_CACHE_WRITE_EXTRA, type ModelPrice } from "./setup-agent-price.js";
+import { dearestInputPerMTok, tokensOfUsage, turnCostUsd, type ModelPrice } from "./setup-agent-price.js";
+import type { UsageStats } from "./usage.js";
 import { centsFromDollars } from "./setup-agent-journal.js";
 import { assistantOutcome, failedTurn } from "./session-events.js";
 import type { PiSessionHandle, WorkspaceModelConfiguration, createWorkspacePiSession } from "./pi-session.js";
@@ -50,6 +51,8 @@ export interface StandInWriterRun {
   register?: ((abort: () => Promise<void>) => () => void) | undefined;
   /** True once a person has stopped the setup run: the writer then does not start, or ends its call at once. */
   cancelled?: (() => boolean) | undefined;
+  /** Called once with the writer's session stats, its model and the cents counted for it, just before the session is closed: the caller books them (the setup run's usage report). */
+  onUsage?: ((stats: UsageStats, model: { provider: string; modelId: string }, spendCents: number) => void) | undefined;
   /** The longest the model call may take. Past it the call is aborted and counted as failed (its spend is still counted). Default `STANDIN_WRITER_TIMEOUT_MS`. */
   timeoutMs?: number | undefined;
 }
@@ -73,6 +76,22 @@ const textOf = (content: unknown): string | undefined => {
   return parts.length === 0 ? undefined : parts.join("\n");
 };
 
+/** The contract's ceiling prices all the writer's input at `inputPerMTok` times this (contracts `INPUT_PRICE_FACTOR`: a cache write is 1.25 times input). */
+const CEILING_INPUT_FACTOR = 1.25;
+
+/**
+ * The price the writer's cost ceiling is computed at. The ceiling prices the whole prompt at the dearest rate an input token could cost (the cache write rate included; a model with no cache rates is priced at twice its input
+ * rate), so it bounds a cold-cache write at the gateway's rate. The contract multiplies the input rate by `CEILING_INPUT_FACTOR`, so the rate is divided by it here: the product is the dearest rate itself.
+ */
+export function standInCeilingPrice(price: ModelPrice): { inputPerMTok: number; outputPerMTok: number } {
+  return { inputPerMTok: dearestInputPerMTok(price) / CEILING_INPUT_FACTOR, outputPerMTok: price.outputPerMTok };
+}
+
+/** Hands the caller the writer's usage (never throws: stats that cannot be read leave the run's own figure standing). */
+function tellUsage(run: StandInWriterRun, session: PiSessionHandle, spendCents: number): void {
+  try { run.onUsage?.(session.getSessionStats(), session.getModel(), spendCents); } catch { /* the stats cannot be read */ }
+}
+
 /** Runs the writer once. Never throws: every end is one of the outcomes, with the spend it cost counted. */
 export async function runStandInWriter(run: StandInWriterRun): Promise<StandInWriterOutcome> {
   const parsedInput = StandInWriterInputSchema.safeParse(run.input);
@@ -80,7 +99,7 @@ export async function runStandInWriter(run: StandInWriterRun): Promise<StandInWr
   const input = parsedInput.data;
   // No AI: nothing is opened and nothing is spent. (A model with no price is no model the run can pay for by the cent.)
   if (run.openSession === undefined || run.price === undefined || !Number.isFinite(run.price.inputPerMTok) || !Number.isFinite(run.price.outputPerMTok)) return skipped("no_ai");
-  const ceilingCents = standInWriterCeilingCents(run.price);
+  const ceilingCents = standInWriterCeilingCents(standInCeilingPrice(run.price));
   // The writer is paid from the run's cap: its whole ceiling must fit in what is left, so the cap holds however the model answers.
   if (!Number.isFinite(ceilingCents) || !Number.isSafeInteger(run.remainingCents) || run.remainingCents < ceilingCents) return skipped("no_room");
   let session: PiSessionHandle | undefined;
@@ -103,11 +122,8 @@ export async function runStandInWriter(run: StandInWriterRun): Promise<StandInWr
     if ((event as { type?: unknown }).type !== "message_end" || message?.role !== "assistant") return;
     turns += 1;
     finalText = textOf(message.content) ?? finalText;
-    const written = message.usage?.cacheWrite ?? 0;
-    const used = (message.usage?.input ?? 0) + (message.usage?.cacheRead ?? 0) + written;
-    const produced = message.usage?.output ?? 0;
-    // The same count as the setup run's own: a cache write costs 1.25 times the input price, a read is priced as input (dearer than it is, never cheaper).
-    ownUsd += ((used + written * SETUP_CACHE_WRITE_EXTRA) * run.price!.inputPerMTok + produced * run.price!.outputPerMTok) / 1_000_000;
+    // The same count as the setup run's own: every token class at its own rate.
+    ownUsd += turnCostUsd(run.price!, tokensOfUsage(message.usage));
     const outcome = assistantOutcome(event);
     const failure = failedTurn(outcome);
     if (budgetExhaustedFromMarker(outcome?.errorMessage) !== undefined) verdict ??= "no_room";
@@ -124,7 +140,7 @@ export async function runStandInWriter(run: StandInWriterRun): Promise<StandInWr
     const limit = new Promise<"timeout">((resolve) => { timer = setTimeout(() => { resolve("timeout"); }, run.timeoutMs ?? STANDIN_WRITER_TIMEOUT_MS); timer.unref?.(); });
     const done = session.prompt(standInWriterPrompt(input)).then(() => "done" as const);
     // A call that takes too long is aborted; its late result or failure is ignored.
-    if ((await Promise.race([done, limit])) === "timeout") { verdict ??= "failed"; void done.catch(() => undefined); await cutOff(); }
+    if ((await Promise.race([done, limit])) === "timeout") { verdict ??= "failed"; void done.catch(() => undefined); await Promise.race([cutOff(), new Promise<void>((resolve) => { setTimeout(resolve, 30_000).unref?.(); })]); }
   } catch (error) {
     verdict ??= isModelNotAllowed(error) ? "no_ai" : "failed";
   } finally {
@@ -139,8 +155,10 @@ export async function runStandInWriter(run: StandInWriterRun): Promise<StandInWr
   // Nothing seen after the prompt went out (and no refusal that came before any generation) is as unreadable as a cut-off call: the ceiling.
   const unseen = turns === 0 && verdict !== "no_ai" && verdict !== "no_room";
   const counted = uncertain || unseen ? Math.max(read0, ceilingCents) : read0;
-  session.dispose();
   const spendCents = Math.min(counted, 1_000_000);
+  // The caller books it (the setup run's usage report), with the figure counted here as its cost: never below what the run's cap counted.
+  tellUsage(run, session, spendCents);
+  session.dispose();
   if (verdict !== undefined) return skipped(verdict, spendCents);
   const read = parseStandInWriterOutput(finalText, input);
   return read.ok ? { status: "written", set: read.set, spendCents } : skipped("unusable", spendCents);
