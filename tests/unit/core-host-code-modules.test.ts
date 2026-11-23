@@ -112,7 +112,7 @@ describe("Code's AWS adapter modules", () => {
       [{ codeHost: { provider: new GitHubFixtureProvider(new FakeHostModel({ url: "https://github.com/example/demo.git", id: "1", fullName: "example/demo" })), options: { credentialRef: "" } } }, /codeHost input is hollow/],
       [{ checkRunner: { githubActions: {} as never } }, /checkRunner\.githubActions input is hollow/],
       [{ workerMachines: { ...fleetDeps(), sign: undefined as never } }, /workerMachines input is hollow: sign/],
-      [{ workerMachines: { ...fleetDeps(), sessions: { get: async () => undefined } as never } }, /workerMachines\.sessions input is hollow: ensureSession, deleteSession, claimStop, markStopped/],
+      [{ workerMachines: { ...fleetDeps(), sessions: { get: async () => undefined } as never } }, /workerMachines\.sessions input is hollow: ensureSession, deleteSession, claimStop, requestStop, markStopped/],
     ];
     for (const [override, words] of cases) {
       await expect(buildCoreRegistry({ modules: modulesWithOwed(awsWorld(override)), context: context(), areas: ["flow", "build", "merge"] }), words.source).rejects.toThrow(words);

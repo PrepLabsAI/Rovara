@@ -85,31 +85,41 @@ export function createReaperHandler(dependencies: ReaperDependencies) {
       await terminate(dependencies, session, log);
     }
 
-    for (const session of await dependencies.sessions.listByState("STOPPING")) {
-      const progress = await dependencies.progress(session.instanceId!, session.volumeId!);
-      if (progress.instanceLive) await terminate(dependencies, session, log);
-      if (!progress.instanceGone || !progress.volumeAvailable) {
-        report.stillStopping.push(session.workspaceId);
-        continue;
-      }
-      const stopped = await dependencies.sessions.markStopped(session.workspaceId, session.generation);
-      report.stopped.push(session.workspaceId);
-      // Work that arrived while it was stopping starts the next generation at once.
-      if ((stopped.waitingOutboxIds ?? []).length > 0) {
-        const binding = await dependencies.binding(session.workspaceId);
-        if (binding === undefined) {
-          log({ event: "session.restart_skipped", workspaceId: session.workspaceId, reason: "no ec2-ebs binding" });
-        } else {
-          await dependencies.sessions.ensureSession({ workspaceId: session.workspaceId, binding });
-          report.restarted.push(session.workspaceId);
-        }
-      }
-    }
+    for (const session of await dependencies.sessions.listByState("STOPPING")) await finishStopping(dependencies, session, report, log);
 
     // The STOPPING query runs after this tick's claims, so it already counts them.
     dependencies.emit({ SessionsStopped: report.stopped.length, SessionsStopping: report.stillStopping.length });
     return report;
   };
+}
+
+/** One STOPPING session: its instance is ended while it lives, and once it is gone and the volume detached the session is STOPPED (the volume is kept). */
+async function finishStopping(dependencies: ReaperDependencies, session: WorkspaceSession, report: ReaperReport, log: (entry: Record<string, unknown>) => void): Promise<void> {
+  const progress = await dependencies.progress(session.instanceId!, session.volumeId!);
+  if (progress.instanceLive) await terminate(dependencies, session, log);
+  if (!progress.instanceGone || !progress.volumeAvailable) {
+    report.stillStopping.push(session.workspaceId);
+    return;
+  }
+  let stopped: WorkspaceSession;
+  try {
+    stopped = await dependencies.sessions.markStopped(session.workspaceId, session.generation);
+  } catch (error) {
+    // A Close (or a Stop's Close) moved this session from STOPPING to DELETING after it was listed: the deleter owns its instance and volume now. One session never aborts the tick.
+    if (!(error instanceof Error && "code" in error && error.code === "STALE_FENCE")) throw error;
+    log({ event: "session.stop_superseded", workspaceId: session.workspaceId, generation: session.generation });
+    return;
+  }
+  report.stopped.push(session.workspaceId);
+  // Work that arrived while it was stopping starts the next generation at once.
+  if ((stopped.waitingOutboxIds ?? []).length === 0) return;
+  const binding = await dependencies.binding(session.workspaceId);
+  if (binding === undefined) {
+    log({ event: "session.restart_skipped", workspaceId: session.workspaceId, reason: "no ec2-ebs binding" });
+    return;
+  }
+  await dependencies.sessions.ensureSession({ workspaceId: session.workspaceId, binding });
+  report.restarted.push(session.workspaceId);
 }
 
 async function isBusy(dependencies: ReaperDependencies, session: WorkspaceSession): Promise<boolean> {

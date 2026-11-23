@@ -313,7 +313,7 @@ describe("core outbox stream partial failures", () => {
 it("composes the broker adapters lazily and preserves the L1c builder object including brokerOnly", async () => {
   const unused = async (): Promise<never> => { throw new Error("composition does not invoke adapters"); };
   const machines: NonNullable<CodeModuleDeps["workerMachines"]> = {
-    brokerOnly: true, sessions: { get: unused, ensureSession: unused, deleteSession: unused, claimStop: unused, markStopped: unused },
+    brokerOnly: true, sessions: { get: unused, ensureSession: unused, deleteSession: unused, claimStop: unused, requestStop: unused, markStopped: unused },
     companyOfWorkspace: unused, binding: unused, stopInstance: unused, sign: unused, post: unused, ping: unused,
   };
   const codeHost: Pick<CodeModuleDeps, "codeHost"> = {

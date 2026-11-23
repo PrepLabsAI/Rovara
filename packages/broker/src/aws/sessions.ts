@@ -274,7 +274,10 @@ export class SessionManager {
 
   /**
    * Starts deleting the workspace's instance and volume when it closes. A session that never
-   * provisioned has nothing to delete. Refuses while compute is starting or stopping.
+   * provisioned has nothing to delete. Refuses while compute is starting. A STOPPING session (a person's Stop,
+   * or the reaper's) moves straight to DELETING: the deleter ends the instance itself and waits for the volume
+   * to detach before it deletes it, so a Close inside the stop's window still removes the volume (it would
+   * otherwise be marked STOPPED by the reaper and kept for ever, after the task closed).
    */
   async deleteSession(workspaceId: string): Promise<{ state: "DELETING" | "DELETED" }> {
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
@@ -288,6 +291,7 @@ export class SessionManager {
           })))) continue;
           return { state: "DELETED" };
         case "READY":
+        case "STOPPING":
         case "STOPPED":
         case "FAILED":
           if (!(await this.conditional(this.update(workspaceId, {
@@ -301,13 +305,56 @@ export class SessionManager {
           if (session.executionArn === undefined) await this.startDeletion(session);
           return { state: "DELETING" };
         case "PROVISIONING":
-        case "STOPPING":
-          throw agentXError("WORKSPACE_BUSY", "workspace compute is starting or stopping; retry the close");
+          throw agentXError("WORKSPACE_BUSY", "workspace compute is starting; retry the close");
         default:
           return unhandledState(session.state);
       }
     }
     throw agentXError("RUNTIME_UNAVAILABLE", "workspace session kept changing; retry the close");
+  }
+
+  /**
+   * READY -> STOPPING for a person's (or the flow's) Stop of a running step: the instance is ended by the reaper's STOPPING pass and the volume is KEPT (a Close deletes it, nothing
+   * else does). Unlike `claimStop` it does not wait for the workspace to be idle: the caller holds the operation it is cancelling. So the write is fenced in the same transaction on
+   * the workspace's active operation: it must still be the operation read a moment ago, so a step dispatched in the gap is never ended by a Stop meant for the one before it.
+   * Returns whether this call made the claim. A no-op (false), never a throw, for a session that is already STOPPING, STOPPED, FAILED, DELETING, NONE, DELETED or absent, and for
+   * a workspace with no running operation (the idle rule takes that instance). A PROVISIONING session throws WORKSPACE_BUSY: its instance is not up yet.
+   * (A session in the middle of a retention hold is never claimed here once the retention lane lands: it must add its lifecycle guard to this method and to the STOPPING arm of deleteSession.)
+   */
+  async requestStop(workspaceId: string): Promise<boolean> {
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+      const target = await this.stopTarget(workspaceId);
+      if (target === undefined) return false;
+      const claim = this.update(workspaceId, { set: { state: "STOPPING" }, when: { state: "READY", generation: target.generation } });
+      try {
+        await this.dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+          { Update: claim },
+          { ConditionCheck: {
+            TableName: this.dependencies.tableName,
+            Key: target.workspaceKey,
+            ConditionExpression: "activeOperationId = :seenOperation",
+            ExpressionAttributeValues: { ":seenOperation": target.operationId },
+          } },
+        ] }));
+        return true;
+      } catch (error) {
+        if (!isConditionalFailure(error)) throw error;
+        // The operation moved on (a result cleared it, or the next step took the workspace): not this Stop's to carry out. Anything else (the session changed, a transaction conflict): read again.
+        if (cancelledBy(error, 1)) return false;
+      }
+    }
+    throw agentXError("RUNTIME_UNAVAILABLE", "workspace session kept changing; retry the stop");
+  }
+
+  /** The READY session a Stop may claim and the operation the workspace runs now; undefined when there is nothing to stop (see `requestStop`). Throws WORKSPACE_BUSY while PROVISIONING. */
+  private async stopTarget(workspaceId: string): Promise<{ generation: number; operationId: string; workspaceKey: { pk: string; sk: string } } | undefined> {
+    const session = await this.get(workspaceId);
+    if (session?.state === "PROVISIONING") throw agentXError("WORKSPACE_BUSY", "workspace compute is starting; stop it once it is ready");
+    if (session?.state !== "READY") return undefined;
+    const workspace = await readWorkspaceMeta(this.dependencies.documentClient, this.dependencies.tableName, workspaceId);
+    const operationId = workspace?.item.activeOperationId;
+    if (workspace === undefined || typeof operationId !== "string" || operationId === "") return undefined;
+    return { generation: session.generation, operationId, workspaceKey: workspace.key };
   }
 
   /** Every session in `state`, from the sparse state index. */
@@ -661,6 +708,12 @@ function executionArnFor(stateMachineArn: string, name: string): string {
 
 function outboxKey(outboxId: string): { pk: string; sk: string } {
   return { pk: `OUTBOX#${outboxId}`, sk: "OUTBOX" };
+}
+
+/** Whether the cancelled transaction reports that its step `index` failed its own condition. */
+function cancelledBy(error: unknown, index: number): boolean {
+  const reasons = (error as { CancellationReasons?: Array<{ Code?: string }> }).CancellationReasons;
+  return reasons?.[index]?.Code === "ConditionalCheckFailed";
 }
 
 function isConditionalFailure(error: unknown): boolean {

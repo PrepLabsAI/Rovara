@@ -1,5 +1,5 @@
 // A cancelled critic keeps the workspace fenced until its worker is known to be quiescent.
-import { agentXError, change, when } from "@agentx/contracts";
+import { MachineError, agentXError, change, when, type MachineHealth } from "@agentx/contracts";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import type { OperationRecord, TaskRecord } from "../task-flow/records.js";
 import { readOperation, recordOperationResult, isTerminalStatus } from "../task-flow/results.js";
@@ -23,8 +23,22 @@ export async function quiesceCritic(deps: TaskFlowDeps, task: TaskRecord, operat
   }
   if (operation.machineId === undefined) return { workspace: { ...workspace, fence: heldFence }, confirmed: true };
   await deps.machines.stop(operation.machineId);
-  const health = await deps.machines.health(operation.machineId);
-  return { workspace: { ...workspace, fence: heldFence }, confirmed: health.state === "stopped" || health.state === "terminated" };
+  // Confirmed only once the machine is really stopped or gone: a session still STOPPING (the reaper ends its instance on its next tick) is not, and the hold stays until a later pass sees it.
+  const health = await healthOrUnknown(deps, operation.machineId);
+  return { workspace: { ...workspace, fence: heldFence }, confirmed: health?.state === "stopped" || health?.state === "terminated" };
+}
+
+/**
+ * The machine's health, or undefined when the adapter cannot say right now (`unavailable`). The broker's adapter cannot ping a READY worker and refuses; for the hold that is "not known stopped",
+ * never a failure of the pass.
+ */
+async function healthOrUnknown(deps: TaskFlowDeps, machineId: string): Promise<MachineHealth | undefined> {
+  try {
+    return await deps.machines.health(machineId);
+  } catch (error) {
+    if (error instanceof MachineError && error.code === "unavailable") return undefined;
+    throw error;
+  }
 }
 
 export async function releaseCriticHold(deps: TaskFlowDeps, operation: OperationRecord): Promise<void> {
@@ -42,12 +56,13 @@ export async function settleQuiescedCritic(deps: TaskFlowDeps, operation: Operat
 
 async function finishMachineStop(deps: TaskFlowDeps, operation: OperationRecord): Promise<boolean> {
   if (operation.machineId === undefined) return true;
-  const health = await deps.machines.health(operation.machineId);
-  if (health.state === "stopped" || health.state === "terminated") return true;
-  if (health.state === "stopping") return false;
+  const health = await healthOrUnknown(deps, operation.machineId);
+  if (health?.state === "stopped" || health?.state === "terminated") return true;
+  if (health?.state === "stopping") return false;
+  // Unknown (the broker cannot ping a READY worker) or still up: stop it. The stop is idempotent.
   await deps.machines.stop(operation.machineId);
-  const after = await deps.machines.health(operation.machineId);
-  return after.state === "stopped" || after.state === "terminated";
+  const after = await healthOrUnknown(deps, operation.machineId);
+  return after?.state === "stopped" || after?.state === "terminated";
 }
 
 /** A result can commit while a stop is in flight; its higher workspace fence keeps a later paid round waiting. */
