@@ -24,6 +24,9 @@ export const REGISTRY_CONFIG_PREFIX = ".agentx-registry-";
 const SAFE_TOKEN = /^[A-Za-z0-9._~+/=-]+$/;
 const SAFE_USERNAME = /^[A-Za-z0-9._~@-]{1,128}$/;
 
+/** A minted token (CodeArtifact's) carries its end; a stored one (a personal access token) has none, and none is made up. */
+const isExpired = (credential: RegistryCredential): boolean => credential.expiresAt !== undefined && Date.parse(credential.expiresAt) <= Date.now();
+
 export type PreparedCredential = { registry: PrepareRegistry; username: string; token: string };
 
 const xml = (value: string): string => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
@@ -31,14 +34,20 @@ const xml = (value: string): string => value.replace(/&/g, "&amp;").replace(/</g
 /** npm's `//host/path/` key for a registry URL (npm-auth.html): the URL without its scheme. */
 const npmKey = (url: string): string => url.replace(/^https:/, "");
 
-/** The npmrc: the registry line (per scope), and the token for that registry's URL. https://docs.aws.amazon.com/codeartifact/latest/ug/npm-auth.html */
+/**
+ * The npmrc: each registry's address (per scope), and ONE token line per registry host, keyed by the host (`//host/path/:_authToken`, with its `:always-auth`). Never an unscoped `_authToken`, `_auth` or
+ * `always-auth`: a repository's own `.npmrc` that reroutes a scope to another host makes npm send no token there. A host several scopes share (a company's one token for GitHub Packages) is written once.
+ * https://docs.aws.amazon.com/codeartifact/latest/ug/npm-auth.html
+ */
 export function renderNpmrc(entries: readonly PreparedCredential[]): string {
   const lines: string[] = [];
+  const tokens = new Map<string, string>();
   for (const { registry, token } of entries) {
     lines.push(registry.scope === undefined ? `registry=${registry.url}` : `${registry.scope}:registry=${registry.url}`);
-    lines.push(`${npmKey(registry.url)}:_authToken=${token}`, `${npmKey(registry.url)}:always-auth=true`);
+    tokens.set(npmKey(registry.url), token);
   }
-  return `${lines.join("\n")}\n`;
+  const keyed = [...tokens].flatMap(([key, token]) => [`${key}:_authToken=${token}`, `${key}:always-auth=true`]);
+  return `${[...lines, ...keyed].join("\n")}\n`;
 }
 
 /** The pip.conf: the first index is `index-url`, the rest `extra-index-url`. The user name and token sit in the URL (python-configure-pip.html), percent-encoded. */
@@ -88,7 +97,7 @@ export async function openRegistrySession(input: {
   for (const registry of input.registries) {
     const credential: RegistryCredential = await input.provider(registry.name);
     const username = credential.username ?? "token";
-    if (!SAFE_TOKEN.test(credential.token) || !SAFE_USERNAME.test(username) || credential.token.length < REGISTRY_TOKEN_MIN_LENGTH || Date.parse(credential.expiresAt) <= Date.now()) {
+    if (!SAFE_TOKEN.test(credential.token) || !SAFE_USERNAME.test(username) || credential.token.length < REGISTRY_TOKEN_MIN_LENGTH || isExpired(credential)) {
       throw agentXError("RUNTIME_UNAVAILABLE", `Rovara cannot use the credential of the package registry "${registry.name}"`);
     }
     credentials.push({ registry, username, token: credential.token });

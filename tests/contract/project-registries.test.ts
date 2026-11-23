@@ -4,7 +4,8 @@ import { PREPARE_REGISTRIES_FEATURE, PrepareRegistriesSchema, ProjectDefinitionS
 
 const fakeToken = (seed = "a"): string => `eyJ${Buffer.from(`${seed}-token-material-${seed.repeat(24)}`).toString("base64url")}.${Buffer.from(seed.repeat(30)).toString("base64url")}`;
 const CA: ProjectRegistry = { kind: "codeartifact", name: "internal-npm", format: "npm", domain: "acme", domainOwner: "123456789012", repository: "shared", region: "us-west-2" };
-const GENERIC: ProjectRegistry = { kind: "pypi", name: "corp-pypi", url: "https://pypi.corp.acme.dev/simple/", credentialRef: "corp-pypi-reader" };
+/** What a project can no longer name: its token is the company's, set once. */
+const GENERIC = { kind: "pypi", name: "corp-pypi", url: "https://pypi.corp.acme.dev/simple/", credentialRef: "corp-pypi-reader" };
 const PROJECT = { name: "payments", revision: 1, repositories: [{ name: "api", url: "https://github.com/acme/api.git", path: "repo/api", defaultBranch: "main", credentialRef: "github-app" }], setup: [], readiness: [], orchestratorInstructions: "x" };
 
 describe("a registry entry", () => {
@@ -16,14 +17,21 @@ describe("a registry entry", () => {
     expect(registryUrlOf({ ...CA, region: "cn-north-1" })).toContain(".amazonaws.com.cn/");
   });
 
-  it("keeps a generic address and adds the trailing slash", () => {
-    expect(registryUrlOf({ kind: "npm", name: "n", url: "https://npm.corp.acme.dev/repo", credentialRef: "r" })).toBe("https://npm.corp.acme.dev/repo/");
+  it("refuses a generic registry in a project, with or without a credential reference: private package tokens are set once for the company", () => {
+    const { credentialRef: _ref, ...bare } = GENERIC;
+    void _ref;
+    for (const entry of [GENERIC, bare, { ...GENERIC, kind: "npm", scope: "@acme" }, { ...GENERIC, kind: "maven" }]) {
+      const parsed = ProjectRegistriesSchema.safeParse([entry]);
+      expect(parsed.success).toBe(false);
+      expect(JSON.stringify(parsed.error?.issues)).toContain("set once for the company");
+    }
+    expect(ProjectDefinitionSchema.safeParse({ ...PROJECT, registries: [GENERIC] }).success).toBe(false);
   });
 
   it.each([
-    ["http", { ...GENERIC, url: "http://pypi.corp.acme.dev/simple/" }],
-    ["an address as host", { ...GENERIC, url: "https://10.0.0.5/simple/" }],
-    ["a scope on a pypi registry", { ...GENERIC, scope: "@acme" }],
+    ["a scope on a pypi registry", { ...CA, format: "pypi", scope: "@acme" }],
+    ["a name that is not a name", { ...CA, name: "Not A Name" }],
+    ["a field it does not know", { ...CA, url: "https://pypi.corp.acme.dev/" }],
   ])("refuses %s", (_name, entry) => {
     expect(ProjectRegistriesSchema.safeParse([entry]).success).toBe(false);
   });
@@ -32,15 +40,15 @@ describe("a registry entry", () => {
     expect(ProjectRegistriesSchema.safeParse([CA, { ...CA, domain: "other" }]).success).toBe(false);
     expect(ProjectRegistriesSchema.safeParse([CA, { ...CA, name: "second" }]).success).toBe(false);
     expect(ProjectRegistriesSchema.safeParse([CA, { ...CA, name: "second", scope: "@acme" }]).success).toBe(true);
-    expect(ProjectRegistriesSchema.safeParse(Array.from({ length: 9 }, (_, i) => ({ ...GENERIC, name: `r${String(i)}`, kind: "maven" }))).success).toBe(false);
+    expect(ProjectRegistriesSchema.safeParse(Array.from({ length: 9 }, (_, i) => ({ ...CA, name: `r${String(i)}`, scope: `@s${String(i)}` }))).success).toBe(false);
   });
 });
 
 describe("the project record", () => {
 
   it("holds registries at registration, and a worker is never sent them in the project (they travel as `registries`, only to a worker that lists the feature)", () => {
-    const registered = ProjectDefinitionSchema.parse({ ...PROJECT, registries: [CA, GENERIC] });
-    expect(registered.registries).toHaveLength(2);
+    const registered = ProjectDefinitionSchema.parse({ ...PROJECT, registries: [CA] });
+    expect(registered.registries).toHaveLength(1);
     expect(Object.hasOwn(workerProjectDefinition(registered), "registries")).toBe(false);
   });
 });
@@ -48,12 +56,11 @@ describe("the project record", () => {
 describe("the prepare payload", () => {
   const base = { protocolVersion: 1, operationId: "22222222-2222-4222-8222-222222222222", workspaceId: "11111111-1111-4111-8111-111111111111", fence: 1, projectRevision: 1, callbackCapability: "c".repeat(40), kind: "prepare" };
   it("carries where a registry is, never a credential, and lists its feature", () => {
-    const registries = prepareRegistriesOf([CA, GENERIC]);
+    const registries = prepareRegistriesOf([CA]);
     expect(registries).toStrictEqual([
       { name: "internal-npm", kind: "codeartifact", format: "npm", url: "https://acme-123456789012.d.codeartifact.us-west-2.amazonaws.com/npm/shared/" },
-      { name: "corp-pypi", kind: "pypi", format: "pypi", url: "https://pypi.corp.acme.dev/simple/" },
     ]);
-    expect(JSON.stringify(registries)).not.toContain("corp-pypi-reader");
+    expect(JSON.stringify(registries)).not.toContain("credentialRef");
     expect(WorkerInvocationSchema.safeParse({ ...base, payload: { project: PROJECT, repositoryGrant: "g", registries } }).success).toBe(true);
     expect(PrepareRegistriesSchema.safeParse([{ ...registries[0], credentialRef: "x" }]).success).toBe(false);
     expect(WORKER_INVOCATION_FEATURES).toContain(PREPARE_REGISTRIES_FEATURE);
@@ -65,9 +72,8 @@ describe("what an edition and an org allow", () => {
   const ORG_B = "org_bbbbbbbbbbbbbbbbbbbb";
   const bound = [{ name: "acme", owner: "123456789012", region: "us-west-2", orgId: ORG_A as never, repositories: ["shared"] }];
   const approved = ["*.d.codeartifact.us-west-2.amazonaws.com", "pypi.corp.acme.dev"];
-  it("Enterprise: a CodeArtifact registry in a domain and repository bound to the org, or a generic one, each on an approved website", () => {
-    expect(registryProblems({ edition: "enterprise", registries: [CA, GENERIC], allowedDomains: approved, orgId: ORG_A, boundDomains: bound })).toEqual([]);
-    expect(registryProblems({ edition: "enterprise", registries: [GENERIC], allowedDomains: [], orgId: ORG_A, boundDomains: bound })).toEqual([{ code: "host_not_approved", registry: "corp-pypi" }]);
+  it("Enterprise: a CodeArtifact registry in a domain and repository bound to the org, on an approved website", () => {
+    expect(registryProblems({ edition: "enterprise", registries: [CA], allowedDomains: approved, orgId: ORG_A, boundDomains: bound })).toEqual([]);
     expect(registryProblems({ edition: "enterprise", registries: [CA], allowedDomains: [], orgId: ORG_A, boundDomains: bound })).toEqual([{ code: "host_not_approved", registry: "internal-npm" }]);
   });
   it("another org's domain gets nothing, nor does an unlisted domain, account, region or repository, nor a missing org or binding", () => {
@@ -80,9 +86,9 @@ describe("what an edition and an org allow", () => {
     expect(registryProblems({ edition: "enterprise", registries: [CA], allowedDomains: approved, orgId: undefined, boundDomains: bound })).toEqual(refused);
     expect(registryProblems({ edition: "enterprise", registries: [CA], allowedDomains: approved, orgId: ORG_A, boundDomains: [] })).toEqual(refused);
   });
-  it("Public (and an install with no edition on record) uses no project registry yet", () => {
+  it("Public (and an install with no edition on record) uses no CodeArtifact yet", () => {
     for (const edition of ["public", undefined] as const) {
-      expect(registryProblems({ edition, registries: [CA, GENERIC], allowedDomains: approved, orgId: ORG_A, boundDomains: bound })).toEqual([{ code: "edition_kind", registry: "internal-npm" }, { code: "edition_kind", registry: "corp-pypi" }]);
+      expect(registryProblems({ edition, registries: [CA], allowedDomains: approved, orgId: ORG_A, boundDomains: bound })).toEqual([{ code: "edition_kind", registry: "internal-npm" }]);
     }
   });
   it("the bindings travel as one variable and read back; a malformed value binds nothing", () => {
@@ -148,5 +154,11 @@ describe("the credential on the wire", () => {
     expect(RegistryCredentialSchema.safeParse({ ...ok, token: `${fakeToken("n")}\nregistry=https://evil.example/` }).success).toBe(false);
     expect(RegistryCredentialSchema.safeParse({ ...ok, extra: 1 }).success).toBe(false);
     expect(REGISTRY_TOKEN_SECONDS).toBe(3600);
+  });
+  it("carries no expiry for a stored credential (a personal access token has none), but a present one must be a real timestamp", () => {
+    const { expiresAt: _expiry, ...stored } = ok;
+    void _expiry;
+    expect(RegistryCredentialSchema.safeParse(stored).success).toBe(true);
+    expect(RegistryCredentialSchema.safeParse({ ...ok, expiresAt: "tomorrow" }).success).toBe(false);
   });
 });

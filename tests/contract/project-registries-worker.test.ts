@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, it, vi } from "vitest";
-import { StoredProjectDefinitionSchema, e2eSecretSpellings, prepareRegistriesOf, type PrepareRegistry, type ProjectRegistry, type RegistryCredential } from "../../packages/contracts/src/index.js";
+import { StoredProjectDefinitionSchema, e2eSecretSpellings, prepareRegistriesOf, prepareRegistriesOfCompany, type PrepareRegistry, type ProjectRegistry, type RegistryCredential } from "../../packages/contracts/src/index.js";
 import { ISSUED_TOKENS_PATH, recordIssuedTokens } from "../../packages/worker/src/registry-guard.js";
 import { REGISTRY_CONFIG_PREFIX, openRegistrySession, removeLeftoverRegistryConfigs, renderMavenSettings, renderNpmrc, renderPipConf } from "../../packages/worker/src/registry-config.js";
 import { createRegistryCredentialProvider } from "../../packages/worker/src/registry-credentials.js";
@@ -88,6 +88,13 @@ describe("the config files", () => {
     );
     expect(renderNpmrc([credential({ ...npm!, scope: "@acme" })])).toContain(`@acme:registry=${npm!.url}\n`);
   });
+  it("npm: scopes that share a host (a company's one token) are routed one by one and the host's token is written ONCE, keyed by the host, never unscoped", () => {
+    const company = prepareRegistriesOfCompany([{ host: "npm.pkg.github.com", scopes: ["@acme", "@other"] }]);
+    const text = renderNpmrc(company.map((registry) => credential(registry)));
+    expect(text).toBe(`@acme:registry=https://npm.pkg.github.com/\n@other:registry=https://npm.pkg.github.com/\n//npm.pkg.github.com/:_authToken=${token}\n//npm.pkg.github.com/:always-auth=true\n`);
+    expect(text.split("\n").filter((line) => line.includes("_authToken"))).toHaveLength(1);
+    expect(text).not.toMatch(/^(?:_authToken|_auth|always-auth|registry)=/m);
+  });
   it("pip: the user name and the percent-encoded token sit in the index URL; a second index is an extra", () => {
     const [pip] = registries(CA_PIP);
     expect(renderPipConf([{ ...credential(pip!), token: "a/b+c=d-e_f.g~hijklmnop" }])).toBe(
@@ -147,6 +154,16 @@ describe("a session", () => {
   it("refuses an expired credential", async () => {
     const root = await mkdtemp(join(tmpdir(), "registries-session-"));
     await expect(openRegistrySession({ rootPath: root, registries: registries(CA), provider: async () => ({ token: fakeToken("e"), expiresAt: new Date(Date.now() - 1000).toISOString() }) })).rejects.toThrow(/cannot use the credential/);
+  });
+
+  it("takes a stored credential that carries no expiry (a personal access token has none), writes it for the preparation and removes it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "registries-session-"));
+    const token = `${"gh"}${"p"}_${fakeToken("s").replace(/[^A-Za-z0-9]/g, "").slice(0, 36)}`;
+    const session = await openRegistrySession({ rootPath: root, registries: registries(CA), provider: async () => ({ token }) });
+    expect(await filesCarrying(root, token)).not.toEqual([]);
+    await session.dispose();
+    expect(await filesCarrying(root, token)).toEqual([]);
+    expect(await leftovers(root)).toEqual([]);
   });
 
   it("never sweeps a repository whose folder happens to start with the prefix, nor a folder with anything of its own in it", async () => {

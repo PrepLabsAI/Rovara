@@ -369,7 +369,7 @@ function projectDefinitionObject<Connectors extends z.ZodTypeAny>(connectorsSche
       readiness: z.array(ProjectCommandSchema).max(64),
       devcontainer: DevcontainerDefinitionSchema.optional(),
       network: ProjectNetworkSchema.optional(),
-      /** N9 (INTG2): the project's private package registries. Where they are and which credential reference reaches them, never a token. Control-plane only (`workerProjectDefinition`). */
+      /** N9 (INTG2): the project's private package registries. A CodeArtifact registry: where it is, never a token (a company's package tokens are the company's, set once; a generic registry here is refused). Control-plane only (`workerProjectDefinition`). */
       registries: ProjectRegistriesSchema.optional(),
       orchestratorInstructions: z.string().min(1).max(32_768),
       models: ProjectModelsSchema.optional(),

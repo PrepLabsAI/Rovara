@@ -4,6 +4,7 @@ import type { AgentXError, ScriptTokenPermission, WorkOrigin } from "@agentx/con
 // Lane L6a, task flow core: what the flow is built on. Every dependency is a W0 port or a small seam named here; nothing names DynamoDB, SQS,
 // EC2, a chat tool or a code host (decision 51).
 import type { TaskSharing } from "./share.js";
+import type { ProjectRegistriesInstall } from "../project-registries/prepare.js";
 import type { MoneyStop } from "./money-stop.js";
 import type { TierReviewCall, TierReviewMeter } from "../build-step/tier-review-calls.js";
 import type { TaskTestEnvironment } from "../test-env/seam.js";
@@ -246,6 +247,11 @@ export interface TaskFlowDeps {
   admission: Admission;
   audit: AuditSink;
   projects: ProjectSource;
+  /**
+   * What this install can do for a project's private package registries (A1): where a stored credential is read from, and the CodeArtifact rules. The prepare carries the project's `registries` and the worker
+   * asks for their credentials at `registry-credentials` (core/project-registries). Absent: the install serves none, and a project that declares registries is refused with a fixed sentence at its prepare.
+   */
+  projectRegistries?: ProjectRegistriesInstall | undefined;
   access: TaskAccess;
   /** Final delivery authority, independent of step admission. PARKED means the exact dispatch was durably paused; only an explicit owner retry resumes it. Local installs use their accepted owner authority. */
   deliveryAccess?: (deps: TaskFlowDeps, operation: OperationRecord, workspace: WorkspaceRecord) => Promise<"ALLOWED" | "PARKED">;
