@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { canonicalJson, E2ETargetSchema, type E2ERuntimeCapabilityDescriptor, type E2ERuntimeReadinessInput } from "@agentx/contracts";
-import { E2ERuntimeCapabilityDescriptorSchema, e2eRuntimeCapabilityDigest } from "../../packages/contracts/src/index.js";
-import { applicationRuntimeRowFences, e2eRegisteredRuntimeKey, projectE2ERuntimeReadiness, readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
+import { E2ERuntimeCapabilityDescriptorSchema, SANDBOX_EGRESS_PROBE_IDS, e2eRuntimeCapabilityDigest } from "../../packages/contracts/src/index.js";
+import { admitE2ERegisteredRuntime, applicationRuntimeRowFences, e2eRegisteredRuntimeKey, projectE2ERuntimeReadiness, readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
 
 const sha = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
 const binding = { deploymentMode: "ec2-ebs" as const, launchTemplateId: "lt-0123456789abcdef",
@@ -16,7 +16,7 @@ const capabilities: E2ERuntimeCapabilityDescriptor = E2ERuntimeCapabilityDescrip
 const probeBase = {
   schemaVersion: "e2e-runtime-probe-manifest/v1", profileId: "web-profile", capabilityDigest: e2eRuntimeCapabilityDigest(capabilities),
   runtimeManifestDigest: capabilities.runtimeManifestDigest, suiteDigest: "c".repeat(64),
-  fixtureRefs: [{ path: "fixtures/smoke.json", sha256: "d".repeat(64) }], positiveProbeIds: ["browser-opens"], negativeProbeIds: ["browser-blocked-network"],
+  fixtureRefs: [{ path: "fixtures/smoke.json", sha256: "d".repeat(64) }], positiveProbeIds: ["browser-opens"], negativeProbeIds: ["browser-blocked-network", ...SANDBOX_EGRESS_PROBE_IDS],
 };
 const probe = { ...probeBase, manifestDigest: sha(probeBase) };
 const environment = { ci: true, trustNoticeShown: false, os: "linux 6.8.0", arch: "x64", runtime: "node v22.23.2" };
@@ -55,6 +55,17 @@ describe("registered E2E runtime readiness", () => {
     const malformedCapabilities = { ...capabilities, supportedSteps: ["navigate", "navigate"] };
     expect(() => projectE2ERuntimeReadiness(input({ ...key, ...registration, capabilities: malformedCapabilities }))).not.toThrow();
     expect(projectE2ERuntimeReadiness(input({ ...key, ...registration, capabilities: malformedCapabilities }))).toMatchObject({ status: "INCOMPATIBLE", supportedCapabilities: [] });
+  });
+
+  it("a row that does not list every egress probe is not READY for a check, whatever its state: the projection gates like the readers do", () => {
+    for (const missing of SANDBOX_EGRESS_PROBE_IDS) {
+      const body = { ...probeBase, negativeProbeIds: ["browser-blocked-network", ...SANDBOX_EGRESS_PROBE_IDS.filter((id) => id !== missing)] };
+      const stale = { ...key, ...registration, probeManifest: { ...body, manifestDigest: sha(body) } };
+      expect(projectE2ERuntimeReadiness(input(stale)).status, missing).not.toBe("READY");
+      expect(admitE2ERegisteredRuntime(stale, input(stale).expected), missing).toBeUndefined();
+    }
+    expect(projectE2ERuntimeReadiness(input()).status).toBe("READY");
+    expect(admitE2ERegisteredRuntime({ ...key, ...registration }, input().expected)).toMatchObject({ profileId: "web-profile", state: "READY" });
   });
 
   it("preserves missing, expired, unqualified and access readiness states", () => {

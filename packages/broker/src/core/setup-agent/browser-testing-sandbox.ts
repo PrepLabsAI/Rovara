@@ -2,17 +2,18 @@
 //
 // "This is not your live site" is claimed only on a runtime whose registered record shows the egress probes passed: a runtime row is written only when the registrar re-judged every probe of its
 // qualification, so the probe manifest on a READY row is the record that they passed. `SANDBOX_EGRESS_PROBE_IDS` (contracts) names the ones that matter: the app and the browser refused a public address, the app
-// refused the host on its bridge, and the build container refused the cloud metadata address and a private one. The row is READ, never inferred: a runtime without them is not available for this.
+// refused the host on its bridge and every private-network address, and the build container refused the cloud metadata address and a private one. The row is READ, never inferred: a runtime without them is not
+// available for this. The registrar lists the egress probes on BOTH rows of a qualification (`e2eWebApiRuntimeRecords`), so each row carries the claim on its own (`webApiRuntimeRowProvesSandbox`).
+// The shared runtime reader (`readAdmittedWebApiRuntimes`) applies the same gate, so a runtime that fails it is not READY for planning, approval or admission either; this file asks it again for the page.
 import {
-  Ec2RuntimeBindingSchema, SANDBOX_EGRESS_PROBE_IDS, WEB_API_RUNTIME_PROFILE_ID, projectRevisionKey,
+  Ec2RuntimeBindingSchema, WEB_API_RUNTIME_PROFILE_ID, projectRevisionKey, webApiRuntimeRowProvesSandbox,
   type DocumentStore, type E2ERegisteredRuntime, type E2EReadyRuntimeProfile, type OrgId,
 } from "@agentx/contracts";
 import { readProjectAdmittedE2ERuntimes, runtimeRowReader } from "../e2e/runtime-readiness.js";
 
 /** Whether a registered runtime's probe manifest lists every egress probe. */
 export function runtimeProvesSandbox(row: Pick<E2ERegisteredRuntime, "probeManifest">): boolean {
-  const listed = new Set([...row.probeManifest.positiveProbeIds, ...row.probeManifest.negativeProbeIds]);
-  return SANDBOX_EGRESS_PROBE_IDS.every((probeId) => listed.has(probeId));
+  return webApiRuntimeRowProvesSandbox(row);
 }
 
 interface SandboxInput { store: Pick<DocumentStore, "get">; companyId: OrgId; project: string; runtimeCatalogId: string; now: number }

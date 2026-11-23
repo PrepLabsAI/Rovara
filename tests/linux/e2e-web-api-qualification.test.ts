@@ -6,7 +6,7 @@ import { registerRuntimeInstallation } from "../../packages/broker/src/aws/runti
 import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
 import type { AuthenticatedIdentity } from "../../packages/broker/src/auth.js";
 import { main as qualificationCli } from "../../packages/verifier/src/install-qualification-cli.js";
-import { createLinuxProbeRunner, linuxProbeScratch, removeWebApiProbeScratch } from "../support/linux-web-api-probes.js";
+import { createLinuxProbeRunner, hostLiveTargets, linuxProbeScratch, removeWebApiProbeScratch } from "../support/linux-web-api-probes.js";
 import { EXECUTOR_IMAGE, removeProbeDirs } from "../support/linux-runtime.js";
 import { createFakeRuntimeRegistry } from "../support/runtime-registry-fakes.js";
 import { fakeLinuxEnvironment, shippedAssetManifest, webApiChallenge } from "../support/web-api-qualification.js";
@@ -26,7 +26,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     // Only the worker identity and the installed-manifest read are replaced: this CI host is not the EC2 worker and has no installed root.
     // The manifest still hashes the probe assets and the qualification app in this checkout, so a changed file fails against its pinned digest.
     const fake = fakeLinuxEnvironment(now);
-    // A web/API challenge lives an hour, which fourteen container runs fit inside.
+    // A web/API challenge lives an hour, which fifteen container runs fit inside.
     const challenge = webApiChallenge(now);
     const { runRoot, evidenceRoot } = await linuxProbeScratch();
     const outputRoot = (await linuxProbeScratch()).evidenceRoot;
@@ -34,7 +34,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     const proposalFile = join(outputRoot, "proposal.json");
     await writeFile(challengeFile, canonicalJson(challenge));
     await qualificationCli(["--profile", "linux-arm64-web-api-v1", "--challenge-file", challengeFile, "--evidence-root", evidenceRoot, "--out", proposalFile], {
-      environment: { EXECUTOR_IMAGE }, host: { platform: "linux", arch: "arm64" }, config: { runRoot },
+      environment: { EXECUTOR_IMAGE }, host: { platform: "linux", arch: "arm64" }, config: { runRoot }, liveTargets: hostLiveTargets(),
       // The worker supervisor's Node is at the image's fixed path, which the registrar requires; the CI runner's own Node is elsewhere.
       qualificationEnvironment: { assertHostIdentity: fake.assertHostIdentity!, observeManifest: shippedAssetManifest, now: () => Date.now(), nodeExecPath: fake.nodeExecPath! },
       createProbeRunner: (input) => createLinuxProbeRunner(input) }).finally(() => { workerStandIn?.server.close(); });
@@ -57,6 +57,9 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     expect(byId.get("build-lateral-denial-v1")).toMatchObject({ runUnavailableReason: "build-failed", buildExitCode: 7 });
     // The app of this probe only starts, so the run only passes, when its connection to the host timed out.
     expect(byId.get("app-host-denial-v1")).toMatchObject({ collectorStatus: "PASS", runUnavailableReason: null });
+    // The app of this probe only starts, so the run only passes, when every private-network address it dialled (metadata, resolvers, 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10) was blocked.
+    // ... and the two LIVE private targets (the host's own address and a resolver, both answering from the host side) were handed to the guard and are in the evidence.
+    expect(byId.get("app-private-denial-v1")).toMatchObject({ collectorStatus: "PASS", runUnavailableReason: null, liveTargets: hostLiveTargets() });
     // Chromium ran with its own sandbox on: the retained attestation (re-judged by the registrar below) shows every renderer behind its own filter and namespaces.
     expect(byId.get("chromium-sandbox-v1")).toMatchObject({ collectorStatus: "PASS", runUnavailableReason: null });
     // Task 4.5: the scripted model finds the button, a model that does nothing leaves the case UNKNOWN agent-no-download, and the app started behind the guard that found no path to the model.

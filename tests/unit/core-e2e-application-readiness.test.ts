@@ -74,6 +74,34 @@ describe("application selection before compute", () => {
   });
 });
 
+describe("a runtime that lacks the private-network probe is not one an application check can be approved or dispatched on", () => {
+  /** The same world with the web row's probe list written as a qualification from before the probe wrote it. */
+  async function staleWorld() {
+    const w = await world();
+    const ids = [...w.row.probeManifest.positiveProbeIds, ...w.row.probeManifest.negativeProbeIds].filter((id) => id !== "app-private-denial-v1");
+    const { manifestDigest: _digest, ...content } = w.row.probeManifest; void _digest;
+    const body = { ...content, positiveProbeIds: ids.slice(0, 2), negativeProbeIds: ids.slice(2) };
+    await w.store.update({ key: e2eRegisteredRuntimeKey("catalog", w.row.profileId, "web"), ops: [change.set("probeManifest", { ...body, manifestDigest: sha(canonicalJson(body)) })] });
+    return w;
+  }
+  it("approval refuses it, and a plan already approved refuses to dispatch on it (the row it was approved on went stale)", async () => {
+    const fresh = await world();
+    const selected = await fresh.reader.selection(fresh.task, fresh.fx.intent, fresh.artifact, { mode: "approve", pinned: [] });
+    expect(selected.selection.executableTargetIds).toEqual(["web-1"]);
+    const w = await staleWorld();
+    await expect(w.reader.selection(w.task, w.fx.intent, w.artifact, { mode: "approve", pinned: [] })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    // A plan approved while the runtime was current: the dispatch reads the rows again and finds no runtime.
+    const approved = await fresh.reader.selection(fresh.task, fresh.fx.intent, fresh.artifact, { mode: "approve", pinned: [] });
+    fresh.task.workflow.e2e = { required: true, contractDigest: fresh.artifact.sha256, policyDigest: "b".repeat(64), bundleDigest: "c".repeat(64), executionPlanDigest: "d".repeat(64),
+      applicationSelection: approved.selection, currentGroupRunIds: [], resultRefs: [] };
+    const ids = [...fresh.row.probeManifest.positiveProbeIds, ...fresh.row.probeManifest.negativeProbeIds].filter((id) => id !== "app-private-denial-v1");
+    const { manifestDigest: _digest, ...content } = fresh.row.probeManifest; void _digest;
+    const body = { ...content, positiveProbeIds: ids.slice(0, 2), negativeProbeIds: ids.slice(2) };
+    await fresh.store.update({ key: e2eRegisteredRuntimeKey("catalog", fresh.row.profileId, "web"), ops: [change.set("probeManifest", { ...body, manifestDigest: sha(canonicalJson(body)) })] });
+    await expect(fresh.reader.current(fresh.task, fresh.fx.intent, fresh.artifact)).rejects.toThrow(WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX);
+  });
+});
+
 describe("selection refusal classification", () => {
   it("requires a recorded selection before a current read", async () => {
     const w = await world();
