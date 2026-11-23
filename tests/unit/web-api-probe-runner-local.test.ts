@@ -23,6 +23,8 @@ const enabled = process.env.ROVARA_LOCAL_BROWSER === "1";
 const dirs: string[] = [];
 const dockers: LocalExecutorDocker[] = [];
 afterAll(async () => { dockers.forEach((docker) => docker.stop()); await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true }))); });
+/** The live private targets the private-network probe is handed (a VPC resolver and the host's own address). */
+const LIVE = { resolver: "10.42.0.2", host: "10.42.1.15" };
 const fixtures = join(import.meta.dirname, "../fixtures/web-api-probe-evidence");
 
 describe.runIf(enabled)("production probe runner around the real executor (local, no Docker)", () => {
@@ -32,7 +34,7 @@ describe.runIf(enabled)("production probe runner around the real executor (local
     if (probeId.startsWith("build-")) docker.failOn("build", 7);
     const challenge = webApiChallenge(WEB_API_FIXTURE_NOW);
     const evidenceRoot = join(root, "evidence"); await mkdir(evidenceRoot, { mode: 0o700 });
-    const runner = createWebApiProbeRunner({ docker, executorImage: "rovara-executor:local", buildImage: "node:build-test", runRoot: join(root, "runs"), evidenceRoot, challenge,
+    const runner = createWebApiProbeRunner({ docker, executorImage: "rovara-executor:local", buildImage: "node:build-test", runRoot: join(root, "runs"), evidenceRoot, liveTargets: LIVE, challenge,
       modelChannelFor: (request) => createScriptedQualificationModelChannel(request) });
     const run = await runner(probeId);
     if (process.env.ROVARA_DEBUG_PROBE === "1") process.stdout.write(`${JSON.stringify(run.observation)} ${run.evidence.kind === "unavailable" ? JSON.stringify(run.evidence) : ""}\n${docker.calls.length} docker calls\n${docker.appOutput}\n`);
@@ -54,7 +56,7 @@ describe.runIf(enabled)("production probe runner around the real executor (local
     const proposalFile = join(root, "proposal.json");
     await qualificationCli(["--profile", "linux-arm64-web-api-v1", "--challenge-file", join(root, "challenge.json"), "--evidence-root", evidenceRoot, "--out", proposalFile], {
       environment: { EXECUTOR_IMAGE: "rovara-executor:local" }, host: { platform: "linux", arch: "arm64" }, config: { runRoot: join(root, "runs") },
-      qualificationEnvironment: fakeLinuxEnvironment(now), createProbeRunner: (input) => createWebApiProbeRunner({ ...input, docker, modelChannelFor: (request) => createScriptedQualificationModelChannel(request) }) });
+      qualificationEnvironment: fakeLinuxEnvironment(now), liveTargets: LIVE, createProbeRunner: (input) => createWebApiProbeRunner({ ...input, docker, modelChannelFor: (request) => createScriptedQualificationModelChannel(request) }) });
     const bytes = await readFile(proposalFile);
     process.stdout.write(`proposal ${bytes.byteLength} bytes\n`);
     const proposal = WebApiRuntimeInstallProposalSchema.parse(JSON.parse(bytes.toString("utf8")));

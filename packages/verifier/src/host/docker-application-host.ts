@@ -364,6 +364,8 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   const appendBuildLog = (text: string) => { state.buildLogTail = redact(`${state.buildLogTail}${text}`); };
 
   const left = () => Math.max(1, deadlineAt - deps.now());
+  // The run networks are IPv4 only, explicitly: no IPv6 network, and no IPv6 stack in the app, the mocks or the executor, so an IPv6 address (the metadata service's fd00:ec2::254, a unique-local or link-local one) has nowhere to go whatever the daemon's own defaults are.
+  const ipv4Only = ["--sysctl", "net.ipv6.conf.all.disable_ipv6=1"];
   const hardening = (extra: string[] = []) => ["--cap-drop=ALL", "--security-opt", "no-new-privileges", "--label", label, "--label", `${ROVARA_CREATED_LABEL}=${state.createdAt}`, ...extra];
 
   async function removeWorkspace(): Promise<void> {
@@ -485,7 +487,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
       const fixtureArgs = mock.fixture === null ? [] : ["-v", `${join(dirs.mock, mock.origin)}:/mock:ro`, "-e", "ROVARA_MOCK_FIXTURE=/mock/fixture.json"];
       const lowPorts = mock.fixture === null ? ["--sysctl", "net.ipv4.ip_unprivileged_port_start=0"] : [];
       const created = await docker.run(["run", "-d", "--name", mock.name, "--pull=never", ...hardening(["--network", network, "--network-alias", mock.alias]), "--read-only", "--init",
-        ...limits("128m", "64", "0.5"), "--user", "node", ...lowPorts, ...fixtureArgs, "-v", `${dirs.mockOut}:/out/mock`, deps.executorImage,
+        ...limits("128m", "64", "0.5"), "--user", "node", ...ipv4Only, ...lowPorts, ...fixtureArgs, "-v", `${dirs.mockOut}:/out/mock`, deps.executorImage,
         "node", MOCK_ENTRY_POINT, "--mock", ...(mock.fixture === null ? [] : ["/mock/fixture.json"]), "--origin", mock.origin], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
       if (created.code !== 0) { appendBuildLog(`mock container for ${mock.origin} could not be started: ${created.stderr}${created.stdout}\n`); return false; }
     }
@@ -579,7 +581,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     // run's own resolver file and hosts entries (a Docker 25 daemon would not forward the seed's lookups either). The recipe's literals come first, so the host's own port and seed variables always win.
     const appFlags = (command: { cwd: string; env: Readonly<Record<string, string>> }, alias: string | null) => [
       ...hardening(["--network", network, ...(alias === null ? [] : ["--network-alias", alias]), "--add-host", "app:127.0.0.1", ...addresses.flatMap((item) => ["--add-host", `${item.alias}:${item.address}`])]), "--read-only",
-      "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=256m", ...limits("1g", "512", "1"), "--user", "1000:1000", "-v", `${dirs.app}:/app:ro`, "-v", `${dirs.owned}:/app/.owned:ro`, "-v", `${dirs.resolv}:/etc/resolv.conf:ro`,
+      "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=256m", ...limits("1g", "512", "1"), ...ipv4Only, "--user", "1000:1000", "-v", `${dirs.app}:/app:ro`, "-v", `${dirs.owned}:/app/.owned:ro`, "-v", `${dirs.resolv}:/etc/resolv.conf:ro`,
       // The root is read-only, so npm (the inferred recipe starts through it) gets its home and cache where /tmp is writable, as the build container does, and makes no registry call of its own (an update check, an audit, a funding notice): such a call reaches the sinkhole and makes the case UNKNOWN unmocked-external-call. The recipe's literals come after and may override.
       "-e", "HOME=/tmp/home", "-e", "npm_config_cache=/tmp/home/.npm", "-e", "npm_config_update_notifier=false", "-e", "npm_config_audit=false", "-e", "npm_config_fund=false", "-e", "npm_config_offline=true",
       ...(accountsFileSeed ? ["-v", `${dataVolume}:${DATA_DIR}`] : []), "-w", containerCwd("/app", command.cwd),
@@ -646,7 +648,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     }
     let appGone = false;
     const watching = new AbortController();
-    const executorRun = docker.run(["run", "--name", executorName, "--pull=never", "--label", label, "--label", `${ROVARA_CREATED_LABEL}=${state.createdAt}`, "--network", network,
+    const executorRun = docker.run(["run", "--name", executorName, "--pull=never", "--label", label, "--label", `${ROVARA_CREATED_LABEL}=${state.createdAt}`, "--network", network, ...ipv4Only,
       // The executor's sandbox and limits are one shared definition (the image smoke test runs with the same). Only the executor leaves Docker's default seccomp
       // profile, and only for the namespace syscalls Chromium's own sandbox needs; no capability is added.
       ...executorContainerArgs(seccompProfile), "-v", `${dirs.plan}:/run/rovara/plan.json:ro`, "-v", `${dirs.out}:/out`,
@@ -765,10 +767,10 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
       const labels = ["--label", label, "--label", `${ROVARA_CREATED_LABEL}=${state.createdAt}`];
       // Fixed bridge names let the host firewall tell build, app and executor traffic apart; the name of the network stays last.
       if (buildEgress === undefined) {
-        const createdBuild = await docker.run(["network", "create", ...labels, "-o", `com.docker.network.bridge.name=${buildBridge}`, buildNetwork], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
+        const createdBuild = await docker.run(["network", "create", "--ipv6=false", ...labels, "-o", `com.docker.network.bridge.name=${buildBridge}`, buildNetwork], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
         if (createdBuild.code !== 0) throw new Error(`could not create the run build network: ${redact(createdBuild.stderr)}`);
       }
-      const created = await docker.run(["network", "create", "--internal", ...labels, "-o", `com.docker.network.bridge.name=${internalBridge}`, network], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
+      const created = await docker.run(["network", "create", "--internal", "--ipv6=false", ...labels, "-o", `com.docker.network.bridge.name=${internalBridge}`, network], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
       if (created.code !== 0) throw new Error(`could not create the run network: ${redact(created.stderr)}`);
       if (accountsFileSeed) {
         // A tmpfs of the recipe's size (256 MiB when it states none), owned by the unprivileged user: nothing seeded reaches the runner's disk and nothing can fill it.

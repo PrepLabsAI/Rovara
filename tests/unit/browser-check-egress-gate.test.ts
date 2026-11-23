@@ -141,6 +141,18 @@ describe("census: who can start or plan a browser or API check, and who reads th
     ]);
   });
 
+  it("no file admits a row or projects its readiness around the gate: the admission and the projection are the gate's own, and only the reader file and the re-export call them", () => {
+    expect(filesMatching(/\badmitE2ERegisteredRuntime\s*\(/u)).toEqual(["broker/src/aws/e2e-runtime-readiness.ts"]);
+    expect(filesMatching(/\bprojectE2ERuntimeReadiness\s*\(/u)).toEqual(["broker/src/aws/e2e-runtime-readiness.ts"]);
+    // Everything else that names them is the core's re-export and a comment of the catalog contract.
+    expect(filesMatching(/\b(admitE2ERegisteredRuntime|projectE2ERuntimeReadiness)\b/u)).toEqual(["broker/src/aws/e2e-runtime-readiness.ts", "broker/src/core/e2e/runtime-readiness.ts", "contracts/src/e2e-catalog.ts"]);
+    const reader = sources.find((source) => source.file === "broker/src/aws/e2e-runtime-readiness.ts")!.text;
+    // The only way to admit without the gate is private to the file, and its one other caller is the reader that applies the gate right after.
+    expect(reader).not.toMatch(/export function admitWithoutEgressGate/u);
+    expect([...reader.matchAll(/admitWithoutEgressGate\(/gu)]).toHaveLength(3);
+    expect([...reader.matchAll(/webApiRuntimeRowProvesSandbox\(/gu)].length).toBeGreaterThanOrEqual(3);
+  });
+
   it("the gate is the same check the page asks: both come from the contracts' one function", () => {
     expect(filesMatching(/\bwebApiRuntimeRowProvesSandbox\b/u)).toEqual([
       "broker/src/aws/e2e-feature-verifier-catalog.ts",            // the registrar's own doc comment: it writes the egress probes on both rows so each row can prove it

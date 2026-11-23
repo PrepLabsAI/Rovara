@@ -43,7 +43,7 @@ const probeBase = {
   suiteDigest: "c".repeat(64),
   fixtureRefs: [{ path: "fixtures/smoke.json", sha256: "d".repeat(64) }],
   positiveProbeIds: ["browser-opens"],
-  negativeProbeIds: ["browser-blocked-network"],
+  negativeProbeIds: ["browser-blocked-network", ...SANDBOX_EGRESS_PROBE_IDS],
 };
 function probeManifest(overrides: Record<string, unknown> = {}) {
   const base = { ...probeBase, ...overrides };

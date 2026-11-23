@@ -85,8 +85,17 @@ function parseRegisteredRow(recordInput: unknown, expected: ExpectedRuntime): E2
   return runtime;
 }
 
-/** Reads an authenticated catalog row; no writer or registration side effect is exposed here. */
+/**
+ * Reads an authenticated catalog row; no writer or registration side effect is exposed here. The egress gate is part of the admission itself: a row that does not list every egress probe is
+ * not admitted by ANY caller (the readers below, and whatever a later change adds), so no path can admit a runtime around the gate.
+ */
 export function admitE2ERegisteredRuntime(recordInput: unknown, expected: ExpectedRuntime): E2ERegisteredRuntime | undefined {
+  const runtime = admitWithoutEgressGate(recordInput, expected);
+  return runtime !== undefined && webApiRuntimeRowProvesSandbox(runtime) ? runtime : undefined;
+}
+
+/** The admission checks that do not depend on the egress probes, kept apart so a reader can tell "stale for checks" (and say so) from "not READY". Never exported. */
+function admitWithoutEgressGate(recordInput: unknown, expected: ExpectedRuntime): E2ERegisteredRuntime | undefined {
   if (!Number.isSafeInteger(expected.now) || expected.now < 0) return undefined;
   const runtime = parseRegisteredRow(recordInput, expected);
   if (runtime === undefined || runtime.state !== "READY") return undefined;
@@ -121,7 +130,7 @@ async function readAdmittedWebApiRuntimes(input: { runtimeCatalogId: string; pro
     if (row === null || typeof row !== "object" || Array.isArray(row)) continue;
     const { binding, capabilityDigest } = row as { binding?: unknown; capabilityDigest?: unknown };
     if (typeof capabilityDigest !== "string") continue;
-    const runtime = admitE2ERegisteredRuntime(row, { runtimeCatalogId: input.runtimeCatalogId, profileId: input.profileId,
+    const runtime = admitWithoutEgressGate(row, { runtimeCatalogId: input.runtimeCatalogId, profileId: input.profileId,
       binding: input.binding ?? binding as Ec2RuntimeBinding, capabilityDigest, now: input.now, kind });
     if (runtime !== undefined) admittedRows.push({ kind, runtime });
   }
@@ -265,7 +274,8 @@ export function projectE2ERuntimeReadiness(input: RuntimeReadinessInput): E2ERun
       qualification: "qualified", state: runtime.state, expiresAt: runtime.expiresAt, now: input.expected.now, capabilities: runtime.capabilities,
     });
   }
-  if (Date.parse(runtime.qualifiedAt) > input.expected.now) {
+  // A row that does not list every egress probe is not qualified for a check, whatever its state: the same answer as a qualification that has not happened yet.
+  if (Date.parse(runtime.qualifiedAt) > input.expected.now || !webApiRuntimeRowProvesSandbox(runtime)) {
     return resolveE2ERuntimeReadiness({
       target: input.target, requiredSteps: input.requiredSteps, requiredAssertions: input.requiredAssertions, minimumEvidence: input.minimumEvidence,
       installationEnabled: input.installationEnabled, activationEnabled: true, connection: input.connection, approval: input.approval,
