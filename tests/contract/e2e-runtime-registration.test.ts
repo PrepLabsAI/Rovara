@@ -19,7 +19,7 @@ import { RUNTIME_PROPOSAL_MAX_BYTES, issueRuntimeInstallChallenge, registerRunti
 import type { AuthenticatedIdentity } from "../../packages/broker/src/auth.js";
 import { ROVARA_HTTP_ENGINE_DESCRIPTOR } from "../../packages/verifier/src/rovara-http-engine-descriptor.js";
 import { qualifyInstalledWebApiRuntime } from "../../packages/verifier/src/install-qualification.js";
-import { WEB_API_CHALLENGE_LIFETIME_MS, WEB_API_PROBE_PROPOSAL_MAX_BYTES, WEB_API_REQUIRED_PROBES, runtimeInstallationProposalSha256, webApiRuntimeInstallProposalSha256, type RuntimeInstallChallenge } from "../../packages/contracts/src/index.js";
+import { WEB_API_CHALLENGE_LIFETIME_MS, WEB_API_PROBE_PROPOSAL_MAX_BYTES, WEB_API_REQUIRED_PROBES, runtimeInstallationProposalSha256, webApiRuntimeInstallProposalSha256, webApiRuntimeRowProvesSandbox, SANDBOX_EGRESS_PROBE_IDS, type RuntimeInstallChallenge } from "../../packages/contracts/src/index.js";
 import { proposalFor } from "../support/p0-runtime-proposal.js";
 import { createFakeRuntimeRegistry } from "../support/runtime-registry-fakes.js";
 import { fakeLinuxEnvironment, fakeProbeRunner, privateEvidenceRoot, webApiChallenge } from "../support/web-api-qualification.js";
@@ -43,7 +43,7 @@ const probeBase = {
   suiteDigest: "c".repeat(64),
   fixtureRefs: [{ path: "fixtures/smoke.json", sha256: "d".repeat(64) }],
   positiveProbeIds: ["browser-opens"],
-  negativeProbeIds: ["browser-blocked-network"],
+  negativeProbeIds: ["browser-blocked-network", ...SANDBOX_EGRESS_PROBE_IDS],
 };
 function probeManifest(overrides: Record<string, unknown> = {}) {
   const base = { ...probeBase, ...overrides };
@@ -220,7 +220,7 @@ describe("web/API runtime registration (linux-arm64-web-api-v1)", () => {
 
     it("lists agent and the model channel on the web row only, for a qualification that holds all three agent probes accepted", async () => {
       const t = await setup();
-      expect(t.proposal.probes).toHaveLength(14);
+      expect(t.proposal.probes).toHaveLength(15);
       await registerRuntimeInstallation(t.deps, admin, t.request());
       const { web, api } = rowsOf(t);
       expect(web.capabilities.supportedSteps).toEqual(["navigate", "fill", "click", "choose-file", "agent"]);
@@ -245,11 +245,31 @@ describe("web/API runtime registration (linux-arm64-web-api-v1)", () => {
       }
     });
 
-    it.each([12, 13])("refuses a record that holds %i probes, some but not all of the agent probes, and registers nothing", async (count) => {
+    it.each([12, 13, 16])("refuses a record that holds %i probes, part of a group (or more than there are), and registers nothing", async (count) => {
       const t = await setup();
-      const partial = { ...t.proposal, probes: t.proposal.probes.slice(0, count) };
-      await expect(registerRuntimeInstallation(t.deps, admin, { proposal: partial, proposalSha256: "a".repeat(64) })).rejects.toThrow(/never part of the agent probes/);
+      const partial = { ...t.proposal, probes: count > t.proposal.probes.length ? [...t.proposal.probes, t.proposal.probes[0]!] : t.proposal.probes.slice(0, count) };
+      await expect(registerRuntimeInstallation(t.deps, admin, { proposal: partial, proposalSha256: "a".repeat(64) })).rejects.toThrow(count > 15 ? /runtime proposal is not/ : /never part of a group/);
       expect(t.transactions).toHaveLength(0);
+    });
+
+    it("registers a qualification from before the private-network probe (fourteen probes) with its agent probes, but its rows do not prove the sandbox; the current one does, on each row", async () => {
+      type Proving = Parameters<typeof webApiRuntimeRowProvesSandbox>[0] & Row;
+      const current = await setup();
+      await registerRuntimeInstallation(current.deps, admin, current.request());
+      const now = rowsOf(current) as unknown as Record<"web" | "api", Proving>;
+      // The registrar lists the egress probes on both rows (the walls are the runtime's), besides the probes of the row's own kind: each row proves the sandbox on its own.
+      expect(webApiRuntimeRowProvesSandbox(now.web)).toBe(true);
+      expect(webApiRuntimeRowProvesSandbox(now.api)).toBe(true);
+      const before = await setup();
+      const fourteen = { ...before.proposal, probes: before.proposal.probes.slice(0, 14) };
+      expect(fourteen.probes.map((probe) => probe.probeId)).not.toContain("app-private-denial-v1");
+      await expect(registerRuntimeInstallation(before.deps, admin, { proposal: fourteen, proposalSha256: webApiRuntimeInstallProposalSha256(fourteen) })).resolves.toMatchObject({ featureRevisions: { web: 1, api: 1 } });
+      const old = rowsOf(before) as unknown as Record<"web" | "api", Proving>;
+      expect(old.web.capabilities.supportedSteps).toContain("agent");
+      expect(webApiRuntimeRowProvesSandbox(old.web)).toBe(false);
+      expect(webApiRuntimeRowProvesSandbox(old.api)).toBe(false);
+      // Both rows of the old qualification still list the four egress probes it ran, so the missing one is the private-network probe and nothing else.
+      for (const row of [old.web, old.api]) expect(SANDBOX_EGRESS_PROBE_IDS.filter((id) => ![...row.probeManifest.positiveProbeIds, ...row.probeManifest.negativeProbeIds].includes(id))).toEqual(["app-private-denial-v1"]);
     });
 
     it("refuses an agent probe whose recorded observation the evidence does not show, even when the observation is the one the oracle wants", async () => {
@@ -404,7 +424,7 @@ describe("web/API runtime registration (linux-arm64-web-api-v1)", () => {
     it("registers the untampered proposal the production runner's evidence produces", async () => {
       const t = await setup();
       expect(t.proposal.probes.map((probe) => probe.evidence.kind)).toEqual(["collected", "collected", "collected", "collected", "collected", "collected", "collected", "unavailable", "unavailable", "collected", "collected",
-        "collected", "collected", "collected"]);
+        "collected", "collected", "collected", "collected"]);
       await expect(registerRuntimeInstallation(t.deps, admin, t.request())).resolves.toMatchObject({ featureRevisions: { web: 1, api: 1 } });
     });
 

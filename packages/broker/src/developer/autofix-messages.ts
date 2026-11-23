@@ -66,7 +66,7 @@ const CODE_SENTENCES: Readonly<Record<AutoFixCode, string>> = Object.freeze({
   "runtime-expired": "The browser and API runtime's qualification expired.",
   "runtime-environment-drifted": "The test machine changed since it was qualified.",
   "model-environment-unsafe": "The runner's setup could let AI model calls be redirected.",
-  "login-failed": "The test account couldn't sign in.",
+  "login-failed": "Rovara couldn't sign in as a test user (a problem with the project's browser testing setup, not this change).",
   "model-route-changed-reapprove": "The AI navigation settings changed after setup was approved.",
   "agent-route-not-approved": "AI navigation isn't approved for this project yet.",
   "model-route-not-tested": "AI navigation has not passed its driving test yet.",

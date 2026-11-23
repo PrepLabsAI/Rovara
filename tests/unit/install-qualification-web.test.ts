@@ -3,7 +3,7 @@ import { stat, writeFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { E2ERegisteredRuntimeSchema, WEB_API_AGENT_PROBE_IDS, WEB_API_REQUIRED_PROBES, WebApiRuntimeInstallProposalSchema, canonicalJson, e2eRuntimeCapabilityDigest, evaluateWebApiProbeObservation,
+import { E2ERegisteredRuntimeSchema, SANDBOX_EGRESS_PROBE_IDS, WEB_API_AGENT_PROBE_IDS, WEB_API_REQUIRED_PROBES, WebApiRuntimeInstallProposalSchema, canonicalJson, e2eRuntimeCapabilityDigest, evaluateWebApiProbeObservation, webApiRuntimeRowProvesSandbox,
   webApiProbeAssetManifestPath, webApiProbeRunId, webApiProposalQualifiesAgent, type WebApiProbeObservation } from "../../packages/contracts/src/index.js";
 import { e2eWebApiRuntimeRecords, webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
 import { WebApiQualificationRejected, assertRuntimeInstallationHostIdentity, qualifyInstalledWebApiRuntime } from "../../packages/verifier/src/install-qualification.js";
@@ -229,7 +229,7 @@ describe("web/API qualification oracle and proposal", () => {
     expect(JSON.stringify(parsed.error?.issues)).toContain("negative-probe-passed:web-csv-negative-v1");
     expect(WebApiRuntimeInstallProposalSchema.safeParse({ ...result, state: "PARKED" }).success).toBe(false);
     expect(WebApiRuntimeInstallProposalSchema.safeParse({ ...result, probes: result.probes.slice(0, 5) }).success).toBe(false);
-    // Neither is a record that holds some of the agent probes: it has the eleven base probes or all fourteen.
+    // Neither is a record that holds some of the agent probes: it has the eleven base probes or all of them.
     expect(WebApiRuntimeInstallProposalSchema.safeParse({ ...result, probes: result.probes.slice(0, 12) }).success).toBe(false);
     expect(WebApiRuntimeInstallProposalSchema.safeParse({ ...result, probes: result.probes.slice(0, 13) }).success).toBe(false);
     expect(WebApiRuntimeInstallProposalSchema.safeParse({ ...result, probes: [...result.probes].reverse() }).success).toBe(false);
@@ -256,6 +256,22 @@ describe("the agent capability of the registered runtime (Task 4.5)", () => {
     expect(rows.web.probeManifest.negativeProbeIds).toContain("web-agent-wrong-action-v1");
     expect([...rows.api.probeManifest.positiveProbeIds, ...rows.api.probeManifest.negativeProbeIds].filter((id) => id.startsWith("web-agent-"))).toEqual([]);
     expect(E2ERegisteredRuntimeSchema.safeParse(rows.web).success).toBe(true);
+  });
+
+  it("lists every egress probe on BOTH rows, so each row proves the sandbox on its own, and a qualification without the private-network probe proves it on neither", async () => {
+    const { result } = await qualify();
+    const rows = rowsOf(result);
+    for (const kind of ["web", "api"] as const) {
+      const listed = [...rows[kind].probeManifest.positiveProbeIds, ...rows[kind].probeManifest.negativeProbeIds];
+      for (const probeId of SANDBOX_EGRESS_PROBE_IDS) expect(listed, `${kind} lists ${probeId}`).toContain(probeId);
+      expect(webApiRuntimeRowProvesSandbox(rows[kind]), kind).toBe(true);
+      expect(E2ERegisteredRuntimeSchema.safeParse(rows[kind]).success).toBe(true);
+    }
+    const before = rowsOf({ ...result, probes: result.probes.slice(0, 14) });
+    for (const kind of ["web", "api"] as const) {
+      expect([...before[kind].probeManifest.positiveProbeIds, ...before[kind].probeManifest.negativeProbeIds], kind).not.toContain("app-private-denial-v1");
+      expect(webApiRuntimeRowProvesSandbox(before[kind]), kind).toBe(false);
+    }
   });
 
   it("still parses a record from before the agent probes (eleven probes, no agent) and yields rows without agent, with the capability digests they always had", async () => {

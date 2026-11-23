@@ -15,13 +15,15 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
   PROMPT_LOCATIONS_MAX, ProjectDefinitionSchema, SETUP_TIMEOUT, TEST_TIMEOUT, agentXError, canonicalJson, change, formatCommandLine, orgProjectCatalogKey, parseCommandLine, projectMetaKey, projectRevisionKey, promptLocationKey, promptLocationsOf, setupItemsOf, when,
-  type DocumentKey, type DocumentStore, type OrgId, type Principal, type ProjectCommand, type ProjectDefinition, type PromptLocation, type SetupVerification, type TransactItem,
+  type DocumentKey, type DocumentStore, type OrgId, type Principal, type ProjectCommand, type ProjectDefinition, type PromptLocation, type SetupVerification, type TransactItem, type UpdateOp,
 } from "@agentx/contracts";
 import { SubjectRefusal, type AppliedDecision, type DecisionAttempt, type DecisionSubject, type LoadedSubject } from "../decisions/approval-gate.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { readState, verifiedView, type SetupAgentDeps } from "./agent.js";
 import { buildSetupCheck, relayCheck, setupStateOfCheck, type SetupCheckMark } from "./check.js";
 import { setupPartition } from "./keys.js";
+import { BROWSER_TESTING_WORDS, type BrowserCandidateFacts } from "./browser-testing-state.js";
+import type { BrowserApprovalSteps } from "./browser-testing-approval.js";
 import { commitsOf, readCurrentSetupFiles, snapshotItem, takeSetupSnapshot } from "./snapshot.js";
 import { refusedCommand } from "./refused-command.js";
 import { classifySetupChange, type SetupChangeRisk, type SetupRisk } from "./setup-risk.js";
@@ -80,6 +82,11 @@ export interface SetupApplyRow {
    * project's latest; `at` is when. Tasks keep using that revision after a later candidate is rejected or discarded (its candidate revision is deleted, and the catalog still names this one), so the checklist reads the approval from here.
    */
   earlierApproval?: { revision: number; at: string };
+  /**
+   * Browser testing (owner decision 421): present when this candidate is a project's browser testing setup, not a setup run's commands. What the approval writes beside the catalog move comes from it
+   * (browser-testing-approval.ts), and only a LIVE company owner or admin may decide it (the host's `approval.browserTesting`), whatever the candidate's risk reads as.
+   */
+  browserTesting?: BrowserCandidateFacts;
 }
 
 /** The approval a replaced row leaves behind: its own when it was approved, else the one it was itself carrying. Pure; a malformed value is no approval. */
@@ -262,6 +269,8 @@ export interface StoreCandidateInput {
   alsoTransact: readonly TransactItem[];
   /** More of the candidate the approval must be bound to (L4-SC: the fakes a plan's mock adds), folded into the digest the approver sees and approves. Absent: the digest is of the commands only, as before. */
   digestExtra?: Record<string, unknown>;
+  /** Browser testing: marks the proposal row as a browser testing candidate (the facts its approval writes from). Absent: an ordinary setup candidate. */
+  rowExtra?: { browserTesting: BrowserCandidateFacts };
 }
 
 /**
@@ -269,7 +278,7 @@ export interface StoreCandidateInput {
  * revision (written, not the project's latest), start its check on a NEW workspace, and keep the one proposal row; all in one transaction that also requires the project to still be at `baseRevision` and no other
  * proposal to be waiting. Nothing is applied and nothing is approved: only the approval (`createSetupProposalSubject`) makes a candidate the project's latest.
  */
-export async function storeSetupCandidate(deps: SetupApplyDeps, input: StoreCandidateInput): Promise<Record<string, unknown>> {
+export async function storeSetupCandidate(deps: Pick<SetupApplyDeps, "flow" | "store" | "companyId" | "now">, input: StoreCandidateInput): Promise<Record<string, unknown>> {
   const { project, by, requestId, taskId, baseRevision, candidate } = input;
   const orgId = deps.companyId;
   const candidateRevision = candidate.revision;
@@ -285,7 +294,7 @@ export async function storeSetupCandidate(deps: SetupApplyDeps, input: StoreCand
   const baseCommits = await readBaseCommits(deps.flow, candidate);
   // L4-T2b: the row about to be replaced may hold the project's approved setup; keep that fact on the new row (a row still waiting is refused below by the put's own condition, and an approval that lands first moves the catalog, which fails the check).
   const earlierApproval = earlierApprovalOf(await deps.store.get(setupApplyKey(orgId, project)));
-  const row: SetupApplyRow = { entityType: "SETUP_APPLY", orgId, project, taskId, requestId, by, digest, baseRevision, candidateRevision, state: "checking", check: started.mark, reply, createdAt: now, ...(baseCommits === undefined ? {} : { baseCommits }), ...(earlierApproval === undefined ? {} : { earlierApproval }) };
+  const row: SetupApplyRow = { entityType: "SETUP_APPLY", orgId, project, taskId, requestId, by, digest, baseRevision, candidateRevision, state: "checking", check: started.mark, reply, createdAt: now, ...(baseCommits === undefined ? {} : { baseCommits }), ...(earlierApproval === undefined ? {} : { earlierApproval }), ...(input.rowExtra ?? {}) };
   const result = await deps.store.transact([
     // The candidate revision: stored, not the project's latest (the catalog row still names the base), so no task starts on it.
     { kind: "put", item: { ...projectRevisionKey(orgId, project, candidateRevision), entityType: "PROJECT", candidate: true, definition: JSON.parse(JSON.stringify(candidate)) as never }, condition: when.absent() },
@@ -320,9 +329,12 @@ export async function readSetupApply(deps: Pick<SetupApplyDeps, "flow" | "store"
  * The owner drops a waiting proposal: the candidate is removed and the project is free to change again. Not an approval: it applies nothing. With `onlyRequestId` (L4-RD: Rovara's own failed draft) it drops the
  * waiting proposal ONLY if it is that request's: a person's candidate that replaced it is never touched.
  */
-export async function discardSetupApply(deps: Pick<SetupApplyDeps, "store" | "companyId" | "now">, project: string, by: string, onlyRequestId?: string): Promise<boolean> {
+export async function discardSetupApply(deps: Pick<SetupApplyDeps, "store" | "companyId" | "now">, project: string, by: string, onlyRequestId?: string, options: { mayDiscardBrowserTesting?: boolean } = {}): Promise<boolean> {
   const row = await waitingSetupApply(deps.store, deps.companyId, project);
   if (row === undefined || (onlyRequestId !== undefined && row.requestId !== onlyRequestId)) return false;
+  // Browser testing: dropping its waiting change is the same outcome as rejecting it, so it is the same person: a live company owner or admin, whoever asks and by whichever route. The caller says so after
+  // reading the person's standing now; a caller that does not is refused (a project's own administrator may drop a setup run's candidate, never this one).
+  if (row.browserTesting !== undefined && options.mayDiscardBrowserTesting !== true) throw agentXError("FORBIDDEN", BROWSER_TESTING_WORDS.notAllowed);
   const at = new Date(deps.now()).toISOString();
   const result = await deps.store.transact([
     { kind: "update", key: setupApplyKey(deps.companyId, project), ops: [change.set("state", "discarded"), change.set("decidedAt", at), change.set("decidedBy", by)], condition: onlyRequestId === undefined ? when.eq("state", "checking") : when.and(when.eq("state", "checking"), when.eq("requestId", onlyRequestId)) },
@@ -385,12 +397,72 @@ export interface SetupProposalApproval {
    * it throws a `SubjectRefusal` when that copy no longer matches what the setup was made from. Absent: nothing more is written.
    */
   registryMirror?: { itemsFor: (row: { project: string; baseRevision: number; candidateRevision: number }, at: string) => Promise<readonly TransactItem[]> };
+  /**
+   * Browser testing: who may decide a browser testing candidate (a live company owner or admin, never a project maintainer) and what its approval writes. Absent: a browser testing candidate is refused
+   * here, whoever asks (a host that cannot write the accounts and the approval must not move the project onto one).
+   */
+  browserTesting?: BrowserApprovalSteps;
 }
 
 /** The candidate's risk and its changes, from its stored revision against the project's approved (base) revision. A row it cannot read is high. */
 export async function setupCandidateRisk(store: Pick<DocumentStore, "get">, orgId: OrgId, row: Pick<SetupApplyRow, "project" | "baseRevision" | "candidateRevision">): Promise<SetupChangeRisk> {
   const [base, candidate] = await Promise.all([store.get(projectRevisionKey(orgId, row.project, row.baseRevision)), store.get(projectRevisionKey(orgId, row.project, row.candidateRevision))]);
   return classifySetupChange((base as { definition?: unknown } | undefined)?.definition, (candidate as { definition?: unknown } | undefined)?.definition);
+}
+
+/**
+ * A transaction names a key once, and a host's registry mirror may already update the candidate's row: the extra attributes join that update (an attribute the mirror sets itself keeps the mirror's value);
+ * otherwise they are an update of their own.
+ */
+export function withCandidateOps(items: readonly TransactItem[], key: DocumentKey, ops: readonly UpdateOp[]): TransactItem[] {
+  if (ops.length === 0) return [...items];
+  const index = items.findIndex((item) => item.kind === "update" && item.key.pk === key.pk && item.key.sk === key.sk);
+  if (index < 0) return [...items, { kind: "update", key, ops, condition: when.eq("entityType", "PROJECT") }];
+  const found = items[index] as Extract<TransactItem, { kind: "update" }>;
+  const have = new Set(found.ops.map((op) => op.path.join(".")));
+  const merged: TransactItem = { ...found, ops: [...found.ops, ...ops.filter((op) => !have.has(op.path.join(".")))] };
+  return items.map((item, at) => (at === index ? merged : item));
+}
+
+/**
+ * Browser testing: a LIVE company owner or admin decides it, both answers, read now by the host. A host with no such rule refuses it (never the laptop's owner rule, never a maintainer's). An ordinary setup
+ * candidate is not asked.
+ */
+async function requireBrowserApprovers(approval: SetupProposalApproval | undefined, row: SetupApplyRow, approvers: readonly Principal[]): Promise<void> {
+  if (row.browserTesting === undefined) return;
+  const steps = approval?.browserTesting;
+  if (steps === undefined) throw new SubjectRefusal("not_the_approver", BROWSER_TESTING_WORDS.notHere);
+  for (const approver of approvers) {
+    let allowed: unknown;
+    try { allowed = await steps.mayDecide(approver, { project: row.project }); } catch { allowed = false; }
+    if (allowed !== true) throw new SubjectRefusal("not_the_approver", BROWSER_TESTING_WORDS.adminOnly);
+  }
+}
+
+/**
+ * The extra steps of an approval's own transaction: a host's other copy of the project's revisions (L4-SF c; it throws a `SubjectRefusal` when that copy has moved), and, for a browser testing candidate, the
+ * approval's own writes read from its stored proposal. The candidate's row is one update however many want it (a transaction names a key once).
+ */
+async function approvalExtraItems(approval: SetupProposalApproval | undefined, row: SetupApplyRow, approver: Principal, at: string, store: Pick<DocumentStore, "get">): Promise<readonly TransactItem[]> {
+  const mirrored = approval?.registryMirror === undefined ? [] : await approval.registryMirror.itemsFor({ project: row.project, baseRevision: row.baseRevision, candidateRevision: row.candidateRevision }, at);
+  const candidateKey = projectRevisionKey(row.orgId, row.project, row.candidateRevision);
+  const steps = approval?.browserTesting;
+  if (row.browserTesting === undefined || steps === undefined) return withCandidateOps(mirrored, candidateKey, await approvedBrowserTestingCarried(store, row));
+  const browser = await steps.itemsFor(row, approver, at);
+  return [...withCandidateOps(mirrored, candidateKey, browser.candidateOps), ...browser.items];
+}
+
+/**
+ * An ordinary setup candidate on top of an approved browser testing setup keeps the policy in its definition; the approval, the registrant and the runtime binding live on the revision's ROW, so they are carried
+ * to the new revision (the host's registry mirror, when it has one, sets the registrant and binding itself and keeps its values). Carried only while the candidate's policy is exactly the base's: a changed
+ * policy is not what was approved, and gets nothing. Without this the page would read "not set up", the 90-day renewal would stop, and the planning seam would lose the approved source.
+ */
+async function approvedBrowserTestingCarried(store: Pick<DocumentStore, "get">, row: Pick<SetupApplyRow, "project" | "orgId" | "baseRevision" | "candidateRevision">): Promise<UpdateOp[]> {
+  // Never makes the approval fail for a read (like the snapshot above): a fault here carries nothing, and the next browser testing change or renewal says what is missing.
+  const [base, candidate] = await Promise.all([store.get(projectRevisionKey(row.orgId, row.project, row.baseRevision)), store.get(projectRevisionKey(row.orgId, row.project, row.candidateRevision))]).catch(() => [undefined, undefined] as const);
+  const baseE2e = (base?.["definition"] as { e2e?: unknown } | undefined)?.e2e;
+  if (base === undefined || baseE2e === undefined || base["setupApproval"] === undefined || canonicalJson(baseE2e) !== canonicalJson((candidate?.["definition"] as { e2e?: unknown } | undefined)?.e2e)) return [];
+  return (["setupApproval", "runtimeBinding", "registeredBy"] as const).filter((field) => base[field] !== undefined).map((field) => change.set(field, base[field] as never));
 }
 
 /**
@@ -418,6 +490,7 @@ export function createSetupProposalSubject(options: { flow: Pick<TaskFlowDeps, "
     },
     async apply(loaded, attempt: DecisionAttempt, approvers: readonly Principal[], at: string): Promise<AppliedDecision> {
       const { row, risk } = loaded.state as { row: SetupApplyRow; risk: SetupRisk };
+      await requireBrowserApprovers(approval, row, approvers);
       if (approval === undefined) {
         if (!approvers.every((approver) => approver.roles.includes("owner"))) throw new SubjectRefusal("not_the_approver", SETUP_OWNER_ONLY);
       } else {
@@ -433,7 +506,8 @@ export function createSetupProposalSubject(options: { flow: Pick<TaskFlowDeps, "
       const orgId = row.orgId;
       if (attempt.outcome === "approve") {
         // A host's other copy of the revisions moves in the same transaction (L4-SF c); a copy that has moved refuses the approval.
-        const mirrored = approval?.registryMirror === undefined ? [] : await approval.registryMirror.itemsFor({ project: row.project, baseRevision: row.baseRevision, candidateRevision: row.candidateRevision }, at);
+        // The host's other copy of the revisions, and (browser testing) the approval's own writes, joined without naming a key twice.
+        const extraItems = await approvalExtraItems(approval, row, approver, at, flow.store);
         // L4-DR (DEC 254z c): what the setup was approved against, saved in the approval's own transaction (the files that decide whether it still works, by id, and the websites it allows). Read from the code host
         // BEFORE the transaction; one that cannot be read whole saves none, and the next re-check saves the baseline instead. It never makes the approval wait on, or fail for, the host.
         const snapshot = await snapshotOfApproved(flow, row, at);
@@ -445,7 +519,7 @@ export function createSetupProposalSubject(options: { flow: Pick<TaskFlowDeps, "
             // The project moves to the candidate only if it is still at the revision the owner looked at.
             { kind: "update", key: orgProjectCatalogKey(orgId, row.project), ops: [change.set("latestRevision", row.candidateRevision)], condition: when.eq("latestRevision", row.baseRevision) },
             { kind: "update", key: projectMetaKey(orgId, row.project), ops: [change.set("setupCheck", { ...row.check })], condition: when.and(when.present(), identityCondition) },
-            ...mirrored,
+            ...extraItems,
             ...(snapshot === undefined ? [] : [snapshotItem(orgId, row.project, snapshot)]),
           ],
           result: { project: row.project, revision: row.candidateRevision },

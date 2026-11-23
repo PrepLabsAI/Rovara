@@ -202,6 +202,11 @@ async function standingOf(input: HostedSetupRunInput, project: string): Promise<
   return { access: "none" };
 }
 
+/** Whether this person is a live company owner or admin right now (the rule browser testing's changes need on every route). A read that fails is no. */
+async function isCompanyAdminNow(input: HostedSetupRunInput, project: string): Promise<boolean> {
+  try { return input.wiring.approval !== undefined && setupHostApproverAllows(await input.wiring.approval.standing(input.principal.personId, project)); } catch { return false; }
+}
+
 /** The audit record of one act, naming the person and why they were allowed. */
 function auditEvent(input: HostedSetupRunInput, action: string, eventId: string, project: string, basis: SetupRunBasis, details: Record<string, string | boolean>): AuditEvent {
   return {
@@ -227,6 +232,8 @@ async function applyView(input: HostedSetupRunInput, deps: SetupApplyDeps, proje
     // L4-SC: the fakes the candidate sets (the approver sees which variable is redirected and from which spec), bound into the digest the approval names.
     ...(apply.fakes === undefined ? {} : { fakes: apply.fakes }),
     ...(apply.promptLocations.length === 0 ? {} : { promptLocations: apply.promptLocations }),
+    // Browser testing: this candidate is a project's browser testing setup (decided on its own page, by a live company owner or admin), not a setup run's commands.
+    ...(apply.browserTesting === undefined ? {} : { browserTesting: true }),
     check: { status: apply.checkState.status, ...(apply.checkState.failedStep === undefined ? {} : { failedStep: apply.checkState.failedStep }) },
     risk, changes, approver: SETUP_RISK_APPROVER[risk],
     // L4-RD: the candidate was drafted by Rovara's automatic repair (its check ran as the project's system owner); a person still decides it, by the same rule.
@@ -507,7 +514,7 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
       if (tail === "discard") {
         const body = parsed(DiscardBodySchema, raw);
         await recorded(input, auditEvent(input, "setup_run.discard_requested", `setup_run.discard:${companyId}:${project}:${personId}:${body.requestId}`, project, basis, { requestId: body.requestId }));
-        return json(200, { discarded: await discardSetupApply(deps, project, personId) });
+        return json(200, { discarded: await discardSetupApply(deps, project, personId, undefined, { mayDiscardBrowserTesting: await isCompanyAdminNow(input, project) }) });
       }
       if (tail === "host-decide") return await decideHost(input, approval, project, raw);
       return await decide(input, approval, project, raw);

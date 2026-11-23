@@ -12,7 +12,8 @@ import { COMPANY, createHarness, newRequestId, definition, type Harness } from "
 import { workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
 import type { WorkspaceRecord } from "../../packages/broker/src/core/task-flow/records.js";
-import { NOW, planFixture, sha, webApiRow } from "../support/e2e-application-plan-fixtures.js";
+import { NOW, planFixture, sha, shaCanonical, webApiRow } from "../support/e2e-application-plan-fixtures.js";
+import { e2eRegisteredRuntimeKey, readProjectReadyE2ERuntimes } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
 
 function fixture() {
   const fx = planFixture({});
@@ -60,6 +61,29 @@ describe("core source-backed application planning", () => {
     const { ports, task } = fixture();
     const context = await createApplicationPlanningContext({ ...ports, accounts: async () => { throw new Error("unavailable"); }, readyRuntimes: async () => [] })(task);
     expect(context).toMatchObject({ status: "available", executableKinds: [], runtimeAccountRefs: [] });
+  });
+  it("a task of a project with no application checks never reads the runtime rows, so a runtime that fails the egress gate cannot touch it", async () => {
+    const { ports, task, project } = fixture();
+    delete (project.definition as { e2e?: unknown }).e2e;
+    let reads = 0;
+    const context = await createApplicationPlanningContext({ ...ports, readyRuntimes: async () => { reads += 1; throw new Error("no runtime reads for a task with no application checks"); } })(task);
+    expect(context).toBeUndefined();
+    expect(reads).toBe(0);
+  });
+  it("a project with application checks on a runtime that fails the egress gate plans with no executable kind: the checks are unavailable, the task is not refused", async () => {
+    const { ports, task } = fixture();
+    const stale = "app-private-denial-v1";
+    const row = webApiRow("web");
+    const ids = [...row.probeManifest.positiveProbeIds, ...row.probeManifest.negativeProbeIds].filter((id) => id !== stale);
+    const { manifestDigest: _digest, ...content } = row.probeManifest; void _digest;
+    const body = { ...content, positiveProbeIds: ids.slice(0, 2), negativeProbeIds: ids.slice(2) };
+    const staleRow = webApiRow("web", { probeManifest: { ...body, manifestDigest: shaCanonical(body) } });
+    const key = e2eRegisteredRuntimeKey("catalog", staleRow.profileId, "web");
+    const read = async (wanted: { pk: string; sk: string }) => (wanted.pk === key.pk && wanted.sk === key.sk ? { ...key, ...staleRow } : undefined);
+    // The same reader the core's planning wiring calls (`aws/core-application-e2e.ts`), over a row listing every egress probe but the private-network one.
+    const readyRuntimes = async () => readProjectReadyE2ERuntimes({ runtimeCatalogId: "catalog", profileId: staleRow.profileId, binding: staleRow.binding, now: NOW, read });
+    expect(await readyRuntimes()).toEqual([]);
+    expect(await createApplicationPlanningContext({ ...ports, readyRuntimes })(task)).toMatchObject({ status: "available", executableKinds: [] });
   });
   it("passes application context only to a coding plan's structured rules", async () => {
     const { ports, task } = fixture();

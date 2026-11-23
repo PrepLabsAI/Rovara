@@ -4,6 +4,9 @@ import { join } from "node:path";
 import { collectE2EApplicationRun } from "../../packages/verifier/src/application-collection.js";
 import { createProcessDockerCli } from "../../packages/verifier/src/host/docker-application-host.js";
 import { createWebApiProbeRunner, type WebApiProbeRunnerDeps } from "../../packages/verifier/src/host/web-api-probe-runner.js";
+import { hostNameServers } from "../../packages/verifier/src/host/web-api-live-targets.js";
+import { isWebApiPrivateIpv4, type WebApiProbeLiveTargets } from "../../packages/contracts/src/index.js";
+import { networkInterfaces } from "node:os";
 import { createScriptedQualificationModelChannel } from "../../packages/worker/src/e2e-qualification-model-channel.js";
 
 /**
@@ -40,4 +43,14 @@ export async function linuxProbeScratch(): Promise<{ runRoot: string; evidenceRo
 }
 export async function removeWebApiProbeScratch(): Promise<void> {
   for (const dir of scratch.splice(0)) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+}
+
+/**
+ * The live private targets of the private-network probe on THIS host (a CI runner has no VPC): its first private IPv4 address, which answers from the host side (a connection or a reset), and the
+ * first private name server of its resolver files, or that same address when it has none. On an EC2 worker the qualifier reads the real VPC resolver (`webApiLiveTargets`) and this is not used.
+ */
+export function hostLiveTargets(): WebApiProbeLiveTargets {
+  const host = Object.values(networkInterfaces()).flatMap((list) => list ?? []).find((item) => item.family === "IPv4" && !item.internal && isWebApiPrivateIpv4(item.address))?.address;
+  if (host === undefined) throw new Error("this host has no private IPv4 address to use as a live target of the private-network probe");
+  return { resolver: hostNameServers().find(isWebApiPrivateIpv4) ?? host, host };
 }

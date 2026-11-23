@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import {
   canonicalJson, E2E_MODEL_CHANNEL_SCHEMA_VERSION, Ec2RuntimeBindingSchema, ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema, type Ec2RuntimeBinding,
   E2ERegisteredRuntimeSchema, E2ERuntimeCapabilityDescriptorSchema, WEB_API_NETWORK_POLICY_DIGEST, WEB_API_RUNTIME_PROFILE_ID,
-  e2eRuntimeCapabilityDigest, webApiProposalQualifiesAgent, type E2ERegisteredRuntime, type E2ERuntimeCapabilityDescriptor, type WebApiRuntimeInstallProposal,
+  SANDBOX_EGRESS_PROBE_IDS, e2eRuntimeCapabilityDigest, webApiProposalQualifiesAgent, type E2ERegisteredRuntime, type E2ERuntimeCapabilityDescriptor, type WebApiRuntimeInstallProposal,
 } from "@agentx/contracts";
 import { ROVARA_HTTP_ENGINE_DESCRIPTOR } from "@agentx/verifier";
 import { z } from "zod";
@@ -112,7 +112,9 @@ export function e2eWebApiRuntimeRecords(input: {
   const rowFor = (kind: "web" | "api"): E2ERegisteredRuntime => {
     const capabilities = webApiRuntimeCapabilities(kind, proposal.manifest.sha256, kind === "web" && agent ? { agent: true } : {});
     const capabilityDigest = e2eRuntimeCapabilityDigest(capabilities);
-    const probes = proposal.probes.filter((probe) => probe.kind === kind || probe.kind === "build");
+    // The row lists its own kind's probes, the build probes, and every egress probe the qualification ran whatever its kind: the walls are the runtime's, so a browser check on the web row and an API check on
+    // the API row each rest on the same proof, and a row proves the sandbox (`webApiRuntimeRowProvesSandbox`) only if the qualification it came from held every one of them.
+    const probes = proposal.probes.filter((probe) => probe.kind === kind || probe.kind === "build" || SANDBOX_EGRESS_PROBE_IDS.includes(probe.probeId));
     const probeBody = { schemaVersion: "e2e-runtime-probe-manifest/v1" as const, profileId: WEB_API_RUNTIME_PROFILE_ID, capabilityDigest,
       runtimeManifestDigest: proposal.manifest.sha256, suiteDigest: sha(probes.map((probe) => ({ probeId: probe.probeId, assetDigest: probe.assetDigest }))),
       fixtureRefs: probes.map((probe) => ({ path: `application-runtime-v1/probes/${probe.probeId}.json`, sha256: probe.assetDigest })),
