@@ -20,7 +20,7 @@ const selector = (input: Inspection): CloseRetention | undefined => {
     contentDigest: input.contentDigest, generation: input.retentionProof?.generation });
   return result.success ? result.data : undefined;
 };
-interface HostedCloseDeps { companyId: OrgId; store: DocumentStore; machines: WorkerMachines; sessions: Pick<SessionManager, "get"> & Partial<Pick<SessionManager, "deleteRetainedSession">> }
+interface HostedCloseDeps { now?: () => Date; companyId: OrgId; store: DocumentStore; machines: WorkerMachines; sessions: Pick<SessionManager, "get"> & Partial<Pick<SessionManager, "deleteRetainedSession">> }
 
 /** Strict read-only request discrimination happens before any legacy/SQS routing. */
 export function withCloseVerification<E, C, R>(inner: (event: E, context?: C) => Promise<R>, verify: (event: CloseVerificationEvent) => Promise<boolean>) {
@@ -95,7 +95,8 @@ export function createDispatcherCloseInspection(deps: HostedCloseDeps): CloseIns
       const claimed = await store.transact([
         { kind: "check", key: location.workspaceKey, condition: when.and(when.eq("companyId", companyId), when.eq("activeOperationId", input.operationId), when.eq("fence", input.fence), when.notExists("legacyCloseClaim")) },
         { kind: "update", key: location.operationKey(input.operationId), condition: when.and(when.eq("companyId", companyId), when.eq("status", "RUNNING"), when.eq("closePreflight", toDocument(operation.closePreflight))), ops: [change.set("closePreflight.target", toDocument(generation))] },
-        { kind: "update", key: workspaceSessionKey(input.workspaceId), condition: when.and(sessionIdentity(session), session.closeRetention === undefined ? when.notExists("closeRetention") : when.eq("closeRetention", toDocument(session.closeRetention)), when.notExists("closeDestroy")), ops: [change.set("closeRetention", toDocument(session.closeRetention?.operationId === input.operationId ? session.closeRetention : intent)), change.set("workspaceDataIdentity", toDocument(generation))] },
+        { kind: "update", key: workspaceSessionKey(input.workspaceId), condition: when.and(sessionIdentity(session), session.closeRetention === undefined ? when.notExists("closeRetention") : when.eq("closeRetention", toDocument(session.closeRetention)), when.notExists("closeDestroy")), // The check gets a FULL idle window from here: a step longer than the window leaves the session looking idle, and the idle reaper must not end the instance under a retain that is running.
+        ops: [change.set("closeRetention", toDocument(session.closeRetention?.operationId === input.operationId ? session.closeRetention : intent)), change.set("workspaceDataIdentity", toDocument(generation)), change.set("lastActivityAt", (deps.now?.() ?? new Date()).toISOString())] },
       ]);
       if (!claimed.applied) throw new Error("retention preparation moved");
       const reply = await command(input.workspaceId, input.operationId, input.fence, { schemaVersion: 1, action: "retain", target: generation });

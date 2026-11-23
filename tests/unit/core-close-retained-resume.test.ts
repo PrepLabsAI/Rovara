@@ -155,6 +155,16 @@ describe("an unconfirmed retention (the worker never confirmed it)", () => {
     }
   });
 
+  it("N2: a CONFIRMED retention (the worker's `retained` was saved) whose preflight never reached SUCCEEDED is never dropped by a Continue: it is refused and nothing is written", async () => {
+    const w = await finishedAndIdleStopped("STOPPED");
+    const holder = textField((await w.h.store.get(w.wk))!, "activeOperationId");
+    // The broker crashed after saving `retained` but before the preflight was SUCCEEDED, and the session was then lost to STOPPED.
+    await w.h.store.update({ key: operationKey(w.h.deps.companyId, w.task.workspaceId, holder), ops: [change.set("status", "RUNNING"), change.remove("result")] });
+    const before = [await w.session(), await w.h.store.get(w.wk), await w.h.store.get(operationKey(w.h.deps.companyId, w.task.workspaceId, holder))];
+    await expect(createTaskActions(w.h.deps).continue(w.h.owner, w.task.taskId, { requestId: randomUUID(), instructions: "no" })).rejects.toMatchObject({ code: "TASK_BUSY" });
+    expect([await w.session(), await w.h.store.get(w.wk), await w.h.store.get(operationKey(w.h.deps.companyId, w.task.workspaceId, holder))]).toEqual(before);
+  });
+
   it("Close says 'can't check' until a Continue re-runs the check: an unbound Close is refused with the retained sentence and nothing is terminated", async () => {
     const w = await unconfirmed("STOPPED");
     const error = await w.h.flow.close(w.h.owner, w.task.taskId).then(() => undefined, (caught: unknown) => caught);

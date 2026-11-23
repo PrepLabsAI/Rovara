@@ -247,6 +247,25 @@ describe("idle reaper and a retained session", () => {
     expect(tick.claimed).toEqual([w.workspaceId]);
   });
 
+  it("N-F1: a check that has just written its intent (a step longer than the idle window came before it) is not stopped under its own retain: the instance is left alone while the window runs, and ended once it has passed", async () => {
+    const w = retainedIdle(false);
+    const row = sessionOf(w.db, w.workspaceId) as Record<string, unknown> & { closeRetention: Record<string, unknown> };
+    const intent = { ...row.closeRetention };
+    delete intent["retained"];
+    const op = w.db.get(`WORKSPACE#${w.workspaceId}`, `OPERATION#${intent["operationId"] as string}`)!;
+    w.db.set({ ...op, status: "RUNNING", closePreflight: { schemaVersion: 1, target: intent["generation"] } });
+    // The last dispatch was 6 minutes ago, but the intent was written 1 minute ago (the intent write refreshes the activity).
+    w.db.set({ ...row, closeRetention: intent, lastActivityAt: minutesAgo(1) });
+    const during = await w.real();
+    expect(during.claimed).toEqual([]);
+    expect(w.terminate).not.toHaveBeenCalled();
+    expect(sessionOf(w.db, w.workspaceId)).toMatchObject({ state: "READY" });
+    // The window passes with no confirmation: the instance is ended, the volume and the record are kept.
+    w.db.set({ ...sessionOf(w.db, w.workspaceId), lastActivityAt: minutesAgo(6) });
+    expect((await w.real()).claimed).toEqual([w.workspaceId]);
+    expect(sessionOf(w.db, w.workspaceId)).toMatchObject({ state: "STOPPED", volumeId: "vol-0123456789abcdef0", closeRetention: intent });
+  });
+
   it("the busy rule: an operation that is not the retained preflight is work; the retained preflight itself is not", () => {
     expect(holdsActiveOperation(undefined)).toBe(false);
     expect(holdsActiveOperation({ activeOperationId: null })).toBe(false);

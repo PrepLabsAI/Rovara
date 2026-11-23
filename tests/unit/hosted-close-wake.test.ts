@@ -9,6 +9,7 @@ import { readWorkspace } from "../../packages/broker/src/core/task-flow/stage-ma
 import { sessionMachineId } from "../../packages/broker/src/aws/worker-machines/session-worker-machines.js";
 import { createHarness } from "../support/task-flow-harness.js";
 
+const CHECK_TIME = "2026-11-23T12:00:00.000Z";
 async function fixture(session: Partial<WorkspaceSession> | undefined, startState: "ready" | "provisioning" = "provisioning", retentionHolds = true) {
   const h = createHarness(); await h.registerProject();
   const { task } = await h.flow.start(h.owner, { requestId: randomUUID(), project: "payments", instructions: "wake me" });
@@ -23,7 +24,7 @@ async function fixture(session: Partial<WorkspaceSession> | undefined, startStat
   const health: MachineHealth = { state: "ready", activeOperations: 0, features: [CLOSE_RETENTION_FEATURE], checkedAt: "2026-11-23T00:00:00.000Z", workspaceDataIdentity: { sessionGeneration: 2, instanceId: "i-00000001", volumeId: "vol-00000001", dataGeneration: randomUUID() } };
   const machines = { start: vi.fn(async () => ({ machineId: sessionMachineId(workspaceId), machineKey: workspaceId, state: startState })), stop: vi.fn(), terminate: vi.fn(), health: vi.fn(async () => health), deliver: vi.fn() };
   const deleteSession = vi.fn();
-  const provider = createDispatcherCloseInspection({ store: h.store, companyId: h.deps.companyId, machines: machines as unknown as WorkerMachines, sessions: { get: async () => (full === undefined ? undefined : (await h.store.get(workspaceSessionKey(workspaceId))) as unknown as WorkspaceSession | undefined), deleteSession } as never });
+  const provider = createDispatcherCloseInspection({ now: () => new Date(CHECK_TIME), store: h.store, companyId: h.deps.companyId, machines: machines as unknown as WorkerMachines, sessions: { get: async () => (full === undefined ? undefined : (await h.store.get(workspaceSessionKey(workspaceId))) as unknown as WorkspaceSession | undefined), deleteSession } as never });
   return { h, workspaceId, machines, provider, deleteSession };
 }
 
@@ -165,6 +166,12 @@ describe("the check replaces a retention a step has superseded, and only that", 
     expect(result.retentionId).toBeDefined();
     expect((await f.h.store.get(workspaceSessionKey(f.workspaceId)))?.["closeRetention"]).toMatchObject({ operationId, retained: { inspectionOperationId: operationId } });
     expect((await f.h.store.get(workspaceSessionKey(f.workspaceId)))?.["volumeId"]).toBe("vol-00000001");
+  });
+  it("N-F1: the check's intent write refreshes the session's last activity, so a step longer than the idle window does not leave it looking idle under a running retain", async () => {
+    const { f, operationId, fence } = await checkOver({});
+    await f.h.store.update({ key: workspaceSessionKey(f.workspaceId), ops: [change.set("lastActivityAt", "2026-11-23T11:54:00.000Z")] });
+    await f.provider.inspectWorkspaceForClose({ workspaceId: f.workspaceId, operationId, fence });
+    expect((await f.h.store.get(workspaceSessionKey(f.workspaceId)))?.["lastActivityAt"]).toBe(CHECK_TIME);
   });
   it("a record an ACCEPTED close owns is never replaced: the check refuses and the record is as it was", async () => {
     const { f, operationId, fence } = await checkOver({ acceptedOperationId: randomUUID() });
