@@ -360,7 +360,7 @@ describe("a preparation that finds the pinned commit gone from the default branc
 
     const setup = build();
     await setup.h.registerProject();
-    const run = await startTask(setup.h.deps, setup.h.owner, { project: "payments", requestId: randomUUID(), instructions: "Set up payments", title: "Set up payments" }, { setupAgent: { limits: { ...SETUP_AGENT_LIMITS_DEFAULT } } });
+    const run = await startTask(setup.h.deps, setup.h.owner, { project: "payments", requestId: randomUUID(), instructions: "Set up payments", title: "Set up payments" }, { setupAgent: { limits: { ...SETUP_AGENT_LIMITS_DEFAULT }, seenTaskId: undefined } });
     expect(await setup.h.flow.dispatchOnce()).toMatchObject({ delivered: 1 });
     const setupMachine = ((await locateWorkspace(setup.h.deps, run.task.workspaceId))!.workspace["machine"] as { machineId: string }).machineId;
     const [setupPrepare] = setup.h.machines.delivered(setupMachine);
