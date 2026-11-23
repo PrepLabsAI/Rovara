@@ -7,14 +7,14 @@ import { workspaceCompanyReader } from "./workspace-company.js";
 
 export interface BrokerCoreWorkerMachinesDependencies {
   /** Pass the ec2Sessions already held by broker.ts. No new clients or grants. */
-  sessions: Pick<SessionManager, "get" | "deleteSession">;
+  sessions: Pick<SessionManager, "get" | "deleteSession" | "requestStop">;
   documentClient: Pick<DynamoDBDocumentClient, "send">;
   tableName: string;
 }
 
 /**
  * L6's CodeModuleDeps.workerMachines piece; codeModules constructs its SessionWorkerFleet.
- * Capabilities: VM isolation, cancellation through the existing deleter (instance AND volume), record health only.
+ * Capabilities: VM isolation; stop marks the session STOPPING for the reaper to end the instance (the volume is KEPT); terminate (a Close) goes through the deleter (instance AND volume); record health only.
  * No start, signing, post, direct EC2 stop or live ping. Every operation checks the workspace META company afresh.
  */
 export function brokerCoreWorkerMachines(deps: BrokerCoreWorkerMachinesDependencies): SessionWorkerFleetDependencies {
@@ -30,6 +30,7 @@ export function brokerCoreWorkerMachines(deps: BrokerCoreWorkerMachinesDependenc
     sessions: {
       get: (workspaceId) => existingOperation(() => deps.sessions.get(workspaceId)),
       deleteSession: (workspaceId) => existingOperation(() => deps.sessions.deleteSession(workspaceId)),
+      requestStop: (workspaceId) => existingOperation(() => deps.sessions.requestStop(workspaceId)),
       ensureSession: dispatchOnly,
       claimStop: dispatchOnly,
       markStopped: dispatchOnly,

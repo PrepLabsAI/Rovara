@@ -100,7 +100,8 @@ it("the broker watchdog waits on unavailable live health and interrupts a record
   const deps = { ...h.deps, machines: fleet.forCompany(COMPANY) };
   expect(await sweepLostRuns(deps)).toMatchObject({ waiting: 1, interrupted: 0 });
   expect(await h.store.get(runWatchKey(COMPANY, run.workspaceId, run.operationId))).not.toHaveProperty("unhealthySince");
-  await deps.machines.stop(machine.machineId);
+  // A Close deletes the session (a Stop only stops it and keeps the volume: stop-keeps-volume.test.ts).
+  await deps.machines.terminate(machine.machineId);
   await world.settle();
   expect(await sweepLostRuns(deps)).toMatchObject({ waiting: 1, interrupted: 0 });
   h.clock.advance(RUN_LOST_GRACE_SECONDS + 1);

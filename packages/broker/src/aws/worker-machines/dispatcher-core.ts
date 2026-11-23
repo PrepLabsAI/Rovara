@@ -199,7 +199,7 @@ export function refusingTaskAccess(): TaskAccess {
  * (`dispatcherStopInstance`). The dispatch consumer never stops a machine; only a cancel does, on the broker.
  */
 export interface DispatcherMachineOps {
-  sessions: Pick<SessionManager, "get" | "ensureSession" | "deleteSession" | "claimStop" | "markStopped">;
+  sessions: Pick<SessionManager, "get" | "ensureSession" | "deleteSession" | "claimStop" | "requestStop" | "markStopped">;
   stopInstance: SessionWorkerMachinesDependencies["stopInstance"];
   sign: SessionWorkerMachinesDependencies["sign"];
   post: SessionWorkerMachinesDependencies["post"];

@@ -50,31 +50,56 @@ describe("broker worker operations", () => {
 
   it("reads recorded lost states for the watchdog and refuses unknown live-worker facts", async () => {
     const { world, fleet, deps } = setup();
-    const workspace = world.workspace(COMPANY_A);
+    const workspace = world.workspace(COMPANY_A, { activeOperationId: "op-running" });
     const machine = await world.machinesFor(COMPANY_A).start({ companyId: COMPANY_A, machineKey: workspace });
     await world.settle();
     await expect(fleet.forCompany(COMPANY_A).health(machine.machineId)).rejects.toMatchObject({ code: "unavailable", message: "live worker health is unavailable on the broker" });
     await expect(deps.ping("secret-input")).rejects.toMatchObject({ code: "unavailable", message: "live worker health is unavailable on the broker" });
+    // A Stop keeps the volume: the session is STOPPING, then the reaper's ticks end the instance and it reads stopped. It never reads terminated, and the deleter never runs.
+    const volumeId = (await world.sessions.get(workspace))!.volumeId;
     await fleet.forCompany(COMPANY_A).stop(machine.machineId);
     expect((await fleet.forCompany(COMPANY_A).health(machine.machineId)).state).toBe("stopping");
+    await world.reap();
+    await world.reap();
+    expect((await fleet.forCompany(COMPANY_A).health(machine.machineId)).state).toBe("stopped");
+    expect((await world.sessions.get(workspace))!.volumeId).toBe(volumeId);
+    expect(world.executions.filter((execution) => execution.stateMachineArn.endsWith(":deleter"))).toEqual([]);
+    // Only terminate (a Close) deletes: the deleter then gets the volume.
+    await fleet.forCompany(COMPANY_A).terminate(machine.machineId);
     await world.settle();
     expect((await fleet.forCompany(COMPANY_A).health(machine.machineId)).state).toBe("terminated");
+    expect(world.executions.filter((execution) => execution.stateMachineArn.endsWith(":deleter"))).toMatchObject([{ input: { workspaceId: workspace, volumeId } }]);
+  });
+
+  it("keeps the volume of a persistent machine: the broker adapter says so, and a stop with no running operation changes nothing", async () => {
+    const { world, fleet } = setup();
+    expect(fleet.capabilities.persistentVolume).toBe(true);
+    expect(fleet.forCompany(COMPANY_A).capabilities.persistentVolume).toBe(true);
+    const workspace = world.workspace(COMPANY_A);
+    const machine = await world.machinesFor(COMPANY_A).start({ companyId: COMPANY_A, machineKey: workspace });
+    await world.settle();
+    await fleet.forCompany(COMPANY_A).stop(machine.machineId);
+    expect((await world.sessions.get(workspace))!.state).toBe("READY");
   });
 });
 
 it("never echoes failures from workspace, session or deleter reads", async () => {
   const { world } = setup();
-  const workspace = world.workspace(COMPANY_A);
+  const workspace = world.workspace(COMPANY_A, { activeOperationId: "op-running" });
   const machine = await world.machinesFor(COMPANY_A).start({ companyId: COMPANY_A, machineKey: workspace });
   await world.settle();
   const fail = async (): Promise<never> => { throw new Error("private-resource-canary"); };
-  for (const override of [
-    { documentClient: { send: fail } },
-    { sessions: { get: fail, deleteSession: world.sessions.deleteSession.bind(world.sessions) } },
-    { sessions: { get: world.sessions.get.bind(world.sessions), deleteSession: fail } },
-  ]) {
-    const deps = brokerCoreWorkerMachines({ sessions: world.sessions, documentClient: world.db, tableName: TABLE, ...override });
+  const sessions = (replace: Record<string, unknown>) => ({ sessions: { get: world.sessions.get.bind(world.sessions), deleteSession: world.sessions.deleteSession.bind(world.sessions), requestStop: world.sessions.requestStop.bind(world.sessions), ...replace } as never });
+  const words = { code: "unavailable", message: "the broker could not read or cancel the worker session" };
+  for (const [override, call] of [
+    [{ documentClient: { send: fail } }, "stop"],
+    [sessions({ get: fail }), "stop"],
+    [sessions({ requestStop: fail }), "stop"],
+    [{ documentClient: { send: fail } }, "terminate"],
+    [sessions({ deleteSession: fail }), "terminate"],
+  ] as const) {
+    const deps = brokerCoreWorkerMachines({ ...{ sessions: world.sessions, documentClient: world.db, tableName: TABLE }, ...override });
     const a = new SessionWorkerFleet(deps).forCompany(COMPANY_A);
-    await expect(a.stop(machine.machineId)).rejects.toMatchObject({ code: "unavailable", message: "the broker could not read or cancel the worker session" });
+    await expect(a[call](machine.machineId)).rejects.toMatchObject(words);
   }
 });
