@@ -85,7 +85,7 @@ describe("a close of a machine-backed task with no preview asks for ONE check, a
     expect(await w.rows()).toEqual(before);
   });
 
-  it("a retained session that was stopped cannot be started again by anything yet (ensureSession refuses it): it is never promised a check, never woken, and never deleted", async () => {
+  it("a retained session that was stopped is never promised a Close check (a Continue resumes it; the check is not layered on a retention): never woken by the Close, never deleted", async () => {
     const w = await guardWorld({ machine: "backed", session: { state: "STOPPED", generation: 2, extra: { closeRetention: { schemaVersion: 1 } } }, check: closeCheckPort });
     w.h.deps.closeInspection = createBrokerCloseInspection(async () => false, w.h.deps.companyId, w.h.store);
     const spies = w.writes(), before = await w.rows();

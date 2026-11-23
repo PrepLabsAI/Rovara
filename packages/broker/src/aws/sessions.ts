@@ -153,6 +153,8 @@ export class SessionManager {
                 // DEC 254zb: a new generation starts with no fallback reason; this one's is recorded when it is picked or launched.
                 remove: ["instanceId", "privateIp", "launchedAt", "readyAt", "executionArn", "machineFallback"],
                 ...(park ? { addWaiting: waitingOutboxId } : {}),
+                // A retained session that was stopped (or whose last start failed) is started again on its kept volume, exactly like a plain one: retention changes what a Close does, never whether work resumes.
+                ...(session.closeRetention === undefined ? {} : { retention: session.closeRetention, retainedBy: "wake" as const }),
                 when: { state, generation: session.generation },
               }) };
           if (!(await this.writeWithOutbox(sessionWrite, waitingOutboxId))) continue;
@@ -166,7 +168,7 @@ export class SessionManager {
           if (waitingOutboxId !== undefined) {
             // Nothing changes on the session unless the record is parked.
             const parked = await this.writeWithOutbox((park) => (park ? { Update: this.update(workspaceId, {
-              addWaiting: waitingOutboxId,
+              addWaiting: waitingOutboxId, retainedBy: "provisioning",
               when: { state, generation: current.generation },
             }) } : undefined), waitingOutboxId);
             if (!parked) continue;
@@ -201,7 +203,7 @@ export class SessionManager {
   async markInstance(workspaceId: string, generation: number, instanceId: string, privateIp: string, launched: { instanceType?: string; machineFallback?: "size-unavailable" } = {}): Promise<void> {
     await this.dependencies.documentClient.send(new UpdateCommand(this.update(workspaceId, {
       set: { instanceId, privateIp, launchedAt: this.now(), ...(launched.instanceType === undefined ? {} : { instanceType: launched.instanceType }), ...(launched.machineFallback === undefined ? {} : { machineFallback: launched.machineFallback }) },
-      when: { state: "PROVISIONING", generation },
+      when: { state: "PROVISIONING", generation }, retainedBy: "provisioning",
     })));
   }
 
@@ -210,7 +212,7 @@ export class SessionManager {
     const now = this.now();
     const moved = await this.conditional(this.update(workspaceId, {
       set: { state: "READY", readyAt: now, lastActivityAt: now },
-      when: { state: "PROVISIONING", generation },
+      when: { state: "PROVISIONING", generation }, retainedBy: "provisioning",
       require: ["instanceId", "privateIp", "volumeId"],
     }));
     const session = await this.get(workspaceId);
@@ -252,7 +254,7 @@ export class SessionManager {
     const moved = await this.conditional(this.update(workspaceId, {
       set: { state: "FAILED" },
       remove: ["instanceId", "privateIp"],
-      when: { state: "PROVISIONING", generation },
+      when: { state: "PROVISIONING", generation }, retainedBy: "provisioning",
     }));
     const session = await this.get(workspaceId);
     if (!moved && !(session?.state === "FAILED" && session.generation === generation)) {
@@ -603,6 +605,11 @@ export class SessionManager {
 
   private update(workspaceId: string, change: {
     retention?: WorkspaceSession["closeRetention"];
+    /**
+     * How a retained session is touched. `wake`: a STOPPED or FAILED session is started again on its kept volume; the retention record must be the one seen and name this volume. `provisioning`: a step of the
+     * start that is under way (the provisioner's, a parked request); the retention record rides along untouched. Absent: a plain write, which only a session with no retention accepts.
+     */
+    retainedBy?: "wake" | "provisioning";
     set?: Partial<Record<keyof WorkspaceSession, unknown>>;
     remove?: Array<keyof WorkspaceSession>;
     addWaiting?: string;
@@ -632,7 +639,7 @@ export class SessionManager {
     ];
     if (change.addPingFailure) values[":one"] = 1;
     if (change.addWaiting !== undefined) values[":waiting"] = new Set([change.addWaiting]);
-    const retained = retainedLifecycleGuard(change.retention);
+    const retained = retainedLifecycleGuard(change.retention, change.retainedBy);
     Object.assign(values, retained.values);
     const required = (change.require ?? []).map((field) => ` AND attribute_exists(${field})`).join("");
     return {
@@ -793,7 +800,13 @@ function retainedReadySession(session: WorkspaceSession | undefined): EnsureSess
   return undefined;
 }
 
-function retainedLifecycleGuard(retention: WorkspaceSession["closeRetention"]): { condition: string; values: Record<string, unknown> } {
+function retainedLifecycleGuard(retention: WorkspaceSession["closeRetention"], retainedBy?: "wake" | "provisioning"): { condition: string; values: Record<string, unknown> } {
+  // A Close that was accepted, or a destroy under way, owns the session: nothing here touches it.
+  if (retainedBy === "provisioning") return { condition: " AND attribute_not_exists(closeDestroy) AND attribute_not_exists(closeRetention.acceptedOperationId)", values: {} };
+  if (retainedBy === "wake" && retention !== undefined) {
+    return { condition: " AND closeRetention = :seenRetention AND volumeId = :retainedVolume AND attribute_not_exists(closeDestroy) AND attribute_not_exists(closeRetention.acceptedOperationId)",
+      values: { ":seenRetention": retention, ":retainedVolume": retention.generation.volumeId } };
+  }
   if (retention === undefined) return { condition: " AND attribute_not_exists(closeRetention) AND attribute_not_exists(closeDestroy)", values: {} };
   return { condition: " AND closeRetention = :seenRetention AND instanceId = :retainedInstance AND volumeId = :retainedVolume AND attribute_not_exists(closeDestroy)",
     values: { ":seenRetention": retention, ":retainedInstance": retention.generation.instanceId, ":retainedVolume": retention.generation.volumeId } };

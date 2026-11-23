@@ -32,21 +32,31 @@ export function preparationDeliveryItem(deps: TaskFlowDeps, op: OperationRecord,
 
 export async function runClosePreparation(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessage, op: OperationRecord): Promise<"delivered" | "retried" | "failed"> {
   if (op.status === "SUCCEEDED" || op.status === "FAILED" || op.status === "INTERRUPTED") { await queue.ack(message.receiptHandle); return "delivered"; }
-  const workspace = await readWorkspace(deps, op.workspaceId), location = await workspaceKeys(deps, op.workspaceId);
+  const workspace = await readWorkspace(deps, op.workspaceId);
   const owned = workspace !== undefined && workspace.status === "READY" && workspace.fence === op.fence && workspace.activeOperationId === op.id;
   // A machine whose instance is gone is started first (the check of a stopped task): the preparation waits for it, and gives up (releasing the workspace) only when the budget runs out.
   const awake = owned && op.closePreflight?.target === undefined ? await wakeForCheck(deps, op.workspaceId) : "ready";
   if (awake === "waking") return retryPreparation(deps, queue, message, op, WAKE_ATTEMPTS);
   // Before a target is captured, unsupported workers can safely retain legacy behavior. Afterwards an intent may exist: hold it.
   if (!owned || (op.closePreflight?.target === undefined && !await deps.closeInspection?.ready?.(op.workspaceId, true))) {
-    const items: TransactItem[] = [{ kind: "update", key: location.operationKey(op.id), condition: when.and(when.eq("status", op.status), when.eq("closePreflight", toDocument(op.closePreflight!))), ops: [change.set("status", "INTERRUPTED")] }, preparationDeliveryItem(deps, op)];
-    if (owned) items.push({ kind: "update", key: location.workspaceKey, condition: when.and(when.eq("fence", op.fence), when.eq("activeOperationId", op.id)), ops: [change.set("activeOperationId", null)] });
-    if ((await deps.store.transact(items)).applied) { await queue.ack(message.receiptHandle); return "failed"; }
-  } else {
-    if (op.status === "ACCEPTED") await deps.store.update({ key: location.operationKey(op.id), condition: when.and(when.eq("status", "ACCEPTED"), when.eq("fence", op.fence)), ops: [change.set("status", "RUNNING")] });
-    if (await prepareCloseInspection(deps, op.workspaceId, op.id)) { await queue.ack(message.receiptHandle); return "delivered"; }
-  }
+    if (await interruptPreparation(deps, op, owned)) { await queue.ack(message.receiptHandle); return "failed"; }
+  } else if (await inspectPreparation(deps, op)) { await queue.ack(message.receiptHandle); return "delivered"; }
   return retryPreparation(deps, queue, message, op);
+}
+
+/** Runs the retention and the inspection of a preparation this call owns: it goes ACCEPTED to RUNNING first. True when the inspection was recorded. */
+async function inspectPreparation(deps: TaskFlowDeps, op: OperationRecord): Promise<boolean> {
+  const location = await workspaceKeys(deps, op.workspaceId);
+  if (op.status === "ACCEPTED") await deps.store.update({ key: location.operationKey(op.id), condition: when.and(when.eq("status", "ACCEPTED"), when.eq("fence", op.fence)), ops: [change.set("status", "RUNNING")] });
+  return prepareCloseInspection(deps, op.workspaceId, op.id);
+}
+
+/** Ends a preparation that cannot run (the workspace moved, or the worker cannot retain): INTERRUPTED, its delivery done, and the workspace given back when it still held it. False when it moved meanwhile. */
+async function interruptPreparation(deps: TaskFlowDeps, op: OperationRecord, owned: boolean): Promise<boolean> {
+  const location = await workspaceKeys(deps, op.workspaceId);
+  const items: TransactItem[] = [{ kind: "update", key: location.operationKey(op.id), condition: when.and(when.eq("status", op.status), when.eq("closePreflight", toDocument(op.closePreflight!))), ops: [change.set("status", "INTERRUPTED")] }, preparationDeliveryItem(deps, op)];
+  if (owned) items.push({ kind: "update", key: location.workspaceKey, condition: when.and(when.eq("fence", op.fence), when.eq("activeOperationId", op.id)), ops: [change.set("activeOperationId", null)] });
+  return (await deps.store.transact(items)).applied;
 }
 
 /** Receives a preparation gets while it waits for a woken machine (30 s apart): above a measured cold start of the machine. */

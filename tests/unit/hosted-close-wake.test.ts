@@ -71,7 +71,7 @@ describe("what a check needs, from the session item alone", () => {
     ["DELETING", { state: "DELETING" }, "unsupported"],
     ["DELETED", { state: "DELETED" }, "unsupported"],
     ["READY with a retention already on it", { state: "READY", ...retains, closeRetention: { schemaVersion: 1 } }, "unsupported"],
-    ["STOPPED with a retention on it (ensureSession cannot start it)", { state: "STOPPED", closeRetention: { schemaVersion: 1 } }, "unsupported"],
+    ["STOPPED with a retention on it (a Continue wakes it; a Close check is not layered on a retention)", { state: "STOPPED", closeRetention: { schemaVersion: 1 } }, "unsupported"],
     ["STOPPING with a destroy on it", { state: "STOPPING", closeDestroy: { schemaVersion: 1 } }, "unsupported"],
     ["no session", undefined, "unsupported"],
   ] as const)("%s is %s", async (_name, session, expected) => {
@@ -83,5 +83,34 @@ describe("what a check needs, from the session item alone", () => {
     expect(await broker.availability!(f.workspaceId)).toBe(expected);
     expect(f.machines.start).not.toHaveBeenCalled();
     expect(f.machines.health).not.toHaveBeenCalled();
+  });
+});
+
+describe("a retained session woken by a step: the new instance lifts the old retention only for the step that supersedes it", () => {
+  async function woken() {
+    const old = { sessionGeneration: 1, instanceId: "i-old", volumeId: "vol-1", dataGeneration: randomUUID() };
+    const retained = { inspectionOperationId: randomUUID(), inspectionFence: 2, retentionId: randomUUID(), contentDigest: "a".repeat(64), generation: old };
+    const closeRetention = { schemaVersion: 1, operationId: retained.inspectionOperationId, fence: 2, generation: old, retained };
+    // The session is READY again on a NEW instance and generation, on the SAME volume; the retention record is still the old one.
+    const f = await fixture({ state: "READY", generation: 2, instanceId: "i-new", volumeId: "vol-1", privateIp: "10.0.0.2", closeRetention } as never);
+    const health: MachineHealth = { state: "ready", activeOperations: 0, features: [CLOSE_RETENTION_FEATURE], checkedAt: "2026-11-23T00:00:00.000Z", workspaceDataIdentity: { sessionGeneration: 2, instanceId: "i-new", volumeId: "vol-1", dataGeneration: old.dataGeneration } };
+    return { f, retained, health };
+  }
+  it("a step that supersedes the retention removes it (the work can run; only a later Close sees a fresh check)", async () => {
+    const { f, retained, health } = await woken();
+    await f.provider.noteRuntime!(f.workspaceId, health, { supersedesRetention: retained } as never);
+    expect((await f.h.store.get(workspaceSessionKey(f.workspaceId)))?.["closeRetention"]).toBeUndefined();
+    expect((await f.h.store.get(workspaceSessionKey(f.workspaceId)))?.["volumeId"]).toBe("vol-1");
+  });
+  it("a start that does not supersede it (a check, a probe) leaves the retention record exactly as it was", async () => {
+    const { f, health } = await woken();
+    const before = await f.h.store.get(workspaceSessionKey(f.workspaceId));
+    await f.provider.noteRuntime!(f.workspaceId, health);
+    expect((await f.h.store.get(workspaceSessionKey(f.workspaceId)))?.["closeRetention"]).toEqual(before?.["closeRetention"]);
+  });
+  it("a step that supersedes ANOTHER retention removes nothing", async () => {
+    const { f, retained, health } = await woken();
+    await f.provider.noteRuntime!(f.workspaceId, health, { supersedesRetention: { ...retained, retentionId: randomUUID() } } as never);
+    expect((await f.h.store.get(workspaceSessionKey(f.workspaceId)))?.["closeRetention"]).toBeDefined();
   });
 });

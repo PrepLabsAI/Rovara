@@ -16,6 +16,7 @@ export async function retainedSuccessor(deps: TaskFlowDeps, workspace: Workspace
   if (!found.success) return undefined;
   return { retention: found.data, items: [
     { kind: "check", key: (await workspaceKeys(deps, workspace.id)).operationKey(operation.id), condition: when.and(when.eq("companyId", deps.companyId), when.eq("status", "SUCCEEDED"), when.eq("fence", workspace.fence), when.eq("result", toDocument(operation.result!))) },
-    { kind: "check", key: workspaceSessionKey(workspace.id), condition: when.and(when.eq("state", "READY"), when.eq("closeRetention.retained", toDocument(found.data)), when.notExists("closeRetention.acceptedOperationId"), when.notExists("closeDestroy")) },
+    // A STOPPED (idle-stopped after the check) or FAILED (its wake did not provision) session is continued too: the step wakes it on the same volume like a plain stopped session; retention changes only what Close does.
+    { kind: "check", key: workspaceSessionKey(workspace.id), condition: when.and(when.or(when.eq("state", "READY"), when.eq("state", "STOPPED"), when.eq("state", "FAILED")), when.eq("closeRetention.retained", toDocument(found.data)), when.notExists("closeRetention.acceptedOperationId"), when.notExists("closeDestroy")) },
   ] };
 }

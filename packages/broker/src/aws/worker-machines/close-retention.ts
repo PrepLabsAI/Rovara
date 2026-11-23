@@ -134,8 +134,8 @@ export function createDispatcherCloseInspection(deps: HostedCloseDeps): CloseIns
  */
 export function closeAvailability(session: object | undefined): "ready" | "wake" | "unsupported" {
   const { state, workerFeatures, closeRetention, closeDestroy } = (session ?? {}) as { state?: unknown; workerFeatures?: unknown; closeRetention?: unknown; closeDestroy?: unknown };
-  // A session the retention protocol already owns cannot have a second check layered on it (its preparation refuses "another retention owns the session"), and a stopped one cannot be started again until the
-  // retention lane's own restart rule exists (`ensureSession` refuses a retained STOPPED session): such a close is never promised a check.
+  // A session the retention protocol already owns cannot have a second check layered on it (its preparation refuses "another retention owns the session"): such a close is never promised a check. (Work CAN resume
+  // on it: a Continue or a new step wakes a retained STOPPED session on its volume and lifts the retention; only a Close's check is not layered on a retention.)
   if (closeRetention !== undefined || closeDestroy !== undefined) return "unsupported";
   if (state === "STOPPED" || state === "STOPPING") return "wake";
   if (state !== "READY") return "unsupported";

@@ -654,7 +654,8 @@ class Parser {
       this.expect("(");
       const path = this.path();
       this.expect(")");
-      const exists = item?.[path] !== undefined;
+      // A dotted path (`closeRetention.acceptedOperationId`) is read through the map, as DynamoDB does.
+      const exists = this.pathValue(item, path) !== undefined;
       return token === "attribute_exists" ? exists : !exists;
     }
     if (token === "contains") {
