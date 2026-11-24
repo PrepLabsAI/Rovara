@@ -1,18 +1,37 @@
 // Lead 4 L4-HW8 (1): the hosted dispatcher's lessons reader gets a company-scoped, read-only people port (worker-machines/dispatcher-people.ts), so a worker step receives the company's lessons
 // learned from other people's tasks while the person running the task is on the project's roster. The Dynamo client below plays the dispatcher ROLE: GetItem only, and on the sign-in table only the two keys with the projected attributes that
-// the runtime's own attribute lists name (no stack grants the dispatcher these reads today).
-import { afterEach, describe, expect, it, vi } from "vitest";
+// the DispatcherLessonsPeople policy of the SYNTHESIZED control plane (legacy and named layouts) allows: the role is derived from the real template, never written by hand (LESSONS-PORT-FIX, DEC 254zzz473).
+import { Stack } from "aws-cdk-lib";
+import { Template } from "aws-cdk-lib/assertions";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { GetCommand, QueryCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { LEARNED_CONTEXT_FEATURE, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
 import { createDispatcherLearned } from "../../packages/broker/src/aws/worker-machines/dispatcher-lessons.js";
 import { createDispatcherLessonsPeople, dispatcherPeopleClient } from "../../packages/broker/src/aws/worker-machines/dispatcher-people.js";
 import { hostedDispatcherFlow, NO_PEOPLE_HERE } from "../../packages/broker/src/aws/worker-machines/dispatcher-core.js";
-import { TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES, TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES } from "../../packages/broker/src/aws/task-person-runtime.js";
+import { TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES } from "../../packages/broker/src/aws/task-person-runtime.js";
+import { buildAgentXApp } from "../../infra/lib/app.js";
+import { dispatcherIds, dispatcherRolePolicy, SIGNIN_TABLE_VARIABLE } from "../support/dispatcher-lessons-people-template.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { DocumentLessonStore } from "../../packages/broker/src/lessons/document-store.js";
 import { setLearnedLessonsGate } from "../../packages/broker/src/lessons/policy.js";
 import { taskKey, taskPointerKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { lessonRecord } from "./lessons/lesson-helpers.js";
+
+skipLambdaBundling();
+type Layout = "named" | "legacy";
+type Synthesized = { Resources: Record<string, { Type: string; Properties: Record<string, unknown> }> };
+const synthesized = {} as Record<Layout, { role: ReturnType<typeof dispatcherRolePolicy>; env: unknown }>;
+beforeAll(() => {
+  for (const layout of ["named", "legacy"] as const) {
+    const app = buildAgentXApp(layout === "legacy" ? {} : { agentxEnv: "staging" });
+    const stack = app.node.children.find((child): child is Stack => Stack.isStack(child) && child.node.id === "AgentXControlPlane")!;
+    const template = Template.fromStack(stack).toJSON() as Synthesized;
+    const ids = dispatcherIds(template);
+    synthesized[layout] = { role: dispatcherRolePolicy(template), env: (template.Resources[ids.dispatcher]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables[SIGNIN_TABLE_VARIABLE] };
+  }
+}, 240_000);
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa";
 const B = "org_bbbbbbbbbbbbbbbbbbbb";
@@ -30,7 +49,7 @@ const WORLD = {
 const request = (company: typeof A | typeof B) => ({ workspaceId: WORLD[company].ws, operationId: WORLD[company].task, workflowMode: "PLAN", features: [LEARNED_CONTEXT_FEATURE] });
 afterEach(() => { setLearnedLessonsGate(undefined); });
 
-async function world() {
+async function world(layout: Layout = "named") {
   setLearnedLessonsGate(() => true);
   const store = new MemoryDocumentStore();
   const signIn = new Map<string, Record<string, unknown>>();
@@ -66,8 +85,8 @@ async function world() {
       sent.push({ table: TableName, kind: "get", key: Key, projection });
       if (ConsistentRead !== true) throw new Error("not consistent");
       if (TableName === SIGN_IN) {
-        const allowed: readonly string[] | undefined = Key.pk.startsWith("COMPANY_MEMBER#") ? [...TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES] : Key.pk.startsWith("DEVELOPER#") ? [...TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES] : undefined;
-        if (allowed === undefined || projection === undefined || projection.some((attribute) => !allowed.includes(attribute))) throw new Error("AccessDeniedException: sign-in table");
+        // The dispatcher's role as the synthesized template grants it: GetItem on the table, its key prefix, the projected attributes.
+        if (projection === undefined || !synthesized[layout].role.allows({ action: "dynamodb:GetItem", leadingKeys: [Key.pk], attributes: projection })) throw new Error("AccessDeniedException: sign-in table");
         const row = signIn.get(`${Key.pk}|${Key.sk}`);
         return { Item: row === undefined ? undefined : Object.fromEntries(projection.filter((attribute) => attribute in row).map((attribute) => [attribute, row[attribute]])) };
       }
@@ -212,5 +231,49 @@ describe("the client the port reads through", () => {
     await expect(none.send(get(SIGN_IN, "COMPANY_MEMBER#x", "COMPANY"))).rejects.toThrow();
     await expect(dispatcherPeopleClient({ documentClient: inner, stateTableName: STATE, signInTableName: "" }).send(get("", "COMPANY_MEMBER#x", "COMPANY"))).rejects.toThrow();
     expect(inner.send).not.toHaveBeenCalled();
+  });
+});
+
+// LESSONS-PORT-FIX (DEC 254zzz473): the journey, end to end, on each layout, with the dispatcher's sign-in table access taken from the synthesized control plane.
+describe.each(["named", "legacy"] as const)("a worker step's source lessons on the %s layout", (layout) => {
+  it("is given the table by the real construct, and loads the company's source lesson through GetItems the template grants", async () => {
+    // The variable is the real sign-in table (a Ref, resolved at deploy to its name, here SIGN_IN), never conditional or empty.
+    expect(Object.keys(synthesized[layout].env as object)).toEqual(["Ref"]);
+    expect((synthesized[layout].env as { Ref: string }).Ref).toMatch(/^DeveloperSignInTable[0-9A-F]{8}$/u);
+    const w = await world(layout);
+    const learned = await w.flowFor(A).learned!(request(A));
+    expect(learned.learnedContext?.lessons.map((lesson) => lesson.id)).toEqual(["les_aaaa1111"]);
+    const signInReads = w.sent.filter((read) => read.table === SIGN_IN);
+    expect(signInReads.length).toBeGreaterThan(0);
+    for (const read of signInReads) expect(read.projection).toBeDefined();
+  });
+
+  it("gives a removed member, a member of another company and a person with no grant nothing, and reads no other company's member", async () => {
+    for (const change of ["removed", "other-company", "no-grant"] as const) {
+      const w = await world(layout);
+      const key = `COMPANY_MEMBER#${WORLD[A].runner}|COMPANY`;
+      if (change === "removed") w.signIn.set(key, { ...w.signIn.get(key)!, revokedAt: iso });
+      if (change === "other-company") w.signIn.set(key, { ...w.signIn.get(key)!, companyId: B });
+      if (change === "no-grant") await w.store.delete({ key: { pk: `ORG#${A}#MEMBER#${WORLD[A].runner}`, sk: "PROJECT#payments" } });
+      expect(await w.flowFor(A).learned!(request(A)), change).toEqual({});
+      // Company A's step asked about company A's runner only: no read of company B's person, and none of the source authors.
+      expect(w.sent.some((read) => read.key.pk.includes(WORLD[B].runner) || read.key.pk.includes(WORLD[B].author) || read.key.pk.includes(WORLD[A].author)), change).toBe(false);
+    }
+  });
+
+  it("with the table's name unset (the bug this fixes) loads no source lesson and reads nothing from the sign-in table; set, the same step loads it", async () => {
+    const w = await world(layout);
+    w.sent.length = 0;
+    await expect(w.flowFor(A, null).learned!(request(A))).rejects.toThrow(/RUNTIME_UNAVAILABLE/u);
+    expect(w.sent.filter((read) => read.table === SIGN_IN)).toEqual([]);
+    expect((await w.flowFor(A).learned!(request(A))).learnedContext?.lessons.map((lesson) => lesson.id)).toEqual(["les_aaaa1111"]);
+  });
+
+  it("the template's role refuses what the code never sends: a whole-row read and another company's key family", async () => {
+    const w = await world(layout);
+    const role = synthesized[layout].role;
+    expect(role.allows({ action: "dynamodb:GetItem", leadingKeys: [`COMPANY_MEMBER#${WORLD[A].runner}`], attributes: undefined })).toBe(false);
+    expect(role.allows({ action: "dynamodb:GetItem", leadingKeys: [`COMPANY#${A}`], attributes: ["pk", "sk"] })).toBe(false);
+    expect(w.sent).toEqual([]);
   });
 });

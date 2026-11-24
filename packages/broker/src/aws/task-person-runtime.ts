@@ -5,6 +5,8 @@ import { isDeepStrictEqual } from "node:util";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
   SlackTeamIdSchema,
+  TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES,
+  TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES,
   agentXError,
   orgOfProjectPk,
   type OrgId,
@@ -26,9 +28,8 @@ import { membershipKey, ownPartitionRow, recordInCompany, strictLiveMembership }
 import { namedCompany, revisionPkFor } from "./company-layout.js";
 import { readNamedCompanyRevisionRow } from "./company-revision-row.js";
 
-export const TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES = [
-  "pk", "sk", "developerId", "provider", "issuer", "subject", "slackUserId", "revoked", "displayName",
-] as const;
+// The two attribute lists live in @agentx/contracts (task-person-attributes.ts) so the dispatcher's sign-in table grant (infra/lib/dispatcher-lessons-people.ts) names the very lists the reads project.
+export { TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES, TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES };
 
 export type TaskPersonDeveloperRecordProjection = { pk: string; sk: string; developerId?: string } & Pick<DeveloperRecord,
   "provider" | "issuer" | "subject" | "slackUserId" | "revoked" | "displayName">;
@@ -128,11 +129,6 @@ export function ownCompanyAuthorityRows<T extends Record<string, unknown>>(items
     return rest;
   });
 }
-
-/** C2: the fields of a `COMPANY_MEMBER#<developerId>` / `COMPANY` row the web proof reads (the reviewed `Membership` record, company-check.ts). */
-export const TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES = [
-  "pk", "sk", "entityType", "personId", "companyId", "role", "joinedAt", "joinedVia", "revokedAt", "revokedBy",
-] as const;
 
 /** C2 (plan 4.1 rule 3): the bounded read set's addition for a `web` identity. */
 export interface TaskPersonRuntimeWebPorts {

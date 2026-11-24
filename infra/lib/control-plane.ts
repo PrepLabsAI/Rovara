@@ -44,6 +44,7 @@ import { SlackCompanyTokenReader } from "./slack-company-token-reader.js";
 import { addGithubWebhookSecret, GITHUB_WEBHOOK_ROUTE, guardGithubWebhookRoute } from "./github-webhook.js";
 import { SavedEnvImages } from "./saved-env-images.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
+import { connectDispatcherLessonsPeople } from "./dispatcher-lessons-people.js";
 import { addBrokerDeadLetterQueues, addBrokerName, addBrokerSetting, addDerivedBrokerVariable, brokerEnvironmentName, brokerNamesParameterArn } from "./broker-names.js";
 import { CompanySignInSwitch } from "./company-signin.js";
 import { DeveloperTaskNotifier } from "./developer-task-notifier.js";
@@ -1095,6 +1096,8 @@ export class ControlPlaneStack extends Stack {
         naming, env: naming.env ?? "production", api, stage: defaultStage, brokerIntegration: integration, broker, dispatcher, slackSecret, parameters: signInParameters, turnRecords, stateTable: state,
         ...(companySignIn === undefined ? {} : { company: companySignIn }),
       });
+      // The dispatcher's lessons people port (a worker step's source lessons need the project roster): the sign-in table's name and two projected GetItem reads of it, from the real table, both layouts, no switch.
+      connectDispatcherLessonsPeople(this, dispatcher, developerSignIn.table);
       // Named: one statement for the broker's two invokes (the plan evidence job and the sign-in function; developer-signin.ts leaves its grant to this), ENV-ROOM 2's IAM room.
       // The same resources CDK's grantInvoke gives each: the function and its versions and aliases.
       if (naming.env !== undefined) {
