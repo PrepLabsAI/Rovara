@@ -1,4 +1,4 @@
-// Private packages P2a, on REAL Docker: the install container's own claims. NOT RUN on a Mac; a recorded native PASS (linux-runtime CI job, ROVARA_DOCKER=1, passwordless sudo, the container firewall of boot.sh installed first) is required before merge (rule #15).
+// Private packages P2a, on REAL Docker: the install container's own claims. NOT RUN on a Mac; a recorded native PASS (linux-runtime CI job, ROVARA_DOCKER=1, passwordless sudo, the container firewall of boot.sh installed first) is required before merge (rule #15). CI runs it in a step of its own, beside no other Linux test file.
 // Each claim is shown with a positive control, so a pass cannot be a test that never looked:
 //   - T-TMPFS-1  the step refuses a folder that is not a tmpfs mountpoint of its own, and accepts one that is;
 //   - T-SCRIPTS  a hostile root postinstall and a dependency's install script do NOT run under the container's command (a control without --ignore-scripts DOES run them);
@@ -7,6 +7,7 @@
 //   - T-NET-1    on the `rvbp` bridge the host's own port, the metadata address and a private range are dropped by the boot firewall, while a public name resolves;
 //   - T-CONC-1   a sandbox started DURING an install cannot see the token folder, the process or the environment.
 //   - T-HOST-1   (npm and yarn 1, against a fake HTTPS registry answering as npm.pkg.github.com with a throwaway CA): the token reaches that host and no other (a second registry, the target of a tarball redirect); a control keyed to the second host shows it would be seen;
+//   - T-YARNRC-1 (yarn 1): a repository .yarnrc / .npmrc that set a dead proxy do not apply, because inside the container an empty .yarnrc and the derived .npmrc are mounted over them; the control without the mounts fails on that proxy;
 //   - T-OFFLINE-1 (same registry): after the install the repository's own `npm ci` / `yarn install --frozen-lockfile` in a sandbox with NO network and no token succeeds from the cache and runs the root postinstall; the control without the cache variables fails.
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -138,14 +139,29 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
   }, 300_000);
 
   it("T-NPMRC-1: a repository .npmrc with a ${NPM_TOKEN} auth line is overridden by the derived copy inside the container; the host file is byte-equal", async () => {
-    const original = "@acme:registry=https://npm.pkg.github.com/\n//npm.pkg.github.com/:_authToken=${NPM_TOKEN}\n";
+    // The repository's own file routes the scope somewhere else, so that the override is something npm shows: `npm config get` refuses to print an _authToken ("protected"), so the proof is the scope's registry (ours wins) and the file as the container sees it.
+    const original = "@acme:registry=https://registry.npmjs.org/\n//npm.pkg.github.com/:_authToken=${NPM_TOKEN}\n";
     const { repository, secrets, token, input } = await fixture({ "package.json": "{}", ".npmrc": original }, { derivedNpmrc: true });
     const key = installRepositoryKey(input.operationId, input.repository);
-    await writeFile(join(secrets, `${key}.npmrc`), renderDerivedNpmrc([], ["@acme"], token), { mode: 0o644 });
+    const derived = renderDerivedNpmrc([], ["@acme"], token);
+    await writeFile(join(secrets, `${key}.npmrc`), derived, { mode: 0o644 });
     const args = installContainerArgs({ ...input, derivedNpmrc: true });
-    const printed = await docker(...asRun(args, "none", ["/usr/local/bin/npm", "config", "get", "//npm.pkg.github.com/:_authToken"]));
-    expect(printed.code, printed.stderr).toBe(0);
-    expect(printed.stdout.trim()).toBe(token);
+    const inContainer = (command: string[]) => docker(...asRun(args, "none", command));
+    // Control: without the mount npm reads the repository's own file (the scope goes to the public registry), so this assertion can fail.
+    const own = await docker(...asRun(installContainerArgs({ ...input, derivedNpmrc: false }), "none", ["/usr/local/bin/npm", "config", "get", "@acme:registry"]));
+    expect(own.code, own.stderr).toBe(0);
+    expect(own.stdout.trim()).toBe("https://registry.npmjs.org/");
+    const routed = await inContainer(["/usr/local/bin/npm", "config", "get", "@acme:registry"]);
+    expect(routed.code, routed.stderr).toBe(0);
+    expect(routed.stdout.trim()).toBe("https://npm.pkg.github.com/");
+    // The file the container reads IS the derived copy: the one token line, no `${NPM_TOKEN}`.
+    const seen = await inContainer(["cat", join(repository, ".npmrc")]);
+    expect(seen.code, seen.stderr).toBe(0);
+    expect(seen.stdout).toBe(derived);
+    expect(seen.stdout).not.toContain("${");
+    // A step cannot read the token back through npm either (npm refuses to print an _authToken), nor does it print it on the way.
+    const asked = await inContainer(["/usr/local/bin/npm", "config", "get", "//npm.pkg.github.com/:_authToken"]);
+    expect(`${asked.stdout}${asked.stderr}`).not.toContain(token);
     expect(await readFile(join(repository, ".npmrc"), "utf8")).toBe(original);
   }, 120_000);
 
@@ -170,14 +186,14 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     const name = `rovara-pi-conc-${randomBytes(4).toString("hex")}`;
     const long = asRun(args, "none", ["/bin/sleep", "60"]).map((entry, index, all) => (all[index - 1] === "--name" ? name : entry));
     const started = await docker(...long.map((entry, index) => (index === 0 ? "run" : entry)).flatMap((entry) => (entry === "--rm" ? ["--rm", "--detach"] : [entry])));
-    expect(started.code, started.stderr).toBe(0);
     cleanups.push(() => docker("rm", "--force", name));
+    expect(started.code, started.stderr).toBe(0);
     // Positive control: the install container sees its file.
     expect((await docker("exec", name, "cat", "/run/rovara-install/npmrc")).stdout).toContain(token);
     const sandbox = taskSandboxRunArgs({ name: `${name}-sandbox`, taskId: "conc", image: APP_NODE_IMAGE, rootPath: root, maskedPaths: [] }).map((entry, index, all) => (all[index - 1] === "--network" ? "none" : all[index - 1] === "--entrypoint" ? "/usr/bin/env" : entry));
     const sandboxStart = await docker(...sandbox.slice(0, sandbox.indexOf("--") + 1).concat(["sleep", "30"]));
-    expect(sandboxStart.code, sandboxStart.stderr).toBe(0);
     cleanups.push(() => docker("rm", "--force", `${name}-sandbox`));
+    expect(sandboxStart.code, sandboxStart.stderr).toBe(0);
     const looked = await docker("exec", `${name}-sandbox`, "sh", "-c", "ls /run/rovara-install 2>&1; env; ps -eo args 2>&1 | cat");
     expect(looked.stdout).toMatch(/No such file or directory/u);
     expect(looked.stdout).not.toContain(token);
@@ -350,6 +366,22 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       const seen = (await registry.requests()).filter((row) => row.host === "other-registry.test");
       expect(seen.length).toBeGreaterThanOrEqual(1);
       expect(seen.every((row) => row.auth === "token")).toBe(true);
+    }, 300_000);
+
+    // Yarn 1 reads the project's own `.npmrc` and `.yarnrc` (it has no way to read only ours and still send the token): inside the container both are replaced, so a repository's proxy or registry settings never apply. The control shows they WOULD.
+    it.runIf(manager === "yarn1")("T-YARNRC-1: a repository .yarnrc and .npmrc that set a dead proxy do not apply (an empty .yarnrc and the derived .npmrc are mounted over them); without those mounts the install fails on that proxy", async () => {
+      const deps = [dependency(registry, "priv")];
+      const hostile = { ".yarnrc": 'proxy "http://127.0.0.1:9"\nhttps-proxy "http://127.0.0.1:9"\n', ".npmrc": "proxy=http://127.0.0.1:9\nhttps-proxy=http://127.0.0.1:9\n" };
+      const covered = await fixture({ ...projectFiles(manager, deps), ...hostile }, { manager, derivedNpmrc: true, blankYarnrc: true }, { token: registry.token });
+      await writeFile(join(covered.secrets, `${installRepositoryKey(covered.input.operationId, covered.input.repository)}.npmrc`), renderDerivedNpmrc([], ["@acme"], registry.token), { mode: 0o644 });
+      const installed = await docker(...installRun(covered, registry, manager));
+      expect(installed.code, `${installed.stdout}\n${installed.stderr}`).toBe(0);
+      expect((await stat(join(covered.repository, "node_modules", "@acme", "priv"))).isDirectory()).toBe(true);
+      // Control: the same repository files, not covered, are read by yarn 1 and break the install.
+      const open = await fixture({ ...projectFiles(manager, deps), ...hostile }, { manager }, { token: registry.token });
+      const exposed = await docker(...installRun(open, registry, manager));
+      expect(exposed.code, "the control must fail on the repository's proxy").not.toBe(0);
+      for (const run of [covered, open]) expect(await readFile(join(run.repository, ".yarnrc"), "utf8")).toBe(hostile[".yarnrc"]);
     }, 300_000);
 
     it("T-OFFLINE-1: after the install, the repository's own `install` in a sandbox with NO network and NO token succeeds from the cache and runs the root postinstall; without the cache variables it cannot", async () => {

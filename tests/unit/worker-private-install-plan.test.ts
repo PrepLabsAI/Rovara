@@ -110,11 +110,12 @@ describe("the manager comes from the lockfile, never from the repository's own p
     expect(selectManager(lockfiles)).toEqual(expected);
   });
 
-  it("the commands are fixed: the image's own program, scripts off, no repository config for yarn 1", () => {
+  it("the commands are fixed: the image's own program, scripts off; yarn 1 reads its npm userconfig (a `--no-default-rc` yarn 1 sends no token), the repository's rc files being replaced in the container", () => {
     expect(installCommand("npm")).toEqual(["/usr/local/bin/npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=warn", "--include=dev"]);
     const yarn = installCommand("yarn1");
     expect(yarn.slice(0, 2)).toEqual(["/usr/local/bin/yarn", "install"]);
-    for (const flag of ["--frozen-lockfile", "--ignore-scripts", "--non-interactive", "--no-default-rc", "--use-yarnrc"]) expect(yarn).toContain(flag);
+    for (const flag of ["--frozen-lockfile", "--ignore-scripts", "--non-interactive", "--use-yarnrc"]) expect(yarn).toContain(flag);
+    expect(yarn).not.toContain("--no-default-rc");
     expect(yarn.join(" ")).not.toMatch(/\.yarn\/releases|yarn-path/u);
   });
 });
@@ -154,6 +155,15 @@ describe("inspecting a repository reads files and runs nothing", () => {
     expect((await inspectRepository(directory)).npmrc).toEqual({ kind: "other" });
     await mkdir(join(directory, "sub"));
     expect((await inspectRepository(join(directory, "sub"))).npmrc).toEqual({ kind: "absent" });
+  });
+
+  it("a .yarnrc is 'absent', a regular file with its text, or 'other' (a link), and never read through", async () => {
+    expect((await inspectRepository(await repo({ "yarn.lock": "x" }))).yarnrc).toEqual({ kind: "absent" });
+    expect((await inspectRepository(await repo({ "yarn.lock": "x", ".yarnrc": "registry \"https://registry.yarnpkg.com\"\n" }))).yarnrc).toEqual({ kind: "file", text: "registry \"https://registry.yarnpkg.com\"\n" });
+    const directory = await repo({ "yarn.lock": "x" });
+    await writeFile(join(directory, "real-yarnrc"), "x\n");
+    await symlink(join(directory, "real-yarnrc"), join(directory, ".yarnrc"));
+    expect((await inspectRepository(directory)).yarnrc).toEqual({ kind: "other" });
   });
 });
 

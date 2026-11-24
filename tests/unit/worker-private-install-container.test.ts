@@ -39,7 +39,7 @@ describe("installContainerArgs", () => {
 
   it("the token folder is mounted read-only into this container and no other, and no secret is in any argument", () => {
     const token = `ghp_${randomBytes(24).toString("base64url")}`;
-    for (const input of [base(), base({ manager: "yarn1" }), base({ derivedNpmrc: true })]) {
+    for (const input of [base(), base({ manager: "yarn1" }), base({ derivedNpmrc: true }), base({ manager: "yarn1", derivedNpmrc: true, blankYarnrc: true })]) {
       const args = installContainerArgs(input);
       expect(args.join("\n")).not.toContain(token);
       expect(flag(args, "--volume").filter((value) => value.includes("/run/rovara-install")).every((value) => value.endsWith(":ro"))).toBe(true);
@@ -54,6 +54,13 @@ describe("installContainerArgs", () => {
     const withCopy = installContainerArgs(base({ derivedNpmrc: true }));
     expect(flag(withCopy, "--volume")).toContain(`/run/rovara-install/aaaaaaaaaaaaaaaa/${installRepositoryKey("op-1", "web")}.npmrc:${ROOT}/repo/web/.npmrc:ro`);
     expect(flag(installContainerArgs(base()), "--volume").some((value) => value.endsWith("/.npmrc:ro"))).toBe(false);
+  });
+
+  it("mounts an EMPTY file over the repository's .yarnrc, read-only, only when asked", () => {
+    const blank = installContainerArgs(base({ manager: "yarn1", blankYarnrc: true }));
+    expect(flag(blank, "--volume")).toContain(`/run/rovara-install/aaaaaaaaaaaaaaaa/empty:${ROOT}/repo/web/.yarnrc:ro`);
+    expect(flag(installContainerArgs(base({ manager: "yarn1" })), "--volume").some((value) => value.endsWith("/.yarnrc:ro"))).toBe(false);
+    expect(() => assertInstallContainerArgs(blank, base({ manager: "yarn1", blankYarnrc: true }))).not.toThrow();
   });
 
   it("the environment is a fixed list of non-secret names; NODE_ENV is emptied so the dev dependencies are installed", () => {
@@ -120,6 +127,8 @@ describe("assertInstallContainerArgs refuses anything that is not the install co
     refuses(good, base({ operationId: "op-2" }));
     refuses(good, base({ repositoryDirectory: `${ROOT}/repo/other` }));
     refuses(good, base({ derivedNpmrc: true }));
+    refuses(good, base({ blankYarnrc: true }));
+    refuses(installContainerArgs(base({ blankYarnrc: true })), input);
   });
 
   it("memory and cpu limits are checked by shape", () => {

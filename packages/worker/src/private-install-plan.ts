@@ -123,7 +123,11 @@ export function renderDerivedNpmrc(kept: readonly string[], scopes: readonly str
   return `${[...new Set([...kept, ...routeLines(scopes)]), authLine(token)].join("\n")}\n`;
 }
 
-/** The yarn 1 rc (`--use-yarnrc`, with `--no-default-rc`): the same routing and token, in yarn's own quoting. */
+/**
+ * The yarn 1 rc (`--use-yarnrc`): the same routing and token, in yarn's own quoting. Yarn 1 reads an extra rc file ONLY into its own "yarn" registry; the "npm" registry, which downloads every tarball and decides whether
+ * the token is sent, reads only `npm_config_*` variables and `.npmrc` files (proven on a fake registry: with `--no-default-rc` yarn 1.22 sent no token at all). So the token reaches yarn through the npm userconfig (mounted, token
+ * line host-keyed) and the repository's own `.npmrc` / `.yarnrc` are replaced inside the container (`derivedNpmrc`, `blankYarnrc` of the container arguments), never read from the repository.
+ */
 export function renderYarnrc(scopes: readonly string[], token: string): string {
   const lines = [...new Set(scopes)].sort().map((scope) => `"${scope}:registry" "${GITHUB_PACKAGES_URL}"`);
   return `${[...lines, `"${AUTH_KEY}" "${token}"`].join("\n")}\n`;
@@ -140,6 +144,8 @@ export interface RepositoryInspection {
   lockfileSha256?: string;
   /** The `.npmrc`: absent, a regular file with its text, or something else (a link, a folder). */
   npmrc: { kind: "absent" } | { kind: "file"; text: string } | { kind: "other" };
+  /** The `.yarnrc` (yarn 1 reads it from the project folder): the same three cases. It is never read by the install; a regular file is covered by an empty one inside the container. */
+  yarnrc: { kind: "absent" } | { kind: "file"; text: string } | { kind: "other" };
 }
 
 const LOCKFILE_BYTES_MAX = 64 * 1024 * 1024;
@@ -176,12 +182,10 @@ export async function inspectRepository(directory: string): Promise<RepositoryIn
     if (bytes.includes(GITHUB_PACKAGES_HOST)) namesHost = true;
   }
   const npmrc = await readSmallFile(join(directory, ".npmrc"));
-  for (const name of [".yarnrc", ".yarnrc.yml"]) {
-    const rc = await readSmallFile(join(directory, name));
-    if (rc.kind === "file" && rc.text.includes(GITHUB_PACKAGES_HOST)) namesHost = true;
-  }
-  if (npmrc.kind === "file" && npmrc.text.includes(GITHUB_PACKAGES_HOST)) namesHost = true;
-  return { namesHost, lockfiles: [...kinds], ...(kinds.size === 0 ? {} : { lockfileSha256: hash.digest("hex") }), npmrc };
+  const yarnrc = await readSmallFile(join(directory, ".yarnrc"));
+  const berryrc = await readSmallFile(join(directory, ".yarnrc.yml"));
+  for (const rc of [yarnrc, berryrc, npmrc]) if (rc.kind === "file" && rc.text.includes(GITHUB_PACKAGES_HOST)) namesHost = true;
+  return { namesHost, lockfiles: [...kinds], ...(kinds.size === 0 ? {} : { lockfileSha256: hash.digest("hex") }), npmrc, yarnrc };
 }
 
 /** The manager of a repository, or the plain refusal: no lockfile, several managers, or one the image does not ship. */
@@ -195,7 +199,7 @@ export function selectManager(lockfiles: readonly LockfileKind[]): { ok: true; m
 /** The fixed command of a manager (the image's own, scripts off, repository code not loaded). The argument list is asserted exactly by the container's args check. */
 export function installCommand(manager: InstallManager): string[] {
   if (manager === "npm") return ["/usr/local/bin/npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=warn", "--include=dev"];
-  return ["/usr/local/bin/yarn", "install", "--frozen-lockfile", "--ignore-scripts", "--non-interactive", "--no-progress", "--no-default-rc", "--use-yarnrc", `${INSTALL_MOUNT_PATH}/yarnrc`, "--production=false"];
+  return ["/usr/local/bin/yarn", "install", "--frozen-lockfile", "--ignore-scripts", "--non-interactive", "--no-progress", "--use-yarnrc", `${INSTALL_MOUNT_PATH}/yarnrc`, "--production=false"];
 }
 
 // ---- the result of one run

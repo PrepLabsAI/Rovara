@@ -103,8 +103,10 @@ interface InstallJob {
   directory: string;
   manager: InstallManager;
   entry: PrivateInstallEntry;
-  /** The kept lines of the repository's `.npmrc` (npm only; absent when it has none): the derived copy is made from them. */
+  /** The kept lines of the repository's `.npmrc` (npm and yarn 1; absent when it has none): the derived copy is made from them. */
   keptNpmrc?: string[];
+  /** The repository has a `.yarnrc` (yarn 1 reads it from the project folder): an empty file covers it inside the container. */
+  blankYarnrc?: true;
   githubScopes: string[];
 }
 type Planned = { kind: "skip" } | { kind: "entry"; entry: PrivateInstallEntry } | { kind: "job"; job: InstallJob };
@@ -156,12 +158,13 @@ async function planRepository(ctx: Context, repository: { name: string; path: st
   if (refused !== undefined) return { kind: "entry", entry: entryOf(repository.name, inspected, refused.outcome, refused.detail) };
   const selection = selectManager(inspected.lockfiles);
   if (!selection.ok) return { kind: "entry", entry: entryOf(repository.name, inspected, selection.outcome) };
+  if (selection.manager === "yarn1" && inspected.yarnrc.kind === "other") return { kind: "entry", entry: entryOf(repository.name, inspected, "refused_npmrc_key", "(.yarnrc is not a regular file)") };
   const reading = inspected.npmrc.kind === "file" ? parseNpmrc(inspected.npmrc.text, ctx.companyScopes) : undefined;
   if (reading?.ok === false) return { kind: "entry", entry: entryOf(repository.name, inspected, "refused_npmrc_key", reading.key) };
   const earlier = await alreadyInstalled(ctx, repository.name, directory, inspected);
   if (earlier !== undefined) return { kind: "entry", entry: earlier };
   const entry = entryOf(repository.name, inspected, "installed");
-  return { kind: "job", job: { repo: repository.name, directory, manager: selection.manager, entry, githubScopes: reading?.githubScopes ?? [], ...(reading === undefined || selection.manager !== "npm" ? {} : { keptNpmrc: reading.kept }) } };
+  return { kind: "job", job: { repo: repository.name, directory, manager: selection.manager, entry, githubScopes: reading?.githubScopes ?? [], ...(reading === undefined ? {} : { keptNpmrc: reading.kept }), ...(selection.manager === "yarn1" && inspected.yarnrc.kind === "file" ? { blankYarnrc: true as const } : {}) } };
 }
 
 // ---- the run
@@ -223,7 +226,7 @@ async function runJob(state: RunState, job: InstallJob, directory: InstallDirect
   const { ctx } = state;
   const input: InstallContainerInput = {
     operationId: ctx.options.operationId, repository: job.repo, workspace: state.workspace, image: ctx.options.image!, rootPath: ctx.root, repositoryDirectory: job.directory, manager: job.manager, secretsDirectory: directory.directory,
-    ...(job.keptNpmrc === undefined ? {} : { derivedNpmrc: true }), hostCpus: ctx.options.hostCpus ?? availableParallelism(), hostMemoryBytes: ctx.options.hostMemoryBytes ?? totalmem(),
+    ...(job.keptNpmrc === undefined ? {} : { derivedNpmrc: true }), ...(job.blankYarnrc === true ? { blankYarnrc: true } : {}), hostCpus: ctx.options.hostCpus ?? availableParallelism(), hostMemoryBytes: ctx.options.hostMemoryBytes ?? totalmem(),
   };
   const args = installContainerArgs(input);
   assertInstallContainerArgs(args, input);
@@ -242,7 +245,7 @@ async function runJob(state: RunState, job: InstallJob, directory: InstallDirect
   return outcome;
 }
 
-/** The token files: the npm userconfig, the yarn rc, an empty global config, and for an npm repository with an `.npmrc` its derived copy. */
+/** The token files: the npm userconfig, the yarn rc, an empty global config, and for a repository with an `.npmrc` its derived copy. */
 async function writeTokenFiles(directory: InstallDirectory, jobs: readonly InstallJob[], scopes: readonly string[], token: string, operationId: string): Promise<void> {
   await directory.write("npmrc", renderUserNpmrc(scopes, token));
   await directory.write("yarnrc", renderYarnrc(scopes, token));

