@@ -111,9 +111,12 @@ const PRE_STREAM_REFUSAL_DETAILS = new Set([
  * tokens and no cost. The ONE place this rule lives: the usage checkpointer counts these calls for the broker (`usageMissingCalls`), and a setup run's spend meter counts them as spend.
  * Feed it every event of the session, in order. `observe` answers undefined for any event that is not an assistant message's end, and for that end whether the call is a missing-usage one.
  */
-export function createMissingUsageDetector(): { observe(event: unknown): boolean | undefined } {
+export function createMissingUsageDetector(): { observe(event: unknown): boolean | undefined; readonly refusedCalls: number } {
   let streamStarted = false;
+  // #1395: calls the provider refused before any stream (they spent nothing), so a run whose every call was refused can say so instead of reporting nothing.
+  let refusedCalls = 0;
   return {
+    get refusedCalls() { return refusedCalls; },
     observe(event) {
       const value = event as { type?: unknown; assistantMessageEvent?: { type?: unknown }; message?: { role?: unknown; stopReason?: unknown; errorMessage?: string; status?: unknown; content?: { type?: unknown; text?: unknown; thinking?: unknown }[]; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } } } } | null | undefined;
       // Pi emits message_start both for a provider start (unfinished stop reason)
@@ -138,6 +141,7 @@ export function createMissingUsageDetector(): { observe(event: unknown): boolean
         || (typeof text === "string" && PRE_STREAM_REFUSAL_DETAILS.has(/^[A-Za-z][A-Za-z0-9 ._-]{0,30} request failed; ([^\n]{1,200})$/u.exec(text)?.[1] ?? ""))
         || budgetExhaustedFromMarker(text) !== undefined || modelNotAllowedFromMarker(text) !== undefined || text === "Retry cancelled" || text === "Model request refused: the conversation holds tool calls but declares no tools"
       );
+      if (refusal) refusedCalls += 1;
       // Only a started response stream can be a missing-usage call.
       return began && !refusal && (u === undefined || ![u.input, u.output, u.cacheRead, u.cacheWrite, u.cost?.total].some(n => typeof n === "number" && Number.isFinite(n) && n > 0));
     },
@@ -194,7 +198,13 @@ export function createUsageCheckpointer(input: {
     endReport(stats, model, outcome, requested) {
       const left = statsSince(stats, reported);
       const usageMissingCalls = missingCalls - reportedMissingCalls;
-      if (!checkpointed && spentNothing(left) && usageMissingCalls === 0) return undefined;
+      if (!checkpointed && spentNothing(left) && usageMissingCalls === 0) {
+        // #1395: a run that tried and was refused before any stream spent nothing, and says so: without a report the broker could never know this run's spend, and its task's
+        // next step would be refused for good. A run that made no model call at all still reports nothing.
+        if (detector.refusedCalls === 0) return undefined;
+        const usage = redactCredentials(telemetryOf(left, model, outcome)) as Record<string, unknown>;
+        return usageForControlPlane({ ...usage, refusedBeforeStreamCalls: detector.refusedCalls }, requested);
+      }
       const usage = redactCredentials(telemetryOf(left, model, outcome)) as Record<string, unknown>;
       return usageForControlPlane({ ...usage, ...(usageMissingCalls > 0 ? { usageMissingCalls } : {}), ...(checkpointed ? { final: true } : {}) }, requested);
     },
