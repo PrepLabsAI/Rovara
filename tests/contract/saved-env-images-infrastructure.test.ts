@@ -294,10 +294,30 @@ describe("saved environment images: the registry side (L4-SE6)", () => {
         expect(brokerMayAssume(imgArn(kind)), kind).toBe(true);
         expect(boundaryAllows("sts:AssumeRole", imgArn(kind), brokerArn), `boundary ${kind}`).toBe(true);
       }
-      // The runtime boundary's other assume is the Slack service's, on its one token reader role (R5; its tests are in slack-company-token-reader-infrastructure.test.ts). The deploy boundary has none.
-      expect(boundary.filter((statement) => list(statement.Action).some((action) => /^sts:(AssumeRole|\*)/u.test(action))).map((statement) => statement.Sid)).toEqual(["AssumeSessionRoles", "SlackTokenReader"]);
+      // The runtime boundary's other assumes: the company-secrets role's own statement (PRIVATE-PACKAGES P1b, asserted below; the image roles' statement never carries a session tag action) and the Slack service's, on its one token reader role (R5; its tests are in slack-company-token-reader-infrastructure.test.ts). The deploy boundary has none.
+      expect(boundary.filter((statement) => list(statement.Action).some((action) => /^sts:(AssumeRole|\*)/u.test(action))).map((statement) => statement.Sid)).toEqual(["AssumeSessionRoles", "AssumeCompanySecretsRole", "SlackTokenReader"]);
+      expect(list(boundary.find((statement) => statement.Sid === "AssumeSessionRoles")!.Action)).toEqual(["sts:AssumeRole"]);
       expect(deployBoundary.filter((statement) => list(statement.Action).some((action) => /^sts:(AssumeRole|\*)/u.test(action)))).toEqual([]);
       expect(boundaryAllows("sts:AssumeRole", imgArn("push"), `arn:aws:iam::${ACCOUNT}:role/agentx/staging/agentx-staging-control-plane-SlackOrchestratorTaskRole-ABC`)).toBe(false);
+    });
+
+    it("(P1b) the broker role may assume the company-secrets role AND tag the session, that one role only; no other principal may, and nothing wider is allowed", () => {
+      const secretsRole = `arn:aws:iam::${ACCOUNT}:role/agentx/staging/agentx-staging-company-secrets`;
+      for (const action of ["sts:AssumeRole", "sts:TagSession"]) expect(boundaryAllows(action, secretsRole, brokerArn), action).toBe(true);
+      const dispatcher = `arn:aws:iam::${ACCOUNT}:role/agentx/staging/agentx-staging-control-plane-DispatcherServiceRole-ABCDEF`;
+      const worker = `arn:aws:iam::${ACCOUNT}:role/agentx/staging/agentx-staging-runtime-WorkerRole-ABCDEF`;
+      for (const principal of [dispatcher, worker, `arn:aws:iam::${ACCOUNT}:role/agentx-staging-operator`, `arn:aws:iam::${ACCOUNT}:root`, `${brokerArn}-x`, `arn:aws:iam::${ACCOUNT}:role/agentx/other/agentx-other-broker-role`]) {
+        for (const action of ["sts:AssumeRole", "sts:TagSession"]) expect(boundaryAllows(action, secretsRole, principal), `${principal} ${action}`).toBe(false);
+      }
+      for (const resource of [`arn:aws:iam::${ACCOUNT}:role/agentx/staging/agentx-staging-company-secrets-x`, `arn:aws:iam::${ACCOUNT}:role/agentx/staging/agentx-staging-company-*`, `arn:aws:iam::${ACCOUNT}:role/agentx-staging-company-secrets`,
+        `arn:aws:iam::${ACCOUNT}:role/agentx/prod/agentx-prod-company-secrets`, `arn:aws:iam::210987654321:role/agentx/staging/agentx-staging-company-secrets`]) {
+        for (const action of ["sts:AssumeRole", "sts:TagSession"]) expect(boundaryAllows(action, resource, brokerArn), `${resource} ${action}`).toBe(false);
+      }
+      for (const action of ["sts:AssumeRoleWithWebIdentity", "sts:AssumeRoleWithSAML", "sts:SetSourceIdentity", "sts:*"]) expect(boundaryAllows(action, secretsRole, brokerArn), action).toBe(false);
+      // The deploy role may look the fixed-name role up by its path-less ARN (and clean it up), never create or change it.
+      const lookup = `arn:aws:iam::${ACCOUNT}:role/agentx-staging-company-secrets`;
+      expect(allowedUnderBoundary(deploy, deployBoundary, { action: "iam:GetRole", resource: lookup })).toBe(true);
+      for (const action of ["iam:CreateRole", "iam:PutRolePolicy", "iam:UpdateAssumeRolePolicy", "iam:PassRole"]) expect(allowedUnderBoundary(deploy, deployBoundary, { action, resource: lookup, context: { "iam:PermissionsBoundary": `arn:aws:iam::${ACCOUNT}:policy/agentx/staging/agentx-staging-boundary` } }), action).toBe(false);
     });
 
     it("no other principal may assume them, and the broker may assume nothing else", () => {
@@ -310,7 +330,7 @@ describe("saved environment images: the registry side (L4-SE6)", () => {
       for (const resource of [
         `arn:aws:iam::${ACCOUNT}:role/agentx/staging/agentx-staging-img-create`, `arn:aws:iam::${ACCOUNT}:role/agentx/staging/agentx-staging-img-*`, `arn:aws:iam::${ACCOUNT}:role/agentx/staging/agentx-staging-img-other`,
         `arn:aws:iam::${ACCOUNT}:role/agentx-staging-img-push`, `arn:aws:iam::${ACCOUNT}:role/agentx/prod/agentx-prod-img-push`, `arn:aws:iam::${ACCOUNT}:role/agentx/staging/agentx-staging-broker-role`,
-        `arn:aws:iam::${ACCOUNT}:role/agentx/staging/agentx-staging-company-secrets`, `arn:aws:iam::210987654321:role/agentx/staging/agentx-staging-img-push`, `arn:aws:iam::${ACCOUNT}:role/agentx-staging-operator`,
+        `arn:aws:iam::210987654321:role/agentx/staging/agentx-staging-img-push`, `arn:aws:iam::${ACCOUNT}:role/agentx-staging-operator`,
       ]) {
         expect(boundaryAllows("sts:AssumeRole", resource, brokerArn), resource).toBe(false);
       }
@@ -356,8 +376,8 @@ describe("saved environment images: the registry side (L4-SE6)", () => {
 
     it("the statements the access template holds are exactly contracts' (asserted and taken out), and nothing else in the access stack changed in meaning", () => {
       const stripped = withoutSavedEnvAccess(structuredClone(access), ENV);
-      expect(JSON.stringify(stripped)).not.toMatch(/AssumeSessionRoles|IamFixedNameRolesNotYetCreated|EcrTemplateServiceLinkedRole/u);
-      expect(expectedAccessStatements(ENV).runtimeBoundary.map((statement) => statement.Sid)).toEqual(["AssumeSessionRoles"]);
+      expect(JSON.stringify(stripped)).not.toMatch(/AssumeSessionRoles|AssumeCompanySecretsRole|IamFixedNameRolesNotYetCreated|EcrTemplateServiceLinkedRole/u);
+      expect(expectedAccessStatements(ENV).runtimeBoundary.map((statement) => statement.Sid)).toEqual(["AssumeSessionRoles", "AssumeCompanySecretsRole"]);
       expect(expectedAccessStatements(ENV).deployBoundary.map((statement) => statement.Sid)).toEqual(["IamFixedNameRolesNotYetCreated", "EcrTemplateServiceLinkedRole"]);
       expect(expectedAccessStatements(ENV).deploy.map((statement) => statement.Sid)).toEqual(["IamFixedNameRolesNotYetCreated", "EcrTemplateServiceLinkedRole"]);
     });

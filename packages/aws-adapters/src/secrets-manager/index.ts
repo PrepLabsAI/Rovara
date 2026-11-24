@@ -99,3 +99,4 @@ export function createSecretsManagerSecretStore(options: SecretsManagerSecretSto
 export { COMPANY_SECRET_PATHS, COMPANY_SECRET_TAG_KEY, companyOfSecretName } from "./company-names.js";
 export { createCompanyClientFactory } from "./tagged-session.js";
 export { createSecretsManagerConnectionSecrets } from "./connection-secrets.js";
+export type { ConnectionSecretsClient } from "./connection-secrets.js";

@@ -390,6 +390,10 @@ export const APP_ROUTES: readonly DevRoute[] = [
   // L4-P3: the company's one control over Rovara's automatic runs (core-host/system-runs-routes.ts): full access only, then only a live company owner or admin reads it, allows it or withdraws it.
   { method: "GET", path: "/v1/app/company/system-runs", requires: "full" },
   { method: "PUT", path: "/v1/app/company/system-runs", requires: "full" },
+  // PRIVATE-PACKAGES P1b: the company's package tokens (core-host/package-registries-routes.ts): full access only; any live member reads the status line, only a live owner or admin sets, replaces or deletes. No row answers a value.
+  { method: "GET", path: "/v1/app/company/package-registries", requires: "full" },
+  { method: "PUT", path: "/v1/app/company/package-registries", requires: "full" },
+  { method: "DELETE", path: "/v1/app/company/package-registries", requires: "full" },
   // L4-EVC (DEC 254zzz20): the project's ONE eval card (dollars), its single approval (confirm and approve the eval's spend in one act: the live owner/admin/maintainer rule). Full access only, like the setup candidate.
   { method: "GET", path: "/v1/app/projects/{project}/setup-agent/eval", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/eval-approve", requires: "full" },

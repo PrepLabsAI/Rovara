@@ -170,14 +170,14 @@ function inTemplateForm(value: unknown): unknown {
 }
 
 /**
- * The statements contracts access-policies.ts adds for saved environments, as the access template holds them. TWO-BOUNDARIES: the broker's assume is in the RUNTIME boundary; the fixed-name
+ * The statements contracts access-policies.ts adds for saved environments, as the access template holds them. TWO-BOUNDARIES: the broker's assumes (the saved environment image roles, and PRIVATE-PACKAGES P1b's company-secrets role) are in the RUNTIME boundary; the fixed-name
  * lookups and ECR's template service-linked role are in the DEPLOY boundary and in the deploy role.
  */
 export function expectedAccessStatements(env: string): { runtimeBoundary: Statement[]; deployBoundary: Statement[]; deploy: Statement[] } {
   const scope = { env, partition: "@P@", region: "@R@", account: "@A@", cloudFormationRoleName: `agentx-${env}-cloudformation`, artifactBucketArn: "arn:@P@:s3:::bucket", pullThroughPrefix: `agentx-${env}` };
   const pick = (statements: Statement[], sids: string[]) => statements.filter((statement) => sids.includes(statement.Sid ?? "")).map((statement) => inTemplateForm(statement) as Statement);
   return {
-    runtimeBoundary: pick(defaultBoundaryStatements(scope) as unknown as Statement[], ["AssumeSessionRoles"]),
+    runtimeBoundary: pick(defaultBoundaryStatements(scope) as unknown as Statement[], ["AssumeSessionRoles", "AssumeCompanySecretsRole"]),
     deployBoundary: pick(deployBoundaryStatements(scope) as unknown as Statement[], ["IamFixedNameRolesNotYetCreated", "EcrTemplateServiceLinkedRole"]),
     deploy: pick(serviceRoleStatements(scope) as unknown as Statement[], ["IamFixedNameRolesNotYetCreated", "EcrTemplateServiceLinkedRole"]),
   };

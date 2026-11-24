@@ -64,6 +64,8 @@ const RegistryUrlSchema = z.string().max(2_048).superRefine((value, context) => 
 });
 
 const ScopeSchema = z.string().regex(NPM_SCOPE);
+/** An npm scope as a company's registry entry names it (`@acme`). */
+export const RegistryScopeSchema = ScopeSchema;
 const RegistryNameSchema = AgentXNameSchema;
 
 /** The sentence a project gets when it names a generic registry: its token is the company's, set once. */

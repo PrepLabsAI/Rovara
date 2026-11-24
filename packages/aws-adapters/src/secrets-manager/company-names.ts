@@ -13,3 +13,14 @@ export function companyOfSecretName(value: string): { path: typeof COMPANY_SECRE
   if (parts.some((part) => part === "." || part === ".." || !/^[A-Za-z0-9_+=.@-]+$/u.test(part))) return undefined;
   return { path, company: parts[1]! };
 }
+
+/**
+ * The leaves a company's CreateSecret makes WITHOUT tags (PRIVATE-PACKAGES P1b): the company's package token per registry host, `pkgreg_<hostKey>`. A tagged create also needs TagResource, which the company role
+ * does not hold (its own note in infra/lib/company-secrets.ts), so these names are made untagged under their own create statement, whose resource is exactly `.../org-connectors/<company>/pkgreg_*`. The NAME is the
+ * fence (the company is in the path, and the session's company tag is in the IAM resource). Everything else keeps the tagged create.
+ */
+export const UNTAGGED_CREATE_LEAF = /^pkgreg_[a-z0-9]{1,32}$/u;
+export function isUntaggedCreateName(relativeName: string): boolean {
+  const parts = relativeName.split("/");
+  return parts.length === 3 && parts[0] === "org-connectors" && UNTAGGED_CREATE_LEAF.test(parts[2]!);
+}

@@ -22,10 +22,14 @@ export function parseStoredRegistryValue(raw: string | undefined): StoredRegistr
   return object.success ? { token: object.data.token.trim(), ...(object.data.username === undefined ? {} : { username: object.data.username }) } : undefined;
 }
 
-export function companyRegistryTokenReader(input: { env: string; secrets: Pick<ConnectionSecrets, "read"> }): CompanyRegistryStore["token"] {
-  return async (companyId: string, host: PrivateRegistryHost) => {
+/**
+ * `versionId` is the secret version the company's settings row names (P1b review F1): the ROW is the one source of truth for the token in force, so a version written by a save that lost the row's fence (two admins at
+ * once) is never served. Without one, the current version is read (P1a's own tests).
+ */
+export function companyRegistryTokenReader(input: { env: string; secrets: Pick<ConnectionSecrets, "read"> }): (companyId: string, host: PrivateRegistryHost, versionId?: string) => ReturnType<CompanyRegistryStore["token"]> {
+  return async (companyId, host, versionId) => {
     const name = companyRegistrySecretName(input.env, companyId, host);
     if (name === undefined) return undefined;
-    return parseStoredRegistryValue(await input.secrets.read(companyId, name));
+    return parseStoredRegistryValue(versionId === undefined ? await input.secrets.read(companyId, name) : await input.secrets.read(companyId, name, versionId));
   };
 }
