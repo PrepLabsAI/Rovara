@@ -1,6 +1,8 @@
 // Explicit policy for company mode. Unknown actions are unavailable, including newly added buttons.
 // Source census: slack-press-routing.ts ADMIN_CHANGE_PRESSES:34, FORM_SLACK_PRESSES:21,
 // SLACK_FORM_SUBMISSIONS:27, ROUTED_SLACK_PRESSES:80; model-command.ts parses `use <model>`.
+import { taskActionOfButtonId } from "@agentx/contracts";
+import { TASK_ACTION_FORM } from "../plugins/channel/slack/task-actions.js";
 export type SlackActionClass = "member" | "admin" | "settings";
 export const SLACK_WEB_SIGNIN_NOTICE = "That needs a web sign-in. Open it in Rovara.";
 export const SLACK_ACTION_CLASSES: Readonly<Record<string, SlackActionClass>> = Object.freeze({
@@ -24,5 +26,7 @@ export const SLACK_ACTION_CLASSES: Readonly<Record<string, SlackActionClass>> = 
   rovara_open_task: "member",
 });
 export function slackActionClass(action: unknown): SlackActionClass | undefined {
+  // S1: every task action button (`rovara_task:<id>`) and its form is the member class: the fine-grained right (who, when, what was shown) is Code's, judged again at each press. Adding an action touches the registry and its words, not this table.
+  if (typeof action === "string" && (taskActionOfButtonId(action) !== undefined || action === TASK_ACTION_FORM)) return "member";
   return typeof action === "string" && Object.hasOwn(SLACK_ACTION_CLASSES, action) ? SLACK_ACTION_CLASSES[action] : undefined;
 }

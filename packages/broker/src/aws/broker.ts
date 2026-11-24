@@ -298,7 +298,7 @@ import type { AdminChangeHandlers, PlanDependencies, ReviewedChannelBinding } fr
 import { ZodError, z } from "zod";
 import { healthProbes } from "./health-probes.js";
 import { recordPrepareFailureEvent } from "./operation-events.js";
-import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js"; import { coreThreadNote } from "./slack-core-thread-input.js"; import { answerSlackCorePress, isSlackCorePressEvent } from "./slack-core-decision.js"; import type { ThreadInputNotice } from "./slack-thread-input-words.js"; import { isOwnSlackStart, startSlackWorkflowOnCore } from "./slack-core-start.js"; import { hostedSlackThreads } from "./slack-thread-channel.js";
+import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js"; import { coreThreadNote } from "./slack-core-thread-input.js"; import { answerSlackCorePress, isSlackCorePressEvent } from "./slack-core-decision.js"; import { answerSlackTaskAction, isSlackTaskActionEvent } from "./slack-core-task-action.js"; import type { ThreadInputNotice } from "./slack-thread-input-words.js"; import { isOwnSlackStart, startSlackWorkflowOnCore } from "./slack-core-start.js"; import { hostedSlackThreads } from "./slack-thread-channel.js";
 import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import type { GitHubAppCredentialProvider } from "../github-app.js";
@@ -1594,7 +1594,7 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
         return unexpectedErrorAnswer(error, "slack-ingress");
       }
     }
-    if (isSlackCorePressEvent(event)) return await answerSlackCorePress(slackView.developer?.coreTasks, event, (thread, userId) => companySlackCaller(slackView, thread, userId)); if (isSlackThreadNoteEvent(event)) {
+    if (isSlackCorePressEvent(event)) return await answerSlackCorePress(slackView.developer?.coreTasks, event, (thread, userId) => companySlackCaller(slackView, thread, userId)); if (isSlackTaskActionEvent(event)) return await answerSlackTaskAction(slackView.developer?.coreTasks, event, (thread, userId) => companySlackCaller(slackView, thread, userId)); if (isSlackThreadNoteEvent(event)) {
       try {
         const result = await recordSlackThreadNote(slackView, slackTasks, event);
         // Never the note's text: only who and where.

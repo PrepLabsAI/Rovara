@@ -105,6 +105,7 @@ import { projectPageUrl } from "../core/decisions/open-path.js";
 import { createCoreTaskRuleRoutes } from "./core-task-rule-routes.js";
 import type { DeveloperTaskRouteDependencies } from "./developer-tasks.js";
 import { recordChatThread } from "../core-host/chat-thread-record.js";
+import { taskActionChatOf } from "../core-host/task-action-routes.js";
 import { hostedChannelView, hostedThreadHandler, hostedThreadNotification, hostedWorkflowThreadRefresh } from "../core-host/thread-notification.js";
 import { addChatThreadInput } from "../core-host/chat-thread-input.js";
 import { readSetupBrokenNotice } from "../core/setup-agent/repair-view.js";
@@ -142,7 +143,7 @@ import { SYSTEM_OWNER_NOT_ALLOWED, isSystemPrincipal, systemStartVerdict, system
 import { readWikiBuildPointer } from "../core/wiki-build/run.js";
 import { Membership, membershipKey, ownPartitionRow } from "./company-check.js";
 import { grantKeyFor, namedCompany } from "./company-layout.js";
-import { coreTaskEntryFrom, type CoreEntryCaller, type CoreTaskEntry } from "./engine-boundary.js";
+import { coreTaskEntryFrom, taskActionMethodsOf, type CoreEntryCaller, type CoreTaskEntry } from "./engine-boundary.js";
 import { coreAppEntryFrom, type CoreAppEntry } from "./core-app-routes.js";
 import { auditSinkForDeployedCaller, hostedSessionCapSeconds } from "./hosted-wiring.js"; import { attentionEmailFromEnvironment, attentionEmailModule } from "./attention-email.js"; import { LambdaClient } from "@aws-sdk/client-lambda";
 import { hostedServiceCatalog, hostedWorkersRunTestServices } from "./hosted-test-services.js";
@@ -744,6 +745,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const displayNameOf = hostedDisplayNameOf(inputs.documentClient, inputs.signInTableName);
   const identity: HostedIdentityOptions = { membershipOf, displayNameOf };
   // HW5b: where the deployment serves ONE chat that can name a person (`ChatThreads.personOf`), a press in it may approve a low or medium risk plan (`hosted-approvers.ts` `chat`).
+  /** S1: what this install can serve of the task action registry on a thread card: the plan decision (the approval gate), the merge (always wired) and the People moves (where the task rules are). */
+  const taskActionCapabilities = { plan: true, merge: true, people: inputs.taskRules !== undefined } as const;
   const chatApproval = hostedChatApproval(inputs.chatThreads, { membershipOf, projectGrantRole }, inputs.callbackSigningKey === undefined ? undefined : approvalProofKeyOf(inputs.callbackSigningKey));
   // Web task channel C8 (option b): the attention email, OFF unless ROVARA_ATTENTION_EMAIL is `on` (attention-email.ts). One attempt per invoke: a send whose answer was lost is never sent again.
   const attention = attentionEmailFromEnvironment({ env, lambda: () => new LambdaClient({ maxAttempts: 1 }), documentClient: inputs.documentClient, signInTableName: inputs.signInTableName, callbackSigningKey: inputs.callbackSigningKey, now: () => now().getTime(), membershipOf, log });
@@ -1007,6 +1010,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
               lessons.milestones.register(hostedThreadHandler({
                 threads, registry, companyId, deps: flow.deps, now: () => now().getTime(), clock: now, origin: originOf,
                 isMember: async (orgId, personId) => (await membershipOf(personId))?.companyId === orgId,
+                taskActions: taskActionCapabilities,
                 log: (event, fields) => log({ component: "channel_thread", event, companyId, ...fields }),
               }));
             }
@@ -1059,7 +1063,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
               ...(attention === undefined ? {} : { address: attention.addressFor(flow.deps.store), emailLinks: attention.links, remember: attention.rememberFor(flow.deps.store) }),
             } }),
             ...(inputs.chatThreads === undefined ? {} : { threadMoments: lessons !== undefined, threadRefresh: hostedWorkflowThreadRefresh({ threads: inputs.chatThreads, registry, companyId, deps: flow.deps, now: () => now().getTime(), clock: now, origin: originOf,
-              isMember: async (orgId, personId) => (await membershipOf(personId))?.companyId === orgId, log: (event, fields) => log({ component: "channel_thread", event, companyId, ...fields }) }) }),
+              isMember: async (orgId, personId) => (await membershipOf(personId))?.companyId === orgId, taskActions: taskActionCapabilities, log: (event, fields) => log({ component: "channel_thread", event, companyId, ...fields }) }) }),
             ...(lessons === undefined ? {} : { humanEdit: lessons.host.noteHumanEdit }), upkeep: { administers: upkeep.administers, setupRead: (orgId, project) => (orgId === companyId ? readSetupBrokenNotice({ flow: flow.deps, store: flow.deps.store, companyId, now: () => now().getTime() }, project) : Promise.resolve(undefined)), setupLink: (project) => projectPageUrl(originOf(), project) } }) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }),
           // L6a: the project setting is off by default; the service is bound to this runtime's company.
           "after-merge": afterMerge,
@@ -1101,6 +1105,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     const decisionProofs = approvalDecisionProofs(approvalProofKeyOf(inputs.callbackSigningKey), () => now().getTime());
     const routes = createCoreDevRoutes({
       app, companyOf, log,
+      // S1: the task action registry's chat presses (the chat seam, the install's proof key, the company's approval gate: the same one the web's cards and the chat decision use).
+      chat: taskActionChatOf(chatApproval, inputs.chatThreads, approvalProofKeyOf(inputs.callbackSigningKey), async (runtime, companyId) => hostedDecisionService({ deps: runtime.flow.deps, registry: await app.registry(), companyId, now }).gate),
       wiring: async (runtime) => {
         const companyLessons = lessonsByCompany.get(runtime.companyId);
         // Lane L11: the session levels, the decision cards and how we work, from the company's own records (membership and the broker's project grants).
@@ -1405,6 +1411,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       // The same list's Understand round: whether the core's task read would show the caller the task.
       ...(entry.taskReadable === undefined ? {} : { taskReadable: entry.taskReadable.bind(entry) }),
       ...(entry.chatDecision === undefined ? {} : { chatDecision: (caller: CoreEntryCaller, press: Parameters<NonNullable<CoreTaskEntry["chatDecision"]>>[1]) => entry.chatDecision!(caller, press) }),
+      // S1: the task action registry's two methods (a method left out here is dropped silently: tests/unit/task-actions-surfaces.test.ts fails when the three places disagree).
+      ...taskActionMethodsOf(entry),
       stopWorkspaceForAdmin: async (workspaceId, administrator, authorize) => {
         const companyId = await companyOfWorkspace(workspaceId);
         if (companyId === undefined) throw agentXError("NOT_FOUND", WORKSPACE_NOT_FOUND);
