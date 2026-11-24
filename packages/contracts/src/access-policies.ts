@@ -1,6 +1,7 @@
 // The two access-stack policy documents as pure functions: no CDK imports, so they can be unit
 // tested with plain strings and printed as JSON (the access stack passes CDK tokens instead).
 import { STACK_PARTS, environmentStackName } from "./environments.js";
+import { releasePipelineDenyStatements } from "./release-pipeline-names.js";
 import { savedEnvManageRoleName, savedEnvPullRoleName, savedEnvPushRoleName } from "./saved-env-image.js";
 
 export interface PolicyScope {
@@ -18,7 +19,8 @@ export interface PolicyStatementJson {
   Sid: string;
   Effect: "Allow" | "Deny";
   Action: string[];
-  Resource: string | string[];
+  Resource?: string | string[];
+  NotResource?: string[];
   Condition?: Record<string, Record<string, string | string[]>>;
 }
 
@@ -102,6 +104,9 @@ const ROLE_ACTIONS = [
   "iam:ListRolePolicies",
   "iam:ListAttachedRolePolicies",
 ];
+
+/** The role actions that set or change what a role may do: allowed only for a role that carries the environment's boundary (the default boundary's IamRolesBounded; serviceRoleStatements' IamRequireBoundary). */
+const BOUNDARY_RULED_ROLE_ACTIONS = ["iam:CreateRole", "iam:PutRolePermissionsBoundary", "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:PutRolePolicy", "iam:DeleteRolePolicy"];
 
 /** Instance profile management the service role needs for the EC2 workers' instance profile. */
 const INSTANCE_PROFILE_ACTIONS = [
@@ -329,7 +334,18 @@ export function defaultBoundaryStatements(scope: Pick<PolicyScope, "env" | "part
     // never ses:* (identity, configuration and suppression-list changes stay outside every AgentX role). The Sid keeps its old name (the step-up sender, removed by DEC 254zzz73) so the
     // deployed boundary does not change.
     { Sid: "StepUpEmail", Effect: "Allow", Action: ["ses:SendEmail"], Resource: `arn:${partition}:ses:${scope.region}:${account}:identity/*` },
-    { Sid: "IamRoles", Effect: "Allow", Action: [...ROLE_ACTIONS], Resource: roles },
+    // Role management on the environment's roles, WITH the boundary rules of serviceRoleStatements built into the boundary itself (a boundary does not pass to the roles it caps, so
+    // a role carrying it could otherwise rebound itself or a sibling to AdministratorAccess, or create a role with none): the actions that set or change what a role may do are
+    // allowed only for a role that carries THIS boundary (iam:PermissionsBoundary is the boundary being set, or the role's current one for the policy actions), and
+    // iam:DeleteRolePermissionsBoundary is in neither list, so it is never allowed. Bounded roles never gain a role unbounded by this policy.
+    { Sid: "IamRoles", Effect: "Allow", Action: ROLE_ACTIONS.filter((action) => !BOUNDARY_RULED_ROLE_ACTIONS.includes(action)), Resource: roles },
+    {
+      Sid: "IamRolesBounded",
+      Effect: "Allow",
+      Action: [...BOUNDARY_RULED_ROLE_ACTIONS],
+      Resource: roles,
+      Condition: { StringEquals: { "iam:PermissionsBoundary": defaultBoundaryArn(scope) } },
+    },
     { Sid: "IamInstanceProfiles", Effect: "Allow", Action: [...INSTANCE_PROFILE_ACTIONS], Resource: environmentInstanceProfiles(scope) },
     {
       // The operator passes the service role (root path) to CloudFormation; CloudFormation passes
@@ -365,6 +381,36 @@ export function defaultBoundaryStatements(scope: Pick<PolicyScope, "env" | "part
       Effect: "Deny",
       Action: ["route53resolver:UpdateFirewallConfig", "route53resolver:Put*Policy", "route53resolver:CreateResolverEndpoint", "route53resolver:CreateResolverRule", "route53resolver:AssociateResolverRule"],
       Resource: "*",
+    },
+    ...stackEscapeDenyStatements(scope),
+    // The environment release pipeline's pointers, secret, buckets, projects, approval and stack: no role under this boundary touches them, whatever a later Allow says.
+    ...releasePipelineDenyStatements(scope),
+  ];
+}
+
+/**
+ * CloudFormation runs a stack's operation as the stack's STORED role when the caller passes none, and a caller needs no iam:PassRole for it. Stacks outside the environment's own (the
+ * access stack, the Cloud stacks, CDKToolkit) may store the admin CDK bootstrap role, so a bounded role with cloudformation:* could update one and run as admin. Two Deny statements:
+ *   - CreateStack, UpdateStack and CreateChangeSet are refused unless the call passes THIS environment's CloudFormation role (cloudformation:RoleArn). With no role passed the key is
+ *     absent and StringNotEquals is true, so a call without a role is refused too (it would run as the caller or the stored role).
+ *   - The writes that run a stack's template, and the delete, are refused on every stack outside `agentx-<env>-*` (the pipeline's stack, the Cloud stacks, CDKToolkit, a new stack with
+ *     any other name). The access stack is `agentx-<env>-access`, so release-pipeline-names.ts denies the same writes there (an administrator deploys it with the caller's own
+ *     credentials, never a stored role, never the environment's CloudFormation role).
+ */
+export function stackEscapeDenyStatements(scope: Pick<PolicyScope, "env" | "partition" | "account" | "cloudFormationRoleName">): PolicyStatementJson[] {
+  return [
+    {
+      Sid: "DenyCfnWithoutEnvRole",
+      Effect: "Deny",
+      Action: ["cloudformation:CreateStack", "cloudformation:UpdateStack", "cloudformation:CreateChangeSet"],
+      Resource: "*",
+      Condition: { StringNotEquals: { "cloudformation:RoleArn": `arn:${scope.partition}:iam::${scope.account}:role/${scope.cloudFormationRoleName}` } },
+    },
+    {
+      Sid: "DenyCfnOutsideEnvStacks",
+      Effect: "Deny",
+      Action: ["cloudformation:Create*", "cloudformation:Update*", "cloudformation:Delete*", "cloudformation:Execute*"],
+      NotResource: [`arn:${scope.partition}:cloudformation:*:*:stack/agentx-${scope.env}-*/*`],
     },
   ];
 }

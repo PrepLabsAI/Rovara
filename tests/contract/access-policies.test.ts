@@ -158,8 +158,8 @@ describe("operator role policy", () => {
     const statements = operatorRoleStatements(scope);
     const changeSetStatements = statements.filter((s) => s.Action.some((a) => /ChangeSet/.test(a)));
     expect(changeSetStatements.map((s) => s.Sid)).toEqual(["ChangeSets"]);
-    expect([changeSetStatements[0]!.Resource].flat().filter((r) => r.includes("agentx-staging-access"))).toEqual([]);
-    const resources = statements.flatMap((s) => [s.Resource].flat());
+    expect([changeSetStatements[0]!.Resource ?? []].flat().filter((r) => r.includes("agentx-staging-access"))).toEqual([]);
+    const resources = statements.flatMap((s) => [s.Resource ?? []].flat());
     expect(resources.filter((r) => r.includes("agentx-staging-*"))).toEqual([]);
     const list = statements.find((s) => s.Action.includes("cloudformation:ListStacks"))!;
     expect(list.Action).toEqual(["cloudformation:ListStacks"]);
@@ -174,7 +174,7 @@ describe("operator role policy", () => {
   it("reads only this environment's stacks' logs", () => {
     const logs = operatorRoleStatements(scope).find((s) => s.Sid === "Logs")!;
     expect(logs.Action).toEqual(["logs:FilterLogEvents", "logs:StartQuery"]);
-    const resources = [logs.Resource].flat();
+    const resources = [logs.Resource ?? []].flat();
     expect(resources).toContain("arn:aws:logs:us-east-1:123456789012:log-group:agentx-staging-control-plane-*");
     expect(resources.every((resource) => resource.includes(":log-group:agentx-staging-"))).toBe(true);
   });
@@ -317,7 +317,8 @@ describe("default permission boundary", () => {
   });
 
   it("explicitly denies account, organization, user, group and policy management, and changing itself", () => {
-    expect(denies.map((s) => ({ Action: s.Action, Resource: s.Resource }))).toEqual([
+    // The release pipeline and CloudFormation denies (tests/contract/release-access-denies.test.ts holds their detail).
+    expect(denies.filter((s) => !s.Sid.startsWith("DenyRelease") && !s.Sid.startsWith("DenyCfn")).map((s) => ({ Action: s.Action, Resource: s.Resource }))).toEqual([
       { Action: ["organizations:*", "account:*"], Resource: "*" },
       { Action: ["iam:*User*", "iam:*Group*"], Resource: "*" },
       { Action: ["iam:CreatePolicy*", "iam:*PolicyVersion*", "iam:DeletePolicy", "iam:SetDefaultPolicyVersion"], Resource: "*" },
@@ -325,7 +326,8 @@ describe("default permission boundary", () => {
       // No role may switch the DNS firewall to fail open, share it, or route DNS around it.
       { Action: ["route53resolver:UpdateFirewallConfig", "route53resolver:Put*Policy", "route53resolver:CreateResolverEndpoint", "route53resolver:CreateResolverRule", "route53resolver:AssociateResolverRule"], Resource: "*" },
     ]);
-    expect(denies.every((s) => s.Condition === undefined)).toBe(true);
+    // The only Conditions: the CloudFormation role rule and the release pipeline key deny (by key alias, since the key's ARN is generated); the access stack's role rules are Allows.
+    expect(denies.filter((s) => s.Condition !== undefined).map((s) => s.Sid)).toEqual(["DenyCfnWithoutEnvRole", "DenyReleaseKey"]);
   });
 
   it("keeps budgets as a wildcard ceiling: AWS Budgets' resource-level support for Modify/Tag is not independently confirmed", () => {

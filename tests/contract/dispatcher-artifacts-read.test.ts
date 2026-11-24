@@ -226,8 +226,14 @@ describe("the deploy role and the permissions boundary allow it (simulated from 
     const dispatcherRole = `arn:aws:iam::${scope.account}:role/agentx/staging/agentx-staging-control-plane-DispatcherServiceRole-ABC123`;
     expect(evaluate(deploy, "iam:PutRolePolicy", dispatcherRole, { "iam:PermissionsBoundary": defaultBoundaryArn(scope) })).toBe("allow");
     expect(evaluate(deploy, "iam:PutRolePolicy", dispatcherRole, { "iam:PermissionsBoundary": "arn:aws:iam::111122223333:policy/other" })).toBe("deny");
-    expect(evaluate(boundary, "iam:PutRolePolicy", dispatcherRole)).toBe("allow");
-    expect(boundary.some((statement) => statement.Effect === "Deny" && list(statement.Action).some((action) => glob(String(action), "s3:GetObject", true)))).toBe(false);
+    // The boundary allows role-policy writes only on a role that carries this same boundary (IamRolesBounded), which the dispatcher's role does.
+    expect(evaluate(boundary, "iam:PutRolePolicy", dispatcherRole, { "iam:PermissionsBoundary": defaultBoundaryArn(scope) })).toBe("allow");
+    expect(evaluate(boundary, "iam:PutRolePolicy", dispatcherRole)).toBe("implicit-deny");
+    // The only boundary Deny that names s3 is the release pipeline's (DenyRelease*), scoped to the pipeline's own buckets; none matches the artifacts bucket.
+    for (const resource of allowedResources) {
+      expect(boundary.some((statement) => statement.Effect === "Deny" && list(statement.Action).some((action) => glob(String(action), "s3:GetObject", true)) && list(statement.Resource).some((pattern) => glob(String(pattern), resource, false)))).toBe(false);
+    }
+    expect(boundary.filter((statement) => statement.Effect === "Deny" && list(statement.Action).some((action) => glob(String(action), "s3:GetObject", true))).map((statement) => statement.Sid)).toEqual(["DenyReleasePipeline"]);
   });
 
   it("the dispatcher's role carries the boundary in the app (so the boundary really bounds it)", () => {

@@ -18,7 +18,7 @@ import {
 } from "aws-cdk-lib";
 import type { App } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import { environmentCloudFormationRoleName, environmentSettingsPrefix, environmentStackName } from "@agentx/contracts";
+import { environmentCloudFormationRoleName, environmentSettingsPrefix, environmentStackName, releasePipelineNames } from "@agentx/contracts";
 import { AGENTX_RELEASE_REPOSITORY_NAME, AGENTX_RELEASE_REPOSITORY_OWNER, RELEASE_TOOL_INSTALL_COMMANDS, RELEASE_TOOL_VARIABLES, releaseProjectSettings } from "./release-pipeline.js";
 import { environmentNaming } from "./naming.js";
 
@@ -123,14 +123,17 @@ export interface EnvironmentReleaseNames {
 
 /** Fixed names, so the boundary can name the roles it exempts without a reference cycle. CodeBuild project names must not match the broker's `agentx-*` allow-list. */
 export function environmentReleaseNames(environment: string, kind = "code"): EnvironmentReleaseNames {
+  // The pipeline, stack, project prefix, parameter prefix and bucket names come from @agentx/contracts: the access stack's boundary denies (the environment's roles may not touch
+  // them) are written against the same strings.
+  const shared = releasePipelineNames(environment, kind);
   return {
-    pipeline: `rovara-${environment}-${kind}-release`,
-    stack: `rovara-${environment}-${kind}-release-pipeline`,
+    pipeline: shared.pipeline,
+    stack: shared.stack,
     boundary: `rovara-${environment}-${kind}-release-boundary`,
-    alertsTopic: `rovara-${environment}-release-alerts`,
+    alertsTopic: shared.alertsTopic,
     role: (key) => `rovara-${environment}-${kind}-rel-${key}`,
-    project: (key) => `rovara-${environment}-${kind}-release-${key}`,
-    parameterPrefix: `/rovara-release/${environment}`,
+    project: (key) => `${shared.projectPrefix}${key}`,
+    parameterPrefix: shared.parameterPrefix,
   };
 }
 
@@ -212,7 +215,10 @@ export class EnvironmentReleasePipelineStack extends Stack {
     });
 
     // ---- storage
+    // Fixed names (the account id keeps them unique), so the environment's permissions boundary can deny every other role these two buckets.
+    const sharedNames = releasePipelineNames(environment, "code");
     const artifactBucket = new s3.Bucket(this, "Artifacts", {
+      bucketName: sharedNames.artifactBucket(account),
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       enforceSSL: true,
@@ -222,6 +228,7 @@ export class EnvironmentReleasePipelineStack extends Stack {
     });
     // `<stage>/<execution>/...`: every stage's records. Versioned, and no pipeline role may delete from it.
     const runsBucket = new s3.Bucket(this, "Runs", {
+      bucketName: sharedNames.runsBucket(account),
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       enforceSSL: true,
@@ -229,6 +236,18 @@ export class EnvironmentReleasePipelineStack extends Stack {
       lifecycleRules: [{ noncurrentVersionExpiration: Duration.days(365) }],
       removalPolicy: RemovalPolicy.RETAIN,
     });
+    // An S3 access point on a bucket is addressed by the access point's own ARN, which the environment boundary's bucket patterns do not name: no request through any access point is
+    // served (every pipeline role and human role uses the bucket directly, so none sets s3:DataAccessPointArn). Any principal, whatever its policy.
+    for (const bucket of [artifactBucket, runsBucket]) {
+      bucket.addToResourcePolicy(new iam.PolicyStatement({
+        sid: "DenyAccessPoints",
+        effect: iam.Effect.DENY,
+        principals: [new iam.AnyPrincipal()],
+        actions: ["s3:*"],
+        resources: [bucket.bucketArn, bucket.arnForObjects("*")],
+        conditions: { Null: { "s3:DataAccessPointArn": "false" } },
+      }));
+    }
     const runObjects = (stage: string): string => `${runsBucket.bucketArn}/${stage}/*`;
     const logGroup = new logs.LogGroup(this, "ReleaseBuildLogs", {
       retention: logs.RetentionDays.THREE_MONTHS,
@@ -237,6 +256,8 @@ export class EnvironmentReleasePipelineStack extends Stack {
 
     // ---- alerts: one new topic (Chatbot is added by P9 after the owner's one-time step) and the environment's OperatorAlerts topic
     const alertsKey = new kms.Key(this, "AlertsKey", { enableKeyRotation: true, removalPolicy: RemovalPolicy.RETAIN, description: `Encrypts ${names.alertsTopic}` });
+    // A stable alias, so the environment's permissions boundary can deny every other role this key (its ARN is generated and unknown to the access stack).
+    new kms.Alias(this, "AlertsKeyAlias", { aliasName: releasePipelineNames(environment, "code").keyAlias, targetKey: alertsKey });
     const alertsTopic = new sns.Topic(this, "AlertsTopic", { topicName: names.alertsTopic, masterKey: alertsKey, enforceSSL: true });
     const operatorAlertsTopicArn = arn("sns", naming.alertsTopicName);
     const alertTopicArns = [alertsTopic.topicArn, operatorAlertsTopicArn];
@@ -263,7 +284,7 @@ export class EnvironmentReleasePipelineStack extends Stack {
       pipeline: names.stack,
     };
     const settingsPrefix = environmentSettingsPrefix(environment).replace(/\/$/u, "");
-    const canarySecretArn = arn("secretsmanager", `secret:rovara-release/${environment}/canary-credential-??????`);
+    const canarySecretArn = arn("secretsmanager", `secret:${sharedNames.canarySecretName}-??????`);
     const signingKeySecretArn = arn("secretsmanager", `secret:agentx/${environment}/callback-signing-key-??????`);
     const notIn = (...keys: ReleaseRoleKey[]): Record<string, Record<string, string[]>> => ({ StringNotEquals: { "aws:PrincipalArn": keys.map(roleArn) } });
     const boundary = new iam.ManagedPolicy(this, "Boundary", {

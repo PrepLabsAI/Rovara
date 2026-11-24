@@ -361,7 +361,9 @@ describe("saved environment images: the registry side (L4-SE6)", () => {
         const longScope = { ...scope, env, cloudFormationRoleName: `agentx-${env}-cloudformation`, pullThroughPrefix: `agentx-${env}` };
         const boundarySize = JSON.stringify({ Version: "2012-10-17", Statement: defaultBoundaryStatements(longScope) }).length;
         const deploySize = JSON.stringify({ Version: "2012-10-17", Statement: serviceRoleStatements({ ...longScope, permissionsBoundaryArn: `arn:aws:iam::${ACCOUNT}:policy/agentx/${env}/agentx-${env}-boundary` }) }).length;
-        expect(boundarySize, `${env} boundary`).toBeLessThanOrEqual(6144 - 1024);
+        // The headroom was 1,024 characters; the release pipeline denies, the CloudFormation role rules (F1) and the boundary's own role rules (F2) use most of it (the policy is about 5,940 of 6,144
+        // at the longest name), so the pin is now 128. tests/contract/release-access-denies.test.ts holds the same pin for the placeholder name the export bundle renders.
+        expect(boundarySize, `${env} boundary`).toBeLessThanOrEqual(6144 - 128);
         expect(deploySize, `${env} deploy`).toBeLessThanOrEqual(10240 - 1024);
       }
     });

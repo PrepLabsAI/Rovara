@@ -23,7 +23,8 @@ describe("permission boundary", () => {
       for (const action of actions) {
         const applicable = policy.filter((s) => [s.Action].flat().some((pattern) => matches(pattern, action)));
         expect(applicable.some((s) => s.Effect === "Allow" && s.Resource === "*" && s.Condition === undefined), action).toBe(true);
-        expect(applicable.filter((s) => s.Effect === "Deny"), action).toEqual([]);
+        // The release pipeline denies name only the pipeline's own resources (tests/contract/release-access-denies.test.ts), so they never touch what these actions do.
+        expect(applicable.filter((s) => s.Effect === "Deny" && !s.Sid.startsWith("DenyRelease")), action).toEqual([]);
       }
     }
     for (const service of ["s3", "sqs", "kms"]) expect(SERVICE_ROLE_SERVICES).toContain(service);

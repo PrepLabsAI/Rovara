@@ -864,11 +864,17 @@ const deploy = serviceRoleStatements(policyScope);
 const boundaryArn = "arn:aws:iam::111122223333:policy/agentx/staging/agentx-staging-boundary";
 const sampleRole = "arn:aws:iam::111122223333:role/agentx/staging/example";
 const sampleSesIdentity = `arn:${policyScope.partition}:ses:${policyScope.region}:${policyScope.account}:identity/codes@example.com`;
-function policyAllows(policy: PolicyStatementJson[], action: string, resource: string, context: Record<string, string> = {}): boolean {
-  const matches = policy.filter((s) => allows(s, action) && [s.Resource].flat().some((r) => globRegExp(r).test(resource))
+function policyAllows(policy: PolicyStatementJson[], action: string, resource: string, context: Record<string, string | string[]> = {}): boolean {
+  const matches = policy.filter((s) => allows(s, action) && [s.Resource ?? []].flat().some((r) => globRegExp(r).test(resource))
     && Object.entries(s.Condition ?? {}).every(([operator, entries]) => Object.entries(entries).every(([key, values]) => {
-      const equal = [values].flat().some((value) => operator === "StringLike" ? globRegExp(value).test(context[key] ?? "") : value === context[key]);
-      expect(["StringNotEquals", "StringLike", "StringEquals"]).toContain(operator);
+      expect(["StringNotEquals", "StringLike", "StringEquals", "ForAnyValue:StringLike"]).toContain(operator);
+      const actual = context[key];
+      if (operator === "ForAnyValue:StringLike") {
+        // A set-valued key (kms:ResourceAliases): true when ANY member of the request's set matches ANY pattern, false for an empty or missing set. The release pipeline's key deny
+        // relies on that, so a key with no alias, or another key's alias, is never caught by it.
+        return [actual ?? []].flat().some((one) => [values].flat().some((value) => globRegExp(value).test(one)));
+      }
+      const equal = [values].flat().some((value) => operator === "StringLike" ? globRegExp(value).test(String(actual ?? "")) : value === actual);
       return operator === "StringNotEquals" ? !equal : equal;
     })));
   return matches.some((s) => s.Effect === "Allow") && !matches.some((s) => s.Effect === "Deny");
@@ -878,6 +884,15 @@ describe("the dispatcher's policy question signer (CORE-DISPATCH-HOOK-SIGNER-202
   // Simulated with the repo's own policy helpers (no AWS call). Template diffs miss the boundary (0.5.15), so each action this change needs is checked against both documents.
   const key = "arn:aws:kms:us-east-1:111122223333:key/00000000-0000-4000-8000-000000000001";
   const dispatcherFunction = "arn:aws:lambda:us-east-1:111122223333:function:agentx-staging-control-plane-Dispatcher-AbCdEf";
+  it("the boundary's release pipeline key deny (ForAnyValue on kms:ResourceAliases) never catches this key, with no alias or with another alias, and does catch a key aliased as the pipeline's", () => {
+    for (const aliases of [undefined, [], ["alias/agentx-staging-dispatcher-signer"], ["alias/rovara-demo-release-alerts"]]) {
+      for (const action of ["kms:Sign", "kms:GetPublicKey", "kms:PutKeyPolicy"]) {
+        expect(policyAllows(boundary, action, key, aliases === undefined ? {} : { "kms:ResourceAliases": aliases }), `${action} ${JSON.stringify(aliases)}`).toBe(true);
+      }
+    }
+    expect(policyAllows(boundary, "kms:Sign", key, { "kms:ResourceAliases": ["alias/other", "alias/rovara-staging-release-alerts"] })).toBe(false);
+  });
+
   it("the deploy role may change the key's policy and the dispatcher's environment, and the boundary allows both", () => {
     for (const [action, resource] of [["kms:PutKeyPolicy", key], ["kms:GetKeyPolicy", key], ["kms:DescribeKey", key], ["lambda:UpdateFunctionConfiguration", dispatcherFunction], ["lambda:GetFunctionConfiguration", dispatcherFunction]] as const) {
       expect(policyAllows(deploy, action, resource), `deploy ${action}`).toBe(true);

@@ -604,20 +604,14 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
             },
             {
               "Action": [
-                "iam:CreateRole",
                 "iam:DeleteRole",
                 "iam:GetRole",
                 "iam:UpdateRole",
                 "iam:UpdateRoleDescription",
                 "iam:TagRole",
                 "iam:UntagRole",
-                "iam:PutRolePolicy",
-                "iam:DeleteRolePolicy",
                 "iam:GetRolePolicy",
-                "iam:AttachRolePolicy",
-                "iam:DetachRolePolicy",
                 "iam:UpdateAssumeRolePolicy",
-                "iam:PutRolePermissionsBoundary",
                 "iam:ListRolePolicies",
                 "iam:ListAttachedRolePolicies",
               ],
@@ -639,6 +633,54 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
                 ],
               },
               "Sid": "IamRoles",
+            },
+            {
+              "Action": [
+                "iam:CreateRole",
+                "iam:PutRolePermissionsBoundary",
+                "iam:AttachRolePolicy",
+                "iam:DetachRolePolicy",
+                "iam:PutRolePolicy",
+                "iam:DeleteRolePolicy",
+              ],
+              "Condition": {
+                "StringEquals": {
+                  "iam:PermissionsBoundary": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "arn:",
+                        {
+                          "Ref": "AWS::Partition",
+                        },
+                        ":iam::",
+                        {
+                          "Ref": "AWS::AccountId",
+                        },
+                        ":policy/agentx/staging/agentx-staging-boundary",
+                      ],
+                    ],
+                  },
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":iam::",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":role/agentx/staging/*",
+                  ],
+                ],
+              },
+              "Sid": "IamRolesBounded",
             },
             {
               "Action": [
@@ -791,6 +833,140 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
                 ],
               },
               "Sid": "DenyBoundaryChanges",
+            },
+            {
+              "Action": [
+                "cloudformation:CreateStack",
+                "cloudformation:UpdateStack",
+                "cloudformation:CreateChangeSet",
+              ],
+              "Condition": {
+                "StringNotEquals": {
+                  "cloudformation:RoleArn": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "arn:",
+                        {
+                          "Ref": "AWS::Partition",
+                        },
+                        ":iam::",
+                        {
+                          "Ref": "AWS::AccountId",
+                        },
+                        ":role/agentx-staging-cloudformation",
+                      ],
+                    ],
+                  },
+                },
+              },
+              "Effect": "Deny",
+              "Resource": "*",
+              "Sid": "DenyCfnWithoutEnvRole",
+            },
+            {
+              "Action": [
+                "cloudformation:Create*",
+                "cloudformation:Update*",
+                "cloudformation:Delete*",
+                "cloudformation:Execute*",
+              ],
+              "Effect": "Deny",
+              "NotResource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":cloudformation:*:*:stack/agentx-staging-*/*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "DenyCfnOutsideEnvStacks",
+            },
+            {
+              "Action": [
+                "ssm:*",
+                "secretsmanager:*",
+                "s3:*",
+                "codebuild:*",
+                "codepipeline:*",
+                "sns:*",
+                "kms:*",
+                "cloudformation:Create*",
+                "cloudformation:Update*",
+                "cloudformation:Delete*",
+                "cloudformation:Execute*",
+              ],
+              "Effect": "Deny",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:*:*:parameter/rovara-release/staging*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":secretsmanager:*:*:secret:rovara-release/staging/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":*rovara-staging-*rel*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":cloudformation:*:*:stack/agentx-staging-access/*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "DenyReleasePipeline",
+            },
+            {
+              "Action": [
+                "kms:*",
+              ],
+              "Condition": {
+                "ForAnyValue:StringLike": {
+                  "kms:ResourceAliases": "alias/rovara-staging-release-*",
+                },
+              },
+              "Effect": "Deny",
+              "Resource": "*",
+              "Sid": "DenyReleaseKey",
             },
           ],
           "Version": "2012-10-17",
