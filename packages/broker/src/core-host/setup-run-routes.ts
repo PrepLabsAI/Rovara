@@ -66,6 +66,7 @@ import { HOST_ASK_REVISION, SETUP_HOST_KIND, hostAskDigest, hostAskSubjectId, ho
 import { setupAgentKey } from "../core/setup-agent/keys.js";
 import { ensureCoreInUse } from "./engine-stamp.js";
 import { setupStateOf, startProjectSetupCheck } from "../core/setup-agent/check.js";
+import { stopProjectSetupChecks } from "../core/setup-agent/check-stop.js";
 import { resumeSetupPausedTasks } from "../core/setup-agent/auto-resume.js";
 import { log as logTaskFlow } from "../core/task-flow/support.js";
 import { setupRepairViewOf } from "../core/setup-agent/repair-view.js";
@@ -608,14 +609,17 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
 //   GET  /v1/app/projects/{project}/setup-check    where the project's setup check stands (the core's `SetupState`, plus `canManage` and, while the setup is broken, `repair`: the "Setup needs repair" card); any live role on the project reads it
 //   POST /v1/app/projects/{project}/setup-check    start the check ({ requestId } and nothing else): a person who MANAGES the project's setup (a company owner or admin, or the project's administrator), read now.
 //                                                  202 started, 200 a repeat of the same request id, 409 when a check of this project is already running.
+//   POST /v1/app/projects/{project}/setup-check/stop   stop the project's running check(s) ({ requestId } and nothing else): the same people who start one. Ends the check's preparation, closes its workspace and releases its
+//                                                  machine (check-stop.ts); answers 200 { stopped: <how many checks it stopped>, nothingRunning }. A repeat, or a project with nothing running, answers 200 { stopped: 0, nothingRunning: true }.
 // It is an ordinary PERSON-started check (the person is the starter and the record says so): no system owner, no flag, no AI, no model key. It is the way to prove the re-check on staging and the button a manager
 // presses when the automatic re-check has not run. The audit record is written BEFORE the start, so nothing is started when it cannot be written. A start needs the company on the core for new tasks.
-const SETUP_CHECK_PATH = /^\/v1\/app\/projects\/([^/]+)\/setup-check$/u;
+const SETUP_CHECK_PATH = /^\/v1\/app\/projects\/([^/]+)\/setup-check(\/stop)?$/u;
 const SetupCheckBodySchema = z.object({ requestId: z.string().uuid() }).strict();
 
 /** Whether this method and path is the hosted "Re-check setup" route. */
 export function isSetupCheckPath(path: string, method: string): boolean {
-  return SETUP_CHECK_PATH.test(path) && (method === "GET" || method === "POST");
+  const match = SETUP_CHECK_PATH.exec(path);
+  return match !== null && (match[2] === undefined ? method === "GET" || method === "POST" : method === "POST");
 }
 
 /** One request on the hosted setup-check path (`isSetupCheckPath`), after the dev routes checked the company from membership. Always answers. */
@@ -641,6 +645,11 @@ export async function routeHostedSetupCheck(input: HostedSetupRunInput): Promise
     if (input.request.method !== "POST") throw agentXError("NOT_FOUND", "route not found");
     if (standing.access !== "manage") throw agentXError("FORBIDDEN", SETUP_RUN_NOT_ALLOWED);
     const body = parsed(SetupCheckBodySchema, bodyOf(input.request));
+    if (match[2] !== undefined) {
+      // Stop: audited first (nothing is stopped when the record cannot be written); a repeat or nothing running is a plain 200.
+      await recorded(input, auditEvent(input, "setup_check.stop_requested", `setup_check.stop_requested:${companyId}:${project}:${input.principal.personId}:${body.requestId}`, project, standing.basis, { requestId: body.requestId }));
+      return json(200, await stopProjectSetupChecks(flow, project));
+    }
     if (!input.startsNewTasks) throw agentXError("RUNTIME_UNAVAILABLE", SETUP_RUN_UNAVAILABLE);
     const personId = input.principal.personId;
     await recorded(input, auditEvent(input, "setup_check.requested", `setup_check.requested:${companyId}:${project}:${personId}:${body.requestId}`, project, standing.basis, { requestId: body.requestId }));

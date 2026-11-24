@@ -341,6 +341,77 @@ describe("worker invocation log lines", () => {
   });
 });
 
+describe("a terminal callback the worker could not deliver (gap C)", () => {
+  async function delivering(onTerminal: () => Promise<void>, execute: () => Promise<unknown> = async () => ({ ok: true })) {
+    const { sink, lines } = capture();
+    const root = await mkdtemp(join(tmpdir(), "agentx-worker-terminal-"));
+    const journal = new OperationJournal(root);
+    const waits: number[] = [];
+    let attempts = 0;
+    const state = createWorkerServerState(journal, { execute }, { log: sink, onTerminal: async () => { attempts += 1; await onTerminal(); }, retrySleep: async (ms) => { waits.push(ms); } });
+    const invocation = taskInvocation();
+    await handleWorkerRequest(invocationRequest(invocation), state);
+    await vi.waitFor(() => expect(state.activeOperations.size).toBe(0));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return { lines, invocation, waits, attempts: () => attempts };
+  }
+
+  it("logs one error line after the last retry, carrying ids, the end, the tries and the HTTP status, and nothing else", async () => {
+    const { lines, invocation, waits, attempts } = await delivering(async () => { throw agentXError("RUNTIME_UNAVAILABLE", "worker callback result failed with HTTP 403"); }, async () => { throw new Error("prepare failed"); });
+    expect(attempts()).toBe(4);
+    expect(waits).toEqual([2_000, 8_000, 30_000]);
+    const dropped = lines.filter((entry) => entry.json.event === "terminal_callback.failed");
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0]!.level).toBe("error");
+    expect(dropped[0]!.json).toEqual({
+      component: "worker", event: "terminal_callback.failed", kind: "task", invocationId: invocation.operationId, outcome: "failed", attempts: 4,
+      errorCode: "RUNTIME_UNAVAILABLE", errorClass: "internal", httpStatus: 403,
+    });
+    // It comes after the invocation's own failure line: the stream tells the whole story in order.
+    expect(lines.map((entry) => entry.json.event)).toEqual(["invocation.started", "invocation.failed", "terminal_callback.failed"]);
+  });
+
+  it("counts every refusal as the failure, a 409 included (a 409 can be WORKSPACE_BUSY: a result the broker could not record)", async () => {
+    for (const message of ["worker callback result failed with HTTP 409", "worker callback terminal failed with HTTP 409: STALE_FENCE", "worker callback result failed with HTTP 404", "worker callback result failed with HTTP 500", "worker callback result failed with HTTP 403"]) {
+      const { lines, invocation } = await delivering(async () => { throw agentXError("RUNTIME_UNAVAILABLE", message); });
+      const status = Number(/HTTP (\d{3})/u.exec(message)![1]);
+      expect(lines.filter((entry) => entry.json.event === "terminal_callback.failed").map((entry) => [entry.level, entry.json.invocationId, entry.json.httpStatus]), message).toEqual([["error", invocation.operationId, status]]);
+      expect(lines.some((entry) => entry.json.event === "terminal_callback.stale"), message).toBe(false);
+    }
+  });
+
+  it("never prints the failure's message, the capability, the result or a secret", async () => {
+    const message = `worker callback result failed with HTTP 502 ${SECRETS.join(" ")} callback-capability-xxxxxxxxxxxx the private result text`;
+    const { lines, invocation } = await delivering(async () => { throw agentXError("RUNTIME_UNAVAILABLE", message); });
+    const dropped = lines.find((entry) => entry.json.event === "terminal_callback.failed")!;
+    expect(dropped.json).toMatchObject({ outcome: "succeeded", httpStatus: 502 });
+    expect(dropped.json).not.toHaveProperty("errorMessage");
+    for (const secret of [...SECRETS, invocation.callbackCapability, "private result text"]) expect(dropped.line).not.toContain(secret);
+  });
+
+  it("logs nothing when a retry gets through, or when the worker has no callback to make", async () => {
+    let calls = 0;
+    const retried = await delivering(async () => { calls += 1; if (calls < 3) throw new Error("ThrottlingException"); });
+    expect(retried.attempts()).toBe(3);
+    expect(retried.lines.map((entry) => entry.json.event)).toEqual(["invocation.started", "invocation.finished"]);
+    const { sink, lines } = capture();
+    const journal = new OperationJournal(await mkdtemp(join(tmpdir(), "agentx-worker-terminal-none-")));
+    const state = createWorkerServerState(journal, { execute: async () => "ok" }, { log: sink });
+    await handleWorkerRequest(invocationRequest(taskInvocation()), state);
+    await vi.waitFor(() => expect(state.activeOperations.size).toBe(0));
+    expect(lines.map((entry) => entry.json.event)).toEqual(["invocation.started", "invocation.finished"]);
+  });
+
+  it("a dropped callback still ends quietly for the worker when the log sink throws", async () => {
+    const journal = new OperationJournal(await mkdtemp(join(tmpdir(), "agentx-worker-terminal-throws-")));
+    const state = createWorkerServerState(journal, { execute: async () => "ok" }, { log: () => { throw new Error("stdout closed"); }, onTerminal: async () => { throw new Error("down"); }, retrySleep: () => Promise.resolve() });
+    const invocation = taskInvocation();
+    await handleWorkerRequest(invocationRequest(invocation), state);
+    await vi.waitFor(async () => expect((await journal.get(invocation.operationId))?.status).toBe("SUCCEEDED"));
+    await vi.waitFor(() => expect(state.activeOperations.size).toBe(0));
+  });
+});
+
 function invocationRequest(invocation: WorkerInvocation): Request {
   return new Request("http://worker/invocations", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(invocation) });
 }

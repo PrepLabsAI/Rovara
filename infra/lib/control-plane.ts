@@ -745,6 +745,25 @@ export class ControlPlaneStack extends Stack {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(notifyOperator);
+    // A worker that could not deliver an operation's end to the broker (every retry refused or lost) logs one `terminal_callback.failed` line (packages/worker/src/worker-log.ts). The worker log group belongs to the
+    // foundation stack and is only named here, so this stack alone carries the filter that counts the line and the alarm that reads it (no foundation change, no new IAM: the deploy role already holds logs:* and cloudwatch:*).
+    // The broker then learns of the operation only from its own watches (a setup check or preparation after 50 minutes, a lost machine after two minutes), so the line is worth a page of its own.
+    new logs.MetricFilter(this, "WorkerTerminalCallbackFailedMetric", {
+      logGroup: logs.LogGroup.fromLogGroupName(this, "WorkerLogGroup", naming.ec2.workerLogGroupName),
+      filterPattern: logs.FilterPattern.stringValue("$.event", "=", "terminal_callback.failed"),
+      metricNamespace: naming.metricsNamespace,
+      metricName: "WorkerTerminalCallbackFailed",
+      metricValue: "1",
+    });
+    new cloudwatch.Alarm(this, "WorkerTerminalCallbackFailedAlarm", {
+      alarmName: naming.alarmName("WorkerTerminalCallbackFailed"),
+      alarmDescription: "A worker could not deliver an operation's end to the broker after every retry. Search the worker log group for terminal_callback.failed (invocation id, kind, HTTP status); the operation stays open until the broker's own watch ends it.",
+      metric: agentxSum("WorkerTerminalCallbackFailed", Duration.minutes(5)),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(notifyOperator);
     // Issue #46: a dispatch job that exhausts its receives lands here and nothing else reports it.
     // #1131: every deployment, production (the legacy template) included.
     {

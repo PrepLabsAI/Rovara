@@ -8,13 +8,17 @@
 // A worker that does not list `PREPARE_EVAL_HEALTH_FEATURE` is never sent the run (the dispatch says `requires`). Fails closed: a project that cannot be read or is archived, heads that do not match the project's
 // repositories, or a store that refuses start nothing and answer false (the claim then ends as "could not be started": nothing was spent).
 import { randomUUID } from "node:crypto";
-import { EVAL_HEALTH_RESULT_PATH, EVAL_PLAN_DELIVERY_ACTION, PREPARE_EVAL_HEALTH_FEATURE, when, workerProjectDefinition, type StoredDocument } from "@agentx/contracts";
+import { EVAL_HEALTH_RESULT_PATH, EVAL_HEALTH_RUN_MAX_MS, EVAL_PLAN_DELIVERY_ACTION, PREPARE_EVAL_HEALTH_FEATURE, when, workerProjectDefinition, type StoredDocument } from "@agentx/contracts";
 import { taskOwnerKey } from "../../developer/task-records.js";
 import { buildOperation } from "../task-flow/accept.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { workspaceKey } from "../task-flow/keys.js";
 import { legacyWorkspaceKey } from "../task-flow/legacy-keys.js";
 import { setupCheckRecordItem } from "./check.js";
+import { prepareWatchItem } from "../task-flow/prepare-watch.js";
+
+/** The longest the watch lets an eval health run live: its own window and ten minutes for the result post. */
+export const EVAL_HEALTH_WATCH_LIMIT_MS = EVAL_HEALTH_RUN_MAX_MS + 10 * 60_000;
 
 const documentOf = <T extends object>(value: T): StoredDocument => JSON.parse(JSON.stringify(value)) as StoredDocument;
 
@@ -51,6 +55,9 @@ export async function launchEvalHealthRun(flow: TaskFlowDeps, job: EvalHealthLau
       { kind: "put", item: workspace, condition: when.absent() },
       { kind: "put", item: { ...legacyWorkspaceKey(workspaceId), entityType: "WORKSPACE_COMPANY_POINTER", workspaceId, companyId: workspace["companyId"]! }, condition: when.absent() },
       ...prepare.items,
+      // Watched like every preparation (prepare-watch.ts), but with the run's own limit: the whole health run measures inside this preparation and its contract allows EVAL_HEALTH_RUN_MAX_MS plus
+      // the result post, so the watch ends it only 10 minutes after that (a run that never answers), never the default 50 minutes.
+      prepareWatchItem(flow.companyId, now, workspaceId, operationId, undefined, EVAL_HEALTH_WATCH_LIMIT_MS),
       // A workspace with no task is closed, with its machine, when its preparation ends (`closeSetupCheck`, read from this record): a finished health run keeps nothing running.
       setupCheckRecordItem(flow, { project: job.project, workspaceId, revision: project.definition.revision, nowMs }),
     ]);

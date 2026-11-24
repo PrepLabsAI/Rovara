@@ -21,6 +21,7 @@ import { withoutBrokerMemberConditionCheck } from "../support/broker-member-cond
 import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js";
 import { withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
 import { withoutApiAccessLog } from "../support/api-access-log-template.js";
+import { withoutWorkerCallbackAlarm } from "../support/worker-callback-alarm-template.js";
 
 skipLambdaBundling();
 const STAGING = { alarmName: "agentx-staging-SessionStuckStopping", namespace: "AgentX/staging", env: "staging" };
@@ -296,13 +297,13 @@ describe("named environment templates", () => {
   for (const stack of stacks) {
     if (stack.stackName === "agentx-staging-control-plane") {
       it("removing only Batch F additions preserves code/next's agentx-staging-control-plane template", () => {
-        const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(withoutStuckStoppingAlarm(withoutApiAccessLog(normalizedTemplate(stack), { env: "staging" }), STAGING)));
+        const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(normalizedTemplate(stack), { env: "staging" }), STAGING))));
         expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("8edf09fff29983cc3c3338a6b2d24bb27d061db29960bfa2e77a52c068618972");
       }, 120_000);
     }
     it(`${stack.stackName} is unchanged`, () => {
       // DEC 254zzz432: the alarm is taken out first, so every pin below holds as recorded (checked to be exactly one resource).
-      let template = stack.stackName === "agentx-staging-control-plane" ? withoutStuckStoppingAlarm(normalizedTemplate(stack), STAGING) : normalizedTemplate(stack);
+      let template = stack.stackName === "agentx-staging-control-plane" ? withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(normalizedTemplate(stack), STAGING)) : normalizedTemplate(stack);
       // SIGNIN-MEMBER-CONDITIONCHECK, DEC 254zzz282 B014-A: pin the new full synth
       // before the existing normalizers, then preserve every old policy/snapshot assertion.
       if (stack.stackName === "agentx-staging-control-plane") {
