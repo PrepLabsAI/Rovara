@@ -64,7 +64,7 @@ import { scopeHoldOf } from "../build-step/scope-question.js";
 import { inertLine } from "../proof/inert-text.js";
 import { flowIs } from "../task-flow/flow-guard.js";
 import { ownCheckSourceOf } from "./summary-check.js";
-import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type HumanApproval, type ApprovalRefusal, type RepositoryPermission, type RequesterAccounts } from "./approval.js";
+import { approvalStandingOf, humanApprovalOf, latestReviewers, requesterHostIds, type HumanApproval, type ApprovalRefusal, type RepositoryPermission, type RequesterAccounts } from "./approval.js";
 import { codeOwnerVerdict, type CodeOwnerVerdict } from "./code-owners.js";
 import { boundCommits, readTierInput, type TierReadTarget } from "./change-tier-read.js";
 import { approvalReviewsOf, changeRequestRef, changedPathsOf, isHostRateLimit, type ConsumerRepository, type RepositoryResolver } from "./host-port.js";
@@ -300,8 +300,7 @@ async function approvalOfItem(
   return humanApprovalOf({
     reviews: [{ hostUserId, login, accountType: "person", state: "APPROVED", commitId, submittedAt: item.observedAt }],
     headSha: item.headSha, syncedFrom: pullRequest?.syncedFrom, ciPassingOnHead: ciCountsAsPassing(item.ci, ctx.ciMode),
-    permissions: new Map([[login, "write" as const]]), requesterHostUserIds: ctx.requesters, linkedHostUserIds: await linkedAmong(deps.people, orgId, [hostUserId]),
-    excludedHostUserIds: await nonWritersAmong(deps.people, orgId, [hostUserId]),
+    permissions: new Map([[login, "write" as const]]), requesterHostUserIds: ctx.requesters, ...await approvalStandingOf(deps.people, orgId, [hostUserId]),
     allowSelfApproval: ctx.allowSelfApproval,
   });
 }
@@ -825,8 +824,8 @@ async function approvalFromStatus(
   }
   return humanApprovalOf({
     reviews, headSha: status.headRevision, syncedFrom: ctx.syncedFrom, ciPassingOnHead: ctx.ciPassing, permissions,
-    requesterHostUserIds: ctx.requesters, linkedHostUserIds: await linkedAmong(deps.people, ctx.orgId, reviewers.map((review) => review.hostUserId)),
-    excludedHostUserIds: await nonWritersAmong(deps.people, ctx.orgId, reviewers.map((review) => review.hostUserId)), allowSelfApproval: ctx.allowSelfApproval,
+    requesterHostUserIds: ctx.requesters, ...await approvalStandingOf(deps.people, ctx.orgId, reviewers.map((review) => review.hostUserId)),
+    allowSelfApproval: ctx.allowSelfApproval,
   });
 }
 
