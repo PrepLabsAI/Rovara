@@ -65,7 +65,17 @@ se_worker_dns() {
 # docker.service). NO_PROXY keeps off the proxy: the proxy itself, loopback, the instance metadata address (the daemon's awslogs driver gets the instance role's credentials from it, and Go does not exempt link-local addresses; the launch template requires IMDSv2 with hop limit 1, so a build's ADD of it gets 401 anyway), and the CloudWatch Logs endpoint of the region (the awslogs driver of the worker container, which must not depend on the gateway). A container with its own `--dns` is not
 # affected by the default name server; one with none asks the gateway, which is reachable only from rovara-snet: on any other network (docker0, a stale bridge) a name lookup now fails, which is the point.
 # Idempotent. Docker is restarted only when either file changes, then the container firewall is put back (a restart rebuilds Docker's chains); on any failure both files are put back and Docker restarted on them.
-se_daemon_dns_is() { grep -q "\"dns\": \[\"${SE_INNER_IP//./\\.}\"\]" "$SE_DAEMON_JSON" 2>/dev/null; }
+# "Ours" is a "dns" list that is EXACTLY the gateway address (what an earlier boot or a first attempt of this stage wrote, in any spacing or line layout), so a repeat is a no-op; any other "dns" key is someone else's (se_daemon_has_dns) and is refused, never overwritten.
+se_daemon_dns_is() {
+  local content re="\"dns\"[[:space:]]*:[[:space:]]*\[[[:space:]]*\"${SE_INNER_IP//./\\.}\"[[:space:]]*\]"
+  [[ -r "$SE_DAEMON_JSON" ]] && content=$(<"$SE_DAEMON_JSON") || return 1
+  [[ "$content" =~ $re ]]
+}
+se_daemon_has_dns() {
+  local content re='"dns"[[:space:]]*:'
+  [[ -r "$SE_DAEMON_JSON" ]] && content=$(<"$SE_DAEMON_JSON") || return 1
+  [[ "$content" =~ $re ]]
+}
 # The drop-in's text for this host (needs the region from the worker's environment file), and whether the file on disk is exactly that (SE_DROPIN_WANT).
 se_dropin_text() {
   local region
@@ -79,29 +89,117 @@ se_daemon_rollback() {
   if [[ -f "$SE_DROPIN.before-sandbox-egress" ]]; then mv -f "$SE_DROPIN.before-sandbox-egress" "$SE_DROPIN"; else rm -f "$SE_DROPIN"; fi
   systemctl daemon-reload 2>/dev/null || true
   systemctl reset-failed docker.service 2>/dev/null || true
-  systemctl restart docker.service
+  timeout 120s systemctl restart docker.service
+}
+
+# WHY A STEP FAILED (EGRESS-BOOT-RACE): this stage used to answer any miss in the daemon change with one fixed sentence and nothing else, so a boot that failed here left no trace of which command, what it said, or what Docker was doing. se_run runs one command,
+# and on a miss keeps the step's name (SE_FAILED_STEP, short, goes into the boot failure reason) and the command, its exit status and what it printed (SE_FAILED, goes to the boot log). se_diagnose then logs the state of Docker itself. Nothing here is secret: file texts are the
+# daemon settings (data root, name server, proxy address, region), unit status and journal lines of docker.service.
+SE_FAILED_STEP=""
+SE_FAILED=""
+se_run() {
+  local step=$1 out status
+  shift
+  out=$("$@" 2>&1)
+  status=$?
+  if ((status == 0)); then
+    # SE_RUN_LOG=1: the step's own lines are wanted in the boot log even when it worked (the container firewall's "setup isolation" line and ip6tables warnings).
+    [[ -z "${SE_RUN_LOG:-}" || -z "$out" ]] || printf '%s\n' "$out" >&2
+    return 0
+  fi
+  SE_FAILED_STEP="$step (exit $status)"
+  SE_FAILED="$step: \`$*\` exit $status${out:+: $(printf '%s' "$out" | tail -n 5 | tr '\n' '|' | head -c 600)}"
+  return "$status"
+}
+# One diagnostic command, its last lines in the boot log. Never fails (the caller is already on a failure path).
+se_logtail() {
+  local label=$1 lines=$2
+  shift 2
+  { "$@" 2>&1 || true; } | tail -n "$lines" | while IFS= read -r line; do log "sandbox egress diagnostic [$label]: $line"; done
+  return 0
+}
+se_diagnose() {
+  log "sandbox egress: the Docker daemon change failed at: ${SE_FAILED:-no step reported}"
+  se_logtail "$SE_DAEMON_JSON" 8 cat "$SE_DAEMON_JSON"
+  se_logtail "$SE_DROPIN" 8 cat "$SE_DROPIN"
+  se_logtail "docker.service state" 12 systemctl show docker.service -p ActiveState -p SubState -p Result -p NRestarts -p ExecMainStatus -p StartLimitBurst -p StartLimitIntervalUSec
+  se_logtail "systemctl status docker.service" 15 systemctl status docker.service --no-pager -l
+  ! command -v journalctl >/dev/null || se_logtail "journalctl -u docker.service" 40 journalctl -u docker.service -n 40 --no-pager
+  se_logtail "docker info" 3 timeout 15 docker info
+  ! command -v iptables >/dev/null || se_logtail "iptables -S DOCKER-USER" 5 iptables -S DOCKER-USER
+}
+
+# BOUNDED WAITS (EGRESS-BOOT-RACE). `systemctl restart docker.service` returning does not mean Docker answers: the socket, and the chains Docker builds in iptables (DOCKER-USER, which the container firewall inserts into), appear a moment later,
+# and the first command that needed them used to be the failure. Each wait polls at most SE_READY_ATTEMPTS times (default 40) with a growing pause (1s, 2s, then 3s), each probe capped at 15 s (or what is left of the boot time: try_seconds), and it stops
+# at the BOOT DEADLINE (boot.sh's BOOT_DEADLINE, AGENTX_BOOT_DEADLINE_SECONDS, 480 s from the start of the boot) with a reason that says so. So the true bound is the smaller of 40 x 15 s + 114 s of pauses (about 12 minutes, only if every probe hangs) and the boot deadline.
+# The probes are functions so the cap is worked out at each probe; a miss names its command (se_run only knows the function's name).
+se_probe_docker_info() { local cap status=0; cap=$(try_seconds 15); timeout "${cap}s" docker info || { status=$?; echo "[timeout ${cap}s docker info exited $status]" >&2; return "$status"; }; }
+se_probe_docker_chain() { local cap status=0; cap=$(try_seconds 15); timeout "${cap}s" iptables -n -L DOCKER-USER || { status=$?; echo "[timeout ${cap}s iptables -n -L DOCKER-USER exited $status]" >&2; return "$status"; }; }
+se_wait() {
+  local what=$1 attempt=1 pause
+  shift
+  until se_run "wait for $what" "$@"; do
+    if [[ -n "${BOOT_DEADLINE:-}" ]] && ((SECONDS >= BOOT_DEADLINE)); then SE_FAILED_STEP="$what: out of boot time after $attempt tries"; SE_FAILED="$SE_FAILED_STEP: ${SE_FAILED#*: }"; return 1; fi
+    ((attempt < ${SE_READY_ATTEMPTS:-40})) || { SE_FAILED_STEP="$what never became ready (${SE_READY_ATTEMPTS:-40} tries)"; SE_FAILED="$SE_FAILED_STEP: ${SE_FAILED#*: }"; return 1; }
+    pause=$((attempt < 3 ? attempt : 3))
+    sleep "$pause"
+    attempt=$((attempt + 1))
+  done
+  SE_FAILED_STEP=""
+  SE_FAILED=""
+}
+se_docker_ready() { se_wait "the Docker daemon (docker info)" se_probe_docker_info; }
+# Docker's DOCKER-USER chain (made by the daemon as it starts) exists: the container firewall's first rule goes into it, and `set -e` there ends the script when the chain is not there yet.
+se_docker_chain_ready() { command -v iptables >/dev/null || return 0; se_wait "Docker's DOCKER-USER firewall chain" se_probe_docker_chain; }
+# The restart itself, at most SE_RESTART_ATTEMPTS times (default 2: one retry) and only after the command itself failed (never after one that worked, so a slow daemon is waited for, not restarted again). Before each try the unit's failed state is cleared:
+# the restarts this boot already made (Docker install, test-services stage) count against systemd's start limit, and a refused restart ("Start request repeated too quickly") is the one failure a later try cannot fix without it.
+se_restart_docker() {
+  local attempt=1
+  until systemctl reset-failed docker.service 2>/dev/null; se_run "restart docker.service" timeout --foreground --kill-after=10s "$(try_seconds 120)s" systemctl restart docker.service; do
+    ((attempt < ${SE_RESTART_ATTEMPTS:-2})) || return 1
+    sleep $((attempt * 5))
+    attempt=$((attempt + 1))
+  done
+}
+# Writes the drop-in and activates both files; only the restart and what follows it can race.
+se_write_dropin() { printf '%s\n' "$SE_DROPIN_WANT" >"$SE_DROPIN" && chmod 0644 "$SE_DROPIN"; }
+se_activate_daemon_config() {
+  se_run "make the Docker drop-in folder" install -d -m 0755 "$SE_DROPIN_DIR" \
+    && se_run "write the Docker drop-in" se_write_dropin \
+    && se_run "check daemon.json holds the gateway name server" se_daemon_dns_is \
+    && se_run "check the Docker drop-in text" se_dropin_is \
+    && se_run "reload systemd" systemctl daemon-reload \
+    && se_restart_docker \
+    && se_docker_ready \
+    && se_docker_chain_ready \
+    && SE_RUN_LOG=1 se_run "put the container firewall back" bash "$SE_FIREWALL" \
+    && se_run "put the test-services walls back" se_after_restart_walls \
+    && se_docker_ready
 }
 se_daemon_config() {
   local content
+  SE_FAILED_STEP=""
+  SE_FAILED=""
   se_daemon_dns_is && se_dropin_is && return 0
   # A default name server of someone else's is never overwritten.
-  if grep -q '"dns"' "$SE_DAEMON_JSON" 2>/dev/null && ! se_daemon_dns_is; then return 1; fi
-  cp -p "$SE_DAEMON_JSON" "$SE_DAEMON_JSON.before-sandbox-egress" || return 1
+  if se_daemon_has_dns && ! se_daemon_dns_is; then SE_FAILED_STEP="daemon.json already names another default name server"; return 1; fi
+  cp -p "$SE_DAEMON_JSON" "$SE_DAEMON_JSON.before-sandbox-egress" || { SE_FAILED_STEP="keep a copy of daemon.json"; return 1; }
   rm -f "$SE_DROPIN.before-sandbox-egress"
-  if [[ -f "$SE_DROPIN" ]]; then cp -p "$SE_DROPIN" "$SE_DROPIN.before-sandbox-egress" || return 1; fi
+  if [[ -f "$SE_DROPIN" ]]; then cp -p "$SE_DROPIN" "$SE_DROPIN.before-sandbox-egress" || { SE_FAILED_STEP="keep a copy of the Docker drop-in"; return 1; }; fi
   if ! se_daemon_dns_is; then
     # The file is one JSON object (boot.sh and the test-services stage write it so); the key goes in right after the opening brace. Anything else is left alone and the boot fails.
     content=$(<"$SE_DAEMON_JSON")
     if [[ "${content//[[:space:]]/}" == "{}" ]]; then printf '{"dns": ["%s"]}\n' "$SE_INNER_IP" >"$SE_DAEMON_JSON"
     elif [[ "$content" == \{* ]]; then printf '%s\n' "{\"dns\": [\"$SE_INNER_IP\"], ${content:1}" >"$SE_DAEMON_JSON"
-    else rm -f "$SE_DAEMON_JSON.before-sandbox-egress" "$SE_DROPIN.before-sandbox-egress"; return 1; fi
+    else rm -f "$SE_DAEMON_JSON.before-sandbox-egress" "$SE_DROPIN.before-sandbox-egress"; SE_FAILED_STEP="daemon.json is not one JSON object"; return 1; fi
   fi
-  if install -d -m 0755 "$SE_DROPIN_DIR" && printf '%s\n' "$SE_DROPIN_WANT" >"$SE_DROPIN" && chmod 0644 "$SE_DROPIN" \
-    && se_daemon_dns_is && se_dropin_is && systemctl daemon-reload && systemctl restart docker.service && bash "$SE_FIREWALL" && se_after_restart_walls && se_docker_ready; then
+  if se_activate_daemon_config; then
     rm -f "$SE_DAEMON_JSON.before-sandbox-egress" "$SE_DROPIN.before-sandbox-egress"
     return 0
   fi
-  se_daemon_rollback
+  # The diagnostics are taken BEFORE the rollback restarts Docker on the old files, so they show the daemon as the failure left it.
+  se_diagnose
+  se_daemon_rollback || log "sandbox egress: Docker did not restart on the old settings either"
   return 1
 }
 # A Docker restart may rebuild Docker's chains. The test-services stage (boot.sh sources it, so its functions are defined here when it ran) walls the rvi bridges from each other and closes them on IPv6; put those back.
@@ -110,7 +208,6 @@ se_after_restart_walls() {
   ts_run_walls_present || ts_wall_run_networks || return 1
   ! declare -F ts_wall_ipv6 >/dev/null || ts_wall_ipv6 || true
 }
-se_docker_ready() { local i; for i in 1 2 3 4 5 6 7 8 9 10; do docker info >/dev/null 2>&1 && return 0; sleep 2; done; return 1; }
 
 # The bridge interface of the old `agentx-task` network, when one is left from a bridge-mode session (the data root lives on the workspace volume): br-<first 12 characters of the network id>. Empty when there is none.
 se_task_bridge() {
@@ -365,7 +462,7 @@ UNIT
 sandbox_egress_main() {
   BOOT_STEP="make the gateway the Docker name server"
   SE_DROPIN_WANT=$(se_dropin_text) || fail "could not work out the Docker daemon's proxy settings (no region in the worker's environment)"
-  se_daemon_config || fail "could not make the sandbox egress gateway the Docker daemon's default name server and proxy"
+  se_daemon_config || fail "could not make the sandbox egress gateway the Docker daemon's default name server and proxy (${SE_FAILED_STEP:-no step reported})"
   BOOT_STEP="give the worker the host's resolvers"
   se_worker_dns || fail "could not give the worker container the host's name servers"
   BOOT_STEP="wall the sandbox network"

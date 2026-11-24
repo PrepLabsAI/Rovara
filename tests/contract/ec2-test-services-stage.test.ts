@@ -28,7 +28,7 @@ interface Host {
 }
 
 /** A fake host: iptables with a rules file, mounts as marker files, docker answering the stage's calls. Options turn single steps into failures. */
-function host(options: { failDockerRestart?: boolean; failPull?: RegExp; failAllPulls?: boolean; failLogin?: boolean; failIp6Insert?: boolean; noMetadataBlock?: boolean; refs?: string[]; list?: string } = {}): Host {
+function host(options: { dockerReadyAfter?: number; dockerNeverReady?: boolean; failDockerRestart?: boolean; failPull?: RegExp; failAllPulls?: boolean; failLogin?: boolean; failIp6Insert?: boolean; noMetadataBlock?: boolean; refs?: string[]; list?: string } = {}): Host {
   const dir = mkdtempSync(join(tmpdir(), "ts-stage-"));
   const bin = join(dir, "bin");
   mkdirSync(bin);
@@ -43,7 +43,7 @@ function host(options: { failDockerRestart?: boolean; failPull?: RegExp; failAll
   writeFileSync(h.pulled, "");
   writeFileSync(join(dir, "refs"), `${(options.refs ?? references).join("\n")}\n`);
   writeFileSync(join(dir, "list"), `${options.list ?? JSON.stringify(mirroredStarterEntries(REGISTRY, "staging"))}\n`);
-  writeFileSync(join(dir, "firewall"), "exit 0\n");
+  writeFileSync(join(dir, "firewall"), `echo "firewall run" >>"${h.calls}"\nexit 0\n`);
   // boot.sh's ensure_docker wrote this before the stage runs.
   writeFileSync(h.daemon, '{"data-root": "/mnt/workspace/.docker"}\n');
   const fake = (name: string, body: string) => { writeFileSync(join(bin, name), `#!/bin/bash\nprintf '%s %s\\n' "${name}" "$*" >>"${h.calls}"\n${body}\n`); chmodSync(join(bin, name), 0o755); };
@@ -62,6 +62,7 @@ esac`;
   fake("mountpoint", 'test -e "$2/.mounted"');
   // With failDockerRestart, Docker does not come back on the stage's daemon.json (it does on the original one).
   fake("systemctl", options.failDockerRestart === true ? `[[ "$*" == "restart docker.service" ]] && grep -q default-address-pools "${h.daemon}" && exit 1; exit 0` : "exit 0");
+  fake("sleep", "exit 0");
   fake("aws", "printf 'password\\n'");
   const failPull = options.failAllPulls === true ? "1" : options.failPull === undefined ? "" : options.failPull.source;
   fake("docker", `case "$1" in
@@ -71,6 +72,7 @@ esac`;
   logout) exit 0 ;;
   pull) ${failPull === "1" ? "exit 1" : failPull === "" ? ":" : `[[ "$2" =~ ${failPull} ]] && exit 1`}; printf '%s\\n' "$2" >>"${h.pulled}" ;;
   image) grep -qxF -- "$3" "${h.pulled}" ;;
+  info) n=$(cat "${h.dir}/info.n" 2>/dev/null || echo 0); n=$((n+1)); echo $n >"${h.dir}/info.n"; ${options.dockerNeverReady === true ? "exit 1" : `((n > ${String(options.dockerReadyAfter ?? 0)}))`} ;;
   version) printf '25.0.8\\n' ;;
   *) exit 1 ;;
 esac`);
@@ -130,6 +132,27 @@ describe("the test-services stage on a worker", () => {
     expect(mounted(h)).toBe(false);
   });
 
+
+  // EGRESS-BOOT-RACE: Docker answering is waited for (bounded) after the address-pool restart, before the container firewall is put back.
+  it("waits for a Docker that answers only on the 4th probe before putting the container firewall back", () => {
+    const h = host({ dockerReadyAfter: 3 });
+    runStage(h);
+    const log = calls(h);
+    expect(log.filter((line) => line === "systemctl restart docker.service")).toHaveLength(1);
+    expect(log.slice(0, log.indexOf("firewall run")).filter((line) => line === "docker info")).toHaveLength(4);
+  });
+
+  it("a Docker that never answers after the address-pool restart puts the old daemon.json back, restarts on it, never runs the firewall on the dead daemon, and withholds test services", () => {
+    const h = host({ dockerNeverReady: true });
+    const result = runStage(h);
+    expect(result.status).not.toBe(0);
+    expect(readFileSync(h.daemon, "utf8")).toBe('{"data-root": "/mnt/workspace/.docker"}\n');
+    expect(calls(h).filter((line) => line === "systemctl restart docker.service")).toHaveLength(2);
+    expect(calls(h).filter((line) => line === "docker info")).toHaveLength(60);
+    expect(calls(h)).not.toContain("firewall run");
+    expect(result.stderr).toContain("Docker's address pools could not be set");
+    expect(envLines(h)).toContain("AGENTX_TEST_SERVICES_NOT_PULLED=all");
+  });
 
   it("refuses an owner list that is not one line of entries, and withholds", () => {
     const h = host({ list: "not json" });
