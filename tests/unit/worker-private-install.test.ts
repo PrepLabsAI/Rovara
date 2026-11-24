@@ -18,6 +18,7 @@ const execFileAsync = promisify(execFile);
 const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com" };
 const canary = (): string => `ghp_${randomBytes(24).toString("base64url")}`;
 const LOCK_WITH_HOST = JSON.stringify({ lockfileVersion: 3, packages: { "node_modules/@acme/x": { version: "1.0.0", resolved: "https://npm.pkg.github.com/download/@acme/x/1.0.0/abc" } } }, null, 2);
+const YARN_LOCK_WITH_HOST = "# yarn lockfile v1\n\n\"@acme/x@^1\":\n  resolved \"https://npm.pkg.github.com/download/@acme/x/1.0.0/abc\"\n";
 const registries = (): PrepareRegistry[] => prepareRegistriesOfCompany([{ host: "npm.pkg.github.com", scopes: ["@acme"] }]);
 const EC2 = { AGENTX_RUNTIME: "ec2" } as const;
 const NO_SUCH = { exitCode: 1, stdout: "", stderr: "Error: No such object: x" };
@@ -156,6 +157,11 @@ describe("refusals are decided before any token is fetched", () => {
     ["no lockfile", { ".npmrc": "@acme:registry=https://npm.pkg.github.com/\n" }, {}, "refused_no_lockfile"],
     ["an .npmrc that sets script-shell", { "package-lock.json": LOCK_WITH_HOST, ".npmrc": "script-shell=/tmp/evil.sh\n" }, {}, "refused_npmrc_key"],
     ["an .npmrc that reroutes the scope to another host", { "package-lock.json": LOCK_WITH_HOST, ".npmrc": "@acme:registry=https://registry.npmjs.org/\n" }, {}, "refused_npmrc_key"],
+    // REVIEW-OPUS-ef25b09a1: yarn 1 now reads the repository's .npmrc (through the derived copy) and .yarnrc (covered by an empty file): the same allow-list and the same link/oversize refusal apply to a yarn 1 repository.
+    ["yarn 1: an .npmrc that sets https-proxy", { "yarn.lock": YARN_LOCK_WITH_HOST, ".npmrc": "https-proxy=http://evil.example:3128\n" }, {}, "refused_npmrc_key"],
+    ["yarn 1: an .npmrc that sets strict-ssl", { "yarn.lock": YARN_LOCK_WITH_HOST, ".npmrc": "strict-ssl=false\n" }, {}, "refused_npmrc_key"],
+    ["yarn 1: an .npmrc that reroutes the scope to another host", { "yarn.lock": YARN_LOCK_WITH_HOST, ".npmrc": "@acme:registry=https://registry.npmjs.org/\n" }, {}, "refused_npmrc_key"],
+    ["yarn 1: an oversize .yarnrc (it cannot be inspected, so it is not covered)", { "yarn.lock": YARN_LOCK_WITH_HOST, ".yarnrc": `# ${"x".repeat(64 * 1024)}\n` }, {}, "refused_npmrc_key"],
   ];
   it.each(refusals)("%s", async (_label, files, input, outcome) => {
     const { root } = await workspace(files);
@@ -272,6 +278,20 @@ describe("the happy path, in order", () => {
     expect(blank).toBe("");
     expect(await readFile(join(repo, ".npmrc"), "utf8")).toBe(npmrc);
     expect(await readFile(join(repo, ".yarnrc"), "utf8")).toBe(yarnrc);
+  });
+
+  it("REVIEW-OPUS-ef25b09a1: a .yarnrc that is a folder refuses a yarn 1 repository; an npm repository (npm never reads .yarnrc) is not refused for it", async () => {
+    const yarn = await workspace({ "yarn.lock": YARN_LOCK_WITH_HOST });
+    await mkdir(join(yarn.repo, ".yarnrc"));
+    const hy = await harness(yarn.root, {});
+    expect((await hy.run()).privateInstall?.[0]).toMatchObject({ manager: "yarn1", outcome: "refused_npmrc_key" });
+    expect(hy.runs).toHaveLength(0);
+    const npm = await workspace({ "package-lock.json": LOCK_WITH_HOST });
+    await mkdir(join(npm.repo, ".yarnrc"));
+    const hn = await harness(npm.root, { async onRun() { return ok; } });
+    const result = await hn.run();
+    expect(result.privateInstall?.[0]).toMatchObject({ manager: "npm", outcome: "installed" });
+    expect(hn.runs[0]!.args.some((value) => value.endsWith("/.yarnrc:ro"))).toBe(false);
   });
 
   it("a .yarnrc that is not a regular file refuses a yarn 1 repository (its rc cannot be covered), without running anything", async () => {
