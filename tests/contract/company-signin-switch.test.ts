@@ -1,12 +1,10 @@
 // DEC 254zg (a), 254zc (6): Code's company layer is ONE stack parameter, CompanySignIn (default disabled). Every function that reads COMPANY_SIGNIN gets it from that switch's
 // condition, the slack-workspaces grant (#865) exists only while it is on, and self-serve create (CompanySelfServe, default disabled) needs both switches. These tests evaluate the
 // synthesized templates under each parameter value, as CloudFormation would (conditions, Fn::If), so "off" means the deployed resources hold no grant and every variable is off.
-import { App, Stack } from "aws-cdk-lib";
+import { type App, Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
-import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
-import { environmentNaming } from "../../infra/lib/naming.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
 
@@ -31,8 +29,7 @@ function deployed(template: TemplateJson, values: Record<string, string>): Templ
     if (node !== null && typeof node === "object" && !Array.isArray(node)) {
       const record = node as Record<string, unknown>;
       if (typeof record.Ref === "string" && record.Ref in template.Parameters) return parameter(record.Ref);
-      // The approved account is the one the template's own install condition names (task-person-proof.ts), never written here.
-      if (record.Ref === "AWS::AccountId") return values["AWS::AccountId"] ?? approvedAccount(template);
+      if (record.Ref === "AWS::AccountId") return values["AWS::AccountId"] ?? "";
       if (record.Ref === "AWS::Region") return values["AWS::Region"] ?? "us-east-1";
     }
     return node;
@@ -64,15 +61,6 @@ function deployed(template: TemplateJson, values: Record<string, string>): Templ
     .map(([id, resource]) => [id, resolve(resource) as Resource]));
   const outputs = Object.fromEntries(Object.entries(template.Outputs ?? {}).filter(([, output]) => output.Condition === undefined || condition(output.Condition)));
   return { ...template, Resources: resources, Outputs: outputs };
-}
-
-/** The account the proof's install condition compares AWS::AccountId with (empty when the template has none). */
-function approvedAccount(template: TemplateJson): string {
-  for (const expression of Object.values(template.Conditions ?? {})) {
-    const found = /\{"Fn::Equals":\[\{"Ref":"AWS::AccountId"\},"([0-9]{12})"\]\}/u.exec(JSON.stringify(expression));
-    if (found !== null) return found[1]!;
-  }
-  return "";
 }
 
 const ids = (template: TemplateJson, prefix: string, type = "AWS::Lambda::Function") =>
@@ -107,7 +95,6 @@ let staging: TemplateJson;
 let stagingSlack: TemplateJson;
 let legacy: TemplateJson;
 let legacySlack: TemplateJson;
-let proof: TemplateJson;
 
 beforeAll(() => {
   const app = buildAgentXApp({ agentxEnv: "staging" });
@@ -116,7 +103,6 @@ beforeAll(() => {
   const legacyApp = buildAgentXApp();
   legacy = synth(legacyApp, "AgentXControlPlane");
   legacySlack = synth(legacyApp, "AgentXSlackOrchestrator");
-  proof = Template.fromStack(new ControlPlaneStack(new App(), "Proof", { env: { region: "us-east-1" }, naming: environmentNaming("agentxlivetest123") })).toJSON() as TemplateJson;
 }, 300_000);
 
 describe("CompanySignIn and CompanySelfServe: the parameters", () => {
@@ -261,20 +247,6 @@ describe("per-company Slack bots (SlackCompanyWorkspaces, DEC 254zk) need compan
   it("the Slack service gets both switches and its inputs from its own stack's parameters", () => {
     const variables = containerVariables(deployed(stagingSlack, { CompanySignIn: "enabled", SlackCompanyWorkspacesState: "enabled", SlackCompanyStateTableName: "agentx-staging-state", SlackCompanyTeamId: "T0INSTALL0" }));
     expect(variables).toMatchObject({ COMPANY_SIGNIN: "enabled", SLACK_COMPANY_WORKSPACES: "enabled", STATE_TABLE_NAME: "agentx-staging-state", SLACK_TEAM_ID: "T0INSTALL0", AGENTX_ENV: "staging" });
-  });
-});
-
-describe("TaskPersonProof (DEC 254zc (6))", () => {
-  it("gets COMPANY_SIGNIN, SLACK_COMPANY_WORKSPACES and the State table from the same switches, so its pinned version follows them", () => {
-    const fn = onlyId(proof, "TaskPersonProofFunction");
-    const values = { TaskPersonProofEnabled: "true" };
-    expect(variablesOf(deployed(proof, values), fn)).toMatchObject({ COMPANY_SIGNIN: "disabled", SLACK_COMPANY_WORKSPACES: "disabled", STATE_TABLE_NAME: "" });
-    expect(variablesOf(deployed(proof, { ...values, CompanySignIn: "enabled" }), fn)).toMatchObject({ COMPANY_SIGNIN: "enabled", SLACK_COMPANY_WORKSPACES: "disabled", STATE_TABLE_NAME: "" });
-    expect(variablesOf(deployed(proof, { ...values, CompanySignIn: "enabled", SlackCompanyWorkspaces: "enabled" }), fn)).toMatchObject({
-      COMPANY_SIGNIN: "enabled", SLACK_COMPANY_WORKSPACES: "enabled", STATE_TABLE_NAME: { Ref: onlyId(proof, "State", "AWS::DynamoDB::Table") } });
-    const policy = (template: TemplateJson) => Object.values(template.Resources).filter((resource) => resource.Properties?.PolicyName === "slack-company-workspaces-taskpersonproof");
-    expect(policy(deployed(proof, { ...values, SlackCompanyWorkspaces: "enabled" }))).toEqual([]);
-    expect(policy(deployed(proof, { ...values, CompanySignIn: "enabled", SlackCompanyWorkspaces: "enabled" }))).toHaveLength(1);
   });
 });
 

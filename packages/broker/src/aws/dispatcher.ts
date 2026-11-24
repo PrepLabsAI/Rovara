@@ -1,15 +1,12 @@
 import "./broker-environment-init.js"; import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { grantKeyFor } from "./company-layout.js";
-import type { SlackWorkspaceBindings } from "./slack-workspace-binding.js";
 import { KMSClient, SignCommand } from "@aws-sdk/client-kms";
-import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { S3Client } from "@aws-sdk/client-s3";
 import { ChangeMessageVisibilityCommand, SQSClient } from "@aws-sdk/client-sqs";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
 import { machineSizePicker, optionalPicker } from "./worker-machines/machine-size-pick.js";
-import { GetCommand, QueryCommand, DynamoDBDocumentClient, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { randomUUID } from "node:crypto";
-import { WORKER_POST_TIMEOUT_MS, CORE_DISPATCH_QUEUE_URL_VARIABLE, Ec2RuntimeBindingSchema, ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, SlackTeamIdSchema, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, agentXError, projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey, workspaceSessionKey, type SlackChannelBinding, type WorkerInvocation, SLACK_CHANNEL, channelBindingPartition, channelBindingSortPrefix } from "@agentx/contracts";
+import { GetCommand, DynamoDBDocumentClient, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { WORKER_POST_TIMEOUT_MS, CORE_DISPATCH_QUEUE_URL_VARIABLE, Ec2RuntimeBindingSchema, ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, agentXError, projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey, workspaceSessionKey, type WorkerInvocation } from "@agentx/contracts";
 import { requiredEnvironment, type DurableOutboxRecord, type Ec2OutboxRecord } from "./lambda.js";
 import type { Ec2Delivery } from "./ec2-delivery.js";
 import { failOutboxOperation } from "./outbox-failure.js";
@@ -20,14 +17,10 @@ import { ProjectSetupSessionManager, SessionManager, workspaceBinding } from "./
 import { admitProjectSetupRuntime, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "./project-setup-runtime-catalog.js";
 import { guardTaskDispatch, isTaskDispatchGuardRetryError } from "./task-dispatch-access.js"; import type { TaskDispatchCandidate, TaskDispatchAccessDependencies } from "./task-dispatch-access.js";
 import { createTaskAuthorityAdmission } from "./task-authority-admission.js";
-import { createTaskPersonRuntime, ownCompanyAuthorityRows, taskPersonLatestRevisionQuery, taskPersonNamedLatestRevision, taskPersonRevisionFromResponse, withTaskPersonMembershipRead, type TaskPersonDeveloperRecordProjection, type TaskPersonRuntimePorts } from "./task-person-runtime.js";
-import { taskPersonProofThroughLambda } from "./task-person-proof-transport.js";
 import type { CoreDispatchHost } from "./worker-machines/core-dispatch-host.js";
 import { coreDispatchQueueArn, createDispatcherCoreHost, dispatcherStopInstance, hostedDispatcherFlow, withCoreDispatch } from "./worker-machines/dispatcher-core.js"; import { loadCallbackSigningKey } from "./callback-signing-key.js"; import { createDispatcherLessonsPeople } from "./worker-machines/dispatcher-people.js"; // one line: no line of dispatcher.ts moves (the company inventory pins its sites by line)
 import { createHostedMoneyStop, gatewayModelKeysModules, hostedSecurityModules, hostedTaskCapUsd, readHostedAdmissionSettings, runStopWiredFrom } from "../core-host/hosted-modules.js"; import { dispatcherProjectTaskCap } from "./engine-policy-hook.js";
 import { sessionWorkerPing, type SessionWorkerPing } from "./worker-machines/session-worker-machines.js";
-import { grantsPkFor, namedCompany } from "./company-layout.js";
-import { slackChannelBindingPkFor } from "./slack-company-layout.js";
 
 const DEFAULT_MAX_DISPATCH_ATTEMPTS = 5;
 
@@ -342,164 +335,14 @@ function dispatcherProjectTaskCapOf(): ReturnType<typeof dispatcherProjectTaskCa
   return dispatcherProjectTaskCap(process.env, { documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), now: () => Date.now() }, kms);
 }
 const sfn = new SFNClient(awsClientConfiguration);
-export const taskPersonProofLambdaClient = new LambdaClient({ ...awsClientConfiguration, maxAttempts: 1 });
-
-export function taskPersonProofInvokeCommand(functionName: string, payload: Uint8Array): InvokeCommand {
-  return new InvokeCommand({ FunctionName: functionName, Payload: payload, InvocationType: "RequestResponse" });
-}
-
-/** The task-person runtime's bounded State reads. `client`: the dispatcher's own DynamoDB client; tests pass a fake (R2-F1 review round 4). */
-export function taskPersonRuntimePorts(input: {
-  admission: ReturnType<typeof createTaskAuthorityAdmission>;
-  stateTableName: string;
-  signInTableName: string | undefined;
-  proofArn: string;
-  slackTeamId: string;
-}, client: Pick<DynamoDBDocumentClient, "send"> = taskAuthorityDocumentClient): TaskPersonRuntimePorts {
-  const taskAuthorityDocumentClient = client;
-  const projection = (attributes: readonly string[]) => ({
-    ProjectionExpression: attributes.map((_, index) => `#p${index}`).join(", "),
-    ExpressionAttributeNames: Object.fromEntries(attributes.map((attribute, index) => [`#p${index}`, attribute])),
-  });
-  const queryPages = async <T>(inputQuery: {
-    pk: string; prefix: string; projection: readonly string[]; abortSignal: AbortSignal;
-  }): Promise<{ items: T[]; complete: boolean }> => {
-    const items: T[] = [];
-    let exclusiveStartKey: Record<string, unknown> | undefined;
-    let page = 0;
-    do {
-      if (page >= 128 || items.length >= 10_000) return { items, complete: false };
-      const abortSignal = page === 0 ? inputQuery.abortSignal : input.admission.admitStateRead();
-      const queryProjection = projection(inputQuery.projection);
-      const response = await taskAuthorityDocumentClient.send(new QueryCommand({
-        TableName: input.stateTableName,
-        KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
-        ExpressionAttributeValues: { ":pk": inputQuery.pk, ":prefix": inputQuery.prefix },
-        ...queryProjection,
-        ConsistentRead: true,
-        Limit: 100,
-        ScanIndexForward: false,
-        ...(exclusiveStartKey === undefined ? {} : { ExclusiveStartKey: exclusiveStartKey }),
-      }), { abortSignal });
-      input.admission.assertOpen();
-      const result = response as { Items?: T[]; LastEvaluatedKey?: Record<string, unknown> };
-      items.push(...(result.Items ?? []));
-      exclusiveStartKey = result.LastEvaluatedKey;
-      page += 1;
-    } while (exclusiveStartKey !== undefined);
-    return { items, complete: true };
-  };
-  const taskProjection = (sortKey: string): readonly string[] => sortKey === "META"
-    ? ["pk", "sk", "entityType", "taskId", "project", "developerId", "provider", "slackUserId", "developerName", "share", "companyId", "orgId"]
-    : sortKey.startsWith("PERSON_SUBJECT#")
-      ? ["pk", "sk", "schemaVersion", "personId", "developerId", "createdAt"]
-      : ["pk", "sk", "schemaVersion", "personId", "developerId", "slackUserId", "name", "method", "issuer", "subject", "createdAt"];
-  return {
-    async readTaskRecord({ taskId, sortKey, abortSignal }) {
-      const fields = taskProjection(sortKey);
-      const response = await taskAuthorityDocumentClient.send(new GetCommand({
-        TableName: input.stateTableName,
-        Key: { pk: `DEVTASK#${taskId}`, sk: sortKey },
-        ConsistentRead: true,
-        ...projection(fields),
-      }), { abortSignal });
-      input.admission.assertOpen();
-      return (response as { Item?: Record<string, unknown> }).Item;
-    },
-    async readDeveloperRecord({ developerId, projection: fields, abortSignal }) {
-      if (input.signInTableName === undefined) throw new Error("developer sign-in table is unavailable");
-      const response = await taskAuthorityDocumentClient.send(new GetCommand({
-        TableName: input.signInTableName,
-        Key: { pk: `DEVELOPER#${developerId}`, sk: "META" },
-        ConsistentRead: true,
-        ...projection(fields),
-      }), { abortSignal });
-      input.admission.assertOpen();
-      return (response as unknown as { Item?: TaskPersonDeveloperRecordProjection }).Item;
-    },
-    projectAuthorityReader: {
-      async latestRevision(project, admission, abortSignal, companyId) {
-        // DEC 254zzz80: a named company's project, read from its own partition in the core's order (company-layout.ts: catalog pointer, else the newest non-candidate;
-        // a row naming another company is absent). The first read uses the admitted signal; each later read is admitted before it is issued.
-        const named = namedCompany(companyId);
-        if (named !== undefined) return taskPersonNamedLatestRevision(taskAuthorityDocumentClient, input.stateTableName, named, project, admission, abortSignal);
-        const response = await taskAuthorityDocumentClient.send(new QueryCommand(taskPersonLatestRevisionQuery(input.stateTableName, project)), { abortSignal });
-        admission.assertOpen();
-        return taskPersonRevisionFromResponse(response);
-      },
-      async memberships(developerId, admission, abortSignal, companyId) {
-        // R2-F1 review round 3: a NAMED company's grants are its own partition's (lane 2, `grantsPkFor`); a row there naming another company is dropped.
-        const named = namedCompany(companyId);
-        if (named !== undefined) {
-          const own = await queryPages<{ pk: string; sk: string; projectName: string; role?: string; companyId?: unknown; orgId?: unknown }>({
-            pk: grantsPkFor(named, developerId), prefix: "PROJECT#", projection: ["pk", "sk", "projectName", "role", "companyId", "orgId"], abortSignal,
-          });
-          admission.assertOpen();
-          return { items: ownCompanyAuthorityRows(own.items, named), complete: own.complete };
-        }
-        const result = await queryPages<{ pk: string; sk: string; projectName: string; role?: string }>({
-          pk: `MEMBER#${developerId}`, prefix: "PROJECT#", projection: ["pk", "sk", "projectName", "role"], abortSignal,
-        });
-        admission.assertOpen();
-        return result;
-      },
-      async bindings(teamId, admission, abortSignal, companyId) {
-        // R2-F1 review round 3: a NAMED company's channel bindings are its own partition's (lane 3, `slackChannelBindingPkFor`); a row naming another company is dropped.
-        const named = namedCompany(companyId);
-        if (named !== undefined) {
-          const own = await queryPages<SlackChannelBinding & { pk: string; sk: string; companyId?: unknown; orgId?: unknown }>({
-            pk: slackChannelBindingPkFor(named, teamId), prefix: channelBindingSortPrefix(SLACK_CHANNEL), projection: ["pk", "sk", "teamId", "channelId", "projectName", "updatedAt", "companyId", "orgId"], abortSignal,
-          });
-          admission.assertOpen();
-          return { items: ownCompanyAuthorityRows(own.items, named), complete: own.complete };
-        }
-        const result = await queryPages<SlackChannelBinding & { pk: string; sk: string }>({
-          pk: channelBindingPartition(SLACK_CHANNEL, teamId), prefix: channelBindingSortPrefix(SLACK_CHANNEL), projection: ["pk", "sk", "teamId", "channelId", "projectName", "updatedAt"], abortSignal,
-        });
-        admission.assertOpen();
-        return result;
-      },
-    },
-    taskPersonProof: (request, admission) => taskPersonProofThroughLambda({
-      admission,
-      now: () => Date.now(),
-      expectedTeamId: request.workspace?.teamId ?? input.slackTeamId,
-      async invoke(payload, options) {
-        const response = await taskPersonProofLambdaClient.send(taskPersonProofInvokeCommand(input.proofArn, payload), { abortSignal: options.abortSignal });
-        return { ...(response.FunctionError === undefined ? {} : { FunctionError: response.FunctionError }), ...(response.Payload === undefined ? {} : { Payload: response.Payload }) };
-      },
-    })(request),
-  };
-}
-
-export const createTaskDispatchGuard = (workspaces?: Pick<SlackWorkspaceBindings, "requireCompany">, core?: TaskDispatchAccessDependencies["core"]) => (record: TaskDispatchCandidate, context?: { remainingTimeMs: () => number }) => {
+export const createTaskDispatchGuard = (core?: TaskDispatchAccessDependencies["core"]) => (record: TaskDispatchCandidate, context?: { remainingTimeMs: () => number }) => {
   const stateTableName = tableName ?? requiredEnvironment("STATE_TABLE_NAME");
   const admission = createTaskAuthorityAdmission({ now: () => Date.now(), lambdaRemainingMs: context?.remainingTimeMs() ?? 60_000 });
-  const proofArn = process.env.TASK_PERSON_PROOF_FUNCTION_ARN;
-  const slackTeamId = process.env.SLACK_TEAM_ID ?? "";
-  const personRuntime = proofArn === undefined || proofArn.trim() === "" || (workspaces === undefined && !SlackTeamIdSchema.safeParse(slackTeamId).success) ? undefined : createTaskPersonRuntime({
-    ...(workspaces === undefined ? {} : { workspaces }),
-    admission,
-    ports: withTaskPersonMembershipRead(taskAuthorityDocumentClient, process.env.DEVELOPER_SIGNIN_TABLE_NAME, taskPersonRuntimePorts({
-      admission,
-      stateTableName,
-      signInTableName: process.env.DEVELOPER_SIGNIN_TABLE_NAME,
-      proofArn,
-      slackTeamId,
-    })),
-    stateTableName,
-    slackTeamId,
-    now: () => Date.now(),
-    uuid: randomUUID,
-  });
-  const checkTaskPerson = personRuntime?.checkTaskPerson;
   return guardTaskDispatch({
     documentClient: taskAuthorityDocumentClient,
     tableName: stateTableName,
     admission, ...(core === undefined ? {} : { core }),
     ...(context === undefined ? {} : { remainingTimeMs: context.remainingTimeMs }),
-    ...(checkTaskPerson === undefined ? {} : { checkTaskPerson }),
-    ...(personRuntime === undefined ? {} : { stateAuthorityWitnessForOwnerActor: (task, ownerActorId) => personRuntime.stateAuthorityWitnessForOwnerActor(task, ownerActorId) }),
   }, record);
 };
 const taskDispatchGuard = createTaskDispatchGuard();
@@ -779,7 +622,7 @@ export const handler = withCoreDispatch(workflowHandler, {
       const sqs = new SQSClient(awsClientConfiguration);
       const queueUrl = process.env[CORE_DISPATCH_QUEUE_URL_VARIABLE] ?? "";
       return createDispatcherCoreHost({
-        env: process.env, callbackSigningKey, deliveryAccess: async (deps, operation, workspace) => createTaskDispatchGuard(undefined, { companyId: deps.companyId, workspacePk: workspace.pk, ttlAttribute: deps.store.ttlAttribute })({ id: operation.id, operationId: operation.id, workspaceId: operation.workspaceId, invocation: { kind: operation.dispatch.kind, fence: operation.fence } }),
+        env: process.env, callbackSigningKey, deliveryAccess: async (deps, operation, workspace) => createTaskDispatchGuard({ companyId: deps.companyId, workspacePk: workspace.pk, ttlAttribute: deps.store.ttlAttribute })({ id: operation.id, operationId: operation.id, workspaceId: operation.workspaceId, invocation: { kind: operation.dispatch.kind, fence: operation.fence } }),
         documentClient,
         clients: { dynamo: new DynamoDBClient(awsClientConfiguration), sqs, s3: new S3Client(awsClientConfiguration) },
         machines: { sessions: dispatcherSessions, stopInstance: dispatcherStopInstance, sign: signWithInvokeKey, post: postToWorker, ping: pingWorker },

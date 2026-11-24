@@ -18,7 +18,7 @@ function variablesOf(template: Template, pattern: RegExp): Record<string, unknow
   return (found[0]![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
 }
 
-export function withoutCompanySignIn(input: unknown, options: { proof?: boolean } = {}): unknown {
+export function withoutCompanySignIn(input: unknown): unknown {
   const template = input as Template;
   expect(template.Parameters?.CompanySignIn).toMatchObject({ Type: "String", Default: "disabled", AllowedValues: ["enabled", "disabled"] });
   expect(template.Parameters?.CompanySelfServe).toMatchObject({ Type: "String", Default: "disabled", AllowedValues: ["enabled", "disabled"] });
@@ -41,7 +41,7 @@ export function withoutCompanySignIn(input: unknown, options: { proof?: boolean 
     Sid: "WriteSlackWorkspaceTokens", Effect: "Allow", Action: ["secretsmanager:CreateSecret", "secretsmanager:PutSecretValue", "secretsmanager:GetSecretValue"] })]);
   delete template.Resources[policyId];
   const conditioned = (value: unknown, condition: string, on: string, off: string) => expect(value).toStrictEqual({ "Fn::If": [condition, on, off] });
-  for (const pattern of [...READERS, ...(options.proof === true ? [/^TaskPersonProofFunction[0-9A-F]{8}$/u] : [])]) {
+  for (const pattern of READERS) {
     const variables = variablesOf(template, pattern);
     conditioned(variables.COMPANY_SIGNIN, on, "enabled", "disabled");
     delete variables.COMPANY_SIGNIN;

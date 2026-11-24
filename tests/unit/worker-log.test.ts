@@ -41,7 +41,7 @@ describe("worker startup log line", () => {
         AGENTX_WORKSPACE_ID: workspaceId,
         AGENTX_SESSION_GENERATION: "4",
         AGENTX_INSTANCE_ID: "i-02cc2105be1d957bb",
-        AGENTX_WORKER_IMAGE: `944937319445.dkr.ecr.us-east-1.amazonaws.com/agentx-worker@sha256:${"a".repeat(64)}`,
+        AGENTX_WORKER_IMAGE: `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-worker@sha256:${"a".repeat(64)}`,
       },
       containedRuntime: unavailableRuntime,
       invocationFeatures: ["task.readiness", "publish.mode"],

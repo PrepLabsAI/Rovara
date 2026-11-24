@@ -24,7 +24,7 @@ function reader(stacks: typeof liveStacks, log: string[] = []): StackReader {
   return { describe: async (name) => { log.push(name); return stacks[name]; } };
 }
 
-const identity = { get: async () => ({ account: "944937319445", arn: "arn:aws:iam::944937319445:user/admin" }) };
+const identity = { get: async () => ({ account: "210987654321", arn: "arn:aws:iam::210987654321:user/admin" }) };
 const now = () => Date.parse("2026-09-26T00:00:00.000Z");
 
 async function run(stacks = liveStacks, store = new MemoryParameterStore()) {
@@ -68,7 +68,7 @@ describe("agentx env adopt", () => {
     expect(settings).toEqual({
       schemaVersion: 1,
       env: "production",
-      account: "944937319445",
+      account: "210987654321",
       region: "us-east-1",
       engine: "cdk",
       version: "unversioned",
@@ -116,7 +116,7 @@ describe("agentx env adopt", () => {
   it("refuses to adopt any environment other than production, touching no store or AWS call", async () => {
     const store = new MemoryParameterStore();
     const home = await mkdtemp(join(tmpdir(), "agentx-adopt-"));
-    const identityGet = vi.fn(async () => ({ account: "944937319445", arn: "arn:aws:iam::944937319445:user/admin" }));
+    const identityGet = vi.fn(async () => ({ account: "210987654321", arn: "arn:aws:iam::210987654321:user/admin" }));
     const stacksLog: string[] = [];
     await expect(
       adoptEnvironment({ env: "staging", region: "us-east-1", stacks: reader(liveStacks, stacksLog), identity: { get: identityGet }, store, home, now }),
@@ -202,7 +202,7 @@ describe("agentx env adopt", () => {
 
 describe("agentx env adopt and the Slack team ID", () => {
   it("never records a Slack team ID: the adopted deployment keeps the legacy names, which sign-in refuses", async () => {
-    const withSecret = { ...liveStacks, AgentXControlPlane: { ...liveStacks.AgentXControlPlane!, outputs: { ...liveStacks.AgentXControlPlane!.outputs, SlackSecretArn: "arn:aws:secretsmanager:us-east-1:944937319445:secret:SlackSecret-AbCdEf" } } };
+    const withSecret = { ...liveStacks, AgentXControlPlane: { ...liveStacks.AgentXControlPlane!, outputs: { ...liveStacks.AgentXControlPlane!.outputs, SlackSecretArn: "arn:aws:secretsmanager:us-east-1:210987654321:secret:SlackSecret-AbCdEf" } } };
     const store = new MemoryParameterStore();
     const home = await mkdtemp(join(tmpdir(), "agentx-adopt-"));
     const settings = await adoptEnvironment({ env: "production", region: "us-east-1", stacks: reader(withSecret), identity, store, home, now });

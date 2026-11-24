@@ -68,7 +68,7 @@ describe("shared release helpers", () => {
   it("creates immutable release tags and validates digest-scoped images", () => {
     expect(releaseTag(new Date("2026-09-23T17:50:35.123Z"), "4f885bb4a8eaffff"))
       .toBe("release-20260923T175035Z-4f885bb4a8ea");
-    const repository = "944937319445.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production";
+    const repository = "123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production";
     const image = `${repository}@sha256:${"a".repeat(64)}`;
     expect(() => assertDigestImage(image, repository)).not.toThrow();
     expect(() => assertDigestImage(`${repository}:latest`, repository)).toThrow(/immutable/);
@@ -126,7 +126,7 @@ describe("production release command", () => {
 });
 
 describe("worker image reuse", () => {
-  const repositoryUri = "944937319445.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production";
+  const repositoryUri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production";
   const deployedImage = `${repositoryUri}@sha256:${"b".repeat(64)}`;
   const options = parseProductionReleaseArgs(["--reuse-unchanged-worker"], {});
   let stdout: MockInstance<typeof process.stdout.write>;

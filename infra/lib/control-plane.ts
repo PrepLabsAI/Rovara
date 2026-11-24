@@ -44,7 +44,6 @@ import { SlackCompanyTokenReader } from "./slack-company-token-reader.js";
 import { addGithubWebhookSecret, GITHUB_WEBHOOK_ROUTE, guardGithubWebhookRoute } from "./github-webhook.js";
 import { SavedEnvImages } from "./saved-env-images.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
-import { TaskPersonProof } from "./task-person-proof.js";
 import { addBrokerDeadLetterQueues, addBrokerName, addBrokerSetting, addDerivedBrokerVariable, brokerEnvironmentName, brokerNamesParameterArn } from "./broker-names.js";
 import { CompanySignInSwitch } from "./company-signin.js";
 import { DeveloperTaskNotifier } from "./developer-task-notifier.js";
@@ -163,12 +162,6 @@ export class ControlPlaneStack extends Stack {
     // Spec 025 phase 25a: declared on the stack itself so the names are exact. The legacy deployment (production) has
     // the developer task settings too, so it runs tasks as named environments do.
     const signInParameters = developerSignInParameters(this, { tasks: true });
-    const taskPersonProofEnabled = naming.env === "agentxlivetest123" ? new CfnParameter(this, "TaskPersonProofEnabled", {
-      type: "String",
-      default: "false",
-      allowedValues: ["true", "false"],
-      description: "Install the dedicated task person proof workload in the approved named TEST environment",
-    }) : undefined;
 
     const state = new dynamodb.Table(this, "State", {
       partitionKey: { name: "pk", type: dynamodb.AttributeType.STRING },
@@ -1115,24 +1108,6 @@ export class ControlPlaneStack extends Stack {
       developerSignIn.function.addEnvironment("ADMIN_OIDC_ISSUER", oidcIssuer.valueAsString);
       developerSignIn.function.addEnvironment("ADMIN_CLAIM", adminClaim.valueAsString);
       developerSignIn.function.addEnvironment("ADMIN_VALUES", adminValues.valueAsString);
-      if (naming.env === "agentxlivetest123" && taskPersonProofEnabled !== undefined) {
-        const proof = new TaskPersonProof(this, "TaskPersonProof", {
-          naming,
-          enabled: taskPersonProofEnabled,
-          slackTeamId: signInParameters.slackTeamId,
-          slackSecret,
-          developerSignInTable: developerSignIn.table,
-          dispatcher,
-          // DEC 254zc (6): the proof's switch variables come with the infrastructure switch (they change the version the dispatcher pins).
-          ...(companySignIn === undefined || slackCompany === undefined ? {} : { companySwitches: {
-            COMPANY_SIGNIN: companySignIn.value, SLACK_COMPANY_WORKSPACES: slackCompany.value,
-            STATE_TABLE_NAME: Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, state.tableName, "")),
-          } }),
-        });
-        if (slackCompany !== undefined) {
-          slackCompany.grant("TaskPersonProof", proof.role, [slackCompany.tokenRead(), slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", SLACK_BINDING_READ_KEYS)], proof.install);
-        }
-      }
       addBrokerSetting(broker, naming, "taskPeopleChanges", taskParameters.taskPeopleChangesEnabled.valueAsString);
       addBrokerSetting(broker, naming, "taskPeoplePublicInvitations", taskParameters.taskPeoplePublicInvitationsEnabled.valueAsString);
       addBrokerSetting(broker, naming, "taskPeoplePrivateInvitations", taskParameters.taskPeoplePrivateInvitationsEnabled.valueAsString);
