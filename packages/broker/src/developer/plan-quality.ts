@@ -91,7 +91,7 @@ function scanScript(script: string): Word[][] {
   return commands;
 }
 
-interface SimpleCommand { executable: string; args: string[]; negated: boolean; writes: boolean }
+interface SimpleCommand { executable: string; args: string[]; negated: boolean; writes: boolean; /** Its input is a file given with `<` (a here-document is not one). */ stdinFile: boolean }
 
 /** A command's words as a simple command: environment assignments, `!`, braces and redirections taken out. */
 function simpleOf(words: readonly Word[]): SimpleCommand | undefined {
@@ -104,14 +104,15 @@ function simpleOf(words: readonly Word[]): SimpleCommand | undefined {
     else break;
   }
   let writes = false;
+  let stdinFile = false;
   const kept: string[] = [];
   for (let index = 0; index < list.length; index += 1) {
     const word = list[index]!;
     if (word.plain && /^\d*>&\d$/u.test(word.text)) continue;
     if (word.plain && /^\d*>>?$/u.test(word.text)) { if (list[index + 1]?.text !== "/dev/null") writes = true; index += 1; continue; }
     if (word.plain && /^\d*>>?\S/u.test(word.text)) { if (!/^\d*>>?\/dev\/null$/u.test(word.text)) writes = true; continue; }
-    if (word.plain && word.text === "<") { index += 1; continue; }
-    if (word.plain && /^<[^<]/u.test(word.text)) continue;
+    if (word.plain && word.text === "<") { stdinFile = true; index += 1; continue; }
+    if (word.plain && /^<[^<]/u.test(word.text)) { stdinFile = true; continue; }
     kept.push(word.text);
   }
   if (kept.length === 0) return undefined;
@@ -122,7 +123,7 @@ function simpleOf(words: readonly Word[]): SimpleCommand | undefined {
     while (at < args.length && args[at]!.startsWith("-")) at += args[at] === "-C" || args[at] === "-c" ? 2 : 1;
     if (args[at] !== undefined) { executable = `git ${args[at]!}`; args = args.slice(at + 1); }
   }
-  return { executable, args, negated, writes };
+  return { executable, args, negated, writes, stdinFile };
 }
 
 /** The simple commands a check runs. A shell's `-c` script (`-c`, `-ec`, `-lc`...) is read too, up to three shells deep. */
@@ -131,7 +132,7 @@ function simpleCommands(command: Pick<WorkflowCheck["command"], "executable" | "
   if (SHELLS.has(executable)) {
     const flag = command.args.findIndex((arg) => /^-[A-Za-z]*c[A-Za-z]*$/u.test(arg));
     const script = flag < 0 ? undefined : command.args[flag + 1];
-    if (script === undefined || depth >= SHELL_DEPTH_MAX) return [{ executable, args: [...command.args], negated: false, writes: false }];
+    if (script === undefined || depth >= SHELL_DEPTH_MAX) return [{ executable, args: [...command.args], negated: false, writes: false, stdinFile: false }];
     return scanScript(script).flatMap((words) => {
       const simple = simpleOf(words);
       if (simple === undefined) return [];
@@ -199,6 +200,15 @@ function grepShape(args: readonly string[]): GrepShape {
   return { letters, patterns };
 }
 
+/** Whether a `wc` argument list asks for the line count (`-l`, a cluster holding `l`, or `--lines`). */
+const countsLines = (args: readonly string[]): boolean => args.some((arg) => /^(?:--lines|-[A-Za-z]*l[A-Za-z]*)$/u.test(arg));
+
+/** Whether a script counts a file's lines with `wc -l`: on an operand, a `<` redirect, or what `cat` prints. A count of what another command printed is not it. */
+const countsFileLines = (commands: readonly SimpleCommand[]): boolean => commands.some((item, at) =>
+  item.executable === "wc" && countsLines(item.args) && [item.stdinFile, item.args.some((arg) => !arg.startsWith("-")), commands[at - 1]?.executable === "cat"].includes(true));
+
+const lineCountLints = (commands: readonly SimpleCommand[]): PlanQualityLint[] => (countsFileLines(commands) ? ["wc-line-count"] : []);
+
 const hasQuote = (text: string): boolean => /["'`]/u.test(text);
 
 /**
@@ -209,7 +219,8 @@ const hasQuote = (text: string): boolean => /["'`]/u.test(text);
 function lintOf(check: WorkflowCheck, wording: string): PlanQualityLint | undefined {
   if (builtinFileCheckOf(check.command) !== undefined) return undefined;
   const commands = simpleCommands(check.command);
-  const found = new Set<PlanQualityLint>();
+  // `wc -l` counts newline characters: on a file a last line without a newline is not counted.
+  const found = new Set<PlanQualityLint>(lineCountLints(commands));
   const absence = ABSENCE_WORDS.test(wording);
   for (const item of commands.filter((entry) => GREPS.has(entry.executable) || entry.executable === "git grep")) {
     const { letters, patterns } = grepShape(item.args);

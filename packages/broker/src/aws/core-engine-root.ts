@@ -68,6 +68,8 @@ import type { CiReporting } from "../core-host/switch-blockers.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../core-host/dev-routes.js";
 import { SETUP_RUN_NOT_ALLOWED, type SetupRunStanding } from "../core-host/setup-run-routes.js";
 import { createHostedSetupApproval } from "../core-host/setup-approval.js";
+import { readyProfilesFor, sandboxAvailableFor } from "../core/setup-agent/browser-testing-sandbox.js";
+import { headOf } from "../core/setup-agent/snapshot.js";
 import { createHostedTestEnvironmentApproval } from "../core-host/test-environment-approval.js";
 import { createCompanyTaskSpend } from "../core-host/company-task-spend.js";
 import { createSetupRegistryMirror } from "./setup-registry-mirror.js";
@@ -158,6 +160,7 @@ import { proposeLessonFromNote, type WikiNoteLessonInput, type WikiNoteLessonRes
 import type { HostedWikiMapWiring } from "../core-host/wiki-map-routes.js";
 import { ciDefinitionReaderOf } from "../core/ci-evidence/eval-check-card.js";
 import { createWikiBuildStarter } from "../core/wiki-build/starter.js";
+import { hostedWikiResnapshot } from "./wiki-resnapshot.js";
 import { projectCitationReader, wikiBuildCallbackWiring, wikiBuildEndedHook } from "../core/wiki-build/wiring.js";
 import { createPersonEraseRoute, type PersonEraseCaller } from "../core-host/person-erase-route.js";
 import { resumePersonErases, type PersonEraseDeps, type PersonEraseObjects } from "../core/people/erase.js";
@@ -1017,6 +1020,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         // L4-P2: the AI step of the night (the wiki refresh) over the SAME flow and its own Admission; it starts only where a dollar cap is really enforced and both locks are open. The file map is the night's own.
         const wikiMapForNight: HostedWikiMapWiring = { standing: setupRunStanding, hostFor: (repository) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }) };
         const modelConfigured = (): boolean => { try { return modelGateway() !== undefined; } catch { return false; } };
+        // A wiki build whose pinned commit is gone from the default branch (a rewrite) is started again ONCE over a new snapshot, with no person asked (the broker has the code host; the dispatcher wires nothing).
+        flow.deps.wikiBuildResnapshot = hostedWikiResnapshot({ flow: flow.deps, companyId, now: () => now().getTime(), map: wikiMapForNight, standing: setupRunStanding, modelAccessConfigured: modelConfigured });
         // L4-SR2: the automatic repair draft, only where the ceiling covers the company (nothing is built otherwise). Its start is behind the effective gate, the project's upkeep switch, an enforced cap with room and the access rule's marks.
         // L4-SR2b: the project's remaining room is the gateway's own answer (the SAME reader as the night's cap signal), read fresh at the draft's start and at every model token's mint; any doubt is no room.
         const upkeepRoom = (project: string): Promise<number | undefined> => upkeepRoomCentsOf(upkeepCapFor(companyId), project, now().getTime(), companyId);
@@ -1105,6 +1110,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           people: { membershipOf, projectGrantRole }, proofKey: approvalProofKeyOf(inputs.callbackSigningKey), now,
           // L4-SF (c): an approval keeps the old broker's project registry in step with the core's, in the same decision.
           registryMirror: createSetupRegistryMirror({ store: runtime.flow.deps.store, companyId: runtime.companyId }),
+          // Browser testing: a browser testing candidate is approved only here, by a live company owner or admin, with its stored proposal read again from the company's own object storage.
+          objects: registry.require("object-storage"),
         });
         // L4-EVH (DEC 254zzz20 D5): the opt-in eval health run is offered only where a run can really happen (the model gateway, a bound reservation adapter and its cap source), and a person's yes starts it.
         const modelGatewayConfigured = (() => { try { return modelGateway() !== undefined; } catch { return false; } })();
@@ -1182,6 +1189,20 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           evalCheck: {
             standing: setupRunStanding,
             readerFor: async (companyId, repository) => companyId !== runtime.companyId ? undefined : ciDefinitionReaderOf(codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }), repository, { orgId: companyId }),
+          },
+          // Browser testing in a project's setup (owner decisions 417, 420, 421): the same live standing (only a company owner or admin changes anything), the ONE approval gate, the company's own code host and object
+          // storage, and the project's own runtime binding for the sandbox.
+          browserTesting: {
+            standing: setupRunStanding, approval: setupApproval, objects: registry.require("object-storage"),
+            capture: async (companyId, repository) => {
+              if (companyId !== runtime.companyId || inputs.applicationSource === undefined) throw new Error("source capture is not available here");
+              const commit = await headOf(codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }), repository, { orgId: companyId });
+              return inputs.applicationSource(repository.url, commit);
+            },
+            readyProfiles: async (companyId, project) => (companyId !== runtime.companyId ? [] : readyProfilesFor({ store: runtime.flow.deps.store, companyId, project, runtimeCatalogId: env["AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID"] ?? "", now: now().getTime() },
+              (await runtime.flow.deps.projects.latest(project))?.definition.revision ?? 0)),
+            sandboxAvailable: async (companyId, project) => (companyId !== runtime.companyId ? false : sandboxAvailableFor({ store: runtime.flow.deps.store, companyId, project, runtimeCatalogId: env["AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID"] ?? "", now: now().getTime() },
+              (await runtime.flow.deps.projects.latest(project))?.definition.revision ?? 0)),
           },
           // Audit gap 11b: the project's ticket-sharing settings. The same live standing; the trackers a hosted company's tickets are written back to (Linear, over its own connection: hosted-intake.ts).
           ticketUpdates: { standing: setupRunStanding, trackers: HOSTED_TICKET_TRACKERS },

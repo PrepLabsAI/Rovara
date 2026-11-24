@@ -218,6 +218,20 @@ export class SessionLifecycle extends Construct {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(props.notifyOperator);
+    // A stop that never finishes keeps its instance billing: the session stays STOPPING (a normal stop is STOPPING -> STOPPED in under two minutes). The reaper emits
+    // SessionsStopping on every one-minute tick (dimensionless, the count of sessions still stopping after the tick), so a minimum of at least 1 in each of ten
+    // consecutive minutes means some session was stopping through the whole window. A missing datapoint is not breaching: a reaper that stops running is
+    // ReaperErrorsAlarm's to report. The reaper keeps no per-session stop time, so this reads the count, not an age.
+    new cloudwatch.Alarm(this, "StuckStoppingAlarm", {
+      alarmName: naming.alarmName("SessionStuckStopping"),
+      alarmDescription: "An EC2 session has stayed STOPPING for ten minutes, so its instance may still be running and billing. Check the reaper's logs, then the workspace's instance and volume in EC2 (a terminate that failed or an instance stuck shutting down, or a volume that will not detach).",
+      metric: new cloudwatch.Metric({ namespace: naming.metricsNamespace, metricName: "SessionsStopping", statistic: "Minimum", period: Duration.minutes(1) }),
+      threshold: 1,
+      evaluationPeriods: 10,
+      datapointsToAlarm: 10,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(props.notifyOperator);
 
     // The reconciler (#86): every 10 minutes, repairs drift between this environment's ec2-ebs
     // instances and volumes and their SESSION items. It never deletes a volume it cannot tie to a

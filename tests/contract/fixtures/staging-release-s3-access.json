@@ -1,0 +1,197 @@
+{
+  "version": 1,
+  "note": "Derived by ops/staging-release/test/s3-access.test.ts from the pack's scripts run against the fake CLI: the paths each stage reads, lists and writes in the runs bucket, as <stage>/<exec>/... (a recursive cp lists and reads everything under its prefix: `<prefix>*`). The Code P1 contract test compares the CodeBuild roles' grants with it.",
+  "stages": {
+    "build": {
+      "read": [
+        "check/<exec>/version.txt"
+      ],
+      "list": [],
+      "write": [
+        "build/<exec>/release/answers.json",
+        "build/<exec>/release/overrides.json",
+        "build/<exec>/release/images.json",
+        "build/<exec>/source.bundle"
+      ]
+    },
+    "canary": {
+      "read": [],
+      "list": [
+        "canary-ledger/"
+      ],
+      "write": [
+        "canary-ledger/*",
+        "canary/<exec>/result.json",
+        "canary/<exec>/summary.txt"
+      ]
+    },
+    "check": {
+      "read": [],
+      "list": [],
+      "write": [
+        "check/<exec>/check.json",
+        "check/<exec>/version.txt"
+      ]
+    },
+    "decide": {
+      "read": [
+        "build/<exec>/release/*",
+        "build/<exec>/source.bundle",
+        "build/<prior-exec>/release/answers.json",
+        "build/<prior-exec>/release/overrides.json",
+        "check/<exec>/check.json",
+        "ci-cache/<key>.json",
+        "decide/<prior-exec>/decision.json",
+        "gates/<exec>/gates/*",
+        "preview/<exec>/preview.json",
+        "preview/<exec>/release.sha256"
+      ],
+      "list": [
+        "89/",
+        "build/<exec>/release/",
+        "decide/",
+        "gates/<exec>/gates/",
+        "release/"
+      ],
+      "write": [
+        "ci-cache/<key>.json",
+        "decide/<exec>/decision.json"
+      ]
+    },
+    "deploy": {
+      "read": [
+        "89/<exec>/RESULT.md",
+        "build/<exec>/release/*",
+        "check/<exec>/check.json",
+        "decide/<exec>/decision.json",
+        "gates/<exec>/gates/*",
+        "guard/<exec>/guard.json",
+        "preview/<exec>/preview.json",
+        "preview/<exec>/release.sha256"
+      ],
+      "list": [
+        "build/<exec>/release/",
+        "gates/<exec>/gates/"
+      ],
+      "write": [
+        "release/<exec>/deploy.json",
+        "release/<exec>/settings-record.json",
+        "release/<exec>/steps.jsonl"
+      ]
+    },
+    "gates": {
+      "read": [
+        "build/<exec>/release/*",
+        "check/<exec>/check.json",
+        "preview/<exec>/*",
+        "preview/<exec>/preview.json",
+        "preview/<exec>/release.sha256"
+      ],
+      "list": [
+        "build/<exec>/release/",
+        "preview/<exec>/"
+      ],
+      "write": [
+        "gates/<exec>/dry-run-failures.txt",
+        "gates/<exec>/gates/15-gate.json",
+        "gates/<exec>/gates/15-gate.log",
+        "gates/<exec>/gates/25-gate.json",
+        "gates/<exec>/gates/25-gate.log",
+        "gates/<exec>/gates/45-gate.json",
+        "gates/<exec>/gates/45-gate.log",
+        "gates/<exec>/gates/46-gate.json",
+        "gates/<exec>/gates/50-dry-run.json",
+        "gates/<exec>/gates/50-dry-run.log",
+        "gates/<exec>/gates/gate-gateway-deployed.json",
+        "gates/<exec>/gates/gate-gateway-deployed.log",
+        "gates/<exec>/gates/gate-gateway-runprice.json",
+        "gates/<exec>/gates/gate-gateway-runprice.log"
+      ]
+    },
+    "guard": {
+      "read": [
+        "89/<exec>/RESULT.md",
+        "build/<exec>/release/*",
+        "check/<exec>/check.json",
+        "decide/<exec>/decision.json",
+        "preview/<exec>/release.sha256"
+      ],
+      "list": [
+        "build/<exec>/release/"
+      ],
+      "write": [
+        "guard/<exec>/guard.json"
+      ]
+    },
+    "postcheck": {
+      "read": [
+        "build/<exec>/release/overrides.json",
+        "check/<exec>/check.json",
+        "preview/<exec>/before-outputs.json",
+        "release/<exec>/deploy.json"
+      ],
+      "list": [],
+      "write": [
+        "release/<exec>/postcheck.json"
+      ]
+    },
+    "preview": {
+      "read": [
+        "build/<exec>/release/*",
+        "build/<exec>/source.bundle",
+        "check/<exec>/version.txt"
+      ],
+      "list": [
+        "build/<exec>/release/"
+      ],
+      "write": [
+        "preview/<exec>/agentx-staging-access.changeset.json",
+        "preview/<exec>/agentx-staging-access.live-params.json",
+        "preview/<exec>/agentx-staging-access.live-template.json",
+        "preview/<exec>/agentx-staging-access.params.json",
+        "preview/<exec>/agentx-staging-access.template.json",
+        "preview/<exec>/agentx-staging-control-plane.changeset.json",
+        "preview/<exec>/agentx-staging-control-plane.live-params.json",
+        "preview/<exec>/agentx-staging-control-plane.live-template.json",
+        "preview/<exec>/agentx-staging-control-plane.params.json",
+        "preview/<exec>/agentx-staging-control-plane.template.json",
+        "preview/<exec>/agentx-staging-foundation.changeset.json",
+        "preview/<exec>/agentx-staging-foundation.live-params.json",
+        "preview/<exec>/agentx-staging-foundation.live-template.json",
+        "preview/<exec>/agentx-staging-foundation.params.json",
+        "preview/<exec>/agentx-staging-foundation.template.json",
+        "preview/<exec>/agentx-staging-identity.changeset.json",
+        "preview/<exec>/agentx-staging-identity.live-params.json",
+        "preview/<exec>/agentx-staging-identity.live-template.json",
+        "preview/<exec>/agentx-staging-identity.params.json",
+        "preview/<exec>/agentx-staging-identity.template.json",
+        "preview/<exec>/agentx-staging-runtime.changeset.json",
+        "preview/<exec>/agentx-staging-runtime.live-params.json",
+        "preview/<exec>/agentx-staging-runtime.live-template.json",
+        "preview/<exec>/agentx-staging-runtime.params.json",
+        "preview/<exec>/agentx-staging-runtime.template.json",
+        "preview/<exec>/agentx-staging-slack.changeset.json",
+        "preview/<exec>/agentx-staging-slack.live-params.json",
+        "preview/<exec>/agentx-staging-slack.live-template.json",
+        "preview/<exec>/agentx-staging-slack.params.json",
+        "preview/<exec>/agentx-staging-slack.template.json",
+        "preview/<exec>/assets.json",
+        "preview/<exec>/before-outputs.json",
+        "preview/<exec>/changesets.json",
+        "preview/<exec>/preview.json",
+        "preview/<exec>/release.sha256",
+        "preview/<exec>/rows-summary.txt"
+      ]
+    },
+    "rollback": {
+      "read": [
+        "canary/<prior-exec>/result.json",
+        "preview/<prior-exec>/release.sha256"
+      ],
+      "list": [
+        "build/<prior-exec>/release/"
+      ],
+      "write": []
+    }
+  }
+}

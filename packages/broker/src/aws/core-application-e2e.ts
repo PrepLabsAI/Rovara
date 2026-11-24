@@ -10,6 +10,9 @@ import { createApplicationPublicationFence } from "../core/e2e/publication-fence
 import { readProjectReadyE2ERuntimes, runtimeRowReader } from "../core/e2e/runtime-readiness.js";
 import { readAccountRegistryEntries } from "../core/e2e/account-registry.js";
 import { acceptStep } from "../core/task-flow/stage-machine.js";
+import { RENEWAL_FAILED_REASON, accountsNeedRenewal, recordSignIns, renewAfterPassedRound, renewWithSnapshot, signInOutcomes, type BrowserRenewalDeps } from "../core/setup-agent/browser-testing-renewal.js";
+import { readPaused } from "../core/setup-agent/browser-testing-state.js";
+import { E2E_OWNER_SENTENCES } from "../e2e/owner-sentences.js";
 import { dispatchRowItem } from "../core/task-flow/dispatch-rows.js";
 import { readTask, workspaceOperations } from "../core/task-flow/reads.js";
 import { cancelTask } from "../core/task-flow/cancel.js";
@@ -44,7 +47,16 @@ export function wireHostedApplicationE2E(input: { flow: TaskFlowDeps; objects: O
     const selected = await reader.selection(...args);
     return { ...selected, items: [...selected.items, ...authority.items] };
   };
+  // Browser testing: the 90-day renewal of the project's test accounts, and the page's per-account sign-in result. Both are the flow's own rows, written best effort and never part of a verdict.
+  const renewal: BrowserRenewalDeps = { store: flow.store, companyId: flow.companyId, objects, now: () => (flow.now?.() ?? new Date()).getTime(), ...(flow.log === undefined ? {} : { log: (entry) => flow.log?.(entry) }) };
   const planning = { context: createApplicationPlanningContext({
+    paused: async (task) => readPaused(flow.store, flow.companyId, task.project),
+    renewAccounts: async (task, approved) => {
+      const result = await renewWithSnapshot(renewal, task.project, approved.snapshot, approved.proposalSha256);
+      if (result.status !== "failed") return { ok: true };
+      // Blocking only when a definition has already lapsed: one with days left still signs in, and the page serves the fault meanwhile.
+      return { ok: false, blocking: await accountsNeedRenewal(renewal, task.project, 0).catch(() => true), reason: RENEWAL_FAILED_REASON };
+    },
     project: async (task) => await flow.store.get(projectRevisionKey(flow.companyId, task.project, task.startingRevision)) as unknown as ApplicationPlanningProject | undefined,
     readText: async (key, max) => { const bytes = await objects.get(key, max); return bytes === undefined ? undefined : Buffer.from(bytes).toString("utf8"); },
     ...(input.capture === undefined ? {} : { capture: (_task, repositoryUrl, commit) => input.capture!(repositoryUrl, commit) }),
@@ -58,8 +70,12 @@ export function wireHostedApplicationE2E(input: { flow: TaskFlowDeps; objects: O
     now: () => (flow.now?.() ?? new Date()).getTime(),
   }), approve: createApplicationApproval({ ...flow, selection }) };
   flow.e2e = verification;
-  const application: ApplicationE2ESeams = { planning, rounds: { ...rounds, selection }, results: createApplicationResults({ ...verification, operations: (task) => workspaceOperations(flow, task.workspaceId) }),
-    publication: createApplicationPublicationFence(flow) };
+  const loginFailed = E2E_OWNER_SENTENCES.groupSentence("login-failed") ?? "";
+  const application: ApplicationE2ESeams = { planning, rounds: { ...rounds, selection },
+    results: createApplicationResults({ ...verification, operations: (task) => workspaceOperations(flow, task.workspaceId),
+      signIns: async (task, scenarios) => recordSignIns(renewal, task.project, signInOutcomes(scenarios, loginFailed)) }),
+    publication: createApplicationPublicationFence(flow),
+    accountRenewal: { afterPassedRound: async (task) => { await renewAfterPassedRound(renewal, task.project, task.startingRevision); } } };
   flow.applicationE2E = application;
   return application;
 }

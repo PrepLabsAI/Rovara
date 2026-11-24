@@ -664,6 +664,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const wikiMap = createLocalWikiMap({ flow: flow.deps, registry, companyId, now: () => clock().getTime(), log });
   // Wiki W4: the wiki build controls (Build, Stop, Continue, Refresh now, the agents switch, Delete wiki). The task flow's wiki build starter is the one seam left to fill (`starter`).
   const wikiBuildControls = createLocalWikiBuild({ flow: flow.deps, wikiMap, owner, companyId, now: () => clock().getTime(), modelAccessConfigured: async () => (await chosen()) !== undefined, starter: createWikiBuildStarter });
+  // A wiki build whose pinned commit is gone from the default branch (a rewrite) is started again ONCE over a new snapshot, as on the hosted core.
+  flow.deps.wikiBuildResnapshot = (run) => wikiBuildControls.resnapshot(run);
   // L4-EVCI2: the setup card's eval check from the customer's CI (owner only; the proposals come from the project's workflow files through the code host the registry holds).
   const evalCheck = createLocalEvalCheck({ flow: flow.deps, registry, companyId, audit: registry.require("audit-sink"), now: () => clock().getTime(), log });
   // Lead 4 N1: the nightly upkeep switch (owner only; recorded here, and nothing AI-spending starts on a laptop by itself).

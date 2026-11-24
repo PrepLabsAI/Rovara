@@ -25,4 +25,9 @@ export interface ApplicationE2ESeams {
     notice(task: ApplicationTask, taskPageUrl?: string): Promise<unknown[] | undefined>;
   };
   publication(task: ApplicationTask): Promise<{ mode: "CHECKED_TREE" | "COMMITTED_HEAD"; items: readonly TransactItem[] } | undefined>;
+  /**
+   * Browser testing: after a task's browser check PASSED and its verdict was recorded, the project's test accounts that are near their 90-day expiry are renewed (the same definition, under the approval in
+   * force). Best effort and after the verdict is committed (the verdict's own fence reads the account rows): it never changes a verdict, and a failure is a served fault, not a thrown error.
+   */
+  accountRenewal?: { afterPassedRound(task: ApplicationTask): Promise<void> };
 }

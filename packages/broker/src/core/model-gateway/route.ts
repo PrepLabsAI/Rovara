@@ -1,4 +1,4 @@
-import { AgentXError, PAYER_UNRESOLVED, TASK_TOKEN_SECONDS, REVIEWER_GRANT_SECONDS, type RunPrice } from "@agentx/contracts";
+import { AgentXError, PAYER_UNRESOLVED, TASK_TOKEN_SECONDS, REVIEWER_GRANT_SECONDS, splitRunPriceBaseBand, type RunPrice } from "@agentx/contracts";
 import type { CallbackCapabilities } from "../../callbacks.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
@@ -39,7 +39,7 @@ export async function handleModelAccess(flow: TaskFlowDeps, capabilities: Callba
       deadline.check();
       // Only these three metadata fields may be logged; never the token or a description.
       flow.log?.({ operationId: scope.operationId, iat: minted.expiresAt / 1000 - (scope.reviewerSlot === undefined ? TASK_TOKEN_SECONDS : REVIEWER_GRANT_SECONDS), exp: minted.expiresAt / 1000 });
-      return { statusCode: 200, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify({ baseUrl: gateway.gatewayUrl, apiKey: minted.token, expiresAt: minted.expiresAt, ...(runPrice === undefined ? {} : { runPrice }) }) };
+      return { statusCode: 200, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify({ baseUrl: gateway.gatewayUrl, apiKey: minted.token, expiresAt: minted.expiresAt, ...(runPrice === undefined ? {} : splitRunPriceBaseBand(runPrice)) }) };
     });
   } catch (error) {
     if (error instanceof AgentXError && error.code === "RUNTIME_UNAVAILABLE") return { statusCode: 503, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify({ error: { code: "RUNTIME_UNAVAILABLE", message: "AgentX does not know this model's price, so it did not start the run" } }) };

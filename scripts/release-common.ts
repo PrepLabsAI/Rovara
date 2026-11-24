@@ -275,6 +275,31 @@ export async function buildAndPushWorker(
   }, revision);
 }
 
+/**
+ * Before any image push: the repository has IMMUTABLE tags and the tag is not in it yet. A pushed tag is never overwritten (a role that could push
+ * could otherwise swap the bytes a later "reused by tag" step or pull trusts), and this push never tries to: a tag that exists stops the push
+ * (the tag carries the second and the revision, so a new build always has a new tag). Nothing here changes the repository; the fix for a
+ * mutable repository is the one command in the message, run by an owner.
+ */
+export function assertTagIsNew(runner: Runner, options: ReleaseOptions, image: Pick<ImageBuild, "repository">, tag: string): void {
+  const described = runner.aws(["ecr", "describe-repositories", "--region", options.region, "--repository-names", image.repository, "--query", "repositories[0].imageTagMutability", "--output", "text"], true);
+  const mutability = described.status === 0 ? described.stdout.trim() : "";
+  if (mutability !== "IMMUTABLE") {
+    throw new Error(
+      `the ECR repository ${image.repository} does not have immutable tags (${mutability === "" ? "its setting could not be read" : mutability}), so a push could overwrite a tag a later deploy trusts; nothing was pushed. ` +
+      `An owner sets it once: aws ecr put-image-tag-mutability --region ${options.region} --repository-name ${image.repository} --image-tag-mutability IMMUTABLE (existing tags stay as they are)`,
+    );
+  }
+  const existing = runner.aws(["ecr", "describe-images", "--region", options.region, "--repository-name", image.repository, "--image-ids", `imageTag=${tag}`, "--query", "imageDetails[0].imageDigest", "--output", "text"], true);
+  if (existing.status === 0) {
+    throw new Error(`the tag ${tag} is already in ${image.repository}: a pushed tag is never overwritten; nothing was pushed. Run the build again for a new tag`);
+  }
+  if (!existing.stderr.includes("ImageNotFoundException")) {
+    process.stderr.write(existing.stderr);
+    throw new Error(`could not tell whether the tag ${tag} is in ${image.repository}; nothing was pushed`);
+  }
+}
+
 export async function buildAndPushImage(
   runner: Runner,
   options: ReleaseOptions,
@@ -302,6 +327,7 @@ export async function buildAndPushImage(
     ".",
   ]);
   await image.smokeTest(runner, localImage);
+  assertTagIsNew(runner, options, image, tag);
 
   const password = runner.aws([
     "ecr",

@@ -23,7 +23,8 @@ describe("permission boundary", () => {
       for (const action of actions) {
         const applicable = policy.filter((s) => [s.Action].flat().some((pattern) => matches(pattern, action)));
         expect(applicable.some((s) => s.Effect === "Allow" && s.Resource === "*" && s.Condition === undefined), action).toBe(true);
-        expect(applicable.filter((s) => s.Effect === "Deny"), action).toEqual([]);
+        // The release pipeline denies name only the pipeline's own resources (tests/contract/release-access-denies.test.ts), so they never touch what these actions do.
+        expect(applicable.filter((s) => s.Effect === "Deny" && !s.Sid.startsWith("DenyRelease")), action).toEqual([]);
       }
     }
     for (const service of ["s3", "sqs", "kms"]) expect(SERVICE_ROLE_SERVICES).toContain(service);
@@ -39,9 +40,12 @@ describe("permission boundary", () => {
       expect(json.Conditions.HasPermissionsBoundary, stack.stackName).toBeDefined();
       // The access stack creates the default boundary, so its roles Ref it (which also orders the
       // policy before the roles); every other stack names its deterministic ARN.
-      const policyIds = Object.entries(json.Resources).filter(([, r]) => r.Type === "AWS::IAM::ManagedPolicy").map(([id]) => id);
-      const elseBranch = stack.stackName === "agentx-staging-access" ? { Ref: policyIds[0] } : defaultArn;
-      expect(policyIds, stack.stackName).toHaveLength(stack.stackName === "agentx-staging-access" ? 1 : 0);
+      // TWO-BOUNDARIES: the access stack creates both default boundaries, and its two roles Ref the DEPLOY one; every other stack's roles name the RUNTIME boundary's ARN.
+      const policies = Object.entries(json.Resources).filter(([, r]) => r.Type === "AWS::IAM::ManagedPolicy");
+      const policyIds = policies.map(([id]) => id);
+      const deployId = policies.find(([, r]) => (r.Properties as { ManagedPolicyName?: string }).ManagedPolicyName === "agentx-staging-deploy-boundary")?.[0];
+      const elseBranch = stack.stackName === "agentx-staging-access" ? { Ref: deployId } : defaultArn;
+      expect(policyIds, stack.stackName).toHaveLength(stack.stackName === "agentx-staging-access" ? 2 : 0);
       for (const [id, resource] of Object.entries(json.Resources).filter(([, r]) => r.Type === "AWS::IAM::Role")) {
         roles += 1;
         expect(resource.Properties.PermissionsBoundary, `${stack.stackName} ${id}`).toEqual({ "Fn::If": ["HasPermissionsBoundary", { Ref: "PermissionsBoundaryArn" }, elseBranch] });

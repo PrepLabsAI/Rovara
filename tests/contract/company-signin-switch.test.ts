@@ -95,10 +95,10 @@ function statements(template: TemplateJson): Array<{ policy: string; statement: 
   });
 }
 /** Any statement at all that names the per-company token family. */
-const namesSlackWorkspaces = (template: TemplateJson) => statements(template).filter(({ statement }) => JSON.stringify(statement.Resource).includes(SLACK_WORKSPACES));
+const namesSlackWorkspaces = (template: TemplateJson) => statements(template).filter(({ statement }) => JSON.stringify(statement.Resource ?? "").includes(SLACK_WORKSPACES));
 const SLACK_WORKSPACES = "slack-workspaces/*";
 const grantsSlackWorkspaceWrite = (template: TemplateJson) => statements(template).filter(({ statement }) =>
-  [statement.Action].flat().includes("secretsmanager:CreateSecret") && JSON.stringify(statement.Resource).includes(SLACK_WORKSPACES));
+  [statement.Action].flat().includes("secretsmanager:CreateSecret") && JSON.stringify(statement.Resource ?? "").includes(SLACK_WORKSPACES));
 
 /** The functions that read COMPANY_SIGNIN in a named control plane (construct-path prefixes of their logical IDs). */
 const READERS = ["Broker", "DeveloperSignInFunction", "SlackIngress", "ChannelApiIngress", "DeveloperTaskNotifierFunction", "SessionsReconciler"];

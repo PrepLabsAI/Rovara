@@ -2,9 +2,10 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { RuntimeInstallChallengeSchema, WEB_API_RUNTIME_PROFILE_ID, canonicalJson, type RuntimeInstallChallenge, type WebApiProbeRun } from "@agentx/contracts";
+import { RuntimeInstallChallengeSchema, WEB_API_RUNTIME_PROFILE_ID, canonicalJson, type RuntimeInstallChallenge, type WebApiProbeLiveTargets, type WebApiProbeRun } from "@agentx/contracts";
 import { containedRuntimeProfileForHost } from "./container-envelope.js";
 import { buildDnsFromEnvironment, createProcessDockerCli } from "./host/docker-application-host.js";
+import { webApiLiveTargets } from "./host/web-api-live-targets.js";
 import { WEB_API_BUILD_IMAGE, createWebApiProbeRunner, type WebApiProbeModelChannelFactory } from "./host/web-api-probe-runner.js";
 import { qualificationFailureOf } from "./install-qualification-failure.js";
 import { qualifyInstalledP0Runtime,qualifyInstalledWebApiRuntime, type WebApiQualificationEnvironment } from "./install-qualification.js";
@@ -61,7 +62,9 @@ export type QualificationCliDeps = Readonly<{
   /** Test seam: the host facts the qualifier reads (worker identity, installed manifest), for a CI host that is not the EC2 worker. */
   qualificationEnvironment?: Partial<WebApiQualificationEnvironment>;
   /** Test seam: builds the probe runner from its configuration, the challenge and the evidence root. The default is the production runner on the real Docker CLI. */
-  createProbeRunner?: (input: WebApiProbeRunnerConfig & { challenge: RuntimeInstallChallenge; evidenceRoot: string }) => ProbeRunner;
+  createProbeRunner?: (input: WebApiProbeRunnerConfig & { challenge: RuntimeInstallChallenge; evidenceRoot: string; liveTargets?: WebApiProbeLiveTargets }) => ProbeRunner;
+  /** Test seam: the live private targets of the private-network probe, where the runner's resolver files and the challenge endpoint would otherwise be read (a CI host has no VPC resolver). */
+  liveTargets?: WebApiProbeLiveTargets;
 }>;
 
 /**
@@ -97,7 +100,9 @@ async function qualify(args: readonly string[], deps: QualificationCliDeps, at: 
     at("runner-config-invalid");
     const config = { ...webApiProbeRunnerConfig(deps.environment ?? process.env, deps.host?.platform, deps.host?.arch), ...deps.config };
     const modelChannelFor = deps.modelChannelFor ?? await installedScriptedModelChannelFactory();
-    const runProbe = (deps.createProbeRunner ?? ((input) => createWebApiProbeRunner({ ...input, docker: createProcessDockerCli(), ...(modelChannelFor === undefined ? {} : { modelChannelFor }) })))({ ...config, challenge, evidenceRoot });
+    // The private-network probe is handed two live targets read here (the runner's VPC resolver and its own address); without them that probe fails closed instead of running on addresses nothing answers on.
+    const liveTargets = deps.liveTargets ?? webApiLiveTargets({ endpoint: challenge.endpoint });
+    const runProbe = (deps.createProbeRunner ?? ((input) => createWebApiProbeRunner({ ...input, docker: createProcessDockerCli(), ...(modelChannelFor === undefined ? {} : { modelChannelFor }) })))({ ...config, challenge, evidenceRoot, ...(liveTargets === undefined ? {} : { liveTargets }) });
     at("qualification-failed");
     proposal = await qualifyInstalledWebApiRuntime({ challenge, evidenceRoot, runProbe, ...(deps.qualificationEnvironment ? { environment: deps.qualificationEnvironment } : {}) });
   } else { at("qualification-failed"); proposal = await qualifyInstalledP0Runtime({ challenge, evidenceRoot }); }

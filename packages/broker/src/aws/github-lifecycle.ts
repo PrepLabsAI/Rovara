@@ -88,7 +88,7 @@ export async function handleGithubInstallationWebhook(input: {
   if (headers["x-github-event"] === "installation_repositories") return handleRepositoriesListed(input, raw, deliveryId);
   if (headers["x-github-event"] === "repository") return handleRepositoryTransferred(input, raw, deliveryId);
   const event = InstallationEvent.safeParse(hasKey(raw, OTHER_EVENT_KEYS) ? undefined : raw);
-  if (!event.success) throw new GithubWebhookRefusal("GitHub webhook event payload is unsupported or incomplete");
+  if (!event.success) throw new GithubWebhookRefusal("GitHub webhook event payload is unsupported or incomplete", { kind: "ignore", reason: "payload_unsupported" });
   if (!MARKED_ACTIONS.has(event.data.action)) return { status: "ACCEPTED", deliveryId };
   let outcome: Awaited<ReturnType<GithubInstallationBindings["markLifecycle"]>>;
   try { outcome = await input.bindings.markLifecycle(event.data.installation.id, event.data.action as LifecycleAction, deliveryId, event.data.installation.account.login); }
@@ -102,10 +102,10 @@ export async function handleGithubInstallationWebhook(input: {
 /** `installation_repositories`: removed marks each listed repository for the installation's company; added clears its marks. The body must have this event's shape and the account must be the binding's. */
 async function handleRepositoriesListed(input: { bindings: LifecycleBindings; log: (entry: Record<string, unknown>) => void }, raw: unknown, deliveryId: string): Promise<{ status: "ACCEPTED"; deliveryId: string }> {
   const parsed = RepositoriesEvent.safeParse(hasKey(raw, [...OTHER_REPOSITORY_EVENT_KEYS, "repository"]) ? undefined : raw);
-  if (!parsed.success) throw new GithubWebhookRefusal("GitHub webhook event payload is unsupported or incomplete");
+  if (!parsed.success) throw new GithubWebhookRefusal("GitHub webhook event payload is unsupported or incomplete", { kind: "ignore", reason: "payload_unsupported" });
   const event = parsed.data;
   const listed = event.action === "removed" ? event.repositories_removed : event.repositories_added;
-  if (listed === undefined) throw new GithubWebhookRefusal("GitHub webhook event payload is unsupported or incomplete");
+  if (listed === undefined) throw new GithubWebhookRefusal("GitHub webhook event payload is unsupported or incomplete", { kind: "ignore", reason: "payload_unsupported" });
   // Marking more than the limit refuses the whole delivery (never a part of it). Clearing is safe at any size (the body is capped at 1 MB), so it goes in chunks of the limit.
   if (event.action === "removed" && listed.length > REPOSITORY_MOVES_MAX) throw new GithubWebhookRefusal("GitHub webhook names too many repositories");
   const names = [...new Set(listed.map((entry) => entry.full_name.toLowerCase()))];
@@ -132,13 +132,13 @@ async function handleRepositoriesListed(input: { bindings: LifecycleBindings; lo
  */
 async function handleRepositoryTransferred(input: { bindings: LifecycleBindings; log: (entry: Record<string, unknown>) => void }, raw: unknown, deliveryId: string): Promise<{ status: "ACCEPTED"; deliveryId: string }> {
   const parsed = RepositoryEvent.safeParse(hasKey(raw, [...OTHER_REPOSITORY_EVENT_KEYS, "repositories_added", "repositories_removed"]) ? undefined : raw);
-  if (!parsed.success) throw new GithubWebhookRefusal("GitHub webhook event payload is unsupported or incomplete");
+  if (!parsed.success) throw new GithubWebhookRefusal("GitHub webhook event payload is unsupported or incomplete", { kind: "ignore", reason: "payload_unsupported" });
   const event = parsed.data;
   if (event.action !== "transferred") return { status: "ACCEPTED", deliveryId };
   const changes = TransferChanges.safeParse(raw);
   const owner = z.object({ owner: z.object({ login: OwnerName }).passthrough() }).safeParse(event.repository);
   const from = changes.success ? [changes.data.changes.owner.from.user?.login, changes.data.changes.owner.from.organization?.login].filter((login): login is string => login !== undefined) : [];
-  if (from.length !== 1 || !owner.success) throw new GithubWebhookRefusal("GitHub webhook event payload is unsupported or incomplete");
+  if (from.length !== 1 || !owner.success) throw new GithubWebhookRefusal("GitHub webhook event payload is unsupported or incomplete", { kind: "ignore", reason: "payload_unsupported" });
   try {
     const outcome = await input.bindings.markRepositories(event.installation.id, [{ fullName: `${from[0]}/${event.repository.name}`, reason: "transferred" }], deliveryId, owner.data.owner.login);
     if (outcome.outcome === "marked") companyLog(outcome.companyId, input.log)({ event: "github.repositories_marked", installationId: event.installation.id, reason: "transferred", count: outcome.count, actor: "github", deliveryId });

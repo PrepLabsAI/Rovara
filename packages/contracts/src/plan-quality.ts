@@ -48,6 +48,7 @@ export const PLAN_QUALITY_LINTS = [
   "grep-absence",
   "grep-invert-match",
   "grep-count",
+  "wc-line-count",
   "exit-ignores-match",
   "quoted-literal",
 ] as const;
@@ -154,6 +155,10 @@ const LINT_SENTENCES: Record<PlanQualityLint, { owner: string; planner: string }
   "grep-count": {
     owner: "uses grep -c, whose count the exit code ignores, so -q says the same thing more clearly",
     planner: "uses grep -c; the count is not used by the exit code, so use -q (or a file-contains check)",
+  },
+  "wc-line-count": {
+    owner: "counts the lines of a file with wc -l, which counts newline characters, so a file whose last line has no newline at its end counts one line short",
+    planner: "uses wc -l on a file; wc -l counts newline characters, so a last line without a newline is not counted. Count with awk (`awk 'END{exit NR==1?0:1}' file`) instead, which counts it",
   },
   "exit-ignores-match": {
     owner: "ends with a command (sed, awk, wc, head...) that succeeds whether or not the text is found, so it can pass without proving anything",

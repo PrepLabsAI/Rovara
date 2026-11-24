@@ -263,10 +263,26 @@ describe("EC2 session lifecycle infrastructure (issue #83)", () => {
     expect(readFileSync(new URL("../../packages/broker/src/aws/session-reconciler.ts", import.meta.url), "utf8")).toContain("ReconcilerQualifiedAmiReadFailures:");
   });
 
+  it("alarms the operator when a session stays STOPPING for ten consecutive minutes, quiet while no datapoint arrives, with no new permission (the reaper emits the metric in log format)", () => {
+    const [, alarm] = ofType("AWS::CloudWatch::Alarm").find(([, a]) => a.Properties.AlarmName === "AgentXSessionStuckStopping")!;
+    expect(alarm.Properties).toMatchObject({
+      Namespace: "AgentX", MetricName: "SessionsStopping", Statistic: "Minimum", Period: 60, Threshold: 1,
+      EvaluationPeriods: 10, DatapointsToAlarm: 10, ComparisonOperator: "GreaterThanOrEqualToThreshold", TreatMissingData: "notBreaching",
+    });
+    expect(alarm.Properties.Dimensions).toBeUndefined();
+    expect(JSON.stringify(alarm.Properties.AlarmActions)).toContain("OperatorAlerts");
+    // The metric the reaper emits (session-reaper.ts) is the one the alarm reads, in the namespace the reaper is given.
+    expect(readFileSync(new URL("../../packages/broker/src/aws/session-reaper.ts", import.meta.url), "utf8")).toContain("SessionsStopping: report.stillStopping.length");
+    const reaper = ofType("AWS::Lambda::Function").find(([id]) => id.startsWith("SessionsReaper"))![1];
+    expect((reaper.Properties.Environment as { Variables: Record<string, unknown> }).Variables).toMatchObject({ AGENTX_METRICS_NAMESPACE: "AgentX" });
+    const roleId = (reaper.Properties.Role as { "Fn::GetAtt": [string] })["Fn::GetAtt"][0];
+    expect([...actions(roleStatements(roleId))].filter((a) => a.startsWith("cloudwatch:"))).toEqual([]);
+  });
+
   it("alarms the operator when either state machine fails or times out", () => {
     const alarms = ofType("AWS::CloudWatch::Alarm").filter(([, a]) => String(a.Properties.AlarmName).startsWith("AgentXSession"));
     expect(alarms.map(([, a]) => a.Properties.AlarmName).sort()).toEqual([
-      "AgentXSessionDeleterFailures", "AgentXSessionProvisionerFailures", "AgentXSessionReaperErrors", "AgentXSessionReconcilerErrors",
+      "AgentXSessionDeleterFailures", "AgentXSessionProvisionerFailures", "AgentXSessionReaperErrors", "AgentXSessionReconcilerErrors", "AgentXSessionStuckStopping",
     ]);
     for (const [, alarm] of alarms) expect(JSON.stringify(alarm.Properties.AlarmActions)).toContain("OperatorAlerts");
   });

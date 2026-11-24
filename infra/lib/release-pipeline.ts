@@ -267,7 +267,7 @@ export class ReleasePipelineStack extends Stack {
 // CodePipeline allows only letters, digits, spaces and !@().*?- in a transition's reason.
 export const PROMOTION_GATE_REASON = "Production waits for a manual approval - enable this transition to release the commit waiting here (issue 1242)";
 
-function releaseProjectSettings(logGroup: logs.ILogGroup) {
+export function releaseProjectSettings(logGroup: logs.ILogGroup) {
   return {
     environment: {
       buildImage: codebuild.LinuxArmBuildImage.AMAZON_LINUX_2023_STANDARD_3_0,
@@ -283,6 +283,26 @@ function releaseProjectSettings(logGroup: logs.ILogGroup) {
     logging: { cloudWatch: { logGroup } },
   };
 }
+
+/** The versions RELEASE_TOOL_INSTALL_COMMANDS reads. */
+export const RELEASE_TOOL_VARIABLES = { AWS_CLI_VERSION: AGENTX_RELEASE_AWS_CLI_VERSION, GITLEAKS_VERSION: "8.30.1", GITLEAKS_SHA256: "e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080" } as const;
+
+/** Pinned Node, AWS CLI and gitleaks, installed under /opt (shared with the environment release pipeline, which must install exactly the same tools). */
+export const RELEASE_TOOL_INSTALL_COMMANDS: readonly string[] = [
+  'node_version="$(cat .node-version)"',
+  'node_archive="node-v${node_version}-linux-arm64.tar.xz"',
+  'curl -fsSL -o "/tmp/${node_archive}" "https://nodejs.org/dist/v${node_version}/${node_archive}"',
+  'curl -fsSL "https://nodejs.org/dist/v${node_version}/SHASUMS256.txt" | grep " ${node_archive}$" | (cd /tmp && sha256sum -c -)',
+  'mkdir -p /opt/node && tar -xJf "/tmp/${node_archive}" -C /opt/node --strip-components=1',
+  'curl -fsSL -o /tmp/awscliv2.zip "https://awscli.amazonaws.com/awscli-exe-linux-aarch64-${AWS_CLI_VERSION}.zip"',
+  "unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install --install-dir /opt/aws-cli --bin-dir /opt/aws-cli/bin",
+  // The port guard's tests run the real secret scan (tests/unit/port-guard.test.ts): the same gitleaks release CI pins, for this machine's arm64.
+  'curl -fsSL -o /tmp/gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_arm64.tar.gz"',
+  'echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -',
+  "mkdir -p /opt/gitleaks && tar -xzf /tmp/gitleaks.tar.gz -C /opt/gitleaks gitleaks",
+  'export PATH="/opt/node/bin:/opt/aws-cli/bin:/opt/gitleaks:$PATH"',
+  "node --version && npm --version && aws --version && gitleaks version && docker buildx version",
+];
 
 interface ReleaseBuildSpec {
   /** Commands before the tools are installed. */
@@ -300,27 +320,12 @@ function releaseBuildSpec(spec: ReleaseBuildSpec): codebuild.BuildSpec {
       shell: "bash",
       // #1118: the release's typecheck (tsc -b) needs about 4 GB of heap since mainline took code/next; Node's default limit on this
       // 16 GB build machine is lower, and tsc died with "JavaScript heap out of memory". 8 GB leaves the tests' own processes room.
-      variables: { NODE_OPTIONS: "--max-old-space-size=8192", AWS_CLI_VERSION: AGENTX_RELEASE_AWS_CLI_VERSION, GITLEAKS_VERSION: "8.30.1", GITLEAKS_SHA256: "e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080", ...spec.variables },
+      variables: { NODE_OPTIONS: "--max-old-space-size=8192", ...RELEASE_TOOL_VARIABLES, ...spec.variables },
     },
     phases: {
       install: {
         // Tools go under /opt so the release's dirty-tree check sees an untouched checkout.
-        commands: [
-          ...spec.firstCommands,
-          'node_version="$(cat .node-version)"',
-          'node_archive="node-v${node_version}-linux-arm64.tar.xz"',
-          'curl -fsSL -o "/tmp/${node_archive}" "https://nodejs.org/dist/v${node_version}/${node_archive}"',
-          'curl -fsSL "https://nodejs.org/dist/v${node_version}/SHASUMS256.txt" | grep " ${node_archive}$" | (cd /tmp && sha256sum -c -)',
-          'mkdir -p /opt/node && tar -xJf "/tmp/${node_archive}" -C /opt/node --strip-components=1',
-          'curl -fsSL -o /tmp/awscliv2.zip "https://awscli.amazonaws.com/awscli-exe-linux-aarch64-${AWS_CLI_VERSION}.zip"',
-          "unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install --install-dir /opt/aws-cli --bin-dir /opt/aws-cli/bin",
-          // The port guard's tests run the real secret scan (tests/unit/port-guard.test.ts): the same gitleaks release CI pins, for this machine's arm64.
-          'curl -fsSL -o /tmp/gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_arm64.tar.gz"',
-          'echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -',
-          "mkdir -p /opt/gitleaks && tar -xzf /tmp/gitleaks.tar.gz -C /opt/gitleaks gitleaks",
-          'export PATH="/opt/node/bin:/opt/aws-cli/bin:/opt/gitleaks:$PATH"',
-          "node --version && npm --version && aws --version && gitleaks version && docker buildx version",
-        ],
+        commands: [...spec.firstCommands, ...RELEASE_TOOL_INSTALL_COMMANDS],
       },
       pre_build: {
         commands: ["npm ci"],

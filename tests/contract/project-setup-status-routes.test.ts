@@ -1007,6 +1007,16 @@ describe("a setup run whose worker stopped talking (L4-T5)", () => {
     expect(await row(waiting)).toMatchObject({ state: "running", status: "running" });
   });
 
+  // SETUP-PARK-LIMIT: the 2-hour park limit is the worker's own end of the run; the view's run-gone backstop stays 26 hours, so a heard-from worker is never read as failed on a clock just past 2 hours of waiting.
+  it("a heard-from worker stays running past the 2-hour park limit, up to the run-gone backstop", async () => {
+    const h = companyA();
+    runningRun(h, 45 + 24 * 60 + 59, 0.25);
+    expect(await row(h)).toMatchObject({ state: "running", status: "running" });
+    const pastParkLimit = companyA();
+    runningRun(pastParkLimit, 45 + 2 * 60 + 61, 0.25);
+    expect(await row(pastParkLimit)).toMatchObject({ state: "running", status: "running" });
+  });
+
   it("a worker silent for more than 10 minutes reads as stopped, with the fixed 'start it again' sentence, and a later word makes it run again", async () => {
     const h = companyA();
     const task = runningRun(h, 30, 10.1);

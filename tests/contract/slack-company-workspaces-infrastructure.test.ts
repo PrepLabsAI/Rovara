@@ -252,7 +252,8 @@ describe("Slack company mode's switch (18a)", () => {
     for (const action of ["secretsmanager:GetSecretValue", "dynamodb:GetItem", "dynamodb:Query"]) {
       const applicable = boundary.filter((s) => [s.Action].flat().some((pattern) => matches(pattern, action)));
       expect(applicable.some((s) => s.Effect === "Allow" && s.Resource === "*" && s.Condition === undefined), action).toBe(true);
-      expect(applicable.filter((s) => s.Effect === "Deny"), action).toEqual([]);
+      // The release pipeline deny names only the pipeline's own resources (tests/contract/release-access-denies.test.ts).
+      expect(applicable.filter((s) => s.Effect === "Deny" && !s.Sid?.startsWith("DenyRelease")), action).toEqual([]);
     }
   });
 });

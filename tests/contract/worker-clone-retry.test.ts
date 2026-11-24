@@ -1,11 +1,11 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
-import type { ProjectDefinition } from "@agentx/contracts";
+import { PREPARE_PIN_MOVED_MARKER, type ProjectDefinition } from "@agentx/contracts";
 import { prepareWorkspace, type RepositoryMaterializer } from "../../packages/worker/src/prepare.js";
 import type { CredentialedGitRunner } from "../../packages/worker/src/git-auth.js";
 
@@ -141,9 +141,73 @@ describe("P1: a setup run's preparation is held to the heads the broker pinned",
   const headOf = async (source: string) => (await execFileAsync("git", ["-C", source, "rev-parse", "HEAD"], { env: gitEnv })).stdout.trim();
   it("refuses when the head differs from the pin, when a repository has no pin, and when the pin is for another repository; and reports no base", async () => {
     const f = await fixture();
-    for (const pins of [[{ repository: "demo", commit: "b".repeat(40) }], [], [{ repository: "other", commit: await headOf(f.source) }]]) {
+    // A pin that is not a commit of the default branch (it never was, or the branch was rewritten): refused, with the sentence the broker reads to tell the owner and to pin again (never "try again" for ever).
+    await expect(prepareWorkspace({ rootPath: await f.workspace(), project: f.project, readOnly: true, cloneRetry: f.retry, credentialProvider: async () => ({}), materializer: flaky(f.source, []), pins: [{ repository: "demo", commit: "b".repeat(40) }] })).rejects.toThrow(PREPARE_PIN_MOVED_MARKER);
+    // No pin for a repository (or a pin for another one) is the broker's own fault: refused as before.
+    for (const pins of [[], [{ repository: "other", commit: await headOf(f.source) }]]) {
       await expect(prepareWorkspace({ rootPath: await f.workspace(), project: f.project, readOnly: true, cloneRetry: f.retry, credentialProvider: async () => ({}), materializer: flaky(f.source, []), pins }), JSON.stringify(pins)).rejects.toThrow(/not at the commit the control plane pinned/u);
     }
+  });
+  // The default branch moves between the broker's pin and the clone (a machine takes minutes to boot): the preparation reads exactly the pinned commit, which is still on the branch. It never fails for a branch that only moved ahead.
+  it("a default branch that moved ahead of the pin is read at the pin, not refused", async () => {
+    const f = await fixture();
+    const pin = await headOf(f.source);
+    await writeFile(join(f.source, "later.txt"), "pushed after the pin\n", "utf8");
+    await execFileAsync("git", ["-C", f.source, "add", "."], { env: gitEnv });
+    await execFileAsync("git", ["-C", f.source, "commit", "--quiet", "-m", "later"], { env: gitEnv });
+    const moved = await headOf(f.source);
+    expect(moved).not.toBe(pin);
+    const root = await f.workspace();
+    const manifest = await prepareWorkspace({ rootPath: root, project: f.project, readOnly: true, cloneRetry: f.retry, credentialProvider: async () => ({}), materializer: flaky(f.source, []), pins: [{ repository: "demo", commit: pin }] });
+    expect(manifest.repositories[0]).toMatchObject({ name: "demo", resolvedCommit: pin });
+    expect((await execFileAsync("git", ["-C", join(root, "repo/demo"), "rev-parse", "HEAD"], { env: gitEnv })).stdout.trim()).toBe(pin);
+    await expect(readFile(join(root, "repo/demo/later.txt"), "utf8")).rejects.toThrow();
+    // A preparation with no pins (an ordinary task, a setup run) reads the head as it is now.
+    const free = await f.workspace();
+    expect((await prepareWorkspace({ rootPath: free, project: f.project, readOnly: true, cloneRetry: f.retry, credentialProvider: async () => ({}), materializer: flaky(f.source, []) })).repositories[0]).toMatchObject({ resolvedCommit: moved });
+    // A pin of the head itself is read as before.
+    expect((await prepareWorkspace({ rootPath: await f.workspace(), project: f.project, readOnly: true, cloneRetry: f.retry, credentialProvider: async () => ({}), materializer: flaky(f.source, []), pins: [{ repository: "demo", commit: moved }] })).repositories[0]).toMatchObject({ resolvedCommit: moved });
+  });
+  // The clone is shallow (a saved environment, a custom materializer) and the branch moved ahead by more commits than its depth: the pin is not in the clone, which means "unknown", never "moved away". It is fetched, the clone deepened, and the pin read.
+  // MUTANT shallow: a pin missing from the clone is read as "the branch no longer holds it", so a busy branch fails the build.
+  it("a shallow clone that does not hold the pin fetches it and reads it; every check says what it found in the log", async () => {
+    const f = await fixture();
+    const pin = await headOf(f.source);
+    for (const n of [1, 2, 3]) {
+      await writeFile(join(f.source, `later-${String(n)}.txt`), `${String(n)}\n`, "utf8");
+      await execFileAsync("git", ["-C", f.source, "add", "."], { env: gitEnv });
+      await execFileAsync("git", ["-C", f.source, "commit", "--quiet", "-m", `later ${String(n)}`], { env: gitEnv });
+    }
+    const shallow: RepositoryMaterializer = async (_repository, target, credential) => {
+      void credential;
+      await execFileAsync("git", ["clone", "--quiet", "--no-checkout", "--depth", "1", pathToFileURL(f.source).href, target], { env: gitEnv });
+    };
+    const runner: CredentialedGitRunner = async (args, options) => execFileAsync("git", [...args], { ...options, env: { ...options.env, GIT_ALLOW_PROTOCOL: "file" }, encoding: "utf8" });
+    const logged: string[] = [];
+    const root = await f.workspace();
+    const manifest = await prepareWorkspace({
+      rootPath: root, project: f.project, readOnly: true, cloneRetry: f.retry, credentialProvider: async () => ({}), materializer: shallow, gitRunner: runner, pullRequestRemote: () => pathToFileURL(f.source).href,
+      pins: [{ repository: "demo", commit: pin }], onDiagnostic: (message) => { logged.push(message); },
+    });
+    expect(manifest.repositories[0]).toMatchObject({ resolvedCommit: pin });
+    expect((await execFileAsync("git", ["-C", join(root, "repo/demo"), "rev-parse", "HEAD"], { env: gitEnv })).stdout.trim()).toBe(pin);
+    // The log names the repository, the ref, the pinned and the resolved commit and the clone's mode (so a failure on prod is decidable).
+    expect(logged.join("\n")).toMatch(new RegExp(`pin check passed.*repository demo, ref origin/main, pinned ${pin}, resolved [a-f0-9]{40}, clone shallow`, "u"));
+    // A refused pin says the same in its error.
+    await expect(prepareWorkspace({ rootPath: await f.workspace(), project: f.project, readOnly: true, cloneRetry: f.retry, credentialProvider: async () => ({}), materializer: flaky(f.source, []), pins: [{ repository: "demo", commit: "b".repeat(40) }], onDiagnostic: (message) => { logged.push(message); } }))
+      .rejects.toThrow(/repository demo, ref origin\/main, pinned b{40}, resolved [a-f0-9]{40}, clone full/u);
+    expect(logged.join("\n")).toMatch(/pin check failed: the pin is not on the branch/u);
+  });
+  // MUTANT history: the check takes any commit the clone holds as "on the branch", so a pin the branch no longer contains (rewritten history, a commit of another ref) is read.
+  it("a pin the branch no longer holds (rewritten history) is refused with the moved sentence, never read", async () => {
+    const f = await fixture();
+    const pin = await headOf(f.source);
+    // The branch is rewritten: a new root commit replaces it, and the old commit stays only as another ref, which a clone of the branch does not bring.
+    await execFileAsync("git", ["-C", f.source, "update-ref", "refs/heads/old-main", pin], { env: gitEnv });
+    const tree = (await execFileAsync("git", ["-C", f.source, "rev-parse", "HEAD^{tree}"], { env: gitEnv })).stdout.trim();
+    const root = (await execFileAsync("git", ["-C", f.source, "commit-tree", tree, "-m", "rewritten"], { env: gitEnv })).stdout.trim();
+    await execFileAsync("git", ["-C", f.source, "update-ref", "refs/heads/main", root], { env: gitEnv });
+    await expect(prepareWorkspace({ rootPath: await f.workspace(), project: f.project, readOnly: true, cloneRetry: f.retry, credentialProvider: async () => ({}), materializer: flaky(f.source, []), pins: [{ repository: "demo", commit: pin }] })).rejects.toThrow(PREPARE_PIN_MOVED_MARKER);
   });
   it("a finished workspace is reused only when it holds each repository at its pin", async () => {
     const f = await fixture();

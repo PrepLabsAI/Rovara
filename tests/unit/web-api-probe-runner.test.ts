@@ -16,6 +16,8 @@ const dirs: string[] = [];
 async function temp() { const dir = realpathSync(await mkdtemp("/tmp/rvrn-")); dirs.push(dir); return dir; }
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
 const challenge = webApiChallenge(Date.now());
+/** The live private targets the private-network probe is handed: a VPC resolver and the host's own address, both private. */
+const LIVE = { resolver: "10.42.0.2", host: "10.42.1.15" };
 
 async function setup(overrides: Partial<Parameters<typeof createWebApiProbeRunner>[0]> = {}, options: { withoutChannel?: boolean } = {}) {
   const fake = new FakeDockerCli();
@@ -23,7 +25,7 @@ async function setup(overrides: Partial<Parameters<typeof createWebApiProbeRunne
   const channelRequests: WebApiProbeModelChannelRequest[] = [];
   // The model channel of an agent probe, as the qualifier supplies it: this stand-in only records what it was asked for (the worker's real one is exercised with a real executor in web-api-probe-runner-local.test.ts).
   const modelChannelFor = (request: WebApiProbeModelChannelRequest) => { channelRequests.push(request); return { open: async () => { throw new Error("not opened in this test"); } }; };
-  const runner = createWebApiProbeRunner({ docker: fake, executorImage: "rovara-executor:test", buildImage: "node:build-test", runRoot, evidenceRoot, challenge, ...(options.withoutChannel === true ? {} : { modelChannelFor }), ...overrides });
+  const runner = createWebApiProbeRunner({ docker: fake, executorImage: "rovara-executor:test", buildImage: "node:build-test", runRoot, evidenceRoot, challenge, liveTargets: LIVE, ...(options.withoutChannel === true ? {} : { modelChannelFor }), ...overrides });
   return { fake, runRoot, evidenceRoot, runner, channelRequests };
 }
 
@@ -85,6 +87,39 @@ describe("the production web/API probe runner", () => {
     for (const probeId of WEB_API_AGENT_PROBE_IDS) {
       const { fake, runRoot, runner } = await setup({}, { withoutChannel: true });
       await expect(runner(probeId)).rejects.toThrow(`no model channel to run ${probeId}`);
+      expect(fake.calls).toEqual([]);
+      expect(await readdir(runRoot)).toEqual([]);
+    }
+  });
+
+  it("the private-network probe is handed its two live targets, which the evidence records; the run networks are IPv4 only; and no other probe is handed them", async () => {
+    const { fake, runner } = await setup();
+    const runId = webApiProbeRunId(challenge, "app-private-denial-v1");
+    fake.exitCodeOfExecutor(2);
+    fake.onExecutor = (outDir) => writeExecutorOutput(outDir, { exitCode: 2, reason: "app-unhealthy", runId, groupId: "unused" });
+    await runner("app-private-denial-v1");
+    const app = fake.calls.find((args) => args[0] === "run" && args.includes("--name") && args[args.indexOf("--name") + 1]!.startsWith("rovara-app-"))!;
+    const env = app.filter((value, at) => app[at - 1] === "-e");
+    expect(env).toContain("ROVARA_PROBE_LIVE_RESOLVER=10.42.0.2");
+    expect(env).toContain("ROVARA_PROBE_LIVE_HOST=10.42.1.15");
+    // IPv4 only: both run networks are created without IPv6, and the app and the executor have no IPv6 stack.
+    for (const create of fake.calls.filter((args) => args[0] === "network" && args[1] === "create")) expect(create).toContain("--ipv6=false");
+    const sysctl = (args: string[]) => args.filter((value, at) => args[at - 1] === "--sysctl");
+    expect(sysctl(app)).toContain("net.ipv6.conf.all.disable_ipv6=1");
+    const executor = fake.calls.find((args) => args[0] === "run" && args.includes("--name") && args[args.indexOf("--name") + 1]!.startsWith("rovara-executor-"));
+    if (executor !== undefined) expect(sysctl(executor)).toContain("net.ipv6.conf.all.disable_ipv6=1");
+    const other = await setup();
+    other.fake.exitCodeOfExecutor(2);
+    other.fake.onExecutor = (outDir) => writeExecutorOutput(outDir, { exitCode: 2, reason: "app-unhealthy", runId: webApiProbeRunId(challenge, "app-host-denial-v1"), groupId: "unused" });
+    await other.runner("app-host-denial-v1");
+    const hostApp = other.fake.calls.find((args) => args[0] === "run" && args.includes("--name") && args[args.indexOf("--name") + 1]!.startsWith("rovara-app-"))!;
+    expect(hostApp.join(" ")).not.toContain("ROVARA_PROBE_LIVE");
+  });
+
+  it("does not run the private-network probe without valid live targets: nothing is staged, nothing is started, the attempt fails closed", async () => {
+    for (const liveTargets of [undefined, { resolver: "1.1.1.1", host: "10.42.1.15" }, { resolver: "10.42.0.2", host: "169.254.169.254" }, { resolver: "10.42.0.2", host: "127.0.0.1" }, { resolver: "10.42.0.2" }, { resolver: "10.42.0.2", host: "10.42.1.15 " }]) {
+      const { fake, runRoot, runner } = await setup({ liveTargets: liveTargets as never });
+      await expect(runner("app-private-denial-v1")).rejects.toThrow("probe-live-targets-missing");
       expect(fake.calls).toEqual([]);
       expect(await readdir(runRoot)).toEqual([]);
     }

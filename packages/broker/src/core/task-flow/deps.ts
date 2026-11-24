@@ -478,6 +478,11 @@ export interface TaskFlowDeps {
    */
   wikiBuildEnded?: (scope: { orgId: string; project: string; taskId: string }) => Promise<void>;
   /**
+   * A wiki build run ended `code_moved` (its preparation found the commit it was pinned to gone from the default branch): takes ONE fresh snapshot and starts the run again over the new pins, answering the new run's task id (core/wiki-build
+   * `resnapshotWikiBuild`). Absent (the dispatcher, which has no code host) or failing: the run stays ended `code_moved` and the next Build or Continue pins again.
+   */
+  wikiBuildResnapshot?: (run: { project: string; taskId: string }) => Promise<string | undefined>;
+  /**
    * The lighter flow, install-wide: a change whose plan is estimated exactly small skips its planning steps (plan check, design review, the requirements, design and plan approvals) and gets, after each push, the
    * reviewer's fixed questions and the quick checks of what it touched; one that grows after the build stops and gets the grown tier's reviews on its current head before it can merge. Off or absent: today's flow.
    * Switching it on needs `tierReviewCall` (construction refuses it without one), and there is no way to switch the reviewer's questions off.

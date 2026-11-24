@@ -59,10 +59,18 @@ export function readGithubWebhookEvent(value: unknown): ReceivedGithubWebhook["e
 
 export const GITHUB_WEBHOOK_SIGNATURE_INVALID = "GitHub webhook signature is invalid";
 
+/**
+ * How the route answers a refusal: "reject" is a 403 (the default), "ignore" is a 202 for a SIGNED delivery that is simply not ours to act on (an unsupported or incomplete payload, a repository outside the
+ * registered scope), "conflict" is a 409 (a delivery id reused with other content). `reason` is a fixed word for the log and the answer; `action` is the payload's own action word, when it was read. Never payload text.
+ */
+export interface GithubWebhookRefusalDetails { kind?: "reject" | "ignore" | "conflict"; reason?: string; action?: string }
+
 export class GithubWebhookRefusal extends Error {
-  constructor(message: string) {
+  readonly details: GithubWebhookRefusalDetails;
+  constructor(message: string, details: GithubWebhookRefusalDetails = {}) {
     super(message);
     this.name = "GithubWebhookRefusal";
+    this.details = details;
   }
 }
 
@@ -78,7 +86,8 @@ export interface ReceiveGithubWebhookInput {
   rawBody: string;
   headers: Record<string, string | undefined>;
   secret: string;
-  authorizeRepository(scope: { installationId: number; repositoryId: number; fullName: string; pullRequestNumber: number }): Promise<boolean>;
+  /** true: authorized. "not_linked": a signed delivery for a repository or pull request no Rovara task tracks (ignored, 202). false: a link exists but the scope disagrees with it (a refusal). */
+  authorizeRepository(scope: { installationId: number; repositoryId: number; fullName: string; pullRequestNumber: number }): Promise<boolean | "not_linked">;
   reserveDelivery(delivery: { deliveryId: string; installationId: number; repositoryId: number; eventHash: string; event: ReceivedGithubWebhook["event"] }): Promise<"reserved" | "retry" | "duplicate" | "conflict">;
 }
 
@@ -128,7 +137,12 @@ async function legacyGithubWorkflowOwnsTask(table: EngineStateTable, taskId: str
 }
 
 /** Requires the PR index, live workflow snapshot, pinned project repo and GitHub App identity to agree. */
-export async function authorizeLinkedGithubWebhook(input: {
+export async function authorizeLinkedGithubWebhook(input: LinkedGithubWebhookInput): Promise<boolean> {
+  return await linkedGithubWebhookVerdict(input) === "authorized";
+}
+
+/** The same check with its reason: "not_linked" when no open Rovara task tracks this pull request (no link row, an ended or core-owned task, a workflow that no longer lists it); "mismatch" when a task does track it but the project, company or live GitHub identity disagrees. */
+export type LinkedGithubWebhookInput = {
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
   scope: { installationId: number; repositoryId: number; fullName: string; pullRequestNumber: number };
@@ -141,28 +155,30 @@ export async function authorizeLinkedGithubWebhook(input: {
   } | undefined } | undefined>;
   repositoryUrl(projectName: string, revision: number, repositoryId: string, task: { companyId?: unknown }): Promise<string | undefined>;
   verifyRepository(url: string, scope: { installationId: number; repositoryId: number; fullName: string }): Promise<boolean>;
-}): Promise<boolean> {
+};
+
+export async function linkedGithubWebhookVerdict(input: LinkedGithubWebhookInput): Promise<"authorized" | "not_linked" | "mismatch"> {
   const linked = await findLinkedGithubWorkflowPullRequest({
     documentClient: input.documentClient,
     tableName: input.tableName,
     repositoryFullName: input.scope.fullName,
     number: input.scope.pullRequestNumber,
   });
-  if (linked === undefined) return false;
-  if (!await legacyGithubWorkflowOwnsTask(input, linked.taskId)) return false;
+  if (linked === undefined) return "not_linked";
+  if (!await legacyGithubWorkflowOwnsTask(input, linked.taskId)) return "not_linked";
   const task = await input.loadTask(linked.taskId);
   const workflow = task?.workflow;
   if (task === undefined || workflow === undefined || !tracksLinkedPullRequests(workflow)
     || !workflow.pullRequests?.some((pullRequest) => pullRequest.repositoryId === linked.repositoryId
       && pullRequest.number === linked.number && pullRequest.url === linked.url
-      && pullRequest.candidateDigest === linked.candidateDigest)) return false;
+      && pullRequest.candidateDigest === linked.candidateDigest)) return "not_linked";
   const repositoryUrl = await input.repositoryUrl(task.project, task.startingRevision, linked.repositoryId, task);
-  if (repositoryUrl === undefined) return false;
-  return input.verifyRepository(repositoryUrl, {
+  if (repositoryUrl === undefined) return "mismatch";
+  return await input.verifyRepository(repositoryUrl, {
     installationId: input.scope.installationId,
     repositoryId: input.scope.repositoryId,
     fullName: input.scope.fullName,
-  });
+  }) ? "authorized" : "mismatch";
 }
 
 /**
@@ -955,7 +971,7 @@ export async function receiveGithubWebhook(input: ReceiveGithubWebhookInput): Pr
   if (deliveryId === undefined || !DELIVERY_ID.test(deliveryId)) throw new GithubWebhookRefusal("GitHub webhook delivery ID is invalid");
   const eventName = headers["x-github-event"];
   if (eventName !== "pull_request" && eventName !== "pull_request_review" && eventName !== "pull_request_review_comment" && eventName !== "issue_comment") {
-    throw new GithubWebhookRefusal("GitHub webhook event type is unsupported");
+    throw new GithubWebhookRefusal("GitHub webhook event type is unsupported", { kind: "ignore", reason: "event_unsupported" });
   }
   let raw: unknown;
   try {
@@ -965,7 +981,7 @@ export async function receiveGithubWebhook(input: ReceiveGithubWebhookInput): Pr
   }
   const parsed = GitHubWebhookPayloadSchema.safeParse(raw);
   const object = parsed.success ? parsed.data : undefined;
-  if (object === undefined) throw new GithubWebhookRefusal("GitHub webhook event payload is unsupported or incomplete");
+  if (object === undefined) throw new GithubWebhookRefusal("GitHub webhook event payload is unsupported or incomplete", { kind: "ignore", reason: "payload_unsupported" });
   let number: number;
   let comment: ReceivedGithubWebhook["event"]["comment"];
   if (eventName === "pull_request" && object.pull_request !== undefined && PULL_REQUEST_ACTIONS.has(object.action)) {
@@ -980,7 +996,7 @@ export async function receiveGithubWebhook(input: ReceiveGithubWebhookInput): Pr
     number = object.issue.number;
     comment = toComment(object.comment, "pr_discussion");
   } else {
-    throw new GithubWebhookRefusal("GitHub webhook event payload is unsupported or incomplete");
+    throw new GithubWebhookRefusal("GitHub webhook event payload is unsupported or incomplete", { kind: "ignore", reason: "payload_unsupported", action: object.action });
   }
   const scope = {
     installationId: object.installation.id,
@@ -988,7 +1004,7 @@ export async function receiveGithubWebhook(input: ReceiveGithubWebhookInput): Pr
     fullName: object.repository.full_name.toLowerCase(),
     pullRequestNumber: number,
   };
-  if (!await input.authorizeRepository(scope)) throw new GithubWebhookRefusal("GitHub webhook repository is outside the registered installation and repository scope");
+  await requireAuthorizedScope(input, scope, object.action);
   const event: ReceivedGithubWebhook["event"] = {
     kind: comment === undefined ? "PULL_REQUEST" : "PR_COMMENT",
     action: object.action,
@@ -1007,12 +1023,19 @@ export async function receiveGithubWebhook(input: ReceiveGithubWebhookInput): Pr
     eventHash: createHash("sha256").update(eventName, "utf8").update("\0").update(input.rawBody, "utf8").digest("hex"),
     event,
   });
-  if (reserved === "conflict") throw new GithubWebhookRefusal("GitHub delivery ID was reused with different content");
+  if (reserved === "conflict") throw new GithubWebhookRefusal("GitHub delivery ID was reused with different content", { kind: "conflict", reason: "delivery_id_reused", action: object.action });
   return {
     delivery: reserved === "duplicate" ? "DUPLICATE" : "ACCEPTED",
     deliveryId,
     event,
   };
+}
+
+/** Not tracked by any Rovara task is not ours to act on (the core path answers 202 for it too); a link that exists but disagrees with the live scope stays a refusal. */
+async function requireAuthorizedScope(input: Pick<ReceiveGithubWebhookInput, "authorizeRepository">, scope: Parameters<ReceiveGithubWebhookInput["authorizeRepository"]>[0], action: string): Promise<void> {
+  const authorized = await input.authorizeRepository(scope);
+  if (authorized === "not_linked") throw new GithubWebhookRefusal("GitHub webhook repository or pull request is not linked to a Rovara task", { kind: "ignore", reason: "not_linked", action });
+  if (authorized !== true) throw new GithubWebhookRefusal("GitHub webhook repository is outside the registered installation and repository scope", { reason: "scope_mismatch", action });
 }
 
 function toComment(input: { id: number; body?: string | null | undefined; html_url: string; updated_at?: string | undefined; path?: string | undefined; line?: number | undefined; diff_hunk?: string | undefined; user: { login: string } }, source: NonNullable<ReceivedGithubWebhook["event"]["comment"]>["source"]): NonNullable<ReceivedGithubWebhook["event"]["comment"]> {

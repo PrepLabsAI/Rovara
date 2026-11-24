@@ -662,6 +662,9 @@ export type ContainerExec = (
   },
 ) => Promise<DevcontainerProcess>;
 
+/** Lane F: an extra exec option the setup agent's shell sets; `containerBashOperations` runs the command under `set -o pipefail` when it is true. A person's command does not set it. */
+export interface PipefailBashOptions { pipefail?: boolean }
+
 /**
  * The agent's shell in a container, each command in its own process group (see devcontainerBashOperations).
  * A timeout or an abort reports back after the stop sequence: the TERM exec, the 5 s grace period (an abort skips what is left
@@ -670,12 +673,14 @@ export type ContainerExec = (
  */
 export function containerBashOperations(exec: ContainerExec, options: ContainerCommandOptions = {}): BashOperations {
   return {
-    async exec(command, cwd, { onData, signal, timeout, env }) {
+    async exec(command, cwd, { onData, signal, timeout, env, ...rest }) {
       if (signal?.aborted) throw new Error("aborted");
+      // Lane F: the setup AGENT's shell asks for pipefail (`pipefail: true` among the options, see `PipefailBashOptions`), so `cmd | tail` fails when `cmd` does. The text run, journaled and reported is the command as typed.
+      const pipefail = (rest as PipefailBashOptions).pipefail === true;
       const run = await runInContainerGroup(exec, {
         groupFilePrefix: "agentx-shell",
         // The agent's command is shell text, so this shell reads it.
-        body: 'eval "$1"',
+        body: pipefail ? 'set -o pipefail && eval "$1"' : 'eval "$1"',
         cwd,
         args: [command],
         ...(timeout !== undefined && timeout > 0 ? { timeoutMs: timeout * 1_000 } : {}),

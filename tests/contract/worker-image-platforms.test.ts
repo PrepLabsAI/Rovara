@@ -102,7 +102,11 @@ describe("the private release path (golden)", () => {
     const calls: string[][] = [];
     const runner = {
       run: (command: string, args: readonly string[]) => { calls.push([command, ...args]); return ""; },
-      aws: (args: readonly string[]) => ({ status: 0, stderr: "", stdout: args.includes("get-login-password") ? "password" : `sha256:${"b".repeat(64)}\n` }),
+      aws: (args: readonly string[]) => args.includes("describe-repositories")
+        ? { status: 0, stderr: "", stdout: "IMMUTABLE\n" }
+        // The tag-is-new check (describe-images before the push) finds nothing; the digest read after the push finds it.
+        : args.includes("describe-images") && !calls.some((call) => call[1] === "push") ? { status: 254, stderr: "ImageNotFoundException", stdout: "" }
+        : { status: 0, stderr: "", stdout: args.includes("get-login-password") ? "password" : `sha256:${"b".repeat(64)}\n` },
     } as unknown as Runner;
     const options: ReleaseOptions = { region: "us-east-1", repository: "agentx-worker-production", allowDirty: false, skipChecks: true, dryRun: false };
     // The smoke test runs the loaded image: stand in for it so no container starts.

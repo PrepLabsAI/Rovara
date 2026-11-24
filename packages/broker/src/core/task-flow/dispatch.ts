@@ -402,6 +402,17 @@ async function abandon(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessag
   return "dropped";
 }
 
+/**
+ * A pinned preparation reads exactly the repositories it pinned: the worker refuses any repository it prepares that has no pin, and a wiki build pins only the repositories its file map could read, so one unreadable repository must
+ * not fail the build for all of them (prod 2026-11-23). Without pins (every ordinary task and setup run) the project goes as it is. A sentence when none of the project's repositories is pinned.
+ */
+function onlyPinned<P extends { repositories: ReadonlyArray<{ name: string }> }>(project: P | string, pins: unknown): P | string {
+  if (typeof project === "string" || !Array.isArray(pins)) return project;
+  const pinned = new Set((pins as Array<{ repository?: unknown }>).map((pin) => pin.repository));
+  const repositories = project.repositories.filter((repository) => pinned.has(repository.name));
+  return repositories.length === 0 ? "none of the project's repositories has a pinned commit" : { ...project, repositories };
+}
+
 /** Builds the worker's invocation, or a sentence saying why this operation cannot be sent to this worker. */
 async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, workspace: WorkspaceRecord, features: readonly string[], standing: StandingInstructionsPayload | undefined, stepModel?: Extract<StepModelOutcome, { ok: true }>): Promise<WorkerInvocation | string> {
   const spec = operation.dispatch;
@@ -466,15 +477,16 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
   if (spec.kind === "prepare") {
     const project = await deps.projects.revision(workspace.projectName, workspace.projectRevision);
     if (project === undefined) return "the project revision this task was started on is gone";
-    const forWorker = toWorker(project.definition);
-    if (typeof forWorker === "string") return forWorker;
+    // A pinned preparation reads exactly the repositories it pinned (see `onlyPinned`).
+    const sent = onlyPinned(toWorker(project.definition), spec.payload["pins"]);
+    if (typeof sent === "string") return sent;
     // L4-NETG follow-up (DEC 254zzz90): the exact S3 hosts the project's allowed websites name, for a worker that lists the feature and only when there are some. The gateway-mode worker publishes them to its host's egress gateway; the allowed
     // websites themselves were approved through the existing audited flow (customer role and company checks), so this adds no route and no permission. Scope, said plainly (owner DEC 254zzz90, review M1/M2): there is NO Rovara staff step on this lift
     // (for the install's own region the VPC list already allows `*.s3.<region>`), and one lifted bucket host is region-wide S3 for that project's sandboxes (the gateway sees the TLS name; S3 routes by Host inside TLS).
     const s3Hosts = features.includes(PREPARE_EGRESS_S3_FEATURE) ? projectAllowedS3Hosts(project.definition.network?.allowedDomains) : [];
     payload = {
       ...payload,
-      project: forWorker,
+      project: sent,
       ...(s3Hosts.length === 0 ? {} : { egressS3Allow: s3Hosts }),
       repositoryGrant: deps.repositoryGrants.issue({
         ownerKey: workspace.ownerKey, projectName: workspace.projectName, workspaceId: workspace.id, operationId: operation.id,

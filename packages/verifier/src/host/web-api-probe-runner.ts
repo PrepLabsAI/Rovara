@@ -1,7 +1,7 @@
 import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { E2E_CHROMIUM_SANDBOX_FILE, WEB_API_AGENT_PROBE_GOAL, WEB_API_AGENT_PROBE_LIMITS, WEB_API_AGENT_PROBE_ROUTE, WEB_API_REQUIRED_PROBES, canonicalJson, webApiProbeRunId, type RuntimeInstallChallenge, type WebApiProbeEvidence,
-  type WebApiProbeRun } from "@agentx/contracts";
+import { E2E_CHROMIUM_SANDBOX_FILE, WEB_API_AGENT_PROBE_GOAL, WEB_API_AGENT_PROBE_LIMITS, WEB_API_AGENT_PROBE_ROUTE, WEB_API_PROBE_LIVE_TARGET_ENV, WEB_API_REQUIRED_PROBES, WebApiProbeLiveTargetsSchema, canonicalJson, webApiProbeRunId, type RuntimeInstallChallenge, type WebApiProbeEvidence,
+  type WebApiProbeLiveTargets, type WebApiProbeRun } from "@agentx/contracts";
 import { collectE2EApplicationRun } from "../application-collection.js";
 import { loadWebApiQualificationProbeAssets, type E2EAgentProbeScriptTurn } from "../application-runtime-probes.js";
 import { e2eApplicationGroupAgentSteps } from "../application-scenarios.js";
@@ -45,6 +45,11 @@ export type WebApiProbeRunnerDeps = Readonly<{
   /** The pre-created private directory the retained probe evidence is written under. */
   evidenceRoot: string;
   challenge: RuntimeInstallChallenge;
+  /**
+   * The live private targets the private-network probe is handed (see `WebApiProbeLiveTargetsSchema`): the runner's real VPC resolver and its own private address, both known to answer from the host side.
+   * Without them that probe does not run (its attempt is `probe-live-targets-missing`), so the qualification cannot pass on addresses nothing answers on.
+   */
+  liveTargets?: WebApiProbeLiveTargets;
   /** Test seams: another copy of the app and of the probe assets (both still checked against their pins), the clock, the collector and the run's time limit. */
   qualificationAppRoot?: string;
   probeAssetsRoot?: string;
@@ -52,6 +57,30 @@ export type WebApiProbeRunnerDeps = Readonly<{
   collect?: typeof collectE2EApplicationRun;
   probeTimeoutMs?: number;
 }>;
+
+/** The live private targets a probe is handed: valid ones for the probe that pins them (anything else is `probe-live-targets-missing`, before anything is staged), none for every other probe. */
+function liveTargetsFor(probeId: string, given: WebApiProbeLiveTargets | undefined): WebApiProbeLiveTargets | undefined {
+  if (WEB_API_REQUIRED_PROBES.find((probe) => probe.probeId === probeId)?.liveTargets !== true) return undefined;
+  const parsed = WebApiProbeLiveTargetsSchema.safeParse(given);
+  if (!parsed.success) throw new Error("probe-live-targets-missing");
+  return parsed.data;
+}
+/** The variables the guard of the private-network probe reads its live targets from. */
+const liveTargetEnv = (live: WebApiProbeLiveTargets | undefined): Record<string, string> => (live === undefined ? {} : { [WEB_API_PROBE_LIVE_TARGET_ENV.resolver]: live.resolver, [WEB_API_PROBE_LIVE_TARGET_ENV.host]: live.host });
+
+/**
+ * The evidence of a run the collector read: the scenario bundle that ran, the collector's collection and oracle, the executor's blocked-requests file for a web probe, its Chromium sandbox attestation
+ * for the probe that retains it (`undefined` for every other), and the live targets for the probe that was handed them.
+ */
+function collectedEvidence(input: { runId: string; bundle: unknown; collection: unknown; oracle: unknown; web: boolean; blockedRequests: Uint8Array | null; chromiumSandbox: Uint8Array | null | undefined;
+  liveTargets: WebApiProbeLiveTargets | undefined }): WebApiProbeEvidence {
+  const json = (value: unknown) => JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+  const base64 = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64");
+  return { kind: "collected", runId: input.runId, scenarioBundle: json(input.bundle), collection: json(input.collection), oracle: json(input.oracle),
+    blockedRequestsBase64: input.web && input.blockedRequests !== null ? base64(input.blockedRequests) : null,
+    ...(input.chromiumSandbox === undefined ? {} : { chromiumSandboxBase64: input.chromiumSandbox === null ? null : base64(input.chromiumSandbox) }),
+    ...(input.liveTargets === undefined ? {} : { liveTargets: input.liveTargets }) };
+}
 
 const reasonOf = (text: string | null | undefined) => (text && text.length > 0 ? text : "unavailable").slice(0, 200);
 
@@ -73,6 +102,8 @@ export function createWebApiProbeRunner(deps: WebApiProbeRunnerDeps): (probeId: 
     const driver = webApiProbeDriver(probeId);
     if (!WEB_API_REQUIRED_PROBES.some((probe) => probe.probeId === probeId)) throw new Error(`no probe plan for ${probeId}`);
     if (driver.agent !== undefined && deps.modelChannelFor === undefined) throw new Error(`no model channel to run ${probeId}`);
+    // The private-network probe is handed live targets, validated here and again by its guard; without valid ones it does not start.
+    const liveTargets = liveTargetsFor(probeId, deps.liveTargets);
     // The probe assets the plan is built from are the pinned ones, or nothing starts.
     loadWebApiQualificationProbeAssets(deps.probeAssetsRoot);
     const runId = webApiProbeRunId(deps.challenge, probeId);
@@ -87,7 +118,7 @@ export function createWebApiProbeRunner(deps: WebApiProbeRunnerDeps): (probeId: 
       // The qualification policy of an agent probe pins the scripted route (no spend, no provider) and the limits the broker derives from its budgets.
       const plan = createWebApiProbePlan({ probe: driver.probe, appRoot: staged, runId, ...(driver.mock === true ? { mock: true } : {}),
         ...(driver.agent === undefined ? {} : { modelRoute: { ...WEB_API_AGENT_PROBE_ROUTE }, routeLimits: { ...WEB_API_AGENT_PROBE_LIMITS } }),
-        recipeStart: { env: { ...(driver.defect ? { ORDERS_TEST_DEFECT_FILE: DEFECT_FILE_IN_OWNED_MOUNT } : {}), ...driver.appEnv }, ...(driver.startArgs ? { args: [...driver.startArgs] } : {}) },
+        recipeStart: { env: { ...(driver.defect ? { ORDERS_TEST_DEFECT_FILE: DEFECT_FILE_IN_OWNED_MOUNT } : {}), ...driver.appEnv, ...liveTargetEnv(liveTargets) }, ...(driver.startArgs ? { args: [...driver.startArgs] } : {}) },
         ...(driver.recipeBuild ? { recipeBuild: driver.recipeBuild.map((command) => ({ ...command, args: [...command.args], env: { ...command.env } })) } : {}) });
       let blockedRequests: Uint8Array | null = null;
       let chromiumSandbox: Uint8Array | null = null;
@@ -118,10 +149,8 @@ export function createWebApiProbeRunner(deps: WebApiProbeRunnerDeps): (probeId: 
         const resolved = resolveE2EExecutorSuite(plan.plan);
         const collected = collect({ actual: run.actualRun, compiled: resolved.suite, binding: resolved.binding, round: resolved.round, ...inputs, roundScope: "qualification" });
         evidence = collected.collection === null || collected.oracle === null ? unavailable(collected.unavailableReason ?? "collector-unavailable")
-          : { kind: "collected", runId, scenarioBundle: JSON.parse(JSON.stringify(plan.compiled.bundle)) as Record<string, unknown>,
-            collection: JSON.parse(JSON.stringify(collected.collection)) as Record<string, unknown>, oracle: JSON.parse(JSON.stringify(collected.oracle)) as Record<string, unknown>,
-            blockedRequestsBase64: driver.probe.startsWith("web-") && blockedRequests !== null ? Buffer.from(blockedRequests).toString("base64") : null,
-            ...(retainsSandbox ? { chromiumSandboxBase64: chromiumSandbox === null ? null : Buffer.from(chromiumSandbox).toString("base64") } : {}) };
+          : collectedEvidence({ runId, bundle: plan.compiled.bundle, collection: collected.collection, oracle: collected.oracle, web: driver.probe.startsWith("web-"), blockedRequests,
+            chromiumSandbox: retainsSandbox ? chromiumSandbox : undefined, liveTargets });
       }
       const derived = deriveWebApiProbeObservation({ challenge: deps.challenge, probeId, evidence });
       if (!derived.ok) throw new Error(derived.reason);

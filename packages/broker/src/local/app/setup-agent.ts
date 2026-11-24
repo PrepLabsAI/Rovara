@@ -13,6 +13,7 @@ import { codeHostForRecord } from "../../plugins/routing.js";
 import { listProjects } from "./projects.js";
 import { startTask } from "../../core/task-flow/start.js";
 import type { TaskCaller, TaskStartCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
+import { carriesOverField } from "../../core/setup-agent/carry-over.js";
 import { readState, startSetupAgent, stopSetupAgent, verifiedView, getSetupAgent, type SetupAgentView } from "../../core/setup-agent/agent.js";
 import { createEvalSpendSubject, EVAL_SPEND_KIND, readEvalSpendItem } from "../../core/setup-agent/eval-spend.js";
 import { evalReachesView } from "../../core/setup-agent/eval-dependency-list.js";
@@ -113,7 +114,7 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
     store, companyId, now: options.now, flow, modelAccessConfigured: await options.modelAccessConfigured(),
     starter: {
       async start(request) {
-        const started = await startTask(flow, callerOf(principal), { requestId: request.requestId, project: request.project, instructions: request.text, title: `Set up ${request.project}` }, { setupAgent: { limits: request.limits, seenTaskId: request.seenTaskId } });
+        const started = await startTask(flow, callerOf(principal), { requestId: request.requestId, project: request.project, instructions: request.text, title: `Set up ${request.project}` }, { setupAgent: { limits: request.limits, seenTaskId: request.seenTaskId, carryOver: request.carryOver } });
         return { taskId: started.task.taskId, duplicate: started.duplicate };
       },
       async cancel(request) { await control.cancelTask(request.taskId, request.requestId); },
@@ -155,7 +156,10 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
     const deps = await depsFor();
     const latest = await deps.latest(project);
     if (latest === undefined) return undefined;
-    const state: SetupAgentView = await verifiedView(deps, latest.definition, (await readState(deps, project, latest.revision)).view);
+    const read = await readState(deps, project, latest.revision);
+    const state: SetupAgentView = await verifiedView(deps, latest.definition, read.view);
+    // DEC 254zzz431: the page says a new run starts from the last run's findings only when the start would build them (the start's own rule).
+    const carriesOver = await carriesOverField({ store, companyId, now: options.now }, project, read);
     const full = await flow.projects.latest(project);
     const check = full === undefined ? { status: "unchecked" as const } : await setupStateOf(flow, project, full.definition);
     const asks = await listHostAsks({ store, now: options.now }, companyId, project, ["open", "approved", "refused"]);
@@ -183,7 +187,7 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
     const cannotStart = !options.enabled ? "Setting a project up with Rovara is off on this install." : (await options.modelAccessConfigured()) ? undefined : "Rovara has no model key on this install, so it cannot run a setup. Set a model key, then restart `rovara up`.";
     return {
       project, revision: latest.revision, status: state.status, ...(state.failure === undefined ? {} : { failure: state.failure }), ...(state.stoppedBy === undefined ? {} : { stoppedBy: state.stoppedBy.name }),
-      limits: state.limits, ...(cannotStart === undefined ? {} : { cannotStart }),
+      limits: state.limits, ...(cannotStart === undefined ? {} : { cannotStart }), ...carriesOver,
       ...(!options.enabled ? {} : { standInWriter: standInWriterCard({ connected: await options.modelAccessConfigured(), capCents: state.limits.budgetCents }).words }),
       ...(state.summary === undefined ? {} : { summary: { commandsRun: state.summary.commandsRun, spendCents: state.summary.spendCents, elapsedMin: Math.round(state.summary.elapsedMs / 60_000), hostAsks: state.summary.hostAsks, partial: state.summary.partial, stop: state.summary.stop } }),
       items, verified: state.verified === true, ...(evalSpend === undefined ? {} : { evalSpend }), ...(evalDiscovery === undefined ? {} : { evalDiscovery }), ...(evalReaches === undefined ? {} : { evalReaches: { words: evalReaches.words } }),

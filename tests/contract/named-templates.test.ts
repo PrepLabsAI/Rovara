@@ -19,8 +19,10 @@ import { createHash } from "node:crypto";
 import { withoutBatchFAdditions } from "../support/batch-f-template.js";
 import { withoutBrokerMemberConditionCheck } from "../support/broker-member-condition-check-template.js";
 import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js";
+import { withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
 
 skipLambdaBundling();
+const STAGING = { alarmName: "agentx-staging-SessionStuckStopping", namespace: "AgentX/staging", env: "staging" };
 
 type Resource = { Type: string; Properties: Record<string, unknown> };
 type Statement = { Sid?: string };
@@ -293,12 +295,13 @@ describe("named environment templates", () => {
   for (const stack of stacks) {
     if (stack.stackName === "agentx-staging-control-plane") {
       it("removing only Batch F additions preserves code/next's agentx-staging-control-plane template", () => {
-        const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(normalizedTemplate(stack)));
+        const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(withoutStuckStoppingAlarm(normalizedTemplate(stack), STAGING)));
         expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("ef7ec71baeba564d5fa957374727f876d1602a7a43ced9676ff93219402c04dd");
       }, 120_000);
     }
     it(`${stack.stackName} is unchanged`, () => {
-      let template = normalizedTemplate(stack);
+      // DEC 254zzz432: the alarm is taken out first, so every pin below holds as recorded (checked to be exactly one resource).
+      let template = stack.stackName === "agentx-staging-control-plane" ? withoutStuckStoppingAlarm(normalizedTemplate(stack), STAGING) : normalizedTemplate(stack);
       // SIGNIN-MEMBER-CONDITIONCHECK, DEC 254zzz282 B014-A: pin the new full synth
       // before the existing normalizers, then preserve every old policy/snapshot assertion.
       if (stack.stackName === "agentx-staging-control-plane") {

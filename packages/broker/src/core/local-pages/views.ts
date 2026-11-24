@@ -324,6 +324,8 @@ export interface SetupPageView {
   cannotStart?: string;
   /** L4-E7: what the run's sample-data writer does and costs (or that an AI must be connected first), in fixed words; shown beside the run's limits, before the run. */
   standInWriter?: string;
+  /** DEC 254zzz431: a new run would start from what the last run found (the broker built the carry-over from the same rule a start uses). Absent: it would start from nothing, and the page says nothing of it. */
+  carriesOver?: true;
   summary?: { commandsRun: number; spendCents: number; elapsedMin: number; hostAsks: number; partial: boolean; stop: string };
   items: SetupItemView[];
   verified: boolean;

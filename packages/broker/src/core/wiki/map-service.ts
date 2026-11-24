@@ -16,8 +16,8 @@ export const repositoryKeyOf = (repository: { url: string; defaultBranch: string
 export interface WikiMapService {
   /** The kept map of this project in this company, if it is fresh and the project's repositories (`repositoryKeyOf`) are the same ones; else undefined. */
   read(companyId: OrgId, project: string, repositoryKeys: readonly string[]): WikiFileMap | undefined;
-  /** Makes (or, within `reuseMs`, reuses) the map. */
-  make(companyId: OrgId, project: string, repositories: readonly FileMapRepository[], scope: HostScope): Promise<WikiFileMap>;
+  /** Makes (or, within `reuseMs`, reuses) the map. `force`: makes a new one even when one was made a moment ago (a map known to be pinned to a commit the branch no longer holds). */
+  make(companyId: OrgId, project: string, repositories: readonly FileMapRepository[], scope: HostScope, options?: { force?: boolean }): Promise<WikiFileMap>;
 }
 
 // Like W0's cache, map admission is local to this broker process. Separate
@@ -42,11 +42,11 @@ export function createWikiMapService(options: { now: () => number; ttlMs?: numbe
       const entry = kept.get(keyOf(companyId, project));
       return fresh(entry, urlsOf(repositoryKeys), ttlMs) ? entry.map : undefined;
     },
-    async make(companyId, project, repositories, scope) {
+    async make(companyId, project, repositories, scope, makeOptions) {
       const key = keyOf(companyId, project);
       const urls = urlsOf(repositories.map(repositoryKeyOf));
       const existing = kept.get(key);
-      if (fresh(existing, urls, reuseMs)) return existing.map;
+      if (makeOptions?.force !== true && fresh(existing, urls, reuseMs)) return existing.map;
       const joined = running.get(`${key}\u0000${urls}`);
       if (joined !== undefined) return joined;
       const active = activeMaps.get(companyId) ?? 0;

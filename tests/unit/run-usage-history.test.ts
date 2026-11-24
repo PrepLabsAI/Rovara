@@ -76,3 +76,55 @@ it("uses full stored comparisons for learning and falls back safely for a restri
  expect(fallback.range).toEqual(available({ lowMicros: 1_000_000, highMicros: 3_000_000 }));
  expect(fallback.inputs.optionsVersion.state).toBe("unavailable");
 });
+
+// A setup run has no merge stage, so "MERGED" can never say it finished: its label comes from the end the broker stored on the task (a proposal, a person's Stop, a spent budget, a fault).
+describe("a setup run's RUN_USAGE outcome follows how the run ended, not the merge stage", () => {
+  const sampleOf = async (stored: Record<string, unknown>, extra: Record<string, unknown> = {}) => {
+    const store = new MemoryDocumentStore();
+    const task = { companyId, taskId: "setup", project: "web", purpose: "setup_agent" as const };
+    await store.put({ item: { pk: "DEVTASK#setup", sk: "META", ...task, ...stored } });
+    await recordClosedRunUsage({ store }, { ...task, ...extra }, at);
+    return RunUsageSampleV1Schema.parse((await store.get(runUsageKey(companyId, "web", "setup")))?.["sample"]);
+  };
+  const ready = { status: "ready", stop: "proposed", proposal: {}, summary: {} };
+  it("a run that ended with a proposal (stop=proposed) is completed", async () => {
+    expect((await sampleOf({ setupAgentResult: ready })).outcome).toBe("completed");
+  });
+  it("a person's Stop is cancelled, with the result stored or only the stop mark on the task", async () => {
+    expect((await sampleOf({ setupAgentResult: { status: "failed", stop: "stopped_by_person", failure: "x" }, setupAgentStop: { by: "ada", at } })).outcome).toBe("cancelled");
+    expect((await sampleOf({ setupAgentStop: { by: "ada", at } })).outcome).toBe("cancelled");
+  });
+  it("a fault (infrastructure, a machine that could not go on, no stored end) is failed", async () => {
+    expect((await sampleOf({ setupAgentResult: { status: "failed", stop: "infrastructure", failure: "x" } })).outcome).toBe("failed");
+    expect((await sampleOf({ setupAgentResult: { status: "failed", stop: "needs_code_change", failure: "x" } })).outcome).toBe("failed");
+    expect((await sampleOf({})).outcome).toBe("failed");
+  });
+  it("a spent budget stays cap_stopped, and a run with a proposal is completed even when a Stop was pressed late", async () => {
+    expect((await sampleOf({ setupAgentResult: { status: "failed", stop: "budget_used", failure: "x" } })).outcome).toBe("cap_stopped");
+    expect((await sampleOf({ setupAgentResult: ready, setupAgentStop: { by: "ada", at } })).outcome).toBe("completed");
+  });
+  it("is read from the stored task: the copy handed to the close (read before the end was written) does not decide", async () => {
+    expect((await sampleOf({ setupAgentResult: ready }, { setupAgentResult: undefined })).outcome).toBe("completed");
+  });
+  it("the setup rule needs only the stored purpose, and a spent cap on the run still says cap_stopped", async () => {
+    expect((await sampleOf({ setupAgentResult: ready }, { purpose: undefined })).outcome).toBe("completed");
+    expect((await sampleOf({ setupAgentResult: ready }, { workflow: { blockReason: "the monthly spend cap was reached" } })).outcome).toBe("cap_stopped");
+  });
+  it("an ordinary unmerged task is still cancelled (the setup rule is only for setup runs)", async () => {
+    const store = new MemoryDocumentStore();
+    const task = { companyId, taskId: "plain", project: "web", workflow: { path: "QUICK", stage: "IMPLEMENT" } };
+    await store.put({ item: { pk: "DEVTASK#plain", sk: "META", ...task, setupAgentResult: ready } });
+    await recordClosedRunUsage({ store }, task, at);
+    expect(RunUsageSampleV1Schema.parse((await store.get(runUsageKey(companyId, "web", "plain")))?.["sample"]).outcome).toBe("cancelled");
+  });
+});
+
+describe("REVIEW: a setup run that ends ready with a spent budget (partial proposal) is cap_stopped", () => {
+  it("status ready + stop budget_used", async () => {
+    const store = new MemoryDocumentStore();
+    const task = { companyId, taskId: "setup2", project: "web", purpose: "setup_agent" as const };
+    await store.put({ item: { pk: "DEVTASK#setup2", sk: "META", ...task, setupAgentResult: { status: "ready", stop: "budget_used", proposal: {}, summary: {} } } });
+    await recordClosedRunUsage({ store }, task, at);
+    expect(RunUsageSampleV1Schema.parse((await store.get(runUsageKey(companyId, "web", "setup2")))?.["sample"]).outcome).toBe("cap_stopped");
+  });
+});

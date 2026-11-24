@@ -1,4 +1,4 @@
-import { RunPriceSchema, OrgIdSchema, type RunPrice } from "@agentx/contracts";
+import { RunPriceSchema, OrgIdSchema, runPriceWithBaseBand, type RunPrice } from "@agentx/contracts";
 import { boundedText, signServiceToken, type OfferedModelsHttpInputs } from "./offered-models-http.js";
 /** Existing signed company price read; never a display-price or cross-provider catalog substitute. */
 export function runPriceReader(input: OfferedModelsHttpInputs): (companyId: string, model: string) => Promise<RunPrice | undefined> {
@@ -13,10 +13,11 @@ export function runPriceReader(input: OfferedModelsHttpInputs): (companyId: stri
         method: "GET", redirect: "error", signal: abort.signal, headers: { accept: "application/json", authorization: `Bearer ${token}` },
       });
       if (response.status !== 200) { await response.body?.cancel().catch(() => undefined); return undefined; }
-      const body = JSON.parse(await boundedText(response, 65_536)) as { runPrice?: unknown } | null;
+      const body = JSON.parse(await boundedText(response, 65_536)) as { runPrice?: unknown; runPriceBaseBand?: unknown } | null;
       const parsed = RunPriceSchema.safeParse(body?.runPrice);
       if (!parsed.success || parsed.data.companyId !== companyId || parsed.data.model !== model || parsed.data.expiresAt <= (input.now?.() ?? Date.now())) return undefined;
-      return parsed.data;
+      // PRICE-BANDS: the quote's base band, when the gateway states one (an older gateway does not: the pooled ceiling alone, as before). One that is not inside the pooled rates is left out.
+      return runPriceWithBaseBand(parsed.data, body?.runPriceBaseBand);
     };
     try { return await Promise.race([read(), timeout]); } catch { return undefined; }
     finally { clearTimeout(timer); }

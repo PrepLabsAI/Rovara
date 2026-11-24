@@ -37,6 +37,15 @@ export const SETUP_ITEM_LIMITS = {
 export const DEVCONTAINER_PATH_PATTERN = /^(?:\.devcontainer\/(?:(?![.]+\/)[A-Za-z0-9_.-]{1,64}\/)?devcontainer\.json|\.devcontainer\.json)$/u;
 const SECRET_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/u;
 
+/** Lane F: the least time (seconds) a setup or test command may be given when a model chooses the limit. Real test suites take minutes; 185 s and 125 s timeouts were a model's own guess. */
+export const SETUP_COMMAND_MIN_TIMEOUT_SECONDS = 600;
+/** The most time (seconds) one setup or test command may be given. */
+export const SETUP_COMMAND_MAX_TIMEOUT_SECONDS = 3_600;
+/** A recorded time limit as a whole number of seconds between the least and the most; `undefined` for anything that is not a finite number. */
+export function clampSetupCommandTimeout(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? Math.min(SETUP_COMMAND_MAX_TIMEOUT_SECONDS, Math.max(SETUP_COMMAND_MIN_TIMEOUT_SECONDS, Math.round(value))) : undefined;
+}
+
 const commandLine = z.string().min(1).max(SETUP_COMMAND_MAX_CHARS);
 const commandList = z.array(commandLine).min(1).max(SETUP_COMMANDS_MAX);
 
@@ -50,7 +59,14 @@ const HttpsRepositoryUrl = z.string().max(2_048).superRefine((value, context) =>
 });
 
 export const SetupRepositoryValueSchema = z.object({ name: AgentXNameSchema, url: HttpsRepositoryUrl, defaultBranch: GitBranchNameSchema.optional() }).strict();
-export const SetupCommandsValueSchema = z.object({ repo: AgentXNameSchema, commands: commandList }).strict();
+/**
+ * One setup or test item. `timeoutSeconds` (lane F, optional so every proposal stored before it reads as before): how long each command of the item may run, recorded by the setup agent from what it saw and
+ * editable by an admin; later runs use it. Absent: today's limits (900 s for setup, 1,800 s for tests).
+ */
+export const SetupCommandsValueSchema = z.object({
+  repo: AgentXNameSchema, commands: commandList,
+  timeoutSeconds: z.number().int().min(SETUP_COMMAND_MIN_TIMEOUT_SECONDS).max(SETUP_COMMAND_MAX_TIMEOUT_SECONDS).optional(),
+}).strict();
 export const SetupCheckValueSchema = z.object({ name: z.string().trim().min(1).max(80), repo: AgentXNameSchema, command: commandLine }).strict();
 export const SetupTestEnvironmentValueSchema = z.object({ hint: z.string().trim().min(1).max(500) }).strict();
 export const SetupDevcontainerValueSchema = z.object({

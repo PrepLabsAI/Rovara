@@ -9,6 +9,7 @@ import { withoutDispatcherHookSigner } from "../support/dispatcher-hook-signer-t
 import { withoutWorkerSandboxEgress } from "../support/worker-sandbox-egress-template.js";
 import { Template } from "aws-cdk-lib/assertions";
 import { createHash } from "node:crypto";
+import { stuckStoppingInstall, withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
 import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
@@ -21,6 +22,7 @@ import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { removePackedPieces, unpackedBrokerVariables, withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
 import { withoutSlackCompanyMode } from "../support/slack-company-template.js";
 import { withoutBrokerMemberConditionCheck } from "../support/broker-member-condition-check-template.js";
+import { withoutLegacyRuntimeBoundary } from "../support/legacy-runtime-boundary-template.js";
 import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js";
 
 skipLambdaBundling();
@@ -335,8 +337,8 @@ describe("the named TEST proof-only installation gate", () => {
     for (const { label, template: installedTemplate, withRoute, withoutRoute, beforeStepUpRemoval, beforeCapabilityRoutes } of digestCases) {
       // Assert and remove only the new broker member statement and first-gateway
       // output; retain the creator fence and every historical parent/reversal pin.
-      // Webhook lane W3: the webhook secret slot, its throttle and its alarm are asserted and taken out too (tests/support/webhook-secret-template.ts).
-      const template = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(installedTemplate));
+      // Webhook lane W3 + DEC 254zzz432: the webhook secret slot and the stuck-stopping alarm are asserted and taken out too, so the pins hold as recorded.
+      const template = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutStuckStoppingAlarm(structuredClone(installedTemplate), stuckStoppingInstall(label === "named" ? "agentxlivetest123" : label === "foreign" ? "staging" : undefined))));
       expect(template.Outputs?.ModelRunPriceVersion, label).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
       delete template.Outputs?.ModelRunPriceVersion;
       const creatorChecks = developerSignInConditionCheckEntries(template);
@@ -364,7 +366,7 @@ describe("the named TEST proof-only installation gate", () => {
       // L4-HW8b: the broker's Slack poster variables and the Slack adapter secret's policy (tests/support/broker-slack-poster-template.ts) are asserted and taken out too; the legacy template has none.
       // CORE-DISPATCH-HOOK-SIGNER-20261117: the dispatcher's question signer is asserted and taken out (tests/support/dispatcher-hook-signer-template.ts); legacy has none.
       const environment = label === "named" ? "agentxlivetest123" : "staging";
-      const pinned = label === "legacy" ? template : withoutWorkerSandboxEgress(withoutDispatcherHookSigner(withoutGithubSignIn(withoutBrokerNamesParameter(withoutCompanyImportReads(withoutChatGptKeyDeny(withoutSavedEnvSwitch(withoutSavedEnvImages(withoutBrokerSlackPoster(structuredClone(template), environment), environment))))), environment)));
+      const pinned = label === "legacy" ? withoutLegacyRuntimeBoundary(template) : withoutWorkerSandboxEgress(withoutDispatcherHookSigner(withoutGithubSignIn(withoutBrokerNamesParameter(withoutCompanyImportReads(withoutChatGptKeyDeny(withoutSavedEnvSwitch(withoutSavedEnvImages(withoutBrokerSlackPoster(structuredClone(template), environment), environment))))), environment)));
       // L4-HARD (c): the ChatGPT key's Deny is asserted and taken out too (tests/support/chatgpt-key-deny-template.ts); legacy has none.
       expect(parentRemainderDigest(pinned, label !== "legacy"), `${label} parent remainder with the route`).toBe(withRoute);
       const priorRemainder = structuredClone(pinned);
