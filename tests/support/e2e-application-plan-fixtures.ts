@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
-  E2EApplicationPlanIntentSchema, E2ERegisteredRuntimeSchema, E2EPolicySchema, E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, WEB_API_RUNTIME_PROFILE_ID, canonicalJson, createCandidateManifest,
+  E2EApplicationPlanIntentSchema, E2ERegisteredRuntimeSchema, E2EPolicySchema, E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, SANDBOX_EGRESS_PROBE_IDS, WEB_API_REQUIRED_PROBES, WEB_API_RUNTIME_PROFILE_ID, canonicalJson, createCandidateManifest,
   deriveE2EApplicationRuntimeAccountRef, deriveE2ESyntheticRuntimeAccountRef, e2eAnonymousRuntimeAccountRef, inspectE2EApplicationRepository, withE2EAnonymousTargets, e2eApplicationMetadataSourceRefs, e2eRuntimeCapabilityDigest, inspectE2ERepository, proposeE2ESetup,
   type E2EPolicy, type E2EScenario, type E2ESourceSnapshot,
 } from "@agentx/contracts";
@@ -19,6 +19,12 @@ export const ordersContractManifest = readFileSync(new URL("../fixtures/e2e-web-
 export const binding = { deploymentMode: "ec2-ebs" as const, launchTemplateId: "lt-0123456789abcdef",
   subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef" }], volumeSizeGiB: 32, volumeType: "gp3" as const };
 
+/** The probes a registered row of this kind lists, as the registrar writes them (`e2eWebApiRuntimeRecords`): its own kind's probes, the build probes and every egress probe, so each row proves the sandbox. */
+export function registeredProbeIds(kind: "web" | "api") {
+  const own = WEB_API_REQUIRED_PROBES.filter((probe) => probe.kind === kind || probe.kind === "build" || SANDBOX_EGRESS_PROBE_IDS.includes(probe.probeId));
+  return { positiveProbeIds: own.filter((probe) => probe.expectedOutcome === "PASS").map((probe) => probe.probeId), negativeProbeIds: own.filter((probe) => probe.expectedOutcome === "EXPECTED_FAILURE").map((probe) => probe.probeId) };
+}
+
 /** One v2 catalog row of the qualified profile, carrying the real registered capability descriptor of its kind. */
 export function webApiRow(kind: "web" | "api", overrides: Record<string, unknown> = {}, editCapabilities: (value: ReturnType<typeof webApiRuntimeCapabilities>) => ReturnType<typeof webApiRuntimeCapabilities> = (value) => value) {
   const capabilities = editCapabilities(webApiRuntimeCapabilities(kind, "a".repeat(64)));
@@ -27,7 +33,7 @@ export function webApiRow(kind: "web" | "api", overrides: Record<string, unknown
   const runnerToolchain = { execPath: "/opt/node/bin/node", version: "v22.23.2" as const, platform: "linux", arch: "arm64" };
   const probeBody = { schemaVersion: "e2e-runtime-probe-manifest/v1" as const, profileId: PROFILE, capabilityDigest,
     runtimeManifestDigest: capabilities.runtimeManifestDigest, suiteDigest: "c".repeat(64), fixtureRefs: [{ path: "fixtures/smoke.json", sha256: "d".repeat(64) }],
-    positiveProbeIds: ["web-csv-positive"], negativeProbeIds: ["web-csv-negative"] };
+    ...registeredProbeIds(kind) };
   return E2ERegisteredRuntimeSchema.parse({ schemaVersion: 2, entityType: "E2E_FEATURE_VERIFIER", runtimeCatalogId: "catalog", catalogRevision: 3,
     profileId: PROFILE, generation: 4, binding, bindingDigest: shaCanonical(binding), endpoint: "http://10.0.0.8:8080",
     transportCorrelationId: "11111111-1111-4111-8111-111111111111", manifestDigest: capabilities.runtimeManifestDigest,

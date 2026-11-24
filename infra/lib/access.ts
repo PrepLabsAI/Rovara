@@ -3,7 +3,7 @@ import * as ecr from "aws-cdk-lib/aws-ecr";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import type { Construct } from "constructs";
-import { defaultBoundaryName, defaultBoundaryStatements, environmentRolePath, operatorRoleStatements, serviceRoleStatements } from "./access-policies.js";
+import { defaultBoundaryName, defaultBoundaryStatements, deployBoundaryName, deployBoundaryStatements, environmentRolePath, operatorRoleStatements, serviceRoleStatements } from "./access-policies.js";
 import { OPERATOR_EXTERNAL_ID_PATTERN_SOURCE, OPERATOR_PRINCIPAL_PATTERN_SOURCE } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
 import { applyPermissionsBoundaryParameter } from "./permissions-boundary.js";
@@ -31,24 +31,27 @@ export class AccessStack extends Stack {
     // the Fn::If's else branch, which is valid for a conditional resource (the branch is evaluated
     // only when the resource exists) and makes CloudFormation create the policy before the roles.
     // A DependsOn would not do: DependsOn on a resource whose condition is false fails the stack.
-    const { effectiveBoundaryArn } = applyPermissionsBoundaryParameter(this, env, {
-      defaultBoundary: (hasPermissionsBoundary) => {
-        const useDefaultBoundary = new CfnCondition(this, "UseDefaultBoundary", {
-          expression: Fn.conditionNot(hasPermissionsBoundary),
-        });
-        const policy = new iam.CfnManagedPolicy(this, "DefaultPermissionsBoundary", {
-          managedPolicyName: defaultBoundaryName(env),
-          path: environmentRolePath(env),
-          description: `Default permission boundary for every agentx-${env} role`,
-          policyDocument: {
-            Version: "2012-10-17",
-            Statement: defaultBoundaryStatements({ env, partition: Aws.PARTITION, region: Aws.REGION, account: this.account, cloudFormationRoleName: naming.cloudFormationRoleName })
-              .map((statement) => statement.Sid === "EcsFailureEventsRule" ? { ...statement, Resource: ecsFailureRuleArn } : statement),
-          },
-        });
-        policy.cfnOptions.condition = useDefaultBoundary;
-        return policy.ref;
-      },
+    // TWO-BOUNDARIES: two default policies, both under UseDefaultBoundary. The RUNTIME one (the old name) caps every role the later stacks create; the DEPLOY one caps only this stack's
+    // two roles (the CloudFormation service role and the operator role). A company-given boundary replaces both, as the single one was replaced before.
+    let useDefaultBoundary: CfnCondition | undefined;
+    const defaultPolicy = (id: string, name: string, description: string, statements: ReturnType<typeof defaultBoundaryStatements>, hasPermissionsBoundary: CfnCondition): string => {
+      useDefaultBoundary ??= new CfnCondition(this, "UseDefaultBoundary", { expression: Fn.conditionNot(hasPermissionsBoundary) });
+      const policy = new iam.CfnManagedPolicy(this, id, {
+        managedPolicyName: name,
+        path: environmentRolePath(env),
+        description,
+        policyDocument: {
+          Version: "2012-10-17",
+          Statement: statements.map((statement) => statement.Sid === "EcsFailureEventsRule" ? { ...statement, Resource: ecsFailureRuleArn } : statement),
+        },
+      });
+      policy.cfnOptions.condition = useDefaultBoundary;
+      return policy.ref;
+    };
+    const boundaryScope = { env, partition: Aws.PARTITION, region: Aws.REGION, account: this.account, cloudFormationRoleName: naming.cloudFormationRoleName };
+    const { effectiveBoundaryArn, rolesBoundaryArn } = applyPermissionsBoundaryParameter(this, env, {
+      defaultBoundary: (hasPermissionsBoundary) => defaultPolicy("DefaultPermissionsBoundary", defaultBoundaryName(env), `Default permission boundary for every agentx-${env} runtime role`, defaultBoundaryStatements(boundaryScope), hasPermissionsBoundary),
+      deployBoundary: (hasPermissionsBoundary) => defaultPolicy("DeployPermissionsBoundary", deployBoundaryName(env), `Permission boundary for the agentx-${env} CloudFormation service role and operator role`, deployBoundaryStatements(boundaryScope), hasPermissionsBoundary),
     });
     // Who may assume the operator role (L4-HARD, owner 2026-11-18). Empty (the documented default): any principal of THIS account that its own IAM allows to call
     // sts:AssumeRole on the role (the customer's own platform team). A named principal is ONE role or user: never a whole account (`...:root`), whichever account.
@@ -169,11 +172,14 @@ export class AccessStack extends Stack {
     new CfnOutput(this, "CloudFormationRoleArn", { value: serviceRole.attrArn });
     new CfnOutput(this, "OperatorRoleArn", { value: operatorRole.attrArn });
     const effectiveBoundaryOutput = new CfnOutput(this, "EffectiveBoundaryArn", { value: effectiveBoundaryArn });
+    const deployBoundaryOutput = new CfnOutput(this, "DeployBoundaryArn", { value: rolesBoundaryArn });
     // The validator does not see that the Fn::If takes the Ref branch only under UseDefaultBoundary.
-    Validations.of(effectiveBoundaryOutput).acknowledge({
-      id: "CloudFormation-Validate::W1001",
-      reason: "The Ref to DefaultPermissionsBoundary is in the Fn::If branch taken only when UseDefaultBoundary holds",
-    });
+    for (const output of [effectiveBoundaryOutput, deployBoundaryOutput]) {
+      Validations.of(output).acknowledge({
+        id: "CloudFormation-Validate::W1001",
+        reason: "The Ref to the default permissions boundary is in the Fn::If branch taken only when UseDefaultBoundary holds",
+      });
+    }
     new CfnOutput(this, "PullThroughPrefix", { value: naming.pullThroughPrefix });
   }
 }

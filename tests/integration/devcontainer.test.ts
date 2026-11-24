@@ -771,6 +771,15 @@ describe("the devcontainer CLI seam", () => {
     await expectGone(Number.parseInt(output.join("").trim(), 10));
   }, 30_000);
 
+  it("runs a command under pipefail only when the shell asks for it (lane F: the setup agent's shell does, a person's command does not), with real bash", async () => {
+    const exec: ContainerExec = (command, options) => runCollected(command[0]!, command.slice(1), options);
+    const exitOf = async (command: string, pipefail: boolean) => (await containerBashOperations(exec).exec(command, tmpdir(), { onData: () => undefined, timeout: 20, ...(pipefail ? { pipefail: true } : {}) })).exitCode;
+    expect(await exitOf("false | cat", true)).toBe(1);
+    expect(await exitOf("true | cat", true)).toBe(0);
+    expect(await exitOf("(exit 3) | tail -n 1 && echo not-reached", true)).toBe(3);
+    expect(await exitOf("false | cat", false)).toBe(0);
+  }, 30_000);
+
   it("reports a stop that kill refused, with real bash, as an unconfirmed stop rather than calling the group gone (#174 review)", async () => {
     // BASH_ENV, read by the kill execs' bash only, makes kill refuse every signal as a group owned by
     // root would: "Operation not permitted" is not "No such process".

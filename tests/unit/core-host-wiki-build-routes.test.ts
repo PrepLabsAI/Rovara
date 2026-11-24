@@ -11,7 +11,7 @@ import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/
 import type { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createWikiStore } from "../../packages/broker/src/core/wiki/store.js";
 import { wikiBuildPartition } from "../../packages/broker/src/core/wiki-build/keys.js";
-import { readWikiBuildPointer } from "../../packages/broker/src/core/wiki-build/run.js";
+import { endWikiBuild, readWikiBuildPointer } from "../../packages/broker/src/core/wiki-build/run.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import type { HostedWikiBuildWiring, WikiBuildStarterInput } from "../../packages/broker/src/core-host/wiki-build-routes.js";
@@ -236,6 +236,28 @@ describe("hosted wiki build controls: the rest of each control", () => {
     expect(starter.cancelled).toHaveLength(1);
     expect((await call(post(WB("payments", "/continue"), { requestId: id() }), owner)).status).toBe(202);
     expect(wikiEvents(world).map((event) => event.action)).toEqual(["wiki_build.start_requested", "wiki_build.start_requested", "wiki_build.start_requested", "wiki_build.stop_requested", "wiki_build.continue_requested"]);
+  });
+
+  // MUTANT remake: the route's map reader ignores the build's ask for a new map, so the Build pressed again within the kept map's minutes pins the commit the last run could not read.
+  it("a Build after a run that ended code_moved reads the branches again, even within a minute; after any other end it uses the kept map", async () => {
+    const { world, person, call, listings } = await buildWorld();
+    const owner = person("p-owner", FAKE_COMPANY, "owner");
+    const endWith = async (word: "time_used" | "code_moved") => {
+      const pointer = (await readWikiBuildPointer(world.store, FAKE_COMPANY, "payments"))!;
+      await endWikiBuild(world.store, { orgId: FAKE_COMPANY, project: "payments", taskId: pointer.taskId }, word, () => world.clock.now);
+    };
+    expect((await call(post(WB("payments"), { requestId: id() }), owner)).status).toBe(202);
+    const afterFirst = listings.mock.calls.length;
+    expect(afterFirst).toBeGreaterThan(0);
+    await endWith("time_used");
+    expect((await call(post(WB("payments"), { requestId: id() }), owner)).status).toBe(202);
+    expect(listings.mock.calls.length).toBe(afterFirst);
+    await endWith("code_moved");
+    const stopped = await call(get(WB("payments")), owner);
+    expect(stopped.body).toMatchObject({ status: "stopped", stop: "code_moved", message: WIKI_BUILD_WORDS.code_moved });
+    expect(stopped.body).toMatchObject({ canContinue: true });
+    expect((await call(post(WB("payments"), { requestId: id() }), owner)).status).toBe(202);
+    expect(listings.mock.calls.length).toBeGreaterThan(afterFirst);
   });
 
   it("Refresh now needs a wiki, and then plans only what is out of date", async () => {

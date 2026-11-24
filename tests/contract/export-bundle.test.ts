@@ -10,6 +10,7 @@ import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
   defaultBoundaryArn,
+  deployBoundaryArn,
   environmentCloudFormationRoleName,
   environmentOperatorRoleName,
   type ReleaseManifest,
@@ -182,6 +183,7 @@ describe("writeExportBundle", () => {
       "parameters/slack.json",
       "policies/access-deployer.json",
       "policies/default-boundary.json",
+      "policies/deploy-boundary.json",
       "policies/operator-role.json",
       "policies/service-role.json",
       "templates/access.template.json",
@@ -462,7 +464,7 @@ describe("writeExportBundle", () => {
     const readJson = async (relativePath: string) =>
       JSON.parse(await readFile(join(dir, relativePath), "utf8")) as { Version: string; Statement: Statement[] };
 
-    for (const name of ["service-role", "operator-role", "default-boundary", "access-deployer"]) {
+    for (const name of ["service-role", "operator-role", "default-boundary", "deploy-boundary", "access-deployer"]) {
       const text = await readFile(join(dir, `policies/${name}.json`), "utf8");
       expect(text).not.toContain('"Ref"');
       expect(text).not.toContain("AWS::");
@@ -480,6 +482,10 @@ describe("writeExportBundle", () => {
 
     const defaultBoundary = await readJson("policies/default-boundary.json");
     expect(defaultBoundary.Statement.some((s) => s.Sid === "Services")).toBe(true);
+    // TWO-BOUNDARIES: the runtime boundary has no role management; the deploy boundary has it, on the environment's roles only.
+    expect(defaultBoundary.Statement.some((s) => s.Sid === "IamRoles")).toBe(false);
+    const deployBoundary = await readJson("policies/deploy-boundary.json");
+    expect([deployBoundary.Statement.find((s) => s.Sid === "IamRoles")!.Resource].flat()).toEqual([`arn:aws:iam::${ACCOUNT}:role/agentx/${ENV}/*`]);
 
     // --- Item 2: the access-deployer's role actions are scoped to the two real role ARNs — never
     // PassRole, DeleteRolePermissionsBoundary, UpdateAssumeRolePolicy, CreateServiceLinkedRole (that
@@ -496,9 +502,9 @@ describe("writeExportBundle", () => {
     }
 
     // The managed-policy actions are scoped to the exact boundary ARN, not a path wildcard.
-    const boundaryArn = defaultBoundaryArn({ env: ENV, partition: "aws", account: ACCOUNT });
+    const boundaryArns = [defaultBoundaryArn({ env: ENV, partition: "aws", account: ACCOUNT }), deployBoundaryArn({ env: ENV, partition: "aws", account: ACCOUNT })];
     const iamManagedPolicy = accessDeployer.Statement.find((s) => s.Sid === "IamManagedPolicy")!;
-    expect([iamManagedPolicy.Resource].flat()).toEqual([boundaryArn]);
+    expect([iamManagedPolicy.Resource].flat()).toEqual(boundaryArns);
     expect(iamManagedPolicy.Action.some((a) => a.includes("*"))).toBe(false);
 
     // iam:PassRole is never granted anywhere in this policy, and secretsmanager: actions (both

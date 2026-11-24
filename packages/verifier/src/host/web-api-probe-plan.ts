@@ -447,6 +447,8 @@ export function webApiProbeDriver(probeId: string): WebApiProbeDriver {
     // The scripted run again, with the app started behind a guard that keeps checking every path to the model (socket, model proxy, gateway) for as long as the app runs, and again before it answers each request, so a check runs inside the window where the channel is open for the executor (the asset's start command).
     case "web-agent-app-isolation-v1": return { probe: "web-agent-isolation-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: webApiAgentIsolationGuardArgs(), agent: { script: webApiAgentProbeScript(probeId) } };
     case "app-host-denial-v1": return { probe: "api-state-positive-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: webApiAppStartGuardArgs() };
+    // The same app and scenario behind a guard that dials private-network addresses (the asset's start command) and starts the app only when every attempt is blocked.
+    case "app-private-denial-v1": return { probe: "api-state-positive-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: webApiAppStartGuardArgs("app-private-denial-v1") };
     default: throw new Error(`no probe plan for ${probeId}`);
   }
 }
@@ -478,14 +480,14 @@ export function webApiBuildProbeCommand(probeId: "build-imds-denial-v1" | "build
 }
 
 /**
- * The start command arguments of `app-host-denial-v1`, from the installed probe asset (so the pinned asset digest covers them). The qualification app is
+ * The start command arguments of `app-host-denial-v1` (or `app-private-denial-v1`, whose guard dials private-network addresses and not the host), from the installed probe asset (so the pinned asset digest covers them). The qualification app is
  * started behind a guard that connects to the host's address on the run's internal bridge (the first address of the on-link network, from the route table)
  * at port 8080, where the Rovara worker listens on a runner. The app starts, and so the probe can pass, only when that connection times out, which is
  * what the host firewall's DROP does: a refusal or a connection means the host is reachable, and with no route to read the guard refuses to start too.
  */
-export function webApiAppStartGuardArgs(): readonly string[] {
-  const asset = loadWebApiQualificationProbeAssets().find((item) => item.probeId === "app-host-denial-v1")!;
-  if (asset.probe.oracle.kind !== "protected-network-denial" || asset.probe.oracle.appStart === undefined) throw new Error("the app host probe asset has no start guard");
+export function webApiAppStartGuardArgs(probeId: "app-host-denial-v1" | "app-private-denial-v1" = "app-host-denial-v1"): readonly string[] {
+  const asset = loadWebApiQualificationProbeAssets().find((item) => item.probeId === probeId)!;
+  if (asset.probe.oracle.kind !== "protected-network-denial" || asset.probe.oracle.appStart === undefined) throw new Error(`the ${probeId} probe asset has no start guard`);
   return Object.freeze([...asset.probe.oracle.appStart.args]);
 }
 

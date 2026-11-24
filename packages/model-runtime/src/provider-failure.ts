@@ -120,3 +120,34 @@ export function runPriceRefusedBody(status: number, body: string): boolean {
   const { type, code } = error as { type?: unknown; code?: unknown };
   return type === RUN_PRICE_REFUSED_CODE || code === RUN_PRICE_REFUSED_CODE;
 }
+
+// ---- the gateway's fixed quota sentences (a Bedrock throttle: the model's AWS quota is used up or set to 0)
+
+/** The stable token the model-call note carries for it (letters only, so it passes the failure-signal allow-list). */
+export const MODEL_QUOTA_SIGNAL = "QuotaExhausted";
+/**
+ * Code's own fixed sentence after "<Label> request failed; " (the worker reads it whole; never the gateway's words). It starts "rate limited" ON PURPOSE: Pi's retry list (isRetryableAssistantError)
+ * matches that, and the gateway sends this one sentence for every Bedrock 429, including a transient per-minute throttle, so it must stay retried as before. Do not add a word Pi treats as final ("quota exceeded", "billing").
+ */
+export const MODEL_QUOTA_DETAIL = "rate limited; the AWS quota for this model is used up or set to 0; choose another model, or ask AWS to raise the quota";
+/** What the task view tells the owner for it (fixed text). */
+export const MODEL_QUOTA_VIEW_TEXT = "the AWS quota for this model is used up or set to 0";
+export const MODEL_QUOTA_VIEW_NEXT = "Choose another model, or ask AWS to raise the quota.";
+/**
+ * The hosted gateway's fixed 429 `rate_limit_error` sentences for a Bedrock quota throttle: Rovara's AI (one sentence) and the company's own Bedrock (one sentence naming the Region, which must be
+ * an AWS Region name). Matched whole against `error.message`, never kept: any other text, even a near miss, is not it.
+ */
+export const GATEWAY_QUOTA_ANSWERS: readonly string[] = Object.freeze(["Rovara's AI has no room for this model right now: its AWS quota is used up or set to 0. Choose another model, or try again later."]);
+const GATEWAY_QUOTA_OWN_BEDROCK = /^Your AWS account has no Bedrock room for this model in (?:us|eu|ap|ca|sa|me|af|il|mx)-[a-z]+-[1-9]: its quota is used up or set to 0\. Choose another model, or ask AWS to raise the quota \(Service Quotas\)\.$/u;
+const GATEWAY_QUOTA_ERROR_TYPE = "rate_limit_error";
+
+/** Whether a gateway 429 body is its fixed quota answer: `{ error: { type | code: "rate_limit_error", message: <one of its fixed sentences> } }`. Only matched; nothing of the body is kept. */
+export function gatewayQuotaBody(body: string): boolean {
+  let parsed: unknown;
+  try { parsed = JSON.parse(body); } catch { return false; }
+  const error = parsed !== null && typeof parsed === "object" ? (parsed as { error?: unknown }).error : undefined;
+  if (error === null || typeof error !== "object") return false;
+  const { type, code, message } = error as { type?: unknown; code?: unknown; message?: unknown };
+  if (type !== GATEWAY_QUOTA_ERROR_TYPE && code !== GATEWAY_QUOTA_ERROR_TYPE) return false;
+  return typeof message === "string" && (GATEWAY_QUOTA_ANSWERS.includes(message) || GATEWAY_QUOTA_OWN_BEDROCK.test(message));
+}

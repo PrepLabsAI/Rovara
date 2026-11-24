@@ -1,6 +1,6 @@
 // Moved to @agentx/contracts in feature 013 so the Slack orchestrator's turn records share the shape.
 import { SECOND_REVIEW_OPERATION_TAG, createTaskUsageTelemetry as telemetryOf, type TaskUsageOutcome as Outcome, type UsageStats } from "@agentx/contracts";
-import { budgetExhaustedFromMarker, modelNotAllowedFromMarker } from "@agentx/model-runtime";
+import { MODEL_QUOTA_DETAIL, budgetExhaustedFromMarker, modelNotAllowedFromMarker } from "@agentx/model-runtime";
 import { sanitizeModelCallEvent } from "./model-call-monitor.js";
 import { redactCredentials, WORKER_EVENT_PAYLOAD_MAX_BYTES } from "./events.js";
 export {
@@ -93,6 +93,7 @@ const PRE_STREAM_REFUSAL_DETAILS = new Set([
   "rate limited; wait before retrying",
   "rate limited or out of credits; check the key's usage limits before retrying",
   "the model gateway does not offer this model",
+  MODEL_QUOTA_DETAIL,
   "the request was refused; check the model's context and output limits",
   "check the API key and its permissions",
   "the API key was refused; check that it is valid and has not expired",

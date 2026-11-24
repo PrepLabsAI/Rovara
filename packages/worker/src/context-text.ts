@@ -37,6 +37,18 @@ export function quotedContextText(value: string): string {
     .replace(/>/g, "\\u003e");
 }
 
+/**
+ * A value as one JSON text that is safe inside a tag Pi or a prompt wraps it in: every string is cleaned of hidden characters first (`inertContextText`), and the line separators and the angle brackets (which could close
+ * the tag) are escaped, so nothing in the value can end the block it is shown in. Used for data that came from a repository or from command output.
+ */
+export function quotedContextJson(value: unknown): string {
+  return JSON.stringify(value, (_key, inner: unknown) => (typeof inner === "string" ? inertContextText(inner).text : inner))
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029")
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e");
+}
+
 /** A name or path as one inert piece of text: no hidden characters, and the angle brackets that could close Pi's tag escaped. */
 export function inertLabel(value: string): string {
   return quotedContextText(inertContextText(value).text).slice(1, -1);

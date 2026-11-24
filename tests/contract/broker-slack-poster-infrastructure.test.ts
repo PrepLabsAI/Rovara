@@ -92,11 +92,14 @@ function checkBrokerSlackPoster(template: TemplateJson, env: string, baseline: {
   if (JSON.stringify(brokerIdentitySecretStatements(template)) !== baseline.identitySecretStatements) throw new Error("the broker's identity policy changed in Secrets Manager or KMS actions");
 }
 
-/** A plain evaluation for one action: allowed by an Allow whose resource is `*`, denied by no Deny naming it. */
+/** A plain evaluation for one action (and, when given, one resource): allowed by an Allow whose resource is `*`, denied by no Deny naming it. A Deny that names the action but only other resources (the release pipeline's) does not apply to this resource. */
 const matches = (pattern: string, action: string): boolean => new RegExp(`^${pattern.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/gu, "\\$&")).join(".*")}$`, "iu").test(action);
-function allows(statements: readonly PolicyStatementJson[], action: string): boolean {
+function allows(statements: readonly PolicyStatementJson[], action: string, resource?: string): boolean {
   const named = (statement: PolicyStatementJson) => [statement.Action].flat().some((pattern) => matches(String(pattern), action));
-  if (statements.some((statement) => statement.Effect === "Deny" && named(statement))) return false;
+  const reaches = (statement: PolicyStatementJson) => resource === undefined || [statement.Resource].flat().some((pattern) => matches(String(pattern), resource));
+  // A Deny with a Condition is not modelled here: refuse to guess (the release pipeline's key deny names kms only, never Secrets Manager).
+  if (statements.some((statement) => statement.Effect === "Deny" && named(statement) && reaches(statement) && statement.Condition !== undefined)) throw new Error("this evaluator does not model a conditional Deny");
+  if (statements.some((statement) => statement.Effect === "Deny" && named(statement) && reaches(statement))) return false;
   return statements.some((statement) => statement.Effect === "Allow" && statement.Resource === "*" && named(statement));
 }
 
@@ -177,16 +180,22 @@ describe("the broker's Slack poster and its read of the Slack adapter secret (L4
     // boundary allow secretsmanager:* and no Deny in either names Secrets Manager.
     const ACTIONS = ["secretsmanager:PutResourcePolicy", "secretsmanager:GetResourcePolicy", "secretsmanager:DeleteResourcePolicy", "secretsmanager:ValidateResourcePolicy", "secretsmanager:DescribeSecret", "secretsmanager:GetSecretValue"];
 
-    it("both allow every one of them, and neither has a Deny that names Secrets Manager", () => {
+    // The Slack adapter secret the broker reads, as the hosted code names it (agentx/<env>/channel-adapter/slack).
+    const slackSecret = "arn:aws:secretsmanager:us-west-2:111122223333:secret:agentx/staging/channel-adapter/slack-AbCdEf";
+    const releaseSecret = "arn:aws:secretsmanager:us-west-2:111122223333:secret:rovara-release/staging/canary-credential-AbCdEf";
+
+    it("both allow every one of them on the Slack adapter secret, and neither has a Deny that names Secrets Manager and reaches it (the release pipeline's deny names only its own secrets)", () => {
       const service = serviceRoleStatements({ ...scope, artifactBucketArn: "arn:aws:s3:::b" } as never);
       const boundary = defaultBoundaryStatements(scope);
       for (const action of ACTIONS) {
-        expect(allows(service, action), `deploy role: ${action}`).toBe(true);
-        expect(allows(boundary, action), `boundary: ${action}`).toBe(true);
+        expect(allows(service, action, slackSecret), `deploy role: ${action}`).toBe(true);
+        expect(allows(boundary, action, slackSecret), `boundary: ${action}`).toBe(true);
       }
       for (const statements of [service, boundary]) {
-        expect(statements.filter((statement) => statement.Effect === "Deny" && [statement.Action].flat().some((action) => /^(secretsmanager|\*)/u.test(String(action))))).toEqual([]);
+        expect(statements.filter((statement) => statement.Effect === "Deny" && [statement.Action].flat().some((action) => /^(secretsmanager|\*)/u.test(String(action))) && [statement.Resource].flat().some((resource) => matches(String(resource), slackSecret)))).toEqual([]);
       }
+      // Not vacuous: the boundary does deny Secrets Manager on the release pipeline's own secret.
+      expect(allows(boundary, "secretsmanager:GetSecretValue", releaseSecret)).toBe(false);
     });
 
     it("the same deploy already creates a resource policy on the callback signing key's secret", () => {

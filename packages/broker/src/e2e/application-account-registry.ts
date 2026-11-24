@@ -1,5 +1,5 @@
 import {
-  E2E_SYNTHETIC_ACCOUNT_RENEWAL_DAYS, E2EApplicationAccountDefinitionSchema, E2EApplicationAccountLatestSchema, E2EApplicationProjectContractSchema,
+  E2E_SYNTHETIC_ACCOUNT_RENEWAL_DAYS, E2EApplicationAccountDefinitionSchema, e2eAccountEffectiveExpiry, E2EApplicationAccountLatestSchema, E2EApplicationProjectContractSchema,
   createE2ESyntheticAccountDefinition, deriveE2EApplicationRuntimeAccountRef, e2eApplicationAccountDefinitionDigest, e2eSyntheticAccountContractDigest,
   resolveE2ELatestAccountRef, validateE2EApplicationAccountBinding,
   type E2EApplicationAccountDefinition, type E2EApplicationAccountLatest, type E2EApplicationProjectContract, type E2ERuntimeAccountRef,
@@ -22,6 +22,8 @@ export type E2EAccountRegistryEntry = {
   definition: E2EApplicationAccountDefinition; latest: E2EApplicationAccountLatest;
   /** When the setup approval that wrote this revision was given (an ISO instant); absent on a row written before it was recorded. */
   setupApprovedAt?: string;
+  /** When the account's pointer says the (unchanged) definition was renewed until: a renewal extends the expiry and writes no revision, so the reference a plan is pinned to does not move. */
+  renewedUntil?: string;
   /** Older revisions of the account, newest first: what a task pinned to an older project revision (an older contract) is still held to. */
   earlier?: readonly E2EApplicationAccountDefinition[];
   /** Read from the unscoped partition the account was first stored in (nothing is under the company's partition yet); every write for it goes under the company's. */
@@ -61,9 +63,10 @@ export function accountDefinitionRow(orgId: KeyScope, projectId: string, definit
   return { ...e2eAccountDefinitionKey(orgId, projectId, definition.applicationId, definition.profileId, definition.revision), entityType: "E2E_ACCOUNT", ...definition };
 }
 export function accountLatestRow(orgId: KeyScope, projectId: string, applicationId: string, profileId: string, latest: E2EApplicationAccountLatest,
-  setup?: { approvedAt: string; proposalSha256: string }): Record<string, unknown> {
+  setup?: { approvedAt: string; proposalSha256: string }, renewedUntil?: string): Record<string, unknown> {
   return { ...e2eAccountLatestKey(orgId, projectId, applicationId, profileId), entityType: "E2E_ACCOUNT_LATEST", ...latest,
-    ...(setup === undefined ? {} : { setupApprovedAt: setup.approvedAt, setupProposalSha256: setup.proposalSha256 }) };
+    ...(setup === undefined ? {} : { setupApprovedAt: setup.approvedAt, setupProposalSha256: setup.proposalSha256 }),
+    ...(renewedUntil === undefined ? {} : { renewedUntil }) };
 }
 
 /** A registry row that cannot be read: specific about which account, and repaired by registering the project's setup again (which writes the next revision over it). */
@@ -89,15 +92,16 @@ export function parseAccountDefinitionRow(orgId: KeyScope, projectId: string, ap
  */
 export function parseAccountEntry(orgId: KeyScope, projectId: string, applicationId: string, profileId: string, latestRow: unknown, definitionRow: unknown): E2EAccountRegistryEntry {
   if (!isRecord(latestRow)) throw unreadable(applicationId, profileId);
-  const { pk: latestPk, sk: latestSk, entityType: latestType, setupApprovedAt, setupProposalSha256, ...latestBody } = latestRow;
+  const { pk: latestPk, sk: latestSk, entityType: latestType, setupApprovedAt, setupProposalSha256, renewedUntil, ...latestBody } = latestRow;
   const latest = E2EApplicationAccountLatestSchema.safeParse(latestBody);
   const expectedLatest = e2eAccountLatestKey(orgId, projectId, applicationId, profileId);
   if (!latest.success || latestType !== "E2E_ACCOUNT_LATEST" || latestPk !== expectedLatest.pk || latestSk !== expectedLatest.sk
     || (setupApprovedAt !== undefined && (typeof setupApprovedAt !== "string" || Number.isNaN(Date.parse(setupApprovedAt))))
-    || (setupProposalSha256 !== undefined && typeof setupProposalSha256 !== "string")) throw unreadable(applicationId, profileId);
+    || (setupProposalSha256 !== undefined && typeof setupProposalSha256 !== "string")
+    || (renewedUntil !== undefined && (typeof renewedUntil !== "string" || Number.isNaN(Date.parse(renewedUntil))))) throw unreadable(applicationId, profileId);
   const definition = parseAccountDefinitionRow(orgId, projectId, applicationId, profileId, latest.data.revision, definitionRow);
   if (definition === undefined) throw unreadable(applicationId, profileId);
-  return { definition, latest: latest.data, ...(typeof setupApprovedAt === "string" ? { setupApprovedAt } : {}) };
+  return { definition, latest: latest.data, ...(typeof setupApprovedAt === "string" ? { setupApprovedAt } : {}), ...(typeof renewedUntil === "string" ? { renewedUntil } : {}) };
 }
 
 /** Every account of a project in the rows read from its partition (a test's view of the table; the broker reads the accounts a plan names, by key). */
@@ -120,9 +124,20 @@ export function pickAccountEntry(entries: readonly E2EAccountRegistryEntry[], ap
   return matches[0]!;
 }
 
+/** The pointer's renewal as an optional property to spread (nothing when the account was never renewed). */
+const renewalOf = (entry: Pick<E2EAccountRegistryEntry, "renewedUntil">): { renewedUntil?: string } => (entry.renewedUntil === undefined ? {} : { renewedUntil: entry.renewedUntil });
+/** Until when the entry's latest definition is usable, its renewal included. */
+const expiryOf = (entry: Pick<E2EAccountRegistryEntry, "definition" | "renewedUntil">): string => e2eAccountEffectiveExpiry(entry.definition, entry.renewedUntil);
+
 /** The definition behind a ref: the entry's latest, or an older revision of the same account. */
 export function definitionOfAccountRef(entry: E2EAccountRegistryEntry, ref: Pick<E2ERuntimeAccountRef, "revision">): E2EApplicationAccountDefinition | undefined {
   return entry.definition.revision === ref.revision ? entry.definition : entry.earlier?.find((definition) => definition.revision === ref.revision);
+}
+
+/** When the account definition behind a ref expires, its renewal included (a renewal extends the account's latest definition only), or undefined when no definition is registered for it. */
+export function accountRefExpiry(entry: E2EAccountRegistryEntry | undefined, ref: Pick<E2ERuntimeAccountRef, "revision">): string | undefined {
+  const definition = entry === undefined ? undefined : definitionOfAccountRef(entry, ref);
+  return entry === undefined || definition === undefined ? undefined : e2eAccountEffectiveExpiry(definition, definition.revision === entry.definition.revision ? entry.renewedUntil : undefined);
 }
 
 /**
@@ -135,7 +150,7 @@ export function latestAccountRef(input: { contract: E2EApplicationProjectContrac
   const entry = pickAccountEntry(input.entries, input.applicationId, input.profileId);
   const what = `account profile ${input.profileId} of application ${input.applicationId}`;
   try {
-    return resolveE2ELatestAccountRef({ contract: input.contract, definition: entry.definition, latest: entry.latest, now: input.now });
+    return resolveE2ELatestAccountRef({ contract: input.contract, definition: entry.definition, latest: entry.latest, now: input.now, ...renewalOf(entry) });
   } catch (error) {
     // An older revision of the same account that this contract stands behind: a task pinned to an older project revision keeps its own line of definitions.
     for (const definition of entry.earlier ?? []) {
@@ -146,7 +161,7 @@ export function latestAccountRef(input: { contract: E2EApplicationProjectContrac
     const otherSetup = ((): boolean => {
       try { return entry.definition.contractDigest !== e2eSyntheticAccountContractDigest(input.contract, input.profileId); } catch { return false; }
     })();
-    const why = Date.parse(entry.definition.expiresAt) <= input.now ? `its definition expired at ${entry.definition.expiresAt}`
+    const why = Date.parse(expiryOf(entry)) <= input.now ? `its definition expired at ${expiryOf(entry)}`
       : otherSetup ? "it was registered for a newer setup than this project revision's, and no earlier definition of it fits; start the task again on the current project revision"
         : error instanceof Error ? error.message : "it cannot be read";
     throw new E2EAccountRegistryError("accounts-changed-reapprove", `accounts-changed-reapprove: ${what} is not usable as registered (${why})`);
@@ -164,6 +179,8 @@ export type E2EAccountRegistryWrite = {
   repair?: true;
   /** Only the pointer is raised, to record a newer setup approval that registered this definition unchanged; `definition` is the one already registered. */
   touch?: true;
+  /** A touch keeps the renewal the pointer already records. */
+  renewedUntil?: string;
 };
 
 /**
@@ -202,11 +219,11 @@ export function planSyntheticAccountWrites(input: { contract: E2EApplicationProj
     const implied = { ...createE2ESyntheticAccountDefinition({ contract, applicationId: input.applicationId, profileId: profile.profileId, revision: previous.definition.revision, now: input.now }),
       expiresAt: previous.definition.expiresAt };
     const sameDefinition = previous.latest.revision === previous.definition.revision && previous.latest.definitionDigest === e2eApplicationAccountDefinitionDigest(implied);
-    if (sameDefinition && Date.parse(previous.definition.expiresAt) - input.now > renewalMs) {
+    if (sameDefinition && Date.parse(expiryOf(previous)) - input.now > renewalMs) {
       // Nothing to write, but a newer setup that registers the definition unchanged is still the newest word on it: the pointer records that, or an older setup that
       // changes the account could be registered after it. A pointer that records no setup approval is the oldest.
       if (input.setup !== undefined && (previous.setupApprovedAt ?? "") < input.setup.approvedAt) {
-        return [{ definition: previous.definition, latest: previous.latest, previousRevision: previous.latest.revision, setupApprovedAt: input.setup.approvedAt, touch: true }];
+        return [{ definition: previous.definition, latest: previous.latest, previousRevision: previous.latest.revision, setupApprovedAt: input.setup.approvedAt, touch: true, ...renewalOf(previous) }];
       }
       return [];
     }

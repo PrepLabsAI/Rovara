@@ -1,5 +1,5 @@
 import { MODEL_PROVIDERS, canonicalModelName, editionFromEnvironment, modelNotEnabledSentence, type Edition, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
-import { MODEL_NOT_ENABLED_SIGNAL, MODEL_NOT_OFFERED_DETAIL, MODEL_NOT_OFFERED_SIGNAL, RUN_PRICE_REFUSED_MESSAGE, RUN_PRICE_REFUSED_SIGNAL, classifyProviderFailure } from "@agentx/model-runtime";
+import { MODEL_NOT_ENABLED_SIGNAL, MODEL_NOT_OFFERED_DETAIL, MODEL_QUOTA_DETAIL, MODEL_QUOTA_SIGNAL, MODEL_NOT_OFFERED_SIGNAL, RUN_PRICE_REFUSED_MESSAGE, RUN_PRICE_REFUSED_SIGNAL, classifyProviderFailure } from "@agentx/model-runtime";
 import type { WorkerLogSink } from "./worker-log.js";
 
 /**
@@ -131,6 +131,7 @@ function fixedSentenceFailure(message: Record<string, unknown>, attempt: number,
   const tail = durationMs === undefined ? {} : { durationMs };
   if (text === RUN_PRICE_REFUSED_MESSAGE) return { modelCall: { outcome: "failed", class: "request-rejected", signal: RUN_PRICE_REFUSED_SIGNAL, ...common, status: 409, ...tail } };
   if (text !== undefined && TRANSPORT_FAILURE.exec(text.slice(0, 4_000))?.[1] === MODEL_NOT_OFFERED_DETAIL) return { modelCall: { outcome: "failed", class: "model-not-found", signal: MODEL_NOT_OFFERED_SIGNAL, ...common, status: 400, ...tail } };
+  if (text !== undefined && TRANSPORT_FAILURE.exec(text.slice(0, 4_000))?.[1] === MODEL_QUOTA_DETAIL) return { modelCall: { outcome: "failed", class: "limit-or-rate-limited", signal: MODEL_QUOTA_SIGNAL, ...common, status: 429, ...tail } };
   return undefined;
 }
 
@@ -215,6 +216,7 @@ export function describeModelCallNote(note: ModelCallNote): string {
 export function modelFailureNextAction(note: Extract<ModelCallNote, { outcome: "failed" }>, edition: Edition | undefined = editionFromEnvironment()): string {
   if (note.signal === MODEL_NOT_ENABLED_SIGNAL) return modelNotEnabledSentence(note.model, edition);
   if (note.signal === MODEL_NOT_OFFERED_SIGNAL) return MODEL_NOT_OFFERED_NEXT;
+  if (note.signal === MODEL_QUOTA_SIGNAL) return MODEL_QUOTA_NEXT;
   if (note.status === 402) return "add credits to the model account, then retry";
   switch (note.class) {
     case "key-rejected": return note.chatgpt === true ? "connect ChatGPT again, then retry" : "check the model key and its permissions, then retry";
@@ -229,6 +231,9 @@ export function modelFailureNextAction(note: Extract<ModelCallNote, { outcome: "
 
 /** DEC 254g: what to do when the model gateway does not offer the model (fixed words). */
 export const MODEL_NOT_OFFERED_NEXT = "the model is not offered: the model gateway does not offer this model to this company; choose a model it offers (agentx config set coreEngine.agentModel checks it against the gateway), then retry";
+
+/** What to do when the gateway says the model's AWS quota is used up or set to 0 (fixed words). */
+export const MODEL_QUOTA_NEXT = "the AWS quota for this model is used up or set to 0; choose another model, or ask AWS to raise the quota, then retry";
 
 export const MODEL_CALL_HEARTBEAT_MS = 60_000;
 export const MODEL_CALL_MAX_HEARTBEATS = 60;

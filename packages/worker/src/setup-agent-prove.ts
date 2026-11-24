@@ -110,6 +110,10 @@ export interface MergedEnvironment {
   notes: string[];
 }
 
+/** One command line the agent proposed, with the first place its item cited and the time limit its item recorded (lane F). */
+interface AgentLine { line: string; place?: { path: string; line: number }; timeoutSeconds?: number }
+interface AgentCandidate extends AgentLine { command: ProjectCommand }
+
 function sourceAt(valueSources: EnvironmentDraft["valueSources"], field: string, source: TestEnvValueSource): void {
   const at = valueSources.findIndex((entry) => entry.field === field);
   if (at >= 0) valueSources[at] = { field, source }; else valueSources.push({ field, source });
@@ -130,15 +134,16 @@ export function mergeAgentFindings(detected: EnvironmentDraft, findings: AgentFi
   let leftOut = 0;
 
   /** The agent's lines for this repository that can be commands: one program, not flagged, not a download-and-run. */
-  const usable = (lines: ReadonlyArray<{ line: string; place?: { path: string; line: number } }>): Array<{ line: string; command: ProjectCommand; place?: { path: string; line: number } }> => lines.flatMap(({ line, place }) => {
+  const usable = (lines: ReadonlyArray<AgentLine>): AgentCandidate[] => lines.flatMap(({ line, place, timeoutSeconds }) => {
     if (flagged.has(oneSpace(line)) || remoteCodeReason(line) !== undefined) { leftOut += 1; return []; }
-    try { return [{ line, command: parseCommandLine(line, input.cwd, 900), ...(place === undefined ? {} : { place }) }]; } catch { leftOut += 1; return []; }
+    try { return [{ line, command: parseCommandLine(line, input.cwd, 900), ...(place === undefined ? {} : { place }), ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }) }]; } catch { leftOut += 1; return []; }
   });
   /** The agent's command lines for this repository, each with the first file and line the item cited (kept when the line never ran, so the card still says where it came from). */
-  const agentLines = (items: SetupProposal["setup"]): Array<{ line: string; place?: { path: string; line: number } }> => items.filter((item) => item.value.repo === input.repo).flatMap((item) => {
+  const agentLines = (items: SetupProposal["setup"]): AgentLine[] => items.filter((item) => item.value.repo === input.repo).flatMap((item) => {
     const cited = item.from.find((place) => place.repo === input.repo && typeof place.path === "string" && typeof place.line === "number");
     const place = cited === undefined ? undefined : { path: cited.path!, line: cited.line! };
-    return item.value.commands.map((line) => ({ line, ...(place === undefined ? {} : { place }) }));
+    // Lane F: the limit the proposal recorded for the item (absent on an older proposal) goes with each of its commands.
+    return item.value.commands.map((line) => ({ line, ...(place === undefined ? {} : { place }), ...(item.value.timeoutSeconds === undefined ? {} : { timeoutSeconds: item.value.timeoutSeconds }) }));
   });
   const otherRepos = [...findings.proposal.setup, ...findings.proposal.tests].filter((item) => item.value.repo !== input.repo).length;
   if (otherRepos > 0) notes.push("The setup run proposed commands for another repository; they are not part of this environment.");
@@ -149,7 +154,7 @@ export function mergeAgentFindings(detected: EnvironmentDraft, findings: AgentFi
    */
   function mergeList(
     current: Array<{ command: ProjectCommand; field: string }>,
-    proposed: Array<{ line: string; command: ProjectCommand; place?: { path: string; line: number } }>,
+    proposed: AgentCandidate[],
     replace: (at: number, command: ProjectCommand) => void,
     add: (command: ProjectCommand, source: TestEnvValueSource) => void,
     capacity: () => number,
@@ -176,7 +181,7 @@ export function mergeAgentFindings(detected: EnvironmentDraft, findings: AgentFi
       used.add(choice);
       const candidate = fresh[choice]!;
       const workedAtN = firstWorked(journal, candidate.line)!;
-      const command: ProjectCommand = { ...candidate.command, cwd: existing.command.cwd, timeoutSeconds: existing.command.timeoutSeconds };
+      const command: ProjectCommand = { ...candidate.command, cwd: existing.command.cwd, timeoutSeconds: candidate.timeoutSeconds ?? existing.command.timeoutSeconds };
       replace(old.at, command);
       sourceAt(valueSources, existing.field, observedSource(findings.runId, workedAtN));
       replacements.push({ field: existing.field, detected: formatCommandLine(existing.command), replacedBy: formatCommandLine(command), failedAtN: old.failedAtN, workedAtN });
@@ -188,7 +193,7 @@ export function mergeAgentFindings(detected: EnvironmentDraft, findings: AgentFi
       const fate = fateOf(journal, candidate.line);
       if (typeof fate === "object" && "failedAtN" in fate) { leftOut += 1; return; }
       const workedAtN = firstWorked(journal, candidate.line);
-      add({ ...candidate.command, timeoutSeconds }, workedAtN !== undefined ? observedSource(findings.runId, workedAtN) : candidate.place ?? "model");
+      add({ ...candidate.command, timeoutSeconds: candidate.timeoutSeconds ?? timeoutSeconds }, workedAtN !== undefined ? observedSource(findings.runId, workedAtN) : candidate.place ?? "model");
     });
   }
 

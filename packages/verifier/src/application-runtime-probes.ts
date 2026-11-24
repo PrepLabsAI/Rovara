@@ -29,7 +29,7 @@ const probeOracle = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("protected-network-denial"), requiresKernelDenialCounter: z.literal(true), requiresAbsenceOfEffect: z.literal(true),
     candidateUiIsNotEvidence: z.literal(true).optional(), candidateResponseIsNotEvidence: z.literal(true).optional(),
     /** The command the app is started with for this probe (`app-host-denial-v1`), so the asset digest pins it. */
-    appStart: z.object({ program: z.literal("node"), args: z.array(z.string().min(1).max(1_024)).min(1).max(8) }).strict().optional() }).strict(),
+    appStart: z.object({ program: z.literal("node"), args: z.array(z.string().min(1).max(2_048)).min(1).max(8) }).strict().optional() }).strict(),
   z.object({ kind: z.literal("chromium-sandbox"), requiresRendererSeccompFilter: z.literal(true), requiresRendererPidNamespace: z.literal(true),
     requiresRendererUserNamespace: z.literal(true) }).strict(),
   z.object({ kind: z.literal("json-state"), path: z.string().startsWith("/"), expected: z.object({ version: z.number().int().positive(), tenantId: z.string().min(1), orderIds: z.array(z.string().min(1)).min(1).max(10) }).strict() }).strict(),

@@ -109,7 +109,7 @@ const GROUP_SENTENCES = Object.freeze({
   "app-unhealthy": "The app didn't answer its health check in time. If it listens on another port, answers on another path, or needs longer to start, change that in the project's browser and API check settings; otherwise the coding agent needs to fix it.",
   "seed-failed": "The app couldn't load its test data. The coding agent needs to fix it.",
   // The test account's sign-in (RUN-7): only an app's own email-and-password form with the accounts Rovara creates is supported.
-  "login-failed": "The test account couldn't sign in. Signed-in checks work only with a plain email-and-password form and the test accounts Rovara creates; sign-in through Auth0, Clerk, Google or similar is not supported yet.",
+  "login-failed": "Rovara couldn't sign in as a test user. This is a problem with the project's browser testing setup, not with this change. Signed-in checks need a plain email-and-password form (Auth0, Clerk or Google sign-in isn't supported yet). Check the sign-in in your repo, then run the project setup again.",
   // Rovara's side or the environment's.
   "deadline-exceeded": `The checks ran out of time before they finished. ${RETRY_THEN_SUPPORT("deadline-exceeded")}`,
   "executor-failed": `The browser runner stopped before it finished. ${RETRY_THEN_SUPPORT("executor-failed")}`,

@@ -12,9 +12,10 @@
 // the candidate's revision and digest, the answer and the card `setup_proposal:<project>` at that digest. A candidate that moved (another digest or revision, the project no longer at the base
 // revision) is refused by the gate (`stale`) or by the decision's own transaction.
 import type { SessionMembers } from "../core/sessions/access.js";
-import { type AuditSink, type Approvers, type IdentityProvider, type OrgId, type OrgRole, type DocumentStore } from "@agentx/contracts";
+import { type AuditSink, type Approvers, type IdentityProvider, type ObjectStorage, type OrgId, type OrgRole, type DocumentStore } from "@agentx/contracts";
 import { createDecisionGate, type Credential, type DecisionGate } from "../core/decisions/approval-gate.js";
 import { createSetupProposalSubject } from "../core/setup-agent/apply.js";
+import { createBrowserApprovalSteps } from "../core/setup-agent/browser-testing-approval.js";
 import { createEvalSpendSubject } from "../core/setup-agent/eval-spend.js";
 import { createSetupHostSubject } from "../core/setup-agent/host-ask.js";
 import { SETUP_RISK_APPROVER, setupApproverAllows, setupHostApproverAllows, type SetupApproverStanding, type SetupRisk } from "../core/setup-agent/setup-risk.js";
@@ -87,6 +88,11 @@ export interface HostedSetupApprovalOptions {
   proofKey: Buffer;
   /** L4-SF (c): the other copy of the project's revisions an approval keeps in step (the old broker's registry, aws/setup-registry-mirror.ts). Absent: none. */
   registryMirror?: NonNullable<Parameters<typeof createSetupProposalSubject>[0]["approval"]>["registryMirror"];
+  /**
+   * Browser testing: the company's object storage, where a browser testing candidate's stored proposal is read again at its approval. Absent: a browser testing candidate cannot be approved here (it is
+   * refused, never decided by the ordinary risk rule).
+   */
+  objects?: ObjectStorage;
   now: () => Date;
 }
 
@@ -102,6 +108,8 @@ export function createHostedSetupApproval(options: HostedSetupApprovalOptions): 
       mayDecide: async (approver, input) => approver.companyId === companyId && setupApproverAllows(await standing(approver.personId, input.project), input.risk, input.outcome),
       refusal: setupApproverRefusal,
       ...(options.registryMirror === undefined ? {} : { registryMirror: options.registryMirror }),
+      // Browser testing is decided by a live company owner or admin only (read now, here), and its approval writes the policy, the approval and the test accounts in the decision's own transaction.
+      ...(options.objects === undefined ? {} : { browserTesting: createBrowserApprovalSteps({ store: options.store, companyId, objects: options.objects, standing }) }),
     },
   });
   // L4-SF (d): a website ask is high risk always, so a company owner or admin decides it (either answer), on their live standing read inside the decision. The ask's own checks (no private, paste or

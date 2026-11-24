@@ -226,7 +226,7 @@ export const HEALTH_ALARM_SUFFIXES = [
   "EvalBatchTickErrors", "EvalBatchWatcherErrors", "EvalExecutionsFailed", "GithubWebhookRejected",
   "ReconcilerLostInstances", "ReconcilerQualifiedAmiReadFailures", "ReconcilerQuarantinedVolumes", "ReconcilerStuckProvisioning", "RecordingFailures",
   "RuntimeRequalifyAgeUnreadable", "RuntimeRequalifyMachineFailures", "RuntimeRequalifyStale", "RuntimeRequalifyStepErrors",
-  "SessionDeleterFailures", "SessionProvisionerFailures", "SessionReaperErrors", "SessionReconcilerErrors",
+  "SessionDeleterFailures", "SessionProvisionerFailures", "SessionReaperErrors", "SessionReconcilerErrors", "SessionStuckStopping",
   "SlackDeadLetters", "SlackDeliveryFailed", "SlackHandOffFailures", "SlowTurns", "StuckCancels", "TestAlarm", "TurnErrors", "UnwaitedTaskFailures",
 ] as const;
 /** The listed alarms an environment creates only on Amazon Bedrock (or, for RuntimeRequalify*, only with the automatic renewal on), so their absence is expected. */

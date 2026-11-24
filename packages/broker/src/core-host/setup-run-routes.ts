@@ -19,6 +19,9 @@
 //   POST /v1/app/projects/{project}/setup-agent/eval-health   the OPT-IN "Check my evals now": records the person's yes; nothing runs without it (eval-health-request.ts)
 //   POST /v1/app/projects/{project}/setup-agent/decide     approve or reject the waiting candidate once its check passed (L4-D, setup-approval.ts): the risk-based
 //                                                         approver rule (DEC 254z b), through the approval gate, bound to the candidate's digest and revision
+//   GET  /v1/app/projects/{project}/setup-agent/limits    the project's own run limits, the company's caps, what a run started now would use, and the bounds (any live role on the project reads; limits.ts)
+//   PUT  /v1/app/projects/{project}/setup-agent/limits    set the project's own limits ({ requestId, expectedRevision, limits }): the SAME people who start a run (a live company owner or admin, or the project's administrator), audited,
+//                                                         revision-checked, bounded by the contract's maxima and the company's cap; the next run starts with them (a run going keeps the ones it began with)
 //   POST /v1/app/projects/{project}/setup-agent/host-decide  allow or refuse a website a setup run asked for (L4-SF d): the high-risk rule (a company owner or admin, either answer), through
 //                                                         the approval gate, bound to the exact ask (its host and when it was asked); the journal lists each open ask's `approval` and `canDecide`
 //
@@ -66,9 +69,11 @@ import { setupStateOf, startProjectSetupCheck } from "../core/setup-agent/check.
 import { resumeSetupPausedTasks } from "../core/setup-agent/auto-resume.js";
 import { log as logTaskFlow } from "../core/task-flow/support.js";
 import { setupRepairViewOf } from "../core/setup-agent/repair-view.js";
+import { putSetupLimits, readSetupLimits, setupLimitSettingReader } from "../core/setup-agent/limits.js";
 
 export const SETUP_RUN_PROJECT_NOT_FOUND = "project not found";
 export const SETUP_RUN_NOT_ALLOWED = "Only company owners and admins, or this project's admins, can run the project's setup.";
+export const SETUP_LIMITS_NOT_ALLOWED = "Only company owners and admins, or this project's admins, can change the project's setup limits.";
 export const SETUP_RUN_UNAVAILABLE = "Setting a project up with Rovara isn't available for this company yet.";
 export const SETUP_RUN_UNREADABLE = "The project's setup could not be read just now. Try again.";
 export const SETUP_RUN_AUDIT_UNAVAILABLE = "The record of this change could not be written, so nothing was done. Try again.";
@@ -126,6 +131,8 @@ export interface HostedSetupRunInput {
   path: string;
   principal: TaskStartCaller["principal"];
   client?: string | undefined;
+  /** Set only by the broker's sign-in for the Rovara website's own client (DEC 254zzz91): a change that raises a setup limit needs it. */
+  webApp?: boolean | undefined;
   companyId: OrgId;
   flow: TaskFlowDeps;
   wiring: HostedSetupRunWiring;
@@ -163,7 +170,7 @@ const EvalDecideBodySchema = z.object({
 /** L4-SC: the task whose offer the person pressed (a task id, as every key names one). */
 const UpdateBodySchema = z.object({ requestId: z.string().uuid(), taskId: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/u) }).strict();
 
-const SETUP_PATH = /^\/v1\/app\/projects\/([^/]+)\/setup-agent(?:\/(stop|journal|confirm|discard|decide|eval|eval-approve|eval-decide|eval-health|eval-wrapper|updates|updates\/prepare|updates\/dismiss|host-decide))?$/u;
+const SETUP_PATH = /^\/v1\/app\/projects\/([^/]+)\/setup-agent(?:\/(stop|journal|confirm|discard|decide|eval|eval-approve|eval-decide|eval-health|eval-wrapper|updates|updates\/prepare|updates\/dismiss|host-decide|limits))?$/u;
 const PROJECT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u;
 
 /** Whether this method and path is the hosted setup run's. */
@@ -171,14 +178,23 @@ export function isSetupRunPath(path: string, method: string): boolean {
   const match = SETUP_PATH.exec(path);
   if (match === null) return false;
   const tail = match[2];
-  if (method === "GET") return tail === undefined || tail === "journal" || tail === "updates" || tail === "eval";
+  if (method === "GET") return tail === undefined || tail === "journal" || tail === "updates" || tail === "eval" || tail === "limits";
   if (method === "POST") return tail === undefined || tail === "stop" || tail === "confirm" || tail === "discard" || tail === "decide" || tail === "updates/prepare" || tail === "updates/dismiss" || tail === "host-decide" || tail === "eval-approve" || tail === "eval-decide" || tail === "eval-health" || tail === "eval-wrapper";
+  if (method === "PUT") return tail === "limits";
   return false;
 }
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify(value) });
 const errorAnswer = (error: AgentXError): BrokerResponse => json(error.statusCode, { error: { code: error.code, message: error.message.slice(error.code.length + 2) } });
 const notFound = (): AgentXError => agentXError("NOT_FOUND", SETUP_RUN_PROJECT_NOT_FOUND);
+
+/** The project's name from the path: a malformed escape or name is a project that does not exist. */
+function projectOf(raw: string): string {
+  let project: string;
+  try { project = decodeURIComponent(raw); } catch { throw notFound(); }
+  if (!PROJECT_NAME.test(project)) throw notFound();
+  return project;
+}
 
 function bodyOf(request: BrokerRequest): unknown {
   if (request.body === undefined || request.body === "") return {};
@@ -200,6 +216,11 @@ async function standingOf(input: HostedSetupRunInput, project: string): Promise<
   if (standing?.access === "manage" && (standing.basis === "company-owner" || standing.basis === "company-admin" || standing.basis === "project-admin")) return standing;
   if (standing?.access === "view") return { access: "view" };
   return { access: "none" };
+}
+
+/** Whether this person is a live company owner or admin right now (the rule browser testing's changes need on every route). A read that fails is no. */
+async function isCompanyAdminNow(input: HostedSetupRunInput, project: string): Promise<boolean> {
+  try { return input.wiring.approval !== undefined && setupHostApproverAllows(await input.wiring.approval.standing(input.principal.personId, project)); } catch { return false; }
 }
 
 /** The audit record of one act, naming the person and why they were allowed. */
@@ -227,6 +248,8 @@ async function applyView(input: HostedSetupRunInput, deps: SetupApplyDeps, proje
     // L4-SC: the fakes the candidate sets (the approver sees which variable is redirected and from which spec), bound into the digest the approval names.
     ...(apply.fakes === undefined ? {} : { fakes: apply.fakes }),
     ...(apply.promptLocations.length === 0 ? {} : { promptLocations: apply.promptLocations }),
+    // Browser testing: this candidate is a project's browser testing setup (decided on its own page, by a live company owner or admin), not a setup run's commands.
+    ...(apply.browserTesting === undefined ? {} : { browserTesting: true }),
     check: { status: apply.checkState.status, ...(apply.checkState.failedStep === undefined ? {} : { failedStep: apply.checkState.failedStep }) },
     risk, changes, approver: SETUP_RISK_APPROVER[risk],
     // L4-RD: the candidate was drafted by Rovara's automatic repair (its check ran as the project's system owner); a person still decides it, by the same rule.
@@ -374,14 +397,20 @@ async function evalWrapperAct(input: HostedSetupRunInput, project: string, basis
   });
 }
 
+/** The project's setup-run limits: any live role on the project reads; only a person who manages the project's setup (read live by the caller), the same people who start a run, changes them. */
+async function limitsRoute(input: HostedSetupRunInput, standing: SetupRunStanding, project: string): Promise<BrokerResponse> {
+  const deps = { store: input.flow.store, companyId: input.companyId, now: input.now };
+  if (input.request.method === "GET") return json(200, await readSetupLimits(deps, project));
+  if (standing.access !== "manage") throw agentXError("FORBIDDEN", SETUP_LIMITS_NOT_ALLOWED);
+  return json(200, await putSetupLimits(deps, project, bodyOf(input.request), input.principal.personId, standing.basis, input.audit, input.webApp === true));
+}
+
 /** One request on a hosted setup-run path (`isSetupRunPath`), after the dev routes checked the company from membership. Always answers. */
 export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<BrokerResponse> {
   try {
     const match = SETUP_PATH.exec(input.path);
     if (match === null) throw agentXError("NOT_FOUND", "route not found");
-    let project: string;
-    try { project = decodeURIComponent(match[1]!); } catch { throw notFound(); }
-    if (!PROJECT_NAME.test(project)) throw notFound();
+    const project = projectOf(match[1]!);
     const tail = match[2];
     const standing = await standingOf(input, project);
     if (standing.access === "none") throw notFound();
@@ -394,6 +423,8 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
     const deps: SetupApplyDeps = {
       store: flow.store, companyId, now: input.now, flow, modelAccessConfigured: input.wiring.modelAccessConfigured(),
       readFile: input.wiring.readFile,
+      // The project's own limits (cut to the company's cap), read when a run starts and for the page's "limits" of a project with no run.
+      limitSetting: setupLimitSettingReader({ store: flow.store, companyId }),
       stopperName: async (by) => input.wiring.displayName?.(by),
       async latest(name) {
         const found = await flow.projects.latest(name);
@@ -426,13 +457,14 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
             },
           };
           const caller: TaskStartCaller = { principal: input.principal, client: input.client ?? "app", origin: "app" };
-          const started = await startTask(setupDeps, caller, { requestId: request.requestId, project: request.project, instructions: request.text, title: `Set up ${request.project}` }, { setupAgent: { limits: request.limits, seenTaskId: request.seenTaskId } });
+          const started = await startTask(setupDeps, caller, { requestId: request.requestId, project: request.project, instructions: request.text, title: `Set up ${request.project}` }, { setupAgent: { limits: request.limits, seenTaskId: request.seenTaskId, carryOver: request.carryOver } });
           return { taskId: started.task.taskId, duplicate: started.duplicate };
         },
         async cancel(request) { await cancelTask(flow, request.taskId); },
       },
     };
 
+    if (tail === "limits") return await limitsRoute(input, standing, project);
     if (input.request.method === "GET" && tail === "eval") {
       const approval = input.wiring.approval;
       if (approval === undefined || input.wiring.eval === undefined) throw agentXError("NOT_FOUND", EVAL_APPROVAL_UNAVAILABLE);
@@ -507,7 +539,7 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
       if (tail === "discard") {
         const body = parsed(DiscardBodySchema, raw);
         await recorded(input, auditEvent(input, "setup_run.discard_requested", `setup_run.discard:${companyId}:${project}:${personId}:${body.requestId}`, project, basis, { requestId: body.requestId }));
-        return json(200, { discarded: await discardSetupApply(deps, project, personId) });
+        return json(200, { discarded: await discardSetupApply(deps, project, personId, undefined, { mayDiscardBrowserTesting: await isCompanyAdminNow(input, project) }) });
       }
       if (tail === "host-decide") return await decideHost(input, approval, project, raw);
       return await decide(input, approval, project, raw);

@@ -547,7 +547,7 @@ export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationR
 
   // A wiki build's own operation, or its preparation failing, ends the run (idempotent: the first end word stands) and gives the workspace back.
   if (task.purpose === "wiki_build" && ((operation.kind === "task" && operation.workflowMode === "WIKI_BUILD") || (operation.kind === "prepare" && !succeeded))) {
-    await endWikiBuildTask(deps, task);
+    await endWikiBuildTask(deps, task, operation.kind === "prepare" ? { error: ended.error } : undefined);
     return;
   }
 

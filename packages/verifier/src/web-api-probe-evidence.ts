@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { ChromiumSandboxAttestationSchema, E2EScenarioBundleSchema, WEB_API_AGENT_PROBE_ROUTE, WEB_API_REQUIRED_PROBES, WebApiProbeEvidenceSchema, WebApiProbeObservationSchema, canonicalJson, e2eModelRouteRevision, evaluateChromiumSandbox, webApiProbeRunId,
-  type RuntimeInstallChallenge, type WebApiProbeEvidence, type WebApiProbeObservation } from "@agentx/contracts";
+  type RuntimeInstallChallenge, type WebApiProbeEvidence, type WebApiProbeLiveTargets, type WebApiProbeObservation } from "@agentx/contracts";
 import { parseE2EApplicationReport } from "./application-report-schema.js";
 import { E2EApplicationCollectionOracleSchema, E2EApplicationCollectionSchema, qualifyE2EApplicationCollection, type E2EApplicationCollectionOracle } from "./application-result-adapter.js";
 
@@ -39,6 +39,18 @@ function sandboxedAttestation(base64: string | null | undefined, expected: { run
     const parsed = ChromiumSandboxAttestationSchema.safeParse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(base64, "base64"))));
     return parsed.success && parsed.data.runId === expected.runId && parsed.data.groupId === expected.groupId && evaluateChromiumSandbox(parsed.data).sandboxed;
   } catch { return false; }
+}
+
+/** What the verified mock evidence shows: how often each variant was served, what no mock matched, and the reason the verified result gave. */
+function mockObservations(qualification: ReturnType<typeof qualifyE2EApplicationCollection>): Pick<WebApiProbeObservation, "mockConsumptions" | "unmockedCalls" | "runReason"> {
+  return { mockConsumptions: qualification.mockSummary?.consumptions ?? { success: 0, refusal: 0, invalidData: 0 },
+    unmockedCalls: qualification.mockSummary?.unmockedCalls ?? { sinkhole: 0, mocked: 0 }, runReason: qualification.result?.reason ?? qualification.reason };
+}
+
+/** The live targets a collected run carries, as observation facts: required of the probe that pins them and carried by no other. Null when the evidence does not say what the pin says. */
+function liveTargetFacts(required: RequiredProbe, evidence: Extract<WebApiProbeEvidence, { kind: "collected" }>): { liveTargets?: WebApiProbeLiveTargets } | null {
+  if ((required.liveTargets === true) !== (evidence.liveTargets !== undefined)) return null;
+  return evidence.liveTargets === undefined ? {} : { liveTargets: evidence.liveTargets };
 }
 
 /**
@@ -94,10 +106,12 @@ export function deriveWebApiProbeObservation(input: Readonly<{ challenge: Runtim
   const reports = collection.data.shards.map((shard) => parseE2EApplicationReport(Buffer.from(shard.rawReport.bytesBase64, "base64")));
   const parsedReports = reports.flatMap((report) => (report.kind === "parsed" ? [report.report.run] : []));
   // What the verified mock evidence shows, for the probes that pin it: how often each variant was served and what no mock matched. The adapter derives it from the retained bytes alone.
-  const mockFacts = required.mock === true ? { mockConsumptions: qualification.mockSummary?.consumptions ?? { success: 0, refusal: 0, invalidData: 0 },
-    unmockedCalls: qualification.mockSummary?.unmockedCalls ?? { sinkhole: 0, mocked: 0 }, runReason: qualification.result?.reason ?? qualification.reason } : {};
+  const mockFacts = required.mock === true ? mockObservations(qualification) : {};
   const agentFacts = required.agent === undefined ? {} : { agent: webApiAgentFacts(oracle.data, qualification, scenario) };
-  return { ok: true, observation: WebApiProbeObservationSchema.parse({ collectorStatus: qualification.status, runUnavailableReason: null, failedAssertionKinds, blockedHosts: hosts, buildExitCode: null, ...mockFacts, ...agentFacts,
+  // The live private targets belong to exactly the probe that pins them: required there (a run that was not handed them cannot stand as it), and never carried by another probe's evidence.
+  const liveFacts = liveTargetFacts(required, evidence);
+  if (liveFacts === null) return mismatch(required.probeId);
+  return { ok: true, observation: WebApiProbeObservationSchema.parse({ collectorStatus: qualification.status, runUnavailableReason: null, failedAssertionKinds, blockedHosts: hosts, buildExitCode: null, ...mockFacts, ...agentFacts, ...liveFacts,
     attempts: Math.max(1, ...parsedReports.flatMap((run) => run.results.map((result) => result.attempts.length))),
     skipped: parsedReports.reduce((total, run) => total + run.summary.skipped, 0), flaky: parsedReports.reduce((total, run) => total + run.summary.flaky, 0), evidenceDigest }) };
 }

@@ -149,7 +149,10 @@ describe("EC2 worker infrastructure (issue #82), shown for a named environment",
     const role = resourcesOf(foundation)[roleId]!;
     expect(JSON.stringify(role.Properties.AssumeRolePolicyDocument)).toContain("ec2.amazonaws.com");
     const policies = ofType(foundation, "AWS::IAM::Policy").filter(([, p]) => JSON.stringify(p.Properties.Roles).includes(roleId));
-    const actions = actionsOf(policies.flatMap(([, p]) => (p.Properties.PolicyDocument as { Statement: Array<{ Action: string | string[] }> }).Statement));
+    const statements = policies.flatMap(([, p]) => (p.Properties.PolicyDocument as { Statement: Array<{ Effect: string; Sid?: string; Action: string | string[] }> }).Statement);
+    // the one Deny is the saved-environment-image fence (tests/contract/worker-ecr-read-scope.test.ts); what the role is ALLOWED is the set below
+    expect(statements.filter((statement) => statement.Effect === "Deny").map((statement) => [statement.Sid, statement.Action])).toEqual([["NoSavedEnvironmentImages", "ecr:*"]]);
+    const actions = actionsOf(statements.filter((statement) => statement.Effect === "Allow"));
     expect(new Set(actions)).toEqual(new Set([
       "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:GetAuthorizationToken", "ecr:BatchImportUpstreamImage", "ecr:CreateRepository",
       "bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream", "logs:CreateLogStream", "logs:PutLogEvents",
@@ -297,16 +300,15 @@ describe("standing E2E qualification transport (agentx:e2eQualificationTransport
       ["ListBedrockModels", ["bedrock:ListFoundationModels", "bedrock:ListInferenceProfiles"]],
       ["ReadBedrockModelAvailability", ["bedrock:GetFoundationModelAvailability"]],
       ["ReadBedrockInferenceProfiles", ["bedrock:GetInferenceProfile"]],
+      // DEC 432: ListServiceQuotas only (read-only; the runtime boundary allows exactly it). GetServiceQuota is never called, so it is not granted.
       ["ListBedrockQuotas", ["servicequotas:ListServiceQuotas"]],
-      ["ReadBedrockQuota", ["servicequotas:GetServiceQuota"]],
     ]);
     expect(shown[0]!.resources).toEqual(["*"]);
     expect(shown[1]!.resources).toEqual(["*"]);
-    expect(shown[3]!.resources).toEqual(["*"]);
     expect(JSON.stringify(shown[2]!.resources)).toContain("inference-profile/*");
-    expect(JSON.stringify(shown[4]!.resources)).toContain("bedrock/*");
+    expect(shown[3]!.resources).toEqual(["*"]);
     const all = actionsOf(statements);
-    expect(all.every((action) => /^(bedrock:(List|Get)|servicequotas:(List|Get))/.test(action))).toBe(true);
+    expect(all.every((action) => /^(bedrock:(List|Get)|servicequotas:ListServiceQuotas$)/.test(action))).toBe(true);
     expect(all.some((action) => /Invoke|Put|Create|Delete|Update|Request|Tag/.test(action))).toBe(false);
     expect(policy![1].Properties.Roles).toEqual([{ "Fn::Select": [3, { "Fn::Split": ["/", { Ref: "Ec2WorkerInstanceRoleArn" }] }] }]);
     // Nothing without the context flag.

@@ -7,14 +7,14 @@
 // `PROJECT_NOT_FOUND`. The install has one company (`IMPLICIT_COMPANY_ID`), and every row is still keyed by it AND the project. The build is the task flow's own (run.ts): the project pays, the build
 // has its own cap, no model key is "Connect an AI key" with nothing written. The task flow's wiki build starter (W3b's `createWikiBuildStarter`) is the `starter` seam; without it Build says
 // "not set up in this deployment" and the other controls (state, the agents switch, delete) work.
-import { AgentXError, IMPLICIT_COMPANY_ID, WIKI_CONTROLS_WORDS, agentXError, type OrgId, type Principal } from "@agentx/contracts";
+import { AgentXError, IMPLICIT_COMPANY_ID, WIKI_CONTROLS_WORDS, agentXError, type OrgId, type Principal, type WikiFileMap } from "@agentx/contracts";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import type { TaskCaller, TaskFlowDeps, TaskStartCaller } from "../../core/task-flow/deps.js";
 import { createWikiStore } from "../../core/wiki/store.js";
 import {
   agentsSwitchControl, continueWikiControl, deleteWikiControl, refreshWikiControl, startWikiControl, stopWikiControl, wikiControlsView, type WikiControlsDeps,
 } from "../../core/wiki-build/controls.js";
-import type { WikiBuildStarter } from "../../core/wiki-build/run.js";
+import { resnapshotWikiBuild, type WikiBuildDeps, type WikiBuildStarter } from "../../core/wiki-build/run.js";
 import type { WikiBuildStarterInput } from "../../core-host/wiki-build-routes.js";
 import { createSessionControlHost } from "./host.js";
 import type { LocalWikiMap } from "./wiki-map.js";
@@ -38,7 +38,11 @@ export interface LocalWikiBuildOptions {
   starter?: ((input: WikiBuildStarterInput) => WikiBuildStarter) | undefined;
 }
 
-export interface LocalWikiBuild { routes(request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> }
+export interface LocalWikiBuild {
+  routes(request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined>;
+  /** `TaskFlowDeps.wikiBuildResnapshot` on the laptop: a run that ended `code_moved` (its pinned commit is gone from the default branch) is started again ONCE over a new snapshot, with the owner's own standing and starter. */
+  resnapshot(run: { project: string; taskId: string }): Promise<string | undefined>;
+}
 
 export function createLocalWikiBuild(options: LocalWikiBuildOptions): LocalWikiBuild {
   const companyId = options.companyId ?? IMPLICIT_COMPANY_ID;
@@ -46,6 +50,31 @@ export function createLocalWikiBuild(options: LocalWikiBuildOptions): LocalWikiB
   const control = createSessionControlHost(flow);
   const callerOf = (): TaskStartCaller => ({ principal: options.owner, client: "app", origin: "app" });
   return {
+    async resnapshot({ project, taskId }) {
+      const latest = await flow.projects.latest(project);
+      if (latest === undefined) return undefined;
+      const repositories = latest.definition.repositories;
+      const wiki = createWikiStore({ store: flow.store, companyId, now: options.now });
+      // ONE new map for the retry: the plan and the pins are read from the same snapshot.
+      let made: Promise<WikiFileMap> | undefined;
+      const readMap = (name: string): Promise<WikiFileMap> => (made ??= options.wikiMap.mapFor(name, repositories, { fresh: true, remake: true }));
+      const configured = await options.modelAccessConfigured();
+      const deps: WikiBuildDeps = {
+        store: flow.store, companyId, now: options.now,
+        starter: options.starter?.({ flow, caller: callerOf(), cancel: async (cancel) => { await control.cancelTask(cancel.taskId, cancel.requestId); } }),
+        // The owner manages every project of this install.
+        standing: async () => ({ access: "manage" }),
+        modelAccessConfigured: configured, aiKey: async () => (configured ? "connected" : "missing"),
+        fileMap: readMap,
+        defaultBranchHeads: async (name) => (await readMap(name)).repositories.flatMap((repository) => (repository.status === "unavailable" || repository.commit === undefined ? [] : [{ repo: repository.name, commit: repository.commit }])),
+        async requireNewWork(name) {
+          const found = await flow.projects.latest(name);
+          if (found?.archived === true) throw agentXError("PROJECT_ARCHIVED", `project \`${name}\` is archived; unarchive it to start new work`);
+        },
+        recordBuild: (record) => wiki.writeBuild(project, record),
+      };
+      return await resnapshotWikiBuild(deps, project, taskId);
+    },
     async routes(request, caller) {
       const url = request.path.split("?")[0] ?? request.path;
       const match = ROUTE.exec(url);
@@ -63,7 +92,7 @@ export function createLocalWikiBuild(options: LocalWikiBuildOptions): LocalWikiB
         await wiki.pruneRepositories(project, repositories.map((repository) => repository.name));
         const personId = caller.principal.personId;
         let fresh = false;
-        const readMap = (name: string) => options.wikiMap.mapFor(name, repositories, { fresh });
+        const readMap = (name: string, mapOptions?: { remake?: boolean }) => options.wikiMap.mapFor(name, repositories, { fresh, ...(mapOptions?.remake === true ? { remake: true } : {}) });
         const configured = await options.modelAccessConfigured();
         const controls: WikiControlsDeps = {
           build: {

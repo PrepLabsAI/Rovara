@@ -14392,11 +14392,36 @@ exports[`legacy production templates > AgentXProductionFoundation is unchanged 1
                     {
                       "Ref": "AWS::AccountId",
                     },
-                    ":repository/*",
+                    ":repository/agentx-worker-production",
                   ],
                 ],
               },
               "Sid": "EcrImageAccess",
+            },
+            {
+              "Action": "ecr:*",
+              "Effect": "Deny",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ecr:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":repository/rovara-env/*",
+                  ],
+                ],
+              },
+              "Sid": "NoSavedEnvironmentImages",
             },
             {
               "Action": "ecr:GetAuthorizationToken",

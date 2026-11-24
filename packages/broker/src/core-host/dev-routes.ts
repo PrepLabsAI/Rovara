@@ -99,6 +99,7 @@ import { hostedAnswerService, isAnswersPath, routeHostedAnswers, type HostedAnsw
 import { isStartSuggestPath, routeHostedStartSuggest, type HostedStartSuggestWiring } from "./start-suggest-routes.js";
 import { isUpkeepPath, routeHostedUpkeep, type HostedUpkeepWiring } from "./upkeep-routes.js";
 import { isEvalCheckPath, routeHostedEvalCheck, type HostedEvalCheckWiring } from "./eval-check-routes.js";
+import { isBrowserTestingPath, routeHostedBrowserTesting, type HostedBrowserTestingWiring } from "./browser-testing-routes.js";
 import { isAgentDirectoryPath, routeHostedAgentDirectory } from "./agent-directory-routes.js";
 import { isSystemRunsPath, routeHostedSystemRuns } from "./system-runs-routes.js";
 import { isHostedMergePath, routeHostedMerge, type HostedMergeWiring } from "./hosted-merge-routes.js";
@@ -262,6 +263,8 @@ export interface CoreDevWiring {
   projectNotices?: { administers(orgId: string, developerId: string, project: string): Promise<boolean>; setupRead?(orgId: string, project: string): Promise<{ key: string; failedStep: string; fixReady: boolean } | undefined> } | undefined;
   /** L4-EVCI2: the setup card's eval check from the customer's CI (`/v1/app/projects/<p>/ci-eval-check`, eval-check-routes.ts). Absent: that path says "not on the core yet". */
   evalCheck?: HostedEvalCheckWiring;
+  /** Browser testing in a project's setup (`/v1/app/projects/<p>/browser-testing...`, browser-testing-routes.ts). Absent: those paths say "not on the core yet". */
+  browserTesting?: HostedBrowserTestingWiring;
   /** DEC 254zzz94: the Merge button on a finished task (`/v1/app/tasks/<id>/merge`, hosted-merge-routes.ts). Absent: those paths say merging from Rovara is not set up. */
   merge?: HostedMergeWiring;
   /** Audit gap 11b: a project's ticket-sharing settings (`/v1/app/projects/<p>/intake/updates`, ticket-updates-routes.ts). Absent: that path says "not on the core yet". */
@@ -318,7 +321,7 @@ function owns(path: string, method: string, query: string): boolean {
   if (INBOX_PATH.test(path)) return inboxOwns(path, method);
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
   if (isSetupRunPath(path, method) || isSetupCheckPath(path, method) || isWikiMapPath(path, method) || isReportPath(path, method)) return true;
-  if (isKnownFailingPath(path, method) || isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method) || isEvalCheckPath(path, method) || isAgentDirectoryPath(path, method) || isSystemRunsPath(path, method) || isTicketUpdatesPath(path, method)) return true;
+  if (isKnownFailingPath(path, method) || isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method) || isEvalCheckPath(path, method) || isBrowserTestingPath(path, method) || isAgentDirectoryPath(path, method) || isSystemRunsPath(path, method) || isTicketUpdatesPath(path, method)) return true;
   return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path) || parityTaskRoute(path, method) !== undefined || isPrFeedbackPath(path, method);
 }
 /** Neither decisions surface relies on sign-in time or methods (DEC 254zzz73). */
@@ -418,6 +421,11 @@ interface Mounted {
   sessions?: ReturnType<typeof createSessionRoutes>; inbox?: ReturnType<typeof createInboxRoutes>;
   playbook?: ReturnType<typeof createLocalPlaybook>;
   actions?: TaskActions;
+}
+
+/** The audit sink of one request: the deployment's own (it names the caller), else the runtime's. */
+function auditOf(target: Mounted, caller: DeployedCaller): AuditSink {
+  return target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit);
 }
 
 /** Figures belong to the stored task owner or a live company admin. A co-owner's
@@ -735,7 +743,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
         }
         if (isHostedMergePath(path, request.method)) {
           // DEC 254zzz94: the Merge button (hosted-merge-routes.ts holds every rule: the website only for a press, who may merge, Rovara's checks and GitHub's mergeable state, one merge at a time, audit).
-          const audit = target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit);
+          const audit = auditOf(target, caller);
           return await routeHostedMerge({
             request, path, principal: caller.principal, companyId: target.runtime.companyId, role: membership.role, flow: target.runtime.flow.deps, wiring: target.wiring.merge, audit,
             now: () => nowOf(target), webApp: caller.webApp === true, ...(options.log === undefined ? {} : { log: options.log }),
@@ -770,8 +778,8 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           // Guided onboarding L2-3: the company's own runtime, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
           if (target.wiring.setupRun === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           return await (isSetupCheckPath(path, request.method) ? routeHostedSetupCheck : routeHostedSetupRun)({
-            request, path, principal: caller.principal, client: caller.client, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.setupRun,
-            audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit),
+            request, path, principal: caller.principal, client: caller.client, webApp: caller.webApp === true, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.setupRun,
+            audit: auditOf(target, caller),
             startsNewTasks: options.app.engineForNewTask(companyId) === "core", now: () => nowOf(target),
           });
         }
@@ -807,7 +815,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           if (target.wiring.report === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           return await routeHostedReport({
             request, path, principal: caller.principal, role: membership.role, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.report,
-            audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit), now: () => nowOf(target),
+            audit: auditOf(target, caller), now: () => nowOf(target),
           });
         }
         if (isUpkeepPath(path, request.method)) {
@@ -815,7 +823,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           if (target.wiring.upkeep === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           return await routeHostedUpkeep({
             request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.upkeep, webApp: caller.webApp === true,
-            audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit), now: () => nowOf(target),
+            audit: auditOf(target, caller), now: () => nowOf(target),
           });
         }
         if (isEvalCheckPath(path, request.method)) {
@@ -823,7 +831,15 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           if (target.wiring.evalCheck === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           return await routeHostedEvalCheck({
             request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.evalCheck,
-            audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit), now: () => nowOf(target), log: options.log,
+            audit: auditOf(target, caller), now: () => nowOf(target), log: options.log,
+          });
+        }
+        if (isBrowserTestingPath(path, request.method)) {
+          // Browser testing: the company's own runtime, the caller's LIVE standing on the project (read inside; only a company owner or admin changes anything), the request's audit sink naming the caller.
+          if (target.wiring.browserTesting === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          return await routeHostedBrowserTesting({
+            request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.browserTesting,
+            audit: auditOf(target, caller), now: () => nowOf(target),
           });
         }
         if (isKnownFailingPath(path, request.method)) return await routeKnownFailing({ flow: target.runtime.flow.deps, principal: caller.principal, companyId: target.runtime.companyId, members: target.wiring.members, webApp: caller.webApp === true, path, request, ...(target.wiring.testEnvironment === undefined ? {} : { env: target.wiring.testEnvironment.env }) });
@@ -832,7 +848,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           if (target.wiring.ticketUpdates === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           return await routeHostedTicketUpdates({
             request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.ticketUpdates,
-            audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit), now: () => nowOf(target),
+            audit: auditOf(target, caller), now: () => nowOf(target),
           });
         }
         if (isSystemRunsPath(path, request.method)) {
@@ -840,7 +856,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           if (target.wiring.upkeep === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           return await routeHostedSystemRuns({
             request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, role: membership.role, available: target.wiring.upkeep.available, webApp: caller.webApp === true,
-            audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit), now: () => nowOf(target),
+            audit: auditOf(target, caller), now: () => nowOf(target),
           });
         }
         if (isWikiBuildPath(path, request.method)) {
@@ -848,7 +864,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           if (target.wiring.wikiBuild === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           return await routeHostedWikiBuild({
             request, path, principal: caller.principal, client: caller.client, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.wikiBuild,
-            audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit),
+            audit: auditOf(target, caller),
             startsNewTasks: options.app.engineForNewTask(companyId) === "core", now: () => nowOf(target), log: options.log,
           });
         }
@@ -935,7 +951,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
         if (tokens !== null) {
           const enabled = target.wiring.scriptTokens?.enabled ?? (() => scriptTokensEnabled());
           if (target.wiring.scriptTokens === undefined || !enabled()) throw agentXError("NOT_FOUND", "route not found");
-          const audit = target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit);
+          const audit = auditOf(target, caller);
           const deps = { store: target.runtime.flow.deps.store, audit, now: () => nowOf(target) };
           // Read live for this request: the role controls creation and whether list/revoke reach every company token or only the caller's own.
           const scriptCaller: ScriptTokenCaller = { developerId: developerIdOf(caller.principal), personId: caller.principal.personId, orgId: companyId, orgRole: membership.role };

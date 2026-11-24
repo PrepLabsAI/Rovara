@@ -13,7 +13,7 @@ import {
   type E2EApplicationCompilationContext,
 } from "@agentx/verifier";
 import { ApplicationBaselineSkipped, ApplicationPlanDefect, applicationAccountsRefusal, applicationRoundRefusal, applicationRuntimeRefusal } from "./application-dispatch-check.js";
-import { definitionOfAccountRef, type E2EAccountRegistryEntry } from "./application-account-registry.js";
+import { accountRefExpiry, type E2EAccountRegistryEntry } from "./application-account-registry.js";
 import { applicationIntentDigest, evaluateApplicationPlanApproval } from "./application-plan-approval.js";
 import { scenarioTitle } from "./application-display.js";
 
@@ -299,9 +299,9 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
   // setup again renews it. (A ref with no registered definition is an M1.2 record's, which has no expiry.)
   for (const ref of evaluation.accountRefs) {
     const entry = input.accountEntries.find((item) => item.definition.applicationId === ref.applicationId && item.definition.profileId === ref.profileId);
-    const definition = entry === undefined ? undefined : definitionOfAccountRef(entry, ref);
-    if (definition !== undefined && Date.parse(definition.expiresAt) < Date.parse(deadlineAt)) {
-      throw applicationAccountsRefusal(`accounts-changed-reapprove: account profile ${ref.profileId} of application ${ref.applicationId} expires at ${definition.expiresAt}, before this round could end at ${deadlineAt}; register the project's setup again to renew it`);
+    const expiresAt = accountRefExpiry(entry, ref);
+    if (expiresAt !== undefined && Date.parse(expiresAt) < Date.parse(deadlineAt)) {
+      throw applicationAccountsRefusal(`accounts-changed-reapprove: account profile ${ref.profileId} of application ${ref.applicationId} expires at ${expiresAt}, before this round could end at ${deadlineAt}; register the project's setup again to renew it`);
     }
   }
 

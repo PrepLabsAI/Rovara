@@ -255,7 +255,7 @@ async function reserve(input: GithubCoreWebhookInput, mapped: Mapped, eventHash:
   const stored = await get(input, { pk: `GITHUB_DELIVERY#${input.deliveryId}`, sk: "META" });
   // The same id with other content is a refusal (as on the legacy path); the same body under a fresh id, or the same delivery again, is a duplicate.
   if (stored !== undefined && (stored["eventHash"] !== eventHash || stored["installationId"] !== mapped.installationId || !recordInCompany(stored, mapped.companyId))) {
-    throw new GithubWebhookRefusal("GitHub delivery ID was reused with different content");
+    throw new GithubWebhookRefusal("GitHub delivery ID was reused with different content", { kind: "conflict", reason: "delivery_id_reused" });
   }
   return "duplicate";
 }

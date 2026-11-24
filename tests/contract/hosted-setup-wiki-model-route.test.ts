@@ -121,6 +121,24 @@ describe("composed generated boot / broker / selected session / setup and wiki",
   });
 });
 
+// PRICE-BANDS: the route's answer keeps `runPrice` in its old strict shape with the base band BESIDE it (an older worker must still parse it), and the signed task token carries the band inside `runPrice`.
+it("a base band rides beside runPrice in the answer and inside runPrice in the signed token", async () => {
+  const t = await world("SETUP_AGENT", "bridge", { alias: "zai.glm-5", api: "anthropic-messages", catalog: "zai.glm-5" });
+  const band = { upToInputTokens: 200_000, inputUsdPerMillion: 5, outputUsdPerMillion: 20, cacheWriteUsdPerMillion: 15, cacheReadUsdPerMillion: 1 };
+  const pooled = runPriceFor("zai.glm-5", t.h.clock.now);
+  t.setPrice({ ...pooled, baseBand: band });
+  const answer = JSON.parse((await t.get()).body) as { runPrice: Record<string, unknown>; runPriceBaseBand?: unknown };
+  expect(Object.keys(answer.runPrice)).toHaveLength(13);
+  expect(answer.runPrice).toEqual(pooled);
+  expect(answer.runPriceBaseBand).toEqual(band);
+  await t.run();
+  expect(t.outbound[0]!.claims).toMatchObject({ runPrice: { inputUsdPerMillion: 10, baseBand: band } });
+  // An older gateway's price (no band): no sibling, no band in the token.
+  const old = await world("SETUP_AGENT", "bridge", { alias: "zai.glm-5", api: "anthropic-messages", catalog: "zai.glm-5" });
+  const plain = JSON.parse((await old.get()).body) as Record<string, unknown>;
+  expect(plain).not.toHaveProperty("runPriceBaseBand");
+});
+
 for (const mode of ["SETUP_AGENT", "WIKI_BUILD"] as const) {
   it.each([
     { alias: "claude-haiku-4-5", catalog: "claude-haiku-4-5", api: "anthropic-messages" },

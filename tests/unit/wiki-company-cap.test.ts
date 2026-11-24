@@ -50,6 +50,23 @@ describe("company-wide wiki map admission", () => {
 
 });
 
+describe("wiki map service: reuse and a forced new map", () => {
+  // MUTANT force: `force` is ignored, so a Build pressed again within a minute of a map pinned to a commit the branch no longer holds reads the same map and pins the same dead commit.
+  it("hands back a map made less than a minute ago, unless a new one is forced (the last run was pinned to a commit that is gone)", async () => {
+    let head = API_SHA;
+    const moving = { ...host(), baseBranchHead: async () => head };
+    const service = createWikiMapService({ now: () => NOW });
+    const first = await service.make(COMPANY_A, "one", [repo(moving)], scope);
+    head = "d".repeat(40);
+    expect(await service.make(COMPANY_A, "one", [repo(moving)], scope)).toBe(first);
+    const forced = await service.make(COMPANY_A, "one", [repo(moving)], scope, { force: true });
+    expect(forced).not.toBe(first);
+    expect(forced.repositories[0]?.commit).toBe(head);
+    // The new map is the kept one, so the plan and the pins of the Build that forced it describe the same tree.
+    expect(service.read(COMPANY_A, "one", [`${repo(moving).url}\u0000main`])).toBe(forced);
+  });
+});
+
 describe("company-wide wiki build admission", () => {
 
   it("returns reservations after a failed starter, without changing the existing workspace count", async () => {

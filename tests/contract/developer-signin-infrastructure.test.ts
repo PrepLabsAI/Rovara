@@ -1,10 +1,11 @@
 // tests/contract/developer-signin-infrastructure.test.ts
 import { createHash } from "node:crypto";
 import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js";
+import { stuckStoppingInstall, withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
 import { App, CfnParameter, Stack, aws_iam as iam } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
-import { companyScoped, serviceRoleStatements, defaultBoundaryStatements, IMPLICIT_COMPANY_ID, SERVICE_ROLE_SERVICES, SLACK_OIDC_ISSUER, type PolicyStatementJson } from "@agentx/contracts";
+import { companyScoped, serviceRoleStatements, defaultBoundaryStatements, deployBoundaryStatements, IMPLICIT_COMPANY_ID, SERVICE_ROLE_SERVICES, SLACK_OIDC_ISSUER, type PolicyStatementJson } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { withoutCoreModelAccessRoute } from "../support/core-model-access-template.js";
 import { withoutCoreEngine } from "../support/core-engine-template.js";
@@ -182,8 +183,8 @@ function withoutBrokerMemberConditionCheck(template: TemplateJson): TemplateJson
 
 describe("broker membership condition-check grant", () => {
   it("adds only the exact member-key statement to the broker; every other action, resource and principal stays pinned", () => {
-    // Webhook lane W3: the webhook secret slot, its throttle and its alarm are asserted and taken out too (tests/support/webhook-secret-template.ts), so both pins below still hold.
-    const before = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(namedRaw));
+    // Webhook lane W3 + DEC 254zzz432: the webhook secret slot and the stuck-stopping alarm are asserted and taken out too, so both pins below still hold.
+    const before = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutStuckStoppingAlarm(structuredClone(namedRaw), stuckStoppingInstall("staging"))));
     // The providers branch also adds this exact capability output. Keep a measured
     // combined pin, then remove only the asserted output to retain the upstream pin.
     expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("946f06d30e6b8150a1fe4086c119c5d6d22bf0b83c1981cf1e79b3ca4be6913b");
@@ -692,8 +693,8 @@ describe("task-token key and membership IAM", () => {
 
   it("changes only the named task key, alias, two env vars, public read and membership list item", () => {
     // ENV-ROOM 2 is checked in full by broker-names-parameter-infrastructure.test.ts; its shape is asserted and it is taken out first, so the digest still pins everything else.
-    // Webhook lane W3: the webhook secret slot, its throttle and its alarm are asserted and taken out too (tests/support/webhook-secret-template.ts), so the digest below still holds.
-    const remainder = withoutWebhookSecretLane(withoutBrokerNamesParameter(withoutBrokerMemberConditionCheck(named)));
+    // Webhook lane W3 + DEC 254zzz432: as above, so the digest below still holds.
+    const remainder = withoutWebhookSecretLane(withoutBrokerNamesParameter(withoutBrokerMemberConditionCheck(withoutStuckStoppingAlarm(structuredClone(named), stuckStoppingInstall("staging")))));
     withoutCoreModelAccessRoute(remainder);
     // Guided onboarding PR 7: the Linear app's webhook route (no authorizer; the broker verifies the HMAC). Its shape is asserted here, then it is taken out so the digest still pins everything else.
     expect(remainder.Resources["LinearWebhookRoute"]).toMatchObject({ Type: "AWS::ApiGatewayV2::Route", Properties: { RouteKey: "POST /v1/linear/webhooks", AuthorizationType: "NONE" } });
@@ -859,15 +860,23 @@ describe("task-token key and membership IAM", () => {
 
 const policyScope = { env: "staging", partition: "aws", region: "us-east-1", account: "111122223333", artifactBucketArn: "arn:aws:s3:::agentx-artifacts", pullThroughPrefix: "agentx", cloudFormationRoleName: "agentx-staging-cloudformation" };
 const boundary = defaultBoundaryStatements(policyScope);
+// TWO-BOUNDARIES: the CloudFormation service role (the `deploy` policy below) is capped by the DEPLOY boundary; the roles it creates are capped by the runtime one (`boundary`).
+const deployBoundary = deployBoundaryStatements(policyScope);
 const deploy = serviceRoleStatements(policyScope);
 const boundaryArn = "arn:aws:iam::111122223333:policy/agentx/staging/agentx-staging-boundary";
 const sampleRole = "arn:aws:iam::111122223333:role/agentx/staging/example";
 const sampleSesIdentity = `arn:${policyScope.partition}:ses:${policyScope.region}:${policyScope.account}:identity/codes@example.com`;
-function policyAllows(policy: PolicyStatementJson[], action: string, resource: string, context: Record<string, string> = {}): boolean {
-  const matches = policy.filter((s) => allows(s, action) && [s.Resource].flat().some((r) => globRegExp(r).test(resource))
+function policyAllows(policy: PolicyStatementJson[], action: string, resource: string, context: Record<string, string | string[]> = {}): boolean {
+  const matches = policy.filter((s) => allows(s, action) && [s.Resource ?? []].flat().some((r) => globRegExp(r).test(resource))
     && Object.entries(s.Condition ?? {}).every(([operator, entries]) => Object.entries(entries).every(([key, values]) => {
-      const equal = [values].flat().some((value) => operator === "StringLike" ? globRegExp(value).test(context[key] ?? "") : value === context[key]);
-      expect(["StringNotEquals", "StringLike", "StringEquals"]).toContain(operator);
+      expect(["StringNotEquals", "StringLike", "StringEquals", "ForAnyValue:StringLike"]).toContain(operator);
+      const actual = context[key];
+      if (operator === "ForAnyValue:StringLike") {
+        // A set-valued key (kms:ResourceAliases): true when ANY member of the request's set matches ANY pattern, false for an empty or missing set. The release pipeline's key deny
+        // relies on that, so a key with no alias, or another key's alias, is never caught by it.
+        return [actual ?? []].flat().some((one) => [values].flat().some((value) => globRegExp(value).test(one)));
+      }
+      const equal = [values].flat().some((value) => operator === "StringLike" ? globRegExp(value).test(String(actual ?? "")) : value === actual);
       return operator === "StringNotEquals" ? !equal : equal;
     })));
   return matches.some((s) => s.Effect === "Allow") && !matches.some((s) => s.Effect === "Deny");
@@ -877,6 +886,15 @@ describe("the dispatcher's policy question signer (CORE-DISPATCH-HOOK-SIGNER-202
   // Simulated with the repo's own policy helpers (no AWS call). Template diffs miss the boundary (0.5.15), so each action this change needs is checked against both documents.
   const key = "arn:aws:kms:us-east-1:111122223333:key/00000000-0000-4000-8000-000000000001";
   const dispatcherFunction = "arn:aws:lambda:us-east-1:111122223333:function:agentx-staging-control-plane-Dispatcher-AbCdEf";
+  it("the boundary's release pipeline key deny (ForAnyValue on kms:ResourceAliases) never catches this key, with no alias or with another alias, and does catch a key aliased as the pipeline's", () => {
+    for (const aliases of [undefined, [], ["alias/agentx-staging-dispatcher-signer"], ["alias/rovara-demo-release-alerts"]]) {
+      for (const action of ["kms:Sign", "kms:GetPublicKey", "kms:PutKeyPolicy"]) {
+        expect(policyAllows(boundary, action, key, aliases === undefined ? {} : { "kms:ResourceAliases": aliases }), `${action} ${JSON.stringify(aliases)}`).toBe(true);
+      }
+    }
+    expect(policyAllows(boundary, "kms:Sign", key, { "kms:ResourceAliases": ["alias/other", "alias/rovara-staging-release-alerts"] })).toBe(false);
+  });
+
   it("the deploy role may change the key's policy and the dispatcher's environment, and the boundary allows both", () => {
     for (const [action, resource] of [["kms:PutKeyPolicy", key], ["kms:GetKeyPolicy", key], ["kms:DescribeKey", key], ["lambda:UpdateFunctionConfiguration", dispatcherFunction], ["lambda:GetFunctionConfiguration", dispatcherFunction]] as const) {
       expect(policyAllows(deploy, action, resource), `deploy ${action}`).toBe(true);
@@ -930,7 +948,7 @@ describe("task key deployment boundary coverage", () => {
         action = `${service}:*`;
       }
       expect(policyAllows(deploy, action, resource, context), `${type} deploy`).toBe(true);
-      expect(policyAllows(boundary, action, resource, context), `${type} boundary`).toBe(true);
+      expect(policyAllows(deployBoundary, action, resource, context), `${type} deploy boundary`).toBe(true);
     }
     expect(policyAllows(deploy, "iam:CreateRole", sampleRole)).toBe(false);
     expect(policyAllows(deploy, "iam:CreateRole", sampleRole.replace("staging", "other"), { "iam:PermissionsBoundary": boundaryArn })).toBe(false);
@@ -942,15 +960,15 @@ describe("task key deployment boundary coverage", () => {
     // scheduler service by wildcard (SERVICE_ROLE_SERVICES, BOUNDARY_SERVICES), so no policy changed; this pins that it stays so.
     const group = "arn:aws:scheduler:us-east-1:111122223333:schedule-group/agentx-staging-core-jobs";
     for (const action of ["scheduler:CreateScheduleGroup", "scheduler:GetScheduleGroup", "scheduler:DeleteScheduleGroup", "scheduler:TagResource", "scheduler:UntagResource", "scheduler:ListTagsForResource"]) {
-      for (const policy of [deploy, boundary]) expect(policyAllows(policy, action, group), action).toBe(true);
+      for (const policy of [deploy, deployBoundary]) expect(policyAllows(policy, action, group), action).toBe(true);
     }
   });
 
   it("covers KMS lifecycle actions while refusing managed-policy creation", () => {
     for (const action of ["kms:CreateKey", "kms:PutKeyPolicy", "kms:DescribeKey", "kms:GetKeyPolicy", "kms:TagResource", "kms:ScheduleKeyDeletion", "kms:CreateAlias", "kms:UpdateAlias", "kms:DeleteAlias", "kms:ListAliases"]) {
-      for (const policy of [deploy, boundary]) expect(policyAllows(policy, action, "*"), action).toBe(true);
+      for (const policy of [deploy, deployBoundary]) expect(policyAllows(policy, action, "*"), action).toBe(true);
     }
-    for (const policy of [deploy, boundary]) expect(policyAllows(policy, "iam:CreatePolicy", "*"), "the deploy role cannot create a split managed policy").toBe(false);
+    for (const policy of [deploy, deployBoundary]) expect(policyAllows(policy, "iam:CreatePolicy", "*"), "the deploy role cannot create a split managed policy").toBe(false);
     expect(boundary.some((s) => s.Effect === "Deny" && allows(s, "iam:CreatePolicy"))).toBe(true);
   });
 
@@ -2127,7 +2145,7 @@ describe("install company import reads (DEC 254zzz(2))", () => {
     const brokerRole = "arn:aws:iam::111122223333:role/agentx/staging/agentx-staging-control-plane-BrokerServiceRole-AbCdEf";
     for (const action of ["iam:PutRolePolicy", "iam:DeleteRolePolicy"]) {
       expect(policyAllows(deploy, action, brokerRole, { "iam:PermissionsBoundary": boundaryArn }), `deploy ${action}`).toBe(true);
-      expect(policyAllows(boundary, action, brokerRole, { "iam:PermissionsBoundary": boundaryArn }), `boundary ${action}`).toBe(true);
+      expect(policyAllows(deployBoundary, action, brokerRole, { "iam:PermissionsBoundary": boundaryArn }), `deploy boundary ${action}`).toBe(true);
     }
     expect(policyAllows(deploy, "iam:PutRolePolicy", brokerRole.replace("/staging/", "/other/"), { "iam:PermissionsBoundary": boundaryArn })).toBe(false);
     expect(policyAllows(deploy, "iam:CreatePolicy", "*"), "no managed policy").toBe(false);
@@ -2331,7 +2349,7 @@ describe("company sign-in issuer read (DEC 254zzz29)", () => {
     const brokerRole = "arn:aws:iam::111122223333:role/agentx/staging/agentx-staging-control-plane-BrokerServiceRole-AbCdEf";
     for (const action of ["iam:PutRolePolicy", "iam:DeleteRolePolicy"]) {
       expect(policyAllows(deploy, action, brokerRole, { "iam:PermissionsBoundary": boundaryArn }), `deploy ${action}`).toBe(true);
-      expect(policyAllows(boundary, action, brokerRole, { "iam:PermissionsBoundary": boundaryArn }), `boundary ${action}`).toBe(true);
+      expect(policyAllows(deployBoundary, action, brokerRole, { "iam:PermissionsBoundary": boundaryArn }), `deploy boundary ${action}`).toBe(true);
     }
     expect(policyAllows(deploy, "iam:CreatePolicy", "*"), "no managed policy").toBe(false);
     expect(ofType(named, "AWS::IAM::ManagedPolicy")).toHaveLength(0);

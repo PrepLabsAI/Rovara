@@ -37,6 +37,13 @@ export const BASE_MERGED_RETRIES_PER_DAY = 3;
 export const BASE_MERGED_RECHECKING_MILESTONE = "The base branch was merged into the pull request. Rovara is re-checking the merged code.";
 export const BASE_MERGED_NEEDS_YOU_MILESTONE = "The base branch was merged into the pull request. The merged code needs its checks again: open the task and choose Retry checks.";
 
+/** The reason stored when a check ran and failed, or its result is unknown; stored before as `CHECKS_NOT_PASSED_LEGACY_REASON`. */
+export const CHECKS_NOT_PASSED_REASON = "The candidate checks failed or have unknown results.";
+/** The wording of `CHECKS_NOT_PASSED_REASON` before it became a sentence; a task blocked then still holds it. */
+export const CHECKS_NOT_PASSED_LEGACY_REASON = "candidate checks failed or have unknown results";
+/** The wording of `WORKFLOW_BLOCK_REASONS.checksBroken` before it became a sentence. */
+export const CHECKS_BROKEN_LEGACY_REASON = "the checks couldn't run";
+
 export const WORKFLOW_BLOCK_REASONS = {
   checksUnconfirmed: "AgentX couldn't confirm the selected checks ran on the final code. Choose checks and retry.",
   checkRetryStale: "This check run no longer matches the task's current step. Use the latest update in the thread.",
@@ -44,7 +51,7 @@ export const WORKFLOW_BLOCK_REASONS = {
   /** The task has checks to run (project, proposed or chosen), but the worker reported none ran. */
   noChecksConfigured: "AgentX ran none of this task's checks on the final code. Choose checks and retry, or close the task.",
   /** Every failed check could not run: the check itself is broken, so coding again would not help. */
-  checksBroken: "the checks couldn't run",
+  checksBroken: "The checks couldn't run.",
   checkRunnerFailed: "AgentX couldn't run the selected checks. Retry once the check runner is working.",
   /** Review only: AgentX's rerun of the agent's own tests found one that passed before and fails now. */
   regressionFound: "A test that passed before this change fails now. Send it back to coding, or close the task.",
@@ -124,6 +131,19 @@ const PLAN_UNREADABLE_LEGACY_REASON = "the plan couldn't be read";
 /** Whether a block reason says the plan could not be read, in its present wording or the one stored before. */
 export const isPlanUnreadableBlockReason = (reason: string | undefined): boolean =>
   reason === WORKFLOW_BLOCK_REASONS.planUnreadable || reason === PLAN_UNREADABLE_LEGACY_REASON;
+
+/**
+ * A block reason as a sentence for a person: its first letter a capital and one full stop (or `!` or `?`) at the end. The one formatter every place that shows a reason uses, so a reason stored in
+ * lower case before the wording changed (`the checks couldn't run`, `Rovara stopped while planning: <error>`) reads as a sentence too, with no data migration. A reason that is already a sentence comes
+ * back unchanged, and a full stop is never doubled. Quotes or brackets closing a sentence (`... "x".`, `... (x).`) count as its end.
+ */
+export function blockReasonSentence(reason: string): string {
+  const text = reason.trim();
+  if (text === "") return "";
+  const first = Array.from(text)[0]!;
+  const capitalised = `${first.toLocaleUpperCase("en-US")}${text.slice(first.length)}`;
+  return /[.!?\u2026]["'\u2019\u201d)\]]*$/u.test(capitalised) ? capitalised : `${capitalised}.`;
+}
 
 /** At most this many regressed tests are kept on a blocked workflow, each cut to WORKFLOW_REGRESSED_CHECK_MAX characters. */
 export const WORKFLOW_REGRESSED_CHECKS_MAX = 8;
