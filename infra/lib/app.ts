@@ -6,6 +6,7 @@ import { AccessStack } from "./access.js";
 import { ControlPlaneStack } from "./control-plane.js";
 import { IdentityStack } from "./identity.js";
 import { INSTALLER_DESCRIPTION, InstallerStack } from "./installer.js";
+import { applyLegacyRuntimeBoundaries } from "./legacy-runtime-boundary.js";
 import { namingFromContext } from "./naming.js";
 import { applyPermissionsBoundaryParameter } from "./permissions-boundary.js";
 import { ProductionFoundationStack } from "./production-foundation.js";
@@ -120,12 +121,12 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
       env: { region },
     });
   }
-  new ControlPlaneStack(app, "AgentXControlPlane", {
+  const controlPlaneStack = new ControlPlaneStack(app, "AgentXControlPlane", {
     description: "AgentX authenticated control plane and durable dispatch foundation",
     naming,
     ...(naming.env === undefined ? {} : { stackName: naming.stackName("control-plane") }),
   });
-  new ProductionFoundationStack(app, "AgentXProductionFoundation", {
+  const foundationStack = new ProductionFoundationStack(app, "AgentXProductionFoundation", {
     description: "Stable AgentX production network, encryption, and persistent workspace capacity",
     deploymentRegion: deploymentRegion ?? "us-east-1",
     env: { region: deploymentRegion ?? "us-east-1" },
@@ -160,7 +161,7 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
       env: { region: deploymentRegion ?? "us-east-1" },
     });
   }
-  new SlackOrchestratorStack(app, "AgentXSlackOrchestrator", {
+  const slackStack = new SlackOrchestratorStack(app, "AgentXSlackOrchestrator", {
     description: "Hosted AgentX Slack orchestrator on ECS Fargate",
     env: { region: deploymentRegion ?? "us-east-1" },
     naming,
@@ -205,6 +206,10 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
       stackName: swebenchNames(naming).stackName,
     });
   }
+  // The deployment that predates environments has no environment boundary, so its runtime roles (Lambda, ECS task, the worker's instance
+  // role, the Slack orchestrator) get a deny-only one: no IAM, CloudFormation, CDK deployer role or Lambda code changes. Not the release
+  // pipeline stack (the deployer by design), the installer or the other context-gated stacks. An in-place PermissionsBoundary on each role.
+  applyLegacyRuntimeBoundaries(naming, { controlPlane: controlPlaneStack, foundation: foundationStack, slack: slackStack });
   if (naming.env !== undefined) {
     Tags.of(app).add("agentx:env", naming.env);
     // Every environment role goes under /agentx/<env>/, the path the CloudFormation service role is
