@@ -228,7 +228,38 @@ class Images:
             run(['docker', 'rm', '--force', container], self.repository)
 
 
+def precondition_paths(repository):
+    """The paths the boot proof refuses a non-pristine host for: read from the proof itself, so the two never drift apart."""
+    text = (repository / TEST).read_text()
+    found = re.search(r"for\(const p of \[ROOT,RUN,HOST,((?:'[^']+',?)+)\]\)assert\.equal\(await lstat\(p\)", text)
+    if found is None:
+        raise RuntimeError('the boot proof no longer lists its disposable-host paths where the grid reads them')
+    return ['/mnt/workspace', '/run/agentx-close-retention', '/run/agentx-close-retention-host'] + re.findall(r"'([^']+)'", found.group(1))
+
+
+def reset_disposable_host(repository, paths=None, execute=run, ci=None):
+    """An earlier step on the same runner (the job's own Linux tests, a sandbox-egress run) can leave one of the boot proof's paths behind, and the proof refuses a host that is not pristine. Name every dirty path
+    (the next log then shows who left it); on the disposable GitHub runner remove it, anywhere else refuse. Returns the paths that were dirty."""
+    paths = precondition_paths(repository) if paths is None else paths
+    dirty = [path for path in paths if os.path.lexists(path)]
+    if not dirty:
+        return []
+    for path in dirty:
+        print('host not pristine before the close-retention proof: ' + path + '  ' + execute(['ls', '-ld', path], repository).strip(), file=sys.stderr)
+    if not (os.environ.get('GITHUB_ACTIONS') == 'true' if ci is None else ci):
+        raise RuntimeError('host is not pristine and is not a disposable CI runner: ' + ', '.join(dirty))
+    for path in dirty:
+        try:
+            execute(['sudo', '-n', 'umount', '-R', '-l', path], repository)
+        except subprocess.CalledProcessError:
+            pass
+        execute(['sudo', '-n', 'rm', '-rf', path], repository)
+    execute(['sudo', '-n', 'systemctl', 'daemon-reload'], repository)
+    return dirty
+
+
 def result(repository, image, selector, report, expected_failure=None):
+    reset_disposable_host(repository)
     env = {**os.environ, 'CODE_CI_LINUX': '1', 'CLOSE_RETENTION_TEST_IMAGE': image}
     args = [str(repository / 'node_modules/.bin/vitest'), 'run', TEST, '--bail=1',
             '--no-file-parallelism', '--maxWorkers=1', '--reporter=json', '--outputFile=' + str(report)]

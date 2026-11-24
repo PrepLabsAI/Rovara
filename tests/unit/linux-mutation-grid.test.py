@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -155,6 +156,33 @@ class GridTests(unittest.TestCase):
             with patch.object(grid, 'run', side_effect=subprocess.TimeoutExpired(['vitest'], 540)):
                 with self.assertRaises(subprocess.TimeoutExpired):
                     grid.result(ROOT, 'image', '', report)
+
+    def test_the_grid_reads_the_boot_proofs_own_disposable_host_paths(self):
+        paths = grid.precondition_paths(ROOT)
+        self.assertEqual(paths[:3], ['/mnt/workspace', '/run/agentx-close-retention', '/run/agentx-close-retention-host'])
+        for path in ('/etc/agentx', '/var/lib/rovara-egress', '/etc/systemd/system/agentx-worker.service', '/run/agentx-boot-failure'):
+            self.assertIn(path, paths)
+
+    def test_a_dirty_runner_is_named_then_cleaned_on_ci_and_refused_anywhere_else(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            clean, dirty = Path(temporary) / 'clean', Path(temporary) / 'agentx'
+            dirty.mkdir()
+            (dirty / 'worker-dns').write_text('1.1.1.1\n')
+            calls = []
+            def fake(args, *unused, **kwargs):
+                calls.append(args)
+                if args[0] == 'ls': return 'drwx------ root ' + args[2] + '\n'
+                if args[:4] == ['sudo', '-n', 'rm', '-rf']: shutil.rmtree(args[4])
+                return ''
+            self.assertEqual(grid.reset_disposable_host(ROOT, paths=[str(clean)], execute=fake, ci=True), [])
+            self.assertEqual(calls, [])
+            with self.assertRaisesRegex(RuntimeError, 'not a disposable CI runner'):
+                grid.reset_disposable_host(ROOT, paths=[str(clean), str(dirty)], execute=fake, ci=False)
+            self.assertTrue(dirty.exists())
+            self.assertEqual(grid.reset_disposable_host(ROOT, paths=[str(clean), str(dirty)], execute=fake, ci=True), [str(dirty)])
+            self.assertFalse(dirty.exists())
+            self.assertIn(['sudo', '-n', 'systemctl', 'daemon-reload'], calls)
+            self.assertEqual([c for c in calls if c[0] == 'ls'], [['ls', '-ld', str(dirty)]] * 2)
 
     def test_registry_is_loopback_and_removes_only_its_container_even_on_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
