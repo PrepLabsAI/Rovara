@@ -19,7 +19,7 @@ export * from "./e2e-route-derive.js";
 export { classifyProviderFailure, isNetworkCode, signalPattern, BEDROCK_SIGNAL_PATTERN, KEYED_SIGNAL_PATTERN, MODEL_NOT_ENABLED_SIGNAL, MODEL_NOT_OFFERED_SIGNAL, RUN_PRICE_REFUSED_CODE, RUN_PRICE_REFUSED_MESSAGE, RUN_PRICE_REFUSED_SIGNAL, runPriceRefusedBody, GATEWAY_QUOTA_ANSWERS, MODEL_QUOTA_DETAIL, MODEL_QUOTA_SIGNAL, gatewayQuotaBody } from "./provider-failure.js";
 import { MODEL_QUOTA_DETAIL as QUOTA_DETAIL, RUN_PRICE_REFUSED_MESSAGE, gatewayQuotaBody, runPriceRefusedBody } from "./provider-failure.js";
 export type { ProviderFailureFacts } from "./provider-failure.js";
-import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, ROVARA_AI_PAUSED_MESSAGE, isRovaraAiPaused, agentXError, isClaudeAgentModel, isKeyedModelProvider, type RunPrice, type RateQuoteV1 as RateQuote, type InvocationModelRoute, type KeyedModelProvider, type ModelIdentifier, type ThinkingLevel } from "@agentx/contracts";
+import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, ROVARA_AI_PAUSED_MESSAGE, isRovaraAiPaused, agentXError, isClaudeAgentModel, isKeyedModelProvider, isOpenAiAgentModel, type RunPrice, type RateQuoteV1 as RateQuote, type InvocationModelRoute, type KeyedModelProvider, type ModelIdentifier, type ThinkingLevel } from "@agentx/contracts";
 import { InMemoryCredentialStore, createAssistantMessageEventStream, type Api, type Model, type SimpleStreamOptions, type TranscriptContext, type AssistantMessage, type AssistantMessageEventStream, type OpenAICompletionsCompat } from "@earendil-works/pi-ai";
 import { streamSimple as openAICompletionsStream } from "@earendil-works/pi-ai/api/openai-completions";
 import { streamSimple as anthropicMessagesStream } from "@earendil-works/pi-ai/api/anthropic-messages";
@@ -81,7 +81,17 @@ export interface ModelProxyOptions {
  * The thinking level a project chose was chosen for another model, so a routed model without reasoning runs with it off.
  */
 export function routeSupportsReasoning(route: InvocationModelRoute): boolean {
+  if (isGatewayChatModel(route)) return false;
   return catalogModelByName(route.catalog)?.model.reasoning ?? UNLISTED_ROUTED_MODEL.reasoning;
+}
+
+/**
+ * #1389: an OpenAI model on the gateway's Anthropic Messages route runs on the company's own OpenAI key, which the gateway reaches by translating the request to
+ * Chat Completions. That translation refuses a whole request carrying extended thinking or an image, so such a model is sent neither: it runs with Anthropic
+ * thinking off (OpenAI still applies the model's own default reasoning) and text-only input (Pi puts its placeholder where an image would go).
+ */
+export function isGatewayChatModel(route: InvocationModelRoute): boolean {
+  return route.api === "anthropic-messages" && isOpenAiAgentModel(route.catalog);
 }
 
 /** The thinking level a routed model runs with: the one asked for if the model reasons, else off; absent stays absent. */
@@ -336,7 +346,7 @@ async function createRoutedModelRuntime(selected: ModelIdentifier & { thinkingLe
     baseUrl, api: route.api,
     models: [{
       id: route.alias, name: route.alias, api: route.api, baseUrl,
-      reasoning: base.reasoning, input: base.input, cost, contextWindow: base.contextWindow,
+      reasoning: isGatewayChatModel(route) ? false : base.reasoning, input: isGatewayChatModel(route) ? ["text"] : base.input, cost, contextWindow: base.contextWindow,
       maxTokens: route.api === "anthropic-messages" && !isClaudeFamilyCatalog(route.catalog) ? Math.min(base.maxTokens, GATEWAY_CONVERSE_MAX_OUTPUT_TOKENS) : base.maxTokens,
       ...(catalog?.thinkingLevelMap === undefined ? {} : { thinkingLevelMap: catalog.thinkingLevelMap }),
       ...(catalog?.promptCache === undefined ? {} : { promptCache: catalog.promptCache }),

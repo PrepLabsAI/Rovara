@@ -49,13 +49,14 @@ describe("the contract the gateway publishes", () => {
     for (const value of bad) expect(OfferedAgentModelsSchema.safeParse(value).success, JSON.stringify(value)).toBe(false);
   });
 
-  it("names a Claude model under Anthropic and every other model under Bedrock, one name for one model", () => {
+  it("names a Claude model under Anthropic, an OpenAI model under OpenAI (#1389) and every other model under Bedrock, one name for one model", () => {
     expect(agentModelIdentity("claude-opus-5-5")).toEqual({ provider: "anthropic", modelId: "claude-opus-5-5" });
     expect(agentModelIdentity("us.amazon.nova-2-lite-v1:0")).toEqual({ provider: "amazon-bedrock", modelId: "us.amazon.nova-2-lite-v1:0" });
     for (const name of GATEWAY_OFFERED_MODELS) expect(agentModelName(agentModelIdentity(name))).toBe(name);
     expect(agentModelName({ provider: "amazon-bedrock", modelId: "claude-opus-5-5" })).toBeUndefined();
     expect(agentModelName({ provider: "anthropic", modelId: "qwen.qwen3-coder-480b-a35b-v1:0" })).toBeUndefined();
-    expect(agentModelName({ provider: "openai", modelId: "gpt-5" })).toBeUndefined();
+    expect(agentModelName({ provider: "openai", modelId: "gpt-5" })).toBe("gpt-5");
+    expect(agentModelName({ provider: "amazon-bedrock", modelId: "gpt-5" })).toBeUndefined();
     expect(agentModelName({ provider: "openrouter", modelId: "anthropic/claude-opus-5-5" })).toBe("anthropic/claude-opus-5-5");
     expect(agentModelName({ provider: "anthropic", modelId: "claude opus" })).toBeUndefined();
   });
