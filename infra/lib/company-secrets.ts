@@ -28,6 +28,15 @@ export const COMPANY_SECRET_FAMILIES = ["org-connectors", "org-hooks"] as const;
 /** The read and write actions the name fence covers. */
 export const COMPANY_SECRET_USE_ACTIONS = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret", "secretsmanager:PutSecretValue"] as const;
 
+/** The trust conditions of a role a session may take only with exactly the one company tag (shared with the Slack token reader role, slack-company-token-reader.ts). */
+export function companyTagTrustConditions() {
+  return {
+    Null: { [`aws:RequestTag/${COMPANY_TAG_KEY}`]: "false", "aws:TagKeys": "false" },
+    "ForAllValues:StringEquals": { "aws:TagKeys": [COMPANY_TAG_KEY] },
+    StringLike: { [`aws:RequestTag/${COMPANY_TAG_KEY}`]: COMPANY_TAG_VALUE_GLOB },
+  };
+}
+
 export interface CompanySecretsProps {
   /** The environment's name ("production" for the legacy deployment). */
   readonly env: string;
@@ -42,11 +51,7 @@ export class CompanySecrets extends Construct {
     super(scope, id);
     const stack = Stack.of(this);
     const principalCompany = `\${aws:PrincipalTag/${COMPANY_TAG_KEY}}`;
-    const tagConditions = {
-      Null: { [`aws:RequestTag/${COMPANY_TAG_KEY}`]: "false", "aws:TagKeys": "false" },
-      "ForAllValues:StringEquals": { "aws:TagKeys": [COMPANY_TAG_KEY] },
-      StringLike: { [`aws:RequestTag/${COMPANY_TAG_KEY}`]: COMPANY_TAG_VALUE_GLOB },
-    };
+    const tagConditions = companyTagTrustConditions();
     const brokerArn = props.brokerRole.roleArn;
     // The trust: one statement, sts:AssumeRole and sts:TagSession together, each only with exactly the one company tag.
     this.role = new iam.Role(this, "Role", {

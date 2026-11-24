@@ -1,7 +1,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { pathToFileURL } from "node:url";
 import { createWorkspaceSlackClients, type ServiceSlackWorkspaces } from "./slack-workspace-clients.js";
-import { serviceSlackWorkspacesFromEnvironment } from "./slack-company-workspaces.js";
+import { serviceSlackWorkspacesFromEnvironment, type ScopedSecrets } from "./slack-company-workspaces.js";
+import { AssumeRoleCommand, STSClient } from "@aws-sdk/client-sts";
 import { createHash } from "node:crypto";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -632,7 +633,19 @@ process.exit(0);
 /** L2-2 PR 18d: Slack company mode (slack-company-workspaces.ts); off, nothing is built and the service runs exactly as before. */
 export function slackServiceCompanyFromEnvironment(env: NodeJS.ProcessEnv): Parameters<typeof runSlackService> {
   const region = env.AWS_REGION === undefined ? {} : { region: env.AWS_REGION };
-  const company = serviceSlackWorkspacesFromEnvironment(env, { documentClient: DynamoDBDocumentClient.from(new DynamoDBClient(region)), secrets: new SecretsManagerClient(region) });
+  const sts = new STSClient(region);
+  // R5 step 1 (DEC 254zzz444): the per-company token reader session (slack-company-workspaces.ts); used only when SLACK_COMPANY_TOKEN_ROLE_ARN is set.
+  const scoped: ScopedSecrets = {
+    async assumeRole(request) {
+      const result = await sts.send(new AssumeRoleCommand({ RoleArn: request.roleArn, RoleSessionName: request.sessionName, DurationSeconds: request.durationSeconds, Tags: request.tags }));
+      const credentials = result.Credentials;
+      if (credentials?.AccessKeyId === undefined || credentials.SecretAccessKey === undefined || credentials.SessionToken === undefined || credentials.Expiration === undefined) throw new Error("no credentials");
+      return { credentials: { accessKeyId: credentials.AccessKeyId, secretAccessKey: credentials.SecretAccessKey, sessionToken: credentials.SessionToken }, expiresAt: credentials.Expiration.getTime() };
+    },
+    clientFrom: (credentials) => new SecretsManagerClient({ ...region, credentials }),
+  };
+  const company = serviceSlackWorkspacesFromEnvironment(env, { documentClient: DynamoDBDocumentClient.from(new DynamoDBClient(region)), secrets: new SecretsManagerClient(region), scoped,
+    log: (event, fields) => console.log(JSON.stringify({ component: "slack-orchestrator", event, ...fields })) });
   return company === undefined ? [] : [company.workspaces, company.legacyTeamId];
 }
 if (process.argv[1] !== undefined && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) await runSlackService(...slackServiceCompanyFromEnvironment(process.env));

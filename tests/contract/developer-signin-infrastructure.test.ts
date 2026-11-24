@@ -187,10 +187,10 @@ describe("broker membership condition-check grant", () => {
     const before = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutStuckStoppingAlarm(structuredClone(namedRaw), stuckStoppingInstall("staging"))));
     // The providers branch also adds this exact capability output. Keep a measured
     // combined pin, then remove only the asserted output to retain the upstream pin.
-    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("946f06d30e6b8150a1fe4086c119c5d6d22bf0b83c1981cf1e79b3ca4be6913b");
+    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("57d17108e226e286fa426400cd2d589463d2ecb23e910ed28399591e9c389659");
     expect(before.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     delete before.Outputs.ModelRunPriceVersion;
-    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("06108dfc29ca5002c166873dc011428a489f0d524e6c3e197828d805d0052bc7");
+    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("31020f3bb3a93ddaa21ed47660a69d013abff96102a62a4753cdd9488791dae7");
     const afterTuples = accessTuples(namedRaw);
     const beforeTuples = accessTuples(before);
     const broker = "role:BrokerServiceRole";

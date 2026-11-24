@@ -1,4 +1,4 @@
-import { MODEL_PROVIDERS, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS } from "@agentx/contracts";
+import { MODEL_PROVIDERS, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, SLACK_COMPANY_TOKEN_FALLBACK_VARIABLE, SLACK_COMPANY_TOKEN_ROLE_VARIABLE, slackTokenReaderRoleArn } from "@agentx/contracts";
 import { providerKeyParameters } from "./model-keys.js";
 import { openRouterRoutingParameter } from "./openrouter.js";
 import {
@@ -412,6 +412,10 @@ export class SlackOrchestratorStack extends Stack {
           { name: "SLACK_TEAM_ID", value: slackCompany.team.valueAsString },
           { name: "AGENTX_ENV", value: naming.env ?? "production" },
           { name: "COMPANY_SIGNIN", value: companySignIn.valueAsString },
+          // R5 step 1 (DEC 254zzz444): the company-scoped Slack token reader role the service assumes per company (contracts slack-company-tokens.ts; created by the control plane only while Slack company
+          // mode is on, and only read by the service in company mode). Release 1 falls back to the task role's own family-wide read; release 2 drops the fallback variable and that read.
+          { name: SLACK_COMPANY_TOKEN_ROLE_VARIABLE, value: slackTokenReaderRoleArn({ env: naming.env ?? "production", partition: Aws.PARTITION, account: Aws.ACCOUNT_ID, named: naming.env !== undefined }) },
+          { name: SLACK_COMPANY_TOKEN_FALLBACK_VARIABLE, value: "shared" },
         ],
         logConfiguration: {
           logDriver: "awslogs",

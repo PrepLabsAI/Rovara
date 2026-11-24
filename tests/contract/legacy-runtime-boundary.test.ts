@@ -99,7 +99,7 @@ const changeSetArn = `arn:aws:cloudformation:us-east-1:${ACCOUNT}:changeSet/cs/0
 const cdkRole = (kind: string) => `arn:aws:iam::${ACCOUNT}:role/cdk-hnb659fds-${kind}-${ACCOUNT}-us-east-1`;
 
 describe("legacy runtime boundary: which roles carry it", () => {
-  it("is on every runtime role of the control plane, foundation and Slack orchestrator, pointing at that stack's own policy (29 roles, an in-place property)", () => {
+  it("is on every runtime role of the control plane, foundation and Slack orchestrator, pointing at that stack's own policy (30 roles incl. R5's Slack token reader, an in-place property)", () => {
     let roles = 0;
     for (const [stackName, part] of Object.entries(STACK_PARTS)) {
       const boundary = boundaryOf(stackName);
@@ -112,8 +112,8 @@ describe("legacy runtime boundary: which roles carry it", () => {
         expect(role.Properties.PermissionsBoundary, `${stackName} ${id}`).toStrictEqual({ Ref: boundary.id });
       }
     }
-    expect(roles).toBe(29);
-    expect([rolesOf("AgentXControlPlane").length, rolesOf("AgentXProductionFoundation").length, rolesOf("AgentXSlackOrchestrator").length]).toEqual([26, 2, 1]);
+    expect(roles).toBe(30);
+    expect([rolesOf("AgentXControlPlane").length, rolesOf("AgentXProductionFoundation").length, rolesOf("AgentXSlackOrchestrator").length]).toEqual([27, 2, 1]);
   });
 
   it("names the worker's instance role, the Slack task role and the Lambda roles among the bounded roles", () => {
@@ -121,6 +121,8 @@ describe("legacy runtime boundary: which roles carry it", () => {
     expect(ids("AgentXProductionFoundation").some((id) => id.startsWith("Ec2WorkersInstanceRole"))).toBe(true);
     expect(ids("AgentXControlPlane").filter((id) => id.startsWith("SlackOrchestratorTaskRole"))).toHaveLength(1);
     expect(ids("AgentXControlPlane").filter((id) => id.startsWith("BrokerServiceRole"))).toHaveLength(1);
+    // R5: the per-company Slack token reader role is a runtime role of the control plane, so it carries the boundary too.
+    expect(ids("AgentXControlPlane").filter((id) => id.includes("SlackCompanyTokenReaderRole"))).toHaveLength(1);
     expect(ids("AgentXSlackOrchestrator").filter((id) => id.startsWith("ExecutionRole"))).toHaveLength(1);
   });
 

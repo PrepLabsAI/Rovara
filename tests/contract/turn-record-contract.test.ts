@@ -500,14 +500,15 @@ describe("secret redaction, fix round 3", () => {
   });
 
   it("redactArguments scales linearly for a long argv array and many keys", () => {
-    // N = 1,000 argv items and 400 keys; 8N = 8,000 and 3,200 (about 24 bytes per unit, so 8N stays under 256 KiB and stays in CPU cache).
+    // N = 1,000 argv items and 400 keys; 10N = 10,000 and 4,000 (about 24 bytes per unit, so 10N stays under 256 KiB and stays in CPU cache).
+    // Relative bound: the ratio of the 10N time to the N time must stay under 30 (linear ~10, quadratic ~100).
     expectLinearScaling((scale) => {
       const inputs = [
         Array.from({ length: scale }, () => "-p"),
         Object.fromEntries(Array.from({ length: scale * 0.4 }, (_, i) => [`key${i}`, `password=x${i}`])),
       ] as const;
       return () => { for (const value of inputs) redactArguments(value); };
-    }, { n: 1_000, unitBytes: 24, label: "redactArguments on a long argv array and many keys" });
+    }, { n: 1_000, k: 10, maxRatio: 30, unitBytes: 24, label: "redactArguments on a long argv array and many keys" });
   });
 
   it("redactAndCap keeps content when the text past the ceiling has no whitespace", () => {

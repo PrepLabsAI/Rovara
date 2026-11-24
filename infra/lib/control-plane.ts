@@ -38,6 +38,7 @@ import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { ChannelAdapters } from "./channel-adapters.js";
 import { CoreEngine, TEST_SERVICES_PARAMETER, TEST_SERVICE_IMAGES_PARAMETER } from "./core-engine.js";
 import { CompanySecrets } from "./company-secrets.js";
+import { SlackCompanyTokenReader } from "./slack-company-token-reader.js";
 import { addGithubWebhookSecret, GITHUB_WEBHOOK_ROUTE, guardGithubWebhookRoute } from "./github-webhook.js";
 import { SavedEnvImages } from "./saved-env-images.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
@@ -1332,6 +1333,9 @@ export class ControlPlaneStack extends Stack {
       sessions.reconciler.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env ?? "production", "")));
       // The hosted Slack service (ECS): the team's binding and the company's token for its posts. Its container gets the switch from the slack stack.
       slackCompany.grant("SlackOrchestrator", slackOrchestratorRole, [slackCompany.tokenRead(), slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", SLACK_BINDING_READ_KEYS)]);
+      // R5 step 1 (DEC 254zzz444): the orchestrator's company-scoped token reader (slack-company-token-reader.ts). ADDITIVE: the family-wide read above stays for one release (the service falls back to
+      // it, SLACK_COMPANY_TOKEN_FALLBACK=shared in the Slack stack); release 2 removes it. The role and its policy exist only while the switch is on, like every other grant here.
+      new SlackCompanyTokenReader(this, "SlackCompanyTokenReader", { naming, slackCompany, readerRole: slackOrchestratorRole });
       // L2-2 PR 18d: the Slack service's inputs, handed to the slack stack by the deploy (parameters.ts optionalOutputs). DEC 254zk: always there, so that agentx config set
       // slack.companyWorkspaces, which sets the slack stack's own switch (SlackCompanyWorkspacesState), finds them in place from the last deploy.
       for (const [id, value] of [["SlackCompanyStateTableName", state.tableName], ["SlackCompanyTeamId", signInParameters.slackTeamId.valueAsString]] as const) new CfnOutput(this, id, { value });
