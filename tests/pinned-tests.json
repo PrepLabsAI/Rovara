@@ -200,6 +200,24 @@
       "decision": "DEC 254zzz333",
       "restoringLane": "RESTORE-8F1BE0A80 item 3",
       "deletedBy": "8f1be0a80"
+    },
+    {
+      "path": "tests/unit/core-host-parity.test.ts",
+      "minimumTests": 18,
+      "reason": "Per-root parity of late-bound deps keys and service names (a reviewed fixture): the safety net for the F4 engine restructuring.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/unit/second-review-failure-rules.test.ts",
+      "minimumTests": 12,
+      "reason": "Per-hook failure rules and per-site order pinned as today's behaviour: the safety net for the F4 engine restructuring.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/unit/second-review-money-exits.test.ts",
+      "minimumTests": 10,
+      "reason": "Every second-review money exit (incl. the dispatcher's sweep-only exit) pinned as today's behaviour: the safety net for the F4 engine restructuring.",
+      "decision": "DEC 254zzz459"
     }
   ],
   "pendingRestore": []
