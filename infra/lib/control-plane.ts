@@ -1,4 +1,5 @@
 import { grantProviderKeySecrets } from "./model-keys.js";
+import { CODEBUILD_START_OVERRIDE_KEYS } from "./codebuild-start-overrides.js";
 import { resolve } from "node:path";
 import {
   ArnFormat,
@@ -273,10 +274,30 @@ export class ControlPlaneStack extends Stack {
       resources: [this.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `${naming.connectorSecretPrefix}*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
       conditions: { StringEquals: { "secretsmanager:ResourceTag/agentx-writable": "refresh-token" } },
     }));
-    broker.addToRolePolicy(new iam.PolicyStatement({
-      actions: ["codebuild:StartBuild", "codebuild:BatchGetBuilds"],
-      resources: [this.formatArn({ service: "codebuild", resource: "project", resourceName: "agentx-*" })],
-    }));
+    const codeBuildProjects = this.formatArn({ service: "codebuild", resource: "project", resourceName: "agentx-*" });
+    broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["codebuild:BatchGetBuilds"], resources: [codeBuildProjects] }));
+    // StartBuild is allowed only as the gate project stores it. The broker's call (packages/broker/src/codebuild.ts) sends projectName, sourceVersion, timeoutInMinutesOverride and
+    // idempotencyToken, none of which has a condition key. Every StartBuild override that has a key (buildspec, image, environment variables, source type and location, secondary sources,
+    // artifacts, cache, logs, service role, ... see codebuild-start-overrides.ts) must be ABSENT: `Null: {key: "true"}` for each. Conditions in one block are AND'ed, so this one Allow
+    // holds only when all are absent and a single override of any one key leaves it unmatched (implicit deny). That is sufficient because the broker's codebuild grants are pinned to exactly
+    // this Allow plus BatchGetBuilds (tests/contract/broker-codebuild-scope.test.ts): no other Allow can start a build. Not covered, because IAM has no key for it: `sourceVersion` (anyone who
+    // can push to the gate's repository chooses the in-repo buildspec) and secondarySourcesVersionOverride. StartBuildBatch is never needed and is denied outright; an explicit Deny wins
+    // over any later Allow. Its own inline role policy, not the broker's DefaultPolicy: the override keys would not fit under CDK's split threshold (a split is a managed policy the deploy
+    // role cannot create), the same reason BrokerCompanyImportReads is separate.
+    const codeBuildStart = new iam.Policy(this, "BrokerCodeBuildStart", {
+      roles: [broker.role!],
+      statements: [
+        new iam.PolicyStatement({
+          actions: ["codebuild:StartBuild"],
+          resources: [codeBuildProjects],
+          conditions: { Null: Object.fromEntries(CODEBUILD_START_OVERRIDE_KEYS.map((key) => [key, "true"])) },
+        }),
+        new iam.PolicyStatement({ effect: iam.Effect.DENY, actions: ["codebuild:StartBuildBatch"], resources: ["*"] }),
+      ],
+    });
+    // Deploy order: the conditional StartBuild Allow must exist before the DefaultPolicy update drops StartBuild from its old combined statement, or a build start could be refused
+    // briefly during the stack update. The DefaultPolicy therefore depends on BrokerCodeBuildStart (pinned: tests/contract/broker-codebuild-scope.test.ts).
+    broker.role!.node.findChild("DefaultPolicy").node.addDependency(codeBuildStart);
     if (naming.env !== undefined) addDerivedBrokerVariable(broker, naming, "CONNECTOR_SECRET_PREFIX", naming.connectorSecretPrefix);
     // Spec 043: SWE-bench runs. The broker reads the optional eval stack's settings, the runner image
     // and the worker model per request, and starts the eval state machine by its fixed name; both

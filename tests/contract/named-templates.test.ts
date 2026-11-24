@@ -296,7 +296,7 @@ describe("named environment templates", () => {
     if (stack.stackName === "agentx-staging-control-plane") {
       it("removing only Batch F additions preserves code/next's agentx-staging-control-plane template", () => {
         const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(withoutStuckStoppingAlarm(normalizedTemplate(stack), STAGING)));
-        expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("b17ea37bd6eb50c703e6cf0e1e1620d11c2340dbecb2762b31dca75dfe35e074");
+        expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("eda108a047914fd07bacdedd8ec3dc62f60c0b792febfbc5d0ed7f2d4c1d6b41");
       }, 120_000);
     }
     it(`${stack.stackName} is unchanged`, () => {
@@ -305,7 +305,7 @@ describe("named environment templates", () => {
       // SIGNIN-MEMBER-CONDITIONCHECK, DEC 254zzz282 B014-A: pin the new full synth
       // before the existing normalizers, then preserve every old policy/snapshot assertion.
       if (stack.stackName === "agentx-staging-control-plane") {
-        expect(createHash("sha256").update(JSON.stringify(template)).digest("hex")).toBe("ca42c2f75d9b10cc62f9f87c96388dd0ea28e11c5cde383c7022dbbe044dfd05");
+        expect(createHash("sha256").update(JSON.stringify(template)).digest("hex")).toBe("c1d95e009dfa8a48a7596f7e7b959f6321b3c89ad1874dd07d5d8bd4c2fd7a68");
         // Webhook lane W3: the webhook secret slot, its throttle and one alarm, pinned exactly in tests/support/webhook-secret-template.ts, then removed.
         template = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(template));
       }
