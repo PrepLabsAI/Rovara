@@ -210,12 +210,14 @@ export function fakeOidc(options: { users: FakeOidcUser[]; clientSecret?: string
   const issuedAt = () => Math.floor((options.now ?? Date.now)() / 1000);
   const signer = signingKey();
   const codes = new Map<string, { user: FakeOidcUser; nonce: string; redirectUri: string; idToken?: string }>();
-  const state = { down: false, authorizations: [] as string[] };
+  // `endSession`: the discovery document's end_session_endpoint (Cloud sign-out, issue 314); unset, it has none, as before.
+  const state = { down: false, authorizations: [] as string[], endSession: undefined as string | undefined };
   const handler: Handler = async (url, init) => {
     if (url.origin !== OIDC_ISSUER) return undefined;
     if (state.down) throw new TypeError("fetch failed");
     if (url.pathname === "/.well-known/openid-configuration") {
-      return Response.json({ issuer: OIDC_ISSUER, authorization_endpoint: `${OIDC_ISSUER}/authorize`, token_endpoint: `${OIDC_ISSUER}/token`, jwks_uri: `${OIDC_ISSUER}/jwks` });
+      return Response.json({ issuer: OIDC_ISSUER, authorization_endpoint: `${OIDC_ISSUER}/authorize`, token_endpoint: `${OIDC_ISSUER}/token`, jwks_uri: `${OIDC_ISSUER}/jwks`,
+        ...(state.endSession === undefined ? {} : { end_session_endpoint: state.endSession }) });
     }
     if (url.pathname === "/token") {
       const expected = `Basic ${Buffer.from(`${formEncodeForBasic(OIDC_CLIENT_ID)}:${formEncodeForBasic(options.clientSecret ?? OIDC_CLIENT_SECRET)}`).toString("base64")}`;

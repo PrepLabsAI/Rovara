@@ -117,6 +117,10 @@ const CHALLENGE = /^[A-Za-z0-9_-]{43,128}$/;
 const REVIEW_RETURN_TO = /^\/review\/(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:\/task(?:\?doc=(?:requirements|design|coding-plan)(?:&from=[1-9][0-9]{0,2})?)?)?|link\/[A-Za-z0-9_-]{32})$/i;
 const REVIEW_PKCE_COOKIE = "__Host-agentx_review_pkce";
 const REVIEW_SESSION_COOKIE = "__Host-agentx_review_session";
+/** Cloud sign-out, issue 314: where a sign-out returns once the provider's session ended (the provider's sign-out redirect carries no state of its own). */
+const END_SESSION_COOKIE = "__Host-rovara_end_session";
+const END_SESSION_MAX_AGE_SECONDS = 600;
+const RETURN_ADDRESS_MAX = 2048;
 const JSON_HEADERS = { "content-type": "application/json", "cache-control": "no-store", pragma: "no-cache" };
 const HTML_HEADERS = {
   "content-type": "text/html; charset=utf-8",
@@ -169,6 +173,23 @@ function isRetryableAwsError(error: unknown): boolean {
   const meta = error as { $retryable?: unknown; $metadata?: { httpStatusCode?: number } };
   return RETRYABLE_AWS_ERRORS.has(error.name) || meta.$retryable !== undefined || (meta.$metadata?.httpStatusCode ?? 0) >= 500;
 }
+
+/**
+ * Cloud sign-out, issue 314: a registered client's sign-out may return only to an HTTPS address on the origin of one of its own registered redirect
+ * URLs (with no credentials or fragment), so the end-session endpoint is never an open redirect.
+ */
+function postLogoutReturnAllowed(client: SignInClientRecord, value: string): boolean {
+  if (value.length > RETURN_ADDRESS_MAX) return false;
+  let url: URL;
+  try { url = new URL(value); } catch { return false; }
+  if (url.protocol !== "https:" || url.username !== "" || url.password !== "" || url.hash !== "") return false;
+  return client.redirectUris.some((registered) => {
+    try { return new URL(registered).origin === url.origin; } catch { return false; }
+  });
+}
+
+const cookieValue = (header: string | undefined, name: string): string | undefined =>
+  (header ?? "").split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`))?.slice(name.length + 1);
 
 function toClient(redirectUri: string, params: Record<string, string>): HttpResult {
   const url = new URL(redirectUri);
@@ -526,6 +547,62 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       href: `${endpoint("/authorize")}?request=${encodeURIComponent(auth.id)}&method=${method}`,
       label: `Sign in with ${methodLabel(method)}`,
     }))), cookies: [cookie] };
+  }
+
+  /** A registered client's sign-out return address, or undefined when the client or the address is not one this client may use. */
+  async function signOutReturn(clientId: string, returnTo: string): Promise<string | undefined> {
+    if (clientId === AGENTX_CLI_CLIENT_ID) return undefined;
+    const client = await registeredClient(clientId);
+    return client !== undefined && postLogoutReturnAllowed(client, returnTo) ? returnTo : undefined;
+  }
+
+  /**
+   * Cloud sign-out, issue 314: OpenID Connect RP-Initiated Logout for a registered client (`client_id`, `post_logout_redirect_uri`). The client has already ended
+   * its own session and revoked its tokens; this ends the browser's sessions behind them. Code's own review-page session cookie is cleared, and with
+   * the install's company sign-in on, the browser goes through that provider's sign-out (for Cognito, its managed login's `/logout`), so the next
+   * sign-in shows the login form instead of signing the same person straight back in. The provider returns to `/end-session/return`, which must be
+   * registered with it as a sign-out URL; the return address waits in a short-lived cookie. A provider with no sign-out address, or one that can't
+   * be read, returns the browser straight to the client: the person is signed out of Rovara either way.
+   */
+  async function endSession(query: URLSearchParams): Promise<HttpResult> {
+    const clientId = query.get("client_id") ?? "";
+    let returnTo: string | undefined;
+    try {
+      returnTo = await signOutReturn(clientId, query.get("post_logout_redirect_uri") ?? "");
+    } catch (error) {
+      deps.log({ event: "signin.error", path: "/v1/auth/end-session", error: errorName(error) });
+      return page(503, "Sign-out is unavailable", ["You are signed out of the service. Close this tab, or try signing out again in a moment."]);
+    }
+    if (returnTo === undefined) return page(400, "This sign-out link is not valid", ["You are signed out of the service. Close this tab, or go back to the service to sign in again."]);
+    const cookies = [`${REVIEW_SESSION_COOKIE}=; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`];
+    let target: string | undefined;
+    if (enabledMethods(deps).includes("oidc")) {
+      try {
+        target = await deps.providers.oidc?.endSessionUrl?.({ postLogoutRedirectUri: endpoint("/end-session/return") });
+      } catch (error) {
+        deps.log({ event: "signin.end_session_provider_failed", error: errorName(error) });
+      }
+    }
+    if (target === undefined) {
+      deps.log({ event: "signin.session_ended", clientId, provider: false });
+      return { ...redirect(returnTo), cookies };
+    }
+    const pending = Buffer.from(JSON.stringify({ clientId, returnTo })).toString("base64url");
+    deps.log({ event: "signin.session_ended", clientId, provider: true });
+    return { ...redirect(target), cookies: [...cookies, `${END_SESSION_COOKIE}=${pending}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=${END_SESSION_MAX_AGE_SECONDS}`] };
+  }
+
+  /** Cloud sign-out, issue 314: back from the provider's sign-out. The waiting return address is checked again against the client's registration. */
+  async function endSessionReturn(headers: Record<string, string | undefined>): Promise<HttpResult> {
+    const cookies = [`${END_SESSION_COOKIE}=; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`];
+    const signedOut = () => ({ ...page(200, "You are signed out", ["Go back to the service to sign in again."]), cookies });
+    const raw = cookieValue(headers.cookie, END_SESSION_COOKIE);
+    if (raw === undefined || raw.length > RETURN_ADDRESS_MAX * 2) return signedOut();
+    let pending: { clientId?: unknown; returnTo?: unknown };
+    try { pending = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as typeof pending; } catch { return signedOut(); }
+    if (pending === null || typeof pending !== "object" || typeof pending.clientId !== "string" || typeof pending.returnTo !== "string") return signedOut();
+    const returnTo = await signOutReturn(pending.clientId, pending.returnTo);
+    return returnTo === undefined ? signedOut() : { ...redirect(returnTo), cookies };
   }
 
   /** Once the CLI's redirect URI and state are known, any failure goes back to the CLI, so it never
@@ -1018,6 +1095,10 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         // DEC 254h: GitHub's callback; with GitHub off (or the company layer off) the sign-in request never chose it, so this answers "expired".
         case "/v1/auth/callback/github":
           return callback("github", url.searchParams, headers);
+        case "/v1/auth/end-session":
+          return endSession(url.searchParams);
+        case "/v1/auth/end-session/return":
+          return endSessionReturn(headers);
       }
     }
     if (method === "POST" && pathname === "/v1/auth/token") return token(new URLSearchParams(body ?? ""), headers.authorization);
@@ -1025,7 +1106,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     return jsonResult(404, { error: "not_found" });
   }
 
-  const isPage = (pathname: string) => pathname === "/v1/auth/authorize" || pathname === "/v1/auth/browser/authorize" || pathname.startsWith("/v1/auth/callback/");
+  const isPage = (pathname: string) => pathname === "/v1/auth/authorize" || pathname === "/v1/auth/browser/authorize" || pathname.startsWith("/v1/auth/callback/")
+    || pathname.startsWith("/v1/auth/end-session");
 
   return async (
     event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | TaskPeopleDisplayReadRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
