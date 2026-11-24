@@ -90,6 +90,18 @@ describe("the affected plan of an ordinary pull request", () => {
     expect(planCi(input({ changed: ["packages/other-d/src/x.ts"] })).extraTests).toEqual([pinnedBoundary, "tests/unit/uses-d.test.ts"]);
   });
 
+  it("runs every journey test (tests/journeys/) in an affected run, whatever the change reaches, and never turns the run into the whole suite for it (A1)", () => {
+    const sources = new Map([...testSources, ["tests/journeys/sample-b.test.ts", "journey"], ["tests/journeys/harness/sample-helper.ts", "not a test"], ["tests/journeys/sample-a.test.ts", "journey"]]);
+    const plan = planCi(input({ changed: ["packages/other-d/src/x.ts"], testSources: sources }));
+    expect(plan).toMatchObject({ mode: "affected", tests: "changed" });
+    expect(plan.extraTests).toEqual([pinnedBoundary, "tests/journeys/sample-a.test.ts", "tests/journeys/sample-b.test.ts", "tests/unit/uses-d.test.ts"]);
+    // After the too-many check: more related tests than the limit still means the whole suite (journeys or not), and a run with few related tests is not widened by them.
+    const crowded = new Map<string, string>([["tests/journeys/sample-b.test.ts", "journey"]]);
+    for (let index = 0; index <= MAX_EXTRA_TESTS; index += 1) crowded.set(`tests/unit/many-${String(index)}.test.ts`, "scripts/sample-tool.ts");
+    expect(planCi(input({ changed: ["scripts/sample-tool.ts"], testSources: crowded }))).toMatchObject({ tests: "all", extraTests: [] });
+    expect(planCi(input({ changed: ["docs/x.md"], testSources: sources }))).toMatchObject({ docsOnly: true, tests: "none", extraTests: [] });
+  });
+
   it("finds the packages a change reaches through their dependencies, however deep", () => {
     expect(affectedPackages(["packages/core-a/src/x.ts"], packages).map((pkg) => pkg.dir)).toEqual(["packages/core-a", "packages/mid-b", "packages/leaf-c"]);
     expect(affectedPackages(["docs/x.md"], packages)).toEqual([]);

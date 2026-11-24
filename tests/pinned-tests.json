@@ -200,6 +200,48 @@
       "decision": "DEC 254zzz333",
       "restoringLane": "RESTORE-8F1BE0A80 item 3",
       "deletedBy": "8f1be0a80"
+    },
+    {
+      "path": "tests/journeys/journey-gate.test.ts",
+      "minimumTests": 9,
+      "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): the gate that fails when a journey lacks a file or a named known gap, or is skipped, or runs outside every affected run. A whole task on the real core and real worker, in every pull request run; the floor is the file's 9 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/journeys/merge-recovery.test.ts",
+      "minimumTests": 3,
+      "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journey 12, merge recovery (merged without a webhook, merged at an unchecked head, a refused press). A whole task on the real core and real worker, in every pull request run; the floor is the file's 3 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/journeys/pr-feedback.test.ts",
+      "minimumTests": 2,
+      "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journey 11, PR feedback (dismiss with a note; approve the recommended fix and the fix starts). A whole task on the real core and real worker, in every pull request run; the floor is the file's 2 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/journeys/questions-money.test.ts",
+      "minimumTests": 5,
+      "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journeys 6, 7, 8 and 10 (a question asked and answered, over-budget refusal, a failed check sent back, unknown result fields). A whole task on the real core and real worker, in every pull request run; the floor is the file's 5 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/journeys/resilience.test.ts",
+      "minimumTests": 2,
+      "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journey 13, the worker goes silent (lost machine, duplicate and foreign results). A whole task on the real core and real worker, in every pull request run; the floor is the file's 2 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/journeys/web-task.test.ts",
+      "minimumTests": 7,
+      "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journeys 1, 5 (web) and 9 (a web task start to close, quick and full path, default and self-approval merge rules, stop, another company). A whole task on the real core and real worker, in every pull request run; the floor is the file's 7 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/journeys/linear.test.ts",
+      "minimumTests": 3,
+      "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journeys 3a, 3b and 4 (Linear: a linked member, an unlinked ticket that waits, an admin starts it). A whole task on the real core and real worker, in every pull request run; the floor is the file's 3 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
     }
   ],
   "pendingRestore": []
