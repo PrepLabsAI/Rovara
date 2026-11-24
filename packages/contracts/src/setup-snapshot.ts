@@ -27,7 +27,7 @@ export const SETUP_WATCH_WORDS: Readonly<Record<SetupDriftClass, string>> = Obje
   version: "a language version file",
   test_config: "a test configuration",
   ci: "a CI workflow",
-  websites: "the allowed websites",
+  websites: "the allowed addresses",
 });
 
 /** Paths under these folders are installed or vendored code, never the project's own setup inputs. */

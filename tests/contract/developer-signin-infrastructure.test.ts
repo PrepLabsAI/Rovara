@@ -1,5 +1,6 @@
 // tests/contract/developer-signin-infrastructure.test.ts
 import { createHash } from "node:crypto";
+import { STARTBUILD_OVERRIDE_KEYS, brokerCodeBuildStartStatements, withoutBrokerCodeBuildStart } from "../support/broker-codebuild-start-template.js";
 import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js";
 import { stuckStoppingInstall, withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
 import { App, CfnParameter, Stack, aws_iam as iam } from "aws-cdk-lib";
@@ -134,9 +135,12 @@ const statementsOfRole = (template: TemplateJson, roleName: string) => grants(te
 // DEC 254zzz(2): the install company import's two sign-in table reads are the broker's own role policy (BrokerCompanyImportReads), kept out of the DefaultPolicy that CDK would split.
 const companyImportPolicies = (template: TemplateJson) => ofType(template, "AWS::IAM::Policy").filter(([id]) => withoutHash(id) === "DeveloperSignInBrokerCompanyImportReads");
 const companyImportStatements = (template: TemplateJson) => companyImportPolicies(template).flatMap(([, policy]) => statementsIn(policy.Properties.PolicyDocument));
-/** The broker's statements in its DefaultPolicy: everything except BrokerCompanyImportReads (the one policy CDK's split threshold applies to). */
+// BROKER-CODEBUILD-START: the broker's conditional StartBuild Allow and StartBuildBatch Deny are the broker's own role policy too (BrokerCodeBuildStart, in both control planes): the override keys
+// do not fit under CDK's split threshold in the DefaultPolicy.
+const codeBuildStartStatements = (template: TemplateJson) => ofType(template, "AWS::IAM::Policy").filter(([id]) => withoutHash(id) === "BrokerCodeBuildStart").flatMap(([, policy]) => statementsIn(policy.Properties.PolicyDocument));
+/** The broker's statements in its DefaultPolicy: everything except BrokerCompanyImportReads and BrokerCodeBuildStart (the one policy CDK's split threshold applies to). */
 const brokerDefaultStatements = (template: TemplateJson) => {
-  const own = new Set(companyImportStatements(template).map((statement) => JSON.stringify(statement)));
+  const own = new Set([...companyImportStatements(template), ...codeBuildStartStatements(template)].map((statement) => JSON.stringify(statement)));
   return statementsOfRole(template, "BrokerServiceRole").filter((statement) => !own.has(JSON.stringify(statement)));
 };
 
@@ -167,6 +171,8 @@ beforeAll(() => {
 // DEC 254zzz284: the only new authority is the broker's membership transaction fence.
 function withoutBrokerMemberConditionCheck(template: TemplateJson): TemplateJson {
   const copy = structuredClone(template);
+  // BROKER-CODEBUILD-START: the broker's CodeBuild start policy is asserted exactly and taken out too, so the pins below stay the ones recorded before it.
+  withoutBrokerCodeBuildStart(copy);
   const policy = companyImportPolicies(copy)[0]![1];
   const document = policy.Properties.PolicyDocument as { Statement: Statement[] };
   const table = ofType(copy, "AWS::DynamoDB::Table").find(([id]) => withoutHash(id) === "DeveloperSignInTable")![0];
@@ -187,10 +193,10 @@ describe("broker membership condition-check grant", () => {
     const before = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutStuckStoppingAlarm(structuredClone(namedRaw), stuckStoppingInstall("staging"))));
     // The providers branch also adds this exact capability output. Keep a measured
     // combined pin, then remove only the asserted output to retain the upstream pin.
-    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("946f06d30e6b8150a1fe4086c119c5d6d22bf0b83c1981cf1e79b3ca4be6913b");
+    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("57d17108e226e286fa426400cd2d589463d2ecb23e910ed28399591e9c389659");
     expect(before.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     delete before.Outputs.ModelRunPriceVersion;
-    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("06108dfc29ca5002c166873dc011428a489f0d524e6c3e197828d805d0052bc7");
+    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("31020f3bb3a93ddaa21ed47660a69d013abff96102a62a4753cdd9488791dae7");
     const afterTuples = accessTuples(namedRaw);
     const beforeTuples = accessTuples(before);
     const broker = "role:BrokerServiceRole";
@@ -1725,8 +1731,9 @@ const BROKER_ARN_ESTIMATE = 144;
 // DEC 254zzz(2): +710 for BrokerCompanyImportReads (6026 before): the broker's second role policy, counted here with every other inline document. The DefaultPolicy estimate below is unchanged.
 // DEC 254zzz29/254zzz32: +84 for ORG#<id>#SIGNIN_ISSUER (+45) and ORG#<id>#EMAIL#* (+39) in BrokerCompanyImportReads' GetItem keys (6736 before). DefaultPolicy unchanged.
 // DEC 254zzz284: +328 in the existing second inline policy; DefaultPolicy reserve unchanged.
-const BROKER_RESOLVED_INLINE_SIZE = 7148; // All inline documents after realistic ARN expansion.
-const BROKER_INLINE_ESTIMATE = 7453; // This replaces the R3R4 pin.
+// BROKER-CODEBUILD-START: BrokerCodeBuildStart (7148 before): the broker's third role policy (the conditional StartBuild Allow and the StartBuildBatch Deny), counted here with every other inline document. The DefaultPolicy estimate drops (StartBuild leaves it).
+const BROKER_RESOLVED_INLINE_SIZE = 8465; // All inline documents after realistic ARN expansion.
+const BROKER_INLINE_ESTIMATE = 7430; // This replaces the R3R4 pin. BROKER-CODEBUILD-START: was 7453; StartBuild left the DefaultPolicy (-23).
 const BROKER_INLINE_TARGET = 8500;
 const RESERVED = {
   r2: 600, // State stream reads and callback-key read; EC2 belongs to the dispatcher.
@@ -1746,8 +1753,9 @@ function checkHeadroom(template: TemplateJson): void {
   const reserveUnspent = Object.values(RESERVED).reduce((a, b) => a + b, 0);
   const message = `broker inline policy estimate is ${n}, pinned ${BROKER_INLINE_ESTIMATE}. CDK splits at 10,000 into a managed policy the deploy role cannot create (the boundary denies iam:CreatePolicy*), so the deploy would fail. Before adding a statement here, move the grant to a resource policy or merge statements (see briefs/codex/infra-iam-headroom/BRIEF.md). Reserve left: ${8500 - n - reserveUnspent}.`;
   const brokerPolicies = ofType(template, "AWS::IAM::Policy").filter(([, r]) => JSON.stringify(r.Properties.Roles).includes("BrokerServiceRole"));
-  expect(brokerPolicies.filter(([id]) => withoutHash(id) !== "DeveloperSignInBrokerCompanyImportReads"), message).toHaveLength(1);
+  expect(brokerPolicies.filter(([id]) => withoutHash(id) !== "DeveloperSignInBrokerCompanyImportReads" && withoutHash(id) !== "BrokerCodeBuildStart"), message).toHaveLength(1);
   expect(companyImportPolicies(template), message).toHaveLength(1);
+  expect(codeBuildStartStatements(template), message).toEqual(brokerCodeBuildStartStatements(codeBuildStartStatements(template)[0]?.Resource));
   expect(ofType(template, "AWS::IAM::ManagedPolicy"), message).toHaveLength(0);
   expect(Object.keys(template.Resources).filter((id) => id.includes("Overflow")), message).toEqual([]);
   expect(n, message).toBe(BROKER_INLINE_ESTIMATE);
@@ -1911,9 +1919,15 @@ const lessonsReflectTuples: AccessTuple[] = [
 ];
 // L4-HARD (c): the ChatGPT key's Deny: the four actions, denied to every principal but the broker's role (the same shape as the sibling keys' Deny tuples in beforeTuples).
 const chatGptKeyDenyTuples: AccessTuple[] = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey*", "kms:ReEncrypt*"].map((action) => ["*", "Deny", action, "key:ChatGptConnectionKey", "{\"ArnNotEquals\":{\"aws:PrincipalArn\":[\"role:BrokerServiceRole\"]}}"] as AccessTuple);
+// BROKER-CODEBUILD-START: StartBuild is allowed only with every override condition key absent (Null "true" on each, AND'ed; replaces the unconditioned row in beforeTuples), and StartBuildBatch is denied.
+// Evaluated key by key in broker-codebuild-scope.test.ts. The keys come from the independently written list in tests/support/broker-codebuild-start-template.ts.
+const codeBuildStartTuples: AccessTuple[] = [
+  ["role:BrokerServiceRole", "Allow", "codebuild:StartBuild", "arn:parameter:AWS::Partition:codebuild:parameter:AWS::Region:parameter:AWS::AccountId:project/agentx-*", JSON.stringify({ Null: Object.fromEntries([...STARTBUILD_OVERRIDE_KEYS].sort().map((key) => [key, ["true"]])) })],
+  ["role:BrokerServiceRole", "Deny", "codebuild:StartBuildBatch", "*", "{}"],
+];
 const pinnedTuples: AccessTuple[] = [
   ["role:BrokerServiceRole", "Allow", "dynamodb:ConditionCheckItem", "table:DeveloperSignInTable", "{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"COMPANY_MEMBER#*\"]},\"Null\":{\"dynamodb:LeadingKeys\":[\"false\"]}}"] as AccessTuple,
-  ...beforeTuples, ...chatGptKeyDenyTuples, ...hostedWiringTuples, ...githubSignInTuples, ...companySignInAuditTuples, ...attentionEmailTuples, ...companyImportTuples,
+  ...beforeTuples.filter((tuple) => !(tuple[1] === "Allow" && tuple[2] === "codebuild:StartBuild")), ...codeBuildStartTuples, ...chatGptKeyDenyTuples, ...hostedWiringTuples, ...githubSignInTuples, ...companySignInAuditTuples, ...attentionEmailTuples, ...companyImportTuples,
   ["role:DeveloperTaskNotifierFunctionServiceRole", "Allow", "lambda:InvokeFunction", "function:Broker", "{}"] as AccessTuple,
   // DEC 254v(c): the dispatcher reads the callback signing key's one secret, under the core switch's condition (core-engine.ts). The broker, the eval tick and the reconciler read it through the secret's own policy, which adds no tuple here.
   ["role:DispatcherServiceRole", "Allow", "secretsmanager:GetSecretValue", "secret:CallbackSigningKeySecret", "{}"] as AccessTuple,
@@ -2041,7 +2055,10 @@ describe("broker IAM headroom", () => {
   });
 
   it("sanity-checks JSON with every ARN token expanded to 150 characters", () => {
-    const statements = statementsOfRole(named, "BrokerServiceRole").map((s) => ({ ...s, Resource: ([s.Resource].flat()).map((r) => typeof r === "string" ? r : "x".repeat(150)) }));
+    // BROKER-CODEBUILD-START: BrokerCodeBuildStart is about 1,350 characters (28 override keys). Its one ARN token is counted at its realistic length by the longest-environment resolved aggregate
+    // above (8,465 of 8,740 allowed); this synthetic 150-character worst case is kept, with its 9,240 bound unchanged, for every other broker statement.
+    const own = new Set(codeBuildStartStatements(named).map((statement) => JSON.stringify(statement)));
+    const statements = statementsOfRole(named, "BrokerServiceRole").filter((s) => !own.has(JSON.stringify(s))).map((s) => ({ ...s, Resource: ([s.Resource].flat()).map((r) => typeof r === "string" ? r : "x".repeat(150)) }));
     expect(JSON.stringify({ Version: "2012-10-17", Statement: statements }).replace(/\s/g, "").length).toBeLessThan(10240 - 1000);
   });
 

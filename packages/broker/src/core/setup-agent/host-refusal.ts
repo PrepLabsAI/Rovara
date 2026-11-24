@@ -14,18 +14,18 @@ export type SetupHostRefusal = (typeof SETUP_HOST_REFUSALS)[number];
 
 /** The fixed words a refusal is shown with (never a repository's or a model's words). */
 export const SETUP_HOST_REFUSAL_WORDS: Record<SetupHostRefusal, string> = {
-  not_a_host: "Not a plain website name.",
-  address_literal: "An address, not a website name.",
-  ip_in_name: "A name that stands for an address.",
+  not_a_host: "Not a plain address.",
+  address_literal: "An IP number, not a name.",
+  ip_in_name: "A name that stands for an IP number.",
   private_name: "A name that only means something inside one network.",
   too_long: "The name is too long to show whole.",
-  paste_site: "A paste or file-drop website.",
-  link_shortener: "A link-shortener website.",
+  paste_site: "A paste or file-drop address.",
+  link_shortener: "A link-shortener address.",
   tunnel: "A tunnel to a machine outside the company.",
-  webhook_sink: "A website that collects whatever is sent to it.",
+  webhook_sink: "An address that collects whatever is sent to it.",
   raw_storage: "Storage or hosting that anyone can upload to.",
   production: "On the company's production deny list.",
-  model_host: "A model host: the test sandbox is not allowed to reach it.",
+  model_host: "An AI model's address: the test sandbox is not allowed to reach it.",
 };
 
 type SuffixKind = "paste_site" | "link_shortener" | "tunnel" | "webhook_sink" | "raw_storage" | "ip_in_name";

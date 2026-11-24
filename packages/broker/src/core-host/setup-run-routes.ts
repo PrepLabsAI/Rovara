@@ -85,7 +85,7 @@ const CHECK_NOW_FLOOR_MS = 15_000;
 export const EVAL_WRAPPER_ROLE = "Only a company owner, admin or project maintainer can ask Rovara to open a pull request for the eval's file, set it aside, or approve its test run.";
 export const EVAL_DECIDE_STALE = "That eval approval changed since you looked. Read it again.";
 export const EVAL_APPROVAL_UNAVAILABLE = "Approving an eval's spend isn't available on this install yet.";
-export const SETUP_NO_HOST_WAITING = "That website is not waiting for a decision any more. Open the project's setup again.";
+export const SETUP_NO_HOST_WAITING = "That address is not waiting for a decision any more. Open the project's setup again.";
 export const SETUP_PROOF_UNAVAILABLE = "Your approval could not be proved just now, so nothing was decided. Try again.";
 
 /** Why a person may manage a project's setup run, as the audit record names it. */

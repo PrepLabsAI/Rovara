@@ -324,10 +324,10 @@ describe("the named TEST proof-only installation gate", () => {
         // LEGACY-WORKER-CAPABILITY-ROUTES: re-pinned for the legacy template gaining the ContextToolsListRoute and DesignReviewPacketRoute resources (named and foreign already had
         // them), and #1275 for removing the core engine switch. Rule D: with exactly those two resources taken out, the switch removal's own pins e07dd415... and 7f704d79... hold
         // (beforeCapabilityRoutes proves it).
-        withRoute: "92ccc74ca50810d362f06cd6fb12e5cfa49dfee83734a4620c52d0afe0d9c53a",
-        withoutRoute: "dc2ced9d7780780e18d5e74d3d1a95b82f72700f532bf58ebdd4ac785f82ce83",
+        withRoute: "db1281068c1f47b18b673623e30bcf4155de205c3a6074d3d04da5d23b1f51ce",
+        withoutRoute: "b2ad2e7fe11c788fc74c6ac4c5563dca5e8ad721d9a2340ca0d09e686eb9799b",
         beforeStepUpRemoval: undefined,
-        beforeCapabilityRoutes: { withRoute: "e07dd4159c119f01af79e029eca73c35fff9cc4098ad8341f946a5070517cded", withoutRoute: "7f704d79dc046c8f3fb1c6141eeb0cfcc8f21fe9cc1ab1380fdbee2f55db74ff" },
+        beforeCapabilityRoutes: { withRoute: "354a47eb0c2604e7c0836c434cac991fd9acb1c3ebcd7bc89b7ad7df22205aa1", withoutRoute: "f1081c58a959c01958ac9e0a44157b1d4b0a40f6e14fb3e08226fb6fbc3fdb03" },
       },
     ] as const;
     expect(named.Parameters?.CoreTaskCapUsd, "named has the core engine").toBeDefined();

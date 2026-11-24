@@ -1,6 +1,7 @@
 import { MissingProviderSecret, type ModelRole } from "./config.js";
 import { openRouterRouting, readProviderKey, requireKeyedModel } from "./config.js";
 import { ROUTE_PROVIDER, bedrockClaudeModelIds, catalogModel, catalogModelByName, proxyGeographyOfModelId } from "./catalog.js";
+import { gatewayModelCost } from "./gateway-cost.js";
 export { ROUTE_PROVIDER };
 import { TRANSPORTS, carriesUnsignedReasoning, requestCompat } from "./transport.js";
 import { TOOL_DECLARATIONS_MISSING_WORDS, toolBlocksWithoutTools } from "./tool-history.js";
@@ -18,7 +19,7 @@ export * from "./e2e-route-derive.js";
 export { classifyProviderFailure, isNetworkCode, signalPattern, BEDROCK_SIGNAL_PATTERN, KEYED_SIGNAL_PATTERN, MODEL_NOT_ENABLED_SIGNAL, MODEL_NOT_OFFERED_SIGNAL, RUN_PRICE_REFUSED_CODE, RUN_PRICE_REFUSED_MESSAGE, RUN_PRICE_REFUSED_SIGNAL, runPriceRefusedBody, GATEWAY_QUOTA_ANSWERS, MODEL_QUOTA_DETAIL, MODEL_QUOTA_SIGNAL, gatewayQuotaBody } from "./provider-failure.js";
 import { MODEL_QUOTA_DETAIL as QUOTA_DETAIL, RUN_PRICE_REFUSED_MESSAGE, gatewayQuotaBody, runPriceRefusedBody } from "./provider-failure.js";
 export type { ProviderFailureFacts } from "./provider-failure.js";
-import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, ROVARA_AI_PAUSED_MESSAGE, isRovaraAiPaused, agentXError, isClaudeAgentModel, isKeyedModelProvider, type RunPrice, type InvocationModelRoute, type KeyedModelProvider, type ModelIdentifier, type ThinkingLevel } from "@agentx/contracts";
+import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, ROVARA_AI_PAUSED_MESSAGE, isRovaraAiPaused, agentXError, isClaudeAgentModel, isKeyedModelProvider, isOpenAiAgentModel, type RunPrice, type RateQuoteV1 as RateQuote, type InvocationModelRoute, type KeyedModelProvider, type ModelIdentifier, type ThinkingLevel } from "@agentx/contracts";
 import { InMemoryCredentialStore, createAssistantMessageEventStream, type Api, type Model, type SimpleStreamOptions, type TranscriptContext, type AssistantMessage, type AssistantMessageEventStream, type OpenAICompletionsCompat } from "@earendil-works/pi-ai";
 import { streamSimple as openAICompletionsStream } from "@earendil-works/pi-ai/api/openai-completions";
 import { streamSimple as anthropicMessagesStream } from "@earendil-works/pi-ai/api/anthropic-messages";
@@ -58,6 +59,11 @@ export interface ModelRuntimeOptions {
 export interface ModelProxyOptions {
   /** The same model-access answer used for this proxy's URL/key; internal worker preflight only. */
   runPrice?: () => Promise<RunPrice | undefined>;
+  /**
+   * What the gateway states a call costs for THIS run (task cost truth): its rate quote (base rates and every band) and the accepted run price. A routed model is priced from it, so the usage Pi reports is
+   * what the gateway settles; without it the catalog row of the model's name stands (a laptop run, an older broker).
+   */
+  gatewayPricing?: () => Promise<{ rateQuote?: RateQuote | undefined; runPrice?: RunPrice | undefined } | undefined>;
   /** Set only by the local worker launcher path, never task payloads. */
   localCatalogPricing?: boolean;
   /** The proxy's origin, without a path: Pi adds /v1/messages. */
@@ -75,7 +81,17 @@ export interface ModelProxyOptions {
  * The thinking level a project chose was chosen for another model, so a routed model without reasoning runs with it off.
  */
 export function routeSupportsReasoning(route: InvocationModelRoute): boolean {
+  if (isGatewayChatModel(route)) return false;
   return catalogModelByName(route.catalog)?.model.reasoning ?? UNLISTED_ROUTED_MODEL.reasoning;
+}
+
+/**
+ * #1389: an OpenAI model on the gateway's Anthropic Messages route runs on the company's own OpenAI key, which the gateway reaches by translating the request to
+ * Chat Completions. That translation refuses a whole request carrying extended thinking or an image, so such a model is sent neither: it runs with Anthropic
+ * thinking off (OpenAI still applies the model's own default reasoning) and text-only input (Pi puts its placeholder where an image would go).
+ */
+export function isGatewayChatModel(route: InvocationModelRoute): boolean {
+  return route.api === "anthropic-messages" && isOpenAiAgentModel(route.catalog);
 }
 
 /** The thinking level a routed model runs with: the one asked for if the model reasons, else off; absent stays absent. */
@@ -292,6 +308,22 @@ const isClaudeFamilyCatalog = (catalog: string): boolean => isClaudeAgentModel(c
 const UNLISTED_ROUTED_MODEL = { reasoning: false, input: ["text"] as ("text" | "image")[], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128_000, maxTokens: 16_384 };
 
 /**
+ * The cost a routed model's usage is priced at: the gateway's own rates for this run (rate quote, else the signed run price), so Pi's usage figure is what the gateway settles. The catalog row is kept when the
+ * gateway states nothing (a laptop run, an older broker) and for a company's own endpoint model, which the catalog does not know. A run priced from the pooled run price alone (no rate quote, no base band: a model with no band, or a band dropped on the way) is logged `hosted_cost_pooled`:
+ * every call is then counted at the dearest rates (never below the gateway).
+ */
+async function gatewayRoutedCost(proxy: ModelProxyOptions, route: InvocationModelRoute, catalogCost: Model<Api>["cost"]): Promise<Model<Api>["cost"]> {
+  if (proxy.localCatalogPricing === true || proxy.gatewayPricing === undefined) return catalogCost;
+  try {
+    const stated = await proxy.gatewayPricing();
+    const found = stated === undefined ? undefined : gatewayModelCost({ rateQuote: stated.rateQuote, runPrice: stated.runPrice, now: Date.now() });
+    if (found === undefined) return catalogCost;
+    if (found.basis === "run_price_pooled") console.error(JSON.stringify({ event: "hosted_cost_pooled", model: route.alias }));
+    return found.cost;
+  } catch { return catalogCost; }
+}
+
+/**
  * A runtime whose one model is the route's (Task 27): the proxy alias, spoken in the route's API, with the limits of the
  * catalog entry the route names. Pi sends the alias as the request model and the proxy's key as the credential; the usage
  * record names the catalog entry, so a price list and the spend reports see the model and not the company's alias.
@@ -309,11 +341,12 @@ async function createRoutedModelRuntime(selected: ModelIdentifier & { thinkingLe
   const baseUrl = route.api === "anthropic-messages" ? proxy.baseUrl : `${origin}/v1`;
   const identity = routeUsageIdentity(route);
   const base = catalog ?? UNLISTED_ROUTED_MODEL;
+  const cost = await gatewayRoutedCost(proxy, route, base.cost);
   runtime.registerProvider(ROUTE_PROVIDER, {
     baseUrl, api: route.api,
     models: [{
       id: route.alias, name: route.alias, api: route.api, baseUrl,
-      reasoning: base.reasoning, input: base.input, cost: base.cost, contextWindow: base.contextWindow,
+      reasoning: isGatewayChatModel(route) ? false : base.reasoning, input: isGatewayChatModel(route) ? ["text"] : base.input, cost, contextWindow: base.contextWindow,
       maxTokens: route.api === "anthropic-messages" && !isClaudeFamilyCatalog(route.catalog) ? Math.min(base.maxTokens, GATEWAY_CONVERSE_MAX_OUTPUT_TOKENS) : base.maxTokens,
       ...(catalog?.thinkingLevelMap === undefined ? {} : { thinkingLevelMap: catalog.thinkingLevelMap }),
       ...(catalog?.promptCache === undefined ? {} : { promptCache: catalog.promptCache }),

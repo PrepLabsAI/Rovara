@@ -129,8 +129,8 @@ export const SETUP_POLL_FAILURES_MAX = 5;
 
 /** F5: how long a run that a person stopped may take to finish and report what it had (killing the sandbox, the last look at the tracked files, reading the proposal). Past it the stop is reported with no proposal. */
 export const SETUP_STOP_FINISH_MS = 15_000;
-/** What the live view says when the websites the run needs ended it (the 2-hour wait ran out, or it asked about more websites than its limit): fixed words true for both, shown once. */
-export const SETUP_HOST_WAIT_ENDED_WORDS = "Rovara ended the setup run: it needs websites an administrator has not decided.";
+/** What the live view says when the addresses the run needs ended it (the 2-hour wait ran out, or it asked about more addresses than its limit): fixed words true for both, shown once. */
+export const SETUP_HOST_WAIT_ENDED_WORDS = "Rovara ended the setup run: it needs addresses an administrator has not decided.";
 
 /** The live view's one line when the wait on a website ended the run (the 2-hour limit, or one host ask too many); a person's Stop gets none. Best effort: a progress line that cannot be sent changes nothing. */
 async function sayHostWaitEnd(ended: string | undefined, cancelled: boolean, ports: Pick<SetupRunPorts, "progress">): Promise<void> {
@@ -430,7 +430,7 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
       if (governor.ended() !== undefined) break;
       parked = true;
       armTick(ports.parkTickMs ?? 15_000);
-      await ports.progress("Rovara is waiting for an administrator to decide a website.");
+      await ports.progress("Rovara is waiting for an administrator to decide an address.");
       while (governor.check() === undefined && !cancelled && waitingOn.every((host) => askStates.get(host) === "open")) await pause(ports.parkTickMs === undefined ? 1_000 : Math.min(ports.parkTickMs, 1_000));
       governor.resumeFromHosts();
       parked = false;

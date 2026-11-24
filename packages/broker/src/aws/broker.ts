@@ -1336,15 +1336,26 @@ async function routeServiceRequest(dependencies: AwsBrokerDependencies, tasks: D
 }
 
 // GitHub's webhook deliveries (#1315): verified by signature, with one retry on a freshly read secret.
+/**
+ * The installation bindings the webhook route reads (the core branch and the installation lifecycle events): the host's broker-wide `githubBindings` where it set them, else the client project
+ * routes' `clientProjects.bindings`, which the deployed broker always gives (same class, same State table, same role: no new table or permission). The deployed host never sets `githubBindings`, so
+ * before this fallback the core branch and the lifecycle events were dead on hosted and every delivery fell to the legacy handler (`not_linked` for a core task). Deliberately NOT used for the legacy
+ * handler's company scoping (`companyForInstallation`): that stays tied to the broker-wide `githubBindings`, because the legacy delivery recovery reads its partition by the same condition.
+ */
+function webhookGithubBindings(dependencies: AwsBrokerDependencies): GithubInstallationBindings | undefined {
+  return dependencies.githubBindings ?? dependencies.clientProjects?.bindings;
+}
+
 async function routeGithubWebhook(dependencies: AwsBrokerDependencies, request: BrokerHttpRequest): Promise<ReturnType<typeof json>> {
   if (request.method !== "POST") return json({ error: { code: "NOT_FOUND", message: "route not found" } }, request.requestId, 404);
+  const bindings = webhookGithubBindings(dependencies);
   // Webhook lane W0: the route's front half (shape, secret, HMAC over the raw body, then the core branch) is aws/github-webhook-route.ts; the legacy handlers below run with the secret that verified.
   const answer = await handleGithubWebhookRoute({
     headers: request.headers, body: request.body, secret: dependencies.githubWebhookSecret, isSecretMissing: isWebhookSecretMissing, now: Date.now, log: brokerLogLine,
-    ...(dependencies.githubBindings === undefined ? {} : { core: { documentClient: dependencies.documentClient, tableName: dependencies.tableName, bindings: dependencies.githubBindings } }),
+    ...(bindings === undefined ? {} : { core: { documentClient: dependencies.documentClient, tableName: dependencies.tableName, bindings, legacyUnscoped: dependencies.githubBindings === undefined } }),
     // Guided onboarding PR 3: an `installation` event (uninstalled, suspended, unsuspended) marks the binding; it is verified by the same signature check first.
-    legacy: (webhookSecret) => dependencies.githubBindings !== undefined && isGithubInstallationEvent(request.headers)
-      ? handleGithubInstallationWebhook({ rawBody: request.body ?? "", headers: request.headers, secret: webhookSecret, bindings: dependencies.githubBindings, log: brokerLogLine })
+    legacy: (webhookSecret) => bindings !== undefined && isGithubInstallationEvent(request.headers)
+      ? handleGithubInstallationWebhook({ rawBody: request.body ?? "", headers: request.headers, secret: webhookSecret, bindings, log: brokerLogLine })
       : handleGithubWebhook({
         documentClient: dependencies.documentClient,
         tableName: dependencies.tableName,

@@ -35,10 +35,10 @@ export const SETUP_AGENT_WORKFLOW_MODE = "SETUP_AGENT" as const;
 
 export const SETUP_AGENT_BUSY = "Rovara is already setting up this project.";
 export const SETUP_AGENT_FAILURES = {
-  attempts_used: "Rovara used up its tries before the setup worked. It kept what it learned.",
-  time_used: "Rovara ran out of time before the setup worked. It kept what it learned.",
-  budget_used: "The setup run reached its spending limit before it finished. It kept what it learned.",
-  hosts_waiting: `The setup run ended: it needs websites an administrator has not allowed yet (it waits at most ${SETUP_HOST_WAIT_MAX_HOURS} hours for a decision). Allow them, then run the setup again.`,
+  attempts_used: "Rovara used up its tries before the setup worked. The commands it ran are kept.",
+  time_used: "Rovara ran out of time before the setup worked. The commands it ran are kept.",
+  budget_used: "The setup run reached its spending limit before it finished. The commands it ran are kept.",
+  hosts_waiting: `The setup run ended: it needs addresses an administrator has not allowed yet. It waits at most ${SETUP_HOST_WAIT_MAX_HOURS} hours for a decision. Allow them, then run the setup again.`,
   stopped_by_person: "The setup run was stopped.",
   needs_code_change: "The setup needs a change in the code. Ask Rovara to make it as a normal task.",
   changed_repository_files: "The setup changed files that are tracked in the repository. Rovara did not keep that change.",

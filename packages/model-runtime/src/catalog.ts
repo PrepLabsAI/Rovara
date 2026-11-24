@@ -109,3 +109,20 @@ export function proxyGeographyOfModelId(modelId: string): ProxyGeography | undef
   const prefix = /^(us|eu|apac)\./.exec(modelId)?.[1];
   return prefix === "us" || prefix === "eu" || prefix === "apac" ? prefix : undefined;
 }
+
+export * from "./gateway-cost.js";
+
+/**
+ * The list price of the geography profile (`us.`) of a Claude model, by its canonical name (`claude-haiku-4-5` and `claude-haiku-4-5-20251001` both name `us.anthropic.claude-haiku-4-5-20251001-v1:0`), as the
+ * installed Bedrock catalog records it (a regional profile is dearer than the direct row). Undefined for a model with no such profile. Used only where a CAP must not assume less than a gateway-served call can cost.
+ */
+export function bedrockProfileListPrice(model: ModelIdentifier, geography = "us"): { input: number; output: number; cacheRead: number; cacheWrite: number } | undefined {
+  const wanted = canonicalModelName({ provider: "anthropic", modelId: model.modelId.replace(INFERENCE_PROFILE, "").replace(/^anthropic\./u, "") });
+  for (const entry of amazonBedrockProvider().getModels()) {
+    if (!entry.id.startsWith(`${geography}.anthropic.claude-`)) continue;
+    if (canonicalModelName({ provider: "anthropic", modelId: entry.id.slice(geography.length + 1).replace(/^anthropic\./u, "") }) !== wanted) continue;
+    const { input, output, cacheRead, cacheWrite } = entry.cost;
+    return { input, output, cacheRead, cacheWrite };
+  }
+  return undefined;
+}

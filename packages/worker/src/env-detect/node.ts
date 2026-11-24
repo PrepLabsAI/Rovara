@@ -2,6 +2,7 @@
 import { awsClientCandidate, callArguments, candidate, gcpClientFamily, hardcodedEndpoint, isOwnedElsewhere, mergeCandidates, normalizeAwsService, scanDrivers, type DriverRule } from "./dependency-candidates.js";
 import type { ProjectCommand } from "@agentx/contracts";
 import { readsDatabaseSetting } from "./env-config.js";
+import { detectNodeMajor, OFFERED_NODE, type NodeChoice } from "./node-version.js";
 import { type DependencyCandidate, type Detection, type Detector, type DetectorContext, type Located, findLine } from "./types.js";
 
 const LOCKS: ReadonlyArray<{ file: string; setup: [string, string[]] }> = [
@@ -198,8 +199,55 @@ export function nodeCodeCandidates(path: string, text: string): DependencyCandid
   return found;
 }
 
+/** The folders that may carry a Node hint, root first: the same files the runtime reads per cwd (node-runtime.ts), at most 20 folders, none inside a dependency or build folder. */
+function nodeHintFolders(paths: readonly string[]): string[] {
+  const found = new Set<string>();
+  for (const path of paths) {
+    const parts = path.split("/");
+    const name = parts.pop()!;
+    if (!NODE_HINT_FILES.has(name) || parts.some((part) => NODE_SKIPPED_FOLDERS.has(part))) continue;
+    found.add(parts.join("/"));
+  }
+  return [...found].sort((a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b)).slice(0, 20);
+}
+const NODE_HINT_FILES: ReadonlySet<string> = new Set([".nvmrc", ".node-version", ".tool-versions", "package.json"]);
+const NODE_SKIPPED_FOLDERS: ReadonlySet<string> = new Set(["node_modules", "vendor", "dist", "build", "testdata", "fixtures"]);
+
+/**
+ * Lane E: which Node the repository's own files ask for (node-version.ts), per folder, by the same rule the runtime uses for a command's cwd (the nearest folder with a hint decides). Said only when it matters: a
+ * folder that needs Node 24, a folder that keeps the default where the root asks for 24, or a Node the image does not carry.
+ */
+async function nodeVersionNotes(repo: DetectorContext["repo"]): Promise<string[]> {
+  const notes: string[] = [];
+  let rootMajor: number | undefined;
+  for (const folder of nodeHintFolders(repo.paths)) {
+    const choice = await detectNodeMajor(repo, folder);
+    notes.push(...choice.notes);
+    if (!choice.hinted) continue;
+    if (folder === "") rootMajor = choice.major;
+    const note = folderNodeNote(folder, choice, rootMajor);
+    if (note !== undefined) notes.push(note);
+  }
+  return notes;
+}
+
+/** The sentence for one folder with a hint, or undefined when there is nothing worth saying (see nodeVersionNotes). */
+function folderNodeNote(folder: string, choice: NodeChoice, rootMajor: number | undefined): string | undefined {
+  const [, other] = OFFERED_NODE;
+  const source = choice.source === undefined || typeof choice.source === "string" ? "" : ` (${choice.source.path} line ${String(choice.source.line)})`;
+  if (choice.major === other.major) {
+    return folder === ""
+      ? `This repository asks for Node ${String(other.major)}${source}; its commands run with Node ${String(other.major)} instead of the default.`
+      : `In ${folder}, this repository asks for Node ${String(other.major)}${source}; commands run there use Node ${String(other.major)} instead of the default.`;
+  }
+  if (folder !== "" && rootMajor === other.major) return `In ${folder}, the files ask for the default Node${source}; commands run there use Node ${String(choice.major)}, not the Node ${String(other.major)} the repository root asks for.`;
+  return undefined;
+}
+
 export const detectNode: Detector = async (context) => {
   const found = await detectNodeBuild(context);
   const dependencies = await nodeManifestCandidates(context.repo);
-  return dependencies.length === 0 ? found : { ...found, dependencies };
+  const versionNotes = await nodeVersionNotes(context.repo);
+  const withNotes = versionNotes.length === 0 ? found : { ...found, notes: [...(found.notes ?? []), ...versionNotes] };
+  return dependencies.length === 0 ? withNotes : { ...withNotes, dependencies };
 };

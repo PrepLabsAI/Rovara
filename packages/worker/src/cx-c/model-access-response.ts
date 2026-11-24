@@ -1,4 +1,4 @@
-import { TASK_BUDGET_EXCEEDED_PREFIX, RunPriceSchema, agentXError, runPriceWithBaseBand, safeRefusalWords } from "@agentx/contracts";
+import { TASK_BUDGET_EXCEEDED_PREFIX, RateQuoteV1Schema, RunPriceSchema, agentXError, runPriceWithBaseBand, safeRefusalWords } from "@agentx/contracts";
 import { ModelBudgetExhaustedError, ModelNotAllowedError, type ModelBudgetScope } from "@agentx/model-runtime";
 import type { ModelAccess } from "../model-access.js";
 
@@ -24,7 +24,11 @@ export function parseModelAccess(body: unknown, fallbackBaseUrl?: string, allowL
   if (address === undefined || address === "") throw agentXError("RUNTIME_UNAVAILABLE", "model access has no usable proxy address");
   const parsed = RunPriceSchema.safeParse(value.runPrice);
   // PRICE-BANDS: the base band rides beside `runPrice` (`runPriceBaseBand`); a control plane that sends none, or one that is not inside the pooled rates, leaves the pooled price alone.
-  return { baseUrl: address, apiKey, expiresAt, ...(parsed.success ? { runPrice: runPriceWithBaseBand(parsed.data, value.runPriceBaseBand) } : {}) };
+  // Task cost truth: the gateway's rate quote rides beside it (`rateQuote`) for pricing; one that does not read, or names another model than the run price's, is left out (the run price alone prices the run).
+  const quote = RateQuoteV1Schema.safeParse(value.rateQuote);
+  const price = parsed.success ? runPriceWithBaseBand(parsed.data, value.runPriceBaseBand) : undefined;
+  const usableQuote = quote.success && (price === undefined || price.catalogModel === quote.data.model.modelId) ? quote.data : undefined;
+  return { baseUrl: address, apiKey, expiresAt, ...(price === undefined ? {} : { runPrice: price }), ...(usableQuote === undefined ? {} : { rateQuote: usableQuote }) };
 }
 
 /** The budget level each refusal code of the control plane names; BUDGET_EXCEEDED is the member's or, by its message, the task's. */

@@ -2,6 +2,8 @@
 // release workflow): what a repository's setup and test commands can count on.
 import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { OFFERED_NODE } from "../../packages/worker/src/env-detect/node-version.js";
+import { NODE_24_BIN } from "../../packages/worker/src/node-runtime.js";
 import { webApiProbeRunnerConfig } from "../../packages/verifier/src/install-qualification-cli.js";
 
 const dockerfile = readFileSync("environments/base/Dockerfile", "utf8");
@@ -61,6 +63,31 @@ describe("the worker image", () => {
     expect(toolsStage).toMatch(/amd64\) uv_arch=x86_64; uv_sha=6590717592ace991ff83a63fef799e3ad9d33ecc8f96c5d6bdd732496e79337f ;/);
     expect(toolsStage).toContain('https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$uv_arch-unknown-linux-gnu.tar.gz');
     expect(toolsStage).toMatch(/echo "\$uv_sha {2}\/tmp\/uv\.tgz" \| sha256sum -c -/);
+  });
+
+  // Lane E (Node 24 per repo): the second Node, for a repository whose own files ask for it. The default stays 22.
+  it("carries Node 24 LTS at /opt/rovara/node/24, pinned by version and SHA-256 per architecture, and keeps Node 22 as the default and the worker's own", () => {
+    expect(toolsStage).toContain("ARG NODE24_VERSION=24.22.3");
+    expect(toolsStage).toMatch(/arm64\) node_arch=arm64; node_sha=261af2af250dfd7e9f25cf151d1b2713a0adf8f10a9ad116c4947f68627affe8 ;;/);
+    expect(toolsStage).toMatch(/amd64\) node_arch=x64; node_sha=061ec3e3062115705b56b51fa9cc330ab50d34b6969387d4e4b1a50c6809acc2 ;;/);
+    expect(toolsStage).toContain('https://nodejs.org/dist/v$NODE24_VERSION/node-v$NODE24_VERSION-linux-$node_arch.tar.gz');
+    expect(toolsStage).toMatch(/echo "\$node_sha {2}\/tmp\/node24\.tgz" \| sha256sum -c -/);
+    expect(toolsStage).toMatch(/tar -xzf \/tmp\/node24\.tgz -C \/opt\/rovara\/node\/24 --strip-components=1 --no-same-owner/);
+    // The download is checked before it is unpacked.
+    expect(toolsStage.indexOf("sha256sum -c - ", toolsStage.indexOf("node_sha="))).toBeLessThan(toolsStage.indexOf("tar -xzf /tmp/node24.tgz"));
+    expect(finalStage).toContain("COPY --from=tools /opt/rovara/node/24 /opt/rovara/node/24");
+    // Not on the default PATH, and the default Node and the worker stay 22: no ENV PATH, node 22 base image, and the worker still starts with the image's own node.
+    expect(finalStage).not.toMatch(/\nENV[^\n]*PATH=/);
+    expect(dockerfile).not.toMatch(/node:24/);
+    expect(finalStage).toContain('CMD ["node", "packages/worker/dist/main.js"]');
+  });
+
+  it("agrees with the worker's own list of offered Nodes and the folder the worker puts on PATH", () => {
+    const [first, second] = OFFERED_NODE;
+    expect(first).toEqual({ major: 22, version: dockerfile.match(/node:(22\.\d+\.\d+)-bookworm-slim@sha256:/)![1] });
+    expect(second).toEqual({ major: 24, version: toolsStage.match(/ARG NODE24_VERSION=(24\.\d+\.\d+)\n/)![1] });
+    expect(NODE_24_BIN).toBe("/opt/rovara/node/24/bin");
+    expect(finalStage).toContain("COPY --from=tools /opt/rovara/node/24 /opt/rovara/node/24");
   });
 
   it("installs the verified buildx v0.38.2 binary only after its architecture checksum passes", () => {

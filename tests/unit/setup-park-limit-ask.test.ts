@@ -63,7 +63,7 @@ describe("the Code setup page for a run that ended on a website with a partial s
     const html = renderSetupPage(context, page({}));
     expect(html).toContain("Rovara finished and has a setup to use.");
     expect(html).toContain(SETUP_OPEN_HOST_NOTE);
-    expect(SETUP_OPEN_HOST_NOTE).toBe("A website decision is still open: allow it, then run the setup again to include it.");
+    expect(SETUP_OPEN_HOST_NOTE).toBe("An address decision is still open: allow it, then run the setup again to include it.");
   });
   it("says nothing of the kind when no ask is open, when the run ended another way, or when the run did not finish with a setup", () => {
     expect(renderSetupPage(context, page({ hostAsks: [{ host: HOST, status: "approved", international: false }] }))).not.toContain(SETUP_OPEN_HOST_NOTE);

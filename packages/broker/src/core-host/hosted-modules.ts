@@ -23,11 +23,11 @@
 //
 // Not here: `model-keys` (lane L2b). It stays empty, so the registry refuses the switch by name.
 import auditSinkPlugin from "@agentx/local-adapters/audit-sink";
-import { listPricesPerMillion } from "@agentx/model-runtime/catalog";
+import { bedrockProfileListPrice, listPricesPerMillion, rateQuoteUsageMicros } from "@agentx/model-runtime/catalog";
 import {
   IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, change, when,
   type Admission, type AdmissionDecision, type AdmissionRequest, type Cost, type DocumentStore, type IdentityProvider, type MeterResult, type Metering, type ModelPrice, type ModelUsage, type OrgId, type OrgRole, type Principal,
-  type TransactItem,
+  type RateQuoteV1, type RunUsageCallV1, type TransactItem,
 } from "@agentx/contracts";
 import { companyDayKey, createCostLedger, costPartition, utcDayOf, type CostLedger } from "../core/cost/ledger.js";
 import { CALL_HOLD_SECONDS, TASK_HOLD_SECONDS, closeHold, createLedgerHolds, dayRoomCondition, companyOfReservation, holdItems, holdStateOf, openHoldRoom, planHoldClose, readDayLoad, reservationIdOf, sweepExpiredHolds } from "../core/cost/holds.js";
@@ -461,17 +461,49 @@ export const UNKNOWN_MODEL_PRICE: ModelPrice = Object.freeze({
   cacheWriteMicrosPerMillionTokens: 18_750_000,
 });
 
-/** The staging meter: the catalog's prices; an unknown model at `UNKNOWN_MODEL_PRICE`. Stateless: the ledger counts each usage once. */
-export function createHostedMetering(prices: ModelPrices = createModelPrices({ providers: () => [], catalog: listPricesPerMillion })): Metering {
+/** The rate quote of a company's source for one model, or undefined (no reader, no quote: the table prices). */
+export type HostedRateQuote = (companyId: string, model: string) => Promise<RateQuoteV1 | undefined>;
+
+/** The usages a booking names that are no model's: an unreadable report and an estimate of a stopped run. They have no gateway rate. */
+const isInternalUsage = (provider: string): boolean => provider.startsWith("rovara-") && provider !== "rovara-route";
+
+/**
+ * What a CAP or hold must assume for a Claude model served through the gateway: never below the geography profile (`us.`) row the gateway can settle at, and cache writes at the 1 hour rate (twice the input
+ * rate), which the catalog's single write rate (5 minutes) leaves out. Only holds and caps read this, and only because no company is known there to read a source-bound quote for; it is never a floor on a booked
+ * usage, so it cannot raise a figure the worker priced exactly (a company's own key, say).
+ */
+function gatewayCapPrice(model: { provider: string; modelId: string }, price: ModelPrice): ModelPrice {
+  if (!/claude/iu.test(model.modelId) || (model.provider !== "anthropic" && model.provider !== "amazon-bedrock")) return price;
+  const profile = model.provider === "anthropic" ? bedrockProfileListPrice(model) : undefined;
+  const input = Math.max(price.inputMicrosPerMillionTokens, profile === undefined ? 0 : Math.round(profile.input * 1_000_000));
+  const read = price.cacheReadMicrosPerMillionTokens ?? price.inputMicrosPerMillionTokens;
+  const write = price.cacheWriteMicrosPerMillionTokens ?? price.inputMicrosPerMillionTokens;
+  return {
+    inputMicrosPerMillionTokens: input,
+    outputMicrosPerMillionTokens: Math.max(price.outputMicrosPerMillionTokens, profile === undefined ? 0 : Math.round(profile.output * 1_000_000)),
+    cacheReadMicrosPerMillionTokens: Math.max(read, profile === undefined ? 0 : Math.round(profile.cacheRead * 1_000_000)),
+    cacheWriteMicrosPerMillionTokens: Math.max(write, profile === undefined ? 0 : Math.round(profile.cacheWrite * 1_000_000), input * 2),
+  };
+}
+
+/**
+ * The staging meter: the catalog's prices; an unknown model at `UNKNOWN_MODEL_PRICE`. Stateless: the ledger counts each usage once.
+ * Task cost truth: a booked usage is priced at the SOURCE-BOUND rate quote of the gateway when one can be read (`options.rateQuote`: the rates the gateway settles it at, with its bands and cache-write rates), else
+ * at the table; the worker's own figure still wins when it is higher. Holds and caps (`price`) assume the dearer geography row (`gatewayCapPrice`).
+ */
+export function createHostedMetering(prices: ModelPrices = createModelPrices({ providers: () => [], catalog: listPricesPerMillion }), options: { rateQuote?: HostedRateQuote | undefined } = {}): Metering {
   const cautious = (usage: ModelUsage): Cost => ({ micros: costMicrosOf(UNKNOWN_MODEL_PRICE, usage.tokens), currency: "USD" });
   return {
     async price(usage) {
       const found = prices.findCap({ provider: usage.provider, modelId: usage.modelId });
-      return found === undefined ? cautious(usage) : { micros: costMicrosOf(found.price, usage.tokens), currency: found.currency };
+      return found === undefined ? cautious(usage) : { micros: costMicrosOf(found.currency === "USD" ? gatewayCapPrice(usage, found.price) : found.price, usage.tokens), currency: found.currency };
     },
     async record(entry) {
       const found = prices.find({ provider: entry.usage.provider, modelId: entry.usage.modelId });
-      const table: MeterResult = found === undefined ? { cost: cautious(entry.usage), source: "unknown" } : { cost: { micros: costMicrosOf(found.price, entry.usage.tokens), currency: found.currency }, source: "price-table" };
+      const quote = options.rateQuote === undefined || isInternalUsage(entry.usage.provider) ? undefined : await options.rateQuote(entry.companyId, entry.usage.modelId).catch(() => undefined);
+      const calls = (entry as { runUsageCalls?: readonly RunUsageCallV1[] }).runUsageCalls?.flatMap((call) => call.usage.state === "available" ? [{ input: call.usage.value.input, output: call.usage.value.output, cacheRead: call.usage.value.cacheRead, cacheWrite: call.usage.value.cacheWrite5m + call.usage.value.cacheWrite1h + call.usage.value.cacheWriteUnknown }] : []);
+      const table: MeterResult = quote !== undefined ? { cost: { micros: rateQuoteUsageMicros(quote, entry.usage.tokens, calls), currency: "USD" }, source: "price-table" }
+        : found === undefined ? { cost: cautious(entry.usage), source: "unknown" } : { cost: { micros: costMicrosOf(found.price, entry.usage.tokens), currency: found.currency }, source: "price-table" };
       // The provider's own figure is charged when it is the higher dollar amount: a price table that is behind never makes the cost smaller than what was billed.
       const reported = entry.reportedCost;
       const readable = reported !== undefined && reported !== null && reported.currency === "USD" && Number.isSafeInteger(reported.micros) && reported.micros >= 0;
@@ -541,6 +573,8 @@ export interface HostedSecurityInputs {
   identity: HostedIdentityOptions;
   /** The meter's prices (tests). Absent: the catalog's. */
   prices?: ModelPrices;
+  /** The gateway's rate quote for a company's source and model (task cost truth): the booking floor of a hosted usage. Absent: the table prices. */
+  rateQuote?: HostedRateQuote | undefined;
   /** The install's callback signing key, from which the approval proof key is derived (the broker). Absent: the approvers point refuses every proof (the dispatcher). */
   callbackSigningKey?: string;
   /** The root wires the per-run stop (see `HostedAdmissionOptions.runStopWired`). */
@@ -562,7 +596,7 @@ export interface HostedSecurityInputs {
  */
 export function hostedSecurityModules(inputs: HostedSecurityInputs): CoreAdapterModule[] {
   return [
-    coreAdapter({ point: "metering", name: "hosted-price-table", owner: OWNER, create: () => createHostedMetering(inputs.prices) }),
+    coreAdapter({ point: "metering", name: "hosted-price-table", owner: OWNER, create: () => createHostedMetering(inputs.prices, { rateQuote: inputs.rateQuote }) }),
     coreAdapter({
       point: "admission", name: "hosted-allow-list", owner: OWNER,
       create: (context, registry) => {

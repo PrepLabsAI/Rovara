@@ -50,7 +50,7 @@ export class AccessStack extends Stack {
     };
     const boundaryScope = { env, partition: Aws.PARTITION, region: Aws.REGION, account: this.account, cloudFormationRoleName: naming.cloudFormationRoleName };
     const { effectiveBoundaryArn, rolesBoundaryArn } = applyPermissionsBoundaryParameter(this, env, {
-      defaultBoundary: (hasPermissionsBoundary) => defaultPolicy("DefaultPermissionsBoundary", defaultBoundaryName(env), `Default permission boundary for every agentx-${env} runtime role`, defaultBoundaryStatements(boundaryScope), hasPermissionsBoundary),
+      defaultBoundary: (hasPermissionsBoundary) => defaultPolicy("DefaultPermissionsBoundary", defaultBoundaryName(env), `Default permission boundary for every agentx-${env} role`, defaultBoundaryStatements(boundaryScope), hasPermissionsBoundary),
       deployBoundary: (hasPermissionsBoundary) => defaultPolicy("DeployPermissionsBoundary", deployBoundaryName(env), `Permission boundary for the agentx-${env} CloudFormation service role and operator role`, deployBoundaryStatements(boundaryScope), hasPermissionsBoundary),
     });
     // Who may assume the operator role (L4-HARD, owner 2026-11-18). Empty (the documented default): any principal of THIS account that its own IAM allows to call

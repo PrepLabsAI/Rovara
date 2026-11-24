@@ -156,9 +156,10 @@ export function withoutBrokerNamesParameter<T>(template: T): T {
   type Statement = { Action: unknown; Effect: string; Resource: unknown; Condition?: unknown; Sid?: string };
   const roleId = (broker.Properties!.Role as { "Fn::GetAtt": [string, string] })["Fn::GetAtt"][0];
   // DEC 254zzz(2): BrokerCompanyImportReads is the broker's second role policy (the install company import's two sign-in table reads); it is not the default policy this edits.
+  // BROKER-CODEBUILD-START: so is BrokerBuildspecDeny (the broker's CodeBuild buildspec-override Denys, in both control planes; pinned in tests/support/broker-codebuild-start-template.ts).
   // DEC 254zzz32/35: so is SlackCompanyModeBroker (Slack company mode's conditional secret reads; slack-company-workspaces-infrastructure.test.ts asserts it in full).
   const policies = Object.entries(resources).filter(([id, resource]) => resource.Type === "AWS::IAM::Policy" && same(resource.Properties!.Roles, [{ Ref: roleId }])
-    && !/^DeveloperSignInBrokerCompanyImportReads[0-9A-F]{8}$/u.test(id) && !/^SlackCompanyModeBroker[0-9A-F]{8}$/u.test(id)).map(([, resource]) => resource);
+    && !/^DeveloperSignInBrokerCompanyImportReads[0-9A-F]{8}$/u.test(id) && !/^SlackCompanyModeBroker[0-9A-F]{8}$/u.test(id) && !/^BrokerCodeBuildStart[0-9A-F]{8}$/u.test(id)).map(([, resource]) => resource);
   if (policies.length !== 1) fail("expected the broker's one default policy");
   const document = policies[0]!.Properties!.PolicyDocument as { Statement: Statement[] };
   const statements = document.Statement;

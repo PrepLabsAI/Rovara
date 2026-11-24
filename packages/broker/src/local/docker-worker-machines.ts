@@ -361,7 +361,7 @@ export class DockerWorkerMachines implements WorkerMachines {
     if (existing !== undefined) {
       // A worker in the middle of a job is not replaced: the caller retries when it is idle.
       if (existing.status === "running" && existing.hostPort !== undefined && ((await this.#ping(existing.hostPort))?.activeOperations ?? 0) > 0) {
-        throw new MachineError("unavailable", "the worker is running a job and was created with another image, environment, website list or broker address; try again when it is idle");
+        throw new MachineError("unavailable", "the worker is running a job and was created with another image, environment, address list or broker address; try again when it is idle");
       }
       // It was created for another image, environment or broker address (a restart on a new port): its callbacks would go to the old
       // address. The workspace folder is a bind mount and survives.

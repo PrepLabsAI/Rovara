@@ -152,7 +152,7 @@ export function riskTierOf(kind: DecisionKind, inputs: TierInputs, locks: Decisi
       if ((inputs.fixSetup?.knownFailingTests ?? 0) > 0) tally.raise("medium", "Marking tests as already failing changes how later results are judged.");
       break;
     case "setup_host":
-      tally.raise("medium", "Lets this project's machines reach a new website.");
+      tally.raise("medium", "Lets this project's machines reach a new address.");
       break;
     case "approve_fixture_set": {
       const fixture = inputs.fixtureSet;

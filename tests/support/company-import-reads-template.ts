@@ -3,6 +3,7 @@
 // ones recorded before this change: removing exactly this policy gives back the old template. The statements are also asserted in full, with the sign-in function's reads,
 // in tests/contract/developer-signin-infrastructure.test.ts. A template with no such policy (the legacy deployment, production) is returned as it is.
 import { expect } from "vitest";
+import { withoutBrokerCodeBuildStart } from "./broker-codebuild-start-template.js";
 
 type Resource = { Type: string; Properties: Record<string, unknown>; DependsOn?: string[] };
 type Template = { Resources: Record<string, Resource> };
@@ -12,6 +13,8 @@ const POLICY_ID = /^DeveloperSignInBrokerCompanyImportReads[0-9A-F]{8}$/u;
 export function withoutCompanyImportReads<T>(input: T): T {
   // DEC 254zzz33: the sign-in function's company grants are the same kind of named-only role policy, asserted and taken out with it (every pin that takes one out takes both).
   withoutSignInCompanyGrants(input);
+  // BROKER-CODEBUILD-START: the broker's CodeBuild buildspec Deny, in both control planes (legacy too), asserted exactly and taken out the same way.
+  withoutBrokerCodeBuildStart(input);
   const resources = (input as unknown as Template).Resources;
   const found = Object.keys(resources).filter((id) => POLICY_ID.test(id));
   expect(found.length, "at most one BrokerCompanyImportReads policy").toBeLessThanOrEqual(1);

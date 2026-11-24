@@ -34,14 +34,15 @@ export const SLACK_COMPANY_TOKEN_ROLE_VARIABLE = "SLACK_COMPANY_TOKEN_ROLE_ARN";
 export const SLACK_COMPANY_TOKEN_FALLBACK_VARIABLE = "SLACK_COMPANY_TOKEN_FALLBACK";
 
 /**
- * NOT WIRED (owner's boundary is designed with the ACCESS-DENIES lane): the one statement the default permission boundary needs so the orchestrator's role may assume the reader role. The role's own trust names
- * the orchestrator and the one session tag, so the boundary needs no principal or tag condition (the ceiling only says what a bounded role may do; the trust says who). Add it next to `AssumeSessionRoles`.
+ * The one statement the RUNTIME permissions boundary carries (access-policies.ts, as `SlackTokenReader`, next to `AssumeSessionRoles`) so the orchestrator's role may assume the reader role. The role's own
+ * trust names the orchestrator and the one session tag, so the boundary needs no principal or tag condition (the ceiling only says what a bounded role may do; the trust says who). It has no Sid here only
+ * to keep the helper's text small; the boundary adds its own.
  */
 export function slackTokenReaderBoundaryStatement(scope: SlackTokenReaderScope): Omit<PolicyStatementJson, "Sid"> {
   return { Effect: "Allow", Action: ["sts:AssumeRole", "sts:TagSession"], Resource: slackTokenReaderRoleArn(scope) };
 }
 
-/** NOT WIRED: the path-less ARN to add to `IamFixedNameRolesNotYetCreated`'s Resource list (the deploy role's and the boundary's lookup of a fixed-name role before it exists). */
+/** The path-less ARN `IamFixedNameRolesNotYetCreated` lists beside the three image roles (access-policies.ts: the deploy role's and the deploy boundary's lookup of a fixed-name role before it exists). */
 export function slackTokenReaderLookupResource(scope: Omit<SlackTokenReaderScope, "named">): string {
   return `arn:${scope.partition}:iam::${scope.account}:role/${slackTokenReaderRoleName(scope.env)}`;
 }

@@ -1,4 +1,4 @@
-import { AgentXError, PAYER_UNRESOLVED, TASK_TOKEN_SECONDS, REVIEWER_GRANT_SECONDS, splitRunPriceBaseBand, type RunPrice } from "@agentx/contracts";
+import { AgentXError, PAYER_UNRESOLVED, TASK_TOKEN_SECONDS, REVIEWER_GRANT_SECONDS, splitRunPriceBaseBand, type RateQuoteV1, type RunPrice } from "@agentx/contracts";
 import type { CallbackCapabilities } from "../../callbacks.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
@@ -9,7 +9,11 @@ import { evalHealthTokenDescriber } from "./health.js";
 import { taskTokenScope } from "./cx-a/request-scope.js";
 
 export const MODEL_ACCESS_PATH = "/v1/internal/model-access";
-export type ModelGateway = Omit<TaskTokenDeps, "now"> & { gatewayUrl: string; runPrice?: (model: string) => Promise<RunPrice | undefined> };
+export type ModelGateway = Omit<TaskTokenDeps, "now"> & {
+  gatewayUrl: string; runPrice?: (model: string) => Promise<RunPrice | undefined>;
+  /** Task cost truth: the gateway's rate quote for the company's source and one model. Sent beside the run price for PRICING only (never signed into the token), and also to a reviewer key slot, which gets no run price. */
+  rateQuote?: (companyId: string, model: string) => Promise<RateQuoteV1 | undefined>;
+};
 const fixedRefusals = new Set([
   "CALLBACK_FORBIDDEN: callback capability is required", "CALLBACK_FORBIDDEN: invalid capability",
   "CALLBACK_FORBIDDEN: invalid capability signature", "CALLBACK_FORBIDDEN: capability does not allow model-access",
@@ -37,9 +41,12 @@ export async function handleModelAccess(flow: TaskFlowDeps, capabilities: Callba
       const runPrice = minted.runPrice;
 
       deadline.check();
+      // The quote is read for the one model the token allows; a read that fails is no quote (the worker prices from the run price, or the catalog row for a slot).
+      const quote = minted.models.length === 1 && gateway.rateQuote !== undefined ? await gateway.rateQuote(minted.companyId, minted.models[0]!).catch(() => undefined) : undefined;
+      deadline.check();
       // Only these three metadata fields may be logged; never the token or a description.
       flow.log?.({ operationId: scope.operationId, iat: minted.expiresAt / 1000 - (scope.reviewerSlot === undefined ? TASK_TOKEN_SECONDS : REVIEWER_GRANT_SECONDS), exp: minted.expiresAt / 1000 });
-      return { statusCode: 200, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify({ baseUrl: gateway.gatewayUrl, apiKey: minted.token, expiresAt: minted.expiresAt, ...(runPrice === undefined ? {} : splitRunPriceBaseBand(runPrice)) }) };
+      return { statusCode: 200, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify({ baseUrl: gateway.gatewayUrl, apiKey: minted.token, expiresAt: minted.expiresAt, ...(runPrice === undefined ? {} : splitRunPriceBaseBand(runPrice)), ...(quote === undefined ? {} : { rateQuote: quote }) }) };
     });
   } catch (error) {
     if (error instanceof AgentXError && error.code === "RUNTIME_UNAVAILABLE") return { statusCode: 503, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify({ error: { code: "RUNTIME_UNAVAILABLE", message: "AgentX does not know this model's price, so it did not start the run" } }) };
