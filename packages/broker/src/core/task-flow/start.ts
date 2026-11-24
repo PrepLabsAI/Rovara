@@ -49,7 +49,7 @@ import { developerIdOf } from "../sessions/create.js";
 import type { PinnedStanding } from "../instructions/pinned.js";
 import { setupFailedMessage, setupStateOf } from "../setup-agent/check.js";
 import { setupDriftAtStart } from "../setup-agent/recheck.js";
-import { PREPARE_PINS_FEATURE, type SetupAgentLimits, type WikiBuildWire } from "@agentx/contracts";
+import { PREPARE_PINS_FEATURE, type SetupAgentLimits, type SetupCarryOver, type WikiBuildWire } from "@agentx/contracts";
 import { reportOriginOf, startIsReported } from "../report/task-row.js";
 import { startWorkEventItems } from "../work-events/flow-events.js";
 
@@ -74,7 +74,12 @@ function parseRequest(value: unknown): StartDeveloperTaskRequest {
  * What a setup run adds to a start (`core/setup-agent`): the task is made for setting the project up by running its commands, with these limits, and the project's pointer to its current run is written in the start's own
  * transaction. It holds only while the pointer is the one the caller read (`seenTaskId`), so two runs of one project cannot both start.
  */
-export interface SetupAgentStart { limits: SetupAgentLimits; seenTaskId: string | undefined }
+export interface SetupAgentStart { limits: SetupAgentLimits; seenTaskId: string | undefined; /** DEC 254zzz431: what the project's last ended run found (a re-run only), kept on the task and sent to the worker. */ carryOver?: SetupCarryOver | undefined }
+
+/** The task record's own fields for a setup run: its purpose, the limits it started with and, on a re-run, what the last ended run found (DEC 254zzz431). Nothing for any other task. */
+function setupRunFields(start: SetupAgentStart | undefined): Pick<TaskRecord, "purpose" | "setupAgentLimits" | "setupAgentCarryOver"> | Record<string, never> {
+  return start === undefined ? {} : { purpose: "setup_agent", setupAgentLimits: start.limits, ...(start.carryOver === undefined ? {} : { setupAgentCarryOver: start.carryOver }) };
+}
 
 /**
  * What a wiki build run adds to a start (`core/wiki-build`, W3b): the task is made for building the project's wiki, with these limits and these pinned commits (the preparation carries the same pins, read-only,
@@ -250,7 +255,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
     ...(designFirst?.designFirst === true ? { designFirst: { by: developerId, at: receivedAt } } : {}),
     createdAt: receivedAt, updatedAt: receivedAt,
     ...(extras?.sessionId === undefined ? {} : { sessionId: extras.sessionId }),
-    ...(run?.setupAgent === undefined ? {} : { purpose: "setup_agent" as const, setupAgentLimits: run.setupAgent.limits }),
+    ...setupRunFields(run?.setupAgent),
     ...(run?.wikiBuild === undefined ? {} : { purpose: "wiki_build" as const, wikiBuild: run.wikiBuild.wire }),
     ...(asWorkflow ? { workflow: createWorkflowSnapshot({
       taskId, ownerId: ownerKey, now: receivedAt, path: workflowPath, checkPolicy: taskWorkflowCheckPolicy(project.definition, testEnvironment?.environment),

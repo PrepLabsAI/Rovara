@@ -15,6 +15,7 @@
 import { AGENTX_NAME_PATTERN, ROVARA_CODE_AGENT_ID, UPKEEP_ORIGIN, agentXError, systemOwnerIdOf, systemOwnerName, type Admission, type OrgId, type UpkeepPauseReason } from "@agentx/contracts";
 import { admissionEnforcesCost, type AutomatedRunStarter, type UnattendedStartDeps } from "../core/automation/run-seam.js";
 import { setupAgentRequestText, type SetupAgentDeps } from "../core/setup-agent/agent.js";
+import { setupLimitSettingReader } from "../core/setup-agent/limits.js";
 import { advanceInFlightRepairDraft, repairDraftHook, startRepairDraft, type RepairDraftDeps, type RepairRow, type UpkeepGate } from "../core/setup-agent/repair-draft.js";
 import { systemPrincipalOf } from "../core/system-runs/access.js";
 import type { SystemRunsGate } from "../core/system-runs/consent.js";
@@ -110,6 +111,8 @@ export function createHostedSetupRepair(inputs: HostedSetupRepairInputs): Hosted
     return {
       store: flow.store, companyId, now, flow,
       starter: undefined, modelAccessConfigured: inputs.modelAccessConfigured(), readFile: inputs.readFile,
+      // The project's own run limits (cut to the company's cap): Rovara's repair draft is a setup run too, so it is held to what the owner set.
+      limitSetting: setupLimitSettingReader({ store: flow.store, companyId }),
       async latest(name) {
         const found = await flow.projects.latest(name);
         return found === undefined ? undefined : { revision: found.definition.revision, definition: found.definition };

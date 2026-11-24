@@ -98,6 +98,8 @@ describe("the /v1/app route table", () => {
     ["POST", "/v1/app/projects/payments/answers/a0123456789/not-right", "full"], ["GET", "/v1/app/projects/payments/wiki/gaps", "full"],
     // L4-SF: allow or refuse a website a setup run asked for.
     ["POST", "/v1/app/projects/payments/setup-agent/host-decide", "full"],
+    // SETUP-LIMITS: the project's setup-run limits.
+    ["GET", "/v1/app/projects/payments/setup-agent/limits", "full"], ["PUT", "/v1/app/projects/payments/setup-agent/limits", "full"],
     // Lead 4 N1: the nightly upkeep switch.
     ["GET", "/v1/app/projects/payments/upkeep", "full"], ["PUT", "/v1/app/projects/payments/upkeep", "full"],
     // L4-EVCI2: the setup card's eval check from the customer's CI (additive: no existing row changed).

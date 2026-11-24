@@ -58,6 +58,16 @@ describe("the worker's sanitized model-call and heartbeat progress", () => {
     expect(view?.text).toBe("The model call failed: rate or quota limit (ThrottlingException), attempt 1. Wait a minute, or raise the model's limit.");
   });
 
+  it("a quota-used-up note (the worker's QuotaExhausted on HTTP 429) says the AWS quota is used up or 0; the same signal on any other shape stays the generic limit words", () => {
+    const quota = { outcome: "failed", class: "limit-or-rate-limited", signal: "QuotaExhausted", status: 429, attempt: 1, provider: "rovara-route" };
+    expect(taskEvent(stored("progress", { modelCall: quota }))).toEqual({ at, kind: "error", text: "The model call failed: the AWS quota for this model is used up or set to 0, attempt 1. Choose another model, or ask AWS to raise the quota." });
+    for (const other of [{ status: 500 }, { status: undefined }, { class: "provider-outage" }, { signal: "Other" }]) {
+      const text = taskEvent(stored("progress", { modelCall: { ...quota, ...other } }))?.text ?? "";
+      expect(text, JSON.stringify(other)).not.toContain("AWS quota for this model");
+    }
+    expect(taskEvent(stored("progress", { modelCall: { outcome: "failed", class: "limit-or-rate-limited", signal: null, status: 429, attempt: 1, provider: "rovara-route" } }))?.text).toContain("rate or quota limit");
+  });
+
   it("renders a 402 from any provider as out of credits, not as an unknown cause", () => {
     for (const provider of ["anthropic", "openai", "openrouter"]) {
       const view = taskEvent(stored("progress", { modelCall: { outcome: "failed", class: "unknown", signal: null, attempt: 1, provider, status: 402 } }));

@@ -3,7 +3,7 @@ import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // The setup agent's stores and rules, on the in-memory document store: the person's commands, the websites a run asks for, the journal, what a proposal's commands become, and the status of a setup check.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, SETUP_JOURNAL_TAIL_BYTES, sanitizeSetupProposal, setupItemsOf, type ProjectCommand, type SetupProposal } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, SETUP_JOURNAL_TAIL_BYTES, SetupProposalSchema, sanitizeSetupProposal, setupItemsOf, type ProjectCommand, type SetupProposal } from "@agentx/contracts";
 import { SETUP_COMMAND_SHOWN_MAX, readSetupApply, setupApplyKey } from "../../packages/broker/src/core/setup-agent/apply.js";
 import { projectRevisionKey } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
@@ -176,6 +176,32 @@ const COMMIT = "a".repeat(40);
 const from = (quote = "some quote that is long enough") => [{ kind: "file", repo: "web", path: "package.json", commit: COMMIT, line: 1, quote }];
 const definition = { repositories: [{ name: "web", path: "repo/web" }, { name: "api", path: "repo/api" }] };
 
+describe("a command item's recorded time limit (lane F)", () => {
+  const timeoutOf = (proposal: SetupProposal, kind: "setup" | "tests") => proposal[kind].map((item) => (item.value as { timeoutSeconds?: number }).timeoutSeconds);
+  it("is read as a whole number of seconds, kept between 600 and 3,600, and left out when absent or not a number", () => {
+    const proposal = proposalOf({
+      setup: [{ repo: "web", commands: ["npm ci"], timeoutSeconds: 30, from: from() }, { repo: "api", commands: ["uv sync"], timeoutSeconds: 1_234.6, from: from() }],
+      tests: [{ repo: "web", commands: ["npm test"], timeoutSeconds: 999_999, from: from() }, { repo: "api", commands: ["pytest"], timeoutSeconds: "soon", from: from() }],
+    });
+    expect(timeoutOf(proposal, "setup")).toEqual([600, 1_235]);
+    expect(timeoutOf(proposal, "tests")).toEqual([3_600, undefined]);
+    expect(Object.hasOwn(proposal.tests[1]!.value, "timeoutSeconds")).toBe(false);
+  });
+  it("is the larger one when the model names a repository twice, and survives being read again (the broker reads the worker's copy)", () => {
+    const answer = { tests: [{ repo: "web", commands: ["npm test"], timeoutSeconds: 900, from: from() }, { repo: "web", commands: ["npm run e2e"], timeoutSeconds: 2_000, from: from() }] };
+    const once = proposalOf(answer);
+    expect(timeoutOf(once, "tests")).toEqual([2_000]);
+    expect(proposalOf(JSON.parse(JSON.stringify(once)))).toEqual(once);
+    expect(SetupProposalSchema.safeParse(once).success).toBe(true);
+  });
+  it("is optional: a proposal stored before the field existed still reads, byte for byte", () => {
+    const stored = proposalOf({ setup: [{ repo: "web", commands: ["npm ci"], from: from() }], tests: [{ repo: "web", commands: ["npm test"], from: from() }] });
+    expect(JSON.stringify(stored)).not.toContain("timeoutSeconds");
+    expect(SetupProposalSchema.safeParse(stored).success).toBe(true);
+    expect(SetupProposalSchema.safeParse({ ...stored, tests: [{ ...stored.tests[0]!, value: { ...stored.tests[0]!.value, timeoutSeconds: 599 } }] }).success).toBe(false);
+  });
+});
+
 describe("what a proposal's commands become", () => {
   it("takes the confirmed setup and test commands, in the repository's directory, and says why it left each other out", () => {
     const proposal = proposalOf({
@@ -190,6 +216,22 @@ describe("what a proposal's commands become", () => {
     expect(made.readiness!.map((command: ProjectCommand) => [command.cwd, command.executable])).toEqual([["repo/web", "npm"], ["repo/api", "pytest"]]);
     expect(made.left.map((entry) => entry.reason)).toEqual(["invalid_command"]);
     expect(made.used.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("carries a proposal's recorded time limit onto its commands; a proposal without one keeps today's limits (setup 900 s, tests 1,800 s)", () => {
+    const old = proposalOf({ setup: [{ repo: "web", commands: ["npm ci"], from: from() }], tests: [{ repo: "web", commands: ["npm test"], from: from() }] });
+    const oldMade = commandsFromProposal(old, Object.fromEntries(setupItemsOf(old).map((item) => [item.id, "verified" as const])), definition);
+    if ("error" in oldMade) throw new Error(oldMade.error);
+    expect(oldMade.setup!.map((command: ProjectCommand) => command.timeoutSeconds)).toEqual([900]);
+    expect(oldMade.readiness!.map((command: ProjectCommand) => command.timeoutSeconds)).toEqual([1_800]);
+    const recorded = proposalOf({
+      setup: [{ repo: "web", commands: ["npm ci"], timeoutSeconds: 1_500, from: from() }],
+      tests: [{ repo: "web", commands: ["npm test", "npm run lint"], timeoutSeconds: 2_400, from: from() }, { repo: "api", commands: ["pytest"], from: from() }],
+    });
+    const made = commandsFromProposal(recorded, Object.fromEntries(setupItemsOf(recorded).map((item) => [item.id, "verified" as const])), definition);
+    if ("error" in made) throw new Error(made.error);
+    expect(made.setup!.map((command: ProjectCommand) => command.timeoutSeconds)).toEqual([1_500]);
+    expect(made.readiness!.map((command: ProjectCommand) => [command.executable, command.timeoutSeconds])).toEqual([["npm", 2_400], ["npm", 2_400], ["pytest", 1_800]]);
   });
 
   it("uses only what the code host confirmed unless the person chose an item, never one that failed, and refuses an item that is not a command", () => {

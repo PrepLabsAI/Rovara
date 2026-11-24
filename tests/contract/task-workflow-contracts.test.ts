@@ -994,7 +994,7 @@ describe("sending blocked work back to coding (Task 16)", () => {
     const mixed = verification([{ checkId: "unit", status: "FAILED", broken: true }, { checkId: "lint", status: "FAILED" }]);
     expect(workflowContracts.workflowSendBackOffered(mixed)).toBe(true);
     expect(workflowContracts.sendBackProblems(mixed)).toEqual([{ source: "check", text: "lint failed" }]);
-    expect(workflowContracts.WORKFLOW_BLOCK_REASONS.checksBroken).toBe("the checks couldn't run");
+    expect(workflowContracts.WORKFLOW_BLOCK_REASONS.checksBroken).toBe("The checks couldn't run.");
   });
 
   it("offers Send Back from a refused application round, and tells the coder why, but not from a changed selection (which approving the plan again fixes)", () => {

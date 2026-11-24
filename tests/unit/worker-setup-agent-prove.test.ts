@@ -53,6 +53,34 @@ const testsOf = (...commands: string[]) => ({ tests: [{ repo: "service", command
 const MERGE = { repo: "service", cwd: "service" };
 const lines = (commands: readonly ProjectCommand[]) => commands.map((command) => formatCommandLine(command));
 
+describe("the recorded time limit of a proposal's commands (lane F)", () => {
+  const timeouts = (commands: readonly ProjectCommand[]) => commands.map((command) => [formatCommandLine(command), command.timeoutSeconds]);
+  it("gives an added test command the limit the proposal recorded, and today's 1,800 s when none was", async () => {
+    const recorded = await proposalOf({ ...testsOf("pytest -m unit"), tests: [{ repo: "service", commands: ["pytest -m unit"], timeoutSeconds: 2_700, from: FROM }] });
+    const withLimit = mergeAgentFindings(draftOf(), { runId: "run-1", proposal: recorded, journal: [entry(1, "pytest -m unit", 0)] }, MERGE);
+    expect(timeouts(withLimit.draft.environment.repos[0]!.checks.filter((check) => check.id.startsWith("agent-")).map((check) => check.command))).toEqual([["pytest -m unit", 2_700]]);
+    const plain = await proposalOf(testsOf("pytest -m unit"));
+    const without = mergeAgentFindings(draftOf(), { runId: "run-1", proposal: plain, journal: [entry(1, "pytest -m unit", 0)] }, MERGE);
+    expect(timeouts(without.draft.environment.repos[0]!.checks.filter((check) => check.id.startsWith("agent-")).map((check) => check.command))).toEqual([["pytest -m unit", 1_800]]);
+  });
+  it("gives an added setup command the recorded limit, and 900 s without one", async () => {
+    const recorded = await proposalOf({ setup: [{ repo: "service", commands: ["uv sync", "make deps"], timeoutSeconds: 1_200, from: FROM }] });
+    const merged = mergeAgentFindings(draftOf(), { runId: "run-1", proposal: recorded, journal: [entry(1, "make deps", 0)] }, MERGE);
+    expect(timeouts(merged.draft.environment.repos[0]!.setupCommands).filter(([line]) => line === "make deps")).toEqual([["make deps", 1_200]]);
+    const plain = await proposalOf(setupOf("uv sync", "make deps"));
+    const without = mergeAgentFindings(draftOf(), { runId: "run-1", proposal: plain, journal: [entry(1, "make deps", 0)] }, MERGE);
+    expect(timeouts(without.draft.environment.repos[0]!.setupCommands).filter(([line]) => line === "make deps")).toEqual([["make deps", 900]]);
+  });
+  it("gives a command that replaces a failed detected one the recorded limit, else the detected command's own", async () => {
+    const journal = [entry(1, "uv sync --frozen", 1), entry(2, "uv sync", 0)];
+    const recorded = await proposalOf({ setup: [{ repo: "service", commands: ["uv sync"], timeoutSeconds: 1_600, from: FROM }] });
+    const replaced = mergeAgentFindings(draftOf(), { runId: "run-1", proposal: recorded, journal }, MERGE);
+    expect(timeouts(replaced.draft.environment.repos[0]!.setupCommands)).toEqual([["uv sync", 1_600]]);
+    const plain = await proposalOf(setupOf("uv sync"));
+    expect(timeouts(mergeAgentFindings(draftOf(), { runId: "run-1", proposal: plain, journal }, MERGE).draft.environment.repos[0]!.setupCommands)).toEqual([["uv sync", 900]]);
+  });
+});
+
 describe("what the journal says a command came to", () => {
   it("finds a command as a whole command inside a longer line, and not as part of another word", () => {
     expect(ranCommand("uv sync --frozen", "uv sync --frozen")).toBe(true);

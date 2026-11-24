@@ -5,7 +5,7 @@
 //   - wall clock (not counting the time spent parked on a host nobody has answered yet): a deadline timer ends the run `time_used` even while the model is only thinking, and no command is given more
 //     time than is left;
 //   - model spend: read from the session at every check, and a spend that cannot be read is treated as used up (fail closed); the run ends `budget_used`;
-//   - new host asks: one more than the limit ends the run `hosts_waiting`, and so does a host ask that nobody answered in 24 hours;
+//   - new host asks: one more than the limit ends the run `hosts_waiting`, and so does a host ask that nobody answered in `SETUP_HOST_WAIT_MAX_HOURS` (2 hours);
 //   - the first reason wins and is final; when two limits are met at once the order is money, time, attempts, hosts, so the same facts always give the same word.
 // A limit stop keeps everything learned: `finishStoppedRun` reads whatever proposal block the model had given (and what the folders show), and the journal lists the commands that worked.
 // Nothing here reads a command's output for meaning: the exit code, the time and the command's own words are all it looks at.
@@ -273,10 +273,10 @@ export class SetupAgentGovernor implements SetupAgentHooks {
     return "new";
   }
 
-  /** Nothing else is left to do and a host ask is open: the run parks. The wall clock stops while it is parked; 24 hours parked ends the run `hosts_waiting`. */
+  /** Nothing else is left to do and a host ask is open: the run parks. The wall clock stops while it is parked; `SETUP_HOST_WAIT_MAX_HOURS` (2 hours) parked ends the run `hosts_waiting`. */
   parkOnHosts(): void {
     if (this.stopped !== undefined || this.parkedAt !== undefined) return;
-    // The 24 hours are the run's TOTAL wait, not one wait's: once they are used up the run does not park again, it ends.
+    // The parked hours are the run's TOTAL wait, not one wait's: once they are used up the run does not park again, it ends.
     if (this.parkedTotalMs >= SETUP_HOST_WAIT_MAX_HOURS * 3_600_000) { this.stop("hosts_waiting"); return; }
     this.parkedAt = this.now();
     this.armDeadline();

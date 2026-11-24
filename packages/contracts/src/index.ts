@@ -66,6 +66,8 @@ export * from "./oauth-profiles.js";
 export * from "./operation.js";
 export * from "./project-node.js";
 export * from "./project-registries.js";
+export * from "./package-key.js";
+export * from "./package-key-detect.js";
 export * from "./attribution.js";
 export * from "./provenance.js";
 export * from "./meta-project.js";

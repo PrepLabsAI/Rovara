@@ -1,4 +1,4 @@
-import { TASK_BUDGET_EXCEEDED_PREFIX, RunPriceSchema, agentXError, safeRefusalWords } from "@agentx/contracts";
+import { TASK_BUDGET_EXCEEDED_PREFIX, RunPriceSchema, agentXError, runPriceWithBaseBand, safeRefusalWords } from "@agentx/contracts";
 import { ModelBudgetExhaustedError, ModelNotAllowedError, type ModelBudgetScope } from "@agentx/model-runtime";
 import type { ModelAccess } from "../model-access.js";
 
@@ -23,7 +23,8 @@ export function parseModelAccess(body: unknown, fallbackBaseUrl?: string, allowL
   const address = valid ? baseUrl as string : fallbackBaseUrl;
   if (address === undefined || address === "") throw agentXError("RUNTIME_UNAVAILABLE", "model access has no usable proxy address");
   const parsed = RunPriceSchema.safeParse(value.runPrice);
-  return { baseUrl: address, apiKey, expiresAt, ...(parsed.success ? { runPrice: parsed.data } : {}) };
+  // PRICE-BANDS: the base band rides beside `runPrice` (`runPriceBaseBand`); a control plane that sends none, or one that is not inside the pooled rates, leaves the pooled price alone.
+  return { baseUrl: address, apiKey, expiresAt, ...(parsed.success ? { runPrice: runPriceWithBaseBand(parsed.data, value.runPriceBaseBand) } : {}) };
 }
 
 /** The budget level each refusal code of the control plane names; BUDGET_EXCEEDED is the member's or, by its message, the task's. */

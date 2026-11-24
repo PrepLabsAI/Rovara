@@ -2,7 +2,7 @@
 // plain message (at most 1,200 visible characters), and every blocked step carries its ways out as buttons. Every
 // value from a record, the model or a reviewer is redacted where it is free text, cut short and escaped here.
 import {
-  CI_FIX_ROUNDS_MAX, isPlanUnreadableBlockReason, workflowFixRounds, isCiFixBlockReason, isBranchSyncBlockReason, WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE,
+  CI_FIX_ROUNDS_MAX, CHECKS_BROKEN_LEGACY_REASON, blockReasonSentence, isPlanUnreadableBlockReason, workflowFixRounds, isCiFixBlockReason, isBranchSyncBlockReason, WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE,
   WORKFLOW_KEEP_PULL_REQUESTS_NOTE, WORKFLOW_RESOLVE_FINDINGS_MAX, openReviewFindings, redactText, workflowKeepPullRequestsOffered, sendBackProblems, workflowIsReviewOnly, workflowReviewsSawPartialDiff, workflowCheckResultBroken, workflowSelectedChecks, workflowSendBackOffered, workflowApplicationEvidenceCodes, workflowReadmitsApplicationRound, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { splitTextAtLines } from "@agentx/contracts";
@@ -126,6 +126,7 @@ const REWORDED_REASONS: ReadonlyMap<string, string> = new Map([
   ...["failed", "interrupted", "cancelled"].map((status): [string, string] => [`PR feedback review operation ended ${status}`, WORKFLOW_BLOCK_REASONS.feedbackReviewFailed]),
   ["PR feedback review report was invalid, incomplete, or stale", WORKFLOW_BLOCK_REASONS.feedbackReviewFailed],
   ["the plan couldn't be read", WORKFLOW_BLOCK_REASONS.planUnreadable],
+  [CHECKS_BROKEN_LEGACY_REASON, WORKFLOW_BLOCK_REASONS.checksBroken],
 ]);
 
 /** Whether a pull request's feedback review failed, by the reason stored now or before its wording changed. */
@@ -149,15 +150,15 @@ function visibleBlockReason(reason: string): string | undefined {
 export function plainBlockReason(blockReason: string | undefined): string {
   if (blockReason === undefined) return GENERIC_REASON;
   const visible = visibleBlockReason(blockReason);
-  if (visible !== undefined) return slackText(visible);
+  if (visible !== undefined) return slackText(blockReasonSentence(visible));
   const reworded = REWORDED_REASONS.get(blockReason);
-  if (reworded !== undefined) return slackText(reworded);
+  if (reworded !== undefined) return slackText(blockReasonSentence(reworded));
   // PLANINC-2: a stop the owner asked for (cancelled, or interrupted when the stop could not be delivered) says so and what to do; only a failed run is unexpected.
   const stopped = STOPPED_BY_OWNER.exec(blockReason);
   if (stopped !== null) return `${STOPPED_STEP_NAME[stopped[1]!]!} was stopped before it finished. Choose Retry to run it again.`;
   if (/operation ended (failed|interrupted|cancelled)$/.test(blockReason)) return "The run stopped unexpectedly.";
   if (/ was invalid, incomplete, or stale$/.test(blockReason)) return "The result couldn't be trusted, so nothing moved forward.";
-  return PLAIN_REASONS.has(blockReason) ? slackText(blockReason) : GENERIC_REASON;
+  return PLAIN_REASONS.has(blockReason) ? slackText(blockReasonSentence(blockReason)) : GENERIC_REASON;
 }
 
 /** PLANREADMSG: an unreadable plan says why in a fixed category sentence (never the validator's words) and what to do. */

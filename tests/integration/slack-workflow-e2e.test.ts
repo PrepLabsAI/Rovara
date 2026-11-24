@@ -772,7 +772,7 @@ describe("Slack-only workflow, end to end in one process", () => {
     expect(workflow.verification?.results.map((result) => [result.checkId, result.status])).toEqual([["proposed-1", "PASS"], ["proposed-2", "FAILED"]]);
     expect(workflow.verification?.results[1]).toMatchObject({ broken: true });
     expect(workflow.verification?.results[0]).not.toHaveProperty("broken");
-    expect(workflow.blockReason).toBe("the checks couldn't run");
+    expect(workflow.blockReason).toBe("The checks couldn't run.");
     expect(e2e.db.find((item) => item.entityType === "OPERATION" && item.workflowMode === "REVIEW")).toEqual([]);
     const brokenCard = e2e.slack.lastPostWithAction("agentx_workflow_retry_checks");
     expect(brokenCard.text).toContain(`These checks couldn't run because the check itself is broken: ${BROKEN.label}. Untick them with Choose checks and retry, or close the task.`);

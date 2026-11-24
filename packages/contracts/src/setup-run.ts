@@ -40,8 +40,8 @@ export const SETUP_AGENT_LIMITS_DEFAULT = { commands: 40, sameStepTries: 3, wall
 export const SETUP_AGENT_LIMITS_MAX = { commands: 120, sameStepTries: 5, wallClockMin: 120, budgetCents: 2_000, hostAsks: 10 } as const satisfies Record<SetupAgentLimitName, number>;
 /** Setup runs at once per project. Not a setting: it is 1. */
 export const SETUP_AGENT_CONCURRENT_RUNS = 1 as const;
-/** How long a run parks, waiting for an admin to answer a host ask, before it ends `hosts_waiting`. */
-export const SETUP_HOST_WAIT_MAX_HOURS = 24 as const;
+/** How long a run parks in all, waiting for an admin to answer a host ask, before it ends `hosts_waiting` (DEC 254zzz428: 2 hours, was 24). The worker's own timer ends it; the broker's run-gone bound counts the same hours. */
+export const SETUP_HOST_WAIT_MAX_HOURS = 2 as const;
 /** Blocked host names one run remembers (the DNS watch's bound). */
 export const SETUP_BLOCKED_HOSTS_MAX = 50 as const;
 /** Bytes of redacted output a journal entry keeps. */
@@ -94,7 +94,7 @@ export function effectiveSetupAgentLimits(project?: unknown, lock?: unknown): Se
 
 /**
  * Why a run stopped because a limit was used up, in fixed words. `attempts_used`: the commands limit, or the tries of one failing step. `time_used`: the wall clock. `budget_used`: the model spend.
- * `hosts_waiting`: the host asks limit, or a host ask that nobody answered in 24 hours with nothing else left to do.
+ * `hosts_waiting`: the host asks limit, or a host ask that nobody answered in `SETUP_HOST_WAIT_MAX_HOURS` (2 hours) with nothing else left to do.
  */
 export const SETUP_RUN_LIMIT_STOPS = ["attempts_used", "time_used", "budget_used", "hosts_waiting"] as const;
 export type SetupRunLimitStop = (typeof SETUP_RUN_LIMIT_STOPS)[number];
@@ -269,6 +269,49 @@ export function isPinMovedError(error: unknown): boolean {
 /** A worker that lists this runs a setup run (`workflowMode: "SETUP_AGENT"`); the broker sends one only to such a worker. */
 export const SETUP_AGENT_FEATURE = "task.setupAgent.v1" as const;
 
+// ---- the carry-over of a re-run (DEC 254zzz431)
+
+/**
+ * A worker that lists this reads `setupAgent.carryOver` (what the project's last ended run found). The broker drops the field for a worker that does not list it (as for every optional payload field), so an old worker
+ * is sent the run as it always was, and a new worker sent no field behaves as it always did.
+ */
+export const SETUP_CARRY_OVER_FEATURE = "task.setupAgent.carryOver.v1" as const;
+/** The most bytes the whole carry-over takes on the wire (its JSON). The journal summary is cut first; the proposal after it. */
+export const SETUP_CARRY_OVER_MAX_BYTES = 16_384 as const;
+/** The proposal's share of it, leaving the rest to the journal summary. */
+export const SETUP_CARRY_OVER_PROPOSAL_MAX_BYTES = 10_240 as const;
+/** Characters of one journal summary line, and hosts named. */
+export const SETUP_CARRY_OVER_LINE_CHARS = 300 as const;
+export const SETUP_CARRY_OVER_HOSTS_MAX = 20 as const;
+/** The parts of the stored proposal left out, in the order they are left out, when it does not fit its share (`proposalCut` names what was left out). `all`: the whole proposal. */
+export const SETUP_CARRY_OVER_CUTS = ["devcontainer", "notes", "promptLocations", "browserEvidence", "intake", "sources", "knowledge", "specTarget", "foundNotUsed", "testEnvironment", "extraCitations", "all"] as const;
+export type SetupCarryOverCut = (typeof SETUP_CARRY_OVER_CUTS)[number];
+
+/**
+ * What the last ended run of THIS project found, for the next run to start from. It is DATA: the proposal and the journal lines hold text that came from the repository and from commands, and the worker shows it to the
+ * model in a block that says so. `proposal` is the run's stored partial proposal as JSON text (parts left out are named in `proposalCut`). `journal.lines` is one line per command that worked or failed (newest kept:
+ * `journal.total` commands ran, `journal.lines.length` are shown, the oldest left out first). The whole value is at most `SETUP_CARRY_OVER_MAX_BYTES`.
+ */
+export const SetupCarryOverSchema = z
+  .object({
+    version: z.literal(1),
+    /** The ended run it came from (its task). */
+    fromRun: line(64),
+    endedAs: SetupRunEndWordSchema,
+    proposal: z.string().min(2).max(SETUP_CARRY_OVER_PROPOSAL_MAX_BYTES).optional(),
+    proposalCut: z.array(z.enum(SETUP_CARRY_OVER_CUTS)).max(SETUP_CARRY_OVER_CUTS.length).optional(),
+    journal: z
+      .object({
+        total: z.number().int().min(0).max(SETUP_JOURNAL_MAX_ENTRIES),
+        lines: z.array(line(SETUP_CARRY_OVER_LINE_CHARS + 100)).max(SETUP_JOURNAL_MAX_ENTRIES),
+        hosts: z.array(z.object({ host: SetupHostSchema, state: z.enum(["blocked", "open", "approved", "refused"]) }).strict()).max(SETUP_CARRY_OVER_HOSTS_MAX),
+      })
+      .strict(),
+  })
+  .strict()
+  .refine((value) => utf8ByteLength(JSON.stringify(value)) <= SETUP_CARRY_OVER_MAX_BYTES, { message: "the carry-over is at most 16 KiB" });
+export type SetupCarryOver = z.infer<typeof SetupCarryOverSchema>;
+
 /**
  * What the broker tells the worker about a setup run: the limits the run started with (the project's setting cut down to the company's lock, fixed at start). Nothing else: the repositories and the
  * commit each is read at come from the preparation manifest the broker wrote (the default branch's head as the broker resolved it), never from a field of this payload. The payload's `commits` are only a
@@ -281,5 +324,7 @@ export const SetupAgentWireSchema = z.object({
    * difference, a missing repository or a missing list. Optional only so that an older broker's payload still parses (the worker then refuses it); the current broker always sends it when it has it.
    */
   commits: z.array(z.object({ repository: z.string().min(1).max(200), commit: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u) }).strict()).min(1).max(32).optional(),
+  /** DEC 254zzz431: what the project's last ended run found, on a re-run. Optional both ways: absent, the run starts as it always did; an older worker is sent the run without it (`SETUP_CARRY_OVER_FEATURE`). */
+  carryOver: SetupCarryOverSchema.optional(),
 }).strict();
 export type SetupAgentWire = z.infer<typeof SetupAgentWireSchema>;

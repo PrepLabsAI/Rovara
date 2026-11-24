@@ -103,18 +103,18 @@ describe("host asks", () => {
     expect(h.stops).toEqual(["hosts_waiting"]);
     expect(h.governor.summary().hostAsks).toBe(2);
   });
-  it("ends hosts_waiting after 24 hours parked, by check and by timer, and not a minute sooner", () => {
+  it("ends hosts_waiting after 2 hours parked, by check and by timer, and not a minute sooner", () => {
     const h = harness();
     h.governor.parkOnHosts();
-    h.clock.t += 24 * 3_600_000 - 1_000;
+    h.clock.t += 2 * 3_600_000 - 1_000;
     expect(h.governor.check()).toBeUndefined();
     h.clock.t += 1_000;
     expect(h.governor.check()).toBe("hosts_waiting");
     const g = harness();
     g.governor.parkOnHosts();
     const parkedTimer = g.timers.at(-1)!;
-    expect(parkedTimer.ms).toBe(24 * 3_600_000);
-    g.clock.t += 24 * 3_600_000;
+    expect(parkedTimer.ms).toBe(2 * 3_600_000);
+    g.clock.t += 2 * 3_600_000;
     parkedTimer.fire();
     expect(g.governor.ended()).toBe("hosts_waiting");
   });

@@ -372,6 +372,9 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/app/projects/{project}/wiki/gaps", requires: "full" },
   // L4-SF (d): allow or refuse a website a setup run asked for: a company owner or admin (the high-risk rule), bound to the exact ask.
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/host-decide", requires: "full" },
+  // SETUP-LIMITS: the project's setup-run limits (core-host/setup-run-routes.ts, core/setup-agent/limits.ts): full access only, then any live role on the project reads them; the people who start a run change them.
+  { method: "GET", path: "/v1/app/projects/{project}/setup-agent/limits", requires: "full" },
+  { method: "PUT", path: "/v1/app/projects/{project}/setup-agent/limits", requires: "full" },
   // Lead 4 N1: the nightly upkeep switch (core-host/upkeep-routes.ts): full access only, then any live role on the project reads it; a live company owner or admin, or the project's administrator, switches it.
   { method: "GET", path: "/v1/app/projects/{project}/upkeep", requires: "full" },
   { method: "PUT", path: "/v1/app/projects/{project}/upkeep", requires: "full" },

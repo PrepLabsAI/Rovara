@@ -9,6 +9,7 @@ import { INSTALLER_DESCRIPTION, InstallerStack } from "./installer.js";
 import { namingFromContext } from "./naming.js";
 import { applyPermissionsBoundaryParameter } from "./permissions-boundary.js";
 import { ProductionFoundationStack } from "./production-foundation.js";
+import { maybeEnvironmentReleasePipeline } from "./environment-release-pipeline.js";
 import { ReleasePipelineStack } from "./release-pipeline.js";
 import { RetainExceptOnCreate } from "./retention.js";
 import { EnvironmentRolePath } from "./role-path.js";
@@ -19,20 +20,8 @@ import { BetaDomainStack } from "./beta-domain.js";
 import { BetaReleaseAccessStack } from "./beta-release-access.js";
 import { WorkerSettingsStack } from "./worker-settings.js";
 
-export function buildAgentXApp(context: Record<string, unknown> = {}): App {
-  // The default stack synthesizer (and the assembly output directory, below) are
-  // App-construction-time settings (Stack cannot pick them up afterwards), so they must be decided
-  // before `new App(...)`, from the same context sources CDK itself would merge for every other
-  // context key: CDK_CONTEXT_JSON and the context-overflow temp file (how the `cdk` CLI passes `-c`
-  // flags and cdk.json to the app it shells out to, since bin/agentx.ts calls buildAgentXApp() with
-  // no arguments — the overflow file is used instead of the environment variable when the context
-  // is too large for one) and this function's own context argument. App.loadContext treats the
-  // constructor's `context` prop as defaults, then layers `{...environment, ...tempFile}` on top of
-  // it (the overflow file winning over the environment variable for any key both set), so these
-  // pre-App guard clauses must use the same precedence to validate the values the App actually goes
-  // on to use. Letting the argument win instead, as before, meant the guard could accept a value
-  // that CDK_CONTEXT_JSON/the overflow file would then silently override once the App applied its
-  // own precedence — a mismatch between what was validated and what was actually built.
+/** The context the App will go on to use, with CDK's own precedence (moved out of buildAgentXApp unchanged, to keep its complexity under the ratchet). */
+function mergedAppContext(context: Record<string, unknown>): Record<string, unknown> {
   let cliContext: Record<string, unknown>;
   try {
     cliContext = JSON.parse(process.env[CONTEXT_ENV] ?? "{}") as Record<string, unknown>;
@@ -57,7 +46,24 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
       );
     }
   }
-  const mergedContext = { ...context, ...cliContext, ...overflowContext };
+  return { ...context, ...cliContext, ...overflowContext };
+}
+
+export function buildAgentXApp(context: Record<string, unknown> = {}): App {
+  // The default stack synthesizer (and the assembly output directory, below) are
+  // App-construction-time settings (Stack cannot pick them up afterwards), so they must be decided
+  // before `new App(...)`, from the same context sources CDK itself would merge for every other
+  // context key: CDK_CONTEXT_JSON and the context-overflow temp file (how the `cdk` CLI passes `-c`
+  // flags and cdk.json to the app it shells out to, since bin/agentx.ts calls buildAgentXApp() with
+  // no arguments — the overflow file is used instead of the environment variable when the context
+  // is too large for one) and this function's own context argument. App.loadContext treats the
+  // constructor's `context` prop as defaults, then layers `{...environment, ...tempFile}` on top of
+  // it (the overflow file winning over the environment variable for any key both set), so these
+  // pre-App guard clauses must use the same precedence to validate the values the App actually goes
+  // on to use. Letting the argument win instead, as before, meant the guard could accept a value
+  // that CDK_CONTEXT_JSON/the overflow file would then silently override once the App applied its
+  // own precedence — a mismatch between what was validated and what was actually built.
+  const mergedContext = mergedAppContext(context);
   const synthesizerMode = mergedContext.agentxSynthesizer as string | undefined;
   if (synthesizerMode !== undefined && synthesizerMode !== "legacy") {
     throw new Error(`unsupported agentxSynthesizer ${JSON.stringify(synthesizerMode)}; expected legacy or unset`);
@@ -79,6 +85,8 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
     // IReusableStackSynthesizer (same shape as the artifactBucket cast in release-pipeline.ts).
     ...(synthesizerMode === "legacy" ? { defaultStackSynthesizer: new LegacyStackSynthesizer() as IReusableStackSynthesizer } : {}),
   });
+  // The environment release pipeline (-c agentxReleasePipeline=<environment>) is the only stack then; unset, nothing here runs and every other template is unchanged.
+  if (maybeEnvironmentReleasePipeline(app)) return app;
   const naming = namingFromContext(app);
   const deploymentRegion = app.node.tryGetContext("agentxRegion") as string | undefined;
   const deploymentMode =

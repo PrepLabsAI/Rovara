@@ -84,6 +84,12 @@ export const asksForApplicationPlan = (prompt: string): boolean => prompt.includ
 const PLAN_QUALITY_OPEN = "Plan quality guidance:";
 const PLAN_QUALITY_CLOSE = "End of plan quality guidance.";
 /**
+ * Line-count checks. `wc -l` counts newline characters, so a one-line file whose last line has no newline at its end counts as 0 lines, and a check that expects 1 fails on correct work.
+ * Exported so the guidance text stays pinned by a test.
+ */
+export const LINE_COUNT_GUIDANCE = "Count lines robustly. Never use `wc -l` to count a file's lines: it counts newline characters, so a last line without a newline is not counted (a file holding `hello` with no newline counts 0). Use `awk`, which counts a last line without a newline and needs no shell: executable `awk`, args `END{exit NR==1?0:1}` and the file (its exit status is the answer). Do not make a check depend on a trailing newline unless the task asks for one.";
+
+/**
  * Asked only of a worker that lists the plan-quality feature (it also parses the members named here), for every coding plan, Quick and Full alike:
  * AgentX runs the same checks on a Quick plan as on a Full one and sends the plan back to the planner once when they find a problem.
  */
@@ -302,7 +308,8 @@ export function planChecksInstructions(
     "- args: up to 32 arguments, each up to 1,024 characters;",
     "- timeoutSeconds: optional, a whole number up to 1800 (600 when left out);",
     `- cwd: one of these repository paths, or a folder under one: ${repositoryPaths.join(", ")}.`,
-    "Prefer simple, robust check commands (`grep -c`, `grep -q`, `test`, `wc -l`) over inline scripts. If an inline script is needed, keep it to one line without backslash escapes. A check's label and arguments may not contain line breaks or other control characters.",
+    "Prefer simple, robust check commands (`grep -q`, `test`, `awk`) over inline scripts. If an inline script is needed, keep it to one line without backslash escapes. A check's label and arguments may not contain line breaks or other control characters.",
+    LINE_COUNT_GUIDANCE,
     "Checks run on the AgentX worker, which has git, python3, node and npm, and uv and uvx, plus whatever the project's setup installs.",
     own,
     `Put the checks in the plan's \`checks\` member, in exactly this JSON shape:\n\n\`\`\`json\n${example}\n\`\`\`\n\nIn \`proves\`, list the IDs of the claims each check proves. A check may also prove a Not changing item: write \`nc1\`, \`nc2\` and so on, counting the \`notChanging\` entries from 1. If no check sensibly applies, give an empty checks list and set none_reason to one sentence saying why.`,

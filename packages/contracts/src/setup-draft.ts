@@ -58,6 +58,41 @@ export function remoteCodeReason(command: string): string | undefined {
   return REMOTE_CODE_PATTERNS.some((pattern) => pattern.test(command)) ? REMOTE_CODE_REASON : undefined;
 }
 
+// ---- a package manager's `run` with more than one script name
+//
+// `npm run lint npm test` is not two commands: the package manager runs `lint` and hands it the words `npm` and `test`. A model that glues two commands into one string writes exactly this, and the person would read
+// it as a valid command that does not match the repository. So an `npm run` with a second bare word after the script name (before any flag or `--`), or a yarn or pnpm `run` whose second word is another runner, is NOT kept as a command: it is flagged with
+// this reason, in fixed words the agent can act on. `npm run test -- --watch=false` (arguments after `--`) and `npm run lint && npm test` (each part read on its own) are fine.
+
+/** What the agent and the person are told about a `run` with more than one script name. Fixed words, never the command's own text. */
+export const MALFORMED_RUN_REASON = "A package manager's run takes one script name; to run several commands, write each in its own entry, or join them with &&, and put arguments for a script after --.";
+
+/** Options of `npm`, `yarn` and `pnpm` that take the next word as their value; that word is not a script name. */
+const RUN_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set(["--prefix", "--workspace", "-w", "--filter", "-F", "--cwd", "-C", "--dir", "--loglevel"]);
+
+/** Words that start another package-manager command: after a yarn or pnpm script name they show two commands glued into one. */
+const RUNNER_WORDS: ReadonlySet<string> = new Set(["npm", "yarn", "pnpm", "npx", "bun"]);
+
+/**
+ * Whether one part of a command (no `&&`, `||`, `;` or `|` in it) is a glued package-manager `run`. For npm, `npm run <script> <another word>` with no flag or `--` between hands the word to the script as if it were a
+ * second script, so any bare second word is refused. yarn and pnpm pass extra words to the script legitimately (`yarn run jest path/to/file`), so only a second word that is itself another runner (`yarn run lint yarn test`) is refused.
+ */
+function glueOf(words: readonly string[]): boolean {
+  const manager = words[0];
+  if (words.length < 4 || (manager !== "npm" && manager !== "yarn" && manager !== "pnpm") || !(words[1] === "run" || (manager === "npm" && words[1] === "run-script"))) return false;
+  let at = 2;
+  // Options before the script name (`--silent`, `--prefix web`) are not script names.
+  while (at < words.length && words[at]!.startsWith("-") && words[at] !== "--") at += RUN_OPTIONS_WITH_VALUE.has(words[at]!) ? 2 : 1;
+  const next = words[at + 1];
+  if (at >= words.length || words[at] === "--" || next === undefined || next.startsWith("-")) return false;
+  return manager === "npm" || RUNNER_WORDS.has(next);
+}
+
+/** `MALFORMED_RUN_REASON` when a part of the command is `npm|yarn|pnpm run <script> <another word>` with no `--` between, else undefined. A command that is not such a run is never refused here. */
+export function malformedRunReason(command: string): string | undefined {
+  return command.split(/&&|\|\||;|\|/u).some((part) => glueOf(part.trim().split(/\s+/u))) ? MALFORMED_RUN_REASON : undefined;
+}
+
 // ---- helpers
 
 export const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);

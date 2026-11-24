@@ -15,8 +15,8 @@ export { createE2EProviderInvoke } from "./e2e-provider-invoke.js";
 export type { E2EProviderInvoke, E2EProviderInvokeDependencies } from "./e2e-provider-invoke.js";
 export * from "./e2e-environment-guard.js";
 export * from "./e2e-route-derive.js";
-export { classifyProviderFailure, isNetworkCode, signalPattern, BEDROCK_SIGNAL_PATTERN, KEYED_SIGNAL_PATTERN, MODEL_NOT_ENABLED_SIGNAL, MODEL_NOT_OFFERED_SIGNAL, RUN_PRICE_REFUSED_CODE, RUN_PRICE_REFUSED_MESSAGE, RUN_PRICE_REFUSED_SIGNAL, runPriceRefusedBody } from "./provider-failure.js";
-import { RUN_PRICE_REFUSED_MESSAGE, runPriceRefusedBody } from "./provider-failure.js";
+export { classifyProviderFailure, isNetworkCode, signalPattern, BEDROCK_SIGNAL_PATTERN, KEYED_SIGNAL_PATTERN, MODEL_NOT_ENABLED_SIGNAL, MODEL_NOT_OFFERED_SIGNAL, RUN_PRICE_REFUSED_CODE, RUN_PRICE_REFUSED_MESSAGE, RUN_PRICE_REFUSED_SIGNAL, runPriceRefusedBody, GATEWAY_QUOTA_ANSWERS, MODEL_QUOTA_DETAIL, MODEL_QUOTA_SIGNAL, gatewayQuotaBody } from "./provider-failure.js";
+import { MODEL_QUOTA_DETAIL as QUOTA_DETAIL, RUN_PRICE_REFUSED_MESSAGE, gatewayQuotaBody, runPriceRefusedBody } from "./provider-failure.js";
 export type { ProviderFailureFacts } from "./provider-failure.js";
 import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, ROVARA_AI_PAUSED_MESSAGE, isRovaraAiPaused, agentXError, isClaudeAgentModel, isKeyedModelProvider, type RunPrice, type InvocationModelRoute, type KeyedModelProvider, type ModelIdentifier, type ThinkingLevel } from "@agentx/contracts";
 import { InMemoryCredentialStore, createAssistantMessageEventStream, type Api, type Model, type SimpleStreamOptions, type TranscriptContext, type AssistantMessage, type AssistantMessageEventStream, type OpenAICompletionsCompat } from "@earendil-works/pi-ai";
@@ -380,6 +380,8 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
   let notEnabled = false;
   // Set when the model gateway answered 400 because it does not offer the routed model (DEC 254g).
   let notOffered = false;
+  // Set when the model gateway answered 429 in its fixed quota sentence (a Bedrock throttle: the model's AWS quota is used up or set to 0).
+  let quotaUsedUp = false;
   let installPaused = false;
   // Set when the model gateway answered 409 `run_price_authorization_required`: the run's price authorization no longer fits the call. A stop, never a retry (see observedFetch).
   let runPriceRefused = false;
@@ -398,6 +400,8 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
     if (response.status === 403 && proxyKey !== undefined && plan === undefined) notEnabled = modelNotEnabledBody((await response.clone().text().catch(() => "")).slice(0, 65_536)) || notEnabled;
     // DEC 254g: the model gateway is the authority on which models it offers. Its 400 for a model it does not offer is read (matched against its fixed words, never kept) so the step fails as "model not offered".
     if (response.status === 400 && route?.api === "anthropic-messages" && plan === undefined) notOffered = gatewayModelNotOfferedBody((await response.clone().text().catch(() => "")).slice(0, 65_536)) || notOffered;
+    // The gateway's fixed 429 quota answer is read (matched against its exact words, never kept) on the hosted gateway route only; any other 429 stays the generic rate limit.
+    if (response.status === 429 && route?.api === "anthropic-messages" && plan === undefined) quotaUsedUp = gatewayQuotaBody((await response.clone().text().catch(() => "")).slice(0, 65_536)) || quotaUsedUp;
     // The gateway's 409 for a run whose price authorization no longer fits the call is a STOP: the same grant is refused again. The body is matched (never kept) on the hosted gateway route only. The
     // answer is handed on with `x-should-retry: false` so the Anthropic client does not retry it, and its error text is the fixed sentence, which Pi's retry list does not match: one call, no retry.
     runPriceRefused = response.status === 409 && route !== undefined && plan === undefined && runPriceRefusedBody(409, (await response.clone().text().catch(() => "")).slice(0, 65_536));
@@ -483,7 +487,7 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
           return await fallBack(plan.fallback, refusal);
         }
         started = true;
-        if (event.type === "error") event.error.errorMessage = errorText(safeError(provider, event.reason === "aborted", failureStatus, chatgpt, exhausted, route !== undefined, notEnabled, notOffered));
+        if (event.type === "error") event.error.errorMessage = errorText(safeError(provider, event.reason === "aborted", failureStatus, chatgpt, exhausted, route !== undefined, notEnabled, notOffered, quotaUsedUp));
         if (event.type === "done" || event.type === "error") {
           const message = event.type === "done" ? event.message : event.error;
           // Pi retains the response in the transcript. This record also identifies the serving model
@@ -503,7 +507,7 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
     } catch (error) {
       const aborted = options?.signal?.aborted === true;
       const message: AssistantMessage = { role: "assistant", api: model.api, provider, model: model.id,
-        content: [], timestamp: Date.now(), stopReason: aborted ? "aborted" : "error", errorMessage: errorText(error instanceof ToolDeclarationsMissing ? TOOL_DECLARATIONS_MISSING_WORDS : error instanceof ModelNotAllowedError && !aborted ? modelNotAllowedMarker(error.text) : safeError(provider, aborted, failureStatus, chatgpt, exhausted ?? (error instanceof ModelBudgetExhaustedError ? error.scope : undefined), route !== undefined, notEnabled, notOffered)),
+        content: [], timestamp: Date.now(), stopReason: aborted ? "aborted" : "error", errorMessage: errorText(error instanceof ToolDeclarationsMissing ? TOOL_DECLARATIONS_MISSING_WORDS : error instanceof ModelNotAllowedError && !aborted ? modelNotAllowedMarker(error.text) : safeError(provider, aborted, failureStatus, chatgpt, exhausted ?? (error instanceof ModelBudgetExhaustedError ? error.scope : undefined), route !== undefined, notEnabled, notOffered, quotaUsedUp)),
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
       };
       output.push({ type: "error", reason: aborted ? "aborted" : "error", error: message });
@@ -553,8 +557,28 @@ export function gatewayModelNotOfferedBody(body: string): boolean {
 /** The fixed sentence for a model the gateway does not offer (the worker reads it as `model-not-found ModelNotOffered`). */
 export const MODEL_NOT_OFFERED_DETAIL = "the model gateway does not offer this model";
 
+/** The fixed words for a failure whose body the gateway (or the model proxy) worded in a sentence Code recognises whole; undefined for every other answer. */
+function gatewayDetail(status: number | undefined, notEnabled: boolean, notOffered: boolean, quotaUsedUp: boolean): string | undefined {
+  if (status === 403 && notEnabled) return MODEL_NOT_ENABLED_DETAIL;
+  if (status === 400 && notOffered) return MODEL_NOT_OFFERED_DETAIL;
+  return status === 429 && quotaUsedUp ? QUOTA_DETAIL : undefined;
+}
+
+/** The ordinary words for a status. */
+function statusDetail(provider: KeyedModelProvider, status: number | undefined): string {
+  return status === 401 ? "the API key was refused; check that it is valid and has not expired"
+    : status === 403 ? "check the API key and its permissions"
+    : status === 402 ? "check the key's credit balance and spending limit"
+    : status === 404 ? (provider === "openrouter" ? "check model availability and the provider allowlist" : "check the model ID and that the key's organization can use it")
+    : status === 429 ? (provider === "openrouter" ? "rate limited; wait before retrying" : "rate limited or out of credits; check the key's usage limits before retrying")
+    : status === 529 ? "the provider is overloaded; wait before retrying"
+    : status !== undefined && status >= 500 ? "upstream unavailable; check provider status before retrying"
+    : status === 400 || status === 413 ? "the request was refused; check the model's context and output limits"
+    : "check credentials, model availability, rate limits and provider status";
+}
+
 /** A diagnostic chosen from the HTTP status alone, so provider error bodies (which can echo prompts) never surface. */
-function safeError(provider: KeyedModelProvider, aborted: boolean, status?: number, chatgpt = false, exhausted?: ModelBudgetScope, routed = false, notEnabled = false, notOffered = false): string {
+function safeError(provider: KeyedModelProvider, aborted: boolean, status?: number, chatgpt = false, exhausted?: ModelBudgetScope, routed = false, notEnabled = false, notOffered = false, quotaUsedUp = false): string {
   // A routed model is a company's source, whichever API it speaks: it is not named after a provider it may not be.
   const label = routed ? "Model source" : KEYED_MODEL_PROVIDERS[provider].label;
   if (aborted) return `${label} request cancelled`;
@@ -566,16 +590,6 @@ function safeError(provider: KeyedModelProvider, aborted: boolean, status?: numb
   if (chatgpt && (status === 400 || status === 404)) return "ChatGPT request failed; your ChatGPT plan may not allow this model";
   // 401 is a key the provider does not accept (invalid, expired, not yet live); 403 is a key that may not use this model or call. Told apart so a person can be sent to the right place (QA6-14).
   // A 403 that Bedrock words as unentitled is MODEL_NOT_ENABLED (DR-KEY-1).
-  const detail = status === 403 && notEnabled ? MODEL_NOT_ENABLED_DETAIL
-    : status === 400 && notOffered ? MODEL_NOT_OFFERED_DETAIL
-    : status === 401 ? "the API key was refused; check that it is valid and has not expired"
-    : status === 403 ? "check the API key and its permissions"
-    : status === 402 ? "check the key's credit balance and spending limit"
-    : status === 404 ? (provider === "openrouter" ? "check model availability and the provider allowlist" : "check the model ID and that the key's organization can use it")
-    : status === 429 ? (provider === "openrouter" ? "rate limited; wait before retrying" : "rate limited or out of credits; check the key's usage limits before retrying")
-    : status === 529 ? "the provider is overloaded; wait before retrying"
-    : status !== undefined && status >= 500 ? "upstream unavailable; check provider status before retrying"
-    : status === 400 || status === 413 ? "the request was refused; check the model's context and output limits"
-    : "check credentials, model availability, rate limits and provider status";
+  const detail = gatewayDetail(status, notEnabled, notOffered, quotaUsedUp) ?? statusDetail(provider, status);
   return `${label} request failed; ${detail}`;
 }

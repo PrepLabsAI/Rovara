@@ -18,14 +18,15 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
-  isBudgetExhaustedMessage, SETUP_HOST_WAIT_MAX_HOURS, SETUP_RUN_LIMIT_STOPS, SETUP_RUN_REFUSED_MESSAGES, SetupRunSummarySchema, agentXError, change, effectiveSetupAgentLimits, isSetupRunLimitStop, oneLineText, sanitizeSetupProposal, standInWriterCard, when,
-  type DocumentStore, type JsonValue, type OrgId, type SetupAgentLimits, type SetupAgentWire, type SetupProposal, type SetupRunEndWord, type SetupRunRefusal, type SetupRunSummary, type SetupVerification, type StandInWriterCard, type StoredDocument, type TransactItem,
+  isBudgetExhaustedMessage, SETUP_HOST_WAIT_MAX_HOURS, SETUP_RUN_LIMIT_STOPS, SETUP_RUN_REFUSED_MESSAGES, SetupRunSummarySchema, agentXError, change, SetupCarryOverSchema, effectiveSetupAgentLimits, isSetupRunLimitStop, oneLineText, sanitizeSetupProposal, standInWriterCard, when,
+  type DocumentStore, type JsonValue, type OrgId, type SetupAgentLimits, type SetupAgentWire, type SetupCarryOver, type SetupProposal, type SetupRunEndWord, type SetupRunRefusal, type SetupRunSummary, type SetupVerification, type StandInWriterCard, type StoredDocument, type TransactItem,
 } from "@agentx/contracts";
 import { taskKey } from "../task-flow/keys.js";
 import type { TaskRecord } from "../task-flow/records.js";
 import type { CitationFileReader } from "../citations/citation-check.js";
 import { verifyProposalDetailed } from "./proposal-verify.js";
 import { setupAgentKey } from "./keys.js";
+import { setupCarryOverFor } from "./carry-over.js";
 
 /** The operation mode of a setup run's own step. */
 export const SETUP_AGENT_WORKFLOW_MODE = "SETUP_AGENT" as const;
@@ -37,7 +38,7 @@ export const SETUP_AGENT_FAILURES = {
   attempts_used: "Rovara used up its tries before the setup worked. It kept what it learned.",
   time_used: "Rovara ran out of time before the setup worked. It kept what it learned.",
   budget_used: "The setup run reached its spending limit before it finished. It kept what it learned.",
-  hosts_waiting: "The setup needs websites that nobody has allowed yet. Allow them, then run the setup again.",
+  hosts_waiting: `The setup run ended: it needs websites an administrator has not allowed yet (it waits at most ${SETUP_HOST_WAIT_MAX_HOURS} hours for a decision). Allow them, then run the setup again.`,
   stopped_by_person: "The setup run was stopped.",
   needs_code_change: "The setup needs a change in the code. Ask Rovara to make it as a normal task.",
   changed_repository_files: "The setup changed files that are tracked in the repository. Rovara did not keep that change.",
@@ -128,9 +129,13 @@ export interface SetupAgentView {
   standInWriter?: StandInWriterCard;
 }
 
-/** What a run may take at the longest: its wall clock, the longest wait on the owner, and an hour of grace for the end to be reported. Past it with no result the run reads as failed. */
+/** The longest wait on the owner that the broker's run-gone backstop allows for (24 hours, as before the park limit). This is NOT the park limit (`SETUP_HOST_WAIT_MAX_HOURS`, 2 hours): that limit is enforced by the worker ENDING the run
+ * (a recorded end the view then shows); the status view never turns a run into "failed" on a clock while its worker is still heard from, so this bound must not shrink with the park limit. */
+const RUN_GONE_BACKSTOP_WAIT_HOURS = 24;
+
+/** What a run may take at the longest before it reads as gone: its wall clock, the backstop wait above, and an hour of grace for the end to be reported. Past it with no result the run reads as failed. */
 function staleAfterMs(limits: SetupAgentLimits): number {
-  return (limits.wallClockMin + SETUP_HOST_WAIT_MAX_HOURS * 60 + 60) * 60_000;
+  return (limits.wallClockMin + RUN_GONE_BACKSTOP_WAIT_HOURS * 60 + 60) * 60_000;
 }
 
 /**
@@ -319,9 +324,11 @@ export async function recordSetupAgentEnd(
  * What a setup run's invocation carries: the limits it started with, read again through the contract, and the commits the broker recorded when the preparation reported. Without a record there are no commits and the
  * worker refuses the run.
  */
-export function setupAgentWireOf(task: Pick<TaskRecord, "setupAgentLimits" | "preparedBase"> | undefined): SetupAgentWire {
+export function setupAgentWireOf(task: Pick<TaskRecord, "setupAgentLimits" | "preparedBase"> & Partial<Pick<TaskRecord, "setupAgentCarryOver">> | undefined): SetupAgentWire {
   const commits = task?.preparedBase?.map((entry) => ({ repository: entry.repositoryId, commit: entry.baseCommitSha }));
-  return { limits: effectiveSetupAgentLimits(task?.setupAgentLimits), ...(commits === undefined || commits.length === 0 ? {} : { commits }) };
+  // DEC 254zzz431: a re-run's carry-over, read again through the contract (a value that does not read is left out: the run then starts as it always did).
+  const carried = task?.setupAgentCarryOver === undefined ? undefined : SetupCarryOverSchema.safeParse(task.setupAgentCarryOver);
+  return { limits: effectiveSetupAgentLimits(task?.setupAgentLimits), ...(commits === undefined || commits.length === 0 ? {} : { commits }), ...(carried?.success === true ? { carryOver: carried.data } : {}) };
 }
 
 // ---- routes' logic
@@ -329,7 +336,7 @@ export function setupAgentWireOf(task: Pick<TaskRecord, "setupAgentLimits" | "pr
 /** The task flow's start and cancel, as a setup run uses them. */
 export interface SetupAgentStarter {
   /** Starts the run as the owner. A repeat of `request.requestId` answers the first run's task and starts nothing. A pointer that moved (another run began) is `WORKSPACE_BUSY`. */
-  start(request: { requestId: string; project: string; text: string; limits: SetupAgentLimits; seenTaskId: string | undefined }): Promise<{ taskId: string; duplicate: boolean }>;
+  start(request: { requestId: string; project: string; text: string; limits: SetupAgentLimits; seenTaskId: string | undefined; carryOver?: SetupCarryOver | undefined }): Promise<{ taskId: string; duplicate: boolean }>;
   /** Cancels the run's task (the task flow's own cancel). A task that is already over is left as it is. */
   cancel(request: { taskId: string; requestId: string }): Promise<void>;
 }
@@ -418,8 +425,10 @@ export async function startSetupAgent(deps: SetupAgentDeps, project: string, raw
   }
   await deps.requireNewWork?.(project);
   if (before.view.status === "running") throw agentXError("WORKSPACE_BUSY", SETUP_AGENT_BUSY);
+  // DEC 254zzz431: a re-run after an ended run starts from what that run found (this company's and this project's own most recent run, read here and never from the request).
+  const carryOver = await setupCarryOverFor({ store: deps.store, companyId: deps.companyId, now: deps.now }, project, before);
   try {
-    await starter.start({ requestId, project, text, limits, seenTaskId: before.pointer?.taskId });
+    await starter.start({ requestId, project, text, limits, seenTaskId: before.pointer?.taskId, ...(carryOver === undefined ? {} : { carryOver }) });
   } catch (error) {
     // The pointer moved between the read and the write: another run started first.
     if (error instanceof Error && "code" in error && (error as { code?: unknown }).code === "WORKSPACE_BUSY" && (await setupAgentState(deps, project, latest.revision)).status === "running") throw agentXError("WORKSPACE_BUSY", SETUP_AGENT_BUSY);

@@ -93,7 +93,7 @@ export async function runSetupAgentInvocation(
   const conversationId = invocation.payload.conversationId;
   const result = await runSetupAgent({
     rootPath: canonicalRoot, operationId: invocation.operationId, basedOnRevision: invocation.projectRevision, limits: setup.limits, price, cacheRetention: dependencies.model.cacheRetention,
-    repositories: manifest.repositories, commits: setup.commits, evalImage: environment[EVAL_WORKER_IMAGE_VARIABLE],
+    repositories: manifest.repositories, commits: setup.commits, ...(setup.carryOver === undefined ? {} : { carryOver: setup.carryOver }), evalImage: environment[EVAL_WORKER_IMAGE_VARIABLE],
     // L4-E12 (E2): the free dry run of the drafted eval, started without asking, never spending (scripted model replies, no bridge). It needs the worker's own pinned image and the fresh eval sandbox's walls; otherwise it gives nothing.
     evalDryRun: (report, signal) => runSetupEvalDryRun({
       docker, environment, taskId: invocation.operationId, workspaceKey: () => setupWorkspaceKey(canonicalRoot), commits: setup.commits, servicesOff: testServicesConfigFromEnvironment(environment, docker) === undefined,

@@ -13,7 +13,8 @@ import { DEFAULT_PROMPTS, PLAN_EARLIER_HEADER, PLAN_PREVIOUS_HEADER, PLAN_SECTIO
 import { planContextOf } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { UNDERSTAND_REQUEST_HEADER, PLAN_UNDERSTANDING_HEADER, ANSWERS_BLOCK_HEADER } from "../../packages/broker/src/rovara-code/understand.js";
 import { approvedCodingPlan } from "../../packages/broker/src/core/build-step/plan-input.js";
-import { implementPrompt } from "../../packages/broker/src/core/build-step/prompts.js";
+import { TEXT_FILE_NEWLINE_NOTE, implementPrompt, sendBackPrompt } from "../../packages/broker/src/core/build-step/prompts.js";
+import { LINE_COUNT_GUIDANCE, planChecksInstructions } from "../../packages/broker/src/developer/plan-instructions.js";
 import { documentSummary } from "../../packages/broker/src/core/decisions/plan-summary.js";
 import { planFactsOf } from "../../packages/broker/src/core/decisions/plan-risk.js";
 import { loadWorkflowDocument } from "../../packages/broker/src/developer/plan-document-reader.js";
@@ -130,5 +131,28 @@ describe("the coding, send-back and review prompts", () => {
 
   it("the saved understanding artifact the broker reads back is the same shape the prompt asks for", () => {
     expect(readIntentArtifact(JSON.stringify({ kind: "ready", path: "FULL", restatement: "x", assumptions: [] })).ok).toBe(true);
+  });
+});
+
+describe("CHECK-AND-WORDING: files end with a newline, and a line-count check does not depend on one", () => {
+  const plan = { text: "Create notes.txt with one line: hello", sha256: "a".repeat(64) };
+
+  it("asks the coder to end every text file with a newline, unless the task says otherwise, in every coding prompt", () => {
+    expect(TEXT_FILE_NEWLINE_NOTE).toMatch(/newline/u);
+    expect(TEXT_FILE_NEWLINE_NOTE).toMatch(/unless the task asks for no trailing newline/u);
+    expect(implementPrompt(plan)).toContain(TEXT_FILE_NEWLINE_NOTE);
+    expect(implementPrompt(plan, false)).toContain(TEXT_FILE_NEWLINE_NOTE);
+    expect(sendBackPrompt({ problems: "x", plan, constraints: "" })).toContain(TEXT_FILE_NEWLINE_NOTE);
+    expect(sendBackPrompt({ problems: "x", plan, constraints: "", approved: false })).toContain(TEXT_FILE_NEWLINE_NOTE);
+  });
+
+  it("tells the planner to count lines robustly, and no longer offers wc -l as a robust check command", () => {
+    const text = planChecksInstructions(["repo"]);
+    expect(text).toContain(LINE_COUNT_GUIDANCE);
+    expect(LINE_COUNT_GUIDANCE).toContain("Never use `wc -l`");
+    expect(LINE_COUNT_GUIDANCE).toContain("awk");
+    expect(LINE_COUNT_GUIDANCE).toContain("last line without a newline");
+    expect(LINE_COUNT_GUIDANCE).toContain("unless the task asks for one");
+    expect(text).not.toMatch(/robust check commands \([^)]*wc -l/u);
   });
 });
