@@ -8,9 +8,30 @@ import { it } from "vitest";
 //   1. F3: a Continue over a SEALED but unconfirmed retention (the worker sealed and answered, the broker never saved the reply) sends no `supersedesRetention`, so the worker's sealed journal record is never
 //      marked superseded. The step's writes must still be admitted on the woken worker, and the next Close's retain must succeed.
 //   2. N-F1: an instance ended in the middle of a retain (the idle reaper's stop) leaves the retention either complete or absent, never half: the volume is intact, no writer is admitted, and the next retain succeeds.
+
+// A proof owns /mnt/workspace and /run/agentx-close-retention while it runs. Its own teardown runs inside the process that still holds journal descriptors, so a mount can stay busy and the NEXT proof (or the grid's
+// baseline) then fails "host already owns workspace path". Every proof therefore ends with a FRESH root process that detaches what the proof made, however the proof ended: lazy recursive unmounts, the loop devices
+// backing /mnt/workspace, the serve helper, then the directories. It runs only after a proof that started (this suite refuses a host that already used those paths before it begins).
+const teardownScript = [
+  "pkill -f 'close-retention.sh serve' 2>/dev/null || true",
+  "loops=$(losetup -a 2>/dev/null | grep '/mnt/workspace/' | cut -d: -f1 || true)",
+  "umount -R -l /run/agentx-close-retention/view 2>/dev/null || true",
+  "umount -R -l /mnt/workspace 2>/dev/null || true",
+  "for device in $loops; do losetup --detach \"$device\" 2>/dev/null || true; done",
+  "rm -rf /run/agentx-close-retention /mnt/workspace",
+  "test ! -e /mnt/workspace && test ! -e /run/agentx-close-retention",
+].join("\n");
+async function teardownProofHost(): Promise<string | undefined> {
+  try { await promisify(execFile)("sudo", ["-n", "bash", "-c", teardownScript], { timeout: 60_000 }); return undefined; }
+  catch (error) { return "teardown could not release the proof host: " + String((error as { stderr?: string }).stderr ?? error); }
+}
 async function runRootProof(proof: string, image: string, timeout: number) {
+  let failure: Error | undefined;
   try { await promisify(execFile)("sudo", ["-n", process.execPath, "--input-type=module", "-e", proof, resolve(import.meta.dirname, "../.."), image], { timeout, maxBuffer: 1_048_576 }); }
-  catch (error) { throw new Error((error as { stderr?: string }).stderr ?? "root proof failed without stderr", { cause: error }); }
+  catch (error) { failure = new Error((error as { stderr?: string }).stderr ?? "root proof failed without stderr", { cause: error }); }
+  const leftover = await teardownProofHost();
+  if (failure !== undefined) throw new Error(failure.message + (leftover === undefined ? "" : "\n" + leftover), { cause: failure.cause });
+  if (leftover !== undefined) throw new Error(leftover);
 }
 const image = () => {
   const value = process.env.CLOSE_RETENTION_TEST_IMAGE;
@@ -82,7 +103,7 @@ const proofFinally = String.raw`
     await command('umount','--recursive',RUN+'/view').catch(()=>{});
     await command('umount','--recursive',ROOT).catch(()=>{});
     for(const device of loops)await command('losetup','--detach',device).catch(()=>{});
-    await rm(RUN,{recursive:true,force:true}); await rm(ROOT,{recursive:true,force:true});
+    await rm(RUN,{recursive:true,force:true}).catch(e=>console.error('proof teardown: rm RUN failed',e.message)); await rm(ROOT,{recursive:true,force:true}).catch(e=>console.error('proof teardown: rm ROOT failed',e.message));
   }
 }
 `;
