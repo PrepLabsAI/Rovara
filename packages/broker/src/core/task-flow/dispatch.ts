@@ -195,12 +195,19 @@ async function retryCloseDelivery(deps: TaskFlowDeps, queue: Queue, message: Rec
   return "retried";
 }
 
-async function feedbackApprovalCurrent(deps: TaskFlowDeps, operation: OperationRecord): Promise<boolean> {
-  if (operation.workflowFeedbackApproval === undefined) return true;
+/** Why an approved feedback fix may not start, in the person's words; undefined when the approval is current. A refusal says its own reason, never a guess. */
+async function feedbackApprovalRefusal(deps: TaskFlowDeps, operation: OperationRecord): Promise<string | undefined> {
+  if (operation.workflowFeedbackApproval === undefined) return undefined;
   try {
     await validateFeedbackApproval(deps, operation, operation.workflowFeedbackApproval);
-    return true;
-  } catch { return false; }
+    return undefined;
+  } catch (error) {
+    // The stable code goes to the log (fixed words, no ids); the person reads the sentence.
+    log(deps, { event: "task_flow.feedback_approval_refused", code: error instanceof AgentXError ? error.code : "UNREADABLE" });
+    if (error instanceof AgentXError && error.code === "STALE_FENCE") return "The feedback approval is no longer current. Refresh the task before retrying.";
+    if (error instanceof AgentXError) return error.message.replace(/^[A-Z_]+: /u, "");
+    return "The feedback approval could not be read just now. Refresh the task before retrying.";
+  }
 }
 
 /** A queued cancel handed to the worker that runs the operation (moved unchanged out of handleWorkerDispatch, train 5, complexity ratchet). */
@@ -253,7 +260,8 @@ async function handleWorkerDispatch(deps: TaskFlowDeps, queue: Queue, message: R
     await queue.ack(message.receiptHandle);
     return "dropped";
   }
-  if (!await feedbackApprovalCurrent(deps, operation)) return endAndAck("FAILED", "The feedback approval changed or could not be verified. Refresh the task before retrying.");
+  const approvalRefusal = await feedbackApprovalRefusal(deps, operation);
+  if (approvalRefusal !== undefined) return endAndAck("FAILED", approvalRefusal);
   // Standing instructions (the company's rules and the project's How we work): read now, before admission and before any machine is started, since a refusal needs no machine and a code host that is down must
   // not wake one on every try. The playbook is read at the commit the task pinned when it started. A refusal that waiting will not mend ends the step with its sentence; a read that may pass is tried again, and when
   // the tries run out the step ends with the true cause (the rules could not be read), never "the machine did not become ready".

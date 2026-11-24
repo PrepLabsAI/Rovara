@@ -30,7 +30,12 @@ export function requireSafeFeedbackSelection(task: TaskRecord, selected: Workflo
   if (selected.length === 0 || invalid) throw agentXError("CONFIG_INVALID", "Select findings with a valid fix for this candidate.");
 }
 
-export async function feedbackFixContext(deps: TaskFlowDeps, task: TaskRecord, activeRevision: number) {
+/**
+ * The approved fix's context. `admit` (default true) asks the money check (admitRound) at the end of the evidence checks: approval (decide.ts) and start (start.ts) keep it.
+ * Re-validating an approval that already passed it (validateFeedbackApproval) passes `admit: false`: from inside the fix's own run the strict hosted spend reader refuses (a run of the task is open),
+ * and the money is already held by the check at approval and at start and by the per-run stop (see owner-round.ts).
+ */
+export async function feedbackFixContext(deps: TaskFlowDeps, task: TaskRecord, activeRevision: number, options: { admit: boolean } = { admit: true }) {
   const workflow = task.workflow!;
   const review = workflow.feedbackReview;
   const latest = workflow.feedbackDecisions?.at(-1);
@@ -40,7 +45,7 @@ export async function feedbackFixContext(deps: TaskFlowDeps, task: TaskRecord, a
   const selected = report.findings.filter(f => decision.selectedFindingIds.includes(f.id));
   requireSafeFeedbackSelection(task, selected, decision.ownerNote);
   await refreshFeedback(deps, task);
-  await admitRound(deps, feedbackRoundOptions(deps), { task, caller, requestId: decision.requestId });
+  if (options.admit) await admitRound(deps, feedbackRoundOptions(deps), { task, caller, requestId: decision.requestId });
   const approval = WorkflowFeedbackApprovalBindingSchema.parse({ taskId: task.taskId, requestId: decision.requestId, ownerId: task.ownerKey,
     decisionWorkflowRevision: decision.workflowRevision, activeWorkflowRevision: activeRevision, reviewDigest: decision.reviewDigest,
     proposalDigest: decision.proposalDigest, bundleDigests: decision.bundleDigests, candidateDigest: workflow.candidate!.digest,
@@ -67,7 +72,8 @@ export async function validateFeedbackApproval(deps: TaskFlowDeps, operation: Op
     || task.workspaceId !== operation.workspaceId || wf?.stage !== "IMPLEMENT" || wf.state !== "RUNNING" || wf.revision !== binding.activeWorkflowRevision
     || operation.workflowRevision !== wf.revision || JSON.stringify(operation.workflowFeedbackApproval) !== JSON.stringify(binding)
     || JSON.stringify(wf.feedbackDispatchApproval) !== JSON.stringify(binding)) throw agentXError("STALE_FENCE", "The approved feedback fix is no longer current.");
-  const context = await feedbackFixContext(deps, task, wf.revision);
+  // The approval is verified here, not the money: it passed the check at approval and at start, and the per-run stop holds it during the run.
+  const context = await feedbackFixContext(deps, task, wf.revision, { admit: false });
   if (JSON.stringify(context.approval) !== JSON.stringify(binding)) throw agentXError("STALE_FENCE", "The feedback selection changed.");
 }
 
