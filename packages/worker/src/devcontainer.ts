@@ -579,6 +579,7 @@ export async function runContainerCommand(
   options: ContainerCommandOptions = {},
 ): Promise<CommandResult> {
   const cwd = contained(rootPath, command.cwd);
+  const pathPrefix = options.pathPrefixFor === undefined ? [] : await options.pathPrefixFor(cwd).catch(() => []);
   const run = await runInContainerGroup(exec, {
     groupFilePrefix: "agentx-command",
     // The executable and its arguments stay positional parameters: no shell reads them again.
@@ -590,6 +591,7 @@ export async function runContainerCommand(
     ...(command.env !== undefined || options.defaultEnvironment !== undefined ? { env: { ...options.defaultEnvironment, ...command.env } } : {}),
     ...(options.unsetEnvironment === undefined ? {} : { unsetEnvironment: options.unsetEnvironment }),
     ...(options.pathSuffix === undefined ? {} : { pathSuffix: options.pathSuffix }),
+    ...(pathPrefix.length === 0 ? {} : { pathPrefix }),
     ...(signal !== undefined ? { signal } : {}),
   });
   const { result } = run;
@@ -629,6 +631,11 @@ export interface ContainerCommandOptions {
    * (M2: a planted `pytest` cannot stand in for one the image has, in a check, a setup or readiness command or the agent's shell). A tool the image does not ship (what `pip install --user` put there) is still found.
    */
   pathSuffix?: readonly string[];
+  /**
+   * Folders put BEFORE the command's PATH, for a command run in `cwd` (absolute), unless the command sets its own PATH. The sandbox uses this to give a repository that needs Node 24 /opt/rovara/node/24/bin first
+   * (lane E, node-runtime.ts); a repository with no such need gets none, so its commands are unchanged. Must not throw: an answer it cannot give is no folders.
+   */
+  pathPrefixFor?: (cwd: string) => Promise<readonly string[]>;
 }
 
 /** The command's stderr, then a line for each step of the stop sequence that failed. */
@@ -677,6 +684,7 @@ export function containerBashOperations(exec: ContainerExec, options: ContainerC
       if (signal?.aborted) throw new Error("aborted");
       // Lane F: the setup AGENT's shell asks for pipefail (`pipefail: true` among the options, see `PipefailBashOptions`), so `cmd | tail` fails when `cmd` does. The text run, journaled and reported is the command as typed.
       const pipefail = (rest as PipefailBashOptions).pipefail === true;
+      const pathPrefix = options.pathPrefixFor === undefined ? [] : await options.pathPrefixFor(cwd).catch(() => []);
       const run = await runInContainerGroup(exec, {
         groupFilePrefix: "agentx-shell",
         // The agent's command is shell text, so this shell reads it.
@@ -687,6 +695,7 @@ export function containerBashOperations(exec: ContainerExec, options: ContainerC
         env: { ...options.defaultEnvironment, ...sessionEnvironment(env) },
         ...(options.unsetEnvironment === undefined ? {} : { unsetEnvironment: options.unsetEnvironment }),
         ...(options.pathSuffix === undefined ? {} : { pathSuffix: options.pathSuffix }),
+        ...(pathPrefix.length === 0 ? {} : { pathPrefix }),
         ...(signal !== undefined ? { signal } : {}),
         onStdout: onData,
         onStderr: onData,
@@ -713,6 +722,8 @@ interface ContainerGroupCommand {
   unsetEnvironment?: readonly string[];
   /** Folders put after PATH before the command starts, unless `env` sets PATH (see ContainerCommandOptions). */
   pathSuffix?: readonly string[];
+  /** Folders put before PATH before the command starts, unless `env` sets PATH (see ContainerCommandOptions.pathPrefixFor). */
+  pathPrefix?: readonly string[];
   signal?: AbortSignal;
   onStdout?: (data: Buffer) => void;
   onStderr?: (data: Buffer) => void;
@@ -720,9 +731,11 @@ interface ContainerGroupCommand {
 
 /** `export PATH="$PATH":'dir';` for the folders the command asks to have last on PATH, or "" when it sets its own PATH (or asks for none). */
 function pathStatement(command: ContainerGroupCommand): string {
-  if ((command.pathSuffix ?? []).length === 0 || Object.hasOwn(command.env ?? {}, "PATH")) return "";
-  const quoted = (command.pathSuffix ?? []).map((folder) => `'${folder.replaceAll("'", "'\\''")}'`).join(":");
-  return `export PATH="$PATH":${quoted}; `;
+  if (Object.hasOwn(command.env ?? {}, "PATH")) return "";
+  const quote = (folders: readonly string[]): string => folders.map((folder) => `'${folder.replaceAll("'", "'\\''")}'`).join(":");
+  const first = (command.pathPrefix ?? []).length === 0 ? "" : `export PATH=${quote(command.pathPrefix ?? [])}:"$PATH"; `;
+  const last = (command.pathSuffix ?? []).length === 0 ? "" : `export PATH="$PATH":${quote(command.pathSuffix ?? [])}; `;
+  return `${first}${last}`;
 }
 
 /**

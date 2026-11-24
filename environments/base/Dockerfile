@@ -38,6 +38,7 @@ ARG DOCKER_VERSION=29.8.1
 ARG COMPOSE_VERSION=v5.5.1
 ARG BUILDX_VERSION=v0.38.2
 ARG UV_VERSION=0.12.20
+ARG NODE24_VERSION=24.22.3
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
@@ -77,6 +78,24 @@ RUN set -eu; \
     tar -xzf /tmp/uv.tgz -C /tmp; \
     install -m 0755 "/tmp/uv-$uv_arch-unknown-linux-gnu/uv" /usr/local/bin/uv; \
     install -m 0755 "/tmp/uv-$uv_arch-unknown-linux-gnu/uvx" /usr/local/bin/uvx
+# Node 24 LTS (Krypton), for a repository whose own files ask for it (.nvmrc, .node-version, .tool-versions, engines.node, volta.node: packages/worker/src/node-runtime.ts).
+# It sits at /opt/rovara/node/24 and is NOT on the default PATH: /usr/local/bin/node stays Node 22, and so does the worker. The worker puts /opt/rovara/node/24/bin first on PATH
+# for the commands of a repository that needs 24, and for no other. Pinned by the SHA-256 of nodejs.org's published SHASUMS256.txt for v24.22.3 (released 2026-11-10; read 2026-11-23
+# from https://nodejs.org/dist/v24.22.3/SHASUMS256.txt, and the arm64 hash was checked against the downloaded tarball). Size (measured on the arm64 tarball): 58 MB compressed
+# download, about 200 MB unpacked, per architecture. The .tar.gz is used because the slim base has no xz.
+#   node-v24.22.3-linux-arm64.tar.gz  261af2af250dfd7e9f25cf151d1b2713a0adf8f10a9ad116c4947f68627affe8
+#   node-v24.22.3-linux-x64.tar.gz    061ec3e3062115705b56b51fa9cc330ab50d34b6969387d4e4b1a50c6809acc2
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      arm64) node_arch=arm64; node_sha=261af2af250dfd7e9f25cf151d1b2713a0adf8f10a9ad116c4947f68627affe8 ;; \
+      amd64) node_arch=x64; node_sha=061ec3e3062115705b56b51fa9cc330ab50d34b6969387d4e4b1a50c6809acc2 ;; \
+      *) echo "unsupported architecture $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/node24.tgz "https://nodejs.org/dist/v$NODE24_VERSION/node-v$NODE24_VERSION-linux-$node_arch.tar.gz"; \
+    echo "$node_sha  /tmp/node24.tgz" | sha256sum -c -; \
+    mkdir -p /opt/rovara/node/24; \
+    tar -xzf /tmp/node24.tgz -C /opt/rovara/node/24 --strip-components=1 --no-same-owner; \
+    chmod -R go-w /opt/rovara/node/24
 
 FROM public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
 
@@ -96,6 +115,7 @@ COPY --from=tools /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/li
 COPY --from=tools /usr/local/lib/docker/cli-plugins/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
 COPY --from=tools /usr/local/bin/uv /usr/local/bin/uv
 COPY --from=tools /usr/local/bin/uvx /usr/local/bin/uvx
+COPY --from=tools /opt/rovara/node/24 /opt/rovara/node/24
 WORKDIR /opt/agentx
 COPY --from=build /opt/agentx/package-lock.json ./package-lock.json
 COPY --from=build /opt/agentx/node_modules ./node_modules

@@ -6,6 +6,7 @@ import { openDirectory } from "./candidate-fs.js";
 import { join, resolve } from "node:path";
 import { agentXError, type ProjectCommand } from "@agentx/contracts";
 import { createLocalBashOperations, type BashOperations } from "@earendil-works/pi-coding-agent";
+import { nodePathPrefixFor } from "./node-runtime.js";
 import { containerBashOperations, runContainerCommand, type ContainerCommandOptions, type ContainerExec } from "./devcontainer.js";
 import { fileOpsExec, type FileOpsTarget } from "./file-ops-exec.js";
 import type { CommandResult } from "./readiness.js";
@@ -96,7 +97,8 @@ export const SANDBOX_PYTHON_USER_BASE_DIRECTORY = ".agentx-python";
  */
 export function sandboxCommandOptions(rootPath: string): ContainerCommandOptions {
   const base = join(resolve(rootPath), SANDBOX_PYTHON_USER_BASE_DIRECTORY);
-  return { target: "sandbox", unsetEnvironment: SANDBOX_UNSET_ENVIRONMENT, defaultEnvironment: { PYTHONUSERBASE: base }, pathSuffix: [join(base, "bin")] };
+  // Lane E: a repository whose own files ask for Node 24 gets it first on PATH (node-runtime.ts); every other command is unchanged.
+  return { target: "sandbox", unsetEnvironment: SANDBOX_UNSET_ENVIRONMENT, defaultEnvironment: { PYTHONUSERBASE: base }, pathSuffix: [join(base, "bin")], pathPrefixFor: (cwd) => nodePathPrefixFor(rootPath, cwd) };
 }
 /**
  * The environment variable that names a network the sandboxes join, made and walled by whoever starts the worker (`rovara up`, lane
