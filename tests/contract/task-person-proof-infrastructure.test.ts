@@ -10,6 +10,7 @@ import { withoutWorkerSandboxEgress } from "../support/worker-sandbox-egress-tem
 import { Template } from "aws-cdk-lib/assertions";
 import { createHash } from "node:crypto";
 import { stuckStoppingInstall, withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
+import { withoutApiAccessLog } from "../support/api-access-log-template.js";
 import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
@@ -338,7 +339,7 @@ describe("the named TEST proof-only installation gate", () => {
       // Assert and remove only the new broker member statement and first-gateway
       // output; retain the creator fence and every historical parent/reversal pin.
       // Webhook lane W3 + DEC 254zzz432: the webhook secret slot and the stuck-stopping alarm are asserted and taken out too, so the pins hold as recorded.
-      const template = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutStuckStoppingAlarm(structuredClone(installedTemplate), stuckStoppingInstall(label === "named" ? "agentxlivetest123" : label === "foreign" ? "staging" : undefined))));
+      const template = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutStuckStoppingAlarm(withoutApiAccessLog(structuredClone(installedTemplate), (label === "named" ? { env: "agentxlivetest123" } : label === "foreign" ? { env: "staging" } : {})), stuckStoppingInstall(label === "named" ? "agentxlivetest123" : label === "foreign" ? "staging" : undefined))));
       expect(template.Outputs?.ModelRunPriceVersion, label).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
       delete template.Outputs?.ModelRunPriceVersion;
       const creatorChecks = developerSignInConditionCheckEntries(template);

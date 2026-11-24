@@ -15,6 +15,11 @@ export interface AgentXNaming {
   readonly env: string | undefined;
   stackName(part: StackPart): string;
   readonly apiName: string;
+  /**
+   * The CloudWatch log group that receives the control-plane HTTP API's `$default` stage access logs. Under `/aws/vendedlogs/` on purpose: API Gateway delivers through a
+   * log group resource policy, and that prefix is the one CloudWatch Logs exempts from the account's shared resource-policy size limit (as the Slack action logs do).
+   */
+  readonly apiAccessLogGroupName: string;
   /** Prefix of the foundation's `Name` tags. */
   readonly resourcePrefix: string;
   readonly workspaceKeyAlias: string;
@@ -74,6 +79,7 @@ export function legacyNaming(): AgentXNaming {
       return LEGACY_STACK_NAMES[part];
     },
     apiName: "agentx-control-plane",
+    apiAccessLogGroupName: "/aws/vendedlogs/agentx/production/control-plane-api-access",
     resourcePrefix: "agentx-production",
     workspaceKeyAlias: "alias/agentx/production-workspaces",
     // Never used: developer sign-in exists only for named environments (R3).
@@ -117,6 +123,7 @@ export function environmentNaming(env: string): AgentXNaming {
     env: name,
     stackName: (part) => environmentStackName(name, part),
     apiName: `agentx-${name}-control-plane`,
+    apiAccessLogGroupName: `/aws/vendedlogs/agentx/${name}/control-plane-api-access`,
     resourcePrefix: `agentx-${name}`,
     workspaceKeyAlias: `alias/agentx/${name}/workspaces`,
     developerTokenKeyAlias: `alias/agentx/${name}/developer-tokens`,

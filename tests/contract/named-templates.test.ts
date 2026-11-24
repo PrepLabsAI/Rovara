@@ -20,6 +20,7 @@ import { withoutBatchFAdditions } from "../support/batch-f-template.js";
 import { withoutBrokerMemberConditionCheck } from "../support/broker-member-condition-check-template.js";
 import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js";
 import { withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
+import { withoutApiAccessLog } from "../support/api-access-log-template.js";
 
 skipLambdaBundling();
 const STAGING = { alarmName: "agentx-staging-SessionStuckStopping", namespace: "AgentX/staging", env: "staging" };
@@ -295,7 +296,7 @@ describe("named environment templates", () => {
   for (const stack of stacks) {
     if (stack.stackName === "agentx-staging-control-plane") {
       it("removing only Batch F additions preserves code/next's agentx-staging-control-plane template", () => {
-        const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(withoutStuckStoppingAlarm(normalizedTemplate(stack), STAGING)));
+        const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(withoutStuckStoppingAlarm(withoutApiAccessLog(normalizedTemplate(stack), { env: "staging" }), STAGING)));
         expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("8edf09fff29983cc3c3338a6b2d24bb27d061db29960bfa2e77a52c068618972");
       }, 120_000);
     }
@@ -305,9 +306,13 @@ describe("named environment templates", () => {
       // SIGNIN-MEMBER-CONDITIONCHECK, DEC 254zzz282 B014-A: pin the new full synth
       // before the existing normalizers, then preserve every old policy/snapshot assertion.
       if (stack.stackName === "agentx-staging-control-plane") {
-        expect(createHash("sha256").update(JSON.stringify(template)).digest("hex")).toBe("5b526b779a52869b09cb602a1d0a97545f10818f29983a879129dbf70553c745");
+        // APIGW-ACCESS-LOGS (2026-11-24): re-pinned for exactly the access log group and the `$default` stage AccessLogSettings. Rule D: with those two taken out the old pin
+        // 5b526b779a52869b09cb602a1d0a97545f10818f29983a879129dbf70553c745 holds (checked on the next line).
+        expect(createHash("sha256").update(JSON.stringify(template)).digest("hex")).toBe("ee257190b12ebbfc2e493432f8f3f130a7173a64cb80434cc87fcbc44805997e");
+        expect(createHash("sha256").update(JSON.stringify(withoutApiAccessLog(structuredClone(template), { env: "staging" }))).digest("hex"), "minus only the access log").toBe("5b526b779a52869b09cb602a1d0a97545f10818f29983a879129dbf70553c745");
         // Webhook lane W3: the webhook secret slot, its throttle and one alarm, pinned exactly in tests/support/webhook-secret-template.ts, then removed.
-        template = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(template));
+        // APIGW-ACCESS-LOGS (2026-11-24): the full-template pin above moved; the access log group and the stage setting are asserted and taken out, so every pin and snapshot below still holds.
+        template = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutApiAccessLog(structuredClone(template), { env: "staging" })));
       }
       const parity = stack.stackName === "agentx-staging-foundation" ? withoutNatEgressAddresses(withoutDnsFirewall(template))
         : stack.stackName === "agentx-staging-access" ? withoutSavedEnvAccess(withoutDnsFirewallAccess(template), "staging")

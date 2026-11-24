@@ -7,6 +7,7 @@ import { withoutBrokerMemberConditionCheck } from "../support/broker-member-cond
 import { withoutLegacyRuntimeBoundary } from "../support/legacy-runtime-boundary-template.js";
 import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js";
 import { withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
+import { withoutApiAccessLog } from "../support/api-access-log-template.js";
 import { withoutWorkerEcrScope } from "../support/worker-ecr-scope-template.js";
 
 skipLambdaBundling();
@@ -18,7 +19,9 @@ const LEGACY = { alarmName: "AgentXSessionStuckStopping", namespace: "AgentX" };
 // recorded: tests/support/legacy-runtime-boundary-template.ts asserts the addition's shape (one policy per stack, a PermissionsBoundary on every runtime role, nothing else) and takes it
 // out; each changed stack's full template has its own new pin below, and legacy-runtime-boundary.test.ts proves the policy.
 const BOUNDED_STACK_PINS: Record<string, string> = {
-  AgentXControlPlane: "61d1eac2d6a528e2f300b5cc4773fbd6d46b31f3d860c6f6514491fbe3bafb65",
+  // APIGW-ACCESS-LOGS (2026-11-24): re-pinned for exactly the access log group and the `$default` stage AccessLogSettings. Rule D: with those two taken out (withoutApiAccessLog) the old pin
+  // 61d1eac2d6a528e2f300b5cc4773fbd6d46b31f3d860c6f6514491fbe3bafb65 holds (the test below checks it).
+  AgentXControlPlane: "45259f9a0b368e97f50af3f88987e43b3b5360644d43ffd4f0f0d97222fc5b4b",
   AgentXProductionFoundation: "e7c873b146a748408b545e42d2f17596c04ad229271ed7776312d312eca9ca63",
   AgentXSlackOrchestrator: "9ed4e1e13eeb3ecf860e61d9f2c9b332901f36190e0685fa695a390335420bf5",
 };
@@ -31,7 +34,7 @@ describe("legacy production templates", () => {
   for (const stack of legacyProductionStacks()) {
     if (stack.stackName === "AgentXControlPlane") {
       it("removing only Batch F additions preserves code/next's AgentXControlPlane template", () => {
-        const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(withoutLegacyRuntimeBoundary(withoutStuckStoppingAlarm(normalizedTemplate(stack), LEGACY))));
+        const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(withoutLegacyRuntimeBoundary(withoutStuckStoppingAlarm(withoutApiAccessLog(normalizedTemplate(stack)), LEGACY))));
         expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("d9bfc520cf02657c1b6be9b16b821e910504a1599cb3652d7405f9c6509b4048");
       }, 120_000);
     }
@@ -47,7 +50,11 @@ describe("legacy production templates", () => {
       // SIGNIN-MEMBER-CONDITIONCHECK, DEC 254zzz282 B014-A: pin the new template,
       // assert the exact broker-only addition, and retain the entire historical snapshot.
       if (stack.stackName === "AgentXControlPlane") {
-        const withoutBoundary = withoutLegacyRuntimeBoundary(template);
+        // APIGW-ACCESS-LOGS (2026-11-24): the access log group and the stage setting are asserted and taken out first, so the recorded pin and snapshot below still hold. The full-template pin above
+        // (BOUNDED_STACK_PINS) is the one that moved.
+        const beforeAccessLog = withoutApiAccessLog(structuredClone(template));
+        expect(createHash("sha256").update(JSON.stringify(beforeAccessLog)).digest("hex"), "AgentXControlPlane minus only the access log").toBe("61d1eac2d6a528e2f300b5cc4773fbd6d46b31f3d860c6f6514491fbe3bafb65");
+        const withoutBoundary = withoutLegacyRuntimeBoundary(beforeAccessLog);
         expect(createHash("sha256").update(JSON.stringify(withoutBoundary)).digest("hex")).toBe("7af9f78c71ac9c6156127490b80985a46f7f15b026c254e1e59df6e03451da3f");
         // Webhook lane W3 adds the webhook secret slot, its throttle and one alarm (tests/support/webhook-secret-template.ts pins them); the historical snapshot is of the rest.
         expect(withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutBoundary))).toMatchSnapshot();
