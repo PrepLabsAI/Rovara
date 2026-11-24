@@ -28,6 +28,12 @@ export interface SignInProvider {
    */
   authorizeUrl(input: { state: string; nonce: string; redirectUri: string; workspaceHint?: string }): Promise<string>;
   complete(input: { code: string; nonce: string; redirectUri: string }): Promise<ProviderResult>;
+  /**
+   * Cloud sign-out, issue 314: where to send the browser to end the provider's own session (its sign-in cookie), so the next sign-in shows the provider's
+   * login form instead of signing the same person straight back in. The provider then sends the browser to `postLogoutRedirectUri`, which must be
+   * registered with the provider as a sign-out address. Undefined: the provider offers no such address. Only the company (OIDC) sign-in has one.
+   */
+  endSessionUrl?(input: { postLogoutRedirectUri: string }): Promise<string | undefined>;
 }
 
 const SCOPES = "openid email profile";
@@ -173,7 +179,9 @@ function isAdministrator(payload: JWTPayload, administrator: { claim: string; va
   return claimValues(payload[administrator.claim]).some((value) => administrator.values.includes(value));
 }
 
-interface Discovery { issuer: string; authorization_endpoint: string; token_endpoint: string; jwks_uri: string }
+interface Discovery { issuer: string; authorization_endpoint: string; token_endpoint: string; jwks_uri: string; end_session_endpoint?: unknown }
+/** Amazon Cognito's issuers. Its logout endpoint takes `logout_uri`, not OpenID Connect RP-Initiated Logout's `post_logout_redirect_uri`. */
+const COGNITO_ISSUER_HOST = /^cognito-idp\.[a-z0-9-]+\.amazonaws\.com$/u;
 
 export function oidcSignInProvider(input: {
   issuer: string; clientId: string; clientSecret: () => Promise<string>; requiredClaim?: string; requiredValues: readonly string[];
@@ -209,6 +217,14 @@ export function oidcSignInProvider(input: {
       const doc = await discover();
       const url = new URL(doc.authorization_endpoint);
       for (const [key, value] of Object.entries({ response_type: "code", scope: SCOPES, client_id: input.clientId, state, nonce, redirect_uri: redirectUri })) url.searchParams.set(key, value);
+      return url.toString();
+    },
+    async endSessionUrl({ postLogoutRedirectUri }) {
+      const endpoint = (await discover()).end_session_endpoint;
+      if (typeof endpoint !== "string" || !endpoint.startsWith("https://")) return undefined;
+      const url = new URL(endpoint);
+      url.searchParams.set("client_id", input.clientId);
+      url.searchParams.set(COGNITO_ISSUER_HOST.test(new URL(issuer).hostname) ? "logout_uri" : "post_logout_redirect_uri", postLogoutRedirectUri);
       return url.toString();
     },
     async complete({ code, nonce, redirectUri }) {
