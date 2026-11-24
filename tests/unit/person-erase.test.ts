@@ -18,6 +18,7 @@ import { VersionedBucket } from "../support/versioned-bucket.js";
 import { inboxKey, inboxPartition, inboxRow } from "../../packages/broker/src/core/notify/inbox-rows.js";
 import { involvedPartition, involvedRowPut } from "../../packages/broker/src/core/task-flow/involved.js";
 import { githubLinkOf, linkGithubAccount, linkedGithubPerson } from "../../packages/broker/src/core/people/github-links.js";
+import { accountLinkOf, linkAccount, personAccountLink } from "../../packages/broker/src/core/people/account-links.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 const B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
@@ -176,6 +177,21 @@ describe("person erase: what it removes", () => {
     expect(await githubLinkOf(w.store, A, OTHER)).toMatchObject({ accountId: "8" });
     expect(await githubLinkOf(w.store, B, MALLORY)).toMatchObject({ accountId: "7" });
     // The erase is repeatable with the link already gone.
+    await expect(erase(w)).resolves.toMatchObject({ alreadyErased: true });
+  });
+
+  it("removes the person's outside-account links (Linear, and any other provider) in this company, but not another person's, nor the same person's links in another company (R1 + L1)", async () => {
+    const w = world();
+    const at = "2026-11-17T10:00:00.000Z";
+    const link = (companyId: string, personId: string, provider: string, tenant: string, accountId: string) => linkAccount(w.store, { companyId, provider, tenant, accountId, personId, display: "x", linkedAt: at });
+    await link(A, MALLORY, "linear", "ws-1", "user-m"); await link(A, MALLORY, "jira", "acme.example.net", "5b10");
+    await link(A, OTHER, "linear", "ws-1", "user-o"); await link(B, MALLORY, "linear", "ws-2", "user-m");
+    await erase(w);
+    expect(await personAccountLink(w.store, A, MALLORY, "linear")).toBeUndefined();
+    expect(await personAccountLink(w.store, A, MALLORY, "jira")).toBeUndefined();
+    expect(await accountLinkOf(w.store, A, { provider: "linear", tenant: "ws-1", accountId: "user-m" })).toBeUndefined();
+    expect((await personAccountLink(w.store, A, OTHER, "linear"))?.accountId).toBe("user-o");
+    expect((await personAccountLink(w.store, B, MALLORY, "linear"))?.accountId).toBe("user-m");
     await expect(erase(w)).resolves.toMatchObject({ alreadyErased: true });
   });
 

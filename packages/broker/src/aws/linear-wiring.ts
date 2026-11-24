@@ -7,9 +7,11 @@
 // The company's tokens are only ever read for the company asking (`linearCompanyApiAccess`), so another company's token is never used for its projects.
 import { GetSecretValueCommand, type SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { DecryptCommand, EncryptCommand, type KMSClient } from "@aws-sdk/client-kms";
+import { stateStoreFromEnvironment, type GithubLinkClients } from "./github-link-wiring.js";
 import { linearAppIntakeDeliver, type LinearAppIntakeWiring } from "./linear-app-intake.js";
 import { LinearAppSettingsSchema, LinearConnections, linearAppSecretName, type LinearAppSettings, type LinearSealer } from "./linear-connections.js";
 import type { LinearConnectWiring } from "./linear-connect-routes.js";
+import type { LinearLinkWiring } from "./linear-account-link-routes.js";
 import type { LinearWebhookWiring } from "./linear-app-webhook.js";
 
 const SETTINGS_CACHE_MS = 300_000;
@@ -45,7 +47,11 @@ export function linearAppSettingsReader(secrets: Pick<SecretsManagerClient, "sen
   };
 }
 
-export interface LinearCompanyWiring { connect: LinearConnectWiring; webhook: LinearWebhookWiring; connections: LinearConnections }
+export interface LinearCompanyWiring {
+  connect: LinearConnectWiring; webhook: LinearWebhookWiring; connections: LinearConnections;
+  /** R1 + L1: a member's own Linear link routes; absent when the State table's client is not given. */
+  link?: LinearLinkWiring;
+}
 
 /** Everything, or nothing when the key is not given (the routes are then unknown and the webhook 404s). */
 export function linearCompanyWiring(input: {
@@ -53,15 +59,19 @@ export function linearCompanyWiring(input: {
   connectorSecretPrefix: string; fetch?: typeof fetch; log: (entry: Record<string, unknown>) => void;
   /** L2-4: each company's tracker intake (the core root's `intake.intakeFor`), asked at delivery time. Absent: every routed event logs `linear.intake_not_wired`. */
   intakeFor?: LinearAppIntakeWiring["intakeFor"];
+  /** R1 + L1: the raw DynamoDB client the link rows' document store is built over (as GitHub's link routes). Absent: no link routes, and a disconnect has no links to remove. */
+  dynamo?: GithubLinkClients["dynamo"];
 }): LinearCompanyWiring | undefined {
   const keyArn = input.env.CHATGPT_CONNECTION_KEY_ARN;
   if (keyArn === undefined || keyArn === "") return undefined;
   const fetchImpl = input.fetch ?? fetch;
   const app = linearAppSettingsReader(input.secrets, linearAppSecretName(input.connectorSecretPrefix));
   const connections = new LinearConnections({ documentClient: input.documentClient, tableName: input.tableName, sealer: kmsLinearSealer(input.kms, keyArn), fetch: fetchImpl, now: Date.now, app, log: input.log });
+  const links = input.dynamo === undefined ? undefined : stateStoreFromEnvironment({ ...input.env, STATE_TABLE_NAME: input.tableName }, input.dynamo);
   return {
     connections,
-    connect: { connections, app, fetch: fetchImpl, log: input.log },
+    connect: { connections, app, fetch: fetchImpl, log: input.log, ...(links === undefined ? {} : { links }) },
+    ...(links === undefined ? {} : { link: { connections, links, app, fetch: fetchImpl, log: input.log } }),
     webhook: { connections, app, now: Date.now, log: input.log, deliver: linearAppIntakeDeliver({ connections, app, fetch: fetchImpl, log: input.log, ...(input.intakeFor === undefined ? {} : { intakeFor: input.intakeFor }) }) },
   };
 }

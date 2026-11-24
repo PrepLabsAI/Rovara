@@ -232,6 +232,13 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/dev/company/linear/projects/{project}", requires: "full" },
   { method: "PUT", path: "/v1/dev/company/linear/projects/{project}", requires: "full" },
   { method: "DELETE", path: "/v1/dev/company/linear/projects/{project}", requires: "full" },
+  // R1 + L1: a member links their own Linear account to themselves (the web app only; Code checks the live membership and Linear's own sign-in itself), and the company's owner/admin list who linked and remove a link.
+  { method: "GET", path: "/v1/dev/me/tracker-accounts/linear", requires: "full" },
+  { method: "DELETE", path: "/v1/dev/me/tracker-accounts/linear", requires: "full" },
+  { method: "POST", path: "/v1/dev/me/tracker-accounts/linear/link", requires: "full" },
+  { method: "POST", path: "/v1/dev/me/tracker-accounts/linear/link/claim", requires: "full" },
+  { method: "GET", path: "/v1/dev/company/linear/people", requires: "full" },
+  { method: "DELETE", path: "/v1/dev/company/linear/people/{personId}", requires: "full" },
   // Guided onboarding PR 14 (DEC 254n item 1): the company's own engine model (read: any member; change: live owner/admin, checked against the gateway's live list for the company).
   { method: "GET", path: "/v1/dev/company/engine-model", requires: "full" },
   { method: "PUT", path: "/v1/dev/company/engine-model", requires: "full" },

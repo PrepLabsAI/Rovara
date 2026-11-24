@@ -32,6 +32,7 @@ import type { AdaptedHttpRequest } from "./lambda.js";
 import { Membership, membershipKey, ownPartitionRow, recordInCompany } from "./company-check.js";
 import { grantsPkFor, namedCompany } from "./company-layout.js";
 import { unlinkGithubAccount } from "../core/people/github-links.js";
+import { unlinkPersonEverywhere } from "../core/people/account-links.js";
 import { profileDisplayName } from "../developer/github-profile.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { companyMemberActionsThroughLambda } from "./company-member-forwarding.js";
@@ -86,6 +87,8 @@ export interface CompanyMemberRouteContext {
   projectsInCompany(names: readonly string[], companyId: string): Promise<ReadonlySet<string>>;
   /** L4-GH2: where the members' GitHub links live (the core's own store) and the broker's log sink. Absent: a removal removes no link (the install has none). */
   githubLinks?: { store: Pick<DocumentStore, "get" | "delete" | "transact">; log: (entry: Record<string, unknown>) => void };
+  /** R1 + L1: where the members' own outside-account links (Linear) live (the core's own store) and the broker's log sink. Absent: a removal removes no such link (the install has none). */
+  accountLinks?: { store: Pick<DocumentStore, "get" | "delete" | "transact" | "query">; log: (entry: Record<string, unknown>) => void };
   /** DEC 254zzz84 (5): Task People, as the task routes build it, so open tasks can be handed over. Absent: no task is handed over (each is counted as left). */
   taskHandOver?: HandOverContext["tasks"];
 }
@@ -97,6 +100,16 @@ async function dropGithubLink(ctx: CompanyMemberRouteContext, companyId: string,
     await unlinkGithubAccount(ctx.githubLinks.store, companyId, personId);
   } catch {
     try { companyLog(companyId, ctx.githubLinks.log)({ event: "member_removal.github_link_not_removed", level: "error", person: personId }); } catch { /* a log sink that fails must not turn a finished removal into an error */ }
+  }
+}
+
+/** R1 + L1: the removed person's outside-account links (Linear) in their own company, as dropGithubLink: never throws, a failure is only logged by name and person id. */
+async function dropAccountLinks(ctx: CompanyMemberRouteContext, companyId: string, personId: string): Promise<void> {
+  if (ctx.accountLinks === undefined) return;
+  try {
+    await unlinkPersonEverywhere(ctx.accountLinks.store, companyId, personId);
+  } catch {
+    try { companyLog(companyId, ctx.accountLinks.log)({ event: "member_removal.account_link_not_removed", level: "error", person: personId }); } catch { /* a log sink that fails must not turn a finished removal into an error */ }
   }
 }
 
@@ -255,7 +268,7 @@ async function removeWithHandOver(ctx: CompanyMemberRouteContext, caller: Develo
     if (!endedBy(target, record)) {
       // This request's own STARTED record (someone else ended the membership first) is dropped, with its pending row, so it never blocks the one that did.
       if (record?.state === "STARTED") await dropStartedRemoval(handOver, record);
-      await dropGithubLink(ctx, companyId, leaverId);
+      await dropGithubLink(ctx, companyId, leaverId); await dropAccountLinks(ctx, companyId, leaverId);
       throw agentXError("MEMBER_ALREADY_REMOVED", MEMBER_REVOKED);
     }
   } else {
@@ -281,7 +294,7 @@ async function removeWithHandOver(ctx: CompanyMemberRouteContext, caller: Develo
       if (!revoked.ok && (revoked.error !== "unavailable" || "message" in revoked)) await dropStartedRemoval(handOver, record);
       unwrap(revoked);
     }
-    await dropGithubLink(ctx, companyId, leaverId);
+    await dropGithubLink(ctx, companyId, leaverId); await dropAccountLinks(ctx, companyId, leaverId);
   }
   if (record === undefined) throw agentXError("RUNTIME_UNAVAILABLE", MEMBERS_UNAVAILABLE);
   // The successor was live when the membership ended (T3b's fence); they must still be when what was theirs moves.

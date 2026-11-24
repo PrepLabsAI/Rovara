@@ -87,7 +87,7 @@ function expandRegex(source: string): string[] {
 function routerPaths(): Set<string> {
   const paths = new Set<string>();
   // The company reads' paths are constants of their contract (#649), which the router imports.
-  for (const file of ["packages/broker/src/aws/developer-routes.ts", "packages/broker/src/aws/developer-tasks.ts", "packages/contracts/src/company-reads.ts", "packages/contracts/src/company-egress-addresses.ts", "packages/broker/src/aws/company-member-routes.ts", "packages/broker/src/aws/company-learning-model-routes.ts", "packages/broker/src/aws/github-connect-routes.ts", "packages/broker/src/aws/github-account-link-routes.ts", "packages/broker/src/aws/slack-company-install.ts", "packages/broker/src/aws/slack-channel-link.ts", "packages/broker/src/aws/linear-connect-routes.ts", "packages/broker/src/aws/company-engine-model-routes.ts"]) {
+  for (const file of ["packages/broker/src/aws/developer-routes.ts", "packages/broker/src/aws/developer-tasks.ts", "packages/contracts/src/company-reads.ts", "packages/contracts/src/company-egress-addresses.ts", "packages/broker/src/aws/company-member-routes.ts", "packages/broker/src/aws/company-learning-model-routes.ts", "packages/broker/src/aws/github-connect-routes.ts", "packages/broker/src/aws/github-account-link-routes.ts", "packages/broker/src/aws/linear-account-link-routes.ts", "packages/broker/src/aws/slack-company-install.ts", "packages/broker/src/aws/slack-channel-link.ts", "packages/broker/src/aws/linear-connect-routes.ts", "packages/broker/src/aws/company-engine-model-routes.ts"]) {
     const code = readFileSync(new URL(`../../${file}`, import.meta.url), "utf8").split("\n").filter((line) => !/^\s*(\/\/|\*|\/\*\*)/.test(line)).join("\n");
     for (const [, path] of code.matchAll(/"(\/v1\/dev\/[^"]*)"/g)) if (!path!.endsWith("/")) paths.add(path!);
     for (const [, name, path] of code.matchAll(/const (\w+) = "(\/v1\/dev\/[^"]*)"/g)) {
@@ -184,6 +184,8 @@ async function setUp(mode: "linking" | "developer") {
     slackChannels: { slack: { channels: async () => ({ channels: [] }), channel: async () => "not_found" as const, join: async () => false }, log: () => undefined },
     // Guided onboarding PR 7: the Linear connect routes need their wiring to exist; this one connects nothing, so only the route table's answer is tested here.
     linearConnect: { connections: {} as never, app: async () => undefined, fetch: vi.fn() as never, log: () => undefined },
+    // R1 + L1: the member's own Linear link routes and the admin's list of links need their wiring to exist; this one links nothing, so only the route table's answer is tested here.
+    linearLink: { connections: {} as never, links: new MemoryDocumentStore(), app: async () => undefined, fetch: vi.fn() as never, log: () => undefined },
     // L2-4: the waiting-ticket routes need the core's intake to exist; this one holds no tickets, so only the route table's answer is tested here.
     coreTasks: { route: previewCore },
     coreIntake: { intakeFor: async () => undefined, waiting: async () => ({ items: [], sources: [] }), start: async () => ({ outcome: "not_found" }), seedTicketUpdates: async () => "no_intake", dismiss: async () => false },

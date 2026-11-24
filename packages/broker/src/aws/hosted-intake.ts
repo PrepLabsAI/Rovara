@@ -31,7 +31,7 @@ import type { TaskFlow } from "../core/task-flow/flow.js";
 import { waitingViewOf } from "../local/app/intake.js";
 import { createSessionStartExtras } from "../local/app/session-start.js";
 import { isSystemPrincipal } from "../core/system-runs/access.js";
-import { linearAccountResolver } from "./linear-account-links.js";
+import { hostedLinearResolver } from "./linear-account-links.js";
 import { linearCompanyTracker } from "./linear-app-intake.js";
 import type { LinearConnections } from "./linear-connections.js";
 
@@ -109,7 +109,7 @@ export function createHostedIntake(deps: HostedIntakeDeps): HostedIntake {
     return intakePortsOf({
       store: company.store, companyId, now: deps.now,
       log: (event, fields) => { log({ component: "intake", event, ...fields }); },
-      identity: { getPrincipal: principalOf, resolveExternalAccount: linearAccountResolver({ store: company.store, connections: deps.connections, principalOf }) },
+      identity: { getPrincipal: principalOf, resolveExternalAccount: hostedLinearResolver({ store: company.store, connections: deps.connections, principalOf }) },
       access: company.access, flow: company.flow, fenceKey: deps.fenceKey,
       ...(presser === undefined ? {} : { owner: presser }),
       ...(company.milestones === undefined ? {} : { milestones: company.milestones }),

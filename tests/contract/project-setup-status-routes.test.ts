@@ -1274,9 +1274,13 @@ describe("what did not change", () => {
     expect(rows.filter((row) => row === closePreview)).toEqual([closePreview]);
     const serverReads = ["GET /v1/dev/tasks/start-requests/{requestId} tasks:read", "POST /v1/dev/company/connections/impact full"];
     expect(rows.filter(row => serverReads.includes(row))).toEqual(serverReads);
-    const withPreview = rows.filter((row) => !added.some((path) => row === `${path} full`) && row !== inviteResend && !serverReads.includes(row));
+    // R1 + L1 (rule D): the six Linear link rows (a member's own link, and the admin's list and removal) are additive, full access only; removing exactly those 6 rows gives back the pin below.
+    const linearLinks = ["GET /v1/dev/me/tracker-accounts/linear full", "DELETE /v1/dev/me/tracker-accounts/linear full", "POST /v1/dev/me/tracker-accounts/linear/link full", "POST /v1/dev/me/tracker-accounts/linear/link/claim full",
+      "GET /v1/dev/company/linear/people full", "DELETE /v1/dev/company/linear/people/{personId} full"];
+    expect(rows.filter((row) => linearLinks.includes(row))).toEqual(linearLinks);
+    const withPreview = rows.filter((row) => !added.some((path) => row === `${path} full`) && row !== inviteResend && !serverReads.includes(row) && !linearLinks.includes(row));
     const existing = withPreview.filter((row) => row !== preview && row !== closePreview);
-    expect(existing).toHaveLength(DEV_ROUTES.length - 9);
+    expect(existing).toHaveLength(DEV_ROUTES.length - 15);
     // A digest of every other row, in order: any change to an existing route fails here and must be reviewed.
     expect(createHash("sha256").update(existing.join("\n")).digest("hex")).toBe(EXISTING_ROUTES_DIGEST);
     // L4-JA7 (rule D): the pin above moved only by the four hosted knowledge-switch rows; with exactly those removed the digest is the one the table had before.

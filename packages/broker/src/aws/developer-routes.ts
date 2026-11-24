@@ -26,6 +26,7 @@ import { grantProjectAccess, listProjectMembers, projectGrant, projectMemberKey,
 import { appRouteOf, devRouteOf, type DevRoute } from "./dev-route-scopes.js";
 import { isGithubConnectPath, routeGithubConnect, type GithubConnectWiring } from "./github-connect-routes.js";
 import { isGithubLinkPath, routeGithubLink, type GithubLinkWiring } from "./github-account-link-routes.js";
+import { isLinearAccountLinkPath, routeLinearAccountLink, type LinearLinkWiring } from "./linear-account-link-routes.js";
 import { isLinearConnectPath, routeLinearConnect, type LinearConnectWiring } from "./linear-connect-routes.js";
 import { routeHostedIntake } from "./hosted-intake-routes.js";
 import type { HostedIntake } from "./hosted-intake.js";
@@ -213,6 +214,8 @@ export interface DeveloperApiConfiguration {
   slackChannels?: SlackChannelWiring;
   /** Guided onboarding PR 7: the Linear connect routes (linear-connect-routes.ts). Absent (or no company layer): those routes are unknown. */
   linearConnect?: LinearConnectWiring;
+  /** R1 + L1: a member links their own Linear account, and the company's admin lists and removes links (linear-account-link-routes.ts). Absent (or no company layer): those routes are unknown. */
+  linearLink?: LinearLinkWiring;
   /** L2-4: a project's waiting tickets on the core (hosted-intake-routes.ts), set only while the core switch serves and Linear is wired. Absent (or no company layer): those routes are unknown. */
   coreIntake?: HostedIntake;
   /** Guided onboarding PR 14 (DEC 254n item 1): the company engine model route (company-engine-model-routes.ts). Absent (no model gateway, or no company layer): the route is unknown. */
@@ -2346,6 +2349,7 @@ async function companyAdminRoute(deps: DeveloperRouteDependencies, request: Adap
     documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName, now: deps.now, members,
     projectsInCompany: async (names, company) => new Set((await projectsWithPolicy(deps, names, company)).keys()),
     ...(deps.developer.githubLink === undefined ? {} : { githubLinks: { store: deps.developer.githubLink.store, log: deps.developer.githubLink.log } }),
+    ...(deps.developer.linearLink === undefined ? {} : { accountLinks: { store: deps.developer.linearLink.links, log: deps.developer.linearLink.log } }),
     ...(taskHandOverOf(deps, person) ?? {}),
   }, { caller: person, companyId, webApp: _webApp === true }, request, url);
 }
@@ -2416,6 +2420,7 @@ async function slackChannelLinkRoute(deps: DeveloperRouteDependencies, request: 
 
 /** Guided onboarding PR 7: the Linear connect routes. Unknown, before anyone is authenticated, without the company layer or the wiring. */
 async function linearConnectRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  if (isLinearAccountLinkPath(url.pathname)) return linearAccountLinkRoute(deps, request, url);
   const wiring = deps.developer.linearConnect;
   if (deps.companies === undefined || wiring === undefined) throw agentXError("NOT_FOUND", "route not found");
   const route = devRouteOf(request.method, url.pathname);
@@ -2430,6 +2435,18 @@ async function linearConnectRoute(deps: DeveloperRouteDependencies, request: Ada
     // A project's first tracker team: where the new-hosted-project ticket-updates default is saved (once, only if none is saved), for a company whose tasks start on the core.
     ...(deps.developer.coreIntake === undefined ? {} : { onFirstTeam: async (company: string, project: string, personId: string) => { await deps.developer.coreIntake!.seedTicketUpdates(OrgIdSchema.parse(company), project, personId); } }),
   }, caller, companyId, request, url);
+}
+
+/** R1 + L1: the member's own Linear link routes and the admin's list of links. Unknown, before anyone is authenticated, without the company layer or the wiring. */
+async function linearAccountLinkRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  const wiring = deps.developer.linearLink;
+  if (deps.companies === undefined || wiring === undefined) throw agentXError("NOT_FOUND", "route not found");
+  const route = devRouteOf(request.method, url.pathname);
+  if (route === undefined) throw agentXError("NOT_FOUND", "not found");
+  const caller = await authenticateCaller(deps, request.headers.authorization, route);
+  const companyId = await resolveCompany(deps.companies, caller.developerId);
+  if (companyId === undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  return routeLinearAccountLink({ documentClient: deps.documentClient, signInTableName: deps.developer.signInTableName, now: deps.now, wiring }, caller, companyId, request, url);
 }
 
 /** L2-4: a project's waiting tickets (hosted-intake-routes.ts parses what this matched). */
