@@ -110,6 +110,8 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/tasks/t1/feature-choices", "full"],
     // L4-P3: the company's one control over Rovara's automatic runs.
     ["GET", "/v1/app/company/system-runs", "full"], ["PUT", "/v1/app/company/system-runs", "full"],
+    // PRIVATE-PACKAGES P1b: the company's package tokens (status line, set or replace, delete; no row answers a value).
+    ["GET", "/v1/app/company/package-registries", "full"], ["PUT", "/v1/app/company/package-registries", "full"], ["DELETE", "/v1/app/company/package-registries", "full"],
     // L4-EVC (DEC 254zzz20): the eval card and its one approval.
     ["GET", "/v1/app/projects/payments/setup-agent/eval", "full"], ["POST", "/v1/app/projects/payments/setup-agent/eval-approve", "full"], ["POST", "/v1/app/projects/payments/setup-agent/eval-decide", "full"], ["POST", "/v1/app/projects/payments/setup-agent/eval-health", "full"],
     // L4-EVW2 (DEC 254zzz20 D2): Rovara's proposed wrapper file, tried again.

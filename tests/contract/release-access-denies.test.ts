@@ -201,8 +201,8 @@ describe("the environment boundary's release pipeline denies (shape)", () => {
     const size = (statements: typeof defaultBoundaryStatements, env: string, partition: string) => JSON.stringify({ Version: "2012-10-17", Statement: statements({ env, partition, region: partition === "aws" ? REGION : "us-gov-west-1", account: ACCOUNT, cloudFormationRoleName: `agentx-${env}-cloudformation` }) }).replace(/\s/gu, "").length;
     for (const env of ["staging", "a".repeat(20), "qqenv-placeholderqq"]) {
       for (const partition of ["aws", "aws-us-gov"]) {
-        expect(size(defaultBoundaryStatements, env, partition), `runtime ${env} ${partition}`).toBeLessThanOrEqual(6144 - 2000);
-        expect(size(deployBoundaryStatements, env, partition), `deploy ${env} ${partition}`).toBeLessThanOrEqual(6144 - 300);
+        expect(size(defaultBoundaryStatements, env, partition), `runtime ${env} ${partition}`).toBeLessThanOrEqual(6144 - 1700);
+        expect(size(deployBoundaryStatements, env, partition), `deploy ${env} ${partition}`).toBeLessThanOrEqual(6144 - 250);
       }
     }
     expect(releasePipelineNames("a".repeat(20)).runsBucket(ACCOUNT).length).toBeLessThanOrEqual(63);

@@ -12,11 +12,14 @@
 //     company families (org-connectors, org-hooks). No aws:ResourceTag condition on them, so the company's own missing secret is ResourceNotFoundException (not AccessDenied) and its
 //     untagged older secrets stay usable; another company's path, existing or not, is AccessDenied.
 //   - CreateSecret: the company's own path AND the request's `rovara:org` tag equal to the session's.
+//   - CreateSecret for a company's package token (`pkgreg_*` under org-connectors): an UNTAGGED create on exactly that name (PRIVATE-PACKAGES P1b), so no TagResource is needed; see CreateOwnCompanyRegistrySecrets.
+//   - RestoreSecret on the company's own `pkgreg_*` only (RestoreOwnCompanyRegistrySecrets): the token's secret is adopted and restored, never force-deleted or recreated.
 //   - TagResource / UntagResource: NOT allowed, and no Deny either. A tagged CreateSecret also needs TagResource authorization (CreateSecret API reference: "If you include tags in the
 //     secret, you also need secretsmanager:TagResource"), and no documented condition key tells a TagResource made as part of CreateSecret from a direct one, so allowing it would allow
 //     retagging an existing secret. Until that discriminator is verified (AWS docs + the IAM policy simulator), a tagged create is refused here: deployment of tagged creates stays
 //     blocked and the constraint goes back to the owner. No unconditional Deny on TagResource is added, so a later, verified create-only allow is not overridden.
 import { ArnFormat, Stack, aws_iam as iam } from "aws-cdk-lib";
+import { companySecretsRoleName } from "@agentx/contracts";
 import { Construct } from "constructs";
 
 /** The session tag that carries the company. */
@@ -25,6 +28,8 @@ export const COMPANY_TAG_KEY = "rovara:org";
 export const COMPANY_TAG_VALUE_GLOB = `org_${"?".repeat(20)}`;
 /** The secret-name families that belong to one company (packages/broker/src/core-host/code-modules.ts COMPANY_SECRET_PATHS). */
 export const COMPANY_SECRET_FAMILIES = ["org-connectors", "org-hooks"] as const;
+/** The leaf a company's package token is created under (PRIVATE-PACKAGES P1b): `pkgreg_<hostKey>`, created WITHOUT tags (see `CreateOwnCompanyRegistrySecrets`). */
+export const COMPANY_REGISTRY_SECRET_LEAF_GLOB = "pkgreg_*";
 /** The read and write actions the name fence covers. */
 export const COMPANY_SECRET_USE_ACTIONS = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret", "secretsmanager:PutSecretValue"] as const;
 
@@ -55,6 +60,8 @@ export class CompanySecrets extends Construct {
     const brokerArn = props.brokerRole.roleArn;
     // The trust: one statement, sts:AssumeRole and sts:TagSession together, each only with exactly the one company tag.
     this.role = new iam.Role(this, "Role", {
+      // A fixed name (like the saved environment image roles): the broker's permissions boundary names this one role (`AssumeCompanySecretsRole`, contracts access-policies.ts) and the deploy role looks it up by name.
+      roleName: companySecretsRoleName(props.env),
       description: "The broker acting for one company: that company's secrets only (session tag rovara:org)",
       assumedBy: new iam.PrincipalWithConditions(new iam.ArnPrincipal(brokerArn).withSessionTags(), tagConditions),
     });
@@ -70,6 +77,23 @@ export class CompanySecrets extends Construct {
       resources: companyArns,
       conditions: { ...sessionHasCompany, Bool: { "secretsmanager:ForceDeleteWithoutRecovery": "false" } },
     }));
+    // PRIVATE-PACKAGES P1b: the company's package token per registry host, `agentx/<env>/org-connectors/<company>/pkgreg_*`, created WITHOUT tags: a tagged create needs TagResource (above), and this role has none. The
+    // NAME is the fence (the company is the session's own tag in the resource, the leaf is `pkgreg_*`), and `aws:TagKeys` must be absent so this statement can never create a tagged secret or become the tagging path.
+    // Reads, version writes and recoverable deletes of these names are already covered by the name fence above; nothing else is added.
+    this.role.addToPolicy(new iam.PolicyStatement({
+      sid: "CreateOwnCompanyRegistrySecrets",
+      actions: ["secretsmanager:CreateSecret"],
+      resources: [stack.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `agentx/${props.env}/org-connectors/${principalCompany}/${COMPANY_REGISTRY_SECRET_LEAF_GLOB}`, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
+      conditions: { Null: { [`aws:PrincipalTag/${COMPANY_TAG_KEY}`]: "false", "aws:TagKeys": "true" } },
+    }));
+    // The company's package token is ADOPTED, not recreated: a secret scheduled for deletion (a removal's recovery window, or a delete whose row write failed) is restored before a new version is written into it.
+    // Exactly like the statement above: the company's own org (the session tag in the resource), `pkgreg_*` only, no other family and no other name.
+    this.role.addToPolicy(new iam.PolicyStatement({
+      sid: "RestoreOwnCompanyRegistrySecrets",
+      actions: ["secretsmanager:RestoreSecret"],
+      resources: [stack.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `agentx/${props.env}/org-connectors/${principalCompany}/${COMPANY_REGISTRY_SECRET_LEAF_GLOB}`, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
+      conditions: sessionHasCompany,
+    }));
     this.role.addToPolicy(new iam.PolicyStatement({
       sid: "CreateOwnCompanySecrets",
       actions: ["secretsmanager:CreateSecret"],
@@ -79,6 +103,14 @@ export class CompanySecrets extends Construct {
         StringEquals: { [`aws:RequestTag/${COMPANY_TAG_KEY}`]: principalCompany },
         "ForAllValues:StringEquals": { "aws:TagKeys": [COMPANY_TAG_KEY] },
       },
+    }));
+    // Hardening (Opus review of P1b, F2): IAM's `*` matches `/`, so `pkgreg_*` would also let the role create an untagged secret at a NESTED name (`pkgreg_x/y`) inside its own company's prefix. The adapter refuses
+    // that name before any call; this Deny makes IAM refuse it too. A Deny on a resource pattern needs no condition key. The org segment is `*` here (a Deny may be wider than the Allow); a leaf is never nested.
+    this.role.addToPolicy(new iam.PolicyStatement({
+      sid: "DenyNestedCompanyRegistrySecrets",
+      effect: iam.Effect.DENY,
+      actions: ["secretsmanager:CreateSecret"],
+      resources: [stack.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `agentx/${props.env}/org-connectors/*/${COMPANY_REGISTRY_SECRET_LEAF_GLOB}/*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
     }));
   }
 }

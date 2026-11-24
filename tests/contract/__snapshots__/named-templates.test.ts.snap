@@ -5778,6 +5778,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             },
           ],
         },
+        "RoleName": "agentx-staging-company-secrets",
         "Tags": [
           {
             "Key": "agentx:env",
@@ -5905,6 +5906,67 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             {
               "Action": "secretsmanager:CreateSecret",
               "Condition": {
+                "Null": {
+                  "aws:PrincipalTag/rovara:org": "false",
+                  "aws:TagKeys": "true",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":secretsmanager:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":secret:agentx/staging/org-connectors/\${aws:PrincipalTag/rovara:org}/pkgreg_*",
+                  ],
+                ],
+              },
+              "Sid": "CreateOwnCompanyRegistrySecrets",
+            },
+            {
+              "Action": "secretsmanager:RestoreSecret",
+              "Condition": {
+                "Null": {
+                  "aws:PrincipalTag/rovara:org": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":secretsmanager:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":secret:agentx/staging/org-connectors/\${aws:PrincipalTag/rovara:org}/pkgreg_*",
+                  ],
+                ],
+              },
+              "Sid": "RestoreOwnCompanyRegistrySecrets",
+            },
+            {
+              "Action": "secretsmanager:CreateSecret",
+              "Condition": {
                 "ForAllValues:StringEquals": {
                   "aws:TagKeys": [
                     "rovara:org",
@@ -5961,6 +6023,31 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                 },
               ],
               "Sid": "CreateOwnCompanySecrets",
+            },
+            {
+              "Action": "secretsmanager:CreateSecret",
+              "Effect": "Deny",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":secretsmanager:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":secret:agentx/staging/org-connectors/*/pkgreg_*/*",
+                  ],
+                ],
+              },
+              "Sid": "DenyNestedCompanyRegistrySecrets",
             },
           ],
           "Version": "2012-10-17",

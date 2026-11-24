@@ -39,11 +39,12 @@ describe("service role policy", () => {
           Condition: { StringEquals: { "iam:AWSServiceName": "ecr.amazonaws.com" } },
         });
       } else if (statement.Sid === "IamFixedNameRolesNotYetCreated") {
-        // L4-SE6: the three saved environment image roles by their PATH-LESS ARN (what CloudFormation looks up before it creates a fixed-name role): lookups and deletes, never a create or change.
+        // L4-SE6: the three saved environment image roles, and (PRIVATE-PACKAGES P1b) the company-secrets role, by their PATH-LESS ARN (what CloudFormation looks up before it creates a fixed-name role): lookups and deletes, never a create or change.
         expect(resources).toEqual([
           "arn:aws:iam::123456789012:role/agentx-staging-img-push",
           "arn:aws:iam::123456789012:role/agentx-staging-img-pull",
           "arn:aws:iam::123456789012:role/agentx-staging-img-manage",
+          "arn:aws:iam::123456789012:role/agentx-staging-company-secrets",
           // R5 step 1: the Slack token reader role (fixed name).
           "arn:aws:iam::123456789012:role/agentx-staging-slk",
         ]);
@@ -344,8 +345,8 @@ describe("runtime permission boundary (every role a merged template creates)", (
   const statements = defaultBoundaryStatements(scope);
   const allows = statements.filter((s) => s.Effect === "Allow");
 
-  it("allows exactly what runtime roles use: the services, the email send, PassRole on the environment's roles, the broker's and the Slack service's assumes", () => {
-    expect(allows.map((s) => s.Sid)).toEqual(["Services", "StepUpEmail", "PassRoles", "ReadRoles", "ListQuotas", "AssumeSessionRoles", "SlackTokenReader"]);
+  it("allows exactly what runtime roles use: the services, the email send, PassRole on the environment's roles, the broker's assumes and the Slack service's assume", () => {
+    expect(allows.map((s) => s.Sid)).toEqual(["Services", "StepUpEmail", "PassRoles", "ReadRoles", "ListQuotas", "AssumeSessionRoles", "AssumeCompanySecretsRole", "SlackTokenReader"]);
     // The auto-requalify machine's preflight reads the worker role: read-only, the environment's roles only.
     // DEC 432: the model-discovery check's quota List, read-only, and nothing else in servicequotas.
     expect(allows.find((s) => s.Sid === "ListQuotas")).toEqual({ Sid: "ListQuotas", Effect: "Allow", Action: ["servicequotas:ListServiceQuotas"], Resource: "*" });
@@ -363,6 +364,13 @@ describe("runtime permission boundary (every role a merged template creates)", (
       ],
       Condition: { ArnEquals: { "aws:PrincipalArn": "arn:aws:iam::123456789012:role/agentx/staging/agentx-staging-broker-role" } },
     });
+    // PRIVATE-PACKAGES P1b: the company-secrets role: AssumeRole and TagSession on that ONE role (never a wildcard), for the broker's role only. The image roles above take no session tags: TagSession is NOT on them.
+    expect(allows.find((s) => s.Sid === "AssumeCompanySecretsRole")).toEqual({
+      Sid: "AssumeCompanySecretsRole", Effect: "Allow", Action: ["sts:AssumeRole", "sts:TagSession"],
+      Resource: "arn:aws:iam::123456789012:role/agentx/staging/agentx-staging-company-secrets",
+      Condition: { ArnEquals: { "aws:PrincipalArn": "arn:aws:iam::123456789012:role/agentx/staging/agentx-staging-broker-role" } },
+    });
+    expect(allows.filter((s) => s.Action.some((a) => /^sts:TagSession/u.test(a))).map((s) => s.Sid)).toEqual(["AssumeCompanySecretsRole", "SlackTokenReader"]);
     expect(allows.find((s) => s.Sid === "SlackTokenReader")).toEqual({ Sid: "SlackTokenReader", Effect: "Allow", Action: ["sts:AssumeRole", "sts:TagSession"], Resource: "arn:aws:iam::123456789012:role/agentx/staging/agentx-staging-slk" });
   });
 

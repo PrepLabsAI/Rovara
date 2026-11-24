@@ -141,7 +141,7 @@ it("a closing run cannot exchange a repository credential", async () => {
   w.h.deps.resumeAcceptedClose = async () => {};
   await w.h.flow.close(w.h.owner, w.task.taskId, w.input);
   const exchange = vi.fn(async () => ({ username: "worker", password: "fixture" }));
-  const handler = createCallbackHandler({ flow: w.h.deps, blobs: {} as never, grants: { exchange } });
+  const handler = createCallbackHandler({ flow: w.h.deps, blobs: {} as never, grants: { exchange, inspect: () => { throw new Error("unused"); } } });
   const response = await handler({ method: "POST", path: `/v1/internal/workspaces/${w.run.workspaceId}/operations/${w.run.id}/repository-credentials`, headers: { "x-agentx-repository-grant": "fixture" }, body: JSON.stringify({ credentialRef: "fixture", repositoryUrl: "https://github.com/acme/app", access: "clone" }) });
   expect(response.statusCode).toBe(403);
   expect(exchange).not.toHaveBeenCalled();
@@ -195,7 +195,7 @@ it("an artifact callback on a closing run cannot impersonate its usage channel",
   const w = await closeRecoveryHarness(); w.h.deps.resumeAcceptedClose = async () => {};
   await w.h.flow.close(w.h.owner, w.task.taskId, w.input);
   const bookUsage = vi.fn(async () => {});
-  const handler = createCallbackHandler({ flow: w.h.deps, blobs: {} as never, grants: { exchange: async () => { throw new Error("unused"); } }, bookUsage });
+  const handler = createCallbackHandler({ flow: w.h.deps, blobs: {} as never, grants: { exchange: async () => { throw new Error("unused"); }, inspect: () => { throw new Error("unused"); } }, bookUsage });
   const token = new CallbackCapabilities(Buffer.from(w.h.deps.callbackSigningKey)).issue({ workspaceId: w.run.workspaceId, operationId: w.run.id, fence: w.run.fence, actions: ["artifacts"], expiresInSeconds: 600 });
   expect((await handler({ method: "POST", path: `/v1/internal/workspaces/${w.run.workspaceId}/operations/${w.run.id}/artifacts`, headers: { [CAPABILITY_HEADER]: token }, body: JSON.stringify({ events: w.usage }) })).statusCode).toBe(409);
   expect(bookUsage).not.toHaveBeenCalled();
@@ -204,7 +204,7 @@ it("an artifact callback on a closing run cannot impersonate its usage channel",
 it("the admitted CodeBuild callback reaches its publication validator", async () => {
   const w = await seed({ workflow: null });
   const op = await startManualPublication(w.h.deps, w.caller, TASK_ID, { requestId: randomUUID(), title: "Retry", draft: true });
-  const handler = createCallbackHandler({ flow: w.h.deps, blobs: {} as never, grants: { exchange: async () => { throw new Error("unused"); } } });
+  const handler = createCallbackHandler({ flow: w.h.deps, blobs: {} as never, grants: { exchange: async () => { throw new Error("unused"); }, inspect: () => { throw new Error("unused"); } } });
   const token = new CallbackCapabilities(Buffer.from(w.h.deps.callbackSigningKey)).issue({ workspaceId: op.workspaceId, operationId: op.id, fence: op.fence, actions: op.dispatch.extraActions as CallbackAction[], expiresInSeconds: 600 });
   const response = await handler({ method: "POST", path: `/v1/internal/workspaces/${op.workspaceId}/operations/${op.id}/codebuild`, headers: { [CAPABILITY_HEADER]: token }, body: JSON.stringify({ unexpected: true }) });
   expect(response.statusCode).toBe(400);
@@ -216,7 +216,7 @@ it("the larger feedback-report byte allowance does not apply to unrelated artifa
   const started = await h.flow.start(h.owner, { requestId: randomUUID(), project: "payments", instructions: "Bound artifacts" });
   const operation = (await workspaceOperations(h.deps, started.task.workspaceId)).find(op => op.kind === "prepare")!;
   await h.store.put({ item: toDocument({ ...operation, workflowMode: "FEEDBACK_REVIEW" }) });
-  const handler = createCallbackHandler({ flow: h.deps, blobs: { put: async () => {}, get: async () => undefined } as never, grants: { exchange: async () => { throw new Error("unused"); } } });
+  const handler = createCallbackHandler({ flow: h.deps, blobs: { put: async () => {}, get: async () => undefined } as never, grants: { exchange: async () => { throw new Error("unused"); }, inspect: () => { throw new Error("unused"); } } });
   const token = new CallbackCapabilities(Buffer.from(h.deps.callbackSigningKey)).issue({ workspaceId: operation.workspaceId, operationId: operation.id, fence: operation.fence, actions: ["artifacts"], expiresInSeconds: 600 });
   expect((await handler({ method: "POST", path: `/v1/internal/workspaces/${operation.workspaceId}/operations/${operation.id}/artifacts`, headers: { [CAPABILITY_HEADER]: token }, body: JSON.stringify({ name: "unrelated.json", mediaType: "application/json", content: "x".repeat(200_001) }) })).statusCode).toBe(400);
 });

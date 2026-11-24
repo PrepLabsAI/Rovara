@@ -1,13 +1,14 @@
-// Plug-in foundations N9 (INTG2): a project's private package registries (npm, PyPI, Maven; CodeArtifact first, kept generic).
+// Plug-in foundations N9 (INTG2) and the company package token (PRIVATE-PACKAGES P1a, owner decision 254zzz434): private package registries for a run's setup.
 //
-// What is stored is only WHERE a registry is and WHICH credential reference reaches it, never a token. At `prepare` the worker asks the broker for a short-lived, read-only
-// token by registry NAME (`/registry-credentials`), writes the package manager's config outside every repository, runs the project's setup and readiness commands, and removes
-// the file. The token never enters model context, the transcript, evidence, logs, the manifest or a pull request: every command result passes `scrubRegistrySecrets` first.
+// Two sources, never a token in either record:
+//   - a PROJECT may name a CodeArtifact registry (a domain the install bound to its company): where it is, and nothing that reaches it (the broker's own identity mints a short-lived token);
+//   - a COMPANY holds one install secret per supported registry host (`PRIVATE_REGISTRY_HOSTS`: GitHub Packages' npm registry first), pasted once, write-only. Every project of the company gets the
+//     company's entries at its `prepare`, each with the npm scopes the company set for it. No project holds a credential reference: a generic `npm`/`pypi`/`maven` project entry is refused.
+// At `prepare` the worker asks the broker for each registry's token by NAME (`/registry-credentials`), writes the package manager's config outside every repository, runs the setup and readiness
+// commands, and removes the file. The token never enters model context, the transcript, evidence, logs, the manifest or a pull request: every command result passes `scrubRegistrySecrets` first.
 //
-// Public edition: none yet (the install is shared by many companies; a CodeArtifact domain is install-wide until a per-org binding exists). The public registries (npmjs, PyPI, Maven
-// Central) need no entry and no credential: they stay reachable under the default allow-list.
-// Company installs: CodeArtifact (a domain and repositories the install bound to the org), or a generic registry (npm, pypi, maven) the customer runs, reached with a credential reference the
-// broker resolves.
+// Public edition: no CodeArtifact yet (the install is shared by many companies; a CodeArtifact domain is install-wide until a per-org binding exists). A company's own secret is read for that company
+// only, so the company entries need no edition. The public registries (npmjs, PyPI, Maven Central) need no entry and no credential: they stay reachable under the default allow-list.
 import { z } from "zod";
 import { AgentXNameSchema } from "./names.js";
 import { e2eSecretSpellings } from "./e2e-secret-spellings.js";
@@ -17,6 +18,11 @@ import { OrgIdSchema, type OrgId } from "./browser-ids.js";
 
 /** The feature a worker lists when it can take the prepare payload's `registries` and run setup with a registry's config. Added to WORKER_INVOCATION_FEATURES. */
 export const PREPARE_REGISTRIES_FEATURE = "prepare.registries.v1" as const;
+/**
+ * The feature a worker lists ONLY when it installs a company's private packages in its own install step (PRIVATE-PACKAGES P2a: worker/src/private-install.ts; a tmpfs file outside the workspace, scripts off, so no project command, sandbox or the agent sees the token).
+ * A company's package token reaches no worker without it: a `prepare.registries.v1` worker alone would hand the token to the project's own setup commands, so the broker refuses the company's registries for such a worker.
+ */
+export const PREPARE_COMPANY_REGISTRIES_FEATURE = "prepare.registries.companyInstallStep.v1" as const;
 
 export const REGISTRY_FORMATS = ["npm", "pypi", "maven"] as const;
 export type RegistryFormat = (typeof REGISTRY_FORMATS)[number];
@@ -57,17 +63,15 @@ const RegistryUrlSchema = z.string().max(2_048).superRefine((value, context) => 
 });
 
 const ScopeSchema = z.string().regex(NPM_SCOPE);
+/** An npm scope as a company's registry entry names it (`@acme`). */
+export const RegistryScopeSchema = ScopeSchema;
 const RegistryNameSchema = AgentXNameSchema;
 
-const GenericRegistrySchema = z.object({
-  kind: z.enum(REGISTRY_FORMATS),
-  name: RegistryNameSchema,
-  url: RegistryUrlSchema,
-  /** The reference the broker resolves to this registry's credential. A name, never a value. */
-  credentialRef: AgentXNameSchema,
-  /** npm only: the packages under this scope come from this registry. */
-  scope: ScopeSchema.optional(),
-}).strict();
+/** The sentence a project gets when it names a generic registry: its token is the company's, set once. */
+export const GENERIC_REGISTRY_REFUSED = "private package tokens are set once for the company, not in the project";
+const RefusedGenericRegistrySchema = z.object({ kind: z.enum(REGISTRY_FORMATS) }).passthrough().superRefine((_entry, context) => {
+  context.addIssue({ code: "custom", message: GENERIC_REGISTRY_REFUSED });
+});
 
 const CodeArtifactRegistrySchema = z.object({
   kind: z.literal("codeartifact"),
@@ -80,16 +84,10 @@ const CodeArtifactRegistrySchema = z.object({
   scope: ScopeSchema.optional(),
 }).strict();
 
-export const ProjectRegistrySchema = z.discriminatedUnion("kind", [
-  GenericRegistrySchema.extend({ kind: z.literal("npm") }),
-  GenericRegistrySchema.extend({ kind: z.literal("pypi") }),
-  GenericRegistrySchema.extend({ kind: z.literal("maven") }),
-  CodeArtifactRegistrySchema,
-]).superRefine((entry, context) => {
-  const format = entry.kind === "codeartifact" ? entry.format : entry.kind;
-  if (entry.scope !== undefined && format !== "npm") context.addIssue({ code: "custom", path: ["scope"], message: "scope applies to npm registries only" });
-});
-export type ProjectRegistry = z.infer<typeof ProjectRegistrySchema>;
+export const ProjectRegistrySchema = z.discriminatedUnion("kind", [CodeArtifactRegistrySchema, RefusedGenericRegistrySchema]).superRefine((entry, context) => {
+  if (entry.kind === "codeartifact" && entry.scope !== undefined && entry.format !== "npm") context.addIssue({ code: "custom", path: ["scope"], message: "scope applies to npm registries only" });
+}) as unknown as z.ZodType<z.infer<typeof CodeArtifactRegistrySchema>>;
+export type ProjectRegistry = z.infer<typeof CodeArtifactRegistrySchema>;
 
 export const ProjectRegistriesSchema = z.array(ProjectRegistrySchema).max(REGISTRIES_MAX).superRefine((entries, context) => {
   const names = new Set<string>();
@@ -105,11 +103,11 @@ export const ProjectRegistriesSchema = z.array(ProjectRegistrySchema).max(REGIST
 });
 
 export function formatOf(entry: ProjectRegistry): RegistryFormat {
-  return entry.kind === "codeartifact" ? entry.format : entry.kind;
+  return entry.format;
 }
 
 /** The CodeArtifact host of a domain: `<domain>-<owner>.d.codeartifact.<region>.amazonaws.com` (China regions end in `.amazonaws.com.cn`). */
-function codeArtifactHost(entry: Extract<ProjectRegistry, { kind: "codeartifact" }>): string {
+function codeArtifactHost(entry: ProjectRegistry): string {
   return `${entry.domain}-${entry.domainOwner}.d.codeartifact.${entry.region}.amazonaws.com${entry.region.startsWith("cn-") ? ".cn" : ""}`;
 }
 
@@ -118,12 +116,8 @@ function codeArtifactHost(entry: Extract<ProjectRegistry, { kind: "codeartifact"
  * https://docs.aws.amazon.com/codeartifact/latest/ug/npm-auth.html , python-configure-pip.html , maven-mvn.html
  */
 export function registryUrlOf(entry: ProjectRegistry): string {
-  if (entry.kind === "codeartifact") {
-    const base = `https://${codeArtifactHost(entry)}/${entry.format}/${entry.repository}/`;
-    return entry.format === "pypi" ? `${base}simple/` : base;
-  }
-  const url = new URL(entry.url);
-  return `${url.origin}${url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`}`;
+  const base = `https://${codeArtifactHost(entry)}/${entry.format}/${entry.repository}/`;
+  return entry.format === "pypi" ? `${base}simple/` : base;
 }
 
 export function registryHostOf(entry: ProjectRegistry): string {
@@ -155,9 +149,45 @@ const TokenSchema = z.string().min(REGISTRY_TOKEN_MIN_LENGTH).max(REGISTRY_TOKEN
 export const RegistryCredentialSchema = z.object({
   username: z.string().min(1).max(256).regex(/^[\x21-\x7e]+$/).optional(),
   token: TokenSchema,
-  expiresAt: z.string().datetime(),
+  /** When the token stops working. Present for a minted token (CodeArtifact's, at most REGISTRY_TOKEN_SECONDS). ABSENT for a stored one (a personal access token has no expiry of its own and none is made up for it). */
+  expiresAt: z.string().datetime().optional(),
 }).strict();
 export type RegistryCredential = z.infer<typeof RegistryCredentialSchema>;
+
+// ---- the company's registry secrets
+
+/**
+ * The registry hosts a company may hold a package token for (v1). A fixed table: the form, the exchange and the card refuse any other host. `key` is the host's id in the secret's name, `tokenPrefix` what
+ * its token starts with (GitHub Packages' npm registry takes a classic personal access token only).
+ */
+export const PRIVATE_REGISTRY_HOSTS = { "npm.pkg.github.com": { key: "ghnpm", format: "npm", tokenPrefix: "ghp_" } } as const satisfies Record<string, { key: string; format: RegistryFormat; tokenPrefix: string }>;
+export type PrivateRegistryHost = keyof typeof PRIVATE_REGISTRY_HOSTS;
+export const isPrivateRegistryHost = (host: string): host is PrivateRegistryHost => Object.hasOwn(PRIVATE_REGISTRY_HOSTS, host);
+
+/** What a company set for one host: the npm scopes whose packages come from it. Never a token. */
+export interface CompanyRegistryEntry { host: PrivateRegistryHost; scopes: readonly string[] }
+
+/**
+ * The name of a company's package token for one host: `agentx/<env>/org-connectors/<company>/pkgreg_<hostKey>`. ONE secret per company per host (npm keys its token by host, and the scopes are the entry's
+ * metadata, not part of the name). Built from the company of the run and the fixed host table, never from anything a worker, a browser or a project sends: the company is part of the name, the secrets
+ * adapter reads a company path for that company only, and the company-tagged session fences it again in IAM. Undefined when the company id or the host is not valid.
+ * The company-side store that SAVES the secret must write exactly this name.
+ */
+export function companyRegistrySecretName(env: string, orgId: string, host: string): string | undefined {
+  if (!OrgIdSchema.safeParse(orgId).success || !isPrivateRegistryHost(host) || !/^[a-z][a-z0-9-]{0,62}$/.test(env)) return undefined;
+  return `agentx/${env}/org-connectors/${orgId}/pkgreg_${PRIVATE_REGISTRY_HOSTS[host].key}`;
+}
+
+/** The registry name a worker asks for one scope of a company entry by: the host's key and the scope's place in the entry's sorted scopes (`ghnpm-1`). Stable for one list of entries; a list that changed refuses the ask. */
+export function companyRegistryNames(entries: readonly CompanyRegistryEntry[]): Array<{ name: string; host: PrivateRegistryHost; scope: string }> {
+  return entries.flatMap((entry) => [...new Set(entry.scopes)].sort().map((scope, index) => ({ name: `${PRIVATE_REGISTRY_HOSTS[entry.host].key}-${String(index + 1)}`, host: entry.host, scope })));
+}
+
+/** What a worker is told of the company's entries: one registry per scope (npm routes each scope to the host), each asked for by its name. An entry with no scope routes nothing and is left out. */
+export function prepareRegistriesOfCompany(entries: readonly CompanyRegistryEntry[]): PrepareRegistry[] {
+  return companyRegistryNames(entries).filter((item) => ScopeSchema.safeParse(item.scope).success)
+    .map((item) => ({ name: item.name, kind: PRIVATE_REGISTRY_HOSTS[item.host].format, format: PRIVATE_REGISTRY_HOSTS[item.host].format, url: `https://${item.host}/`, scope: item.scope }));
+}
 
 // ---- what a project may name, by edition and org
 
@@ -211,8 +241,9 @@ export function hostMatchesDomain(host: string, patterns: readonly string[]): bo
 }
 
 /**
- * Everything that keeps a project's registries from being used on this install, in registry order:
- *  - Public uses none yet: its install is shared by many companies and a CodeArtifact domain is install-wide until a per-org binding exists;
+ * Everything that keeps a project's (CodeArtifact) registries from being used on this install, in registry order. The company's package-token hosts are not here: they are a fixed table (`PRIVATE_REGISTRY_HOSTS`), need no edition
+ * (the secret is the company's own) and no approved website of the project (a project's allowed websites say what the AI may use, not what setup installs from).
+ *  - Public uses no CodeArtifact yet: its install is shared by many companies and a CodeArtifact domain is install-wide until a per-org binding exists;
  *  - a CodeArtifact registry must name a domain, account, region AND repository that the install bound to the requesting org (`boundDomains`); another org's domain gets no token;
  *  - the registry's host must be on the project's approved websites (the normal egress approval).
  * Fail closed: an install that has no edition on record is held to Public's rule, and a missing org binds nothing.
@@ -222,10 +253,8 @@ export function registryProblems(input: { edition: Edition | undefined; registri
   const problems: RegistryProblem[] = [];
   for (const entry of input.registries) {
     if (edition === "public") { problems.push({ code: "edition_kind", registry: entry.name }); continue; }
-    if (entry.kind === "codeartifact") {
-      const bound = input.orgId !== undefined && (input.boundDomains ?? []).some((domain) => domain.orgId === input.orgId && domain.name === entry.domain && domain.owner === entry.domainOwner && domain.region === entry.region && domain.repositories.includes(entry.repository));
-      if (!bound) { problems.push({ code: "domain_not_bound", registry: entry.name }); continue; }
-    }
+    const bound = input.orgId !== undefined && (input.boundDomains ?? []).some((domain) => domain.orgId === input.orgId && domain.name === entry.domain && domain.owner === entry.domainOwner && domain.region === entry.region && domain.repositories.includes(entry.repository));
+    if (!bound) { problems.push({ code: "domain_not_bound", registry: entry.name }); continue; }
     if (!hostMatchesDomain(registryHostOf(entry), input.allowedDomains)) problems.push({ code: "host_not_approved", registry: entry.name });
   }
   return problems;

@@ -102,6 +102,7 @@ import { isEvalCheckPath, routeHostedEvalCheck, type HostedEvalCheckWiring } fro
 import { isBrowserTestingPath, routeHostedBrowserTesting, type HostedBrowserTestingWiring } from "./browser-testing-routes.js";
 import { isAgentDirectoryPath, routeHostedAgentDirectory } from "./agent-directory-routes.js";
 import { isSystemRunsPath, routeHostedSystemRuns } from "./system-runs-routes.js";
+import { isPackageRegistriesPath, routeHostedPackageRegistries, type HostedPackageRegistriesWiring } from "./package-registries-routes.js";
 import { isHostedMergePath, routeHostedMerge, type HostedMergeWiring } from "./hosted-merge-routes.js";
 import { isTicketUpdatesPath, routeHostedTicketUpdates, type HostedTicketUpdatesWiring } from "./ticket-updates-routes.js";
 
@@ -269,6 +270,8 @@ export interface CoreDevWiring {
   merge?: HostedMergeWiring;
   /** Audit gap 11b: a project's ticket-sharing settings (`/v1/app/projects/<p>/intake/updates`, ticket-updates-routes.ts). Absent: that path says "not on the core yet". */
   ticketUpdates?: HostedTicketUpdatesWiring;
+  /** PRIVATE-PACKAGES P1b: the company's package tokens (`/v1/app/company/package-registries`, package-registries-routes.ts). Absent: that path says "not on the core yet". */
+  packageRegistries?: HostedPackageRegistriesWiring;
 }
 
 export interface CoreDevRoutesOptions {
@@ -321,7 +324,7 @@ function owns(path: string, method: string, query: string): boolean {
   if (INBOX_PATH.test(path)) return inboxOwns(path, method);
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
   if (isSetupRunPath(path, method) || isSetupCheckPath(path, method) || isWikiMapPath(path, method) || isReportPath(path, method)) return true;
-  if (isKnownFailingPath(path, method) || isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method) || isEvalCheckPath(path, method) || isBrowserTestingPath(path, method) || isAgentDirectoryPath(path, method) || isSystemRunsPath(path, method) || isTicketUpdatesPath(path, method)) return true;
+  if (isKnownFailingPath(path, method) || isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method) || isEvalCheckPath(path, method) || isBrowserTestingPath(path, method) || isAgentDirectoryPath(path, method) || isSystemRunsPath(path, method) || isPackageRegistriesPath(path, method) || isTicketUpdatesPath(path, method)) return true;
   return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path) || parityTaskRoute(path, method) !== undefined || isPrFeedbackPath(path, method);
 }
 /** Neither decisions surface relies on sign-in time or methods (DEC 254zzz73). */
@@ -848,6 +851,14 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           if (target.wiring.ticketUpdates === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           return await routeHostedTicketUpdates({
             request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.ticketUpdates,
+            audit: auditOf(target, caller), now: () => nowOf(target),
+          });
+        }
+        if (isPackageRegistriesPath(path, request.method)) {
+          // PRIVATE-PACKAGES P1b: the company's own runtime and store; the role is membership's, read for this request; the request's audit sink names the caller. No route answers a stored token.
+          if (target.wiring.packageRegistries === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          return await routeHostedPackageRegistries({
+            request, path, principal: caller.principal, role: membership.role, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.packageRegistries,
             audit: auditOf(target, caller), now: () => nowOf(target),
           });
         }

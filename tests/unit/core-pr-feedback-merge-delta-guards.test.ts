@@ -75,7 +75,7 @@ it.each(["FEEDBACK_REVIEW", "PLAN"] as const)("CB5: a 1 MB feedback-report artif
   const operation = (await workspaceOperations(h.deps, started.task.workspaceId)).find(op => op.kind === "prepare")!;
   await h.store.put({ item: toDocument({ ...operation, workflowMode: mode }) });
   const put = vi.fn(async () => {});
-  const handler = createCallbackHandler({ flow: h.deps, blobs: { put, get: async () => undefined } as never, grants: { exchange: async () => { throw new Error("unused"); } } });
+  const handler = createCallbackHandler({ flow: h.deps, blobs: { put, get: async () => undefined } as never, grants: { exchange: async () => { throw new Error("unused"); }, inspect: () => { throw new Error("unused"); } } });
   const token = new CallbackCapabilities(Buffer.from(h.deps.callbackSigningKey)).issue({ workspaceId: operation.workspaceId, operationId: operation.id, fence: operation.fence, actions: ["artifacts"], expiresInSeconds: 600 });
   const response = await handler({ method: "POST", path: `/v1/internal/workspaces/${operation.workspaceId}/operations/${operation.id}/artifacts`, headers: { [CAPABILITY_HEADER]: token },
     body: JSON.stringify({ name: `workflow-feedback-review-${"a".repeat(64)}.json`, mediaType: "application/json", content: "x".repeat(1_000_000) }) });

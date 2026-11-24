@@ -22,7 +22,7 @@ async function world(enabled = true) {
   const capability = new CallbackCapabilities(Buffer.from(h.deps.callbackSigningKey));
   const issue = (patch = {}) => capability.issue({ workspaceId: v.ws, operationId: v.op, fence: 1, actions: ["model-access"], expiresInSeconds: 900, ...patch });
   const gateway = { gatewayUrl: "https://gateway.example", signer: w.signer, issuer: v.iss, describer: { describe: async () => ({ companyId: h.deps.companyId, project: v.pid, person: v.per!, payer: v.pay, taskId: v.tid, step: v.stp, origin: "app" as const, models: v.mdl }) } };
-  const deps: CallbackDeps = { flow: h.deps, blobs: createDocumentObjectStorage(h.store, { companyId: h.deps.companyId }), grants: { exchange: async () => ({ token: "unused" }) }, ...(enabled ? { modelGateway: gateway } : {}) };
+  const deps: CallbackDeps = { flow: h.deps, blobs: createDocumentObjectStorage(h.store, { companyId: h.deps.companyId }), grants: { exchange: async () => ({ token: "unused" }), inspect: () => { throw new Error("unused"); } }, ...(enabled ? { modelGateway: gateway } : {}) };
   const handler = createCallbackHandler(deps);
   const call = (token: string | undefined = issue(), path = "/v1/internal/model-access", method = "GET", body?: string) => handler({ method, path, headers: token === undefined ? {} : { "x-agentx-callback-capability": token }, ...(body === undefined ? {} : { body }) });
   return { h, w, logs, issue, call, deps, gateway };
@@ -203,7 +203,7 @@ it.each(["current", "old member", "old no identity"] as const)("real task-start 
   h.deps.log = entry => logs.push(entry);
   const capability = new CallbackCapabilities(Buffer.from(h.deps.callbackSigningKey));
   const token = capability.issue({ ...scope, actions: ["model-access"], expiresInSeconds: 900 });
-  const handler = createCallbackHandler({ flow: h.deps, blobs: createDocumentObjectStorage(h.store, { companyId: h.deps.companyId }), grants: { exchange: async () => ({ token: "unused" }) }, modelGateway: { gatewayUrl: "https://gateway.example", issuer: "https://install-a.example/v1/auth", signer: signer.signer, describer: createTaskTokenDescriber(h.deps) } });
+  const handler = createCallbackHandler({ flow: h.deps, blobs: createDocumentObjectStorage(h.store, { companyId: h.deps.companyId }), grants: { exchange: async () => ({ token: "unused" }), inspect: () => { throw new Error("unused"); } }, modelGateway: { gatewayUrl: "https://gateway.example", issuer: "https://install-a.example/v1/auth", signer: signer.signer, describer: createTaskTokenDescriber(h.deps) } });
   const response = await handler({ method: "GET", path: "/v1/internal/model-access", headers: { "x-agentx-callback-capability": token } });
   expect(await h.store.get(tk)).toEqual(task);
   if (shape === "old no identity") {

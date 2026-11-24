@@ -493,7 +493,7 @@ jobs:
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
-        run: npx vitest run tests/linux --exclude tests/linux/e2e-docker25-dns.test.ts --exclude tests/linux/e2e-model-channel.test.ts --exclude tests/linux/e2e-agent.test.ts --exclude tests/linux/e2e-agent-probes.test.ts --exclude tests/linux/e2e-midstep-carriers.test.ts --exclude tests/linux/device-evidence-emulator.test.ts --exclude tests/linux/worker-sandbox-egress.test.ts
+        run: npx vitest run tests/linux --exclude tests/linux/e2e-docker25-dns.test.ts --exclude tests/linux/e2e-model-channel.test.ts --exclude tests/linux/e2e-agent.test.ts --exclude tests/linux/e2e-agent-probes.test.ts --exclude tests/linux/e2e-midstep-carriers.test.ts --exclude tests/linux/device-evidence-emulator.test.ts --exclude tests/linux/worker-sandbox-egress.test.ts --exclude tests/linux/private-install.test.ts
       # The EC2 worker runs Docker 25 (the only version Amazon Linux 2023 ships), which does not forward an internal-only container's DNS queries to a --dns server; this runner's
       # Docker is newer and does, so the step above cannot see that. This one starts Docker 25.0.5 in Docker (a privileged container with its own network namespace, no change to this
       # runner) and runs the production host against it: the app's lookup of an undeclared name must reach the sinkhole, and a mock's alias must resolve.
@@ -543,6 +543,14 @@ jobs:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
         run: npx vitest run --config vitest.native-p0.config.ts tests/e2e/m1-4-journeys.test.ts
+      # Private packages P2a: the install container on real Docker (npm and yarn 1 against a fake HTTPS registry, scripts off, the token only to its host, the rvbp bridge walled by the boot firewall, the offline cache). It runs ALONE: it creates and
+      # removes containers and `rvbp` networks (172.30.<slot>.0/24, the same address range the eval and run networks use) in quick succession, which another file listing every container on this daemon (eval-fresh-sandbox) must not meet halfway.
+      - name: Private package install container (alone)
+        if: (success() || failure()) && steps.runtime_setup.outcome == 'success'
+        env:
+          ROVARA_DOCKER: "1"
+          ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
+        run: npx vitest run tests/linux/private-install.test.ts
       # L4-NETG / NETG2 / NETG3: the EC2 worker's sandbox-egress boot stage on REAL Docker. It restarts Docker (twice), sets the daemon's default name server and proxy, and walls docker0 and the old agentx-task
       # bridge, so it runs ALONE, last, after every other Docker step (never beside another test file), and its afterAll takes back the firewall rules it added.
       - name: Sandbox egress gateway (boot stage on real Docker)

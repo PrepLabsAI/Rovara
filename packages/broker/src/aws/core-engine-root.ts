@@ -151,6 +151,7 @@ import { savedEnvEnabled } from "../core/test-env/saved-env-switch.js";
 import { fixtureObjectPortOf } from "../core/test-env/fixture-store-aws.js";
 import { hostedSavedEnvDeps } from "./hosted-saved-env.js";
 import { savedEnvRoleSessionsFromEnvironment, type SavedEnvRoleSessions } from "./saved-env-role-sessions.js";
+import { companySecretsFromEnvironment } from "./company-secrets-sessions.js";
 import { savedEnvImageModules } from "./ecr-image-registry.js";
 import { baseFlakyTests } from "../core/test-env/base-flaky.js";
 import { flakyFactsPort } from "../lessons/knowledge-facts.js";
@@ -781,6 +782,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       return modelCheck();
     } };
   };
+  // PRIVATE-PACKAGES P1b: the company secret store (one session per company, company-tagged), or none where the install has no company-secrets role.
+  const companySecrets = companySecretsFromEnvironment(env);
   const lessonsSwitch: ReturnType<typeof readCoreLessonsSwitch> = readCoreLessonsSwitch(env);
   // The weekly lessons summary's pilot list, resolved ONCE so the sender (createCoreLessons) and the settings API (createLessonsApi) can never disagree about which companies default to on.
   const lessonsDigestPilot = digestPilotOf({ lessonsSwitch: lessonsSwitch.value, ...(inputs.lessonsDigestPilot === undefined ? {} : { digestPilot: inputs.lessonsDigestPilot }) });
@@ -1209,6 +1212,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           },
           // Audit gap 11b: the project's ticket-sharing settings. The same live standing; the trackers a hosted company's tickets are written back to (Linear, over its own connection: hosted-intake.ts).
           ticketUpdates: { standing: setupRunStanding, trackers: HOSTED_TICKET_TRACKERS },
+          // PRIVATE-PACKAGES P1b: the company's package tokens (write only: the status line is read, no route answers a value). Through the company-tagged session of the CompanySecrets role; an install
+          // without that role has no wiring and the path says "not on the core yet". Nothing here hands a token to a run: the exchange's company store is a later step (P2).
+          ...(companySecrets === undefined ? {} : { packageRegistries: { env: companySecrets.env, secrets: companySecrets.secrets } }),
           // Lead 4 W2: the project wiki's reads. Any live role on the project reads (the setup run's standing); the project must be in the company's catalog.
           wiki: {
             standing: setupRunStanding,

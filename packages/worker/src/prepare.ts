@@ -50,6 +50,7 @@ import { openRegistrySession, removeLeftoverRegistryConfigs, type RegistrySessio
 import { RegistryTokenLeakError, wipeWorkspaceForTaint } from "./registry-guard.js";
 import type { RegistryCredentialProvider } from "./registry-credentials.js";
 import { savedEnvMaterializer, type SavedEnvUseOptions } from "./saved-env/use.js";
+import { runPrivateInstallStep, splitRegistries, type PrivateInstallEntry, type PrivateInstallOptions } from "./private-install.js";
 
 const MANIFEST_PATH = ".agentx/preparation-manifest.json";
 const MAX_COMMAND_OUTPUT_BYTES = 1_048_576;
@@ -112,6 +113,11 @@ export interface PreparationManifest {
    * the project's code made and clones again (`wipeWorkspaceForTaint`).
    */
   tainted?: boolean;
+  /**
+   * Private packages P2a: what the install step did for each repository that names the company's package registry (private-install.ts): the manager, the lockfile's digest and a fixed outcome. Never a token, a path or
+   * package-manager output. A resumed preparation installs again only the repositories without an `installed` entry at the same lockfile digest.
+   */
+  privateInstall?: PrivateInstallEntry[];
 }
 
 export type RepositoryMaterializer = (
@@ -180,6 +186,11 @@ export interface PrepareWorkspaceOptions {
    */
   registries?: readonly PrepareRegistry[];
   registryCredentialProvider?: RegistryCredentialProvider;
+  /**
+   * Private packages P2a: the install step (private-install.ts). The company's registries (GitHub Packages) in `registries` are installed by it, in a Rovara container with scripts off, BEFORE any devcontainer, test service, setup
+   * command or sandbox; the project's commands never see the token. Absent (a laptop, a test): the step does not run.
+   */
+  privateInstall?: PrivateInstallOptions;
   /** The waits and log of the "Repository not found" retry (see `retryRepositoryNotFound`); tests replace them. */
   cloneRetry?: CloneRetryOptions;
   /**
@@ -294,10 +305,12 @@ async function prepareWorkspaceOnce(options: PrepareWorkspaceOptions): Promise<P
   const runtimeBackingPath = options.trustedRuntimeBackingOwner === undefined
     ? undefined
     : resolve(canonicalRoot, RUNTIME_BACKING_DIRECTORY);
-  if ((options.registries ?? []).length > 0 && target !== undefined) {
+  // The company's registries (GitHub Packages) are the install step's; the rest (CodeArtifact) keep the project-command path of N9.
+  const { company: companyRegistries, others: projectRegistries } = splitRegistries(options.registries);
+  if (projectRegistries.length > 0 && target !== undefined) {
     throw new Error("a project with a devcontainer cannot use private package registries yet");
   }
-  if ((options.registries ?? []).length > 0 && options.registryCredentialProvider === undefined) {
+  if (projectRegistries.length > 0 && options.registryCredentialProvider === undefined) {
     throw new Error("package registries need the broker's credential exchange");
   }
   const devcontainerCli = target === undefined ? undefined : options.devcontainerCli ?? createDevcontainerCli();
@@ -347,10 +360,10 @@ async function prepareWorkspaceOnce(options: PrepareWorkspaceOptions): Promise<P
   try {
     // N9: the registries' tokens exist from here to the end of this preparation, for the setup and readiness commands only. They are asked for FIRST: the repository grant
     // that authorizes the request lives 15 minutes from the invocation, and a slow clone must not outlast it. No token reaches a clone, which runs none of the project's code.
-    if ((options.registries ?? []).length > 0) {
+    if (projectRegistries.length > 0) {
       registrySession = await openRegistrySession({
         rootPath: canonicalRoot,
-        registries: options.registries!,
+        registries: projectRegistries,
         provider: options.registryCredentialProvider!,
         onDiagnostic: options.onDiagnostic ?? logPreparationDiagnostic,
       });
@@ -414,6 +427,12 @@ async function prepareWorkspaceOnce(options: PrepareWorkspaceOptions): Promise<P
     if (options.meta !== undefined && manifest.meta === undefined) {
       manifest = await writeManifest(canonicalRoot, withoutFailure({ ...manifest, meta: await prepareMetaRepository(canonicalRoot, options.meta, options, materializer, runtimeBackingPath) }));
     }
+
+    // Private packages P2a: the install container, after the clone and the meta repository and before anything of the repository runs (a devcontainer, test services, a setup or readiness command, any sandbox).
+    manifest = await writeManifest(canonicalRoot, withoutFailure({
+      ...manifest,
+      ...await runPrivateInstallStep({ options: options.privateInstall, readOnly, rootPath: canonicalRoot, repositories: project.repositories, registries: companyRegistries, hasDevcontainer: target !== undefined, previous: manifest.privateInstall, onDiagnostic: options.onDiagnostic ?? logPreparationDiagnostic }),
+    }));
 
     if (readOnly) {
       // Nothing of the repository runs: the checkout is all an agent step reads.

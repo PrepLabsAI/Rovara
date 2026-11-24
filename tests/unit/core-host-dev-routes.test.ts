@@ -2,7 +2,7 @@ import { CORE_CONTEXT_WORKER_ROUTES, coreContextWorkerRouteOf, appRouteOf as con
 // Engine host (lane E2): the core's own handlers mounted on the deployed developer API behind the switch. Off is byte-identical (nothing read, nothing answered); the company comes from
 // membership only and fails closed; another company's task reads exactly like a missing one; unwired parts say so in fixed words; a script token is never made through this API.
 import { randomUUID } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ON_THE_WEBSITE_MESSAGE, WorkflowSnapshotSchema, agentXError, orgProjectCatalogKey, projectRevisionKey, change, type CodeBuildCheckResult, type AuditSink, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -1572,4 +1572,69 @@ it.each(["feedback-decision", "feedback-retry", "keep-pull-requests"])("hosted %
   expect(response?.statusCode).toBe(404);
   expect(transact).not.toHaveBeenCalled();
   expect(w.admit).not.toHaveBeenCalled();
+});
+
+// PRIVATE-PACKAGES P1b: the company's package tokens on the deployed API (core-host/package-registries-routes.ts holds the rules; tests/unit/company-package-registries.test.ts proves them).
+// Here: the wiring only: the live role from membership for each request, the company from membership, no wiring = "not on the core yet", and a script token never reaches it.
+describe("the company's package tokens on the deployed API", () => {
+  const PATH = "/v1/app/company/package-registries";
+  const fakeToken = ["ghp", "_", "RouteWiringCanary".padEnd(36, "x")].join("");
+  const secretsCalls: Array<{ op: string; company: string }> = [];
+  beforeEach(() => { secretsCalls.length = 0; });
+  const wiring = (): CoreDevWiring => ({
+    ...WIRED,
+    packageRegistries: {
+      env: "staging",
+      secrets: { putRegistryToken: async (company: string) => { secretsCalls.push({ op: "put", company }); return { versionId: "v1", created: true, restored: false }; }, scheduleDelete: async (company: string) => { secretsCalls.push({ op: "scheduleDelete", company }); } },
+      probe: async () => ({ status: 200, scopes: "read:packages" }),
+    },
+  });
+  const call = (method: string, body?: unknown) => ({ method, path: PATH, headers: {}, body: body === undefined ? "" : JSON.stringify(body) });
+  const save = () => call("PUT", { requestId: randomUUID(), expectedRevision: 0, host: "npm.pkg.github.com", scopes: ["@acme"], token: fakeToken });
+
+  it("the role is membership's for each request: an owner saves, the same person demoted is refused on the next request, a member reads the status line", async () => {
+    const { app, companyOf, remember } = await world2();
+    const routes = createCoreDevRoutes({ app, companyOf, wiring });
+    const owner = remember(FAKE_COMPANY, "owner", "alice");
+    const saved = await routes.route(save(), owner);
+    expect(saved?.statusCode).toBe(200);
+    expect(JSON.parse(saved!.body)).toMatchObject({ host: "npm.pkg.github.com", state: "set", setBy: "alice" });
+    expect(saved!.body).not.toContain(fakeToken);
+    const demoted = remember(FAKE_COMPANY, "member", "alice");
+    const refused = await routes.route(call("DELETE", { requestId: randomUUID(), expectedRevision: 1, host: "npm.pkg.github.com" }), demoted);
+    expect(refused?.statusCode).toBe(403);
+    expect(secretsCalls.map((entry) => entry.op)).toEqual(["put"]);
+    const read = await routes.route(call("GET"), demoted);
+    expect(read?.statusCode).toBe(200);
+    expect((JSON.parse(read!.body) as { registries: unknown[] }).registries[0]).toMatchObject({ state: "set", revision: 1, scopes: ["@acme"] });
+    expect(read!.body).not.toContain(fakeToken);
+  });
+
+  it("the company is membership's: a person of another company reads and writes only their own; a person with no membership is refused sign-in", async () => {
+    const { app, companyOf, remember, world } = await world2();
+    const routes = createCoreDevRoutes({ app, companyOf, wiring });
+    const mine = remember(FAKE_COMPANY, "owner", "alice");
+    const theirs = remember(OTHER, "owner", "bob");
+    expect((await routes.route(save(), mine))?.statusCode).toBe(200);
+    const before = secretsCalls.length;
+    const bob = await routes.route(call("GET"), theirs);
+    expect((JSON.parse(bob!.body) as { registries: unknown[] }).registries[0]).toMatchObject({ state: "not_set", revision: 0 });
+    expect((await routes.route(save(), theirs))?.statusCode).toBe(200);
+    expect(secretsCalls.slice(before)).toEqual([{ op: "put", company: OTHER }]);
+    expect(await world.store.get({ pk: `ORG#${OTHER}#PACKAGE_REGISTRIES`, sk: "HOST#ghnpm" })).toMatchObject({ orgId: OTHER, setBy: "bob" });
+    const stranger = callerOf(FAKE_COMPANY);
+    stranger.principal = { ...stranger.principal, personId: "stranger" };
+    expect((await routes.route(call("GET"), stranger))?.statusCode).toBe(401);
+  });
+
+  it("is not on the core where the install wired nothing, and a script token never reaches it", async () => {
+    const { app, companyOf, remember } = await world2();
+    const bare = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
+    const owner = remember(FAKE_COMPANY, "owner", "alice");
+    const missing = await bare.route(call("GET"), owner);
+    expect(missing?.statusCode).toBe(404);
+    expect((JSON.parse(missing!.body) as { error: { message: string } }).error.message).toBe(NOT_ON_THE_CORE_YET);
+    const routes = createCoreDevRoutes({ app, companyOf, wiring });
+    for (const request of [call("GET"), save()]) expect((await routes.route(request, { ...owner, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } }))?.statusCode).toBe(403);
+  });
 });
