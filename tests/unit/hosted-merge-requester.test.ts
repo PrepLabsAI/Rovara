@@ -15,6 +15,7 @@ import { routeHostedMerge } from "../../packages/broker/src/core-host/hosted-mer
 import { githubLinkReaderOver, linkGithubAccount } from "../../packages/broker/src/core/people/github-links.js";
 import type { MergeTask } from "../../packages/broker/src/core/merge/seams.js";
 import { riskOfTask } from "../../packages/broker/src/core/merge/merge.js";
+import { fixedCodeSettings } from "../../packages/broker/src/core/merge/defaults.js";
 import { recoveryRowKey } from "../../packages/broker/src/core/merge/store.js";
 import { pullRequestRecordKey } from "../../packages/broker/src/core/build-step/records.js";
 import { taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -49,12 +50,13 @@ type Link = "creator" | "newOwner";
  * The hosted world: the task's creator (a member, or one who left), its stored owner id (always the creator's own key, as production keeps it), the task People list, the members and the GitHub links. The pull request has ONE approval, from the fake host's reviewer
  * `priya`, whose GitHub account is linked to whoever `approvedBy` names (no one: an approval no member stands behind).
  */
-async function world(options: { links?: readonly Link[]; approvedBy?: "approver" | "creator" | "newOwner" | "nobody"; people?: HostedTaskPeopleSource; creatorLeft?: boolean } = {}) {
-  const { links = ["creator"], approvedBy = "approver", people = peopleTable([CREATOR]), creatorLeft = false } = options;
+async function world(options: { links?: readonly Link[]; approvedBy?: "approver" | "creator" | "newOwner" | "nobody"; people?: HostedTaskPeopleSource; creatorLeft?: boolean; approverLeft?: boolean; selfApproval?: boolean } = {}) {
+  const { links = ["creator"], approvedBy = "approver", people = peopleTable([CREATOR]), creatorLeft = false, approverLeft = false, selfApproval = false } = options;
+  const settings = selfApproval ? fixedCodeSettings({ ...DEFAULT_CODE_SETTINGS, allowSelfApproval: true }) : undefined;
   const w = await host();
   const model = w.world.prs[0]!.model;
   const priya = model.accounts.get("priya")!.hostUserId;
-  const members = [APPROVER, NEW_OWNER, BYSTANDER, ...(creatorLeft ? [] : [CREATOR])];
+  const members = [NEW_OWNER, BYSTANDER, ...(approverLeft ? [] : [APPROVER]), ...(creatorLeft ? [] : [CREATOR])];
   await w.h.store.update({ key: taskKey(TASK_ID), ops: [change.set(["developerId"], CREATOR), change.set(["workflow", "ownerId"], taskOwnerKey(CREATOR, TASK_ID))] });
   // Rovara's own record of the pull request and its workspace (the press reads the base branch from it).
   const home = { ownerKey: "owner-1", workspaceId: "ws-1" };
@@ -87,13 +89,13 @@ async function world(options: { links?: readonly Link[]; approvedBy?: "approver"
     const result = await routeHostedMerge({ path, request: { method: "POST", path, headers: {}, body: JSON.stringify({ requestId: randomUUID(), ...shown }) },
       companyId: ORG, principal: person(presser), role: "admin", flow: w.h.deps, audit: w.h.deps.audit, now: () => w.clock.ms, webApp: true,
       wiring: { projectGrantRole: async () => undefined, afterMerge: async () => undefined,
-        merge: (audit) => hostedMergeDependencies({ runtime, registry: w.registry, settings: undefined, defaults: DEFAULT_CODE_SETTINGS, now: () => w.clock.ms, policyHook: false, audit, taskPeople: people }) },
+        merge: (audit) => hostedMergeDependencies({ runtime, registry: w.registry, settings, defaults: DEFAULT_CODE_SETTINGS, now: () => w.clock.ms, policyHook: false, audit, taskPeople: people }) },
     });
     return { status: result.statusCode, body: JSON.parse(result.body) as { status?: string; error?: { message?: string } } };
   };
   /** One merge-tracking pass of the hosted job services (no people override: the hosted rule), then whether the task was announced as approved. */
   const track = async () => {
-    const services = createHostedBrokerCoreServices({ companyId: ORG, flow: w.h.flow, registry: w.registry, ciMode: async () => "their_ci_fix" as const, now: () => new Date(w.clock.ms), taskPeople: people });
+    const services = createHostedBrokerCoreServices({ companyId: ORG, flow: w.h.flow, registry: w.registry, ciMode: async () => "their_ci_fix" as const, now: () => new Date(w.clock.ms), taskPeople: people, ...(settings === undefined ? {} : { settings }) });
     await w.h.store.put({ item: { ...recoveryRowKey(TASK_ID), entityType: "WORKFLOW_MERGE_RECOVERY", kind: "tracking", taskId: TASK_ID, nextAttemptAt: 0 } });
     expect(await services["merge-tracking"].pass({ budgetMs: 10_000 })).toMatchObject({ attempted: 1, failed: 0 });
     const rows = (await w.h.store.query({ pk: codeMilestoneKey(TASK_ID, "approved", 0).pk, sk: { op: "beginsWith", prefix: "CODE_MILESTONE#approved#" } })).items;
@@ -202,6 +204,39 @@ describe("hosted merge with the default rule (self-approval off): who asked for 
     expect((await w.press()).status).toBe(409);
     expect(w.merges).not.toHaveBeenCalled();
     expect(await (await world({ approvedBy: "nobody" })).track()).toBe(false);
+  });
+});
+
+// The owner's decision: an approval counts only from a CURRENT MEMBER of the company, whatever "allow self-approval" says. Self-approval ON only lets a requester's OWN approval count.
+describe("hosted merge with self-approval ON: only a current member's approval counts", () => {
+  it("a person who LEFT the company but still has GitHub write access and a link row: their approval does not count (the press refuses, tracking does not announce)", async () => {
+    const w = await world({ selfApproval: true, approvedBy: "approver", approverLeft: true });
+    const refused = await w.press();
+    expect(refused.status).toBe(409);
+    expect(refused.body.error?.message).toBe(M.needsWriteApproval("app"));
+    expect(w.merges).not.toHaveBeenCalled();
+    expect(await (await world({ selfApproval: true, approvedBy: "approver", approverLeft: true })).track()).toBe(false);
+  });
+
+  it("an approval from a GitHub account no member stands behind does not count either", async () => {
+    const w = await world({ selfApproval: true, approvedBy: "nobody" });
+    expect((await w.press()).status).toBe(409);
+    expect(w.merges).not.toHaveBeenCalled();
+    expect(await (await world({ selfApproval: true, approvedBy: "nobody" })).track()).toBe(false);
+  });
+
+  it("the requester, a current member, approving their own task counts (self-approval's whole meaning): the press merges and tracking announces", async () => {
+    const w = await world({ selfApproval: true, approvedBy: "creator" });
+    expect(await w.press()).toMatchObject({ status: 200, body: { status: "MERGED" } });
+    expect(w.merges).toHaveBeenCalledTimes(1);
+    expect(await (await world({ selfApproval: true, approvedBy: "creator" })).track()).toBe(true);
+  });
+
+  it("another current member approving counts too, and with self-approval OFF a departed member still does not (unchanged)", async () => {
+    expect(await (await world({ selfApproval: true })).press()).toMatchObject({ status: 200, body: { status: "MERGED" } });
+    const off = await world({ approvedBy: "approver", approverLeft: true });
+    expect((await off.press()).status).toBe(409);
+    expect(off.merges).not.toHaveBeenCalled();
   });
 });
 

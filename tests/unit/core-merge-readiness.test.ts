@@ -60,13 +60,20 @@ describe("readReviews", () => {
 describe("humanApprovalOf", () => {
   const base = (over: Partial<Parameters<typeof humanApprovalOf>[0]> = {}) => humanApprovalOf({
     reviews: [{ hostUserId: "1", login: "ana", accountType: "person", state: "APPROVED", commitId: HEAD, submittedAt: "2026-11-09T08:00:00Z" }], headSha: HEAD, syncedFrom: undefined, ciPassingOnHead: true,
-    permissions: new Map([["ana", "write" as const]]), requesterHostUserIds: "unlinked", linkedHostUserIds: new Set(), allowSelfApproval: true, ...over,
+    permissions: new Map([["ana", "write" as const]]), requesterHostUserIds: "unlinked", linkedHostUserIds: new Set(["1"]), allowSelfApproval: true, ...over,
   });
   it("counts a writer's approval of the head, with self-approval on, and names why not otherwise", () => {
     expect(base()).toMatchObject({ approved: true, by: { login: "ana" } });
     expect(base({ headSha: OLD })).toEqual({ approved: false, reason: "stale" });
     expect(base({ permissions: new Map([["ana", "read" as const]]) })).toEqual({ approved: false, reason: "no_write" });
     expect(base({ reviews: [] })).toEqual({ approved: false, reason: "none" });
+  });
+  it("with self-approval ON still counts only a linked current member: a requester's own approval counts, a non-member's does not (one rule, both modes)", () => {
+    expect(base({ requesterHostUserIds: ["1"] })).toMatchObject({ approved: true, by: { login: "ana" } });
+    expect(base({ linkedHostUserIds: new Set() })).toEqual({ approved: false, reason: "none" });
+    expect(base({ linkedHostUserIds: new Set(["9"]), requesterHostUserIds: ["1"] })).toEqual({ approved: false, reason: "none" });
+    // A host that tracks no members (the laptop's sole owner) says so, and then self-approval ON counts a writer as before.
+    expect(base({ linkedHostUserIds: new Set(), membersTracked: false })).toMatchObject({ approved: true });
   });
   it("with self-approval off needs a linked person who is not a requester", () => {
     expect(base({ allowSelfApproval: false })).toEqual({ approved: false, reason: "unlinked_requester" });

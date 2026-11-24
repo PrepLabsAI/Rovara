@@ -263,7 +263,11 @@ it("the documented feedback-approval callback authorizes only its exact worker b
   expect(JSON.parse(response.body) as unknown).toEqual({ authorized: true });
   w.h.deps.taskCapUsd = async () => 1;
   w.h.deps.taskSpendUsd = async () => undefined;
-  expect((await handler(request)).statusCode).not.toBe(200);
+  // The callback re-verifies the approval, not the money (checked at approval and at start; see core-pr-feedback-fix-dispatch-money.test.ts), so an unreadable spend does not refuse it.
+  expect((await handler(request)).statusCode).toBe(200);
+  // A changed approval is still refused.
+  const changed = { ...request, body: JSON.stringify({ ...operation.workflowFeedbackApproval, selectedFindingIds: ["other-finding"] }) };
+  expect((await handler(changed)).statusCode).not.toBe(200);
 });
 
 
