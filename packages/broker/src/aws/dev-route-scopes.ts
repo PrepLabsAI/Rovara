@@ -312,6 +312,8 @@ export const APP_ROUTES: readonly DevRoute[] = [
   // admin, or the project's administrator, starts it (the audit record first). No AI, no model key.
   { method: "GET", path: "/v1/app/projects/{project}/setup-check", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-check", requires: "full" },
+  // SETUP-CHECK-WATCH: "Stop check" (the same routeHostedSetupCheck): ends the project's running check, closes its workspace and releases its machine. The same people as start; the audit record first.
+  { method: "POST", path: "/v1/app/projects/{project}/setup-check/stop", requires: "full" },
   // Wiki W0: a project's free file map (code host listings only: no model call, nothing spent or stored): full access only, then a live company owner or admin, or the project's administrator, to make one;
   // any person with a role on the project reads a kept one.
   { method: "GET", path: "/v1/app/projects/{project}/wiki-map", requires: "full" },

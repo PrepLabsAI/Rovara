@@ -644,7 +644,7 @@ describe("L1a broker environment derivation", () => {
     // SIGNIN-MEMBER-CONDITIONCHECK statement (DEC 254zzz282 B014-A). Assert each
     // addition before removing it; all historical pins still cover every other byte.
     // Webhook lane W3 + DEC 254zzz432: the webhook secret slot (with its throttle and alarm) and the SessionStuckStopping alarm are asserted and taken out first, so every pin below still holds.
-    const beforeFirstGateway = withoutWebhookSecretLane(withoutStuckStoppingAlarm(withoutApiAccessLog(structuredClone(legacy.toJSON()) as Json & { Outputs: Record<string, unknown> }), stuckStoppingInstall()));
+    const beforeFirstGateway = withoutWebhookSecretLane(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(structuredClone(legacy.toJSON()) as Json & { Outputs: Record<string, unknown> }), stuckStoppingInstall())));
     expect(beforeFirstGateway.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     delete beforeFirstGateway.Outputs.ModelRunPriceVersion;
     expect(digest(beforeFirstGateway), "legacy without the first-gateway output retains the upstream member-check pin").toBe("fef96cf61a67a412e6d99ef4bf9567f05dd1a518d02471de8dede006a78bbc1e");
@@ -655,12 +655,13 @@ describe("L1a broker environment derivation", () => {
     delete withoutCapabilityRoutes.Resources.ContextToolsListRoute;
     delete withoutCapabilityRoutes.Resources.DesignReviewPacketRoute;
     expect(digest(withoutCapabilityRoutes), "legacy with the two capability routes taken out").toBe("b304960b2db5e8cd2ccdb7cc84fc45b58f13e8eff4e8e6810cde809f190fc82b");
-    expect(digest(withoutStuckStoppingAlarm(withoutApiAccessLog(structuredClone(legacy.toJSON())), stuckStoppingInstall()))).toBe("50f67718e9973dd22b4699e0155c3e29fd34c86016f3ce28e7c531517b43668c");
+    expect(digest(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(structuredClone(legacy.toJSON())), stuckStoppingInstall())))).toBe("50f67718e9973dd22b4699e0155c3e29fd34c86016f3ce28e7c531517b43668c");
   });
 });
 import { createHash } from "node:crypto";
 import { stuckStoppingInstall, withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
 import { withoutApiAccessLog } from "../support/api-access-log-template.js";
+import { withoutWorkerCallbackAlarm } from "../support/worker-callback-alarm-template.js";
 
 
 it("exposes only the exact core model-access GET without an authorizer on named installs", () => {

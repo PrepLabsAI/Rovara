@@ -102,6 +102,11 @@ workspace takes the next request:
 agentx admin workspace cancel --workspace <workspace-id>
 ```
 
+The same command stops a project's setup check that is stuck (a check has no task): its preparation
+ends CANCELLED, its workspace is closed and its machine is released, and the project reads the check
+as failed ("the setup check was stopped before it finished") until it is checked again. A check that
+does not finish within 50 minutes is ended the same way automatically.
+
 An administrator can also switch a task that a developer shared from an AI tool between view only
 and continue, within the project's `developerTasks` settings:
 
