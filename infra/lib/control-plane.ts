@@ -34,6 +34,7 @@ import {
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
 import { CORE_DISPATCHER_TIMEOUT_SECONDS, CORE_BROKER_TIMEOUT_SECONDS, E2E_ARTIFACT_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, OUTBOX_PENDING_INDEX, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX, TEST_SERVICES_SETTING_VARIABLE, TEST_SERVICE_IMAGES_SETTING_VARIABLE, EGRESS_ADDRESSES_PARAMETER_PATTERN, EGRESS_ADDRESSES_VARIABLE, NAT_EGRESS_ADDRESSES_OUTPUT, WORKER_SANDBOX_EGRESS_DEFAULT, WORKER_SANDBOX_EGRESS_SETTING_VARIABLE, WORKER_SANDBOX_EGRESS_VALUES } from "@agentx/contracts";
+import { API_ACCESS_LOG_FORMAT } from "./api-access-log.js";
 import { EgressAlarms } from "./egress-alarms.js";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { ChannelAdapters } from "./channel-adapters.js";
@@ -958,10 +959,18 @@ export class ControlPlaneStack extends Stack {
         retryPolicy: { maximumRetryAttempts: 2, maximumEventAgeInSeconds: 300 },
       },
     });
+    // Access log of the `$default` stage (staging stuck-dispatch diagnosis, 2026-11-24: a worker's terminal callback was refused with a 4xx and nothing recorded which route or status).
+    // See api-access-log.ts for the fields and what is deliberately left out. Diagnostic data, so it is destroyed with the stack like the other operational log groups.
+    const accessLogGroup = new logs.LogGroup(this, "ApiAccessLogs", {
+      logGroupName: naming.apiAccessLogGroupName,
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
     const defaultStage = new apigwv2.CfnStage(this, "DefaultStage", {
       apiId: api.ref,
       stageName: "$default",
       autoDeploy: true,
+      accessLogSettings: { destinationArn: accessLogGroup.logGroupArn, format: API_ACCESS_LOG_FORMAT },
     });
     // Webhook lane W3: the public GitHub webhook route's throttle and its alarm (infra/lib/github-webhook.ts).
     guardGithubWebhookRoute(this, naming, api.ref, defaultStage, githubWebhookRoute, notifyOperator);
