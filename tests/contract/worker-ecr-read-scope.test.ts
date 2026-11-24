@@ -11,13 +11,30 @@
 //   1. EcrImageAccess is exactly two read actions on exactly the environment's pull-through prefix; no bare `repository/*` anywhere on the role;
 //   2. every image reference the boot paths pull is covered by an ARN the role reads, and a reference outside them (another environment, an unrelated repository) is not;
 //   3. the set of `docker pull` sites in the boot scripts is pinned, so a new pull cannot appear without this file being revisited;
-//   4. the legacy (production) template's statement is unchanged; the default boundary still allows the actions.
+//   4. the legacy (production) role reads ONE repository, the worker image's (it used to read `repository/*`: every image in the account), plus the five starter copies;
+//      the default boundary still allows the actions.
+//   5. (worker ECR scope lane, 2026-11-23) saved environment images (`rovara-env/<env>/o<org>/p<project>`): the worker's INSTANCE role, in both apps, can read, write, list or delete none of them, for
+//      any company, any project, any environment, and holds no ECR write action on any repository; the company's own image is reached only through the broker's one-repository session
+//      (pull / push / manage), which never names another company's repository; and the repository policy refuses the worker role too.
 import { readFileSync, readdirSync } from "node:fs";
 import { Stack, type App } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
-import { defaultBoundaryStatements, environmentPullThroughPrefix, mirroredStarterEntries, serviceRoleStatements, type PolicyStatementJson } from "@agentx/contracts";
+import {
+  defaultBoundaryStatements,
+  environmentPullThroughPrefix,
+  mirroredStarterEntries,
+  savedEnvManageSessionPolicy,
+  savedEnvPullSessionPolicy,
+  savedEnvPushSessionPolicy,
+  savedEnvRepositoryArn,
+  savedEnvRepositoryName,
+  savedEnvRepositoryPolicy,
+  serviceRoleStatements,
+  type PolicyStatementJson,
+} from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
+import { AGENTX_PRODUCTION_WORKER_REPOSITORY } from "../../infra/lib/release-pipeline.js";
 import { privateImageUri } from "../../packages/cli/src/deploy/parameters.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
@@ -96,8 +113,9 @@ describe("the worker role's ECR image read is scoped (L4-IAM)", () => {
 
   it("no ECR statement on the role has a wildcard repository, and the token statement is the only ECR action on *", () => {
     const ecr = staging.filter((statement) => asList(statement.Action).some((action) => String(action).startsWith("ecr:")));
-    expect(ecr.map((statement) => statement.Sid).sort()).toEqual(["EcrImageAccess", "EcrPullThroughCache", "EcrTokenAccess", "TestServiceImageRead"]);
+    expect(ecr.map((statement) => statement.Sid).sort()).toEqual(["EcrImageAccess", "EcrPullThroughCache", "EcrTokenAccess", "NoSavedEnvironmentImages", "TestServiceImageRead"]);
     for (const statement of ecr) {
+      if (statement.Sid === "NoSavedEnvironmentImages") continue; // the one Deny; held in the saved-environment tests below
       if (statement.Sid === "EcrTokenAccess") { expect(statement).toMatchObject({ Action: "ecr:GetAuthorizationToken", Resource: "*" }); continue; }
       for (const resource of asList(statement.Resource)) {
         const arn = resolveArn(resource);
@@ -178,12 +196,28 @@ describe("the worker role's ECR image read is scoped (L4-IAM)", () => {
     expect([...stage.matchAll(/ecr get-login-password/gu)]).toHaveLength(1);
   });
 
-  it("the legacy (production) role's statement is unchanged: this change is for named environments", () => {
+  it("the legacy (production) role reads exactly the worker image repository, no longer every repository in the account", () => {
     const old = legacy.filter((statement) => statement.Sid === "EcrImageAccess");
     expect(old).toHaveLength(1);
-    expect(resolveArn(old[0]!.Resource)).toBe(`arn:aws:ecr:${REGION}:${ACCOUNT}:repository/*`);
-    expect(old[0]!.Action).toEqual(READ_ACTIONS);
+    expect(old[0]).toMatchObject({ Effect: "Allow", Action: READ_ACTIONS });
+    expect(resolveArn(old[0]!.Resource)).toBe(`arn:aws:ecr:${REGION}:${ACCOUNT}:repository/${AGENTX_PRODUCTION_WORKER_REPOSITORY}`);
     expect(legacy.map((statement) => statement.Sid)).not.toContain("EcrPullThroughCache");
+    // no Allow on the role names a wildcard repository
+    for (const statement of legacy.filter((candidate) => candidate.Effect === "Allow" && asList(candidate.Action).some((action) => String(action).startsWith("ecr:") && action !== "ecr:GetAuthorizationToken"))) {
+      for (const resource of asList(statement.Resource)) expect(resolveArn(resource), `${statement.Sid}`).not.toContain("*");
+    }
+  });
+
+  it("the legacy worker pulls its worker image (also the sandbox) and the five starter copies, and nothing else in the account", () => {
+    const arns = readableRepositories(legacy);
+    const at = (repository: string) => `${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/${repository}@sha256:${d("e")}`;
+    expect(covered(arns, at(AGENTX_PRODUCTION_WORKER_REPOSITORY))).toBe(true);
+    for (const entry of mirroredStarterEntries(`${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com`, "production")) expect(covered(arns, entry.reference), entry.reference).toBe(true);
+    for (const repository of [
+      "agentx-slack-orchestrator", "agentx-embedder-production", "agentx-worker-production-old", "agentx-worker-productio", "agentx-worker",
+      "other-product-production-images-abcdefghijkl", "cdk-hnb659fds-container-assets-111122223333-us-west-2", "rovara-catalog/production/svc/postgres",
+      "rovara-bundle/production/embedder", "agentx-staging/worker",
+    ]) expect(covered(arns, at(repository)), repository).toBe(false);
   });
 
   it("the default boundary and the deploy role still allow what the narrowed statement and the role's policy need", () => {
@@ -192,5 +226,117 @@ describe("the worker role's ECR image read is scoped (L4-IAM)", () => {
       expect(allows(defaultBoundaryStatements(scope), action), `boundary: ${action}`).toBe(true);
     }
     expect(serviceRoleStatements(scope).find((statement) => statement.Sid === "IamRoles")?.Action).toContain("iam:PutRolePolicy");
+  });
+});
+
+
+// ---- saved environment images: the worker's instance role versus one company's repositories
+
+/** What IAM does with one statement set: an explicit Deny wins; otherwise an Allow whose action and resource patterns match. Single account, so a resource policy would only ever ADD a Deny here. */
+function evaluates(statements: readonly Statement[], action: string, resourceArn: string): "allow" | "deny" | "implicit-deny" {
+  const named = (statement: Statement) => asList(statement.Action).some((pattern) => globMatches(String(pattern).toLowerCase(), action.toLowerCase()));
+  const reaches = (statement: Statement) => asList(statement.Resource).some((resource) => (resource === "*" ? true : globMatches(resolveArn(resource), resourceArn)));
+  const matching = statements.filter((statement) => named(statement) && reaches(statement));
+  if (matching.some((statement) => statement.Effect === "Deny")) return "deny";
+  return matching.some((statement) => statement.Effect === "Allow") ? "allow" : "implicit-deny";
+}
+/** Whether a policy document's statement list allows an action on a resource ARN (session policies: a literal ARN, an Allow, no Deny). */
+const policyAllows = (policy: { Statement: Array<Record<string, unknown>> }, action: string, resourceArn: string): boolean =>
+  policy.Statement.some((statement) => statement.Effect === "Allow" && [statement.Action].flat().some((pattern) => globMatches(String(pattern).toLowerCase(), action.toLowerCase())) && [statement.Resource].flat().some((resource) => globMatches(String(resource), resourceArn)));
+
+const READ_DATA = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"];
+const LIST_ACTIONS = ["ecr:DescribeImages", "ecr:ListImages", "ecr:DescribeRepositories", "ecr:GetRepositoryPolicy"];
+const WRITE_ACTIONS = [
+  "ecr:PutImage", "ecr:InitiateLayerUpload", "ecr:UploadLayerPart", "ecr:CompleteLayerUpload", "ecr:BatchDeleteImage", "ecr:DeleteRepository", "ecr:SetRepositoryPolicy",
+  "ecr:DeleteRepositoryPolicy", "ecr:PutLifecyclePolicy", "ecr:PutImageTagMutability", "ecr:TagResource", "ecr:CreateRepository",
+];
+const SCOPE = { partition: "aws", region: REGION, account: ACCOUNT };
+const savedEnvRepository = (env: string, orgId: string, projectId: string) => savedEnvRepositoryName({ env, orgId, projectId });
+const ROLE_ARNS = { pushRoleArn: `arn:aws:iam::${ACCOUNT}:role/agentx/staging/agentx-staging-img-push`, pullRoleArn: `arn:aws:iam::${ACCOUNT}:role/agentx/staging/agentx-staging-img-pull`, manageRoleArn: `arn:aws:iam::${ACCOUNT}:role/agentx/staging/agentx-staging-img-manage` };
+
+describe("a worker cannot touch another company's saved environment image, or any saved environment image with its instance role (worker ECR scope lane)", () => {
+  let staging: Statement[];
+  let legacy: Statement[];
+  beforeAll(() => {
+    const foundation = Template.fromStack(stacksOf(buildAgentXApp({ agentxEnv: "staging" })).find((stack) => stack.stackName === "agentx-staging-foundation")!);
+    staging = workerStatements(foundation);
+    legacy = stacksOf(buildAgentXApp()).flatMap((stack) => workerStatements(Template.fromStack(stack)));
+  }, 240_000);
+
+  const companies = [{ orgId: "org_company_a", projectId: "proj_1" }, { orgId: "org_company_b", projectId: "proj_1" }, { orgId: "org_company_a", projectId: "proj_2" }];
+
+  it.each([["the legacy (production) app", "production"], ["a named environment (staging)", "staging"]] as const)("%s: the instance role is denied every ECR action on every company's repository, in this and any other environment", (_name, env) => {
+    const statements = env === "production" ? legacy : staging;
+    for (const environment of [env, "production", "staging", "dev-3"]) {
+      for (const company of companies) {
+        const arn = savedEnvRepositoryArn(SCOPE, savedEnvRepository(environment, company.orgId, company.projectId));
+        for (const action of [...READ_DATA, ...LIST_ACTIONS, ...WRITE_ACTIONS]) expect(evaluates(statements, action, arn), `${action} on ${arn}`).toBe("deny");
+      }
+    }
+    // a repository of a shape no module makes, still under the root: denied too (a hand-made or pre-template repository has no repository policy to fall back on)
+    expect(evaluates(statements, "ecr:BatchGetImage", `arn:aws:ecr:${REGION}:${ACCOUNT}:repository/rovara-env/${env}/handmade`)).toBe("deny");
+    expect(evaluates(statements, "ecr:BatchGetImage", `arn:aws:ecr:${REGION}:${ACCOUNT}:repository/rovara-env/${env}`)).toBe("deny");
+  });
+
+  it.each([["the legacy (production) app", "legacy"], ["a named environment (staging)", "staging"]] as const)("%s: the instance role holds no ECR write, delete or policy action on any repository", (_name, which) => {
+    const statements = which === "legacy" ? legacy : staging;
+    const repositories = ["agentx-worker-production", "agentx-staging/worker", "agentx-staging/anything", "agentx-staging--test-services/postgres-16/postgres", "agentx-slack-orchestrator", "rovara-env/staging/oa/pb", "some-other"];
+    for (const repository of repositories) {
+      for (const action of WRITE_ACTIONS) {
+        const result = evaluates(statements, action, `arn:aws:ecr:${REGION}:${ACCOUNT}:repository/${repository}`);
+        // the one write-like grant a named environment keeps: its OWN pull-through prefix (create + import for the cache), never a push, a delete or a policy change
+        const cacheCreate = which === "staging" && action === "ecr:CreateRepository" && repository.startsWith("agentx-staging/");
+        expect(result === "allow", `${action} on ${repository}`).toBe(cacheCreate);
+      }
+    }
+  });
+
+  it("the base images stay readable: the worker image (and sandbox) and the starter copies, in both apps", () => {
+    const at = (repository: string) => `arn:aws:ecr:${REGION}:${ACCOUNT}:repository/${repository}`;
+    for (const action of ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]) {
+      expect(evaluates(legacy, action, at(AGENTX_PRODUCTION_WORKER_REPOSITORY))).toBe("allow");
+      expect(evaluates(staging, action, at("agentx-staging/worker"))).toBe("allow");
+      expect(evaluates(staging, action, at("agentx-staging/executor"))).toBe("allow");
+      for (const entry of mirroredStarterEntries(`${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com`, "production")) {
+        expect(evaluates(legacy, action, at(entry.reference.slice(entry.reference.indexOf("/") + 1).split("@")[0]!)), entry.reference).toBe("allow");
+      }
+    }
+    expect(evaluates(legacy, "ecr:GetAuthorizationToken", "*")).toBe("allow");
+    expect(evaluates(staging, "ecr:GetAuthorizationToken", "*")).toBe("allow");
+  });
+
+  it("a company's own image is reached only through the broker's one-repository session: company A's pull, push and manage sessions name A's repository and never B's", () => {
+    const a = savedEnvRepository("staging", "org_company_a", "proj_1");
+    const b = savedEnvRepository("staging", "org_company_b", "proj_1");
+    const aSibling = savedEnvRepository("staging", "org_company_a", "proj_2");
+    expect(new Set([a, b, aSibling]).size).toBe(3);
+    const sessions = [
+      ["pull", savedEnvPullSessionPolicy(SCOPE, a), READ_DATA.slice(0, 2)],
+      ["push", savedEnvPushSessionPolicy(SCOPE, a), ["ecr:PutImage", "ecr:UploadLayerPart", "ecr:BatchGetImage"]],
+      ["manage", savedEnvManageSessionPolicy(SCOPE, a), ["ecr:BatchDeleteImage", "ecr:DeleteRepository", "ecr:ListImages"]],
+    ] as const;
+    for (const [kind, policy, actions] of sessions) {
+      for (const action of actions) {
+        expect(policyAllows(policy, action, savedEnvRepositoryArn(SCOPE, a)), `${kind} ${action} own`).toBe(true);
+        expect(policyAllows(policy, action, savedEnvRepositoryArn(SCOPE, b)), `${kind} ${action} other company`).toBe(false);
+        expect(policyAllows(policy, action, savedEnvRepositoryArn(SCOPE, aSibling)), `${kind} ${action} sibling project`).toBe(false);
+      }
+    }
+    // the pull session cannot write or delete; the push session cannot delete
+    expect(policyAllows(savedEnvPullSessionPolicy(SCOPE, a), "ecr:PutImage", savedEnvRepositoryArn(SCOPE, a))).toBe(false);
+    expect(policyAllows(savedEnvPullSessionPolicy(SCOPE, a), "ecr:BatchDeleteImage", savedEnvRepositoryArn(SCOPE, a))).toBe(false);
+    expect(policyAllows(savedEnvPushSessionPolicy(SCOPE, a), "ecr:BatchDeleteImage", savedEnvRepositoryArn(SCOPE, a))).toBe(false);
+  });
+
+  it("the repository policy every saved environment repository is created with refuses the worker's instance role: reads to anyone but push and pull, writes to anyone but push, image deletes to anyone but manage", () => {
+    const workerRole = `arn:aws:iam::${ACCOUNT}:role/agentx/staging/agentx-staging-foundation-Ec2WorkersInstanceRole`;
+    const statements = savedEnvRepositoryPolicy(ROLE_ARNS).Statement as Array<{ Effect: string; Action: string[]; Condition: { ArnNotEquals: { "aws:PrincipalArn": string | string[] } } }>;
+    const deniedFor = (principal: string, action: string) => statements.some((statement) => statement.Effect === "Deny" && statement.Action.includes(action) && [statement.Condition.ArnNotEquals["aws:PrincipalArn"]].flat().every((arn) => arn !== principal));
+    for (const action of [...READ_DATA, "ecr:PutImage", "ecr:InitiateLayerUpload", "ecr:UploadLayerPart", "ecr:CompleteLayerUpload", "ecr:BatchDeleteImage"]) expect(deniedFor(workerRole, action), action).toBe(true);
+    for (const action of READ_DATA) { expect(deniedFor(ROLE_ARNS.pullRoleArn, action)).toBe(false); expect(deniedFor(ROLE_ARNS.pushRoleArn, action)).toBe(false); }
+    expect(deniedFor(ROLE_ARNS.pullRoleArn, "ecr:PutImage")).toBe(true);
+    expect(deniedFor(ROLE_ARNS.pushRoleArn, "ecr:PutImage")).toBe(false);
+    expect(deniedFor(ROLE_ARNS.pushRoleArn, "ecr:BatchDeleteImage")).toBe(true);
+    expect(deniedFor(ROLE_ARNS.manageRoleArn, "ecr:BatchDeleteImage")).toBe(false);
   });
 });

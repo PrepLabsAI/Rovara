@@ -7,6 +7,7 @@ import { withoutBrokerMemberConditionCheck } from "../support/broker-member-cond
 import { withoutLegacyRuntimeBoundary } from "../support/legacy-runtime-boundary-template.js";
 import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js";
 import { withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
+import { withoutWorkerEcrScope } from "../support/worker-ecr-scope-template.js";
 
 skipLambdaBundling();
 const LEGACY = { alarmName: "AgentXSessionStuckStopping", namespace: "AgentX" };
@@ -18,9 +19,12 @@ const LEGACY = { alarmName: "AgentXSessionStuckStopping", namespace: "AgentX" };
 // out; each changed stack's full template has its own new pin below, and legacy-runtime-boundary.test.ts proves the policy.
 const BOUNDED_STACK_PINS: Record<string, string> = {
   AgentXControlPlane: "4ab39f2edce8a0d23cd306aabeed2077129c21879caeda1f9ba37f255d59740a",
-  AgentXProductionFoundation: "979226446fd4f97a824d983d189e9b4125e468dedc1fbfcbf540c24386b98abc",
+  AgentXProductionFoundation: "e7c873b146a748408b545e42d2f17596c04ad229271ed7776312d312eca9ca63",
   AgentXSlackOrchestrator: "1b511b1013eb0c7692c3f99802062f6aa6152ad040d53f873305112be71c35ad",
 };
+// Worker ECR scope lane (2026-11-23): the Foundation pin moved only by the worker role's ECR statements (narrowed read, new Deny). The pin recorded before the lane (Fix A's) is kept
+// below and re-derived in the test: Foundation minus exactly those two statement changes hashes to it.
+const FOUNDATION_PIN_BEFORE_WORKER_ECR_SCOPE = "979226446fd4f97a824d983d189e9b4125e468dedc1fbfcbf540c24386b98abc";
 // Batch F adds only Outputs.ModelRunPriceVersion; the invariant below retains code/next's full pin.
 // The separate proof removes it; existing snapshots retain the capability output.
 describe("legacy production templates", () => {
@@ -37,6 +41,9 @@ describe("legacy production templates", () => {
       const pin = BOUNDED_STACK_PINS[stack.stackName];
       if (pin !== undefined) expect(createHash("sha256").update(JSON.stringify(template)).digest("hex"), `${stack.stackName} with the runtime boundary`).toBe(pin);
       else expect(JSON.stringify(template)).not.toContain("PermissionsBoundary");
+      if (stack.stackName === "AgentXProductionFoundation") {
+        expect(createHash("sha256").update(JSON.stringify(withoutWorkerEcrScope(template))).digest("hex"), "Foundation minus only the worker ECR lane's statements").toBe(FOUNDATION_PIN_BEFORE_WORKER_ECR_SCOPE);
+      }
       // SIGNIN-MEMBER-CONDITIONCHECK, DEC 254zzz282 B014-A: pin the new template,
       // assert the exact broker-only addition, and retain the entire historical snapshot.
       if (stack.stackName === "AgentXControlPlane") {

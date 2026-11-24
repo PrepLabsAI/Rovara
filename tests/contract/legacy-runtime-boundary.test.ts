@@ -339,21 +339,12 @@ describe("legacy runtime boundary: the statements", () => {
 describe("legacy runtime boundary: it denies no permission a runtime role has today", () => {
   const WORKER_ROLE_BY_NAME = "<worker instance role, by name>";
 
-/** Every Allow of every runtime role: its AWS::IAM::Policy resources and inline policies, as [role, action, resource, condition]. */
-  function allowsOf(stackName: string): Array<{ role: string; action: string; resources: string[]; passedToService?: string }> {
-    const found: Array<{ role: string; action: string; resources: string[]; passedToService?: string }> = [];
+/** Every statement of every runtime role's own policies (its AWS::IAM::Policy resources and inline policies), as [role, statement]. */
+  function identityStatementsOf(stackName: string): Array<{ role: string; statement: Statement }> {
+    const found: Array<{ role: string; statement: Statement }> = [];
     const resources = template(stackName).Resources;
     const collect = (roleIds: string[], statements: Statement[]) => {
-      for (const statement of statements) {
-        expect(statement.Effect).toBe("Allow");
-        expect(statement.NotAction, "no NotAction allow").toBeUndefined();
-        const conditionValue = statement.Condition?.StringEquals?.["iam:PassedToService"];
-        for (const role of roleIds) {
-          for (const action of list(statement.Action) as string[]) {
-            found.push({ role, action, resources: list(statement.Resource).map(resolve), ...(conditionValue === undefined ? {} : { passedToService: conditionValue }) });
-          }
-        }
-      }
+      for (const statement of statements) for (const role of roleIds) found.push({ role, statement });
     };
     for (const [, resource] of Object.entries(resources)) {
       if (resource.Type === "AWS::IAM::Policy") {
@@ -367,6 +358,38 @@ describe("legacy runtime boundary: it denies no permission a runtime role has to
     }
     return found;
   }
+
+  /**
+   * A Deny in a role's own policy only narrows that role: it is never an allow the boundary could block, so the allow walk below does not walk it. Every effect must still be Allow or Deny,
+   * and the Denys are listed (and pinned by the test after) so one cannot appear unnoticed.
+   */
+  function identityDeniesOf(stackName: string): string[] {
+    return identityStatementsOf(stackName).filter(({ statement }) => statement.Effect === "Deny").map(({ role, statement }) => `${role.replace(/[0-9A-F]{8}$/, "")} ${statement.Sid ?? "?"} ${list(statement.Action).join(",")}`);
+  }
+
+  /** Every Allow of every runtime role, as [role, action, resource, condition]. */
+  function allowsOf(stackName: string): Array<{ role: string; action: string; resources: string[]; passedToService?: string }> {
+    const found: Array<{ role: string; action: string; resources: string[]; passedToService?: string }> = [];
+    for (const { role, statement } of identityStatementsOf(stackName)) {
+      expect(["Allow", "Deny"], `${role} ${statement.Sid ?? "?"} has an Effect`).toContain(statement.Effect);
+      if (statement.Effect === "Deny") continue;
+      expect(statement.NotAction, "no NotAction allow").toBeUndefined();
+      const conditionValue = statement.Condition?.StringEquals?.["iam:PassedToService"];
+      for (const action of list(statement.Action) as string[]) {
+        found.push({ role, action, resources: list(statement.Resource).map(resolve), ...(conditionValue === undefined ? {} : { passedToService: conditionValue }) });
+      }
+    }
+    return found;
+  }
+
+  it("skips the Denys in the roles' own policies (a Deny is not an allow to check) and lists exactly the one there is: the worker role's saved-environment-image fence", () => {
+    const denies = Object.keys(STACK_PARTS).flatMap((stackName) => identityDeniesOf(stackName).map((deny) => `${stackName}: ${deny}`));
+    expect(denies).toEqual(["AgentXProductionFoundation: Ec2WorkersInstanceRole NoSavedEnvironmentImages ecr:*"]);
+    // The walk sees none of it: no allow carries the Deny's action or its repository.
+    for (const stackName of Object.keys(STACK_PARTS)) {
+      for (const allow of allowsOf(stackName)) expect(allow.action === "ecr:*" && allow.resources.some((r) => r.includes("rovara-env")), `${stackName} ${allow.role}`).toBe(false);
+    }
+  });
 
   it("walks every allow of every runtime role: none is denied, and the near-misses are exactly the documented ones", () => {
     let walked = 0;

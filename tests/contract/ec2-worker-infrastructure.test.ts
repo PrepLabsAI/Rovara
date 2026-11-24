@@ -149,7 +149,10 @@ describe("EC2 worker infrastructure (issue #82), shown for a named environment",
     const role = resourcesOf(foundation)[roleId]!;
     expect(JSON.stringify(role.Properties.AssumeRolePolicyDocument)).toContain("ec2.amazonaws.com");
     const policies = ofType(foundation, "AWS::IAM::Policy").filter(([, p]) => JSON.stringify(p.Properties.Roles).includes(roleId));
-    const actions = actionsOf(policies.flatMap(([, p]) => (p.Properties.PolicyDocument as { Statement: Array<{ Action: string | string[] }> }).Statement));
+    const statements = policies.flatMap(([, p]) => (p.Properties.PolicyDocument as { Statement: Array<{ Effect: string; Sid?: string; Action: string | string[] }> }).Statement);
+    // the one Deny is the saved-environment-image fence (tests/contract/worker-ecr-read-scope.test.ts); what the role is ALLOWED is the set below
+    expect(statements.filter((statement) => statement.Effect === "Deny").map((statement) => [statement.Sid, statement.Action])).toEqual([["NoSavedEnvironmentImages", "ecr:*"]]);
+    const actions = actionsOf(statements.filter((statement) => statement.Effect === "Allow"));
     expect(new Set(actions)).toEqual(new Set([
       "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:GetAuthorizationToken", "ecr:BatchImportUpstreamImage", "ecr:CreateRepository",
       "bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream", "logs:CreateLogStream", "logs:PutLogEvents",

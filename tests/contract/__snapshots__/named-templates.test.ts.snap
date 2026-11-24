@@ -14835,6 +14835,31 @@ exports[`named environment templates > agentx-staging-foundation is unchanged 1`
               "Sid": "EcrImageAccess",
             },
             {
+              "Action": "ecr:*",
+              "Effect": "Deny",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ecr:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":repository/rovara-env/*",
+                  ],
+                ],
+              },
+              "Sid": "NoSavedEnvironmentImages",
+            },
+            {
               "Action": "ecr:GetAuthorizationToken",
               "Effect": "Allow",
               "Resource": "*",
