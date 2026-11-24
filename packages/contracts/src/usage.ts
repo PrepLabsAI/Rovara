@@ -13,6 +13,8 @@ export interface TaskUsageTelemetry {
   chargeReceipts?: ChargeReceiptV1[];
   /** Assistant calls that ended without token usage or provider cost; absent on older workers. */
   usageMissingCalls?: number;
+  /** #1395: on a zero report, the calls the provider refused before any stream (nothing spent); absent otherwise and on older workers. */
+  refusedBeforeStreamCalls?: number;
   /** Optional unit history. Old workers omit it; readers accept it before new workers emit it. */
   calls?: RunUsageCallV1[];
   schemaVersion: 1;
@@ -48,6 +50,7 @@ const TokenCount = z.number().int().nonnegative();
 export const TaskUsageTelemetrySchema = z.object({
   schemaVersion: z.literal(1),
   usageMissingCalls: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  refusedBeforeStreamCalls: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
   chargeReceipts: z.array(z.custom<ChargeReceiptV1>(v => parseChargeReceiptV1(v) !== undefined)).min(1).max(64).optional(),
   calls: z.array(RunUsageCallSchema).max(2000).optional(),
   outcome: z.enum(["SUCCEEDED", "FAILED", "CANCELLED"]),
