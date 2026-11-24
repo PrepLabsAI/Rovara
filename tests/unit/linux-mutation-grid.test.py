@@ -163,7 +163,8 @@ class GridTests(unittest.TestCase):
             def fake(args, *unused, **kwargs):
                 calls.append(args)
                 if args[:2] == ['docker', 'run']:
-                    return 'owned-container\n'
+                    # A first pull's progress arrives on the merged stream before the id: only the last line is the container.
+                    return 'Unable to find image \'registry:2\' locally\n2: Pulling from library/registry\nDigest: sha256:' + 'a' * 64 + '\nowned-container\n'
                 if args[:2] == ['docker', 'port']:
                     return '127.0.0.1:50123\n'
                 if args[:3] == ['docker', 'image', 'inspect']:
@@ -172,7 +173,9 @@ class GridTests(unittest.TestCase):
             with patch.object(grid, 'run', side_effect=fake):
                 with self.assertRaisesRegex(RuntimeError, 'inspect failed'):
                     images.digest('local-image')
-            self.assertIn('127.0.0.1::5000', calls[0])
+            self.assertEqual(calls[0], ['docker', 'pull', '--quiet', 'registry:2'])
+            self.assertIn('127.0.0.1::5000', calls[1])
+            self.assertIn(['docker', 'port', 'owned-container', '5000/tcp'], calls)
             self.assertIn(['docker', 'push', 'localhost:50123/close-retention:proof'], calls)
             self.assertEqual(calls[-1], ['docker', 'rm', '--force', 'owned-container'])
 

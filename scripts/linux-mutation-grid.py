@@ -201,9 +201,12 @@ class Images:
 
     def digest(self, tag):
         registry = 'registry:2'
+        # `docker run` prints the pull's progress on stderr, and `run` merges stderr into stdout: a first pull on a fresh runner would make that progress the "container id". Pull quietly first, and
+        # take the id from the last line of the output.
+        run(['docker', 'pull', '--quiet', registry], self.repository, timeout=900)
         container = run(['docker', 'run', '-d', '--rm', '--user', f'{os.getuid()}:{os.getgid()}',
                          '-p', f'127.0.0.1:{self.port or ""}:5000',
-                         '-v', str(self.storage) + ':/var/lib/registry', registry], self.repository).strip()
+                         '-v', str(self.storage) + ':/var/lib/registry', registry], self.repository).strip().splitlines()[-1]
         try:
             binding = run(['docker', 'port', container, '5000/tcp'], self.repository).strip()
             self.port = binding.rsplit(':', 1)[1]
