@@ -74,8 +74,10 @@ describe("the NAT gateways' Elastic IPs are Rovara's outbound addresses", () => 
     expect(controlPlane.Parameters!.NatEgressAddresses!.MaxLength).toBeGreaterThanOrEqual(4 * 15 + 3);
   });
 
-  it("leaves the legacy deployment alone: no retain, no output, no parameter, no variable (its recorded snapshot stays byte-identical)", () => {
-    for (const [id, eip] of ofType(legacyFoundation, "AWS::EC2::EIP")) expect([id, eip.DeletionPolicy, eip.UpdateReplacePolicy]).toEqual([id, undefined, undefined]);
+  it("the legacy deployment retains the addresses too (RETAIN, arch ruling 2026-11-24: a released address is gone), with no output, no parameter, no variable", () => {
+    const legacyEips = ofType(legacyFoundation, "AWS::EC2::EIP");
+    expect(legacyEips.map(([id]) => id).sort()).toEqual(["NatEip1", "NatEip2"]);
+    for (const [id, eip] of legacyEips) expect([id, eip.DeletionPolicy, eip.UpdateReplacePolicy]).toEqual([id, "Retain", "Retain"]);
     expect(legacyFoundation.Outputs).not.toHaveProperty("NatEgressAddresses");
     expect(legacyControlPlane.Parameters).not.toHaveProperty("NatEgressAddresses");
     expect(JSON.stringify(legacyControlPlane)).not.toContain(EGRESS_ADDRESSES_VARIABLE);

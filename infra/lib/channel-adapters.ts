@@ -81,7 +81,8 @@ export class ChannelAdapters extends Construct {
       secretName: slackAdapterSecretName,
       description: "Signing secret of the built-in Slack channel adapter (spec 062 FR-073); 64 letters and digits, read as base64",
       generateSecretString: { passwordLength: 64, excludePunctuation: true, includeSpace: false },
-      removalPolicy: RemovalPolicy.DESTROY,
+      // Retained: the value is generated once and cannot be read back from anywhere else; a deleted secret is a new value for every reader and a signature failure for anything in flight.
+      removalPolicy: RemovalPolicy.RETAIN,
     });
     const builtInAdapter = this.builtInAdapter = {
       BUILT_IN_ADAPTER: slackViaChannel,
@@ -99,7 +100,8 @@ export class ChannelAdapters extends Construct {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
       timeToLiveAttribute: "expiresAt",
-      removalPolicy: RemovalPolicy.DESTROY,
+      // Retained: replay and link-notice claims expire, but the LAST_EVENT rows (the newest event per conversation) do not, and must outlive a stack deletion.
+      removalPolicy: RemovalPolicy.RETAIN,
     });
 
     // Accepted messages and decisions, ordered per conversation, run by the hosted orchestrator.

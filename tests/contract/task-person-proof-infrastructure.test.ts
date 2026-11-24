@@ -304,15 +304,15 @@ describe("the named TEST proof-only installation gate", () => {
       {
         label: "named",
         template: named,
-        withRoute: "4e36adab5541e4f08f2d34afa47cb3c32b187292b555993d44b67bf917a6bfa9", withoutRoute: "13b43075fe353ae758d5517bfef5b7ef9258c1244977b72d445c7070bbc4ca4f",
-        beforeStepUpRemoval: { withRoute: "74961350024ecce5d93868e60038be43814785de2d99b948cd76846cf9fe8487", withoutRoute: "b49c2f10b87615ee4daf212599bddfb8dd7d556172efd7e7283f4366a93963f3" },
+        withRoute: "0e5a4ce5d035a543d897e9fb9822fd73616919593a956072260581dcd2401366", withoutRoute: "205d16f4777659c2c91dcebbde261cc5560c78bd5aa7d8f84d2915b0f18da332",
+        beforeStepUpRemoval: { withRoute: "c2fd2b58cb811409a32b3b47d6c65a16284c00f09f5591596646c0323c77eb64", withoutRoute: "0b905ee3672ba69a5ccdbf5681cc8105bb96fb82a79e63649d59aadc1ce8846c" },
         beforeCapabilityRoutes: undefined,
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "e3b4841573390747c8f77d6d21aa14cddc8cf47e556b166f8e9f7ef3f161cb24", withoutRoute: "b5f9015a1956a24c8481b4590c473ed0bf72c4da845dbc60daee7bc13da9b037",
-        beforeStepUpRemoval: { withRoute: "1404efad45834cb42276f3b8c5e86915cdd6ed3bfcdb3ee977cf8775530db169", withoutRoute: "5da8076bacf0946f04a4c29363329357f453ec4ece947ac633ddff88bb4aeac6" },
+        withRoute: "7bb2b0a54f75d20c3995b89d94cb6781fc9d114705508fcabe284d5f5d1702c6", withoutRoute: "31f025b0b644ae3e4dce837716c65ef3d0a7b6c514b5b2d997f512bff3aa7464",
+        beforeStepUpRemoval: { withRoute: "5a43e3bf6a90590244c2a65ee50516ca1484a84b982576a7b4bbfc94606fc921", withoutRoute: "3c1dc6fc2adf3689dd78fcce66895bfd8747778771924384fb432c24bdf9db37" },
         beforeCapabilityRoutes: undefined,
       },
       {
@@ -326,10 +326,10 @@ describe("the named TEST proof-only installation gate", () => {
         // LEGACY-WORKER-CAPABILITY-ROUTES: re-pinned for the legacy template gaining the ContextToolsListRoute and DesignReviewPacketRoute resources (named and foreign already had
         // them), and #1275 for removing the core engine switch. Rule D: with exactly those two resources taken out, the switch removal's own pins e07dd415... and 7f704d79... hold
         // (beforeCapabilityRoutes proves it).
-        withRoute: "0fca5afc88f8492defe8ab983b4660aca147b3c71ec890b24fd6db09c45d20bf",
-        withoutRoute: "0b272679f7be2c793009828bcad721ee884b494d0151a918446750bda40ef161",
+        withRoute: "6d00a920cce4b4fdaa8413c678ad19dc2b4e043607fb6f7d3d16db27d52b1edf",
+        withoutRoute: "dec5dfcbbc5520c99dad225ec291b4166d9c5eae46c846749b312cdf5b2e5ffb",
         beforeStepUpRemoval: undefined,
-        beforeCapabilityRoutes: { withRoute: "9a33a913e3b75933086daae375dc2cb823650cc550ba5041bcaf3d7fa621dac1", withoutRoute: "ebf19414715828c47745822e63e5558cd113798da93815c3766fe41cc7b443ad" },
+        beforeCapabilityRoutes: { withRoute: "e5c06577cee646e66ab970fab22b8d1243a58900b844b2232d705b3ac494b374", withoutRoute: "f8173606e0391b79f452ffc9ef4a4616f95aefd744d472fd458b9ad78d349aad" },
       },
     ] as const;
     expect(named.Parameters?.CoreTaskCapUsd, "named has the core engine").toBeDefined();

@@ -647,15 +647,15 @@ describe("L1a broker environment derivation", () => {
     const beforeFirstGateway = withoutWebhookSecretLane(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(structuredClone(legacy.toJSON()) as Json & { Outputs: Record<string, unknown> }), stuckStoppingInstall())));
     expect(beforeFirstGateway.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     delete beforeFirstGateway.Outputs.ModelRunPriceVersion;
-    expect(digest(beforeFirstGateway), "legacy without the first-gateway output retains the upstream member-check pin").toBe("fef96cf61a67a412e6d99ef4bf9567f05dd1a518d02471de8dede006a78bbc1e");
+    expect(digest(beforeFirstGateway), "legacy without the first-gateway output retains the upstream member-check pin").toBe("3f3ba5dc44340a7f31b65e745c6126b938d54986fcb8fd5bf428d4de16fd290d");
     const beforeMemberCheck = withoutBrokerMemberConditionCheck(beforeFirstGateway);
-    expect(digest(beforeMemberCheck), "legacy without the first-gateway output and broker member check").toBe("e08e8a557cfcd0f1815bbfdc23a162704e0d0995d9d04b073b2b6feb30e44a09");
+    expect(digest(beforeMemberCheck), "legacy without the first-gateway output and broker member check").toBe("76db83ecbf4e8ec0302f423235c27f0f762d5ac68b3ba4c6170936aa514f91e5");
     // Rule D proof: removing exactly the two capability routes retains the switch-removal pin.
     const withoutCapabilityRoutes = structuredClone(beforeMemberCheck);
     delete withoutCapabilityRoutes.Resources.ContextToolsListRoute;
     delete withoutCapabilityRoutes.Resources.DesignReviewPacketRoute;
-    expect(digest(withoutCapabilityRoutes), "legacy with the two capability routes taken out").toBe("b304960b2db5e8cd2ccdb7cc84fc45b58f13e8eff4e8e6810cde809f190fc82b");
-    expect(digest(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(structuredClone(legacy.toJSON())), stuckStoppingInstall())))).toBe("50f67718e9973dd22b4699e0155c3e29fd34c86016f3ce28e7c531517b43668c");
+    expect(digest(withoutCapabilityRoutes), "legacy with the two capability routes taken out").toBe("ede0408195451a557afe3bfb95a588e107a6cbee1ee64814b7769484049b4e79");
+    expect(digest(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(structuredClone(legacy.toJSON())), stuckStoppingInstall())))).toBe("1dc517571d37ee73d023698fc668b384827e553a058e7241c3b95bdda97b64e3");
   });
 });
 import { createHash } from "node:crypto";
