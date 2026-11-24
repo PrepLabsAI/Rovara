@@ -11,6 +11,11 @@ import type { MergeTask } from "./seams.js";
 export interface MergePeople {
   /** The code-host account ids of the people who asked for the task, "unlinked" when any of them has none (their approval cannot be told from a reviewer's), or "no_owner" when no one holds the task. */
   requestersOf(orgId: OrgId, task: MergeTask): Promise<RequesterAccounts>;
+  /**
+   * Whether the company's members are known at all. Absent or true: an approval counts only from a linked current member, whatever the self-approval setting says. False is only code's one implicit owner
+   * (`soleOwnerPeople`), who has no members to link.
+   */
+  membersTracked?: boolean;
   /** Which of these code-host accounts are linked to a person who is in the company now and may approve. */
   linkedAmong(orgId: OrgId, hostUserIds: readonly string[]): Promise<Set<string>>;
   /** Which of these code-host accounts are linked to a person who is in the company but may not approve (the Auditor): their approval counts for nothing. */
@@ -26,6 +31,7 @@ export interface MergePeople {
 
 /** Code's default: one owner, no linked accounts, nobody excluded. */
 export const soleOwnerPeople: MergePeople = {
+  membersTracked: false,
   requestersOf: async () => "unlinked",
   linkedAmong: async () => new Set(),
   nonWritersAmong: async () => new Set(),

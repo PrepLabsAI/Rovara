@@ -49,7 +49,7 @@ import { judgeProofHold, type ProofHoldSource } from "./proof-hold.js";
 import { ownCheckSourceOf, readVerdict, stopSummaryChecks, syncSummaryCheck, type SummaryCheckSource } from "./summary-check.js";
 import { ciFixComment, postCiFixComment } from "./pr-comments.js";
 import { SWEEP_INTERVAL_MS, type MergeReadBudget, type MergeRecoveryResult } from "./budget.js";
-import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type RepositoryPermission } from "./approval.js";
+import { approvalStandingOf, humanApprovalOf, latestReviewers, requesterHostIds, type RepositoryPermission } from "./approval.js";
 import { approvalReviewsOf, changeRequestRef, rateLimitRetryAt, type RepositoryResolver } from "./host-port.js";
 import { orderHoldsReady, providersWaitingFor } from "./order-watch.js";
 import { requireRepositoryKey } from "./repository-key.js";
@@ -879,8 +879,7 @@ async function trackOne(
     for (const reviewer of reviewers) known.set(reviewer.login, await permission(reviewer.login));
     const counted = humanApprovalOf({
       reviews: approvalReviews, headSha: status.headRevision, syncedFrom: pullRequest.syncedFrom, ciPassingOnHead: ciCountsAsPassing(ci.ci, ciMode), permissions: known,
-      requesterHostUserIds: await requesterHostIds(deps.people, task.orgId, task), linkedHostUserIds: await linkedAmong(deps.people, task.orgId, reviewers.map((reviewer) => reviewer.hostUserId)),
-      excludedHostUserIds: await nonWritersAmong(deps.people, task.orgId, reviewers.map((reviewer) => reviewer.hostUserId)),
+      requesterHostUserIds: await requesterHostIds(deps.people, task.orgId, task), ...await approvalStandingOf(deps.people, task.orgId, reviewers.map((reviewer) => reviewer.hostUserId)),
       allowSelfApproval: settings.allowSelfApproval,
     });
     if (counted.approved) {

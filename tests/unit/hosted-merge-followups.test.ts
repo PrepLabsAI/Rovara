@@ -54,12 +54,15 @@ async function hookedRoute(mode: "allow" | "deny" | "no-answer" | "unaskable" | 
   const client = createPolicyHookClient({ settings: settingsFor(hookKey), install: { issuer: ISSUER, signer: signerOf(install) }, fetch: service.fetch, now: () => w.clock.ms, audit: w.h.deps.audit });
   w.registry.register("approvers", "rules", withPolicyHookApprovers(w.world.deps.approvers, mode === "unaskable" ? { ...client, prepare: async () => undefined } : client, { now: () => w.clock.ms }));
   const identities: Array<[string, string]> = [];
+  const priyaAccount = w.world.prs[0]!.model.accounts.get("priya")!.hostUserId;
   const identity = { getPrincipal: vi.fn(async (companyId: string, id: string) => {
     identities.push([companyId, id]);
     return companyId === ORG && id === CREATOR ? person(CREATOR) : undefined;
-  }), resolveExternalAccount: async () => undefined,
+  }),
+  // Self-approval is ON here, and an approval counts only from a linked CURRENT member whatever that setting says: the reviewer's account belongs to the creator (a member).
+  resolveExternalAccount: async (companyId: string, account: { accountId: string }) => (companyId === ORG && account.accountId === priyaAccount ? person(CREATOR) : undefined),
   accountsOf: async (companyId: string, id: string) => companyId === ORG && [CREATOR, PRESSER].includes(id)
-    ? [{ provider: "github", tenant: "", accountId: w.world.prs[0]!.model.accounts.get("priya")!.hostUserId }] : [],
+    ? [{ provider: "github", tenant: "", accountId: priyaAccount }] : [],
   };
   w.registry.register("identity", "test", identity as never);
   const runtime = { companyId: ORG, flow: w.h.flow, ciReporting: { honest: true, ciMode: async () => "their_ci_fix" as const } } as never;

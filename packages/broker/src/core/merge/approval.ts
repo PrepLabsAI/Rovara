@@ -33,8 +33,13 @@ export interface ApprovalInput {
   permissions: ReadonlyMap<string, RepositoryPermission>;
   /** The code-host accounts of the task's requesters, "unlinked" when any requester has no linked account, "no_owner" when the task has no requester. */
   requesterHostUserIds: RequesterAccounts;
-  /** The code-host accounts (among the reviewers) that are linked to a member of the org. */
+  /** The code-host accounts (among the reviewers) that are linked to a current member of the org who may approve. */
   linkedHostUserIds: ReadonlySet<string>;
+  /**
+   * Whether the host tracks the company's members at all. Absent or true: an approval counts only from a linked current member, in BOTH modes. False is only the laptop's one implicit owner, who has no members
+   * to link (`soleOwnerPeople`): there self-approval ON counts any writer, as before. With self-approval OFF it changes nothing.
+   */
+  membersTracked?: boolean | undefined;
   /** The host account Rovara acts as: never counts, whatever its type says. */
   appUserId?: string | undefined;
   allowSelfApproval: boolean;
@@ -60,9 +65,27 @@ export function latestReviewers(reviews: readonly ApprovalReview[], appUserId?: 
 }
 
 /**
+ * Of the fresh approvals of people with write access, those that count, or why none does. Only a linked current member counts, in both modes (unless the host tracks no members: the laptop's sole owner, with
+ * self-approval on). With self-approval off the requesters' own approvals do not count either.
+ */
+function countedApprovals(input: ApprovalInput, fresh: readonly ApprovalReview[]): ApprovalReview[] | ApprovalRefusal {
+  const members = input.allowSelfApproval && input.membersTracked === false ? fresh : fresh.filter((review) => input.linkedHostUserIds.has(review.hostUserId));
+  let counted = members;
+  if (!input.allowSelfApproval) {
+    if (input.requesterHostUserIds === "unlinked") return "unlinked_requester";
+    if (input.requesterHostUserIds === "no_owner") return "no_owner";
+    const requesters = input.requesterHostUserIds;
+    counted = members.filter((review) => !requesters.includes(review.hostUserId));
+    if (counted.length === 0) return members.some((review) => requesters.includes(review.hostUserId)) ? "self_only" : "none";
+  }
+  return counted.length === 0 ? "none" : [...counted];
+}
+
+/**
  * Whose approval counts. Only a person (not an App or a bot) with write access counts; one of them asking for changes refuses; an approval counts on the head, or on the head before
- * a run of clean merges of the base when CI passes on the merged head. With self-approval off, the requesters must all have a linked host account and only an account linked to a
- * member who is not a requester counts.
+ * a run of clean merges of the base when CI passes on the merged head. An approval counts only from an account linked to a CURRENT MEMBER of the company, whatever self-approval says (a person who
+ * left but still has write access on the host does not count). Self-approval only decides whether a requester's OWN approval may count: with it off, the requesters must all have a linked host
+ * account and an approval of theirs does not count.
  */
 export function humanApprovalOf(input: ApprovalInput): HumanApproval {
   const people = latestReviewers(input.reviews, input.appUserId);
@@ -73,14 +96,8 @@ export function humanApprovalOf(input: ApprovalInput): HumanApproval {
   if (writeApprovals.length === 0) return { approved: false, reason: "no_write" };
   const fresh = writeApprovals.filter((review) => review.commitId === input.headSha || (input.syncedFrom !== undefined && review.commitId === input.syncedFrom && input.ciPassingOnHead));
   if (fresh.length === 0) return { approved: false, reason: "stale" };
-  let counted = fresh;
-  if (!input.allowSelfApproval) {
-    if (input.requesterHostUserIds === "unlinked") return { approved: false, reason: "unlinked_requester" };
-    if (input.requesterHostUserIds === "no_owner") return { approved: false, reason: "no_owner" };
-    const requesters = input.requesterHostUserIds;
-    counted = fresh.filter((review) => input.linkedHostUserIds.has(review.hostUserId) && !requesters.includes(review.hostUserId));
-    if (counted.length === 0) return { approved: false, reason: fresh.some((review) => requesters.includes(review.hostUserId)) ? "self_only" : "none" };
-  }
+  const counted = countedApprovals(input, fresh);
+  if (typeof counted === "string") return { approved: false, reason: counted };
   const newest = counted[counted.length - 1]!;
   return {
     approved: true, by: { hostUserId: newest.hostUserId, login: newest.login }, commitId: newest.commitId,
@@ -98,6 +115,17 @@ export function requesterIds(task: Pick<MergeTask, "ownerId" | "creatorId" | "st
 /** The requesters' code-host accounts, "unlinked" when any of them has none (their approval cannot be told from a reviewer's), "no_owner" when the task has none. */
 export function requesterHostIds(people: MergePeople, orgId: OrgId, task: MergeTask): Promise<RequesterAccounts> {
   return people.requestersOf(orgId, task);
+}
+
+/**
+ * What the approval rules need to know about the reviewers' accounts, read in ONE place for the press and for merge tracking: which are linked to a current member who may approve, which to a member
+ * who may not (the Auditor), and whether the host tracks members at all.
+ */
+export async function approvalStandingOf(people: MergePeople, orgId: OrgId, hostUserIds: readonly string[]): Promise<Pick<ApprovalInput, "linkedHostUserIds" | "excludedHostUserIds" | "membersTracked">> {
+  return {
+    linkedHostUserIds: await linkedAmong(people, orgId, hostUserIds), excludedHostUserIds: await nonWritersAmong(people, orgId, hostUserIds),
+    membersTracked: people.membersTracked !== false,
+  };
 }
 
 /** Which of these accounts are linked to a person in the company who may approve. */
