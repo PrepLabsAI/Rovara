@@ -34,7 +34,9 @@ export function strictMethodsFor(
   const noComment = (methods: readonly string[]): readonly string[] => methods.filter((method) => !isCommentMethod(method, requirement));
   const narrowed = (named: readonly string[] | undefined, limit: readonly string[] | undefined, fallback: readonly string[]): readonly string[] =>
     (named ?? fallback).filter((method) => limit === undefined || limit.includes(method));
-  if (outcome === "reject") return noComment(narrowed(requirement.rejectMethods, policy.rejectMethods, [LOCAL_SESSION_METHOD]));
+  // S1 (owner DEC 254zzz477): a rejection may be taken in a chat, with a reason, where the requirement NAMES the chat's method for it (the hosted approvers do, at low and medium risk). A chat method the requirement does not name for
+  // rejection, a code host comment and any `commentMethods` method stay out, whatever else names them.
+  if (outcome === "reject") return narrowed(requirement.rejectMethods, policy.rejectMethods, [LOCAL_SESSION_METHOD]).filter((method) => !isCommentMethod(method, requirement) || (method.startsWith(CHAT_METHOD_PREFIX) && requirement.rejectMethods?.includes(method) === true && requirement.commentMethods?.includes(method) !== true));
   // A request for changes may be a comment or a chat press, but not a chat press on a high-risk request: the high-risk path is the task page's (sign-in), so a chat press is refused here as well as in the sink and the approvers.
   if (outcome === "request_changes") return narrowed(requirement.changesMethods, policy.changesMethods, [LOCAL_SESSION_METHOD, CODE_HOST_COMMENT_METHOD]).filter((method) => risk !== "high" || !method.startsWith(CHAT_METHOD_PREFIX));
   return risk === "high" ? noComment(narrowed(requirement.strongMethods, policy.highRiskMethods, [LOCAL_SESSION_METHOD])) : undefined;

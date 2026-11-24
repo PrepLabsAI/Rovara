@@ -47,6 +47,11 @@ export const ChannelCapabilitiesSchema = z.object({
   startConversations: z.boolean().optional(),
   /** `thread_messages` commands: one read of a thread's replies (Lead 4, the lessons' Slack source). */
   history: z.boolean().optional(),
+  /**
+   * S1: the adapter takes presses of the task action registry (`rovara_task:*` buttons and their forms) on its messages, and the host wired the press. Off unless the adapter says so: a thread whose adapter does not declare it
+   * (a laptop's) is shown no task action buttons.
+   */
+  taskActions: z.boolean().optional(),
 }).strict();
 export type ChannelCapabilities = z.infer<typeof ChannelCapabilitiesSchema>;
 

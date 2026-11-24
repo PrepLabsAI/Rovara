@@ -9,6 +9,7 @@
 //   setupPausedTold   the same for the setup pause message.
 //   doneToldInThread  the thread's own "done" line is told by the thread's milestones, only where those run (the company has milestones).
 import type { AdapterRegistry, DocumentStore, OrgId, WorkflowSnapshot } from "@agentx/contracts";
+import type { OfferCapabilities } from "../core/task-actions/index.js";
 import { channelThreadHandler, planCardPosted, setupPausedPosted } from "../core/channel/thread-notices.js";
 import type { CodeMilestoneHandler } from "../core/milestones/milestones.js";
 import { PendingMilestoneDelivery } from "../core/milestones/pending-delivery.js";
@@ -83,6 +84,8 @@ export interface HostedThreadHandlerInputs {
   /** Whether the person who started the task is still this company's member. */
   isMember: ChannelMemberRule;
   log: (event: string, fields: Record<string, unknown>) => void;
+  /** S1: what the host can serve of the task action registry. Cards carry task action buttons only where it is given AND the thread's adapter declares `taskActions` (the host wired the press). */
+  taskActions?: OfferCapabilities | undefined;
 }
 
 /**
@@ -122,6 +125,7 @@ export function hostedThreadHandler(input: HostedThreadHandlerInputs): CodeMiles
       if (cleanup.status !== "COMPLETE") throw new PendingMilestoneDelivery("Canvas closeout remains pending");
       return words;
     },
+    ...(input.taskActions === undefined ? {} : { taskActions: input.taskActions }),
     log: input.log,
   });
 }
@@ -130,7 +134,7 @@ export function hostedThreadHandler(input: HostedThreadHandlerInputs): CodeMiles
 export function hostedWorkflowThreadRefresh(input: HostedThreadHandlerInputs) {
   const refreshFor = (store: DocumentStore) => workflowThreadRefresh({ store, companyId: input.companyId, now: input.now,
     messageOf: (message) => input.threads.messageOf?.(message), registry: hostedChannelView(input.threads, input.registry, input.companyId), companyOf: input.threads.companyOf, isMember: input.isMember,
-    taskUrl: (_taskId, task) => task?.sessionId === undefined ? undefined : sessionPageUrl(input.origin(), task.sessionId), log: input.log });
+    taskUrl: (_taskId, task) => task?.sessionId === undefined ? undefined : sessionPageUrl(input.origin(), task.sessionId), ...(input.taskActions === undefined ? {} : { taskActions: input.taskActions }), log: input.log });
   return async (orgId: OrgId, sessionId: string, store: DocumentStore) => {
     if (orgId !== input.companyId) return;
     const session = await store.get(agentSessionKey(orgId, sessionId, "META"));

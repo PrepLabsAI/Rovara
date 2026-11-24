@@ -202,6 +202,31 @@ export function workflowPublicationRetryable(workflow: { stage: string; state: s
     && (workflow.state === "READY" || (workflow.state === "BLOCKED" && (workflow.blockReason === WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE || isStepNotRunReason(workflow.blockReason))));
 }
 
+/** The stages an owner's Retry covers when the step stopped (Cloud's stage list for it, `blockedStepRetry`, moved here so one place holds it). */
+const STEP_RETRY_STAGES: ReadonlySet<string> = new Set(["UNDERSTAND", "PLAN", "PLAN_CRITIQUE", "IMPLEMENT", "VERIFY", "PULL_REQUEST", "WAIT_FOR_MERGE"]);
+
+/**
+ * S1: whether the owner may retry the step that stopped (the planning, coding, checks, opening the pull request, or a failed push of a reviewed fix). A review that stopped is retried through `workflowReviewRetryOffered`.
+ * A task waiting for more spend to be approved is not sent on by a person's retry, and the merge wait retries only a failed pull request update.
+ */
+export function workflowStepRetryOffered(workflow: { stage: string; state: string; blockReason?: string | undefined; revision: number }): boolean {
+  if (workflow.state !== "BLOCKED" || !STEP_RETRY_STAGES.has(workflow.stage)) return false;
+  if (workflow.blockReason === WORKFLOW_BLOCK_REASONS.budgetPaused || isRunLimitBlockReason(workflow.blockReason)) return false;
+  if (workflow.stage === "WAIT_FOR_MERGE" && workflow.blockReason !== WORKFLOW_BLOCK_REASONS.pullRequestUpdateFailed) return false;
+  return Number.isSafeInteger(workflow.revision) && workflow.revision >= 1;
+}
+
+/**
+ * S1: whether the owner may retry the reviews of a task stopped at review: only on the same checked code, so the checks on exactly that code passed (Cloud's `blockedReview().retry`, moved here).
+ */
+export function workflowReviewRetryOffered(workflow: { stage: string; state: string; revision: number; candidate?: { digest: string } | undefined;
+  verification?: { candidateDigest?: string | undefined; reviewOnly?: boolean | undefined; results?: ReadonlyArray<{ status: string }> | undefined } | undefined }): boolean {
+  if (workflow.stage !== "REVIEW" || workflow.state !== "BLOCKED") return false;
+  const digest = workflow.candidate?.digest;
+  const results = workflow.verification?.results ?? [];
+  return digest !== undefined && workflow.verification?.candidateDigest === digest && (results.length > 0 || workflow.verification.reviewOnly === true) && results.every((result) => result.status === "PASS");
+}
+
 /** Whether a review of the current code saw only part of the change: its diff was too large to show in full. */
 export function workflowReviewsSawPartialDiff(workflow: { candidate?: { digest: string } | undefined; reviews?: ReadonlyArray<{ candidateDigest: string; partialDiff?: boolean | undefined }> | undefined }): boolean {
   const current = workflow.candidate?.digest;

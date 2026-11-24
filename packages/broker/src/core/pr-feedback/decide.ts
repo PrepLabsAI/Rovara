@@ -83,7 +83,7 @@ export async function decidePrFeedback(deps: TaskFlowDeps, caller: TaskCaller, t
   }
   // Live ownership and its conditional access proof are obtained again after host and artifact reads.
   const latest = await feedbackOwner(deps, caller, taskId);
-  if (latest.task.workflow?.revision !== current.revision || latest.acting.actorId !== acting.actorId) throw agentXError("IDEMPOTENCY_CONFLICT", "The feedback card changed. Refresh the task.");
+  if (latest.task.workflow?.revision !== current.revision || latest.acting.actorId !== acting.actorId) throw agentXError("IDEMPOTENCY_CONFLICT", "The feedback card changed. Refresh the task.", { reason: "stale", writes: "none" });
   const committed = await commitWorkflow(deps, task, next, [
     ...(latest.acting.items ?? []),
     { kind: "put", item: toDocument({ ...key, entityType: "IDEMPOTENCY", payloadHash, actorId: acting.actorId, requester: caller.principal }), condition: when.absent() },

@@ -54,7 +54,7 @@ export async function resolveReviewFindings(deps: TaskFlowDeps, options: TaskAct
   requirePageForSecurityAccept(caller, via, workflow, request);
   // A person's move never skips an approval of more spend.
   if (waitingForSpend(workflow)) throw agentXError("CONFIG_INVALID", WAITING_FOR_SPEND);
-  if (request.expectedRevision !== workflow.revision || workflow.candidate?.digest !== request.candidateDigest) throw agentXError("CHANGE_STALE", FINDINGS_OUT_OF_DATE);
+  if (request.expectedRevision !== workflow.revision || workflow.candidate?.digest !== request.candidateDigest) throw agentXError("CHANGE_STALE", FINDINGS_OUT_OF_DATE, { reason: "stale", writes: "none" });
   let next: WorkflowSnapshot;
   try {
     next = resolveWorkflowReviewFindings(workflow, request, { actorId: acting.actorId }, { now }, acting.authority);
