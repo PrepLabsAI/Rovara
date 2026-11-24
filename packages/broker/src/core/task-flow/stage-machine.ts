@@ -737,6 +737,6 @@ type StepSuccessor = Awaited<ReturnType<typeof retainedSuccessor>>;
 function workspaceAdmitsStep(workspace: WorkspaceRecord, successor: StepSuccessor): boolean {
   return workspace.legacyCloseClaim === undefined && workspace.status === "READY" && (workspace.activeOperationId === null || successor !== undefined);
 }
-function successorFields(successor: StepSuccessor): Pick<OperationRecord, "supersedesRetention"> {
-  return successor?.retention === undefined ? {} : { supersedesRetention: successor.retention };
+function successorFields(successor: StepSuccessor): Pick<OperationRecord, "supersedesRetention" | "supersedesUnconfirmed"> {
+  return { ...(successor?.retention === undefined ? {} : { supersedesRetention: successor.retention }), ...(successor?.unconfirmed === undefined ? {} : { supersedesUnconfirmed: successor.unconfirmed }) };
 }

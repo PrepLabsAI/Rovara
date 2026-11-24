@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { WorkspaceDataIdentitySchema, WorkspaceClosePreflightResultSchema, type WorkspaceDataIdentity, type MachineHealth, type TransactItem, change, when, type TaskCloseAction, type TaskClosePreviewResponse } from "@agentx/contracts";
+import { WorkspaceDataIdentitySchema, WorkspaceClosePreflightResultSchema, type CloseRetention, type WorkspaceDataIdentity, type MachineHealth, type TransactItem, change, when, type TaskCloseAction, type TaskClosePreviewResponse } from "@agentx/contracts";
 import { buildTaskClosePreview } from "../../developer/task-close-preview.js";
 import type { TaskCaller, TaskFlowDeps } from "./deps.js";
 import { loadOwnedTask, workspaceOperations } from "./reads.js";
@@ -24,6 +24,12 @@ export interface CloseInspectionProvider {
   /** Dispatcher only. Starts the machine of a stopped workspace (idempotent; the workspace's machine already exists, so this admits no new machine). `ready` once it is up and its runtime is noted; `waking` while it starts; `gone` when there is no session to start. */
   wake?(workspaceId: string): Promise<"ready" | "waking" | "gone">;
   noteRuntime?(workspaceId: string, health: MachineHealth, operation?: OperationRecord): Promise<void>;
+  /**
+   * Dispatcher only. A step took over a retention the broker never confirmed: asks the worker to replay that retain (same preflight, same fence, same target, so the worker answers from its journal) and returns the
+   * retention it answered, when it did seal and answer. Undefined when it answered anything else (it never sealed, it cannot prove the seal): the step then goes without a selector, which the worker admits only over
+   * a retention it never answered.
+   */
+  replayRetention?(workspaceId: string, unconfirmed: NonNullable<OperationRecord["supersedesUnconfirmed"]>): Promise<CloseRetention | undefined>;
   acceptanceItems?(input: RetainedCloseInspection & { contentDigest: string }, acceptedOperationId: string): TransactItem[];
   /** DEC 290's durable, monotonic journal barrier, before inspection. */
   raiseFence(workspaceId: string, fence: number): Promise<void>;

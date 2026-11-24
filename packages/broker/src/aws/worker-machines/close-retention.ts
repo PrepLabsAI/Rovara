@@ -67,6 +67,10 @@ export function createDispatcherCloseInspection(deps: HostedCloseDeps): CloseIns
       const handle = await machines.start({ machineKey: workspaceId, companyId, projectName: workspace.projectName, labels: { workspaceId } });
       return handle.state === "ready" ? "ready" : "waking";
     },
+    replayRetention: async (workspaceId, unconfirmed) => {
+      const reply = await command(workspaceId, unconfirmed.operationId, unconfirmed.fence, { schemaVersion: 1, action: "retain", target: unconfirmed.generation });
+      return reply.status === "retained" && reply.action === "retain" ? reply.retention : undefined;
+    },
     noteRuntime: async (workspaceId, health, operation) => {
       const session = await sessionFor(workspaceId), generation = health.workspaceDataIdentity;
       if (session?.state !== "READY" || generation === undefined || !sameMachine(session, generation)) return;

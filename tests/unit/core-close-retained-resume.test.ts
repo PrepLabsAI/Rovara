@@ -136,6 +136,56 @@ describe("an unconfirmed retention (the worker never confirmed it)", () => {
     expect(await w.session()).not.toHaveProperty("closeRetention");
   });
 
+  it("the takeover step records WHAT it took over (the dead preflight, its fence and the generation it captured), for the dispatcher; a confirmed hand-over records nothing of the kind", async () => {
+    const w = await unconfirmed("STOPPED");
+    await createTaskActions(w.h.deps).continue(w.h.owner, w.task.taskId, { requestId: randomUUID(), instructions: "more work" });
+    const step = (await operations(w)).find((item) => item["kind"] === "task")!;
+    expect(step["supersedesUnconfirmed"]).toEqual({ operationId: w.holder, fence: w.retained.inspectionFence, generation: w.retained.generation });
+    const confirmed = await finishedAndIdleStopped();
+    await createTaskActions(confirmed.h.deps).continue(confirmed.h.owner, confirmed.task.taskId, { requestId: randomUUID(), instructions: "more work" });
+    expect((await operations(confirmed)).find((item) => item["kind"] === "task")).not.toHaveProperty("supersedesUnconfirmed");
+  });
+
+  /** The fake machine takes a couple of looks to come up (a step that finds it starting is tried again): run the dispatcher until the step is on a machine. */
+  async function dispatchUntilSent(h: World["h"]) {
+    for (let round = 0; round < 6; round += 1) {
+      await h.flow.dispatchOnce({ maxMessages: 10 });
+      h.clock.now += 60_000;
+    }
+  }
+
+  async function delivered(w: Awaited<ReturnType<typeof unconfirmed>>, replay: ((...args: never[]) => Promise<unknown>) | undefined) {
+    (w.h.deps.closeInspection as unknown as Record<string, unknown>)["replayRetention"] = replay;
+    await createTaskActions(w.h.deps).continue(w.h.owner, w.task.taskId, { requestId: randomUUID(), instructions: "more work" });
+    await dispatchUntilSent(w.h);
+    const machineId = ((await w.h.store.get(w.wk))!["machine"] as { machineId: string }).machineId;
+    return w.h.machines.delivered(machineId).filter((invocation) => invocation.kind === "task");
+  }
+
+  it("dispatch: when the worker replays a sealed retention, the step carries it as its selector (the ordinary confirmed hand-over)", async () => {
+    const w = await unconfirmed("STOPPED");
+    const replay = vi.fn(async () => w.retained);
+    const sent = await delivered(w, replay);
+    expect(replay).toHaveBeenCalledWith(w.task.workspaceId, { operationId: w.holder, fence: w.retained.inspectionFence, generation: w.retained.generation });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ supersedesRetention: w.retained });
+  });
+
+  it("dispatch: when the worker has nothing sealed to replay (or the replay fails), the step goes without a selector, and a confirmed step's own selector is never replaced", async () => {
+    for (const replay of [async () => undefined, async () => { throw new Error("worker unreachable"); }]) {
+      const w = await unconfirmed("STOPPED");
+      const sent = await delivered(w, replay);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).not.toHaveProperty("supersedesRetention");
+    }
+    const confirmed = await finishedAndIdleStopped();
+    const replay = vi.fn(async () => ({ ...confirmed.retained, retentionId: randomUUID() }));
+    (confirmed.h.deps.closeInspection as unknown as Record<string, unknown>)["replayRetention"] = replay;
+    await createTaskActions(confirmed.h.deps).continue(confirmed.h.owner, confirmed.task.taskId, { requestId: randomUUID(), instructions: "more work" });
+    await dispatchUntilSent(confirmed.h);
+    expect(replay).not.toHaveBeenCalled();
+  });
+
   it("while the instance RUNS (READY) nothing is taken over: the idle rule ends it first; Continue is refused and nothing is written", async () => {
     const w = await unconfirmed("READY");
     const before = [await w.session(), await w.h.store.get(w.wk), await opOf(w, w.holder)];

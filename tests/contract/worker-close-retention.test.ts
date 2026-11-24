@@ -240,3 +240,65 @@ it("a different live data generation refuses an initial retain before any seal o
   expect(await h.executor().answer(h.invocation)).toMatchObject({ status: "unavailable", reason: "mismatch" });
   expect(h.storage.seal).not.toHaveBeenCalled(); expect(h.inspect).not.toHaveBeenCalled();
 });
+
+// F3 (Opus FAIL c62732f0b, Linux run 45301251271): a Continue over a retention the broker never confirmed. The worker releases ONLY what it never answered (an `intent`: never sealed, no reply); a sealed
+// retention, answered or not, is released only by the step that names it, which the broker learns by replaying the retain (the worker answers from its journal).
+describe("a step over a retention the broker never confirmed", () => {
+  const plain = (h: Awaited<ReturnType<typeof fixture>>, fence: number): WorkerInvocation => ({ ...h.invocation, kind: "task", operationId: randomUUID(), fence, payload: { conversationId: randomUUID(), prompt: "continue" } });
+
+  it("a retain that never sealed or answered (the worker said unavailable) holds nothing: a newer-fence step is admitted without any selector, the volume is never made read-only, and the old command can no longer seal", async () => {
+    const h = await fixture(); h.storage.seal.mockRejectedValue(new Error("remount busy"));
+    expect(await h.executor().answer(h.invocation)).toMatchObject({ status: "unavailable", reason: "unproven" });
+    expect((await h.journal.get(h.invocation.operationId))?.closeRetention).toMatchObject({ phase: "intent" });
+    const step = plain(h, 10);
+    expect((await h.executor().admitWriter(step)).duplicate).toBe(false);
+    expect(h.storage.successor).not.toHaveBeenCalled();
+    // The retain of the old fence cannot come back and seal under the step.
+    h.storage.seal.mockResolvedValue(h.seal);
+    await h.journal.transition(step.operationId, "RUNNING"); await h.journal.transition(step.operationId, "SUCCEEDED");
+    await expect(h.executor().answer(h.invocation)).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect(h.storage.seal).toHaveBeenCalledTimes(1);
+  });
+
+  it("the NEXT check's retain (a higher fence, another operation) also goes past a never-answered intent", async () => {
+    const h = await fixture(); h.storage.seal.mockRejectedValueOnce(new Error("remount busy"));
+    await h.executor().answer(h.invocation);
+    const next = await h.executor().answer({ ...h.invocation, operationId: randomUUID(), fence: 11 });
+    expect(next.status).toBe("retained");
+  });
+
+  it("the same fence, or a lower one, never goes past it", async () => {
+    const h = await fixture(); h.storage.seal.mockRejectedValue(new Error("remount busy"));
+    await h.executor().answer(h.invocation);
+    for (const fence of [8, 9]) await expect(h.executor().admitWriter(plain(h, fence))).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+  });
+
+  it("a SEALED retention that was answered (the reply may be the one the broker lost) is never released without its selector: the step is refused, the volume stays sealed", async () => {
+    const h = await fixture(); const first = await h.executor().answer(h.invocation);
+    if (first.status !== "retained") throw new Error("retention fixture failed");
+    await expect(h.executor().admitWriter(plain(h, 10))).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect(h.storage.successor).not.toHaveBeenCalled();
+    expect((await h.journal.get(h.invocation.operationId))?.closeRetention).toMatchObject({ phase: "sealed", terminalReply: first });
+    expect((await h.journal.get(h.invocation.operationId))?.closeRetention?.supersededBy).toBeUndefined();
+  });
+
+  it("a SEALED retention that was never answered (the inspection failed after the seal) is not released either", async () => {
+    const h = await fixture(); h.inspect.mockRejectedValueOnce(new Error("inspector failed"));
+    await h.executor().answer(h.invocation);
+    expect((await h.journal.get(h.invocation.operationId))?.closeRetention).toMatchObject({ phase: "sealed" });
+    await expect(h.executor().admitWriter(plain(h, 10))).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+  });
+
+  it("the broker's path: replaying the same retain returns the SAME reply (also on a restarted worker), and a step that names it is admitted and gets a distinct writable generation", async () => {
+    const h = await fixture(); const first = await h.executor().answer(h.invocation);
+    if (first.status !== "retained") throw new Error("retention fixture failed");
+    h.inspect.mockClear();
+    const replay = await h.executor().answer({ ...h.invocation, callbackCapability: "renewed".repeat(10) });
+    expect(replay).toEqual(first);
+    expect(h.inspect).not.toHaveBeenCalled();
+    const step: WorkerInvocation = { ...plain(h, 10), supersedesRetention: first.retention };
+    expect((await h.executor().admitWriter(step)).duplicate).toBe(false);
+    expect(h.storage.successor).toHaveBeenCalledOnce();
+    expect((await h.journal.get(h.invocation.operationId))?.closeRetention).toMatchObject({ supersededBy: step.operationId });
+  });
+});

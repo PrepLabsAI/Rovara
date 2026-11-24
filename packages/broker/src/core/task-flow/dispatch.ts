@@ -356,7 +356,7 @@ async function handleWorkerDispatch(deps: TaskFlowDeps, queue: Queue, message: R
     if (!claimed) return abandon(deps, queue, message, operation, handle.machineId, reservationId ?? workspace.machineReservationId, delivery);
     const invocation = await buildInvocation(deps, operation, workspace, health.features, standing, sent);
     if (typeof invocation === "string") return endAndAck("FAILED", invocation);
-    await deliverNotingRuntime(deps, workspace.id, handle.machineId, health, operation, invocation);
+    await deliverNotingRuntime(deps, workspace.id, handle.machineId, health, operation, await withUnconfirmedSelector(deps, operation, invocation));
     await queue.ack(message.receiptHandle);
     return "delivered";
   } catch (error) {
@@ -412,6 +412,17 @@ async function deliverNotingRuntime(deps: TaskFlowDeps, workspaceId: string, mac
   if (!successor) await deps.closeInspection?.noteRuntime?.(workspaceId, health, operation);
   await deps.machines.deliver(machineId, invocation);
   if (successor) await deps.closeInspection?.noteRuntime?.(workspaceId, await deps.machines.health(machineId), operation);
+}
+
+/**
+ * A step that took over a retention the broker never confirmed learns the worker's retention here: the worker is asked to replay that retain (its journal answers; nothing new is decided) and, when it did seal and
+ * answer, the reply is the step's selector, which is the ordinary confirmed hand-over (so a worker holding a sealed retention releases it to this step and only to it). Any other answer leaves the invocation as it
+ * is: the worker then admits the step only over a retention it never answered, and refuses it over a sealed one (the step fails with the worker's words and is never run on held data).
+ */
+async function withUnconfirmedSelector(deps: TaskFlowDeps, operation: OperationRecord, invocation: WorkerInvocation): Promise<WorkerInvocation> {
+  if (operation.supersedesUnconfirmed === undefined || invocation.supersedesRetention !== undefined || deps.closeInspection?.replayRetention === undefined) return invocation;
+  const selector = await deps.closeInspection.replayRetention(operation.workspaceId, operation.supersedesUnconfirmed).catch(() => undefined);
+  return selector === undefined ? invocation : { ...invocation, supersedesRetention: selector };
 }
 
 /** The retention a superseding step replaces rides on its invocation. */

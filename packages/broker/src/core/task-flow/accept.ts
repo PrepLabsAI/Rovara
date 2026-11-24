@@ -11,6 +11,7 @@ import { dispatchQueueName, hashJson, iso, newId } from "./support.js";
 
 export interface AcceptInput {
   supersedesRetention?: CloseRetention;
+  supersedesUnconfirmed?: OperationRecord["supersedesUnconfirmed"];
   workspace: Pick<WorkspaceRecord, "id" | "pk" | "fence" | "ownerKey">;
   kind: "prepare" | "task" | "publish" | "maintain";
   requestId: string;
@@ -130,6 +131,6 @@ export function assertPromptFits(prompt: string): void {
   if (Buffer.byteLength(prompt, "utf8") > 65_536) throw agentXError("CONFIG_INVALID", "the request is too long for the worker");
 }
 
-function retentionFields(input: AcceptInput): Pick<OperationRecord, "supersedesRetention"> {
-  return input.supersedesRetention === undefined ? {} : { supersedesRetention: input.supersedesRetention };
+function retentionFields(input: AcceptInput): Pick<OperationRecord, "supersedesRetention" | "supersedesUnconfirmed"> {
+  return { ...(input.supersedesRetention === undefined ? {} : { supersedesRetention: input.supersedesRetention }), ...(input.supersedesUnconfirmed === undefined ? {} : { supersedesUnconfirmed: input.supersedesUnconfirmed }) };
 }

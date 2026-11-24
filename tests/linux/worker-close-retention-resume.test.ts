@@ -5,25 +5,51 @@ import { it } from "vitest";
 
 // CLOSE-RETENTION, Opus delta c62732f0b: the two Rule #15 items the review adds to the Linux grid. MANUAL LINUX CI ONLY (CODE_CI_LINUX=1 on a disposable Docker host with a digest-pinned worker image): they
 // need root, loop devices and the worker image, and were NOT run when written. A red here is a finding, not a flaky test:
-//   1. F3: a Continue over a SEALED but unconfirmed retention (the worker sealed and answered, the broker never saved the reply) sends no `supersedesRetention`, so the worker's sealed journal record is never
+//   1. F3 (decision: DONE.md): a Continue over a SEALED retention the broker never confirmed (the worker sealed and answered, the broker never saved the reply). A step without a selector is REFUSED; the dispatcher replays
+//      the retain, the worker answers from its journal, and the step names that reply, so the worker's sealed journal record is
 //      marked superseded. The step's writes must still be admitted on the woken worker, and the next Close's retain must succeed.
 //   2. N-F1: an instance ended in the middle of a retain (the idle reaper's stop) leaves the retention either complete or absent, never half: the volume is intact, no writer is admitted, and the next retain succeeds.
 
 // A proof owns /mnt/workspace and /run/agentx-close-retention while it runs. Its own teardown runs inside the process that still holds journal descriptors, so a mount can stay busy and the NEXT proof (or the grid's
 // baseline) then fails "host already owns workspace path". Every proof therefore ends with a FRESH root process that detaches what the proof made, however the proof ended: lazy recursive unmounts, the loop devices
 // backing /mnt/workspace, the serve helper, then the directories. It runs only after a proof that started (this suite refuses a host that already used those paths before it begins).
-const teardownScript = [
-  "pkill -f 'close-retention.sh serve' 2>/dev/null || true",
-  "loops=$(losetup -a 2>/dev/null | grep '/mnt/workspace/' | cut -d: -f1 || true)",
-  "umount -R -l /run/agentx-close-retention/view 2>/dev/null || true",
-  "umount -R -l /mnt/workspace 2>/dev/null || true",
-  "for device in $loops; do losetup --detach \"$device\" 2>/dev/null || true; done",
-  "rm -rf /run/agentx-close-retention /mnt/workspace",
-  "test ! -e /mnt/workspace && test ! -e /run/agentx-close-retention",
-].join("\n");
+const teardownScript = String.raw`
+set +u
+R=/mnt/workspace; V=/run/agentx-close-retention
+# Holders: any process whose cwd, root, an open descriptor or a mapping points under the proof's paths (this shell excluded).
+holders() {
+  for p in /proc/[0-9]*; do
+    pid=$(basename "$p"); [ "$pid" = "$$" ] && continue
+    hit=""
+    for link in "$p/cwd" "$p/root" "$p"/fd/*; do
+      target=$(readlink "$link" 2>/dev/null) || continue
+      case "$target" in "$R"|"$R"/*|"$V"|"$V"/*) hit="$link -> $target"; break;; esac
+    done
+    [ -z "$hit" ] && grep -qE " ($R|$V)(/| )" "$p/maps" 2>/dev/null && hit="maps"
+    [ -n "$hit" ] && echo "$pid $(tr '\0' ' ' < "$p/cmdline" 2>/dev/null | cut -c1-160) via $hit"
+  done
+}
+# The serve helper first, by a pattern that cannot match this very command line.
+pkill -f 'close-retention[.]sh serve' 2>/dev/null
+loops=$(losetup -a 2>/dev/null | grep "$R/" | cut -d: -f1)
+holders | while read -r pid rest; do kill -9 "$pid" 2>/dev/null; done
+sleep 1
+# Every mount under the proof's paths, deepest first, lazily.
+awk -v r="$R" -v v="$V" '{m=$2; if (m==r||index(m,r"/")==1||m==v||index(m,v"/")==1) print m}' /proc/mounts | sort -r | while read -r m; do umount -l "$m" 2>/dev/null; done
+for device in $loops; do losetup --detach "$device" 2>/dev/null; done
+rm -rf "$V" "$R" 2>/dev/null
+if [ -e "$R" ] || [ -e "$V" ]; then
+  echo "STILL PRESENT after teardown: $R=$([ -e "$R" ] && echo yes || echo no) $V=$([ -e "$V" ] && echo yes || echo no)"
+  echo "--- mounts"; grep -E "workspace|agentx-close" /proc/mounts
+  echo "--- loop devices"; losetup -a
+  echo "--- holders"; holders
+  echo "--- rm"; rm -rf "$R" 2>&1 | head -5
+  exit 1
+fi
+`;
 async function teardownProofHost(): Promise<string | undefined> {
   try { await promisify(execFile)("sudo", ["-n", "bash", "-c", teardownScript], { timeout: 60_000 }); return undefined; }
-  catch (error) { return "teardown could not release the proof host: " + String((error as { stderr?: string }).stderr ?? error); }
+  catch (error) { const failed = error as { stdout?: string; stderr?: string }; return "teardown could not release the proof host:\n" + String(failed.stdout ?? "") + String(failed.stderr ?? error); }
 }
 async function runRootProof(proof: string, image: string, timeout: number) {
   let failure: Error | undefined;
@@ -39,7 +65,7 @@ const image = () => {
   return value;
 };
 
-it.runIf(process.env.CODE_CI_LINUX === "1")("F3: a Continue over a sealed but unconfirmed retention is admitted on the woken worker (no supersession was ever sent), and the next Close's retain succeeds", async () => {
+it.runIf(process.env.CODE_CI_LINUX === "1")("F3: a Continue over a sealed retention the broker never confirmed: refused without its selector, admitted with the one a replayed retain returns, the volume writable, and the next Close's retain succeeds", async () => {
   await runRootProof(unconfirmedContinueProof, image(), 180_000);
 }, 190_000);
 
@@ -117,13 +143,20 @@ const unconfirmedContinueProof = proofPrelude + String.raw`
   const wokenExecutor=new CloseRetentionExecutor(wokenJournal,new HostCloseRetentionStorage(),async()=>inspectWorkspaceForClose(ROOT+'/data'),()=>false);
   const wokenState=createWorkerServerState(wokenJournal,{execute:async()=>{wokenWrites++;},retention:i=>wokenExecutor.answer(i),admit:i=>wokenExecutor.admitWriter(i)});
   const wokenSend=async(i)=>{const response=await handleWorkerRequest(new Request('http://worker/invocations',{method:'POST',body:JSON.stringify(i)}),wokenState);return {status:response.status,body:await response.json()};};
-  // The Continue: a plain task step with NO supersedesRetention (the broker had no confirmed retention to name).
-  const step=await wokenSend({...invocation,kind:'task',operationId:randomUUID(),fence:11,payload:{conversationId:randomUUID(),prompt:'continue the work'}});
-  assert.notEqual(step.status,409,'the step must be admitted: an unconfirmed seal must not hold the task'); assert.equal(wokenWrites,1);
+  // 1. A plain step (no selector) over a SEALED retention is refused: a sealed retention, answered or not, is released only by the step that names it.
+  const plainStep=await wokenSend({...invocation,kind:'task',operationId:randomUUID(),fence:11,payload:{conversationId:randomUUID(),prompt:'continue the work'}});
+  assert.equal(plainStep.status,409,'a sealed retention must not be released by a step that does not name it'); assert.equal(wokenWrites,0);
+  // 2. The broker's takeover learns the worker's retention by REPLAYING the same retain: the worker answers from its journal (same reply, no new inspection), also on the woken instance.
+  const replayed=await wokenSend(invocation); assert.equal(replayed.body.status,'retained'); assert.deepEqual(replayed.body.retention,sealed.retention);
+  // 3. The Continue names that retention: it is admitted, gets a distinct generation, and the volume is writable.
+  const stepId=randomUUID();
+  const step=await wokenSend({...invocation,kind:'task',operationId:stepId,fence:11,payload:{conversationId:randomUUID(),prompt:'continue the work'},supersedesRetention:replayed.body.retention});
+  assert.notEqual(step.status,409,'the step naming the retention must be admitted'); assert.equal(wokenWrites,1);
   await writeFile(ROOT+'/data/repo/value','continued work\n');
-  // The next Close's check: a new preflight at a higher fence retains again and sees the continued work.
+  // 4. The next Close's check: a new preflight at a higher fence retains again and sees the continued work.
+  await wokenJournal.transition(stepId,'RUNNING').catch(()=>{}); await wokenJournal.transition(stepId,'SUCCEEDED').catch(()=>{});
   const again=await wokenSend({...invocation,operationId:randomUUID(),fence:12});
-  assert.equal(again.body.status,'retained'); assert.equal(again.body.inspection.repositories.length>=0,true);
+  assert.equal(again.body.status,'retained'); assert.equal(again.body.inspection.safeToClose,false,'the continued work is unpublished');
 ` + proofFinally;
 
 const stopMidRetainProof = proofPrelude + String.raw`

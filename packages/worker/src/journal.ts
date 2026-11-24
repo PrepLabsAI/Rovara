@@ -42,7 +42,9 @@ export class OperationJournal {
       // Recheck under the same lock as the append and destructive raise. The
       // HTTP admission check alone would leave a check-then-write gap.
       await this.checkFence(invocation);
-      await this.checkRetention(invocation);
+      const passedIntent = await this.checkRetention(invocation);
+      // Going past a never-answered intent raises the fence in the same lock: the old command can no longer seal under this work.
+      if (passedIntent) await this.persistFence(invocation.workspaceId, invocation.fence);
       return this.append(invocation);
     });
   }
@@ -213,13 +215,17 @@ export class OperationJournal {
     await this.syncDirectory(this.directory);
   }
 
-  private async checkRetention(input: Pick<WorkerInvocation, "workspaceId" | "fence">): Promise<void> {
+  /** Throws when retained data holds the workspace; true when it went past a never-answered intent (see `supersededByNewerFence`). */
+  private async checkRetention(input: Pick<WorkerInvocation, "workspaceId" | "fence">): Promise<boolean> {
+    let passedIntent = false;
     for (const record of await this.readRecords()) {
       if (record.workspaceId !== input.workspaceId || record.closeRetention === undefined || record.closeRetention.supersededBy !== undefined) continue;
       // Even the same fence cannot write after an intent. Only the originating close command may replay.
       if (matchesRetainedCommand(input, record) || matchesSuccessor(input, record)) continue;
+      if (supersededByNewerFence(input, record)) { passedIntent = true; continue; }
       throw agentXError("IDEMPOTENCY_CONFLICT", "workspace data is held by a retained inspection");
     }
+    return passedIntent;
   }
 
   private path(operationId: string): string {
@@ -318,6 +324,16 @@ function matchesRetainedCommand(input: Pick<WorkerInvocation, "workspaceId" | "f
 function existingAppend(record: JournalRecord, hash: string): { record: JournalRecord; duplicate: boolean } {
   if (record.payloadHash !== CANCELLED_BEFORE_ARRIVAL && record.payloadHash !== hash) throw agentXError("IDEMPOTENCY_CONFLICT", "operation was already journaled with another payload");
   return { record, duplicate: true };
+}
+
+/**
+ * A close command that was journaled but never sealed and never answered (phase `intent`, no seal, no reply: the worker said `unavailable`, or died first) holds nothing: no retained reply exists, so no broker can
+ * hold a digest of it, and the volume was never made read-only. Work at a NEWER fence goes past it (it raised the fence, so the old command can no longer seal). A sealed retention, answered or not, is never
+ * passed this way: it is released only by the step that names it (`matchesSuccessor`).
+ */
+function supersededByNewerFence(input: Pick<WorkerInvocation, "fence">, record: JournalRecord): boolean {
+  const state = record.closeRetention;
+  return state !== undefined && state.phase === "intent" && state.seal === undefined && state.terminalReply === undefined && input.fence > record.fence;
 }
 
 function matchesSuccessor(input: Pick<WorkerInvocation, "workspaceId" | "fence">, record: JournalRecord): boolean {

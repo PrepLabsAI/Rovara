@@ -117,6 +117,11 @@ export interface OperationRecord extends Operation {
   closeAcceptance?: CloseAcceptance;
   closePreflight?: { schemaVersion: 1; target?: WorkspaceDataIdentity };
   supersedesRetention?: CloseRetention;
+  /**
+   * The step took over a retention whose worker reply the broker never confirmed (the check gave up, or its reply was lost): the old preflight and the generation it captured. Broker-only: the dispatcher asks the
+   * worker to replay that retain once, and when the worker did seal and answer, the reply becomes this step's `supersedesRetention` (the ordinary confirmed hand-over). Nothing here reaches a worker as such.
+   */
+  supersedesUnconfirmed?: { operationId: string; fence: number; generation: WorkspaceDataIdentity };
   pk: string;
   sk: string;
   entityType: "OPERATION";

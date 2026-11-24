@@ -180,3 +180,30 @@ describe("the check replaces a retention a step has superseded, and only that", 
     expect(await f.h.store.get(workspaceSessionKey(f.workspaceId))).toEqual(before);
   });
 });
+
+describe("replaying a retain the broker never confirmed", () => {
+  async function replayed(answer: (command: { workspaceId: string; operationId: string; fence: number; payload: unknown }) => unknown) {
+    const f = await fixture({ state: "READY", generation: 2, instanceId: "i-00000001", volumeId: "vol-00000001", privateIp: "10.0.0.2", workerFeatures: [CLOSE_RETENTION_FEATURE] } as never, "provisioning", false);
+    const generation = (await f.machines.health()).workspaceDataIdentity!;
+    const operationId = randomUUID();
+    f.machines.deliver.mockImplementation(async (_machine: string, command: never) => ({ answer: answer(command) }));
+    return { f, generation, operationId, run: () => f.provider.replayRetention!(f.workspaceId, { operationId, fence: 9, generation }) };
+  }
+  const retainedReply = (command: { workspaceId: string; operationId: string; fence: number; payload: { target: unknown } }) => ({
+    schemaVersion: 1, workspaceId: command.workspaceId, operationId: command.operationId, fence: command.fence, action: "retain", status: "retained",
+    retention: { inspectionOperationId: command.operationId, inspectionFence: command.fence, retentionId: "11111111-1111-4111-8111-111111111111", contentDigest: "a".repeat(64), generation: command.payload.target },
+    inspection: { safeToClose: false, repositories: [{ name: "demo", reasons: ["unpushed_head"] }], contentDigest: "a".repeat(64) },
+  });
+  it("sends the SAME retain (the preflight's id, its fence, its captured target) and returns the retention the worker answered", async () => {
+    const { f, generation, operationId, run } = await replayed(retainedReply as never);
+    const retention = await run();
+    expect(retention).toMatchObject({ inspectionOperationId: operationId, inspectionFence: 9, retentionId: "11111111-1111-4111-8111-111111111111", generation });
+    expect(f.machines.deliver).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ kind: "close", operationId, fence: 9, payload: { schemaVersion: 1, action: "retain", target: generation } }));
+  });
+  it("answers nothing when the worker did not seal and answer (unavailable), and a reply for another operation is refused", async () => {
+    const unavailable = await replayed((command) => ({ schemaVersion: 1, workspaceId: command.workspaceId, operationId: command.operationId, fence: command.fence, action: "retain", status: "unavailable", reason: "unproven" }));
+    expect(await unavailable.run()).toBeUndefined();
+    const other = await replayed((command) => ({ ...retainedReply(command as never), operationId: randomUUID() }));
+    await expect(other.run()).rejects.toBeDefined();
+  });
+});

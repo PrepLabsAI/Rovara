@@ -7,18 +7,43 @@ import { it } from "vitest";
 // A proof owns /mnt/workspace and /run/agentx-close-retention while it runs. Its own teardown runs inside the process that still holds journal descriptors, so a mount can stay busy and the NEXT proof (or the grid's
 // baseline) then fails "host already owns workspace path". Every proof therefore ends with a FRESH root process that detaches what the proof made, however the proof ended: lazy recursive unmounts, the loop devices
 // backing /mnt/workspace, the serve helper, then the directories. It runs only after a proof that started (this suite refuses a host that already used those paths before it begins).
-const teardownScript = [
-  "pkill -f 'close-retention.sh serve' 2>/dev/null || true",
-  "loops=$(losetup -a 2>/dev/null | grep '/mnt/workspace/' | cut -d: -f1 || true)",
-  "umount -R -l /run/agentx-close-retention/view 2>/dev/null || true",
-  "umount -R -l /mnt/workspace 2>/dev/null || true",
-  "for device in $loops; do losetup --detach \"$device\" 2>/dev/null || true; done",
-  "rm -rf /run/agentx-close-retention /mnt/workspace",
-  "test ! -e /mnt/workspace && test ! -e /run/agentx-close-retention",
-].join("\n");
+const teardownScript = String.raw`
+set +u
+R=/mnt/workspace; V=/run/agentx-close-retention
+# Holders: any process whose cwd, root, an open descriptor or a mapping points under the proof's paths (this shell excluded).
+holders() {
+  for p in /proc/[0-9]*; do
+    pid=$(basename "$p"); [ "$pid" = "$$" ] && continue
+    hit=""
+    for link in "$p/cwd" "$p/root" "$p"/fd/*; do
+      target=$(readlink "$link" 2>/dev/null) || continue
+      case "$target" in "$R"|"$R"/*|"$V"|"$V"/*) hit="$link -> $target"; break;; esac
+    done
+    [ -z "$hit" ] && grep -qE " ($R|$V)(/| )" "$p/maps" 2>/dev/null && hit="maps"
+    [ -n "$hit" ] && echo "$pid $(tr '\0' ' ' < "$p/cmdline" 2>/dev/null | cut -c1-160) via $hit"
+  done
+}
+# The serve helper first, by a pattern that cannot match this very command line.
+pkill -f 'close-retention[.]sh serve' 2>/dev/null
+loops=$(losetup -a 2>/dev/null | grep "$R/" | cut -d: -f1)
+holders | while read -r pid rest; do kill -9 "$pid" 2>/dev/null; done
+sleep 1
+# Every mount under the proof's paths, deepest first, lazily.
+awk -v r="$R" -v v="$V" '{m=$2; if (m==r||index(m,r"/")==1||m==v||index(m,v"/")==1) print m}' /proc/mounts | sort -r | while read -r m; do umount -l "$m" 2>/dev/null; done
+for device in $loops; do losetup --detach "$device" 2>/dev/null; done
+rm -rf "$V" "$R" 2>/dev/null
+if [ -e "$R" ] || [ -e "$V" ]; then
+  echo "STILL PRESENT after teardown: $R=$([ -e "$R" ] && echo yes || echo no) $V=$([ -e "$V" ] && echo yes || echo no)"
+  echo "--- mounts"; grep -E "workspace|agentx-close" /proc/mounts
+  echo "--- loop devices"; losetup -a
+  echo "--- holders"; holders
+  echo "--- rm"; rm -rf "$R" 2>&1 | head -5
+  exit 1
+fi
+`;
 async function teardownProofHost(): Promise<string | undefined> {
   try { await promisify(execFile)("sudo", ["-n", "bash", "-c", teardownScript], { timeout: 60_000 }); return undefined; }
-  catch (error) { return "teardown could not release the proof host: " + String((error as { stderr?: string }).stderr ?? error); }
+  catch (error) { const failed = error as { stdout?: string; stderr?: string }; return "teardown could not release the proof host:\n" + String(failed.stdout ?? "") + String(failed.stderr ?? error); }
 }
 async function runRootProof(proof: string, image: string, timeout: number) {
   let failure: Error | undefined;
