@@ -69,6 +69,7 @@ import { setupStateOf, startProjectSetupCheck } from "../core/setup-agent/check.
 import { resumeSetupPausedTasks } from "../core/setup-agent/auto-resume.js";
 import { log as logTaskFlow } from "../core/task-flow/support.js";
 import { setupRepairViewOf } from "../core/setup-agent/repair-view.js";
+import { SETUP_NEEDS_REPAIR_WARNING, readSetupRepairCard } from "../core/setup-agent/recheck.js";
 import { putSetupLimits, readSetupLimits, setupLimitSettingReader } from "../core/setup-agent/limits.js";
 
 export const SETUP_RUN_PROJECT_NOT_FOUND = "project not found";
@@ -189,6 +190,11 @@ const errorAnswer = (error: AgentXError): BrokerResponse => json(error.statusCod
 const notFound = (): AgentXError => agentXError("NOT_FOUND", SETUP_RUN_PROJECT_NOT_FOUND);
 
 /** The project's name from the path: a malformed escape or name is a project that does not exist. */
+/** DEC 254zzz447: `{ setupWarning }` (the plain warning) while the project's setup needs repair now (its open repair card); `{}` otherwise or when it cannot be read. */
+async function setupWarningFields(flow: TaskFlowDeps, project: string): Promise<{ setupWarning?: string }> {
+  return (await readSetupRepairCard(flow, project).catch(() => undefined)) === undefined ? {} : { setupWarning: SETUP_NEEDS_REPAIR_WARNING };
+}
+
 function projectOf(raw: string): string {
   let project: string;
   try { project = decodeURIComponent(raw); } catch { throw notFound(); }
@@ -481,7 +487,8 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
       const apply = input.wiring.approval === undefined ? undefined : await applyView(input, deps, project);
       // L4-RD: the admin card of a broken setup ("Approve new setup" / "Fix setup"), for the people who manage the project's setup only. Absent while the setup is not broken.
       const repair = standing.access === "manage" ? await readRepairView(deps, project) : undefined;
-      return json(200, { ...(await getSetupAgent(deps, project)), canManage: standing.access === "manage", ...(apply === undefined ? {} : { apply }), ...(repair === undefined ? {} : { repair }) });
+      // DEC 254zzz447 (don't block work): while the setup is broken EVERY reader gets the plain warning (work continues; nothing is paused or refused), not only the people who manage it.
+      return json(200, { ...(await getSetupAgent(deps, project)), canManage: standing.access === "manage", ...(apply === undefined ? {} : { apply }), ...(repair === undefined ? {} : { repair }), ...(await setupWarningFields(deps.flow, project)) });
     }
     if (input.request.method === "GET" && tail === "updates") {
       // The offers are for the people who manage the project's setup (and only where a candidate can be approved); a reader sees none, and no other company's or project's.
@@ -629,7 +636,7 @@ export async function routeHostedSetupCheck(input: HostedSetupRunInput): Promise
       // L4-U5: the setup state, who may act (read live above), and, while the setup is broken, the "Setup needs repair" card in the words every surface shares. The card's actions are empty for a person who may not act.
       const canManage = standing.access === "manage";
       const repair = await setupRepairViewOf({ flow, store: flow.store, companyId, now: input.now }, project, { canManage }).catch(() => undefined);
-      return json(200, { ...(await setupStateOf(flow, project, latest.definition)), canManage, ...(repair === undefined ? {} : { repair }) });
+      return json(200, { ...(await setupStateOf(flow, project, latest.definition)), canManage, ...(repair === undefined ? {} : { repair }), ...(await setupWarningFields(flow, project)) });
     }
     if (input.request.method !== "POST") throw agentXError("NOT_FOUND", "route not found");
     if (standing.access !== "manage") throw agentXError("FORBIDDEN", SETUP_RUN_NOT_ALLOWED);

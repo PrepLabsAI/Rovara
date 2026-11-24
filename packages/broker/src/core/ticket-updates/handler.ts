@@ -27,7 +27,7 @@ import { inertTicketTitle, plainHttpsLink } from "./text.js";
 import { effectiveLevel, refreshThreadOfTask, sendThreadMilestone, type ThreadOutcome } from "./thread.js";
 
 export { inertTicketTitle } from "./text.js";
-import { setupEvidenceOf, setupPausedMessage, setupTrustLineOf } from "../setup-agent/recheck-rows.js";
+import { setupEvidenceOf, setupBrokenWarningMessage, setupTrustLineOf } from "../setup-agent/recheck-rows.js";
 
 export const TICKET_UPDATES_PER_HOUR = 120;
 export const TICKET_UPDATES_PER_TASK = 12;
@@ -104,7 +104,7 @@ function claimKeyOf(milestone: CodeMilestone, moment: TicketUpdateMoment): strin
 
 /** One milestone: the update it calls for, sent once to the ticket the task started from. Never throws for a ticket that cannot be written; throws a fault that may pass. */
 export async function sendTicketUpdate(deps: TicketUpdatesDependencies, milestone: CodeMilestone): Promise<string> {
-  // L4-U5: `setup_paused` (the task paused before Build because the project's setup broke) is a comment of its own, in the page's fixed words; it never moves a ticket's status.
+  // L4-U5 / DEC 254zzz447: `setup_paused` (the wire id is kept; it now carries a WARNING: the task reached Build while the project's setup needs repair and work continues) is a comment of its own, in the page's fixed words; it never moves a ticket's status.
   const setupPaused = milestone.kind === "setup_paused";
   const moment = setupPaused ? undefined : MOMENT_OF[milestone.kind];
   if (moment === undefined && !setupPaused) return "not_a_moment";
@@ -125,7 +125,7 @@ export async function sendTicketUpdate(deps: TicketUpdatesDependencies, mileston
   if (tracker === undefined || (tracker.comment === undefined && tracker.setStatusByName === undefined)) return "not_connected";
   // Above `status_only` the ticket gets one thread (a root comment edited in place, and replies) from the task log instead of the five one-shot comments; the level is what this project chose, narrowed to what this tracker and this
   // task allow (`effectiveLevel`). At `status_only` nothing below changes: it is the code that was here before the levels.
-  // Batch 17: a setup pause (L4-U5, no moment) is always its own one-shot comment, never a thread message.
+  // Batch 17: a setup warning (L4-U5, no moment) is always its own one-shot comment, never a thread message.
   if (settings.comments && moment !== undefined) {
     let level = await effectiveLevel(deps, { tracker, orgId, taskId: milestone.taskId, level: ticketUpdateLevelOf(settings) });
     const strictTicket = level === "status_only" ? undefined : await originTicketOf(deps, { orgId, project, taskId: milestone.taskId, sessionId }, { strict: true });
@@ -133,14 +133,14 @@ export async function sendTicketUpdate(deps: TicketUpdatesDependencies, mileston
     // The thread goes to the ticket that names THIS task, whichever other ticket the session was bound to.
     if (level !== "status_only" && strictTicket !== undefined) return sendThreadMilestone(deps, { milestone, moment, task, ticket: strictTicket, tracker, orgId, project, settings, settingsAt, level, status, key: claimKeyOf(milestone, moment) });
   }
-  // The setup pause says its words only while the task's re-check says the setup is broken, and once per re-check (a task paused twice by the same break is told once).
+  // The setup warning says its words only while the task's re-check says the setup is broken, and once per re-check (a task that reaches Build twice under the same break is told once).
   let setupText: string | undefined;
   let setupKey: string | undefined;
   if (setupPaused) {
     const evidence = await setupEvidenceOf({ store: deps.store, companyId: orgId }, project, milestone.taskId);
     if (evidence?.state !== "broken" || evidence.recheckKey === undefined) return "not_broken";
     setupKey = `setup_paused#${evidence.recheckKey}`;
-    setupText = setupPausedMessage(evidence.failedStep ?? "setup", deps.setupUrl?.(project));
+    setupText = setupBrokenWarningMessage(evidence.failedStep ?? "setup", deps.setupUrl?.(project));
   }
   // The evidence line rides on the pull request comment only when the setup could not be re-checked (a pass never posts).
   const trustLine = moment === "pr_opened" ? await setupTrustLineOf({ store: deps.store, companyId: orgId }, project, milestone.taskId) : undefined;
