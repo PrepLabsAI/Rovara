@@ -1,8 +1,8 @@
 // Lead 4 L4-HW8: the people port of the dispatcher's lessons reader (`dispatcher-lessons.ts`), for ONE company, read-only. The dispatcher decides nothing for a person, but loading lessons into a worker step must
 // still ask who is on the project's roster now (a task's source lessons are shown only to the project's audience, `lessons/hosted-people.ts`), so the port the broker's lessons already use
 // (`createHostedLessonsPeople`, aws/hosted-lessons-people.ts: live membership, company-bound, throws for another company) is reused here over a client that can only do what the dispatcher's role may:
-//   - sign-in table: one strongly consistent GetItem, and ONLY of `COMPANY_MEMBER#<id>` with the Membership fields or `DEVELOPER#<id>` with the projected developer fields: the exact keys and attributes the dispatcher role is granted
-//     (infra/lib/task-person-proof.ts `DispatcherPolicy`); any other key, any other command, any other table is refused before it is sent;
+//   - sign-in table: one strongly consistent GetItem, and ONLY of `COMPANY_MEMBER#<id>` with the Membership fields or `DEVELOPER#<id>` with the projected developer fields: the exact keys and attributes a dispatcher role grant would name
+//     (no stack grants them to the dispatcher today, so without `DEVELOPER_SIGNIN_TABLE_NAME` every question throws); any other key, any other command, any other table is refused before it is sent;
 //   - State table: GetItem only (the project grant row `MEMBER#<id>` / `PROJECT#<name>`, or a named company's `ORG#<company>#MEMBER#<id>` / `PROJECT#<name>`); no Query, no write.
 // NOT given (no new IAM): the company's member list (a Query the dispatcher's role is not granted) so `approvers` and `projectMembers` refuse; and the merge record `mergedInto` of a developer (not among the attributes the role may read)
 // so `resolveMember` is absent and ids compare as they are, exactly as the dispatcher's lessons did before this port (the approvals were checked with merges resolved when they were made, on the broker).

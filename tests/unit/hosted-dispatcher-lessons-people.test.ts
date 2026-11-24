@@ -1,7 +1,6 @@
 // Lead 4 L4-HW8 (1): the hosted dispatcher's lessons reader gets a company-scoped, read-only people port (worker-machines/dispatcher-people.ts), so a worker step receives the company's lessons
 // learned from other people's tasks while the person running the task is on the project's roster. The Dynamo client below plays the dispatcher ROLE: GetItem only, and on the sign-in table only the two keys with the projected attributes that
-// infra/lib/task-person-proof.ts `DispatcherPolicy` grants.
-import { readFileSync } from "node:fs";
+// the runtime's own attribute lists name (no stack grants the dispatcher these reads today).
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GetCommand, QueryCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { LEARNED_CONTEXT_FEATURE, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
@@ -30,13 +29,6 @@ const WORLD = {
 } as const;
 const request = (company: typeof A | typeof B) => ({ workspaceId: WORLD[company].ws, operationId: WORLD[company].task, workflowMode: "PLAN", features: [LEARNED_CONTEXT_FEATURE] });
 afterEach(() => { setLearnedLessonsGate(undefined); });
-
-/** What the dispatcher role may read of the sign-in table, as the infra says it (so the runtime's lists cannot drift from the grant). */
-function infraList(name: string): string[] {
-  const text = readFileSync("infra/lib/task-person-proof.ts", "utf8");
-  const match = new RegExp(`const ${name} = \\[([^\\]]*)\\]`, "u").exec(text);
-  return [...(match?.[1] ?? "").matchAll(/"([^"]+)"/gu)].map((found) => found[1]!);
-}
 
 async function world() {
   setLearnedLessonsGate(() => true);
@@ -74,7 +66,7 @@ async function world() {
       sent.push({ table: TableName, kind: "get", key: Key, projection });
       if (ConsistentRead !== true) throw new Error("not consistent");
       if (TableName === SIGN_IN) {
-        const allowed = Key.pk.startsWith("COMPANY_MEMBER#") ? infraList("COMPANY_MEMBER_ATTRIBUTES") : Key.pk.startsWith("DEVELOPER#") ? infraList("DEVELOPER_ATTRIBUTES") : undefined;
+        const allowed: readonly string[] | undefined = Key.pk.startsWith("COMPANY_MEMBER#") ? [...TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES] : Key.pk.startsWith("DEVELOPER#") ? [...TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES] : undefined;
         if (allowed === undefined || projection === undefined || projection.some((attribute) => !allowed.includes(attribute))) throw new Error("AccessDeniedException: sign-in table");
         const row = signIn.get(`${Key.pk}|${Key.sk}`);
         return { Item: row === undefined ? undefined : Object.fromEntries(projection.filter((attribute) => attribute in row).map((attribute) => [attribute, row[attribute]])) };
@@ -121,9 +113,7 @@ describe("the dispatcher's company-scoped lessons people port", () => {
       expect(read.projection).toBeDefined();
       expect(read.key.pk.startsWith("COMPANY_MEMBER#") || read.key.pk.startsWith("DEVELOPER#")).toBe(true);
     }
-    expect([...TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES]).toEqual(infraList("COMPANY_MEMBER_ATTRIBUTES"));
-    expect([...TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES]).toEqual(infraList("DEVELOPER_ATTRIBUTES"));
-    expect(infraList("DEVELOPER_ATTRIBUTES")).not.toContain("mergedInto");
+    expect([...TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES]).not.toContain("mergedInto");
   });
 
   it("withholds the lessons learned from other people's tasks when the person running the task is no longer on the company (removed), is another company's member, or has no grant, and does not fail the step", async () => {

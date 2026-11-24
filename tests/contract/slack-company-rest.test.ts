@@ -6,7 +6,6 @@ import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { slackTokens } from "../../packages/testing/src/channel/slack-world.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { noticeServedByCompany, slackNoteIsInstalls, splitNoticesBySlackCompany } from "../../packages/broker/src/aws/slack-company-notices.js";
-import { createTaskPersonProofRuntime, proofIsInstalls } from "../../packages/broker/src/aws/task-person-proof-runtime.js";
 import { createSlackWorkspaceBindings } from "../../packages/broker/src/aws/slack-workspace-binding.js";
 import { createSlackWorkspaceTokens } from "../../packages/broker/src/aws/slack-workspace-tokens.js";
 import { serviceSlackWorkspacesFromEnvironment } from "../../packages/slack-service/src/slack-company-workspaces.js";
@@ -112,25 +111,6 @@ describe("the reconciler's install rule", () => {
     expect(slackNoteIsInstalls(undefined, {}, INSTALL)).toBe(false);
     expect(slackNoteIsInstalls(INSTALL, null, INSTALL)).toBe(false);
     expect(slackNoteIsInstalls(INSTALL, { entityType: "WORKSPACE_COMPANY_POINTER" }, INSTALL)).toBe(false);
-  });
-});
-
-describe("TaskPersonProof's split", () => {
-  const scope = (companyId: string, teamId: string) => ({ companyId, teamId });
-  it("keeps the install's own proof (or one naming no workspace) on today's handler", () => {
-    expect(proofIsInstalls({ request: {} }, INSTALL)).toBe(true);
-    expect(proofIsInstalls({ workspace: scope(IMPLICIT_COMPANY_ID, INSTALL), request: { workspace: scope(IMPLICIT_COMPANY_ID, INSTALL) } }, INSTALL)).toBe(true);
-    expect(proofIsInstalls({ workspace: scope(IMPLICIT_COMPANY_ID, INSTALL), request: {} }, INSTALL)).toBe(false);
-    expect(proofIsInstalls({ workspace: scope(B, INSTALL), request: { workspace: scope(B, INSTALL) } }, INSTALL)).toBe(false);
-    expect(proofIsInstalls({ workspace: scope(B, OTHER), request: { workspace: scope(B, OTHER) } }, INSTALL)).toBe(false);
-    expect(proofIsInstalls({ request: {} }, undefined)).toBe(false);
-  });
-  it("routes by that rule in the runtime", async () => {
-    const legacy = vi.fn(async () => "legacy");
-    const runtime = createTaskPersonProofRuntime({ workspaces: { requireCompany: async () => B, tokenForCompany: async () => undefined }, legacyTeamId: INSTALL, legacy: legacy as never, env: { AGENTX_ENV: "staging" } });
-    expect(await runtime({ request: {} }, { getRemainingTimeInMillis: () => 1000 })).toBe("legacy");
-    await expect(runtime({ workspace: scope(B, OTHER), request: { workspace: scope(B, OTHER) } }, { getRemainingTimeInMillis: () => 1000 })).rejects.toThrow();
-    expect(legacy).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -476,10 +476,6 @@
             "ParameterValue": "agentx-agentxlivetest123-ac-artifactbucket7410c9ef-tdepjp3jep13"
         },
         {
-            "ParameterKey": "TaskPersonProofEnabled",
-            "ParameterValue": "true"
-        },
-        {
             "ParameterKey": "DeveloperOidcSince",
             "ParameterValue": "0"
         },

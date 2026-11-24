@@ -303,13 +303,10 @@ export const CONTROL_PLANE_LAMBDAS = {
   "sessions-reconciler": { logicalId: "SessionsReconciler4316A0A2", entry: "packages/broker/src/aws/session-reconciler.ts" },
 } as const satisfies Record<string, LambdaSpec>;
 /**
- * Repo-built control-plane Lambdas that test-deploy does not move, with why. The proof function is invoked through a published
- * Lambda version (its ARN is the Dispatcher's TASK_PERSON_PROOF_FUNCTION_ARN), and a version is immutable: new code in the function
- * changes nothing that runs, and a new version is a template change this script does not make. A contract test requires every
+ * Repo-built control-plane Lambdas that test-deploy does not move, with why. A contract test requires every
  * repo-built Lambda of the synthesized control-plane template to be in exactly one of this and CONTROL_PLANE_LAMBDAS.
  */
 export const CONTROL_PLANE_LAMBDAS_NOT_DEPLOYED: Readonly<Record<string, string>> = {
-  TaskPersonProofFunction817A5A36: "invoked through a published Lambda version, which a code-only change set cannot move; it needs a CDK deploy",
   // Batch 14 (#907, C8B): the attention email sender exists only while CoreAttentionEmail is on (off by default), so a code-only change set cannot count on it.
   CoreEngineJobsAttentionEmailSenderC7CE396D: "exists only while CoreAttentionEmail is on (off by default); a code-only change set cannot move a function the stack may not have; it needs a CDK deploy",
 };

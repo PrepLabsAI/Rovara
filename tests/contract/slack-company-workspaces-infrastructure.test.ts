@@ -44,14 +44,12 @@ const BINDINGS = ["SLACK_TEAM#*", "SLACK_WORKSPACE_BINDING"];
 
 let named: TemplateJson;
 let legacy: TemplateJson;
-let proofEnv: TemplateJson;
 let on: string;
 beforeAll(() => {
   named = controlPlane("staging");
   legacy = controlPlane(undefined);
-  proofEnv = controlPlane("agentxlivetest123");
   on = Object.keys(named.Conditions).find((id) => id.startsWith("SlackCompanyModeOn"))!;
-  // #1120: three control plane synths; on a busy CI runner they pass the 10 s default, as the other stack tests allow for.
+  // #1120: control plane synths; on a busy CI runner they pass the 10 s default, as the other stack tests allow for.
 }, 240_000);
 
 describe("Slack company mode's switch (18a)", () => {
@@ -74,7 +72,7 @@ describe("Slack company mode's switch (18a)", () => {
       expect(resource.Type, id).toBe("AWS::IAM::Policy");
       expect(resource.Condition, id).toBe(legacyOn);
     }
-    // The same consumers as a named environment's, but for the TEST proof-only installation's (agentxlivetest123 only).
+    // The same consumers as a named environment's.
     const consumers = (template: TemplateJson) => Object.keys(template.Resources).filter((id) => id.startsWith("SlackCompanyMode")).map((id) => id.replace(/^SlackCompanyMode/u, "").replace(/[0-9A-F]{8}$/u, "")).sort();
     expect(consumers(legacy)).toEqual(consumers(named));
     const text = JSON.stringify(legacy);
@@ -190,18 +188,6 @@ describe("Slack company mode's switch (18a)", () => {
     expect(statementsOf(policy(named, "Broker"))).toStrictEqual([TOKENS, { Sid: "ReadInstallSlackToken", Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: { Ref: slackSecret } }]);
     expect(policy(named, "Broker").Condition).toBe(on);
     expect(policy(named, "Broker").Properties.PolicyName).toBe("slack-company-workspaces-broker");
-  });
-
-  it("adds the proof's reads only where the proof is installed, under both conditions", () => {
-    const proof = policy(proofEnv, "TaskPersonProof");
-    expect(statementsOf(proof)).toStrictEqual([{ ...TOKENS, Resource: JSON.parse(JSON.stringify(TOKENS.Resource).replace("agentx/staging/", "agentx/agentxlivetest123/")) as unknown },
-      reads("ReadSlackWorkspaceBindings", tableArn(proofEnv, "State"), BINDINGS)]);
-    expect(roleOf(proof)[0]).toMatch(/^TaskPersonProofRole/u);
-    const both = proof.Condition!;
-    const onHere = Object.keys(proofEnv.Conditions).find((id) => id.startsWith("SlackCompanyModeOn"))!;
-    const install = Object.keys(proofEnv.Conditions).find((id) => id.includes("InstallTaskPersonProof"))!;
-    expect(proofEnv.Conditions[both]).toStrictEqual({ "Fn::And": [{ Condition: onHere }, { Condition: install }] });
-    expect(Object.keys(named.Resources).some((id) => id.startsWith("SlackCompanyModeTaskPersonProof"))).toBe(false);
   });
 
   it("hands each consumer the switch, 'disabled' (or no table) while it is off", () => {
