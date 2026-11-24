@@ -30,6 +30,7 @@ import { isConditional } from "./broker-shared.js";
 import { requiredEnvironment } from "./lambda.js";
 import { parseSlackSecrets } from "./slack-ingress.js";
 import { runTaskCanvasCloseout, type CanvasCloseoutStore, type TaskCanvasCloseoutTask } from "./developer-task-closeout.js";
+import { CANVAS_CLOSEOUT_RETRY_WINDOW_MS, WORKFLOW_CARD_RETRY_WINDOW_MS, endsAbandoned, hasNoCanvasesToClose, keepsRetrying } from "./developer-notice-retry-policy.js";
 import { slackNoticeChannelFromEnvironment } from "./slack-notice-channel.js";
 import { SlackPostError, chatPostEphemeral, chatPostMessage, chatUpdate, createTaskPlanCanvas, deleteTaskPlanCanvas, postMayHaveLanded } from "./slack-web.js";
 import { readWorkflowE2ENotifierProjection } from "./workflow-e2e-notifier-projection.js";
@@ -95,6 +96,9 @@ class CanvasCloseoutPending extends Error {
 export const retryDelaySeconds = (attempt: number): number => Math.min(900, 30 * 2 ** Math.max(0, Math.min(attempt - 1, 5)));
 
 const NOTICE_KINDS = new Set(["start", "mode", "closed", "cancelled", "ready", "setup_failed", "ended", "pull_request", "workflow", "github_feedback", "canvas_closeout", "admin_change_dm", "admin_change_outcome", "admin_change_expiry", "workflow_refusal", "comment_nudge", "people_dm", "chatgpt_fallback"]);
+
+/** What a failed notice is recorded and logged as: Slack's own answer, a pending closeout's reason, else the error's name. */
+const failureReason = (error: unknown): string => error instanceof SlackPostError ? error.slackError : error instanceof CanvasCloseoutPending ? error.reason : errorName(error);
 
 class PeopleDeliveryRetry extends Error {
   constructor(readonly attempt: number) { super("People notification delivery should retry"); this.name = "PeopleDeliveryRetry"; }
@@ -1366,16 +1370,23 @@ async function deliverChatGptFallback(deps: NotifierDependencies, notice: Notice
   return "posted";
 }
 
+/** A task that was never shared and never made a Canvas has nothing to archive: a recorded no-op that must not reach Slack (the scope check refuses a task with no share team). Otherwise the closeout runs, and anything but COMPLETE is retried. */
+async function deliverCanvasCloseout(deps: NotifierDependencies, notice: Notice, task: DeveloperTaskRecord | undefined): Promise<Outcome> {
+  if (task !== undefined && hasNoCanvasesToClose(task)) {
+    deps.log({ event: "developer_notifier.canvas_closeout_no_canvases", noticeId: notice.id, taskId: task.taskId });
+    return "recorded";
+  }
+  if (task === undefined || deps.closeTaskCanvases === undefined) throw new Error("Canvas closeout service is unavailable");
+  const result = await deps.closeTaskCanvases(task.taskId, notice.manifestDigest, notice.expectedWorkflowRevision);
+  if (result.status !== "COMPLETE") throw new CanvasCloseoutPending(result.reason ?? "archive_pending");
+  return "recorded";
+}
+
 async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outcome> {
   if (notice.kind === "workflow_refusal") return deliverRefusal(deps, notice);
   const task = await noticeTask(deps, notice);
   if (notice.kind === "chatgpt_fallback") return deliverChatGptFallback(deps, notice, task);
-  if (notice.kind === "canvas_closeout") {
-    if (task === undefined || deps.closeTaskCanvases === undefined) throw new Error("Canvas closeout service is unavailable");
-    const result = await deps.closeTaskCanvases(task.taskId, notice.manifestDigest, notice.expectedWorkflowRevision);
-    if (result.status !== "COMPLETE") throw new CanvasCloseoutPending(result.reason ?? "archive_pending");
-    return "recorded";
-  }
+  if (notice.kind === "canvas_closeout") return deliverCanvasCloseout(deps, notice, task);
   if (task?.share === undefined) return "not_shared";
   const share = task.share;
   // Ruling F7: a notice carries its change's own time to the millisecond, so it compares exactly with the share's.
@@ -1571,8 +1582,7 @@ async function releaseSaid(deps: NotifierDependencies, said: { pk: string; sk: s
   }
 }
 
-/** How long a task-state card ("workflow" notice) is retried before it is given up on: far longer than the hour of the other notices, and well inside the queue's day of retention and its 100 receives. */
-export const WORKFLOW_CARD_RETRY_WINDOW_MS = 12 * 60 * 60_000;
+export { WORKFLOW_CARD_RETRY_WINDOW_MS, CANVAS_CLOSEOUT_RETRY_WINDOW_MS };
 
 /** The delivery-failure count the SlackDeliveryFailed alarm watches. An expired notice is dropped whatever happens to its count, so it can never loop. */
 function countDeliveryFailure(deps: NotifierDependencies): void {
@@ -1653,7 +1663,7 @@ export function createNotifierHandler(deps: NotifierDependencies) {
           : notice.kind === "admin_change_dm" || notice.kind === "admin_change_outcome" || notice.kind === "admin_change_expiry" ? await deliverAdminChange(deps, notice) : await deliver(deps, notice);
         deps.log({ event: "developer_notifier.notice", kind: notice.kind, noticeId: notice.id, outcome });
       } catch (error) {
-        const reason = error instanceof SlackPostError ? error.slackError : errorName(error);
+        const reason = failureReason(error);
         if (error instanceof PeopleDeliveryRetry) {
           try { await deps.retryLater(record.receiptHandle, error.attempt === 1 ? 30 : 60); } catch (delayError) { deps.log({ event: "developer_notifier.delay_failed", error: errorName(delayError) }); }
           deps.log({ event: "developer_notifier.retry", kind: notice.kind, noticeId: notice.id, attempt: error.attempt, reason });
@@ -1662,7 +1672,7 @@ export function createNotifierHandler(deps: NotifierDependencies) {
         }
         const elapsed = deps.now() - Date.parse(notice.at);
         // A task-state card (a blocked step, a plan to approve) is kept for much longer than the hour: dropping it leaves the owner waiting on a task nobody told them about.
-        const keepRetrying = notice.kind === "canvas_closeout" || elapsed < SHARE_DELIVERY_WINDOW_MS || (notice.kind === "workflow" && elapsed < WORKFLOW_CARD_RETRY_WINDOW_MS);
+        const keepRetrying = keepsRetrying(notice.kind, elapsed);
         if (keepRetrying) {
           // Past the hour the failure is counted once (the alarm) and recorded durably; the later tries only retry.
           if (notice.kind === "workflow" && elapsed >= SHARE_DELIVERY_WINDOW_MS && await recordDeliveryFailure(deps, notice, reason, false) !== "known") {
@@ -1680,7 +1690,7 @@ export function createNotifierHandler(deps: NotifierDependencies) {
           batchItemFailures.push({ itemIdentifier: record.messageId });
         } else {
           // A card that was retried past the hour ends here with its own words and the durable record marked; every other notice is dropped as before, with its record.
-          const abandoned = notice.kind === "workflow";
+          const abandoned = endsAbandoned(notice.kind);
           deps.log({ event: abandoned ? "developer_notifier.delivery_abandoned" : "developer_notifier.delivery_failed", kind: notice.kind, noticeId: notice.id, reason: abandoned ? failureReasonCode(reason) : reason });
           await recordDeliveryFailure(deps, notice, reason, true);
           countDeliveryFailure(deps);
