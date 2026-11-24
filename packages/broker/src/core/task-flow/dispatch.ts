@@ -23,6 +23,7 @@ import {
   change,
   when,
   workerProjectDefinition,
+  type ProjectDefinition,
   PREPARE_EGRESS_S3_FEATURE,
   projectAllowedS3Hosts,
   workflowPublicationContext,
@@ -40,6 +41,7 @@ import { admit, releaseAdmission } from "./admission.js";
 import { runWatchItem } from "./run-watch-rows.js";
 import type { DispatchMessage } from "./accept.js";
 import type { TaskFlowDeps } from "./deps.js";
+import { registriesForPrepare } from "../project-registries/prepare.js";
 import { testServicesMissingWords } from "../test-env/seam.js";
 import { RUN_START_ACTION, cancelInvocation, isSpendStopCode, queuedCancelOf, spendStopReason } from "./money-stop.js";
 import { isTerminalStatus, readOperation, recordOperationResult } from "./results.js";
@@ -413,6 +415,14 @@ function onlyPinned<P extends { repositories: ReadonlyArray<{ name: string }> }>
   return repositories.length === 0 ? "none of the project's repositories has a pinned commit" : { ...project, repositories };
 }
 
+/** The project as a worker is sent it, with the registries its PREPARE carries (where, never a credential), or the sentence that ends the preparation. */
+async function preparedProject(deps: TaskFlowDeps, definition: ProjectDefinition, spec: OperationRecord["dispatch"], features: readonly string[], toWorker: (definition: ProjectDefinition) => object | string): Promise<string | { forWorker: object; registries: Awaited<ReturnType<typeof registriesForPrepare>> & object }> {
+  const forWorker = toWorker(definition);
+  if (typeof forWorker === "string") return forWorker;
+  const registries = await registriesForPrepare({ project: definition, companyId: deps.companyId, install: deps.projectRegistries, readOnly: spec.payload["readOnly"] === true, features });
+  return typeof registries === "string" ? registries : { forWorker, registries };
+}
+
 /** Builds the worker's invocation, or a sentence saying why this operation cannot be sent to this worker. */
 async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, workspace: WorkspaceRecord, features: readonly string[], standing: StandingInstructionsPayload | undefined, stepModel?: Extract<StepModelOutcome, { ok: true }>): Promise<WorkerInvocation | string> {
   const spec = operation.dispatch;
@@ -477,16 +487,21 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
   if (spec.kind === "prepare") {
     const project = await deps.projects.revision(workspace.projectName, workspace.projectRevision);
     if (project === undefined) return "the project revision this task was started on is gone";
-    // A pinned preparation reads exactly the repositories it pinned (see `onlyPinned`).
-    const sent = onlyPinned(toWorker(project.definition), spec.payload["pins"]);
-    if (typeof sent === "string") return sent;
+    // A1: the project's private package registries (where they are, never a credential), for the PREPARE only: the run of the approved setup and readiness commands. A preparation that only reads carries none; a task, a publication and
+    // a push (below, and every other kind) never do. The worker asks for each credential by name, with the preparation's own grant (core/project-registries/exchange.ts). A worker that cannot take the field is refused: setup would
+    // otherwise run without the registry and fail on a 401. An install that cannot serve them (or a CodeArtifact registry its rules refuse) ends the preparation with a fixed sentence.
+    // A pinned preparation reads exactly the repositories it pinned (see `onlyPinned`); the registries are the project's own.
+    const prepared = await preparedProject(deps, project.definition, spec, features, (definition) => onlyPinned(toWorker(definition), spec.payload["pins"]));
+    if (typeof prepared === "string") return prepared;
+    const { forWorker, registries } = prepared;
     // L4-NETG follow-up (DEC 254zzz90): the exact S3 hosts the project's allowed websites name, for a worker that lists the feature and only when there are some. The gateway-mode worker publishes them to its host's egress gateway; the allowed
     // websites themselves were approved through the existing audited flow (customer role and company checks), so this adds no route and no permission. Scope, said plainly (owner DEC 254zzz90, review M1/M2): there is NO Rovara staff step on this lift
     // (for the install's own region the VPC list already allows `*.s3.<region>`), and one lifted bucket host is region-wide S3 for that project's sandboxes (the gateway sees the TLS name; S3 routes by Host inside TLS).
     const s3Hosts = features.includes(PREPARE_EGRESS_S3_FEATURE) ? projectAllowedS3Hosts(project.definition.network?.allowedDomains) : [];
     payload = {
       ...payload,
-      project: sent,
+      project: forWorker,
+      ...registries,
       ...(s3Hosts.length === 0 ? {} : { egressS3Allow: s3Hosts }),
       repositoryGrant: deps.repositoryGrants.issue({
         ownerKey: workspace.ownerKey, projectName: workspace.projectName, workspaceId: workspace.id, operationId: operation.id,

@@ -48,6 +48,7 @@ import { DESIGN_REVIEW_RESULT_MAX_BYTES } from "../core/design-review/outcome.js
 import { handleSetupAgentCallback, type SetupAgentCallbackDeps } from "../core/setup-agent/callback.js";
 import { handleWikiBuildCallback, type WikiBuildCallbackDeps } from "../core/wiki-build/callback.js";
 import type { RepositoryCredential, RepositoryGrantService } from "../repository-access.js";
+import { registryCredentialRoute } from "../core/project-registries/operations.js";
 
 import { handleModelAccess, MODEL_ACCESS_PATH, type ModelGateway } from "../core/model-gateway/route.js";
 
@@ -87,7 +88,7 @@ export interface CallbackDeps {
   flow: TaskFlowDeps;
   blobs: ObjectStorage;
   /** The repository grants this process issued; a worker exchanges one for a clone or push credential. */
-  grants: Pick<RepositoryGrantService, "exchange">;
+  grants: Pick<RepositoryGrantService, "exchange" | "inspect">;
   /**
    * The records of the browser and API round kinds, which the admission read is held to. Absent on an install that does not run those checks: `e2e-admission` and `e2e-evidence` are then
    * answered "not available" (no checks operation is ever started there, so no worker asks).
@@ -372,6 +373,12 @@ function isFeedbackAction(action: string): action is "feedback-bundles" | "feedb
   return action === "feedback-bundles" || action === "feedback-approval";
 }
 
+type GrantRoute = (deps: CallbackDeps, request: BrokerRequest, workspaceId: string, operationId: string) => Promise<BrokerResponse>;
+const GRANT_ROUTES: ReadonlyMap<string, GrantRoute> = new Map<string, GrantRoute>([
+  ["repository-credentials", async (deps, request, workspaceId, operationId) => json(200, { credential: await exchangeCredential(deps, request, workspaceId, operationId) })],
+  ["registry-credentials", (deps, request, workspaceId, operationId) => registryCredentialRoute(deps.flow, deps.grants, request, workspaceId, operationId, bodyOf(request))],
+]);
+
 export function createCallbackHandler(deps: CallbackDeps): (request: BrokerRequest) => Promise<BrokerResponse> {
   const capabilities = new CallbackCapabilities(Buffer.from(deps.flow.callbackSigningKey));
   return async (request) => {
@@ -391,7 +398,9 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       const match = ROUTE.exec((request.path.split("?")[0]) ?? "");
       if (request.method !== "POST" || match === null) throw agentXError("NOT_FOUND", "route not found");
       const [, workspaceId, operationId, action] = match as unknown as [string, string, string, string];
-      if (action === "repository-credentials") return json(200, { credential: await exchangeCredential(deps, request, workspaceId, operationId) });
+      // The two routes the worker's own grant is the proof for (no capability): a repository credential, and a project's package registry credential (core/project-registries).
+      const grantRoute = GRANT_ROUTES.get(action);
+      if (grantRoute !== undefined) return await grantRoute(deps, request, workspaceId, operationId);
       const token = request.headers[CAPABILITY_HEADER];
       if (token === undefined || token === "") throw agentXError("CALLBACK_FORBIDDEN", "callback capability is required");
       if ((!SERVED_ACTIONS.has(action) && !(deps.savedEnv !== undefined && savedEnvWorkerRouteOf(request.method, bare) !== undefined)) || (action === "setup-agent" && deps.setupAgent === undefined) || (action === "wiki-build" && deps.wikiBuild === undefined) || (action === "browser-evidence-sign-in" && deps.browserEvidenceSignIn === undefined)

@@ -213,7 +213,7 @@ describe("publication credential release", () => {
     const w = await world({ workspaceId: "33333333-3333-4333-8333-333333333333" });
     const { operation } = await w.started();
     const exchange = vi.fn(async () => ({ token: "fixture-token" }));
-    const handler = createCallbackHandler({ flow: w.h.deps, blobs: createDocumentObjectStorage(w.h.store, { companyId: ORG }), grants: { exchange } });
+    const handler = createCallbackHandler({ flow: w.h.deps, blobs: createDocumentObjectStorage(w.h.store, { companyId: ORG }), grants: { exchange, inspect: () => { throw new Error("unused"); } } });
     const post = (access: "clone" | "push" = "push") => handler({ method: "POST",
       path: `/v1/internal/workspaces/${w.workspace.id}/operations/${operation!.id}/repository-credentials`,
       headers: { "x-agentx-repository-grant": "fixture-grant" },

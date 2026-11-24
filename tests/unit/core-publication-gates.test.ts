@@ -41,7 +41,7 @@ describe("publication gate exact-source proof", () => {
     const w = await world();
     const capabilities = new CallbackCapabilities(Buffer.from(w.h.deps.callbackSigningKey));
     const token = capabilities.issue({ workspaceId: w.op.workspaceId, operationId: w.op.id, fence: w.op.fence, actions: ["events", ...w.op.dispatch.extraActions!] as CallbackAction[], expiresInSeconds: 600 });
-    const handler = createCallbackHandler({ flow: w.h.deps, blobs: createDocumentObjectStorage(w.h.store, { companyId: w.h.deps.companyId }), grants: { exchange: async () => ({ token: "fixture" }) } });
+    const handler = createCallbackHandler({ flow: w.h.deps, blobs: createDocumentObjectStorage(w.h.store, { companyId: w.h.deps.companyId }), grants: { exchange: async () => ({ token: "fixture" }), inspect: () => { throw new Error("unused"); } } });
     const post = (action: string, body: unknown) => handler({ method: "POST", path: `/v1/internal/workspaces/${w.op.workspaceId}/operations/${w.op.id}/${action}`, headers: { [CAPABILITY_HEADER]: token }, body: JSON.stringify(body) });
     const events = await post("events", { events: [{ type: "progress", timestamp: "2026-11-09T10:00:00.000Z", payload: {} }] });
     expect(events.statusCode).toBe(200);
