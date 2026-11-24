@@ -16,7 +16,9 @@ export interface ApprovalReview {
 
 export type RepositoryPermission = HostPermission;
 
-export type ApprovalRefusal = "none" | "no_write" | "self_only" | "unlinked_requester" | "stale" | "changes_requested";
+export type ApprovalRefusal = "none" | "no_write" | "self_only" | "unlinked_requester" | "no_owner" | "stale" | "changes_requested";
+/** The requesters' code-host accounts; "unlinked" when any requester has none; "no_owner" when the task has no requester at all (nobody owns it, so nobody's own approval can be told apart). */
+export type RequesterAccounts = readonly string[] | "unlinked" | "no_owner";
 export type HumanApproval =
   | { approved: true; by: { hostUserId: string; login: string }; commitId: string; approvers: Array<{ hostUserId: string; login: string }> }
   | { approved: false; reason: ApprovalRefusal };
@@ -29,8 +31,8 @@ export interface ApprovalInput {
   ciPassingOnHead: boolean;
   /** The live permission of each reviewer, by login. A login with no entry has no access. */
   permissions: ReadonlyMap<string, RepositoryPermission>;
-  /** The code-host accounts of the task's requesters, or "unlinked" when any requester has no linked account. */
-  requesterHostUserIds: readonly string[] | "unlinked";
+  /** The code-host accounts of the task's requesters, "unlinked" when any requester has no linked account, "no_owner" when the task has no requester. */
+  requesterHostUserIds: RequesterAccounts;
   /** The code-host accounts (among the reviewers) that are linked to a member of the org. */
   linkedHostUserIds: ReadonlySet<string>;
   /** The host account Rovara acts as: never counts, whatever its type says. */
@@ -74,6 +76,7 @@ export function humanApprovalOf(input: ApprovalInput): HumanApproval {
   let counted = fresh;
   if (!input.allowSelfApproval) {
     if (input.requesterHostUserIds === "unlinked") return { approved: false, reason: "unlinked_requester" };
+    if (input.requesterHostUserIds === "no_owner") return { approved: false, reason: "no_owner" };
     const requesters = input.requesterHostUserIds;
     counted = fresh.filter((review) => input.linkedHostUserIds.has(review.hostUserId) && !requesters.includes(review.hostUserId));
     if (counted.length === 0) return { approved: false, reason: fresh.some((review) => requesters.includes(review.hostUserId)) ? "self_only" : "none" };
@@ -92,8 +95,8 @@ export function requesterIds(task: Pick<MergeTask, "ownerId" | "creatorId" | "st
   return [...new Set([task.creatorId, task.startedBy?.developerId, task.ownerId].filter((id): id is string => typeof id === "string" && id !== ""))];
 }
 
-/** The requesters' code-host accounts, or "unlinked" when any of them has none (their approval cannot be told from a reviewer's). */
-export function requesterHostIds(people: MergePeople, orgId: OrgId, task: MergeTask): Promise<string[] | "unlinked"> {
+/** The requesters' code-host accounts, "unlinked" when any of them has none (their approval cannot be told from a reviewer's), "no_owner" when the task has none. */
+export function requesterHostIds(people: MergePeople, orgId: OrgId, task: MergeTask): Promise<RequesterAccounts> {
   return people.requestersOf(orgId, task);
 }
 

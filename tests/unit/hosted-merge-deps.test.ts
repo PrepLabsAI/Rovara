@@ -20,7 +20,7 @@ function build(options: { ciMode?: false; policyHook?: boolean; mergeWait?: (tas
     flow: { deps: { store, companyId: A, audit: { stage: () => [], record: async () => undefined }, projects: { revision: async (project: string) => { projectsAsked.push(project); return undefined; } }, ...(options.mergeWait === undefined ? {} : { secondReview: { mergeWait: options.mergeWait } }) } },
     ...(options.ciMode === false ? {} : { ciReporting: { honest: true, ciMode: async () => "their_ci_fix" } }),
   } as never;
-  const deps = () => hostedMergeDependencies({ runtime, registry, settings: { read: async (orgId: OrgId, project: string) => { settingsAsked.push(`${orgId}/${project}`); return { ...DEFAULT_CODE_SETTINGS, mergeMethod: "merge" }; } }, defaults: DEFAULT_CODE_SETTINGS, now: () => 1_000, policyHook: options.policyHook === true, ...(options.audit === undefined ? {} : { audit: options.audit as never }) });
+  const deps = () => hostedMergeDependencies({ runtime, registry, settings: { read: async (orgId: OrgId, project: string) => { settingsAsked.push(`${orgId}/${project}`); return { ...DEFAULT_CODE_SETTINGS, mergeMethod: "merge" }; } }, defaults: DEFAULT_CODE_SETTINGS, now: () => 1_000, policyHook: options.policyHook === true, taskPeople: { documentClient: { send: async () => ({}) }, tableName: "state" }, ...(options.audit === undefined ? {} : { audit: options.audit as never }) });
   return { store, deps, settingsAsked, projectsAsked };
 }
 

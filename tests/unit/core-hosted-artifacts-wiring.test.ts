@@ -29,7 +29,7 @@ async function world() {
     repositoryCredential: async () => ({ token: "fake" }), codeModules: () => ({}) as never,
     origin: () => "https://api.example", now: () => new Date(w.clock.now), log: (entry) => { logs.push(entry); },
     ciReporting: { honest: true, ciMode: async () => "sandbox_only" as const },
-    services: (companyId, flow, registry, wiring) => createBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!, now: () => new Date(w.clock.now) }),
+    services: (companyId, flow, registry, wiring) => createBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!, now: () => new Date(w.clock.now), taskPeople: { documentClient: { send: async () => ({}) }, tableName: "state" } }),
   });
   const registry = await root.app.registry();
   const blobs = registry.require("object-storage");
