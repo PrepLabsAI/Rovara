@@ -89,7 +89,7 @@ describe("the 2-hour limit on a run parked on a website ask", () => {
   it("a run parked for 2 hours ENDS with `hosts_waiting`, in the fixed words, keeping the partial proposal, with no further model call; not a minute sooner", async () => {
     const t = await parkedRun();
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(t.progress).toContain("Rovara is waiting for an administrator to decide a website.");
+    expect(t.progress).toContain("Rovara is waiting for an administrator to decide an address.");
     await vi.advanceTimersByTimeAsync(2 * HOUR - 60_000 - 10_000);
     expect(t.isDone()).toBe(false);
     await vi.advanceTimersByTimeAsync(60_000 + 5_000);
@@ -124,17 +124,17 @@ describe("the 2-hour limit on a run parked on a website ask", () => {
     expect(t.isDone()).toBe(true);
     const result = await t.running;
     expect(result.setupRunSummary).toMatchObject({ stop: "hosts_waiting", partial: true });
-    expect(t.progress).not.toContain("Rovara is waiting for an administrator to decide a website.");
+    expect(t.progress).not.toContain("Rovara is waiting for an administrator to decide an address.");
     expect(t.progress).toContain(SETUP_HOST_WAIT_ENDED_WORDS);
     // The words say what is true of both causes: websites that are not decided yet. Neither says the run "was waiting" or "waited".
     for (const words of [SETUP_HOST_WAIT_ENDED_WORDS, SETUP_AGENT_FAILURES.hosts_waiting]) expect(words).not.toMatch(/was waiting|waited|while waiting/u);
-    expect(SETUP_HOST_WAIT_ENDED_WORDS).toBe("Rovara ended the setup run: it needs websites an administrator has not decided.");
+    expect(SETUP_HOST_WAIT_ENDED_WORDS).toBe("Rovara ended the setup run: it needs addresses an administrator has not decided.");
   });
 
   it("a person's Stop while the run is parked shows NO website-wait line (it was stopped, not timed out)", async () => {
     const t = await parkedRun();
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(t.progress).toContain("Rovara is waiting for an administrator to decide a website.");
+    expect(t.progress).toContain("Rovara is waiting for an administrator to decide an address.");
     await t.control()!.abort();
     await vi.advanceTimersByTimeAsync(20_000);
     const result = await t.running;
@@ -179,7 +179,7 @@ describe("the broker's side of the same limit", () => {
   });
 
   it("the stored end of a run that waited too long says what will show, in fixed words that name the wait and say what to do", () => {
-    expect(SETUP_AGENT_FAILURES.hosts_waiting).toBe("The setup run ended: it needs websites an administrator has not allowed yet (it waits at most 2 hours for a decision). Allow them, then run the setup again.");
+    expect(SETUP_AGENT_FAILURES.hosts_waiting).toBe("The setup run ended: it needs addresses an administrator has not allowed yet. It waits at most 2 hours for a decision. Allow them, then run the setup again.");
   });
 
   it("what a run learned before the 2 hours ran out is kept in its stored end: the broker reads the worker's partial proposal and summary again and stores them with the stop `hosts_waiting`", async () => {

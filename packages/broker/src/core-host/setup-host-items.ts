@@ -9,7 +9,7 @@ import { HOST_ASK_REVISION, hostAskDigest, hostAskSubjectId, isInternationalName
 export function setupHostItemOf(companyId: OrgId, ask: SetupHostAsk): DecisionItem {
   const digest = hostAskDigest(ask);
   return {
-    kind: "setup_host", subjectId: hostAskSubjectId(companyId, ask.project, ask.host), project: ask.project, title: `Website for setup: ${ask.host}`, createdAt: ask.askedAt,
+    kind: "setup_host", subjectId: hostAskSubjectId(companyId, ask.project, ask.host), project: ask.project, title: `Address for setup: ${ask.host}`, createdAt: ask.askedAt,
     openPath: `/app/projects/${encodeURIComponent(ask.project)}/setup`, contentVersion: digest, binding: { revision: HOST_ASK_REVISION, artifactDigest: digest },
     host: ask.host, staffStep: false, ...(isInternationalName(ask.host) ? { international: true } : {}),
     ...(ask.from === undefined ? {} : { from: ask.from }), ...(ask.journalN === undefined ? {} : { journalN: ask.journalN }),

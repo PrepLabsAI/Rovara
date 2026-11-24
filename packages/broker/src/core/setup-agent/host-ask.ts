@@ -38,18 +38,18 @@ export const SETUP_HOST_INDEX_MAX = 500;
 
 /** The words a refusal is shown with (never a repository's or a model's words). */
 export const SETUP_HOST_REFUSAL_WORDS: Record<SetupHostRefusal, string> = {
-  not_a_host: "Not a plain website name.",
-  address_literal: "An address, not a website name.",
-  ip_in_name: "A name that stands for an address.",
+  not_a_host: "Not a plain address.",
+  address_literal: "An IP number, not a name.",
+  ip_in_name: "A name that stands for an IP number.",
   private_name: "A name that only means something inside one network.",
   too_long: "The name is too long to show whole.",
-  paste_site: "A paste or file-drop website.",
-  link_shortener: "A link-shortener website.",
+  paste_site: "A paste or file-drop address.",
+  link_shortener: "A link-shortener address.",
   tunnel: "A tunnel to a machine outside the company.",
-  webhook_sink: "A website that collects whatever is sent to it.",
+  webhook_sink: "An address that collects whatever is sent to it.",
   raw_storage: "Storage or hosting that anyone can upload to.",
   production: "On the production deny list.",
-  model_host: "A model host: the test sandbox is not allowed to reach it.",
+  model_host: "An AI model's address: the test sandbox is not allowed to reach it.",
 };
 
 export const SETUP_HOST_ASK_STATES = ["open", "approved", "refused"] as const;
@@ -69,7 +69,7 @@ export type SetupHostAsk = z.infer<typeof AskRowSchema>;
 const countKey = (orgId: OrgId, project: string) => ({ pk: projectPk(orgId, project), sk: "SETUP_HOST_OPEN_COUNT" });
 const indexPartition = (orgId: OrgId): string => orgScoped(orgId, "SETUP_HOST_OPEN");
 const indexKey = (orgId: OrgId, project: string, host: string) => ({ pk: indexPartition(orgId), sk: `${project}#${host}` });
-const unavailable = () => agentXError("RUNTIME_UNAVAILABLE", "The website ask could not be read.");
+const unavailable = () => agentXError("RUNTIME_UNAVAILABLE", "The address ask could not be read.");
 const json = (value: unknown): JsonValue => JSON.parse(JSON.stringify(value)) as JsonValue;
 
 /** The id an ask has in the audit and on its card: a hash of the company, project and host (no dot, no repository text). */
@@ -305,9 +305,9 @@ export function createSetupHostSubject(options: { store: DocumentStore; approval
     async apply(loaded, attempt: DecisionAttempt, approvers: readonly Principal[], at: string): Promise<AppliedDecision> {
       const { ask } = loaded.state as { ask: SetupHostAsk };
       if (options.approval === undefined) {
-        if (!approvers.every((approver) => approver.roles.includes("owner"))) throw new SubjectRefusal("not_the_approver", "Only the owner decides a website for a setup run.");
+        if (!approvers.every((approver) => approver.roles.includes("owner"))) throw new SubjectRefusal("not_the_approver", "Only the owner decides an address for a setup run.");
       } else {
-        if (attempt.outcome !== "approve" && attempt.outcome !== "reject") throw new SubjectRefusal("invalid_outcome", "A website ask is approved or refused.");
+        if (attempt.outcome !== "approve" && attempt.outcome !== "reject") throw new SubjectRefusal("invalid_outcome", "An address ask is approved or refused.");
         // Every approver, read live against this ask; a read that fails is a refusal.
         for (const approver of approvers) {
           let allowed: unknown;
@@ -333,7 +333,7 @@ export function createSetupHostSubject(options: { store: DocumentStore; approval
           extra: open, result: { host: ask.host, state: "refused" },
         };
       }
-      throw new SubjectRefusal("invalid_outcome", "A website ask is approved or refused.");
+      throw new SubjectRefusal("invalid_outcome", "An address ask is approved or refused.");
     },
   };
 }

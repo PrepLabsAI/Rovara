@@ -242,7 +242,7 @@ describe("review (lead 4 Opus): the stand-in writer's cut-off is bounded", () =>
 });
 
 describe("review (lead 4 Opus): prod run 3, a provider error with no retry while a website ask is open", () => {
-  const PARKED = "Rovara is waiting for an administrator to decide a website.";
+  const PARKED = "Rovara is waiting for an administrator to decide an address.";
   /** The agent runs a command that hits a blocked website (the ask is then open with an administrator), and its turn then ends as `last` says. */
   async function hostRig(last: Record<string, unknown>) {
     const asks: string[] = [];

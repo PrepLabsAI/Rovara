@@ -308,16 +308,16 @@ function wordsOf(item: DecisionItem): { question: string; next: string; costUsd?
     case "setup_host":
       return {
         question: plainLine(`Let the setup of this project reach ${item.host}?`, 160),
-        next: item.staffStep ? "The website is added to this project's list; Rovara staff then approve it before it works." : "The website is added to this project's list, and setup tries again.",
+        next: item.staffStep ? "The address is added to this project's list; Rovara staff then approve it before it works." : "The address is added to this project's list, and setup tries again.",
         evidence: [
-          chip("environment", "Website", item.host, "warning"),
+          chip("environment", "Address", item.host, "warning"),
           ...(item.international === true ? [chip("risk", "Name", "international name", "warning")] : []),
           ...(item.companyApproved === true ? [chip("environment", "Your company", item.staffStep ? "Approved in a company recipe; Rovara staff still approve it" : "Approved in a company recipe", "good")] : []),
           ...(item.from === undefined ? [] : [chip("other", "From the repository", `${item.from.path}:${String(item.from.line)}`, "unknown")]),
           ...(item.journalN === undefined ? [] : [chip("checks", "Setup command", `#${String(item.journalN)} was blocked`, "unknown")]),
           ...(item.typedBy === undefined ? [] : [chip("other", "Typed by", item.typedBy, "warning")]),
         ],
-        why: "A setup command could not reach this website. Allow it only if you know what it is.",
+        why: "A setup command could not reach this address. Allow it only if you know what it is.",
       };
     case "approve_fixture_set":
       return {

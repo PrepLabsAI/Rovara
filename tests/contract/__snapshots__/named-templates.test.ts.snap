@@ -527,7 +527,7 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
     "DefaultPermissionsBoundary": {
       "Condition": "UseDefaultBoundary",
       "Properties": {
-        "Description": "Default permission boundary for every agentx-staging runtime role",
+        "Description": "Default permission boundary for every agentx-staging role",
         "ManagedPolicyName": "agentx-staging-boundary",
         "Path": "/agentx/staging/",
         "PolicyDocument": {

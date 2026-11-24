@@ -153,7 +153,7 @@ describe("the words", () => {
   it("names the classes in fixed words, in the fixed order, and never a path", () => {
     expect(setupDriftWords(["lockfile"])).toBe("dependency files");
     expect(setupDriftWords(["ci", "lockfile"])).toBe("dependency files and a CI workflow");
-    expect(setupDriftWords(["websites", "dockerfile", "marker"])).toBe("the project's package files, a Dockerfile and the allowed websites");
+    expect(setupDriftWords(["websites", "dockerfile", "marker"])).toBe("the project's package files, a Dockerfile and the allowed addresses");
     expect(setupDriftWords([])).toBe("the project");
   });
 });

@@ -38,8 +38,9 @@ export class DeveloperTaskNotifier extends Construct {
     this.deadLetters = new sqs.Queue(this, "NoticeDeadLetterQueue", {
       encryption: sqs.QueueEncryption.SQS_MANAGED, enforceSSL: true, retentionPeriod: Duration.days(14),
     });
-    // C9: a notice is retried for one hour, then counted and dropped; one day of retention is ample,
-    // and the dead-letter queue only catches a notice the function itself cannot handle.
+    // C9: a notice is retried for one hour, then counted and dropped (a task-state card for 12 hours, a Canvas
+    // closeout for 12 hours, then recorded as failed); one day of retention is ample, and the dead-letter queue
+    // only catches a notice the function itself cannot handle.
     this.queue = new sqs.Queue(this, "NoticeQueue", {
       encryption: sqs.QueueEncryption.SQS_MANAGED, enforceSSL: true,
       retentionPeriod: Duration.days(1),

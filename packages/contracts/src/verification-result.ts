@@ -73,7 +73,7 @@ export const TESTING_REASON_TEXT: Readonly<Record<TestingReason, string>> = {
   leftover_processes: "programs left running by earlier work could not be stopped",
   fails_on_original_code: "a test fails on the original code too and is not known to be failing",
   setup_failed_in_task: "the test setup failed in this task",
-  host_blocked: "a website the setup needs is not allowed",
+  host_blocked: "an address the setup needs is not allowed",
   build_host_offline: "the build host is offline",
   full_suite_pending: "the full suite has not finished yet",
   full_suite_not_run: "the full suite was not run",
