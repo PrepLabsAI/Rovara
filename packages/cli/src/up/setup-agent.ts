@@ -80,7 +80,7 @@ export function registerSetupAgentCommands(program: Command, context: SetupAgent
     const answer = await call(context, options.stateDir, `${projectPath(project)}/setup-agent/discard`, { method: "POST", body: {} });
     show(command, answer, answer["discarded"] === true ? "That setup was discarded." : "There was no setup waiting.");
   });
-  common(group.command("open").description("open the project's setup page in your browser: type a command, allow a website, approve what Rovara found")).action(async (project: string, options: { stateDir?: string }, command: Command) => {
+  common(group.command("open").description("open the project's setup page in your browser: type a command, allow an address, approve what Rovara found")).action(async (project: string, options: { stateDir?: string }, command: Command) => {
     projectPath(project);
     await call(context, options.stateDir, "/v1/local/pages/open", { method: "POST", body: { path: `/setup/${project}` } });
     show(command, { opened: true }, "Opened the setup page in your browser.");

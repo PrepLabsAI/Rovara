@@ -599,12 +599,12 @@ describe("a setup run, from the owner's request to the use of what it found", ()
     const hostForm = formOf((await raw(h.runtime.pagesUrl, { path: link.pathname, headers: { host: link.host } })).body, "/host");
     await h.post(link, hostForm.action, { ...hostForm.fields, decision: "approve" });
     const shown = await raw(h.runtime.pagesUrl, { path: link.pathname, headers: { host: link.host } });
-    expect(shown.body).toContain("Websites you allowed");
+    expect(shown.body).toContain("Addresses you allowed");
     expect(shown.body).toMatch(/allowed \d{4}-\d{2}-\d{2}/u);
     const forget = formOf(shown.body, "/forget");
     expect((await h.post(link, forget.action, { ...forget.fields })).headers["location"]).toContain("n=setupdone");
     expect(await h.runtime.app.setupAgent.approvedHosts("payments")).toEqual([]);
-    expect((await raw(h.runtime.pagesUrl, { path: link.pathname, headers: { host: link.host } })).body).not.toContain("Websites you allowed");
+    expect((await raw(h.runtime.pagesUrl, { path: link.pathname, headers: { host: link.host } })).body).not.toContain("Addresses you allowed");
     // It can be asked about again at once, and taking back a website that is not approved does nothing.
     expect((await h.callback(run.job, "setup-agent", { kind: "host", host: "deps.exampledeps.dev" })).body).toMatchObject({ outcome: "created" });
     expect(await h.runtime.app.setupAgent.page.forgetHost({ project: "payments", host: "deps.exampledeps.dev" })).toMatchObject({ ok: false });

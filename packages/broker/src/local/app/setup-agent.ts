@@ -244,9 +244,9 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
       return { ok: true, message: "Rovara is checking those commands on a fresh workspace. You can approve them when the check passes." };
     }),
     discard: (input) => guarded(async () => ({ ok: true, message: (await discardSetupApply({ store, companyId, now: options.now }, input.project, ownerDeveloperId)) ? "That setup was discarded." : "There was no setup waiting." })),
-    forgetHost: (input) => guarded(async () => ((await forgetApprovedHost({ store, now: options.now }, companyId, input.project, input.host, ownerDeveloperId)) ? { ok: true, message: "That website is taken back for the next machines of this project." } : { ok: false, reason: "not_found", message: "That website is not approved." })),
+    forgetHost: (input) => guarded(async () => ((await forgetApprovedHost({ store, now: options.now }, companyId, input.project, input.host, ownerDeveloperId)) ? { ok: true, message: "That address is taken back for the next machines of this project." } : { ok: false, reason: "not_found", message: "That address is not approved." })),
     check: (input) => guarded(async () => { await startProjectSetupCheck(flow, { project: input.project, requestId: input.requestId, startedBy: ownerDeveloperId }); return { ok: true, message: "Rovara is checking the project's setup." }; }),
-    decideHost: (input) => guarded(() => decide(SETUP_HOST_KIND, hostAskSubjectId(companyId, input.project, input.host), input, input.decision === "approve" ? "That website is allowed for the next setup run." : "That website is refused.")),
+    decideHost: (input) => guarded(() => decide(SETUP_HOST_KIND, hostAskSubjectId(companyId, input.project, input.host), input, input.decision === "approve" ? "That address is allowed for the next setup run." : "That address is refused.")),
     decideEval: (input) => guarded(() => decide(EVAL_SPEND_KIND, input.project, input, input.decision === "approve" ? "Eval spend is approved within this estimate. Each run still needs a monthly-cap reservation." : "Eval spend was rejected.")),
     evalConfirm: (input) => guarded(async () => {
       await confirmEvalDiscovery(evalConfirmDeps(await depsFor()), input.project, { taskId: input.taskId, reportDigest: input.reportDigest, selection: input.selection, paths: input.paths }, options.owner);

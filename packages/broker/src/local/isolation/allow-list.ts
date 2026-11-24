@@ -26,7 +26,7 @@ export function localAllowedDomains(extra: readonly string[] = []): string[] {
   for (const entry of LOCAL_DEFAULT_ALLOW_DOMAINS) add(entry);
   extra.forEach((entry, index) => {
     const domain = entry.toLowerCase();
-    if (!isAllowedDomain(domain)) throw new Error(`allowed website number ${index + 1} must be a domain name such as artifacts.acme.dev or *.acme.dev`);
+    if (!isAllowedDomain(domain)) throw new Error(`allowed address number ${index + 1} must be a domain name such as artifacts.acme.dev or *.acme.dev`);
     add(domain);
   });
   return result;

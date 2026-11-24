@@ -29,7 +29,7 @@ describe("the setup agent cannot ask for a model host back (M1)", () => {
     expect(refuseSetupHost("api.openai.com")).toBeUndefined();
     expect(refuseSetupHost("api.openai.com", undefined, [])).toBeUndefined();
     expect(SETUP_HOST_REFUSALS).toContain("model_host");
-    expect(SETUP_HOST_REFUSAL_WORDS.model_host).toBe("A model host: the test sandbox is not allowed to reach it.");
+    expect(SETUP_HOST_REFUSAL_WORDS.model_host).toBe("An AI model's address: the test sandbox is not allowed to reach it.");
   });
 
   it("a request for a denied host is refused as a model host, counted, never `already_allowed` (L3) and never a card; with no deny it is as before", async () => {

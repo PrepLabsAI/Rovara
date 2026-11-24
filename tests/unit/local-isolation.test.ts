@@ -44,7 +44,7 @@ describe("the allow-list", () => {
     expect(localAllowedDomains(["Artifacts.Acme.dev", "*.internal.acme.dev"])).toEqual(expect.arrayContaining(["artifacts.acme.dev", "*.internal.acme.dev"]));
     expect(localAllowedDomains(["github.com"]).filter((entry) => entry === "github.com")).toHaveLength(1);
     for (const bad of ["*", "*.com", "com", "localhost", "10.0.0.1", "*.github.io", "https://acme.dev", "acme.dev/path", "a b.dev", ""]) {
-      expect(() => localAllowedDomains(["ok.acme.dev", bad]), bad).toThrowError(/allowed website number 2 must be a domain name/);
+      expect(() => localAllowedDomains(["ok.acme.dev", bad]), bad).toThrowError(/allowed address number 2 must be a domain name/);
     }
   });
 

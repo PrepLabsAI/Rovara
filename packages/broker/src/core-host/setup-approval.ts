@@ -23,8 +23,8 @@ import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 import { deployedSessionMembers } from "./deployed-decisions.js";
 import { issueEvalSpendApprovalProof, issueSetupHostApprovalProof, issueSetupApprovalProof, type SetupHostApprovalProofInput, type SetupApprovalProofInput } from "./hosted-approvers.js";
 
-export const SETUP_NEEDS_ADMIN = "This setup change reaches outside the project's commands (a website, a secret, a registry, an integration or something Rovara does not recognise), so a company owner or admin must approve it.";
-export const SETUP_HOST_NEEDS_ADMIN = "A website for a setup run changes what the project's code can reach, so only a company owner or admin can allow or refuse it.";
+export const SETUP_NEEDS_ADMIN = "This setup change reaches outside the project's commands (an address, a secret, a registry, an integration or something Rovara does not recognise), so a company owner or admin must approve it.";
+export const SETUP_HOST_NEEDS_ADMIN = "An address for a setup run changes what the project's code can reach, so only a company owner or admin can allow or refuse it.";
 export const SETUP_NEEDS_MAINTAINER = "Only the project's maintainers, or a company owner or admin, can decide this setup.";
 
 /** The words of a refusal by the candidate's risk and the answer (any maintainer may reject). */

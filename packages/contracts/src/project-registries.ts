@@ -52,7 +52,7 @@ const RegistryUrlSchema = z.string().max(2_048).superRefine((value, context) => 
   if (url.protocol !== "https:" || url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "" || url.port !== "") {
     context.addIssue({ code: "custom", message: "registry url must be an https address without credentials, a port, a query or a fragment" });
   } else if (!isRegistryHostname(url.hostname)) {
-    context.addIssue({ code: "custom", message: "registry url must name a host of at least two labels (not an address)" });
+    context.addIssue({ code: "custom", message: "registry url must name a host of at least two labels (not an IP number)" });
   }
 });
 
@@ -167,7 +167,7 @@ export interface RegistryProblem { code: RegistryProblemCode; registry: string }
 /** Fixed sentences: they name a registry (a name the project chose), never a host's path or a value. */
 export const REGISTRY_PROBLEM_MESSAGES: Readonly<Record<RegistryProblemCode, string>> = {
   edition_kind: "This edition does not support project package registries yet. Public package registries need no entry.",
-  host_not_approved: "The registry's host is not on the project's approved websites. Ask an admin to approve it, then try again.",
+  host_not_approved: "The registry's address is not on the project's allowed addresses. Ask an admin to allow it, then try again.",
   domain_not_bound: "This registry's CodeArtifact domain and repository are not set up for this organization on this install. Ask the install's admin.",
 };
 

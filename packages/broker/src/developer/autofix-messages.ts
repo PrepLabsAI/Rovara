@@ -93,7 +93,7 @@ const CODE_SENTENCES: Readonly<Record<AutoFixCode, string>> = Object.freeze({
   // Sentences for failure codes the contracts name that this broker does not raise yet (port lane L1; same words as the engine port will bring).
   "new-failing-test": "A check that also failed before has a failing test that was not failing before this change.",
   "setup-failed-in-task": "The test setup failed in this task.",
-  "host-blocked": "A website the test setup needs is not allowed yet.",
+  "host-blocked": "An address the test setup needs is not allowed yet.",
   "build-host-offline": "The build host for this project is offline.",
   "setup-changed-files": "The dev container's setup changed the project's files, so the checks did not run.",
   "leftover-processes": "The programs left running from earlier work could not be stopped, so the step did not run.",
