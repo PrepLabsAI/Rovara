@@ -47,7 +47,7 @@ async function teardownProofHost(): Promise<string | undefined> {
 }
 async function runRootProof(proof: string, image: string, timeout: number) {
   let failure: Error | undefined;
-  try { await promisify(execFile)("sudo", ["-n", process.execPath, "--input-type=module", "-e", proof, resolve(import.meta.dirname, "../.."), image], { timeout, maxBuffer: 1_048_576 }); }
+  try { await promisify(execFile)("sudo", ["-n", "env", "CODE_CI_LINUX=1", process.execPath, "--input-type=module", "-e", proof, resolve(import.meta.dirname, "../.."), image], { timeout, maxBuffer: 1_048_576 }); }
   catch (error) { failure = new Error((error as { stderr?: string }).stderr ?? "root proof failed without stderr", { cause: error }); }
   const leftover = await teardownProofHost();
   if (failure !== undefined) throw new Error(failure.message + (leftover === undefined ? "" : "\n" + leftover), { cause: failure.cause });
