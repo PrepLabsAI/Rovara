@@ -18,9 +18,9 @@ const LEGACY = { alarmName: "AgentXSessionStuckStopping", namespace: "AgentX" };
 // recorded: tests/support/legacy-runtime-boundary-template.ts asserts the addition's shape (one policy per stack, a PermissionsBoundary on every runtime role, nothing else) and takes it
 // out; each changed stack's full template has its own new pin below, and legacy-runtime-boundary.test.ts proves the policy.
 const BOUNDED_STACK_PINS: Record<string, string> = {
-  AgentXControlPlane: "4ab39f2edce8a0d23cd306aabeed2077129c21879caeda1f9ba37f255d59740a",
+  AgentXControlPlane: "1191755c74c726e9aaf36e877f47ab321bc3d96c3ae352ab4db563b3aa3f0705",
   AgentXProductionFoundation: "e7c873b146a748408b545e42d2f17596c04ad229271ed7776312d312eca9ca63",
-  AgentXSlackOrchestrator: "1b511b1013eb0c7692c3f99802062f6aa6152ad040d53f873305112be71c35ad",
+  AgentXSlackOrchestrator: "9ed4e1e13eeb3ecf860e61d9f2c9b332901f36190e0685fa695a390335420bf5",
 };
 // Worker ECR scope lane (2026-11-23): the Foundation pin moved only by the worker role's ECR statements (narrowed read, new Deny). The pin recorded before the lane (Fix A's) is kept
 // below and re-derived in the test: Foundation minus exactly those two statement changes hashes to it.
@@ -32,7 +32,7 @@ describe("legacy production templates", () => {
     if (stack.stackName === "AgentXControlPlane") {
       it("removing only Batch F additions preserves code/next's AgentXControlPlane template", () => {
         const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(withoutLegacyRuntimeBoundary(withoutStuckStoppingAlarm(normalizedTemplate(stack), LEGACY))));
-        expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("a2098ca531ef21213fc6d3a6fa57f7a330475d9181de891a288b6c608085d6a6");
+        expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("e507d3fb0ea80447881b09b79502bcfcd444adabd5aabc807ba809b624bce4ec");
       }, 120_000);
     }
     it(`${stack.stackName} is unchanged`, () => {
@@ -48,7 +48,7 @@ describe("legacy production templates", () => {
       // assert the exact broker-only addition, and retain the entire historical snapshot.
       if (stack.stackName === "AgentXControlPlane") {
         const withoutBoundary = withoutLegacyRuntimeBoundary(template);
-        expect(createHash("sha256").update(JSON.stringify(withoutBoundary)).digest("hex")).toBe("c56e0bf3d053743471b5545f1b78a0487030335cb9dcb977095dd162686b8e7e");
+        expect(createHash("sha256").update(JSON.stringify(withoutBoundary)).digest("hex")).toBe("12b0b4104f4c5d7a66b89782aab8e92d43f0739f5da52cc31cf1f9eea024a88c");
         // Webhook lane W3 adds the webhook secret slot, its throttle and one alarm (tests/support/webhook-secret-template.ts pins them); the historical snapshot is of the rest.
         expect(withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutBoundary))).toMatchSnapshot();
       } else expect(withoutLegacyRuntimeBoundary(template)).toMatchSnapshot();

@@ -8,7 +8,7 @@ type Resource = { Type: string; Properties: Record<string, unknown>; Condition?:
 type Template = { Parameters?: Record<string, unknown>; Conditions?: Record<string, unknown>; Resources: Record<string, Resource> };
 
 /** The policies' logical-id prefixes, one per consumer role (control-plane.ts). */
-export const SLACK_COMPANY_POLICIES = ["SlackIngress", "ChannelApi", "DeveloperTaskNotifier", "DeveloperIdentity", "SlackIngressMembers", "ChannelApiMembers", "SessionReconciler", "SlackOrchestrator", "Broker", "SlackIngressCompanyBindings", "SlackIngressCompanyProjects", "ChannelApiCompanyProjects"] as const;
+export const SLACK_COMPANY_POLICIES = ["SlackIngress", "ChannelApi", "DeveloperTaskNotifier", "DeveloperIdentity", "SlackIngressMembers", "ChannelApiMembers", "SessionReconciler", "SlackOrchestrator", "Broker", "SlackIngressCompanyBindings", "SlackIngressCompanyProjects", "ChannelApiCompanyProjects", "SlackTokenReader"] as const;
 /** Each consumer function's logical-id prefix and the variables the switch adds to it. */
 const VARIABLES: ReadonlyArray<readonly [RegExp, readonly string[]]> = [
   [/^SlackIngress[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES", "DEVELOPER_SIGNIN_TABLE_NAME", "AGENTX_ENV", "SLACK_TEAM_ID"]],
@@ -45,6 +45,14 @@ export function withoutSlackCompanyMode(input: unknown, options: { proof?: boole
     expect(conditions, id).toContain(policy.Condition);
     delete template.Resources[id];
   }
+  // R5 step 1 (DEC 254zzz444): the orchestrator's company-scoped Slack token reader ROLE (its policy is the SlackTokenReader policy above). Exactly one, under the switch's condition and the
+  // fixed name; tests/contract/slack-company-token-reader-infrastructure.test.ts checks its trust and policy in full.
+  const readers = Object.entries(template.Resources).filter(([id]) => /^SlackCompanyTokenReaderRole[0-9A-F]{8}$/u.test(id));
+  expect(readers).toHaveLength(1);
+  expect(readers[0]![1].Type).toBe("AWS::IAM::Role");
+  expect(conditions).toContain(readers[0]![1].Condition);
+  expect(readers[0]![1].Properties.RoleName).toMatch(/^agentx-[a-z0-9-]+-slk$/u);
+  delete template.Resources[readers[0]![0]];
   for (const id of conditions) delete template.Conditions![id];
   // L2-2 PR 18d: the Slack service's inputs. DEC 254zk: the table and the team are always output (the switch is the slack stack's own, set by config set); no state output.
   const outputs = (template as { Outputs?: Record<string, { Value: unknown; Condition?: string }> }).Outputs ?? {};
@@ -99,10 +107,12 @@ export function withoutSlackCompanyService(input: unknown): unknown {
   const tasks = Object.values(template.Resources).filter((resource) => resource.Type === "AWS::ECS::TaskDefinition");
   expect(tasks).toHaveLength(1);
   const container = (tasks[0]!.Properties.ContainerDefinitions as Array<{ Environment: Array<{ Name: string; Value: unknown }> }>)[0]!;
-  const added = container.Environment.filter((entry) => ["SLACK_COMPANY_WORKSPACES", "STATE_TABLE_NAME", "SLACK_TEAM_ID", "AGENTX_ENV"].includes(entry.Name));
+  const added = container.Environment.filter((entry) => ["SLACK_COMPANY_WORKSPACES", "STATE_TABLE_NAME", "SLACK_TEAM_ID", "AGENTX_ENV", "SLACK_COMPANY_TOKEN_ROLE_ARN", "SLACK_COMPANY_TOKEN_FALLBACK"].includes(entry.Name));
   expect(added.map((entry) => [entry.Name, entry.Value])).toEqual([
     ["SLACK_COMPANY_WORKSPACES", { Ref: "SlackCompanyWorkspacesState" }], ["STATE_TABLE_NAME", { Ref: "SlackCompanyStateTableName" }], ["SLACK_TEAM_ID", { Ref: "SlackCompanyTeamId" }],
     ["AGENTX_ENV", expect.any(String)],
+    // R5 step 1 (DEC 254zzz444): the token reader role's ARN (built from the environment alone) and the release-1 fallback.
+    ["SLACK_COMPANY_TOKEN_ROLE_ARN", expect.objectContaining({ "Fn::Join": expect.any(Array) as unknown }) as unknown], ["SLACK_COMPANY_TOKEN_FALLBACK", "shared"],
   ]);
   container.Environment = container.Environment.filter((entry) => !added.includes(entry));
   return withoutCompanySignInService(template);
