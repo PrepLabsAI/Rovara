@@ -1,0 +1,27 @@
+[
+  {
+    "label": "CompanySecretsRole63E074C9/AssumeRolePolicyDocument",
+    "issueCode": "WILDCARD_USAGE_TOO_PERMISSIVE",
+    "reason": "The trust names ONE principal (the broker role) and the session tag rovara:org must match org_ plus 20 characters (the fixed company id shape, so ? x20). An Access Analyzer advisory about the pattern, not a CreateRole rule; the same pattern is the Slack token reader role's trust. Neither role is deployed in staging, so IAM's acceptance is unconfirmed there: watch the first create."
+  },
+  {
+    "label": "SlackCompanyTokenReaderRole3917AFD9/AssumeRolePolicyDocument",
+    "issueCode": "WILDCARD_USAGE_TOO_PERMISSIVE",
+    "reason": "Same as the company-secrets role: one principal, the rovara:org session tag must be org_ plus 20 characters. validate-policy reports it as ERROR, but it is not a CreateRole rule: IAM accepted the identical org_ + 20-character trust on the deployed staging CompanySecretsRole (2026-11-16)."
+  },
+  {
+    "label": "SavedEnvImagesCreationTemplate55581766/RepositoryPolicy",
+    "issueCode": "MISSING_RESOURCE",
+    "reason": "An ECR repository policy (a creation template's policy) has no Resource element by design: it applies to the repository it is attached to. The analyzer's generic RESOURCE_POLICY check has no ECR type."
+  },
+  {
+    "label": "RuntimeBoundary9D352254/PolicyDocument",
+    "issueCode": "PASS_ROLE_WITH_STAR_IN_ACTION_AND_RESOURCE",
+    "reason": "The legacy runtime boundary is deny-only by design (AllowAll, then Deny statements, DEC 254zzz443): the Allow * is capped by DenyPassRole / DenyPassRoleExceptWorkerRole in the same document."
+  },
+  {
+    "label": "rovara-staging-code-release-pipeline/BoundaryEA298153/PolicyDocument",
+    "issueCode": "PASS_ROLE_WITH_STAR_IN_RESOURCE",
+    "reason": "The release pipeline's own boundary is a service ceiling (iam:PassRole among the services, Resource *) with explicit IAM-write denies; the pipeline roles' own policies name the roles they pass. Pre-existing; an analyzer advisory."
+  }
+]

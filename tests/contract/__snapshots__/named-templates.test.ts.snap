@@ -701,40 +701,22 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
                 "iam:*Policy*",
               ],
               "Effect": "Deny",
-              "Resource": [
-                {
-                  "Fn::Join": [
-                    "",
-                    [
-                      "arn:",
-                      {
-                        "Ref": "AWS::Partition",
-                      },
-                      ":iam::",
-                      {
-                        "Ref": "AWS::AccountId",
-                      },
-                      ":policy/agentx/staging/agentx-staging-boundary",
-                    ],
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":iam::",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":policy/agentx/staging/agentx-staging-*boundary",
                   ],
-                },
-                {
-                  "Fn::Join": [
-                    "",
-                    [
-                      "arn:",
-                      {
-                        "Ref": "AWS::Partition",
-                      },
-                      ":iam::",
-                      {
-                        "Ref": "AWS::AccountId",
-                      },
-                      ":policy/agentx/staging/agentx-staging-deploy-boundary",
-                    ],
-                  ],
-                },
-              ],
+                ],
+              },
               "Sid": "DenyBoundaryChanges",
             },
             {
@@ -874,7 +856,55 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
                       {
                         "Ref": "AWS::Partition",
                       },
-                      ":*rovara-staging-*rel*",
+                      ":s3:::rovara-staging-*rel*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":codebuild:*:*:project/rovara-staging-*rel*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":codepipeline:*:*:rovara-staging-*rel*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":sns:*:*:rovara-staging-*rel*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":kms:*:*:alias/rovara-staging-*rel*",
                     ],
                   ],
                 },
@@ -1190,40 +1220,22 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
                 "iam:*Policy*",
               ],
               "Effect": "Deny",
-              "Resource": [
-                {
-                  "Fn::Join": [
-                    "",
-                    [
-                      "arn:",
-                      {
-                        "Ref": "AWS::Partition",
-                      },
-                      ":iam::",
-                      {
-                        "Ref": "AWS::AccountId",
-                      },
-                      ":policy/agentx/staging/agentx-staging-boundary",
-                    ],
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":iam::",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":policy/agentx/staging/agentx-staging-*boundary",
                   ],
-                },
-                {
-                  "Fn::Join": [
-                    "",
-                    [
-                      "arn:",
-                      {
-                        "Ref": "AWS::Partition",
-                      },
-                      ":iam::",
-                      {
-                        "Ref": "AWS::AccountId",
-                      },
-                      ":policy/agentx/staging/agentx-staging-deploy-boundary",
-                    ],
-                  ],
-                },
-              ],
+                ],
+              },
               "Sid": "DenyBoundaryChanges",
             },
             {
@@ -1351,7 +1363,55 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
                       {
                         "Ref": "AWS::Partition",
                       },
-                      ":*rovara-staging-*rel*",
+                      ":s3:::rovara-staging-*rel*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":codebuild:*:*:project/rovara-staging-*rel*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":codepipeline:*:*:rovara-staging-*rel*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":sns:*:*:rovara-staging-*rel*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":kms:*:*:alias/rovara-staging-*rel*",
                     ],
                   ],
                 },

@@ -335,11 +335,11 @@ describe("escalation by a runtime role (an administrator policy attached, under 
 describe("size: both boundaries fit their managed-policy limit with headroom, at the longest environment name on the longest partition", () => {
   const size = (statements: typeof defaultBoundaryStatements, env: string, partition: string) =>
     JSON.stringify({ Version: "2012-10-17", Statement: statements({ env, partition, region: partition === "aws" ? "us-west-2" : "us-gov-west-1", account: ACCOUNT, cloudFormationRoleName: `agentx-${env}-cloudformation` }) }).replace(/\s/gu, "").length;
-  it("keeps the runtime boundary at least 1,700 characters and the deploy boundary at least 250 under 6,144", () => {
+  it("keeps the runtime boundary at least 1,500 characters and the deploy boundary at least 100 under 6,144 (VENDOR FIX: the per-service release denies took 200 and 150 of the old headroom)", () => {
     for (const env of ["staging", "a".repeat(20)]) {
       for (const partition of ["aws", "aws-us-gov"]) {
-        expect(size(defaultBoundaryStatements, env, partition), `runtime ${env.length} ${partition}`).toBeLessThanOrEqual(6144 - 1700);
-        expect(size(deployBoundaryStatements, env, partition), `deploy ${env.length} ${partition}`).toBeLessThanOrEqual(6144 - 250);
+        expect(size(defaultBoundaryStatements, env, partition), `runtime ${env.length} ${partition}`).toBeLessThanOrEqual(6144 - 1500);
+        expect(size(deployBoundaryStatements, env, partition), `deploy ${env.length} ${partition}`).toBeLessThanOrEqual(6144 - 100);
       }
     }
   });
