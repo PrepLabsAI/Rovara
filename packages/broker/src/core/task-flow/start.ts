@@ -14,7 +14,6 @@ import {
   WorkOriginSchema,
   UNRUNNABLE_EXTERNAL_CHECK_MESSAGE,
   unrunnableExternalCheck,
-  ROVARA_CODE_V2_FOR_NEW_ORGS,
   StartDeveloperTaskRequestSchema,
   WORKFLOW_PATH_REQUIRED,
   agentXError,
@@ -170,7 +169,8 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
   // An external check nothing in this release runs is refused here, with the clear sentence, before the budget, the limits and any machine (lane P2, review M2).
   if (unrunnableExternalCheck(project.definition.repositories) !== undefined) return refused(agentXError("CONFIG_INVALID", UNRUNNABLE_EXTERNAL_CHECK_MESSAGE));
 
-  const understandFirst = asWorkflow && (deps.understandFirst ?? ROVARA_CODE_V2_FOR_NEW_ORGS);
+  // Both production roots (hosted core-engine-root, laptop app) pass true; a caller that passes nothing starts on the 1.0.0 path.
+  const understandFirst = asWorkflow && (deps.understandFirst ?? false);
   // A workflow with no Quick or Full path is Understand's to choose on version 1.1.0; anywhere else the explicit path is required.
   if (asWorkflow && request.workflowPath === undefined && !understandFirst) return refused(agentXError("CONFIG_INVALID", WORKFLOW_PATH_REQUIRED));
   const workflowPath = request.workflowPath ?? "QUICK";

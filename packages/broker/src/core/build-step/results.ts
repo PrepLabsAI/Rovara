@@ -277,7 +277,7 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
     // The worker reports the readiness commands it was sent as `readiness:<index>`, in the order of the selected checks; agent-claimed entries never stand in for them, and a missing one is unknown.
     const selected = workflowSelectedChecks(workflow.checkPolicy);
     const measured = verificationResultsOf(selected, checks.data.checks);
-    // TE-C6 (switch ROVARA_FLAKY_RERUN, 9d's decision): a check that failed ONLY on tests that passed on the worker's one rerun is recorded as passed for VERIFY, and the workflow carries the fact that B5's hold reads (the draft
+    // TE-C6 (9d's decision): a check that failed ONLY on tests that passed on the worker's one rerun is recorded as passed for VERIFY, and the workflow carries the fact that B5's hold reads (the draft
     // stays a draft). Any other failure, a timeout, a check that did not run or one whose command could not run stays FAILED, exactly as before; without the seam nothing changes.
     let flakyFact: ReturnType<typeof flakyHoldFactOf>;
     let results = measured;

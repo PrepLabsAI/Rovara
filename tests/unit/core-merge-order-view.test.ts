@@ -12,15 +12,14 @@ const edge = (consumer: string, provider: string) => ({ consumer, provider, lang
 const PRS = [{ repositoryId: "app", number: 1 }, { repositoryId: "payments-lib", number: 1 }];
 
 describe("the Merge section's view", () => {
-  const viewOf = async (facts: unknown, over: { orderInView?: boolean; pullRequests?: typeof PRS; seam?: false } = {}) => {
+  const viewOf = async (facts: unknown, over: { pullRequests?: typeof PRS; seam?: false } = {}) => {
     const world = await mergeWorld({ pullRequests: over.pullRequests ?? PRS });
     await world.seedTracking();
     if (over.seam !== false) world.deps.repositoryEdges = async () => facts;
-    const deps = { ...world.deps, ...(over.orderInView === false ? {} : { orderInView: true }) };
-    return { world, view: await mergeViewOf(deps, await world.task(), await readMergeTracking(world.store, TASK_ID, ORG), undefined) };
+    return { world, view: await mergeViewOf(world.deps, await world.task(), await readMergeTracking(world.store, TASK_ID, ORG), undefined) };
   };
 
-  it("carries the order for a task with dependency facts, and nothing for today's repository order", async () => {
+  it("carries the order for a task with dependency facts by default (no option turns it on), and nothing for today's repository order", async () => {
     const { view, world } = await viewOf([edge("app", "payments-lib")]);
     const numbers = world.prs.map((pr) => pr.number);
     expect(view).toMatchObject({ ready: true, order: { lines: [`Merge order: payments-lib #${String(numbers[1])} first, then app #${String(numbers[0])}.`] } });
@@ -40,7 +39,7 @@ describe("the Merge section's view", () => {
     const world = await mergeWorld({ pullRequests: PRS });
     await world.seedTracking();
     world.deps.repositoryEdges = async () => { throw new Error("secret-canary"); };
-    const view = await mergeViewOf({ ...world.deps, orderInView: true }, await world.task(), await readMergeTracking(world.store, TASK_ID, ORG), undefined);
+    const view = await mergeViewOf(world.deps, await world.task(), await readMergeTracking(world.store, TASK_ID, ORG), undefined);
     expect(view?.order).toEqual({ lines: [MERGE_ORDER_WORDS.noSafeOrder.unreadable], needsOverride: true });
     expect(JSON.stringify(view)).not.toContain("secret-canary");
   });
@@ -59,7 +58,7 @@ describe("the Merge section's view", () => {
     const task = await world.task();
     await world.setWorkflow({ pullRequests: task.workflow.pullRequests!.map((entry) => ({ ...entry, state: entry.repositoryId === "app" ? "MERGED" : entry.state })) });
     world.deps.repositoryEdges = async () => [edge("app", "payments-lib")];
-    const view = await mergeViewOf({ ...world.deps, orderInView: true }, await world.task(), await readMergeTracking(world.store, TASK_ID, ORG), undefined);
+    const view = await mergeViewOf(world.deps, await world.task(), await readMergeTracking(world.store, TASK_ID, ORG), undefined);
     expect(view?.order?.lines.at(-1)).toBe(MERGE_ORDER_WORDS.outOfOrderWarning("app", "payments-lib", [], 0));
   });
 

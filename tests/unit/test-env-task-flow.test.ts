@@ -1,7 +1,7 @@
 // The approved test environment in the task flow: a starting task pins the revision it started with, a coding or verification run is told the plan of that revision, and an environment the flow cannot carry
 // out is recorded as not applied (with its reason), never half-used.
 import { describe, expect, it } from "vitest";
-import { TestEnvironmentBodySchema, testEnvDigest, type TestEnvironmentBody } from "@agentx/contracts";
+import { TASK_FLAKY_RERUN_FEATURE, TestEnvironmentBodySchema, testEnvDigest, type TestEnvironmentBody } from "@agentx/contracts";
 import { COMPANY, createHarness, newRequestId } from "../support/task-flow-harness.js";
 import { createTaskTestEnvironment, featuresForTestPlan } from "../../packages/broker/src/core/test-env/seam.js";
 import { testEnvLatestKey, testEnvRevisionKey } from "../../packages/broker/src/core/test-env/environment.js";
@@ -48,7 +48,8 @@ describe("the plan a run is told", () => {
     const readiness = [cmd("npm", ["test"])];
     const checks = await seam.stepPlan({ project: PROJECT, taskId: started.task.taskId, mode: "CHECKS", readiness });
     expect(checks?.plan).toMatchObject({ revision: 1, digest: testEnvDigest(environment), roundBudgetMin: 30, checks: [{ id: "unit", kind: "test" }], selection: { method: "full" } });
-    expect(checks?.requires).toEqual(["task.testEnvironment.v1"]);
+    // The failing-test rerun is on by default (DEC 254zzz448): the run also needs its worker feature.
+    expect(checks?.requires).toEqual(["task.testEnvironment.v1", TASK_FLAKY_RERUN_FEATURE]);
     // The run's first commands are not the environment's checks (the task's policy was edited since): the run goes out as it would without an environment.
     expect(await seam.stepPlan({ project: PROJECT, taskId: started.task.taskId, mode: "CHECKS", readiness: [cmd("npm", ["run", "other"])] })).toBeUndefined();
     expect(await seam.stepPlan({ project: PROJECT, taskId: started.task.taskId, mode: "CHECKS" })).toBeUndefined();

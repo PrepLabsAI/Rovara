@@ -647,15 +647,15 @@ describe("L1a broker environment derivation", () => {
     const beforeFirstGateway = withoutWebhookSecretLane(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(structuredClone(legacy.toJSON()) as Json & { Outputs: Record<string, unknown> }), stuckStoppingInstall())));
     expect(beforeFirstGateway.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     delete beforeFirstGateway.Outputs.ModelRunPriceVersion;
-    expect(digest(beforeFirstGateway), "legacy without the first-gateway output retains the upstream member-check pin").toBe("fef96cf61a67a412e6d99ef4bf9567f05dd1a518d02471de8dede006a78bbc1e");
+    expect(digest(beforeFirstGateway), "legacy without the first-gateway output retains the upstream member-check pin").toBe("fa3f46c142e42a2aa9a818a430126fc9517e56400166f8e5258c6429344f2a7e");
     const beforeMemberCheck = withoutBrokerMemberConditionCheck(beforeFirstGateway);
-    expect(digest(beforeMemberCheck), "legacy without the first-gateway output and broker member check").toBe("e08e8a557cfcd0f1815bbfdc23a162704e0d0995d9d04b073b2b6feb30e44a09");
+    expect(digest(beforeMemberCheck), "legacy without the first-gateway output and broker member check").toBe("9d66b2611225f1c3263c5fd2510f2b8ea4b80af5b08c1daa5afdbbc596e9efb2");
     // Rule D proof: removing exactly the two capability routes retains the switch-removal pin.
     const withoutCapabilityRoutes = structuredClone(beforeMemberCheck);
     delete withoutCapabilityRoutes.Resources.ContextToolsListRoute;
     delete withoutCapabilityRoutes.Resources.DesignReviewPacketRoute;
-    expect(digest(withoutCapabilityRoutes), "legacy with the two capability routes taken out").toBe("b304960b2db5e8cd2ccdb7cc84fc45b58f13e8eff4e8e6810cde809f190fc82b");
-    expect(digest(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(structuredClone(legacy.toJSON())), stuckStoppingInstall())))).toBe("50f67718e9973dd22b4699e0155c3e29fd34c86016f3ce28e7c531517b43668c");
+    expect(digest(withoutCapabilityRoutes), "legacy with the two capability routes taken out").toBe("4a27a5baaedf71bdec8045bd904aa73159ea7288d4bf0243c6d23278a1ddbba1");
+    expect(digest(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(structuredClone(legacy.toJSON())), stuckStoppingInstall())))).toBe("e903743cd092937281ed7ebf0c6fbd60d642cd93cdddbc20dc33f14b3d7eb8b7");
   });
 });
 import { createHash } from "node:crypto";
@@ -693,6 +693,19 @@ describe("the test services setting (stack parameter TestServices)", () => {
 
   it("is an operator setting an upgrade keeps", () => {
     expect(OPERATOR_PARAMETERS["control-plane"]).toContain("TestServices");
+  });
+});
+
+// DEC 254zzz461: the test-environment features that were switches (failing-test rerun, baseline per commit, verification results, eval stand-ins) are always on, so no stack parameter and no packed setting carries them.
+describe("the retired test environment switches", () => {
+  it.each(["FlakyRerun", "BaselineCache", "VerificationResults", "EvalStandIns"])("%s is no stack parameter, in the named or the legacy template", (parameter) => {
+    expect((json as unknown as { Parameters: Record<string, unknown> }).Parameters).not.toHaveProperty(parameter);
+    expect((legacy.toJSON() as Json).Parameters).not.toHaveProperty(parameter);
+    expect(OPERATOR_PARAMETERS["control-plane"]).not.toContain(parameter);
+  });
+  it.each(["fr", "bc", "vx", "es", "wd"])("%s is no packed setting of the broker or the dispatcher", (code) => {
+    expect(packedSettings(brokerVariables).has(code)).toBe(false);
+    expect(packedSettings(dispatcherVariables).has(code)).toBe(false);
   });
 });
 

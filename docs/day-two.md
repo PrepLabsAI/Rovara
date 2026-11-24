@@ -212,6 +212,9 @@ set` (the CloudFormation console, say) are not recorded. Each key lives in exact
 | `company.selfServe` | stack parameter CompanySelfServe on agentx-<env>-control-plane | disabled | enabled or disabled; a person with an operator's invite code may create their own company, only while `company.signIn` is enabled too. While disabled every self-serve create is refused, whatever the stored self-serve setting says (named environments only) |
 | `slack.companyWorkspaces` | stack parameter SlackCompanyWorkspaces on agentx-<env>-control-plane, and SlackCompanyWorkspacesState on agentx-<env>-slack | disabled | enabled or disabled; per-company Slack bots: workspaces other than the install's own use their company's bot token and company checks. Served only while `company.signIn` is enabled too: its grants and variables need both (named environments only) |
 
+- **Features with no switch (DEC 254zzz461).** The failing-test rerun, the baseline per commit, the verification results, the eval stand-ins, Pi's MCP client for context sources and ordered work are always on: there is no stack parameter, no
+  `config` key and no environment variable for them, and rollback is the previous version. Install the broker and the worker image together: a worker image that does not list `task.flakyRerun.v1` or `task.workflowDependencies`
+  refuses the step ("this worker is too old to run this step; upgrade it").
 - **Models.** A new model must answer a one-token call before anything changes. `set` then
   updates the stack, the settings and the install answers, so `upgrade` and `init --resume` keep
   it.

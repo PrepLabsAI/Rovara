@@ -20,7 +20,7 @@ async function setup() {
   const events: string[] = [];
   let role = "administrator", auditAvailable = true, pack = evidence();
   const audit: AuditSink = { stage(event) { if (!auditAvailable) throw new Error("ledger unavailable"); events.push(event.action); return [{ kind: "put", item: { pk: `AUDIT#${event.companyId}`, sk: event.eventId, action: event.action, details: event.details ?? {} } }]; }, async record() { throw new Error("must be transactional"); } };
-  const deps: KnownFailingDeps = { store, now: () => now, audit, env: { ROVARA_VERIFICATION_RESULTS: "1" }, mayMaintain: async (p) => p.companyId === company && (role === "owner" || role === "admin" || role === "administrator"), evidenceOf: async () => pack };
+  const deps: KnownFailingDeps = { store, now: () => now, audit, mayMaintain: async (p) => p.companyId === company && (role === "owner" || role === "admin" || role === "administrator"), evidenceOf: async () => pack };
   const service = createKnownFailing(deps);
   for (const c of [company, other]) {
     await store.put({ item: { ...projectRevisionKey(c, "sample", 1), definition: { repositories: [{ defaultBranch: "main" }] } } });
@@ -48,7 +48,7 @@ describe("hosted known-failing lifecycle", () => {
     const audit = await s.store.query({ pk: `AUDIT#${company}` });
     expect(audit.items.some((row) => row["action"] === "known_failing.marked")).toBe(true);
     expect(JSON.stringify(audit.items)).not.toContain("old test");
-    const result = await classifyStoredTestingResult({ store: s.store, now: () => now, env: { ROVARA_VERIFICATION_RESULTS: "1" } }, { companyId: company, project: "sample", taskId, workflow, evidence: evidence(), facts: {}, budget: { enabled: false, dayBudgetHasRoom: true, baselineRequests: 0, spend: { spentUsd: wholeTaskSpendUsd(0), roundEstimateUsd: 0, capUsd: 1 } } });
+    const result = await classifyStoredTestingResult({ store: s.store, now: () => now }, { companyId: company, project: "sample", taskId, workflow, evidence: evidence(), facts: {}, budget: { enabled: false, dayBudgetHasRoom: true, baselineRequests: 0, spend: { spentUsd: wholeTaskSpendUsd(0), roundEstimateUsd: 0, capUsd: 1 } } });
     expect(result).toMatchObject({ decided: true, result: "partially_verified" });
     await s.service.undo(company, "sample", person(), true, marks.marks[0]!);
     await expect(s.service.undo(company, "sample", person(), true, marks.marks[0]!)).rejects.toThrow();

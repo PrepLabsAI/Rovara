@@ -5,14 +5,13 @@ import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/de
 
 describe("workflow dependency runtime configuration", () => {
 
-  it("composes the real developer route feature settings without changing People or invitations", () => {
-    const build = (flag: string | undefined) => createDeveloperApiConfiguration({
+  it("composes the real developer route feature settings: ordered work has no switch (DEC 254zzz461), People and invitations are unchanged", () => {
+    const developer = createDeveloperApiConfiguration({
       DEVELOPER_TOKEN_ISSUER: "https://issuer.example/v1/auth",
       DEVELOPER_IDENTITY_FUNCTION_ARN: "developer-identity",
       DEVELOPER_SIGNIN_TABLE_NAME: "sign-ins",
       AGENTX_ENV: "agentxlivetest123",
       DEVELOPER_SIGNIN_SLACK: "enabled",
-      AGENTX_WORKFLOW_DEPENDENCIES_ENABLED: flag,
       AGENTX_TASK_PEOPLE_CHANGES_ENABLED: "true",
       AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED: "false",
       AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED: "false",
@@ -20,23 +19,14 @@ describe("workflow dependency runtime configuration", () => {
       channelMembers: async () => ({ ok: true as const, memberOf: [] as string[] }),
       verifyAccessToken: async () => ({}),
     }));
-    const routesFor = (developer: NonNullable<ReturnType<typeof build>>) => developerTaskRouteDependencies({
-      documentClient: { send: async () => ({}) }, tableName: "state", developer, now: Date.now,
+    expect(developer).toBeDefined();
+    expect(developer).not.toHaveProperty("workflowDependenciesEnabled");
+    const routes = developerTaskRouteDependencies({
+      documentClient: { send: async () => ({}) }, tableName: "state", developer: developer!, now: Date.now,
     }, { developerId: "dev", sessionId: "session", amr: "slack", name: "Dev" });
-
-    const enabled = build("true");
-    expect(enabled).toBeDefined();
-    const enabledRoutes = routesFor(enabled!);
-    expect(enabledRoutes.workflowDependenciesEnabled).toBe(true);
-    expect(enabledRoutes.taskPeopleConfiguration).toEqual({ peopleChangesEnabled: true });
-    expect(typeof enabledRoutes.inviteTaskPerson).toBe("undefined");
-
-    const disabled = build("false");
-    expect(disabled).toBeDefined();
-    const disabledRoutes = routesFor(disabled!);
-    expect(disabledRoutes.workflowDependenciesEnabled).toBe(false);
-    expect(disabledRoutes.taskPeopleConfiguration).toEqual({ peopleChangesEnabled: true });
-    expect(typeof disabledRoutes.inviteTaskPerson).toBe("undefined");
+    expect(routes).not.toHaveProperty("workflowDependenciesEnabled");
+    expect(routes.taskPeopleConfiguration).toEqual({ peopleChangesEnabled: true });
+    expect(typeof routes.inviteTaskPerson).toBe("undefined");
   });
 
   it("adds canonical work-breakdown guidance only when the pinned task context is supplied", () => {

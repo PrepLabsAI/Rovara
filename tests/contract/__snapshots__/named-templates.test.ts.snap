@@ -2925,15 +2925,6 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       "Description": "Test services: 1 on (the default), 0 off",
       "Type": "String",
     },
-    "WorkflowDependenciesEnabled": {
-      "AllowedValues": [
-        "true",
-        "false",
-      ],
-      "Default": "false",
-      "Description": "Whether bounded serial task work breakdowns are enabled in this environment",
-      "Type": "String",
-    },
     "WorkspaceKmsKeyArn": {
       "Description": "The foundation's workspace volume KMS key",
       "Type": "String",
@@ -3327,10 +3318,6 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                   ",tm=",
                   {
                     "Ref": "SlackTeamId",
-                  },
-                  ",wd=",
-                  {
-                    "Ref": "WorkflowDependenciesEnabled",
                   },
                 ],
               ],

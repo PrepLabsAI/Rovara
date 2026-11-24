@@ -1,4 +1,4 @@
-// TE-C6, the broker's half of the plan: with ROVARA_FLAKY_RERUN on, a run whose first commands are the environment's checks is told `flakyRerun: true` (and needs a worker that lists the feature); with it off the plan and its
+// TE-C6, the broker's half of the plan: a run whose first commands are the environment's checks is told `flakyRerun: true` (and needs a worker that lists the feature); with it off the plan and its
 // requirements are today's, byte for byte. The base's flaky set is read through ONE function.
 import { describe, expect, it } from "vitest";
 import { NightlyBaselineSchema, TASK_FLAKY_RERUN_FEATURE, TestEnvTaskPlanSchema, TestEnvironmentBodySchema, projectPk, projectRevisionKey, testEnvDigest, type TestEnvironmentBody } from "@agentx/contracts";
@@ -38,12 +38,11 @@ async function world(env: NodeJS.ProcessEnv) {
 }
 
 const READY = [cmd("pytest", ["--junitxml=r.xml"])];
-const ON = { ROVARA_FLAKY_RERUN: "1" } as NodeJS.ProcessEnv;
 
 describe("the plan of a verification run", () => {
 
-  it("a coding run is told the plan (no dependencies) so its settle round can rerun, only with the switch on and its readiness matching the environment's checks", async () => {
-    const { seam, taskId } = await world(ON);
+  it("a coding run is told the plan (no dependencies) so its settle round can rerun, only with its readiness matching the environment's checks", async () => {
+    const { seam, taskId } = await world({});
     const coding = await seam.stepPlan({ project: PROJECT, taskId, mode: "IMPLEMENT", readiness: READY });
     expect(coding?.plan.flakyRerun).toBe(true);
     expect(coding?.plan).not.toHaveProperty("dependencies");
@@ -53,6 +52,13 @@ describe("the plan of a verification run", () => {
     expect(await seam.stepPlan({ project: PROJECT, taskId, mode: "IMPLEMENT", readiness: [cmd("pytest", ["other"])] })).toBeUndefined();
     // And a verification run whose commands are not the environment's checks is told nothing at all.
     expect(await seam.stepPlan({ project: PROJECT, taskId, mode: "CHECKS", readiness: [cmd("pytest", ["other"])] })).toBeUndefined();
+  });
+
+  it("the rerun is always planned for a run whose first commands are the environment's checks (no switch, DEC 254zzz461)", async () => {
+    const { seam, taskId } = await world({});
+    const checks = await seam.stepPlan({ project: PROJECT, taskId, mode: "CHECKS", readiness: READY });
+    expect(checks?.plan.flakyRerun).toBe(true);
+    expect(checks?.requires).toContain(TASK_FLAKY_RERUN_FEATURE);
   });
 
   it("the flag is a literal true: false and any other value are refused, and a plan without it parses as it did", () => {

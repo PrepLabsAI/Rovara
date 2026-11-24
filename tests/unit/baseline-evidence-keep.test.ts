@@ -31,7 +31,7 @@ async function world(rawText: string | undefined) {
     scan: scanTextForTests, store: { blobs },
     actions: { async artifacts() { return rawText === undefined ? [] : [{ name: "evidence-raw.json", objectKey: `${PREFIX}evidence-raw.json` }]; }, async readArtifact(key, max) { return key === `${PREFIX}evidence-raw.json` && rawText !== undefined ? rawText.slice(0, max) : ""; } },
   };
-  const testEnv = { store: documents, now: () => NOW, env: { ROVARA_BASELINE_CACHE: "1" } };
+  const testEnv = { store: documents, now: () => NOW };
   for (const [n, hours] of [[1, 5], [2, 30]] as const) {
     await recordBaselineRow(testEnv, mintTrustedBaselineRun({ orgId: ORG, project: PROJECT, row: BaselineRowSchema.parse({
       recordedAt: new Date(NOW - hours * 3_600_000).toISOString(), envRevision: 1, branch: "main", headSha: sha(n), finishedAt: new Date(NOW - hours * 3_600_000).toISOString(), writer: "nightly",
@@ -40,7 +40,7 @@ async function world(rawText: string | undefined) {
   const plan = (candidates: string[] | undefined) => ({ revision: 1, ...(candidates === undefined ? {} : { baselineCandidates: candidates.map((value) => ({ sha: value })) }) });
   // The default branch of the project, as the nightly's usability rule reads it.
   await documents.put({ item: { ...projectRevisionKey(ORG, PROJECT, 1), entityType: "PROJECT", definition: { name: PROJECT, revision: 1, repositories: [{ name: "r", url: "https://example.invalid/r.git", path: "r", defaultBranch: "main", credentialRef: "c" }] } } });
-  const baseline = (candidates: string[] | undefined, env: NodeJS.ProcessEnv = { ROVARA_BASELINE_CACHE: "1" }) => taskBaselineOf({ ...testEnv, env }, { orgId: ORG, project: PROJECT, taskId: TASK.taskId, plan: plan(candidates) });
+  const baseline = (candidates: string[] | undefined, env: NodeJS.ProcessEnv = {}) => taskBaselineOf({ ...testEnv, env }, { orgId: ORG, project: PROJECT, taskId: TASK.taskId, plan: plan(candidates) });
   const keep = (candidates: string[] | undefined, env?: NodeJS.ProcessEnv) => keepEvidence(deps, { orgId: ORG, task: TASK, operationId: OP, candidateDigest: DIGEST, checks: [entry("readiness:0")], baseline: baseline(candidates, env) });
   return { deps, documents, blobs, keep, baseline };
 }
@@ -89,7 +89,7 @@ describe("the claim is used only for a commit this task's plan offered", () => {
 
   it("a claim for the candidate of another company's task finds nothing (the company is the task's)", async () => {
     const w = await world(raw({ sha: sha(1), commitsBack: 1 }));
-    const stranger = taskBaselineOf({ store: w.documents, now: () => NOW, env: { ROVARA_BASELINE_CACHE: "1" } }, { orgId: `org_${"b".repeat(20)}` as never, project: PROJECT, taskId: TASK.taskId, plan: { revision: 1, baselineCandidates: [{ sha: sha(1) }] } });
+    const stranger = taskBaselineOf({ store: w.documents, now: () => NOW }, { orgId: `org_${"b".repeat(20)}` as never, project: PROJECT, taskId: TASK.taskId, plan: { revision: 1, baselineCandidates: [{ sha: sha(1) }] } });
     await keepEvidence(w.deps, { orgId: "org-b", task: TASK, operationId: OP, candidateDigest: DIGEST, checks: [entry("readiness:0")], baseline: stranger });
     expect(await kept(w)).toBeUndefined();
   });

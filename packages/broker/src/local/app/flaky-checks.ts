@@ -1,5 +1,5 @@
 // TE-C6 (9d's decision on the VERIFY block): the seam that tells `recordBuilt` which failed checks of a run may count as passed because EVERY test that failed in them passed on the worker's one rerun.
-// Behind `ROVARA_FLAKY_RERUN` (off unless exactly "1", read at each call). Everything here is fail closed: a switch that is off, a missing, oversized, unreadable or unparseable file, a file under another operation's
+// Everything here is fail closed: a missing, oversized, unreadable or unparseable file, a file under another operation's
 // prefix, ids the data guard would drop, or a check the broker's own entries do not show as a regression that failed, excuses nothing and the check stays FAILED exactly as before.
 // The worker's file only NAMES checks and tests; the broker's own check entries decide what may be excused (`flakyOnlyChecks`), and the base's flaky set (`baseFlakyTests`) decides whether a test is flaky on the base too.
 import { scanText } from "@agentx/verifier";
@@ -7,14 +7,12 @@ import { FLAKY_RERUN_ARTIFACT, FLAKY_RERUN_FILE_MAX_BYTES, FlakyRerunFileSchema,
 import { NO_PROD_DENY, evidenceFindings } from "../../core/proof/evidence-guard.js";
 import type { TestEnvDeps } from "../../core/test-env/deps.js";
 import { baseFlakyTests } from "../../core/test-env/base-flaky.js";
-import { flakyRerunEnabled } from "../../core/test-env/switch.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { operationArtifactActions } from "./evidence.js";
 
-export function createLocalFlakyChecks(options: { flow: Pick<TaskFlowDeps, "store" | "companyId">; blobs: ObjectStorage; testEnv: TestEnvDeps; env: NodeJS.ProcessEnv }): NonNullable<TaskFlowDeps["flakyChecks"]> {
+export function createLocalFlakyChecks(options: { flow: Pick<TaskFlowDeps, "store" | "companyId">; blobs: ObjectStorage; testEnv: TestEnvDeps }): NonNullable<TaskFlowDeps["flakyChecks"]> {
   return async (input) => {
     try {
-      if (!flakyRerunEnabled(options.env)) return undefined;
       const { task, operation } = input;
       const actions = operationArtifactActions({ store: options.flow.store, blobs: options.blobs }, task, operation);
       const prefix = `private/${task.ownerKey}/${task.workspaceId}/${operation.id}/`;

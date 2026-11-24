@@ -575,8 +575,8 @@ export const MergeRiskSchema = z.object({ level: z.enum(["low", "medium", "high"
 export type MergeRisk = z.infer<typeof MergeRiskSchema>;
 /**
  * MR3b (TE-R3): the order a multi-repository task's pull requests merge in, as the Merge section shows it: fixed words, at most 4 lines. `needsOverride` is true when no safe order could be found (a dependency cycle, or
- * facts that could not be read): only a person's confirmation (`MergePressBody.orderOverride`) merges them, in repository order (DEC 209). Absent for a one-repository task, a task with no dependency facts and any install that
- * has not turned it on: the field is added READERS FIRST (DEC 152a), and the writer (`MergeDependencies.orderInView`) is switched on one release after the readers shipped.
+ * facts that could not be read): only a person's confirmation (`MergePressBody.orderOverride`) merges them, in repository order (DEC 209). Absent for a one-repository task and a task with no dependency facts. The writer is always on (DEC 254zzz448); the field was added
+ * readers first (DEC 152a), and a client that parses the view strictly must take `order` (Cloud's page reads the view through a reader that keeps extra fields).
  */
 export const MergeOrderViewSchema = z.object({ lines: z.array(z.string().min(1).max(MERGE_VIEW_MESSAGE_MAX)).min(1).max(4), needsOverride: z.literal(true).optional() }).strict();
 export type MergeOrderView = z.infer<typeof MergeOrderViewSchema>;

@@ -13,7 +13,7 @@
 // Anything that cannot be read is never Verified.
 import type { OrgId } from "@agentx/contracts";
 import type { TestEnvDeps } from "../test-env/deps.js";
-import { readKnownFailingMarks, knownFailingTaskBranches, verificationResultsEnabled } from "../test-env/known-failing.js";
+import { readKnownFailingMarks, knownFailingTaskBranches } from "../test-env/known-failing.js";
 import { usableNightlyBaseline } from "../test-env/nightly-usable.js";
 import {
   autoFixDecision, classifyBlockedWorkflow, E2E_PROJECT_CHECK_ID, SANDBOX_MODEL_HOSTS_ITEM_ID, isValidTestId,
@@ -293,7 +293,6 @@ function knownFailingExcusedAll(failingChecks: readonly EvidencePack["checks"][n
 
 /** Storage-backed production classifier. Any incomplete required read excuses nothing. */
 export async function alreadyFailingForResults(deps: Pick<TestEnvDeps, "store" | "now" | "env">, input: { companyId: OrgId; project: string; taskId: string }): Promise<KnownFailingEntry[]> {
-  if (!verificationResultsEnabled(deps.env)) return [];
   try {
     const marks = await readKnownFailingMarks(deps, input.companyId, input.project);
     const taskBranches = await knownFailingTaskBranches(deps, input.taskId);

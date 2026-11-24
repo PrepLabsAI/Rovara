@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { EVAL_STAND_IN_RUN_DIR, buildOpenApiFake, parseEvalStandInSetBytes, type EvalStandInPlan, type EvalStandInSetContent, type TrustedEvalStandInSummary } from "@agentx/contracts";
 import { RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL, RUN_NETWORK_WORKSPACE_LABEL, runNetworkAddresses, runNetworkHelperIp, runNetworkLabelArgs, runNetworkName } from "../../packages/worker/src/run-network.js";
 import {
-  EVAL_STAND_IN_ENVIRONMENT, EVAL_STAND_IN_FAILURE_SENTENCE, EVAL_STAND_IN_HELPER_INDEX, EVAL_STAND_IN_GRACE_MS, EVAL_STAND_IN_HELPER_ENTRY, evalStandInArgProblems, evalStandInContainerName, evalStandInRunArgs, evalStandInsOffered,
+  EVAL_STAND_IN_FAILURE_SENTENCE, EVAL_STAND_IN_HELPER_INDEX, EVAL_STAND_IN_GRACE_MS, EVAL_STAND_IN_HELPER_ENTRY, evalStandInArgProblems, evalStandInContainerName, evalStandInRunArgs,
   startEvalStandIns, startEvalStandInsOnce, writeEvalStandInRunFiles, type EvalStandInNetwork,
 } from "../../packages/worker/src/eval-standin-hosted.js";
 import { createRunCa } from "../../packages/worker/src/run-ca.js";
@@ -177,14 +177,5 @@ describe("starting the helper", () => {
     const twice = fakeDaemon({ failRuns: 2 });
     await expect(startEvalStandIns({ docker: twice.docker, image: IMAGE, net, parent: await scratch(), content: content(), roundBudgetMs: 600_000, sleep: async () => undefined })).rejects.toThrow(EVAL_STAND_IN_FAILURE_SENTENCE);
     expect(twice.calls.filter((call) => call[0] === "run")).toHaveLength(2);
-  });
-});
-
-describe("the operator's switch", () => {
-  it("is off unless it says 1 and the image is pinned", () => {
-    expect(evalStandInsOffered({}, IMAGE)).toBe(false);
-    expect(evalStandInsOffered({ [EVAL_STAND_IN_ENVIRONMENT]: "0" }, IMAGE)).toBe(false);
-    expect(evalStandInsOffered({ [EVAL_STAND_IN_ENVIRONMENT]: "1" }, "worker:latest")).toBe(false);
-    expect(evalStandInsOffered({ [EVAL_STAND_IN_ENVIRONMENT]: "1" }, IMAGE)).toBe(true);
   });
 });

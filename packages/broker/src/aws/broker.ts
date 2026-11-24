@@ -5229,7 +5229,6 @@ async function codingPlanChecksInstructions(dependencies: AwsBrokerDependencies,
 
 /** Bind planner guidance to the task's starting project revision; never consult the latest project here. */
 async function codingPlanWorkBreakdownContext(dependencies: AwsBrokerDependencies, workspaceId: string): Promise<{ taskId: string; repositoryId: string } | undefined> {
-  if (dependencies.developer?.workflowDependenciesEnabled !== true) return undefined;
   const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspaceId));
   const task = pointer === undefined ? undefined : await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
   if (task === undefined) throw agentXError("CONFIG_INVALID", "the task for this planning step is missing");

@@ -1,4 +1,4 @@
-// L4-EINT: PLANS the stand-in round of one eval check (the production path; the operator's switch AGENTX_EVAL_STAND_INS, default off). Inputs: the descriptor the broker delivered (the free dry run's outside hosts, the stand-in
+// L4-EINT: PLANS the stand-in round of one eval check (the production path; no switch, DEC 254zzz461). Inputs: the descriptor the broker delivered (the free dry run's outside hosts, the stand-in
 // writer's sample set) and the repository at its BASE commit. Output: ONE `EvalStandInRound` (both sides, every re-ask and the second look share its answer book and certificate authority) and the digests that make the
 // stand-in set's VERSION (E4).
 //

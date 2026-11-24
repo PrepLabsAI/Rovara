@@ -1,7 +1,7 @@
 // L4-HW4: the evidence of a task's checks, kept on a hosted company (the laptop's `evidence.keepAfterChecks`, local/app/evidence.ts, over the company-bound object store). When a run's checks are recorded for a
 // candidate, the keeper assembles the pack (per-check output tails, the failing tests with the change that most likely broke each (TE-A6), the baseline words (TE-C1)) with the SAME data guard, caps and
 // redaction as the laptop, and keeps it where the Proof route (`GET /v1/dev/tasks/{id}/evidence`) reads it back. Informational: a fault or a slow store only means there is no pack for this code.
-import { createKnownFailing, verificationResultsEnabled } from "../core/test-env/known-failing.js";
+import { createKnownFailing } from "../core/test-env/known-failing.js";
 import type { DocumentStore, ObjectStorage, OrgId } from "@agentx/contracts";
 import { createLocalEvidence, type LocalEvidence } from "../local/app/evidence.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
@@ -40,7 +40,7 @@ export function createHostedEvidence(options: HostedEvidenceOptions): LocalEvide
   return createLocalEvidence({
     flow: { store, companyId, log: (entry) => { log({ companyId, ...entry }); } },
     blobs: hostedEvidenceBlobs(options),
-    // TE-C1: the baseline the plan offered, looked up in this company's own records, only while the baseline switch is on.
+    // TE-C1: the baseline the plan offered, looked up in this company's own records.
     testEnv: { store, now: options.now, env: options.env },
   });
 }
@@ -50,7 +50,7 @@ export function hostedKeepEvidence(options: HostedEvidenceOptions): NonNullable<
   const evidence = createHostedEvidence(options);
   return async (input) => {
     const result = await evidence.keepAfterChecks(input);
-    if (!verificationResultsEnabled(options.env) || result?.kept !== true) return result;
+    if (result?.kept !== true) return result;
     const pack = await evidence.packOf(input.task, input.candidateDigest);
     if (pack !== undefined) await createKnownFailing({ store: options.store, now: options.now, env: options.env, mayMaintain: async () => false, evidenceOf: async () => pack }).observe({ companyId: options.companyId, project: input.task.project, taskId: input.task.taskId, workflow: { ...input.workflow, candidate: { ...input.workflow.candidate!, digest: input.candidateDigest } }, evidence: pack });
     return result;

@@ -255,11 +255,6 @@ export interface MergeDependencies {
    * facts, and the merge order, digest and words are the ones the merge core always had. A read that throws is "unreadable" (no safe order until a person confirms the override).
    */
   repositoryEdges?(task: MergeTask): unknown;
-  /**
-   * MR3b: whether the task view's `merge` carries the order (`MergeView.order`). Off by default: the field is added readers first (DEC 152a), so a client built before it, which reads the view strictly, never meets
-   * it. An install turns it on one release after the readers shipped.
-   */
-  orderInView?: boolean;
   /** DEC 254zzz94/104: readiness needs the checks to have PASSED, never "no CI" (`ReadinessInput.requirePassingCi`). The hosted Merge button sets it; absent: today's rule. */
   requirePassingCi?: boolean;
   /** Hosted policy-hook press authorization; absent keeps the existing press behavior. */
@@ -352,12 +347,14 @@ export async function mergeViewOf(deps: MergeDependencies, task: MergeTask, item
   if (items.length === 0 || task.orgId === undefined || !tracksMerge(task.workflow)) return undefined;
   const tracked = task as MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot };
   const { readiness } = await readinessFromItems(deps, tracked, items, viewerPersonId);
-  const order = deps.orderInView === true ? await orderViewOf(deps, tracked) : undefined;
+  const order = await orderViewOf(deps, tracked);
   return { ...mergeViewFromReadiness(readiness), risk: riskOfTask(task.workflow, items), ...(order === undefined ? {} : { order }) };
 }
 
 /** MR3b: the order the Merge section shows, from the same facts the press reads. Nothing for today's repository order. Lines are cut to the view's bound, and a read that fails says "no safe order" (never a guessed order). */
 async function orderViewOf(deps: MergeDependencies, task: MergeTask & { workflow: WorkflowSnapshot }): Promise<MergeOrderView | undefined> {
+  // One pull request has no order to get wrong (the press says the same): no order and no override ask, whatever the dependency facts say.
+  if (requiredPullRequests(task.workflow).length < 2) return undefined;
   const found = await mergeOrderOfTask(deps, task);
   const lines = mergeOrderStateLines(found, requiredPullRequests(task.workflow)).slice(0, 4).map((line) => mergeViewFromReadiness({ ready: false, message: line }).message!);
   return lines.length === 0 ? undefined : { lines, ...(found.kind === "no_safe_order" ? { needsOverride: true as const } : {}) };

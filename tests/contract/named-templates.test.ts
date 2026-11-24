@@ -298,7 +298,7 @@ describe("named environment templates", () => {
     if (stack.stackName === "agentx-staging-control-plane") {
       it("removing only Batch F additions preserves code/next's agentx-staging-control-plane template", () => {
         const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(normalizedTemplate(stack), { env: "staging" }), STAGING))));
-        expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("8edf09fff29983cc3c3338a6b2d24bb27d061db29960bfa2e77a52c068618972");
+        expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("c59110c3ca4f7ad61988d1b29d5d89088d5907ed0bd42205698dd03f5e651e79");
       }, 120_000);
     }
     it(`${stack.stackName} is unchanged`, () => {
@@ -308,9 +308,11 @@ describe("named environment templates", () => {
       // before the existing normalizers, then preserve every old policy/snapshot assertion.
       if (stack.stackName === "agentx-staging-control-plane") {
         // APIGW-ACCESS-LOGS (2026-11-24): re-pinned for exactly the access log group and the `$default` stage AccessLogSettings. Rule D: with those two taken out the old pin
-        // 5b526b779a52869b09cb602a1d0a97545f10818f29983a879129dbf70553c745 holds (checked on the next line).
-        expect(createHash("sha256").update(JSON.stringify(template)).digest("hex")).toBe("ee257190b12ebbfc2e493432f8f3f130a7173a64cb80434cc87fcbc44805997e");
-        expect(createHash("sha256").update(JSON.stringify(withoutApiAccessLog(structuredClone(template), { env: "staging" }))).digest("hex"), "minus only the access log").toBe("5b526b779a52869b09cb602a1d0a97545f10818f29983a879129dbf70553c745");
+        // 5b526b779a52869b09cb602a1d0a97545f10818f29983a879129dbf70553c745 held (before the switch removal below).
+        // DEC 254zzz461 (turn on, rebased onto train 24): the WorkflowDependenciesEnabled parameter and its `,wd=` packed piece are gone, so the full pin moved again. Rule D: with the access log taken out
+        // (the next line) the pre-train-23 switch-removal pin 751ab7c9515b44216734ca1cb737f3cae1cc76aaff41a83639de3862a55e1fa1 holds, i.e. the two moves are independent and add up.
+        expect(createHash("sha256").update(JSON.stringify(template)).digest("hex")).toBe("91b25352228ba91a8029948899699c643f6854c942d2b0ac01a0834456cd427e");
+        expect(createHash("sha256").update(JSON.stringify(withoutApiAccessLog(structuredClone(template), { env: "staging" }))).digest("hex"), "minus only the access log (the switch-removal pin)").toBe("751ab7c9515b44216734ca1cb737f3cae1cc76aaff41a83639de3862a55e1fa1");
         // Webhook lane W3: the webhook secret slot, its throttle and one alarm, pinned exactly in tests/support/webhook-secret-template.ts, then removed.
         // APIGW-ACCESS-LOGS (2026-11-24): the full-template pin above moved; the access log group and the stage setting are asserted and taken out, so every pin and snapshot below still holds.
         template = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutApiAccessLog(structuredClone(template), { env: "staging" })));

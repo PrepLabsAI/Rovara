@@ -445,12 +445,6 @@ export function currentBuiltinVersion(id: BuiltinAgentId): number {
 }
 
 /**
- * Whether an org created from now on is pinned to Rovara Code version 2. Off until Task 8 (the plan check) is built, because a 1.1.0 task would otherwise
- * run without Understand or the plan check; Task 8 flips it. An explicit pin of 2 (tests, internal trials) works either way.
- */
-export const ROVARA_CODE_V2_FOR_NEW_ORGS = false;
-
-/**
  * The version an org runs before it has any settings for a built-in: the newest release, except Rovara Code, which stays on version 1 until the org adopts
  * version 2 (new orgs are created pinned to it). Plan 6 question 16: orgs on version 1 keep today's behaviour until an admin adopts the new one.
  */

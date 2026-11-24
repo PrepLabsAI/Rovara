@@ -13,26 +13,9 @@ import { sha256Hex } from "./web-hash.js";
 type Edition = "enterprise" | "public";
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------------
-// Switches. Three packed settings in the design (`rd`, `ak`, and the fix switch), all OFF by default. The design named the third `fx`, but `fx` is already the autofix
-// switch (BROKER_SETTINGS.autofix), so the fix switch is `fd`. All three are in BROKER_SETTINGS (`liveRedirect`, `liveAsk`, `liveFix`), each with its stack parameter,
-// CLI key and a row in the broker-settings test table; `ak` and `fd` are held by the deploy gates below.
+// Switches. Stop & redirect, Ask and Fix with agent are not install switches: no environment variable or packed setting reads them (the laptop has them on, local/runtime.ts). This file keeps
+// only the shared reader of a plain "1" switch, which core lessons and design review use.
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-export const LIVE_INTERACTION_FLAGS = {
-  redirect: { code: "rd", variable: "LIVE_REDIRECT_ENABLED" },
-  ask: { code: "ak", variable: "LIVE_ASK_ENABLED" },
-  fix: { code: "fd", variable: "LIVE_FIX_ENABLED" },
-} as const;
-export type LiveInteractionFlagKey = keyof typeof LIVE_INTERACTION_FLAGS;
-
-/**
- * HARD DEPLOY GATES: what must be wired before a switch may exist in the deploy (stack parameter, CLI key, broker setting). `tests/contract/live-interaction-deploy-gate.test.ts` fails the build as
- * soon as a switch is added to a deploy file while one of its items is missing. For the fix switch the one item is `diagnoses_erase_step`: the team-record person erasure runs the `diagnoses` step (a
- * person's link to the diagnoses they asked for goes). For the ask switch:
- *  - `asks_erase_step`: the team-record person erasure runs the `asks` step (a person's Asks and their label in other answers go), and
- *  - `daily_ask_sweep`: a scheduled job calls `sweepExpiredAsks` for every org at least daily, so the 30 days hold in environments whose table has no TTL.
- */
-export const LIVE_INTERACTION_DEPLOY_GATES = { ask: ["asks_erase_step", "daily_ask_sweep"], fix: ["diagnoses_erase_step"] } as const;
 
 /** A switch is on only when its value is exactly "1". Anything else (missing, empty, "true", " 1") is off. */
 export function liveInteractionFlagOn(value: string | undefined): boolean {

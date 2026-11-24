@@ -1,6 +1,6 @@
 // The stage's sources through Pi's own MCP client: one server, "rovara", which the egress gateway serves and the broker answers (context-sources/mcp-endpoint.ts).
 // A real Pi session on a scripted model against a real HTTP endpoint: Pi lists and calls the tools, a project's or the user's mcp.json adds nothing, an answer
-// is framed, a held call is waited for, the bearer is the capability and nothing else, and ROVARA_PI_MCP picks the path. No Docker.
+// is framed, a held call is waited for, the bearer is the capability and nothing else. No Docker.
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -9,7 +9,7 @@ import { fauxAssistantMessage, fauxToolCall, getCurrentTools, type TranscriptCon
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ContextToolCallRequest, ContextToolCallResponse, ContextToolCatalog } from "../../packages/contracts/src/index.js";
 import { answerMcp } from "../../packages/broker/src/context-sources/mcp-endpoint.js";
-import { piMcpEnabled, rovaraMcpConfig, rovaraMcpExtensions, rovaraMcpTransport, ROVARA_MCP_TOOL_PREFIX } from "../../packages/worker/src/context-sources/pi-mcp.js";
+import { rovaraMcpConfig, rovaraMcpExtensions, rovaraMcpTransport, ROVARA_MCP_TOOL_PREFIX } from "../../packages/worker/src/context-sources/pi-mcp.js";
 import { MCP_ANSWER_MAX_BYTES } from "../../packages/broker/src/context-sources/mcp-endpoint.js";
 import { createDefaultPiSessionAdapter, createWorkspacePiSession, promptWithSources, workerPiDirectory } from "../../packages/worker/src/pi-session.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
@@ -128,14 +128,6 @@ describe("the worker writes Pi's whole MCP configuration", () => {
     for (const bad of ["!cat /etc/passwd", "${HOME}", "a b", ""]) {
       expect(() => rovaraMcpExtensions({ brokerUrl: "http://rovara-broker:8081", capability: bad, catalog })).toThrow(/bearer/u);
     }
-  });
-});
-
-describe("the switch (one release)", () => {
-  it("uses Pi's MCP client only when the worker is told ROVARA_PI_MCP=1; unset or 0 keeps the worker's own source tools", () => {
-    expect(piMcpEnabled({ ROVARA_PI_MCP: "1" })).toBe(true);
-    expect(piMcpEnabled({ ROVARA_PI_MCP: "0" })).toBe(false);
-    expect(piMcpEnabled({})).toBe(false);
   });
 });
 

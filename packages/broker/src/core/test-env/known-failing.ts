@@ -11,7 +11,6 @@ import { readableFailingTests, RESULT_RULES } from "../proof/verification-result
 import { SubjectRefusal, type DecisionSubject } from "../decisions/approval-gate.js";
 import type { DecisionItem } from "../decisions/project.js";
 
-export const verificationResultsEnabled = (env: NodeJS.ProcessEnv = process.env): boolean => env["ROVARA_VERIFICATION_RESULTS"] === "1";
 export const KNOWN_FAILING_SUBJECT = "known_failing";
 const MAX = 500, CARD_MAX = 20, TASK_MAX = 100;
 const Test = z.object({ name: z.string().refine(isValidTestId), checkId: z.string().regex(/^[A-Za-z0-9_.:-]{1,64}$/u) }).strict();
@@ -49,8 +48,7 @@ export async function knownFailingTaskBranches(deps: Pick<TestEnvDeps, "store">,
 }
 
 export function createKnownFailing(deps: KnownFailingDeps) {
-  const enabled = () => verificationResultsEnabled(deps.env);
-  const maintain = async (company: string, project: string, principal: Principal) => enabled() && principal.companyId === company && await deps.mayMaintain(principal, project).catch(() => false);
+  const maintain = async (company: string, project: string, principal: Principal) => principal.companyId === company && await deps.mayMaintain(principal, project).catch(() => false);
   const audit = (event: AuditEvent): readonly TransactItem[] => {
     if (deps.audit === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "The audit ledger is unavailable.");
     const staged = deps.audit.stage(event);
@@ -107,7 +105,6 @@ export function createKnownFailing(deps: KnownFailingDeps) {
   const subject: DecisionSubject = {
     kind: KNOWN_FAILING_SUBJECT,
     async load(company, id) {
-      if (!enabled()) return undefined;
       const parts = /^([a-f0-9]{64})_([a-f0-9]{64})$/u.exec(id);
       if (parts === null) return undefined;
       const found = await current(company, parts[1]!);
@@ -135,7 +132,7 @@ export function createKnownFailing(deps: KnownFailingDeps) {
   return {
     subject,
     async observeBlocked(input: { companyId: OrgId; project: string; taskId: string; workflow: WorkflowSnapshot }) {
-      if (!enabled() || input.workflow.state !== "BLOCKED") return;
+      if (input.workflow.state !== "BLOCKED") return;
       const cause = classifyBlockedWorkflow(input.workflow, {}).find((signal) => RESULT_RULES[signal.code].kind === "environment")?.code;
       if (cause === undefined) return;
       const id = hash([input.project, cause]), old = await read(input.companyId, id), open = old?.state === "open";
@@ -146,7 +143,7 @@ export function createKnownFailing(deps: KnownFailingDeps) {
       if (!(await deps.store.put({ item: documentOf({ ...recordKey(input.companyId, id), entityType: "FIX_SETUP", ...row }), condition: old === undefined ? when.absent() : when.eq("version", old.version) })).applied) throw stale();
     },
     async observe(input: { companyId: OrgId; project: string; taskId: string; workflow: WorkflowSnapshot; evidence: EvidencePack }) {
-      if (!enabled() || input.workflow.candidate?.digest !== input.evidence.candidateDigest) return undefined;
+      if (input.workflow.candidate?.digest !== input.evidence.candidateDigest) return undefined;
       const tests = await eligible(input.companyId, input.project, input.taskId, input.evidence);
       const original = input.evidence.checks.some((check) => check.after === "failed" && check.class === "already_failing");
       // Causes are the broker's fixed classification, never printed output or a caller's words.
@@ -163,7 +160,7 @@ export function createKnownFailing(deps: KnownFailingDeps) {
       return item(id, row, await readKnownFailingMarks(deps, input.companyId, input.project));
     },
     async items(company: OrgId, principal: Principal): Promise<DecisionItem[]> {
-      if (!enabled() || principal.companyId !== company) return [];
+      if (principal.companyId !== company) return [];
       const page = await deps.store.query({ pk: recordsPk(company), limit: 100 });
       const items: DecisionItem[] = [];
       for (const raw of page.items) {
@@ -185,7 +182,7 @@ export function createKnownFailing(deps: KnownFailingDeps) {
       if (!result.applied) throw stale();
     },
     async health(company: OrgId, project: string, baseline: NightlyBaseline, health: StoredNightlyHealth | undefined) {
-      if (!enabled() || health?.class !== "environment" || !NIGHTLY_ENVIRONMENT_CAUSES.includes(health.cause as typeof NIGHTLY_ENVIRONMENT_CAUSES[number]) || !(await nightlyBaselineUsable(deps, company, project, baseline))) return;
+      if (health?.class !== "environment" || !NIGHTLY_ENVIRONMENT_CAUSES.includes(health.cause as typeof NIGHTLY_ENVIRONMENT_CAUSES[number]) || !(await nightlyBaselineUsable(deps, company, project, baseline))) return;
       const cause = health.cause!, id = hash([project, cause]), old = await read(company, id), open = old?.state === "open";
       const evidenceDigest = hash({ baseline, health });
       if (old?.evidenceDigest === evidenceDigest) return;
@@ -193,7 +190,7 @@ export function createKnownFailing(deps: KnownFailingDeps) {
       if (!(await deps.store.put({ item: documentOf({ ...recordKey(company, id), entityType: "FIX_SETUP", ...row }), condition: old === undefined ? when.absent() : when.eq("version", old.version) })).applied) throw stale();
     },
     async nightly(company: OrgId, project: string, baseline: NightlyBaseline, passedNames: readonly string[] = []) {
-      if (!enabled() || baseline.tests.failed !== 0 || baseline.tests.skipped !== 0 || baseline.tests.total === 0 || baseline.tests.passed !== baseline.tests.total || !(await nightlyBaselineUsable(deps, company, project, baseline))) return;
+      if (baseline.tests.failed !== 0 || baseline.tests.skipped !== 0 || baseline.tests.total === 0 || baseline.tests.passed !== baseline.tests.total || !(await nightlyBaselineUsable(deps, company, project, baseline))) return;
       const current = await readKnownFailingMarks(deps, company, project);
       const removed = current.marks.filter((mark) => passedNames.includes(mark.name) && Date.parse(mark.markedAt) <= Date.parse(baseline.finishedAt));
       if (removed.length > 0) {

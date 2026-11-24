@@ -1,15 +1,9 @@
 import type { DeveloperApiConfiguration } from "./developer-routes.js";
 import { developerSinceFromEnvironment, githubSignInFromEnvironment } from "./developer-routes.js";
 
-export function workflowDependenciesConfigurationFromEnvironment(environment: Record<string, string | undefined>): {
-  workflowDependenciesEnabled: boolean;
-} {
-  return { workflowDependenciesEnabled: environment.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED === "true" };
-}
-
 type DeveloperApiIntegrations = Omit<DeveloperApiConfiguration,
   "issuer" | "env" | "methods" | "slackTeamId" | "since" | "signInTableName" |
-  "taskPeopleConfiguration" | "workflowDependenciesEnabled" | "inviteTaskPerson">;
+  "taskPeopleConfiguration" | "inviteTaskPerson">;
 
 /** The deployed developer configuration factory; transports remain injected and this seam is directly contract-tested. */
 export function createDeveloperApiConfiguration(
@@ -34,7 +28,6 @@ export function createDeveloperApiConfiguration(
     ...(slackTeamId === "" ? {} : { slackTeamId }),
     since: developerSinceFromEnvironment(environment),
     signInTableName,
-    ...workflowDependenciesConfigurationFromEnvironment(environment),
     taskPeopleConfiguration: { peopleChangesEnabled: environment.AGENTX_TASK_PEOPLE_CHANGES_ENABLED === "true" },
     ...(inviteTaskPerson === undefined ? {} : { inviteTaskPerson }),
   };

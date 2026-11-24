@@ -908,7 +908,7 @@ the conformance suite.
 
 A project's test environment is a setting Rovara PROPOSES, a Prove run checks, and the owner approves once; each approved change is a new immutable revision, and a task keeps the revision it started
 with. The stored rows are Cloud's, key for key (`TESTENV#PROPOSAL#<digest>`, `#PROVE#<digest>`, `#REV#<revision>`, `#LATEST`, the task's `#PIN#<task>`, `#NIGHTLY#...`), under `projectPk(company, project)`, so
-Cloud can switch to this code with no data move. One row kind is new and the ENGINE's (TE-C1, switch `ROVARA_BASELINE_CACHE`): `TESTENV#BASELINE#SHA#<revision, 8 digits>#<head sha>`, one per trusted run at a commit (`baseline-cache.ts`), written only by the nightly's record, kept 90 days, deleted with the project's partition. A task's checks keep the words of the run they were compared with beside the evidence pack (`<digest>.baseline.json`, the pack's retention, deleted with the task's evidence).
+Cloud can switch to this code with no data move. One row kind is new and the ENGINE's (TE-C1, always on since DEC 254zzz461): `TESTENV#BASELINE#SHA#<revision, 8 digits>#<head sha>`, one per trusted run at a commit (`baseline-cache.ts`), written only by the nightly's record, kept 90 days, deleted with the project's partition. A task's checks keep the words of the run they were compared with beside the evidence pack (`<digest>.baseline.json`, the pack's retention, deleted with the task's evidence).
 
 - **The approval is a subject of the approval gate** (`createTestEnvironmentSubject`, kind `test-environment`). Cloud's own checks (a maintainer role, a fresh sign-in, a second person for a less-safe
   change, a confirmation card) are the Approvers seam's rules here. A less-safe change, a proposal a setup run or draft made, and any card the contract grades high are HIGH risk, so only the methods the
@@ -917,7 +917,7 @@ Cloud can switch to this code with no data move. One row kind is new and the ENG
 - **The task flow takes it through one seam** (`TaskFlowDeps.testEnvironment`, `core/test-env/seam.ts`): a starting workflow task pins the newest usable revision in its own start transaction (an environment the flow cannot carry out is
   recorded as not applied, with the reason); a coding or verification run is told the plan of the pinned revision and the worker features it needs (a worker that lacks one is refused the run, never sent it without).
 - **Switches** are environment variables read by leaf modules (`switch.ts`): `ROVARA_TEST_ENVIRONMENT` (on unless `0`), `ROVARA_TEST_SERVICES`, `ROVARA_TEST_ACCOUNTS`, `ROVARA_PROJECT_IMAGES`,
-  `ROVARA_SAVED_ENVIRONMENTS`, `ROVARA_NIGHTLY_HEALTH` and `ROVARA_FLAKY_RERUN` (each on only when exactly `1`; the last reruns a failing test of a task round once to tell a flaky one).
+  `ROVARA_SAVED_ENVIRONMENTS` and `ROVARA_NIGHTLY_HEALTH` (each on only when exactly `1`). The failing-test rerun has no switch (DEC 254zzz461): a task round reruns a failing test once to tell a flaky one, and a worker image that does not list `task.flakyRerun.v1` refuses the step, so install the broker and the worker image together.
 
 ## Realtime (lane K1, a new interface: the owner decides it alone, decision 63)
 

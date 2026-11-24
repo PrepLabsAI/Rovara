@@ -162,7 +162,6 @@ describe("P0 normal project onboarding journey", () => {
     const ownerSessionId = randomUUID();
     const broker = createBroker({ s3, developer: {
       issuer, env: "staging", methods: { slack: false, oidc: true }, signInTableName: "state",
-      workflowDependenciesEnabled: true,
       channelMembers: async () => ({ ok: true, memberOf: [] }),
       verifyAccessToken: async () => ({ iss: issuer, aud: "agentx-developer", env: "staging", sub: ownerDeveloperId, sid: ownerSessionId, amr: "oidc" }),
     }, turnRecordsTableName: "turns", extra: { projectSetupSource: sourcePort, projectSetupRuntimeCatalogId: runtimeCatalogId } });

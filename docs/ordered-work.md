@@ -21,10 +21,10 @@ If the plan changes, review and approve the complete new plan before more work b
 
 ## Enabling the feature
 
-Named deployments provide the CloudFormation parameter `WorkflowDependenciesEnabled`, with a
-default of `false`. The broker reads it as `AGENTX_WORKFLOW_DEPENDENCIES_ENABLED`. Enable it only
-in the environment approved for the trial, after installing a compatible broker and worker.
-The worker must advertise `task.workflowDependencies`; AgentX refuses an incompatible worker.
+Ordered work has no install switch (DEC 254zzz461): the CloudFormation parameter `WorkflowDependenciesEnabled`
+and the broker variable `AGENTX_WORKFLOW_DEPENDENCIES_ENABLED` are gone, and rollback is the previous
+version. Install a compatible broker and worker together: the worker must advertise
+`task.workflowDependencies`; AgentX refuses an incompatible worker.
 
 Preserve the deployment's existing parameter values during an upgrade. This feature does not
 enable People role changes or automatic invitations, alter model settings, or grant merge or

@@ -12,12 +12,11 @@ import { DEPENDENCY_PLAN_REFUSAL_WORDS, taskDependencyPlansOf, type ServiceCatal
 import { lastNightlyFailures } from "./nightly.js";
 import { baselineCandidatesOf } from "./baseline-cache.js";
 import { taskBaselineBranch } from "./nightly-usable.js";
-import { baselineCacheEnabled } from "./switch.js";
 import type { TestEnvDeps } from "./deps.js";
 import { readApprovedSeedFiles } from "./environment.js";
 import { selectionFieldsAreSafe } from "./prove-from-setup-check.js";
 import { readTestEnvPin, usableTestEnvironment } from "./usable.js";
-import { flakyRerunEnabled, testEnvironmentEnabled } from "./switch.js";
+import { testEnvironmentEnabled } from "./switch.js";
 import { DEPENDENCIES_WITH_DEVCONTAINER_WORDS, projectUsesDevcontainer } from "./devcontainer-check.js";
 import { approvedFixturesOf, recordsOf, type FixtureStoreFactory } from "./fixture-lookup.js";
 import { testServicesEnabled } from "./test-services-switch.js";
@@ -46,9 +45,9 @@ export async function testEnvPlanFor(
 export async function testEnvImplementPlanFor(
   deps: TestEnvPlanDeps, input: { orgId: OrgId; project: string; taskId: string; readiness?: readonly ProjectCommand[] }, env: NodeJS.ProcessEnv = process.env,
 ): Promise<TestEnvTaskPlan | undefined> {
-  // TE-C6: with the flaky-rerun switch on and the run's readiness given, a coding run is also told the plan (without dependencies when the environment has none) so its settle round can rerun a failing test once. The readiness
+  // TE-C6: with the run's readiness given, a coding run is also told the plan (without dependencies when the environment has none) so its settle round can rerun a failing test once. The readiness
   // is only used to prove the run's first commands ARE the environment's checks (`flakyRerun` is planned only then); it never decides the dependencies, which are planned as they always were.
-  const flaky = flakyRerunEnabled(env) && input.readiness !== undefined && input.readiness.length > 0;
+  const flaky = input.readiness !== undefined && input.readiness.length > 0;
   if (!testEnvironmentEnabled(env) || (!testServicesEnabled(env) && !flaky)) return undefined;
   const { readiness, ...scope } = input;
   const plan = await planOf(deps, scope, env, flaky ? readiness : undefined);
@@ -84,11 +83,11 @@ async function planOf(
     if (!planned.ok) throw agentXError("RUNTIME_UNAVAILABLE", DEPENDENCY_PLAN_REFUSAL_WORDS[planned.reason]);
     dependencies = planned.dependencies;
   }
-  // TE-C6: the rerun is planned only with the switch on and only when the run's first commands are exactly the environment's checks (the worker pairs `checks[i]` with command `i`), so a command is never paired with another's template.
-  const flakyRerun = flakyRerunEnabled(env) && flakyReadiness !== undefined && checks.length <= flakyReadiness.length && checks.every((check, index) => sameCommand(check.command, flakyReadiness[index]!));
+  // TE-C6: the rerun is planned only when the run's first commands are exactly the environment's checks (the worker pairs `checks[i]` with command `i`), so a command is never paired with another's template.
+  const flakyRerun = flakyReadiness !== undefined && checks.length <= flakyReadiness.length && checks.every((check, index) => sameCommand(check.command, flakyReadiness[index]!));
   const failures = readiness === undefined ? [] : await lastNightlyFailures(deps, input.orgId, input.project).catch(() => []);
-  // TE-C1 (switch `ROVARA_BASELINE_CACHE`): the newest trusted baseline commits on the task's base branch, for the worker to find the nearest ancestor of the task's base commit. Shas only; none (or off) leaves the plan as it was.
-  const baseBranch = readiness !== undefined && baselineCacheEnabled(env) ? await taskBaselineBranch(deps, input.orgId, input.project, input.taskId) : undefined;
+  // TE-C1: the newest trusted baseline commits on the task's base branch, for the worker to find the nearest ancestor of the task's base commit. Shas only; none (or off) leaves the plan as it was.
+  const baseBranch = readiness !== undefined ? await taskBaselineBranch(deps, input.orgId, input.project, input.taskId) : undefined;
   const candidates = baseBranch === undefined ? [] : await baselineCandidatesOf(deps, { orgId: input.orgId, project: input.project, envRevision: found.environment.revision, branch: baseBranch });
   return {
     revision: found.environment.revision, digest: pin.digest, roundBudgetMin: body.roundBudgetMin,

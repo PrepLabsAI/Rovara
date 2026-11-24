@@ -52,7 +52,7 @@ describe("only a trusted run writes a row", () => {
   });
 });
 
-describe("the nightly's record leaves the row, behind the switch", () => {
+describe("the nightly's record leaves the row (no switch, DEC 254zzz461)", () => {
   const record = async (env: NodeJS.ProcessEnv | undefined) => {
     const h = await nightlyWorld();
     const fire = await handleNightlyFire(h.deps, h.due());
@@ -62,22 +62,18 @@ describe("the nightly's record leaves the row, behind the switch", () => {
     return h;
   };
 
-  it("with the switch on, one row for the run's commit and revision, the nightly as writer; with it off, exactly the rows of today", async () => {
-    const on = await record({ ROVARA_BASELINE_CACHE: "1" });
+  it("leaves one row for the run's commit and revision, the nightly as writer", async () => {
+    const on = await record(undefined);
     expect(await rows(on.store, "TESTENV#BASELINE#")).toEqual([expect.stringMatching(/^TESTENV#BASELINE#2/u), `TESTENV#BASELINE#LATEST`, `TESTENV#BASELINE#SHA#00000001#${HEAD1}`]);
     const stored = (await on.store.get({ pk: projectPk(ORG, PROJECT), sk: `TESTENV#BASELINE#SHA#00000001#${HEAD1}` })) as Record<string, unknown>;
     expect(BaselineRowSchema.parse(stored["baseline"])).toMatchObject({ writer: "nightly", headSha: HEAD1, branch: "main", envRevision: 1, failed: ["tests/test_x.py::bad1", "tests/test_x.py::bad2"], flaky: ["tests/test_y.py::flaky1"] });
-    for (const env of [undefined, {}, { ROVARA_BASELINE_CACHE: "0" }]) {
-      const off = await record(env);
-      expect(await rows(off.store, "TESTENV#BASELINE#")).toEqual([expect.stringMatching(/^TESTENV#BASELINE#2/u), `TESTENV#BASELINE#LATEST`]);
-    }
   });
 
   it("a refused result writes no row (a stale slot, an environment that changed)", async () => {
     const h = await nightlyWorld();
     const fire = await handleNightlyFire(h.deps, h.due());
     if (fire.outcome !== "started") throw new Error("not started");
-    const env = { ROVARA_BASELINE_CACHE: "1" };
+    const env = {};
     await expect(recordNightlyResult({ ...h.deps, env }, h.mapStore, { orgId: ORG, project: PROJECT, result: result("f".repeat(64)).result })).rejects.toThrow();
     await expect(recordNightlyResult({ ...h.deps, env }, h.mapStore, { orgId: ORG, project: PROJECT, result: result(fire.slotId, { envRevision: 2 }).result, coverageMap: result(fire.slotId).coverageMap })).rejects.toThrow();
     expect(await rows(h.store, "TESTENV#BASELINE#SHA#")).toEqual([]);
@@ -87,7 +83,7 @@ describe("the nightly's record leaves the row, behind the switch", () => {
     const h = await nightlyWorld();
     const fire = await handleNightlyFire(h.deps, h.due());
     if (fire.outcome !== "started") throw new Error("not started");
-    const env = { ROVARA_BASELINE_CACHE: "1" };
+    const env = {};
     const failing = (inner: typeof h.store, error: Error): typeof h.deps.store => wrapped(inner, { put: (request: { item: { sk: string } }) => (request.item.sk.startsWith("TESTENV#BASELINE#SHA#") ? Promise.reject(error) : inner.put(request as never)) });
     const data = result(fire.slotId);
     const permanent = Object.assign(new Error("too big"), { name: "DocumentStoreError", retryable: false });

@@ -31,7 +31,7 @@ const entry = (id: string): CheckEntry => ({ id, label: "pytest -q", source: "pr
 
 async function world(rows: BaselineRow[], rawBaselines: unknown, candidates?: string[], repositoryNames: string[] = ["lib", "service"]) {
   const documents = new MemoryDocumentStore();
-  const testEnv = { store: documents, now: () => NOW, env: { ROVARA_BASELINE_CACHE: "1" } };
+  const testEnv = { store: documents, now: () => NOW };
   for (const value of rows) await recordBaselineRow(testEnv, mintTrustedBaselineRun({ orgId: ORG, project: PROJECT, row: value }));
   await documents.put({ item: { ...projectRevisionKey(ORG, PROJECT, 1), entityType: "PROJECT", definition: { name: PROJECT, revision: 1, repositories: repositoryNames.map((name) => ({ name, url: `https://example.invalid/${name}.git`, path: name, defaultBranch: "main", credentialRef: "c" })) } } });
   const blobs = createDocumentEvidenceBlobStore(documents, { companyId: ORG });

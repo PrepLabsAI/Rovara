@@ -175,8 +175,6 @@ export interface DeveloperApiConfiguration {
   taskPeopleDisplayRead?: (request: TaskPeopleDisplayReadRequest) => Promise<TaskPeopleDisplayReadResponse>;
   /** D: exact opt-in for role changes; an existing PEOPLE sidecar remains enforced while false. */
   taskPeopleConfiguration?: { peopleChangesEnabled: boolean };
-  /** Spec 059: absent is the safe default; production factories intentionally leave graph starts disabled. */
-  workflowDependenciesEnabled?: boolean;
   /** C: optional distinct claim-bound invitation endpoint; production leaves it absent until separately configured. */
   inviteTaskPerson?: DeveloperTaskRouteDependencies["inviteTaskPerson"];
   /** R10: bound channels' names and privacy, read by DeveloperIdentity. Optional: without it channels are listed by ID. */
@@ -2160,7 +2158,6 @@ export function developerTaskRouteDependencies(
     ...(deps.validateWorkflowE2EApplicationPlan === undefined ? {} : { validateWorkflowE2EApplicationPlan: deps.validateWorkflowE2EApplicationPlan }),
     ...(deps.registeredRepositoryIdentity === undefined ? {} : { registeredRepositoryIdentity: deps.registeredRepositoryIdentity }),
     ...(deps.developer.taskPeopleConfiguration === undefined ? {} : { taskPeopleConfiguration: deps.developer.taskPeopleConfiguration }),
-    ...(deps.developer.workflowDependenciesEnabled === undefined ? {} : { workflowDependenciesEnabled: deps.developer.workflowDependenciesEnabled }),
     taskPeopleStart: async task => prepareTaskPeopleStart(await identityDependenciesOrWebOnly(task), task),
     checkTaskPerson: async (task, developerId, admission) => checkTaskPersonIdentity(await identityDependenciesOrWebOnly(task, admission), task, developerId),
     // C4 (plan 4.2 "Add a person from the web"): the web proof's own reads, which need no Slack.

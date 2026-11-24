@@ -18,7 +18,7 @@ afterEach(async () => {
   while (cleanup.length > 0) await rm(cleanup.pop()!, { recursive: true, force: true });
 });
 
-async function build(options: { docker?: FakeDocker; maxConcurrentMachines?: number | null; stateDirectory?: string; callbackPort?: number; signer?: ReturnType<typeof createEphemeralInvokeSigner>; modelProxy?: boolean; piMcp?: boolean } = {}) {
+async function build(options: { docker?: FakeDocker; maxConcurrentMachines?: number | null; stateDirectory?: string; callbackPort?: number; signer?: ReturnType<typeof createEphemeralInvokeSigner>; modelProxy?: boolean } = {}) {
   const stateDirectory = options.stateDirectory ?? (await mkdtemp(join(tmpdir(), "rovara-l4-")));
   cleanup.push(stateDirectory);
   const docker = options.docker ?? new FakeDocker();
@@ -30,7 +30,6 @@ async function build(options: { docker?: FakeDocker; maxConcurrentMachines?: num
     docker,
     fetch: docker.fetch,
     ...(options.modelProxy === undefined ? {} : { modelProxy: options.modelProxy }),
-    ...(options.piMcp === undefined ? {} : { piMcp: options.piMcp }),
     ...(options.maxConcurrentMachines === undefined ? {} : { maxConcurrentMachines: options.maxConcurrentMachines }),
   });
   return { stateDirectory, docker, machines };

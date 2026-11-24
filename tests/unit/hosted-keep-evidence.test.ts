@@ -198,12 +198,11 @@ describe("the baseline words (TE-C1)", () => {
     return w;
   }
 
-  it("not for a commit the plan did not offer, not another company's baseline row, and not with the switch off", async () => {
-    const offered = [await baselineWorld({ ROVARA_BASELINE_CACHE: "1" }), "2".padStart(40, "0")] as const;
+  it("not for a commit the plan did not offer, and not another company's baseline row", async () => {
+    const offered = [await baselineWorld({}), "2".padStart(40, "0")] as const;
     const cases: Array<[Awaited<ReturnType<typeof baselineWorld>>, string, string, string]> = [
       [offered[0], FAKE_COMPANY, offered[1], baselineSha], // the claim is for a sha the plan never offered
-      [await baselineWorld({ ROVARA_BASELINE_CACHE: "1" }, OTHER), FAKE_COMPANY, baselineSha, baselineSha], // the only row is another company's
-      [await baselineWorld({}), FAKE_COMPANY, baselineSha, baselineSha], // switch off
+      [await baselineWorld({}, OTHER), FAKE_COMPANY, baselineSha, baselineSha], // the only row is another company's
     ];
     for (const [w, companyId, offeredSha, claimSha] of cases) {
       w.fake.clock.now = NOW;
@@ -217,7 +216,7 @@ describe("the baseline words (TE-C1)", () => {
 
 
 it("KF end to end: callback artifacts produce a hosted card; one website approval reaches the production result reader and exact Undo", async () => {
-  const env = { ROVARA_VERIFICATION_RESULTS: "1" };
+  const env = {};
   const w = await world({ env });
   const owner = w.person(OWNER_ID, FAKE_COMPANY);
   const t = await w.taskOf(owner, FAKE_COMPANY);

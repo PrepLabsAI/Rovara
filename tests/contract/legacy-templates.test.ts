@@ -21,8 +21,10 @@ const LEGACY = { alarmName: "AgentXSessionStuckStopping", namespace: "AgentX" };
 // out; each changed stack's full template has its own new pin below, and legacy-runtime-boundary.test.ts proves the policy.
 const BOUNDED_STACK_PINS: Record<string, string> = {
   // APIGW-ACCESS-LOGS (2026-11-24): re-pinned for exactly the access log group and the `$default` stage AccessLogSettings. Rule D: with those two taken out (withoutApiAccessLog) the old pin
-  // 61d1eac2d6a528e2f300b5cc4773fbd6d46b31f3d860c6f6514491fbe3bafb65 holds (the test below checks it).
-  AgentXControlPlane: "45259f9a0b368e97f50af3f88987e43b3b5360644d43ffd4f0f0d97222fc5b4b",
+  // 61d1eac2d6a528e2f300b5cc4773fbd6d46b31f3d860c6f6514491fbe3bafb65 held (the pin below carries the switch removal, so the test below checks the switch-removal pin 4c365c02... instead).
+  // DEC 254zzz461 (turn on, rebased onto train 24): the WorkflowDependenciesEnabled parameter and its `,wd=` packed piece are gone, so the full pin moved again. Rule D: with the access log taken out
+  // (the test below) the pre-train-23 switch-removal pin 4c365c02d4e5db274ffe3328ed70e8e4bd25c9eac24e66010d1284c22e744b85 holds, i.e. the two moves are independent and add up.
+  AgentXControlPlane: "d323e772083cc8440a05e64e2dd03c2f388379607de8107a5617c2904036af6e",
   AgentXProductionFoundation: "e7c873b146a748408b545e42d2f17596c04ad229271ed7776312d312eca9ca63",
   AgentXSlackOrchestrator: "9ed4e1e13eeb3ecf860e61d9f2c9b332901f36190e0685fa695a390335420bf5",
 };
@@ -36,7 +38,7 @@ describe("legacy production templates", () => {
     if (stack.stackName === "AgentXControlPlane") {
       it("removing only Batch F additions preserves code/next's AgentXControlPlane template", () => {
         const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(withoutLegacyRuntimeBoundary(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(normalizedTemplate(stack)), LEGACY)))));
-        expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("d9bfc520cf02657c1b6be9b16b821e910504a1599cb3652d7405f9c6509b4048");
+        expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("b5268797839ab9b38a32e0e4fc3571264d87448f3e9c98906b0099c8f410e64a");
       }, 120_000);
     }
     it(`${stack.stackName} is unchanged`, () => {
@@ -54,9 +56,9 @@ describe("legacy production templates", () => {
         // APIGW-ACCESS-LOGS (2026-11-24): the access log group and the stage setting are asserted and taken out first, so the recorded pin and snapshot below still hold. The full-template pin above
         // (BOUNDED_STACK_PINS) is the one that moved.
         const beforeAccessLog = withoutApiAccessLog(structuredClone(template));
-        expect(createHash("sha256").update(JSON.stringify(beforeAccessLog)).digest("hex"), "AgentXControlPlane minus only the access log").toBe("61d1eac2d6a528e2f300b5cc4773fbd6d46b31f3d860c6f6514491fbe3bafb65");
+        expect(createHash("sha256").update(JSON.stringify(beforeAccessLog)).digest("hex"), "AgentXControlPlane minus only the access log (the switch-removal pin)").toBe("4c365c02d4e5db274ffe3328ed70e8e4bd25c9eac24e66010d1284c22e744b85");
         const withoutBoundary = withoutLegacyRuntimeBoundary(beforeAccessLog);
-        expect(createHash("sha256").update(JSON.stringify(withoutBoundary)).digest("hex")).toBe("7af9f78c71ac9c6156127490b80985a46f7f15b026c254e1e59df6e03451da3f");
+        expect(createHash("sha256").update(JSON.stringify(withoutBoundary)).digest("hex")).toBe("f026f5acd1dc0dee7e8e949e2b032e059a9f27c47691bed02914520eb20989cd");
         // Webhook lane W3 adds the webhook secret slot, its throttle and one alarm (tests/support/webhook-secret-template.ts pins them); the historical snapshot is of the rest.
         expect(withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutBoundary))).toMatchSnapshot();
       } else expect(withoutLegacyRuntimeBoundary(template)).toMatchSnapshot();

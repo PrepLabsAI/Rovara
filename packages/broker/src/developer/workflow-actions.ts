@@ -41,7 +41,6 @@ export const WORKFLOW_BREAKDOWN_REFUSALS = Object.freeze({
   digestMissing: "approve this exact ordered work plan by refreshing the plan and submitting its work breakdown digest",
   digestChanged: "the work breakdown changed; refresh the plan before deciding",
   noBreakdown: "the current plan has no work breakdown to approve",
-  notEnabled: "ordered work plans are saved but this broker is not enabled to start them",
   onePinnedRepository: "ordered work is available only when this task is pinned to one registered repository",
 });
 

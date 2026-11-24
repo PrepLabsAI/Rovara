@@ -243,8 +243,6 @@ export interface DeveloperTaskRouteDependencies extends Pick<TaskPeopleEffectsDe
   taskPeopleStart?: (task: DeveloperTaskRecord) => Promise<TransactItem[]>;
   /** C: absent is write-disabled; an existing PEOPLE sidecar remains authoritative either way. */
   taskPeopleConfiguration?: { peopleChangesEnabled: boolean };
-  /** Spec 059: absent is the safe default; production factories intentionally leave graph starts disabled. */
-  workflowDependenciesEnabled?: boolean;
   /** C: trusted exact-principal eligibility and bound-channel proof; never supplied by a request body. */
   checkTaskPerson?: (task: DeveloperTaskRecord, developerId: string, admission?: TaskPeopleDisplayAdmission) => Promise<{
     subject: { developerId: string; slackUserId?: string };
@@ -861,9 +859,6 @@ export async function submitWorkflowFeedbackDecision(
       && JSON.stringify(prior.selectedFindingIds) === JSON.stringify(input.selectedFindingIds) && prior.ownerNote === input.ownerNote;
     if (!same) throw agentXError("IDEMPOTENCY_CONFLICT", "this decision request ID was already used");
     return { status: prior.decision === "APPROVE" ? "APPROVED" : prior.decision === "REQUEST_CHANGES" ? "CHANGES_REQUESTED" : "DISMISSED", nextAction: prior.decision === "APPROVE" ? "implementation" : "owner_review" };
-  }
-  if (input.decision === "APPROVE" && current.workflowDependenciesApproval !== undefined && deps.workflowDependenciesEnabled !== true) {
-    throw agentXError("CONFIG_INVALID", "this task has an approved ordered work plan, but this broker is not enabled to apply PR feedback through that plan; request changes or dismiss the proposal");
   }
   if (deps.refreshTaskFeedback === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "current GitHub PR feedback cannot be verified for this decision");
   await deps.refreshTaskFeedback(taskId);
@@ -1620,7 +1615,6 @@ export async function decideTaskWorkflow(
   const planGraph = loaded?.format === "structured" ? loaded.plan.workBreakdown : undefined;
   let workBreakdownDigest: string | undefined;
   if (planGraph !== undefined && request.decision === "APPROVE") {
-    if (prior === undefined && deps.workflowDependenciesEnabled !== true) throw agentXError("CONFIG_INVALID", "ordered work plans are saved but this broker is not enabled to start them");
     const pinnedProject = await readTaskLegacyProject(task, () => deps.actions.projectRevision(task.project, task.startingRevision));
     if (pinnedProject === undefined || pinnedProject.definition.repositories.length !== 1) {
       throw agentXError("CONFIG_INVALID", "ordered work is available only when this task is pinned to one registered repository");
@@ -2264,7 +2258,7 @@ async function loadCommittedSourceRecovery(
   }
   await actionableWorkspace(deps, task);
   const invocation = await approvedWorkflowDependencies(deps, task, access.peopleRevision);
-  if (invocation === undefined || deps.workflowDependenciesEnabled !== true) {
+  if (invocation === undefined) {
     throw agentXError("CONFIG_INVALID", "the approved ordered plan is not available for retained-source recovery");
   }
   const operationId = workflow.workflowDependenciesOperationId;
@@ -2494,9 +2488,6 @@ async function retryWorkflowImplementation(
   await actionableWorkspace(deps, task);
   const plan = await approvedCodingPlan(deps, workflow);
   const workflowDependencies = await approvedWorkflowDependencies(deps, task, access.peopleRevision);
-  if (workflowDependencies !== undefined && deps.workflowDependenciesEnabled !== true) {
-    throw agentXError("CONFIG_INVALID", "the approved ordered work plan is retained, but this broker is not enabled to retry it");
-  }
   const { blockReason: _blockReason, ...unblocked } = workflow;
   void _blockReason;
   const next: WorkflowSnapshot = { ...unblocked, revision: workflow.revision + 1, state: "RUNNING", updatedAt: iso(deps) };
@@ -2538,9 +2529,6 @@ export async function sendTaskWorkflowBackToCoding(deps: DeveloperTaskRouteDepen
   await actionableWorkspace(deps, task);
   const plan = await approvedCodingPlan(deps, workflow);
   const workflowDependencies = await approvedWorkflowDependencies(deps, task, access.peopleRevision);
-  if (workflowDependencies !== undefined && deps.workflowDependenciesEnabled !== true) {
-    throw agentXError("CONFIG_INVALID", "the approved ordered work plan is retained, but this broker is not enabled to continue it");
-  }
   const restartApprovedGraph = workflowDependencies === undefined ? undefined : {
     ...workflowDependencies,
     resumeTreeSha: workflowDependencies.resumeTreeSha,
@@ -2590,9 +2578,6 @@ export async function resolveTaskWorkflowFindings(deps: DeveloperTaskRouteDepend
     await actionableWorkspace(deps, task);
     const plan = await approvedCodingPlan(deps, workflow);
     const workflowDependencies = await approvedWorkflowDependencies(deps, task, access.peopleRevision);
-    if (workflowDependencies !== undefined && deps.workflowDependenciesEnabled !== true) {
-      throw agentXError("CONFIG_INVALID", "the approved ordered work plan is retained, but this broker is not enabled to continue it");
-    }
     const restartApprovedGraph = workflowDependencies === undefined ? undefined : {
       ...workflowDependencies,
       resumeTreeSha: next.candidate?.repositories.length === 1 ? next.candidate.repositories[0]!.treeSha : workflowDependencies.resumeTreeSha,
@@ -2883,9 +2868,6 @@ export async function autoSendBackToCodingFromSystem(
   await actionableWorkspace(deps, task);
   const plan = await approvedCodingPlan(deps, workflow);
   const workflowDependencies = await approvedWorkflowDependencies(deps, task, access.peopleRevision);
-  if (workflowDependencies !== undefined && deps.workflowDependenciesEnabled !== true) {
-    throw agentXError("CONFIG_INVALID", "the approved ordered work plan is retained, but this broker is not enabled to continue it");
-  }
   const restartApprovedGraph = workflowDependencies === undefined ? undefined : {
     ...workflowDependencies,
     resumeTreeSha: workflowDependencies.resumeTreeSha,

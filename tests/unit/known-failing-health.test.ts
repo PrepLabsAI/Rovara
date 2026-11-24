@@ -12,7 +12,7 @@ async function fixture() {
   const store = new MemoryDocumentStore();
   let unavailable = false;
   const audit: AuditSink = { stage(event) { if (unavailable) throw new Error("ledger unavailable"); return [{ kind: "put", item: { pk: `AUDIT#${company}`, sk: event.eventId, action: event.action } }]; }, async record() { throw new Error("must use transaction"); } };
-  const service = createKnownFailing({ store, now: () => now, env: { ROVARA_VERIFICATION_RESULTS: "1" }, audit, mayMaintain: async () => true, evidenceOf: async () => undefined, workflowOf: async () => blockedWorkflow });
+  const service = createKnownFailing({ store, now: () => now, audit, mayMaintain: async () => true, evidenceOf: async () => undefined, workflowOf: async () => blockedWorkflow });
   await store.put({ item: { ...projectRevisionKey(company, project, 1), definition: { repositories: [{ defaultBranch: "main" }] } } });
   const marks = ["passed test", "absent test"].map((name) => ({ name, checkId: "unit", markedBy: "maintainer", markedAt: at, epoch: 1, version: randomUUID() }));
   await store.put({ item: { pk: projectPk(company, project), sk: "KNOWN_FAILING", version: 1, marks } });
@@ -60,5 +60,5 @@ it("excuses nothing when the task branch evidence cannot be read completely", as
     if (input.pk.startsWith("DEVTASK#")) throw new Error("branch evidence unavailable");
     return query(input);
   });
-  expect(await alreadyFailingForResults({ store: s.store, now: () => now, env: { ROVARA_VERIFICATION_RESULTS: "1" } }, { companyId: company, project, taskId: blockedWorkflow.taskId })).toEqual([]);
+  expect(await alreadyFailingForResults({ store: s.store, now: () => now }, { companyId: company, project, taskId: blockedWorkflow.taskId })).toEqual([]);
 });

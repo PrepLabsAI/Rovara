@@ -314,8 +314,7 @@ export const TestEnvTaskPlanSchema = z
      */
     dependencies: z.array(TaskDependencyPlanSchema).min(1).max(TASK_DEPENDENCY_PLAN_MAX).optional(),
     /**
-     * TE-C1: the newest trusted baseline commits on the task's base branch (shas only), for the worker to find the nearest one that is an ancestor of the task's base commit. Present only when the switch `ROVARA_BASELINE_CACHE`
-     * is on and there is at least one; sent only to a worker that lists `TEST_ENV_BASELINE_FEATURE`. Absent: today's plan byte for byte. Never empty.
+     * TE-C1: the newest trusted baseline commits on the task's base branch (shas only), for the worker to find the nearest one that is an ancestor of the task's base commit. Present only when there is at least one; sent only to a worker that lists `TEST_ENV_BASELINE_FEATURE`. Absent: today's plan byte for byte. Never empty.
      */
     baselineCandidates: z.array(BaselineCandidateSchema).min(1).max(BASELINE_CANDIDATES_MAX).optional(),
     /**

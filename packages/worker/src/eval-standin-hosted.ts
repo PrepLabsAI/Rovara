@@ -30,8 +30,6 @@ import type { DockerCli } from "./swebench/containers.js";
 export const EVAL_STAND_IN_HELPER_ENTRY = "/opt/agentx/packages/worker/dist/eval-standin-helper.js";
 /** The one sentence every start failure gives: Docker's own words are never repeated. */
 export const EVAL_STAND_IN_FAILURE_SENTENCE = "AgentX could not start the stand-in for this eval round";
-/** The operator's switch. Absent or anything but "1": off, and an eval round runs exactly as without stand-ins. */
-export const EVAL_STAND_IN_ENVIRONMENT = "AGENTX_EVAL_STAND_INS";
 /** How long past the round's budget the helper lives on its own before it stops itself (shorter than the run network's stale margin). */
 export const EVAL_STAND_IN_GRACE_MS = 5 * 60_000;
 const NODE = "/usr/local/bin/node";
@@ -317,9 +315,4 @@ export async function startEvalStandInsOnce(input: StartEvalStandInsInput): Prom
 /** One try and, when it fails, one more (a stand-in that will not start is Rovara's problem, not the customer's: the second try is the only recovery; a second failure is the caller's to report). */
 export async function startEvalStandIns(input: StartEvalStandInsInput): Promise<StartedEvalStandIns> {
   try { return await startEvalStandInsOnce(input); } catch { return startEvalStandInsOnce(input); }
-}
-
-/** Whether this worker offers the stand-in: the operator turned it on and the worker's own image is known and pinned. The round network's walls are the model helper's gate (the stand-in joins its network). */
-export function evalStandInsOffered(environment: NodeJS.ProcessEnv, image: string): boolean {
-  return environment[EVAL_STAND_IN_ENVIRONMENT] === "1" && IMAGE_REFERENCE.test(image);
 }

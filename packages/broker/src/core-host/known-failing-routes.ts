@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { agentXError, type OrgId, type Principal } from "@agentx/contracts";
-import { createKnownFailing, verificationResultsEnabled } from "../core/test-env/known-failing.js";
+import { createKnownFailing } from "../core/test-env/known-failing.js";
 import type { SessionMembers } from "../core/sessions/access.js";
 import { developerIdOf } from "../core/sessions/create.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
@@ -9,7 +9,6 @@ const PATH = /^\/v1\/app\/projects\/([^/]+)\/known-failing$/u;
 export const isKnownFailingPath = (path: string, method: string): boolean => PATH.test(path) && (method === "GET" || method === "POST");
 const Undo = z.object({ action: z.literal("undo"), requestId: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u), name: z.string().min(1).max(500), checkId: z.string().min(1).max(64), markedBy: z.string().min(1).max(200), markedAt: z.string().datetime(), epoch: z.number().int().positive() }).strict();
 export async function routeKnownFailing(input: { flow: TaskFlowDeps; principal: Principal; companyId: OrgId; members: SessionMembers | undefined; webApp: boolean; path: string; request: BrokerRequest; env?: NodeJS.ProcessEnv }): Promise<BrokerResponse> {
-  if (!verificationResultsEnabled(input.env)) throw agentXError("NOT_FOUND", "route not found");
   const project = decodeURIComponent(PATH.exec(input.path)![1]!);
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u.test(project) || input.principal.companyId !== input.companyId || input.members === undefined) throw agentXError("NOT_FOUND", "Project not found.");
   const who = { companyId: input.companyId, developerId: developerIdOf(input.principal), principal: input.principal };
