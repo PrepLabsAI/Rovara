@@ -205,4 +205,4 @@ The wizard's steps, for a connector set up without it:
 
 4. Register the project's next revision.
 
-The full schema is in `specs/055-generic-mcp-connectors/spec.md`.
+The full schema is in [Project configuration](../project-configuration.md).

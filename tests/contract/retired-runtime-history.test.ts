@@ -10,7 +10,7 @@ import {
 } from "../support/slack-broker.js";
 
 // Representative wire values from the retired architecture, kept with its design history.
-const routing = JSON.parse(readFileSync(new URL("../../specs/036-ec2-only-runtime/historical-routing.json", import.meta.url), "utf8")) as {
+const routing = JSON.parse(readFileSync(new URL("../fixtures/retired-runtime/historical-routing.json", import.meta.url), "utf8")) as {
   runtimeArn: string; endpointQualifier: string; capacityProviderArn: string; runtimeSessionId: string;
 };
 const thread = `${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000001`;

@@ -139,9 +139,6 @@ sign-in) gets 401. Each change records the person and the service that made it.
 
 The member list shows grants made once this release is in. A grant made before it is listed once it is made again.
 
-See the specs: [sign-in clients](../specs/063-sign-in-clients/spec.md) and
-[scoped actions](../specs/065-client-scopes/spec.md).
-
 ## Named scopes on the developer API
 
 Every developer API route (`/v1/dev/*`) has one row in the broker's route table

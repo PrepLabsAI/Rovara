@@ -13,7 +13,7 @@ body:
     id: proposal
     attributes:
       label: What you propose
-      description: How AgentX could solve it. Larger changes become a specification under specs/ before any code.
+      description: How AgentX could solve it. Larger changes are agreed in the issue before any code.
   - type: textarea
     id: alternatives
     attributes:
