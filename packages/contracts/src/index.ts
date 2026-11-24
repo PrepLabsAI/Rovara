@@ -9,6 +9,7 @@ export * from "./rovara-comment.js";
 export * from "./item-paths.js";
 export * from "./mcp-connector.js";
 export * from "./models-node.js";
+export * from "./gateway-stops.js";
 export * from "./model-sources.js";
 export * from "./model-providers.js";
 export * from "./errors.js";
