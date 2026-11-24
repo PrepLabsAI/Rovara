@@ -66,9 +66,11 @@ import { HOST_ASK_REVISION, SETUP_HOST_KIND, hostAskDigest, hostAskSubjectId, ho
 import { setupAgentKey } from "../core/setup-agent/keys.js";
 import { ensureCoreInUse } from "./engine-stamp.js";
 import { setupStateOf, startProjectSetupCheck } from "../core/setup-agent/check.js";
+import { stopProjectSetupChecks } from "../core/setup-agent/check-stop.js";
 import { resumeSetupPausedTasks } from "../core/setup-agent/auto-resume.js";
 import { log as logTaskFlow } from "../core/task-flow/support.js";
 import { setupRepairViewOf } from "../core/setup-agent/repair-view.js";
+import { SETUP_NEEDS_REPAIR_WARNING, readSetupRepairCard } from "../core/setup-agent/recheck.js";
 import { putSetupLimits, readSetupLimits, setupLimitSettingReader } from "../core/setup-agent/limits.js";
 
 export const SETUP_RUN_PROJECT_NOT_FOUND = "project not found";
@@ -189,6 +191,11 @@ const errorAnswer = (error: AgentXError): BrokerResponse => json(error.statusCod
 const notFound = (): AgentXError => agentXError("NOT_FOUND", SETUP_RUN_PROJECT_NOT_FOUND);
 
 /** The project's name from the path: a malformed escape or name is a project that does not exist. */
+/** DEC 254zzz447: `{ setupWarning }` (the plain warning) while the project's setup needs repair now (its open repair card); `{}` otherwise or when it cannot be read. */
+async function setupWarningFields(flow: TaskFlowDeps, project: string): Promise<{ setupWarning?: string }> {
+  return (await readSetupRepairCard(flow, project).catch(() => undefined)) === undefined ? {} : { setupWarning: SETUP_NEEDS_REPAIR_WARNING };
+}
+
 function projectOf(raw: string): string {
   let project: string;
   try { project = decodeURIComponent(raw); } catch { throw notFound(); }
@@ -481,7 +488,8 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
       const apply = input.wiring.approval === undefined ? undefined : await applyView(input, deps, project);
       // L4-RD: the admin card of a broken setup ("Approve new setup" / "Fix setup"), for the people who manage the project's setup only. Absent while the setup is not broken.
       const repair = standing.access === "manage" ? await readRepairView(deps, project) : undefined;
-      return json(200, { ...(await getSetupAgent(deps, project)), canManage: standing.access === "manage", ...(apply === undefined ? {} : { apply }), ...(repair === undefined ? {} : { repair }) });
+      // DEC 254zzz447 (don't block work): while the setup is broken EVERY reader gets the plain warning (work continues; nothing is paused or refused), not only the people who manage it.
+      return json(200, { ...(await getSetupAgent(deps, project)), canManage: standing.access === "manage", ...(apply === undefined ? {} : { apply }), ...(repair === undefined ? {} : { repair }), ...(await setupWarningFields(deps.flow, project)) });
     }
     if (input.request.method === "GET" && tail === "updates") {
       // The offers are for the people who manage the project's setup (and only where a candidate can be approved); a reader sees none, and no other company's or project's.
@@ -601,14 +609,17 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
 //   GET  /v1/app/projects/{project}/setup-check    where the project's setup check stands (the core's `SetupState`, plus `canManage` and, while the setup is broken, `repair`: the "Setup needs repair" card); any live role on the project reads it
 //   POST /v1/app/projects/{project}/setup-check    start the check ({ requestId } and nothing else): a person who MANAGES the project's setup (a company owner or admin, or the project's administrator), read now.
 //                                                  202 started, 200 a repeat of the same request id, 409 when a check of this project is already running.
+//   POST /v1/app/projects/{project}/setup-check/stop   stop the project's running check(s) ({ requestId } and nothing else): the same people who start one. Ends the check's preparation, closes its workspace and releases its
+//                                                  machine (check-stop.ts); answers 200 { stopped: <how many checks it stopped>, nothingRunning }. A repeat, or a project with nothing running, answers 200 { stopped: 0, nothingRunning: true }.
 // It is an ordinary PERSON-started check (the person is the starter and the record says so): no system owner, no flag, no AI, no model key. It is the way to prove the re-check on staging and the button a manager
 // presses when the automatic re-check has not run. The audit record is written BEFORE the start, so nothing is started when it cannot be written. A start needs the company on the core for new tasks.
-const SETUP_CHECK_PATH = /^\/v1\/app\/projects\/([^/]+)\/setup-check$/u;
+const SETUP_CHECK_PATH = /^\/v1\/app\/projects\/([^/]+)\/setup-check(\/stop)?$/u;
 const SetupCheckBodySchema = z.object({ requestId: z.string().uuid() }).strict();
 
 /** Whether this method and path is the hosted "Re-check setup" route. */
 export function isSetupCheckPath(path: string, method: string): boolean {
-  return SETUP_CHECK_PATH.test(path) && (method === "GET" || method === "POST");
+  const match = SETUP_CHECK_PATH.exec(path);
+  return match !== null && (match[2] === undefined ? method === "GET" || method === "POST" : method === "POST");
 }
 
 /** One request on the hosted setup-check path (`isSetupCheckPath`), after the dev routes checked the company from membership. Always answers. */
@@ -629,11 +640,16 @@ export async function routeHostedSetupCheck(input: HostedSetupRunInput): Promise
       // L4-U5: the setup state, who may act (read live above), and, while the setup is broken, the "Setup needs repair" card in the words every surface shares. The card's actions are empty for a person who may not act.
       const canManage = standing.access === "manage";
       const repair = await setupRepairViewOf({ flow, store: flow.store, companyId, now: input.now }, project, { canManage }).catch(() => undefined);
-      return json(200, { ...(await setupStateOf(flow, project, latest.definition)), canManage, ...(repair === undefined ? {} : { repair }) });
+      return json(200, { ...(await setupStateOf(flow, project, latest.definition)), canManage, ...(repair === undefined ? {} : { repair }), ...(await setupWarningFields(flow, project)) });
     }
     if (input.request.method !== "POST") throw agentXError("NOT_FOUND", "route not found");
     if (standing.access !== "manage") throw agentXError("FORBIDDEN", SETUP_RUN_NOT_ALLOWED);
     const body = parsed(SetupCheckBodySchema, bodyOf(input.request));
+    if (match[2] !== undefined) {
+      // Stop: audited first (nothing is stopped when the record cannot be written); a repeat or nothing running is a plain 200.
+      await recorded(input, auditEvent(input, "setup_check.stop_requested", `setup_check.stop_requested:${companyId}:${project}:${input.principal.personId}:${body.requestId}`, project, standing.basis, { requestId: body.requestId }));
+      return json(200, await stopProjectSetupChecks(flow, project));
+    }
     if (!input.startsNewTasks) throw agentXError("RUNTIME_UNAVAILABLE", SETUP_RUN_UNAVAILABLE);
     const personId = input.principal.personId;
     await recorded(input, auditEvent(input, "setup_check.requested", `setup_check.requested:${companyId}:${project}:${personId}:${body.requestId}`, project, standing.basis, { requestId: body.requestId }));

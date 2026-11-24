@@ -90,7 +90,7 @@ async function world(options: { noSigner?: boolean; offeredModels?: OfferedModel
     ...(options.offeredModels === undefined ? {} : { offeredModels: options.offeredModels }),
     ciReporting: { honest: true, ciMode: async () => "sandbox_only" as const },
     lessonsPeople: () => ({ approvers: async () => ({ complete: true, membershipVersion: 1, ownerIds: [], eligibleIds: [], lastEligibleLossAtMs: null }), onProjectRoster: async () => true, linkedAccounts: async () => [], displayName: async () => "Member", isErased: async () => false }),
-    services: (companyId, flow, registry, wiring) => createBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!, now: () => new Date(w.clock.now) }),
+    services: (companyId, flow, registry, wiring) => createBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!, now: () => new Date(w.clock.now), taskPeople: { documentClient: { send: async () => ({}) }, tableName: "state" } }),
   });
   for (const companyId of [A, B]) {
     await w.store.put({ item: plain({ ...projectRevisionKey(companyId, "payments", 1), definition: project }) });

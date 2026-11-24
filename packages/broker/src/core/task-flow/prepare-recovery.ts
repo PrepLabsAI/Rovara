@@ -1,7 +1,7 @@
 // Historical preparations have no SETUP_WATCH. Walk one bounded project-index page per scheduled pass.
 import { companyScoped, orgProjectCatalogPk, workspaceProjectIndexValue, WORKSPACE_PROJECT_INDEX, when, type Condition, type StoredDocument } from "@agentx/contracts";
 import type { TaskFlowDeps } from "./deps.js";
-import { prepareWatchKey, recoverDeadPreparation } from "./prepare-watch.js";
+import { expireStalledCheck, prepareWatchKey, recoverDeadPreparation } from "./prepare-watch.js";
 import { readWorkspace } from "./stage-machine.js";
 import { log } from "./support.js";
 
@@ -48,5 +48,7 @@ async function recoverHistoricalWorkspace(deps: TaskFlowDeps, row: StoredDocumen
   const workspace = await readWorkspace(deps, row["id"]);
   if (workspace?.status !== "PREPARING" || typeof workspace.activeOperationId !== "string") return;
   if (await deps.store.get(prepareWatchKey(deps.companyId, workspace.createdAt, workspace.id)) !== undefined) return;
-  await recoverDeadPreparation(deps, workspace.id, workspace.activeOperationId);
+  if (await recoverDeadPreparation(deps, workspace.id, workspace.activeOperationId)) return;
+  // A setup check with no watch row whose machine took its preparation but never answered: past the check's limit it is ended, so it cannot run for ever.
+  await expireStalledCheck(deps, workspace.id, workspace.activeOperationId, workspace.createdAt);
 }

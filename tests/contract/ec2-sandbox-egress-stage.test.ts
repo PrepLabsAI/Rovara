@@ -19,7 +19,9 @@ interface Options {
   failIsolationSet?: boolean; failIsolationVerify?: boolean; failIpv6?: boolean; failRuleInsert?: boolean; noMetadataBlock?: boolean; failInnerCreate?: boolean; failOuterCreate?: boolean; emptyProgram?: boolean; fewNames?: boolean; badName?: boolean; fewS3?: boolean; badS3?: boolean;
   failCreate?: boolean; failConnect?: boolean; failStart?: boolean; ghostNetworks?: boolean; failProbe?: boolean; innerNotInternal?: boolean; innerExistsRight?: boolean; innerIccOn?: boolean;
   // L4-NETG2: the Docker daemon's name server, the container firewall script, and the old agentx-task bridge.
-  otherDaemonDns?: boolean; failDockerRestart?: boolean; failFirewall?: boolean; dockerNotReady?: boolean; staleTaskNetwork?: boolean; taskNetworkHeld?: boolean; loopbackResolver?: boolean; dnsAlreadySet?: boolean; emptyDaemonJson?: boolean; notJsonDaemon?: boolean; noResolvers?: boolean; noAgentxDir?: boolean; installFailsForAgentx?: boolean; proxyDead?: boolean; proxyOpen?: boolean; noRegion?: boolean;
+  otherDaemonDns?: boolean; failDockerRestart?: boolean; failFirewall?: boolean; dockerNotReady?: boolean; staleTaskNetwork?: boolean; taskNetworkHeld?: boolean; loopbackResolver?: boolean; dnsAlreadySet?: boolean; daemonText?: string; emptyDaemonJson?: boolean; notJsonDaemon?: boolean; noResolvers?: boolean; noAgentxDir?: boolean; installFailsForAgentx?: boolean; proxyDead?: boolean; proxyOpen?: boolean; noRegion?: boolean;
+  // EGRESS-BOOT-RACE: a Docker that is slow to answer after its restart (the first N `docker info` probes fail), a DOCKER-USER chain that appears late (the first N probes fail), `systemctl restart docker.service` that fails N times and then works.
+  dockerReadyAfter?: number; chainReadyAfter?: number; neverChain?: boolean; restartFailsTimes?: number; firewallSays?: string;
 }
 const DAEMON_BEFORE = '{"data-root": "/mnt/workspace/.docker", "default-address-pools": [{"base":"172.28.0.0/16","size":24}]}\n';
 const TASK_NETWORK_ID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -37,8 +39,8 @@ function host(options: Options = {}): Host {
   writeFileSync(h.rules, options.noMetadataBlock === true ? "" : "DOCKER-USER -d 169.254.169.254/32 -j DROP\n");
   writeFileSync(h.rules6, "");
   writeFileSync(h.resolv, options.noResolvers === true ? "nameserver 127.0.0.53\n" : `${options.loopbackResolver === true ? "nameserver 127.0.0.53\n" : ""}nameserver 10.42.0.2\nnameserver 169.254.169.253\n`);
-  writeFileSync(h.daemon, options.emptyDaemonJson === true ? "{}\n" : options.notJsonDaemon === true ? "[]\n" : options.otherDaemonDns === true ? '{"dns": ["8.8.8.8"], "data-root": "/x"}\n' : options.dnsAlreadySet === true ? '{"dns": ["172.28.250.2"], "data-root": "/x"}\n' : DAEMON_BEFORE);
-  writeFileSync(h.firewall, `#!/bin/bash\necho "firewall run" >>"${h.calls}"\n${options.failFirewall === true ? "exit 1" : "exit 0"}\n`);
+  writeFileSync(h.daemon, options.daemonText !== undefined ? options.daemonText : options.emptyDaemonJson === true ? "{}\n" : options.notJsonDaemon === true ? "[]\n" : options.otherDaemonDns === true ? '{"dns": ["8.8.8.8"], "data-root": "/x"}\n' : options.dnsAlreadySet === true ? '{"dns": ["172.28.250.2"], "data-root": "/x"}\n' : DAEMON_BEFORE);
+  writeFileSync(h.firewall, `#!/bin/bash\necho "firewall run" >>"${h.calls}"\necho "setup isolation: ready" >&2\n${options.failFirewall === true ? `echo "${options.firewallSays ?? "iptables: No chain/target/match by that name."}" >&2\nexit 1` : "exit 0"}\n`);
   chmodSync(h.firewall, 0o755);
   if (options.staleTaskNetwork === true) writeFileSync(join(h.state, "nets", "agentx-task"), TASK_NETWORK_ID);
   if (options.taskNetworkHeld === true) writeFileSync(join(h.state, "held"), "");
@@ -54,7 +56,9 @@ function host(options: Options = {}): Host {
   -I) shift; ${failInsert ? "exit 1" : `{ printf '%s\\n' "$*"; cat "${file}"; } >"${file}.new"; mv "${file}.new" "${file}"`} ;;
   *) exit 1 ;;
 esac`;
-  fake("iptables", table(h.rules, options.failRuleInsert === true));
+  // `iptables -n -L DOCKER-USER` (the chain wait) and `-S` (the diagnostics): the chain shows up after `chainReadyAfter` probes, or never.
+  const chainProbe = `-n) n=$(cat "${h.state}/chain.n" 2>/dev/null || echo 0); n=$((n+1)); echo $n >"${h.state}/chain.n"; ${options.neverChain === true ? "exit 1" : `((n > ${String(options.chainReadyAfter ?? 0)}))`} ;;\n  -S) cat "${h.rules}" ;;\n  `;
+  fake("iptables", table(h.rules, options.failRuleInsert === true).replace("case \"$1\" in\n  ", `case "$1" in\n  ${chainProbe}`));
   fake("ip6tables", table(h.rules6, options.failIpv6 === true));
   for (const [name, index] of [["vethgw", "101"], ["vethpeer", "102"]]) {
     mkdirSync(join(h.dir, "sys", "rvs0", "brif", name!), { recursive: true });
@@ -69,7 +73,17 @@ esac`;
   fake("timeout", 'while [[ "$1" == -* ]]; do shift; done; shift; exec "$@"');
   fake("install", options.installFailsForAgentx === true ? 'dir=0; for last; do [[ "$last" == -d ]] && dir=1; done; [[ "$dir" == 1 && "$last" == */agentx ]] && exit 1; [[ "$dir" == 1 ]] && mkdir -p "$last"; exit 0' : 'dir=0; for last; do [[ "$last" == -d ]] && dir=1; done; [[ "$dir" == 1 ]] && mkdir -p "$last"; exit 0');
   // A restart of Docker on the new file (the one with the gateway as name server) fails; on the old file it works.
-  fake("systemctl", options.failDockerRestart === true ? `[[ "$*" == "restart docker.service" ]] && grep -q '"dns"' "${h.daemon}" && exit 1\nexit 0` : "exit 0");
+  fake("systemctl", `case "$*" in
+  "restart docker.service")
+    ${options.failDockerRestart === true ? `grep -q '"dns"' "${h.daemon}" && { echo "Job for docker.service failed because the control process exited with error code." >&2; exit 1; }` : ":"}
+    n=$(cat "${h.state}/restart.n" 2>/dev/null || echo 0); n=$((n+1)); echo $n >"${h.state}/restart.n"
+    ((n <= ${String(options.restartFailsTimes ?? 0)})) && { echo "Job for docker.service failed: Start request repeated too quickly." >&2; exit 1; }
+    exit 0 ;;
+  show*) printf 'ActiveState=failed\\nSubState=failed\\nResult=start-limit-hit\\n' ;;
+  status*) printf 'docker.service - Docker Application Container Engine\\n   Active: failed (Result: start-limit-hit)\\n' ;;
+  *) exit 0 ;;
+esac`);
+  fake("journalctl", 'printf "dockerd[1]: failed to start daemon: fake journal line\\n"');
   fake("sleep", "exit 0");
   fake("docker", `S="${h.state}"
 case "$1" in
@@ -86,7 +100,7 @@ case "$1" in
       connect) ${options.failConnect === true ? "exit 1" : `echo "$5" >>"$S/gw.nets"; for a; do :; done`} ;;
       *) exit 1 ;;
     esac ;;
-  info) ${options.dockerNotReady === true ? "exit 1" : "exit 0"} ;;
+  info) n=$(cat "$S/info.n" 2>/dev/null || echo 0); n=$((n+1)); echo $n >"$S/info.n"; ${options.dockerNotReady === true ? "exit 1" : `((n > ${String(options.dockerReadyAfter ?? 0)}))`} ;;
   rm) rm -f "$S/gw" "$S/gw.nets" "$S/gw.running" ;;
   create) ${options.failCreate === true ? "exit 1" : `for ((i=1;i<=$#;i++)); do [[ "\${!i}" == --network ]] && { j=$((i+1)); echo "\${!j}" >"$S/gw.nets"; }; done; : >"$S/gw"`} ;;
   start) ${options.failStart === true ? "exit 1" : `: >"$S/gw.running"`} ;;
@@ -131,11 +145,11 @@ BOOT_STEP=start; WORKER_ENV_FILE=${h.envFile}; WORKER_UNIT=agentx-worker.service
 ${stageFor(h)}
 ${body}`;
 }
-function runStage(h: Host, withTestServices = false): { status: number | null; stderr: string; failure: string } {
+function runStage(h: Host, withTestServices = false, extraEnv: Record<string, string> = {}): { status: number | null; stderr: string; failure: string } {
   // The test-services stage's functions, as boot.sh leaves them defined (it sources the stage inside a function): the rvi wall is missing after the Docker restart unless the stage puts it back.
   const proxyAsk = `se_proxy_ask() { ${h.proxyReply === null ? "return 1" : `printf '%s' "${h.proxyReply}"`}; }\n`;
   const functions = proxyAsk + (withTestServices ? `ts_run_walls_present() { return 1; }\nts_wall_run_networks() { echo "ts-wall-run-networks" >>"${h.calls}"; }\nts_wall_ipv6() { echo "ts-wall-ipv6" >>"${h.calls}"; }\n` : "");
-  const ran = spawnSync("bash", ["-c", harness(h, `${functions}sandbox_egress_main`)], { encoding: "utf8", env: { PATH: `${join(h.dir, "bin")}:${process.env.PATH ?? ""}`, AGENTX_WORKER_IMAGE: WORKER_IMAGE } });
+  const ran = spawnSync("bash", ["-c", harness(h, `${functions}sandbox_egress_main`)], { encoding: "utf8", env: { PATH: `${join(h.dir, "bin")}:${process.env.PATH ?? ""}`, AGENTX_WORKER_IMAGE: WORKER_IMAGE, ...extraEnv } });
   return { status: ran.status, stderr: ran.stderr, failure: existsSync(h.failure) ? readFileSync(h.failure, "utf8").trim() : "" };
 }
 const envLines = (h: Host): string[] => readFileSync(h.envFile, "utf8").split("\n").filter((line) => line !== "");
@@ -244,6 +258,114 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     expect(existsSync(h.restore)).toBe(false);
   });
 
+  // ---- EGRESS-BOOT-RACE: Docker is not ready the moment `systemctl restart` returns; the stage waits for it (bounded) and, when it fails, says why ----
+  describe("Docker slow to come back after the restart (EGRESS-BOOT-RACE)", () => {
+    const probes = (h: Host, command: string): number => calls(h).filter((line) => line === command).length;
+
+    it("waits for a daemon that answers only on the 6th probe, THEN puts the firewall back (never before Docker answers), restarting Docker once", () => {
+      const h = host({ dockerReadyAfter: 5, chainReadyAfter: 3 });
+      const result = runStage(h);
+      expect(result.status, result.stderr).toBe(0);
+      const log = calls(h);
+      expect(log.filter((line) => line === "systemctl restart docker.service")).toHaveLength(1);
+      const firstFirewall = log.indexOf("firewall run");
+      const infoBefore = log.slice(0, firstFirewall).filter((line) => line === "docker info").length;
+      expect(infoBefore).toBe(6);
+      // The DOCKER-USER chain the firewall inserts into was waited for too (3 misses, then it answered).
+      expect(log.slice(0, firstFirewall).filter((line) => line === "iptables -n -L DOCKER-USER")).toHaveLength(4);
+      // The unit's failed state is cleared before the restart (earlier restarts of this boot count against systemd's start limit).
+      expect(log.indexOf("systemctl reset-failed docker.service")).toBeLessThan(log.indexOf("systemctl restart docker.service"));
+      expect(envLines(h)).toContain("AGENTX_SANDBOX_EGRESS=gateway");
+      expect(readFileSync(h.daemon, "utf8")).toContain('"dns": ["172.28.250.2"]');
+    });
+
+    it("a Docker that never answers FAILS the boot within the bound (SE_READY_ATTEMPTS probes, no more), says what it waited for in the reason, logs the daemon.json, the status and the journal, and puts the old files back", () => {
+      const h = host({ dockerNotReady: true });
+      const result = runStage(h, false, { SE_READY_ATTEMPTS: "7" });
+      expect(result.status).not.toBe(0);
+      expect(result.failure).toContain("default name server and proxy (the Docker daemon (docker info) never became ready (7 tries))");
+      // Exactly 7 probes of the wait (the diagnostics add one more of their own); one sleep fewer than probes, none after the last.
+      expect(probes(h, "docker info")).toBe(7 + 1);
+      expect(calls(h).filter((line) => line.startsWith("sleep ")).length).toBe(6);
+      expect(result.stderr).toContain("the Docker daemon change failed at: the Docker daemon (docker info) never became ready (7 tries): `se_probe_docker_info` exit 1: [timeout 15s docker info exited 1]");
+      expect(result.stderr).toContain('diagnostic [/etc/docker/daemon.json'.replace("/etc/docker/daemon.json", h.daemon));
+      expect(result.stderr).toContain('"dns": ["172.28.250.2"]');
+      expect(result.stderr).toContain("diagnostic [docker.service state]: Result=start-limit-hit");
+      expect(result.stderr).toContain("diagnostic [systemctl status docker.service]:    Active: failed");
+      expect(result.stderr).toContain("diagnostic [journalctl -u docker.service]: dockerd[1]: failed to start daemon: fake journal line");
+      expect(result.stderr).toContain("30-rovara-build-proxy.conf");
+      // Diagnostics were taken before the rollback: the rollback restart is the second (and last) restart.
+      expect(readFileSync(h.daemon, "utf8")).toBe(DAEMON_BEFORE);
+      expect(probes(h, "systemctl restart docker.service")).toBe(2);
+      expect(envLines(h)).toEqual(NO_SANDBOX_ENV);
+    });
+
+    it("a DOCKER-USER chain that never appears fails with that named (not the firewall's bare exit 1), and the firewall is not even run", () => {
+      const h = host({ neverChain: true });
+      const result = runStage(h, false, { SE_READY_ATTEMPTS: "4" });
+      expect(result.status).not.toBe(0);
+      expect(result.failure).toContain("Docker's DOCKER-USER firewall chain never became ready (4 tries)");
+      expect(calls(h)).not.toContain("firewall run");
+    });
+
+    it("the container firewall's own failure is logged with its command, exit status and what it printed", () => {
+      const h = host({ failFirewall: true, firewallSays: "iptables: No chain/target/match by that name." });
+      const result = runStage(h);
+      expect(result.status).not.toBe(0);
+      expect(result.failure).toContain("(put the container firewall back (exit 1))");
+      expect(result.stderr).toMatch(/failed at: put the container firewall back: `bash .*firewall\.sh` exit 1: setup isolation: ready\|iptables: No chain\/target\/match by that name\./u);
+    });
+
+    it("a restart that is refused once (start limit) is tried once more after clearing the failed state, with a pause between; a restart refused twice fails and says so", () => {
+      const once = host({ restartFailsTimes: 1 });
+      const ok = runStage(once);
+      expect(ok.status, ok.stderr).toBe(0);
+      const log = calls(once);
+      expect(log.filter((line) => line === "systemctl restart docker.service")).toHaveLength(2);
+      expect(log.filter((line) => line === "systemctl reset-failed docker.service")).toHaveLength(2);
+      expect(log.filter((line) => line === "sleep 5")).toHaveLength(1);
+      const twice = host({ restartFailsTimes: 2 });
+      const bad = runStage(twice);
+      expect(bad.status).not.toBe(0);
+      expect(bad.failure).toContain("(restart docker.service (exit 1))");
+      expect(bad.stderr).toContain("`timeout --foreground --kill-after=10s 120s systemctl restart docker.service` exit 1: Job for docker.service failed: Start request repeated too quickly.");
+      expect(readFileSync(twice.daemon, "utf8")).toBe(DAEMON_BEFORE);
+    });
+
+    it("stops at the boot deadline (BOOT_DEADLINE) instead of polling on, with a reason that says it ran out of boot time; each probe is capped by try_seconds", () => {
+      const h = host({ dockerNotReady: true });
+      // BOOT_DEADLINE=0: the deadline is already past, so the wait makes its one probe and stops (no pauses).
+      const result = runStage(h, false, { BOOT_DEADLINE: "0" });
+      expect(result.status).not.toBe(0);
+      expect(result.failure).toContain("(the Docker daemon (docker info): out of boot time after 1 tries)");
+      expect(calls(h).filter((line) => line.startsWith("sleep ")).length).toBe(0);
+      expect(calls(h)).toContain("timeout 15s docker info");
+      const chain = host({ neverChain: true });
+      const second = runStage(chain, false, { BOOT_DEADLINE: "0" });
+      expect(second.failure).toContain("(Docker's DOCKER-USER firewall chain: out of boot time after 1 tries)");
+    });
+
+    it("the restart command has a time limit (a hung `systemctl restart` is killed, not waited for)", () => {
+      const h = host();
+      expect(runStage(h).status).toBe(0);
+      expect(calls(h)).toContain("timeout --foreground --kill-after=10s 120s systemctl restart docker.service");
+    });
+
+    it("keeps the container firewall's own output lines in the boot log when it works (the setup isolation line, ip6tables warnings)", () => {
+      const h = host();
+      const result = runStage(h);
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stderr).toContain("setup isolation: ready");
+    });
+
+    it("the failure reason stays short enough for the boot failure report (300 characters) and holds no multi-line text", () => {
+      const h = host({ dockerNotReady: true });
+      const result = runStage(h, false, { SE_READY_ATTEMPTS: "2" });
+      expect(result.failure.length).toBeLessThan(300);
+      expect(result.failure).not.toContain("\n");
+    });
+  });
+
   it("never falls back: no failure leaves the worker an environment that names the open bridge, and the stage never touches `agentx-task` or the default bridge", () => {
     for (const options of [{ failStart: true }, { failProbe: true }, { failInnerCreate: true }] as const) {
       const h = host(options);
@@ -265,7 +387,9 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     const restart = log.indexOf("systemctl restart docker.service");
     expect(log.filter((line) => line === "systemctl restart docker.service")).toHaveLength(1);
     expect(restart).toBeGreaterThan(-1);
-    expect(log[restart + 1]).toBe("firewall run");
+    // Only the waits for Docker (its `docker info` and the DOCKER-USER chain) sit between the restart and the firewall.
+    expect(log.slice(restart + 1, log.indexOf("firewall run")).every((line) => /^(timeout 15s docker info|timeout 15s iptables -n -L DOCKER-USER|docker info|iptables -n -L DOCKER-USER|timeout --foreground --kill-after=10s 120s systemctl restart docker.service)$/u.test(line))).toBe(true);
+    expect(log.indexOf("firewall run")).toBeGreaterThan(restart);
     expect(restart).toBeLessThan(log.findIndex((line) => line.startsWith("docker network create")));
     expect(restart).toBeLessThan(log.findIndex((line) => line.startsWith("docker create")));
   });
@@ -373,6 +497,43 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     expect(existsSync(join(partial.units, "docker.service.d", "30-rovara-build-proxy.conf"))).toBe(true);
   });
 
+  // EGRESS-BOOT-RACE: the stage's OWN entry (exactly the gateway address, from an earlier boot or a first attempt, in any spacing or line layout) is already done; any other default name server is refused by name and the file is left as it was.
+  it.each([
+    ["compact", '{"dns":["172.28.250.2"],"data-root":"/x"}\n'],
+    ["spaced", '{ "dns" : [ "172.28.250.2" ] , "data-root": "/x" }\n'],
+    ["one key to a line", '{\n  "data-root": "/x",\n  "dns": [\n    "172.28.250.2"\n  ]\n}\n'],
+  ])("its own earlier name server entry (%s) is accepted as already done: no rewrite, no copy left, the drop-in added and Docker restarted once, and a second run changes nothing", (_layout, text) => {
+    const h = host({ daemonText: text });
+    expect(runStage(h).status).toBe(0);
+    expect(readFileSync(h.daemon, "utf8")).toBe(text);
+    expect(existsSync(`${h.daemon}.before-sandbox-egress`)).toBe(false);
+    expect(calls(h).filter((line) => line === "systemctl restart docker.service")).toHaveLength(1);
+    expect(runStage(h).status).toBe(0);
+    expect(calls(h).filter((line) => line === "systemctl restart docker.service")).toHaveLength(1);
+    expect(readFileSync(h.daemon, "utf8")).toBe(text);
+  });
+  it.each([
+    ["another address", '{"dns": ["8.8.8.8"], "data-root": "/x"}\n'],
+    ["the gateway with another address after it", '{"dns": ["172.28.250.2", "8.8.8.8"]}\n'],
+    ["another address before the gateway", '{"dns": ["10.0.0.2", "172.28.250.2"]}\n'],
+    ["a lookalike address", '{"dns": ["172.28.250.20"]}\n'],
+    ["one key to a line", '{\n  "dns" :\n  [ "169.254.169.253" ]\n}\n'],
+  ])("a foreign default name server (%s) is still refused with its named reason, never overwritten, and nothing else is touched", (_what, text) => {
+    const h = host({ daemonText: text });
+    const result = runStage(h);
+    expect(result.status).not.toBe(0);
+    expect(result.failure).toContain("daemon.json already names another default name server");
+    expect(readFileSync(h.daemon, "utf8")).toBe(text);
+    expect(existsSync(`${h.daemon}.before-sandbox-egress`)).toBe(false);
+    expect(calls(h)).not.toContain("systemctl restart docker.service");
+    expect(envLines(h)).toEqual(NO_SANDBOX_ENV);
+  });
+  it("a clean daemon.json (no name server) gets exactly the gateway as its one default name server", () => {
+    const h = host({ daemonText: '{"data-root": "/x"}\n' });
+    expect(runStage(h).status).toBe(0);
+    expect((JSON.parse(readFileSync(h.daemon, "utf8")) as { dns: string[] }).dns).toEqual(["172.28.250.2"]);
+  });
+
   it("puts the drop-in back (removes it when there was none) with the old daemon.json when Docker will not run on the new files, then fails the boot", () => {
     const h = host({ failDockerRestart: true });
     expect(runStage(h).status).not.toBe(0);
@@ -404,7 +565,8 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     const h = host({ failDockerRestart: true });
     expect(runStage(h).status).not.toBe(0);
     expect(readFileSync(h.daemon, "utf8")).toBe(DAEMON_BEFORE);
-    expect(calls(h).filter((line) => line === "systemctl restart docker.service")).toHaveLength(2);
+    // Two tries on the new file (the bounded retry of a failed restart), then the restart on the old one.
+    expect(calls(h).filter((line) => line === "systemctl restart docker.service")).toHaveLength(3);
     expect(envLines(h)).toEqual(NO_SANDBOX_ENV);
   });
 

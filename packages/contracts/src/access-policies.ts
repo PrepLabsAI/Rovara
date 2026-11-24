@@ -180,11 +180,11 @@ function environmentInstanceProfiles(scope: Pick<PolicyScope, "env" | "partition
 
 /**
  * Saved environment images (L4-SE6, owner-approved 2026-11-18): the broker assumes three fixed-name roles (push, pull, manage), each with a session policy that names ONE repository
- * (contracts saved-env-image.ts). Three statements carry it, all for named environments:
+ * (contracts saved-env-image.ts). Three statements carry it, all for named environments (the fixed-name lookup also names the company-secrets role):
  *   - `AssumeSessionRoles` (the boundary only): `sts:AssumeRole` on exactly those three role ARNs, and only for the broker's role (`aws:PrincipalArn`). The boundary has no other
  *     `sts:AssumeRole`: `sts:*` would let a bounded role assume any same-account role that trusts the account. The three roles' trust policies name the broker role too, so the broker's own
- *     inline policy needs nothing (it is at its size pin). The company-secrets role (lane T6) has the same gap and is NOT added here (not approved in this change): when it is, its role ARN
- *     goes into `brokerAssumableRoleArns`, with `sts:TagSession`, so the two share ONE statement.
+ *     inline policy needs nothing (it is at its size pin). The company-secrets role (lane T6) has the same gap; PRIVATE-PACKAGES P1b allows it
+ *     with a statement of its own, `AssumeCompanySecretsRole` (`sts:AssumeRole` and `sts:TagSession`, that one role, the broker's role only), because those three roles take no session tags.
  *   - `IamFixedNameRolesNotYetCreated` (deploy role and boundary): CloudFormation looks a fixed-name role up by its PATH-LESS ARN (iam:GetRole) before it creates it, and cleans it up by that ARN when
  *     a create rolls back; IAM, which cannot know the path of a role that does not exist yet, checks `role/<name>`. Lookups and deletes only: no create or change action, so a role at the root path
  *     can never be made through it (the real role is created under the environment path, where `IamRoles` applies).
@@ -214,9 +214,35 @@ export function savedEnvSessionRoleArns(scope: Pick<PolicyScope, "env" | "partit
     .map((name) => `arn:${scope.partition}:iam::${scope.account}:role${environmentRolePath(scope.env)}${name}`);
 }
 
-/** Every role the broker may assume under the boundary: today the three saved environment image roles only. */
+/** Every role the broker may assume under the boundary with no session tags: today the three saved environment image roles only. */
 export function brokerAssumableRoleArns(scope: Pick<PolicyScope, "env" | "partition" | "account">): string[] {
   return savedEnvSessionRoleArns(scope);
+}
+
+/**
+ * The role the broker assumes, tagged with ONE company (`rovara:org`), to read and write that company's secrets (lane T6, infra/lib/company-secrets.ts). A fixed name, like the saved environment image roles,
+ * so the boundary and the deploy role can name it exactly (PRIVATE-PACKAGES P1b: nothing assumed it before; the company's package token is the first user).
+ */
+export const companySecretsRoleName = (env: string): string => {
+  if (!/^[a-z][a-z0-9-]{0,19}$/u.test(env)) throw new Error("an environment name");
+  return `agentx-${env}-company-secrets`;
+};
+export function companySecretsRoleArn(scope: Pick<PolicyScope, "env" | "partition" | "account">): string {
+  return `arn:${scope.partition}:iam::${scope.account}:role${environmentRolePath(scope.env)}${companySecretsRoleName(scope.env)}`;
+}
+
+/**
+ * The boundary's allowance for the company-secrets role: `sts:AssumeRole` AND `sts:TagSession` (the session carries the company tag) on that ONE role, for the broker's role only. A statement of its own, not
+ * the saved environment image roles' (`AssumeSessionRoles`): those roles take no session tags, and the boundary must not allow tagging a session for them.
+ */
+function assumeCompanySecretsRoleStatement(scope: Pick<PolicyScope, "env" | "partition" | "account">): PolicyStatementJson {
+  return {
+    Sid: "AssumeCompanySecretsRole",
+    Effect: "Allow",
+    Action: ["sts:AssumeRole", "sts:TagSession"],
+    Resource: companySecretsRoleArn(scope),
+    Condition: { ArnEquals: { "aws:PrincipalArn": brokerRoleArn(scope) } },
+  };
 }
 
 function assumeSessionRolesStatement(scope: Pick<PolicyScope, "env" | "partition" | "account">): PolicyStatementJson {
@@ -234,8 +260,8 @@ function fixedNameRoleLookupStatement(scope: Pick<PolicyScope, "env" | "partitio
     Sid: "IamFixedNameRolesNotYetCreated",
     Effect: "Allow",
     Action: [...FIXED_NAME_ROLE_LOOKUP_ACTIONS],
-    // R5 step 1: the Slack token reader role is fixed-name too (contracts slack-company-tokens.ts), so its lookup is listed with the three image roles.
-    Resource: [...[savedEnvPushRoleName(scope.env), savedEnvPullRoleName(scope.env), savedEnvManageRoleName(scope.env)].map((name) => `arn:${scope.partition}:iam::${scope.account}:role/${name}`), slackTokenReaderLookupResource(scope)],
+    // R5 step 1: the Slack token reader role is fixed-name too (contracts slack-company-tokens.ts), so its lookup is listed with the three image roles and (PRIVATE-PACKAGES P1b) the company-secrets role.
+    Resource: [...[savedEnvPushRoleName(scope.env), savedEnvPullRoleName(scope.env), savedEnvManageRoleName(scope.env), companySecretsRoleName(scope.env)].map((name) => `arn:${scope.partition}:iam::${scope.account}:role/${name}`), slackTokenReaderLookupResource(scope)],
   };
 }
 
@@ -348,7 +374,9 @@ function boundaryDenyStatements(scope: BoundaryScope): PolicyStatementJson[] {
       Action: ["iam:CreatePolicy*", "iam:*PolicyVersion*", "iam:DeletePolicy", "iam:SetDefaultPolicyVersion"],
       Resource: "*",
     },
-    { Sid: "DenyBoundaryChanges", Effect: "Deny", Action: ["iam:*Policy*"], Resource: [defaultBoundaryArn(scope), deployBoundaryArn(scope)] },
+    // One pattern for both boundaries (`agentx-<env>-boundary` and `agentx-<env>-deploy-boundary`), not two ARNs: the managed-policy size limit pays for every character (the release pipeline's
+    // per-service denies, VENDOR FIX, needed the room). It names no policy the pair does not (`*boundary` under this environment's path and name prefix), so the Deny is no narrower.
+    { Sid: "DenyBoundaryChanges", Effect: "Deny", Action: ["iam:*Policy*"], Resource: `arn:${scope.partition}:iam::${scope.account}:policy${environmentRolePath(scope.env)}agentx-${scope.env}-*boundary` },
     // Never remove a boundary from a role (no Allow lists it either; the explicit Deny keeps a later Allow from opening it).
     { Sid: "DenyBoundaryRemoval", Effect: "Deny", Action: ["iam:DeleteRolePermissionsBoundary"], Resource: roles },
     // The DNS firewall fails closed and is the VPC's only resolver path: no AgentX role may switch it to fail open, share it, or route DNS around it, whatever a later Allow says.
@@ -367,7 +395,7 @@ function boundaryDenyStatements(scope: BoundaryScope): PolicyStatementJson[] {
 /**
  * The RUNTIME permission boundary (`defaultBoundaryName`): the most any role a merged template creates under /agentx/<env>/ can ever do, whatever its own policy says. It allows the
  * services AgentX uses, `iam:PassRole` on the environment's roles (the sessions provisioner passes the worker role to EC2), a read-only `iam:GetRole` on them (the auto-requalify preflight), the read-only quota List (the model-discovery check), the one email send, the broker's assume of the saved
- * environment image roles and the Slack service's assume of its token reader role. It has NO role management, no instance profiles and no service-linked roles: no runtime role uses
+ * environment image roles and of the company-secrets role, and the Slack service's assume of its token reader role. It has NO role management, no instance profiles and no service-linked roles: no runtime role uses
  * any (census, tests/contract/two-boundaries.test.ts), so a runtime role can never be given them by editing its own policy. The Deny statements hold even if a later change widens an Allow.
  */
 export function defaultBoundaryStatements(scope: BoundaryScope): PolicyStatementJson[] {
@@ -387,6 +415,8 @@ export function defaultBoundaryStatements(scope: BoundaryScope): PolicyStatement
     // L4-SE6 and R5: the broker's sts:AssumeRole of the saved environment image roles (the trust names the broker role), and the Slack service's of its per-company token reader role (the
     // trust names the service's role and the one session tag). Trust grants, boundary caps: neither role's own policy has a statement for it.
     assumeSessionRolesStatement(scope),
+    // PRIVATE-PACKAGES P1b: the broker's assume (with the company session tag) of the company-secrets role. A runtime-boundary statement like the two above: only the broker's role uses it.
+    assumeCompanySecretsRoleStatement(scope),
     { Sid: "SlackTokenReader", ...slackTokenReaderBoundaryStatement({ env: scope.env, partition, account, named: true }) },
     ...boundaryDenyStatements(scope),
   ];

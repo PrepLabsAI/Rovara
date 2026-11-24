@@ -221,7 +221,8 @@ ensure_docker() {
   install -d -m 0755 /etc/docker
   printf '{"data-root": "%s"}\n' "$DOCKER_DATA_ROOT" >/etc/docker/daemon.json
   systemctl enable docker.service
-  systemctl restart docker.service
+  timeout "$(try_seconds 120)s" systemctl restart docker.service
+  retry "Docker did not answer after its restart" timeout "$(try_seconds 15)s" docker info
   wall_off_containers
 }
 
@@ -392,6 +393,8 @@ else
   log 'verifier unavailable; worker continues with /tmp'
   args+=(--env TMPDIR=/tmp)
 fi
+t=/run/rovara-install; mountpoint -q $t || { mkdir -p $t; o=size=4m,mode=0700,uid=1000,gid=1000,nosuid,nodev,noexec; mount -t tmpfs -o $o,noswap tmpfs $t || mount -t tmpfs -o $o tmpfs $t; } 2>/dev/null
+! mountpoint -q $t || args+=(--volume $t:$t)
 t=/run/agentx-test-services; ! mountpoint -q $t || args+=(--volume $t:$t --env AGENTX_TEST_SERVICES_RUN_DIR=$t)
 t=/var/lib/rovara-egress; [[ ! -d $t ]] || args+=(--volume $t:$t)
 # L4-NETG2: the host resolvers a gateway-mode stage wrote (the daemon default name server is the egress gateway there, which this host-network container cannot reach). Before the image, which stays the last docker argument.

@@ -187,6 +187,13 @@ describe("EC2 worker user data", () => {
     expect(bootScript).toContain('|| fail "could not wall containers off from the host and private networks"');
     // DOCKER-USER exists only once the daemon is running.
     expect(bootScript.indexOf("systemctl restart docker.service")).toBeLessThan(bootScript.indexOf("  wall_off_containers\n}\n"));
+    // EGRESS-BOOT-RACE: the restart has a time limit, and Docker is waited for (retry on `docker info`) between the restart and the firewall, whose first rule needs the daemon's DOCKER-USER chain.
+    const ensureDockerBody = /^ensure_docker\(\) \{\n([\s\S]*?)\n\}\n/m.exec(bootScript)?.[1] ?? "";
+    const restart = ensureDockerBody.indexOf('timeout "$(try_seconds 120)s" systemctl restart docker.service\n');
+    const answers = ensureDockerBody.indexOf('retry "Docker did not answer after its restart" timeout "$(try_seconds 15)s" docker info\n');
+    expect(restart).toBeGreaterThan(-1);
+    expect(answers).toBeGreaterThan(restart);
+    expect(ensureDockerBody.indexOf("  wall_off_containers")).toBeGreaterThan(answers);
     // The rules are also a oneshot unit, so they return after a reboot (Docker rebuilds its chains) and land before the worker starts.
     expect(bootScript).toContain("readonly FIREWALL_UNIT=rovara-container-firewall.service");
     expect(bootScript).toContain("Type=oneshot");

@@ -10,7 +10,7 @@ import {
   type InvokeAuthentication,
   type InvokeRejection,
 } from "./invoke-auth.js";
-import { logInvocationStarted, type WorkerInvocationLog, type WorkerLogSink } from "./worker-log.js";
+import { logInvocationStarted, logTerminalCallbackFailed, type WorkerInvocationLog, type WorkerLogSink } from "./worker-log.js";
 
 const MAX_INVOCATION_BYTES = 1_048_576;
 
@@ -270,15 +270,19 @@ async function reportTerminal(
 ): Promise<void> {
   const { onTerminal, retrySleep = sleep } = state.callbacks;
   if (!onTerminal) return;
+  let lastError: unknown;
   for (let attempt = 0; attempt <= TERMINAL_CALLBACK_RETRY_DELAYS_MS.length; attempt += 1) {
     try {
       await onTerminal(terminal, invocation);
       return;
-    } catch {
+    } catch (error) {
+      lastError = error;
       const delay = TERMINAL_CALLBACK_RETRY_DELAYS_MS[attempt];
       if (delay !== undefined) await retrySleep(delay);
     }
   }
+  // Every try failed: the broker never heard how this operation ended. Said out loud (and counted: infra alarms on the line) instead of leaving a stream that looks as if the worker simply stopped.
+  if (state.callbacks.log !== undefined) logTerminalCallbackFailed(state.callbacks.log, { invocation, outcome: terminal.status, attempts: TERMINAL_CALLBACK_RETRY_DELAYS_MS.length + 1, error: lastError });
 }
 
 function sleep(ms: number): Promise<void> {

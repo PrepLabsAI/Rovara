@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import { STARTBUILD_OVERRIDE_KEYS, brokerCodeBuildStartStatements, withoutBrokerCodeBuildStart } from "../support/broker-codebuild-start-template.js";
 import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js";
 import { stuckStoppingInstall, withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
+import { withoutApiAccessLog } from "../support/api-access-log-template.js";
+import { withoutWorkerCallbackAlarm } from "../support/worker-callback-alarm-template.js";
 import { App, CfnParameter, Stack, aws_iam as iam } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -190,13 +192,13 @@ function withoutBrokerMemberConditionCheck(template: TemplateJson): TemplateJson
 describe("broker membership condition-check grant", () => {
   it("adds only the exact member-key statement to the broker; every other action, resource and principal stays pinned", () => {
     // Webhook lane W3 + DEC 254zzz432: the webhook secret slot and the stuck-stopping alarm are asserted and taken out too, so both pins below still hold.
-    const before = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutStuckStoppingAlarm(structuredClone(namedRaw), stuckStoppingInstall("staging"))));
+    const before = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(structuredClone(namedRaw), { env: "staging" }), stuckStoppingInstall("staging")))));
     // The providers branch also adds this exact capability output. Keep a measured
     // combined pin, then remove only the asserted output to retain the upstream pin.
-    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("57d17108e226e286fa426400cd2d589463d2ecb23e910ed28399591e9c389659");
+    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("23e7a69839d8b913eb1c601b320f5ba05c6416f324a22b6abede4901020ebee6");
     expect(before.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     delete before.Outputs.ModelRunPriceVersion;
-    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("31020f3bb3a93ddaa21ed47660a69d013abff96102a62a4753cdd9488791dae7");
+    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("e051a59b71fd9cd8188851b57c0dc738b10fb98acc33a4225639f33336669466");
     const afterTuples = accessTuples(namedRaw);
     const beforeTuples = accessTuples(before);
     const broker = "role:BrokerServiceRole";
@@ -700,7 +702,7 @@ describe("task-token key and membership IAM", () => {
   it("changes only the named task key, alias, two env vars, public read and membership list item", () => {
     // ENV-ROOM 2 is checked in full by broker-names-parameter-infrastructure.test.ts; its shape is asserted and it is taken out first, so the digest still pins everything else.
     // Webhook lane W3 + DEC 254zzz432: as above, so the digest below still holds.
-    const remainder = withoutWebhookSecretLane(withoutBrokerNamesParameter(withoutBrokerMemberConditionCheck(withoutStuckStoppingAlarm(structuredClone(named), stuckStoppingInstall("staging")))));
+    const remainder = withoutWebhookSecretLane(withoutBrokerNamesParameter(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(structuredClone(named), { env: "staging" }), stuckStoppingInstall("staging"))))));
     withoutCoreModelAccessRoute(remainder);
     // Guided onboarding PR 7: the Linear app's webhook route (no authorizer; the broker verifies the HMAC). Its shape is asserted here, then it is taken out so the digest still pins everything else.
     expect(remainder.Resources["LinearWebhookRoute"]).toMatchObject({ Type: "AWS::ApiGatewayV2::Route", Properties: { RouteKey: "POST /v1/linear/webhooks", AuthorizationType: "NONE" } });
@@ -799,14 +801,17 @@ describe("task-token key and membership IAM", () => {
     // Owner DEC 254zzz73 (rule D, a removal): re-pinned for the step-up's removal ONLY: the StepUpEmailSender parameter, the sign-in function's STEP_UP_EMAIL_FROM and DEVELOPER_PASSKEYS variables,
     // its ses:SendEmail statement and its PASSKEYS# Query/DeleteItem statement. The named-templates snapshot diff of the same change is those 68 lines deleted and nothing added, and the
     // effective-tuple pin below drops exactly those three tuples. The old value was ed3d1dc0a51d0607302a7b61ad15bc4613a4fbe86e8031beadbcc58a2b125668.
+    // PRIVATE-PACKAGES P1b (re-pin, rule D): the company-secrets role has a FIXED name (agentx-<env>-company-secrets) and one new statement, CreateOwnCompanyRegistrySecrets (an untagged CreateSecret on pkgreg_* under
+    // the company's own connector path). Nothing else in the named template moved; the effective IAM tuples are pinned exactly in hostedWiringTuples (the one new tuple) and tests/contract/hosted-wiring-infrastructure.test.ts.
+    // The old values were 946f06d30e6b8150a1fe4086c119c5d6d22bf0b83c1981cf1e79b3ca4be6913b (before) and 45381fa27ed39c910005a077c4c7afd1314354136ba6ccbf00ee9e90b6f173de (complete template).
     // b28 first-gateway fix: every current broker advertises its capability before a gateway
     // is configured. Pin the complete new template AND prove this exact output is its only delta.
     expect(remainder.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
-    expect(createHash("sha256").update(text).digest("hex")).toBe("45381fa27ed39c910005a077c4c7afd1314354136ba6ccbf00ee9e90b6f173de");
+    expect(createHash("sha256").update(text).digest("hex")).toBe("9d3f6f734b745c5d93a2d5a4fb79505c9c91a9bab4e5d9ecdbe1f0cb9070eac5");
     const beforeFirstGateway = structuredClone(remainder);
     delete beforeFirstGateway.Outputs.ModelRunPriceVersion;
     const beforeText = JSON.stringify(beforeFirstGateway).replace(/[a-f0-9]{64}/g, "<asset-hash>");
-    expect(createHash("sha256").update(beforeText).digest("hex")).toBe("7a0c1f8f959f8a5d4546e251f9df1eecf5b8fc63c0de796f45b9c4feda58c5f4");
+    expect(createHash("sha256").update(beforeText).digest("hex")).toBe("f555abd801f394036cebef13b345e8025c88fb38bec7272a7aab3abf0649577d");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {
@@ -1836,6 +1841,12 @@ const hostedWiringTuples: AccessTuple[] = [
   ["*","Deny","sqs:*","queue:CoreEngineJobsQueue","{\"Bool\":{\"aws:SecureTransport\":[\"false\"]}}"],
   ["role:BrokerServiceRole","Allow","kms:GetPublicKey","key:DeveloperSignInPolicyHookKey","{}"],
   ["role:BrokerServiceRole","Allow","kms:Sign","key:DeveloperSignInPolicyHookKey","{}"],
+  // PRIVATE-PACKAGES P1b: the company's package token, created untagged on exactly pkgreg_* under the company's own connector path (aws:TagKeys must be absent).
+  ["role:CompanySecretsRole","Allow","secretsmanager:CreateSecret","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/org-connectors/${aws:PrincipalTag/rovara:org}/pkgreg_*","{\"Null\":{\"aws:PrincipalTag/rovara:org\":[\"false\"],\"aws:TagKeys\":[\"true\"]}}"],
+  // P1b: the token's secret is adopted and restored (never force-deleted or recreated): RestoreSecret on own pkgreg_* only.
+  ["role:CompanySecretsRole","Allow","secretsmanager:RestoreSecret","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/org-connectors/${aws:PrincipalTag/rovara:org}/pkgreg_*","{\"Null\":{\"aws:PrincipalTag/rovara:org\":[\"false\"]}}"],
+  // P1b review F2: a nested pkgreg_*/* create is denied outright.
+  ["role:CompanySecretsRole","Deny","secretsmanager:CreateSecret","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/org-connectors/*/pkgreg_*/*","{}"],
   ["role:CompanySecretsRole","Allow","secretsmanager:CreateSecret","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/org-connectors/${aws:PrincipalTag/rovara:org}/*","{\"ForAllValues:StringEquals\":{\"aws:TagKeys\":[\"rovara:org\"]},\"Null\":{\"aws:PrincipalTag/rovara:org\":[\"false\"]},\"StringEquals\":{\"aws:RequestTag/rovara:org\":[\"${aws:PrincipalTag/rovara:org}\"]}}"],
   ["role:CompanySecretsRole","Allow","secretsmanager:CreateSecret","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/org-hooks/${aws:PrincipalTag/rovara:org}/*","{\"ForAllValues:StringEquals\":{\"aws:TagKeys\":[\"rovara:org\"]},\"Null\":{\"aws:PrincipalTag/rovara:org\":[\"false\"]},\"StringEquals\":{\"aws:RequestTag/rovara:org\":[\"${aws:PrincipalTag/rovara:org}\"]}}"],
   ["role:CompanySecretsRole","Allow","secretsmanager:DeleteSecret","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/org-connectors/${aws:PrincipalTag/rovara:org}/*","{\"Bool\":{\"secretsmanager:ForceDeleteWithoutRecovery\":[\"false\"]},\"Null\":{\"aws:PrincipalTag/rovara:org\":[\"false\"]}}"],

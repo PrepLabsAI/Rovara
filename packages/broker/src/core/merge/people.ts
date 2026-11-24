@@ -5,12 +5,12 @@
 // Lane P3 (item I1, decision 60): these lookups are the identity port's abilities, `accountsOf` (a person's outside accounts) and `resolveExternalAccount` (the person of an outside account). `createIdentityMergePeople`
 // builds `MergePeople` from any identity adapter, so a plug-in implements the identity port once and the merge code needs no seam of its own. The interface stays as the shape the merge code reads.
 import { isKnownOrgRole, type IdentityProvider, type OrgId, type Principal } from "@agentx/contracts";
-import { requesterIds } from "./approval.js";
+import { requesterIds, type RequesterAccounts } from "./approval.js";
 import type { MergeTask } from "./seams.js";
 
 export interface MergePeople {
-  /** The code-host account ids of the people who asked for the task, or "unlinked" when any of them has none (their approval cannot be told from a reviewer's). */
-  requestersOf(orgId: OrgId, task: MergeTask): Promise<string[] | "unlinked">;
+  /** The code-host account ids of the people who asked for the task, "unlinked" when any of them has none (their approval cannot be told from a reviewer's), or "no_owner" when no one holds the task. */
+  requestersOf(orgId: OrgId, task: MergeTask): Promise<RequesterAccounts>;
   /** Which of these code-host accounts are linked to a person who is in the company now and may approve. */
   linkedAmong(orgId: OrgId, hostUserIds: readonly string[]): Promise<Set<string>>;
   /** Which of these code-host accounts are linked to a person who is in the company but may not approve (the Auditor): their approval counts for nothing. */

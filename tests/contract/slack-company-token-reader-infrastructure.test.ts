@@ -135,8 +135,8 @@ describe("the boundary statement the runtime boundary carries (SlackTokenReader)
     expect([statementCost, lookupCost, statementCost + lookupCost]).toEqual([142, 52, 194]);
     expect(() => slackTokenReaderRoleName("Bad_Name")).toThrow();
   });
-  it("is in the runtime boundary as SlackTokenReader, next to the broker's AssumeSessionRoles, and those are the boundary's only sts:AssumeRole", () => {
+  it("is in the runtime boundary as SlackTokenReader, next to the broker's AssumeSessionRoles and AssumeCompanySecretsRole (PRIVATE-PACKAGES P1b), and those are the boundary's only sts:AssumeRole", () => {
     const boundary = defaultBoundaryStatements({ ...scope, region: "us-west-2", cloudFormationRoleName: "cfn", });
-    expect(boundary.filter((statement) => statement.Action.includes("sts:AssumeRole")).map((statement) => statement.Sid)).toEqual(["AssumeSessionRoles", "SlackTokenReader"]);
+    expect(boundary.filter((statement) => statement.Action.includes("sts:AssumeRole")).map((statement) => statement.Sid)).toEqual(["AssumeSessionRoles", "AssumeCompanySecretsRole", "SlackTokenReader"]);
   });
 });

@@ -13,15 +13,23 @@ export interface GithubLinkClients {
   log: GithubLinkWiring["log"];
 }
 
-/** Undefined (the routes answer "route not found") when the State table is not named. The store is built on first use. */
-export function githubLinkWiringFromEnvironment(env: NodeJS.ProcessEnv, clients: GithubLinkClients): GithubLinkWiring | undefined {
+/**
+ * The State table as a document store, built on first use; undefined when the table is not named. Shared by the person's own link routes (GitHub's, and Linear's in linear-wiring.ts): each reads and
+ * writes its rows in the core's own store.
+ */
+export function stateStoreFromEnvironment(env: NodeJS.ProcessEnv, dynamo: GithubLinkClients["dynamo"]): DocumentStore | undefined {
   const tableName = env.STATE_TABLE_NAME ?? "";
   if (tableName === "") return undefined;
   let store: DocumentStore | undefined;
-  const storeOnce = (): DocumentStore => (store ??= createDynamoStoreFromSettings({ tableName, ...(env.AWS_REGION === undefined ? {} : { region: env.AWS_REGION }) }, clients.dynamo));
-  const lazyStore = new Proxy({} as DocumentStore, { get: (_target, field) => {
+  const storeOnce = (): DocumentStore => (store ??= createDynamoStoreFromSettings({ tableName, ...(env.AWS_REGION === undefined ? {} : { region: env.AWS_REGION }) }, dynamo));
+  return new Proxy({} as DocumentStore, { get: (_target, field) => {
     const value = (storeOnce() as unknown as Record<PropertyKey, unknown>)[field];
     return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(storeOnce()) : value;
   } });
-  return { store: lazyStore, github: clients.github, log: clients.log };
+}
+
+/** Undefined (the routes answer "route not found") when the State table is not named. The store is built on first use. */
+export function githubLinkWiringFromEnvironment(env: NodeJS.ProcessEnv, clients: GithubLinkClients): GithubLinkWiring | undefined {
+  const store = stateStoreFromEnvironment(env, clients.dynamo);
+  return store === undefined ? undefined : { store, github: clients.github, log: clients.log };
 }

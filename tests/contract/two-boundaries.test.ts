@@ -306,9 +306,17 @@ describe("escalation by a runtime role (an administrator policy attached, under 
 
   it("cannot assume the CloudFormation role, the operator role, the CDK roles, another environment's roles, or the image roles as anyone but the broker", () => {
     const img = `arn:aws:iam::${ACCOUNT}:role/agentx/staging/agentx-staging-img-push`;
-    for (const target of [CFN_ROLE, OPERATOR_ROLE, CDK_EXEC_ROLE, `arn:aws:iam::${ACCOUNT}:role/agentx/prod/agentx-prod-img-push`, `arn:aws:iam::${ACCOUNT}:role/agentx/staging/agentx-staging-company-secrets`]) {
+    for (const target of [CFN_ROLE, OPERATOR_ROLE, CDK_EXEC_ROLE, `arn:aws:iam::${ACCOUNT}:role/agentx/prod/agentx-prod-img-push`]) {
       expect(adminOnRuntime("sts:AssumeRole", target, { "aws:PrincipalArn": BROKER_ROLE }), target).toBe("not-allowed");
     }
+    // PRIVATE-PACKAGES P1b: the company-secrets role is the broker's to assume (and to tag the session for), nobody else's, and only that one role.
+    const secrets = `arn:aws:iam::${ACCOUNT}:role/agentx/staging/agentx-staging-company-secrets`;
+    for (const action of ["sts:AssumeRole", "sts:TagSession"]) {
+      expect(adminOnRuntime(action, secrets, { "aws:PrincipalArn": BROKER_ROLE }), action).toBe("allowed");
+      expect(adminOnRuntime(action, secrets, { "aws:PrincipalArn": SLACK_ROLE }), `slack ${action}`).toBe("not-allowed");
+      expect(adminOnRuntime(action, `${secrets}-x`, { "aws:PrincipalArn": BROKER_ROLE }), `${action} sibling`).toBe("not-allowed");
+    }
+    expect(adminOnRuntime("sts:TagSession", img, { "aws:PrincipalArn": BROKER_ROLE }), "no session tags on the image roles").toBe("not-allowed");
     expect(adminOnRuntime("sts:AssumeRole", img, { "aws:PrincipalArn": SLACK_ROLE })).toBe("not-allowed");
     expect(adminOnRuntime("sts:AssumeRole", img, { "aws:PrincipalArn": BROKER_ROLE })).toBe("allowed");
     for (const action of ["sts:AssumeRoleWithWebIdentity", "sts:GetFederationToken", "sts:*"]) expect(adminOnRuntime(action, img, { "aws:PrincipalArn": BROKER_ROLE }), action).toBe("not-allowed");
@@ -327,11 +335,11 @@ describe("escalation by a runtime role (an administrator policy attached, under 
 describe("size: both boundaries fit their managed-policy limit with headroom, at the longest environment name on the longest partition", () => {
   const size = (statements: typeof defaultBoundaryStatements, env: string, partition: string) =>
     JSON.stringify({ Version: "2012-10-17", Statement: statements({ env, partition, region: partition === "aws" ? "us-west-2" : "us-gov-west-1", account: ACCOUNT, cloudFormationRoleName: `agentx-${env}-cloudformation` }) }).replace(/\s/gu, "").length;
-  it("keeps the runtime boundary at least 2,000 characters and the deploy boundary at least 300 under 6,144", () => {
+  it("keeps the runtime boundary at least 1,500 characters and the deploy boundary at least 100 under 6,144 (VENDOR FIX: the per-service release denies took 200 and 150 of the old headroom)", () => {
     for (const env of ["staging", "a".repeat(20)]) {
       for (const partition of ["aws", "aws-us-gov"]) {
-        expect(size(defaultBoundaryStatements, env, partition), `runtime ${env.length} ${partition}`).toBeLessThanOrEqual(6144 - 2000);
-        expect(size(deployBoundaryStatements, env, partition), `deploy ${env.length} ${partition}`).toBeLessThanOrEqual(6144 - 300);
+        expect(size(defaultBoundaryStatements, env, partition), `runtime ${env.length} ${partition}`).toBeLessThanOrEqual(6144 - 1500);
+        expect(size(deployBoundaryStatements, env, partition), `deploy ${env.length} ${partition}`).toBeLessThanOrEqual(6144 - 100);
       }
     }
   });

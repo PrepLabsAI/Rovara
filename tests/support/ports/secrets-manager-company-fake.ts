@@ -1,6 +1,6 @@
 // In-process model of the REQUIRED IAM answer matrix, not proof of IAM expressibility or deployed IAM.
 // The infra lane must verify create-time TagResource context in AWS docs and the IAM simulator.
-import { CreateSecretCommand, DeleteSecretCommand, DescribeSecretCommand, GetSecretValueCommand, PutSecretValueCommand, TagResourceCommand, UntagResourceCommand } from "@aws-sdk/client-secrets-manager";
+import { CreateSecretCommand, DeleteSecretCommand, DescribeSecretCommand, GetSecretValueCommand, PutSecretValueCommand, RestoreSecretCommand, TagResourceCommand, UntagResourceCommand } from "@aws-sdk/client-secrets-manager";
 import type { CompanySession, CompanySessionRequest } from "../../../packages/aws-adapters/src/secrets-manager/tagged-session.js";
 import type { ConnectionSecretsClient, ConnectionSecretsCommand } from "../../../packages/aws-adapters/src/secrets-manager/connection-secrets.js";
 type FakeCommand = ConnectionSecretsCommand | DescribeSecretCommand | UntagResourceCommand;
@@ -46,8 +46,10 @@ export class CompanySecretsManagerFake {
       if(command instanceof CreateSecretCommand) {
         const {Name,SecretString,Tags}=command.input;
         const tags=Object.fromEntries((Tags??[]).map(tag=>[tag.Key!,tag.Value!]));
-        // CreateSecret with Tags must also pass the creation-context TagResource rule.
-        this.authorizeOrgTag(company, tags, true);
+        // CreateSecret with Tags must also pass the creation-context TagResource rule. An UNTAGGED create is allowed only for `pkgreg_*` under the company's own connector path (infra CreateOwnCompanyRegistrySecrets).
+        if (company !== undefined && Object.keys(tags).length === 0) {
+          if (!/^agentx\/local\/org-connectors\/[^/]+\/pkgreg_[a-z0-9]{1,32}$/u.test(Name!)) throw refusal("AccessDeniedException");
+        } else this.authorizeOrgTag(company, tags, true);
         if(this.secrets.has(Name!)) throw refusal("ResourceExistsException");
         const version=`v${++this.#counter}`;
         this.secrets.set(Name!,{tags,versions:new Map([[version,SecretString!]]),deleted:false});
@@ -65,7 +67,12 @@ export class CompanySecretsManagerFake {
         for (const key of command.input.TagKeys ?? []) delete held.tags[key];
         return {};
       }
-      if (command instanceof DescribeSecretCommand) return {};
+      if (command instanceof DescribeSecretCommand) return held.deleted ? { DeletedDate: new Date(this.now()) } : {};
+      if (command instanceof RestoreSecretCommand) {
+        // IAM: RestoreSecret only on the company's own `pkgreg_*` names (infra RestoreOwnCompanyRegistrySecrets).
+        if (company !== undefined && !/\/pkgreg_[a-z0-9]{1,32}$/u.test(name)) throw refusal("AccessDeniedException");
+        held.deleted = false; return {};
+      }
       if(command instanceof DeleteSecretCommand) {
         held.deleted=true;this.deletions.push({SecretId:command.input.SecretId!,RecoveryWindowInDays:command.input.RecoveryWindowInDays!});return {};
       }

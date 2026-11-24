@@ -588,6 +588,8 @@ export const MERGE_NOT_READY_MESSAGES = {
   needsOtherApproval: (requester: string): string => `This pull request needs an approval from someone other than ${requester}.`,
   needsWriteApproval: (repository: string): string => `This pull request needs an approval on GitHub from someone who can write to ${repository}.`,
   linkGithub: "Link your GitHub account so Rovara can tell your approval from a reviewer's.",
+  /** Nobody owns the task now (its creator left the company and no one holds it), so an approval cannot be told from the owner's. Stable: the hosted merge says it for exactly that case. */
+  noOwner: "This task has no owner right now, so Rovara can't tell an approval from the owner's. Someone has to take over the task on its People page first.",
   presserApproved: "You approved this pull request, so someone else must press Merge.",
   checks: "Checks haven't passed on the latest code.",
   conflicted: (base: string): string => `The branch conflicts with ${base}. I'm resolving it.`,
@@ -732,8 +734,8 @@ export type SetupDraftApplyBody = z.infer<typeof SetupDraftApplyBodySchema>;
 // ---- milestones
 
 /**
- * `started` and `closed` (slice 5): the task began from a ticket, and the task ended without a merge; ticket updates are told them like any other milestone. `setup_paused` (L4-U5): the task paused before Build because
- * the project's setup stopped working; the chat thread and the ticket it came from are told once, in fixed words (the handlers read the rest from the project's own re-check rows, never from the milestone's text).
+ * `started` and `closed` (slice 5): the task began from a ticket, and the task ended without a merge; ticket updates are told them like any other milestone. `setup_paused` (L4-U5; DEC 254zzz447: the wire id is kept, it now carries a WARNING): the task reached Build while
+ * the project's setup needs repair and work continues; the chat thread and the ticket it came from are told once, in fixed words (the handlers read the rest from the project's own re-check rows, never from the milestone's text).
  */
 export const CODE_MILESTONE_KINDS = ["questions", "answered", "plan_ready", "pr_ready", "review_nudge", "fixing", "stuck", "approved", "merged", "started", "closed", "setup_paused"] as const;
 export const CodeMilestoneKindSchema = z.enum(CODE_MILESTONE_KINDS);

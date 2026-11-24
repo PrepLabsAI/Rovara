@@ -198,6 +198,12 @@ describe("(h) the company-secrets role (T6)", () => {
     expect(envOf(named, "Broker").COMPANY_SECRETS_ROLE_ARN).toEqual({ Ref: role()[0] });
   });
 
+  it("has a fixed name (the boundary and the deploy role name it exactly; contracts access-policies.ts), in the legacy deployment too", () => {
+    expect(role()[1].Properties.RoleName).toBe("agentx-staging-company-secrets");
+    const legacyRole = ofType(legacy, "AWS::IAM::Role").find(([id]) => withoutHash(id) === "CompanySecretsRole")!;
+    expect(legacyRole[1].Properties.RoleName).toBe("agentx-production-company-secrets");
+  });
+
   it("trusts only the broker's role, to assume and tag together, with exactly one company tag", () => {
     const trust = (role()[1].Properties.AssumeRolePolicyDocument as { Statement: Statement[] }).Statement;
     expect(trust).toEqual([{
@@ -218,22 +224,32 @@ describe("(h) the company-secrets role (T6)", () => {
   it("fences use by the secret's name only, creates only with the session's own company tag, and neither allows nor denies tagging", () => {
     const statements = statementsOfRole(named, "CompanySecretsRole");
     const env = "staging";
-    const arn = (family: string) => ({ "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":secretsmanager:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, `:secret:agentx/${env}/${family}/\${aws:PrincipalTag/rovara:org}/*`]] });
+    const arn = (family: string, leaf = "*") => ({ "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":secretsmanager:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, `:secret:agentx/${env}/${family}/\${aws:PrincipalTag/rovara:org}/${leaf}`]] });
     const companyArns = [arn("org-connectors"), arn("org-hooks")];
+    const nested = { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":secretsmanager:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, `:secret:agentx/${env}/org-connectors/*/pkgreg_*/*`]] };
     expect(statements).toEqual([
       { Sid: "UseOwnCompanySecrets", Effect: "Allow", Action: [...COMPANY_SECRET_USE_ACTIONS], Resource: companyArns, Condition: { Null: { "aws:PrincipalTag/rovara:org": "false" } } },
       { Sid: "DeleteOwnCompanySecretsRecoverably", Effect: "Allow", Action: "secretsmanager:DeleteSecret", Resource: companyArns, Condition: { Null: { "aws:PrincipalTag/rovara:org": "false" }, Bool: { "secretsmanager:ForceDeleteWithoutRecovery": "false" } } },
+      // PRIVATE-PACKAGES P1b: the company's package token, created UNTAGGED on exactly `pkgreg_*` under the company's own connector path (so no TagResource is needed); `aws:TagKeys` must be absent.
+      {
+        Sid: "CreateOwnCompanyRegistrySecrets", Effect: "Allow", Action: "secretsmanager:CreateSecret", Resource: arn("org-connectors", "pkgreg_*"),
+        Condition: { Null: { "aws:PrincipalTag/rovara:org": "false", "aws:TagKeys": "true" } },
+      },
+      // The token's secret is ADOPTED and RESTORED, never force-deleted or recreated: RestoreSecret on the company's own `pkgreg_*` only.
+      { Sid: "RestoreOwnCompanyRegistrySecrets", Effect: "Allow", Action: "secretsmanager:RestoreSecret", Resource: arn("org-connectors", "pkgreg_*"), Condition: { Null: { "aws:PrincipalTag/rovara:org": "false" } } },
       {
         Sid: "CreateOwnCompanySecrets", Effect: "Allow", Action: "secretsmanager:CreateSecret", Resource: companyArns,
         Condition: { Null: { "aws:PrincipalTag/rovara:org": "false" }, StringEquals: { "aws:RequestTag/rovara:org": "${aws:PrincipalTag/rovara:org}" }, "ForAllValues:StringEquals": { "aws:TagKeys": ["rovara:org"] } },
       },
+      // Hardening (Opus review of P1b, F2): IAM's `*` matches `/`; a nested `pkgreg_x/y` create is denied outright (the only Deny of the role, and no condition).
+      { Sid: "DenyNestedCompanyRegistrySecrets", Effect: "Deny", Action: "secretsmanager:CreateSecret", Resource: nested },
     ]);
     const text = JSON.stringify(statements);
     // Pitfall 2 of the T6 review: no resource-tag condition on use, so an own missing secret is not-found, not AccessDenied.
     expect(text).not.toContain("ResourceTag");
     // Pitfall 1: no Deny on TagResource (it would also cover a tagged create); tagging is simply not allowed until a create-only discriminator is verified.
     expect(text).not.toContain("TagResource");
-    expect(statements.every((statement) => statement.Effect === "Allow")).toBe(true);
+    expect(statements.filter((statement) => statement.Effect !== "Allow").map((statement) => statement.Sid)).toEqual(["DenyNestedCompanyRegistrySecrets"]);
     expect(text).not.toMatch(/"Resource":"\*"/u);
   });
 });

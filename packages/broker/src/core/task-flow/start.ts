@@ -21,6 +21,9 @@ import {
   SCRIPT_TOKEN_CLIENT_NAME,
   cleanClientName,
   createWorkflowSnapshot,
+  isSystemOwnerId,
+  type ProjectDefinition,
+  projectMetaKey,
   workspaceProjectIndexAttributes,
   when,
   DocumentStoreError,
@@ -161,11 +164,8 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
     }
   }
 
-  // A project whose own setup check failed starts no work until it is fixed and checked again (a setup run is how it gets fixed, so it is let through). A project nobody checked starts as it always did.
-  if (run?.setupAgent === undefined && run?.wikiBuild === undefined) {
-    const setup = await setupStateOf(deps, request.project, project.definition);
-    if (setup.status === "failed") return refused(agentXError("CONFIG_INVALID", setupFailedMessage(setup.failedStep ?? "setup")));
-  }
+  const setupRefusal = await failedSetupRefusal(deps, request.project, project.definition, run);
+  if (setupRefusal !== undefined) return refused(setupRefusal);
 
   // An external check nothing in this release runs is refused here, with the clear sentence, before the budget, the limits and any machine (lane P2, review M2).
   if (unrunnableExternalCheck(project.definition.repositories) !== undefined) return refused(agentXError("CONFIG_INVALID", UNRUNNABLE_EXTERNAL_CHECK_MESSAGE));
@@ -345,6 +345,17 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
     log(deps, { event: "task_flow.start_retry", attempt, failed: failed.length });
   }
   throw agentXError("WORKSPACE_BUSY", "Rovara could not start the task just now; try again with the same request_id");
+}
+
+// A project whose own setup check failed starts no work until it is fixed and checked again (a setup run is how it gets fixed, so it is let through). A project nobody checked starts as it always did.
+// DEC 254zzz447 (don't block work): EXCEPT when the failed check was started by ROVARA, not by a person: a free re-check and the night's check are both started by the project's system owner (`systemOwnerIdOf`), a
+// person's "check the setup" by that person. Only a person's own failed check refuses; Rovara's own failure is a warning on the task. A mark with no readable starter refuses (as before).
+async function failedSetupRefusal(deps: TaskFlowDeps, project: string, definition: ProjectDefinition, run: { setupAgent?: SetupAgentStart; wikiBuild?: WikiBuildStart } | undefined): Promise<AgentXError | undefined> {
+  if (run?.setupAgent !== undefined || run?.wikiBuild !== undefined) return undefined;
+  const setup = await setupStateOf(deps, project, definition);
+  if (setup.status !== "failed") return undefined;
+  const mark = (await deps.store.get(projectMetaKey(deps.companyId, project)))?.["setupCheck"] as { startedBy?: unknown } | undefined;
+  return isSystemOwnerId(mark?.startedBy) ? undefined : agentXError("CONFIG_INVALID", setupFailedMessage(setup.failedStep ?? "setup"));
 }
 
 function limitError(full: "member" | "organization", limits: { member: number; organization: number }): AgentXError {

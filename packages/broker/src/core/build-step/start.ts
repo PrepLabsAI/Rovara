@@ -19,7 +19,7 @@ import { ownerRoundPlaceOf, readOwnerNote, readOwnerRoundPlace } from "../task-f
 import { readTask } from "../task-flow/reads.js";
 import type { StepTestPlan } from "../test-env/seam.js";
 import { toDocument, type TaskRecord, type WorkspaceRecord } from "../task-flow/records.js";
-import { setupGateBeforeBuild } from "../setup-agent/recheck.js";
+import { SETUP_NEEDS_REPAIR_WARNING, setupGateBeforeBuild } from "../setup-agent/recheck.js";
 import { acceptStep, acceptStepWithNotes, commitWorkflow, readWorkspace, type StepStart } from "../task-flow/stage-machine.js";
 import { iso, log, newId } from "../task-flow/support.js";
 import { firstGraphInvocation, restartedGraphInvocation, resumeGraphInvocation, workflowWithCurrentGraphOperation } from "../work-breakdown/invocation.js";
@@ -31,8 +31,13 @@ import {
   AUTOMATIC_REVIEW_NOTE, AUTOMATIC_REVIEW_ONLY_NOTE, NO_PUBLISH_NOTE, implementPrompt, ownerConstraintsSection, promptTagId, reviewCheckCommand, reviewPrompt, selectedCheckCommands,
   sendBackPrompt, sendBackProblemsPromptSection,
 } from "./prompts.js";
-/** The timeline line and milestone text of the pause: fixed words, never the check's failing step (repository text). */
-const SETUP_PAUSED_TIMELINE = "Paused before Build: the project's setup needs repair.";
+/** The timeline line and milestone text of the setup warning (DEC 254zzz447): fixed words, never the check's failing step (repository text). */
+const SETUP_WARNING_TIMELINE = SETUP_NEEDS_REPAIR_WARNING;
+/** Whether this task's timeline already carries the setup warning (one line per task: a later coding round does not repeat it). */
+async function setupWarningWritten(deps: TaskFlowDeps, taskId: string): Promise<boolean> {
+  const page = await deps.store.query({ pk: `DEVTASK#${taskId}`, sk: { op: "beginsWith", prefix: "CODE_MILESTONE#setup_paused#" }, limit: 1 });
+  return page.items.length > 0;
+}
 
 /** A UUID made from text (the workflow's retry record wants one): the same text always gives the same one, so a repeated retry is recognised. */
 export function uuidFrom(text: string): string {
@@ -202,21 +207,10 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef, manua
   if (found === "waiting") return "WAITING";
   const { task, workspace } = found;
   const { workflow } = task;
-  // L4-DR (DEC 254z c): the task's first coding run waits for the project's automatic setup re-check, if one was started for it at the task's start; the earlier steps never did. A re-check that found the setup
-  // BROKEN pauses the task here, with fixed words, and nothing else does. A task with no re-check (the common case) goes straight on.
+  // DEC 254zzz447 (don't block work): the first coding run never waits for the project's automatic setup re-check and is never paused by a broken setup. When the project's setup needs repair NOW, the task says so once
+  // (a timeline line, and the thread and the ticket it came from through the milestone hook, once per break); the coding run starts all the same.
   const setupGate = await setupGateBeforeBuild(deps, { project: task.project, taskId: task.taskId });
-  if (setupGate.answer === "wait") return "WAITING";
-  if (setupGate.answer === "blocked") {
-    const blocked = blockWorkflow(workflow, setupGate.words.slice(0, 500), iso(deps));
-    // L4-U5: the thread and the ticket the task came from are told ONCE that it paused, in the same transaction as the pause (the milestone hook tells them and tries again after a failure). The handlers read the words from the
-    // project's own re-check rows; the text here is only the session's timeline line.
-    const told = deps.milestones === undefined ? [] : deps.milestones.items({
-      kind: "setup_paused", orgId: deps.companyId, taskId: task.taskId, ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }), at: iso(deps), text: SETUP_PAUSED_TIMELINE,
-    }, blocked.revision);
-    const committed = await commitWorkflow(deps, task, blocked, told);
-    if (committed && told.length > 0) await deps.milestones?.deliver(task.taskId).catch(() => undefined);
-    return settled(deps, row, "STALE");
-  }
+  const warn = setupGate.brokenSetup !== undefined && deps.milestones !== undefined && !(await setupWarningWritten(deps, task.taskId).catch(() => true));
   // A fix is made for the head Rovara pushed: if a person pushed meanwhile, the round ends here and the task waits for the merge again.
   if (await personPushedMeanwhile(deps, task, workflow)) {
     await commitWorkflow(deps, task, abandonWorkflowFix(workflow, iso(deps)));
@@ -269,10 +263,14 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef, manua
     ...(graph === undefined ? {} : { workflowDependencies: graph.invocation }),
     ...(approvedPlan === undefined ? {} : { workflowApprovedPlan: approvedPlan }),
   });
+  // The handlers read the words from the project's own re-check rows; the text here is only the session's timeline line. Written in the same transaction as the coding run's start.
+  const warned = !warn || deps.milestones === undefined ? [] : deps.milestones.items({
+    kind: "setup_paused", orgId: deps.companyId, taskId: task.taskId, ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }), at: receivedAt, text: SETUP_WARNING_TIMELINE,
+  }, next.revision);
   const accepted = await acceptStepWithNotes(deps, {
     task, workspace, requestId, prompt: withTestRule(prompt, next), workflowMode: "IMPLEMENT",
     workflow: { current: workflow, next: operationId === undefined ? next : workflowWithCurrentGraphOperation(next, operationId, graph?.invocation) },
-    extra: [resolveRowItem(deps, task.taskId, row.workflowRevision), ...(feedback?.items ?? [])], payload,
+    extra: [resolveRowItem(deps, task.taskId, row.workflowRevision), ...(feedback?.items ?? []), ...warned], payload,
     requires: [
       "task.workflowMode", ...(feedback === undefined ? [] : ["task.workflowFeedbackApproval"]), ...(readiness === undefined ? [] : ["task.readiness"]), ...(payload["workflowBase"] === undefined ? [] : ["task.workflowBase"]), ...(workflow.fixSource === undefined ? [] : ["task.workflowFix"]),
       ...(graph === undefined ? [] : ["task.workflowDependencies"]),
@@ -284,6 +282,7 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef, manua
     ...(graph === undefined || operationId === undefined ? {} : { workflowDependencies: graph.invocation, operationId }),
     ...((row.firstEvent === undefined && graph?.note === undefined) ? {} : { firstEvent: [row.firstEvent, graph?.note].filter((line): line is string => line !== undefined).join("\n") }),
   });
+  if (warned.length > 0 && accepted.result === "STARTED") await deps.milestones?.deliver(task.taskId).catch(() => undefined);
   return settled(deps, row, accepted.result);
 }
 

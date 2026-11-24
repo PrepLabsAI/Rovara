@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
-const read = () => readFile(new URL("../../.specify/memory/constitution.md", import.meta.url), "utf8");
+const read = () => readFile(new URL("../../docs/constitution.md", import.meta.url), "utf8");
 
 describe("constitution 5.1.0 (channel adapters)", () => {
   it("is version 5.1.0 with sync impact notes naming the changed principles", async () => {

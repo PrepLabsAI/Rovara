@@ -53,9 +53,12 @@ describe("refresh-token write-back grant (phase 7)", () => {
     // #1129: the company layer's own writes, each only under its company's own path in agentx/production/: the company-secrets role (T6; nothing assumes it yet) and
     // Add to Slack's per-company bot tokens (under the CompanySignIn switch).
     const companyWrites = all.filter((statement) => /secret:agentx\/production\/(org-connectors|org-hooks|slack-workspaces)\//u.test(JSON.stringify(statement.Resource)));
+    // PRIVATE-PACKAGES P1b: the company-secrets role also has an UNTAGGED CreateSecret on its own `pkgreg_*` names (hosted-wiring-infrastructure.test.ts pins its exact resource and condition).
     expect(companyWrites.map((statement) => [statement.Action].flat().sort().join(" ")).sort()).toEqual([
-      "secretsmanager:CreateSecret", "secretsmanager:CreateSecret secretsmanager:GetSecretValue secretsmanager:PutSecretValue",
+      "secretsmanager:CreateSecret", "secretsmanager:CreateSecret", "secretsmanager:CreateSecret secretsmanager:GetSecretValue secretsmanager:PutSecretValue",
       "secretsmanager:DeleteSecret", "secretsmanager:DescribeSecret secretsmanager:GetSecretValue secretsmanager:PutSecretValue",
+      // P1b: RestoreSecret on the company's own pkgreg_* (the token's secret is adopted, never recreated).
+      "secretsmanager:RestoreSecret",
     ]);
     const writes = all.filter((statement) => !adapterSecrets.includes(statement) && !companyWrites.includes(statement));
     expect(writes).toHaveLength(1);

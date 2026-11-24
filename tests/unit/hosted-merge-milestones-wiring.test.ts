@@ -51,7 +51,7 @@ async function setup(options: { lessons?: string } = {}) {
     // The same builder the broker passes (aws/broker.ts), over the flow the root gives it.
     services: (companyId, flow, registry, wiring) => {
       flows.set(companyId, flow);
-      const built = createHostedBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!, ...(wiring.notification === undefined ? {} : { notification: wiring.notification }) });
+      const built = createHostedBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!, taskPeople: { documentClient: client, tableName: "state" }, ...(wiring.notification === undefined ? {} : { notification: wiring.notification }) });
       jobs.set(companyId, built);
       return { ...built, "admission-hold-sweep": { pass: async () => ({}) } };
     },

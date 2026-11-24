@@ -19,6 +19,7 @@ import { randomUUID } from "node:crypto";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { AgentXErrorCodeSchema, OrgIdSchema, agentXError, type ActorRef, type ConversationRef, type DeveloperSignInMethod } from "@agentx/contracts";
 import { workspaceKey, taskPointerKey as scopedTaskPointerKey } from "../core/task-flow/keys.js";
+import { setupCheckRecordKey } from "../core/setup-agent/check.js";
 import { engineStampKey, stampOf, type Engine, type EngineStamp } from "../core-host/engine-stamp.js";
 import type { CoreArea } from "../core-host/flags.js";
 import { NOT_ON_THE_CORE_YET, type DeployedCaller } from "../core-host/dev-routes.js";
@@ -123,6 +124,22 @@ export async function ownerOfExistingTask(table: EngineStateTable, taskId: strin
 }
 
 /**
+ * Whether this workspace is a setup check's: its company discovery pointer and scoped META name one company and that company's own SETUP_CHECK record exists, and it holds no task pointer. A check is the core's,
+ * but `ownerOfWorkspace` reads a workspace with no task as unavailable, so the administrator's stop asks this first.
+ */
+export async function isSetupCheckWorkspace(table: EngineStateTable, workspaceId: string): Promise<boolean> {
+  const discovery = await readItem(table, { pk: `WORKSPACE#${workspaceId}`, sk: "META" });
+  if (discovery?.["entityType"] !== "WORKSPACE_COMPANY_POINTER") return false;
+  const company = OrgIdSchema.safeParse(discovery["companyId"]);
+  if (!company.success) return false;
+  const scoped = await readItem(table, workspaceKey(company.data, workspaceId));
+  if (scoped === undefined || scoped["companyId"] !== company.data) return false;
+  if (await readItem(table, scopedTaskPointerKey(company.data, workspaceId)) !== undefined) return false;
+  const record = await readItem(table, setupCheckRecordKey(company.data, workspaceId));
+  return record?.["companyId"] === company.data;
+}
+
+/**
  * Who owns a workspace's rows (its META, operations, artifacts, pull requests): the engine of the task whose pointer it holds. A workspace with no task pointer is no core task's
  * (every core start writes its pointer with the task), so it is the workflow's. Company discovery pointers require a live scoped META on every call; legacy workspace verdicts are kept.
  */
@@ -161,7 +178,7 @@ export interface CoreTaskEntry {
    * project by name only). Throws the missing workspace's words for a workspace that is no core task's of a company on the core.
    * Absent: the deployment does not serve it (the admin route keeps its answer for a core workspace).
    */
-  stopWorkspaceForAdmin?(workspaceId: string, administrator: { id: string }, authorize: (project: string) => Promise<void>): Promise<{ taskId: string; nothingRunning: boolean }>;
+  stopWorkspaceForAdmin?(workspaceId: string, administrator: { id: string }, authorize: (project: string) => Promise<void>): Promise<{ taskId?: string; nothingRunning: boolean }>;
   /**
    * L4-U5b: remembers the chat conversation a core task was started from, so what the task later tells that conversation (`core/channel/thread-notices.ts`) has somewhere to go. The company is the CALLER'S live membership's,
    * the task must be one this caller may act on, and the conversation's tenant must belong to that company; anything else records nothing (`false`). Written once: a repeat changes nothing. Absent: the deployment keeps no thread.

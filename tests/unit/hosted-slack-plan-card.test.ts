@@ -20,7 +20,7 @@ import { projectPageUrl, sessionPageUrl } from "../../packages/broker/src/core/d
 import { PENDING_PK, deliverAttention } from "../../packages/broker/src/core/notify/index.js";
 import { createTaskSessionItems, developerIdOf, refreshSessionSummary, taskSessionId } from "../../packages/broker/src/core/sessions/index.js";
 import { createTaskFactsSource } from "../../packages/broker/src/local/app/facts.js";
-import { driftTaskKey, recheckRowKey, setupPausedMessage, type RecheckState } from "../../packages/broker/src/core/setup-agent/recheck.js";
+import { driftTaskKey, recheckRowKey, setupBrokenWarningMessage, type RecheckState } from "../../packages/broker/src/core/setup-agent/recheck.js";
 import { taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { ticketMomentsOnChange } from "../../packages/broker/src/core/ticket-updates/moments.js";
 import { createDocumentMilestones } from "../../packages/broker/src/core/milestones/milestones.js";
@@ -267,7 +267,7 @@ describe("the plan card on a hosted Slack thread", () => {
     await w.handler.on(w.milestone("setup_paused"));
     await w.handler.on(w.milestone("setup_paused"));
     expect(w.slack.posts).toHaveLength(1);
-    expect(w.slack.posts[0]!.text).toBe(setupPausedMessage(STEP, `${ORIGIN}/app/projects/payments`));
+    expect(w.slack.posts[0]!.text).toBe(setupBrokenWarningMessage(STEP, `${ORIGIN}/app/projects/payments`));
     expect(w.slack.posts[0]!.text).toContain("https://app.example/app/projects/payments");
   });
 });

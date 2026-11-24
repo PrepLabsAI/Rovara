@@ -26,7 +26,7 @@ async function world() {
     callbackSigningKey: "k".repeat(32), repositoryGrantKey: Buffer.alloc(32, 1), repositoryCredential: async () => ({ token: "fake" }), codeModules: () => ({}) as never,
     origin: () => "https://api.example", now: () => new Date(w.clock.now), log: () => undefined,
     ciReporting: { honest: true, ciMode: async () => "sandbox_only" as const },
-    services: (companyId, flow, registry, wiring) => createBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!, now: () => new Date(w.clock.now) }),
+    services: (companyId, flow, registry, wiring) => createBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!, now: () => new Date(w.clock.now), taskPeople: { documentClient: { send: async () => ({}) }, tableName: "state" } }),
   });
   await w.store.put({ item: { ...workspaceKey(A, "ws-a"), entityType: "WORKSPACE", id: "ws-a", companyId: A, orgId: A, ownerKey: "owner-a", projectName: "payments" } });
   const flow = (await root.app.runtimeFor(A)).flow.deps;

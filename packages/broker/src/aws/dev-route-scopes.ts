@@ -232,6 +232,13 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/dev/company/linear/projects/{project}", requires: "full" },
   { method: "PUT", path: "/v1/dev/company/linear/projects/{project}", requires: "full" },
   { method: "DELETE", path: "/v1/dev/company/linear/projects/{project}", requires: "full" },
+  // R1 + L1: a member links their own Linear account to themselves (the web app only; Code checks the live membership and Linear's own sign-in itself), and the company's owner/admin list who linked and remove a link.
+  { method: "GET", path: "/v1/dev/me/tracker-accounts/linear", requires: "full" },
+  { method: "DELETE", path: "/v1/dev/me/tracker-accounts/linear", requires: "full" },
+  { method: "POST", path: "/v1/dev/me/tracker-accounts/linear/link", requires: "full" },
+  { method: "POST", path: "/v1/dev/me/tracker-accounts/linear/link/claim", requires: "full" },
+  { method: "GET", path: "/v1/dev/company/linear/people", requires: "full" },
+  { method: "DELETE", path: "/v1/dev/company/linear/people/{personId}", requires: "full" },
   // Guided onboarding PR 14 (DEC 254n item 1): the company's own engine model (read: any member; change: live owner/admin, checked against the gateway's live list for the company).
   { method: "GET", path: "/v1/dev/company/engine-model", requires: "full" },
   { method: "PUT", path: "/v1/dev/company/engine-model", requires: "full" },
@@ -312,6 +319,8 @@ export const APP_ROUTES: readonly DevRoute[] = [
   // admin, or the project's administrator, starts it (the audit record first). No AI, no model key.
   { method: "GET", path: "/v1/app/projects/{project}/setup-check", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-check", requires: "full" },
+  // SETUP-CHECK-WATCH: "Stop check" (the same routeHostedSetupCheck): ends the project's running check, closes its workspace and releases its machine. The same people as start; the audit record first.
+  { method: "POST", path: "/v1/app/projects/{project}/setup-check/stop", requires: "full" },
   // Wiki W0: a project's free file map (code host listings only: no model call, nothing spent or stored): full access only, then a live company owner or admin, or the project's administrator, to make one;
   // any person with a role on the project reads a kept one.
   { method: "GET", path: "/v1/app/projects/{project}/wiki-map", requires: "full" },
@@ -390,6 +399,10 @@ export const APP_ROUTES: readonly DevRoute[] = [
   // L4-P3: the company's one control over Rovara's automatic runs (core-host/system-runs-routes.ts): full access only, then only a live company owner or admin reads it, allows it or withdraws it.
   { method: "GET", path: "/v1/app/company/system-runs", requires: "full" },
   { method: "PUT", path: "/v1/app/company/system-runs", requires: "full" },
+  // PRIVATE-PACKAGES P1b: the company's package tokens (core-host/package-registries-routes.ts): full access only; any live member reads the status line, only a live owner or admin sets, replaces or deletes. No row answers a value.
+  { method: "GET", path: "/v1/app/company/package-registries", requires: "full" },
+  { method: "PUT", path: "/v1/app/company/package-registries", requires: "full" },
+  { method: "DELETE", path: "/v1/app/company/package-registries", requires: "full" },
   // L4-EVC (DEC 254zzz20): the project's ONE eval card (dollars), its single approval (confirm and approve the eval's spend in one act: the live owner/admin/maintainer rule). Full access only, like the setup candidate.
   { method: "GET", path: "/v1/app/projects/{project}/setup-agent/eval", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/eval-approve", requires: "full" },

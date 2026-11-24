@@ -32,6 +32,7 @@ import { taskKey } from "../../developer/task-records.js";
 import { rowInCompany } from "../../developer/company-rows.js";
 import { prefsKey } from "../notify/prefs.js";
 import { unlinkGithubAccount } from "./github-links.js";
+import { unlinkPersonEverywhere } from "./account-links.js";
 import { notifySentKey } from "../notify/attention.js"; import { eraseInboxRows } from "../notify/inbox-rows.js";
 import { eraseInvolvedRows } from "../task-flow/involved.js";
 
@@ -176,6 +177,8 @@ export async function erasePerson(deps: PersonEraseDeps, input: PersonEraseInput
     // Their "tasks I'm involved in" pointers in this company (`ORG#<company>#INVOLVED#<person>`), across every task.
     await eraseInvolvedRows(deps.store, companyId, personId);
     await unlinkGithubAccount(deps.store, companyId, personId);
+    // R1 + L1: their outside-account links (Linear), every provider.
+    await unlinkPersonEverywhere(deps.store, companyId, personId);
   } catch (error) {
     log({ event: "person_erase.links_failed", level: "error", error: errorName(error) });
     throw agentXError("RUNTIME_UNAVAILABLE", "The person is erased, but their chat links or notification settings could not be removed just now. Send the same request again.");

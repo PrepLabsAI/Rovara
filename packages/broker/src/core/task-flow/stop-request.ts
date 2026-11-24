@@ -20,6 +20,7 @@ import { parseBody } from "./owner-round.js";
 import { readTask } from "./reads.js";
 import type { TaskRecord } from "./records.js";
 import { readWorkspace } from "./stage-machine.js";
+import { readSetupCheck, stopSetupCheck } from "../setup-agent/check-stop.js";
 import { hashJson, newId } from "./support.js";
 import { locateWorkspace, workspaceKeys } from "./workspace-location.js";
 
@@ -131,9 +132,11 @@ export interface StopAdministrator { id: string; companyOf(): Promise<string | u
  * Q2: a project grant names a project by NAME only (its rows carry no company), and two companies may each have a project of that name. So the grant counts only for an administrator whose
  * live membership is the TASK'S company (the stored task's, never the request's); another company's administrator, or one whose company can't be read, gets the missing grant's answer.
  */
-export async function stopWorkspaceAsAdministrator(deps: TaskFlowDeps, workspaceId: string, administrator: StopAdministrator, authorize: (project: string) => Promise<void>): Promise<{ taskId: string; nothingRunning: boolean }> {
+export async function stopWorkspaceAsAdministrator(deps: TaskFlowDeps, workspaceId: string, administrator: StopAdministrator, authorize: (project: string) => Promise<void>): Promise<{ taskId?: string; nothingRunning: boolean }> {
   const location = await locateWorkspace(deps, workspaceId);
   const pointer = location === undefined ? undefined : await deps.store.get(location.taskPointerKey());
+  // A workspace with no task is a setup check's (its own record says so): the same administrator rule stops it (setup-agent/check-stop.ts).
+  if (location !== undefined && pointer === undefined) return await stopCheckAsAdministrator(deps, workspaceId, administrator, authorize);
   const taskId = pointer?.["taskId"];
   const task = typeof taskId === "string" ? await readTask(deps, taskId) : undefined;
   // The task must be this company's and must hold this workspace: a pointer alone never names a task of another company.
@@ -144,6 +147,20 @@ export async function stopWorkspaceAsAdministrator(deps: TaskFlowDeps, workspace
   await recordAudit(deps, { eventId: `task.stop_requested:${task.taskId}:admin:${newId(deps)}`, actor: { type: "person", id: administrator.id }, action: "task.stop_requested", subject: { type: "task", id: task.taskId }, details: { project: task.project, by: "install-admin" } });
   const answer = await cancelTask(deps, task.taskId);
   return { taskId: task.taskId, nothingRunning: answer.nothingRunning };
+}
+
+/**
+ * The administrator's stop of a setup check's workspace (no task). A workspace that is not this company's check answers like a missing workspace; the company and project grant are judged exactly as for a task
+ * (the check record's own project, read here from this company's runtime, never a caller's word).
+ */
+async function stopCheckAsAdministrator(deps: TaskFlowDeps, workspaceId: string, administrator: StopAdministrator, authorize: (project: string) => Promise<void>): Promise<{ nothingRunning: boolean }> {
+  const check = await readSetupCheck(deps, workspaceId);
+  if (check === undefined) throw agentXError("NOT_FOUND", WORKSPACE_NOT_FOUND);
+  if (await administratorCompany(administrator) !== deps.companyId) throw agentXError("NOT_FOUND", ADMIN_GRANT_MISSING);
+  await authorize(check.project);
+  await recordAudit(deps, { eventId: `setup_check.stop_requested:${workspaceId}:admin:${newId(deps)}`, actor: { type: "person", id: administrator.id }, action: "setup_check.stop_requested", subject: { type: "project", id: check.project }, details: { project: check.project, workspaceId, by: "install-admin" } });
+  const stopped = await stopSetupCheck(deps, workspaceId);
+  return { nothingRunning: stopped.nothingRunning };
 }
 
 /** The administrator's company, or undefined when it can't be read (no cause is kept: the refusal is the same either way). */

@@ -311,7 +311,7 @@ export interface AttentionDeliveryDependencies {
    */
   planCarded?: (session: AgentSessionRecord) => Promise<boolean>;
   /**
-   * L4-U5: whether the task's setup pause ("I can't build this yet ...") was already told in the conversation the task was started from (`core/channel/thread-notices.ts` `setupPausedPosted`). The needs-you reminder is then not sent to THAT
+   * L4-U5: whether the task's setup message (an earlier pause, or the DEC 254zzz447 setup warning) was already told in the conversation the task was started from (`core/channel/thread-notices.ts` `setupPausedPosted`). The needs-you reminder is then not sent to THAT
    * conversation as well (one message for the requester); it still goes to the places the person chose. A failure counts as "not told", so the reminder is sent.
    */
   setupPausedTold?: (session: AgentSessionRecord) => Promise<boolean>;

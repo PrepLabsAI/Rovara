@@ -245,6 +245,7 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
       "Agent qualification probes (scripted route)",
       "Mid-step values never reach the model (scripted route)",
       "Native M1.4 journeys",
+      "Private package install container (alone)",
       "Sandbox egress gateway (boot stage on real Docker)",
     ]);
     for (const step of checks) {
@@ -261,6 +262,12 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     expect(generic.run).toContain("--exclude tests/linux/e2e-docker25-dns.test.ts");
     // L4-NETG: the sandbox-egress boot stage restarts Docker and walls docker0, so it never runs beside another Linux test file: out of the generic step, in a step of its own that comes after every other Docker step of the job.
     expect(generic.run).toContain("--exclude tests/linux/worker-sandbox-egress.test.ts");
+    // Private packages P2a: the install container's test creates and removes containers and `rvbp` networks quickly, so it has a step of its own (before the egress step) and never runs beside another Linux test file.
+    expect(generic.run).toContain("--exclude tests/linux/private-install.test.ts");
+    const privateInstall = job.steps.find((candidate) => (candidate.run ?? "").includes("tests/linux/private-install.test.ts") && candidate !== generic)!;
+    expect(privateInstall.run).toBe("npx vitest run tests/linux/private-install.test.ts");
+    expect(privateInstall.name).toMatch(/Private package install container/);
+    expect(privateInstall.env).toEqual({ ROVARA_DOCKER: "1", ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:ci" });
     const egress = job.steps.find((candidate) => (candidate.run ?? "").includes("tests/linux/worker-sandbox-egress.test.ts") && candidate !== generic)!;
     expect(egress.run).toBe("npx vitest run tests/linux/worker-sandbox-egress.test.ts");
     expect(egress.name).toMatch(/Sandbox egress gateway/);

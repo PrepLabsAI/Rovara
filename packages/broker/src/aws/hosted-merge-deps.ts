@@ -1,5 +1,6 @@
 // Owner DEC 254zzz104: the merge core's dependencies for ONE company's runtime on the hosted install, for the Merge button (core-host/hosted-merge-routes.ts). The same seams the company's merge
 // tracking reads (aws/core-job-services.ts, services/merge-tracking.ts), so the press and tracking judge a task alike:
+//   - the people as one hosted rule reads them (`createHostedMergePeople`: the requesters are the creator while a member and the People list's current owners), the same for the press and tracking;
 //   - the task as the core reads it (`mergeTaskOf`; another company's task reads as absent), the project's pinned repository on the registry's code host (the company's own resolver; another company's asks
 //     resolve nothing), the base branch from Rovara's own pull request record (never GitHub's word), the linked pull requests, the people's code-host accounts (identity), the project's merge rules, the
 //     company's milestones and session lines, and the validated CI mode reader of the runtime;
@@ -17,7 +18,7 @@ import type { MergeTask } from "../core/merge/seams.js";
 import type { CodeSettingsReader } from "../core/merge/seams.js";
 import { fixedCodeSettings } from "../core/merge/defaults.js";
 import { storeLinkedChangeRequests } from "../core/merge/linked.js";
-import { createIdentityMergePeople } from "../core/merge/people.js";
+import { createHostedMergePeople, type HostedTaskPeopleSource } from "./hosted-merge-people.js";
 import { readTask } from "../core/task-flow/reads.js";
 import { pullRequestRecordOf } from "../core/build-step/records.js";
 import { createMilestoneService, createRepositoryResolver, mergeTaskOf, sessionTimeline, wakeMergeTrackingForPerson } from "../services/merge-tracking.js";
@@ -27,7 +28,7 @@ import { personPressOf } from "../core/policy-hook/approvers.js";
 
 export const HOSTED_MERGE_SETTINGS_REFUSED = "the project's merge rules could not be read";
 
-export function hostedMergeDependencies(input: { runtime: CoreRuntime; registry: AdapterRegistry; settings: CodeSettingsReader | undefined; defaults: CodeSettings; now: () => number; policyHook: boolean; audit?: AuditSink | undefined }): MergeDependencies {
+export function hostedMergeDependencies(input: { runtime: CoreRuntime; registry: AdapterRegistry; settings: CodeSettingsReader | undefined; defaults: CodeSettings; now: () => number; policyHook: boolean; audit?: AuditSink | undefined; taskPeople: HostedTaskPeopleSource }): MergeDependencies {
   const { runtime, registry, now } = input;
   const companyId: OrgId = runtime.companyId;
   const flow = runtime.flow.deps;
@@ -57,7 +58,7 @@ export function hostedMergeDependencies(input: { runtime: CoreRuntime; registry:
     approvers,
     // The request's own sink when the route gives it (it names the client the press came through), else the flow's.
     audit: input.audit ?? flow.audit,
-    people: createIdentityMergePeople(identity, { hostProvider: "github" }),
+    people: createHostedMergePeople(identity, input.taskPeople),
     identity,
     ...(personPress === undefined ? {} : {
       requesterOf: async (task: MergeTask) => task.creatorId === undefined ? undefined : identity.getPrincipal(companyId, task.creatorId),

@@ -52,6 +52,28 @@ describe("setup auto resume", () => {
     expect((await h.store.get(dispatchRowKey(h.deps.companyId, task.taskId, resumed.workflow!.revision)))?.["firstEvent"]).toBe("Setup fixed, continuing");
   });
 
+  it("DEC 254zzz447: with no pauses there is nothing to resume: a task that went on under the break (link released, not blocked) and a project with no links are left exactly as they are", async () => {
+    const h = createHarness();
+    const task = await setupPaused(h);
+    // The task went on under the warning instead of pausing: its link was let through and its workflow is not blocked.
+    const { blockReason: _reason, ...unblocked } = (await readTask(h.deps, task.taskId))!.workflow!;
+    void _reason;
+    await h.store.update({ key: taskKey(task.taskId), ops: [change.set("workflow", { ...unblocked, stage: "IMPLEMENT", state: "RUNNING" } as unknown as JsonValue)] });
+    await h.store.update({ key: driftTaskKey(h.deps.companyId, "payments", task.taskId), ops: [change.set("state", "released")] });
+    await h.registerProject({ ...definition, name: "payments", revision: 2 });
+    const before = (await readTask(h.deps, task.taskId))!.workflow!;
+    expect(await resumeSetupPausedTasks(h.deps, "payments", approved(2))).toBe(0);
+    expect(await resumeSetupPausedTasks(h.deps, "payments", { kind: "check_passed", revision: 2, workspaceId: "nothing" })).toBe(0);
+    expect((await readTask(h.deps, task.taskId))!.workflow).toEqual(before);
+    // A pending link whose task is not paused is skipped too, and a project with no links at all answers 0.
+    await h.store.update({ key: driftTaskKey(h.deps.companyId, "payments", task.taskId), ops: [change.set("state", "pending")] });
+    expect(await resumeSetupPausedTasks(h.deps, "payments", approved(2))).toBe(0);
+    expect((await readTask(h.deps, task.taskId))!.workflow).toEqual(before);
+    await h.registerProject({ ...definition, name: "quiet" });
+    await h.registerProject({ ...definition, name: "quiet", revision: 2 });
+    expect(await resumeSetupPausedTasks(h.deps, "quiet", approved(2))).toBe(0);
+  });
+
   it("does not resume a stopped task or a task paused for another reason", async () => {
     const h = createHarness();
     const stopped = await setupPaused(h);

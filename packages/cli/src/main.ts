@@ -875,7 +875,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     });
   adminWorkspace
     .command("cancel")
-    .description("cancel the workspace's running coding task; its conversation keeps what finished before")
+    .description("cancel the workspace's running coding task (its conversation keeps what finished before), or stop a project's setup check that is stuck: its workspace is closed and its machine released")
     .requiredOption("--workspace <workspace-id>", "workspace whose task to cancel")
     .action(async (options: { workspace: string }, command: Command) => {
       const globals = globalOptions(command);

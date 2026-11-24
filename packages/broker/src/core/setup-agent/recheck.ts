@@ -3,7 +3,8 @@
 // At the start of a task (`setupDriftAtStart`, called by `startTask` before its transaction) the broker lists the setup files of each repository at the base commit through the code host and compares them with the
 // snapshot saved when the setup was approved (`compareSetupSnapshot`). No drift: nothing is written, nothing is shown. Drift, or a comparison that cannot be told (never read as "no drift"): Rovara starts the
 // project's EXISTING setup check by itself, as the project's system owner (nobody's AI and no person's rights), at most once per (project revision, base commits), held by the project's monthly cap on automatic
-// runs (`claimAutomaticRun`: at the cap nothing starts). The task goes on through Understand and Plan; only the first coding run waits (`setupGateBeforeBuild`).
+// runs (`claimAutomaticRun`: at the cap nothing starts). DEC 254zzz447 (don't block work): NOTHING here ever holds a task. The task goes on through Understand, Plan and Build whatever the re-check says or is still doing
+// (`setupGateBeforeBuild` always answers go); a broken setup is a WARNING on the task, the project and its thread, never a pause or a refused start.
 //
 // Rows, in the project's setup partition (`setupPartition(orgId, project)`), so another company's project of the same name never meets them:
 //   RECHECK#<key>      one re-check per (project revision, base commits): its state, which attempt, the check it runs, what changed (fixed classes only)
@@ -15,8 +16,9 @@
 //   passed         the setup works on the newer code: silent; the snapshot's baseline moves to the re-checked commits.
 //   tests_failing  a TEST command failed while the setup commands passed: not a setup problem. Never blocks (the failing tests belong to the base branch). The baseline moves: the setup was proved on this code.
 //   unclear        a stalled check, an unreadable result: never blocks.
-//   broken         a setup step failed (twice: one retry for a machine fault): ONLY THIS BLOCKS. The project's own setup state becomes "failed" (so new starts are refused by today's rule), the project gets one admin
-//                  card, and a task waiting at Build is paused with fixed words. A fix is a NEW setup candidate: a person approves it (never automatic); approving it moves the project to a new revision, which ends the pause.
+//   broken         a setup step failed (twice: one retry for a machine fault): ONLY THIS WARNS. The project's own setup state becomes "failed" (the setup page says it; a start is NOT refused for THIS kind of failure, see
+//                  `startRefusedBySetup` in `task-flow/start.ts`), the project gets one admin card, and every task that starts or reaches Build says "Setup needs repair: work continues; ..." once. A fix is a NEW setup
+//                  candidate: a person approves it (never automatic); approving it moves the project to a new revision, which ends the warning.
 import { projectIncarnationUpdate } from "../project-incarnation.js";
 import { createHash } from "node:crypto";
 import {
@@ -30,7 +32,7 @@ import { iso, log } from "../task-flow/support.js";
 import { classifyNightlyHealth, type NightlyHealth } from "../test-env/nightly-health.js";
 import { buildSetupCheck, relayCheck, setupCheckRecordKey, setupStateOf, setupStateOfCheck, type SetupCheckMark, type SetupState } from "./check.js";
 import {
-  driftTaskKey, isRow, recheckCurrentKey, recheckRowKey, repairNoticeKey, setupBrokenTaskWords, setupRepairCardOf,
+  driftTaskKey, isRow, recheckCurrentKey, recheckRowKey, repairNoticeKey, setupRepairCardOf,
   type DriftTaskRow, type RecheckRow, type RecheckState, type RepairNoticeRow, type SetupRepairCard,
 } from "./recheck-rows.js";
 import { expiryAfter } from "./keys.js";
@@ -45,7 +47,7 @@ const errorName = (error: unknown): string => (error instanceof Error ? error.na
 const KEEP_SECONDS = 62 * 86_400;
 /** A failed first check is retried only after this, so a short outage of the host or the machines does not fail both tries. */
 export const RECHECK_RETRY_DELAY_MS = 5 * 60_000;
-/** A task that has waited this long at Build for the re-check goes on: a result that has not come is "unclear", which never blocks (the check's own limit is 50 minutes, and a retry may follow). */
+/** A running re-check older than this is no longer joined by a new start (the check's own limit is 50 minutes, and a retry may follow). No task waits for a re-check any more (DEC 254zzz447). */
 export const RECHECK_WAIT_MAX_MS = 55 * 60_000;
 /** The most failed-step text a row keeps (the check's own failing step is already redacted, on one line and cut to this). */
 const STEP_KEPT = 300;
@@ -82,6 +84,10 @@ export function classifySetupRecheck(state: SetupState): NightlyHealth {
  */
 export async function setupDriftAtStart(deps: TaskFlowDeps, input: { project: string; taskId: string; definition: ProjectDefinition }): Promise<TransactItem[]> {
   try {
+    // While the project's setup is ALREADY broken (its open repair card) a start runs no drift check: another re-check could not fix it, and would spend a machine and the cap and tell the admins again for every new commit.
+    // The task is only linked to the break (its page, thread and ticket say so).
+    const broken = await brokenSetupLink(deps, input.project, input.taskId);
+    if (broken.length > 0) return broken;
     return await driftAtStart(deps, input);
   } catch (error) {
     log(deps, { event: "setup_drift.failed", taskId: input.taskId, error: errorName(error) });
@@ -133,6 +139,22 @@ async function runningRecheckOf(deps: TaskFlowDeps, project: string, revision: n
   const row = await readRecheck(deps, project, pointer["key"]);
   if (row === undefined || row.state !== "running" || row.setupRevision !== revision) return undefined;
   return (deps.now?.() ?? new Date()).getTime() - Date.parse(row.startedAt) > RECHECK_WAIT_MAX_MS ? undefined : row;
+}
+
+/**
+ * DEC 254zzz447: a task that starts while the project's setup is ALREADY broken (the project's open repair card) gets no drift link of its own when its start finds no drift; this one, released at once, points it at the
+ * break, so its page, its chat thread and its ticket say the setup needs repair (the evidence reads the link). Never throws; a fault is no link.
+ */
+async function brokenSetupLink(deps: TaskFlowDeps, project: string, taskId: string): Promise<TransactItem[]> {
+  try {
+    const card = await readSetupRepairCard(deps, project);
+    if (card === undefined) return [];
+    const row: DriftTaskRow = { entityType: "SETUP_DRIFT_TASK", orgId: deps.companyId, project, taskId, recheckKey: card.key, state: "released", at: iso(deps), releasedAt: iso(deps) };
+    return [putRow(driftTaskKey(deps.companyId, project, taskId), row.entityType, { ...row, ...expiry(deps) })];
+  } catch (error) {
+    log(deps, { event: "setup_drift.broken_link_failed", taskId, error: errorName(error) });
+    return [];
+  }
 }
 
 /** The link of a task whose re-check could not be made: nothing to wait on (released at once), and the quiet note on its page. */
@@ -324,7 +346,8 @@ async function brokenItems(deps: TaskFlowDeps, project: string, row: RecheckRow,
 }
 
 /**
- * The project's own setup state becomes the failed re-check, so a new start is refused by today's rule (`setupFailedMessage`), the setup page says it, and a person's "check again" or an approved new setup replaces it.
+ * The project's own setup state becomes the failed re-check: the setup page says it, and a person's "check again" or an approved new setup replaces it. (A start is no longer refused for THIS failure, DEC 254zzz447: it is
+ * told apart from a person's own failed check by the repair card, `readSetupRepairCard`, which is open only while the mark is THIS re-check's.)
  * Idempotent, and never over a NEWER mark (a person's own check that began after this re-check did). A project with no record to mark is left as it is. Never throws.
  */
 async function markProjectBroken(deps: TaskFlowDeps, project: string, row: RecheckRow): Promise<void> {
@@ -412,47 +435,47 @@ export async function readSetupRepairCard(deps: Pick<TaskFlowDeps, "store" | "co
   return { ...setupRepairCardOf(notice.failedStep), classes: notice.classes, at: notice.at, failedStep: notice.failedStep, key: notice.key };
 }
 
-// ---- the wait before Build
-
-export type BuildGate = { answer: "go" } | { answer: "wait" } | { answer: "blocked"; words: string };
+// ---- Build: never held (DEC 254zzz447)
 
 /**
- * Asked before a task's first coding run. A task with no drift link goes on, and so does one whose re-check passed, found only failing tests, or could not be told. It WAITS while the re-check runs (up to
- * `RECHECK_WAIT_MAX_MS`, after which an answer that has not come is unclear and never blocks). It is paused ONLY for "setup broken", and only while the project is still at the revision that broke; a newly approved
- * setup is a new revision and lets it through. A repeated question after the task went on answers `go` at once. Never throws: a fault lets the task go on.
+ * What the gate answers: always `go`. `brokenSetup` is present while the project's setup needs repair now (its open repair card): the build step says so on the task's timeline and tells the thread and the ticket, once.
+ * The "wait" (a running re-check) and "blocked" (a broken one) answers of DEC 254z c are gone.
+ */
+export interface BuildGate { answer: "go"; brokenSetup?: { recheckKey: string; failedStep: string } }
+
+/**
+ * Asked before a task's first coding run. It NEVER holds the task: a running re-check is not waited for, a broken one pauses nothing. It still settles what the task's re-check has found so far (the project's mark, the
+ * admins' notice, the repair hook: `advanceRecheck`), lets the task's link through, and, when the project's setup needs repair now, points the task's link at that break (so the page, the thread and the ticket read it)
+ * and says so in `brokenSetup`. Never throws: a fault lets the task go on, as it always did.
  */
 export async function setupGateBeforeBuild(deps: TaskFlowDeps, input: { project: string; taskId: string }): Promise<BuildGate> {
   try {
-    const orgId = deps.companyId;
-    const linkKey = driftTaskKey(orgId, input.project, input.taskId);
-    const stored = await deps.store.get(linkKey);
-    if (!isRow(stored, orgId, input.project, "SETUP_DRIFT_TASK") || stored?.["taskId"] !== input.taskId) return { answer: "go" };
-    const link = stored as unknown as DriftTaskRow;
-    if (link.state === "released") return { answer: "go" };
-    const release = async (): Promise<BuildGate> => {
-      await deps.store.update({ key: linkKey, ops: [change.set("state", "released"), change.set("releasedAt", iso(deps))], condition: when.eq("state", "pending") }).catch(() => undefined);
-      return { answer: "go" };
-    };
-    const row = await advanceRecheck(deps, input.project, link.recheckKey);
-    if (row === undefined) return release();
-    if (row.state === "running") {
-      const waited = (deps.now?.() ?? new Date()).getTime() - Date.parse(row.startedAt);
-      return waited > RECHECK_WAIT_MAX_MS ? release() : { answer: "wait" };
-    }
-    if (row.state !== "broken") return release();
-    const latest = await deps.projects.latest(input.project);
-    // A new setup was approved since: it has its own baseline, and this task is no longer held back by the old break.
-    if (latest === undefined || latest.definition.revision !== row.setupRevision) return release();
-    // The project's mark may not have been written when the break was settled (a store fault): it is written again now, and only a mark that is someone else's (a newer check) lifts the break.
-    if (!(await brokenStillHolds(deps, input.project, row))) {
-      await markProjectBroken(deps, input.project, row);
-      if (!(await brokenStillHolds(deps, input.project, row))) return release();
-    }
-    return { answer: "blocked", words: setupBrokenTaskWords(row.failedStep ?? "setup") };
+    await settleTaskLink(deps, input).catch((error: unknown) => log(deps, { event: "setup_drift.gate_failed", taskId: input.taskId, error: errorName(error) }));
+    const card = await readSetupRepairCard(deps, input.project).catch(() => undefined);
+    if (card === undefined) return { answer: "go" };
+    // The task's page, thread and ticket read the break through its link: a task started before the break, or one that joined another re-check, is pointed at this one.
+    const link = breakLink(deps, input, card.key);
+    await deps.store.transact([overwriteRow(driftTaskKey(deps.companyId, input.project, input.taskId), link.entityType, { ...link, ...expiry(deps) })]).catch(() => undefined);
+    return { answer: "go", brokenSetup: { recheckKey: card.key, failedStep: card.failedStep } };
   } catch (error) {
     log(deps, { event: "setup_drift.gate_failed", taskId: input.taskId, error: errorName(error) });
     return { answer: "go" };
   }
+}
+
+const breakLink = (deps: TaskFlowDeps, input: { project: string; taskId: string }, recheckKey: string): DriftTaskRow =>
+  ({ entityType: "SETUP_DRIFT_TASK", orgId: deps.companyId, project: input.project, taskId: input.taskId, recheckKey, state: "released", at: iso(deps), releasedAt: iso(deps) });
+
+/** Moves the task's re-check on (its result, the project's mark, the admins' notice) and releases the task's link. A task with no link, or one already released, has nothing to settle. */
+async function settleTaskLink(deps: TaskFlowDeps, input: { project: string; taskId: string }): Promise<void> {
+  const orgId = deps.companyId;
+  const linkKey = driftTaskKey(orgId, input.project, input.taskId);
+  const stored = await deps.store.get(linkKey);
+  if (!isRow(stored, orgId, input.project, "SETUP_DRIFT_TASK") || stored?.["taskId"] !== input.taskId) return;
+  const link = stored as unknown as DriftTaskRow;
+  if (link.state === "released") return;
+  await advanceRecheck(deps, input.project, link.recheckKey);
+  await deps.store.update({ key: linkKey, ops: [change.set("state", "released"), change.set("releasedAt", iso(deps))], condition: when.eq("state", "pending") }).catch(() => undefined);
 }
 
 /**

@@ -151,6 +151,7 @@ import { savedEnvEnabled } from "../core/test-env/saved-env-switch.js";
 import { fixtureObjectPortOf } from "../core/test-env/fixture-store-aws.js";
 import { hostedSavedEnvDeps } from "./hosted-saved-env.js";
 import { savedEnvRoleSessionsFromEnvironment, type SavedEnvRoleSessions } from "./saved-env-role-sessions.js";
+import { companySecretsFromEnvironment } from "./company-secrets-sessions.js";
 import { savedEnvImageModules } from "./ecr-image-registry.js";
 import { baseFlakyTests } from "../core/test-env/base-flaky.js";
 import { flakyFactsPort } from "../lessons/knowledge-facts.js";
@@ -190,7 +191,7 @@ import { handleCoreContextTools } from "../core-host/context-tools.js";
 import { createTaskLogHooks } from "../core/task-log/hooks.js";
 import { hostedPlanSummaryOf } from "../core-host/plan-summary.js";
 import { createHostedIntake, hostedTicketUpdates, hostedTrackerFor, intakeFenceKeyOf, ticketSessionStartExtras, type HostedIntake } from "./hosted-intake.js";
-import { linearAccountResolver } from "./linear-account-links.js";
+import { hostedLinearResolver } from "./linear-account-links.js";
 import type { LinearConnections } from "./linear-connections.js";
 import { createWikiOnEvents, readWikiTaskUse } from "../core/wiki/agent-context.js";
 
@@ -781,6 +782,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       return modelCheck();
     } };
   };
+  // PRIVATE-PACKAGES P1b: the company secret store (one session per company, company-tagged), or none where the install has no company-secrets role.
+  const companySecrets = companySecretsFromEnvironment(env);
   const lessonsSwitch: ReturnType<typeof readCoreLessonsSwitch> = readCoreLessonsSwitch(env);
   // The weekly lessons summary's pilot list, resolved ONCE so the sender (createCoreLessons) and the settings API (createLessonsApi) can never disagree about which companies default to on.
   const lessonsDigestPilot = digestPilotOf({ lessonsSwitch: lessonsSwitch.value, ...(inputs.lessonsDigestPilot === undefined ? {} : { digestPilot: inputs.lessonsDigestPilot }) });
@@ -975,7 +978,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             ...(inputs.linearIntake === undefined ? {} : {
               tickets: {
                 trackerFor: hostedTrackerFor(companyId, inputs.linearIntake.connections, inputs.linearIntake.fetch),
-                resolveAccount: linearAccountResolver({ store: registry.require("storage"), connections: inputs.linearIntake.connections, principalOf: (org, personId) => registry.require("identity").getPrincipal(org, personId) }),
+                resolveAccount: hostedLinearResolver({ store: registry.require("storage"), connections: inputs.linearIntake.connections, principalOf: (org, personId) => registry.require("identity").getPrincipal(org, personId) }),
               },
             }),
             ...((slack) => (slack === undefined ? {} : { channelCompanyOf: slack.companyOf, slackThreadCommand: slack.command }))(inputs.lessonsSlack?.(companyId)),
@@ -1133,7 +1136,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           // DEC 254zzz94: the Merge button, over the root's own grant reader, the project's pinned repositories on the registry's code host, and the project's merge method (Code's default: squash).
           merge: {
             projectGrantRole: (personId, project, companyId) => projectGrantRole(personId, project, companyId),
-            merge: (audit) => withFeedbackMergeReads(hostedMergeDependencies({ runtime, registry, audit, settings: inputs.codeSettings, defaults: DEFAULT_CODE_SETTINGS, now: () => now().getTime(), policyHook: hookSettings !== undefined || hookProblem }), runtime.flow.deps, registry),
+            merge: (audit) => withFeedbackMergeReads(hostedMergeDependencies({ runtime, registry, audit, settings: inputs.codeSettings, defaults: DEFAULT_CODE_SETTINGS, now: () => now().getTime(), policyHook: hookSettings !== undefined || hookProblem, taskPeople }), runtime.flow.deps, registry),
             afterMerge: (taskId) => wakeMergeTrackingForPerson(runtime.flow.deps.store, taskId, now().getTime()),
           },
           // DEC 254z-amend3: the project's test environment state, with the install's switches (and the host's "not available here" marker, broker-environment-init.ts) and the owner starter list as the catalog.
@@ -1209,6 +1212,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           },
           // Audit gap 11b: the project's ticket-sharing settings. The same live standing; the trackers a hosted company's tickets are written back to (Linear, over its own connection: hosted-intake.ts).
           ticketUpdates: { standing: setupRunStanding, trackers: HOSTED_TICKET_TRACKERS },
+          // PRIVATE-PACKAGES P1b: the company's package tokens (write only: the status line is read, no route answers a value). Through the company-tagged session of the CompanySecrets role; an install
+          // without that role has no wiring and the path says "not on the core yet". Nothing here hands a token to a run: the exchange's company store is a later step (P2).
+          ...(companySecrets === undefined ? {} : { packageRegistries: { env: companySecrets.env, secrets: companySecrets.secrets } }),
           // Lead 4 W2: the project wiki's reads. Any live role on the project reads (the setup run's standing); the project must be in the company's catalog.
           wiki: {
             standing: setupRunStanding,

@@ -10,6 +10,8 @@ import { withoutWorkerSandboxEgress } from "../support/worker-sandbox-egress-tem
 import { Template } from "aws-cdk-lib/assertions";
 import { createHash } from "node:crypto";
 import { stuckStoppingInstall, withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
+import { withoutApiAccessLog } from "../support/api-access-log-template.js";
+import { withoutWorkerCallbackAlarm } from "../support/worker-callback-alarm-template.js";
 import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
@@ -302,15 +304,15 @@ describe("the named TEST proof-only installation gate", () => {
       {
         label: "named",
         template: named,
-        withRoute: "ff39867ccbebe339f5521b328242810296cf9f22de7164fc0c753a22d8ad994a", withoutRoute: "d2e9d7f43372743cffea7a4c6550137b924b4e751adcee11c4e27420b94ac1f8",
-        beforeStepUpRemoval: { withRoute: "d58b14cb4439b703997e2d5384f7965da0149c0fe6267f70f1b7e0eed9208bd9", withoutRoute: "4d23c397d6fcd7b7d9b117358b7684afb36f811ce460095553b334a01791d139" },
+        withRoute: "4e36adab5541e4f08f2d34afa47cb3c32b187292b555993d44b67bf917a6bfa9", withoutRoute: "13b43075fe353ae758d5517bfef5b7ef9258c1244977b72d445c7070bbc4ca4f",
+        beforeStepUpRemoval: { withRoute: "74961350024ecce5d93868e60038be43814785de2d99b948cd76846cf9fe8487", withoutRoute: "b49c2f10b87615ee4daf212599bddfb8dd7d556172efd7e7283f4366a93963f3" },
         beforeCapabilityRoutes: undefined,
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "89f0bd99f26d69338ba56b954d8233b0f2cf24202aa20f3765130a1c53176a13", withoutRoute: "64558d40113fef82c6c9a2e9ce36e20306b73a7c64d472c73f56798c33904487",
-        beforeStepUpRemoval: { withRoute: "773ebd697b866d1844dc835ed3eb504a4fb61cfddc004f2e25ef15ea0fe8bc6e", withoutRoute: "1d6fd5d890d61ab815c6fbb4e6640e69d9997eb7cfc58d09687434fe23e1124e" },
+        withRoute: "e3b4841573390747c8f77d6d21aa14cddc8cf47e556b166f8e9f7ef3f161cb24", withoutRoute: "b5f9015a1956a24c8481b4590c473ed0bf72c4da845dbc60daee7bc13da9b037",
+        beforeStepUpRemoval: { withRoute: "1404efad45834cb42276f3b8c5e86915cdd6ed3bfcdb3ee977cf8775530db169", withoutRoute: "5da8076bacf0946f04a4c29363329357f453ec4ece947ac633ddff88bb4aeac6" },
         beforeCapabilityRoutes: undefined,
       },
       {
@@ -324,10 +326,10 @@ describe("the named TEST proof-only installation gate", () => {
         // LEGACY-WORKER-CAPABILITY-ROUTES: re-pinned for the legacy template gaining the ContextToolsListRoute and DesignReviewPacketRoute resources (named and foreign already had
         // them), and #1275 for removing the core engine switch. Rule D: with exactly those two resources taken out, the switch removal's own pins e07dd415... and 7f704d79... hold
         // (beforeCapabilityRoutes proves it).
-        withRoute: "db1281068c1f47b18b673623e30bcf4155de205c3a6074d3d04da5d23b1f51ce",
-        withoutRoute: "b2ad2e7fe11c788fc74c6ac4c5563dca5e8ad721d9a2340ca0d09e686eb9799b",
+        withRoute: "0fca5afc88f8492defe8ab983b4660aca147b3c71ec890b24fd6db09c45d20bf",
+        withoutRoute: "0b272679f7be2c793009828bcad721ee884b494d0151a918446750bda40ef161",
         beforeStepUpRemoval: undefined,
-        beforeCapabilityRoutes: { withRoute: "354a47eb0c2604e7c0836c434cac991fd9acb1c3ebcd7bc89b7ad7df22205aa1", withoutRoute: "f1081c58a959c01958ac9e0a44157b1d4b0a40f6e14fb3e08226fb6fbc3fdb03" },
+        beforeCapabilityRoutes: { withRoute: "9a33a913e3b75933086daae375dc2cb823650cc550ba5041bcaf3d7fa621dac1", withoutRoute: "ebf19414715828c47745822e63e5558cd113798da93815c3766fe41cc7b443ad" },
       },
     ] as const;
     expect(named.Parameters?.CoreTaskCapUsd, "named has the core engine").toBeDefined();
@@ -338,7 +340,7 @@ describe("the named TEST proof-only installation gate", () => {
       // Assert and remove only the new broker member statement and first-gateway
       // output; retain the creator fence and every historical parent/reversal pin.
       // Webhook lane W3 + DEC 254zzz432: the webhook secret slot and the stuck-stopping alarm are asserted and taken out too, so the pins hold as recorded.
-      const template = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutStuckStoppingAlarm(structuredClone(installedTemplate), stuckStoppingInstall(label === "named" ? "agentxlivetest123" : label === "foreign" ? "staging" : undefined))));
+      const template = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(structuredClone(installedTemplate), (label === "named" ? { env: "agentxlivetest123" } : label === "foreign" ? { env: "staging" } : {})), stuckStoppingInstall(label === "named" ? "agentxlivetest123" : label === "foreign" ? "staging" : undefined)))));
       expect(template.Outputs?.ModelRunPriceVersion, label).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
       delete template.Outputs?.ModelRunPriceVersion;
       const creatorChecks = developerSignInConditionCheckEntries(template);

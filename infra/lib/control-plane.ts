@@ -34,6 +34,7 @@ import {
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
 import { CORE_DISPATCHER_TIMEOUT_SECONDS, CORE_BROKER_TIMEOUT_SECONDS, E2E_ARTIFACT_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, OUTBOX_PENDING_INDEX, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX, TEST_SERVICES_SETTING_VARIABLE, TEST_SERVICE_IMAGES_SETTING_VARIABLE, EGRESS_ADDRESSES_PARAMETER_PATTERN, EGRESS_ADDRESSES_VARIABLE, NAT_EGRESS_ADDRESSES_OUTPUT, WORKER_SANDBOX_EGRESS_DEFAULT, WORKER_SANDBOX_EGRESS_SETTING_VARIABLE, WORKER_SANDBOX_EGRESS_VALUES } from "@agentx/contracts";
+import { API_ACCESS_LOG_FORMAT } from "./api-access-log.js";
 import { EgressAlarms } from "./egress-alarms.js";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { ChannelAdapters } from "./channel-adapters.js";
@@ -744,6 +745,25 @@ export class ControlPlaneStack extends Stack {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(notifyOperator);
+    // A worker that could not deliver an operation's end to the broker (every retry refused or lost) logs one `terminal_callback.failed` line (packages/worker/src/worker-log.ts). The worker log group belongs to the
+    // foundation stack and is only named here, so this stack alone carries the filter that counts the line and the alarm that reads it (no foundation change, no new IAM: the deploy role already holds logs:* and cloudwatch:*).
+    // The broker then learns of the operation only from its own watches (a setup check or preparation after 50 minutes, a lost machine after two minutes), so the line is worth a page of its own.
+    new logs.MetricFilter(this, "WorkerTerminalCallbackFailedMetric", {
+      logGroup: logs.LogGroup.fromLogGroupName(this, "WorkerLogGroup", naming.ec2.workerLogGroupName),
+      filterPattern: logs.FilterPattern.stringValue("$.event", "=", "terminal_callback.failed"),
+      metricNamespace: naming.metricsNamespace,
+      metricName: "WorkerTerminalCallbackFailed",
+      metricValue: "1",
+    });
+    new cloudwatch.Alarm(this, "WorkerTerminalCallbackFailedAlarm", {
+      alarmName: naming.alarmName("WorkerTerminalCallbackFailed"),
+      alarmDescription: "A worker could not deliver an operation's end to the broker after every retry. Search the worker log group for terminal_callback.failed (invocation id, kind, HTTP status); the operation stays open until the broker's own watch ends it.",
+      metric: agentxSum("WorkerTerminalCallbackFailed", Duration.minutes(5)),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(notifyOperator);
     // Issue #46: a dispatch job that exhausts its receives lands here and nothing else reports it.
     // #1131: every deployment, production (the legacy template) included.
     {
@@ -958,10 +978,18 @@ export class ControlPlaneStack extends Stack {
         retryPolicy: { maximumRetryAttempts: 2, maximumEventAgeInSeconds: 300 },
       },
     });
+    // Access log of the `$default` stage (staging stuck-dispatch diagnosis, 2026-11-24: a worker's terminal callback was refused with a 4xx and nothing recorded which route or status).
+    // See api-access-log.ts for the fields and what is deliberately left out. Diagnostic data, so it is destroyed with the stack like the other operational log groups.
+    const accessLogGroup = new logs.LogGroup(this, "ApiAccessLogs", {
+      logGroupName: naming.apiAccessLogGroupName,
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
     const defaultStage = new apigwv2.CfnStage(this, "DefaultStage", {
       apiId: api.ref,
       stageName: "$default",
       autoDeploy: true,
+      accessLogSettings: { destinationArn: accessLogGroup.logGroupArn, format: API_ACCESS_LOG_FORMAT },
     });
     // Webhook lane W3: the public GitHub webhook route's throttle and its alarm (infra/lib/github-webhook.ts).
     guardGithubWebhookRoute(this, naming, api.ref, defaultStage, githubWebhookRoute, notifyOperator);

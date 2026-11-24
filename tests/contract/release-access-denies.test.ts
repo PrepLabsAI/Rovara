@@ -165,7 +165,11 @@ describe("the environment boundary's release pipeline denies (shape)", () => {
     expect(deny.resources).toEqual([
       "arn:aws:ssm:*:*:parameter/rovara-release/staging*",
       "arn:aws:secretsmanager:*:*:secret:rovara-release/staging/*",
-      "arn:aws:*rovara-staging-*rel*",
+      "arn:aws:s3:::rovara-staging-*rel*",
+      "arn:aws:codebuild:*:*:project/rovara-staging-*rel*",
+      "arn:aws:codepipeline:*:*:rovara-staging-*rel*",
+      "arn:aws:sns:*:*:rovara-staging-*rel*",
+      "arn:aws:kms:*:*:alias/rovara-staging-*rel*",
       "arn:aws:cloudformation:*:*:stack/agentx-staging-access/*",
     ]);
   });
@@ -201,8 +205,8 @@ describe("the environment boundary's release pipeline denies (shape)", () => {
     const size = (statements: typeof defaultBoundaryStatements, env: string, partition: string) => JSON.stringify({ Version: "2012-10-17", Statement: statements({ env, partition, region: partition === "aws" ? REGION : "us-gov-west-1", account: ACCOUNT, cloudFormationRoleName: `agentx-${env}-cloudformation` }) }).replace(/\s/gu, "").length;
     for (const env of ["staging", "a".repeat(20), "qqenv-placeholderqq"]) {
       for (const partition of ["aws", "aws-us-gov"]) {
-        expect(size(defaultBoundaryStatements, env, partition), `runtime ${env} ${partition}`).toBeLessThanOrEqual(6144 - 2000);
-        expect(size(deployBoundaryStatements, env, partition), `deploy ${env} ${partition}`).toBeLessThanOrEqual(6144 - 300);
+        expect(size(defaultBoundaryStatements, env, partition), `runtime ${env} ${partition}`).toBeLessThanOrEqual(6144 - 1500);
+        expect(size(deployBoundaryStatements, env, partition), `deploy ${env} ${partition}`).toBeLessThanOrEqual(6144 - 100);
       }
     }
     expect(releasePipelineNames("a".repeat(20)).runsBucket(ACCOUNT).length).toBeLessThanOrEqual(63);

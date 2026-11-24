@@ -152,6 +152,67 @@ describe("hosted Re-check setup: who may do what", () => {
   });
 });
 
+// SETUP-CHECK-WATCH (C): `POST /v1/app/projects/{project}/setup-check/stop`, the same people as start. It ends the project's running check (its preparation, its workspace, its machine) and answers 200 either way.
+describe("hosted Stop check: POST /v1/app/projects/{project}/setup-check/stop", () => {
+  const STOP = `${CHECK}/stop`;
+  const stopEvents = (world: FakeWorld): AuditEvent[] => world.audit.filter((event) => event.action === "setup_check.stop_requested");
+  const workspaceStatus = async (world: FakeWorld, workspaceId: string) => (await world.store.get({ pk: `ORG#${FAKE_COMPANY}#WORKSPACE#${workspaceId}`, sk: "META" }))?.["status"];
+
+  it("lets a company owner, admin and the project's administrator stop a running check: audited first, the workspace closed, and a repeat answers nothing running", async () => {
+    for (const [role, grant, basis] of [["owner", undefined, "company-owner"], ["admin", undefined, "company-admin"], ["member", "administrator", "project-admin"]] as const) {
+      const { world, person, call } = await setupWorld();
+      const caller = person(`p-${role}`, FAKE_COMPANY, role, grant);
+      const started = await call(post(CHECK, { requestId: randomUUID() }), caller);
+      const workspaceId = started.body["workspaceId"] as string;
+      expect(await workspaceStatus(world, workspaceId), role).toBe("PREPARING");
+      const requestId = randomUUID();
+      const stopped = await call(post(STOP, { requestId }), caller);
+      expect({ status: stopped.status, body: stopped.body }, role).toEqual({ status: 200, body: { stopped: 1, nothingRunning: false } });
+      expect(await workspaceStatus(world, workspaceId), role).toBe("CLOSED");
+      expect(stopEvents(world).map((event) => [event.actor, event.details?.["basis"], event.subject])).toEqual([[{ type: "person", id: `p-${role}` }, basis, { type: "project", id: "payments" }]]);
+      const again = await call(post(STOP, { requestId }), caller);
+      expect({ status: again.status, body: again.body }).toEqual({ status: 200, body: { stopped: 0, nothingRunning: true } });
+      // The page then reads the check as failed, and a new check may start.
+      expect((await call(get(CHECK), caller)).body).toMatchObject({ status: "failed" });
+      expect((await call(post(CHECK, { requestId: randomUUID() }), caller)).status).toBe(202);
+    }
+  });
+
+  it("refuses a reader in fixed words and stops nothing; anyone else, another company and a malformed project read the uniform 404", async () => {
+    const { world, person, call } = await setupWorld();
+    const owner = person("p-owner", FAKE_COMPANY, "owner");
+    const started = await call(post(CHECK, { requestId: randomUUID() }), owner);
+    const workspaceId = started.body["workspaceId"] as string;
+    const reader = person("p-dev", FAKE_COMPANY, "member", "developer");
+    const refused = await call(post(STOP, { requestId: randomUUID() }), reader);
+    expect(refused.status).toBe(403);
+    expect(refused.body).toEqual({ error: { code: "FORBIDDEN", message: SETUP_RUN_NOT_ALLOWED } });
+    for (const caller of [person("p-none", FAKE_COMPANY, "member"), person("p-foreign", OTHER, "member")]) {
+      const answer = await call(post(STOP, { requestId: randomUUID() }), caller);
+      expect({ status: answer.status, body: answer.body }).toEqual({ status: 404, body: { error: { code: "NOT_FOUND", message: SETUP_RUN_PROJECT_NOT_FOUND } } });
+    }
+    expect((await call(post("/v1/app/projects/-bad/setup-check/stop", { requestId: randomUUID() }), owner)).status).toBe(404);
+    expect(await workspaceStatus(world, workspaceId)).toBe("PREPARING");
+    expect(stopEvents(world)).toEqual([]);
+  });
+
+  it("takes only { requestId }, writes nothing when the audit record cannot be written, and is a POST only", async () => {
+    const owner = await setupWorld();
+    const caller = owner.person("p-owner", FAKE_COMPANY, "owner");
+    const started = await owner.call(post(CHECK, { requestId: randomUUID() }), caller);
+    for (const body of [{}, { requestId: "nope" }, { requestId: randomUUID(), workspaceId: started.body["workspaceId"] }]) expect((await owner.call(post(STOP, body), caller)).status).toBe(400);
+    expect(await workspaceStatus(owner.world, started.body["workspaceId"] as string)).toBe("PREPARING");
+    await expect(owner.call(get(STOP), caller)).rejects.toThrow("not served");
+
+    const failing = await setupWorld({ audit: (sink) => ({ ...sink, record: async (event) => { if (event.action === "setup_check.stop_requested") throw new Error("audit down"); return sink.record(event); } }) });
+    const person = failing.person("p-owner", FAKE_COMPANY, "owner");
+    const check = await failing.call(post(CHECK, { requestId: randomUUID() }), person);
+    const refused = await failing.call(post(STOP, { requestId: randomUUID() }), person);
+    expect(refused.status).toBe(503);
+    expect(await workspaceStatus(failing.world, check.body["workspaceId"] as string)).toBe("PREPARING");
+  });
+});
+
 // L4-U5: the same read carries who may act and, while the setup is broken, the "Setup needs repair" card in the words every surface shares.
 describe("hosted Re-check setup: the repair card on the read (L4-U5)", () => {
   const STEP = "setup: npm ci - setup step 0 (npm ci) failed: exit 1";

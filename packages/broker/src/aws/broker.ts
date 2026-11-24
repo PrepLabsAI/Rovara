@@ -15970,7 +15970,7 @@ const lambdaClient = new LambdaClient(awsClientConfiguration);
 /** Batch 12: the core root buildBrokerHandler made (#872 builds it on the first request); Linear's intake asks it at delivery time. */
 let builtCoreRoot: ReturnType<typeof createBrokerCoreRoot> | undefined;
 const linear = linearCompanyWiring({ env: process.env, documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), kms: new KMSClient(awsClientConfiguration), secrets: secretsManager,
-  connectorSecretPrefix: process.env.CONNECTOR_SECRET_PREFIX ?? CONNECTOR_SECRET_PREFIX, log: brokerLogLine,
+  connectorSecretPrefix: process.env.CONNECTOR_SECRET_PREFIX ?? CONNECTOR_SECRET_PREFIX, log: brokerLogLine, dynamo: dynamoClient,
   // L2-4: each company's tracker intake from the core root (built below; asked only at delivery time).
   // Batch 12 (#872 builds the core root on the first request, after the callback key is read): the root built then; no delivery reaches this before it.
   intakeFor: async (companyId) => await builtCoreRoot?.intake?.intakeFor(companyId) });
@@ -16005,6 +16005,8 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
       ...(slackChannelWiring === undefined ? {} : { slackChannels: slackChannelWiring }),
       // Guided onboarding PR 7: the Linear connect routes (linear-connect-routes.ts), where the token key is given.
       ...(linear === undefined ? {} : { linearConnect: linear.connect }),
+      // R1 + L1: a member links their own Linear account; the admin lists and removes links (linear-account-link-routes.ts).
+      ...(linear?.link === undefined ? {} : { linearLink: linear.link }),
       // Guided onboarding PR 14: the company engine model route, only where the model gateway is configured (its live list is the authority).
       ...(companyEngineModelOffered === undefined ? {} : { companyEngineModel: { offered: companyEngineModelOffered, installModel: () => installEngineModel(process.env), log: brokerLogLine }, companyLearningModel: { offered: companyEngineModelOffered, installModel: () => installLearningModel(process.env), log: brokerLogLine } }),
       // L4-EGR: Rovara's outbound addresses (the stack parameter NatEgressAddresses); an empty or absent value reads as an empty list.
@@ -16112,8 +16114,9 @@ function buildBrokerHandler(callbackSigningKey: string) {
     // L4-HW3b: the project's own merge rules (the record the developer API's code-settings route saves), not Code's defaults: for how we work (every company's runtime) and for the merge
     // tracker (this company's only). A project with none saved reads the defaults, as before. The laptop's rules are fixed instead (local/app/app.ts:395 and local/app/tracking.ts:34).
     codeSettings: codeSettingsReader({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }),
+    // `taskPeople` (the task People list the merge requesters are read from, aws/hosted-merge-people.ts) is REQUIRED by the job services: a root built without it throws.
     services: (companyId, flow, registry, wiring) => createHostedBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!,
-      settings: companyCodeSettingsReader({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }, companyId), ...(wiring.humanEdit === undefined ? {} : { humanEdit: wiring.humanEdit }), ...(wiring.threadMoments === true ? { threadMoments: true } : {}), ...(wiring.threadRefresh === undefined ? {} : { threadRefresh: wiring.threadRefresh }),
+      settings: companyCodeSettingsReader({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }, companyId), taskPeople: { documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }, ...(wiring.humanEdit === undefined ? {} : { humanEdit: wiring.humanEdit }), ...(wiring.threadMoments === true ? { threadMoments: true } : {}), ...(wiring.threadRefresh === undefined ? {} : { threadRefresh: wiring.threadRefresh }),
       // The email seams travel with the upkeep notice's (#959); L4-AK1H: a queued admin notice (unusual team knowledge reading) is told only to someone who is an admin now (the core root answers once built; before that: no one).
       notification: { ...(wiring.notification ?? {}), ...(wiring.upkeep === undefined ? {} : { upkeep: wiring.upkeep }), adminNotice: async (orgId, developerId) => (await builtCoreRoot?.adminNotice?.(orgId, developerId)) === true },
     }),

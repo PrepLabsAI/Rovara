@@ -200,6 +200,17 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     daemonBefore = had.code === 0 ? (await sudo("cat", DAEMON_JSON)).stdout : undefined;
     if (daemonBefore !== undefined) await writeFile(join(dir, "daemon.before"), daemonBefore);
     if (daemonBefore === undefined) await sudo("bash", "-c", `mkdir -p /etc/docker && echo '{}' > ${DAEMON_JSON}`);
+    else {
+      // A real EC2 worker's daemon.json (written by boot.sh and the test-services stage) never has a default name server, and the stage refuses to overwrite one. A runner image may come with one preset, so the stage starts from the runner's file WITHOUT its "dns" key
+      // (every other key kept; the original is put back in afterAll). A foreign entry staying in place would be a refusal, which is the stage's own, separately tested, behaviour.
+      const parsed: unknown = daemonBefore.trim() === "" ? {} : JSON.parse(daemonBefore);
+      expect(parsed !== null && typeof parsed === "object" && !Array.isArray(parsed), `the runner's ${DAEMON_JSON} must be one JSON object: ${daemonBefore}`).toBe(true);
+      const { dns: presetDns, ...clean } = parsed as Record<string, unknown>;
+      if (presetDns !== undefined) console.warn(`worker-sandbox-egress: the runner's ${DAEMON_JSON} had a default name server (${JSON.stringify(presetDns)}); it is taken out for this test and put back after`);
+      await writeFile(join(dir, "daemon.clean"), `${JSON.stringify(clean)}\n`);
+      expect((await sudo("cp", join(dir, "daemon.clean"), DAEMON_JSON)).code).toBe(0);
+    }
+    expect((await sudo("cat", DAEMON_JSON)).stdout, "the stage starts from a daemon.json with no default name server").not.toMatch(/"dns"\s*:/u);
     // A user bridge with a way out (the control), and a left-over agentx-task network that something still holds, as a bridge-mode session leaves it.
     await docker("network", "create", CONTROL_NETWORK);
     await docker("network", "create", "agentx-task");

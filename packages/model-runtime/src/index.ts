@@ -89,9 +89,12 @@ export function routeSupportsReasoning(route: InvocationModelRoute): boolean {
  * #1389: an OpenAI model on the gateway's Anthropic Messages route runs on the company's own OpenAI key, which the gateway reaches by translating the request to
  * Chat Completions. That translation refuses a whole request carrying extended thinking or an image, so such a model is sent neither: it runs with Anthropic
  * thinking off (OpenAI still applies the model's own default reasoning) and text-only input (Pi puts its placeholder where an image would go).
+ * The company's own OpenRouter key takes the same Chat Completions path (`vendor/model` names), so a route whose provider identity is OpenRouter (its own, else the
+ * catalog entry the route names; never the shape of the name) is held to the same rule. Without it Pi sends thinking for a catalog row that reasons, clamps "off" up to
+ * "low" when the row does not allow off, and the gateway refuses the whole request.
  */
 export function isGatewayChatModel(route: InvocationModelRoute): boolean {
-  return route.api === "anthropic-messages" && isOpenAiAgentModel(route.catalog);
+  return route.api === "anthropic-messages" && (isOpenAiAgentModel(route.catalog) || routeUsageIdentity(route).provider === "openrouter");
 }
 
 /** The thinking level a routed model runs with: the one asked for if the model reasons, else off; absent stays absent. */
@@ -350,7 +353,7 @@ async function createRoutedModelRuntime(selected: ModelIdentifier & { thinkingLe
       maxTokens: route.api === "anthropic-messages" && !isClaudeFamilyCatalog(route.catalog) ? Math.min(base.maxTokens, GATEWAY_CONVERSE_MAX_OUTPUT_TOKENS) : base.maxTokens,
       ...(catalog?.thinkingLevelMap === undefined ? {} : { thinkingLevelMap: catalog.thinkingLevelMap }),
       ...(catalog?.promptCache === undefined ? {} : { promptCache: catalog.promptCache }),
-      compat: routeCompat(route.api, catalog?.api === route.api ? catalog.compat : undefined, route.catalog),
+      compat: routeCompat(route.api, catalog?.api === route.api ? catalog.compat : undefined, route.catalog, isGatewayChatModel(route)),
     }],
     streamSimple: (entry, context, streamOptions) => safeProviderStream(route.api === "anthropic-messages" ? "anthropic" : "openai", entry, context, streamOptions, undefined, options.fetch, options.onUsage, undefined, proxyRequestKey(proxy, route.api), { api: route.api, identity }),
   });
@@ -361,10 +364,11 @@ async function createRoutedModelRuntime(selected: ModelIdentifier & { thinkingLe
 
 /**
  * The request a routed model gets: the shared rules of requestCompat, and no session-affinity header for a company's endpoint. A routed Anthropic-format model that
- * needs its earlier reasoning sent back (carriesUnsignedReasoning) also keeps its unsigned thinking blocks as thinking blocks.
+ * needs its earlier reasoning sent back (carriesUnsignedReasoning) also keeps its unsigned thinking blocks as thinking blocks. A gateway chat model (isGatewayChatModel) is told not to manage effort per turn.
  */
-function routeCompat(api: InvocationModelRoute["api"], compat: unknown, catalogName: string) {
-  if (api === "anthropic-messages") return { ...requestCompat("anthropic", compat), ...(carriesUnsignedReasoning(catalogName) ? { allowEmptySignature: true } : {}) };
+function routeCompat(api: InvocationModelRoute["api"], compat: unknown, catalogName: string, gatewayChat: boolean) {
+  // A gateway chat model never thinks, but a catalog row that manages effort per turn (an Anthropic model listed under OpenRouter) makes Pi send `thinking: adaptive` even with reasoning off.
+  if (api === "anthropic-messages") return { ...requestCompat("anthropic", compat), ...(carriesUnsignedReasoning(catalogName) ? { allowEmptySignature: true } : {}), ...(gatewayChat ? { supportsMidConvoEffort: false } : {}) };
   if (api === "openai-responses") return requestCompat("openai", compat);
   return { ...(compat as OpenAICompletionsCompat | undefined), sendSessionAffinityHeaders: false, supportsMidConvoSystemMessages: false };
 }

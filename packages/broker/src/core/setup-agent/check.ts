@@ -22,8 +22,9 @@ import { legacyWorkspaceKey } from "../task-flow/legacy-keys.js";
 import { fromDocument, toDocument, type WorkspaceRecord } from "../task-flow/records.js";
 import { iso, log, newId } from "../task-flow/support.js";
 import { releaseAdmission } from "../task-flow/admission.js";
+import { prepareWatchItem } from "../task-flow/prepare-watch.js";
 
-/** The longest a preparation may be PREPARING before the check reads as failed. */
+/** The longest a preparation may be PREPARING before the check reads as failed. The preparation watch ends it at the same limit (`PREPARATION_TIMEOUT_MS`, task-flow/prepare-watch.ts; a test holds the two equal). */
 export const SETUP_CHECK_STUCK_MS = 50 * 60_000;
 export const STALLED_STEP = "setup did not finish";
 /** The most characters the whole failing step keeps (stage, command and reason): the session views cap `failedStep` at 300. */
@@ -149,6 +150,8 @@ export function buildSetupCheck(deps: TaskFlowDeps, input: { project: string; re
     { kind: "put", item: toDocument(workspace), condition: when.absent() },
     { kind: "put", item: { ...legacyWorkspaceKey(workspaceId), entityType: "WORKSPACE_COMPANY_POINTER", workspaceId, companyId: workspace.companyId }, condition: when.absent() },
     ...prepare.items,
+    // The check's preparation is watched like a task's (prepare-watch.ts): one that has not settled within the limit is ended, its workspace closed and its machine released (a worker whose answer was lost left it running for ever).
+    prepareWatchItem(deps.companyId, now, workspaceId, prepareOperationId),
     { kind: "put", item: { ...setupCheckRecordKey(deps.companyId, workspaceId), entityType: "SETUP_CHECK", companyId: deps.companyId, project: input.project, workspaceId, revision: input.revision, candidate: input.candidate, createdAt: now, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(now) / 1000) + 31 * 86_400 }, condition: when.absent() },
   ];
   return { workspaceId, mark, items, operationId: prepare.operation.id };
