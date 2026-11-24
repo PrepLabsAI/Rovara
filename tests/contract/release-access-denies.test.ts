@@ -427,11 +427,13 @@ describe("the pipeline's own roles are unaffected (two boundaries, no collision)
 });
 
 describe("what the denies do not need: prod and the legacy deployment", () => {
-  it("adds nothing to the deployment that predates environments: it has no access stack, no boundary and no release pipeline name", () => {
+  it("adds nothing to the deployment that predates environments: no access stack, none of these release denies and no release pipeline name", () => {
     const stacks = buildAgentXApp().node.children.filter((child): child is Stack => Stack.isStack(child));
     for (const stack of stacks) {
       const text = JSON.stringify(Template.fromStack(stack).toJSON());
-      expect(text, stack.stackName).not.toContain("DenyRelease");
+      // Exact Sids: the legacy runtime boundary (Fix A, DEC 254zzz443) has its own DenyReleasePipelineRoles / DenyReleaseProjects; these two must never reach it.
+      expect(text, stack.stackName).not.toContain('"Sid":"DenyReleasePipeline"');
+      expect(text, stack.stackName).not.toContain('"Sid":"DenyReleaseKey"');
       expect(text, stack.stackName).not.toContain("rovara-release");
       expect(text, stack.stackName).not.toContain("-rel-runs-");
     }
