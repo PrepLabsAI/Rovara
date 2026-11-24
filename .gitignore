@@ -4,7 +4,7 @@ build/
 coverage/
 cdk.out/
 .release-synth/
-# docs/ stays ignored except the trees the-loop records into (they must be committed).
+# docs/ stays ignored except the pages and trees listed here (they must be committed).
 docs/*
 !docs/npm-package.md
 !docs/company-and-projects.md
@@ -12,7 +12,8 @@ docs/*
 !docs/porting.md
 !docs/ports.md
 !docs/local.md
-!docs/core-switch-on-runbook.md
+!docs/core-settings.md
+!docs/constitution.md
 !docs/specs/
 !docs/decisions/
 !docs/learnings/
@@ -33,20 +34,8 @@ Thumbs.db
 .agentx/
 .codex/
 *.tsbuildinfo
-# Keep .agents/skills/ versioned; it contains Spec Kit instructions, not credentials.
-
 # Evaluation results stay local; only baselines are committed.
 tests/eval/results/
 
-# the-loop: generated state under state.root (.the-loop). Local handles never leave
-# the machine; .the-loop/portable/ travels with the work, so it is tracked.
-.the-loop/local/
-.the-loop/logs/
-.the-loop/*.pid
-.the-loop/poll-status.json
-.the-loop/self-diagnosis.json*
-.the-loop/channels/
-.the-loop/portable/*.tmp
-.the-loop/learnings-pending/
 work-item-state.lock
 graph-state.lock

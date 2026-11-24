@@ -34,50 +34,8 @@ For Bedrock/OpenRouter configuration, Slack model selection, and the live verifi
 
 ## Implementation documents
 
-- [Pull-request task list](../specs/002-create-pull-request/tasks.md): implementation and validation
-  status for explicit publication.
-- [Safe PR lifecycle task list](../specs/003-safe-pr-lifecycle/tasks.md): clean publication,
-  append/sync, replacement, and revert progress.
-- [Pull-request specification](../specs/002-create-pull-request/spec.md): publication behavior,
-  safety, and retry requirements.
-- [Conversation continuity task list](../specs/012-conversation-continuity/tasks.md): reopening a
-  thread's saved session, and what is verified locally rather than on a deployment.
-- [Task list](../specs/001-agentx-foundation/tasks.md): the foundation's implementation tasks, in
-  dependency order.
-- [Specification](../specs/001-agentx-foundation/spec.md): agreed workflows and acceptance criteria.
-- [Plan](../specs/001-agentx-foundation/plan.md): architecture, boundaries and delivery sequence.
-- [Research](../specs/001-agentx-foundation/research.md): decisions and primary sources.
 - [Production AWS architecture](architecture-production.md): EC2 workers and persistent EBS,
   per-session EBS, networking, release, isolation, and migration boundaries.
-- [Contracts](../specs/001-agentx-foundation/contracts/): project config, control API and worker protocol.
-- [Validation guide](../specs/001-agentx-foundation/quickstart.md).
-- [Installer specification](../specs/015-installer/spec.md) and
-  [phase plans](../specs/015-installer/plans/README.md): `agentx init`, `upgrade`, `config`, `doctor`
-  and `destroy` (phases 15a to 15e built).
-- [MCP server specification](../specs/025-mcp-server/spec.md) and
-  [phase plans](../specs/025-mcp-server/plans/README.md): developer sign-in, tasks from AI tools and
-  sharing (phases 25a to 25c built; 25d and 25e not yet).
-- [Local install page specification](../specs/040-install-ui/spec.md): `agentx init --ui` (phase 1
-  built; phases 2 to 4 not yet).
+- [Ports](ports.md): the plug-in points of the core engine and their adapters.
 - [Project configuration](project-configuration.md): every field of a project file.
-- [Constitution](../.specify/memory/constitution.md): project principles, version 4.0.0.
-
-## GitHub Spec Kit
-
-Initialized with the official Specify CLI 1.0.7 and Codex skills integration:
-
-```sh
-uvx --from specify-cli==1.0.7 specify init --here --integration codex --integration-options="--skills" --script sh --ignore-agent-tools --non-interactive
-```
-
-Initialization has already run; do not rerun it over these artifacts unnecessarily.
-The installed skills are in `.agents/skills/`, with templates/scripts under `.specify/`.
-
-Spec Kit skills are agent instructions, not shell commands. No Git repository or branch was
-created by this setup.
-
-Validate the active feature now:
-
-```sh
-.specify/scripts/bash/check-prerequisites.sh --json --require-spec --require-tasks --include-tasks
-```
+- [Constitution](constitution.md): project principles.

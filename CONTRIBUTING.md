@@ -9,7 +9,7 @@ This page says how to propose a change and get it merged.
 - **Found a bug?** Open an issue with the bug form. Include `agentx --version` and, for an
   installed environment, the output of `agentx --env <name> doctor`, with secrets removed.
 - **Want to add or change a feature?** Open an issue first and describe the problem. Larger changes
-  start as a specification under `specs/`, so we can agree the behaviour before anyone writes code.
+  start as a written proposal in the issue, so we can agree the behaviour before anyone writes code.
 
 ## Set up
 
@@ -50,12 +50,6 @@ npm run build
 - Describe the problem, the change, and how you tested it. Link the issue or spec.
 - Keep a pull request to one change. Small pull requests are reviewed faster.
 - CI must pass. A maintainer reviews every pull request, and a maintainer merges it.
-
-## Specifications
-
-Features are designed with [GitHub Spec Kit](https://github.com/github/spec-kit). Each feature has
-a folder under `specs/` with its `spec.md`, `plan.md` and `tasks.md`. Read the relevant spec before
-changing a feature, and update it in the same pull request when the behaviour changes.
 
 ## Writing style
 

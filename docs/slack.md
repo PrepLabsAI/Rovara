@@ -42,8 +42,7 @@ connector covers several. Its instructions open with a list of what the channel 
 integrations are not connected. Calls go orchestrator → control plane → GitHub MCP, without a
 worker.
 
-See [GitHub MCP setup and policy example](../specs/007-github-mcp/quickstart.md). The policy can be
-written as `integrations.githubMcp` or, since feature 013, as a `github` entry in
+The policy can be written as `integrations.githubMcp` or, since feature 013, as a `github` entry in
 `integrations.connectors`, which can also limit it to named repositories; a definition may use one
 form, not both. Every GitHub write signs the `body` the model supplies (an update without a body
 stays unsigned) with a footer naming the requesting Slack member and thread; set
@@ -405,10 +404,7 @@ With JavaScript off the page still shows the plan, every comment and AgentX's an
 that need JavaScript stay hidden. Unsent answers and comment text are kept in the browser tab while it
 is open, so a refresh does not lose them; they are gone when the tab closes or the sign-in ends.
 
-**After a release.** `npx tsx scripts/plan-review-live-check.ts --page <task page link>` checks a
-deployed page (set `AGENTX_REVIEW_SESSION` to your review sign-in cookie; it is never printed) and
-prints the hands-on list to try on real phones: an iPhone in Slack's browser, Android in dark mode,
-keyboard only, VoiceOver, a second person suggesting, and a Full task with one Request changes.
+**After a release.** Open a deployed task page and try the hands-on list on real phones: an iPhone in Slack's browser, Android in dark mode, keyboard only, VoiceOver, a second person suggesting, and a Full task with one Request changes.
 
 ## Tasks shared from an AI tool
 
@@ -645,8 +641,7 @@ Interactivity, which the action gate's confirmation buttons already turned on; i
 scope.
 
 Connector and turn metrics go to the `AgentX` CloudWatch namespace (`AgentX/<env>` in an
-installed environment); see
-[contracts/metrics.md](../specs/013-connector-gateway/contracts/metrics.md) for the full list. The
+installed environment). The
 names below are the maintainers' deployment's. An installed environment has the same alarms named
 `agentx-<env>-<Name>` (for example `agentx-<env>-ConnectorBroken`) on the topic
 `agentx-<env>-alerts`, plus Slack service, session and shared-task notice alarms (such as

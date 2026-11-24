@@ -4,7 +4,7 @@ Rovara can call Anthropic's API or OpenAI's API directly, using an API key you s
 alongside) Amazon Bedrock and OpenRouter. Any role can use it: the Slack orchestrator, the action-gate
 classifier and the coding worker. Projects can also approve these models for Slack's `@agentx use`. The
 key belongs to the installation: only an administrator sets it, through `agentx init`. It is never entered
-in Slack. See [spec 054](../specs/054-direct-provider-keys/spec.md).
+in Slack.
 
 To let each developer use their **own ChatGPT Plus or Pro plan** for their tasks instead, see
 [Sign in with ChatGPT](chatgpt.md).

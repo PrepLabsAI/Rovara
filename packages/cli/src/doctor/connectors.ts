@@ -121,7 +121,7 @@ export async function connectorChecks(context: DoctorContext): Promise<DoctorChe
   for (const file of files) {
     const integrations = (file.definition.integrations ?? {}) as { githubMcp?: unknown; connectors?: unknown[] };
     if (integrations.githubMcp !== undefined) {
-      checks.push(check("connectors", `project ${file.name}`, "warn", "uses the older integrations.githubMcp setting", "move it to integrations.connectors (specs/013-connector-gateway/contracts/project-config.md), then register the project again"));
+      checks.push(check("connectors", `project ${file.name}`, "warn", "uses the older integrations.githubMcp setting", "move it to integrations.connectors (docs/project-configuration.md), then register the project again"));
     }
     for (const entry of integrations.connectors ?? []) {
       if ((entry as { type?: unknown }).type === "mcp") {
