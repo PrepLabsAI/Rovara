@@ -17,14 +17,6 @@ export type ParallelPartsDependencies = Pick<TaskFlowDeps, "store" | "limits">;
 /** Rovara Code v2 is the one definition version that builds parts in parallel. */
 export const isParallelPartsWorkflow = (workflow: { definitionVersion?: string } | undefined): boolean => workflow?.definitionVersion === "1.1.0";
 
-/**
- * Whether a task's approved ordered plan may start. Version 1 keeps the install's switch (`workflowDependenciesEnabled`, off by default); a version 2 task does not need it, since a version 2 task exists only
- * where the install started tasks on version 2 (`rovara up` always does).
- */
-export function workflowDependenciesAllowed(deps: { workflowDependenciesEnabled?: boolean | undefined }, workflow: { definitionVersion?: string } | undefined): boolean {
-  return deps.workflowDependenciesEnabled === true || isParallelPartsWorkflow(workflow);
-}
-
 /** The parts setting, and the line for the timeline when it holds the plan's parts back (see `parallelPartsDecision`). */
 export interface PartsDecision { parallel: WorkflowParallel | undefined; note?: string }
 

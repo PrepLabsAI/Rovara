@@ -242,7 +242,7 @@ export interface TaskInvocationDependencies {
   contextSources?: {
     catalog: () => Promise<ContextToolCatalog | undefined>;
     call: ContextBridgeCall;
-    /** Present: the stage reaches its sources through Pi's own MCP client, as the one server "rovara" (context-sources/pi-mcp.ts), and `call` is not used. */
+    /** Present (always, in production: no switch, DEC 254zzz461): the stage reaches its sources through Pi's own MCP client, as the one server "rovara" (context-sources/pi-mcp.ts), and `call` is not used. Absent only in a test that injects its own `call`. */
     mcp?: { brokerUrl: string; capability: string };
   };
   /**
@@ -715,7 +715,7 @@ async function runTask(
       sourceGuard.current = guard;
       const mcp = dependencies.contextSources.mcp;
       sourceSession = {
-        // Pi's own MCP client and the rovara server by default; the worker's own tools when the switch is off (ROVARA_PI_MCP=0).
+        // Pi's own MCP client and the rovara server; the worker's own tools only where a test gives a `call` and no `mcp`.
         ...(mcp === undefined
           ? { contextTools: createContextTools(catalog, dependencies.contextSources.call, { workspaceId: invocation.workspaceId, conversationId, operationId: invocation.operationId }, { onText: (text) => { guard.remember(text); } }) }
           : { contextTools: [], contextMcp: { brokerUrl: mcp.brokerUrl, capability: mcp.capability, catalog, onText: (text: string) => { guard.remember(text); } } }),

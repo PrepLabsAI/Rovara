@@ -10,7 +10,6 @@ import { textReaderOf } from "../build-step/plan-input.js";
 import { loadPlanDocument } from "../plan/document.js";
 import type { ArtifactReader, TaskFlowDeps } from "../task-flow/deps.js";
 import type { TaskRecord } from "../task-flow/records.js";
-import { workflowDependenciesAllowed } from "./parallel-parts.js";
 
 /** The graph a plan document carries, read from the document the artifact names (bytes checked against its digest). Undefined for a Markdown plan, an unreadable one, or a plan with no breakdown. */
 export async function planGraphOf(artifacts: ArtifactReader | undefined, artifact: WorkflowArtifact): Promise<TaskGraphV1 | undefined> {
@@ -25,12 +24,12 @@ export const PLAN_UNREADABLE = "the plan could not be read back, so it was not a
 export type BreakdownAnswer = { digest?: string; refusal?: undefined } | { refusal: string; digest?: undefined };
 
 /**
- * The breakdown an approval of the plan waiting now would bind, read from the stored document the artifact digest names. Version 1 tasks need the install's switch; the task must be pinned to one repository; the
+ * The breakdown an approval of the plan waiting now would bind, read from the stored document the artifact digest names. The task must be pinned to one repository; the
  * graph must be valid for this task and that repository. Every Code surface that decides a plan (the page, a card, a comment) gets the digest from here, derived from the same document the decision binds by its own
  * digest, so a surface cannot bind a graph the person was not shown.
  */
 export async function breakdownForApproval(
-  deps: Pick<TaskFlowDeps, "artifacts" | "projects" | "workflowDependenciesEnabled">,
+  deps: Pick<TaskFlowDeps, "artifacts" | "projects">,
   task: { taskId: string; project: string; startingRevision: number },
   workflow: { artifacts: readonly WorkflowArtifact[]; definitionVersion?: string },
   artifactDigest: string,
@@ -42,7 +41,6 @@ export async function breakdownForApproval(
   if (loaded.kind !== "structured") return { refusal: PLAN_UNREADABLE };
   const graph: TaskGraphV1 | undefined = loaded.plan.workBreakdown;
   if (graph === undefined) return {};
-  if (!workflowDependenciesAllowed(deps, workflow)) return { refusal: WORKFLOW_BREAKDOWN_REFUSALS.notEnabled };
   const pinned = await deps.projects.revision(task.project, task.startingRevision);
   if (pinned === undefined || pinned.definition.repositories.length !== 1) return { refusal: WORKFLOW_BREAKDOWN_REFUSALS.onePinnedRepository };
   const validated = validateTaskGraph(graph, { taskId: task.taskId, repositoryId: pinned.definition.repositories[0]!.name });

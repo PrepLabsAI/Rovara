@@ -278,13 +278,8 @@ export interface TaskFlowDeps {
   codeHosts?: RegistryView;
   /** Open workspaces one person may hold, and all together. Default 10 and 100. */
   limits?: { member: number; organization: number } | (() => Promise<{ member: number; organization: number }>);
-  /** Whether a workflow task starts by understanding the request (workflow 1.1.0). Default: Cloud's `ROVARA_CODE_V2_FOR_NEW_ORGS`. */
+  /** Whether a workflow task starts by understanding the request (workflow 1.1.0). Default: false (the 1.0.0 path); the hosted and the laptop roots both pass true. */
   understandFirst?: boolean;
-  /**
-   * Whether a task on workflow version 1.0.0 may start its approved ordered plan (spec 059). Default off. A version 1.1.0 task (every task `rovara up` starts)
-   * does not need it: it exists only where the install started tasks on 1.1.0.
-   */
-  workflowDependenciesEnabled?: boolean;
   /** The queue operations are dispatched on. Default `task-dispatch`. */
   dispatchQueue?: string;
   /**
@@ -367,7 +362,7 @@ export interface TaskFlowDeps {
    */
   keepEvidence?: (input: { task: TaskRecord; operation: OperationRecord; workflow: WorkflowSnapshot; candidateDigest: string; checks: readonly CheckEntry[] }) => Promise<unknown>;
   /**
-   * TE-C6 (behind `ROVARA_FLAKY_RERUN`): the failed checks of a run that may be recorded as passed because every test that failed in them passed on the worker's one rerun, with those tests' ids, and the base's flaky set
+   * TE-C6: the failed checks of a run that may be recorded as passed because every test that failed in them passed on the worker's one rerun, with those tests' ids, and the base's flaky set
    * (undefined when it is not known: then no test is flaky on the base). Read BEFORE the verification is recorded; a fault, a missing answer or an empty one changes nothing (the check stays failed). Absent: nothing is excused.
    */
   flakyChecks?: (input: { task: TaskRecord; operation: OperationRecord; candidateDigest: string; checks: readonly CheckEntry[] }) => Promise<{ byCheck: ReadonlyMap<string, readonly string[]>; baseFlaky: readonly string[] | undefined } | undefined>;

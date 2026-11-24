@@ -674,8 +674,8 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
               return shared;
             })
             : await loadOwnedTask(target.runtime.flow.deps, taskCaller, task[1]!);
-          await observeHostedBlockedTask(target.runtime.flow.deps, record, target.wiring.testEnvironment?.env);
-          const testing = await hostedTestingView(target.runtime.flow.deps, target.blobs, record, target.wiring.testEnvironment?.env);
+          await observeHostedBlockedTask(target.runtime.flow.deps, record);
+          const testing = await hostedTestingView(target.runtime.flow.deps, target.blobs, record);
           const view = await taskViewFor(target, record, caller, membership);
           return json(200, { task: { ...view, ...(testing === undefined ? {} : { testing }), ...await applicationReadProjection(target.runtime, record, caller.principal.personId) } });
         }

@@ -8,9 +8,8 @@ import { agentXError, canonicalJson, taskGraphDigest, workflowDependencyAttemptT
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { fromDocument, type OperationRecord, type TaskRecord } from "../task-flow/records.js";
 import { approvedGraphOf } from "./plan-graph.js";
-import { parallelPartsDecision, parallelPartsForTask, workflowDependenciesAllowed } from "./parallel-parts.js";
+import { parallelPartsDecision, parallelPartsForTask } from "./parallel-parts.js";
 
-export const ORDERED_WORK_NOT_ENABLED = "the approved ordered work plan is retained, but this install is not enabled to continue it";
 
 const TERMINAL_OPERATION = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
 
@@ -19,7 +18,6 @@ export async function firstGraphInvocation(deps: TaskFlowDeps, task: TaskRecord 
   const { workflow } = task;
   const approval = workflow.workflowDependenciesApproval;
   if (approval === undefined) return undefined;
-  if (!workflowDependenciesAllowed(deps, workflow)) throw agentXError("CONFIG_INVALID", ORDERED_WORK_NOT_ENABLED);
   const graph = await approvedGraphOf(deps, task, workflow);
   if (graph === undefined) return undefined;
   const parts = await parallelPartsDecision(deps, { charge: task.charge, workflow }, graph);
@@ -34,7 +32,6 @@ export async function resumeGraphInvocation(deps: TaskFlowDeps, task: TaskRecord
   const { workflow } = task;
   const approval = workflow.workflowDependenciesApproval;
   if (approval === undefined) return undefined;
-  if (!workflowDependenciesAllowed(deps, workflow)) throw agentXError("CONFIG_INVALID", ORDERED_WORK_NOT_ENABLED);
   const graph = await approvedGraphOf(deps, task, workflow);
   if (graph === undefined) return undefined;
   const progress = workflow.workflowDependenciesProgress ?? [];

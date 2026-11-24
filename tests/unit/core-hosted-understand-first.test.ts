@@ -19,9 +19,9 @@ import { createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-
 import { createBrokerCoreServices } from "../../packages/broker/src/aws/core-job-services.js";
 import { taskKeySigner } from "../../packages/broker/src/core-host/gateway-model-access.js";
 import { workflowPullRequestCheckVerdict } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
+import { isParallelPartsWorkflow } from "../../packages/broker/src/core/work-breakdown/parallel-parts.js";
 import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
 import { commitWorkflow } from "../../packages/broker/src/core/task-flow/stage-machine.js";
-import { workflowDependenciesAllowed } from "../../packages/broker/src/core/work-breakdown/parallel-parts.js";
 import { createFakeWorld } from "../support/core-host-fakes.js";
 import { makeKey, signerOf } from "./policy-hook-fixture.js";
 import { signedRunPriceResponse } from "../support/signed-run-price-fetch.js";
@@ -138,9 +138,8 @@ describe("the hosted core root starts workflow tasks on 1.1.0 (L4-HW1)", () => {
     const deps = await h.depsOf(root, A);
     const record = (await readTask(deps, taskId))!;
     const workflow = record.workflow!;
-    // Parts: the hosted flow has no install switch for ordered plans, and a 1.1.0 task needs none.
-    expect(deps.workflowDependenciesEnabled).not.toBe(true);
-    expect(workflowDependenciesAllowed(deps, workflow)).toBe(true);
+    // Parts: ordered plans have no install switch (DEC 254zzz461); a 1.1.0 task is the one that builds parts in parallel.
+    expect(isParallelPartsWorkflow(workflow)).toBe(true);
     // Plan check: the program has the plan_critic step (core/plan runs the check from it).
     expect(workflow.program?.steps.some((step) => step.kind === "plan_critic")).toBe(true);
     // An unreviewed start has no verdict; the 1.1.0 projection engages once its current code reviews clear.

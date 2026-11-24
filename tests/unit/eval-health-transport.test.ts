@@ -128,16 +128,14 @@ describe("the run's own preparation", () => {
 });
 
 describe("the hosted health stand-in source", () => {
-  it("uses the operator switch and scopes the descriptor to its company", async () => {
+  it("always carries the descriptor source (no switch, DEC 254zzz461) and scopes the descriptor to its company", async () => {
     const w = await world(); const required: string[] = [];
     const registry = { names: () => [], get: () => undefined, require: (point: string) => { required.push(point); return point === "storage" ? w.h.store : {}; } } as never;
     const input = { registry, companyId: A, members: w.w.members, now: () => w.h.clock.now, modelGatewayConfigured: true };
-    expect(evalHealthRunDeps(input)).not.toHaveProperty("standIns");
-    expect(required).not.toContain("object-storage");
-    const on = evalHealthRunDeps({ ...input, environment: { AGENTX_EVAL_STAND_INS: "1" } });
-    expect(on.standIns).toBeTypeOf("function");
+    const deps = evalHealthRunDeps(input);
+    expect(deps.standIns).toBeTypeOf("function");
     expect(required).toContain("object-storage");
-    expect(await on.standIns!({ companyId: "other", project })).toBeUndefined();
+    expect(await deps.standIns!({ companyId: "other", project })).toBeUndefined();
   });
 });
 

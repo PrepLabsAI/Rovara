@@ -1,6 +1,6 @@
-// L4-EINT: the eval stand-in lanes (E3, E4, E6, E7, E8, E12) joined into ONE production path, behind the operator's switch AGENTX_EVAL_STAND_INS (default off). One end-to-end test with fakes: the free dry run's dependency list (kept by
+// L4-EINT: the eval stand-in lanes (E3, E4, E6, E7, E8, E12) joined into ONE production path, with no switch (DEC 254zzz461). One end-to-end test with fakes: the free dry run's dependency list (kept by
 // the broker per company and project) -> the descriptor the worker is delivered -> a stand-in round planned from the BASE commit's recordings and OpenAPI description plus the writer's sample set -> both sides of the comparison get the
-// SAME bytes from the real stand-in server -> the eval's verdict and the PR lines. Then two companies, a switch that is off (byte for byte), and the version (E4).
+// SAME bytes from the real stand-in server -> the eval's verdict and the PR lines. Then two companies and the version (E4).
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import type net from "node:net";
@@ -62,7 +62,7 @@ const materializeFrom = (root: string) => async (_dir: string, sha: string, dest
   await cp(root, destination, { recursive: true });
 };
 
-describe("the dry run's dependency list reaches the worker as a descriptor, only with the switch on", () => {
+describe("the dry run's dependency list reaches the worker as a descriptor", () => {
   it("builds the descriptor from THIS company's list (telemetry host left out) and the writer's set, and nothing for another company", async () => {
     const store = new MemoryDocumentStore();
     await recordEvalDependencyList({ store, now: () => NOW }, { orgId: A, project, taskId: "task-1" }, LIST);
@@ -75,7 +75,7 @@ describe("the dry run's dependency list reaches the worker as a descriptor, only
     expect(await readEvalStandInDescriptor({ store, companyId: B }, project)).toEqual({ version: 1, hosts: [{ name: "api.other-company.example.test" }] });
     expect(await readEvalStandInDescriptor({ store, companyId: A }, project)).toEqual(own);
     // The source asked for another company's scope answers nothing.
-    const source = createEvalStandInDescriptorSource({ store, companyId: A }, { AGENTX_EVAL_STAND_INS: "1" })!;
+    const source = createEvalStandInDescriptorSource({ store, companyId: A });
     expect(await source({ companyId: B, project })).toBeUndefined();
     expect(await source({ companyId: A, project })).toEqual(own);
   });

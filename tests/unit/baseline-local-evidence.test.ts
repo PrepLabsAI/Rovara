@@ -35,8 +35,14 @@ async function world(env: NodeJS.ProcessEnv | undefined, claim: unknown) {
 
 describe("the laptop keeps the baseline words for a plan that offered candidates", () => {
 
-  it("not with the switch off, no testEnv wiring, a plan that offered other shas, or none, or a stored plan that does not read", async () => {
-    for (const [env, plan] of [[{}, planOf([sha(1)])], [undefined, planOf([sha(1)])], [{ ROVARA_BASELINE_CACHE: "1" }, planOf([sha(2)])], [{ ROVARA_BASELINE_CACHE: "1" }, planOf()], [{ ROVARA_BASELINE_CACHE: "1" }, { nonsense: true }], [{ ROVARA_BASELINE_CACHE: "1" }, undefined]] as const) {
+  it("keeps the words for an offered commit (no switch, DEC 254zzz461)", async () => {
+    const w = await world({}, { sha: sha(1), commitsBack: 2 });
+    expect(await w.keep(planOf([sha(1)]))).toMatchObject({ kept: true });
+    expect(await w.evidence.baselineOf(TASK, DIGEST)).toMatchObject({ sha: sha(1), commitsBack: 2, writer: "nightly" });
+  });
+
+  it("not with no testEnv wiring, a plan that offered other shas, or none, or a stored plan that does not read", async () => {
+    for (const [env, plan] of [[undefined, planOf([sha(1)])], [{}, planOf([sha(2)])], [{}, planOf()], [{}, { nonsense: true }], [{}, undefined]] as const) {
       const w = await world(env, { sha: sha(1), commitsBack: 2 });
       expect(await w.keep(plan)).toMatchObject({ kept: true });
       expect(await w.evidence.baselineOf(TASK, DIGEST)).toBeUndefined();

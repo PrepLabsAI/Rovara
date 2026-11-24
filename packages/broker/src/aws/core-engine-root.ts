@@ -50,7 +50,7 @@ import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
   HostedSavedEnvRegistryAuthSchema,
   DEFAULT_CODE_SETTINGS,
-  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, LESSONS_REFLECT_QUEUE, IMPLICIT_COMPANY_ID, evalStandInsOn, codeRepositoriesOf, OrgRoleSchema, AgentXError, agentXError, WIKI_BUILD_WORDS,
+  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, LESSONS_REFLECT_QUEUE, IMPLICIT_COMPANY_ID, codeRepositoriesOf, OrgRoleSchema, AgentXError, agentXError, WIKI_BUILD_WORDS,
   when, isSystemOwnerId, type PolicySource, type AdapterRegistry, type HostedPolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
 import { wakeMergeTrackingForPerson } from "../services/merge-tracking.js";
@@ -373,11 +373,11 @@ const CORE_SETTINGS_REFUSAL_WORDS = "The core engine settings are not readable."
  * approval through the install's bound `eval-reservation` adapter only, and the company's base-score cache. The approver's CURRENT role is the hosted members reader
  * (`deployedSessionMembers`: live `COMPANY_MEMBER#` membership in THIS company, the broker's project grant), never the role stored at approval or a role the gateway names.
  */
-export function coreEvalPlanSources(registry: Pick<AdapterRegistry, "names" | "get" | "require">, companyId: OrgId, people: DeployedPeople, log?: (entry: { event: string }) => void, environment?: EvalEnvironmentSource, env: Readonly<Record<string, string | undefined>> = {}): EvalPlanSources {
-  // L4-EINT: the stand-in descriptor, only where the operator's switch AGENTX_EVAL_STAND_INS is "1" (default off: today's answer).
-  const standIns = evalStandInsOn(env) ? createEvalStandInDescriptorSource({ store: registry.require("storage"), companyId, objects: fixtureObjectPortOf(registry.require("object-storage")) }, env) : undefined;
+export function coreEvalPlanSources(registry: Pick<AdapterRegistry, "names" | "get" | "require">, companyId: OrgId, people: DeployedPeople, log?: (entry: { event: string }) => void, environment?: EvalEnvironmentSource): EvalPlanSources {
+  // L4-EINT: the stand-in descriptor (no switch, DEC 254zzz461).
+  const standIns = createEvalStandInDescriptorSource({ store: registry.require("storage"), companyId, objects: fixtureObjectPortOf(registry.require("object-storage")) });
   return createEvalPlanSources({
-    store: registry.require("storage"), companyId, registry, members: deployedSessionMembers(companyId, people), ...(environment === undefined ? {} : { environment }), ...(standIns === undefined ? {} : { standIns }),
+    store: registry.require("storage"), companyId, registry, members: deployedSessionMembers(companyId, people), ...(environment === undefined ? {} : { environment }), standIns,
     ...(log === undefined ? {} : { log: (event) => { log({ event: `core_engine.${event}` }); } }),
   });
 }
@@ -1122,7 +1122,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         // L4-EVH (DEC 254zzz20 D5): the opt-in eval health run is offered only where a run can really happen (the model gateway, a bound reservation adapter and its cap source), and a person's yes starts it.
         const modelGatewayConfigured = (() => { try { return modelGateway() !== undefined; } catch { return false; } })();
         const healthRuns = evalHealthRunsAvailable({ registry, modelGatewayConfigured });
-        const healthDeps = healthRuns ? evalHealthRunDeps({ registry, environment: env, companyId: runtime.companyId, now: () => now().getTime(), members: setupApproval.evalMembers, flow: runtime.flow.deps, modelGatewayConfigured }) : undefined;
+        const healthDeps = healthRuns ? evalHealthRunDeps({ registry, companyId: runtime.companyId, now: () => now().getTime(), members: setupApproval.evalMembers, flow: runtime.flow.deps, modelGatewayConfigured }) : undefined;
         return {
           origin: inputs.origin,
           startEstimates: (project) => hostedPreviewContext({ store: runtime.flow.deps.store, companyId: runtime.companyId, project, now, rateQuote: previewRates, workflowVersion: inputs.understandFirst === false ? "1.0.0" : "1.1.0", settings: admissionSettings, projectTaskCap, defaultRoute: async () => { const gateway = modelGateway(); return gateway === undefined ? undefined : companyEngineModelRoute({ store: runtime.flow.deps.store, companyId: runtime.companyId, offered: engineOffered, install: gateway.flowOptions.modelAccess }).route(); } }),
@@ -1458,9 +1458,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             store: registry.require("storage"), companyId, now: () => now().getTime(), env, repositoryPaths: repositoryPathsOf(runtime.flow.deps.projects),
             savedEnv: () => evalSavedEnvDepsOf({ store: registry.require("storage"), registry: () => registry.require("image-registry"), envName: env["AGENTX_ENV"] ?? "", now: () => now().getTime(), env, hosted: true }),
             log: (event) => { log({ event: `core_engine.${event}` }); },
-          }), env),
+          })),
           // L4-EVH: the opt-in eval health run's own preparation asks for its plan and posts its one result here (only where a run can really happen).
-          ...(evalHealthRunsAvailable({ registry, modelGatewayConfigured: wiring !== undefined }) ? { evalHealth: evalHealthRunDeps({ registry, environment: env, companyId, now: () => now().getTime(), members: deployedSessionMembers(companyId, { membershipOf, projectGrantRole }), modelGatewayConfigured: true }) } : {}),
+          ...(evalHealthRunsAvailable({ registry, modelGatewayConfigured: wiring !== undefined }) ? { evalHealth: evalHealthRunDeps({ registry, companyId, now: () => now().getTime(), members: deployedSessionMembers(companyId, { membershipOf, projectGrantRole }), modelGatewayConfigured: true }) } : {}),
           // Guided onboarding L2-3: a hosted setup run's callback (its journal, website asks, polls and eval report). No person types a command into a hosted run (the command route is
           // the laptop page's only), so nothing is ever handed over.
           // L4-E7: and the stand-in writer's sample data goes to this install's object storage (the broker's own bucket access; keys are `private/<company>/standins/<project>/<digest>`).

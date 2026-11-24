@@ -49,10 +49,9 @@ describe("what approving a plan binds", () => {
     expect(await breakdownForApproval({ ...markdown.deps, artifacts: { get: async () => undefined } }, markdown.task, markdown.workflow(), markdown.sha256)).toEqual({});
   });
 
-  it("is refused for a version 1 task unless the install's switch is on", async () => {
+  it("binds a version 1 task's breakdown too: ordered work has no install switch (DEC 254zzz461)", async () => {
     const w = world(graphOf());
-    expect(await breakdownForApproval(w.deps, w.task, w.workflow("1.0.0"), w.sha256)).toEqual({ refusal: WORKFLOW_BREAKDOWN_REFUSALS.notEnabled });
-    expect(await breakdownForApproval({ ...w.deps, workflowDependenciesEnabled: true }, w.task, w.workflow("1.0.0"), w.sha256)).toEqual({ digest: taskGraphDigest(graphOf()) });
+    expect(await breakdownForApproval(w.deps, w.task, w.workflow("1.0.0"), w.sha256)).toEqual({ digest: taskGraphDigest(graphOf()) });
   });
 
   it("is refused when the task is not pinned to exactly one repository, or the graph names another one or another task", async () => {

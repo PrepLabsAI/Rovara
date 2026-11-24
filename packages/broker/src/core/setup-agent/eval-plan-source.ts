@@ -33,7 +33,7 @@ export interface EvalPlanSourceDeps {
    * answered with no environment (the bare worker image, as before).
    */
   readonly environment?: EvalEnvironmentSource | undefined;
-  /** L4-EINT: what the project's evals reach, for the run's own company and project (`createEvalStandInDescriptorSource`: present only when the operator's switch `AGENTX_EVAL_STAND_INS` is "1"). Absent: the answer has no stand-in field. */
+  /** L4-EINT: what the project's evals reach, for the run's own company and project (`createEvalStandInDescriptorSource`). Absent: the answer has no stand-in field. */
   readonly standIns?: ((scope: EvalPlanScope) => Promise<unknown>) | undefined;
 }
 

@@ -23,7 +23,7 @@ import { createEvalGatewayAccess } from "./eval-gateway-access.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EVAL_VERTEX_ROW, evalImageDigestOf, evalStandInsOn, type EvalEnvironment, type EvalStandInDescriptor, type TaskDependencyPlan } from "@agentx/contracts";
+import { EVAL_VERTEX_ROW, evalImageDigestOf, type EvalEnvironment, type EvalStandInDescriptor, type TaskDependencyPlan } from "@agentx/contracts";
 import { prepareEvalStandIns, type PreparedEvalStandIns } from "../eval-stand-in-plan.js";
 import type { EvalServicesStarter } from "./eval-services.js";
 import { createBridgedEvalExec, createFreshEvalSandbox, freshEvalSandboxOffered, FRESH_EVAL_RUN_MAX_MS, type FreshEvalSandbox, type FreshEvalSandboxConfig } from "./eval-bridged-exec.js";
@@ -159,7 +159,7 @@ export interface EvalFreshHost {
   /** L4-E12 (E1): the project's test services for the eval (the starter `createEvalServicesStarter` makes from the task's dependency plan), read at each run. Absent or undefined: the box gets no service, exactly as before. */
   readonly services?: ((context: EvalServicesContext) => EvalServicesStarter | undefined) | undefined;
   /**
-   * L4-EINT: the PRODUCTION stand-ins, behind the operator's switch `AGENTX_EVAL_STAND_INS` (exactly "1" in `environment`; anything else and the whole feature is off, byte for byte). Present: the check prepares ONE stand-in set
+   * L4-EINT: the PRODUCTION stand-ins (no switch, DEC 254zzz461). Present: the check prepares ONE stand-in set
    * from the BASE commit (the descriptor the broker delivered, the repository's recordings and descriptions, the seed files of `dependencies`): the outside-HTTP round, the seed step of each side's services and the version in the cache key.
    */
   readonly standIns?: { readonly dependencies: readonly TaskDependencyPlan[] | undefined } | undefined;
@@ -191,7 +191,7 @@ export function plannedFreshEvalSandbox(host: EvalFreshHost, invocation: Pick<Ev
   // The model the running plan pins (set when a run has read its plan): a frame for another row or model is refused before the stage.
   let pinned: { row: string; path: RegExp } | undefined;
   // L4-EINT: the stand-in set of this check, prepared ONCE from the base commit (the version needs it before the first run, the runs need it after). Off unless the switch is "1" and the host asked for it.
-  const standInsOn = host.standIns !== undefined && evalStandInsOn(host.environment);
+  const standInsOn = host.standIns !== undefined;
   let prepared: Promise<PreparedEvalStandIns | undefined> | undefined;
   const prepare = (stop?: AbortSignal): Promise<PreparedEvalStandIns | undefined> => {
     if (!standInsOn) return Promise.resolve(undefined);

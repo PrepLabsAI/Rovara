@@ -1,6 +1,6 @@
 import { withWorkspaceGuard } from "./workspace-quarantine.js";
 import {taskFallbackAuthorizer} from "./model-fallback-authority.js";
-import { evalStandInsOn, type WorkerInvocation } from "@agentx/contracts";
+import { type WorkerInvocation } from "@agentx/contracts";
 import { CONTAINED_RUNTIME_PROFILE, inspectContainedRuntimeReadiness, type ContainedRuntimeReadiness } from "@agentx/verifier";
 import { OperationJournal } from "./journal.js";
 import { prepareWorkspace, preparedBaseResult } from "./prepare.js";
@@ -25,7 +25,6 @@ import { evalEnvironmentWithGateway, evalFinalCheckForTask, evalHostSourcesFor }
 import { chatGptTokenSource } from "./chatgpt-token.js";
 import { agentSkillsSource } from "./agent-step.js";
 import { brokerContextCall, contextToolsCatalogSource } from "./context-sources/bridge.js";
-import { piMcpEnabled } from "./context-sources/pi-mcp.js";
 import { designReviewBindingOf, designReviewDependencies, operationModelProxy } from "./design-review-sessions.js";
 import { lazyModelProxy, modelAccessSource } from "./model-access.js";
 import { createDefaultProjectSetupExecutor, createReadinessGatedProjectSetupRuntime } from "./project-setup-executor.js";
@@ -217,10 +216,10 @@ const state = createWorkerServerState(
         const evalFinalCheck = evalFinalCheckForTask({ requested: evalRequested, environment: evalEnvironmentWithGateway(process.env, invocation.payload.evalGatewayUrl), controlPlaneUrl, capability: invocation.callbackCapability, sources: evalRequested ? evalHostSourcesFor(invocation, { controlPlaneUrl,
           // DEC 253n(2): the fresh check sandbox (TE-B1), built per check from the delivered plan's confirmed command and the check's pinned candidate.
           fresh: { environment: process.env, docker: evalDocker ?? createDockerCli(), workspaceKey: () => setupWorkspaceKey(rootPath),
-          // L4-E12 (E1): the task's own dependency plan, started as this eval round's services when this worker offers test services. L4-EINT (E3): with the operator's switch on, each side's services are seeded from the base commit's seed files and generated rows.
+          // L4-E12 (E1): the task's own dependency plan, started as this eval round's services when this worker offers test services. L4-EINT (E3): each side's services are seeded from the base commit's seed files and generated rows.
           services: (context) => createEvalServicesStarter({ config: testServicesConfigFromEnvironment(process.env), dependencies: invocation.payload.testEnvironment?.dependencies, ...(context.prepared === undefined ? {} : { seed: evalDatabaseSeed({ docker: evalDocker ?? createDockerCli(), side: context.side, prepared: context.prepared }) }) }),
-          // L4-EINT: the production stand-ins (the round, the seeds, the version), only with AGENTX_EVAL_STAND_INS=1 (default off: nothing here is read).
-          ...(evalStandInsOn(process.env) ? { standIns: { dependencies: invocation.payload.testEnvironment?.dependencies } } : {}) } }) : undefined });
+          // L4-EINT: the production stand-ins (the round, the seeds, the version); no switch (DEC 254zzz461).
+          standIns: { dependencies: invocation.payload.testEnvironment?.dependencies } } }) : undefined });
         return runTaskInvocation(invocation, {
           rootPath,
           model: session.model,
@@ -241,8 +240,8 @@ const state = createWorkerServerState(
           contextSources: {
             catalog: contextToolsCatalogSource({ brokerUrl: controlPlaneUrl, capability: invocation.callbackCapability, onDiagnostic: (message) => console.log(JSON.stringify({ component: "worker", event: "context_sources", message })) }),
             call: brokerContextCall({ brokerUrl: controlPlaneUrl, capability: invocation.callbackCapability }),
-            // Pi's own MCP client, with the one server the egress gateway serves; ROVARA_PI_MCP=0 goes back to the worker's own tools for one release.
-            ...(piMcpEnabled(process.env) ? { mcp: { brokerUrl: controlPlaneUrl, capability: invocation.callbackCapability } } : {}),
+            // Pi's own MCP client, with the one server the egress gateway serves (no switch, DEC 254zzz461).
+            mcp: { brokerUrl: controlPlaneUrl, capability: invocation.callbackCapability },
           },
           ...(invocation.payload.workflowE2EAdmission === undefined ? {} : {
             workflowE2EEvidenceRoot: requiredEnvironment("CONTAINED_FOUNDATION_EVIDENCE_DIR"),

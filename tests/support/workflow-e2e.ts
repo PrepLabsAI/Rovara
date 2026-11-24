@@ -77,7 +77,6 @@ import { postWorkerTerminalResult } from "../../packages/worker/src/terminal-cal
 import { publishWorkspace } from "../../packages/worker/src/publish.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 import { WorkerCancellationController } from "../../packages/worker/src/cancel.js";
-import { workflowDependenciesConfigurationFromEnvironment } from "../../packages/broker/src/aws/workflow-dependencies-configuration.js";
 import { inspectWorkspaceForClose } from "../../packages/worker/src/close-workspace.js";
 import { projectCheckKey } from "../../packages/worker/src/verification/check-history.js";
 import type { CheckRunners } from "../../packages/worker/src/verification/checks.js";
@@ -271,8 +270,6 @@ export async function createWorkflowE2E(options: {
   initialRepositoryFiles?: readonly { path: string; content: string }[];
   /** The thread brief limit; null turns it off. */
   briefLimit?: number | null;
-  /** The exact deployment environment seam; evaluated by the production helper before broker composition. */
-  workflowDependenciesEnvironment?: Record<string, string | undefined>;
   /** Changes only the worker's observed callback response, after the real broker callback has committed. */
   workerCallbackResponse?: (request: { path: string; body: string; statusCode: number }) => number | undefined | Promise<number | undefined>;
   /** Runs project readiness commands in the real fixture repository. */
@@ -378,17 +375,15 @@ export async function createWorkflowE2E(options: {
     : { ...github.gateway, ...mutableGithubReads, getPullRequestMergeObservation: mergeObservationReader(github, false, mergeObservationRequests, options.mergeObservation) };
   // The plan evidence jobs the broker started: the background Lambda is run by the test, with `runPlanEvidenceJobs`.
   const planEvidenceJobs: PlanEvidenceEvent[] = [];
-  const workflowDependenciesConfiguration = workflowDependenciesConfigurationFromEnvironment(options.workflowDependenciesEnvironment ?? {});
   const harness = await createSingleAnswerPlanBroker({
     register: false,
     ...(options.memberLimit === undefined ? {} : { memberLimit: options.memberLimit }),
     ...(options.channelMembers === undefined ? {} : { channelMembers: options.channelMembers }),
     ...((options.slackRequestQueue === undefined && options.taskPeople?.changesEnabled === undefined
       && options.taskPeople?.taskPersonProof === undefined && options.taskPeople?.taskPeopleDisplayRead === undefined
-      && options.taskPeople?.inviteTaskPerson === undefined && options.workflowDependenciesEnvironment === undefined) ? {} : { developerExtra: {
+      && options.taskPeople?.inviteTaskPerson === undefined) ? {} : { developerExtra: {
       ...(options.slackRequestQueue === undefined ? {} : { slackRequestQueue: options.slackRequestQueue }),
       ...(taskPeopleConfiguration === undefined ? {} : { taskPeopleConfiguration }),
-      ...workflowDependenciesConfiguration,
       ...(options.taskPeople?.taskPersonProof === undefined ? {} : { taskPersonProof: options.taskPeople.taskPersonProof }),
       ...(options.taskPeople?.taskPeopleDisplayRead === undefined ? {} : { taskPeopleDisplayRead: options.taskPeople.taskPeopleDisplayRead }),
       ...(options.taskPeople?.inviteTaskPerson === undefined ? {} : { inviteTaskPerson: options.taskPeople.inviteTaskPerson }),
@@ -1548,12 +1543,6 @@ export async function createWorkflowE2E(options: {
       features: (list: readonly string[] | undefined): void => { workerFeatureList = list; },
       /** Changes the fresh People proof used by every later dispatch guard. */
       taskPerson: (proof: CheckTaskPerson | undefined): void => { checkTaskPerson = proof; },
-      /** Re-evaluates the production environment helper against the live broker config for toggle journeys. */
-      workflowDependenciesEnvironment(environment: Record<string, string | undefined>): void {
-        const developerConfiguration = harness.brokerInput.developer;
-        if (developerConfiguration === undefined) throw new Error("broker developer configuration is unavailable");
-        Object.assign(developerConfiguration, workflowDependenciesConfigurationFromEnvironment(environment));
-      },
       /** Runs once during the next worker feature probe, between EC2 delivery's two fresh guard checks. */
       beforeFeatureProbe: (barrier: () => void | Promise<void>): void => { beforeNextFeatureProbe = barrier; },
       /** Cancels the real run-task through the same controller used by the worker's /cancel handler. */

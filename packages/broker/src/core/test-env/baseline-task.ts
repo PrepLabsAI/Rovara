@@ -5,7 +5,6 @@ import type { KeepEvidenceBaseline } from "../proof/evidence-keep.js";
 import { baselineFor, combinedBaselineFor, knownFailingOf, type FoundBaseline, type FoundCombinedBaseline } from "./baseline-cache.js";
 import type { TestEnvDeps } from "./deps.js";
 import { projectRepositoryNames, taskBaselineBranch } from "./nightly-usable.js";
-import { baselineCacheEnabled } from "./switch.js";
 
 /** The words a task keeps for the run it was compared with: numbers and fixed words, frozen when the checks were compared. `knownFailing` is the row's failing set, which a found row always holds whole. */
 export const evidenceBaselineOf = (found: FoundBaseline): EvidenceBaseline => ({
@@ -21,13 +20,13 @@ export const evidenceCombinedBaselineOf = (found: FoundCombinedBaseline): Eviden
 
 /**
  * What `keepEvidence` is given: the shas THIS task's plan offered, and how to turn the worker's claim (untrusted) into words by looking the row up itself, for the task's company, project, environment revision and base
- * branch (the task's own: `taskBaselineBranch`). Undefined when the switch is off or the plan offered nothing: then no claim is looked at.
+ * branch (the task's own: `taskBaselineBranch`). Undefined when the plan offered nothing: then no claim is looked at.
  */
 export function taskBaselineOf(
   deps: Pick<TestEnvDeps, "store" | "now" | "env">, input: { orgId: OrgId; project: string; taskId: string; plan: Pick<TestEnvTaskPlan, "revision" | "baselineCandidates"> },
 ): KeepEvidenceBaseline | undefined {
   const offered = input.plan.baselineCandidates?.map((candidate) => candidate.sha) ?? [];
-  if (!baselineCacheEnabled(deps.env ?? process.env) || offered.length === 0) return undefined;
+  if (offered.length === 0) return undefined;
   return {
     offered,
     async resolve(claim) {

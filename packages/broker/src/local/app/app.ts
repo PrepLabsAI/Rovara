@@ -501,8 +501,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     milestones,
     taskLog,
     keepEvidence: (input) => evidence.keepAfterChecks(input),
-    // TE-C6: a failed check whose every failing test passed on the worker's one rerun may be recorded as passed (the draft is then held for it); off unless ROVARA_FLAKY_RERUN=1.
-    flakyChecks: createLocalFlakyChecks({ flow: { store, companyId }, blobs, testEnv: testEnvironment.deps, env: options.environment ?? process.env }),
+    // TE-C6: a failed check whose every failing test passed on the worker's one rerun may be recorded as passed (the draft is then held for it).
+    flakyChecks: createLocalFlakyChecks({ flow: { store, companyId }, blobs, testEnv: testEnvironment.deps }),
     // TE-H1: the recipe is the owner's (config); the pull request's lines are text only and say "on the task page, behind sign-in" (the laptop's own address is http, so no link is written).
     ...(browserEvidence === undefined || options.browserEvidenceCanRun === undefined ? {} : { browserEvidence: {
       // The recipe is asked for only when the worker can take it: a worker without the executor image would be refused the step.
@@ -766,7 +766,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     // DEC 253j(1): the trusted eval plan source (the stored EVAL_PLAN bound to an approved eval spend item, the approval, the company's base-score cache). The approval uses only the
     // registry's `eval-reservation` adapter; a laptop binds none, so it never answers and an eval reads "spend not approved" (zero calls).
     // L4-EVS2: the sealed eval's environment (this project's saved image when this computer can serve a pull, else its approved install steps, else none), read for the run's own company and project.
-    evalPlan: createEvalPlanSources({ store, companyId, registry, ...((): { standIns?: NonNullable<ReturnType<typeof createEvalStandInDescriptorSource>> } => { const source = createEvalStandInDescriptorSource({ store, companyId, objects: fixtureObjectPortOf(blobs) }, options.environment ?? process.env); return source === undefined ? {} : { standIns: source }; })(), environment: createEvalEnvironmentSource({
+    evalPlan: createEvalPlanSources({ store, companyId, registry, standIns: createEvalStandInDescriptorSource({ store, companyId, objects: fixtureObjectPortOf(blobs) }), environment: createEvalEnvironmentSource({
       store, companyId, now: () => clock().getTime(), env: options.environment ?? process.env, repositoryPaths: repositoryPathsOf(projectSource),
       savedEnv: () => evalSavedEnvDepsOf({ store, registry: () => registry.require("image-registry"), envName: "local", now: () => clock().getTime(), env: options.environment ?? process.env }),
       log: (event) => { log({ component: "eval-environment", event }); },

@@ -1,7 +1,7 @@
 // TE-C1: what a verification run's plan carries. With the switch off, or with no trusted row, the plan is today's plan byte for byte; with it on, the newest trusted commits of the task's base branch ride along as shas, and
 // the run then needs a worker that lists the feature.
 import { describe, expect, it } from "vitest";
-import { BaselineRowSchema, TEST_ENV_BASELINE_FEATURE, projectPk, TestEnvTaskPlanSchema, TestEnvironmentBodySchema, testEnvDigest, type TestEnvironmentBody } from "@agentx/contracts";
+import { BaselineRowSchema, TASK_FLAKY_RERUN_FEATURE, TEST_ENV_BASELINE_FEATURE, projectPk, TestEnvTaskPlanSchema, TestEnvironmentBodySchema, testEnvDigest, type TestEnvironmentBody } from "@agentx/contracts";
 import { COMPANY, createHarness, newRequestId } from "../support/task-flow-harness.js";
 import { createTaskTestEnvironment, featuresForTestPlan } from "../../packages/broker/src/core/test-env/seam.js";
 import { mintTrustedBaselineRun, recordBaselineRow } from "../../packages/broker/src/core/test-env/baseline-cache.js";
@@ -40,7 +40,7 @@ async function world(env: NodeJS.ProcessEnv, twoRepositories = false) {
 describe("baseline candidates in the task plan", () => {
 
   it("with the switch on, the plan names the newest trusted commits of the base branch and revision, as shas, and asks the worker for the feature", async () => {
-    const on = await world({ ROVARA_BASELINE_CACHE: "1" });
+    const on = await world({});
     for (let n = 1; n <= 7; n += 1) await on.keep({ headSha: sha(n), finishedAt: new Date(Date.UTC(2026, 10, 1, n)).toISOString(), recordedAt: new Date(Date.UTC(2026, 10, 1, n)).toISOString() });
     await on.keep({ headSha: sha(30), branch: "release" });
     await on.keep({ headSha: sha(31), envRevision: 2 });
@@ -52,26 +52,23 @@ describe("baseline candidates in the task plan", () => {
     expect(before).toHaveLength(9);
     expect(planned?.plan.baselineCandidates).toEqual([sha(7), sha(6), sha(5), sha(4), sha(3)].map((value) => ({ sha: value })));
     expect(TestEnvTaskPlanSchema.safeParse(planned?.plan).success).toBe(true);
-    expect([...planned!.requires].sort()).toEqual(["task.testEnvironment.v1", TEST_ENV_BASELINE_FEATURE].sort());
+    // The failing-test rerun is on by default too (DEC 254zzz448), so the run also needs its feature.
+    expect([...planned!.requires].sort()).toEqual(["task.testEnvironment.v1", TEST_ENV_BASELINE_FEATURE, TASK_FLAKY_RERUN_FEATURE].sort());
     // A coding run is never told: candidates are for the verification run.
     expect(await on.plan("IMPLEMENT")).toBeUndefined();
   });
 
   it("TE-MR2b: a project with several repositories also asks for one claim per repository (and needs the feature); one repository does not", async () => {
-    const one = await world({ ROVARA_BASELINE_CACHE: "1" });
+    const one = await world({});
     await one.keep({});
     expect((await one.plan())?.plan.repositoryBaselines).toBeUndefined();
-    const two = await world({ ROVARA_BASELINE_CACHE: "1" }, true);
+    const two = await world({}, true);
     await two.keep({});
     const planned = await two.plan();
     expect(planned?.plan.baselineCandidates).toEqual([{ sha: sha(1) }]);
     expect(planned?.plan.repositoryBaselines).toBe(true);
     expect(TestEnvTaskPlanSchema.safeParse(planned?.plan).success).toBe(true);
-    expect([...planned!.requires].sort()).toEqual(["task.testEnvironment.v1", TEST_ENV_BASELINE_FEATURE, "task.testEnvMultiRepo.v1"].sort());
-    // Without candidates (switch off) nothing is asked.
-    const off = await world({}, true);
-    await off.keep({});
-    expect((await off.plan())?.plan.repositoryBaselines).toBeUndefined();
+    expect([...planned!.requires].sort()).toEqual(["task.testEnvironment.v1", TEST_ENV_BASELINE_FEATURE, "task.testEnvMultiRepo.v1", TASK_FLAKY_RERUN_FEATURE].sort());
   });
 
   it("names the feature only for a plan that carries candidates", () => {

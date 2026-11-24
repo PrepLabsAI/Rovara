@@ -12,7 +12,6 @@ import type { TestProofActions } from "../../developer/test-proof-lines.js";
 import { keepEvidence, loadEvidencePack, policyKindsOf, loadEvidenceBaseline, loadEvidenceRead, type KeepEvidenceResult } from "../../core/proof/evidence-keep.js";
 import type { TestEnvDeps } from "../../core/test-env/deps.js";
 import { taskBaselineOf } from "../../core/test-env/baseline-task.js";
-import { baselineCacheEnabled } from "../../core/test-env/switch.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 
 import { dropBrowserEvidenceUpload, readBrowserEvidenceUpload } from "../../core/proof/browser-evidence-upload.js";
@@ -111,7 +110,7 @@ export function createLocalEvidence(options: {
         orgId: task.companyId, task: { ownerKey: task.ownerKey, workspaceId: task.workspaceId, taskId: task.taskId }, operationId: operation.id, candidateDigest: input.candidateDigest,
         checks: input.checks.filter((entry) => entry.source === "project"), policyKinds: policyKindsOf(workflowSelectedChecks(input.workflow.checkPolicy)),
         ...(await modelHostsAllowed(task) ? { extraNotTested: [MODEL_HOSTS_ALLOWED_ITEM] } : {}),
-        // TE-C1: the candidates THIS operation's plan carried (read from the plan the broker stored with the operation, never from the worker), when the switch is on.
+        // TE-C1: the candidates THIS operation's plan carried (read from the plan the broker stored with the operation, never from the worker), .
         ...baselineInput(options.testEnv, task.companyId, task.project, task.taskId, () => operation.dispatch.payload["testEnvironment"]),
         // TE-H1: what this operation's browser-evidence upload held (none unless the run was asked for it and uploaded), read with the operation's own workspace and id.
         ...(browser === undefined ? {} : { browserEvidence: browser }),
@@ -143,10 +142,13 @@ export function createLocalEvidence(options: {
   };
 }
 
-/** The keeper's baseline input for an operation whose stored plan offered candidates; nothing (so the keeper looks at no claim, and the operation's plan is not even read) when the switch is off, the plan is not readable or it offered none. */
+/** The keeper's baseline input for an operation whose stored plan offered candidates; nothing (so the keeper looks at no claim, and the operation's plan is not even read) when there is no test environment wiring, the plan is not readable or it offered none. */
 function baselineInput(testEnv: Pick<TestEnvDeps, "store" | "now" | "env"> | undefined, companyId: string, project: string, taskId: string, storedPlan: () => unknown): { baseline?: ReturnType<typeof taskBaselineOf> } {
-  if (testEnv === undefined || !baselineCacheEnabled(testEnv.env ?? process.env)) return {};
-  const plan = TestEnvTaskPlanSchema.safeParse(storedPlan());
+  if (testEnv === undefined) return {};
+  // Fail closed: an operation whose stored dispatch cannot be read is one that offered no candidates.
+  let stored: unknown;
+  try { stored = storedPlan(); } catch { return {}; }
+  const plan = TestEnvTaskPlanSchema.safeParse(stored);
   if (!plan.success) return {};
   const baseline = taskBaselineOf(testEnv, { orgId: companyId, project, taskId, plan: plan.data });
   return baseline === undefined ? {} : { baseline };

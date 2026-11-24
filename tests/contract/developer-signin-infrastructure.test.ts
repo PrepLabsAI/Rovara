@@ -195,10 +195,10 @@ describe("broker membership condition-check grant", () => {
     const before = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(structuredClone(namedRaw), { env: "staging" }), stuckStoppingInstall("staging")))));
     // The providers branch also adds this exact capability output. Keep a measured
     // combined pin, then remove only the asserted output to retain the upstream pin.
-    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("23e7a69839d8b913eb1c601b320f5ba05c6416f324a22b6abede4901020ebee6");
+    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("d3940f3e8db7613b6ae04d8216ec8aa343af20008673459362b4874e7f9355e4");
     expect(before.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     delete before.Outputs.ModelRunPriceVersion;
-    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("e051a59b71fd9cd8188851b57c0dc738b10fb98acc33a4225639f33336669466");
+    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("c4eae25440ee1ec8022cd296d6e10fe968450939fb8f26308cc3bb814e85ee5a");
     const afterTuples = accessTuples(namedRaw);
     const beforeTuples = accessTuples(before);
     const broker = "role:BrokerServiceRole";
@@ -238,7 +238,8 @@ describe("developer sign-in infrastructure (named environments)", () => {
     expect(p.TaskPeopleChangesEnabled).toMatchObject({ Type: "String", Default: "false", AllowedValues: ["true", "false"] });
     expect(p.TaskPeoplePublicInvitationsEnabled).toMatchObject({ Type: "String", Default: "false", AllowedValues: ["true", "false"] });
     expect(p.TaskPeoplePrivateInvitationsEnabled).toMatchObject({ Type: "String", Default: "false", AllowedValues: ["true", "false"] });
-    expect(p.WorkflowDependenciesEnabled).toMatchObject({ Type: "String", Default: "false", AllowedValues: ["true", "false"] });
+    // DEC 254zzz461: ordered work has no install switch, so no parameter.
+    expect(p).not.toHaveProperty("WorkflowDependenciesEnabled");
     for (const parameter of Object.values(p)) expect(JSON.stringify(parameter)).not.toContain("—");
   });
 
@@ -434,8 +435,8 @@ describe("developer sign-in infrastructure (named environments)", () => {
       AGENTX_TASK_PEOPLE_CHANGES_ENABLED: { Ref: "TaskPeopleChangesEnabled" },
       AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED: { Ref: "TaskPeoplePublicInvitationsEnabled" },
       AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED: { Ref: "TaskPeoplePrivateInvitationsEnabled" },
-      AGENTX_WORKFLOW_DEPENDENCIES_ENABLED: { Ref: "WorkflowDependenciesEnabled" },
     });
+    expect(variables("Broker")).not.toHaveProperty("AGENTX_WORKFLOW_DEPENDENCIES_ENABLED");
     for (const prefix of ["Broker", "DeveloperSignInFunction"]) {
       expect(variables(prefix).DEVELOPER_SIGNIN_SLACK_SINCE).toEqual({ Ref: "DeveloperSignInSlackSince" });
       expect(variables(prefix).DEVELOPER_OIDC_SINCE).toEqual({ Ref: "DeveloperOidcSince" });
@@ -451,12 +452,13 @@ describe("developer sign-in infrastructure (named environments)", () => {
 describe("the legacy deployment (production)", () => {
   it("has the full developer sign-in and tasks, as named environments do, under its legacy names", () => {
     const text = JSON.stringify(legacy);
-    for (const present of ["TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled", "WorkflowDependenciesEnabled", "McpConfirmElicitation",
+    for (const present of ["TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled", "McpConfirmElicitation",
       "ChatGptConnectionKey", "DeveloperTaskNotifier"]) {
       expect(text, present).toContain(present);
     }
-    // #1149: the legacy broker packs these two settings (AGENTX_WORKFLOW_DEPENDENCIES_ENABLED as `wd`, MCP_CONFIRM_ELICITATION as `mc`); the sign-in function still has its own whole.
-    for (const packed of [",wd=", ",mc=", "MCP_CONFIRM_ELICITATION"]) expect(text, packed).toContain(packed);
+    // #1149: the legacy broker packs this setting (MCP_CONFIRM_ELICITATION as `mc`); the sign-in function still has its own whole.
+    for (const packed of [",mc=", "MCP_CONFIRM_ELICITATION"]) expect(text, packed).toContain(packed);
+    expect(text).not.toContain("WorkflowDependenciesEnabled");
     for (const present of ["SlackTeamId", "DeveloperSignInSlack", "DeveloperOidcIssuer", "DeveloperOidcClientId", "DeveloperOidcSince"]) expect(legacy.Parameters[present], present).toBeDefined();
     expect(legacy.Parameters.DeveloperSignInSlack).toMatchObject({ Default: "disabled" });
     expect(legacy.Parameters.DeveloperOidcIssuer).toMatchObject({ Default: "" });
@@ -807,11 +809,11 @@ describe("task-token key and membership IAM", () => {
     // b28 first-gateway fix: every current broker advertises its capability before a gateway
     // is configured. Pin the complete new template AND prove this exact output is its only delta.
     expect(remainder.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
-    expect(createHash("sha256").update(text).digest("hex")).toBe("9d3f6f734b745c5d93a2d5a4fb79505c9c91a9bab4e5d9ecdbe1f0cb9070eac5");
+    expect(createHash("sha256").update(text).digest("hex")).toBe("e192b208d1485c64c3fdba587702cd04648155bd927458867380c797a03da7ca");
     const beforeFirstGateway = structuredClone(remainder);
     delete beforeFirstGateway.Outputs.ModelRunPriceVersion;
     const beforeText = JSON.stringify(beforeFirstGateway).replace(/[a-f0-9]{64}/g, "<asset-hash>");
-    expect(createHash("sha256").update(beforeText).digest("hex")).toBe("f555abd801f394036cebef13b345e8025c88fb38bec7272a7aab3abf0649577d");
+    expect(createHash("sha256").update(beforeText).digest("hex")).toBe("49ba41bcb36e96f75e27d20c4240d7659b7e2dd5bb7a01d9a7bc334a355d25de");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {

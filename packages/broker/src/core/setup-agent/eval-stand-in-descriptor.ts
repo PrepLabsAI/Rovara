@@ -1,9 +1,9 @@
 // L4-EINT: the broker's side of the stand-in production path. Reads, for the run's OWN company and project only, what the project's evals reach: the free dry run's outside hosts (EVAL_DEPENDENCY_LIST, kept per company+project)
 // and the stand-in writer's stored sample set. The answer rides the worker's existing `eval-plan` ask as one optional field (`standIns`); nothing new is exposed and no route is added.
 //
-// OFF BY DEFAULT: `createEvalStandInDescriptorSource` returns undefined unless the operator's switch `AGENTX_EVAL_STAND_INS` is exactly "1", and then `createEvalPlanSources` adds nothing to the answer (today's bytes).
+// No switch (DEC 254zzz461): `createEvalPlanSources` always adds the descriptor when there is one, as one optional field on the answer.
 // Fail closed: a list or set that cannot be read gives no descriptor (the eval runs as it does without stand-ins); a host of the FIXED telemetry list never appears in it.
-import { evalStandInsOn, evalTelemetryEntryOf, EvalStandInDescriptorSchema, type DocumentStore, type EvalStandInDescriptor, type OrgId } from "@agentx/contracts";
+import { evalTelemetryEntryOf, EvalStandInDescriptorSchema, type DocumentStore, type EvalStandInDescriptor, type OrgId } from "@agentx/contracts";
 import type { FixtureObjectPort } from "../test-env/fixture-store.js";
 import { createStandInDataStore } from "../test-env/standin-data-store.js";
 import { NO_PROD_DENY } from "../proof/evidence-guard.js";
@@ -35,8 +35,7 @@ export async function readEvalStandInDescriptor(deps: EvalStandInDescriptorDeps,
   } catch { return undefined; }
 }
 
-/** The source `createEvalPlanSources` takes, or undefined when the operator's switch is not "1". */
-export function createEvalStandInDescriptorSource(deps: EvalStandInDescriptorDeps, environment: Readonly<Record<string, string | undefined>>): ((scope: { readonly companyId: string; readonly project: string }) => Promise<unknown>) | undefined {
-  if (!evalStandInsOn(environment)) return undefined;
+/** The source `createEvalPlanSources` takes. */
+export function createEvalStandInDescriptorSource(deps: EvalStandInDescriptorDeps): (scope: { readonly companyId: string; readonly project: string }) => Promise<unknown> {
   return async (scope) => (scope.companyId === deps.companyId ? await readEvalStandInDescriptor(deps, scope.project) : undefined);
 }

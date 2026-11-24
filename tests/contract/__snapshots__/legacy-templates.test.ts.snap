@@ -728,15 +728,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Description": "How a worker host's task sandboxes and devcontainers reach the internet: bridge (the default, today's behaviour) or gateway (an internal network whose only exit is the host's egress gateway; the worker boot fails if the gateway cannot start)",
       "Type": "String",
     },
-    "WorkflowDependenciesEnabled": {
-      "AllowedValues": [
-        "true",
-        "false",
-      ],
-      "Default": "false",
-      "Description": "Whether bounded serial task work breakdowns are enabled in this environment",
-      "Type": "String",
-    },
     "WorkspaceKmsKeyArn": {
       "Description": "The foundation's workspace volume KMS key",
       "Type": "String",
@@ -1037,10 +1028,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                   ",tv=",
                   {
                     "Ref": "TaskPeoplePrivateInvitationsEnabled",
-                  },
-                  ",wd=",
-                  {
-                    "Ref": "WorkflowDependenciesEnabled",
                   },
                 ],
               ],

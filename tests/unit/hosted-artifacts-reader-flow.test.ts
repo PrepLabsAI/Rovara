@@ -209,9 +209,9 @@ describe("every other reader of the flow's artifacts, with the hosted reader", (
     expect((await earlierPlans({ artifacts: reader }, { artifacts: [own] })).map((entry) => entry.sha256)).toEqual([own.sha256]);
     expect(await earlierPlans({ artifacts: reader }, { artifacts: [foreign] })).toEqual(await earlierPlans({}, { artifacts: [foreign] }));
     expect(await earlierPlans({ artifacts: reader }, { artifacts: [foreign] })).toEqual([]);
-    const deps = (artifacts: typeof reader | undefined) => ({ ...(artifacts === undefined ? {} : { artifacts }), workflowDependenciesEnabled: false, projects: { latest: async () => undefined, revision: async () => undefined } }) as unknown as Parameters<typeof breakdownForApproval>[0];
+    const deps = (artifacts: typeof reader | undefined) => ({ ...(artifacts === undefined ? {} : { artifacts }), projects: { latest: async () => undefined, revision: async () => undefined } }) as unknown as Parameters<typeof breakdownForApproval>[0];
     const task = { taskId: w.task.taskId, project: "payments", startingRevision: 1 };
-    // With the reader the plan is readable, and its work breakdown is then refused only because the install's switch is off (never treated as "no breakdown")
+    // With the reader the plan is readable, and its work breakdown is then read (never treated as "no breakdown" when the plan could not be read)
     expect(await breakdownForApproval(deps(reader), task, { artifacts: [own], definitionVersion: "1.1.0" }, own.sha256)).not.toEqual({ refusal: PLAN_UNREADABLE });
     expect(await breakdownForApproval(deps(reader), task, { artifacts: [foreign], definitionVersion: "1.1.0" }, foreign.sha256)).toEqual({ refusal: PLAN_UNREADABLE });
     expect(await breakdownForApproval(deps(undefined), task, { artifacts: [foreign], definitionVersion: "1.1.0" }, foreign.sha256)).toEqual({ refusal: PLAN_UNREADABLE });
@@ -276,7 +276,7 @@ const READERS: Record<string, string> = {
   "core/sessions/ask-context-load.ts": "NOT the flow's reader: takes its own `artifacts` (not wired on a hosted root here; the hosted ask surface is separate)",
   "core/task-flow/stage-machine.ts": "ON: the earlier documents a planning run is given, and the plan text for the lighter flow's small-change route (lighter flow is not wired on hosted)",
   "core/task-log/plan-summary-source.ts": "NOT the flow's reader: the hosted plan summary is built over the registry's blobs directly (core-host/plan-summary.ts)",
-  "core/work-breakdown/plan-graph.ts": "ON: the approval's work breakdown digest and ordered work's reload (ordered work stays off while workflowDependenciesEnabled is unset)",
+  "core/work-breakdown/plan-graph.ts": "ON: the approval's work breakdown digest and ordered work's reload (ordered work has no install switch)",
 };
 
 function sourcesUnder(root: string): string[] {

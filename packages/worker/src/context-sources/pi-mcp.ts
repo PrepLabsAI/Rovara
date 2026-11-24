@@ -19,19 +19,9 @@ export const ROVARA_MCP_TOOL_PREFIX = `mcp__${ROVARA_MCP_SERVER}__`;
 export const ROVARA_MCP_TOOL_PATTERN = `${ROVARA_MCP_TOOL_PREFIX}*`;
 /** The path the egress gateway relays (exact, POST only) with the workspace stamped. */
 export const ROVARA_MCP_PATH = "/v1/internal/mcp";
-/**
- * The switch, for one release. On the worker, exactly "1" uses Pi's MCP client; any other value, unset included, keeps the worker's own context tools
- * (bridge.ts), so a worker whose control plane does not serve the endpoint is unchanged. Code's local stack writes "1" or "0" on its workers: "1" when its
- * owner's ROVARA_PI_MCP is unset or "1", "0" for any other value (`ownerWantsPiMcp`, docker-worker-machines.ts).
- */
-export const PI_MCP_SWITCH = "ROVARA_PI_MCP";
 /** As long as the call route's own limit allows: the broker bounds the call itself. */
 const CALL_TIMEOUT_SECONDS = 60;
 const PLACEHOLDER = "Bearer (set by the worker for each request)";
-
-export function piMcpEnabled(environment: NodeJS.ProcessEnv = process.env): boolean {
-  return environment[PI_MCP_SWITCH] === "1";
-}
 
 /** What a session needs to reach the stage's sources through the rovara server. */
 export interface ContextMcpSession {

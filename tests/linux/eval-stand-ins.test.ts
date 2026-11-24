@@ -96,7 +96,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       docker: createDockerCli(), image, workspace: WORKSPACE, taskId: `eint-${randomBytes(4).toString("hex")}`, roundBudgetMs: 300_000,
       repository: { directory: root, baseCommit: "b".repeat(40), candidateCommit: "c".repeat(40) },
       command: { executable: "node", args: ["eval.js"], cwd: "." }, report: { cwd: ".", argument: REPORT }, rowId: "gemini", scratchDir: join(root, "scratch"), workingSandbox: null,
-      environment: { AGENTX_TEST_SERVICES_BOOT_FACTS: FACTS, AGENTX_EVAL_STAND_INS: "1" },
+      environment: { AGENTX_TEST_SERVICES_BOOT_FACTS: FACTS },
       standIns: { round },
       materialize: async (_repo, _commit, destination) => { await writeFile(join(destination, "eval.js"), EVAL_SCRIPT); await chmod(destination, 0o777); },
     };

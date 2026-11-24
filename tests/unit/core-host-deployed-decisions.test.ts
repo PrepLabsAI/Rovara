@@ -247,7 +247,8 @@ describe("the deployed decision cards: what is listed", () => {
 
   it("reads at most DECISION_SOURCE_TASKS_MAX index rows per listing, and says so when it cut", async () => {
     const t = await setup();
-    const query = vi.fn(async () => ({ items: Array.from({ length: 100 }, () => ({ taskId: randomUUID(), orgId: ORG })), cursor: "more" }));
+    // The known-failing source (on by default, DEC 254zzz448) lists its own partition (FIX_SETUP), which holds no row here; every other query is the task index this test cuts.
+    const query = vi.fn(async (input: { pk: string }) => input.pk.includes("FIX_SETUP") ? { items: [] } : { items: Array.from({ length: 100 }, () => ({ taskId: randomUUID(), orgId: ORG })), cursor: "more" });
     const get = vi.fn(async () => undefined);
     const runtime = { companyId: ORG, flow: { deps: { ...t.runtime.flow.deps, companyId: ORG, store: { ...t.runtime.flow.deps.store, query, get } } } } as unknown as CoreRuntime;
     const deps = deployedDecisionCards({ runtime, registry: t.registry, people: t.people, proofs: t.point.proofs, log: t.log });

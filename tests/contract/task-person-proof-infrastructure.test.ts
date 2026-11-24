@@ -21,7 +21,7 @@ import { withoutCoreEngine } from "../support/core-engine-template.js";
 import { withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
 import { withoutNatEgressControlPlane } from "../support/egress-addresses-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
-import { removePackedPieces, unpackedBrokerVariables, withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
+import { unpackedBrokerVariables, withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
 import { withoutSlackCompanyMode } from "../support/slack-company-template.js";
 import { withoutBrokerMemberConditionCheck } from "../support/broker-member-condition-check-template.js";
 import { withoutLegacyRuntimeBoundary } from "../support/legacy-runtime-boundary-template.js";
@@ -92,9 +92,6 @@ function parentRemainderDigest(template: TemplateJson, named = true): string {
     withoutNatEgressControlPlane(remainder);
   } else if (named) expect(JSON.stringify(remainder), "only a template without the core engine may skip its removal").not.toContain("CoreEngine");
   delete remainder.Parameters?.TaskPersonProofEnabled;
-  // Spec 059's default-OFF runtime graph addition is asserted exactly below; exclude only that
-  // named parameter and its corresponding Broker environment reference from the proof-only hash.
-  delete remainder.Parameters?.WorkflowDependenciesEnabled;
   const conditions = remainder.Conditions ?? {};
   for (const id of Object.keys(conditions)) if (id.includes("InstallTaskPersonProof")) delete conditions[id];
   const resources = remainder.Resources ?? {};
@@ -107,9 +104,6 @@ function parentRemainderDigest(template: TemplateJson, named = true): string {
   delete variables.Variables.DEVELOPER_SIGNIN_TABLE_NAME;
   for (const [id] of workflowDependencyEnvironmentEntries(remainder)) {
     const brokerVariables = resources[id]!.Properties!.Environment as { Variables: Record<string, unknown> };
-    delete brokerVariables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED;
-    // ENV-ROOM: in a named Broker the flag is the `wd` piece of AGENTX_SETTINGS.
-    if (brokerVariables.Variables.AGENTX_SETTINGS !== undefined) removePackedPieces(brokerVariables.Variables, "AGENTX_SETTINGS", ["wd"]);
     delete brokerVariables.Variables.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID;
     delete brokerVariables.Variables.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID;
   }
@@ -209,7 +203,7 @@ function developerSignInConditionCheckEntries(template: TemplateJson): Array<{ p
 }
 
 describe("the named TEST proof-only installation gate", () => {
-  it("declares a distinct default-OFF gate only for the approved named environment", () => {
+  it("declares a distinct gate only for the approved named environment", () => {
     const approved = namedTemplate("agentxlivetest123");
     const foreign = namedTemplate("staging", "123456789012");
     const wrongAccount = namedTemplate("agentxlivetest123", "123456789012");
@@ -251,22 +245,14 @@ describe("the named TEST proof-only installation gate", () => {
       }
     }
 
-    for (const [label, template] of [["named", named], ["foreign", foreign]] as const) {
-      expect(template.Parameters?.WorkflowDependenciesEnabled, `${label} preserves the default-OFF workflow gate`).toMatchObject({
-        Type: "String", Default: "false", AllowedValues: ["true", "false"],
-      });
-      const broker = workflowDependencyEnvironmentEntries(template);
-      expect(broker, `${label} has exactly one Broker with the workflow flag`).toHaveLength(1);
-      const variables = broker[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
-      // ENV-ROOM: in a named Broker the flag is the parameter's piece of AGENTX_SETTINGS.
-      expect(unpackedBrokerVariables(variables.Variables, template as never).AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, `${label} wires only the parameter reference`).toEqual({ Ref: "WorkflowDependenciesEnabled" });
+    // DEC 254zzz461: ordered work has no install switch: no parameter and no broker variable in any of the templates.
+    for (const [label, template] of [["named", named], ["foreign", foreign], ["legacy", legacy]] as const) {
+      expect(template.Parameters ?? {}, `${label} has no workflow gate parameter`).not.toHaveProperty("WorkflowDependenciesEnabled");
+      const brokers = workflowDependencyEnvironmentEntries(template);
+      expect(brokers, `${label} has exactly one Broker`).toHaveLength(1);
+      const variables = brokers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
+      expect(unpackedBrokerVariables(variables.Variables, template as never), `${label} carries no workflow flag`).not.toHaveProperty("AGENTX_WORKFLOW_DEPENDENCIES_ENABLED");
     }
-    expect(legacy.Parameters?.WorkflowDependenciesEnabled, "legacy (production) has the workflow gate parameter, off").toMatchObject({ Default: "false" });
-    const legacyBrokers = workflowDependencyEnvironmentEntries(legacy);
-    expect(legacyBrokers, "legacy has its Broker Lambda").toHaveLength(1);
-    const legacyVariables = legacyBrokers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
-    // #1149: the legacy Broker packs it as well.
-    expect(unpackedBrokerVariables(legacyVariables.Variables, legacy as never).AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, "legacy wires only the parameter reference").toEqual({ Ref: "WorkflowDependenciesEnabled" });
 
     // Named/foreign pins include the reviewed destination identity grant and dependency; legacy pins are unchanged. Named/foreign re-pinned for lane E2 (the core engine construct, #663,
     // and R2 step 4: the dispatcher's core queue mapping, its reads, the conditional deleter policy, its variables and the outbox pending index); legacy unchanged.

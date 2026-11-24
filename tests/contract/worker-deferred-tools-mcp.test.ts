@@ -1,4 +1,4 @@
-// Deferring tools must not touch what is always direct: the rovara MCP server's tools (Pi's own MCP client, ROVARA_PI_MCP on, the default) and the structured-answer
+// Deferring tools must not touch what is always direct: the rovara MCP server's tools (Pi's own MCP client) and the structured-answer
 // tools. With more than 20 source tools the rovara tools are all still declared and callable, no Pi host tool appears, and an answer tool stays declared next to
 // deferred connector tools. A real Pi session on a scripted model against the broker's MCP endpoint. No network beyond loopback, no Docker.
 import { mkdtemp, rm } from "node:fs/promises";
