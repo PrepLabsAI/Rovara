@@ -17,6 +17,7 @@ import { readTaskTokenRecords } from "../core/model-gateway/records.js";
 import { withinTaskTokenDeadline } from "../core/model-gateway/deadline.js";
 import { coreContextWorkerRouteOf } from "./dev-route-scopes.js";
 import { previewRateReaderFromEnvironment } from "../core-host/start-estimates-rate-read.js";
+import { gatewayRateQuoteReaderFromEnvironment } from "../core-host/gateway-quote-http.js";
 import { startEstimates } from "../core/cost/start-estimates.js";
 import { hostedPreviewContext } from "../core-host/start-estimates.js";
 import { recordClosedRunUsage } from "../core/cost/run-usage.js";
@@ -754,6 +755,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   // DEC 243c: with the gateway's offered-models reader, the company's per-step model rule chooses each step's model from that list (one rule per company, kept for its page's routes).
   // One reader for every company: the deployment's own (the gateway's route, signed with the task key) unless the root was given one.
   const previewRates = previewRateReaderFromEnvironment(env, inputs.taskTokens);
+  // Task cost truth: ONE quote reader (its cache is shared) for the model-access answer (the worker prices from it) and the usage booking (its floor is priced from it).
+  const quoteReader = gatewayRateQuoteReaderFromEnvironment(env, inputs.taskTokens);
   const modelChoices = createCompanyModelChoices({ reader: env[CORE_AGENT_MODEL_CHOICE_VARIABLE] === "on" ? inputs.offeredModels ?? offeredModelsReaderFromEnvironment(env, inputs.taskTokens) : undefined, now: () => now().getTime() });
   // DEC 254n (1): the company's own engine model (when it set one) replaces the install's for its tasks; its start is refused unless the gateway offers it THAT company now. The list is read
   // through the same reader as the model choice where the root was given one, else the gateway's own route signed with the task key (only the gateway's origin is needed).
@@ -851,7 +854,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const app = createCoreHostApp({
     // B5: a company the lessons switch or the system-runs flag names has its scheduled jobs before its first core task writes an in-use mark.
     alsoNamedBy: [lessonsSwitch.value, systemRunsFlag.value],
-    modules: () => [...codeAdapterModules(inputs.codeModules({ storage: async () => (await app.registry()).require("storage") })), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey, runStopWired: runStopWiredFrom(env), projectTaskCap, taskOwner, ...(chatApproval === undefined ? {} : { chat: chatApproval }) }), ...gatewayModelKeysModules(env), ...(attention === undefined ? [] : [attentionEmailModule(attention.sender)]), ...evalReservationModules(env, inputs.taskTokens), ...companyInstructionsModules(env, inputs.taskTokens), ...savedEnvImageModules(env, inputs.savedEnvSessions ?? savedEnvRoleSessionsFromEnvironment(env)), ...(inputs.extraModules?.() ?? [])],
+    modules: () => [...codeAdapterModules(inputs.codeModules({ storage: async () => (await app.registry()).require("storage") })), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey, runStopWired: runStopWiredFrom(env), projectTaskCap, taskOwner, ...(quoteReader === undefined ? {} : { rateQuote: quoteReader }), ...(chatApproval === undefined ? {} : { chat: chatApproval }) }), ...gatewayModelKeysModules(env), ...(attention === undefined ? [] : [attentionEmailModule(attention.sender)]), ...evalReservationModules(env, inputs.taskTokens), ...companyInstructionsModules(env, inputs.taskTokens), ...savedEnvImageModules(env, inputs.savedEnvSessions ?? savedEnvRoleSessionsFromEnvironment(env)), ...(inputs.extraModules?.() ?? [])],
     context: () => ({ installCompanyId: IMPLICIT_COMPANY_ID, now, env, clients: {}, log }),
     wrapStorage: (store) => hostedAuthorityStore(inputs.wrapStorage?.(store) ?? store, inputs),
     beforeSeal: (registry) => {
@@ -1425,7 +1428,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           ...(gateway === undefined ? {} : { modelGateway: { ...gateway, runPrice: async (model: string) => {
             const tokens = inputs.taskTokens?.();
             return tokens === undefined ? undefined : runPriceReader({ gatewayUrl: gateway.gatewayUrl, ...tokens, now: () => now().getTime() })(companyId, model);
-          } } }),
+          }, ...(quoteReader === undefined ? {} : { rateQuote: quoteReader }) } }),
           authorizeDesignReviewPacket: async (claims) => withinTaskTokenDeadline(async (deadline) => {
             const { task, operation, workspace } = await readTaskTokenRecords(runtime.flow.deps, claims, deadline);
             if ((workspace.orgId !== undefined && workspace.orgId !== companyId) || typeof task.developerId !== "string" || task.developerId === ""

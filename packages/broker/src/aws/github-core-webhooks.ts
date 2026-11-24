@@ -59,6 +59,8 @@ export interface GithubCoreWebhookInput {
   now: () => number;
   log: (entry: Record<string, unknown>) => void;
   perMinute?: number;
+  /** True where the legacy handler has no company scoping of its own (the hosted broker): the core then hands it what it has always served there (a task with no company, an installation with no owner). */
+  legacyUnscoped?: boolean;
 }
 
 const Positive = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
@@ -185,8 +187,12 @@ async function pullRequestOf(input: GithubCoreWebhookInput, companyId: string, r
 /** The linked task, for this company: its record, its engine, its state, its workflow, its pinned repository and its tracking row. `legacy`: the task is the legacy engine's. */
 async function mapTask(input: GithubCoreWebhookInput, companyId: string, repositoryKey: string, link: { taskId: string; repositoryId: string; number: number; url: string; candidateDigest: string }): Promise<GithubIgnoredReason | "legacy" | "ok"> {
   const task = await get(input, taskRecordKey(link.taskId));
+  const legacyOwned = entryOwner(await readTaskStamp(input, link.taskId), "flow") !== "core";
+  // Where the legacy handler is NOT company-scoped (the hosted broker: no broker-wide bindings), a task it owns that carries no company (the built-in company's, which that handler has always served
+  // whatever company the installation is bound to) or that has no record at all is its to answer, not a company mismatch. Where it IS scoped it refuses by company itself, so the rule below holds.
+  if (legacyOwned && input.legacyUnscoped === true && (task === undefined || task["companyId"] === undefined)) return "legacy";
   if (task === undefined || !recordInCompany(task, companyId)) return "company_mismatch";
-  if (entryOwner(await readTaskStamp(input, link.taskId), "flow") !== "core") return "legacy";
+  if (legacyOwned) return "legacy";
   // A core task's company is stamped and must be exactly the installation's (no implicit fallback).
   if (task["companyId"] !== companyId) return "company_mismatch";
   if (taskEnded(task)) return "task_ended";
@@ -199,7 +205,8 @@ async function mapTask(input: GithubCoreWebhookInput, companyId: string, reposit
 /** installation -> company -> pull request -> link -> task, every step a read and every failure a reason. `legacy`: the task is the legacy engine's (or the installation is the old single-company one). */
 async function map(input: GithubCoreWebhookInput, payload: ParsedPayload, hit: Hit): Promise<Mapped | GithubIgnoredReason | "legacy"> {
   const installation = await input.bindings.ownerAndState(payload.installation.id);
-  if (installation.owner === undefined) return "unknown_installation";
+  // No binding row after the backfill marker: nobody owns it, so the core makes no wake on a guess; the legacy handler keeps serving what it always served here.
+  if (installation.owner === undefined) return input.legacyUnscoped === true ? "legacy" : "unknown_installation";
   // The install's old single company has no binding row: only the legacy path serves it (no core wake is made on a guess of who owns what).
   if (!installation.bound) return "legacy";
   if (installation.state !== "active") return "installation_inactive";

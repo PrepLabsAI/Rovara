@@ -45,7 +45,7 @@ function seed(db: FakeDynamoDb, input: Seed): void {
   if (input.tracking !== null) db.set({ ...recoveryRowKey(input.taskId), entityType: "WORKFLOW_MERGE_RECOVERY", kind: "tracking", taskId: input.taskId, nextAttemptAt: NOW + 240_000, attempts: 0, quiet: 3, ...input.tracking });
 }
 
-async function world(options: { perMinute?: number } = {}) {
+async function world(options: { perMinute?: number; legacyUnscoped?: boolean } = {}) {
   const db = new FakeDynamoDb();
   const bindings = new GithubInstallationBindings(db, "state");
   await bindings.backfill(async () => []);
@@ -63,7 +63,7 @@ async function world(options: { perMinute?: number } = {}) {
     const headers = { "x-github-event": event, "x-github-delivery": extra.deliveryId ?? `550e8400-e29b-41d4-a716-${String(state.sequence).padStart(12, "0")}`,
       "x-hub-signature-256": `sha256=${createHmac("sha256", extra.signWith ?? extra.secret ?? SECRET).update(raw).digest("hex")}`, ...extra.headers };
     return handleGithubWebhookRoute({ headers, body: raw, secret, isSecretMissing: () => false, now: () => state.now, log: (entry) => logs.push(entry), legacy,
-      ...(extra.core === false ? {} : { core: { documentClient: db, tableName: "state", bindings, ...(options.perMinute === undefined ? {} : { perMinute: options.perMinute }) } }) });
+      ...(extra.core === false ? {} : { core: { documentClient: db, tableName: "state", bindings, ...(options.perMinute === undefined ? {} : { perMinute: options.perMinute }), ...(options.legacyUnscoped === true ? { legacyUnscoped: true } : {}) } }) });
   };
   const row = (taskId = TASK_A) => db.get(recoveryRowKey(taskId).pk, recoveryRowKey(taskId).sk)!;
   const snapshot = () => JSON.stringify(db.find(() => true).sort((x, y) => `${String(x.pk)}|${String(x.sk)}`.localeCompare(`${String(y.pk)}|${String(y.sk)}`)));
@@ -604,6 +604,59 @@ describe("the mapping is exact and never crosses a company", () => {
     expect(answer.status).toBe(200);
     expect(legacy).toHaveBeenCalledTimes(1);
     expect(db.get(recoveryRowKey(TASK_A).pk, recoveryRowKey(TASK_A).sk)!["lastHintAt"]).toBeUndefined();
+  });
+
+  it("where the legacy handler is unscoped (hosted), an installation with no binding row AFTER the backfill marker is the legacy path's, never a core 202", async () => {
+    const w = await world({ legacyUnscoped: true });
+    expect((await w.post("issue_comment", comment({ installation: { id: 999 } }))).status).toBe(200);
+    expect(w.legacy).toHaveBeenCalledTimes(1);
+    expect(w.writesSince()).toEqual([]);
+  });
+
+  it("where the legacy handler is unscoped, a legacy task with NO companyId on an installation bound to a named company is the legacy path's, not company_mismatch", async () => {
+    const w = await world({ legacyUnscoped: true });
+    seed(w.db, { taskId: TASK_A, company: ORG_A, number: 7, engine: "workflow" });
+    const record = w.db.get(taskRecordKey(TASK_A).pk, taskRecordKey(TASK_A).sk)!;
+    delete record["companyId"];
+    w.db.set(record);
+    expect((await w.post("issue_comment", comment())).status).toBe(200);
+    expect(w.legacy).toHaveBeenCalledTimes(1);
+  });
+
+  it("an unscoped legacy never hands over another company's task: a legacy task of an explicit other company is still IGNORED", async () => {
+    const w = await world({ legacyUnscoped: true });
+    seed(w.db, { taskId: TASK_A, company: ORG_B, number: 7, engine: "workflow" });
+    expect(await w.post("issue_comment", comment())).toEqual({ status: 202, body: { delivery: "IGNORED" } });
+    expect(w.legacy).not.toHaveBeenCalled();
+  });
+
+  it("review R5: where the legacy handler is unscoped, a CORE task with no companyId stays the core's (company_mismatch, 202 IGNORED): legacyUnscoped only hands over legacy-owned tasks", async () => {
+    const w = await world({ legacyUnscoped: true });
+    seed(w.db, { taskId: TASK_A, company: ORG_A, number: 7, engine: "core" });
+    const record = w.db.get(taskRecordKey(TASK_A).pk, taskRecordKey(TASK_A).sk)!;
+    delete record["companyId"];
+    w.db.set(record);
+    expect(await w.post("issue_comment", comment())).toEqual({ status: 202, body: { delivery: "IGNORED" } });
+    expect(w.legacy).not.toHaveBeenCalled();
+    expect(w.writesSince()).toEqual([]);
+  });
+
+  it("review R6: where the legacy handler is unscoped, a CORE-stamped task with no record at all is never handed to the legacy path", async () => {
+    const w = await world({ legacyUnscoped: true });
+    seed(w.db, { taskId: TASK_A, company: ORG_A, number: 7, engine: "core" });
+    w.db.delete(taskRecordKey(TASK_A).pk, taskRecordKey(TASK_A).sk);
+    expect(await w.post("issue_comment", comment())).toEqual({ status: 202, body: { delivery: "IGNORED" } });
+    expect(w.legacy).not.toHaveBeenCalled();
+  });
+
+  it("review R7: where the legacy handler IS scoped (default), a legacy task with no companyId on a named company's installation keeps the W0 answer (202 IGNORED, legacy not called)", async () => {
+    const w = await world();
+    seed(w.db, { taskId: TASK_A, company: ORG_A, number: 7, engine: "workflow" });
+    const record = w.db.get(taskRecordKey(TASK_A).pk, taskRecordKey(TASK_A).sk)!;
+    delete record["companyId"];
+    w.db.set(record);
+    expect(await w.post("issue_comment", comment())).toEqual({ status: 202, body: { delivery: "IGNORED" } });
+    expect(w.legacy).not.toHaveBeenCalled();
   });
 
   it("without installation bindings there is no core branch: every delivery goes to the legacy path", async () => {

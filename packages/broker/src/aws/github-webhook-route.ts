@@ -31,7 +31,7 @@ export interface GithubWebhookRouteInput {
   /** True for the loader's "this secret holds no usable key" refusal. */
   isSecretMissing: (error: unknown) => boolean;
   /** Present when the install has installation bindings: only then is there a core branch. */
-  core?: Pick<GithubCoreWebhookInput, "documentClient" | "tableName" | "bindings" | "perMinute"> | undefined;
+  core?: Pick<GithubCoreWebhookInput, "documentClient" | "tableName" | "bindings" | "perMinute" | "legacyUnscoped"> | undefined;
   now: () => number;
   log: (entry: Record<string, unknown>) => void;
   /** The legacy handlers (the installation lifecycle and the old pull request path), called with the secret that verified. */
