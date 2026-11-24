@@ -10,6 +10,9 @@ import { it } from "vitest";
 //      marked superseded. The step's writes must still be admitted on the woken worker, and the next Close's retain must succeed.
 //   2. N-F1: an instance ended in the middle of a retain (the idle reaper's stop) leaves the retention either complete or absent, never half: the volume is intact, no writer is admitted, and the next retain succeeds.
 
+// A kernel keeps a loop device's BLKROSET read-only flag after the device is detached, and `losetup --find` hands the same /dev/loopN to the next image: the next mount of a plain read-write image then comes up
+// "source write-protected, mounted read-only". A real reboot clears it (a new kernel); a proof that emulates a reboot, or ends, in the same kernel must clear it itself: `blockdev --setrw` BEFORE the detach.
+
 // A proof owns /mnt/workspace and /run/agentx-close-retention while it runs. Its own teardown runs inside the process that still holds journal descriptors, so a mount can stay busy and the NEXT proof (or the grid's
 // baseline) then fails "host already owns workspace path". Every proof therefore ends with a FRESH root process that detaches what the proof made, however the proof ended: lazy recursive unmounts, the loop devices
 // backing /mnt/workspace, the serve helper, then the directories. It runs only after a proof that started (this suite refuses a host that already used those paths before it begins).
@@ -36,7 +39,7 @@ holders | while read -r pid rest; do kill -9 "$pid" 2>/dev/null; done
 sleep 1
 # Every mount under the proof's paths, deepest first, lazily.
 awk -v r="$R" -v v="$V" '{m=$2; if (m==r||index(m,r"/")==1||m==v||index(m,v"/")==1) print m}' /proc/mounts | sort -r | while read -r m; do umount -l "$m" 2>/dev/null; done
-for device in $loops; do losetup --detach "$device" 2>/dev/null; done
+for device in $loops; do blockdev --setrw "$device" 2>/dev/null; losetup --detach "$device" 2>/dev/null; done
 rm -rf "$V" "$R" 2>/dev/null
 if [ -e "$R" ] || [ -e "$V" ]; then
   echo "STILL PRESENT after teardown: $R=$([ -e "$R" ] && echo yes || echo no) $V=$([ -e "$V" ] && echo yes || echo no)"
@@ -132,8 +135,8 @@ const proofFinally = String.raw`
     }
     await command('umount','--recursive',RUN+'/view').catch(()=>{});
     await command('umount','--recursive',ROOT).catch(()=>{});
-    for(const device of loops)await command('losetup','--detach',device).catch(()=>{});
-    await rm(RUN,{recursive:true,force:true}).catch(e=>console.error('proof teardown: rm RUN failed',e.message)); await rm(ROOT,{recursive:true,force:true}).catch(e=>console.error('proof teardown: rm ROOT failed',e.message));
+    for(const device of loops){await command('blockdev','--setrw',device).catch(()=>{});await command('losetup','--detach',device).catch(()=>{});}
+    await rm(RUN,{recursive:true,force:true}).catch(()=>{}); await rm(ROOT,{recursive:true,force:true}).catch(()=>{});
   }
 }
 `;
@@ -142,6 +145,8 @@ const proofFinally = String.raw`
 const intentRebootProof = proofPrelude + String.raw`
   const helperArgs=[workspaceId,'3','i-0123456789abcdef0','vol-0123456789abcdef0'];
   const options=async()=>(await command('findmnt','-n','-o','OPTIONS','--target',ROOT+'/data')).split(',');
+  // The control socket file of the previous serve outlives it: wait for a CONNECTION that works, not for the file.
+  const serving=async()=>{for(let i=0;i<200;i++){try{await new HostCloseRetentionStorage().withOwnership('read',async()=>true);return;}catch{await new Promise(r=>setTimeout(r,25));}}throw new Error('the control socket never accepted a connection');};
   const startWorker=()=>{
     const j=new OperationJournal(ROOT+'/data',ROOT+'/.agentx-control/journal'), st=new HostCloseRetentionStorage();
     const ex=new CloseRetentionExecutor(j,st,async()=>inspectWorkspaceForClose(ROOT+'/data'),()=>false);
@@ -152,13 +157,13 @@ const intentRebootProof = proofPrelude + String.raw`
   const reboot=async()=>{
     daemon.kill('SIGTERM'); await once(daemon,'exit'); daemon=undefined;
     await command('umount','--recursive',RUN+'/view');
-    const current=JSON.parse(await readFile(ROOT+'/.agentx-control/current.json','utf8'));
-    const backing=ROOT+'/.agentx-control/generations/'+current.generation.dataGeneration+'.ext4';
-    const device=await command('losetup','--associated',backing,'--output','NAME','--noheadings');
-    await command('umount',ROOT+'/data'); await command('losetup','--detach',device);
+    // A real reboot drops EVERY mount and loop device of the old boot, the hidden older generations a hand-over stacked under DATA included: unmount all of them and detach every loop backed under the workspace.
+    const attached=(await command('losetup','-a')).split('\n').filter(line=>line.includes(ROOT+'/')).map(line=>line.split(':')[0]);
+    for(let i=0;i<8&&await command('mountpoint','-q',ROOT+'/data').then(()=>true,()=>false);i++)await command('umount',ROOT+'/data');
+    for(const device of attached){await command('blockdev','--setrw',device).catch(()=>{});await command('losetup','--detach',device);}
     assert.equal(await command('bash',helper,'init',...helperArgs),'migrated','validate_boot and restore must accept the journal');
     daemon=spawn('bash',[helper,'serve',...helperArgs],{stdio:['ignore','ignore','pipe']});
-    for(let i=0;i<100;i++){try{await new HostCloseRetentionStorage().identity();break;}catch{await new Promise(r=>setTimeout(r,20));}}
+    await serving();
   };
   // C1: a check whose seal is refused (an old writer holds the file) leaves an INTENT behind.
   writer=spawn('python3',['-u','-c','import sys,mmap; f=open(sys.argv[1],"r+b"); m=mmap.mmap(f.fileno(),0); print("ready",flush=True); sys.stdin.readline()',ROOT+'/data/repo/value'],{stdio:['pipe','pipe','pipe']});
@@ -205,11 +210,13 @@ const unconfirmedContinueProof = proofPrelude + String.raw`
   // 3. The Continue names that retention: it is admitted, gets a distinct generation, and the volume is writable.
   const stepId=randomUUID();
   const step=await wokenSend({...invocation,kind:'task',operationId:stepId,fence:11,payload:{conversationId:randomUUID(),prompt:'continue the work'},supersedesRetention:replayed.body.retention});
-  assert.notEqual(step.status,409,'the step naming the retention must be admitted'); assert.equal(wokenWrites,1);
+  assert.notEqual(step.status,409,'the step naming the retention must be admitted'); for(let i=0;i<100&&wokenWrites<1;i++)await new Promise(r=>setTimeout(r,20)); assert.equal(wokenWrites,1,'the admitted step must reach the executor');
   await writeFile(ROOT+'/data/repo/value','continued work\n');
   // 4. The next Close's check: a new preflight at a higher fence retains again and sees the continued work.
   await wokenJournal.transition(stepId,'RUNNING').catch(()=>{}); await wokenJournal.transition(stepId,'SUCCEEDED').catch(()=>{});
-  const again=await wokenSend({...invocation,operationId:randomUUID(),fence:12});
+  // The hand-over rotated the generation: the next check targets the CURRENT one (a retain of the old target is a mismatch).
+  const current=await new HostCloseRetentionStorage().identity(); assert.notEqual(current.dataGeneration,generation.dataGeneration);
+  const again=await wokenSend({...invocation,operationId:randomUUID(),fence:12,payload:{schemaVersion:1,action:'retain',target:current}});
   assert.equal(again.body.status,'retained'); assert.equal(again.body.inspection.safeToClose,false,'the continued work is unpublished');
 ` + proofFinally;
 
@@ -221,7 +228,7 @@ const stopMidRetainProof = proofPrelude + String.raw`
   assert.equal(await readFile(ROOT+'/data/repo/value','utf8'),'original\n','the volume must be intact');
   // A restarted worker: the retain either completed (and then verifies) or never took hold (and then admits nothing wrong); the next retain succeeds.
   daemon=spawn('bash',[helper,'serve',workspaceId,'3','i-0123456789abcdef0','vol-0123456789abcdef0'],{stdio:['ignore','ignore','pipe']});
-  for(let i=0;i<100;i++){if(await lstat(RUN+'/control.sock').then(()=>true,()=>false))break;await new Promise(r=>setTimeout(r,20));}
+  for(let i=0;i<200;i++){try{await new HostCloseRetentionStorage().withOwnership('read',async()=>true);break;}catch{await new Promise(r=>setTimeout(r,25));}}
   const restartedJournal=new OperationJournal(ROOT+'/data',ROOT+'/.agentx-control/journal');
   const restartedExecutor=new CloseRetentionExecutor(restartedJournal,new HostCloseRetentionStorage(),async()=>inspectWorkspaceForClose(ROOT+'/data'),()=>false);
   const next=await restartedExecutor.answer({...invocation,operationId:randomUUID(),fence:12});

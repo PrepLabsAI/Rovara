@@ -263,6 +263,22 @@ class MigrationTests(unittest.TestCase):
                 else:
                     self.assertEqual(self.ns['validate_boot'](*self.args), rotated)
 
+    # ---- found on real Linux (CI run 45311914124, reproduced in a privileged Ubuntu 24.04 container) ----
+    def test_mountinfo_reads_the_topmost_mount_when_a_hand_over_stacked_a_new_generation_over_the_old_one(self):
+        old = dict(target=self.ns['DATA'], source='/dev/loop1', fstype='ext4', options='ro,noatime', **{'maj:min': '7:1'}, uuid=str(uuid.uuid4()))
+        new = dict(target=self.ns['DATA'], source='/dev/loop2', fstype='ext4', options='rw,noatime', **{'maj:min': '7:2'}, uuid=str(uuid.uuid4()))
+        import json
+        # findmnt lists the stacked mounts bottom first: the data the worker sees is the LAST one.
+        self.ns['run'] = lambda *args: json.dumps({'filesystems': [old, new]})
+        self.assertEqual(self.ns['mountinfo']()['source'], '/dev/loop2')
+
+    def test_a_hand_over_checks_the_copied_image_before_it_changes_its_uuid(self):
+        source = HELPER.read_text()
+        successor = source[source.index('def successor('):source.index('class Handler')]
+        line = next(l for l in successor.splitlines() if "'tune2fs'" in l)
+        # tune2fs -U refuses a metadata_csum filesystem that was mounted after its last check ("requires a freshly checked filesystem"): the copy is checked first.
+        self.assertLess(line.index("'e2fsck'"), line.index("'tune2fs'"))
+
 
 if __name__ == '__main__':
     unittest.main()

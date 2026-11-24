@@ -247,7 +247,7 @@ def data_directory():
     try: require(os.fstat(fd).st_uid in (HOST_UID,WORKER_UID))
     finally: os.close(fd)
 def mountinfo():
-    m=json.loads(run('findmnt','--json','--target',DATA,'--output','TARGET,SOURCE,FSTYPE,OPTIONS,MAJ:MIN,UUID'))['filesystems'][0]
+    m=json.loads(run('findmnt','--json','--target',DATA,'--output','TARGET,SOURCE,FSTYPE,OPTIONS,MAJ:MIN,UUID'))['filesystems'][-1]
     if m['target']!=DATA or m['fstype']!='ext4' or not re.fullmatch(r'/dev/loop[0-9]+',m['source']): raise ValueError('unknown data mount')
     if 'noatime' not in m['options'].split(','): raise ValueError('data mount can update metadata on reads')
     return m
@@ -440,7 +440,7 @@ def successor(operation_id):
     sealed(value)
     next_value=dict(value,successorOperationId=operation_id,generation=dict(value['generation'],dataGeneration=str(uuid.uuid4())))
     backing=image(next_value); copy_regular(image(value),backing); os.chmod(backing,0o600)
-    run('tune2fs','-U','random',backing)
+    subprocess.run(('e2fsck','-fp',backing),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=600); run('tune2fs','-U','random',backing)
     with os.fdopen(open_regular(backing),'rb') as f: os.fsync(f.fileno())
     device=run('losetup','--find','--show',backing); next_value['filesystemId']=run('blkid','-s','UUID','-o','value',device)
     data_directory(); run('mount','-t','ext4','-o','rw,noatime',device,DATA)

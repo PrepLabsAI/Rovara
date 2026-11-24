@@ -30,7 +30,7 @@ holders | while read -r pid rest; do kill -9 "$pid" 2>/dev/null; done
 sleep 1
 # Every mount under the proof's paths, deepest first, lazily.
 awk -v r="$R" -v v="$V" '{m=$2; if (m==r||index(m,r"/")==1||m==v||index(m,v"/")==1) print m}' /proc/mounts | sort -r | while read -r m; do umount -l "$m" 2>/dev/null; done
-for device in $loops; do losetup --detach "$device" 2>/dev/null; done
+for device in $loops; do blockdev --setrw "$device" 2>/dev/null; losetup --detach "$device" 2>/dev/null; done
 rm -rf "$V" "$R" 2>/dev/null
 if [ -e "$R" ] || [ -e "$V" ]; then
   echo "STILL PRESENT after teardown: $R=$([ -e "$R" ] && echo yes || echo no) $V=$([ -e "$V" ] && echo yes || echo no)"
@@ -133,7 +133,7 @@ try {
   await command('umount','--recursive',RUN+'/view');
   const backing=ROOT+'/.agentx-control/generations/'+generation.dataGeneration+'.ext4';
   const device=await command('losetup','--associated',backing,'--output','NAME','--noheadings');
-  await command('umount',ROOT+'/data');await command('losetup','--detach',device);
+  await command('umount',ROOT+'/data');await command('blockdev','--setrw',device);await command('losetup','--detach',device);
   container=await command('docker','run','-d','--restart=always',image,'sleep','300');
   const boot=await readFile(repository+'/packages/worker/ec2/boot.sh','utf8');
   const fn=name=>{const a=boot.indexOf('\n'+name+'() {');const b=boot.indexOf('\n}\n',a);assert.ok(a>=0&&b>a);return boot.slice(a+1,b+3);};
@@ -175,8 +175,8 @@ try {
     }
     await command('umount','--recursive',RUN+'/view').catch(()=>{});
     await command('umount','--recursive',ROOT).catch(()=>{});
-    for(const device of loops)await command('losetup','--detach',device).catch(()=>{});
-    await rm(RUN,{recursive:true,force:true}).catch(e=>console.error('proof teardown: rm RUN failed',e.message)); await rm(ROOT,{recursive:true,force:true}).catch(e=>console.error('proof teardown: rm ROOT failed',e.message));
+    for(const device of loops){await command('blockdev','--setrw',device).catch(()=>{});await command('losetup','--detach',device).catch(()=>{});}
+    await rm(RUN,{recursive:true,force:true}).catch(()=>{}); await rm(ROOT,{recursive:true,force:true}).catch(()=>{});
   }
 }
 `;
