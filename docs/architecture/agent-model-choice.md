@@ -21,7 +21,7 @@ A step's model is, in order: the model the company set for that step (understand
 
 ## The gateway's list (Cloud #72)
 
-Cloud's gateway serves `GET <ROVARA_CORE_MODEL_GATEWAY_URL>/v1/service/companies/<companyId>/offered-models` (Cloud `docs/model-gateway-offered-models.md`), answering the `OfferedAgentModels` contract in `packages/contracts/src/agent-model-choice.ts`: 1 to 64 names, each exactly as the agent route accepts it (the engine name for Claude, the Bedrock id for the rest), one name per model.
+Cloud's gateway serves `GET <ROVARA_CORE_MODEL_GATEWAY_URL>/v1/service/companies/<companyId>/offered-models` (Cloud `docs/model-gateway-offered-models.md`), answering the `OfferedAgentModels` contract in `packages/contracts/src/agent-model-choice.ts`: 1 to 64 names, each exactly as the agent route accepts it (the engine name for Claude, OpenAI's own name such as `gpt-5` for a company's own OpenAI key, the Bedrock id for the rest), one name per model. An OpenAI model is named under the `openai` provider and, on the agent route, runs with Anthropic thinking off and text-only input, because the gateway's Chat Completions translation refuses both (#1389).
 
 Code reads it with `core-host/offered-models-http.ts`:
 

@@ -46,12 +46,19 @@ export const OfferedAgentModelsSchema = z.object({
 });
 export type OfferedAgentModels = z.infer<typeof OfferedAgentModelsSchema>;
 
-/** Claude uses its engine name; slash IDs are OpenRouter; the remaining legacy names are Bedrock IDs. */
+/** Claude uses its engine name; slash IDs are OpenRouter; OpenAI's own names are a company's OpenAI key; the remaining legacy names are Bedrock IDs. */
 export const isClaudeAgentModel = (name: string): boolean => name.startsWith("claude-");
+/**
+ * #1389: an OpenAI model by OpenAI's own name (`gpt-5`, `gpt-5.4-mini`, `o4-mini`), which the gateway serves only on a company's own OpenAI key
+ * (its `openai_key` source, through Chat Completions). A Bedrock id is never one: Bedrock names a vendor first (`openai.gpt-oss-120b-1:0`).
+ */
+export const isOpenAiAgentModel = (name: string): boolean => /^(?:gpt-[0-9]|o[1-9])[a-z0-9.-]*$/u.test(name);
 
 /** The model identity Code's model catalog and per-step rule know a gateway name by. */
 export function agentModelIdentity(name: string): ModelIdentifier {
-  return name.includes("/") ? { provider: "openrouter", modelId: name } : isClaudeAgentModel(name) ? { provider: "anthropic", modelId: name } : { provider: "amazon-bedrock", modelId: name };
+  if (name.includes("/")) return { provider: "openrouter", modelId: name };
+  if (isClaudeAgentModel(name)) return { provider: "anthropic", modelId: name };
+  return isOpenAiAgentModel(name) ? { provider: "openai", modelId: name } : { provider: "amazon-bedrock", modelId: name };
 }
 
 /** The gateway name of a model identity, or undefined when the identity is not one the gateway names (another provider, or a name that is not valid). */
