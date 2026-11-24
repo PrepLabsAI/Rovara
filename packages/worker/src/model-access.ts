@@ -1,7 +1,7 @@
 // A task's model access (ruling R29): the proxy's address and a key minted for this task alone, from the
 // control plane through the operation's callback capability. The worker holds no provider secret; the key
 // stays in memory until shortly before it expires, is asked for once at a time, and is never logged.
-import { type RunPrice, agentXError } from "@agentx/contracts";
+import { type RateQuoteV1, type RunPrice, agentXError } from "@agentx/contracts";
 import { parseModelAccess, refuseModelAccess } from "./cx-c/model-access-response.js";
 import { acceptedRunPrice } from "./cx-c/run-price-ceiling.js";
 
@@ -10,6 +10,10 @@ export const MODEL_ACCESS_MARGIN_MS = 60_000;
 
 export interface ModelAccess {
   runPrice?: RunPrice;
+  /** The gateway's rate quote for this model and company's source (base rates, every band, both cache-write rates), sent beside the run price, for PRICING only (never signed into the token). Absent: an older broker. */
+  rateQuote?: RateQuoteV1;
+  /** The run price this run accepted (the first one, kept inside across renewals): what pricing uses when there is no quote. Absent: the answer had none. */
+  acceptedRunPrice?: RunPrice;
   baseUrl: string;
   apiKey: string;
   /** Epoch milliseconds. */
@@ -35,11 +39,12 @@ export interface ModelAccessSourceInput {
  * the key as often as it is asked for. Nothing is minted until a request actually needs the proxy, so a ChatGPT-plan task whose
  * requests go direct to OpenAI never mints one unless its plan falls back to the proxy's models.
  */
-export function lazyModelProxy(input: { baseUrl: string; source: () => Promise<ModelAccess> }): { baseUrl: string; apiKey: () => Promise<string>; runPrice: () => Promise<RunPrice | undefined> } {
+export function lazyModelProxy(input: { baseUrl: string; source: () => Promise<ModelAccess> }): { baseUrl: string; apiKey: () => Promise<string>; runPrice: () => Promise<RunPrice | undefined>; gatewayPricing: () => Promise<{ rateQuote?: RateQuoteV1 | undefined; runPrice?: RunPrice | undefined }> } {
   let origin: URL | undefined;
   try { origin = new URL(input.baseUrl); } catch { origin = undefined; }
   if (origin === undefined || !/^https?:$/u.test(origin.protocol)) throw agentXError("CONFIG_INVALID", "the worker's model proxy address is not an http or https URL");
-  return { baseUrl: input.baseUrl, runPrice: async () => (await input.source()).runPrice, async apiKey(this: { baseUrl: string }) {
+  return { baseUrl: input.baseUrl, runPrice: async () => (await input.source()).runPrice,
+    gatewayPricing: async () => { const answer = await input.source(); return { rateQuote: answer.rateQuote, runPrice: answer.acceptedRunPrice === undefined ? answer.runPrice : { ...answer.acceptedRunPrice, expiresAt: Math.max(answer.acceptedRunPrice.expiresAt, answer.runPrice?.expiresAt ?? 0) } }; }, async apiKey(this: { baseUrl: string }) {
     const answer = await input.source();
     // The runtime binds this method to a fresh request-local proxy object. URL and key are taken from ONE answer,
     // before returning either to the transport; simultaneous requests cannot overwrite each other's address.
@@ -64,7 +69,7 @@ export function modelAccessSource(input: ModelAccessSourceInput): () => Promise<
         if (!response.ok) await refuseModelAccess(response, input.requiredPriceModel);
         const answer = parseModelAccess(await response.json().catch(() => undefined), input.fallbackBaseUrl, input.allowLocalHttp);
         ceiling = acceptedRunPrice(answer.runPrice, input.requiredPriceModel, ceiling, now);
-        current = answer;
+        current = { ...answer, ...(ceiling === undefined ? {} : { acceptedRunPrice: ceiling }) };
         return current;
       } finally {
         pending = undefined;
