@@ -76,6 +76,7 @@ import { TEST_SERVICES_BOOT_FACTS_ENVIRONMENT, emitReport, type ReportOutcome } 
 import { createDockerCli, type DockerCli } from "./swebench/containers.js";
 import type { CheckRunners } from "./verification/checks.js";
 import { hiddenWorkspaceDirectories } from "./workspace-state.js";
+import { assertNoInstallSecrets } from "./install-secrets.js";
 
 /** The artifact the usage record is written to after every sealed round (latest wins). s1-broker's evidence step reads it by this name. */
 export const TEST_SERVICES_USAGE_ARTIFACT = "test-services-usage.json";
@@ -764,6 +765,8 @@ interface RoundState {
  * no field for a lesser role); that is why no round reuses it. On ANY failure everything made so far is removed before this throws a `TestServicesError`. On success the sandbox's `dispose()` tears the run down.
  */
 export async function startTestServicesRun(config: TestServicesConfig, input: StartTestServicesInput): Promise<TestServicesRun> {
+  // Private packages P2a: no test service starts while the install step's token file exists.
+  await assertNoInstallSecrets();
   // The very first step: a project with a dev container is "not available yet", before a directory, a network, a name server or a helper exists.
   refuseTestServicesWithDevcontainer({ dependencies: input.dependencies, devcontainer: input.hasDevcontainer });
   const ports = config.sealedRound;

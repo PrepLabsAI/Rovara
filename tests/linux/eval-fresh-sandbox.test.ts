@@ -156,7 +156,10 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     // TE-F1C-SOCKET-ACCESS: the daemon's own view of every running container's mounts. Only the helper mounts the bridge folder, read-only; the sandbox mounts the checkout and nothing else.
     const all = (await docker("ps", "--format", "{{.Names}}")).stdout.trim().split("\n").filter(Boolean);
     for (const name of all) {
-      const mounts = JSON.parse((await docker("inspect", "--format", "{{json .Mounts}}", name)).stdout) as { Source: string; Destination: string; RW: boolean; Type: string }[];
+      // Other test files on this daemon start and remove short-lived containers: one listed a moment ago can be gone by now (an empty answer, "No such container"). Every container that still exists is checked; the round's own two are never gone.
+      const looked = await docker("inspect", "--format", "{{json .Mounts}}", name);
+      if (looked.code !== 0 && /no such (?:container|object)/iu.test(looked.stderr) && name !== helperName && name !== sandboxName) continue;
+      const mounts = JSON.parse(looked.stdout) as { Source: string; Destination: string; RW: boolean; Type: string }[];
       const onBridge = mounts.filter((m) => m.Source === w.bridgeDir || m.Source.startsWith(`${w.bridgeDir}/`) || w.bridgeDir.startsWith(`${m.Source}/`));
       if (name === helperName) expect(mounts.filter((m) => m.Type === "bind")).toEqual([expect.objectContaining({ Source: w.bridgeDir, Destination: "/rovara/models", RW: false })]);
       else expect(onBridge, name).toEqual([]);
