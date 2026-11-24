@@ -79,13 +79,16 @@ ts_address_pools() {
   # The old file is kept: if Docker does not come back with the new one, the old one is put back and Docker restarted on it (the worker still needs Docker), and the stage withholds.
   cp -p /etc/docker/daemon.json /etc/docker/daemon.json.before-test-services 2>/dev/null || return 1
   printf '{"data-root": "%s", "default-address-pools": %s}\n' "$DOCKER_DATA_ROOT" "$pools" >/etc/docker/daemon.json || { mv -f /etc/docker/daemon.json.before-test-services /etc/docker/daemon.json; return 1; }
-  if systemctl restart docker.service; then rm -f /etc/docker/daemon.json.before-test-services; bash /usr/local/libexec/rovara-container-firewall; return; fi
+  # EGRESS-BOOT-RACE: `systemctl restart` returning is not Docker answering, and the container firewall inserts into the DOCKER-USER chain the daemon builds as it starts; wait (bounded) for the daemon before the firewall.
+  if timeout "$(try_seconds 120)s" systemctl restart docker.service && ts_docker_ready; then rm -f /etc/docker/daemon.json.before-test-services; bash /usr/local/libexec/rovara-container-firewall; return; fi
   mv -f /etc/docker/daemon.json.before-test-services /etc/docker/daemon.json
   # The failed restart may have tripped systemd's start limit; clear it so the restart on the original file is not refused.
   systemctl reset-failed docker.service 2>/dev/null || true
-  systemctl restart docker.service && bash /usr/local/libexec/rovara-container-firewall
+  timeout 120s systemctl restart docker.service && ts_docker_ready && bash /usr/local/libexec/rovara-container-firewall
   return 1
 }
+# Docker answers `docker info` (30 tries, 2 s apart; each probe capped at 15 s or what is left of the boot time), else 1; it never runs past the boot deadline (BOOT_DEADLINE).
+ts_docker_ready() { local i; for i in $(seq 1 30); do timeout "$(try_seconds 15)s" docker info >/dev/null 2>&1 && return 0; ((SECONDS < BOOT_DEADLINE)) || return 1; sleep 2; done; return 1; }
 
 # The install's copies, as the worker image names them. Fixed form only, at most TS_MAX_IMAGES; anything else is none.
 ts_mirror_references() {

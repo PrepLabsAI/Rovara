@@ -221,7 +221,8 @@ ensure_docker() {
   install -d -m 0755 /etc/docker
   printf '{"data-root": "%s"}\n' "$DOCKER_DATA_ROOT" >/etc/docker/daemon.json
   systemctl enable docker.service
-  systemctl restart docker.service
+  timeout "$(try_seconds 120)s" systemctl restart docker.service
+  retry "Docker did not answer after its restart" timeout "$(try_seconds 15)s" docker info
   wall_off_containers
 }
 
