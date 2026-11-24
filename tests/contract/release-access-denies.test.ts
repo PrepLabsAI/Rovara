@@ -1,7 +1,7 @@
 import { App, Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
-import { defaultBoundaryStatements, releasePipelineDenyStatements, releasePipelineNames, serviceRoleStatements } from "@agentx/contracts";
+import { defaultBoundaryStatements, deployBoundaryStatements, releasePipelineDenyStatements, releasePipelineNames, serviceRoleStatements } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { EnvironmentReleasePipelineStack, RELEASE_PROJECT_KEYS, environmentReleaseNames } from "../../infra/lib/environment-release-pipeline.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
@@ -71,11 +71,14 @@ const matches = (patterns: string[], text: string): boolean => patterns.some((pa
 const sample = (pattern: string): string => pattern.replaceAll("*", "x");
 
 // ---- the access stack's boundary, for one environment
-function accessBoundary(env: string): { statements: Array<Statement & { actions: string[]; resources: string[]; notResources: string[] }>; json: TemplateJson } {
+function accessBoundary(env: string, which: "deploy" | "runtime" = "deploy"): { statements: Array<Statement & { actions: string[]; resources: string[]; notResources: string[] }>; json: TemplateJson } {
   const app = buildAgentXApp({ agentxEnv: env });
   const stack = app.node.children.find((child): child is Stack => Stack.isStack(child) && child.stackName === `agentx-${env}-access`)!;
   const json = Template.fromStack(stack).toJSON() as TemplateJson;
-  const policy = Object.values(json.Resources).find((resource) => resource.Type === "AWS::IAM::ManagedPolicy")!;
+  // TWO-BOUNDARIES: the access stack holds the DEPLOY boundary (the CloudFormation service role and the operator role) and the RUNTIME one (every role a merged template creates); both carry the
+  // same Deny statements, and the escalation rules below (F1, F2) are the DEPLOY roles', which are the ones that can write roles and stacks.
+  const policyName = which === "deploy" ? `agentx-${env}-deploy-boundary` : `agentx-${env}-boundary`;
+  const policy = Object.values(json.Resources).find((resource) => resource.Type === "AWS::IAM::ManagedPolicy" && resource.Properties.ManagedPolicyName === policyName)!;
   const resolve = resolver(json);
   const statements = ((policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement).map((statement) => ({
     ...statement,
@@ -193,10 +196,14 @@ describe("the environment boundary's release pipeline denies (shape)", () => {
     expect(matches(deny, `arn:aws:sns:${REGION}:${ACCOUNT}:agentx-staging-alerts`)).toBe(false);
   });
 
-  it("stays inside the managed policy's 6,144-character limit for the longest environment name (with 128 characters to spare), and for the placeholder the export bundle renders", () => {
+  it("keeps BOTH boundaries inside the managed policy's 6,144-character limit for the longest environment name on the longest partition (the headroom is pinned), and for the placeholder the export bundle renders", () => {
+    // TWO-BOUNDARIES: the runtime boundary and the deploy boundary are separate managed policies, each with its own limit. The headroom numbers are what the next statement can spend.
+    const size = (statements: typeof defaultBoundaryStatements, env: string, partition: string) => JSON.stringify({ Version: "2012-10-17", Statement: statements({ env, partition, region: partition === "aws" ? REGION : "us-gov-west-1", account: ACCOUNT, cloudFormationRoleName: `agentx-${env}-cloudformation` }) }).replace(/\s/gu, "").length;
     for (const env of ["staging", "a".repeat(20), "qqenv-placeholderqq"]) {
-      const document = JSON.stringify({ Version: "2012-10-17", Statement: defaultBoundaryStatements({ env, partition: "aws", region: REGION, account: ACCOUNT, cloudFormationRoleName: `agentx-${env}-cloudformation` }) }).replace(/\s/gu, "");
-      expect(document.length, env).toBeLessThanOrEqual(6144 - 128);
+      for (const partition of ["aws", "aws-us-gov"]) {
+        expect(size(defaultBoundaryStatements, env, partition), `runtime ${env} ${partition}`).toBeLessThanOrEqual(6144 - 2000);
+        expect(size(deployBoundaryStatements, env, partition), `deploy ${env} ${partition}`).toBeLessThanOrEqual(6144 - 300);
+      }
     }
     expect(releasePipelineNames("a".repeat(20)).runsBucket(ACCOUNT).length).toBeLessThanOrEqual(63);
   });
@@ -359,7 +366,7 @@ describe("a role with the environment boundary cannot step outside it (F1 stored
       expect(evaluate(staging.statements, action, roleArn, [], bounded)).toBe("allowed");
     });
     it("DeleteRolePermissionsBoundary is never allowed, whatever the role carries (no Allow lists it)", () => {
-      for (const context of [{}, bounded, admin]) expect(evaluate(staging.statements, "iam:DeleteRolePermissionsBoundary", roleArn, [], context)).toBe("no-allow");
+      for (const context of [{}, bounded, admin]) expect(evaluate(staging.statements, "iam:DeleteRolePermissionsBoundary", roleArn, [], context)).toBe("denied");
     });
     it("AdministratorAccess attached to a bounded role does not widen it: the boundary still allows no user, group, policy or account change, and no sts:AssumeRole of a pipeline role", () => {
       for (const action of ["iam:CreateUser", "iam:CreateAccessKey", "iam:CreatePolicy", "iam:CreatePolicyVersion", "organizations:CreateAccount", "sts:AssumeRole"]) {

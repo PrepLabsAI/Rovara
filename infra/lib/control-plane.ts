@@ -1394,8 +1394,9 @@ export class ControlPlaneStack extends Stack {
             { Sid: "ListBedrockModels", Effect: "Allow", Action: ["bedrock:ListFoundationModels", "bedrock:ListInferenceProfiles"], Resource: "*" },
             { Sid: "ReadBedrockModelAvailability", Effect: "Allow", Action: "bedrock:GetFoundationModelAvailability", Resource: "*" },
             { Sid: "ReadBedrockInferenceProfiles", Effect: "Allow", Action: "bedrock:GetInferenceProfile", Resource: `arn:${Aws.PARTITION}:bedrock:${Aws.REGION}:${Aws.ACCOUNT_ID}:inference-profile/*` },
+            // DEC 432: the worker's quota read (e2e-model-discovery-aws.ts) calls ListServiceQuotas only; the runtime boundary allows exactly that action (it was never allowed before, so the
+            // check was AccessDenied on named environments). GetServiceQuota is never called and stays out of the grant and the boundary.
             { Sid: "ListBedrockQuotas", Effect: "Allow", Action: "servicequotas:ListServiceQuotas", Resource: "*" },
-            { Sid: "ReadBedrockQuota", Effect: "Allow", Action: "servicequotas:GetServiceQuota", Resource: `arn:${Aws.PARTITION}:servicequotas:${Aws.REGION}:${Aws.ACCOUNT_ID}:bedrock/*` },
           ],
         },
       });

@@ -26,6 +26,8 @@ export interface PermissionsBoundaryParameter {
   readonly condition: CfnCondition;
   /** `Fn::If [HasPermissionsBoundary, Ref PermissionsBoundaryArn, <default boundary>]`. */
   readonly effectiveBoundaryArn: string;
+  /** The boundary this stack's own roles carry: the deploy boundary when `deployBoundary` was given, else `effectiveBoundaryArn`. */
+  readonly rolesBoundaryArn: string;
 }
 
 export interface PermissionsBoundaryOptions {
@@ -35,6 +37,12 @@ export interface PermissionsBoundaryOptions {
    * its Ref; every other stack uses the deterministic ARN.
    */
   readonly defaultBoundary?: (hasPermissionsBoundary: CfnCondition) => string;
+  /**
+   * TWO-BOUNDARIES: the access stack's own roles (the CloudFormation service role and the operator role) are capped by a DEPLOY boundary, not by the runtime one the other stacks' roles
+   * carry. Returns the deploy boundary policy's Ref, created like the default one (under the same condition). When the company gives its own boundary, that one caps these roles too, as
+   * before. `effectiveBoundaryArn` stays the RUNTIME boundary: it is what the roles that CloudFormation creates must carry.
+   */
+  readonly deployBoundary?: (hasPermissionsBoundary: CfnCondition) => string;
 }
 
 /**
@@ -95,9 +103,11 @@ export function applyPermissionsBoundaryParameter(stack: Stack, env: string, opt
   Validations.of(condition).acknowledge(W8001_ACKNOWLEDGMENT);
   const fallback = options.defaultBoundary?.(condition) ?? defaultBoundaryArn({ env, partition: Aws.PARTITION, account: Aws.ACCOUNT_ID });
   const effectiveBoundaryArn = Token.asString(Fn.conditionIf(condition.logicalId, parameter.valueAsString, fallback));
-  Aspects.of(stack).add(new PermissionsBoundaryAspect(effectiveBoundaryArn));
+  const rolesBoundaryArn = options.deployBoundary === undefined ? effectiveBoundaryArn
+    : Token.asString(Fn.conditionIf(condition.logicalId, parameter.valueAsString, options.deployBoundary(condition)));
+  Aspects.of(stack).add(new PermissionsBoundaryAspect(rolesBoundaryArn));
 
-  const result = { parameter, condition, effectiveBoundaryArn };
+  const result = { parameter, condition, effectiveBoundaryArn, rolesBoundaryArn };
   applied.set(stack, result);
   return result;
 }

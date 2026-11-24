@@ -3,6 +3,7 @@
 import { STACK_PARTS, environmentStackName } from "./environments.js";
 import { releasePipelineDenyStatements } from "./release-pipeline-names.js";
 import { savedEnvManageRoleName, savedEnvPullRoleName, savedEnvPushRoleName } from "./saved-env-image.js";
+import { slackTokenReaderBoundaryStatement, slackTokenReaderLookupResource } from "./slack-company-tokens.js";
 
 export interface PolicyScope {
   env: string;
@@ -146,6 +147,23 @@ export function defaultBoundaryArn(scope: Pick<PolicyScope, "env" | "partition" 
 }
 
 /**
+ * TWO-BOUNDARIES (owner's choice A): the environment has two default boundaries. The RUNTIME boundary (`defaultBoundaryName`, unchanged name and ARN) caps every role a merged template
+ * creates under /agentx/<env>/ and holds only what such roles use (a census of every role policy of every stack: `iam:PassRole`, `ses:SendEmail` and the services, plus the
+ * trust-granted sts:AssumeRole of the broker and of the Slack service). The DEPLOY boundary caps ONLY the CloudFormation service role and the operator role (the access stack's
+ * two roles) and holds what only they need (IAM role and instance-profile management, service-linked roles, DNS firewall, quotas, the fixed-name lookups) with the rules that stop those
+ * roles escalating: new roles must carry the RUNTIME boundary, CloudFormation writes only through the environment's CloudFormation role and only on the environment's stacks, no
+ * boundary removal and no edit of either boundary.
+ */
+export function deployBoundaryName(env: string): string {
+  return `agentx-${env}-deploy-boundary`;
+}
+
+/** The deploy boundary's ARN, deterministic like the runtime one. */
+export function deployBoundaryArn(scope: Pick<PolicyScope, "env" | "partition" | "account">): string {
+  return `arn:${scope.partition}:iam::${scope.account}:policy${environmentRolePath(scope.env)}${deployBoundaryName(scope.env)}`;
+}
+
+/**
  * Role ARNs this environment's stacks may create and manage: every role under the environment's
  * IAM path. A path, not a name prefix, because CloudFormation truncates generated role names (a
  * long environment name loses the agentx-<env>- prefix) and agentx-prod-* would also match the
@@ -216,7 +234,8 @@ function fixedNameRoleLookupStatement(scope: Pick<PolicyScope, "env" | "partitio
     Sid: "IamFixedNameRolesNotYetCreated",
     Effect: "Allow",
     Action: [...FIXED_NAME_ROLE_LOOKUP_ACTIONS],
-    Resource: [savedEnvPushRoleName(scope.env), savedEnvPullRoleName(scope.env), savedEnvManageRoleName(scope.env)].map((name) => `arn:${scope.partition}:iam::${scope.account}:role/${name}`),
+    // R5 step 1: the Slack token reader role is fixed-name too (contracts slack-company-tokens.ts), so its lookup is listed with the three image roles.
+    Resource: [...[savedEnvPushRoleName(scope.env), savedEnvPullRoleName(scope.env), savedEnvManageRoleName(scope.env)].map((name) => `arn:${scope.partition}:iam::${scope.account}:role/${name}`), slackTokenReaderLookupResource(scope)],
   };
 }
 
@@ -312,32 +331,90 @@ export function operatorTrustProblem(input: { principal?: string | undefined; ex
   return undefined;
 }
 
+type BoundaryScope = Pick<PolicyScope, "env" | "partition" | "region" | "account" | "cloudFormationRoleName">;
+
 /**
- * The default permission boundary: the most any AgentX role (the service and operator roles
- * included) can ever do, whatever its own policy says. It allows the services AgentX uses, role
- * management only on this environment's roles, and nothing for users, groups or managed policies.
- * The Deny statements hold even if a later change widens an Allow.
+ * The Deny statements EVERY AgentX role carries, whichever boundary caps it (the runtime boundary and the deploy boundary both end with these): they hold even if a later change widens an
+ * Allow. Both boundaries' ARNs are named by DenyBoundaryChanges, so no capped role can edit either.
  */
-export function defaultBoundaryStatements(scope: Pick<PolicyScope, "env" | "partition" | "region" | "account" | "cloudFormationRoleName">): PolicyStatementJson[] {
+function boundaryDenyStatements(scope: BoundaryScope): PolicyStatementJson[] {
+  const roles = environmentRoles(scope);
+  return [
+    { Sid: "DenyAccountChanges", Effect: "Deny", Action: ["organizations:*", "account:*"], Resource: "*" },
+    { Sid: "DenyUsersAndGroups", Effect: "Deny", Action: ["iam:*User*", "iam:*Group*"], Resource: "*" },
+    {
+      Sid: "DenyPolicyManagement",
+      Effect: "Deny",
+      Action: ["iam:CreatePolicy*", "iam:*PolicyVersion*", "iam:DeletePolicy", "iam:SetDefaultPolicyVersion"],
+      Resource: "*",
+    },
+    { Sid: "DenyBoundaryChanges", Effect: "Deny", Action: ["iam:*Policy*"], Resource: [defaultBoundaryArn(scope), deployBoundaryArn(scope)] },
+    // Never remove a boundary from a role (no Allow lists it either; the explicit Deny keeps a later Allow from opening it).
+    { Sid: "DenyBoundaryRemoval", Effect: "Deny", Action: ["iam:DeleteRolePermissionsBoundary"], Resource: roles },
+    // The DNS firewall fails closed and is the VPC's only resolver path: no AgentX role may switch it to fail open, share it, or route DNS around it, whatever a later Allow says.
+    {
+      Sid: "DenyDnsFirewallEscapes",
+      Effect: "Deny",
+      Action: ["route53resolver:UpdateFirewallConfig", "route53resolver:Put*Policy", "route53resolver:CreateResolverEndpoint", "route53resolver:CreateResolverRule", "route53resolver:AssociateResolverRule"],
+      Resource: "*",
+    },
+    ...stackEscapeDenyStatements(scope),
+    // The environment release pipeline's pointers, secret, buckets, projects, approval and stack: no role under either boundary touches them, whatever a later Allow says.
+    ...releasePipelineDenyStatements(scope),
+  ];
+}
+
+/**
+ * The RUNTIME permission boundary (`defaultBoundaryName`): the most any role a merged template creates under /agentx/<env>/ can ever do, whatever its own policy says. It allows the
+ * services AgentX uses, `iam:PassRole` on the environment's roles (the sessions provisioner passes the worker role to EC2), a read-only `iam:GetRole` on them (the auto-requalify preflight), the read-only quota List (the model-discovery check), the one email send, the broker's assume of the saved
+ * environment image roles and the Slack service's assume of its token reader role. It has NO role management, no instance profiles and no service-linked roles: no runtime role uses
+ * any (census, tests/contract/two-boundaries.test.ts), so a runtime role can never be given them by editing its own policy. The Deny statements hold even if a later change widens an Allow.
+ */
+export function defaultBoundaryStatements(scope: BoundaryScope): PolicyStatementJson[] {
+  const { partition, account } = scope;
+  return [
+    { Sid: "Services", Effect: "Allow", Action: BOUNDARY_SERVICES.map((s) => `${s}:*`), Resource: "*" },
+    // SES sending only, and only as an email identity of this account and region (the attention email sender's own policy narrows it to the one identity CoreAttentionEmailSender names);
+    // never ses:* (identity, configuration and suppression-list changes stay outside every AgentX role). The Sid keeps its old name (the step-up sender, removed by DEC 254zzz73) so the
+    // deployed boundary does not change.
+    { Sid: "StepUpEmail", Effect: "Allow", Action: ["ses:SendEmail"], Resource: `arn:${partition}:ses:${scope.region}:${account}:identity/*` },
+    { Sid: "PassRoles", Effect: "Allow", Action: ["iam:PassRole"], Resource: environmentRoles(scope) },
+    // Read-only, the environment's roles only: the auto-requalify machine's preflight reads the worker role (runtime-requalify-steps.ts GetRoleCommand; census with every context flag on).
+    { Sid: "ReadRoles", Effect: "Allow", Action: ["iam:GetRole"], Resource: environmentRoles(scope) },
+    // DEC 432: the worker's model-discovery check lists the Bedrock service quotas (e2e-model-discovery-aws.ts ListServiceQuotasCommand). Read-only: the List action alone, which takes no resource
+    // (`*`); never GetServiceQuota (not called), RequestServiceQuotaIncrease or any Put. The single boundary never allowed it, so the check was AccessDenied on named environments.
+    { Sid: "ListQuotas", Effect: "Allow", Action: ["servicequotas:ListServiceQuotas"], Resource: "*" },
+    // L4-SE6 and R5: the broker's sts:AssumeRole of the saved environment image roles (the trust names the broker role), and the Slack service's of its per-company token reader role (the
+    // trust names the service's role and the one session tag). Trust grants, boundary caps: neither role's own policy has a statement for it.
+    assumeSessionRolesStatement(scope),
+    { Sid: "SlackTokenReader", ...slackTokenReaderBoundaryStatement({ env: scope.env, partition, account, named: true }) },
+    ...boundaryDenyStatements(scope),
+  ];
+}
+
+/**
+ * The DEPLOY permission boundary (`deployBoundaryName`): caps ONLY the CloudFormation service role and the operator role. It is the previous single boundary less what only runtime roles
+ * use (the email send, the broker's and the Slack service's assumes), so what CloudFormation and the operator can do is unchanged. What stops them escalating: role management is on this
+ * environment's roles only; the actions that set or change what a role may do (create, set a boundary, attach, detach, put or delete an inline policy) are allowed only for a role that carries the
+ * RUNTIME boundary (a role carrying the deploy boundary, or none, can never be made or changed through it, and an administrator policy attached to a runtime role is capped by the runtime
+ * boundary); iam:DeleteRolePermissionsBoundary is allowed nowhere and denied; and the Deny statements both boundaries share.
+ */
+export function deployBoundaryStatements(scope: BoundaryScope): PolicyStatementJson[] {
   const { partition, account } = scope;
   const roles = environmentRoles(scope);
   return [
     { Sid: "Services", Effect: "Allow", Action: BOUNDARY_SERVICES.map((s) => `${s}:*`), Resource: "*" },
     { Sid: "EcsFailureEventsRule", Effect: "Allow", Action: ["events:*"], Resource: ecsFailureRuleArn(scope) },
     ...dnsFirewallStatements(scope),
-    // The operator's identity check; the only STS action any AgentX role uses.
+    // The operator's identity check; the only STS action either deploy role uses.
     { Sid: "CallerIdentity", Effect: "Allow", Action: ["sts:GetCallerIdentity"], Resource: "*" },
     // The operator's EC2 quota reads (prerequisites on a resume); named like CallerIdentity above,
     // not scoped further, since scoped ARNs in the identity policy already limit it to two quotas.
     { Sid: "Quotas", Effect: "Allow", Action: ["servicequotas:GetServiceQuota"], Resource: "*" },
-    // SES sending only, and only as an email identity of this account and region (the attention email sender's own policy narrows it to the one identity CoreAttentionEmailSender names);
-    // never ses:* (identity, configuration and suppression-list changes stay outside every AgentX role). The Sid keeps its old name (the step-up sender, removed by DEC 254zzz73) so the
-    // deployed boundary does not change.
-    { Sid: "StepUpEmail", Effect: "Allow", Action: ["ses:SendEmail"], Resource: `arn:${partition}:ses:${scope.region}:${account}:identity/*` },
     // Role management on the environment's roles, WITH the boundary rules of serviceRoleStatements built into the boundary itself (a boundary does not pass to the roles it caps, so
     // a role carrying it could otherwise rebound itself or a sibling to AdministratorAccess, or create a role with none): the actions that set or change what a role may do are
-    // allowed only for a role that carries THIS boundary (iam:PermissionsBoundary is the boundary being set, or the role's current one for the policy actions), and
-    // iam:DeleteRolePermissionsBoundary is in neither list, so it is never allowed. Bounded roles never gain a role unbounded by this policy.
+    // allowed only for a role that carries the RUNTIME boundary (iam:PermissionsBoundary is the boundary being set, or the role's current one for the policy actions), and
+    // iam:DeleteRolePermissionsBoundary is in neither list, so it is never allowed. Deploy roles never gain a role unbounded, or bounded by anything but the runtime boundary.
     { Sid: "IamRoles", Effect: "Allow", Action: ROLE_ACTIONS.filter((action) => !BOUNDARY_RULED_ROLE_ACTIONS.includes(action)), Resource: roles },
     {
       Sid: "IamRolesBounded",
@@ -362,29 +439,10 @@ export function defaultBoundaryStatements(scope: Pick<PolicyScope, "env" | "part
       Resource: `arn:${partition}:iam::${account}:role/aws-service-role/*`,
       Condition: { StringLike: { "iam:AWSServiceName": [...SERVICE_LINKED_ROLE_SERVICES] } },
     },
-    // L4-SE6: the saved environment image roles (see above). The broker's one `sts:AssumeRole`, its lookups, and ECR's template service-linked role.
-    assumeSessionRolesStatement(scope),
+    // L4-SE6 and R5: the fixed-name role lookups (the three image roles and the Slack token reader role), and ECR's template service-linked role.
     fixedNameRoleLookupStatement(scope),
     ecrTemplateServiceLinkedRoleStatement(scope),
-    { Sid: "DenyAccountChanges", Effect: "Deny", Action: ["organizations:*", "account:*"], Resource: "*" },
-    { Sid: "DenyUsersAndGroups", Effect: "Deny", Action: ["iam:*User*", "iam:*Group*"], Resource: "*" },
-    {
-      Sid: "DenyPolicyManagement",
-      Effect: "Deny",
-      Action: ["iam:CreatePolicy*", "iam:*PolicyVersion*", "iam:DeletePolicy", "iam:SetDefaultPolicyVersion"],
-      Resource: "*",
-    },
-    { Sid: "DenyBoundaryChanges", Effect: "Deny", Action: ["iam:*Policy*"], Resource: defaultBoundaryArn(scope) },
-    // The DNS firewall fails closed and is the VPC's only resolver path: no AgentX role may switch it to fail open, share it, or route DNS around it, whatever a later Allow says.
-    {
-      Sid: "DenyDnsFirewallEscapes",
-      Effect: "Deny",
-      Action: ["route53resolver:UpdateFirewallConfig", "route53resolver:Put*Policy", "route53resolver:CreateResolverEndpoint", "route53resolver:CreateResolverRule", "route53resolver:AssociateResolverRule"],
-      Resource: "*",
-    },
-    ...stackEscapeDenyStatements(scope),
-    // The environment release pipeline's pointers, secret, buckets, projects, approval and stack: no role under this boundary touches them, whatever a later Allow says.
-    ...releasePipelineDenyStatements(scope),
+    ...boundaryDenyStatements(scope),
   ];
 }
 

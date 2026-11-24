@@ -11,7 +11,7 @@ import { isDeepStrictEqual } from "node:util";
 import { Stack, type App } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
-import { defaultBoundaryStatements, savedEnvManageListSessionPolicy, savedEnvRepositoryName, serviceRoleStatements, type PolicyStatementJson } from "@agentx/contracts";
+import { defaultBoundaryStatements, deployBoundaryStatements, savedEnvManageListSessionPolicy, savedEnvRepositoryName, serviceRoleStatements, type PolicyStatementJson } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import {
@@ -268,8 +268,8 @@ describe("saved environment images: the registry side (L4-SE6)", () => {
     const broker = named.Resources[ids.brokerRole]!;
     expect(broker.Properties.RoleName).toBe("agentx-staging-broker-role");
     const brokerArn = `arn:aws:iam::${ACCOUNT}:role${String(broker.Properties.Path)}${String(broker.Properties.RoleName)}`;
-    const { boundary } = expectedAccessStatements(ENV);
-    const assume = boundary.find((statement) => statement.Sid === "AssumeSessionRoles")!;
+    const { runtimeBoundary } = expectedAccessStatements(ENV);
+    const assume = runtimeBoundary.find((statement) => statement.Sid === "AssumeSessionRoles")!;
     expect(resolveAccess(assume.Condition)).toEqual({ ArnEquals: { "aws:PrincipalArn": brokerArn } });
     expect(list(resolveAccess(assume.Resource) as string[]).sort()).toEqual(SAVED_ENV_ROLE_KINDS.map((kind) => String(resolve({ "Fn::GetAtt": [ids.roles[kind], "Arn"] }))).sort());
   });
@@ -277,6 +277,8 @@ describe("saved environment images: the registry side (L4-SE6)", () => {
   describe("the deploy role and the default boundary (simulated from the policy documents; a template diff misses the boundary)", () => {
     const scope = { env: ENV, partition: "aws", region: REGION, account: ACCOUNT, cloudFormationRoleName: "agentx-staging-cloudformation", artifactBucketArn: "arn:aws:s3:::agentx-staging-artifacts", pullThroughPrefix: "agentx-staging" } as const;
     const boundary = defaultBoundaryStatements(scope);
+    // TWO-BOUNDARIES: the roles a template creates (the broker and the saved environment roles) are capped by the runtime boundary; the CloudFormation service role by the deploy boundary.
+    const deployBoundary = deployBoundaryStatements(scope);
     const deploy = serviceRoleStatements({ ...scope, permissionsBoundaryArn: `arn:aws:iam::${ACCOUNT}:policy/agentx/staging/agentx-staging-boundary` });
     const brokerArn = `arn:aws:iam::${ACCOUNT}:role/agentx/staging/agentx-staging-broker-role`;
     const imgArn = (kind: string) => `arn:aws:iam::${ACCOUNT}:role/agentx/staging/agentx-staging-img-${kind}`;
@@ -292,7 +294,10 @@ describe("saved environment images: the registry side (L4-SE6)", () => {
         expect(brokerMayAssume(imgArn(kind)), kind).toBe(true);
         expect(boundaryAllows("sts:AssumeRole", imgArn(kind), brokerArn), `boundary ${kind}`).toBe(true);
       }
-      expect(boundary.filter((statement) => list(statement.Action).some((action) => /^sts:(AssumeRole|\*)/u.test(action))).map((statement) => statement.Sid)).toEqual(["AssumeSessionRoles"]);
+      // The runtime boundary's other assume is the Slack service's, on its one token reader role (R5; its tests are in slack-company-token-reader-infrastructure.test.ts). The deploy boundary has none.
+      expect(boundary.filter((statement) => list(statement.Action).some((action) => /^sts:(AssumeRole|\*)/u.test(action))).map((statement) => statement.Sid)).toEqual(["AssumeSessionRoles", "SlackTokenReader"]);
+      expect(deployBoundary.filter((statement) => list(statement.Action).some((action) => /^sts:(AssumeRole|\*)/u.test(action)))).toEqual([]);
+      expect(boundaryAllows("sts:AssumeRole", imgArn("push"), `arn:aws:iam::${ACCOUNT}:role/agentx/staging/agentx-staging-control-plane-SlackOrchestratorTaskRole-ABC`)).toBe(false);
     });
 
     it("no other principal may assume them, and the broker may assume nothing else", () => {
@@ -326,40 +331,41 @@ describe("saved environment images: the registry side (L4-SE6)", () => {
       const lookups = ["iam:GetRole", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies", "iam:DeleteRolePolicy", "iam:DetachRolePolicy", "iam:DeleteRole"];
       for (const kind of ["push", "pull", "manage"]) {
         const resource = `arn:aws:iam::${ACCOUNT}:role/agentx-staging-img-${kind}`;
-        for (const action of lookups) expect(allowedUnderBoundary(deploy, boundary, { action, resource }), `${kind} ${action}`).toBe(true);
+        for (const action of lookups) expect(allowedUnderBoundary(deploy, deployBoundary, { action, resource }), `${kind} ${action}`).toBe(true);
         for (const action of ["iam:CreateRole", "iam:PutRolePolicy", "iam:AttachRolePolicy", "iam:UpdateAssumeRolePolicy", "iam:PassRole", "iam:PutRolePermissionsBoundary", "iam:TagRole"]) {
-          expect(allowedUnderBoundary(deploy, boundary, { action, resource, context: { "iam:PermissionsBoundary": `arn:aws:iam::${ACCOUNT}:policy/agentx/staging/agentx-staging-boundary` } }), `${kind} ${action}`).toBe(false);
+          expect(allowedUnderBoundary(deploy, deployBoundary, { action, resource, context: { "iam:PermissionsBoundary": `arn:aws:iam::${ACCOUNT}:policy/agentx/staging/agentx-staging-boundary` } }), `${kind} ${action}`).toBe(false);
         }
       }
       for (const resource of [`arn:aws:iam::${ACCOUNT}:role/agentx-staging-broker-role`, `arn:aws:iam::${ACCOUNT}:role/agentx-staging-img-create`, `arn:aws:iam::${ACCOUNT}:role/agentx-staging-img-*`, `arn:aws:iam::${ACCOUNT}:role/agentx-prod-img-push`, `arn:aws:iam::${ACCOUNT}:role/agentx-staging-operator`]) {
-        expect(allowedUnderBoundary(deploy, boundary, { action: "iam:GetRole", resource }), resource).toBe(false);
+        expect(allowedUnderBoundary(deploy, deployBoundary, { action: "iam:GetRole", resource }), resource).toBe(false);
       }
     });
 
     it("the deploy role may create ECR's repository creation template service-linked role, and no other", () => {
       const ecr = `arn:aws:iam::${ACCOUNT}:role/aws-service-role/ecr.amazonaws.com/AWSServiceRoleForECRTemplate`;
-      expect(allowedUnderBoundary(deploy, boundary, { action: "iam:CreateServiceLinkedRole", resource: ecr, context: { "iam:AWSServiceName": "ecr.amazonaws.com" } })).toBe(true);
+      expect(allowedUnderBoundary(deploy, deployBoundary, { action: "iam:CreateServiceLinkedRole", resource: ecr, context: { "iam:AWSServiceName": "ecr.amazonaws.com" } })).toBe(true);
       for (const [resource, service] of [
         [ecr, "replication.ecr.amazonaws.com"], [ecr, "ecs.amazonaws.com.evil"], [ecr, "inspector2.amazonaws.com"],
         [`arn:aws:iam::${ACCOUNT}:role/aws-service-role/ecr.amazonaws.com/AWSServiceRoleForECRReplication`, "ecr.amazonaws.com"],
         [`arn:aws:iam::${ACCOUNT}:role/aws-service-role/inspector2.amazonaws.com/AWSServiceRoleForAmazonInspector2`, "inspector2.amazonaws.com"],
         [`arn:aws:iam::210987654321:role/aws-service-role/ecr.amazonaws.com/AWSServiceRoleForECRTemplate`, "ecr.amazonaws.com"],
       ] as const) {
-        expect(allowedUnderBoundary(deploy, boundary, { action: "iam:CreateServiceLinkedRole", resource, context: { "iam:AWSServiceName": service } }), `${resource} ${service}`).toBe(false);
+        expect(allowedUnderBoundary(deploy, deployBoundary, { action: "iam:CreateServiceLinkedRole", resource, context: { "iam:AWSServiceName": service } }), `${resource} ${service}`).toBe(false);
       }
     });
 
     it("the statements the access template holds are exactly contracts' (asserted and taken out), and nothing else in the access stack changed in meaning", () => {
       const stripped = withoutSavedEnvAccess(structuredClone(access), ENV);
       expect(JSON.stringify(stripped)).not.toMatch(/AssumeSessionRoles|IamFixedNameRolesNotYetCreated|EcrTemplateServiceLinkedRole/u);
-      expect(expectedAccessStatements(ENV).boundary.map((statement) => statement.Sid)).toEqual(["AssumeSessionRoles", "IamFixedNameRolesNotYetCreated", "EcrTemplateServiceLinkedRole"]);
+      expect(expectedAccessStatements(ENV).runtimeBoundary.map((statement) => statement.Sid)).toEqual(["AssumeSessionRoles"]);
+      expect(expectedAccessStatements(ENV).deployBoundary.map((statement) => statement.Sid)).toEqual(["IamFixedNameRolesNotYetCreated", "EcrTemplateServiceLinkedRole"]);
       expect(expectedAccessStatements(ENV).deploy.map((statement) => statement.Sid)).toEqual(["IamFixedNameRolesNotYetCreated", "EcrTemplateServiceLinkedRole"]);
     });
 
     it("stays under IAM's size limits: the managed boundary under 6,144 characters, the deploy role's inline policy under 10,240 (compact JSON, the longest environment name)", () => {
       for (const env of ["staging", "a1234567890123456789"]) {
         const longScope = { ...scope, env, cloudFormationRoleName: `agentx-${env}-cloudformation`, pullThroughPrefix: `agentx-${env}` };
-        const boundarySize = JSON.stringify({ Version: "2012-10-17", Statement: defaultBoundaryStatements(longScope) }).length;
+        const boundarySize = JSON.stringify({ Version: "2012-10-17", Statement: deployBoundaryStatements(longScope) }).length;
         const deploySize = JSON.stringify({ Version: "2012-10-17", Statement: serviceRoleStatements({ ...longScope, permissionsBoundaryArn: `arn:aws:iam::${ACCOUNT}:policy/agentx/${env}/agentx-${env}-boundary` }) }).length;
         // The headroom was 1,024 characters; the release pipeline denies, the CloudFormation role rules (F1) and the boundary's own role rules (F2) use most of it (the policy is about 5,940 of 6,144
         // at the longest name), so the pin is now 128. tests/contract/release-access-denies.test.ts holds the same pin for the placeholder name the export bundle renders.

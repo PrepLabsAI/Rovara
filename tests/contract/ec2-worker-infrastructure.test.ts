@@ -300,16 +300,15 @@ describe("standing E2E qualification transport (agentx:e2eQualificationTransport
       ["ListBedrockModels", ["bedrock:ListFoundationModels", "bedrock:ListInferenceProfiles"]],
       ["ReadBedrockModelAvailability", ["bedrock:GetFoundationModelAvailability"]],
       ["ReadBedrockInferenceProfiles", ["bedrock:GetInferenceProfile"]],
+      // DEC 432: ListServiceQuotas only (read-only; the runtime boundary allows exactly it). GetServiceQuota is never called, so it is not granted.
       ["ListBedrockQuotas", ["servicequotas:ListServiceQuotas"]],
-      ["ReadBedrockQuota", ["servicequotas:GetServiceQuota"]],
     ]);
     expect(shown[0]!.resources).toEqual(["*"]);
     expect(shown[1]!.resources).toEqual(["*"]);
-    expect(shown[3]!.resources).toEqual(["*"]);
     expect(JSON.stringify(shown[2]!.resources)).toContain("inference-profile/*");
-    expect(JSON.stringify(shown[4]!.resources)).toContain("bedrock/*");
+    expect(shown[3]!.resources).toEqual(["*"]);
     const all = actionsOf(statements);
-    expect(all.every((action) => /^(bedrock:(List|Get)|servicequotas:(List|Get))/.test(action))).toBe(true);
+    expect(all.every((action) => /^(bedrock:(List|Get)|servicequotas:ListServiceQuotas$)/.test(action))).toBe(true);
     expect(all.some((action) => /Invoke|Put|Create|Delete|Update|Request|Tag/.test(action))).toBe(false);
     expect(policy![1].Properties.Roles).toEqual([{ "Fn::Select": [3, { "Fn::Split": ["/", { Ref: "Ec2WorkerInstanceRoleArn" }] }] }]);
     // Nothing without the context flag.

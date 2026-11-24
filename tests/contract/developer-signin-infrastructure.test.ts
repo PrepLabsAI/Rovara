@@ -5,7 +5,7 @@ import { stuckStoppingInstall, withoutStuckStoppingAlarm } from "../support/stuc
 import { App, CfnParameter, Stack, aws_iam as iam } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
-import { companyScoped, serviceRoleStatements, defaultBoundaryStatements, IMPLICIT_COMPANY_ID, SERVICE_ROLE_SERVICES, SLACK_OIDC_ISSUER, type PolicyStatementJson } from "@agentx/contracts";
+import { companyScoped, serviceRoleStatements, defaultBoundaryStatements, deployBoundaryStatements, IMPLICIT_COMPANY_ID, SERVICE_ROLE_SERVICES, SLACK_OIDC_ISSUER, type PolicyStatementJson } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { withoutCoreModelAccessRoute } from "../support/core-model-access-template.js";
 import { withoutCoreEngine } from "../support/core-engine-template.js";
@@ -860,6 +860,8 @@ describe("task-token key and membership IAM", () => {
 
 const policyScope = { env: "staging", partition: "aws", region: "us-east-1", account: "111122223333", artifactBucketArn: "arn:aws:s3:::agentx-artifacts", pullThroughPrefix: "agentx", cloudFormationRoleName: "agentx-staging-cloudformation" };
 const boundary = defaultBoundaryStatements(policyScope);
+// TWO-BOUNDARIES: the CloudFormation service role (the `deploy` policy below) is capped by the DEPLOY boundary; the roles it creates are capped by the runtime one (`boundary`).
+const deployBoundary = deployBoundaryStatements(policyScope);
 const deploy = serviceRoleStatements(policyScope);
 const boundaryArn = "arn:aws:iam::111122223333:policy/agentx/staging/agentx-staging-boundary";
 const sampleRole = "arn:aws:iam::111122223333:role/agentx/staging/example";
@@ -946,7 +948,7 @@ describe("task key deployment boundary coverage", () => {
         action = `${service}:*`;
       }
       expect(policyAllows(deploy, action, resource, context), `${type} deploy`).toBe(true);
-      expect(policyAllows(boundary, action, resource, context), `${type} boundary`).toBe(true);
+      expect(policyAllows(deployBoundary, action, resource, context), `${type} deploy boundary`).toBe(true);
     }
     expect(policyAllows(deploy, "iam:CreateRole", sampleRole)).toBe(false);
     expect(policyAllows(deploy, "iam:CreateRole", sampleRole.replace("staging", "other"), { "iam:PermissionsBoundary": boundaryArn })).toBe(false);
@@ -958,15 +960,15 @@ describe("task key deployment boundary coverage", () => {
     // scheduler service by wildcard (SERVICE_ROLE_SERVICES, BOUNDARY_SERVICES), so no policy changed; this pins that it stays so.
     const group = "arn:aws:scheduler:us-east-1:111122223333:schedule-group/agentx-staging-core-jobs";
     for (const action of ["scheduler:CreateScheduleGroup", "scheduler:GetScheduleGroup", "scheduler:DeleteScheduleGroup", "scheduler:TagResource", "scheduler:UntagResource", "scheduler:ListTagsForResource"]) {
-      for (const policy of [deploy, boundary]) expect(policyAllows(policy, action, group), action).toBe(true);
+      for (const policy of [deploy, deployBoundary]) expect(policyAllows(policy, action, group), action).toBe(true);
     }
   });
 
   it("covers KMS lifecycle actions while refusing managed-policy creation", () => {
     for (const action of ["kms:CreateKey", "kms:PutKeyPolicy", "kms:DescribeKey", "kms:GetKeyPolicy", "kms:TagResource", "kms:ScheduleKeyDeletion", "kms:CreateAlias", "kms:UpdateAlias", "kms:DeleteAlias", "kms:ListAliases"]) {
-      for (const policy of [deploy, boundary]) expect(policyAllows(policy, action, "*"), action).toBe(true);
+      for (const policy of [deploy, deployBoundary]) expect(policyAllows(policy, action, "*"), action).toBe(true);
     }
-    for (const policy of [deploy, boundary]) expect(policyAllows(policy, "iam:CreatePolicy", "*"), "the deploy role cannot create a split managed policy").toBe(false);
+    for (const policy of [deploy, deployBoundary]) expect(policyAllows(policy, "iam:CreatePolicy", "*"), "the deploy role cannot create a split managed policy").toBe(false);
     expect(boundary.some((s) => s.Effect === "Deny" && allows(s, "iam:CreatePolicy"))).toBe(true);
   });
 
@@ -2143,7 +2145,7 @@ describe("install company import reads (DEC 254zzz(2))", () => {
     const brokerRole = "arn:aws:iam::111122223333:role/agentx/staging/agentx-staging-control-plane-BrokerServiceRole-AbCdEf";
     for (const action of ["iam:PutRolePolicy", "iam:DeleteRolePolicy"]) {
       expect(policyAllows(deploy, action, brokerRole, { "iam:PermissionsBoundary": boundaryArn }), `deploy ${action}`).toBe(true);
-      expect(policyAllows(boundary, action, brokerRole, { "iam:PermissionsBoundary": boundaryArn }), `boundary ${action}`).toBe(true);
+      expect(policyAllows(deployBoundary, action, brokerRole, { "iam:PermissionsBoundary": boundaryArn }), `deploy boundary ${action}`).toBe(true);
     }
     expect(policyAllows(deploy, "iam:PutRolePolicy", brokerRole.replace("/staging/", "/other/"), { "iam:PermissionsBoundary": boundaryArn })).toBe(false);
     expect(policyAllows(deploy, "iam:CreatePolicy", "*"), "no managed policy").toBe(false);
@@ -2347,7 +2349,7 @@ describe("company sign-in issuer read (DEC 254zzz29)", () => {
     const brokerRole = "arn:aws:iam::111122223333:role/agentx/staging/agentx-staging-control-plane-BrokerServiceRole-AbCdEf";
     for (const action of ["iam:PutRolePolicy", "iam:DeleteRolePolicy"]) {
       expect(policyAllows(deploy, action, brokerRole, { "iam:PermissionsBoundary": boundaryArn }), `deploy ${action}`).toBe(true);
-      expect(policyAllows(boundary, action, brokerRole, { "iam:PermissionsBoundary": boundaryArn }), `boundary ${action}`).toBe(true);
+      expect(policyAllows(deployBoundary, action, brokerRole, { "iam:PermissionsBoundary": boundaryArn }), `deploy boundary ${action}`).toBe(true);
     }
     expect(policyAllows(deploy, "iam:CreatePolicy", "*"), "no managed policy").toBe(false);
     expect(ofType(named, "AWS::IAM::ManagedPolicy")).toHaveLength(0);

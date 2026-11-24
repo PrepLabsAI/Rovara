@@ -8,7 +8,7 @@ import { isDeepStrictEqual } from "node:util";
 import { App } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
-import { defaultBoundaryArn, defaultBoundaryStatements, serviceRoleStatements, type PolicyScope, type PolicyStatementJson } from "@agentx/contracts";
+import { defaultBoundaryArn, defaultBoundaryStatements, deployBoundaryStatements, serviceRoleStatements, type PolicyScope, type PolicyStatementJson } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { ControlPlaneStack, DISPATCHER_ARTIFACTS_READ_PREFIXES, DISPATCHER_ARTIFACTS_READ_SID } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
@@ -208,6 +208,8 @@ describe("the deploy role and the permissions boundary allow it (simulated from 
     env: "staging", partition: "aws", region: "us-west-2", account: "111122223333", artifactBucketArn: "arn:aws:s3:::agentx-staging-artifacts", pullThroughPrefix: "agentx", cloudFormationRoleName: "agentx-staging-cloudformation",
   };
   const boundary = defaultBoundaryStatements(scope);
+  // TWO-BOUNDARIES: the deploy role is capped by the deploy boundary; the dispatcher's role (a runtime role) by the runtime one.
+  const deployBoundary = deployBoundaryStatements(scope);
   const deploy = serviceRoleStatements(scope);
   const bucket = "arn:aws:s3:::agentx-staging-artifacts-0123456789ab";
   const allowedResources = ["private/", "workspaces/"].map((prefix) => `${bucket}/${prefix}company_x/workspace_y/artifact.json`);
@@ -226,9 +228,9 @@ describe("the deploy role and the permissions boundary allow it (simulated from 
     const dispatcherRole = `arn:aws:iam::${scope.account}:role/agentx/staging/agentx-staging-control-plane-DispatcherServiceRole-ABC123`;
     expect(evaluate(deploy, "iam:PutRolePolicy", dispatcherRole, { "iam:PermissionsBoundary": defaultBoundaryArn(scope) })).toBe("allow");
     expect(evaluate(deploy, "iam:PutRolePolicy", dispatcherRole, { "iam:PermissionsBoundary": "arn:aws:iam::111122223333:policy/other" })).toBe("deny");
-    // The boundary allows role-policy writes only on a role that carries this same boundary (IamRolesBounded), which the dispatcher's role does.
-    expect(evaluate(boundary, "iam:PutRolePolicy", dispatcherRole, { "iam:PermissionsBoundary": defaultBoundaryArn(scope) })).toBe("allow");
-    expect(evaluate(boundary, "iam:PutRolePolicy", dispatcherRole)).toBe("implicit-deny");
+    // The deploy boundary allows role-policy writes only on a role that carries the RUNTIME boundary (IamRolesBounded), which the dispatcher's role does.
+    expect(evaluate(deployBoundary, "iam:PutRolePolicy", dispatcherRole, { "iam:PermissionsBoundary": defaultBoundaryArn(scope) })).toBe("allow");
+    expect(evaluate(deployBoundary, "iam:PutRolePolicy", dispatcherRole)).toBe("implicit-deny");
     // The only boundary Deny that names s3 is the release pipeline's (DenyRelease*), scoped to the pipeline's own buckets; none matches the artifacts bucket.
     for (const resource of allowedResources) {
       expect(boundary.some((statement) => statement.Effect === "Deny" && list(statement.Action).some((action) => glob(String(action), "s3:GetObject", true)) && list(statement.Resource).some((pattern) => glob(String(pattern), resource, false)))).toBe(false);

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  BOUNDARY_SERVICES, SERVICE_ROLE_SERVICES, defaultBoundaryArn, defaultBoundaryName, defaultBoundaryStatements, operatorRoleStatements, serviceRoleStatements, type PolicyScope,
+  BOUNDARY_SERVICES, SERVICE_ROLE_SERVICES, defaultBoundaryArn, defaultBoundaryName, defaultBoundaryStatements, deployBoundaryArn, deployBoundaryName, deployBoundaryStatements, operatorRoleStatements, serviceRoleStatements, type PolicyScope,
 } from "../../infra/lib/access-policies.js";
 
 const scope: PolicyScope = {
@@ -44,6 +44,8 @@ describe("service role policy", () => {
           "arn:aws:iam::123456789012:role/agentx-staging-img-push",
           "arn:aws:iam::123456789012:role/agentx-staging-img-pull",
           "arn:aws:iam::123456789012:role/agentx-staging-img-manage",
+          // R5 step 1: the Slack token reader role (fixed name).
+          "arn:aws:iam::123456789012:role/agentx-staging-slk",
         ]);
         expect(statement.Action).toEqual(["iam:GetRole", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies", "iam:DeleteRolePolicy", "iam:DetachRolePolicy", "iam:DeleteRole"]);
       } else if (statement.Sid === "IamInstanceProfiles") {
@@ -92,7 +94,7 @@ describe("service role policy", () => {
   });
 
   it("manages the DNS firewall only in this account and region, and only lists it on any resource", () => {
-    for (const statements of [serviceRoleStatements(scope), defaultBoundaryStatements(scope)]) {
+    for (const statements of [serviceRoleStatements(scope), deployBoundaryStatements(scope)]) {
       const resolver = statements.filter((s) => s.Effect === "Allow" && s.Action.some((a) => a.startsWith("route53resolver:")));
       expect(resolver).toEqual([
         { Sid: "DnsFirewall", Effect: "Allow", Action: ["route53resolver:*"], Resource: "arn:aws:route53resolver:us-east-1:123456789012:*" },
@@ -101,6 +103,8 @@ describe("service role policy", () => {
     }
     expect(SERVICE_ROLE_SERVICES).not.toContain("route53resolver");
     expect(BOUNDARY_SERVICES).not.toContain("route53resolver");
+    // TWO-BOUNDARIES: no runtime role uses the DNS firewall's management, so the runtime boundary has no route53resolver Allow.
+    expect(defaultBoundaryStatements(scope).filter((st) => st.Effect === "Allow" && st.Action.some((a) => a.startsWith("route53resolver:")))).toEqual([]);
   });
 
   it("never grants iam:* or wildcard IAM user, group or policy management", () => {
@@ -243,14 +247,16 @@ describe("operator role policy", () => {
   });
 });
 
-describe("default permission boundary", () => {
-  const statements = defaultBoundaryStatements(scope);
+describe("deploy permission boundary (the CloudFormation service role and the operator role)", () => {
+  const statements = deployBoundaryStatements(scope);
   const allows = statements.filter((s) => s.Effect === "Allow");
   const denies = statements.filter((s) => s.Effect === "Deny");
 
-  it("has a deterministic name and ARN under the environment's IAM path", () => {
+  it("has a deterministic name and ARN under the environment's IAM path, next to the runtime boundary's (whose name and ARN are unchanged)", () => {
     expect(defaultBoundaryName("staging")).toBe("agentx-staging-boundary");
     expect(defaultBoundaryArn(scope)).toBe("arn:aws:iam::123456789012:policy/agentx/staging/agentx-staging-boundary");
+    expect(deployBoundaryName("staging")).toBe("agentx-staging-deploy-boundary");
+    expect(deployBoundaryArn(scope)).toBe("arn:aws:iam::123456789012:policy/agentx/staging/agentx-staging-deploy-boundary");
   });
 
   it("allows each needed service by wildcard, never IAM, Organizations or Account", () => {
@@ -272,21 +278,9 @@ describe("default permission boundary", () => {
     expect(allows.find((s) => s.Sid === "Services")!.Action).not.toContain("events:*");
   });
 
-  it("allows only sts:GetCallerIdentity from STS, never AssumeRole", () => {
-    const sts = allows.flatMap((s) => s.Action).filter((a) => a.startsWith("sts:"));
-    // L4-SE6: the one AssumeRole is the broker's, on the three saved environment image roles (asserted exactly below); no other statement has an sts action.
-    expect(sts).toEqual(["sts:GetCallerIdentity", "sts:AssumeRole"]);
+  it("allows only sts:GetCallerIdentity from STS, never AssumeRole (the runtime boundary carries the two assumes)", () => {
+    expect(allows.flatMap((s) => s.Action).filter((a) => a.startsWith("sts:"))).toEqual(["sts:GetCallerIdentity"]);
     expect(allows.find((s) => s.Sid === "CallerIdentity")).toEqual({ Sid: "CallerIdentity", Effect: "Allow", Action: ["sts:GetCallerIdentity"], Resource: "*" });
-    expect(allows.filter((s) => s.Action.some((a) => /^sts:AssumeRole/u.test(a))).map((s) => s.Sid)).toEqual(["AssumeSessionRoles"]);
-    expect(allows.find((s) => s.Sid === "AssumeSessionRoles")).toEqual({
-      Sid: "AssumeSessionRoles", Effect: "Allow", Action: ["sts:AssumeRole"],
-      Resource: [
-        "arn:aws:iam::123456789012:role/agentx/staging/agentx-staging-img-push",
-        "arn:aws:iam::123456789012:role/agentx/staging/agentx-staging-img-pull",
-        "arn:aws:iam::123456789012:role/agentx/staging/agentx-staging-img-manage",
-      ],
-      Condition: { ArnEquals: { "aws:PrincipalArn": "arn:aws:iam::123456789012:role/agentx/staging/agentx-staging-broker-role" } },
-    });
     expect(allows.flatMap((s) => s.Action).filter((a) => a === "*" || a === "sts:*")).toEqual([]);
   });
 
@@ -322,7 +316,9 @@ describe("default permission boundary", () => {
       { Action: ["organizations:*", "account:*"], Resource: "*" },
       { Action: ["iam:*User*", "iam:*Group*"], Resource: "*" },
       { Action: ["iam:CreatePolicy*", "iam:*PolicyVersion*", "iam:DeletePolicy", "iam:SetDefaultPolicyVersion"], Resource: "*" },
-      { Action: ["iam:*Policy*"], Resource: "arn:aws:iam::123456789012:policy/agentx/staging/agentx-staging-boundary" },
+      // TWO-BOUNDARIES: neither boundary can be edited by a role that carries either.
+      { Action: ["iam:*Policy*"], Resource: ["arn:aws:iam::123456789012:policy/agentx/staging/agentx-staging-boundary", "arn:aws:iam::123456789012:policy/agentx/staging/agentx-staging-deploy-boundary"] },
+      { Action: ["iam:DeleteRolePermissionsBoundary"], Resource: "arn:aws:iam::123456789012:role/agentx/staging/*" },
       // No role may switch the DNS firewall to fail open, share it, or route DNS around it.
       { Action: ["route53resolver:UpdateFirewallConfig", "route53resolver:Put*Policy", "route53resolver:CreateResolverEndpoint", "route53resolver:CreateResolverRule", "route53resolver:AssociateResolverRule"], Resource: "*" },
     ]);
@@ -341,5 +337,42 @@ describe("default permission boundary", () => {
     expect(services).not.toContain("servicequotas:*");
     expect(BOUNDARY_SERVICES).not.toContain("servicequotas");
     expect(allows.find((s) => s.Sid === "Quotas")).toEqual({ Sid: "Quotas", Effect: "Allow", Action: ["servicequotas:GetServiceQuota"], Resource: "*" });
+  });
+});
+
+describe("runtime permission boundary (every role a merged template creates)", () => {
+  const statements = defaultBoundaryStatements(scope);
+  const allows = statements.filter((s) => s.Effect === "Allow");
+
+  it("allows exactly what runtime roles use: the services, the email send, PassRole on the environment's roles, the broker's and the Slack service's assumes", () => {
+    expect(allows.map((s) => s.Sid)).toEqual(["Services", "StepUpEmail", "PassRoles", "ReadRoles", "ListQuotas", "AssumeSessionRoles", "SlackTokenReader"]);
+    // The auto-requalify machine's preflight reads the worker role: read-only, the environment's roles only.
+    // DEC 432: the model-discovery check's quota List, read-only, and nothing else in servicequotas.
+    expect(allows.find((s) => s.Sid === "ListQuotas")).toEqual({ Sid: "ListQuotas", Effect: "Allow", Action: ["servicequotas:ListServiceQuotas"], Resource: "*" });
+    expect(allows.flatMap((s) => s.Action).filter((a) => a.startsWith("servicequotas:"))).toEqual(["servicequotas:ListServiceQuotas"]);
+    expect(allows.find((s) => s.Sid === "ReadRoles")).toEqual({ Sid: "ReadRoles", Effect: "Allow", Action: ["iam:GetRole"], Resource: "arn:aws:iam::123456789012:role/agentx/staging/*" });
+    expect(allows.find((s) => s.Sid === "Services")!.Action).toEqual(BOUNDARY_SERVICES.map((svc) => `${svc}:*`));
+    expect(allows.find((s) => s.Sid === "StepUpEmail")).toEqual({ Sid: "StepUpEmail", Effect: "Allow", Action: ["ses:SendEmail"], Resource: "arn:aws:ses:us-east-1:123456789012:identity/*" });
+    expect(allows.find((s) => s.Sid === "PassRoles")).toEqual({ Sid: "PassRoles", Effect: "Allow", Action: ["iam:PassRole"], Resource: "arn:aws:iam::123456789012:role/agentx/staging/*" });
+    expect(allows.find((s) => s.Sid === "AssumeSessionRoles")).toEqual({
+      Sid: "AssumeSessionRoles", Effect: "Allow", Action: ["sts:AssumeRole"],
+      Resource: [
+        "arn:aws:iam::123456789012:role/agentx/staging/agentx-staging-img-push",
+        "arn:aws:iam::123456789012:role/agentx/staging/agentx-staging-img-pull",
+        "arn:aws:iam::123456789012:role/agentx/staging/agentx-staging-img-manage",
+      ],
+      Condition: { ArnEquals: { "aws:PrincipalArn": "arn:aws:iam::123456789012:role/agentx/staging/agentx-staging-broker-role" } },
+    });
+    expect(allows.find((s) => s.Sid === "SlackTokenReader")).toEqual({ Sid: "SlackTokenReader", Effect: "Allow", Action: ["sts:AssumeRole", "sts:TagSession"], Resource: "arn:aws:iam::123456789012:role/agentx/staging/agentx-staging-slk" });
+  });
+
+  it("has no role management, instance profile, service-linked role, DNS firewall, events, quota or caller-identity Allow (the deploy roles' alone)", () => {
+    const actions = allows.flatMap((s) => s.Action);
+    expect(actions.filter((a) => /^(iam:(?!PassRole$|GetRole$)|route53resolver:|events:|servicequotas:(?!ListServiceQuotas$)|sts:GetCallerIdentity)/u.test(a))).toEqual([]);
+  });
+
+  it("carries exactly the same Deny statements as the deploy boundary", () => {
+    const denies = (list: typeof statements) => JSON.stringify(list.filter((s) => s.Effect === "Deny"));
+    expect(denies(statements)).toBe(denies(deployBoundaryStatements(scope)));
   });
 });

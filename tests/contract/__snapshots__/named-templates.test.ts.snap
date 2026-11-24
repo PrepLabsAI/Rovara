@@ -69,6 +69,19 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
         ],
       },
     },
+    "DeployBoundaryArn": {
+      "Value": {
+        "Fn::If": [
+          "HasPermissionsBoundary",
+          {
+            "Ref": "PermissionsBoundaryArn",
+          },
+          {
+            "Ref": "DeployPermissionsBoundary",
+          },
+        ],
+      },
+    },
     "EffectiveBoundaryArn": {
       "Value": {
         "Fn::If": [
@@ -239,7 +252,7 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
               "Ref": "PermissionsBoundaryArn",
             },
             {
-              "Ref": "DefaultPermissionsBoundary",
+              "Ref": "DeployPermissionsBoundary",
             },
           ],
         },
@@ -514,8 +527,396 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
     "DefaultPermissionsBoundary": {
       "Condition": "UseDefaultBoundary",
       "Properties": {
-        "Description": "Default permission boundary for every agentx-staging role",
+        "Description": "Default permission boundary for every agentx-staging runtime role",
         "ManagedPolicyName": "agentx-staging-boundary",
+        "Path": "/agentx/staging/",
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "apigateway:*",
+                "cloudformation:*",
+                "cloudwatch:*",
+                "cognito-idp:*",
+                "dynamodb:*",
+                "ec2:*",
+                "ecr:*",
+                "ecs:*",
+                "kms:*",
+                "lambda:*",
+                "logs:*",
+                "s3:*",
+                "scheduler:*",
+                "secretsmanager:*",
+                "sns:*",
+                "sqs:*",
+                "ssm:*",
+                "states:*",
+                "bedrock:*",
+                "budgets:*",
+                "codebuild:*",
+                "execute-api:*",
+                "xray:*",
+              ],
+              "Effect": "Allow",
+              "Resource": "*",
+              "Sid": "Services",
+            },
+            {
+              "Action": [
+                "ses:SendEmail",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ses:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":identity/*",
+                  ],
+                ],
+              },
+              "Sid": "StepUpEmail",
+            },
+            {
+              "Action": [
+                "iam:PassRole",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":iam::",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":role/agentx/staging/*",
+                  ],
+                ],
+              },
+              "Sid": "PassRoles",
+            },
+            {
+              "Action": [
+                "iam:GetRole",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":iam::",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":role/agentx/staging/*",
+                  ],
+                ],
+              },
+              "Sid": "ReadRoles",
+            },
+            {
+              "Action": [
+                "servicequotas:ListServiceQuotas",
+              ],
+              "Effect": "Allow",
+              "Resource": "*",
+              "Sid": "ListQuotas",
+            },
+            {
+              "Action": [
+                "sts:AssumeRole",
+                "sts:TagSession",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":iam::",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":role/agentx/staging/agentx-staging-slk",
+                  ],
+                ],
+              },
+              "Sid": "SlackTokenReader",
+            },
+            {
+              "Action": [
+                "organizations:*",
+                "account:*",
+              ],
+              "Effect": "Deny",
+              "Resource": "*",
+              "Sid": "DenyAccountChanges",
+            },
+            {
+              "Action": [
+                "iam:*User*",
+                "iam:*Group*",
+              ],
+              "Effect": "Deny",
+              "Resource": "*",
+              "Sid": "DenyUsersAndGroups",
+            },
+            {
+              "Action": [
+                "iam:CreatePolicy*",
+                "iam:*PolicyVersion*",
+                "iam:DeletePolicy",
+                "iam:SetDefaultPolicyVersion",
+              ],
+              "Effect": "Deny",
+              "Resource": "*",
+              "Sid": "DenyPolicyManagement",
+            },
+            {
+              "Action": [
+                "iam:*Policy*",
+              ],
+              "Effect": "Deny",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":iam::",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":policy/agentx/staging/agentx-staging-boundary",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":iam::",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":policy/agentx/staging/agentx-staging-deploy-boundary",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "DenyBoundaryChanges",
+            },
+            {
+              "Action": [
+                "iam:DeleteRolePermissionsBoundary",
+              ],
+              "Effect": "Deny",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":iam::",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":role/agentx/staging/*",
+                  ],
+                ],
+              },
+              "Sid": "DenyBoundaryRemoval",
+            },
+            {
+              "Action": [
+                "route53resolver:UpdateFirewallConfig",
+                "route53resolver:Put*Policy",
+                "route53resolver:CreateResolverEndpoint",
+                "route53resolver:CreateResolverRule",
+                "route53resolver:AssociateResolverRule",
+              ],
+              "Effect": "Deny",
+              "Resource": "*",
+              "Sid": "DenyDnsFirewallEscapes",
+            },
+            {
+              "Action": [
+                "cloudformation:CreateStack",
+                "cloudformation:UpdateStack",
+                "cloudformation:CreateChangeSet",
+              ],
+              "Condition": {
+                "StringNotEquals": {
+                  "cloudformation:RoleArn": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "arn:",
+                        {
+                          "Ref": "AWS::Partition",
+                        },
+                        ":iam::",
+                        {
+                          "Ref": "AWS::AccountId",
+                        },
+                        ":role/agentx-staging-cloudformation",
+                      ],
+                    ],
+                  },
+                },
+              },
+              "Effect": "Deny",
+              "Resource": "*",
+              "Sid": "DenyCfnWithoutEnvRole",
+            },
+            {
+              "Action": [
+                "cloudformation:Create*",
+                "cloudformation:Update*",
+                "cloudformation:Delete*",
+                "cloudformation:Execute*",
+              ],
+              "Effect": "Deny",
+              "NotResource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":cloudformation:*:*:stack/agentx-staging-*/*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "DenyCfnOutsideEnvStacks",
+            },
+            {
+              "Action": [
+                "ssm:*",
+                "secretsmanager:*",
+                "s3:*",
+                "codebuild:*",
+                "codepipeline:*",
+                "sns:*",
+                "kms:*",
+                "cloudformation:Create*",
+                "cloudformation:Update*",
+                "cloudformation:Delete*",
+                "cloudformation:Execute*",
+              ],
+              "Effect": "Deny",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:*:*:parameter/rovara-release/staging*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":secretsmanager:*:*:secret:rovara-release/staging/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":*rovara-staging-*rel*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":cloudformation:*:*:stack/agentx-staging-access/*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "DenyReleasePipeline",
+            },
+            {
+              "Action": [
+                "kms:*",
+              ],
+              "Condition": {
+                "ForAnyValue:StringLike": {
+                  "kms:ResourceAliases": "alias/rovara-staging-release-*",
+                },
+              },
+              "Effect": "Deny",
+              "Resource": "*",
+              "Sid": "DenyReleaseKey",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+      },
+      "Type": "AWS::IAM::ManagedPolicy",
+    },
+    "DeployPermissionsBoundary": {
+      "Condition": "UseDefaultBoundary",
+      "Properties": {
+        "Description": "Permission boundary for the agentx-staging CloudFormation service role and operator role",
+        "ManagedPolicyName": "agentx-staging-deploy-boundary",
         "Path": "/agentx/staging/",
         "PolicyDocument": {
           "Statement": [
@@ -574,33 +975,6 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
               "Effect": "Allow",
               "Resource": "*",
               "Sid": "Quotas",
-            },
-            {
-              "Action": [
-                "ses:SendEmail",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":ses:",
-                    {
-                      "Ref": "AWS::Region",
-                    },
-                    ":",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":identity/*",
-                  ],
-                ],
-              },
-              "Sid": "StepUpEmail",
             },
             {
               "Action": [
@@ -816,6 +1190,47 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
                 "iam:*Policy*",
               ],
               "Effect": "Deny",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":iam::",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":policy/agentx/staging/agentx-staging-boundary",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":iam::",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":policy/agentx/staging/agentx-staging-deploy-boundary",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "DenyBoundaryChanges",
+            },
+            {
+              "Action": [
+                "iam:DeleteRolePermissionsBoundary",
+              ],
+              "Effect": "Deny",
               "Resource": {
                 "Fn::Join": [
                   "",
@@ -828,11 +1243,11 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
                     {
                       "Ref": "AWS::AccountId",
                     },
-                    ":policy/agentx/staging/agentx-staging-boundary",
+                    ":role/agentx/staging/*",
                   ],
                 ],
               },
-              "Sid": "DenyBoundaryChanges",
+              "Sid": "DenyBoundaryRemoval",
             },
             {
               "Action": [
@@ -1053,7 +1468,7 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
               "Ref": "PermissionsBoundaryArn",
             },
             {
-              "Ref": "DefaultPermissionsBoundary",
+              "Ref": "DeployPermissionsBoundary",
             },
           ],
         },
