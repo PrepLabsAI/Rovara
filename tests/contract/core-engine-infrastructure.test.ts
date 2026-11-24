@@ -647,7 +647,7 @@ describe("L1a broker environment derivation", () => {
     const beforeFirstGateway = withoutWebhookSecretLane(withoutStuckStoppingAlarm(structuredClone(legacy.toJSON()) as Json & { Outputs: Record<string, unknown> }, stuckStoppingInstall()));
     expect(beforeFirstGateway.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     delete beforeFirstGateway.Outputs.ModelRunPriceVersion;
-    expect(digest(beforeFirstGateway), "legacy without the first-gateway output retains the upstream member-check pin").toBe("689cd3c50c906f4b9d55a1a29b673ce2df08312c2d8cb8a8b4e50385a9100dc2");
+    expect(digest(beforeFirstGateway), "legacy without the first-gateway output retains the upstream member-check pin").toBe("46d3350dc324e2e4594226c192221ed3fdd09a57e7b175ce06b82e086d8f357b");
     const beforeMemberCheck = withoutBrokerMemberConditionCheck(beforeFirstGateway);
     expect(digest(beforeMemberCheck), "legacy without the first-gateway output and broker member check").toBe("7b0cc73b6967ca800f914e4f960d3cd35abbfca646089a1d10d8c55bcd53000e");
     // Rule D proof: removing exactly the two capability routes retains the switch-removal pin.
@@ -655,7 +655,7 @@ describe("L1a broker environment derivation", () => {
     delete withoutCapabilityRoutes.Resources.ContextToolsListRoute;
     delete withoutCapabilityRoutes.Resources.DesignReviewPacketRoute;
     expect(digest(withoutCapabilityRoutes), "legacy with the two capability routes taken out").toBe("e31bdfb47e137fe596427f6437daac1a7cb132058acd57943163fe72228d61c4");
-    expect(digest(withoutStuckStoppingAlarm(structuredClone(legacy.toJSON()), stuckStoppingInstall()))).toBe("ca348dd3dea7801dd9ff1ba28b0c53573920edc5e76e7bbe1a32834a9457cba9");
+    expect(digest(withoutStuckStoppingAlarm(structuredClone(legacy.toJSON()), stuckStoppingInstall()))).toBe("6476fe2a6a0ee58026f3ee4c228845735ec044b651fa531e1dac742c2e9e8099");
   });
 });
 import { createHash } from "node:crypto";

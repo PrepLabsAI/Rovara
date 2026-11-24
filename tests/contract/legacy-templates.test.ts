@@ -18,7 +18,7 @@ const LEGACY = { alarmName: "AgentXSessionStuckStopping", namespace: "AgentX" };
 // recorded: tests/support/legacy-runtime-boundary-template.ts asserts the addition's shape (one policy per stack, a PermissionsBoundary on every runtime role, nothing else) and takes it
 // out; each changed stack's full template has its own new pin below, and legacy-runtime-boundary.test.ts proves the policy.
 const BOUNDED_STACK_PINS: Record<string, string> = {
-  AgentXControlPlane: "1191755c74c726e9aaf36e877f47ab321bc3d96c3ae352ab4db563b3aa3f0705",
+  AgentXControlPlane: "4ad5addfa38c4d6dffa1b1ad33314df09f6622a33af4bf686bfef01f30f7a2ed",
   AgentXProductionFoundation: "e7c873b146a748408b545e42d2f17596c04ad229271ed7776312d312eca9ca63",
   AgentXSlackOrchestrator: "9ed4e1e13eeb3ecf860e61d9f2c9b332901f36190e0685fa695a390335420bf5",
 };
@@ -32,7 +32,7 @@ describe("legacy production templates", () => {
     if (stack.stackName === "AgentXControlPlane") {
       it("removing only Batch F additions preserves code/next's AgentXControlPlane template", () => {
         const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(withoutLegacyRuntimeBoundary(withoutStuckStoppingAlarm(normalizedTemplate(stack), LEGACY))));
-        expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("e507d3fb0ea80447881b09b79502bcfcd444adabd5aabc807ba809b624bce4ec");
+        expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("85d2782aca2dc97b59268b8ac26ec03b745f6378a561757df7afe89b77e075f6");
       }, 120_000);
     }
     it(`${stack.stackName} is unchanged`, () => {
@@ -48,7 +48,7 @@ describe("legacy production templates", () => {
       // assert the exact broker-only addition, and retain the entire historical snapshot.
       if (stack.stackName === "AgentXControlPlane") {
         const withoutBoundary = withoutLegacyRuntimeBoundary(template);
-        expect(createHash("sha256").update(JSON.stringify(withoutBoundary)).digest("hex")).toBe("12b0b4104f4c5d7a66b89782aab8e92d43f0739f5da52cc31cf1f9eea024a88c");
+        expect(createHash("sha256").update(JSON.stringify(withoutBoundary)).digest("hex")).toBe("31166801deac7d92a425ef2fd8affd1fbf7902b81bc648f40dd832e0c16ccd67");
         // Webhook lane W3 adds the webhook secret slot, its throttle and one alarm (tests/support/webhook-secret-template.ts pins them); the historical snapshot is of the rest.
         expect(withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutBoundary))).toMatchSnapshot();
       } else expect(withoutLegacyRuntimeBoundary(template)).toMatchSnapshot();

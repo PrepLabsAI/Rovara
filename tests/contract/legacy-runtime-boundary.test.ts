@@ -384,9 +384,13 @@ describe("legacy runtime boundary: it denies no permission a runtime role has to
     return found;
   }
 
-  it("skips the Denys in the roles' own policies (a Deny is not an allow to check) and lists exactly the one there is: the worker role's saved-environment-image fence", () => {
+  it("skips the Denys in the roles' own policies (a Deny is not an allow to check) and lists exactly the ones there are: the worker role's saved-environment-image fence and the broker's StartBuildBatch deny", () => {
     const denies = Object.keys(STACK_PARTS).flatMap((stackName) => identityDeniesOf(stackName).map((deny) => `${stackName}: ${deny}`));
-    expect(denies).toEqual(["AgentXProductionFoundation: Ec2WorkersInstanceRole NoSavedEnvironmentImages ecr:*"]);
+    // BROKER-CODEBUILD-START: the broker's StartBuildBatch Deny, in the legacy (production) control plane too (infra/lib/control-plane.ts; evaluated in broker-codebuild-scope.test.ts).
+    expect(denies).toEqual([
+      "AgentXControlPlane: BrokerServiceRole ? codebuild:StartBuildBatch",
+      "AgentXProductionFoundation: Ec2WorkersInstanceRole NoSavedEnvironmentImages ecr:*",
+    ]);
     // The walk sees none of it: no allow carries the Deny's action or its repository.
     for (const stackName of Object.keys(STACK_PARTS)) {
       for (const allow of allowsOf(stackName)) expect(allow.action === "ecr:*" && allow.resources.some((r) => r.includes("rovara-env")), `${stackName} ${allow.role}`).toBe(false);

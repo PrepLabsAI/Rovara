@@ -7,6 +7,7 @@ import { AGENTX_BETA_RELEASE_PROJECT_NAME, AGENTX_RELEASE_PROJECT_NAME } from ".
 import { RELEASE_PROJECT_KEYS, environmentReleaseNames } from "../../infra/lib/environment-release-pipeline.js";
 import { CI_RUNNER_PROJECT } from "../../infra/lib/ci-runner.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { STARTBUILD_OVERRIDE_KEYS } from "../support/broker-codebuild-start-template.js";
 
 skipLambdaBundling();
 
@@ -16,7 +17,7 @@ skipLambdaBundling();
 // prefix the gate contract admits, so a change to either side is a decision, not a drift.
 
 type Json = Record<string, unknown>;
-interface Statement { Effect: string; Action?: string | string[]; Resource?: unknown }
+interface Statement { Effect: string; Action?: string | string[]; Resource?: unknown; Condition?: Record<string, Record<string, string | string[]>> }
 interface TemplateJson { Resources: Record<string, { Type: string; Properties: Json }> }
 const ACCOUNT = "123456789012";
 const REGION = "us-east-1";
@@ -42,6 +43,10 @@ interface Grant { readonly stack: string; readonly role: string; readonly action
 const grants: Grant[] = [];
 const projectNames = new Map<string, string>();
 const stackNames: string[] = [];
+/** Every statement of the broker's role policies in the two control planes (legacy and named), Allow and Deny, with the policy resource's logical id. */
+const brokerStatements: Array<{ stack: string; policy: string; statement: Statement }> = [];
+/** Per control plane: the broker's policies with their DependsOn (deploy order). */
+const brokerPolicyDeps: Array<{ stack: string; policy: string; dependsOn: string[]; hasBatchGet: boolean }> = [];
 
 beforeAll(() => {
   const apps = [
@@ -59,6 +64,10 @@ beforeAll(() => {
         if (resource.Type !== "AWS::IAM::Policy") continue;
         const roles = list(resource.Properties.Roles).map((role) => resolve(role));
         const statements = (resource.Properties.PolicyDocument as { Statement: Statement[] }).Statement;
+        if (roles.some((role) => /Broker/u.test(role)) && (stack.stackName.endsWith("control-plane") || stack.stackName === "AgentXControlPlane")) {
+          for (const statement of statements) brokerStatements.push({ stack: stack.stackName, policy: id, statement });
+          brokerPolicyDeps.push({ stack: stack.stackName, policy: id, dependsOn: list((resource as { DependsOn?: string | string[] }).DependsOn), hasBatchGet: statements.some((statement) => list(statement.Action).includes("codebuild:BatchGetBuilds")) });
+        }
         for (const statement of statements) {
           if (statement.Effect !== "Allow") continue;
           for (const action of list(statement.Action).filter((a) => a.toLowerCase().startsWith("codebuild:"))) {
@@ -108,5 +117,102 @@ describe("the broker's CodeBuild grant", () => {
     // The release projects are denied to the broker's boundary as well as left outside the prefix (legacy-runtime-boundary.test.ts, release-access-denies.test.ts).
     expect(AGENTX_RELEASE_PROJECT_NAME.startsWith("release-")).toBe(true);
     expect(AGENTX_BETA_RELEASE_PROJECT_NAME.startsWith("release-")).toBe(true);
+  });
+});
+
+// ---- StartBuild only as the project stores it
+
+// The broker starts a gate project exactly as stored: its call sends projectName, sourceVersion, timeoutInMinutesOverride and idempotencyToken, none of which has a condition key
+// (packages/broker/src/codebuild.ts; the AWS Service Authorization Reference, list_awscodebuild.html, StartBuild row). Every StartBuild override that has a key must be ABSENT for the
+// Allow to hold (`Null: {key: "true"}`, AND'ed inside one block), so one override of any single key leaves the Allow unmatched. The key list is written out in
+// tests/support/broker-codebuild-start-template.ts, independently of infra/lib/codebuild-start-overrides.ts. `codebuild:source.buildspec` (the buildspec override) supports only the Null
+// operator (CodeBuild user guide, action-context-keys.html).
+const PROJECT = projectArn("agentx-website-quality");
+const BROKER_CALL_FIELDS = /timeout|sourceVersion|idempotency|projectName/iu;
+
+/** What IAM does with one statement set for one request: an explicit Deny whose conditions all hold wins; otherwise an Allow whose action, resource and conditions all hold. `present` is the set of
+ * condition keys the request carries. Only the Null operator is understood (anything else throws, so a new operator cannot pass unnoticed). Within one statement the conditions are AND'ed. */
+function evaluate(statements: readonly Statement[], action: string, resource: string, present: readonly string[]): "allow" | "deny" | "implicit-deny" {
+  const holds = (statement: Statement): boolean => Object.entries(statement.Condition ?? {}).every(([operator, keys]) => {
+    if (operator !== "Null") throw new Error(`unsupported condition operator ${operator}`);
+    return Object.entries(keys).every(([key, expected]) => (expected === "true") === !present.includes(key));
+  });
+  const matching = statements.filter((statement) => list(statement.Action).some((pattern) => glob(pattern.toLowerCase(), action.toLowerCase()))
+    && list(statement.Resource).some((pattern) => glob(resolve(pattern), resource)) && holds(statement));
+  if (matching.some((statement) => statement.Effect === "Deny")) return "deny";
+  return matching.some((statement) => statement.Effect === "Allow") ? "allow" : "implicit-deny";
+}
+
+describe("the broker starts a gate project only as it is stored", () => {
+  const controlStacks = (): string[] => [...new Set(brokerStatements.map((entry) => entry.stack))];
+  const statementsOf = (stack: string): Statement[] => brokerStatements.filter((entry) => entry.stack === stack).map((entry) => entry.statement);
+  const startAllows = (stack: string): Statement[] => statementsOf(stack).filter((statement) => statement.Effect === "Allow" && list(statement.Action).includes("codebuild:StartBuild"));
+
+  it("holds exactly StartBuild and BatchGetBuilds on its role, in every policy, so a later batch, retry or wildcard grant fails here and must be reviewed", () => {
+    expect(controlStacks()).toHaveLength(2);
+    for (const stack of controlStacks()) {
+      const actions = statementsOf(stack).filter((statement) => statement.Effect === "Allow")
+        .flatMap((statement) => list(statement.Action)).filter((action) => /^(codebuild|\*)/iu.test(action)).sort();
+      expect(actions, stack).toEqual(["codebuild:BatchGetBuilds", "codebuild:StartBuild"]);
+      // The one StartBuild Allow is the conditional one, in a statement of its own (so it cannot share an unconditioned statement with another action).
+      expect(startAllows(stack), stack).toHaveLength(1);
+      expect(list(startAllows(stack)[0]!.Action), stack).toEqual(["codebuild:StartBuild"]);
+    }
+  });
+
+  it("requires every override key absent: exactly the written-out key list, each Null \"true\", in one AND'ed block", () => {
+    expect(new Set(STARTBUILD_OVERRIDE_KEYS).size).toBe(STARTBUILD_OVERRIDE_KEYS.length);
+    for (const key of STARTBUILD_OVERRIDE_KEYS) {
+      expect(key, key).toMatch(/^codebuild:[A-Za-z.]+$/u);
+      expect(key, `${key} must not be a field the broker sends`).not.toMatch(BROKER_CALL_FIELDS);
+    }
+    for (const stack of controlStacks()) {
+      const condition = startAllows(stack)[0]!.Condition!;
+      expect(Object.keys(condition), stack).toEqual(["Null"]);
+      expect(Object.entries(condition.Null!).sort(), stack).toEqual([...STARTBUILD_OVERRIDE_KEYS].sort().map((key) => [key, "true"]));
+    }
+  });
+
+  it("allows the broker's real StartBuild and BatchGetBuilds; refuses StartBuild with ANY one override key present, one row per key (legacy and named)", () => {
+    for (const stack of controlStacks()) {
+      const statements = statementsOf(stack);
+      expect(evaluate(statements, "codebuild:StartBuild", PROJECT, []), `${stack} the broker's call (no key present)`).toBe("allow");
+      expect(evaluate(statements, "codebuild:BatchGetBuilds", PROJECT, [...STARTBUILD_OVERRIDE_KEYS]), `${stack} read`).toBe("allow");
+      for (const key of STARTBUILD_OVERRIDE_KEYS) expect(evaluate(statements, "codebuild:StartBuild", PROJECT, [key]), `${stack} ${key}`).toBe("implicit-deny");
+      expect(evaluate(statements, "codebuild:StartBuild", PROJECT, [...STARTBUILD_OVERRIDE_KEYS]), `${stack} all keys`).toBe("implicit-deny");
+      // A project outside the gate prefix is not started at all.
+      expect(evaluate(statements, "codebuild:StartBuild", projectArn("release-agentx-production"), []), `${stack} release project`).toBe("implicit-deny");
+    }
+  });
+
+  it("makes the DefaultPolicy (which keeps BatchGetBuilds and lost StartBuild) depend on BrokerCodeBuildStart, so the conditional Allow exists before the old one goes (no deploy blip)", () => {
+    for (const stack of controlStacks()) {
+      const policies = brokerPolicyDeps.filter((entry) => entry.stack === stack);
+      const start = policies.filter((entry) => /^BrokerCodeBuildStart[0-9A-F]{8}$/u.test(entry.policy));
+      const defaults = policies.filter((entry) => entry.hasBatchGet);
+      expect(start, stack).toHaveLength(1);
+      expect(defaults, stack).toHaveLength(1);
+      expect(defaults[0]!.dependsOn, stack).toContain(start[0]!.policy);
+      expect(start[0]!.dependsOn, `${stack} no cycle`).not.toContain(defaults[0]!.policy);
+    }
+  });
+
+  it("denies StartBuildBatch outright, even if a later Allow grants it", () => {
+    for (const stack of controlStacks()) {
+      const statements = statementsOf(stack);
+      expect(evaluate(statements, "codebuild:StartBuildBatch", PROJECT, []), `${stack} as is`).toBe("deny");
+      expect(evaluate([...statements, { Effect: "Allow", Action: "codebuild:*", Resource: "*" }], "codebuild:StartBuildBatch", PROJECT, []), `${stack} with a wildcard Allow`).toBe("deny");
+    }
+  });
+
+  it("is sensitive to every key: with any one key removed from the condition, an override of just that key is allowed (this is what the per-key rows above kill)", () => {
+    for (const stack of controlStacks()) {
+      for (const dropped of STARTBUILD_OVERRIDE_KEYS) {
+        const mutated: Statement[] = statementsOf(stack).map((statement) => (statement === startAllows(stack)[0]
+          ? { ...statement, Condition: { Null: Object.fromEntries(Object.entries(statement.Condition!.Null!).filter(([key]) => key !== dropped)) } }
+          : statement));
+        expect(evaluate(mutated, "codebuild:StartBuild", PROJECT, [dropped]), `${stack} without ${dropped}`).toBe("allow");
+      }
+    }
   });
 });

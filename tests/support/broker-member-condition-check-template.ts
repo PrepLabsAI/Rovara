@@ -1,4 +1,5 @@
 import { expect } from "vitest";
+import { withoutBrokerCodeBuildStart } from "./broker-codebuild-start-template.js";
 
 type Resource = { Type: string; Properties: Record<string, unknown> };
 
@@ -6,6 +7,9 @@ type Resource = { Type: string; Properties: Record<string, unknown> };
 // exactly before removing it from historical template comparisons. Never remove a policy.
 export function withoutBrokerMemberConditionCheck<T>(input: T): T {
   const copy = structuredClone(input);
+  // BROKER-CODEBUILD-START: the broker's CodeBuild CodeBuild start policy (both control planes) is asserted exactly and taken out here too, so every pin that takes the member
+  // check out keeps the bytes it recorded before that policy existed.
+  withoutBrokerCodeBuildStart(copy);
   const resources = (copy as { Resources: Record<string, Resource> }).Resources;
   const idsOf = (prefix: string, type: string) => Object.keys(resources)
     .filter((id) => id.startsWith(prefix) && resources[id]!.Type === type);
