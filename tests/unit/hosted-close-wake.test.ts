@@ -210,9 +210,12 @@ describe("replaying a retain the broker never confirmed", () => {
       await expect(w.run()).rejects.toBeDefined();
     }
   });
-  it("answers nothing when the worker did not seal and answer (unavailable), and a reply for another operation is refused", async () => {
-    const unavailable = await replayed((command) => ({ schemaVersion: 1, workspaceId: command.workspaceId, operationId: command.operationId, fence: command.fence, action: "retain", status: "unavailable", reason: "unproven" }));
-    expect(await unavailable.run()).toBeUndefined();
+  it("only 'no such retention' (a mismatch of the generation) answers nothing; a busy or unproven worker, or a pending seal, is a fault of the moment and is thrown (retry), never a plain send; a reply for another operation is refused", async () => {
+    const reply = (reason: string) => (command: { workspaceId: string; operationId: string; fence: number }) => ({ schemaVersion: 1, workspaceId: command.workspaceId, operationId: command.operationId, fence: command.fence, action: "retain", status: "unavailable", reason });
+    expect(await (await replayed(reply("mismatch"))).run()).toBeUndefined();
+    for (const reason of ["busy", "unproven"]) await expect((await replayed(reply(reason))).run()).rejects.toMatchObject({ name: "MachineError", code: "unavailable" });
+    const pending = await replayed((command) => ({ schemaVersion: 1, workspaceId: command.workspaceId, operationId: command.operationId, fence: command.fence, action: "retain", status: "pending", target: (command.payload as { target: unknown }).target }));
+    await expect(pending.run()).rejects.toMatchObject({ code: "unavailable" });
     const other = await replayed((command) => ({ ...retainedReply(command as never), operationId: randomUUID() }));
     await expect(other.run()).rejects.toBeDefined();
   });

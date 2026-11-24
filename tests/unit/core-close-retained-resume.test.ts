@@ -202,6 +202,30 @@ describe("an unconfirmed retention (the worker never confirmed it)", () => {
     }
   });
 
+  it("F-B backstop: a step that took over an unconfirmed retention and is REFUSED by the worker (HTTP 400 / 409) is tried again, not FAILED: the replay can heal (a busy, unproven or 400 answer is a fault of the moment) and the broker's record is already gone; the attempt limit ends it if it never heals", async () => {
+    const w = await unconfirmed("STOPPED");
+    (w.h.deps.closeInspection as unknown as Record<string, unknown>)["replayRetention"] = async () => undefined;
+    const refuse = vi.spyOn(w.h.machines, "deliver").mockRejectedValueOnce(new MachineError("rejected", "the worker refused the job (HTTP 409)"));
+    await createTaskActions(w.h.deps).continue(w.h.owner, w.task.taskId, { requestId: randomUUID(), instructions: "more work" });
+    await dispatchUntilSent(w.h);
+    const step = (await operations(w)).find((item) => item["kind"] === "task")!;
+    expect(refuse.mock.calls.filter(([, invocation]) => (invocation as { kind: string }).kind === "task").length).toBeGreaterThanOrEqual(2);
+    expect(step["status"]).not.toBe("FAILED");
+    expect(step["error"]).toBeUndefined();
+    expect(step["supersedesUnconfirmed"]).toBeDefined();
+    // ... and the retry reached the worker: the step is on a machine now.
+    const machineId = ((await w.h.store.get(w.wk))!["machine"] as { machineId: string }).machineId;
+    expect(w.h.machines.delivered(machineId).filter((invocation) => invocation.kind === "task")).toHaveLength(1);
+  });
+
+  it("F-B backstop: an ORDINARY step (no unconfirmed takeover) refused by the worker still ends FAILED, as before", async () => {
+    const w = await finishedAndIdleStopped();
+    vi.spyOn(w.h.machines, "deliver").mockRejectedValue(new MachineError("rejected", "the worker refused the job (HTTP 409)"));
+    await createTaskActions(w.h.deps).continue(w.h.owner, w.task.taskId, { requestId: randomUUID(), instructions: "more work" });
+    await dispatchUntilSent(w.h);
+    expect((await operations(w)).find((item) => item["kind"] === "task")!["status"]).toBe("FAILED");
+  });
+
   it("while the instance RUNS (READY) nothing is taken over: the idle rule ends it first; Continue is refused and nothing is written", async () => {
     const w = await unconfirmed("READY");
     const before = [await w.session(), await w.h.store.get(w.wk), await opOf(w, w.holder)];

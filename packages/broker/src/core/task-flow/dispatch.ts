@@ -410,7 +410,13 @@ async function abandon(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessag
 async function deliverNotingRuntime(deps: TaskFlowDeps, workspaceId: string, machineId: string, health: MachineHealth, operation: OperationRecord, invocation: WorkerInvocation): Promise<void> {
   const successor = operation.supersedesRetention !== undefined;
   if (!successor) await deps.closeInspection?.noteRuntime?.(workspaceId, health, operation);
-  await deps.machines.deliver(machineId, invocation);
+  try { await deps.machines.deliver(machineId, invocation); }
+  catch (error) {
+    // A step that took over an unconfirmed retention and was REFUSED is not over: the refusal can be a transient fault of the replay's own answer (a 400, a busy or unproven worker), and the broker's record of the
+    // retention is already gone, so failing it would strand the seal for good. It is reported as "unavailable", which the caller tries again (the next delivery replays again); the attempt limit ends it if it never heals.
+    if (error instanceof MachineError && error.code === "rejected" && operation.supersedesUnconfirmed !== undefined) throw new MachineError("unavailable", "the worker refused the step over an unconfirmed retention; trying again");
+    throw error;
+  }
   if (successor) await deps.closeInspection?.noteRuntime?.(workspaceId, await deps.machines.health(machineId), operation);
 }
 

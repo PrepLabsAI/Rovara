@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { CloseRetentionReplySchema, CloseRetentionSchema, CLOSE_RETENTION_FEATURE, OrgIdSchema, retentionSuperseded, SessionCloseDestroySchema, canonicalRetentionValue, change, when, workspaceSessionKey, type CloseRetention, type CloseRetentionPayload, type DocumentStore, type OrgId, type TransactItem, type WorkerInvocation, type WorkerMachines, type WorkspaceSession } from "@agentx/contracts";
+import { MachineError, CloseRetentionReplySchema, CloseRetentionSchema, CLOSE_RETENTION_FEATURE, OrgIdSchema, retentionSuperseded, SessionCloseDestroySchema, canonicalRetentionValue, change, when, workspaceSessionKey, type CloseRetention, type CloseRetentionPayload, type DocumentStore, type OrgId, type TransactItem, type WorkerInvocation, type WorkerMachines, type WorkspaceSession } from "@agentx/contracts";
 import type { CloseInspectionProvider, RetainedCloseInspection } from "../../core/task-flow/close-inspection.js";
 import { taskKey } from "../../core/task-flow/keys.js";
 import { readWorkspace } from "../../core/task-flow/stage-machine.js";
@@ -69,7 +69,9 @@ export function createDispatcherCloseInspection(deps: HostedCloseDeps): CloseIns
     },
     replayRetention: async (workspaceId, unconfirmed) => {
       const reply = await command(workspaceId, unconfirmed.operationId, unconfirmed.fence, { schemaVersion: 1, action: "retain", target: unconfirmed.generation });
-      if (reply.status !== "retained" || reply.action !== "retain") return undefined;
+      // Only "this worker has no such retention" is definitive (its generation is not the one asked about). A busy or unproven worker, a pending seal, is a fault of the moment: retry, never a plain send.
+      if (reply.status === "unavailable" && reply.reason === "mismatch") return undefined;
+      if (reply.status !== "retained" || reply.action !== "retain") throw new MachineError("unavailable", "the worker could not confirm the retention yet");
       // The reply must name exactly what was asked for: the selector releases whichever retention it equals, so a reply about another preflight is never taken.
       const named = reply.retention;
       if (named.inspectionOperationId !== unconfirmed.operationId || named.inspectionFence !== unconfirmed.fence || !equal(named.generation, unconfirmed.generation)) throw new Error("retention reply names another retention");
