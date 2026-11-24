@@ -193,7 +193,7 @@ export async function grantProjectAccess(deps: AdminActionDependencies, admin: {
 }
 
 /** DEC 254zzz80: revoked where the grant lives for `companyId` (the caller's LIVE membership): a named company's own partition, so nothing of the grant is left behind there. */
-export async function revokeProjectAccess(deps: AdminActionDependencies, project: string, developerId: string, companyId?: string): Promise<{ revoked: boolean }> {
+export async function revokeProjectAccess(deps: Pick<AdminActionDependencies, "documentClient" | "tableName">, project: string, developerId: string, companyId?: string): Promise<{ revoked: boolean }> {
   const revokeAt = async (company: string | undefined): Promise<boolean> => {
     try {
       await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [

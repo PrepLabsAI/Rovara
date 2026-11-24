@@ -56,6 +56,20 @@ const refused = (): CompanyJoin => ({ ok: false, reason: "not_invited" });
 const unavailable = () => new Error("company sign-in unavailable");
 const conditional = (error: unknown) => error instanceof Error && (error.name === "ConditionalCheckFailedException" || error.name === "TransactionCanceledException");
 
+/** Arch ruling: a restored person comes back as a plain member, never with the role they had (a rejoin gets no old grant back). An administrator grants the role again through setRole, audited like any other. */
+function restoredAsMember(member: Member, by: string | undefined, at: string): Member {
+  // A restore of a membership that was never ended changes nothing (it is not a demotion); it is written and audited as before.
+  if (member.revokedAt === undefined) return { ...member };
+  const next: Member = member.role === "member" ? { ...member } : { ...member, role: "member", updatedAt: at, updatedBy: by ?? "operator" };
+  delete next.revokedAt; delete next.revokedBy;
+  return next;
+}
+/** Whether a write changes who the live owners are. A restore of an ended owner membership (it returns as a member) changes none, so it needs no owner actor. */
+function changesOwners(previous: Member, next: Member): boolean {
+  const leavesOwner = previous.role === "owner" && previous.revokedAt === undefined && (next.role !== "owner" || next.revokedAt !== undefined);
+  return leavesOwner || (previous.role !== "owner" && next.role === "owner");
+}
+
 /** One bounded operation, using the host's existing request timeout. No detached I/O. */
 export class CompanySignInStore {
   constructor(private readonly input: { documentClient: { send(command: unknown): Promise<unknown> }; tableName: string; now: () => number }) {}
@@ -310,7 +324,7 @@ export class CompanySignInStore {
     // A self-actor's target snapshot must itself still be authorized. The earlier
     // actor read alone can race with this read; the snapshot CAS then fences it.
     if (createdBy === previous.personId && (previous.revokedAt !== undefined || (previous.role !== "admin" && previous.role !== "owner"))) throw unavailable();
-    const ownerChange = (previous.role === "owner" && (next.role !== "owner" || next.revokedAt !== undefined)) || (previous.role !== "owner" && next.role === "owner");
+    const ownerChange = changesOwners(previous, next);
     if (ownerChange) await this.checkActor(previous.companyId, createdBy, true);
     // The target snapshot CAS includes its current role in this same transaction.
     // A concurrent promotion cannot turn a plain-member write into an elevated write.
@@ -369,9 +383,7 @@ export class CompanySignInStore {
     if (member === undefined || member.companyId !== companyId) return false;
     // DEC 254zzz84 (5): a fenced removal never ends a membership that has already ended (a second removal racing the first refuses, it does not re-stamp it).
     if (revoked && (fence.expectedRole !== undefined || fence.successorId !== undefined) && member.revokedAt !== undefined) throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_REVOKED });
-    const next = { ...member };
-    if (revoked) { next.revokedAt = this.iso(); next.revokedBy = createdBy ?? "operator"; }
-    else { delete next.revokedAt; delete next.revokedBy; }
+    const next = revoked ? { ...member, revokedAt: this.iso(), revokedBy: createdBy ?? "operator" } : restoredAsMember(member, createdBy, this.iso());
     await this.writeMember(member, next, revoked ? "company-member-revoke" : "company-member-restore", createdBy, fence);
     return true;
   }
