@@ -4,6 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { orgProjectCatalogKey, projectRevisionKey, sharedTaskKey, type JsonValue, type ProjectDefinition, type StoredDocument } from "@agentx/contracts";
+import { startProjectSetupCheck } from "../../packages/broker/src/core/setup-agent/check.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { taskKey, workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -174,6 +175,38 @@ describe("the administrator's workspace cancel on a core task's workspace", () =
     expect(await status()).not.toBe("CANCELLED");
   });
 
+});
+
+describe("the administrator's workspace cancel on a setup check's workspace (no task)", () => {
+  async function checkWorld() {
+    const world = await coreWorld();
+    const deps = (await world.app.runtimeFor(FAKE_COMPANY)).flow.deps;
+    const started = await startProjectSetupCheck(deps, { project: "payments", requestId: randomUUID(), startedBy: "owner" });
+    // The broker's table holds the check's discovery pointer and rows, as it does on an install.
+    for (const pk of [workspacePartition(FAKE_COMPANY, started.workspaceId), `WORKSPACE#${started.workspaceId}`]) {
+      for (const row of await partition(world.world, pk)) world.harness.db.set(JSON.parse(JSON.stringify(row)) as Record<string, unknown> & { pk: string; sk: string });
+    }
+    const workspace = async () => (await world.world.store.get({ pk: workspacePartition(FAKE_COMPANY, started.workspaceId), sk: "META" }))!;
+    return { ...world, started, workspace, cancel: (user: { subject: string; admin?: boolean }) => call(world.harness.handler, { method: "POST", path: `/v1/admin/workspaces/${started.workspaceId}/cancel`, user }) };
+  }
+
+  it("stops it for an administrator with the grant on the check's project: preparation cancelled, workspace closed, and a repeat is NOTHING_RUNNING", async () => {
+    const { cancel, workspace, world, started } = await checkWorld();
+    const operationId = (await workspace())["activeOperationId"] as string;
+    const answer = await cancel(ADMIN);
+    expect(answer).toMatchObject({ status: 202, body: { outcome: "CANCEL_REQUESTED", workspaceId: started.workspaceId } });
+    expect(answer.body).not.toHaveProperty("taskId");
+    expect(await workspace()).toMatchObject({ status: "CLOSED", closedFrom: "PREPARATION_FAILED" });
+    expect(await world.store.get({ pk: workspacePartition(FAKE_COMPANY, started.workspaceId), sk: `OPERATION#${operationId}` })).toMatchObject({ status: "CANCELLED" });
+    expect((await cancel(ADMIN)).body).toMatchObject({ outcome: "NOTHING_RUNNING" });
+  });
+
+  it("refuses a caller without the administrator claim, and one without the grant on the check's project; nothing is stopped", async () => {
+    const { cancel, workspace } = await checkWorld();
+    expect((await cancel({ subject: "not-an-admin" })).status).toBe(403);
+    expect(await cancel({ subject: "other-admin", admin: true })).toMatchObject({ status: 404, body: { error: { code: "NOT_FOUND" } } });
+    expect(await workspace()).toMatchObject({ status: "PREPARING" });
+  });
 });
 
 describe("the core's administrator stop (stopWorkspaceAsAdministrator)", () => {

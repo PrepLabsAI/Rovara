@@ -177,6 +177,32 @@ export function logInvocationStarted(sink: WorkerLogSink, invocation: WorkerInvo
   }
 }
 
+/** The terminal result a worker could not deliver: its operation's id and kind, how it ended, and how many tries were made. */
+export interface TerminalCallbackFailure { invocation: WorkerInvocation; outcome: "SUCCEEDED" | "FAILED" | "CANCELLED"; attempts: number; error: unknown }
+
+/**
+ * A worker's terminal callback was refused or never reached the broker after every retry, so the broker will never learn how the operation ended (it then waits for its own watches). One error-level line, always,
+ * and the line is the metric too: the worker log group's `WorkerTerminalCallbackFailed` filter counts `event = terminal_callback.failed` lines and an alarm reads the count. The line carries ids, the operation's kind and
+ * end, the number of tries and the failure's code, class and HTTP status (read from the client's fixed "failed with HTTP <n>" words), never the message, the body, a capability or the result.
+ */
+export function logTerminalCallbackFailed(sink: WorkerLogSink, input: TerminalCallbackFailure): void {
+  write(sink, "error", () => {
+    const failure = describeFailure(input.error);
+    const message = input.error instanceof Error ? input.error.message : "";
+    const fromMessage = /\bfailed with HTTP ([1-5]\d\d)\b/u.exec(message)?.[1];
+    return {
+      component: "worker",
+      event: "terminal_callback.failed",
+      kind: checked(input.invocation.kind, ENUM_VALUE) ?? "unknown",
+      invocationId: checked(input.invocation.operationId, ID),
+      outcome: input.outcome.toLowerCase(),
+      attempts: input.attempts,
+      ...failure,
+      ...(failure.httpStatus === undefined && fromMessage !== undefined ? { httpStatus: Number(fromMessage) } : {}),
+    };
+  });
+}
+
 export interface WorkerFailureDescription {
   errorCode?: string;
   errorClass: WorkerErrorClass;

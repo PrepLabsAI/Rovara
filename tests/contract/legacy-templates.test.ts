@@ -8,6 +8,7 @@ import { withoutLegacyRuntimeBoundary } from "../support/legacy-runtime-boundary
 import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js";
 import { withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
 import { withoutApiAccessLog } from "../support/api-access-log-template.js";
+import { withoutWorkerCallbackAlarm } from "../support/worker-callback-alarm-template.js";
 import { withoutWorkerEcrScope } from "../support/worker-ecr-scope-template.js";
 
 skipLambdaBundling();
@@ -34,13 +35,13 @@ describe("legacy production templates", () => {
   for (const stack of legacyProductionStacks()) {
     if (stack.stackName === "AgentXControlPlane") {
       it("removing only Batch F additions preserves code/next's AgentXControlPlane template", () => {
-        const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(withoutLegacyRuntimeBoundary(withoutStuckStoppingAlarm(withoutApiAccessLog(normalizedTemplate(stack)), LEGACY))));
+        const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(withoutLegacyRuntimeBoundary(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(normalizedTemplate(stack)), LEGACY)))));
         expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("d9bfc520cf02657c1b6be9b16b821e910504a1599cb3652d7405f9c6509b4048");
       }, 120_000);
     }
     it(`${stack.stackName} is unchanged`, () => {
       // DEC 254zzz432: the alarm is taken out first, so every pin below holds as recorded (checked to be exactly one resource).
-      const template = stack.stackName === "AgentXControlPlane" ? withoutStuckStoppingAlarm(normalizedTemplate(stack), LEGACY) : normalizedTemplate(stack);
+      const template = stack.stackName === "AgentXControlPlane" ? withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(normalizedTemplate(stack), LEGACY)) : normalizedTemplate(stack);
       const pin = BOUNDED_STACK_PINS[stack.stackName];
       if (pin !== undefined) expect(createHash("sha256").update(JSON.stringify(template)).digest("hex"), `${stack.stackName} with the runtime boundary`).toBe(pin);
       else expect(JSON.stringify(template)).not.toContain("PermissionsBoundary");
