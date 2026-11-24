@@ -3,6 +3,7 @@
 // the step asks for; Claude and Bedrock models on the same route are unchanged. OpenAI's own names also carry the `openai` provider, never Bedrock's.
 import { describe, expect, it, vi } from "vitest";
 import type { Context } from "@earendil-works/pi-ai";
+import type { InvocationModelRoute } from "@agentx/contracts";
 import { agentModelIdentity, agentModelName, isOpenAiAgentModel } from "../../packages/contracts/src/agent-model-choice.js";
 import { createConfiguredModelRuntime, isGatewayChatModel, routeSupportsReasoning, routedThinkingLevel } from "../../packages/model-runtime/src/index.js";
 
@@ -55,6 +56,38 @@ describe("an OpenAI model on the gateway's agent route (the company's own OpenAI
 
   it("is only the gateway's Anthropic Messages route: the same name on another route API is not changed", () => {
     expect(isGatewayChatModel({ alias: "gpt-5", api: "openai-responses", catalog: "gpt-5" })).toBe(false);
+  });
+});
+
+describe("isGatewayChatModel: the route's provider identity, not the shape of the name", () => {
+  const anthropicRoute = (name: string, identity?: InvocationModelRoute["identity"]): InvocationModelRoute => ({ alias: name, api: "anthropic-messages", catalog: name, ...(identity === undefined ? {} : { identity }) });
+  const openRouterIdentity = (modelId: string) => ({ provider: "openrouter" as const, sourceId: "source-1", connectionRevision: "rev-1", modelId });
+
+  it("is true for an OpenRouter route, named by its own identity", () => {
+    expect(isGatewayChatModel(anthropicRoute("openai/gpt-oss-20b", openRouterIdentity("openai/gpt-oss-20b")))).toBe(true);
+    expect(isGatewayChatModel(anthropicRoute("some-vendor/unlisted-model", openRouterIdentity("some-vendor/unlisted-model")))).toBe(true);
+  });
+
+  it("is true for an OpenRouter route with no identity, named by the OpenRouter catalog entry its name has", () => {
+    expect(isGatewayChatModel(anthropicRoute("openai/gpt-oss-20b"))).toBe(true);
+    expect(isGatewayChatModel(anthropicRoute("z-ai/glm-5"))).toBe(true);
+  });
+
+  it("is false when the route is not OpenRouter's, whatever its name looks like", () => {
+    expect(isGatewayChatModel(anthropicRoute("claude-sonnet-4-6"))).toBe(false);
+    expect(isGatewayChatModel(anthropicRoute("us.anthropic.claude-sonnet-4-6"))).toBe(false);
+    expect(isGatewayChatModel(anthropicRoute("openai.gpt-oss-120b-1:0"))).toBe(false);
+    // A slash name the catalogs do not know and the route does not call OpenRouter's (a company's own model): not guessed from the slash.
+    expect(isGatewayChatModel(anthropicRoute("acme/private-model"))).toBe(false);
+  });
+
+  it("is false for an OpenRouter route on another route API (only the Anthropic Messages route is translated)", () => {
+    expect(isGatewayChatModel({ alias: "openai/gpt-oss-20b", api: "openai-completions", catalog: "openai/gpt-oss-20b", identity: openRouterIdentity("openai/gpt-oss-20b") })).toBe(false);
+  });
+
+  it("keeps the existing OpenAI rule", () => {
+    expect(isGatewayChatModel(anthropicRoute("gpt-5"))).toBe(true);
+    expect(isGatewayChatModel(anthropicRoute("o4-mini"))).toBe(true);
   });
 });
 
