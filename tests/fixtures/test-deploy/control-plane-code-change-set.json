@@ -250,8 +250,8 @@
         }
     ],
     "ChangeSetName": "claude-inspect-cp-1792440295",
-    "ChangeSetId": "arn:aws:cloudformation:us-east-1:944937319445:changeSet/claude-inspect-cp-1792440295/35c7f40c-32c3-4388-a749-6c166657a47c",
-    "StackId": "arn:aws:cloudformation:us-east-1:944937319445:stack/agentx-agentxlivetest123-control-plane/b83be8d0-c350-11f1-bfc9-0e0bb0e82511",
+    "ChangeSetId": "arn:aws:cloudformation:us-east-1:123456789012:changeSet/claude-inspect-cp-1792440295/35c7f40c-32c3-4388-a749-6c166657a47c",
+    "StackId": "arn:aws:cloudformation:us-east-1:123456789012:stack/agentx-agentxlivetest123-control-plane/b83be8d0-c350-11f1-bfc9-0e0bb0e82511",
     "StackName": "agentx-agentxlivetest123-control-plane",
     "Description": null,
     "Parameters": [
@@ -285,7 +285,7 @@
         },
         {
             "ParameterKey": "GitHubAppPrivateKeySecretArn",
-            "ParameterValue": "arn:aws:secretsmanager:us-east-1:944937319445:secret:agentx/agentxlivetest123/github-app-mr5iUo"
+            "ParameterValue": "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/agentxlivetest123/github-app-mr5iUo"
         },
         {
             "ParameterKey": "AssetParametersa97c1627d3ec2b9a15d756a8395a3a118a588a69a021331cab8b822add26f53fS3Bucket9A3452F9",
@@ -305,7 +305,7 @@
         },
         {
             "ParameterKey": "WorkspaceKmsKeyArn",
-            "ParameterValue": "arn:aws:kms:us-east-1:944937319445:key/aaa95a89-d32d-428b-ac0d-a259859d9f6f"
+            "ParameterValue": "arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000"
         },
         {
             "ParameterKey": "AssetParameters774440e653d441dd8b43b14a1a0c7d9618531783bd94753284f42f28a325b0d0S3VersionKey6F3E4B1A",
@@ -397,7 +397,7 @@
         },
         {
             "ParameterKey": "Ec2WorkerInstanceRoleArn",
-            "ParameterValue": "arn:aws:iam::944937319445:role/agentx/agentxlivetest123/agentx-agentxlivetest123--Ec2WorkersInstanceRoleAB9-zb0OAjhEXiCo"
+            "ParameterValue": "arn:aws:iam::123456789012:role/agentx/agentxlivetest123/agentx-agentxlivetest123--Ec2WorkersInstanceRoleAB9-zb0OAjhEXiCo"
         },
         {
             "ParameterKey": "AssetParameters67ed427d35b283ffc40b8d3d7b2ff3cb6df3b526da523226f2f126bb830abeb6ArtifactHashD301FEAC",
