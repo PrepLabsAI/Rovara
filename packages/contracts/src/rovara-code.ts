@@ -732,8 +732,8 @@ export type SetupDraftApplyBody = z.infer<typeof SetupDraftApplyBodySchema>;
 // ---- milestones
 
 /**
- * `started` and `closed` (slice 5): the task began from a ticket, and the task ended without a merge; ticket updates are told them like any other milestone. `setup_paused` (L4-U5): the task paused before Build because
- * the project's setup stopped working; the chat thread and the ticket it came from are told once, in fixed words (the handlers read the rest from the project's own re-check rows, never from the milestone's text).
+ * `started` and `closed` (slice 5): the task began from a ticket, and the task ended without a merge; ticket updates are told them like any other milestone. `setup_paused` (L4-U5; DEC 254zzz447: the wire id is kept, it now carries a WARNING): the task reached Build while
+ * the project's setup needs repair and work continues; the chat thread and the ticket it came from are told once, in fixed words (the handlers read the rest from the project's own re-check rows, never from the milestone's text).
  */
 export const CODE_MILESTONE_KINDS = ["questions", "answered", "plan_ready", "pr_ready", "review_nudge", "fixing", "stuck", "approved", "merged", "started", "closed", "setup_paused"] as const;
 export const CodeMilestoneKindSchema = z.enum(CODE_MILESTONE_KINDS);

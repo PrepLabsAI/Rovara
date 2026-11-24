@@ -30,7 +30,7 @@ import { taskKey } from "../task-flow/keys.js";
 import { readPlanFeature } from "../report/plan-feature.js";
 import { taskSessionId } from "../sessions/create.js";
 import { inertTicketTitle } from "../ticket-updates/handler.js";
-import { setupEvidenceOf, setupPausedMessage, setupTrustLineOf } from "../setup-agent/recheck-rows.js";
+import { setupBrokenTaskWords, setupEvidenceOf, setupBrokenWarningMessage, setupTrustLineOf } from "../setup-agent/recheck-rows.js";
 import { postApprovalCard } from "./cards.js";
 import { personIsServed, tenantIsCompanys, type ChannelCompanyOf, type ChannelMemberRule } from "./company.js";
 import { readTaskThread, type TaskThread } from "./threads.js";
@@ -122,7 +122,7 @@ export function planCardPosted(deps: { store: Pick<DocumentStore, "get">; now: (
 }
 
 /**
- * L4-U5: whether the task's "I can't build this yet" message (the setup pause) was already told in its thread, for the break that holds the task now: the answer the needs-you reminder asks (`deliverAttention`'s
+ * L4-U5 / DEC 254zzz447: whether the setup message (a task that was paused by an earlier break, or a setup warning) was already told in its thread, for the break that holds the task now: the answer the needs-you reminder asks (`deliverAttention`'s
  * `setupPausedTold`), so the thread is not told twice for one pause. True only for a task that is blocked on a broken re-check whose message was sent; anything else (or a read that fails) is "not told".
  */
 export function setupPausedPosted(deps: { store: Pick<DocumentStore, "get"> }): (session: AgentSessionRecord) => Promise<boolean> {
@@ -134,6 +134,8 @@ export function setupPausedPosted(deps: { store: Pick<DocumentStore, "get"> }): 
     if (task === undefined || (task["orgId"] ?? task["companyId"]) !== session.orgId || task["closedAt"] !== undefined || workflow?.state !== "BLOCKED" || typeof project !== "string") return false;
     const evidence = await setupEvidenceOf({ store: deps.store, companyId: session.orgId }, project, session.subject.taskId);
     if (evidence?.state !== "broken" || evidence.recheckKey === undefined) return false;
+    // Only a task still PAUSED by the old setup words (written before DEC 254zzz447, the match `auto-resume.ts` uses): the warning's own claim (a task that keeps running) says nothing about a later block for another reason.
+    if (workflow.blockReason !== setupBrokenTaskWords(evidence.failedStep ?? "setup")) return false;
     const sessionId = typeof task["sessionId"] === "string" ? task["sessionId"] : session.sessionId;
     return (await deps.store.get(claimKey(session.orgId, sessionId, `setup_paused#${evidence.recheckKey}`)))?.["state"] === "done";
   };
@@ -225,13 +227,13 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
       const where = open(taskId, taskWhere);
 
       if (moment === "setup_paused") {
-        // The words come from the project's own re-check rows (never from the milestone's text), and only while the task's re-check says the setup is broken.
+        // The words come from the project's own re-check rows (never from the milestone's text), and only while the task's re-check says the setup is broken. Once per session and break (the claim key).
         const project = typeof task["project"] === "string" ? task["project"] : undefined;
         if (project === undefined || task["closedAt"] !== undefined) return;
         const evidence = await setupEvidenceOf({ store: deps.store, companyId: orgId }, project, taskId);
         if (evidence?.state !== "broken" || evidence.recheckKey === undefined) return;
         const key = `setup_paused#${evidence.recheckKey}`;
-        await send(orgId, sessionId, key, () => tell({ ...base(key), type: "progress", data: { text: setupPausedMessage(evidence.failedStep ?? "setup", deps.setupUrl?.(project)) } }));
+        await send(orgId, sessionId, key, () => tell({ ...base(key), type: "progress", data: { text: setupBrokenWarningMessage(evidence.failedStep ?? "setup", deps.setupUrl?.(project)) } }));
         return;
       }
 

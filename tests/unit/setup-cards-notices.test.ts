@@ -16,7 +16,7 @@ import { readIntakeItem } from "../../packages/broker/src/core/intake/store.js";
 import { createLocalOwnerIdentity, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { FAKE_TRACKER_KIND, FakeTracker } from "../../packages/broker/src/plugins/fake/tracker.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { SETUP_REPAIR_WORDS, driftTaskKey, plainSetupLink, recheckRowKey, setupAdminNoticeWords, setupBrokenTaskWords, setupEvidenceOf, setupMayBeOutOfDateWords, setupNotRecheckedWords, setupPausedMessage, setupPullRequestLineOf, setupStillWorksWords, setupTrustLineOf, type RecheckRow, type RecheckState } from "../../packages/broker/src/core/setup-agent/recheck-rows.js";
+import { SETUP_REPAIR_WORDS, driftTaskKey, plainSetupLink, recheckRowKey, setupAdminNoticeWords, setupBrokenTaskWords, SETUP_NEEDS_REPAIR_WARNING, setupRepairCardOf, setupEvidenceOf, setupMayBeOutOfDateWords, setupNotRecheckedWords, setupBrokenWarningMessage, setupPullRequestLineOf, setupStillWorksWords, setupTrustLineOf, type RecheckRow, type RecheckState } from "../../packages/broker/src/core/setup-agent/recheck-rows.js";
 import { repairToldKey } from "../../packages/broker/src/core/setup-agent/broken-notice.js";
 import { COMPANY, createHarness, newRequestId } from "../support/task-flow-harness.js";
 import { ThreadWorld } from "./support/setup-cards-thread-world.js";
@@ -51,13 +51,13 @@ async function seed(store: DocumentStore, input: { orgId?: OrgId; project?: stri
 describe("the evidence line of a task", () => {
   const reader = (store: MemoryDocumentStore, companyId: OrgId = COMPANY) => ({ store, companyId });
 
-  it("each state has one fixed line; only 'could not be checked' lowers trust, and the pull request carries every finished state", async () => {
+  it("each state has one fixed line; 'could not be checked' and a broken setup (work continues, results may be less reliable) lower trust, and the pull request carries every finished state", async () => {
     const cases: Array<[RecheckState, string, boolean, boolean]> = [
       ["running", "Checking setup again. Your code changed since setup was approved.", false, false],
       ["passed", setupStillWorksWords(["lockfile"]), false, true],
       ["tests_failing", "Setup re-checked after dependency files changed: the setup works; some tests were already failing.", false, true],
       ["unclear", setupNotRecheckedWords(["lockfile"]), true, true],
-      ["broken", setupBrokenTaskWords(STEP), false, false],
+      ["broken", SETUP_NEEDS_REPAIR_WARNING, true, true],
     ];
     for (const [state, line, trust, onPullRequest] of cases) {
       const store = new MemoryDocumentStore();
@@ -84,23 +84,25 @@ describe("the evidence line of a task", () => {
 
 describe("the words are one set, safe for a chat, with no cost in them", () => {
   it("the requester's message is the task page's own sentence plus where to go; the admins' notice names the one action that fits", () => {
-    expect(setupPausedMessage(STEP)).toBe(`I can't build this yet. This project's setup stopped working after recent code changes (${STEP}). I've asked the project's admins to approve a fix. Retry this step once the setup is fixed.\nOpen the project's setup page in Rovara.`);
-    expect(setupPausedMessage(STEP, "https://app.example.test/p/payments/setup")).toMatch(/\nSetup page: https:\/\/app\.example\.test\/p\/payments\/setup$/u);
-    expect(setupAdminNoticeWords(STEP)).toBe(`Setup needs repair. The project's setup stopped working after recent code changes (${STEP}). Rovara cannot build on this project until it is fixed. Fix setup on the setup page.`);
-    expect(setupAdminNoticeWords(STEP, true)).toMatch(/Approve new setup on the setup page\.$/u);
-    for (const text of [setupPausedMessage(STEP), setupAdminNoticeWords(STEP), setupAdminNoticeWords(STEP, true), setupStillWorksWords(["lockfile"]), setupNotRecheckedWords(["compose"]), setupMayBeOutOfDateWords(["version"])]) expect(text, text).not.toMatch(COST);
+    expect(setupBrokenWarningMessage(STEP)).toBe(`Setup needs repair: work continues; results may be less reliable until setup is fixed. The project's setup stopped working after recent code changes (${STEP}).\nOpen the project's setup page in Rovara.`);
+    expect(setupBrokenWarningMessage(STEP, "https://app.example.test/p/payments/setup")).toMatch(/\nSetup page: https:\/\/app\.example\.test\/p\/payments\/setup$/u);
+    expect(setupAdminNoticeWords(STEP)).toBe(`Setup needs repair. The project's setup stopped working after recent code changes (${STEP}). Fix setup on the setup page. Work continues; results may be less reliable until setup is fixed.`);
+    expect(setupAdminNoticeWords(STEP, true)).toMatch(/Approve new setup on the setup page\. Work continues; results may be less reliable until setup is fixed\.$/u);
+    expect(setupAdminNoticeWords(STEP)).toMatch(/Work continues; results may be less reliable until setup is fixed\.$/u);
+    expect(setupRepairCardOf(STEP).body).toBe(`The project's setup stopped working after recent code changes (${STEP}). Work continues; results may be less reliable until setup is fixed.`);
+    for (const text of [setupBrokenWarningMessage(STEP), setupAdminNoticeWords(STEP), setupAdminNoticeWords(STEP, true), setupStillWorksWords(["lockfile"]), setupNotRecheckedWords(["compose"]), setupMayBeOutOfDateWords(["version"])]) expect(text, text).not.toMatch(COST);
     expect(Object.values(SETUP_REPAIR_WORDS).join(" ")).not.toMatch(COST);
   });
 
   it("a link goes into a chat only as a plain https address (no sign-in data, no spaces, no markup)", () => {
     expect(plainSetupLink("https://app.example.test/p/payments/setup")).toBe("https://app.example.test/p/payments/setup");
     for (const bad of ["http://app.example.test/x", "https://user:pw@app.example.test/x", "javascript:alert(1)", "https://app.example.test/a b", "https://app.example.test/<x>", "not a link", undefined]) expect(plainSetupLink(bad as never), String(bad)).toBeUndefined();
-    expect(setupPausedMessage(STEP, "http://insecure.test/x")).toContain("Open the project's setup page in Rovara.");
+    expect(setupBrokenWarningMessage(STEP, "http://insecure.test/x")).toContain("Open the project's setup page in Rovara.");
   });
 
 });
 
-describe("the chat thread: one message when the task pauses at Build", () => {
+describe("the chat thread: one warning message when the task reaches Build under a break", () => {
   const paused = (extra: Partial<CodeMilestone> = {}, org: OrgId = COMPANY): CodeMilestone => ({ kind: "setup_paused", orgId: org, taskId: ThreadWorld.TASK, at: iso(), text: "x", ...extra });
   const prReady = (): CodeMilestone => ({ kind: "pr_ready", orgId: COMPANY, taskId: ThreadWorld.TASK, at: iso(), text: "ready", pullRequests: [{ repository: "demo", number: 7, url: "https://github.com/example/demo/pull/7" }] });
 
@@ -114,16 +116,31 @@ describe("the chat thread: one message when the task pauses at Build", () => {
     const event = w.attempts[0]!;
     expect(event.type).toBe("progress");
     expect((event as { conversation?: unknown }).conversation).toEqual(CONVERSATION);
-    expect((event as ChannelEvent & { data: { text: string } }).data.text).toBe(setupPausedMessage(STEP));
+    expect((event as ChannelEvent & { data: { text: string } }).data.text).toBe(setupBrokenWarningMessage(STEP));
     expect((event as { data: Record<string, unknown> }).data["actions"]).toBeUndefined();
     expect(JSON.stringify(event)).not.toMatch(COST);
+  });
+
+  it("DEC 254zzz447: the warning is told once per break and session, and a NEW break (another re-check key) is told again; the words say work continues", async () => {
+    const w = await ThreadWorld.make();
+    await seed(w.store, { taskId: ThreadWorld.TASK, state: "broken" });
+    await w.handler.on(paused());
+    await w.handler.on(paused());
+    expect(w.attempts).toHaveLength(1);
+    const first = (w.attempts[0] as ChannelEvent & { data: { text: string } }).data.text;
+    expect(first).toContain("work continues");
+    expect(first).not.toMatch(/can't build|paused|retry this step/iu);
+    await seed(w.store, { taskId: ThreadWorld.TASK, state: "broken", key: KEY_B });
+    await w.handler.on(paused());
+    await w.handler.on(paused());
+    expect(w.attempts).toHaveLength(2);
   });
 
   it("carries the setup page's link when the host has one, as the last line, and the words that say where to go when it has none", async () => {
     const w = await ThreadWorld.make({ setupUrl: (project) => `https://app.example.test/p/${project}/setup` });
     await seed(w.store, { taskId: ThreadWorld.TASK, state: "broken" });
     await w.handler.on(paused());
-    expect((w.attempts[0] as { data: { text: string } }).data.text).toBe(setupPausedMessage(STEP, "https://app.example.test/p/payments/setup"));
+    expect((w.attempts[0] as { data: { text: string } }).data.text).toBe(setupBrokenWarningMessage(STEP, "https://app.example.test/p/payments/setup"));
   });
 
   it("still tells the thread a person must act when milestone lines are muted", async () => {
@@ -131,7 +148,7 @@ describe("the chat thread: one message when the task pauses at Build", () => {
     await seed(w.store, { taskId: ThreadWorld.TASK, state: "broken" });
     await w.handler.on(paused());
     expect(w.attempts).toHaveLength(1);
-    expect((w.attempts[0] as ChannelEvent & { data: { text: string } }).data.text).toBe(setupPausedMessage(STEP));
+    expect((w.attempts[0] as ChannelEvent & { data: { text: string } }).data.text).toBe(setupBrokenWarningMessage(STEP));
   });
 
   it("never tells another company's thread, a closed task, or a task of another company's record", async () => {
@@ -209,7 +226,7 @@ describe("the ticket the task came from: the same message, once", () => {
     expect(await sendTicketUpdate(w.deps(), w.milestone("setup_paused"))).toBe("already_sent");
     const added = w.tracker.writes.slice(before);
     expect(added).toHaveLength(1);
-    expect(added[0]).toMatchObject({ kind: "comment", item: "T-1", value: setupPausedMessage(STEP), requirePrivate: true });
+    expect(added[0]).toMatchObject({ kind: "comment", item: "T-1", value: setupBrokenWarningMessage(STEP), requirePrivate: true });
     expect(added.some((write) => write.kind === "status")).toBe(false);
     expect(added[0]!.value).not.toMatch(COST);
   });
@@ -223,8 +240,8 @@ describe("the ticket the task came from: the same message, once", () => {
     await thread.handler.on({ kind: "setup_paused", orgId: COMPANY, taskId: ThreadWorld.TASK, at: iso(), text: "x" });
     const ticketText = w.setupComments().at(-1)!.value;
     const threadText = (thread.attempts[0] as { data: { text: string } }).data.text;
-    expect(ticketText).toBe(setupPausedMessage(STEP, "https://app.example.test/p/payments/setup"));
-    expect(threadText).toBe(setupPausedMessage(STEP));
+    expect(ticketText).toBe(setupBrokenWarningMessage(STEP, "https://app.example.test/p/payments/setup"));
+    expect(threadText).toBe(setupBrokenWarningMessage(STEP));
     expect(ticketText.split("\n")[0]).toBe(threadText.split("\n")[0]);
   });
 
@@ -487,7 +504,7 @@ describe("the admins' notice holds when two readers of one break meet", () => {
 
 describe("the requester hears the pause once: the needs-you reminder knows the thread was told", () => {
   const session = { orgId: COMPANY, sessionId: taskSessionId(ThreadWorld.TASK), subject: { kind: "task", taskId: ThreadWorld.TASK } } as never;
-  const blocked = async (w: ThreadWorld) => { await w.store.update({ key: taskKey(ThreadWorld.TASK), ops: [{ op: "set", path: ["workflow"], value: { state: "BLOCKED", stage: "IMPLEMENT", revision: 3 } }] }); };
+  const blocked = async (w: ThreadWorld) => { await w.store.update({ key: taskKey(ThreadWorld.TASK), ops: [{ op: "set", path: ["workflow"], value: { state: "BLOCKED", stage: "IMPLEMENT", revision: 3, blockReason: setupBrokenTaskWords(STEP) } }] }); };
 
   it("is true only after the pause message was sent for the break that holds the task now", async () => {
     const w = await ThreadWorld.make();
@@ -529,9 +546,10 @@ describe("the wiring that carries the lines is in place (a guard on the source: 
     expect(root).toContain("setupRead: (orgId, project) => (orgId === companyId ? readSetupBrokenNotice(");
     expect(source("packages/broker/src/local/app/app.ts")).toContain("setupPausedTold: setupPausedPosted({ store }),");
   });
-  it("pausing at Build stores fixed words, never the failing step, in the milestone and the session's timeline", () => {
+  it("the Build warning stores fixed words, never the failing step, in the milestone and the session's timeline", () => {
     const start = source("packages/broker/src/core/build-step/start.ts");
-    expect(start).toContain("text: SETUP_PAUSED_TIMELINE,");
+    expect(start).toContain("text: SETUP_WARNING_TIMELINE,");
+    expect(start).toContain("const SETUP_WARNING_TIMELINE = SETUP_NEEDS_REPAIR_WARNING;");
     expect(start).not.toMatch(/kind: "setup_paused"[^]{0,200}text: setupGate/u);
   });
 });

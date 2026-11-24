@@ -408,7 +408,7 @@ describe("the draft, step by step: Rovara drafts, a person decides", () => {
     const r = await rig();
     const { taskId, pausedTaskId, row } = await toChecking(r);
     const orgId = r.w.h.deps.companyId;
-    expect(await setupGateBeforeBuild(r.w.h.deps, { project: "payments", taskId: pausedTaskId })).toMatchObject({ answer: "blocked" });
+    expect(await setupGateBeforeBuild(r.w.h.deps, { project: "payments", taskId: pausedTaskId })).toMatchObject({ answer: "go", brokenSetup: {} });
     // The candidate: stored as revision 2, NOT the project's latest, started by the system owner, its check on a workspace of its own (not the run's).
     const apply = (await r.w.h.store.get(setupApplyKey(orgId, "payments")))!;
     expect(apply).toMatchObject({ state: "checking", requestId: row.confirmRequestId, by: SYSTEM(r.w), baseRevision: 1, candidateRevision: 2, taskId });
@@ -446,7 +446,7 @@ describe("the draft, step by step: Rovara drafts, a person decides", () => {
     expect((await r.w.h.store.transact([{ kind: "update", key: loaded.key, ops: decided.ops, condition: loaded.guard }, ...(decided.extra ?? [])])).applied).toBe(true);
     expect(await r.w.h.store.get(orgProjectCatalogKey(orgId, "payments"))).toMatchObject({ latestRevision: 2 });
     expect(await r.w.h.store.get(setupApplyKey(orgId, "payments"))).toMatchObject({ state: "approved", decidedBy: "p-maint" });
-    // The draft notices; the card goes; the paused task goes on (a newer setup is a new revision).
+    // The draft notices; the card goes; the warning goes (a newer setup is a new revision).
     expect((await advanceRepairDraft(r.deps, "payments"))?.state).toBe("approved");
     expect(await readRepairView(r.deps, "payments")).toBeUndefined();
     expect(await setupGateBeforeBuild(r.w.h.deps, { project: "payments", taskId: pausedTaskId })).toEqual({ answer: "go" });
@@ -578,12 +578,12 @@ describe("races, stuck states and what a draft may touch (review fixes)", () => 
     expect(await r.w.h.store.get(setupApplyKey(orgId, "payments"))).toMatchObject({ state: "discarded" });
   });
 
-  it("a fault in the host's hook (thrown at once, or rejected later) never reaches the re-check: it still settles broken and the project is still paused", async () => {
+  it("a fault in the host's hook (thrown at once, or rejected later) never reaches the re-check: it still settles broken and the project still carries the warning (work continues)", async () => {
     for (const hook of [(() => { throw new Error("hook exploded"); }) as () => Promise<void>, async () => { throw new Error("hook rejected"); }]) {
       const r = await rig({ wireHook: false });
       r.w.h.deps.afterSetupBroken = hook;
       const { taskId } = await breakSetup(r.w);
-      expect(await setupGateBeforeBuild(r.w.h.deps, { project: "payments", taskId })).toMatchObject({ answer: "blocked" });
+      expect(await setupGateBeforeBuild(r.w.h.deps, { project: "payments", taskId })).toMatchObject({ answer: "go", brokenSetup: {} });
       expect(await repairsOf(r.w.h.store, r.w.h.deps.companyId, "payments")).toEqual([]);
     }
   });

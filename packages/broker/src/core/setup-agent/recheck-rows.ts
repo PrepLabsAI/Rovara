@@ -23,7 +23,17 @@ export const setupTestsFailingWords = (classes: readonly SetupDriftClass[]): str
 export const setupNotRecheckedWords = (classes: readonly SetupDriftClass[]): string => (classes.length === 0 ? "Couldn't re-check setup." : `Couldn't re-check setup after ${setupDriftWords(classes)} changed.`);
 /** DEC 254zzl: with the company's system runs off, the free check still compares (it only reads names) and says so quietly; nothing is started, and the task starts all the same. A person starts "Re-check setup". */
 export const setupMayBeOutOfDateWords = (classes: readonly SetupDriftClass[]): string => (classes.length === 0 ? "Setup may be out of date." : `Setup may be out of date after ${setupDriftWords(classes)} changed.`);
-/** What the requester is told when the task pauses before Build (design 3c), with the check's failing step. */
+/**
+ * DEC 254zzz447 (don't block work): the plain WARNING a task shows (its timeline, its page, the project's setup state) while the project's setup needs repair. Work continues; nothing is paused or refused.
+ * No repository text and no failing step: the step is on the setup page and in the admins' card.
+ */
+/** The exact tail the repair card's body and the admins' notice END with (the Cloud lane parses it): work goes on, results may be less reliable. */
+export const SETUP_WORK_CONTINUES_TAIL = "Work continues; results may be less reliable until setup is fixed.";
+export const SETUP_NEEDS_REPAIR_WARNING = "Setup needs repair: work continues; results may be less reliable until setup is fixed.";
+/**
+ * The words a task was PAUSED with before DEC 254zzz447. Nothing writes them any more; a task that is still paused with them (written before the change) is recognised by them (`auto-resume.ts`), and a client in
+ * version skew may still send or read them.
+ */
 export const setupBrokenTaskWords = (failedStep: string): string =>
   `I can't build this yet. This project's setup stopped working after recent code changes (${failedStep}). I've asked the project's admins to approve a fix. Retry this step once the setup is fixed.`;
 
@@ -34,7 +44,7 @@ export const setupBrokenTaskWords = (failedStep: string): string =>
 export const SETUP_REPAIR_WORDS = { title: "Setup needs repair", fixSetup: "Fix setup", approveNewSetup: "Approve new setup", recheckSetup: "Re-check setup", openSetup: "Setup page" } as const;
 /** What the project's admins are told when its setup broke (once per project and re-check): the card's sentence and the one action that fits (`fixReady`: a checked fix waits for approval). No cost, no repository text beyond the check's own failing step. */
 export const setupAdminNoticeWords = (failedStep: string, fixReady = false): string =>
-  `${SETUP_REPAIR_WORDS.title}. The project's setup stopped working after recent code changes (${inertSetupStep(failedStep)}). Rovara cannot build on this project until it is fixed. ${fixReady ? SETUP_REPAIR_WORDS.approveNewSetup : SETUP_REPAIR_WORDS.fixSetup} on the setup page.`;
+  `${SETUP_REPAIR_WORDS.title}. The project's setup stopped working after recent code changes (${inertSetupStep(failedStep)}). ${fixReady ? SETUP_REPAIR_WORDS.approveNewSetup : SETUP_REPAIR_WORDS.fixSetup} on the setup page. ${SETUP_WORK_CONTINUES_TAIL}`;
 
 /** Where the person goes: the setup page's link when the host has one (a plain https address), else the words that say to open it in Rovara. The same on every surface. */
 export const setupPageWords = (url?: string): string => (url === undefined ? "Open the project's setup page in Rovara." : `${SETUP_REPAIR_WORDS.openSetup}: ${url}`);
@@ -48,8 +58,9 @@ export function plainSetupLink(link: string | undefined): string | undefined {
 }
 /** The check's failing step made safe for a chat or a ticket (it is repository text): no controls, no mention, link or markup characters (`@ < > ` [ ] * _ ~ # | !` and `//`), one line, cut. Plain steps such as `setup step 0 (npm ci) failed: exit 1` are unchanged. */
 export const inertSetupStep = (step: string): string => step.replace(/[\p{Cc}\p{Cf}]/gu, " ").replace(/[@<>`[\]*_~#|!]/gu, "").replace(/:\/\//gu, ": ").replace(/\/\/+/gu, "/").replace(/\s+/gu, " ").trim().slice(0, 200);
-/** What the requester reads in the chat thread and on the ticket when their task paused before Build: the task page's own sentence, then where to go. One message, no buttons, no cost. */
-export const setupPausedMessage = (failedStep: string, setupUrl?: string): string => `${setupBrokenTaskWords(inertSetupStep(failedStep))}\n${setupPageWords(plainSetupLink(setupUrl))}`;
+/** What the requester reads in the chat thread and on the ticket when their task reaches Build while the project's setup needs repair: the warning, the check's failing step, then where to go. One message, no buttons, no cost. */
+export const setupBrokenWarningMessage = (failedStep: string, setupUrl?: string): string =>
+  `${SETUP_NEEDS_REPAIR_WARNING} The project's setup stopped working after recent code changes (${inertSetupStep(failedStep)}).\n${setupPageWords(plainSetupLink(setupUrl))}`;
 
 export interface SetupRepairCard {
   title: "Setup needs repair";
@@ -60,7 +71,7 @@ export interface SetupRepairCard {
 /** The admin card of a project whose setup is broken (design 3c, "no fix yet"): the failing step and the two ways out. Both start a NEW setup candidate that a person approves. */
 export const setupRepairCardOf = (failedStep: string): SetupRepairCard => ({
   title: "Setup needs repair",
-  body: `The project's setup stopped working after recent code changes (${failedStep}). Rovara cannot build on this project until it is fixed.`,
+  body: `The project's setup stopped working after recent code changes (${failedStep}). ${SETUP_WORK_CONTINUES_TAIL}`,
   actions: [{ id: "fix_setup", label: "Fix setup (uses your AI)" }, { id: "edit_commands", label: "Edit commands myself" }],
 });
 
@@ -128,7 +139,8 @@ export async function setupEvidenceOf(deps: EvidenceReader, project: string, tas
       case "running": return { ...base, state: "running", line: SETUP_CHECKING_WORDS, lowersTrust: false };
       case "passed": return { ...base, state: "passed", line: setupStillWorksWords(row.classes), lowersTrust: false };
       case "tests_failing": return { ...base, state: "tests_failing", line: setupTestsFailingWords(row.classes), lowersTrust: false };
-      case "broken": return { ...base, state: "broken", line: setupBrokenTaskWords(row.failedStep ?? "setup"), lowersTrust: false, failedStep: row.failedStep ?? "setup" };
+      // DEC 254zzz447: a broken setup no longer pauses the task; it is a warning, and the task's results may be less reliable (so the pull request and the chat message carry it).
+      case "broken": return { ...base, state: "broken", line: SETUP_NEEDS_REPAIR_WARNING, lowersTrust: true, failedStep: row.failedStep ?? "setup" };
       case "unclear": return { ...base, state: "unclear", line: setupNotRecheckedWords(row.classes), lowersTrust: true };
     }
   } catch {
@@ -150,8 +162,8 @@ export async function setupTrustLineOf(deps: EvidenceReader, project: string, ta
   return evidence?.lowersTrust === true ? evidence.line : undefined;
 }
 
-/** The line a pull request carries about the setup (a finished re-check or the note that none could be made); nothing while it runs or after a break (a broken setup never opens a pull request). */
+/** The line a pull request carries about the setup (a finished re-check, the break warning or the note that none could be made); nothing while it runs. */
 export async function setupPullRequestLineOf(deps: EvidenceReader, project: string, taskId: string): Promise<string | undefined> {
   const evidence = await setupEvidenceOf(deps, project, taskId);
-  return evidence === undefined || evidence.state === "running" || evidence.state === "broken" ? undefined : evidence.line;
+  return evidence === undefined || evidence.state === "running" ? undefined : evidence.line;
 }
