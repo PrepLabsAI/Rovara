@@ -330,8 +330,8 @@ describe("control-plane infrastructure", () => {
     const stack = new ControlPlaneStack(app, "LoggedControlPlane");
     const template = Template.fromStack(stack);
 
-    // One per Lambda, plus the EC2 session provisioner's and deleter's (#83). #1148: the attention email sender's too.
-    template.resourceCountIs("AWS::Logs::LogGroup", 15);
+    // One per Lambda, plus the EC2 session provisioner's and deleter's (#83). #1148: the attention email sender's too. Code train 23: the HTTP API's access log group.
+    template.resourceCountIs("AWS::Logs::LogGroup", 16);
     template.allResourcesProperties("AWS::Logs::LogGroup", {
       RetentionInDays: 30,
     });
