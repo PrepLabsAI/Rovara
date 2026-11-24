@@ -110,6 +110,23 @@ describe("who carries which boundary (the synthesized templates)", () => {
     expect(policies.map((resource) => resource.Properties.ManagedPolicyName).sort()).toEqual(["agentx-staging-boundary", "agentx-staging-deploy-boundary"]);
     for (const policy of policies) expect(policy.Properties.Path).toBe("/agentx/staging/");
   }, 300_000);
+
+  // A managed policy's Description requires REPLACEMENT in CloudFormation. The runtime boundary has a fixed name and every role carries it as its boundary, so a changed
+  // Description makes the access stack update fail and roll back (found in the Code 0.5.50 staging prep). The values below are what the RELEASED templates carry: never change
+  // one; give a new wording only to a NEW policy. If a new fixed-name policy is added, pin its description here when it first ships.
+  it("never changes the Description of a fixed-name managed policy that an earlier release created (a Description change replaces the policy, and every role carries it as its boundary)", () => {
+    const RELEASED_DESCRIPTIONS: Record<string, string> = {
+      "agentx-staging-boundary": "Default permission boundary for every agentx-staging role",
+    };
+    const seen = new Map<string, string | undefined>();
+    for (const stack of stacks) {
+      for (const resource of Object.values(json(stack).Resources)) {
+        if (resource.Type !== "AWS::IAM::ManagedPolicy" || typeof resource.Properties.ManagedPolicyName !== "string") continue;
+        seen.set(resource.Properties.ManagedPolicyName, resource.Properties.Description as string | undefined);
+      }
+    }
+    for (const [name, description] of Object.entries(RELEASED_DESCRIPTIONS)) expect(seen.get(name), name).toBe(description);
+  }, 300_000);
 });
 
 describe("the census: what each role needs is still allowed", () => {
