@@ -45,6 +45,14 @@ export interface UsageReport {
   checkpointsBooked?: boolean;
 }
 
+/** The report's call counts, when present: `usageMissingCalls` a whole number, `refusedBeforeStreamCalls` (#1395) a whole number above zero. */
+const countsRead = (record: Record<string, unknown>): boolean => {
+  const missing = record["usageMissingCalls"], refused = record["refusedBeforeStreamCalls"];
+  return (missing === undefined || natural(missing)) && (refused === undefined || (natural(refused) && refused > 0));
+};
+/** #1395: a zero report (no tokens, no cost, no missing-usage call) of a session whose calls were all refused before any stream. */
+const refusedBeforeStream = (record: Record<string, unknown>, tokens: number, reportedMicros: number | undefined): boolean =>
+  tokens === 0 && reportedMicros === undefined && record["refusedBeforeStreamCalls"] !== undefined && record["usageMissingCalls"] === undefined;
 /** The usage a payload reports, or undefined when it does not read as one (see the file comment). */
 export function readUsagePayload(payload: unknown, options: { checkpointsBooked?: boolean } = {}): { usage: ModelUsage; reportedMicros?: number; estimated?: true } | undefined {
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return undefined;
@@ -53,7 +61,7 @@ export function readUsagePayload(payload: unknown, options: { checkpointsBooked?
   if (!text(record["provider"], 128) || !text(record["modelId"], 256) || tokens === null || typeof tokens !== "object" || Array.isArray(tokens)) return undefined;
   const { input, output, cacheRead, cacheWrite } = tokens;
   if (!natural(input) || !natural(output) || !natural(cacheRead) || !natural(cacheWrite)) return undefined;
-  if (record["usageMissingCalls"] !== undefined && !natural(record["usageMissingCalls"])) return undefined;
+  if (!countsRead(record)) return undefined;
   const cost = record["costUsd"];
   if (cost !== undefined && cost !== null && (typeof cost !== "number" || !Number.isFinite(cost) || cost < 0)) return undefined;
   const reportedMicros = typeof cost === "number" && cost > 0 ? Math.ceil(cost * 1_000_000) : undefined;
@@ -61,6 +69,9 @@ export function readUsagePayload(payload: unknown, options: { checkpointsBooked?
   // billed. It is not taken as unreadable, which would stop the whole company for the day. The one exception is a session's `final` report when checkpoints of its run were BOOKED
   // (`checkpointsBooked`, read from the ledger, never the worker's word; per-run dollar stop): the run's spend is what they booked, never less. Without one, the floor stands:
   // the checkpoints told what it spent, and a zero end says only that nothing is left.
+  // #1395: a zero report of a session whose every call the provider refused before any stream (the worker's missing-usage detector, the one place that rule lives): nothing was
+  // spent, so it books $0 rather than the floor. It is still booked, so the run has its end report and its task's spend is known.
+  if (refusedBeforeStream(record, input + output + cacheRead + cacheWrite, reportedMicros)) return { usage: { provider: record["provider"], modelId: record["modelId"], tokens: { input, output, cacheRead, cacheWrite } } };
   if (input + output + cacheRead + cacheWrite === 0 && reportedMicros === undefined && !(typeof record["usageMissingCalls"] === "number" && record["usageMissingCalls"] > 0) && !(record["final"] === true && options.checkpointsBooked === true)) {
     return { usage: { provider: record["provider"], modelId: record["modelId"], tokens: { input, output, cacheRead, cacheWrite } }, reportedMicros: EMPTY_REPORT_CHARGE_MICROS, estimated: true };
   }
