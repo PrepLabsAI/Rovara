@@ -20,7 +20,6 @@ import type { App } from "aws-cdk-lib";
 import type { Construct } from "constructs";
 import { environmentCloudFormationRoleName, environmentSettingsPrefix, environmentStackName } from "@agentx/contracts";
 import { AGENTX_RELEASE_REPOSITORY_NAME, AGENTX_RELEASE_REPOSITORY_OWNER, RELEASE_TOOL_INSTALL_COMMANDS, RELEASE_TOOL_VARIABLES, releaseProjectSettings } from "./release-pipeline.js";
-import { AGENTX_SLACK_ORCHESTRATOR_REPOSITORY } from "./slack-orchestrator.js";
 import { environmentNaming } from "./naming.js";
 
 // The environment release pipeline (staging release pipeline plan v3, lane P1): every merge to the environment's branch deploys to that
@@ -86,6 +85,25 @@ export const RUN_WRITE_PREFIX: Readonly<Record<string, string>> = {
 };
 /** Every stage folder of the runs bucket. */
 export const RUN_STAGES = ["check", "build", "preview", "gates", "decide", "guard", "release", "canary", "89"] as const;
+/**
+ * What each stage role reads, lists and writes in the runs bucket: the single source for its S3 grants. A recursive `aws s3 cp` also LISTS the prefix, so `list` names the
+ * stages a role downloads whole. The contract test compares these grants, as they appear in the synthesized template, with the gate pack's s3-access.json (the scripts' own
+ * paths): every path covered, nothing broader, each grant `<stage>/*` with no leading wildcard.
+ */
+export const RUN_ACCESS = {
+  check: { read: [], list: [], write: ["check"] },
+  build: { read: ["check"], list: [], write: ["build"] },
+  preview: { read: ["check", "build"], list: ["build"], write: ["preview"] },
+  gates: { read: ["check", "preview", "build"], list: ["preview", "build"], write: ["gates"] },
+  decide: { read: ["check", "build", "preview", "gates", "decide"], list: ["build", "gates", "release", "89", "decide"], write: ["decide"] },
+  guard: { read: ["check", "decide", "preview", "build", "89"], list: ["build"], write: ["guard"] },
+  deploy: { read: ["check", "build", "preview", "gates", "decide", "guard", "89"], list: ["build", "gates"], write: ["release"] },
+  postcheck: { read: ["check", "build", "preview", "release"], list: [], write: ["release"] },
+  // The canary counts and writes the cap ledger (`canary-ledger/`, a folder of its own beside the stage folders) and reads no run record.
+  canary: { read: [], list: ["canary-ledger"], write: ["canary", "canary-ledger"] },
+  // The explicit rollback (a human role): the last good run's canary result and Preview's package hash, and it lists that run's release package; it writes nothing.
+  rollback: { read: ["canary", "preview"], list: ["build"], write: [] },
+} as const satisfies Record<string, { read: readonly string[]; list: readonly string[]; write: readonly string[] }>;
 export const CANARY_LEDGER_PREFIX = "canary-ledger/";
 /** The GitHub CI evidence cache (the unauthenticated API allows 60 requests an hour per address, and CodeBuild shares addresses). Only Decide writes it: a forged entry would be forged CI evidence. */
 export const CI_CACHE_PREFIX = "ci-cache/";
@@ -123,7 +141,7 @@ export interface EnvironmentReleasePipelineProps extends Omit<StackProps, "env">
   readonly region: string;
   /** The GitHub repository and the branch whose pushes start a release. */
   readonly repository: { readonly owner: string; readonly name: string; readonly branch: string };
-  /** ECR repositories the Build role may push to. Default: the environment's worker repository and the Slack orchestrator's. */
+  /** ECR repositories the Build role may push to. Default: the environment's own `agentx-<env>/worker` and `agentx-<env>/slack` (the staging layout). */
   readonly imageRepositories?: readonly string[];
 }
 
@@ -333,6 +351,14 @@ export class EnvironmentReleasePipelineStack extends Stack {
           resources: [param("*-release-version")],
           conditions: notIn("check"),
         }),
+        // The environment's deploy lock and settings record are the deploy role's alone among the pipeline's roles (the Mac flow's operator role is not under this boundary).
+        new iam.PolicyStatement({
+          sid: "DenySettingsAndLockWritesExceptDeploy",
+          effect: iam.Effect.DENY,
+          actions: ["ssm:PutParameter", "ssm:DeleteParameter", "ssm:DeleteParameters", "ssm:LabelParameterVersion", "ssm:UnlabelParameterVersion"],
+          resources: [arn("ssm", `parameter${settingsPrefix}/lock`), arn("ssm", `parameter${settingsPrefix}/settings`)],
+          conditions: notIn("deploy"),
+        }),
         // P0 fact (6): only Decide writes the CI evidence cache.
         new iam.PolicyStatement({
           sid: "DenyCiCacheWritesExceptDecide",
@@ -502,8 +528,15 @@ export class EnvironmentReleasePipelineStack extends Stack {
     };
     const statement = (sid: string, actions: string[], resources: string[], conditions?: Record<string, Record<string, string | string[]>>): iam.PolicyStatement =>
       new iam.PolicyStatement({ sid, actions, resources, ...(conditions === undefined ? {} : { conditions }) });
-    const putRun = (key: string): iam.PolicyStatement => statement("WriteOwnRunRecords", ["s3:PutObject"], [runObjects(RUN_WRITE_PREFIX[key] ?? key)]);
     const readRun = (...stages: string[]): iam.PolicyStatement => statement("ReadRunRecords", ["s3:GetObject"], stages.map(runObjects));
+    const runAccess = (key: keyof typeof RUN_ACCESS): iam.PolicyStatement[] => {
+      const access: { read: readonly string[]; list: readonly string[]; write: readonly string[] } = RUN_ACCESS[key];
+      return [
+        ...(access.read.length === 0 ? [] : [readRun(...access.read)]),
+        ...(access.list.length === 0 ? [] : [statement("ListRunRecords", ["s3:ListBucket"], [runsBucket.bucketArn], { StringLike: { "s3:prefix": access.list.map((stage) => `${stage}/*`) } })]),
+        ...(access.write.length === 0 ? [] : [statement("WriteOwnRunRecords", ["s3:PutObject"], access.write.map(runObjects))]),
+      ];
+    };
     const listRuns = statement("ListRunRecords", ["s3:ListBucket"], [runsBucket.bucketArn], { StringLike: { "s3:prefix": RUN_STAGES.map((stage) => `${stage}/*`) } });
     const useConnection = statement("UseGitHubConnection", ["codeconnections:UseConnection", "codestar-connections:UseConnection"], [connectionArn.valueAsString]);
     const identity = statement("WhoAmI", ["sts:GetCallerIdentity"], ["*"]);
@@ -519,10 +552,10 @@ export class EnvironmentReleasePipelineStack extends Stack {
       statement("ReadPolicyPinAndPointers", ["ssm:GetParameter", "ssm:GetParametersByPath"], [param("policy-pin"), param("code-installed"), param("code-hold"), param("code-hold/*")]),
       // P0 fact (4): the pipeline's own release counter (`<major>.<minor>.<patch>`, seeded by hand once); the version is never the repository's own.
       statement("ReadAndAdvanceReleaseVersion", ["ssm:GetParameter", "ssm:PutParameter"], [param("code-release-version")]),
-      putRun("check"),
+      ...runAccess("check"),
       ...publishAlerts(),
     ]);
-    const buildImageRepositories = (props.imageRepositories ?? [`agentx-worker-${environment}`, AGENTX_SLACK_ORCHESTRATOR_REPOSITORY]).map((name) => arn("ecr", `repository/${name}`));
+    const buildImageRepositories = (props.imageRepositories ?? [`agentx-${environment}/worker`, `agentx-${environment}/slack`]).map((name) => arn("ecr", `repository/${name}`));
     allow(roles.build, [
       statement("EcrAuthorization", ["ecr:GetAuthorizationToken"], ["*"]),
       statement("PushOwnImages", [
@@ -535,8 +568,7 @@ export class EnvironmentReleasePipelineStack extends Stack {
       // The gate pack's scripts run here too (beside repo code), so Build checks the pack against the pin first.
       statement("ReadPolicyPin", ["ssm:GetParameter"], [param("policy-pin")]),
       identity,
-      putRun("build"),
-      readRun("check", "build"),
+      ...runAccess("build"),
     ]);
     allow(roles.preview, [
       statement("MakeAndReadChangeSets", ["cloudformation:CreateChangeSet", "cloudformation:DescribeChangeSet", "cloudformation:GetTemplate", "cloudformation:ListChangeSets"], [stackArn(stackNames.access), ...stackNames8(deployedParts)]),
@@ -548,8 +580,7 @@ export class EnvironmentReleasePipelineStack extends Stack {
       statement("PublishTemplates", ["s3:PutObject", "s3:GetObject", "s3:ListBucket"], [accessArtifactBucketArn.valueAsString, `${accessArtifactBucketArn.valueAsString}/*`]),
       readSettings,
       identity,
-      readRun("check", "build"),
-      putRun("preview"),
+      ...runAccess("preview"),
     ]);
     allow(roles.gates, [
       readStacks,
@@ -559,8 +590,7 @@ export class EnvironmentReleasePipelineStack extends Stack {
       statement("ReadImages", ["ecr:DescribeImages", "ecr:DescribeRepositories"], [arn("ecr", "repository/*")]),
       statement("ReadFunctionsAndLogs", ["lambda:GetFunctionConfiguration", "logs:FilterLogEvents", "logs:StartQuery", "logs:GetQueryResults", "logs:DescribeLogGroups"], ["*"]),
       identity,
-      readRun("build", "preview"),
-      putRun("gates"),
+      ...runAccess("gates"),
     ]);
     allow(roles.decide, [
       // Read-only: the change sets and templates come from CloudFormation itself, never from the build's files (P-SEP).
@@ -569,9 +599,9 @@ export class EnvironmentReleasePipelineStack extends Stack {
       readSettings,
       statement("ReadImages", ["ecr:DescribeImages"], [arn("ecr", "repository/*")]),
       identity,
-      statement("ReadRunRecords", ["s3:GetObject"], [runObjects("build"), runObjects("preview"), runObjects("gates"), runObjects("check"), runObjects("decide")]),
-      listRuns,
-      putRun("decide"),
+      ...runAccess("decide"),
+      // Rule A of the policy reads how this run started (the trigger kind and its variables): its own pipeline only.
+      statement("ReadOwnExecution", ["codepipeline:GetPipelineExecution"], [pipelineArn]),
       statement("ReadAndWriteCiEvidenceCache", ["s3:GetObject", "s3:PutObject"], [`${runsBucket.bucketArn}/${CI_CACHE_PREFIX}*`]),
       ...publishAlerts(),
     ]);
@@ -590,8 +620,7 @@ export class EnvironmentReleasePipelineStack extends Stack {
       statement("ReadOwnExecutions", ["codepipeline:GetPipelineExecution", "codepipeline:ListPipelineExecutions", "codepipeline:GetPipelineState", "codepipeline:ListActionExecutions"], [pipelineArn]),
       statement("SetHold", ["ssm:PutParameter"], [param("*-hold/*")]),
       identity,
-      readRun("check", "build", "preview", "gates", "decide"),
-      putRun("guard"),
+      ...runAccess("guard"),
       ...publishAlerts(),
     ]);
     allow(roles.deploy, [
@@ -603,12 +632,15 @@ export class EnvironmentReleasePipelineStack extends Stack {
       readStacks,
       readSettings,
       statement("ReadCallbackSigningKey", ["secretsmanager:GetSecretValue"], [signingKeySecretArn]),
+      // What `agentx deploy` does outside CloudFormation, which executing change sets skips: it holds the environment's deploy lock for the whole deploy (the same parameter
+      // the Mac flow takes, so the two can never run at once) and writes the settings record when the deploy succeeds. Exactly these two parameters, nothing else under /agentx.
+      statement("TakeAndReleaseDeployLock", ["ssm:PutParameter", "ssm:DeleteParameter"], [arn("ssm", `parameter${settingsPrefix}/lock`)]),
+      statement("WriteSettingsRecord", ["ssm:PutParameter"], [arn("ssm", `parameter${settingsPrefix}/settings`)]),
       statement("SetHold", ["ssm:PutParameter"], [param("*-hold/*")]),
       readPointers,
       statement("ReadImages", ["ecr:DescribeImages", "ecr:DescribeRepositories"], [arn("ecr", "repository/*")]),
       identity,
-      readRun("check", "build", "preview", "gates", "decide"),
-      putRun("deploy"),
+      ...runAccess("deploy"),
       ...publishAlerts(),
     ]);
     allow(roles.postcheck, [
@@ -620,8 +652,7 @@ export class EnvironmentReleasePipelineStack extends Stack {
       statement("WriteInstalledPointer", ["ssm:PutParameter"], [param("*-installed")]),
       statement("SetHold", ["ssm:PutParameter"], [param("*-hold/*")]),
       identity,
-      readRun("build", "preview", "gates", "decide", "release"),
-      putRun("postcheck"),
+      ...runAccess("postcheck"),
       ...publishAlerts(),
     ]);
     allow(roles.canary, [
@@ -630,10 +661,7 @@ export class EnvironmentReleasePipelineStack extends Stack {
       statement("WriteLastGoodPointers", ["ssm:PutParameter"], [param("*-last-good"), param("*-last-good-execution")]),
       statement("SetHold", ["ssm:PutParameter"], [param("*-hold/*")]),
       statement("ReadPointers", ["ssm:GetParameter"], [param("*")]),
-      statement("WriteCanaryLedger", ["s3:PutObject"], [`${runsBucket.bucketArn}/${CANARY_LEDGER_PREFIX}*`]),
-      statement("CountCanaryLedger", ["s3:ListBucket"], [runsBucket.bucketArn], { StringLike: { "s3:prefix": [`${CANARY_LEDGER_PREFIX}*`] } }),
-      readRun("release"),
-      putRun("canary"),
+      ...runAccess("canary"),
       ...publishAlerts(),
     ]);
     // Humans: S8.
@@ -651,6 +679,7 @@ export class EnvironmentReleasePipelineStack extends Stack {
       listRuns,
     ]);
     allow(humans.rollback, [
+      ...runAccess("rollback"),
       // P0 fact (1): an explicit rollback, never the native "most recent success" (a skipped canary is a success too).
       statement("RollbackReleaseStage", ["codepipeline:RollbackStage"], [`${pipelineArn}/${RELEASE_STAGE}`]),
       statement("ReadOwnExecutions", ["codepipeline:GetPipelineExecution", "codepipeline:ListPipelineExecutions", "codepipeline:GetPipelineState"], [pipelineArn]),
@@ -671,6 +700,7 @@ export class EnvironmentReleasePipelineStack extends Stack {
       PIPELINE_NAME: { value: names.pipeline },
       PARAM_PREFIX: { value: names.parameterPrefix },
       BRANCH: { value: props.repository.branch },
+      ENV_SETTINGS_PREFIX: { value: settingsPrefix },
     };
     const small = {
       environment: { buildImage: codebuild.LinuxArmBuildImage.AMAZON_LINUX_2023_STANDARD_3_0, computeType: codebuild.ComputeType.SMALL },
@@ -704,7 +734,7 @@ export class EnvironmentReleasePipelineStack extends Stack {
       }),
       "auto-approver": makeProject("auto-approver", "Approves the deploy when this run's Decide action said AUTO", 15, autoApproveCommands()),
       guard: makeProject("guard", "First action of Release: order, hold, rollback safety and floor, before anything deploys (P9 fills the rollback rules)", 30, packStage("guard.sh", "guard", { synth: "verify", refuseRollback: true })),
-      deploy: makeProject("deploy", "Deploys the decided change sets in the pack's order; never the access stack", 120, packStage("deploy.sh", "release", { synth: "verify" }), { concurrentBuildLimit: 1 }),
+      deploy: makeProject("deploy", "Deploys the decided change sets in the pack's order; never the access stack", 120, packStage("deploy.sh", "release", { synth: "verify", lock: true }), { concurrentBuildLimit: 1 }),
       postcheck: makeProject("postcheck", "Post-deploy checks; writes the installed pointer (P3 fills the checks)", 45, packStage("postcheck.sh", "release")),
       canary: makeProject("canary", "The canary task and its verdict (P9 fills it; until then it records SKIPPED-PLACEHOLDER and moves no pointer)", 45, canaryPlaceholderCommands()),
     } as const;
@@ -872,6 +902,38 @@ interface PackStageInputs {
   source?: boolean;
   /** Guard: a ROLLBACK-type execution is refused until the rollback rules exist (P9). */
   refuseRollback?: boolean;
+  /** Deploy: hold the environment deploy lock around the script, and write the settings record under it after a successful deploy. */
+  lock?: boolean;
+}
+
+/** The settings record's script: a pack file, so it is pinned with the rest. Missing means the stage fails closed BEFORE it takes the lock. */
+export const SETTINGS_RECORD_SCRIPT = "settings-record.sh";
+
+/**
+ * The Deploy stage's own commands around the pack's deploy script: take the environment deploy lock (the one `agentx deploy` takes, created only if absent, never taken over),
+ * run the deploy, write the settings record only after it succeeded, and always release the lock. The commands are inline, so a change to the pack cannot skip the lock.
+ */
+function lockedRun(script: string): string[] {
+  return [
+    `test -f "$PACK/${SETTINGS_RECORD_SCRIPT}" || { echo "gate pack script ${SETTINGS_RECORD_SCRIPT} is missing: the stage fails closed"; exit 1; }`,
+    'aws s3 cp --only-show-errors "s3://${RUNS_BUCKET}/check/${EXEC_ID}/version.txt" work/version.txt && RELEASE_VERSION="$(cat work/version.txt)"',
+    'LOCK="${ENV_SETTINGS_PREFIX}/lock"',
+    'HOLDER="$( aws sts get-caller-identity --query Arn --output text )"',
+    'LOCK_VALUE="$( printf \'{"holder":"%s","command":"%s","acquiredAt":"%s"}\' "${HOLDER}" "pipeline deploy ${EXEC_ID}" "$( date -u +%Y-%m-%dT%H:%M:%S.000Z )" )"',
+    'aws ssm put-parameter --name "${LOCK}" --type String --value "${LOCK_VALUE}" > /dev/null 2> work/lock.err || { echo "the environment deploy lock ${LOCK} is held (the Mac flow, or another run): $( cat work/lock.err )"; exit 1; }',
+    "set +e",
+    `( RUN_DIR="out" bash "$PACK/${script}" && RUN_DIR="out" RELEASE_VERSION="\${RELEASE_VERSION}" SETTINGS_PARAMETER="\${ENV_SETTINGS_PREFIX}/settings" bash "$PACK/${SETTINGS_RECORD_SCRIPT}" )`,
+    "RC=$?",
+    "set -e",
+    // Release only OUR lock: read it, compare it with the exact value this execution wrote (holder, command with the execution id, time), delete only on a match. A lock
+    // that is someone else's (a stale takeover while the deploy ran), or gone, is never deleted and fails the stage loudly.
+    'CURRENT_LOCK="$( aws ssm get-parameter --name "${LOCK}" --query Parameter.Value --output text 2> /dev/null || echo unreadable )"',
+    'LOCK_PROBLEM=""',
+    'if [ "${CURRENT_LOCK}" = "${LOCK_VALUE}" ]; then aws ssm delete-parameter --name "${LOCK}" > /dev/null 2>&1 || { echo "WARNING: the deploy lock ${LOCK} could not be released; it goes stale after 2 hours, or delete it" >&2; echo "${LOCK}" > out/lock-not-released.txt; }; else LOCK_PROBLEM="the deploy lock ${LOCK} is no longer ours (someone else holds it, or it is gone): NOT deleted"; fi',
+    'if [ -n "${LOCK_PROBLEM}" ]; then echo "ERROR: ${LOCK_PROBLEM}" >&2; echo "${LOCK_PROBLEM}" > out/lock-not-released.txt; fi',
+    'test "${RC}" = 0 || exit "${RC}"',
+    'test -z "${LOCK_PROBLEM}" || exit 1',
+  ];
 }
 
 function packStage(script: string, outputStage: string, inputs: PackStageInputs = {}): string[] {
@@ -913,7 +975,7 @@ function packStage(script: string, outputStage: string, inputs: PackStageInputs 
           'test "$(git -C "${SOURCE_DIR}" rev-parse "v${RELEASE_VERSION}^{commit}")" = "${RELEASE_SHA}" || { echo "the release tag v${RELEASE_VERSION} is not on the released commit"; exit 1; }',
         ]
       : []),
-    `RUN_DIR="out"${inputs.synth === "record" ? ' SYNTH_DIR="${SYNTH_DIR}"' : ""}${inputs.source === true ? ' SOURCE_DIR="${SOURCE_DIR}" RELEASE_VERSION="${RELEASE_VERSION}"' : ""} bash "$PACK/${script}"`,
+    ...(inputs.lock === true ? lockedRun(script) : [`RUN_DIR="out"${inputs.synth === "record" ? ' SYNTH_DIR="${SYNTH_DIR}"' : ""}${inputs.source === true ? ' SOURCE_DIR="${SOURCE_DIR}" RELEASE_VERSION="${RELEASE_VERSION}"' : ""} bash "$PACK/${script}"`]),
     upload(outputStage),
   ];
 }
