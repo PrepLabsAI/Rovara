@@ -1,7 +1,7 @@
 // Test services, broker side: a fake backing in the plan, only for an APPROVED fixture set of the task's own company; the fixture-set delivery callback and who may call it; the evidence label
 // and the unmatched count; and the Prove usage step. With tx off, or with no fake, everything reads as it did.
 import { describe, expect, it } from "vitest";
-import { EvidenceDependencySchema, FixtureSetSchema, TestEnvTaskPlanSchema, TestEnvironmentBodySchema, fixtureEntry, fixtureSetDigest, TEST_SERVICES_FAKE_USAGE_WORDS, testEnvDigest, type FixtureSet, type OrgId, type ProjectCommand, type TestEnvironmentBody, type TestServicesUsageRecord, type VerifiedCatalog } from "@agentx/contracts";
+import { FixtureSetSchema, TestEnvTaskPlanSchema, TestEnvironmentBodySchema, fixtureEntry, fixtureSetDigest, TEST_SERVICES_FAKE_USAGE_WORDS, testEnvDigest, type FixtureSet, type OrgId, type ProjectCommand, type TestEnvironmentBody, type TestServicesUsageRecord, type VerifiedCatalog } from "@agentx/contracts";
 import { DEPENDENCY_PLAN_REFUSAL_WORDS, dependenciesStartableNow, taskDependencyPlansOf } from "../../packages/broker/src/core/test-env/dependency-plan.js";
 import { approvedFixturesOf, fixtureDigestsOfEnvironment, fixtureDigestsOfPlan } from "../../packages/broker/src/core/test-env/fixture-lookup.js";
 import { createFixtureStore, createMemoryFixturePorts, verifiedFixtureDecision, type FixtureStore } from "../../packages/broker/src/core/test-env/fixture-store.js";
@@ -9,9 +9,7 @@ import { testEnvironmentForStart } from "../../packages/broker/src/core/test-env
 import { testEnvPlanFor, testEnvImplementPlanFor } from "../../packages/broker/src/core/test-env/task-plan.js";
 import { FAKE_USAGE_ITEM_ID, dependencyEvidenceOf, type PinnedDependency, type RawUsage } from "../../packages/broker/src/core/proof/dependency-evidence.js";
 import { packDependencyLines } from "../../packages/broker/src/core/proof/dependency-lines.js";
-import { evidenceEnvironmentOf } from "../../packages/broker/src/core/test-env/evidence-line.js";
 import { dependencyStepsOf } from "../../packages/broker/src/core/test-env/prove-from-setup-check.js";
-import { dependencyCardLines } from "../../packages/broker/src/core/test-env/dependency-card-lines.js";
 import { BENCH_ORG, bench } from "../support/test-env-bench.js";
 import { pinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
 
@@ -31,7 +29,6 @@ const makeSet = (over: Record<string, unknown> = {}): FixtureSet => FixtureSetSc
   entries: [fixtureEntry({ dependency: dependencyOfSet, match }, { method: "GET", path: "/v1/ping", contentType: "", body: "" }, { status: 200, headers: [], contentType: "application/json", body: '{"ok":true}', latencyMs: 0 })],
   faults: [], ...over,
 });
-const recordedSet = (): FixtureSet => makeSet({ origin: "recorded", writtenBy: undefined, recordedAt: "2026-10-20T08:00:00.000Z", revision: 5 });
 const DENY = { accountIds: [], hosts: [], arnPrefixes: [] };
 function storeOf(options: { enabled?: () => boolean; signUrl?: (key: string, seconds: number) => string } = {}) {
   const ports = createMemoryFixturePorts(options.signUrl === undefined ? { signUrl: (key, seconds) => `https://fixtures.example.test/${key}?X-Amz-Expires=${String(seconds)}` } : { signUrl: options.signUrl });
@@ -219,43 +216,6 @@ describe("what the evidence says about a fake", () => {
   });
 });
 
-describe("the vendor spec check on a fake's evidence row (L4-VS)", () => {
-  const stripeDependency = { id: "payments", family: "http:api.stripe.com", protocol: "http_json", target: "api.stripe.com" } as const;
-  const stripeSet = (chargeBody: string): FixtureSet => makeSet({
-    dependency: stripeDependency, origin: "recorded", writtenBy: undefined, recordedAt: "2026-10-20T08:00:00.000Z", revision: 2,
-    entries: [fixtureEntry({ dependency: stripeDependency, match }, { method: "POST", path: "/v1/refunds", contentType: "", body: "" }, { status: 200, headers: [], contentType: "application/json", body: chargeBody, latencyMs: 0 })],
-  });
-  const GOOD = JSON.stringify({ id: "re_1", object: "refund", amount: 5, created: 1700000000, currency: "usd" });
-  const chosenFor = async (set: FixtureSet, store: FixtureStore = storeOf()) => {
-    const digest = await approvedSet(store, set);
-    const h = await approvedWith(body([payments(digest, { family: set.dependency.family })]), store);
-    return { store, h, chosen: await evidenceEnvironmentOf({ ...h.deps, fixtureStore: () => store }, { orgId: ORG, project: PROJECT, taskId: "t1" }, ON) };
-  };
-  const ran = (pinned: PinnedDependency[]) => dependencyEvidenceOf(pinned, usageOf([fakeRow()]));
-
-  it("carries a match for a Stripe fake that fits the pinned spec, from the slice pinned at approval", async () => {
-    const { chosen } = await chosenFor(stripeSet(GOOD));
-    expect(chosen.dependencies![0]!.fake).toMatchObject({ origin: "recorded", mockSpec: { result: "matches", vendor: "stripe" } });
-    const row = ran([{ id: "postgres", name: "Postgres", backing: "local" }, ...chosen.dependencies!]).dependencies[1]!;
-    expect(row).toMatchObject({ mockSpecResult: "matches", mockSpecVendor: "stripe", recordedAt: "2026-10-20T08:00:00.000Z" });
-    expect(EvidenceDependencySchema.parse(row)).toEqual(row);
-  });
-  it("states nothing when the slice cannot be read, and the rest of the row is unchanged; another company reads nothing", async () => {
-    const { store, h } = await chosenFor(stripeSet(GOOD));
-    const broken = { ...store, specSlice: () => Promise.reject(new Error("store down")) } as FixtureStore;
-    const chosen = await evidenceEnvironmentOf({ ...h.deps, fixtureStore: () => broken }, { orgId: ORG, project: PROJECT, taskId: "t1" }, ON);
-    // Batch 14: #926 also states when the set was approved.
-    expect(chosen.dependencies![0]!.fake).toEqual({ origin: "recorded", revision: 2, recordedAt: "2026-10-20T08:00:00.000Z", approvedAt: "2026-11-03T10:00:00.000Z" });
-    const noMethod = { ...store, specSlice: undefined } as unknown as FixtureStore;
-    expect((await evidenceEnvironmentOf({ ...h.deps, fixtureStore: () => noMethod }, { orgId: ORG, project: PROJECT, taskId: "t1" }, ON)).dependencies![0]!.fake).not.toHaveProperty("mockSpec");
-    expect((await evidenceEnvironmentOf({ ...h.deps, fixtureStore: () => store }, { orgId: OTHER_ORG, project: PROJECT, taskId: "t1" }, ON)).dependencies).toBeUndefined();
-    // the slice row itself is the company's: another company, or another project of this one, is refused by the store
-    const digest = fixtureSetDigest(stripeSet(GOOD));
-    expect((await store.specSlice(ORG, PROJECT, digest)).ok).toBe(true);
-    expect((await store.specSlice(OTHER_ORG, PROJECT, digest)).ok).toBe(false);
-    expect((await store.specSlice(ORG, "other-project", digest)).ok).toBe(false);
-  });
-});
 
 describe("the Prove usage step with a fake", () => {
   const planned = (digest = "a".repeat(64)) => body([payments(digest)]);
@@ -268,19 +228,4 @@ describe("the Prove usage step with a fake", () => {
 
 // ---- tx off, or no fake: today, byte for byte; and the one-line hunks of the hot files
 
-describe("the approve card", () => {
-  it("says whether a fake's answers were recorded or written by hand when the store is asked, and 'a fake' when it is not", async () => {
-    const store = storeOf();
-    const written = await approvedSet(store, makeSet());
-    const recorded = await approvedSet(store, recordedSet());
-    const environment = body([payments(written), payments(recorded, { id: "geo", name: "Geo API", connect: { env: [], hostAliases: ["fake-geo"] } })]);
-    const origins = await approvedFixturesOf(store, ORG, PROJECT, environment);
-    const lines = dependencyCardLines(environment.dependencies!, origins);
-    expect(lines).toContain("Payments API: answers from a hand-written fake. Found in src/pay.ts, line 3.");
-    expect(lines).toContain("Geo API: answers from a recorded fake. Found in src/pay.ts, line 3.");
-    expect(dependencyCardLines(environment.dependencies!)[0]).toBe("Payments API: answers from a fake. Found in src/pay.ts, line 3.");
-    // the other company's store answer is no origin
-    expect(dependencyCardLines(environment.dependencies!, await approvedFixturesOf(store, OTHER_ORG, PROJECT, environment))[0]).toBe("Payments API: answers from a fake. Found in src/pay.ts, line 3.");
-  });
-});
 

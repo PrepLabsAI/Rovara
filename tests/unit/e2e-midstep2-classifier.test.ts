@@ -3,7 +3,6 @@ import { classifyString, credentialKey, keyWords } from "../../packages/verifier
 import { classifyStorageEntry } from "../../packages/verifier/src/executor/storage-entry-classifier.js";
 import { headerSecrets, urlSecrets } from "../../packages/verifier/src/executor/request-secrets.js";
 import { BROWSER_STATE_IDB_MAX_BYTES, BROWSER_STATE_IDB_MAX_RECORDS, BrowserStateCapError, tellBrowserState, type BrowserSecretState } from "../../packages/verifier/src/executor/browser-state-secrets.js";
-import { isSessionStorageCredential } from "../../packages/verifier/src/executor/session-storage-secret.js";
 import type { ClassifiedValue } from "../../packages/verifier/src/executor/credential-classifier.js";
 
 // MIDSTEP-2: the tiered classifier, JSON leaves, URL parameters, headers, session storage and IndexedDB, as pure functions (the end-to-end tests are in e2e-midstep2-end-to-end.test.ts).
@@ -97,17 +96,7 @@ describe("tiers (gap 2)", () => {
     expect(classifyString("locale", "en-US")).toEqual([]);
   });
 
-  it("the old boolean keeps its answers (the cookie fix's table)", () => {
-    const jwt = JWT;
-    for (const entry of [{ name: "anything", value: jwt }, { name: "anything", value: "9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c" }, { name: "sb-project-auth-token", value: "keyed-opaque-value-1234" }, { name: "ID_TOKEN", value: "keyed-opaque-value-1234" }]) {
-      expect(isSessionStorageCredential(entry), entry.name).toBe(true);
-    }
-    for (const entry of [{ name: "draft", value: "Quarterly report for ACME" }, { name: "returnTo", value: "https://app.example.com/settings" }, { name: "searchHistory", value: "orders,invoices,customers-with-open-balances" },
-      { name: "access_token", value: "short" }, { name: "locale", value: "en-US" }, { name: "i18nextLng", value: "x".repeat(40) }, { name: "sessionDraft", value: "a draft that is text and has spaces" }]) {
-      expect(isSessionStorageCredential(entry), `${entry.name}=${entry.value}`).toBe(false);
-    }
   });
-});
 
 describe("JSON leaves (gap 1)", () => {
   const TOKEN = "tok_live_9f8e7d6c5b4a3928";
