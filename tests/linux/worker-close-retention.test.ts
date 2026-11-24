@@ -146,7 +146,8 @@ try {
   await assert.rejects(writeFile(ROOT+'/data/repo/value','forbidden after reboot'));
   await command('docker','rm',container);container=undefined;
   daemon=spawn('bash',[helper,'serve',workspaceId,'3','i-0123456789abcdef0','vol-0123456789abcdef0'],{stdio:['ignore','ignore','pipe']});
-  for(let i=0;i<100;i++){try{await storage.identity();break;}catch{await new Promise(r=>setTimeout(r,20));}}
+  // The previous serve's control socket FILE outlives it, and current.json is already published by the restore: wait for a CONNECTION that works, or the verify below meets ECONNREFUSED (which it reports as verified:false).
+  for(let i=0;i<200;i++){try{await storage.withOwnership('read',async()=>true);break;}catch{await new Promise(r=>setTimeout(r,25));}}
   const rebooted=await new CloseRetentionExecutor(new OperationJournal(ROOT+'/data',ROOT+'/.agentx-control/journal'),new HostCloseRetentionStorage(),async()=>{throw new Error('retained reboot must not inspect');},()=>false).answer({...invocation,operationId:randomUUID(),fence:10,payload:{schemaVersion:1,action:'verify',retention:retained.retention,queryId:randomUUID()}});
   assert.equal(rebooted.status,'verified');assert.equal(rebooted.verified,true);
   const pointer=await readFile(ROOT+'/.agentx-control/current.json','utf8');
@@ -154,11 +155,24 @@ try {
   assert.notEqual(stale.body.status,'destroy_authorized'); assert.equal(await readFile(ROOT+'/.agentx-control/current.json','utf8'),pointer);
   // A task running as root could have changed the data filesystem root's owner before sealing.
   // Host-only fixture preparation reproduces that state; the successor must refuse before mounting over it.
-  const oldDevice=await command('findmnt','-n','-o','SOURCE','--target',ROOT+'/data');
-  const owner=async uid=>{await command('blockdev','--setrw',oldDevice);await command('mount','-o','remount,rw,noatime',ROOT+'/data');await command('chown',uid+':'+uid,ROOT+'/data');await command('mount','-o','remount,ro,noatime',ROOT+'/data');await command('blockdev','--setro',oldDevice);};
+  let oldDevice=await command('findmnt','-n','-o','SOURCE','--target',ROOT+'/data');
+  // The restore attached the retained generation with a READ-ONLY loop (losetup --read-only: a flag a remount cannot clear), so the fixture re-attaches the image read-write, changes the owner, and attaches it read-only again, with the serve helper stopped meanwhile.
+  const owner=async uid=>{
+    const backing=ROOT+'/.agentx-control/generations/'+generation.dataGeneration+'.ext4';
+    daemon.kill('SIGTERM');await once(daemon,'exit');daemon=undefined;
+    await command('umount','--recursive',RUN+'/view').catch(()=>{});
+    await command('umount',ROOT+'/data');await command('blockdev','--setrw',oldDevice).catch(()=>{});await command('losetup','--detach',oldDevice);
+    const rw=await command('losetup','--find','--show',backing);
+    await command('mount','-t','ext4','-o','rw,noatime',rw,ROOT+'/data');await command('chown',uid+':'+uid,ROOT+'/data');await command('umount',ROOT+'/data');
+    await command('blockdev','--setrw',rw);await command('losetup','--detach',rw);
+    oldDevice=await command('losetup','--find','--show','--read-only',backing);
+    await command('mount','-t','ext4','-o','ro,noload,noatime',oldDevice,ROOT+'/data');
+    daemon=spawn('bash',[helper,'serve',workspaceId,'3','i-0123456789abcdef0','vol-0123456789abcdef0'],{stdio:['ignore','ignore','pipe']});
+    for(let i=0;i<200;i++){try{await storage.withOwnership('read',async()=>true);break;}catch{await new Promise(r=>setTimeout(r,25));}}
+  };
   await owner(1001);
   const successorId=randomUUID(), successor={...invocation,kind:'task',operationId:successorId,fence:11,payload:{conversationId:randomUUID(),prompt:'new work'},supersedesRetention:retained.retention};
-  await journal.accept(successor);
+  await journal.accept(successor); await journal.raiseFence(workspaceId,11); // the order of the executor's own hand-over (accept, raise the fence, then the host's successor): a restart between them must still validate
   await assert.rejects(storage.withOwnership('write',()=>storage.successor(successorId)),'successor refuses foreign data owner');
   await owner(1000);
   const next=await storage.withOwnership('write',()=>storage.successor(successorId));
@@ -168,7 +182,8 @@ try {
 } finally {
   if(writer){writer.kill('SIGTERM');await once(writer,'exit').catch(()=>{});}
   if(container)await command('docker','rm','--force',container).catch(()=>{});
-  if(daemon){daemon.kill('SIGTERM');await once(daemon,'exit').catch(()=>{});}
+  // A process that already exited never emits 'exit' again: waiting for it leaves the proof's top-level await unsettled (exit code 13).
+  if(daemon&&daemon.exitCode===null&&daemon.signalCode===null){daemon.kill('SIGTERM');await once(daemon,'exit').catch(()=>{});}
   if(owned){
     for(const name of await readdir(ROOT+'/.agentx-control/generations').catch(()=>[])){
       const result=await command('losetup','--associated',ROOT+'/.agentx-control/generations/'+name,'--output','NAME','--noheadings').catch(()=>'');loops.push(...result.split('\n').filter(Boolean));

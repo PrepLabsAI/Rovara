@@ -128,7 +128,8 @@ const proofFinally = String.raw`
 } finally {
   if(writer){writer.kill('SIGTERM');await once(writer,'exit').catch(()=>{});}
   if(container)await command('docker','rm','--force',container).catch(()=>{});
-  if(daemon){daemon.kill('SIGTERM');await once(daemon,'exit').catch(()=>{});}
+  // A process that already exited never emits 'exit' again: waiting for it leaves the proof's top-level await unsettled (exit code 13).
+  if(daemon&&daemon.exitCode===null&&daemon.signalCode===null){daemon.kill('SIGTERM');await once(daemon,'exit').catch(()=>{});}
   if(owned){
     for(const name of await readdir(ROOT+'/.agentx-control/generations').catch(()=>[])){
       const result=await command('losetup','--associated',ROOT+'/.agentx-control/generations/'+name,'--output','NAME','--noheadings').catch(()=>'');loops.push(...result.split('\n').filter(Boolean));
