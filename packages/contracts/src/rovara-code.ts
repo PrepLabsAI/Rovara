@@ -588,6 +588,8 @@ export const MERGE_NOT_READY_MESSAGES = {
   needsOtherApproval: (requester: string): string => `This pull request needs an approval from someone other than ${requester}.`,
   needsWriteApproval: (repository: string): string => `This pull request needs an approval on GitHub from someone who can write to ${repository}.`,
   linkGithub: "Link your GitHub account so Rovara can tell your approval from a reviewer's.",
+  /** Nobody owns the task now (its creator left the company and no one holds it), so an approval cannot be told from the owner's. Stable: the hosted merge says it for exactly that case. */
+  noOwner: "This task has no owner right now, so Rovara can't tell an approval from the owner's. Someone has to take over the task on its People page first.",
   presserApproved: "You approved this pull request, so someone else must press Merge.",
   checks: "Checks haven't passed on the latest code.",
   conflicted: (base: string): string => `The branch conflicts with ${base}. I'm resolving it.`,

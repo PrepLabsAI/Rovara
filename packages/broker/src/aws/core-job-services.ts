@@ -15,7 +15,8 @@ import { createNoticeService, type NoticeServiceOptions } from "../services/noti
 import { taskPeopleRecipients } from "./task-people-recipients.js";
 import { createMergeTrackingService, createMilestoneService } from "../services/merge-tracking.js";
 import { rovaraCheckSource } from "../services/rovara-check.js";
-import { createIdentityMergePeople, type MergePeople } from "../core/merge/people.js";
+import type { MergePeople } from "../core/merge/people.js";
+import { createHostedMergePeople, type HostedTaskPeopleSource } from "./hosted-merge-people.js";
 import { fixedCodeSettings } from "../core/merge/defaults.js";
 import type { CodeSettingsReader, HumanEditSink } from "../core/merge/seams.js";
 import type { SummaryCheckSource } from "../core/merge/summary-check.js";
@@ -95,6 +96,8 @@ export interface BrokerCoreServicesOptions {
   ciMode: NonNullable<CiReporting["ciMode"]>;
   repository?: RepositoryResolver;
   people?: MergePeople;
+  /** The task People list source the merge requesters are read from (see `createHostedMergePeople`). Needed unless `people` is given. */
+  taskPeople?: HostedTaskPeopleSource;
   settings?: CodeSettingsReader;
   /** The "Rovara" Check's source (its gate, facts and address). Absent: no Check. The merge tracking service adds the verdict that the description's words come from. */
   summaryCheck?: SummaryCheckSource;
@@ -109,6 +112,9 @@ export interface BrokerCoreServicesOptions {
   now?: () => Date;
   log?: (entry: Record<string, unknown>) => void;
 }
+
+/** The merge requesters are read from the task People list; without that source nothing is built (never a guess). */
+function failNoTaskPeople(): never { throw new Error("the core jobs need the task People source for the merge requesters"); }
 
 type JobServices = Record<"merge-tracking" | "session-sweep" | "notify-deliver", CoreService>;
 
@@ -158,7 +164,7 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
   const now = () => clock().getTime();
   // Existing helpers may log error class names supplied by adapters. Deployed job evidence uses fixed words only.
   const log = () => options.log?.({ event: "core_job.notice", companyId });
-  const people = options.people ?? createIdentityMergePeople(registry.require("identity"), { hostProvider: "github" });
+  const people = options.people ?? (options.taskPeople === undefined ? failNoTaskPeople() : createHostedMergePeople(registry.require("identity"), options.taskPeople));
   const settings = options.settings ?? fixedCodeSettings(DEFAULT_CODE_SETTINGS);
   const pass = (work: Parameters<typeof boundedCorePass>[2]) => boundedCorePass(flow.deps.store, now, work);
   const depsFor = (store: TaskFlow["deps"]["store"]): TaskFlow["deps"] => ({ ...flow.deps, store, projects: createStoreProjectSource(store, companyId) });

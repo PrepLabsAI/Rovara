@@ -69,7 +69,7 @@ async function hookedRoute(mode: "allow" | "deny" | "no-answer" | "unaskable" | 
     const result = await routeHostedMerge({ path, request: { method: "POST", path, headers, body: JSON.stringify({ requestId: randomUUID(), ...shown, ...body }) },
       companyId: ORG, principal: person(presser), role: "admin", flow: w.h.deps, audit: w.h.deps.audit, now: () => w.clock.ms, webApp: true,
       wiring: { projectGrantRole: async () => undefined, afterMerge: async () => undefined,
-        merge: (audit) => hostedMergeDependencies({ runtime, registry: w.registry, settings, defaults: DEFAULT_CODE_SETTINGS, now: () => w.clock.ms, policyHook: true, audit }) },
+        merge: (audit) => hostedMergeDependencies({ runtime, registry: w.registry, settings, defaults: DEFAULT_CODE_SETTINGS, now: () => w.clock.ms, policyHook: true, audit, taskPeople: { documentClient: { send: async () => ({}) }, tableName: "state" } }) },
     });
     return { status: result.statusCode, body: JSON.parse(result.body) as Record<string, unknown> };
   };

@@ -64,7 +64,7 @@ import { scopeHoldOf } from "../build-step/scope-question.js";
 import { inertLine } from "../proof/inert-text.js";
 import { flowIs } from "../task-flow/flow-guard.js";
 import { ownCheckSourceOf } from "./summary-check.js";
-import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type HumanApproval, type ApprovalRefusal, type RepositoryPermission } from "./approval.js";
+import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type HumanApproval, type ApprovalRefusal, type RepositoryPermission, type RequesterAccounts } from "./approval.js";
 import { codeOwnerVerdict, type CodeOwnerVerdict } from "./code-owners.js";
 import { boundCommits, readTierInput, type TierReadTarget } from "./change-tier-read.js";
 import { approvalReviewsOf, changeRequestRef, changedPathsOf, isHostRateLimit, type ConsumerRepository, type RepositoryResolver } from "./host-port.js";
@@ -143,6 +143,7 @@ function approvalMessage(reason: ApprovalRefusal, repository: string, input: Pic
     case "no_write": return M.needsWriteApproval(repository);
     case "self_only": return M.needsOtherApproval(input.requesterName);
     case "unlinked_requester": return M.linkGithub;
+    case "no_owner": return M.noOwner;
     case "stale": return M.staleApproval;
     case "changes_requested": return M.changesRequested;
   }
@@ -291,7 +292,7 @@ export function factsFromItem(item: MergeTrackingItem, behindRequired = false): 
 /** The approval merge tracking stored for a pull request, judged by the same rules: it holds only the latest approval of a person with write access. */
 async function approvalOfItem(
   deps: MergeDependencies, orgId: OrgId, item: MergeTrackingItem, pullRequest: PullRequestEntry | undefined,
-  ctx: { requesters: string[] | "unlinked"; allowSelfApproval: boolean; ciMode: ProjectCiMode },
+  ctx: { requesters: RequesterAccounts; allowSelfApproval: boolean; ciMode: ProjectCiMode },
 ): Promise<HumanApproval> {
   if (item.review === "changes_requested") return { approved: false, reason: "changes_requested" };
   if (item.approval === undefined) return { approved: false, reason: "none" };
@@ -803,7 +804,7 @@ async function codeOwnersOf(
 async function approvalFromStatus(
   deps: MergeDependencies,
   ctx: {
-    home: ConsumerRepository; scope: HostScope; orgId: OrgId; status: ChangeRequestStatus; syncedFrom: string | undefined; ciPassing: boolean; requesters: string[] | "unlinked";
+    home: ConsumerRepository; scope: HostScope; orgId: OrgId; status: ChangeRequestStatus; syncedFrom: string | undefined; ciPassing: boolean; requesters: RequesterAccounts;
     allowSelfApproval: boolean; permissions: Map<string, Promise<RepositoryPermission>>;
   },
 ): Promise<HumanApproval> {

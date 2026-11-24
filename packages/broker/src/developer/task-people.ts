@@ -608,6 +608,15 @@ export async function resolveTaskPeopleAccess(
   };
 }
 
+/**
+ * The developer ids of the task's CURRENT owners (role `owner` in the stored People list), or undefined when the task has no list (People was never opened on it: the creator is its only owner). A list that cannot be
+ * read throws, as every People read does. The stored list is read as it is: it is not re-proved against the live directory, so it can only name more owners than a live read would (never fewer).
+ */
+export async function taskOwnerDevelopers(deps: Pick<TaskPeopleDependencies, "documentClient" | "tableName">, taskId: string): Promise<string[] | undefined> {
+  const people = await loadPeople(deps, taskId);
+  return people?.people.filter((person) => person.role === "owner").map((person) => person.developerId);
+}
+
 /** The no-checker exception is confined to the hosted creator's unchanged, sole-owner list. */
 function hostedCreatorOnly(task: DeveloperTaskRecord, people: TaskPeople): boolean {
   const creator = people.people[0];

@@ -31,7 +31,7 @@ async function world(extraEnv: Record<string, string> = {}) {
     repositoryCredential: async () => ({ token: "fake" }), codeModules: () => ({}) as never,
     origin: () => "https://api.example", now: () => new Date(w.clock.now), log: (entry) => { logs.push(entry); },
     ciReporting: { honest: true, ciMode: async () => "sandbox_only" as const },
-    services: (companyId, flow, registry, wiring) => createBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!, now: () => new Date(w.clock.now) }),
+    services: (companyId, flow, registry, wiring) => createBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!, now: () => new Date(w.clock.now), taskPeople: { documentClient: { send: async () => ({}) }, tableName: "state" } }),
   });
   // A task of the company (its record, its workspace, no run yet) and its cost total: the rows a hosted start writes.
   const total = async (companyId: OrgId, micros: number, over: Record<string, unknown> = {}, taskId = companyId === A ? TASK : TASK_B) => {
