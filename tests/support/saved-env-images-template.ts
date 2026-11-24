@@ -9,7 +9,7 @@
 import { expect } from "vitest";
 import {
   SAVED_ENV_KEEP_DEFAULT, SAVED_ENV_MANAGE_ACTIONS, SAVED_ENV_PULL_ACTIONS, SAVED_ENV_PUSH_ACTIONS,
-  defaultBoundaryStatements, savedEnvLifecyclePolicy, savedEnvManageRoleName, savedEnvPullRoleName, savedEnvPushRoleName, savedEnvRepositoryPolicy, serviceRoleStatements,
+  defaultBoundaryStatements, deployBoundaryStatements, savedEnvLifecyclePolicy, savedEnvManageRoleName, savedEnvPullRoleName, savedEnvPushRoleName, savedEnvRepositoryPolicy, serviceRoleStatements,
 } from "@agentx/contracts";
 
 type Resource = { Type: string; Properties: Record<string, any>; DependsOn?: unknown };
@@ -157,8 +157,6 @@ export function withoutSavedEnvImages<T>(input: T, env: string): T {
   return input;
 }
 
-const SAVED_ENV_ACCESS_SIDS = ["AssumeSessionRoles", "IamFixedNameRolesNotYetCreated", "EcrTemplateServiceLinkedRole"];
-
 /** A contracts statement with its partition and account as the access template writes them (Fn::Join over Ref AWS::Partition and Ref AWS::AccountId). */
 function inTemplateForm(value: unknown): unknown {
   if (typeof value === "string") {
@@ -171,30 +169,38 @@ function inTemplateForm(value: unknown): unknown {
   return value;
 }
 
-/** The statements contracts access-policies.ts adds for saved environments, as the access template holds them: in the default boundary, and in the deploy role. */
-export function expectedAccessStatements(env: string): { boundary: Statement[]; deploy: Statement[] } {
+/**
+ * The statements contracts access-policies.ts adds for saved environments, as the access template holds them. TWO-BOUNDARIES: the broker's assume is in the RUNTIME boundary; the fixed-name
+ * lookups and ECR's template service-linked role are in the DEPLOY boundary and in the deploy role.
+ */
+export function expectedAccessStatements(env: string): { runtimeBoundary: Statement[]; deployBoundary: Statement[]; deploy: Statement[] } {
   const scope = { env, partition: "@P@", region: "@R@", account: "@A@", cloudFormationRoleName: `agentx-${env}-cloudformation`, artifactBucketArn: "arn:@P@:s3:::bucket", pullThroughPrefix: `agentx-${env}` };
-  const pick = (statements: Statement[]) => statements.filter((statement) => SAVED_ENV_ACCESS_SIDS.includes(statement.Sid ?? "")).map((statement) => inTemplateForm(statement) as Statement);
-  return { boundary: pick(defaultBoundaryStatements(scope) as unknown as Statement[]), deploy: pick(serviceRoleStatements(scope) as unknown as Statement[]) };
+  const pick = (statements: Statement[], sids: string[]) => statements.filter((statement) => sids.includes(statement.Sid ?? "")).map((statement) => inTemplateForm(statement) as Statement);
+  return {
+    runtimeBoundary: pick(defaultBoundaryStatements(scope) as unknown as Statement[], ["AssumeSessionRoles"]),
+    deployBoundary: pick(deployBoundaryStatements(scope) as unknown as Statement[], ["IamFixedNameRolesNotYetCreated", "EcrTemplateServiceLinkedRole"]),
+    deploy: pick(serviceRoleStatements(scope) as unknown as Statement[], ["IamFixedNameRolesNotYetCreated", "EcrTemplateServiceLinkedRole"]),
+  };
 }
 
-/** Access stack: the three statements in the default boundary and the two in the deploy role (exact, from contracts' builders), taken out in place. */
+/** Access stack: the statements in the two boundaries and the two in the deploy role (exact, from contracts' builders), taken out in place. */
 export function withoutSavedEnvAccess<T>(input: T, env: string): T {
   const template = input as unknown as TemplateJson;
   const expected = expectedAccessStatements(env);
-  const documents: Array<{ kind: "boundary" | "deploy"; document: { Statement: Statement[] } }> = [];
+  const documents: Array<{ kind: "runtimeBoundary" | "deployBoundary" | "deploy"; document: { Statement: Statement[] } }> = [];
   for (const resource of Object.values(template.Resources)) {
-    if (resource.Type === "AWS::IAM::ManagedPolicy") documents.push({ kind: "boundary", document: resource.Properties.PolicyDocument });
+    if (resource.Type === "AWS::IAM::ManagedPolicy") documents.push({ kind: resource.Properties.ManagedPolicyName === `agentx-${env}-deploy-boundary` ? "deployBoundary" : "runtimeBoundary", document: resource.Properties.PolicyDocument });
     if (resource.Type === "AWS::IAM::Role") for (const policy of (resource.Properties.Policies as Array<{ PolicyDocument: { Statement: Statement[] } }> | undefined) ?? []) documents.push({ kind: "deploy", document: policy.PolicyDocument });
   }
   let removed = 0;
   for (const { kind, document } of documents) {
-    const found = document.Statement.filter((statement) => SAVED_ENV_ACCESS_SIDS.includes(statement.Sid ?? ""));
+    const sids = expected[kind].map((statement) => statement.Sid ?? "");
+    const found = document.Statement.filter((statement) => sids.includes(statement.Sid ?? ""));
     if (found.length === 0) continue;
     expect(found, `${env} ${kind}`).toEqual(expected[kind]);
-    document.Statement = document.Statement.filter((statement) => !SAVED_ENV_ACCESS_SIDS.includes(statement.Sid ?? ""));
+    document.Statement = document.Statement.filter((statement) => !sids.includes(statement.Sid ?? ""));
     removed += 1;
   }
-  expect(removed, "the boundary and the deploy role").toBe(2);
+  expect(removed, "the two boundaries and the deploy role").toBe(3);
   return input;
 }

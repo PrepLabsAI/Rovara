@@ -100,7 +100,7 @@ describe("repository transferred", () => {
     const { db, bindings } = await bound(); const send = webhook(db, bindings);
     expect((await send("repository", transferred(202, "beta", "web", { user: "olive" }))).statusCode).toBe(200);
     expect(marks(db, B).map((item) => item.fullName)).toEqual(["olive/web"]);
-    for (const from of [{ user: "a", organization: "b" }, {}]) expect((await send("repository", transferred(202, "beta", "x", from), { delivery: D(2) })).statusCode).toBe(403);
+    for (const from of [{ user: "a", organization: "b" }, {}]) expect((await send("repository", transferred(202, "beta", "x", from), { delivery: D(2) })).statusCode).toBe(202);
     expect(marks(db, B)).toHaveLength(1);
   });
   it("another repository action is accepted and writes nothing; so does a new owner that is not the binding's account", async () => {
@@ -143,11 +143,11 @@ describe("the webhook's own checks", () => {
     const installation = { action: "removed", installation: { id: 101, account: { login: "acme" } }, repositories: listed("acme/web"), sender: { login: "olive" } };
     const comment = { ...removed(101, "acme", "acme/web"), comment: { id: 1 } };
     for (const [event, body] of [["repository", pull], ["repository", issue], ["installation_repositories", installation], ["installation_repositories", comment], ["installation_repositories", { ...removed(101, "acme", "acme/web"), repository: { id: 1 } }]] as const) {
-      expect((await send(event, body as Record<string, unknown>)).statusCode).toBe(403);
+      expect((await send(event, body as Record<string, unknown>)).statusCode).toBe(202);
     }
     // An installation event is not a repository list, and a repository list is not an installation event.
-    expect((await send("installation", removed(101, "acme", "acme/web"))).statusCode).toBe(403);
-    expect((await send("repository", removed(101, "acme", "acme/web"))).statusCode).toBe(403);
+    expect((await send("installation", removed(101, "acme", "acme/web"))).statusCode).toBe(202);
+    expect((await send("repository", removed(101, "acme", "acme/web"))).statusCode).toBe(202);
     expect(JSON.stringify([...db.items])).toBe(before);
   });
 });

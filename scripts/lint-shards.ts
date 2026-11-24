@@ -42,7 +42,7 @@ export const PROGRAM_DIRECTORY = "node_modules/.cache/lint-shards";
  */
 export const SHARD_DIRECTORIES: readonly { name: string; directories: readonly string[]; heapMb?: number }[] = [
   { name: "tests-contract-a-d", directories: ["tests/contract/a*.ts", "tests/contract/b*.ts", "tests/contract/c*.ts", "tests/contract/d*.ts"] },
-  { name: "tests-contract-e-j", directories: ["tests/contract/e*.ts", "tests/contract/f*.ts", "tests/contract/g*.ts", "tests/contract/h*.ts", "tests/contract/i*.ts", "tests/contract/j*.ts"] },
+  { name: "tests-contract-e-j", directories: ["tests/contract/e*.ts", "tests/contract/f*.ts", "tests/contract/fixtures", "tests/contract/g*.ts", "tests/contract/h*.ts", "tests/contract/i*.ts", "tests/contract/j*.ts"] },
   { name: "tests-contract-l-p", directories: ["tests/contract/l*.ts", "tests/contract/m*.ts", "tests/contract/n*.ts", "tests/contract/o*.ts", "tests/contract/p*.ts"] },
   { name: "tests-contract-r-s", directories: ["tests/contract/r*.ts", "tests/contract/s*.ts"] },
   { name: "tests-contract-t-z", directories: ["tests/contract/t*.ts", "tests/contract/u*.ts", "tests/contract/v*.ts", "tests/contract/w*.ts"] },

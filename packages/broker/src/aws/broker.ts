@@ -311,7 +311,7 @@ import { grantKeyFor, namedCompany, revisionKeyFor } from "./company-layout.js";
 import { refuseNamedCompanyName } from "./admin-name-collision.js";
 import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubRecoveryContinuation, readGithubWebhookEvent } from "./github-webhooks.js";
 import { handleGithubWebhookRoute } from "./github-webhook-route.js";
-import { GithubWebhookRefusal, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
+import { GithubWebhookRefusal, linkedGithubWebhookVerdict, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
 import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
 import { unsupportedThinkingLevels } from "@agentx/model-runtime/thinking-levels";
 import { executeGitHubTool, toGitHubCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
@@ -1352,7 +1352,7 @@ async function routeGithubWebhook(dependencies: AwsBrokerDependencies, request: 
         headers: request.headers,
         secret: webhookSecret,
         ...(dependencies.githubBindings === undefined ? {} : { companyForInstallation: (id: number) => dependencies.githubBindings!.ownerOf(id) }),
-        authorizeRepository: (scope) => githubEventStillAuthorized(dependencies, { kind: "PULL_REQUEST", action: "authorize", ...scope, number: scope.pullRequestNumber }),
+        authorizeRepository: async (scope) => { const verdict = await githubEventVerdict(dependencies, { kind: "PULL_REQUEST", action: "authorize", ...scope, number: scope.pullRequestNumber }); return verdict === "not_linked" ? "not_linked" : verdict === "authorized"; },
         process: (workflowEvent, deliveryId) => processGithubWorkflowEvent(dependencies, workflowEvent, deliveryId),
         now: () => new Date().toISOString(),
       }),
@@ -11458,7 +11458,11 @@ export async function reconcileWorkflowMergeRecoveryTask(
 }
 
 async function githubEventStillAuthorized(dependencies: AwsBrokerDependencies, event: ReceivedGithubWebhook["event"]): Promise<boolean> {
-  return authorizeLinkedGithubWebhook({
+  return await githubEventVerdict(dependencies, event) === "authorized";
+}
+
+async function githubEventVerdict(dependencies: AwsBrokerDependencies, event: ReceivedGithubWebhook["event"]): Promise<"authorized" | "not_linked" | "mismatch"> {
+  return linkedGithubWebhookVerdict({
     documentClient: dependencies.documentClient,
     tableName: dependencies.tableName,
     scope: { installationId: event.installationId, repositoryId: event.repositoryId, fullName: event.fullName, pullRequestNumber: event.number },

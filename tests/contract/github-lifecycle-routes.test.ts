@@ -215,16 +215,16 @@ describe("GitHub's installation webhook", () => {
     const send = webhook(h.db, h.bindings);
     const before = JSON.stringify([...h.db.items]);
     const comment = { action: "deleted", installation: { id: 101, account: { login: "acme" } }, sender: { login: "olive" }, comment: { id: 1 }, issue: { number: 1 }, repository: { id: 42 } };
-    expect((await send(comment)).statusCode).toBe(403);
-    expect((await send({ action: "deleted", installation: { id: 101 }, sender: { login: "olive" } })).statusCode).toBe(403);
+    expect((await send(comment)).statusCode).toBe(202);
+    expect((await send({ action: "deleted", installation: { id: 101 }, sender: { login: "olive" } })).statusCode).toBe(202);
     expect((await send({ action: "deleted", installation: { id: 101, account: { login: "mallory" } }, sender: { login: "olive" } })).statusCode).toBe(200);
     expect(JSON.stringify([...h.db.items])).toBe(before);
   });
   it("a malformed payload or delivery id is refused; a storage fault is retryable (503) and marks nothing", async () => {
     const h = await world();
     const send = webhook(h.db, h.bindings);
-    expect((await send({ action: "deleted" })).statusCode).toBe(403);
-    expect((await send({ action: "deleted", installation: { id: "101" } })).statusCode).toBe(403);
+    expect((await send({ action: "deleted" })).statusCode).toBe(202);
+    expect((await send({ action: "deleted", installation: { id: "101" } })).statusCode).toBe(202);
     expect((await send({ action: "deleted", installation: { id: 101, account: { login: "acme" } }, sender: { login: "olive" } }, { delivery: "nope" })).statusCode).toBe(403);
     h.db.injectFault({ command: "TransactWriteCommand", error: { name: "InternalServerError", message: "private-canary" } });
     const answer = await send({ action: "deleted", installation: { id: 101, account: { login: "acme" } }, sender: { login: "olive" } });

@@ -1,8 +1,9 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { App } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
@@ -19,6 +20,7 @@ import {
   MANUAL_APPROVAL_ACTION,
   RELEASE_PROJECT_KEYS,
   RELEASE_ROLE_KEYS,
+  RUN_ACCESS,
   RUN_WRITE_PREFIX,
   environmentReleaseNames,
   type ReleaseProjectKey,
@@ -354,7 +356,8 @@ describe("environment release pipeline: S2 and S3, the boundary and the roles", 
     const pinWriters = RELEASE_ROLE_KEYS.filter((key) => policyStatementsOf(key).some((statement) => statement.Effect === "Allow" && statement.resources.some((resource) => resource.endsWith("/policy-pin")) && statement.actions.some((action) => /ssm:(Put|Delete)/u.test(action))));
     expect(pinWriters).toEqual(["approver"]);
     const holdDeleters = RELEASE_ROLE_KEYS.filter((key) => policyStatementsOf(key).some((statement) => statement.Effect === "Allow" && statement.actions.includes("ssm:DeleteParameter")));
-    expect(holdDeleters.sort()).toEqual(["approver"]);
+    // The deploy role deletes exactly the environment deploy lock (checked in the lock test below); only the approver deletes holds.
+    expect(holdDeleters.sort()).toEqual(["approver", "deploy"]);
     const secretReaders = Object.fromEntries(RELEASE_ROLE_KEYS.flatMap((key) => {
       const reads = policyStatementsOf(key).filter((statement) => statement.Effect === "Allow" && statement.actions.some((action) => /^secretsmanager:/u.test(action)));
       return reads.length === 0 ? [] : [[key, reads.flatMap((statement) => statement.resources)]];
@@ -367,8 +370,9 @@ describe("environment release pipeline: S2 and S3, the boundary and the roles", 
   it("limits the Deploy role to EXECUTING the pipeline's own change sets on the environment's stacks: no create, no assume, no PassRole, no asset write, never the access stack (F1, F4)", () => {
     const statements = policyStatementsOf("deploy").filter((statement) => statement.Effect === "Allow");
     const actions = statements.flatMap((statement) => statement.actions);
-    expect(actions.filter((action) => /^sts:Assume|CreateChangeSet|CreateStack|UpdateStack|iam:PassRole|^ssm:DeleteParameter$/u.test(action))).toEqual([]);
-    expect(statements.filter((statement) => statement.actions.includes("ssm:PutParameter")).map((statement) => statement.Sid)).toEqual(["SetHold"]);
+    expect(actions.filter((action) => /^sts:Assume|CreateChangeSet|CreateStack|UpdateStack|iam:PassRole/u.test(action))).toEqual([]);
+    expect(statements.filter((statement) => statement.actions.includes("ssm:PutParameter")).map((statement) => statement.Sid)).toEqual(["TakeAndReleaseDeployLock", "WriteSettingsRecord", "SetHold"]);
+    expect(statements.filter((statement) => statement.actions.includes("ssm:DeleteParameter")).map((statement) => statement.Sid)).toEqual(["TakeAndReleaseDeployLock"]);
     const execute = statements.find((statement) => statement.actions.includes("cloudformation:ExecuteChangeSet"))!;
     expect(execute.actions).toEqual(["cloudformation:ExecuteChangeSet"]);
     expect(execute.resources).toHaveLength(5);
@@ -654,6 +658,182 @@ describe("environment release pipeline: the Opus review (F1 to F4)", () => {
     const deny = boundaryStatement("DenyS3OutsideAccount");
     expect(deny.actions).toEqual(["s3:*"]);
     expect(deny.Condition).toEqual({ Null: { "aws:ResourceAccount": "false" }, StringNotEquals: { "aws:ResourceAccount": { Ref: "AWS::AccountId" } } });
+  });
+});
+
+describe("environment release pipeline: the gate pack's S3 paths vs the roles' grants (P3 review F2)", () => {
+  interface StageAccess { read: string[]; list: string[]; write: string[] }
+  const access = JSON.parse(readFileSync(fileURLToPath(new URL("./fixtures/staging-release-s3-access.json", import.meta.url)), "utf8")) as { stages: Record<string, StageAccess> };
+  const concrete = (key: string): string => key.replace(/<[a-z-]+>/gu, "X1");
+  const globToRegExp = (pattern: string): RegExp => new RegExp(`^${pattern.replace(/[.+^$()|[\]{}\\]/gu, "\\$&").replace(/\*/gu, ".*").replace(/\?/gu, ".")}$`, "u");
+  const folderOf = (key: string): string => key.split("/")[0]!;
+  const BUCKET = /^\$\{Runs[A-Za-z0-9]+\.Arn\}/u;
+
+  it("has a fixture for every stage role that reads or writes run records, and RUN_ACCESS agrees with it", () => {
+    expect(Object.keys(access.stages).sort()).toEqual(Object.keys(RUN_ACCESS).sort());
+    for (const [role, paths] of Object.entries(access.stages)) {
+      const mine = RUN_ACCESS[role as keyof typeof RUN_ACCESS] as { read: readonly string[]; list: readonly string[]; write: readonly string[] };
+      const folders = (keys: string[]): string[] => [...new Set(keys.map(folderOf))].sort();
+      expect([...mine.read].sort(), `${role} read`).toEqual(folders(paths.read).filter((folder) => folder !== "ci-cache"));
+      expect([...mine.list].sort(), `${role} list`).toEqual(folders(paths.list));
+      expect(folders(paths.write).filter((folder) => folder !== "ci-cache"), `${role} write`).toEqual([...mine.write].sort());
+    }
+  });
+
+  for (const [role, paths] of Object.entries(access.stages)) {
+    it(`${role}: the grants cover every path its scripts read, list and write, and nothing broader`, () => {
+      const allows = policyStatementsOf(role as ReleaseRoleKey).filter((statement) => statement.Effect === "Allow");
+      const grants = (action: string) => allows.filter((statement) => statement.actions.includes(action));
+      const inRuns = (resources: string[]): string[] => resources.filter((resource) => BUCKET.test(resource));
+      // Object grants: `<stage>/*` only (no leading wildcard), one per stage the scripts touch.
+      for (const [action, keys] of [["s3:GetObject", paths.read], ["s3:PutObject", paths.write]] as const) {
+        const patterns = inRuns(grants(action).flatMap((statement) => statement.resources)).map((resource) => resource.replace(BUCKET, "").replace(/^\//u, ""));
+        for (const pattern of patterns) expect(pattern, `${role} ${action}`).toMatch(/^[a-z0-9-]+\/\*$/u);
+        for (const key of keys) expect(patterns.some((pattern) => globToRegExp(pattern).test(concrete(key))), `${role} ${action} ${key}`).toBe(true);
+        expect([...new Set(patterns.map(folderOf))].sort(), `${role} ${action} is broader than the scripts`).toEqual([...new Set(keys.map(folderOf))].sort());
+      }
+      // Listing (a recursive copy lists the prefix): the bucket itself, only under the stages the scripts download whole.
+      const lists = grants("s3:ListBucket").filter((statement) => statement.resources.some((resource) => BUCKET.test(resource)));
+      if (paths.list.length === 0) {
+        expect(lists, `${role} has a ListBucket it does not use`).toEqual([]);
+      } else {
+        expect(lists).toHaveLength(1);
+        expect(lists[0]!.resources.every((resource) => BUCKET.test(resource) && !resource.includes("/"))).toBe(true);
+        const condition = (lists[0] as unknown as { Condition: { StringLike: { "s3:prefix": string[] } } }).Condition.StringLike["s3:prefix"];
+        for (const prefix of paths.list) expect(condition.some((pattern) => globToRegExp(pattern).test(concrete(prefix))), `${role} list ${prefix}`).toBe(true);
+        for (const pattern of condition) expect(pattern).toMatch(/^[a-z0-9-]+\/\*$/u);
+        expect([...new Set(condition.map(folderOf))].sort(), `${role} lists more than the scripts`).toEqual([...new Set(paths.list.map(folderOf))].sort());
+      }
+    });
+  }
+});
+
+describe("environment release pipeline: the lock, the settings record, Decide's execution read, the image repositories (P1 follow-up)", () => {
+  it("(a) grants the deploy role exactly the lock (put, delete) and the settings record (put), and reserves both to it in the boundary", () => {
+    const allows = policyStatementsOf("deploy").filter((statement) => statement.Effect === "Allow");
+    const lock = allows.find((statement) => statement.Sid === "TakeAndReleaseDeployLock")!;
+    expect(lock.actions).toEqual(["ssm:PutParameter", "ssm:DeleteParameter"]);
+    expect(lock.resources).toEqual([`arn:\${AWS::Partition}:ssm:${REGION}:\${AWS::AccountId}:parameter/agentx/staging/lock`]);
+    const settings = allows.find((statement) => statement.Sid === "WriteSettingsRecord")!;
+    expect(settings.actions).toEqual(["ssm:PutParameter"]);
+    expect(settings.resources).toEqual([`arn:\${AWS::Partition}:ssm:${REGION}:\${AWS::AccountId}:parameter/agentx/staging/settings`]);
+    const writers = RELEASE_ROLE_KEYS.filter((key) => policyStatementsOf(key).some((statement) => statement.Effect === "Allow" && statement.actions.some((action) => /^ssm:(Put|Delete)/u.test(action)) && statement.resources.some((resource) => /parameter\/agentx\/staging\/(lock|settings)$/u.test(resource))));
+    expect(writers).toEqual(["deploy"]);
+    expect(exemptedRoles("DenySettingsAndLockWritesExceptDeploy")).toEqual(["deploy"]);
+    expect(boundaryStatement("DenySettingsAndLockWritesExceptDeploy").resources).toHaveLength(2);
+  });
+
+  describe("(a) the Deploy stage's own lines, run in a real bash with stand-ins for aws and the pack scripts", () => {
+    const deployCommands = (JSON.parse(buildSpecOf("deploy")) as { phases: { build: { commands: string[] } } }).phases.build.commands;
+    const start = deployCommands.findIndex((line) => line.includes("settings-record.sh is missing"));
+    const end = deployCommands.findIndex((line) => line.startsWith('test -z "${LOCK_PROBLEM}"'));
+    const lines = deployCommands.slice(start, end + 1);
+    interface Outcome { status: number | null; calls: string[]; out: string }
+    function run(options: { lockHeld?: boolean; deployFails?: boolean; omitSettingsScript?: boolean; takeover?: "other-holder" | "gone" }): Outcome {
+      const root = mkdtempSync(join(tmpdir(), "p1-lock-"));
+      try {
+        const pack = join(root, "ops", "staging-release");
+        mkdirSync(pack, { recursive: true });
+        mkdirSync(join(root, "bin"));
+        mkdirSync(join(root, "work"));
+        mkdirSync(join(root, "out"));
+        const log = join(root, "calls.log");
+        const takeover = options.takeover === "other-holder" ? `printf '%s' '{"holder":"someone-else","command":"deploy upgrade","acquiredAt":"2026-11-23T00:00:00.000Z"}' > "${join(root, "lockstore")}"\n` : options.takeover === "gone" ? `rm -f "${join(root, "lockstore")}"\n` : "";
+        writeFileSync(join(pack, "deploy.sh"), `echo "deploy" >> "${log}"\n${takeover}${options.deployFails === true ? "exit 3" : "exit 0"}\n`);
+        if (options.omitSettingsScript !== true) writeFileSync(join(pack, "settings-record.sh"), `echo "settings version=$RELEASE_VERSION parameter=$SETTINGS_PARAMETER" >> "${log}"\n`);
+        writeFileSync(join(root, "bin", "aws"), [
+          "#!/bin/sh",
+          `echo "aws $*" >> "${log}"`,
+          'case "$1 $2" in',
+          '  "s3 cp") printf "9.9.9" > "work/version.txt";;',
+          '  "sts get-caller-identity") echo "arn:aws:sts::1:assumed-role/deploy/s";;',
+          // The lock store: put keeps the --value, get returns it (or fails when it is gone), delete removes it.
+          `  "ssm put-parameter") ${options.lockHeld === true ? 'echo "ParameterAlreadyExists" >&2; exit 254' : 'while [ $# -gt 0 ]; do if [ "$1" = "--value" ]; then printf "%s" "$2" > lockstore; fi; shift; done'};;`,
+          '  "ssm get-parameter") if [ -f lockstore ]; then cat lockstore; else echo ParameterNotFound >&2; exit 254; fi;;',
+          '  "ssm delete-parameter") rm -f lockstore;;',
+          "esac",
+          "",
+        ].join("\n"));
+        chmodSync(join(root, "bin", "aws"), 0o755);
+        const script = ["set -eu", `PACK="${pack}"`, ...(options.omitSettingsScript === true ? [] : []), ...lines].join("\n");
+        const result = spawnSync("bash", ["-c", script], {
+          cwd: root,
+          env: { ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH ?? ""}`, EXEC_ID: "e1", RUNS_BUCKET: "b", ENV_SETTINGS_PREFIX: "/agentx/staging" },
+          encoding: "utf8",
+        });
+        const calls = existsSync(log) ? readFileSync(log, "utf8").split("\n").filter((line) => line !== "") : [];
+        return { status: result.status, calls, out: result.stdout + result.stderr };
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+    const verbs = (calls: string[]): string[] => calls.map((call) => (call.startsWith("aws ssm put-parameter") ? "lock" : call.startsWith("aws ssm delete-parameter") ? "unlock" : call.startsWith("aws") ? "aws" : call.split(" ")[0]!)).filter((verb) => verb !== "aws");
+
+    it("takes the lock, deploys, writes the settings record (the release version and the settings parameter), then releases the lock", () => {
+      const outcome = run({});
+      expect(outcome.status).toBe(0);
+      expect(verbs(outcome.calls)).toEqual(["lock", "deploy", "settings", "unlock"]);
+      expect(outcome.calls.find((call) => call.startsWith("settings"))).toBe("settings version=9.9.9 parameter=/agentx/staging/settings");
+      expect(outcome.calls.find((call) => call.startsWith("aws ssm put-parameter"))).toContain("--name /agentx/staging/lock");
+      expect(outcome.calls.find((call) => call.startsWith("aws ssm put-parameter"))).not.toContain("--overwrite");
+      expect(outcome.calls.find((call) => call.startsWith("aws ssm delete-parameter"))).toContain("--name /agentx/staging/lock");
+    });
+
+    it("writes no settings record when the deploy failed, still releases the lock, and fails the stage", () => {
+      const outcome = run({ deployFails: true });
+      expect(outcome.status).toBe(3);
+      expect(verbs(outcome.calls)).toEqual(["lock", "deploy", "unlock"]);
+    });
+
+    it("deploys nothing while the lock is held (the Mac flow, or another run), and never takes it over", () => {
+      const outcome = run({ lockHeld: true });
+      expect(outcome.status).not.toBe(0);
+      expect(outcome.out).toContain("deploy lock");
+      expect(verbs(outcome.calls)).toEqual(["lock"]);
+    });
+
+    it("deletes the lock only when it is still ours: a lock someone else holds is NOT deleted and the stage fails loudly, even though the deploy succeeded", () => {
+      const outcome = run({ takeover: "other-holder" });
+      expect(outcome.status).not.toBe(0);
+      expect(outcome.out).toContain("no longer ours");
+      expect(verbs(outcome.calls)).toEqual(["lock", "deploy", "settings"]);
+      expect(outcome.calls.some((call) => call.startsWith("aws ssm delete-parameter"))).toBe(false);
+    });
+
+    it("does not delete a lock that has vanished either, and fails the stage loudly", () => {
+      const outcome = run({ takeover: "gone" });
+      expect(outcome.status).not.toBe(0);
+      expect(outcome.out).toContain("no longer ours");
+      expect(outcome.calls.some((call) => call.startsWith("aws ssm delete-parameter"))).toBe(false);
+    });
+
+    it("keeps the deploy's own failure code when the lock is also not ours", () => {
+      const outcome = run({ deployFails: true, takeover: "other-holder" });
+      expect(outcome.status).toBe(3);
+      expect(outcome.calls.some((call) => call.startsWith("aws ssm delete-parameter"))).toBe(false);
+    });
+
+    it("fails closed BEFORE the lock when the pack has no settings-record script", () => {
+      const outcome = run({ omitSettingsScript: true });
+      expect(outcome.status).not.toBe(0);
+      expect(outcome.out).toContain("settings-record.sh is missing");
+      expect(verbs(outcome.calls)).toEqual([]);
+    });
+  });
+
+  it("(b) gives Decide GetPipelineExecution on its own pipeline only", () => {
+    const grants = policyStatementsOf("decide").filter((statement) => statement.Effect === "Allow" && statement.actions.includes("codepipeline:GetPipelineExecution"));
+    expect(grants).toHaveLength(1);
+    expect(grants[0]!.actions).toEqual(["codepipeline:GetPipelineExecution"]);
+    expect(grants[0]!.resources).toEqual([`arn:\${AWS::Partition}:codepipeline:${REGION}:\${AWS::AccountId}:${names.pipeline}`]);
+  });
+
+  it("(c) lets Build push to exactly the environment's own worker and slack repositories", () => {
+    const push = policyStatementsOf("build").find((statement) => statement.Sid === "PushOwnImages")!;
+    expect(push.resources).toEqual([
+      `arn:\${AWS::Partition}:ecr:${REGION}:\${AWS::AccountId}:repository/agentx-staging/worker`,
+      `arn:\${AWS::Partition}:ecr:${REGION}:\${AWS::AccountId}:repository/agentx-staging/slack`,
+    ]);
   });
 });
 

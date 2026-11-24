@@ -11,8 +11,9 @@ import {
   aws_logs as logs,
 } from "aws-cdk-lib";
 import { Construct } from "constructs";
-import { environmentRolePath } from "@agentx/contracts";
+import { SAVED_ENV_REPOSITORY_ROOT, environmentRolePath } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
+import { AGENTX_PRODUCTION_WORKER_REPOSITORY } from "./release-pipeline.js";
 import { TestServiceMirror } from "./test-service-mirror.js";
 
 /** The worker's HTTP port: /ping for health probes, /invocations for signed work (#80). */
@@ -86,12 +87,25 @@ export class Ec2WorkerFoundation extends Construct {
     // L4-IAM: a named environment's boot pulls the worker image (also the sandbox image) and the executor image, both under the environment's pull-through prefix
     // (`agentx-<env>/`, also where the staging build pushes: agentx-<env>/worker, /executor). Its test-service starter copies have their own statement below. Nothing
     // else is read, so the read is that prefix and not every repository in the account. It overlaps the read half of EcrPullThroughCache below on purpose (either could be dropped alone). A
-    // worker image outside the prefix is refused at plan time (packages/cli/src/deploy/parameters.ts). The legacy production template keeps its original statement.
-    const imageRepositories = naming.env === undefined ? "*" : `${naming.pullThroughPrefix}/*`;
+    // worker image outside the prefix is refused at plan time (packages/cli/src/deploy/parameters.ts).
+    // The legacy deployment (production) reads exactly its one worker image repository, the one its release pushes to (release-common.ts DEFAULT_REPOSITORY, the same name the release roles are
+    // scoped to), and the five starter copies below: its ExecutorImageUri is `none` and it has no pull-through cache. It no longer reads every repository in the account (the release images, the
+    // Cloud gateway, the CDK asset store, another install's saved environments): customer repository code and the AI agent run on this role.
+    const imageRepositories = naming.env === undefined ? AGENTX_PRODUCTION_WORKER_REPOSITORY : `${naming.pullThroughPrefix}/*`;
     this.instanceRole.addToPolicy(new iam.PolicyStatement({
       sid: "EcrImageAccess",
       actions: ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
       resources: [`arn:${Aws.PARTITION}:ecr:${Aws.REGION}:${Aws.ACCOUNT_ID}:repository/${imageRepositories}`],
+    }));
+    // Saved environment images (`rovara-env/<env>/o<org hash>/p<project hash>`, contracts saved-env-image.ts) belong to ONE company each. A worker never reads, writes or deletes one with THIS role:
+    // the broker mints a push or pull login for the one repository of the task's own company and project (a one-repository session policy on a broker-assumed role), and the repository policy
+    // denies every other principal. This explicit Deny is the third layer: it holds for a repository the creation template did not make (no repository policy) and whatever any Allow above or added
+    // later says, for every environment's prefix. GetAuthorizationToken is registry-wide (no resource), so it is unaffected.
+    this.instanceRole.addToPolicy(new iam.PolicyStatement({
+      sid: "NoSavedEnvironmentImages",
+      effect: iam.Effect.DENY,
+      actions: ["ecr:*"],
+      resources: [`arn:${Aws.PARTITION}:ecr:${Aws.REGION}:${Aws.ACCOUNT_ID}:repository/${SAVED_ENV_REPOSITORY_ROOT}/*`],
     }));
     this.instanceRole.addToPolicy(new iam.PolicyStatement({
       sid: "EcrTokenAccess",

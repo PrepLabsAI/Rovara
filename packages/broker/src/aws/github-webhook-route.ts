@@ -1,8 +1,10 @@
 // Webhook lane W0: the HTTP front half of POST /v1/github/webhooks, in one place and in the order that keeps a public, unsigned endpoint cheap and safe:
 //
-//   1. cheap shape checks that read no secret and touch no table: the signature header's shape, the delivery id's, the event name (an allow-list) and the body's size;
+//   1. cheap shape checks that read no secret and touch no table: the signature header's shape, the delivery id's, that an event name is present, and the body's size;
 //   2. the secret (the loader caches it, a missing or failing one is remembered; this route also refuses to ask for a forced re-read more than once per interval);
 //   3. the HMAC over the RAW body, constant time (the shared `verifyGithubWebhookSignature`), BEFORE anything is parsed, mapped or written;
+//   3b. an event outside the allow-list is decided only AFTER step 3: a valid signature on an event we do not handle is 202 {ignored: true} (GitHub also sends push, workflow_run and the like to a hook that
+//       subscribed to everything; a 403 there is a sustained 4xx that trips the alarm and can get the hook marked unhealthy); a bad signature stays 403 whatever the event, so no one can probe event handling unsigned;
 //   4. `ping` (only after a valid signature), the installation lifecycle events and the legacy pull request path (unchanged, they verify again with the secret that just verified);
 //   5. the core branch for a core-owned task (aws/github-core-webhooks.ts): reads, then the reservation and the wake.
 //
@@ -48,10 +50,14 @@ function badShape(headers: Record<string, string | undefined>, body: string): { 
   if (signature === undefined || !SIGNATURE_SHAPE.test(signature)) return { answer: failure(403, "FORBIDDEN", GITHUB_WEBHOOK_SIGNATURE_INVALID), reason: "signature_invalid" };
   const delivery = headers["x-github-delivery"];
   if (delivery === undefined || !DELIVERY_SHAPE.test(delivery)) return { answer: failure(403, "FORBIDDEN", "GitHub webhook delivery ID is invalid"), reason: "header" };
+  // Only the presence of an event name is a shape rule; whether we handle it is decided after the signature verified (see the header comment).
   const event = headers["x-github-event"];
-  if (event === undefined || !ALLOWED_EVENTS.has(event)) return { answer: failure(403, "FORBIDDEN", "GitHub webhook event type is unsupported"), reason: "header" };
+  if (event === undefined || event === "") return { answer: failure(403, "FORBIDDEN", "GitHub webhook event type is missing"), reason: "header" };
   return undefined;
 }
+
+/** GitHub's event names are lower-case words and underscores; anything else (only reachable with a valid signature) is logged as "other". */
+const loggableEventName = (event: string): string => (/^[a-z_]{1,64}$/.test(event) ? event : "other");
 
 /** The secret that verifies this body: the cached one, or (once per interval) a forced re-read after a rotation. Undefined when none verifies; "unconfigured" when there is no usable secret. */
 async function verifiedSecret(input: GithubWebhookRouteInput, body: string, signature: string): Promise<{ secret: string } | "invalid" | "unconfigured"> {
@@ -90,6 +96,38 @@ async function dispatch(input: GithubWebhookRouteInput, body: string, headers: R
   }
 }
 
+/**
+ * Every refusal the handlers raise gets one structured line (event, action, reason, delivery id: never payload text or a secret) and an answer by its kind: a signed delivery that is not ours to act on is 202
+ * (ignored, info; GitHub's delivery list stays clean and the 4xx alarm stays quiet), a reused delivery id is 409 (warn), everything else is the 403 it always was (warn). The signature was verified before any
+ * handler ran, so none of this is reachable unsigned.
+ */
+function refusalAnswer(input: GithubWebhookRouteInput, headers: Record<string, string | undefined>, error: GithubWebhookRefusal): GithubWebhookRouteAnswer {
+  const kind = error.details.kind ?? "reject";
+  const reason = error.details.reason ?? "refused";
+  const line = { hook: loggableEventName(headers["x-github-event"] ?? ""), ...(error.details.action === undefined ? {} : { action: loggableEventName(error.details.action) }), reason, deliveryId: headers["x-github-delivery"]! };
+  if (kind === "ignore") {
+    input.log({ event: "github_webhook.ignored", level: "info", ...line });
+    return { status: 202, body: { ignored: true, reason } };
+  }
+  input.log({ event: kind === "conflict" ? "github_webhook.conflict" : "github_webhook.refused", level: "warn", ...line });
+  return kind === "conflict" ? failure(409, "CONFLICT", error.message) : failure(403, "FORBIDDEN", error.message);
+}
+
+/** Signed, but not ours to handle: acknowledge it so GitHub's delivery list stays clean. One info line (event name and delivery id only: no payload, no secret); no table read or write, no rejected-kind log word. Undefined for a handled event. */
+function ignoreUnhandledEvent(input: GithubWebhookRouteInput, headers: Record<string, string | undefined>): GithubWebhookRouteAnswer | undefined {
+  const event = headers["x-github-event"]!;
+  if (ALLOWED_EVENTS.has(event)) return undefined;
+  input.log({ event: "github_webhook.ignored", level: "info", reason: "unhandled_event", hook: loggableEventName(event), deliveryId: headers["x-github-delivery"]! });
+  return { status: 202, body: { ignored: true } };
+}
+
+/** A transient failure is a logged 503 (GitHub's delivery list shows it and a redelivery is safe); anything else is a bug and is rethrown. */
+function retryAnswer(input: GithubWebhookRouteInput, headers: Record<string, string | undefined>, error: unknown): GithubWebhookRouteAnswer {
+  if (!(error instanceof GithubWebhookRetryableError || (error instanceof AgentXError && error.code === "RUNTIME_UNAVAILABLE"))) throw error;
+  input.log({ event: "github_webhook.retry", level: "warn", hook: loggableEventName(headers["x-github-event"] ?? ""), reason: "retryable", deliveryId: headers["x-github-delivery"]! });
+  return failure(503, "RUNTIME_UNAVAILABLE", "GitHub webhook processing will be retried");
+}
+
 export async function handleGithubWebhookRoute(input: GithubWebhookRouteInput): Promise<GithubWebhookRouteAnswer> {
   if (input.body === undefined || input.secret === undefined) return NOT_CONFIGURED();
   const headers = Object.fromEntries(Object.entries(input.headers).map(([key, value]) => [key.toLowerCase(), value]));
@@ -102,11 +140,11 @@ export async function handleGithubWebhookRoute(input: GithubWebhookRouteInput): 
     const verified = await verifiedSecret(input, input.body, headers["x-hub-signature-256"]!);
     if (verified === "unconfigured") return NOT_CONFIGURED();
     if (verified === "invalid") { input.log({ event: "github_webhook.signature_invalid" }); return failure(403, "FORBIDDEN", GITHUB_WEBHOOK_SIGNATURE_INVALID); }
+    const unhandled = ignoreUnhandledEvent(input, headers);
+    if (unhandled !== undefined) return unhandled;
     return await dispatch(input, input.body, headers, verified.secret);
   } catch (error) {
-    if (error instanceof GithubWebhookRefusal) return failure(403, "FORBIDDEN", error.message);
-    if (error instanceof GithubWebhookRetryableError) return failure(503, "RUNTIME_UNAVAILABLE", "GitHub webhook processing will be retried");
-    if (error instanceof AgentXError && error.code === "RUNTIME_UNAVAILABLE") return failure(503, "RUNTIME_UNAVAILABLE", "GitHub webhook processing will be retried");
-    throw error;
+    if (error instanceof GithubWebhookRefusal) return refusalAnswer(input, headers, error);
+    return retryAnswer(input, headers, error);
   }
 }

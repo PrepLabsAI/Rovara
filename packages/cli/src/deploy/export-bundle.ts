@@ -18,6 +18,8 @@ import {
   agentXError,
   defaultBoundaryArn,
   defaultBoundaryStatements,
+  deployBoundaryArn,
+  deployBoundaryStatements,
   environmentCloudFormationRoleName,
   environmentOperatorRoleName,
   environmentPullThroughPrefix,
@@ -216,7 +218,8 @@ function accessDeployerStatements(scope: { env: string; partition: string; regio
     `arn:${partition}:iam::${account}:role/${environmentCloudFormationRoleName(env)}`,
     `arn:${partition}:iam::${account}:role/${environmentOperatorRoleName(env)}`,
   ];
-  const boundaryArn = defaultBoundaryArn({ env, partition, account });
+  // TWO-BOUNDARIES: the stack creates two managed policies, the runtime boundary and the deploy boundary.
+  const boundaryArns = [defaultBoundaryArn({ env, partition, account }), deployBoundaryArn({ env, partition, account })];
   const bucketArn = `arn:${partition}:s3:::${environmentStackName(env, "access")}-*`;
   const serviceLinkedRoleArn = `arn:${partition}:iam::${account}:role/aws-service-role/*`;
   return [
@@ -263,7 +266,7 @@ function accessDeployerStatements(scope: { env: string; partition: string; regio
         "iam:ListEntitiesForPolicy",
         "iam:ListPolicyVersions",
       ],
-      Resource: boundaryArn,
+      Resource: boundaryArns,
     },
     {
       // The one IAM action the ECR pull-through-cache-rule handler needs outside CredentialArn's
@@ -546,8 +549,10 @@ pull-through cache rule, and the two IAM roles every later stack needs.
   stack for this environment.
 - \`agentx-${env}-operator\`: the role an AgentX operator assumes to run \`agentx\` against this
   environment.
-- \`agentx-${env}-boundary\` (only when no permissions boundary ARN is given): the default
-  permission boundary applied to both roles above and every role the later stacks create.
+- \`agentx-${env}-boundary\` and \`agentx-${env}-deploy-boundary\` (only when no permissions boundary ARN is given): the
+  default permission boundaries. The deploy boundary caps the two roles above; the runtime boundary
+  (\`agentx-${env}-boundary\`) caps every role the later stacks create, and is the only boundary those
+  roles may carry.
 - An S3 bucket for release artifacts (templates and code packages) and an ECR pull-through cache
   rule prefixed \`agentx-${env}\`.
 
@@ -730,8 +735,8 @@ whose deletion protection keeps it; its name is not unique, so it never blocks a
   real value.
 - \`packages/\`: the release's code packages, plus \`packages/SHA256SUMS\` to check them
   (\`sha256sum -c SHA256SUMS\` from inside that directory).
-- \`policies/service-role.json\`, \`policies/operator-role.json\`, \`policies/default-boundary.json\`:
-  the inline policies the later stacks' roles carry, with this environment's real account,
+- \`policies/service-role.json\`, \`policies/operator-role.json\`, \`policies/default-boundary.json\` (the runtime
+  boundary) and \`policies/deploy-boundary.json\`: the inline policies and boundaries the later stacks' roles carry, with this environment's real account,
   region and partition.
 - \`policies/access-deployer.json\`: the policy for whoever runs \`deploy-access.sh\`.
 - \`init-answers.json\`: the answers this export knew, for the operator's
@@ -837,6 +842,7 @@ export async function writeExportBundle(input: ExportBundleInput): Promise<Expor
     await write("policies/service-role.json", policyDocument(serviceRoleStatements(policyScope)));
     await write("policies/operator-role.json", policyDocument(operatorRoleStatements(policyScope)));
     await write("policies/default-boundary.json", policyDocument(defaultBoundaryStatements(policyScope)));
+    await write("policies/deploy-boundary.json", policyDocument(deployBoundaryStatements(policyScope)));
     await write("policies/access-deployer.json", policyDocument(accessDeployerStatements({ env, partition, region, account })));
 
     await write("check-readiness.mjs", exportReadinessScript({ gatewayHost: core.CoreModelGatewayHost, agentModel: core.CoreAgentModel, brokerStack: environmentStackName(env, "control-plane"), region, selectedBroker: true }));
