@@ -14,7 +14,7 @@ import { companyMembershipFromDynamo, membershipKey } from "../../packages/broke
 import { LinearConnections, type LinearAppSettings } from "../../packages/broker/src/aws/linear-connections.js";
 import { handleLinearAppWebhook } from "../../packages/broker/src/aws/linear-app-webhook.js";
 import { linearAppIntakeDeliver } from "../../packages/broker/src/aws/linear-app-intake.js";
-import { linkLinearAccount, linkedLinearPerson, linearAccountLinkKey, linearAccountResolver } from "../../packages/broker/src/aws/linear-account-links.js";
+import { linkAccount } from "../../packages/broker/src/core/people/account-links.js";
 import { createHostedIntake, hostedTrackerFor, intakeFenceKeyOf, ticketSessionStartExtras, type HostedIntakeCompany } from "../../packages/broker/src/aws/hosted-intake.js";
 import { INTAKE_ADMIN_ONLY, INTAKE_CANNOT_START, INTAKE_NO_TICKET, INTAKE_PROJECT_NOT_FOUND } from "../../packages/broker/src/aws/hosted-intake-routes.js";
 import { HOSTED_INTAKE_ROUTES } from "../../packages/broker/src/aws/developer-routes.js";
@@ -121,52 +121,10 @@ async function world(options: { onCore?: readonly string[] } = {}) {
     return handleLinearAppWebhook({ connections, app: settings, now: () => now, deliver, log: (e) => logs.push(e) }, { rawBody: raw, headers: { "linear-signature": sign(raw) } });
   };
   const ticket = async (workspace: FakeWorkspace, actor?: string, key?: string) => { at += 1; return appHook(issueCreated(workspace, actor, at, key)); };
-  const link = (companyId: string, organizationId: string, linearUserId: string, personId: string) => linkLinearAccount(store, { companyId, organizationId, linearUserId, personId, linkedAt: TIME });
+  // A member's own link (written by the link routes in production, linear-account-link-routes.ts): under the company, in the workspace it was made in.
+  const link = (companyId: string, organizationId: string, linearUserId: string, personId: string) => linkAccount(store, { companyId, provider: "linear", tenant: organizationId, accountId: linearUserId, personId, display: "", linkedAt: TIME });
   return { h, linear, logs, connections, store, starts, audits, intake, call, as, grant, member, ticket, link, now, project, onCore };
 }
-
-describe("Linear account links (company-scoped, first wins)", () => {
-  it("links once; the same person again is same, another person is taken; reads only under its company and workspace", async () => {
-    const store = new RecordingStore();
-    const input = { companyId: A, organizationId: WORKSPACE_A.id, linearUserId: "user-maya", personId: MAYA, linkedAt: TIME };
-    expect(await linkLinearAccount(store, input)).toBe("linked");
-    expect(await linkLinearAccount(store, input)).toBe("same");
-    expect(await linkLinearAccount(store, { ...input, personId: DEV })).toBe("taken");
-    expect(await linkedLinearPerson(store, A, WORKSPACE_A.id, "user-maya")).toBe(MAYA);
-    // Company B's read of the same Linear user id, and a read for another workspace, find nobody.
-    expect(await linkedLinearPerson(store, B, WORKSPACE_A.id, "user-maya")).toBeUndefined();
-    expect(await linkedLinearPerson(store, A, WORKSPACE_D.id, "user-maya")).toBeUndefined();
-    expect(linearAccountLinkKey(A, "user-maya").pk).not.toBe(linearAccountLinkKey(B, "user-maya").pk);
-    // A row copied under another company's key (its companyId still A) is nobody there.
-    const row = await store.get(linearAccountLinkKey(A, "user-maya"));
-    await store.put({ item: { ...row!, ...linearAccountLinkKey(B, "user-maya") } });
-    expect(await linkedLinearPerson(store, B, WORKSPACE_A.id, "user-maya")).toBeUndefined();
-    await expect(linkLinearAccount(store, { ...input, linearUserId: "bad#id" })).rejects.toThrow("not valid");
-  });
-
-  it("resolves only a linear account, only while the company is connected to the link's workspace, only a live member", async () => {
-    const store = new RecordingStore();
-    await linkLinearAccount(store, { companyId: A, organizationId: WORKSPACE_A.id, linearUserId: "user-maya", personId: MAYA, linkedAt: TIME });
-    let status: "connected" | "needs_reconnect" | "disconnected" = "connected";
-    let organizationId = WORKSPACE_A.id;
-    let live = true;
-    const resolve = linearAccountResolver({
-      store, connections: { connection: async (c) => (c === A ? { organizationId, status } as never : undefined) },
-      principalOf: async (c, p) => (live && c === A ? { companyId: c, personId: p, displayName: "Maya", roles: ["member"], provider: "hosted" } : undefined),
-    });
-    const account = { provider: "linear", tenant: "", accountId: "user-maya" };
-    expect((await resolve(A, account))?.personId).toBe(MAYA);
-    expect(await resolve(A, { ...account, provider: "github" })).toBeUndefined();
-    expect(await resolve(A, { ...account, tenant: WORKSPACE_D.id })).toBeUndefined();
-    expect((await resolve(A, { ...account, tenant: WORKSPACE_A.id }))?.personId).toBe(MAYA);
-    expect(await resolve(B, account)).toBeUndefined();
-    expect(await resolve("not-a-company", account)).toBeUndefined();
-    status = "needs_reconnect"; expect(await resolve(A, account)).toBeUndefined();
-    status = "connected"; organizationId = WORKSPACE_D.id; expect(await resolve(A, account)).toBeUndefined();
-    organizationId = WORKSPACE_A.id; live = false; expect(await resolve(A, account)).toBeUndefined();
-  });
-
-});
 
 describe("Linear app events start work on hosted Code", () => {
   it("a linked member's ticket starts as that member in that company; the same Linear user id in company B waits there", async () => {

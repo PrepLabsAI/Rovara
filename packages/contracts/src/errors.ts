@@ -130,6 +130,13 @@ export const AgentXErrorCodeSchema = z.enum([
   // L4-GH (409): the GitHub account a person tries to connect to themselves is another member's of the company; the person already has a different GitHub account connected. Appended: no code changes meaning.
   "GITHUB_ACCOUNT_TAKEN",
   "GITHUB_ACCOUNT_LINK_EXISTS",
+  // R1 + L1: a member links their own outside account (Linear first). LINK_START_AGAIN (403): the one answer for a link flow that did not check out. EXTERNAL_ACCOUNT_TAKEN (409): the account is another member's of
+  // the company. EXTERNAL_ACCOUNT_OTHER_WORKSPACE (409): the account is in another workspace than the one the company is connected to. EXTERNAL_ACCOUNT_LINK_EXISTS (409): the person already has a different account
+  // linked. Appended: no code changes meaning.
+  "LINK_START_AGAIN",
+  "EXTERNAL_ACCOUNT_TAKEN",
+  "EXTERNAL_ACCOUNT_OTHER_WORKSPACE",
+  "EXTERNAL_ACCOUNT_LINK_EXISTS",
   // Confirmed owner move, but its response could not be read. A 409 for older clients: re-read; never resend blindly.
   "COMMITTED_REFRESH_NEEDED",
 ]);
@@ -191,7 +198,7 @@ export function errorStatus(code: AgentXErrorCode): number {
   if (code === "TASK_STOP_CONFIG_MISSING" || code === "TASK_STOP_CONFIG_INVALID" || code === "TASK_STOP_APPROVAL_ABOVE_CEILING") return 409;
   if (code === "AUTH_REQUIRED") return 401;
   // The sign-in is valid but too old, or the wrong kind, for this change: 403, so a client does not treat it as a sign-in that ended.
-  if (code === "CSRF_STALE" || code === "REAUTH_REQUIRED" || code === "FORBIDDEN" || code === "SLACK_TEAM_NOT_BOUND" || code === "SLACK_ACCOUNT_NOT_LINKED" || code === "PROJECT_ACCESS_DENIED" || code === "PROJECT_TASKS_DISABLED" || code === "TASK_ACCESS_DENIED" || code === "TRIAL_LOCKED" || code === "AGENT_NOT_ON_PROJECT" || code === "AGENT_TOOL_NOT_GRANTED" || code === "MODEL_NOT_ALLOWED" || code === "REMOVED_FROM_ORG" || code === "GITHUB_NOT_CONNECTED" || code === "SESSION_LEVEL_REQUIRED" || code === "LOCAL_AGENT_NOT_ALLOWED" || code === "PROCESS_SELF_CONFIRM") return 403;
+  if (code === "CSRF_STALE" || code === "REAUTH_REQUIRED" || code === "FORBIDDEN" || code === "SLACK_TEAM_NOT_BOUND" || code === "SLACK_ACCOUNT_NOT_LINKED" || code === "PROJECT_ACCESS_DENIED" || code === "PROJECT_TASKS_DISABLED" || code === "TASK_ACCESS_DENIED" || code === "TRIAL_LOCKED" || code === "AGENT_NOT_ON_PROJECT" || code === "AGENT_TOOL_NOT_GRANTED" || code === "MODEL_NOT_ALLOWED" || code === "REMOVED_FROM_ORG" || code === "GITHUB_NOT_CONNECTED" || code === "SESSION_LEVEL_REQUIRED" || code === "LOCAL_AGENT_NOT_ALLOWED" || code === "PROCESS_SELF_CONFIRM" || code === "LINK_START_AGAIN") return 403;
   if (code === "NOT_FOUND" || code === "PROJECT_NOT_FOUND" || code === "TASK_NOT_FOUND" || code === "LEARNING_OFF" || code === "LEARNING_LOCKED" || code === "LESSONS_SWITCHED_OFF" || code === "NOT_AVAILABLE_HERE") return 404;
   if (code === "BUDGET_EXCEEDED" || code === "ORG_BUDGET_EXCEEDED" || code === "MACHINE_TIME_EXCEEDED" || code === "PROJECT_BUDGET_EXCEEDED" || code === "AGENT_BUDGET_EXCEEDED" || code === "TEST_ALLOWANCE_USED" || code === "CHAIN_BUDGET_EXCEEDED") return 402;
   if (code === "CONFIG_INVALID" || code === "PROCESS_UNAVAILABLE" || code === "AUDIT_RANGE_INVALID" || code === "AUDIT_REASON_REQUIRED" || code === "AUDIT_FILTER_TOO_WIDE") return 400;

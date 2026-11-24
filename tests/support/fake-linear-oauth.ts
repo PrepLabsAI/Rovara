@@ -18,12 +18,13 @@ export const WORKSPACE_C: FakeWorkspace = { id: "cccc3333-0000-4000-8000-0000000
 
 const WINDOW_MS = 30 * 60_000;
 
-interface Grant { workspace: FakeWorkspace; current: string; previous?: { token: string; until: number }; access: Set<string>; revoked: boolean }
+export interface FakeLinearUser { id: string; name: string }
+interface Grant { workspace: FakeWorkspace; user: FakeLinearUser; current: string; previous?: { token: string; until: number }; access: Set<string>; revoked: boolean }
 
 export function fakeLinear(now: () => number) {
   let counter = 0;
   const mint = (kind: string) => [kind, "tok", String(++counter).padStart(4, "0"), randomBytes(6).toString("hex")].join("_");
-  const approvals = new Map<string, { workspace: FakeWorkspace; challenge: string; used: boolean }>();
+  const approvals = new Map<string, { workspace: FakeWorkspace; user: FakeLinearUser; challenge: string; used: boolean }>();
   const grants: Grant[] = [];
   const accessOf = new Map<string, Grant>();
   const revoked: string[] = [];
@@ -56,7 +57,7 @@ export function fakeLinear(now: () => number) {
         const verifier = form.get("code_verifier") ?? "";
         if (approval === undefined || approval.used || form.get("redirect_uri") !== LINEAR_REDIRECT || createHash("sha256").update(verifier).digest("base64url") !== approval.challenge) return json({ error: "invalid_grant" }, 400);
         approval.used = true;
-        const grant: Grant = { workspace: approval.workspace, current: mint("refresh"), access: new Set(), revoked: false };
+        const grant: Grant = { workspace: approval.workspace, user: approval.user, current: mint("refresh"), access: new Set(), revoked: false };
         grants.push(grant);
         return json(issue(grant));
       }
@@ -107,6 +108,8 @@ export function fakeLinear(now: () => number) {
         return json({ data: { commentCreate: { success: true } } });
       }
       if (keyWorkspace !== undefined) return json({ errors: [{ message: "unknown query" }] });
+      // R1 + L1: who the person behind a user token is, and the workspace they signed in to.
+      if (query.includes("viewer { id name organization")) return json({ data: { viewer: { id: grant!.user.id, name: grant!.user.name, organization: { id: grant!.workspace.id } } } });
       if (query.includes("viewer { organization")) return json({ data: { viewer: { organization: { id: grant!.workspace.id, name: grant!.workspace.name, urlKey: grant!.workspace.urlKey } } } });
       if (query.includes("teams(")) return json({ data: { teams: { nodes: grant!.workspace.teams, pageInfo: { hasNextPage: false } } } });
       return json({ errors: [{ message: "unknown query" }] });
@@ -124,10 +127,10 @@ export function fakeLinear(now: () => number) {
       issues.set(`${workspace.id}:${issue.identifier}`, full); issues.set(`${workspace.id}:${issue.id}`, full);
     },
     /** The person approves on Linear's consent page for `workspace`: the code Linear would send back, bound to the authorize address's PKCE challenge. */
-    approve(authorizeUrl: string, workspace: FakeWorkspace): string {
+    approve(authorizeUrl: string, workspace: FakeWorkspace, user: FakeLinearUser = { id: "00000000-0000-4000-8000-000000000000", name: "Linear Person" }): string {
       const challenge = new URL(authorizeUrl).searchParams.get("code_challenge") ?? "";
       const code = `code${String(++counter)}${randomBytes(4).toString("hex")}`;
-      approvals.set(code, { workspace, challenge, used: false });
+      approvals.set(code, { workspace, user, challenge, used: false });
       return code;
     },
     get refreshCalls() { return refreshCalls; },

@@ -75,6 +75,19 @@ export function linearAuthorizeUrl(app: Pick<LinearApp, "clientId" | "redirectUr
   return url.toString();
 }
 
+/**
+ * R1 + L1 (6.1): the consent page for a MEMBER linking their own Linear account (not the company's connection): the person as themselves (`actor=user`), the one scope `read` (enough to read who they
+ * are), consent asked every time so the person sees which Linear account they are linking, PKCE S256. The same OAuth app and callback as the company's connection; Code's state names the flow.
+ */
+export function linearLinkAuthorizeUrl(app: Pick<LinearApp, "clientId" | "redirectUri">, state: string, verifier: string): string {
+  const url = new URL(LINEAR_AUTHORIZE_URL);
+  url.search = new URLSearchParams({
+    client_id: app.clientId, redirect_uri: app.redirectUri, response_type: "code", scope: "read", state,
+    actor: "user", prompt: "consent", code_challenge: pkceChallenge(verifier), code_challenge_method: "S256",
+  }).toString();
+  return url.toString();
+}
+
 const Token = z.string().min(1).max(4096).regex(/^[\x21-\x7e]+$/);
 const TokenAnswer = z.object({
   access_token: Token, refresh_token: Token, expires_in: z.number().int().positive().max(31_536_000),
@@ -183,4 +196,14 @@ export async function linearTeamsOf(input: { fetch: Fetch; access: string }): Pr
     found.push({ id: team.data.id, key: team.data.key, name: team.data.name });
   }
   return found;
+}
+
+const Viewer = z.object({ id: Id, name: z.string().max(256).optional(), organization: z.object({ id: Id }).passthrough() }).passthrough();
+
+/** Who the person behind a user token is on Linear, and the workspace they signed in to (`viewer { id name organization { id } }`). Anything that is not a clear answer is `unavailable`. */
+export async function linearViewerOf(input: { fetch: Fetch; access: string }): Promise<{ id: string; name: string; organizationId: string }> {
+  const data = await graphql(input.fetch, input.access, "query { viewer { id name organization { id } } }");
+  const viewer = Viewer.safeParse(data["viewer"]);
+  if (!viewer.success) throw new LinearOAuthFailure("unavailable");
+  return { id: viewer.data.id, name: viewer.data.name ?? "", organizationId: viewer.data.organization.id };
 }

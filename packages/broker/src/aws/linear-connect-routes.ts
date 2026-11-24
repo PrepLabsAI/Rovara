@@ -3,7 +3,7 @@
 //   POST   /v1/dev/company/linear/connect               {}                owner/admin: a single-use state and Linear's consent address (PKCE S256, actor=app)
 //   POST   /v1/dev/company/linear/complete              { state, code }   owner/admin: spend the state, exchange the code, read the workspace, bind it, store the tokens
 //   GET    /v1/dev/company/linear                                         any member: the connection's status, workspace, who connected it and when (never a token)
-//   DELETE /v1/dev/company/linear                                         owner: revoke, unbind, clear every team pick, name the projects that had one
+//   DELETE /v1/dev/company/linear                                         owner: revoke, unbind, clear every team pick, remove every member's own Linear link, name the projects that had one
 //   GET    /v1/dev/company/linear/projects/{project}                      owner/admin or the project's admin: the project's team and the teams the company's token can see
 //   PUT    /v1/dev/company/linear/projects/{project}    { teamId }        owner/admin or the project's admin: set the project's team (one the company's token can see)
 //   DELETE /v1/dev/company/linear/projects/{project}                      owner/admin or the project's admin: clear the project's team
@@ -17,10 +17,13 @@
 //   - Only this company's connection (and so its token) is ever used for this company's projects: the company is the caller's, never named by the request.
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { agentXError, AgentXError, AgentXNameSchema, ON_THE_WEBSITE_MESSAGE, OrgIdSchema } from "@agentx/contracts";
+import { agentXError, AgentXError, AgentXNameSchema, ON_THE_WEBSITE_MESSAGE, OrgIdSchema, type DocumentStore } from "@agentx/contracts";
 import { Membership, membershipKey } from "./company-check.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
+import { LINEAR_LINK_PROVIDER } from "./linear-account-links.js";
+import { isLinearAccountLinkPath } from "./linear-account-link-routes.js";
+import { unlinkProviderForCompany } from "../core/people/account-links.js";
 import { exchangeLinearCode, linearAuthorizeUrl, linearTeamsOf, linearWorkspaceOf, revokeLinearToken, type LinearTokens, type LinearWorkspace } from "./linear-oauth-client.js";
 import { LINEAR_NEEDS_RECONNECT, LINEAR_NOT_CONNECTED, type LinearAppSettings, type LinearConnections } from "./linear-connections.js";
 
@@ -47,6 +50,8 @@ export interface LinearConnectWiring {
   /** The Linear HTTP seam (tests: a fake Linear). */
   fetch: typeof fetch;
   log: (entry: Record<string, unknown>) => void;
+  /** R1 + L1: where the members' own Linear links live (the core's own store). With it, a disconnect removes every link of the company. Absent: the install has none. */
+  links?: Pick<DocumentStore, "get" | "delete" | "transact" | "query">;
 }
 
 export interface LinearConnectContext {
@@ -72,7 +77,8 @@ const PROJECT_PATH = /^\/v1\/dev\/company\/linear\/projects\/([^/]+)$/;
 
 /** Whether this module answers the path (the dispatcher sends it here before anything is read). */
 export function isLinearConnectPath(path: string): boolean {
-  return path === LINEAR_CONNECT_PATH || path === CONNECT || path === COMPLETE || PROJECT_PATH.test(path);
+  // R1 + L1: the member's own link routes and the admin's list of links are the same family; the developer dispatcher's Linear branch splits them off (linearConnectRoute).
+  return path === LINEAR_CONNECT_PATH || path === CONNECT || path === COMPLETE || PROJECT_PATH.test(path) || isLinearAccountLinkPath(path);
 }
 
 const Secret = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
@@ -98,6 +104,30 @@ async function liveMembership(ctx: LinearConnectContext, caller: DeveloperCaller
 }
 
 const isAdmin = (member: z.infer<typeof Membership>) => member.role === "admin" || member.role === "owner";
+
+/**
+ * R1 + L1: removes every member link of the company's Linear workspace (a stale link that revived on a later reconnect would be a hidden identity grant). `throws`: the caller decides whether the
+ * failure stops what it is doing (a disconnect, before it changes anything) or is only logged by name (a sweep after the fact).
+ */
+async function sweepLinks(ctx: LinearConnectContext, companyId: string): Promise<void> {
+  if (ctx.wiring.links === undefined) return;
+  await unlinkProviderForCompany(ctx.wiring.links, companyId, LINEAR_LINK_PROVIDER);
+}
+
+/** The same sweep after the fact: a failure is one fixed log line (names only) and never undoes or blocks what already happened. */
+async function sweepLinksQuietly(ctx: LinearConnectContext, companyId: string): Promise<void> {
+  try { await sweepLinks(ctx, companyId); } catch { ctx.wiring.log({ companyId, event: "linear.account_links_not_removed" }); }
+}
+
+/** A disconnect's first step: if the links cannot be removed nothing else changes (the owner tries again). */
+async function sweepLinksBeforeDisconnect(ctx: LinearConnectContext, companyId: string): Promise<void> {
+  try { await sweepLinks(ctx, companyId); } catch { throw agentXError("RUNTIME_UNAVAILABLE", DISCONNECT_UNAVAILABLE); }
+}
+
+/** A FIRST connection starts with no member link: whatever an earlier workspace's links left (a failed sweep at its disconnect) goes now. A reconnect keeps them. */
+async function sweepLinksOnFirstConnect(ctx: LinearConnectContext, companyId: string, outcome: "connected" | "reconnected"): Promise<void> {
+  if (outcome === "connected") await sweepLinksQuietly(ctx, companyId);
+}
 
 /** Revokes tokens Linear just issued that Rovara will not keep (best effort; logged by name only). */
 async function discard(ctx: LinearConnectContext, companyId: string, tokens: LinearTokens): Promise<void> {
@@ -153,6 +183,7 @@ export async function routeLinearConnect(ctx: LinearConnectContext, caller: Deve
     catch { await discard(ctx, member.companyId, tokens); throw agentXError("RUNTIME_UNAVAILABLE", CONNECT_UNAVAILABLE); }
     if (outcome.outcome === "taken") { await discard(ctx, member.companyId, tokens); throw agentXError("LINEAR_WORKSPACE_TAKEN", LINEAR_TAKEN); }
     if (outcome.outcome === "other_workspace") { await discard(ctx, member.companyId, tokens); throw agentXError("LINEAR_WORKSPACE_TAKEN", LINEAR_OTHER_WORKSPACE); }
+    await sweepLinksOnFirstConnect(ctx, member.companyId, outcome.outcome);
     return { status: "connected" as const, reconnected: outcome.outcome === "reconnected", workspace: { id: workspace.id, name: workspace.name, urlKey: workspace.urlKey } };
   }
   throw agentXError("NOT_FOUND", "not found");
@@ -185,9 +216,13 @@ async function disconnect(ctx: LinearConnectContext, member: z.infer<typeof Memb
   if (member.role !== "owner") throw agentXError("FORBIDDEN", DISCONNECT_OWNER_ONLY);
   // Owner DEC 254zzz99: a disconnect is made only from the Rovara website's own client (never the CLI's or an AI tool's token), after the owner rule.
   if (!webApp) throw agentXError("FORBIDDEN", ON_THE_WEBSITE_MESSAGE);
+  // R1 + L1: the members' links go FIRST: if they cannot be removed nothing else changes (the owner tries again), so a disconnected company never keeps a link that a later reconnect would revive.
+  await sweepLinksBeforeDisconnect(ctx, member.companyId);
   let outcome: Awaited<ReturnType<LinearConnectWiring["connections"]["disconnect"]>>;
   try { outcome = await ctx.wiring.connections.disconnect(member.companyId, personId); } catch { throw agentXError("RUNTIME_UNAVAILABLE", DISCONNECT_UNAVAILABLE); }
   if (outcome.outcome === "not_found") throw agentXError("LINEAR_NOT_CONNECTED", LINEAR_NOT_CONNECTED);
+  // A link claimed while the disconnect ran is swept again once the connection is gone.
+  await sweepLinksQuietly(ctx, member.companyId);
   return { status: "disconnected" as const, workspaceName: outcome.workspaceName, projects: outcome.projects };
 }
 

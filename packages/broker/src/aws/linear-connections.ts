@@ -2,6 +2,7 @@
 //
 // Records (State table):
 //   LINEAR_CONNECT#<sha256(state)> / META             a connect start: company, person, session, 10 minutes, single use; the PKCE verifier sealed
+//   LINEAR_LINK#<sha256(state)> / META                a member's own-account link start (R1 + L1): the same fields in its OWN key family and provider, so a connect state never spends as a link and the reverse
 //   LINEAR_WORKSPACE#<organization id> / BINDING      which company a Linear workspace belongs to: first binder wins (conditional), never overwritten
 //   ORG#<company>#LINEAR_CONNECTION / META            the company's one connection: workspace id/name/url key, status, who connected it and when,
 //                                                     the access and refresh tokens SEALED (KMS, encryption context naming the company and the field), a version
@@ -99,14 +100,22 @@ const PickRow = z.object({
   teamKey: z.string().max(10), teamName: z.string().max(256), setBy: z.string().regex(/^[a-f0-9]{64}$/), setAt: z.iso.datetime(),
 }).passthrough();
 export type LinearTeamPick = z.infer<typeof PickRow>;
-const StateRow = z.object({
-  entityType: z.literal("LINEAR_CONNECT_STATE"), provider: z.literal("linear"), status: z.literal("live"), companyId: OrgIdSchema,
+/** The two flows that start with a state: the company's connection and a member linking their own account. Each has its own key family, record type (below), provider and verifier context. */
+const STATE_KINDS = {
+  connect: { provider: "linear", purpose: "linear-connect" },
+  link: { provider: "linear-link", purpose: "linear-link" },
+} as const;
+export type LinearStateKind = keyof typeof STATE_KINDS;
+const stateFields = {
+  status: z.literal("live"), companyId: OrgIdSchema,
   personId: z.string().regex(/^[a-f0-9]{64}$/), sessionId: z.string().min(1).max(256), createdAt: z.iso.datetime(), expiresAt: z.number().int().positive(),
   sealedVerifier: z.string().min(1).max(16_384),
-}).passthrough();
+};
+const StateRow = z.object({ entityType: z.literal("LINEAR_CONNECT_STATE"), provider: z.literal("linear"), ...stateFields }).passthrough();
+const LinkStateRow = z.object({ entityType: z.literal("LINEAR_LINK_STATE"), provider: z.literal("linear-link"), ...stateFields }).passthrough();
 
 const hashOf = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
-export const linearStateKey = (state: string) => ({ pk: `LINEAR_CONNECT#${hashOf(state)}`, sk: "META" });
+export const linearStateKey = (state: string, kind: LinearStateKind = "connect") => (kind === "connect" ? { pk: `LINEAR_CONNECT#${hashOf(state)}`, sk: "META" } : { pk: `LINEAR_LINK#${hashOf(state)}`, sk: "META" });
 export const linearWorkspaceKey = (organizationId: string) => ({ pk: `LINEAR_WORKSPACE#${organizationId}`, sk: "BINDING" });
 export const linearConnectionKey = (companyId: string) => ({ pk: orgScoped(OrgIdSchema.parse(companyId), "LINEAR_CONNECTION"), sk: "META" });
 export const linearTeamsPk = (companyId: string) => orgScoped(OrgIdSchema.parse(companyId), "LINEAR_TEAMS");
@@ -115,7 +124,7 @@ export const linearAuditKey = (companyId: string, at: string, action: string, id
 export const linearDeliveryKey = (rawBody: string | Buffer) => ({ pk: `LINEAR_DELIVERY#${createHash("sha256").update(rawBody).digest("hex")}`, sk: "META" });
 
 const tokenContext = (companyId: string, organizationId: string, field: "access" | "refresh") => ({ purpose: "linear-connection", companyId, organizationId, field });
-const verifierContext = (companyId: string, personId: string, stateHash: string) => ({ purpose: "linear-connect", companyId, personId, stateHash, field: "verifier" });
+const verifierContext = (kind: LinearStateKind, companyId: string, personId: string, stateHash: string) => ({ purpose: STATE_KINDS[kind].purpose, companyId, personId, stateHash, field: "verifier" });
 
 export const notConnected = () => agentXError("LINEAR_NOT_CONNECTED", LINEAR_NOT_CONNECTED);
 export const needsReconnect = () => agentXError("LINEAR_NOT_CONNECTED", LINEAR_NEEDS_RECONNECT);
@@ -148,32 +157,50 @@ export class LinearConnections {
 
   /** A connect start for this company, person and session: the state (returned once) and the PKCE verifier (sealed, kept here). */
   async mintState(who: { companyId: string; personId: string; sessionId: string }): Promise<{ state: string; verifier: string; expiresAt: number }> {
+    return this.mint("connect", who);
+  }
+
+  /** A member's own-account link start (R1 + L1): the same as a connect start, in the link flow's own key family. */
+  async mintLinkState(who: { companyId: string; personId: string; sessionId: string }): Promise<{ state: string; verifier: string; expiresAt: number }> {
+    return this.mint("link", who);
+  }
+
+  private async mint(kind: LinearStateKind, who: { companyId: string; personId: string; sessionId: string }): Promise<{ state: string; verifier: string; expiresAt: number }> {
     const stateBytes = this.random(32); const verifierBytes = this.random(32);
     if (stateBytes.length !== 32 || verifierBytes.length !== 32) throw new Error("random");
     const state = stateBytes.toString("base64url"); const verifier = verifierBytes.toString("base64url");
     const nowMs = this.deps.now();
     const expiresAt = Math.floor(nowMs / 1000) + LINEAR_CONNECT_TTL_SECONDS;
-    const key = linearStateKey(state);
-    const sealedVerifier = await this.deps.sealer.seal(verifier, verifierContext(who.companyId, who.personId, key.pk));
-    await this.deps.documentClient.send(new PutCommand({ TableName: this.table, Item: { ...key, entityType: "LINEAR_CONNECT_STATE", provider: "linear", status: "live",
+    const key = linearStateKey(state, kind);
+    const sealedVerifier = await this.deps.sealer.seal(verifier, verifierContext(kind, who.companyId, who.personId, key.pk));
+    await this.deps.documentClient.send(new PutCommand({ TableName: this.table, Item: { ...key, ...(kind === "connect" ? { entityType: "LINEAR_CONNECT_STATE", provider: "linear" } : { entityType: "LINEAR_LINK_STATE", provider: "linear-link" }), status: "live",
       ...who, createdAt: new Date(nowMs).toISOString(), expiresAt, sealedVerifier, [INDEX_EXPIRY_ATTRIBUTE]: expiresAt + DELIVERY_KEEP_SECONDS }, ConditionExpression: "attribute_not_exists(pk)" }));
     return { state, verifier, expiresAt };
   }
 
   /** Spends a live state once, only for the same company, person and session, before it expires; its PKCE verifier. Undefined for anything else. */
   async spendState(state: string, who: { companyId: string; personId: string; sessionId: string }): Promise<string | undefined> {
+    return this.spend("connect", state, who);
+  }
+
+  /** Spends a member's own-account link state (only a link state: a connect state is nobody's here, and the reverse). */
+  async spendLinkState(state: string, who: { companyId: string; personId: string; sessionId: string }): Promise<string | undefined> {
+    return this.spend("link", state, who);
+  }
+
+  private async spend(kind: LinearStateKind, state: string, who: { companyId: string; personId: string; sessionId: string }): Promise<string | undefined> {
     try {
-      const key = linearStateKey(state);
+      const key = linearStateKey(state, kind);
       const nowSeconds = Math.floor(this.deps.now() / 1000);
-      const row = StateRow.parse(await this.get(key));
+      const row = (kind === "connect" ? StateRow : LinkStateRow).parse(await this.get(key));
       if (row.companyId !== who.companyId || row.personId !== who.personId || row.sessionId !== who.sessionId || row.expiresAt <= nowSeconds) return undefined;
       await this.deps.documentClient.send(new UpdateCommand({ TableName: this.table, Key: key,
         UpdateExpression: "SET #status = :used, usedAt = :at REMOVE sealedVerifier",
         ConditionExpression: "#status = :live AND #provider = :provider AND companyId = :company AND personId = :person AND sessionId = :session AND expiresAt > :now",
         ExpressionAttributeNames: { "#status": "status", "#provider": "provider" },
-        ExpressionAttributeValues: { ":used": "used", ":live": "live", ":at": new Date(this.deps.now()).toISOString(), ":provider": "linear",
+        ExpressionAttributeValues: { ":used": "used", ":live": "live", ":at": new Date(this.deps.now()).toISOString(), ":provider": STATE_KINDS[kind].provider,
           ":company": who.companyId, ":person": who.personId, ":session": who.sessionId, ":now": nowSeconds } }));
-      return await this.deps.sealer.open(row.sealedVerifier, verifierContext(who.companyId, who.personId, key.pk));
+      return await this.deps.sealer.open(row.sealedVerifier, verifierContext(kind, who.companyId, who.personId, key.pk));
     } catch { return undefined; }
   }
 
