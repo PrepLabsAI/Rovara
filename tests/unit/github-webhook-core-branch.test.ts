@@ -3,10 +3,11 @@
 import { createHmac } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, prHeadKey, projectRevisionKey } from "@agentx/contracts";
+import { adaptHttpApiEvent } from "../../packages/broker/src/aws/lambda.js";
 import { handleGithubWebhookRoute, GITHUB_WEBHOOK_MAX_BYTES } from "../../packages/broker/src/aws/github-webhook-route.js";
 import { GITHUB_DELIVERY_TTL_SECONDS, GITHUB_WEBHOOK_PER_MINUTE, hintTrackingRow, resetGithubWebhookWindows } from "../../packages/broker/src/aws/github-core-webhooks.js";
 import { GithubInstallationBindings } from "../../packages/broker/src/aws/github-credentials.js";
-import { listDueGithubWebhookDeliveries, reserveGithubWebhookDelivery } from "../../packages/broker/src/aws/github-webhooks.js";
+import { handleGithubWebhook, listDueGithubWebhookDeliveries, reserveGithubWebhookDelivery } from "../../packages/broker/src/aws/github-webhooks.js";
 import { stampItem } from "../../packages/broker/src/core-host/engine-stamp.js";
 import { recoveryRowKey, taskRecordKey } from "../../packages/broker/src/core/merge/store.js";
 import { githubWorkflowPullRequestKey } from "../../packages/broker/src/developer/task-records.js";
@@ -153,12 +154,220 @@ describe("the signature is checked on the raw body, before any work", () => {
     expect((await w.post("issue_comment", undefined, { raw: exact })).status).toBe(200);
   });
 
-  it("answers a bad delivery id or an event outside the allow-list before any secret read", async () => {
+  it("answers a bad delivery id or a missing event name before any secret read", async () => {
     const w = await world();
     expect((await w.post("issue_comment", comment(), { deliveryId: "not-a-uuid" })).status).toBe(403);
-    expect((await w.post("push", { ref: "x" })).status).toBe(403);
+    expect((await w.post("push", { ref: "x" }, { deliveryId: "not-a-uuid" })).status).toBe(403);
     expect((await w.post("issue_comment", comment(), { headers: { "x-github-event": undefined } })).status).toBe(403);
+    expect((await w.post("issue_comment", comment(), { headers: { "x-github-event": "" } })).status).toBe(403);
     expect(w.secretCalls).toEqual([]);
+  });
+
+  it.each(["push", "workflow_run", "workflow_job", "create", "delete", "star", "made_up_event"])("a VALID signature on an unhandled event (%s): 202 ignored, one info log with the event and delivery id, no table touch, no legacy call", async (event) => {
+    const w = await world();
+    const parse = vi.spyOn(JSON, "parse");
+    const deliveryId = "550e8400-e29b-41d4-a716-0000000000e1";
+    const before = w.snapshot();
+    const answer = await w.post(event, { ref: "refs/heads/main", secretLookingValue: "do-not-log-me" }, { deliveryId });
+    expect(answer).toEqual({ status: 202, body: { ignored: true } });
+    expect(w.logs).toEqual([{ event: "github_webhook.ignored", level: "info", reason: "unhandled_event", hook: event, deliveryId }]);
+    expect(JSON.stringify(w.logs)).not.toContain("do-not-log-me");
+    expect(w.sentSince()).toEqual([]);
+    expect(w.snapshot()).toBe(before);
+    expect(w.legacy).not.toHaveBeenCalled();
+    expect(parse).not.toHaveBeenCalled();
+    expect(w.logs.some((entry) => entry.event === "github_webhook.rejected")).toBe(false);
+  });
+
+  it("an unhandled event with a BAD signature stays 403 (no unsigned probing of event handling), and logs the signature word, not the ignored one", async () => {
+    for (const mode of ["wrong secret", "malformed", "missing"] as const) {
+      const w = await world();
+      const answer = await w.post("push", { ref: "x" }, mode === "wrong secret" ? { signWith: "forged-".padEnd(40, "f") } : { headers: { "x-hub-signature-256": mode === "missing" ? undefined : "nonsense" } });
+      expect(answer.status, mode).toBe(403);
+      expect(w.logs.map((entry) => entry.event), mode).toEqual(["github_webhook.signature_invalid"]);
+      expect(w.sentSince(), mode).toEqual([]);
+    }
+  });
+
+  it("an unhandled event with a malformed delivery id stays a 403 rejection even when the signature is valid", async () => {
+    const w = await world();
+    const answer = await w.post("push", { ref: "x" }, { deliveryId: "not-a-uuid" });
+    expect(answer.status).toBe(403);
+    expect(w.logs).toEqual([{ event: "github_webhook.rejected", reason: "header" }]);
+  });
+
+  it.each([
+    ["a real GitHub version-1 (time-based) delivery id", "c95a50d8-e79b-11f1-9a76-3cdc2bdcb8fe"],
+    ["a version-4 id", "550e8400-e29b-41d4-a716-446655440000"],
+    ["an upper-case version-1 id", "C95A50D8-E79B-11F1-9A76-3CDC2BDCB8FE"],
+  ])("%s on a handled issue_comment: accepted and processed, not a header rejection", async (_name, deliveryId) => {
+    const w = await world();
+    const answer = await w.post("issue_comment", comment(), { deliveryId });
+    expect(answer).toMatchObject({ status: 200, body: { delivery: "ACCEPTED" } });
+    expect(w.logs.some((entry) => entry.event === "github_webhook.rejected")).toBe(false);
+    expect(w.row().lastHintKind).toBe("comment");
+  });
+
+  it.each([
+    ["too short", "c95a50d8-e79b-11f1-9a76-3cdc2bdcb8f"],
+    ["too long", "c95a50d8-e79b-11f1-9a76-3cdc2bdcb8fe0"],
+    ["non-hex", "c95a50d8-e79b-11f1-9a76-3cdc2bdcb8fg"],
+    ["extra characters around it", " c95a50d8-e79b-11f1-9a76-3cdc2bdcb8fe"],
+    ["a trailing newline", "c95a50d8-e79b-11f1-9a76-3cdc2bdcb8fe\n"],
+    ["no dashes", "c95a50d8e79b11f19a763cdc2bdcb8fe"],
+    ["empty", ""],
+  ])("a malformed delivery id (%s) is a 403 header rejection even with a valid signature", async (_name, deliveryId) => {
+    const w = await world();
+    expect((await w.post("issue_comment", comment(), { deliveryId })).status).toBe(403);
+    expect(w.logs).toEqual([{ event: "github_webhook.rejected", reason: "header" }]);
+    expect(w.secretCalls).toEqual([]);
+    expect(w.sentSince()).toEqual([]);
+  });
+
+  describe("through the real API Gateway event shapes (the adapter lower-cases the header names)", () => {
+    const REAL_DELIVERY = "c95a50d8-e79b-11f1-9a76-3cdc2bdcb8fe";
+    const sign = (raw: string, secret = SECRET) => `sha256=${createHmac("sha256", secret).update(raw).digest("hex")}`;
+    // A REST (v1) proxy event: mixed-case names plus multiValueHeaders. An HTTP (v2) event: lower-case names, `cookies`, requestContext.http.
+    const eventOf = (shape: "rest-v1" | "http-v2", event: string, raw: string, signature: string) => shape === "rest-v1"
+      ? { rawPath: "/v1/github/webhooks", body: raw, requestContext: { http: { method: "POST" }, requestId: "r1" },
+        headers: { "X-GitHub-Delivery": REAL_DELIVERY, "X-GitHub-Event": event, "X-Hub-Signature-256": signature, "Content-Type": "application/json" },
+        multiValueHeaders: { "X-GitHub-Delivery": [REAL_DELIVERY], "X-GitHub-Event": [event], "X-Hub-Signature-256": [signature] } }
+      : { rawPath: "/v1/github/webhooks", body: raw, requestContext: { http: { method: "POST" }, requestId: "r2" }, cookies: [],
+        headers: { "x-github-delivery": REAL_DELIVERY, "x-github-event": event, "x-hub-signature-256": signature, "content-type": "application/json" } };
+    const route = async (shape: "rest-v1" | "http-v2", event: string, payload: unknown, signWith = SECRET) => {
+      const w = await world();
+      const raw = JSON.stringify(payload);
+      const request = adaptHttpApiEvent(eventOf(shape, event, raw, sign(raw, signWith)));
+      const answer = await handleGithubWebhookRoute({ headers: request.headers, body: request.body, secret: async () => SECRET, isSecretMissing: () => false, now: () => NOW, log: (entry) => w.logs.push(entry), legacy: w.legacy,
+        core: { documentClient: w.db, tableName: "state", bindings: w.bindings } });
+      return { answer, w };
+    };
+    it.each(["rest-v1", "http-v2"] as const)("%s: a valid signature on issue_comment with the real v1 delivery id is processed", async (shape) => {
+      const { answer, w } = await route(shape, "issue_comment", comment());
+      expect(answer).toMatchObject({ status: 200, body: { delivery: "ACCEPTED", deliveryId: REAL_DELIVERY } });
+      expect(w.logs.some((entry) => entry.event === "github_webhook.rejected")).toBe(false);
+    });
+    it.each(["rest-v1", "http-v2"] as const)("%s: the same delivery with a bad signature is 403", async (shape) => {
+      const { answer, w } = await route(shape, "issue_comment", comment(), "forged-".padEnd(40, "f"));
+      expect(answer.status).toBe(403);
+      expect(w.logs.map((entry) => entry.event)).toEqual(["github_webhook.signature_invalid"]);
+    });
+    it.each(["rest-v1", "http-v2"] as const)("%s: a signed push is still 202 ignored", async (shape) => {
+      const { answer, w } = await route(shape, "push", { ref: "x" });
+      expect(answer).toEqual({ status: 202, body: { ignored: true } });
+      expect(w.logs).toEqual([{ event: "github_webhook.ignored", level: "info", reason: "unhandled_event", hook: "push", deliveryId: REAL_DELIVERY }]);
+    });
+  });
+
+  describe("signed deliveries the legacy handler refuses: ignored (202), conflict (409) or rejected (403), every one logged (HTTP v2 event shape)", () => {
+    const D = "c95a50d8-e79b-11f1-9a76-3cdc2bdcb8fe";
+    const prComment = (overrides: Record<string, unknown> = {}) => ({ action: "created", installation: { id: 77 }, repository: { id: 42, full_name: "example/demo" }, issue: { number: 7, pull_request: { url: "https://api.github.com/x" } },
+      comment: { id: 1, body: "private words", html_url: "https://github.com/example/demo/pull/7#issuecomment-1", updated_at: "2026-11-23T12:00:00Z", user: { login: "reviewer" } }, ...overrides });
+    // No core bindings: the delivery goes to the legacy handler (real handleGithubWebhook over the fake table), as on an install without them.
+    const legacyRoute = async (event: string, payload: unknown, options: { signWith?: string; deliveryId?: string; raw?: string; authorize?: boolean | "not_linked"; world?: Awaited<ReturnType<typeof world>> } = {}) => {
+      const w = options.world ?? await world();
+      const raw = options.raw ?? JSON.stringify(payload);
+      const signature = `sha256=${createHmac("sha256", options.signWith ?? SECRET).update(raw).digest("hex")}`;
+      const request = adaptHttpApiEvent({ rawPath: "/v1/github/webhooks", body: raw, requestContext: { http: { method: "POST" }, requestId: "v2" },
+        headers: { "x-github-delivery": options.deliveryId ?? D, "x-github-event": event, "x-hub-signature-256": signature } });
+      const answer = await handleGithubWebhookRoute({ headers: request.headers, body: request.body, secret: async () => SECRET, isSecretMissing: () => false, now: () => NOW, log: (entry) => w.logs.push(entry),
+        legacy: (secret) => handleGithubWebhook({ documentClient: w.db, tableName: "state", rawBody: raw, headers: request.headers, secret, now: () => new Date(NOW).toISOString(),
+          authorizeRepository: async () => options.authorize ?? true, process: async () => undefined }) });
+      return { answer, w };
+    };
+    const noDeliveryRow = (w: Awaited<ReturnType<typeof world>>) => expect(w.db.find((item) => String(item.pk).startsWith("GITHUB_DELIVERY#"))).toEqual([]);
+
+    it("(a) a comment on a PLAIN ISSUE (not a pull request) is 202 ignored with an info line, and writes nothing", async () => {
+      const { answer, w } = await legacyRoute("issue_comment", prComment({ issue: { number: 7 } }));
+      expect(answer).toEqual({ status: 202, body: { ignored: true, reason: "payload_unsupported" } });
+      expect(w.logs).toEqual([{ event: "github_webhook.ignored", level: "info", hook: "issue_comment", action: "created", reason: "payload_unsupported", deliveryId: D }]);
+      expect(JSON.stringify(w.logs)).not.toContain("private words");
+      expect(w.writesSince()).toEqual([]);
+      noDeliveryRow(w);
+    });
+
+    it("(a) a payload that does not parse, and an event the legacy path does not take, are 202 ignored too", async () => {
+      const bad = await legacyRoute("pull_request", { nonsense: true });
+      expect(bad.answer).toEqual({ status: 202, body: { ignored: true, reason: "payload_unsupported" } });
+      expect(bad.w.logs).toEqual([{ event: "github_webhook.ignored", level: "info", hook: "pull_request", reason: "payload_unsupported", deliveryId: D }]);
+      const unsupported = await legacyRoute("check_suite", checkSuite("completed"));
+      expect(unsupported.answer).toEqual({ status: 202, body: { ignored: true, reason: "event_unsupported" } });
+      expect(unsupported.w.logs).toEqual([{ event: "github_webhook.ignored", level: "info", hook: "check_suite", reason: "event_unsupported", deliveryId: D }]);
+      expect(unsupported.w.writesSince()).toEqual([]);
+    });
+
+    it("(b) a signed delivery for a repository or pull request NO Rovara task tracks is 202 ignored (not_linked) with an info line, and writes nothing", async () => {
+      const { answer, w } = await legacyRoute("issue_comment", prComment(), { authorize: "not_linked" });
+      expect(answer).toEqual({ status: 202, body: { ignored: true, reason: "not_linked" } });
+      expect(w.logs).toEqual([{ event: "github_webhook.ignored", level: "info", hook: "issue_comment", action: "created", reason: "not_linked", deliveryId: D }]);
+      expect(w.writesSince()).toEqual([]);
+      noDeliveryRow(w);
+    });
+
+    it("(b) a link that exists but disagrees with the live scope is a real violation: 403 with a warn line, nothing written", async () => {
+      const { answer, w } = await legacyRoute("issue_comment", prComment(), { authorize: false });
+      expect(answer.status).toBe(403);
+      expect(JSON.stringify(answer.body)).toContain("outside the registered installation and repository scope");
+      expect(w.logs).toEqual([{ event: "github_webhook.refused", level: "warn", hook: "issue_comment", action: "created", reason: "scope_mismatch", deliveryId: D }]);
+      expect(w.writesSince()).toEqual([]);
+      noDeliveryRow(w);
+    });
+
+    it.each([["check_run", { action: "completed" }], ["check_suite", checkSuite("completed")], ["status", { state: "success" }]])("%s on the legacy path says event unsupported (202 ignored), never the scope text", async (event, payload) => {
+      const { answer, w } = await legacyRoute(event, payload, { authorize: false });
+      expect(answer).toEqual({ status: 202, body: { ignored: true, reason: "event_unsupported" } });
+      expect(JSON.stringify(answer)).not.toContain("scope");
+      expect(w.logs).toEqual([{ event: "github_webhook.ignored", level: "info", hook: event, reason: "event_unsupported", deliveryId: D }]);
+    });
+
+    it("(c) a REUSED delivery id with DIFFERENT content is 409 with a warn line; the same content again is still a duplicate", async () => {
+      const w = await world();
+      expect((await legacyRoute("issue_comment", prComment(), { world: w })).answer).toMatchObject({ status: 200, body: { delivery: "ACCEPTED" } });
+      expect((await legacyRoute("issue_comment", prComment(), { world: w })).answer).toMatchObject({ status: 200, body: { delivery: "DUPLICATE" } });
+      w.logs.length = 0;
+      const other = await legacyRoute("issue_comment", prComment({ comment: { id: 2, body: "changed", html_url: "https://github.com/example/demo/pull/7#issuecomment-2", user: { login: "reviewer" } } }), { world: w });
+      expect(other.answer.status).toBe(409);
+      expect(other.answer.body).toMatchObject({ error: { code: "CONFLICT" } });
+      expect(w.logs).toEqual([{ event: "github_webhook.conflict", level: "warn", hook: "issue_comment", action: "created", reason: "delivery_id_reused", deliveryId: D }]);
+    });
+
+    it("(d) a refusal that stays a rejection (a signed body that is not JSON) is a logged 403", async () => {
+      const { answer, w } = await legacyRoute("issue_comment", undefined, { raw: "not json" });
+      expect(answer.status).toBe(403);
+      expect(w.logs).toEqual([{ event: "github_webhook.refused", level: "warn", hook: "issue_comment", reason: "refused", deliveryId: D }]);
+      expect(w.writesSince()).toEqual([]);
+    });
+
+    it("a BAD signature is 403 before any of this, whatever the payload (no unsigned probing of the scope or payload checks)", async () => {
+      for (const [event, payload, authorize] of [["issue_comment", prComment({ issue: { number: 7 } }), true], ["issue_comment", prComment(), false], ["issue_comment", prComment(), "not_linked"], ["issue_comment", prComment(), true]] as const) {
+        const { answer, w } = await legacyRoute(event, payload, { signWith: "forged-".padEnd(40, "f"), authorize });
+        expect(answer.status).toBe(403);
+        expect(w.logs).toEqual([{ event: "github_webhook.signature_invalid" }]);
+        expect(w.writesSince()).toEqual([]);
+      }
+    });
+
+    it("a handled, mappable delivery is unchanged: ACCEPTED and one delivery row", async () => {
+      const { answer, w } = await legacyRoute("issue_comment", prComment());
+      expect(answer).toMatchObject({ status: 200, body: { delivery: "ACCEPTED", deliveryId: D } });
+      expect(w.db.find((item) => String(item.pk).startsWith("GITHUB_DELIVERY#"))).toHaveLength(1);
+      expect(w.logs.some((entry) => entry.event === "github_webhook.ignored" || entry.event === "github_webhook.refused")).toBe(false);
+    });
+  });
+
+  it("a missing event header with a valid signature is still a 403 rejection", async () => {
+    const w = await world();
+    const answer = await w.post("issue_comment", comment(), { headers: { "x-github-event": undefined } });
+    expect(answer.status).toBe(403);
+    expect(w.logs).toEqual([{ event: "github_webhook.rejected", reason: "header" }]);
+  });
+
+  it("a handled event is unchanged by the unhandled-event path: ACCEPTED with its hint, never the ignored-unhandled answer", async () => {
+    const w = await world();
+    const answer = await w.post("issue_comment", comment());
+    expect(answer).toMatchObject({ status: 200, body: { delivery: "ACCEPTED" } });
+    expect(w.logs.some((entry) => entry.reason === "unhandled_event")).toBe(false);
+    expect(w.row().lastHintKind).toBe("comment");
   });
 
   it("makes no Secrets Manager read per forged request: malformed ones read none, well-formed forged ones force at most one re-read per interval", async () => {
@@ -208,7 +417,8 @@ describe("replay protection and the delivery rows", () => {
     const w = await world();
     await w.post("issue_comment", comment(), { deliveryId: "550e8400-e29b-41d4-a716-0000000000bb" });
     const other = await w.post("issue_comment", comment({ comment: { id: 2 } }), { deliveryId: "550e8400-e29b-41d4-a716-0000000000bb" });
-    expect(other.status).toBe(403);
+    expect(other.status).toBe(409);
+    expect(w.logs.at(-1)).toEqual({ event: "github_webhook.conflict", level: "warn", hook: "issue_comment", reason: "delivery_id_reused", deliveryId: "550e8400-e29b-41d4-a716-0000000000bb" });
   });
 
   it("binds the event name into the replay identity: a body signed for one event is not a duplicate of another", async () => {

@@ -350,7 +350,7 @@ it("pins the broker webhook route absent-mode accepted duplicate and refused byt
   golden("webhook-route-accepted", await invoke());
   golden("webhook-route-duplicate", await invoke());
   db.delete("GITHUB_PR#example/demo", "PR#0000000001");
-  golden("webhook-route-refused", await invoke(78));
+  golden("webhook-route-ignored", await invoke(78));
 });
 
 it("read-budget exhaustion stops before claiming and returns a continuation", async () => {

@@ -469,9 +469,9 @@ describe("the GitHub webhook route and a changed webhook secret", () => {
       return "old-secret-before-the-change".padEnd(40, "o");
     });
     const response = await post(webhookSecret, signedHeaders(pullRequestBody, "added-after-start-".padEnd(40, "x")));
-    // It gets past the signature check and stops at the registered-repository check (nothing is linked in this fixture).
-    expect(response.status).toBe(403);
-    expect(JSON.stringify(response.body)).toMatch(/registered installation and repository/);
+    // It gets past the signature check and stops at the registered-repository check (nothing is linked in this fixture): a signed delivery outside the scope is 202 ignored, not a 403.
+    expect(response.status).toBe(202);
+    expect(response.body).toMatchObject({ ignored: true, reason: "not_linked" });
     expect(webhookSecret.mock.calls).toEqual([[undefined], [{ refresh: true }]]);
   });
 
