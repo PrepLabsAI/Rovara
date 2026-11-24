@@ -118,7 +118,7 @@ def ControlJournalV1(v):
             for key in ('backingId','deviceId'): text(s['seal'][key],r'\d+:\d+')
         require(s['phase']!='sealed' or ('seal' in s and s['command']['action']=='retain'))
         require(s['phase']!='destroy-authorized' or s['command']['action']=='destroy')
-        if 'supersededBy' in s: uid(s['supersededBy']); require(s['phase']=='sealed')
+        if 'supersededBy' in s: uid(s['supersededBy']); require(s['phase']=='sealed' or (s['phase']=='intent' and 'seal' not in s and 'terminalReply' not in s))
         if 'terminalReply' in s:
             r=s['terminalReply']; reply(r)
             require(all(r[k]==v[k] for k in ('workspaceId','operationId','fence')) and r['action']==s['command']['action'])
@@ -322,7 +322,7 @@ def restore():
         state=path.get('closeRetention')
         if state and not state.get('supersededBy'):
             if state.get('schemaVersion')!=1: raise ValueError('unknown retention state')
-            held=True
+            held=held or not (state.get('phase')=='intent' and 'seal' not in state and 'terminalReply' not in state and os.stat(image(value)).st_mode&0o200)
     if not os.path.ismount(DATA):
         if held and 'needs_recovery' in run('tune2fs','-l',image(value)): raise ValueError('uncertain seal requires explicit recovery')
         device=run('losetup','--find','--show',*(['--read-only'] if held else []),image(value))

@@ -200,6 +200,16 @@ describe("replaying a retain the broker never confirmed", () => {
     expect(retention).toMatchObject({ inspectionOperationId: operationId, inspectionFence: 9, retentionId: "11111111-1111-4111-8111-111111111111", generation });
     expect(f.machines.deliver).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ kind: "close", operationId, fence: 9, payload: { schemaVersion: 1, action: "retain", target: generation } }));
   });
+  it("N1: a retained reply naming another retention (another preflight, fence or generation) is never taken as the selector: it is refused, not returned", async () => {
+    for (const wrong of [
+      (r: ReturnType<typeof retainedReply>) => ({ ...r, retention: { ...r.retention, inspectionOperationId: "22222222-2222-4222-8222-222222222222" }, operationId: r.operationId }),
+      (r: ReturnType<typeof retainedReply>) => ({ ...r, retention: { ...r.retention, inspectionFence: 5 } }),
+      (r: ReturnType<typeof retainedReply>) => ({ ...r, retention: { ...r.retention, generation: { ...(r.retention.generation as object), dataGeneration: "33333333-3333-4333-8333-333333333333" } } }),
+    ]) {
+      const w = await replayed((command) => wrong(retainedReply(command as never)));
+      await expect(w.run()).rejects.toBeDefined();
+    }
+  });
   it("answers nothing when the worker did not seal and answer (unavailable), and a reply for another operation is refused", async () => {
     const unavailable = await replayed((command) => ({ schemaVersion: 1, workspaceId: command.workspaceId, operationId: command.operationId, fence: command.fence, action: "retain", status: "unavailable", reason: "unproven" }));
     expect(await unavailable.run()).toBeUndefined();

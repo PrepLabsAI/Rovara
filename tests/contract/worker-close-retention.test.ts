@@ -253,6 +253,9 @@ describe("a step over a retention the broker never confirmed", () => {
     const step = plain(h, 10);
     expect((await h.executor().admitWriter(step)).duplicate).toBe(false);
     expect(h.storage.successor).not.toHaveBeenCalled();
+    // The passed intent is RETIRED in the journal (the host helper reads `supersededBy` at boot: an unsuperseded record mounts the volume read-only and pins its generation).
+    expect((await h.journal.get(h.invocation.operationId))?.closeRetention).toMatchObject({ phase: "intent", supersededBy: step.operationId });
+    expect((await h.journal.readRecords()).filter((r) => r.closeRetention !== undefined && r.closeRetention.supersededBy === undefined)).toEqual([]);
     // The retain of the old fence cannot come back and seal under the step.
     h.storage.seal.mockResolvedValue(h.seal);
     await h.journal.transition(step.operationId, "RUNNING"); await h.journal.transition(step.operationId, "SUCCEEDED");
@@ -260,11 +263,13 @@ describe("a step over a retention the broker never confirmed", () => {
     expect(h.storage.seal).toHaveBeenCalledTimes(1);
   });
 
-  it("the NEXT check's retain (a higher fence, another operation) also goes past a never-answered intent", async () => {
+  it("the NEXT check's retain (a higher fence, another operation) also goes past a never-answered intent, which it retires", async () => {
     const h = await fixture(); h.storage.seal.mockRejectedValueOnce(new Error("remount busy"));
     await h.executor().answer(h.invocation);
-    const next = await h.executor().answer({ ...h.invocation, operationId: randomUUID(), fence: 11 });
+    const nextId = randomUUID();
+    const next = await h.executor().answer({ ...h.invocation, operationId: nextId, fence: 11 });
     expect(next.status).toBe("retained");
+    expect((await h.journal.get(h.invocation.operationId))?.closeRetention?.supersededBy).toBe(nextId);
   });
 
   it("the same fence, or a lower one, never goes past it", async () => {
@@ -279,6 +284,13 @@ describe("a step over a retention the broker never confirmed", () => {
     await expect(h.executor().admitWriter(plain(h, 10))).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
     expect(h.storage.successor).not.toHaveBeenCalled();
     expect((await h.journal.get(h.invocation.operationId))?.closeRetention).toMatchObject({ phase: "sealed", terminalReply: first });
+    expect((await h.journal.get(h.invocation.operationId))?.closeRetention?.supersededBy).toBeUndefined();
+  });
+
+  it("a read-only admission (cancel, steer, peek) goes past an intent without retiring or raising anything: only an admitted writer or check does", async () => {
+    const h = await fixture(); h.storage.seal.mockRejectedValue(new Error("remount busy"));
+    await h.executor().answer(h.invocation);
+    await h.journal.assertFence({ workspaceId: h.invocation.workspaceId, fence: 10 });
     expect((await h.journal.get(h.invocation.operationId))?.closeRetention?.supersededBy).toBeUndefined();
   });
 

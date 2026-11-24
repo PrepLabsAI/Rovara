@@ -187,7 +187,7 @@ mount_workspace() {
   log "mounted $AGENTX_VOLUME_ID at $MOUNT_PATH"
 }
 
-readonly CLOSE_HELPER_SHA256=5557378eac3fa2a33f2ea8b5fe801dcd257996a9af30440445336d3ca86655c0
+readonly CLOSE_HELPER_SHA256=35eee60fc2ac9de8976bcdfca1554272a1431640c4a1e57f4bedb0d4c9fae82c
 readonly HOST_RUN=/run/agentx-close-retention-host
 readonly RESTORE_UNIT=agentx-close-retention-restore.service
 quiesce_workspace_containers() {

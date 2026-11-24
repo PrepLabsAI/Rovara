@@ -42,9 +42,13 @@ export class OperationJournal {
       // Recheck under the same lock as the append and destructive raise. The
       // HTTP admission check alone would leave a check-then-write gap.
       await this.checkFence(invocation);
-      const passedIntent = await this.checkRetention(invocation);
-      // Going past a never-answered intent raises the fence in the same lock: the old command can no longer seal under this work.
-      if (passedIntent) await this.persistFence(invocation.workspaceId, invocation.fence);
+      const passed = await this.checkRetention(invocation);
+      if (passed.length > 0) {
+        // Going past a never-answered intent raises the fence in the same lock (the old command can no longer seal under this work) and RETIRES the intent: `supersededBy` is what the host helper reads at boot
+        // (`restore` mounts read-only for an unsuperseded record, `validate_boot` pins its generation), so a passed intent must never outlive this admission as a hold.
+        await this.persistFence(invocation.workspaceId, invocation.fence);
+        for (const record of passed) await this.saveRetention(record.operationId, { ...record.closeRetention!, supersededBy: invocation.operationId });
+      }
       return this.append(invocation);
     });
   }
@@ -215,17 +219,17 @@ export class OperationJournal {
     await this.syncDirectory(this.directory);
   }
 
-  /** Throws when retained data holds the workspace; true when it went past a never-answered intent (see `supersededByNewerFence`). */
-  private async checkRetention(input: Pick<WorkerInvocation, "workspaceId" | "fence">): Promise<boolean> {
-    let passedIntent = false;
+  /** Throws when retained data holds the workspace; returns the never-answered intents it went past (see `supersededByNewerFence`). */
+  private async checkRetention(input: Pick<WorkerInvocation, "workspaceId" | "fence">): Promise<JournalRecord[]> {
+    const passed: JournalRecord[] = [];
     for (const record of await this.readRecords()) {
       if (record.workspaceId !== input.workspaceId || record.closeRetention === undefined || record.closeRetention.supersededBy !== undefined) continue;
       // Even the same fence cannot write after an intent. Only the originating close command may replay.
       if (matchesRetainedCommand(input, record) || matchesSuccessor(input, record)) continue;
-      if (supersededByNewerFence(input, record)) { passedIntent = true; continue; }
+      if (supersededByNewerFence(input, record)) { passed.push(record); continue; }
       throw agentXError("IDEMPOTENCY_CONFLICT", "workspace data is held by a retained inspection");
     }
-    return passedIntent;
+    return passed;
   }
 
   private path(operationId: string): string {

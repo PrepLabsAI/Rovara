@@ -69,7 +69,11 @@ export function createDispatcherCloseInspection(deps: HostedCloseDeps): CloseIns
     },
     replayRetention: async (workspaceId, unconfirmed) => {
       const reply = await command(workspaceId, unconfirmed.operationId, unconfirmed.fence, { schemaVersion: 1, action: "retain", target: unconfirmed.generation });
-      return reply.status === "retained" && reply.action === "retain" ? reply.retention : undefined;
+      if (reply.status !== "retained" || reply.action !== "retain") return undefined;
+      // The reply must name exactly what was asked for: the selector releases whichever retention it equals, so a reply about another preflight is never taken.
+      const named = reply.retention;
+      if (named.inspectionOperationId !== unconfirmed.operationId || named.inspectionFence !== unconfirmed.fence || !equal(named.generation, unconfirmed.generation)) throw new Error("retention reply names another retention");
+      return named;
     },
     noteRuntime: async (workspaceId, health, operation) => {
       const session = await sessionFor(workspaceId), generation = health.workspaceDataIdentity;

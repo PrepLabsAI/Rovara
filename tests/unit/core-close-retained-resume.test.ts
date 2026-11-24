@@ -4,7 +4,7 @@
 import { textField } from "../support/close-recovery-harness.js";
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { AgentXError, change, workspaceSessionKey } from "@agentx/contracts";
+import { AgentXError, MachineError, change, workspaceSessionKey } from "@agentx/contracts";
 import { createHarness } from "../support/task-flow-harness.js";
 import { prepareCloseInspection } from "../../packages/broker/src/core/task-flow/close-inspection.js";
 import { createTaskActions } from "../../packages/broker/src/core/task-flow/task-actions.js";
@@ -171,8 +171,8 @@ describe("an unconfirmed retention (the worker never confirmed it)", () => {
     expect(sent[0]).toMatchObject({ supersedesRetention: w.retained });
   });
 
-  it("dispatch: when the worker has nothing sealed to replay (or the replay fails), the step goes without a selector, and a confirmed step's own selector is never replaced", async () => {
-    for (const replay of [async () => undefined, async () => { throw new Error("worker unreachable"); }]) {
+  it("dispatch: a DEFINITIVE answer that is not a retention (nothing sealed to replay, or the worker refused the replay) sends the step without a selector; a confirmed step is never replayed", async () => {
+    for (const replay of [async () => undefined, async () => { throw new MachineError("rejected", "the worker refused the job (HTTP 409)"); }]) {
       const w = await unconfirmed("STOPPED");
       const sent = await delivered(w, replay);
       expect(sent).toHaveLength(1);
@@ -184,6 +184,22 @@ describe("an unconfirmed retention (the worker never confirmed it)", () => {
     await createTaskActions(confirmed.h.deps).continue(confirmed.h.owner, confirmed.task.taskId, { requestId: randomUUID(), instructions: "more work" });
     await dispatchUntilSent(confirmed.h);
     expect(replay).not.toHaveBeenCalled();
+  });
+
+  it("F-B: a replay that could not be ASKED (the worker not ready, unreachable, a bad reply) is never an answer: the step is NOT sent plain, it is tried again and still names what it took over, and when the worker answers it carries the retention", async () => {
+    for (const fault of [new MachineError("unavailable", "the worker could not be reached"), new MachineError("not_ready", "the machine is starting"), new Error("bad reply")]) {
+      const w = await unconfirmed("STOPPED");
+      let calls = 0;
+      const replay = vi.fn(async () => { calls += 1; if (calls <= 2) throw fault; return w.retained; });
+      const sent = await delivered(w, replay);
+      // Never a plain step while the worker could not be asked; once it answered, exactly one step carrying the retention.
+      for (const invocation of sent) expect(invocation).toMatchObject({ supersedesRetention: w.retained });
+      expect(calls).toBeGreaterThanOrEqual(1);
+      const step = (await operations(w)).find((item) => item["kind"] === "task")!;
+      expect(step["supersedesUnconfirmed"]).toEqual({ operationId: w.holder, fence: w.retained.inspectionFence, generation: w.retained.generation });
+      expect(["INTERRUPTED"]).not.toContain(step["status"]);
+      expect(step["error"]).toBeUndefined();
+    }
   });
 
   it("while the instance RUNS (READY) nothing is taken over: the idle rule ends it first; Continue is refused and nothing is written", async () => {

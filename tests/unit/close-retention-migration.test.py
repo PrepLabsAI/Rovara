@@ -180,6 +180,89 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(restored, [True])
         with self.assertRaises(ValueError): self.ns['migrate'](self.workspace, '4', *self.args[2:])
 
+    # ---- F-A (Opus review 4eda07a26): the helper's rule for an INTENT (a retain never sealed, never answered) must match the worker journal's ----
+    def intent_world(self, image_mode=0o600, passed=False, phase='intent', old_generation=False, seal_on_intent=False):
+        """A current layout with one retain record at fence 9 (and its image), the journal and the fence file the worker leaves."""
+        import hashlib, json
+        self.journal.mkdir(parents=True, mode=0o700)
+        gen = dict(sessionGeneration=3, instanceId=self.args[2], volumeId=self.args[3], dataGeneration=str(uuid.uuid4()))
+        value = dict(schemaVersion=1, workspaceId=self.workspace, filesystemId=str(uuid.uuid4()), generation=gen)
+        if old_generation:
+            value = dict(value, generation=dict(gen, dataGeneration=str(uuid.uuid4())))
+        self.ns['save'](str(self.control / 'current.json'), value)
+        (self.control / 'generations').mkdir(mode=0o700, exist_ok=True)
+        image = self.control / 'generations' / (value['generation']['dataGeneration'] + '.ext4')
+        image.write_bytes(b'x'); image.chmod(image_mode)
+        (self.root / 'data').mkdir(mode=0o755, exist_ok=True)
+        command = dict(schemaVersion=1, action='retain', target=gen)
+        record = copy.deepcopy(self.record)
+        digest = hashlib.sha256(json.dumps(dict(kind='close', workspaceId=self.workspace, operationId=record['operationId'], fence=9, payload=command), sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        state = dict(schemaVersion=1, commandHash=digest, generation=gen, command=command, phase=phase)
+        if phase == 'sealed' or seal_on_intent:
+            state['seal'] = dict(filesystemId=value['filesystemId'], backingId='1:1', deviceId='7:1')
+        if passed:
+            state['supersededBy'] = str(uuid.uuid4())
+        record.update(payloadHash=digest, closeRetention=state)
+        self.ns['save'](str(self.journal / (record['operationId'] + '.json')), record)
+        (self.journal / 'fences').mkdir(mode=0o700)
+        self.ns['save'](str(self.journal / 'fences' / (self.workspace + '.json')), 11 if passed else 9)
+        return value, record
+
+    def restored_read_only(self, **world):
+        self.intent_world(**world)
+        calls = []
+        def fake(*args):
+            calls.append(args)
+            if args[:2] == ('losetup', '--find'): return '/dev/loop7'
+            return ''
+        self.ns['run'] = fake
+        self.ns['sealed'] = lambda value: None
+        self.ns['publish_view'] = lambda value: None
+        self.enter(patch.object(self.ns['os'].path, 'ismount', return_value=False))
+        self.ns['restore']()
+        mount = next(c for c in calls if c[0] == 'mount')
+        return '--read-only' in next(c for c in calls if c[:2] == ('losetup', '--find')), mount
+
+    def test_a_retired_intent_is_valid_journal_state_and_a_sealed_record_with_a_seal_still_is(self):
+        _, record = self.intent_world(passed=True)
+        self.ns['ControlJournalV1'](record)
+        bad = copy.deepcopy(record); bad['closeRetention']['seal'] = dict(filesystemId=str(uuid.uuid4()), backingId='1:1', deviceId='7:1')
+        with self.assertRaises(ValueError): self.ns['ControlJournalV1'](bad)
+
+    def test_restore_mounts_read_write_under_an_intent_that_never_started_sealing_and_read_only_otherwise(self):
+        for name, world, read_only in [
+            ('an unsuperseded intent, image still writable (never sealed)', dict(), False),
+            ('an intent retired by newer work', dict(passed=True), False),
+            ('an intent whose image the host already made read-only (the seal crashed half way)', dict(image_mode=0o400), True),
+            ('an intent that already carries a seal record', dict(seal_on_intent=True), True),
+            ('a sealed retention', dict(phase='sealed', image_mode=0o400), True),
+        ]:
+            with self.subTest(name):
+                self.tearDown_world()
+                flag, mount = self.restored_read_only(**world)
+                self.assertEqual(flag, read_only)
+                self.assertEqual('ro,noload,noatime' in mount, read_only)
+
+    def tearDown_world(self):
+        import shutil
+        for child in list(self.control.iterdir()):
+            shutil.rmtree(child) if child.is_dir() and not child.is_symlink() else child.unlink()
+        data = self.root / 'data'
+        if data.exists(): shutil.rmtree(data)
+
+    def test_validate_boot_skips_a_retired_intent_of_an_older_generation_and_refuses_an_unretired_one(self):
+        for passed, refused in [(True, False), (False, True)]:
+            with self.subTest(passed=passed):
+                self.tearDown_world()
+                value, record = self.intent_world(passed=passed)
+                # The generation rotated since the intent (a confirmed hand-over): the current layout names another.
+                rotated = dict(value, generation=dict(value['generation'], dataGeneration=str(uuid.uuid4())))
+                self.ns['save'](str(self.control / 'current.json'), rotated)
+                if refused:
+                    with self.assertRaises(ValueError): self.ns['validate_boot'](*self.args)
+                else:
+                    self.assertEqual(self.ns['validate_boot'](*self.args), rotated)
+
 
 if __name__ == '__main__':
     unittest.main()

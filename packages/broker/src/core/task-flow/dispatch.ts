@@ -421,7 +421,12 @@ async function deliverNotingRuntime(deps: TaskFlowDeps, workspaceId: string, mac
  */
 async function withUnconfirmedSelector(deps: TaskFlowDeps, operation: OperationRecord, invocation: WorkerInvocation): Promise<WorkerInvocation> {
   if (operation.supersedesUnconfirmed === undefined || invocation.supersedesRetention !== undefined || deps.closeInspection?.replayRetention === undefined) return invocation;
-  const selector = await deps.closeInspection.replayRetention(operation.workspaceId, operation.supersedesUnconfirmed).catch(() => undefined);
+  // Only a DEFINITIVE answer decides: the worker said it holds no such retention (or refused the replay: a newer close owns the fence), so the step goes without a selector. A transport or readiness fault (the
+  // worker not ready, unreachable, a bad reply) is NOT an answer: it is rethrown, so the delivery is tried again later and the step still names what it took over (`supersedesUnconfirmed` stays on the operation).
+  // Never send the step plain over a worker that merely could not be asked: over a sealed retention it would be refused and the task would wedge.
+  let selector;
+  try { selector = await deps.closeInspection.replayRetention(operation.workspaceId, operation.supersedesUnconfirmed); }
+  catch (error) { if (error instanceof MachineError && error.code === "rejected") return invocation; throw error; }
   return selector === undefined ? invocation : { ...invocation, supersedesRetention: selector };
 }
 

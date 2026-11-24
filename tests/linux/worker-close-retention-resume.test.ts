@@ -69,6 +69,10 @@ it.runIf(process.env.CODE_CI_LINUX === "1")("F3: a Continue over a sealed retent
   await runRootProof(unconfirmedContinueProof, image(), 180_000);
 }, 190_000);
 
+it.runIf(process.env.CODE_CI_LINUX === "1")("F-A: an intent that newer work passed is retired in the journal, so the REBOOTED helper mounts the volume read-write, validate_boot passes after the generation rotates, and the admitted writer writes", async () => {
+  await runRootProof(intentRebootProof, image(), 240_000);
+}, 250_000);
+
 it.runIf(process.env.CODE_CI_LINUX === "1")("N-F1: a worker ended in the middle of a retain leaves the retention complete or absent, the volume intact and no writer admitted, and the next retain succeeds", async () => {
   await runRootProof(stopMidRetainProof, image(), 180_000);
 }, 190_000);
@@ -133,6 +137,56 @@ const proofFinally = String.raw`
   }
 }
 `;
+
+// F-A (Opus review 4eda07a26): the host helper reads the journal at BOOT, so the proof reboots: it runs the helper's own restore + validate_boot (`init`) over the journal the pass leaves, not a same-process worker.
+const intentRebootProof = proofPrelude + String.raw`
+  const helperArgs=[workspaceId,'3','i-0123456789abcdef0','vol-0123456789abcdef0'];
+  const options=async()=>(await command('findmnt','-n','-o','OPTIONS','--target',ROOT+'/data')).split(',');
+  const startWorker=()=>{
+    const j=new OperationJournal(ROOT+'/data',ROOT+'/.agentx-control/journal'), st=new HostCloseRetentionStorage();
+    const ex=new CloseRetentionExecutor(j,st,async()=>inspectWorkspaceForClose(ROOT+'/data'),()=>false);
+    const sv=createWorkerServerState(j,{execute:async()=>{},retention:i=>ex.answer(i),admit:i=>ex.admitWriter(i)});
+    return {journal:j,send:async(i)=>{const response=await handleWorkerRequest(new Request('http://worker/invocations',{method:'POST',body:JSON.stringify(i)}),sv);return {status:response.status,body:await response.json()};}};
+  };
+  // The instance goes away and comes back: serve stopped, the data filesystem detached, then the helper's init (validate_boot + restore) and a new serve.
+  const reboot=async()=>{
+    daemon.kill('SIGTERM'); await once(daemon,'exit'); daemon=undefined;
+    await command('umount','--recursive',RUN+'/view');
+    const current=JSON.parse(await readFile(ROOT+'/.agentx-control/current.json','utf8'));
+    const backing=ROOT+'/.agentx-control/generations/'+current.generation.dataGeneration+'.ext4';
+    const device=await command('losetup','--associated',backing,'--output','NAME','--noheadings');
+    await command('umount',ROOT+'/data'); await command('losetup','--detach',device);
+    assert.equal(await command('bash',helper,'init',...helperArgs),'migrated','validate_boot and restore must accept the journal');
+    daemon=spawn('bash',[helper,'serve',...helperArgs],{stdio:['ignore','ignore','pipe']});
+    for(let i=0;i<100;i++){try{await new HostCloseRetentionStorage().identity();break;}catch{await new Promise(r=>setTimeout(r,20));}}
+  };
+  // C1: a check whose seal is refused (an old writer holds the file) leaves an INTENT behind.
+  writer=spawn('python3',['-u','-c','import sys,mmap; f=open(sys.argv[1],"r+b"); m=mmap.mmap(f.fileno(),0); print("ready",flush=True); sys.stdin.readline()',ROOT+'/data/repo/value'],{stdio:['pipe','pipe','pipe']});
+  const lines=createInterface({input:writer.stdout})[Symbol.asyncIterator](); assert.equal((await lines.next()).value,'ready');
+  assert.equal((await send(invocation)).body.status,'unavailable','an old mapping must prevent the seal');
+  writer.stdin.end('stop\n'); await once(writer,'exit'); writer=undefined;
+  // Reboot 1: the intent is unretired and its image was never made read-only: the volume comes back READ-WRITE (restore must not hold it).
+  await reboot();
+  assert.ok(!(await options()).includes('ro'),'an intent that never sealed must not mount the volume read-only');
+  // The Continue passes the intent (no selector): admitted, the intent is retired, the writer writes.
+  let worker=startWorker();
+  const stepId=randomUUID();
+  const step=await worker.send({...invocation,kind:'task',operationId:stepId,fence:11,payload:{conversationId:randomUUID(),prompt:'continue'}});
+  assert.notEqual(step.status,409,'a never-answered intent must not hold the task');
+  const retired=await worker.journal.get(invocation.operationId); assert.equal(retired.closeRetention.supersededBy,stepId,'the passed intent must be retired');
+  await writeFile(ROOT+'/data/repo/value','continued work\n');
+  await worker.journal.transition(stepId,'RUNNING').catch(()=>{}); await worker.journal.transition(stepId,'SUCCEEDED').catch(()=>{});
+  // Reboot 2: validate_boot over the retired intent, then a check retains (C2) and its CONFIRMED hand-over rotates the generation.
+  await reboot(); assert.ok(!(await options()).includes('ro'));
+  worker=startWorker();
+  const second=await worker.send({...invocation,operationId:randomUUID(),fence:12}); assert.equal(second.body.status,'retained');
+  const handOver=await worker.send({...invocation,kind:'task',operationId:randomUUID(),fence:13,payload:{conversationId:randomUUID(),prompt:'more'},supersedesRetention:second.body.retention});
+  assert.notEqual(handOver.status,409,'the confirmed hand-over must be admitted');
+  const rotated=JSON.parse(await readFile(ROOT+'/.agentx-control/current.json','utf8')).generation.dataGeneration; assert.notEqual(rotated,generation.dataGeneration);
+  // Reboot 3, AFTER the generation rotated: validate_boot must not trip over the retired intent of the old generation, and the new generation is writable.
+  await reboot(); assert.ok(!(await options()).includes('ro'),'the successor generation is writable');
+  await writeFile(ROOT+'/data/repo/value','after rotation\n');
+` + proofFinally;
 
 const unconfirmedContinueProof = proofPrelude + String.raw`
   // The worker seals and answers; the broker "loses" the reply: nothing is saved on its side, and no superseding step is ever sent.
