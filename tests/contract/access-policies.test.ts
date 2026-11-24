@@ -318,11 +318,15 @@ describe("deploy permission boundary (the CloudFormation service role and the op
       { Action: ["iam:*User*", "iam:*Group*"], Resource: "*" },
       { Action: ["iam:CreatePolicy*", "iam:*PolicyVersion*", "iam:DeletePolicy", "iam:SetDefaultPolicyVersion"], Resource: "*" },
       // TWO-BOUNDARIES: neither boundary can be edited by a role that carries either.
-      { Action: ["iam:*Policy*"], Resource: ["arn:aws:iam::123456789012:policy/agentx/staging/agentx-staging-boundary", "arn:aws:iam::123456789012:policy/agentx/staging/agentx-staging-deploy-boundary"] },
+      // ONE pattern for both (VENDOR FIX: the managed-policy size limit; the release denies need one ARN per service). The two checks below prove it names both boundaries.
+      { Action: ["iam:*Policy*"], Resource: "arn:aws:iam::123456789012:policy/agentx/staging/agentx-staging-*boundary" },
       { Action: ["iam:DeleteRolePermissionsBoundary"], Resource: "arn:aws:iam::123456789012:role/agentx/staging/*" },
       // No role may switch the DNS firewall to fail open, share it, or route DNS around it.
       { Action: ["route53resolver:UpdateFirewallConfig", "route53resolver:Put*Policy", "route53resolver:CreateResolverEndpoint", "route53resolver:CreateResolverRule", "route53resolver:AssociateResolverRule"], Resource: "*" },
     ]);
+    const pattern = new RegExp(`^${(denies.find((s) => s.Sid === "DenyBoundaryChanges")!.Resource as string).replace(/[.+?^${}()|[\]\\]/gu, "\\$&").replaceAll("*", ".*")}$`, "u");
+    expect(["arn:aws:iam::123456789012:policy/agentx/staging/agentx-staging-boundary", "arn:aws:iam::123456789012:policy/agentx/staging/agentx-staging-deploy-boundary"].every((arn) => pattern.test(arn))).toBe(true);
+    expect(["arn:aws:iam::123456789012:policy/agentx/prod/agentx-prod-boundary", "arn:aws:iam::123456789012:policy/agentx/staging/agentx-staging-something-else"].some((arn) => pattern.test(arn))).toBe(false);
     // The only Conditions: the CloudFormation role rule and the release pipeline key deny (by key alias, since the key's ARN is generated); the access stack's role rules are Allows.
     expect(denies.filter((s) => s.Condition !== undefined).map((s) => s.Sid)).toEqual(["DenyCfnWithoutEnvRole", "DenyReleaseKey"]);
   });

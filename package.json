@@ -37,7 +37,8 @@
     "release:verify": "tsx scripts/release/verify.ts",
     "release:pack-cli": "tsx scripts/release/pack-cli.ts",
     "swebench:runner-image": "tsx scripts/swebench-runner-image.ts",
-    "infra:synth": "npm run build --workspace @agentx/infra && cdk synth --app 'node infra/dist/bin/agentx.js'"
+    "infra:synth": "npm run build --workspace @agentx/infra && cdk synth --app 'node infra/dist/bin/agentx.js'",
+    "iam:validate": "tsx scripts/validate-iam-policies.ts"
   },
   "devDependencies": {
     "@aws-sdk/client-cloudformation": "3.1134.0",

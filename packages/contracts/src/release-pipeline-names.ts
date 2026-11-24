@@ -47,7 +47,7 @@ export function releasePipelineNames(env: string, kind = "code"): {
  * build projects, approval, alert topics, KMS key, and (write actions) the environment's access stack. The pipeline's own roles carry the pipeline stack's boundary instead (a role has
  * exactly one), so these never apply to them. Every resource is this environment's (the env is in each name), over any region and any kind (`code`, `cloud`). The account is a wildcard,
  * not this account: the roles cannot reach another account's resources anyway, and the 6,144-character managed policy limit pays for every character, so the five resources that share
- * the name shape `rovara-<env>-<kind>-rel...` (both buckets, the projects, the pipeline, the alert topic, the key alias) are ONE pattern.
+ * the name shape `rovara-<env>-<kind>-rel...` (both buckets, the projects, the pipeline, the alert topic, the key alias) are one pattern each in their own service's ARN (IAM needs a literal service).
  */
 export function releasePipelineDenyStatements(scope: Pick<PolicyScope, "env" | "partition">): PolicyStatementJson[] {
   const { env, partition } = scope;
@@ -68,7 +68,15 @@ export function releasePipelineDenyStatements(scope: Pick<PolicyScope, "env" | "
       Resource: [
         arn("ssm", `parameter${names.parameterPrefix}*`),
         arn("secretsmanager", `secret:rovara-release/${env}/*`),
-        `arn:${partition}:*rovara-${env}-*rel*`,
+        // VENDOR FIX: IAM refuses a Resource whose SERVICE (third ARN component) is not a literal name ("Resource vendor must be fully qualified and cannot contain regexes"), so the single
+        // `arn:<partition>:*rovara-<env>-*rel*` this was cannot be created. One ARN per service of the five resources that share the name shape, each as wide as that service's ARN can be.
+        // (The old pattern also matched ssm, secretsmanager and cloudformation ARNs of this name shape; the pipeline's own parameters, secret and stacks are named by the entries above and below, and its
+        // own stack by DenyCfnOutsideEnvStacks, so those three services are not repeated: the room is the managed-policy limit's.)
+        `arn:${partition}:s3:::rovara-${env}-*rel*`,
+        arn("codebuild", `project/rovara-${env}-*rel*`),
+        arn("codepipeline", `rovara-${env}-*rel*`),
+        arn("sns", `rovara-${env}-*rel*`),
+        arn("kms", `alias/rovara-${env}-*rel*`),
         arn("cloudformation", `stack/agentx-${env}-access/*`),
       ],
     },

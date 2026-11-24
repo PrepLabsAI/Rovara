@@ -374,7 +374,9 @@ function boundaryDenyStatements(scope: BoundaryScope): PolicyStatementJson[] {
       Action: ["iam:CreatePolicy*", "iam:*PolicyVersion*", "iam:DeletePolicy", "iam:SetDefaultPolicyVersion"],
       Resource: "*",
     },
-    { Sid: "DenyBoundaryChanges", Effect: "Deny", Action: ["iam:*Policy*"], Resource: [defaultBoundaryArn(scope), deployBoundaryArn(scope)] },
+    // One pattern for both boundaries (`agentx-<env>-boundary` and `agentx-<env>-deploy-boundary`), not two ARNs: the managed-policy size limit pays for every character (the release pipeline's
+    // per-service denies, VENDOR FIX, needed the room). It names no policy the pair does not (`*boundary` under this environment's path and name prefix), so the Deny is no narrower.
+    { Sid: "DenyBoundaryChanges", Effect: "Deny", Action: ["iam:*Policy*"], Resource: `arn:${scope.partition}:iam::${scope.account}:policy${environmentRolePath(scope.env)}agentx-${scope.env}-*boundary` },
     // Never remove a boundary from a role (no Allow lists it either; the explicit Deny keeps a later Allow from opening it).
     { Sid: "DenyBoundaryRemoval", Effect: "Deny", Action: ["iam:DeleteRolePermissionsBoundary"], Resource: roles },
     // The DNS firewall fails closed and is the VPC's only resolver path: no AgentX role may switch it to fail open, share it, or route DNS around it, whatever a later Allow says.
