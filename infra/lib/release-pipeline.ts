@@ -203,11 +203,15 @@ export const CLOUD_STEPS_AFTER_CODE = [
   { action: "CloudProof", step: "proof" },
 ] as const;
 export const AGENTX_RELEASE_AWS_CLI_VERSION = "2.36.47";
+// Every stack the release scripts name (scripts/release-production.ts, release-common.ts): the release roles may read these (cloudformation:DescribeStacks) and no more.
+// A stack the release only READS still belongs here: without the grant, DescribeStacks answers AccessDenied, which the release cannot tell from a missing stack (train 41: AgentXApiAddress).
+// tests/contract/release-stacks-list.test.ts fails if a stack the scripts name is missing. Append only: [0] is the install's GitHub App stack for CI's proof.
 export const AGENTX_RELEASE_STACKS = [
   "AgentXControlPlane",
   "AgentXProductionFoundation",
   "AgentXProductionRuntime",
   "AgentXSlackOrchestrator",
+  "AgentXApiAddress",
 ] as const;
 // Deployable inputs only: the worker and Slack orchestrator images, the control-plane Lambdas, and the CDK app.
 // packages/aws-adapters is left out on purpose: the legacy production template must stay byte-identical, and the images take only that

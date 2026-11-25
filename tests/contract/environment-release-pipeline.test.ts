@@ -911,4 +911,6 @@ function regionPattern(): string {
 //      when codeconnections: / codestar-connections:ProviderPermissionsRequired is read_write (StringEquals, so a request without the key is not denied), so the step that runs before the owner's approval can clone but not push (11 -> 13 statements; nothing else moved).
 //      Interim pin of the first draft of this hunk (StringNotEquals read_only): 84adb7fbf8b04fd6b8d84124c09eb547e7b0cdd73c875ab69affce9f65b461a9.
 // No parameter, output, bucket, trigger, variable, other role or other policy moved; no role was given any codepipeline permission (release-pipeline-prod-approval.test.ts pins that).
-const PRODUCTION_PIPELINE_TEMPLATE_SHA256 = "7e66d04fc164d8a3edc90962636c21a8d514ec15369e0275dc04fa8283a30d46";
+// RELEASE-STACKS-ADDRESS (2026-11-25; pin before it: 7e66d04fc164d8a3edc90962636c21a8d514ec15369e0275dc04fa8283a30d46): the release roles may read the address stack. Changed, and only these (nothing added or removed; shown by a resource-by-resource comparison of the synthesized templates before and after):
+// ReleaseBuildRoleDefaultPolicy and BetaReleaseBuildRoleDefaultPolicy, whose ReadReleaseStacks cloudformation:DescribeStacks statement gains one resource, stack/AgentXApiAddress/* (AGENTX_RELEASE_STACKS gained "AgentXApiAddress"). The legacy-templates snapshot changes by those two resources.
+const PRODUCTION_PIPELINE_TEMPLATE_SHA256 = "ddd23afa7a00a60f4559a3fd980009d3b476e0a5cead70d1e3e0307faa5f927b";
