@@ -54,6 +54,7 @@ import type { TaskCaller } from "../core/task-flow/deps.js";
 import type { TaskRecord } from "../core/task-flow/records.js";
 import { loadOwnedTask, loadReadableTask, readTask, taskViewOf } from "../core/task-flow/reads.js";
 import { coreTaskRuleOf } from "./task-rule-paths.js";
+import { routeTaskScreen, taskScreenRoute } from "./task-screen-routes.js";
 import { involvedListOptions, listInvolvedTasks, wantsInvolved } from "../core/task-flow/involved.js";
 import type { TaskActionsOptions } from "../core/task-flow/owner-round.js";
 import { createTaskActions, type TaskActions } from "../core/task-flow/task-actions.js";
@@ -337,7 +338,7 @@ function owns(path: string, method: string, query: string): boolean {
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
   if (isSetupRunPath(path, method) || isSetupCheckPath(path, method) || isWikiMapPath(path, method) || isReportPath(path, method)) return true;
   if (isKnownFailingPath(path, method) || isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method) || isEvalCheckPath(path, method) || isBrowserTestingPath(path, method) || isAgentDirectoryPath(path, method) || isSystemRunsPath(path, method) || isPackageRegistriesPath(path, method) || isTicketUpdatesPath(path, method) || isIntakePath(path, method)) return true;
-  return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path) || parityTaskRoute(path, method) !== undefined || isPrFeedbackPath(path, method);
+  return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path) || parityTaskRoute(path, method) !== undefined || isPrFeedbackPath(path, method) || taskScreenRoute(path, method) !== undefined;
 }
 /** Neither decisions surface relies on sign-in time or methods (DEC 254zzz73). */
 function decisionCallerOf(caller: DeployedCaller, companyId: string): DeployedDecisionCaller {
@@ -571,6 +572,9 @@ async function feedbackAnswer(target: Mounted, request: BrokerRequest, taskCalle
 function taskSurfaceAnswer(target: Mounted, request: BrokerRequest, taskCaller: TaskCaller, caller: DeployedCaller, membership: CompanyMembership): Promise<BrokerResponse | undefined> | undefined {
   const path = request.path.split("?")[0]!;
   if (isPrFeedbackPath(path, request.method)) return feedbackAnswer(target, request, taskCaller, caller, membership);
+  // RD-2.0: the task page's new reads (spec, checks, changes, timeline), one mount; each answers ROUTE_NOT_SERVED until its lane fills its handler (task-screen-routes.ts).
+  const screen = taskScreenRoute(path, request.method);
+  if (screen !== undefined) return routeTaskScreen({ flow: target.runtime.flow, blobs: target.blobs, caller: taskCaller, request }, screen);
   const parity = parityTaskRoute(path, request.method);
   if (parity === undefined) return undefined;
   return routeParityTask({
