@@ -55,8 +55,9 @@ describe("the health route's grants (A13)", () => {
     expect(egressAlarmNames.every((name) => allNames.includes(name))).toBe(true);
     const stacks = buildAgentXApp({ agentxEnv: "live25d" }).node.children.filter((child): child is Stack => Stack.isStack(child));
     // The automatic renewal's alarms exist only where its CDK context is on (AR-2).
-    expect([...alarmNamesOf({})].sort()).toStrictEqual(HEALTH_ALARM_SUFFIXES.filter((suffix) => !suffix.startsWith("RuntimeRequalify")).map((suffix) => `agentx-live25d-${suffix}`).sort());
-    expect([...alarmNamesOf({ "agentx:autoRequalify": "enabled" })].sort()).toStrictEqual(HEALTH_ALARM_SUFFIXES.map((suffix) => `agentx-live25d-${suffix}`).sort());
+    expect([...alarmNamesOf({})].sort()).toStrictEqual(HEALTH_ALARM_SUFFIXES.filter((suffix) => !suffix.startsWith("RuntimeRequalify") && !suffix.startsWith("CanarySession")).map((suffix) => `agentx-live25d-${suffix}`).sort());
+    // CANARY-SESSION: its three alarms are the legacy (beta) install's alone; a named environment has none (listed so the probe reads them where they exist, conditional so their absence is expected).
+    expect([...alarmNamesOf({ "agentx:autoRequalify": "enabled" })].sort()).toStrictEqual(HEALTH_ALARM_SUFFIXES.filter((suffix) => !suffix.startsWith("CanarySession")).map((suffix) => `agentx-live25d-${suffix}`).sort());
     expect(stacks.flatMap((stack) => Object.keys(Template.fromStack(stack).findResources("AWS::CloudWatch::CompositeAlarm")))).toEqual([]);
   }, 120_000);
 

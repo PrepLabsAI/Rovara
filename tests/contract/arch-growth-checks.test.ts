@@ -140,6 +140,10 @@ describe("check 2: the stack parameters and the settings may not grow", () => {
   // DeveloperOidcSince, DeveloperSignInGithub, DeveloperSignInSlack, DeveloperSignInSlackSince, OpenRouterSecretArn, SlackTeamId; runtime: OpenRouterSecretArn; slack: ChannelEventQueueUrl, ChannelRequestQueueUrl,
   // OpenRouterSecretArn, SlackAdapterCommandsUrl, SlackAdapterSecretName) = "F1 L1a-1 kept-on-upgrade set (+19: existing parameters an upgrade used to reset), Opus PASS ac76bd063" (owner DEC 254zzz507 beta snapshot).
   // Not new settings: a one-time, deliberate step in the ratchet.
+  // stackParameters, four names (infra/lib/canary-session.ts: CanarySessionPlacementEnvironment, CanarySessionPerson, CanarySessionCompany, CanarySessionStepRoleName) = "kind: operator placement (which environment a
+  // resource exists in), not a customer or company setting, never shown in any screen; who asked: the owner (beta canary person for real-call proofs, CANARY-SESSION plan, arch ruling bbff6b7dd); why not a default: the values
+  // are beta-only identities that must stay EMPTY in every other install; a default would place a canary everywhere; removal: with the canary itself." They stay CloudFormation parameters (arch ruling: lock 1 is a template
+  // condition, which can only test a whole parameter), and each has an install row (control-plane, declaredIn legacy), so none is a kept-on-upgrade name.
 
   it("passes on today's tree: nothing above the baseline", () => {
     expect(growth.compareToBaseline(now, baseline).raised).toEqual([]);
