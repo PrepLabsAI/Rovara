@@ -130,6 +130,36 @@ export const NOTICE_WORDS = {
   stoppedByAdmin: (name: string): string => `${name === "" ? "A company admin" : name} stopped your task`,
 } as const;
 
+// ---- a change that grew after its plan (TIER-GROWTH-MERGE): the words the merge view, the task's standing, the session summary and the press all say, one table
+
+/** The words for a change whose diff rates above the level its plan was made at: it can merge only once the code and security reviews of the higher level ran on the version that would be merged. `level` is "standard" or "risky". */
+export const GROWTH_WORDS = {
+  /** The reviews are being run (or are about to be): the fixed sentence the person reads. */
+  running: (level: string): string => `This change grew to ${level}. Rovara is running the ${level} reviews before it can merge.`,
+  /** The short reason a pill or status line carries while they run. */
+  runningReason: (level: string): string => `This change grew, so Rovara is running the ${level} checks`,
+  /** They ran and found something that must be fixed. */
+  foundProblems: (level: string): string => `This change grew to ${level}, and the ${level} reviews found things that must be fixed before it can merge.`,
+  /** They could not run (no reviewer, an answer that could not be read, a change too large to put to them). */
+  couldNotRun: (level: string): string => `This change grew to ${level}, and Rovara could not run the ${level} reviews on this version, so it can't merge yet.`,
+  /** The task's spending limit stopped them. */
+  cap: (level: string): string => `This change grew to ${level}, and the task's spending limit stopped the ${level} reviews. They run once the limit is raised or the allowance changes.`,
+  /** The change is smaller now but grew earlier: a change never goes back down a level, so the higher reviews are owed on this version. */
+  earlier: (level: string): string => `This change grew to ${level} earlier, so it needs the ${level} reviews on this version before it can merge.`,
+  /** This install has no reviewer to run them (no model gateway wired): sending the change back cannot help. */
+  noReviewer: (level: string): string => `This change grew to ${level}, and this install has no reviewer wired for the ${level} reviews, so it can't merge through Rovara.`,
+  /** The gateway cannot serve the checking model's reviews (its refusal is not the spending limit). */
+  unsupported: (level: string): string => `This change grew to ${level}, and the AI source cannot run the ${level} reviews with the checking model chosen, so it can't merge yet.`,
+  nextRunning: "Rovara tells you when the reviews are done.",
+  /** Found problems, or could not run on this version: a new version gets new reviews. */
+  nextNeedsYou: "Send the change back to coding, or close the task.",
+  /** Could not run: a retry asks for the reviews again on this version. */
+  nextRetry: "Retry the reviews, send the change back to coding for a new version, or close the task.",
+  nextUnsupported: "Choose another model for the checking steps, then retry the reviews, or close the task.",
+  nextRaiseLimit: "Raise the task's spending limit, or close the task.",
+  nextNoReviewer: "Merge it on the code host after your own review, or close the task.",
+} as const;
+
 /** "<sentence> (round 2 of 3)". */
 export const roundWords = (sentence: string, round: number, max: number): string => `${sentence} (round ${String(round)} of ${String(max)})`;
 

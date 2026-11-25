@@ -106,3 +106,57 @@ Tests: core `tests/unit/core-e2e-publication-callback.test.ts` with `tests/unit/
 | legacy authority: a clone is not held to the workspace fence | killed (2 tests) |
 
 The journeys (`tests/journeys/web-task.test.ts`, the two "Git exchange" cases) hold the same property end to end on the real core and are not mutated here; they run in every pull request run.
+# TIER-GROWTH-MERGE (lane pr/tier-growth-merge-20261125): a grown change merges only after the higher tier's reviews ran on the current head
+
+Shape (a): the tier pass (`tier-checks.ts`) runs the higher tier's code and security reviews for every grown task (not only the lighter flow), records `recordTierReview` for the head, and the merge view, the press, the standing and the session summary read ONE reader (`core/merge/grown-owed.ts`). Each mutant below was applied singly to a clean tree, the named tests were run (Node 22.23.2, `--maxWorkers=1`), and the line was restored.
+
+| Mutant / production location | Mutation | Killed by |
+|---|---|---|
+| M1 core/merge/merge.ts `readinessFromItems` | `base.ready && owed !== undefined ? notReady(owed.words) : base` becomes `base` (the view says ready while owed) | tests/unit/change-tier-merge-gate.test.ts: 4 fail (BAR, risky, lower tier/older head, skipped at small) |
+| M2 core/merge/grown-owed.ts `growthOwedOf` | a review record for ANY head clears the debt | the same file: BAR (stale review after a push), lower tier/older head, risky |
+| M3 core/merge/grown-owed.ts `growthOwedOf` | a record at level small clears a debt of standard/risky | "grown to risky: a standard review is not enough", lower tier/older head |
+| M4 core/merge/merge.ts `tierGate` | `owed` forced false (the final gate ignores the debt) | "the gate itself ... never merges it without the review" |
+| M5 services/merge-tracking.ts `trackRow` | a grown task is never scheduled for the tier pass | tests/journeys/tier-growth.test.ts: 6 of 7 fail |
+| M6 build-step/tier-review-calls.ts `oneReview` | the spending-limit refusal reads as an outage (no cap words, no Needs you) | tier-growth journey CAP case |
+| M7 build-step/tier-checks.ts `runTierChecks` | a grown normal-flow task is "not owed" whatever the record says (no reviews run) | tier-growth journey: 6 of 7 fail |
+
+The bar tests: `tests/unit/change-tier-merge-gate.test.ts` "a grown change on the normal flow" (BAR; grown to risky; the gate itself; the reader's states) and the journey `tests/journeys/tier-growth.test.ts` (seven cases on the real core and worker).
+
+## TIER-GROWTH-MERGE, hosted wiring (core-host/hosted-tier-review.ts, wired in aws/core-engine-root.ts)
+
+The grown tier's reviews run on the hosted root as the task's own paid call over the gateway's agent route (a task token for the review step with the task's payer, one model, the gateway's current price), under `tierReviewMeter` (admission, task cap room, worst-case price). Tests: tests/journeys/tier-growth.test.ts through the hosted root (only the network is faked; no reviewer is put in the core's deps) and tests/unit/hosted-tier-review.test.ts. Each mutant applied singly, the named test run, the line restored.
+
+| Mutant / production location | Mutation | Killed by |
+|---|---|---|
+| M8 hosted-tier-review.ts `meter` | `worst <= room` becomes `true` (the call's worst-case price is not held against the task's room) | journey CAP case |
+| M9 hosted-tier-review.ts `call` | the usage booking is skipped | journey "rates standard" case (the two bookings on the task's ledger) |
+| M10 hosted-tier-review.ts | the token's step is not `review` | journey "rates standard" case (step, payer and one model asserted on every call) |
+
+## TIER-GROWTH-MERGE, pre-review fixes (money lines of core-host/hosted-tier-review.ts and the typed refusals)
+
+The meter prices the request body as sent (or, without the prompt, the patch's characters at their widest plus framing) and answers by reason; `call` re-checks its own worst case against the room before sending; a 2xx is booked whether or not it reads; nothing is repeated after a request may have reached the model; a booking that failed refuses the task's next call. Each mutant applied singly, the named test run, restored.
+
+| Mutant / production location | Mutation | Killed by |
+|---|---|---|
+| M11 hosted-tier-review.ts `call` | the worst-case-against-room check before sending is removed | tests/unit/hosted-tier-review-call.test.ts "sends nothing when its own worst case ... does not fit" |
+| M12 hosted-tier-review.ts `call` | an answer that cannot be read is not booked | the same file, "books a 2xx whose answer cannot be read" |
+| M13 tier-review-calls.ts `callWithDeadline` | a failure after the request was sent is retried (a second paid call) | the same test (one request only) |
+| M15 hosted-tier-review.ts `FALLBACK_BYTES_PER_CHAR` | the meter without the prompt prices a character as one byte | tests/unit/hosted-tier-review-meter.test.ts (the pre-review's probe) |
+| M16 hosted-tier-review.ts `meter` | an unbooked usage no longer refuses the task's next call | hosted-tier-review-call.test.ts "keeps a booking that failed" |
+
+## TIER-GROWTH-MERGE, the tier_review reviewer kind (core-host/hosted-tier-review.ts)
+
+The hosted call mints a reviewer grant of the Cloud gateway's `tier_review` kind: step = kind, exactly kind/slot/ceilingUsd, the call's priced worst case as the ceiling, one model, 120 s, a fresh jti, the task's own workspace and latest operation, the signed price. Applied singly, run, restored.
+
+| Mutant | Mutation | Killed by |
+|---|---|---|
+| M17 hosted-tier-review.ts | the ceiling is twice the priced worst case | tests/unit/hosted-tier-review-call.test.ts "mints a tier_review reviewer grant" |
+| M18 hosted-tier-review.ts | the step is `review`, not the kind | the same test |
+
+## TIER-GROWTH-MERGE, after the Opus review (a request that may have reached the model is never repeated; a 422 is read by its code)
+
+| Mutant | Mutation | Killed by |
+|---|---|---|
+| M19 hosted-tier-review.ts `provablyNotSent` | any non-abort fetch failure counts as "never sent" (retried, unbooked) | hosted-tier-review-call.test.ts "a socket cut after the request was written" |
+| M20 hosted-tier-review.ts `GATEWAY_REFUSALS` | a 502 counts as a gateway refusal before the model (unbooked) | the same file, "a 502 may come after the model was called" |
+| M21 hosted-tier-review.ts `refuseBeforeSend` | every 422 reads as the spending limit | the same file, "a 422 is the spending limit only by its code" |
