@@ -50,7 +50,7 @@ describe("every touchpoint becomes a card", () => {
       expect(card.risk).toBe(DEFAULT_RISK[kind]);
       expect(card.status).toBe("pending");
       expect(card.friction.expandEvidenceFirst).toBe(card.risk !== "low");
-      expect(card.friction.freshSignIn).toBe(card.risk === "high");
+      expect(card.friction).not.toHaveProperty("freshSignIn");
     });
   }
   it("projects them all in one pass without dropping any", () => {
