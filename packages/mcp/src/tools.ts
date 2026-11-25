@@ -415,7 +415,7 @@ export function nextFor(shown: DeveloperTaskClientView): string {
     // Rovara Code (version 2): merging is Rovara's Merge button, pressed by a person. No tool here merges (Plan 6: a person always presses Merge).
     // MR3b: a task that changes several repositories says the order its pull requests merge in; a person confirms an order that could not be found (DEC 209), and no tool does.
     const order = task.merge?.order === undefined ? "" : ` ${task.merge.order.lines.join(" ")}${task.merge.order.needsOverride === true ? " Only a person can confirm merging them in the order listed; this tool can't." : ""}`;
-    if (task.merge?.ready === true) return `${approvedChecksWords(task.mergeTracking)} A person presses Merge in Rovara (one click in the web app, after a confirm dialog; \`agentx session merge <session id>\` only gives a link to confirm in their browser); this tool can't merge.${order} The task finishes when it's merged.`;
+    if (task.merge?.ready === true) return `${approvedChecksWords(task.mergeTracking)} A person presses Merge in Rovara (one click in the web app, after a confirm dialog; the agentx command line has no merge command); this tool can't merge.${order} The task finishes when it's merged.`;
     if (task.merge !== undefined) return `Waiting for the pull request to be merged. It can't be merged yet: ${task.merge.message ?? "it is not ready"} Once that is fixed, a person presses Merge in Rovara; this tool can't merge.${order} The task finishes when it's merged.`;
     return "Waiting for the pull request to be merged. Review and merge it on GitHub; the task finishes when it's merged.";
   }
