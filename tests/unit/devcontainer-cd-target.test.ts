@@ -2,7 +2,6 @@
 // workspace-relative folder, for every cd in a command rather than only a leading `cd … &&`.
 import { describe, expect, it } from "vitest";
 import { workspaceRelativeCdTarget } from "../../packages/worker/src/devcontainer.js";
-import { testbedRelativeCdTarget } from "../../packages/worker/src/swebench/agent.js";
 
 describe("workspaceRelativeCdTarget", () => {
   const paths = { hostFolder: "/work/root/repo", containerFolder: "/workspaces/repo" };
@@ -29,20 +28,5 @@ describe("workspaceRelativeCdTarget", () => {
 
   it("maps nothing when the host folder is outside the root", () => {
     expect(workspaceRelativeCdTarget("/workspaces/repo", { hostFolder: "/elsewhere/repo", containerFolder: "/workspaces/repo" }, root)).toBeUndefined();
-  });
-});
-
-describe("testbedRelativeCdTarget", () => {
-  const paths = { hostFolder: "/runs/r1/testbed", containerFolder: "/testbed" };
-
-  it.each([
-    ["/testbed", "testbed"],
-    ["/testbed/astropy/io", "testbed/astropy/io"],
-  ])("maps %j to %j", (target, mapped) => {
-    expect(testbedRelativeCdTarget(target, paths)).toBe(mapped);
-  });
-
-  it.each(["/testbedX", "/app", "testbed"])("leaves %j unmapped", (target) => {
-    expect(testbedRelativeCdTarget(target, paths)).toBeUndefined();
   });
 });

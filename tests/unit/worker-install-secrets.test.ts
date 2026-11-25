@@ -10,7 +10,7 @@ import { RegistryTokenLeakError } from "../../packages/worker/src/registry-guard
 import { removeLeftoverPrivateInstall } from "../../packages/worker/src/private-install.js";
 import { ensureDevcontainer, type DevcontainerCli, type DevcontainerTarget } from "../../packages/worker/src/devcontainer.js";
 import { TaskSandbox } from "../../packages/worker/src/task-sandbox.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const temp = () => mkdtemp(join(tmpdir(), "rovara-install-secrets-"));
 const dockerThatRecords = () => {

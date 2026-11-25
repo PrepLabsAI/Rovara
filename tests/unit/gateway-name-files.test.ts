@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createGatewayNameFiles, gatewayResolvConf, gatewayResolverMount, gatewayWorkerDirectory, sweepGatewayNameFiles, verifyGatewayResolverFile } from "../../packages/worker/src/gateway-name-files.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });

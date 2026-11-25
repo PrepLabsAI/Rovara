@@ -30,7 +30,7 @@ import { RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL
 import { TEST_SERVICES_BOOT_FACTS_ENVIRONMENT, parseBootFacts } from "./test-services-report.js";
 import { TEST_SERVICES_RUN_DIR_ENVIRONMENT, notPulledRepositories } from "./test-services-run.js";
 import type { HostedFakeCalls, HostedFakesLauncher, StartedHostedFakes } from "./general-fakes-round.js";
-import type { DockerCli } from "./swebench/containers.js";
+import type { DockerCli } from "./docker-cli.js";
 
 /** The operator's switch for the hosted helper. Absent or anything but "1": off, and a task sandbox runs checks exactly as without general fakes. */
 export const GENERAL_FAKES_HELPER_ENVIRONMENT = "AGENTX_GENERAL_FAKES_HELPER";

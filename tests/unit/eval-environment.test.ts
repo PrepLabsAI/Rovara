@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { EvalEnvironmentSchema, savedEnvRepositoryName, type EvalEnvironment } from "@agentx/contracts";
 import { EVAL_OVERLAY_ENTRIES_MAX, EVAL_PYTHON_USER_BASE, overlayDependencyFolders, useSavedEnvironment } from "../../packages/worker/src/verification/eval-environment.js";
 import { evalInstallArgProblems, evalInstallRunArgs, installModelBlock } from "../../packages/worker/src/verification/eval-bridged-exec.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });

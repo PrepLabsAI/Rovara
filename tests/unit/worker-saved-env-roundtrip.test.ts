@@ -13,7 +13,7 @@ import { emptyDetection } from "../../packages/worker/src/env-detect/types.js";
 import { prepareWorkspace, type RepositoryMaterializer } from "../../packages/worker/src/prepare.js";
 import { buildRepositoriesOf, fsckOf, gitStateOf, hashWithAttributesOf, installGitInto, proveAndBuildSavedImage, rebuildIndexOf, snapshotGitOf, stageTree, trackedTreeOf, type BuildSandbox, type SavedEnvBuildPorts } from "../../packages/worker/src/saved-env/build.js";
 import { scanTreeForSecrets } from "../../packages/worker/src/saved-env/secret-scan.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const cleanup: string[] = [];
 afterEach(async () => { await Promise.all(cleanup.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });

@@ -1,7 +1,7 @@
 // A bounded, worker-only query ledger for disposable Postgres stand-ins. auto_explain records ACTUAL
 // rows (including bound parameters), so no SELECT is re-executed and no customer database is read.
 // Only a whole, zero-row, single-table equality scan is understood. Everything else is left alone.
-import type { DockerCli } from "../swebench/containers.js";
+import type { DockerCli } from "../docker-cli.js";
 import type { SeedFileTarget } from "../service-seed-file.js";
 import {
   PLAIN_NAME, STAND_IN_LIMITS, STAND_IN_SCHEMA_STATEMENT, parentKeyColumns, parseSampledKeys, parseStandInSchema,

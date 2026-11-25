@@ -16,7 +16,7 @@ import type { ModelEgress, ModelEgressEvent } from "@agentx/contracts";
 import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/docker-application-host.js";
 import { createModelBridge } from "../../packages/worker/src/model-bridge.js";
 import { createModelBridgeLedger } from "../../packages/worker/src/model-bridge-ledger.js";
-import { createDockerCli } from "../../packages/worker/src/swebench/containers.js";
+import { createDockerCli } from "../../packages/worker/src/docker-cli.js";
 import { EvalStandInRound } from "../../packages/worker/src/eval-standin-round.js";
 import { EVAL_BRIDGE_SOCKET_NAME, EVAL_HELPER_DIR_NAME, createFreshEvalSandbox, type FreshEvalSandboxConfig } from "../../packages/worker/src/verification/eval-bridged-exec.js";
 import { ensureLocalImage } from "../support/ci-images.js";

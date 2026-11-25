@@ -5,7 +5,7 @@
 import { readFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 export const EVAL_REPORT_FILE = "eval-report.json";
 export interface FakeContainer { id: string; name: string; labels: Record<string, string>; network: string; ip: string; args: string[]; mounts: { Source: string; Destination: string; RW: boolean; Type: string }[]; paused: boolean; aliases: string[] }

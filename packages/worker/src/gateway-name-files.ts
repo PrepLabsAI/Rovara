@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readdir, readFile, rm, rmdir, writeFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import { join, resolve } from "node:path";
-import type { DockerCli } from "./swebench/containers.js";
+import type { DockerCli } from "./docker-cli.js";
 
 export const GATEWAY_RESOLVER_DIRECTORY = "/var/lib/rovara-egress/runs";
 export const GATEWAY_RESOLVER_LABEL = "rovara.egress.resolver";

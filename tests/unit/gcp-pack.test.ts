@@ -16,7 +16,7 @@ import { OwnerDocker } from "../support/owner-docker.js";
 import { boundedReader, runDetectors } from "../../packages/worker/src/env-detect/index.js";
 import { ServiceEnvError, buildServiceEnvironment, type ServiceEnvDependency } from "../../packages/worker/src/service-env.js";
 import { startHelpers, type HelperFiles } from "../../packages/worker/src/service-helpers.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 // The digests the spike read on 2026-11-18 (briefs/lead4/L4-E8S-GCP-EMULATORS.md, "Full references"). Written out here on purpose: a changed pin must fail a test, not pass it.
 const SDK_DIGEST = "4568487af2c00a66e1d3e0f054be208c9c5b499a3999da50428b396e1341e9fd";
