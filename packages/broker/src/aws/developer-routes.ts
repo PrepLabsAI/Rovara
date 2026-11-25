@@ -2004,7 +2004,7 @@ export function developerTaskRouteDependencies(
           freshMemberOf,
           ...(subject.slackUserId === undefined ? {} : { slackUserId: subject.slackUserId }),
         });
-        if (result.kind === "allowed") return;
+        if (result.kind === "allowed") return result.access;
         if (result.kind === "unavailable" || result.kind === "needs-membership") {
           throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
         }

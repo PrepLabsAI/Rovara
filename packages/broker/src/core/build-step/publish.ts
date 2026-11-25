@@ -32,7 +32,7 @@ import { setupPullRequestLineOf } from "../setup-agent/recheck-rows.js";
 import { startPullRequestUpdate } from "./maintain.js";
 import { approvedCodingPlan } from "./plan-input.js";
 import { pullRequestRecordKey, taskOfOperation, type PullRequestRecord } from "./records.js";
-import { jsonOf, locate, settled, type RowRef } from "./start.js";
+import { byOf, jsonOf, locate, settled, type RowRef } from "./start.js";
 import type { Ended } from "./results.js";
 
 /** The branch a publication pushes: named after the operation, so two publications never share one. */
@@ -109,7 +109,7 @@ export async function startPublication(deps: TaskFlowDeps, row: RowRef, options:
   };
   const next = publicationWorkflow(judged, ownerRetry, receivedAt);
   const accepted = await acceptStep(deps, {
-    task, workspace, kind: "publish", operationId, requestId: workflowRequestId("agentx-auto-publish", task.taskId, row.workflowRevision, candidate.digest, repository.repositoryId, attempt),
+    ...byOf(row), task, workspace, kind: "publish", operationId, requestId: workflowRequestId("agentx-auto-publish", task.taskId, row.workflowRevision, candidate.digest, repository.repositoryId, attempt),
     prompt: "publish", workflow: { current: workflow, next }, publication, extraActions: ["pull-request"],
     payload: jsonOf({
       mode: "create", repository: repository.repositoryId, title, body, headBranch, candidateTreeSha: repository.treeSha, publicationMode: fence.mode,

@@ -130,6 +130,11 @@ export interface CoreBrowserBrokerOptions {
   /** The core's log lines (a journey that reads what the broker logged); default: dropped. */
   log?: (entry: Record<string, unknown>) => void;
   /**
+   * The deployed broker's own task People proof on the core's access rule (broker.ts hands `checkTaskPerson` to `createBrokerCoreRoot`): a co-owner or a successor is proved live, as in production. Without it
+   * (every journey but the ones about People), only a hosted creator's sole-owner list is read, and any other person on a list is refused.
+   */
+  taskPeopleProof?: boolean;
+  /**
    * Linear on the hosted root (aws/linear-wiring.ts's pieces): the connections over the broker's table, the company's connect and link routes, the Linear app webhook route on the broker's front and the
    * tracker intake from each company's own runtime. Built with a lazy table client and the world's clock, because both exist only once the broker is built.
    */
@@ -192,6 +197,8 @@ export async function createCoreBrowserBroker(options: CoreBrowserBrokerOptions 
         repositoryGrantKey: Buffer.alloc(32, 4), repositoryCredential: async () => ({ token: "synthetic-local-host-token" }),
         codeModules: () => ({}) as never, origin: () => "https://api.example.test", log: options.log ?? (() => undefined), now: () => new Date(world!.clock.now),
         taskRules: (person, companyId) => ({ ...developerTaskRouteDependencies({ documentClient: db, tableName: "state", developer: signIn!, companies: companyMembershipFromDynamo(db, "signin"), now: Date.now }, { developerId: person.developerId, sessionId: "core", name: person.name, amr: "oidc" }, undefined, null), companyId }),
+        ...(options.taskPeopleProof !== true ? {} : { checkTaskPerson: async (task: Parameters<NonNullable<ReturnType<typeof developerTaskRouteDependencies>["checkTaskPerson"]>>[0], developerId: string, admission?: Parameters<NonNullable<ReturnType<typeof developerTaskRouteDependencies>["checkTaskPerson"]>>[2]) =>
+          developerTaskRouteDependencies({ documentClient: db, tableName: "state", developer: signIn!, companies: companyMembershipFromDynamo(db, "signin"), now: Date.now }, { developerId, sessionId: "core", name: "", amr: "oidc" }, undefined, null).checkTaskPerson!(task, developerId, admission) }),
         ciReporting: { honest: true, ciMode: async () => "sandbox_only" as const },
         chatThreads: { channels: ["examplechat"], ...(options.chatPerson === undefined ? {} : { personOf: options.chatPerson }), companyOf: ({ tenant }) => tenant === "journey-team" ? JOURNEY_COMPANY : undefined, adapterFor: (company, name) => company === JOURNEY_COMPANY && name === "examplechat" ? channel : undefined },
         services: (companyId, flow, registry, wiring) => {

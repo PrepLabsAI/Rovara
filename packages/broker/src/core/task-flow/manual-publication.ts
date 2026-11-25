@@ -39,7 +39,7 @@ export async function startManualPublication(deps: TaskFlowDeps, caller: TaskCal
   const operationId = newId(deps);
   const headBranch = `agentx/${operationId}`;
   const accepted = await acceptStep(deps, {
-    task, workspace, operationId, requestId: request.requestId, kind: "publish", prompt: "publish", extraActions: ["pull-request", "codebuild"],
+    by: caller.principal.personId, task, workspace, operationId, requestId: request.requestId, kind: "publish", prompt: "publish", extraActions: ["pull-request", "codebuild"],
     publication: { repository: repository.name, repositoryUrl: repository.url, headBranch, baseBranch: repository.defaultBranch, title: request.title, body: request.body ?? "", draft: request.draft, codeBuildGates: codeBuildGatesOf(repository) },
     payload: { mode: "create", repository: repository.name, headBranch, title: request.title, body: request.body ?? "", draft: request.draft },
     extra: [...(acting.items ?? []), ...stageAudit(deps, { eventId: `task.pull_request:${taskId}:${request.requestId}`, actor: { type: "person", id: caller.principal.personId }, action: "task.pull_request", subject: { type: "task", id: taskId }, details: { repository: repository.name } })],

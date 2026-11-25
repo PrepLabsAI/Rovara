@@ -7,7 +7,7 @@ import {
 import type { TaskCaller, TaskFlowDeps } from "../task-flow/deps.js";
 import { taskNotFound } from "../task-flow/access.js";
 import { stageAudit } from "../task-flow/admission.js";
-import { dispatchRowItem } from "../task-flow/dispatch-rows.js";
+import { pressedRowItem } from "../task-flow/dispatch-rows.js";
 import { admitRound, loadTaskAsOwner, parseBody } from "../task-flow/owner-round.js";
 import { readTask } from "../task-flow/reads.js";
 import { commitWorkflow } from "../task-flow/stage-machine.js";
@@ -35,9 +35,9 @@ async function priorDecision(deps: TaskFlowDeps, key: ReturnType<typeof feedback
   return true;
 }
 
-function decisionDispatch(deps: TaskFlowDeps, taskId: string, revision: number, decision: string) {
+function decisionDispatch(deps: TaskFlowDeps, taskId: string, revision: number, decision: string, by: string) {
   const due = decision === "APPROVE" ? "IMPLEMENT" : decision === "REQUEST_CHANGES" ? "REVIEW" : undefined;
-  return due === undefined ? [] : [dispatchRowItem(deps, taskId, revision, due, iso(deps))];
+  return due === undefined ? [] : [pressedRowItem(deps, taskId, revision, due, iso(deps), by)];
 }
 
 async function approvedCheckChanges(deps: TaskFlowDeps, task: TaskRecord, selected: WorkflowFeedbackFinding[]) {
@@ -87,7 +87,7 @@ export async function decidePrFeedback(deps: TaskFlowDeps, caller: TaskCaller, t
   const committed = await commitWorkflow(deps, task, next, [
     ...(latest.acting.items ?? []),
     { kind: "put", item: toDocument({ ...key, entityType: "IDEMPOTENCY", payloadHash, actorId: acting.actorId, requester: caller.principal }), condition: when.absent() },
-    ...decisionDispatch(deps, taskId, next.revision, body.decision),
+    ...decisionDispatch(deps, taskId, next.revision, body.decision, caller.principal.personId),
     ...stageAudit(deps, { eventId: `task.feedback_decided:${taskId}:${body.requestId}`, actor: { type: "person", id: caller.principal.personId },
       action: "task.feedback_decided", subject: { type: "task", id: taskId }, details: { decision: body.decision, revision: current.revision, selected: body.selectedFindingIds.length } }),
   ], [], when.eq("companyId", deps.companyId));
@@ -103,7 +103,7 @@ export async function retryPrFeedback(deps: TaskFlowDeps, caller: TaskCaller, ta
   const next: WorkflowSnapshot = retryWorkflowFeedbackReview(current, { reviewDigest: body.reviewDigest, actor: { actorId: acting.actorId, role: "TASK_OWNER" }, now: iso(deps) }, acting.authority);
   await admitRound(deps, feedbackRoundOptions(deps), { task, caller, requestId: body.reviewDigest });
   const latest = await feedbackOwner(deps, caller, taskId);
-  const committed = await commitWorkflow(deps, task, next, [...(latest.acting.items ?? []), dispatchRowItem(deps, taskId, next.revision, "REVIEW", iso(deps))], [], when.eq("companyId", deps.companyId));
+  const committed = await commitWorkflow(deps, task, next, [...(latest.acting.items ?? []), pressedRowItem(deps, taskId, next.revision, "REVIEW", iso(deps), caller.principal.personId)], [], when.eq("companyId", deps.companyId));
   if (!committed) {
     const fresh = (await feedbackOwner(deps, caller, taskId)).task;
     if (fresh.workflow?.feedbackReviewHistory?.some(r => r.sha256 === body.reviewDigest)) return { task: fresh, started: false };

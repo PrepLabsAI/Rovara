@@ -1,4 +1,5 @@
-// L1-RELEASE-TAG-TRIGGER: a Cloud tag push started a release run with CLOUD_PROD=on and CLOUD_REF=latest. A trigger cannot bind variables and the source action exposes no tag name, so
+// L1-RELEASE-TAG-TRIGGER: a Cloud tag push started a release run with CLOUD_PROD=on and CLOUD_REF=latest. A trigger cannot bind variables and the source action exposes a tag name only on a tag run (a Code push run has none, so an action
+// configuration that referenced it would fail), so
 // every triggered run carries the variable DEFAULTS: CLOUD_REF=from-trigger (the Cloud Preflight resolves the one vX.Y.Z tag on CLOUD_SOURCE_COMMIT, else refuses) and CLOUD_PROD=off.
 // Production stays behind a disabled transition that nothing in the pipeline's own roles can enable. Synthesized template only: no AWS.
 import { App } from "aws-cdk-lib";

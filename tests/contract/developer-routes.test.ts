@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AgentXError, type ChannelInfoRequest, type ChannelMembersRequest, type ChannelMembersResponse } from "@agentx/contracts";
+import { AgentXError, SLACK_OIDC_ISSUER, type ChannelInfoRequest, type ChannelMembersRequest, type ChannelMembersResponse } from "@agentx/contracts";
 import { channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
@@ -480,6 +480,31 @@ describe("D2 task-person route dependencies", () => {
     await expect(getTaskPeopleCapabilities(route, nativeCaller, taskId)).rejects.toMatchObject({ code: "TASK_ACCESS_DENIED" });
     expect(db.get(`DEVTASK#${taskId}`, "PEOPLE")).toMatchObject({ revision: 2, orphaned: true, people: [{ role: "denied" }] });
   });
+
+  it.each([{ grant: false, kept: "commenter", orphaned: true }, { grant: true, kept: "owner", orphaned: false }] as const)(
+    "ARCH RULING (b): an owner who is admitted by the project's Slack channel alone is read as a commenter; with an individual grant (%j) the owner stays", async ({ grant, kept, orphaned }) => {
+      const ownerId = developerIdForSlackUser("U0MAYA001");
+      const nativeCaller: DeveloperCaller = { ...maya, developerId: ownerId };
+      // A task of the hosted core (not a Slack-native one, which keeps its channel rule), whose People list holds the Slack-native person.
+      const storedTask = { ...task, developerId: ownerId, provider: "github" };
+      const personId = "99999999-9999-4999-8999-999999999999";
+      db.set(storedTask);
+      db.set({ pk: `DEVTASK#${taskId}`, sk: `PERSON#${personId}`, schemaVersion: 1, personId, developerId: ownerId, slackUserId: "U0MAYA001", name: "Maya Chen", method: "slack",
+        issuer: SLACK_OIDC_ISSUER, subject: "U0MAYA001", createdAt: "2026-09-27T00:00:00.000Z" });
+      db.set({ pk: `DEVTASK#${taskId}`, sk: `PERSON_SUBJECT#${ownerId}`, schemaVersion: 1, personId, developerId: ownerId, createdAt: "2026-09-27T00:00:00.000Z" });
+      db.set({ pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false,
+        people: [{ developerId: ownerId, slackUserId: "U0MAYA001", name: "Maya Chen", role: "owner" }] });
+      db.set({ pk: "SLACK_BINDING#T0TEAM1", sk: "CHANNEL#C0PAY0001", teamId: "T0TEAM1", channelId: "C0PAY0001", projectName: "payments-api", updatedAt: "2026-09-27T00:00:00.000Z" });
+      db.delete(`MEMBER#${ownerId}`, "PROJECT#payments-api");
+      if (grant) db.set({ pk: `MEMBER#${ownerId}`, sk: "PROJECT#payments-api", entityType: "MEMBERSHIP", ownerKey: ownerId, projectName: "payments-api", role: "developer" });
+      config.taskPeopleConfiguration = { peopleChangesEnabled: false };
+      config.taskPersonProof = async () => ({ ok: true, user: { id: "U0MAYA001", teamId: "T0TEAM1", name: "Maya Chen" }, memberOf: ["C0PAY0001"] });
+      const route = developerTaskRouteDependencies({ documentClient: db, tableName: "state", developer: config, now: () => T0 }, nativeCaller);
+
+      await getTaskPeopleCapabilities(route, nativeCaller, taskId);
+
+      expect(db.get(`DEVTASK#${taskId}`, "PEOPLE")).toMatchObject({ orphaned, people: [{ role: kept }] });
+    });
 
   it("fails closed when the trusted fresh-proof port is absent", async () => {
     db.set(task as unknown as Record<string, unknown>);

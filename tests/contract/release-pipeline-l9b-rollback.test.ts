@@ -207,10 +207,12 @@ describe("L9b Preflight: what the Cloud Preflight gets, as ONE quote-free value 
   const uuid = "0a1b2c3d-1111-2222-3333-44445555666a";
   const ctx = (stdout: string): Record<string, string> => {
     const value = /^CTX=(.*)$/mu.exec(stdout)![1]!;
-    // The contract: four comma-separated key:value parts, nothing that needs quoting or escaping.
-    expect(value).toMatch(/^live:[0-9a-f]{40},target:([0-9a-f]{40}|none),supersedes:([0-9a-f-]{36}|none),supersedesSha:([0-9a-f]{40}|none)$/u);
+    // The contract: four comma-separated key:value parts (Beta's value has a fifth, trigger, asserted in release-pipeline-code-release-by-trigger.test.ts), nothing that needs quoting or escaping.
+    expect(value).toMatch(/^live:[0-9a-f]{40},target:([0-9a-f]{40}|none),supersedes:([0-9a-f-]{36}|none),supersedesSha:([0-9a-f]{40}|none)(,trigger:[A-Za-z0-9@.-]+)?$/u);
     expect(value).not.toMatch(/["'\\\s{}]/u);
-    return Object.fromEntries(value.split(",").map((part) => part.split(":") as [string, string]));
+    const parts = Object.fromEntries(value.split(",").map((part) => part.split(":") as [string, string]));
+    delete parts.trigger;
+    return parts;
   };
 
   it("carries the stage's released commit and the rollback target, in a rollback and in a forward run", () => {

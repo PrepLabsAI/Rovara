@@ -39,6 +39,9 @@ export const fakeBin = (dir: string, log: string, names: readonly string[]): str
             'if [[ "$1" == codepipeline ]]; then',
             '  [ -z "$FAKE_CODEPIPELINE_FAIL" ] || exit 254',
             '  [[ "$2" == get-pipeline-state ]] && echo "${FAKE_WAITING_EXEC:-None}"',
+            // Which source started the run (Beta's Preflight, triggerCommands): FAKE_TRIGGER_TYPE answers the trigger type, FAKE_SOURCES (tab-separated lines, \\n and \\t spelled out) the two source actions.
+            '  [[ "$2" == get-pipeline-execution && "$*" == *trigger.triggerType* ]] && { echo "${FAKE_TRIGGER_TYPE:-None}"; exit 0; }',
+            '  [[ "$2" == list-action-executions ]] && { [ -z "$FAKE_SOURCES_FAIL" ] || exit 254; printf "%b\\n" "${FAKE_SOURCES:-}"; exit 0; }',
             '  [[ "$2" == get-pipeline-execution ]] && echo "${FAKE_WAITING_SHA:-None}"',
             "  exit 0",
             "fi",

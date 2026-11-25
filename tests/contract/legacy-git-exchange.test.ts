@@ -1,5 +1,6 @@
 // G1 (grant exchange binding): the LEGACY Git credential exchange (aws/broker.ts, for a workspace the core does not own) has the core's liveness, count and log line, and a push that has no candidate to check
 // (a maintain, a publish without expectedTreeSha) now needs its operation to still hold its workspace and its pull request to be where it started.
+import { tamperedGrant } from "../support/grant-tamper.js";
 import { createHash } from "node:crypto";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
@@ -111,7 +112,7 @@ describe("legacy Git exchange: liveness, count and log", () => {
     expect(await w.post(grant, "clone", "https://user:HOSTILESECRET@evil.example.test")).toEqual({ status: 403, code: "FORBIDDEN" });
     expect(w.lines("repository.credential_refused")[0]).toMatchObject({ reason: "not-covered", grantId: GRANT_ID });
     expect(w.lines("repository.credential_refused")[0]).not.toHaveProperty("repository");
-    expect(await w.post(grant.replace(/.$/u, "x"), "clone", "https://user:HOSTILESECRET@evil.example.test")).toEqual({ status: 403, code: "FORBIDDEN" });
+    expect(await w.post(tamperedGrant(grant), "clone", "https://user:HOSTILESECRET@evil.example.test")).toEqual({ status: 403, code: "FORBIDDEN" });
     expect(JSON.stringify(w.logged)).not.toContain("HOSTILESECRET");
     expect((await w.post(grant, "clone")).status).toBe(200);
     expect(w.lines("repository.credential_issued")[0]).toMatchObject({ repository: "web" });

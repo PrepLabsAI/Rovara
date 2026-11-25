@@ -137,6 +137,27 @@ it("refuses requalified runtime rows and revoked creator proofs at verdict time"
   expect(diagnostic.authorityChecks).toBeUndefined();
 });
 
+it("the creator proof is the task's CURRENT owner's: a task handed over after the round was admitted needs a fresh round, and a round admitted under the new owner is accepted", async () => {
+  const w = await authoritativeRound();
+  const successor = "e".repeat(64);
+  const proofFor = (developerId: string) => ({ kind: "direct-membership" as const, developerId, project: "payments", role: "developer" as const, grantId: "11111111-1111-4111-8111-111111111111" });
+  const asked: string[] = [];
+  const pressedAs: Array<string | undefined> = [];
+  w.deps.access = { checkStep: async (_task, by) => { pressedAs.push(by); return { allowed: true, owner: { personId: successor } }; } };
+  w.deps.creator = async (task) => { asked.push(task.developerId); return { companyId: COMPANY, proof: proofFor(task.developerId), items: [{ kind: "check", key: { pk: "company-member", sk: "maya" }, condition: when.eq("role", "member") } satisfies TransactItem] }; };
+  // The round was admitted under the starter's proof: the proof read now is the successor's, so it no longer matches.
+  const stale: E2EVerificationDiagnostic = {};
+  expect(await createHostedE2EAuthority(w.deps).application(w, stale)).toBe(false);
+  expect(stale.reason).toBe("creator-membership-proof-changed-or-unavailable");
+  expect(asked).toEqual([successor]);
+  // Admitted under the successor's proof (a fresh round after the hand-over): accepted.
+  const fresh: E2EVerificationDiagnostic = {};
+  expect(await createHostedE2EAuthority(w.deps).application({ ...w, admission: { ...w.admission, creatorAuthority: proofFor(successor) } }, fresh)).toBe(true);
+  expect(fresh.reason).toBeUndefined();
+  // The person the round was admitted under is the one asked after (named as the presser), so another owner's later decision or press never flips a valid round to refused.
+  expect(pressedAs).toEqual([w.task.developerId, successor]);
+});
+
 for (const latestRevision of [1, 2]) it(`refuses recording when any live authority row moves after verification (latest revision ${latestRevision})`, async () => {
   const w = await authoritativeRound();
   const pinnedKey = projectRevisionKey(COMPANY, w.task.project, w.task.startingRevision);

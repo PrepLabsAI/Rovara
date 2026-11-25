@@ -17,7 +17,7 @@ export interface TaskStanding { standing: TaskStandingMembers; statusView: TaskS
 
 /** Whether the person the decision waits on is this reader. The owner rule covers the owner and a People co-owner; a company admin stands for `company_admin`. */
 function isAsked(role: RoleKey, standing: Standing): boolean {
-  if (role === "company_admin") return standing.kind === "admin" || (standing.kind === "owner" && standing.admin);
+  if (role === "company_admin" || role === "project_admin") return standing.kind === "admin" || (standing.kind === "owner" && standing.admin);
   return standing.kind === "owner";
 }
 

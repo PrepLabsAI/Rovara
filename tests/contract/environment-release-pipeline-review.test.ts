@@ -46,7 +46,7 @@ function allowsOf(key: ReleaseRoleKey): Allow[] {
 }
 
 describe("P1 review: production pipeline", () => {
-  it("leaves the production release pipeline's RAW template as pinned (sha256 recorded from d66d3c158 and 894278638: equal; re-pinned by L1, L9b and PROD-APPROVAL-BOUND)", () => {
+  it("leaves the production release pipeline's RAW template as pinned (sha256 recorded from d66d3c158 and 894278638: equal; re-pinned by L1, L9b, PROD-APPROVAL-BOUND and PIPELINE-CODE-RELEASE-BY-TRIGGER)", () => {
     const stack = buildAgentXApp().node.children.find((child) => child.node.id === "AgentXReleasePipeline") as Stack;
     const digest = createHash("sha256").update(JSON.stringify(Template.fromStack(stack).toJSON())).digest("hex");
     // L1 (2026-11-24): re-pinned from 01152c761e64805857a650b5473c6e80ceac9fd586f39e062df2a836f2dc72c0; the changed resources are listed at PRODUCTION_PIPELINE_TEMPLATE_SHA256 in environment-release-pipeline.test.ts, which holds the same pin.
@@ -55,7 +55,8 @@ describe("P1 review: production pipeline", () => {
     // L1-RELEASE-TAG-TRIGGER (2026-11-25): re-pinned from a1a1b3c352ec39a5cdb923036fb981ad32e749c770beb6d00119dfa968fbbecd; only the Pipeline's CLOUD_REF and CLOUD_PROD defaults and descriptions and CLOUD_SOURCE_COMMIT on the Beta Cloud Preflight changed (see PRODUCTION_PIPELINE_TEMPLATE_SHA256 in environment-release-pipeline.test.ts).
     // PROD-APPROVAL-BOUND (2026-11-25): re-pinned from 6afbab33423ee9f888a3b10ea01311b6a1c3a46599d6521b25551d844b84d325; the Production stage gains its ApproveProduction manual approval, second, after the read-only Code Preflight (run orders after it +1, a new action role with no policy, one more AssumeRole statement for the pipeline role, the transition's reason text and the same text in the Production Code Preflight's gate command; the five hunks, the fifth being two read-only-clone Deny statements on the Production Code Preflight role, are listed at PRODUCTION_PIPELINE_TEMPLATE_SHA256 in environment-release-pipeline.test.ts).
     // RELEASE-STACKS-ADDRESS (2026-11-25): re-pinned from 7e66d04fc164d8a3edc90962636c21a8d514ec15369e0275dc04fa8283a30d46; only the two release builds' ReadReleaseStacks statements gained stack/AgentXApiAddress/* (see PRODUCTION_PIPELINE_TEMPLATE_SHA256 in environment-release-pipeline.test.ts).
-    expect(digest).toBe("ddd23afa7a00a60f4559a3fd980009d3b476e0a5cead70d1e3e0307faa5f927b");
+    // PIPELINE-CODE-RELEASE-BY-TRIGGER (2026-11-25): re-pinned from ddd23afa7a00a60f4559a3fd980009d3b476e0a5cead70d1e3e0307faa5f927b; see PRODUCTION_PIPELINE_TEMPLATE_SHA256 in environment-release-pipeline.test.ts for the changed resources.
+    expect(digest).toBe("f666faa65ac67edcd17eae5a4387458ea6c299e6bc67d426d08490cdea306e3f");
   });
 });
 

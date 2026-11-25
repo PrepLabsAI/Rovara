@@ -70,13 +70,49 @@ you start a run by hand):
 | Variable | Default | Meaning |
 |---|---|---|
 | `CLOUD_REF` | `from-trigger` | The Cloud release tag to deploy. `from-trigger` (what every triggered run carries) means the one `vX.Y.Z` tag on the Cloud commit the run started from (`CLOUD_SOURCE_COMMIT`); Preflight refuses, before any write, when that commit has no such tag or more than one. `latest` (the newest tag on the Cloud trunk) is for a run you start by hand. An older tag is a Cloud rollback and forces `CODE_RELEASE=skip` |
-| `CODE_RELEASE` | `run` | `skip` releases Cloud only; the commit's Code waits for a later run. Preflight may force `skip`, never `run` |
+| `CODE_RELEASE` | `from-trigger` | `from-trigger` (what every triggered run carries) is decided by Beta's Preflight from WHICH SOURCE started the run, see "CODE_RELEASE by trigger" below. `run` releases the Code commit of the run; `skip` releases Cloud only, and the commit's Code waits for a later run. Name `run` or `skip` on every run you start by hand. Preflight may force `skip`, never `run` |
 | `CLOUD_PROD` | `off` | `off` leaves production's Cloud as it is for this run, so no push or tag deploys it. Start the run that promotes with `CLOUD_PROD=on` (and `CLOUD_REF` set to the tag, by hand): a tag push alone never reaches production, which also needs the transition into Production enabled |
 | `PIPELINE_MODE` | `release` | `adopt` only checks that Cloud as deployed is what the pipeline would deploy and changes nothing; run it once per environment before the first `release` run (the stage tool refuses a release run in an environment it never adopted). `rollback` deploys an earlier released Code commit (`CODE_ROLLBACK_TARGET`) and/or an older Cloud tag (`CLOUD_REF`) |
 | `CODE_ROLLBACK_TARGET` | `none` | With `PIPELINE_MODE=rollback`: the full 40-character Code commit to deploy. It must be in the stage's release history (below). `none` leaves Code as it is. Any other mode requires `none` |
 
 A `skip` run replaces a waiting promotion like any other run, so Preflight says which Code commit
 it leaves unpromoted.
+
+### CODE_RELEASE by trigger
+
+A trigger cannot set a variable, so a Cloud release tag push and a Code mainline push both start a
+run with the defaults, `CODE_RELEASE=from-trigger` among them. Beta's `CodePreflight` reads which source started
+the run from the execution's own record (read-only: `get-pipeline-execution` for the trigger type, `list-action-executions`
+for the output variables of the two source actions; the variables reference says `TagName` is produced only on a run a tag
+trigger started) and passes it to the Cloud Preflight as the last part of `CODE_CTX`. The Cloud Preflight decides, before
+anything is written:
+
+| What started the run | `CODE_RELEASE` | Result |
+|---|---|---|
+| A Cloud release tag push (the tag trigger; its `TagName` must be the one `vX.Y.Z` tag on the Cloud commit) | `from-trigger` | `skip`: Cloud only, so the Cloud-side drift gate is never asked to judge a Code commit that moved ahead of the tag |
+| A Code mainline push | `from-trigger` | `run` |
+| A person (`start-pipeline-execution`) | `run` or `skip` | that value |
+| A person, who left the default | `from-trigger` | refused: name `run` or `skip` |
+| Anything the lookup could not prove (both sources with a tag, a source missing, a failed lookup, another trigger type), or a pushed tag that is not the tag the run resolved | `from-trigger` | refused, nothing released |
+
+The Code builds only ever see the effective `run` or `skip` (a Code build refuses `from-trigger`). The log of Beta's `CodePreflight` says
+`this run was started by: ...` and the Cloud Preflight log says `Code release requested: ...` and why. A run waiting for
+the Production approval shows `from-trigger`; those two logs say what it decided. AWS does not document what the source that did not start a run outputs, so it was checked, read-only, on existing runs (2026-11-25): a Cloud
+tag run (execution cb7408c0) has trigger type `WebhookV2`, its Cloud source's `TagName` is the pushed tag exactly (`v0.13.24`) and the Code source
+has no `TagName`; a Code push run (cb39c169) has trigger type `WebhookV2` and no `TagName` on either source. Both shapes are test fixtures. A shape that
+differs is refused as unproven (safe).
+
+Things to know when running it:
+
+- A failed lookup (a transient CLI or API error) refuses the run, it never guesses: the Preflight log says `trigger type unreadable`
+  or `unknown`, nothing is released, and the answer is to **re-run it** (re-run the failed stage, or push/start again).
+- A run started by hand must name `CODE_RELEASE=run` or `skip` (`start-pipeline-execution` with no variables is refused). Adopt runs, and
+  every other hand-started run, name it too.
+- A later Cloud tag run supersedes a waiting Code-push promotion: a tag run is `skip` (Cloud only), so the Code commit that was waiting for the
+  Production approval is left unpromoted, and Preflight says which one. This changed with `from-trigger`: a tag run used to carry Code (the old default `run`).
+- The first Cloud tag after the pipeline is redeployed must be cut **after** the Cloud change is on the Cloud trunk. A tag run uses the Cloud stage
+  CLI of the tagged commit (the Cloud source), so a tag cut earlier has the old CLI, which rejects `CODE_RELEASE=from-trigger` with USAGE
+  (fails safe, nothing written). Deploy order: Cloud CLI first, then the pipeline redeploy.
 
 The Code release, in both projects, runs:
 

@@ -31,6 +31,7 @@ import { issueChannelLinkCode, redeemChannelLinkCode } from "../../packages/brok
 import { recordTaskThread } from "../../packages/broker/src/core/channel/threads.js";
 import { decisionRefusalWords } from "../../packages/broker/src/core/channel/sink.js";
 import { WORKFLOW_DOCUMENT_KIND } from "../../packages/broker/src/core/decisions/workflow-subject.js";
+import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import { taskSessionId } from "../../packages/broker/src/core/sessions/index.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { CHANGES_CALLBACK, CHANGES_INPUT } from "../../packages/broker/src/plugins/channel/slack/index.js";
@@ -106,7 +107,7 @@ const buttonsOf = (post: { blocks?: Array<Record<string, unknown>> } | undefined
  * The company's world, wired as the broker wires it: ORG has dev-a (the task's own person; Slack OWNER is linked to them), dev-b (a member who owns nothing here; PEER is linked to them), and dev-gone (their membership ended; LEFT is
  * linked to them); company OTHER has dev-x (OTHERCO, in TEAM_B). STRANGER is linked to nobody. The task waits on a plan of the given kind, and its card has been posted to its thread.
  */
-async function world(options: { kind?: Kind; post?: boolean; withChat?: boolean } = {}) {
+async function world(options: { kind?: Kind; post?: boolean; withChat?: boolean; taskOwner?: NonNullable<Parameters<typeof createHostedApprovers>[0]["taskOwner"]> } = {}) {
   const kind = options.kind ?? "medium";
   const fake = createFakeWorld({ without: ["approvers", "identity"] });
   const memberships = new Map<string, { companyId: OrgId; role: OrgRole }>([["dev-a", { companyId: ORG, role: "member" }], ["dev-b", { companyId: ORG, role: "member" }], ["dev-gone", { companyId: ORG, role: "member" }], ["dev-x", { companyId: OTHER, role: "owner" }]]);
@@ -125,6 +126,7 @@ async function world(options: { kind?: Kind; post?: boolean; withChat?: boolean 
   const approvers = (): ReturnType<typeof createHostedApprovers> => createHostedApprovers({
     store: fake.store, identity, key: PROOF_KEY, now: () => new Date(fake.clock.now),
     ...(options.withChat === false ? {} : { chat: hostedChatApproval(threads, people, PROOF_KEY) }),
+    ...(options.taskOwner === undefined ? {} : { taskOwner: options.taskOwner }),
   });
   fake.modules.push(coreAdapter({ point: "identity", name: HOSTED_IDENTITY_PROVIDER, owner: "fake", create: () => identity }));
   fake.modules.push(coreAdapter({ point: "approvers", name: "deployed", owner: "fake", create: () => approvers() }));
@@ -702,8 +704,8 @@ describe("the plan decided through the task action registry", () => {
     kind: "approve_plan" as const, path: "quick" as const, files: ["src/health.ts"], claims: 0, untestedClaims: 0, subjectId: "plan-1", taskId: "", project: "payments", title: "Add a health endpoint", createdAt: "2026-11-15T10:00:00.000Z",
     openPath: "/app/tasks/x", contentVersion: "v1", ...(kind === "high" ? {} : {}),
   }];
-  async function registryWorld(kind: Kind = "medium", peopleOver?: Record<string, unknown>) {
-    const w = await world({ kind, post: false });
+  async function registryWorld(kind: Kind = "medium", peopleOver?: Record<string, unknown>, taskOwner?: NonNullable<Parameters<typeof createHostedApprovers>[0]["taskOwner"]>) {
+    const w = await world({ kind, post: false, ...(taskOwner === undefined ? {} : { taskOwner }) });
     const stored = (await w.fake.store.get(taskKey(w.task.taskId)))!;
     const workflow = stored["workflow"] as unknown as WorkflowSnapshot;
     const digest = workflow.artifacts.at(-1)!.sha256;
@@ -741,6 +743,43 @@ describe("the plan decided through the task action registry", () => {
     const again = await press(as(OWNER, "dev-a"), "plan.approve");
     expect(["replayed", "refused"]).toContain((again as { result: { status: string } }).result.status);
     expect((await workflowOf()).decisions).toHaveLength(1);
+  });
+
+  it("the task's CURRENT owner decides from the chat, not only its starter: a person the owner rule names an owner now (a successor, a co-owner) approves, recorded as them (TASK-TAKEOVER PR A)", async () => {
+    // The approvers point's own re-check names the same owner (production wires it to the company's owner rule: `hostedTaskOwner`).
+    const { w, press, as, workflowOf } = await registryWorld("medium", undefined, async ({ principal }) => principal.personId === "dev-b");
+    const deps = w.runtime.flow.deps;
+    const key = (taskId: string) => taskOwnerKey("dev-b", taskId);
+    // The company's owner rule now names dev-b an owner of the task (the starter's own entry is out of it), with the People revision fence of any owner move.
+    const real = deps.access;
+    deps.access = { ...real, canAct: async (principal, task) => principal.personId === "dev-b" || (principal.personId !== "dev-a" && await real.canAct(principal, task)),
+      ownerActing: async (principal, task) => (principal.personId === "dev-b" ? { actorId: key(task.taskId), authority: { actorId: key(task.taskId), ownerIds: [key(task.taskId)] }, items: [] } : undefined) };
+    expect(await press(as(OWNER, "dev-a"), "plan.approve")).toMatchObject({ result: { status: "refused", writes: "none" } });
+    const approved = await press(as(PEER, "dev-b"), "plan.approve");
+    expect(approved, JSON.stringify(approved)).toMatchObject({ result: { status: "started" } });
+    const decisions = (await workflowOf()).decisions;
+    expect(decisions.map((entry) => [entry.decision, entry.actorId])).toEqual([["APPROVE", key(w.task.taskId)]]);
+  });
+
+  it("an owner who was removed from the project is REFUSED in the chat: by the owner rule itself, and by the approvers' own re-check when the rule is stale; nothing is decided (TASK-TAKEOVER PR A)", async () => {
+    const removed = new Set<string>();
+    const { w, press, as, workflowOf } = await registryWorld("medium", undefined, async ({ principal }) => !removed.has(principal.personId));
+    const deps = w.runtime.flow.deps;
+    const real = deps.access;
+    const key = (taskId: string) => taskOwnerKey("dev-b", taskId);
+    const acting = (taskId: string) => ({ actorId: key(taskId), authority: { actorId: key(taskId), ownerIds: [key(taskId)] }, items: [] });
+    let ruleKnows = true;
+    deps.access = { ...real, canAct: async (principal, task) => (principal.personId === "dev-b" ? ruleKnows : principal.personId !== "dev-a" && await real.canAct(principal, task)),
+      ownerActing: async (principal, task) => (principal.personId === "dev-b" && ruleKnows ? acting(task.taskId) : undefined) };
+    const before = await w.snapshot();
+    // Removed from the project, and the rule has caught up: not found, nothing written.
+    removed.add("dev-b"); ruleKnows = false;
+    expect(await press(as(PEER, "dev-b"), "plan.approve")).toMatchObject({ result: { status: "refused", writes: "none" } });
+    // Removed, and the owner rule still names them (stale): the approvers' own re-check refuses.
+    ruleKnows = true;
+    expect(await press(as(PEER, "dev-b"), "plan.approve")).toMatchObject({ result: { status: "refused", writes: "none" } });
+    expect(await w.snapshot()).toBe(before);
+    expect((await workflowOf()).decisions).toEqual([]);
   });
 
   it("asks a reason for a request for changes and for a rejection, and takes both with it", async () => {

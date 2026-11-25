@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { GetCommand, QueryCommand, TransactWriteCommand, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
-import { AgentXError, BUILT_IN_SIGN_IN_METHODS, SlackThreadSchema, agentXError, cleanDisplayName, redactAndCap, slackThreadUrl } from "@agentx/contracts";
+import { AgentXError, BUILT_IN_SIGN_IN_METHODS, OWNER_NEEDS_GRANT_WORDS, SlackThreadSchema, agentXError, cleanDisplayName, redactAndCap, slackThreadUrl } from "@agentx/contracts";
 import type { DeveloperCaller } from "../aws/developer-routes.js";
 import { isHostedTaskProvider, type ProjectAccessSubject, type TaskPersonIdentity } from "./task-person-identity.js";
 import type { TaskPeopleDisplayAdmission } from "./task-people-display-budget.js";
@@ -30,6 +30,8 @@ export interface TaskPersonCheck {
   identity: TaskPersonIdentity;
   eligible: boolean;
   channelMember: boolean;
+  /** ARCH RULING (b): true when the person passes only through the project's Slack channel, with no individual project grant. Absent: not known to be channel-only (a web person always holds a grant). */
+  channelOnly?: boolean;
 }
 
 export type CheckTaskPerson = (task: DeveloperTaskRecord, developerId: string, admission?: TaskPeopleDisplayAdmission) => Promise<TaskPersonCheck>;
@@ -117,6 +119,67 @@ function samePrincipal(left: TaskPersonIdentity, right: TaskPersonIdentity): boo
 async function get(deps: Pick<TaskPeopleDependencies, "documentClient" | "tableName">, key: { pk: string; sk: string }): Promise<Record<string, unknown> | undefined> {
   const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: key, ConsistentRead: true })) as { Item?: unknown };
   return isRecord(response.Item) ? response.Item : undefined;
+}
+
+/**
+ * THE WORKSPACE SLOT MOVES WITH THE OWNER (TASK-TAKEOVER PR A). A task holds one slot of its member's workspace counter (`DEVELOPER_LIMIT#<person>`, a marker row per task) while it is open. When the task is handed over or
+ * taken over, the slot moves to the new owner IN THE SAME TRANSACTION, from that moment: the old person's counter goes down by one and their marker goes, the new owner's goes up by one and gets the marker, and the
+ * task's own `charge.member` names the new counter (so the close releases the right one). The organization's count does not change (the task is still one task): nothing is counted twice and nothing stays on the person
+ * who left. The new owner's own limit is not asked: a limit gates a START, never a task that is already running. A task that holds no slot (no marker, or a counter that is not a member's own) moves nothing.
+ */
+export interface SlotMove {
+  /** The developer ids the slot moves from and to (the counters are `DEVELOPER_LIMIT#<id>`). */
+  fromId: string; toId: string;
+  /** The per-task steps: the old marker goes, the new one is written. */
+  markers: TransactItem[];
+  /** The two counters' steps (the old person's goes down by one, the new owner's up by one). A transaction that moves several tasks of one person adds the counters ONCE, by the number of tasks (`slotCounterSteps`): one item cannot be written twice in a transaction. */
+  counters: TransactItem[];
+}
+
+async function slotMovePlan(deps: Pick<TaskPeopleDependencies, "documentClient" | "tableName" | "now">, task: DeveloperTaskRecord, toId: string, fromId?: string): Promise<SlotMove | undefined> {
+  const member = (task as { charge?: { member?: { pk?: unknown; sk?: unknown } } }).charge?.member;
+  const held = typeof member?.pk === "string" && member.sk === "MEMBER" && member.pk.startsWith("DEVELOPER_LIMIT#") ? member.pk.slice("DEVELOPER_LIMIT#".length) : undefined;
+  if (held === undefined || held === toId || (fromId !== undefined && held !== fromId)) return undefined;
+  const [counter, marker] = await Promise.all([get(deps, { pk: `DEVELOPER_LIMIT#${held}`, sk: "MEMBER" }), get(deps, { pk: `DEVELOPER_LIMIT#${held}`, sk: `TASK#${task.taskId}` })]);
+  if (marker === undefined || typeof counter?.["count"] !== "number" || counter["count"] < 1) return undefined;
+  const chargedAt = typeof marker["chargedAt"] === "string" ? marker["chargedAt"] : new Date(deps.now()).toISOString();
+  return { fromId: held, toId,
+    markers: [
+      { Delete: { TableName: deps.tableName, Key: { pk: `DEVELOPER_LIMIT#${held}`, sk: `TASK#${task.taskId}` }, ConditionExpression: "attribute_exists(pk)" } },
+      { Put: { TableName: deps.tableName, Item: { pk: `DEVELOPER_LIMIT#${toId}`, sk: `TASK#${task.taskId}`, entityType: "DEVELOPER_LIMIT_TASK", taskId: task.taskId, memberSk: "MEMBER", chargedAt }, ConditionExpression: "attribute_not_exists(pk)" } },
+    ],
+    counters: slotCounterSteps(deps.tableName, held, toId, 1) };
+}
+
+/** How many per-task steps the slot's move adds to a transaction (none for a task that holds no slot). */
+const slotMarkerSteps = (slot: SlotMove | undefined): number => slot === undefined ? 0 : slot.markers.length;
+
+/** The two counters' steps for `count` tasks moving from one member's counter to another's: the old one goes down (it must hold that many), the new one goes up. */
+export function slotCounterSteps(tableName: string, fromId: string, toId: string, count: number): TransactItem[] {
+  return [
+    { Update: { TableName: tableName, Key: { pk: `DEVELOPER_LIMIT#${fromId}`, sk: "MEMBER" }, UpdateExpression: "ADD #count :minus", ConditionExpression: "#count >= :count", ExpressionAttributeNames: { "#count": "count" }, ExpressionAttributeValues: { ":minus": -count, ":count": count } } },
+    { Update: { TableName: tableName, Key: { pk: `DEVELOPER_LIMIT#${toId}`, sk: "MEMBER" }, UpdateExpression: "SET #entityType = :entity ADD #count :plus", ExpressionAttributeNames: { "#count": "count", "#entityType": "entityType" }, ExpressionAttributeValues: { ":plus": count, ":entity": "DEVELOPER_LIMIT" } } },
+  ];
+}
+
+/**
+ * The transaction's guard on the task's own row, with the slot's move written onto it when there is one (one item per row: the guard becomes the update), and the slot's own steps after it. `counters: false` leaves the
+ * two counters to the caller (a hand-over of several tasks adds them once).
+ */
+function withSlot(items: TransactItem[], task: DeveloperTaskRecord, slot: SlotMove | undefined, counters = true): TransactItem[] {
+  if (slot === undefined) return items;
+  let converted = false;
+  const out = items.map((item): TransactItem => {
+    const check = item.ConditionCheck;
+    if (check === undefined || check.Key?.["pk"] !== taskPk(task.taskId) || check.Key["sk"] !== "META") return item;
+    converted = true;
+    return { Update: { TableName: check.TableName, Key: check.Key, UpdateExpression: "SET charge.#chargeMember = :slotTo", ConditionExpression: `${check.ConditionExpression ?? ""} AND charge.#chargeMember.#chargePk = :slotFrom`,
+      ExpressionAttributeNames: { ...check.ExpressionAttributeNames, "#chargeMember": "member", "#chargePk": "pk" },
+      ExpressionAttributeValues: { ...check.ExpressionAttributeValues, ":slotTo": { pk: `DEVELOPER_LIMIT#${slot.toId}`, sk: "MEMBER" }, ":slotFrom": `DEVELOPER_LIMIT#${slot.fromId}` } } };
+  });
+  // The task's own pointer must move with the marker and the counters, or the close would release a marker that is no longer there: no guard on the task row to carry it is a bug of the caller.
+  if (!converted) throw new Error("the slot's move needs the guard on the task's own row");
+  return [...out, ...slot.markers, ...(counters ? slot.counters : [])];
 }
 
 async function loadTask(deps: TaskPeopleDependencies, taskId: string): Promise<DeveloperTaskRecord> {
@@ -209,6 +272,23 @@ export function taskPersonPresent(check: Pick<TaskPersonCheck, "channelMember">)
   return check.channelMember;
 }
 
+/**
+ * ARCH RULING (b), DEC 254zzz523: whether a checked person may be (stay) a task OWNER. The owner is the step's requester, the one the model gateway charges, so an owner needs an INDIVIDUAL project
+ * grant on top of being eligible and present: a person who passes only through the project's Slack channel (`channelOnly`) may be a commenter or a viewer, never an owner. A Slack-native task
+ * (provider `slack`) has no gateway payer: its channel IS its project access, so it keeps the channel rule it always had.
+ * DELETE WITH THE OLD TASKS: a provider-`slack` task is one the retired spec 056 workflow started (its provider was the caller's sign-in method). Every new task starts on the core (developer-tasks.ts
+ * `routeDeveloperTaskRequest`, `POST /v1/dev/tasks`; `core/task-flow/start.ts` checks the grant at `checkStart`), and the core's principals are always `rovara-sign-in` (core-engine-root.ts
+ * `deployedCallerFromMembership`), so none can be made again; every route of an existing one answers "no such task" (`routeDeveloperTaskRequest`, the entry branch), so none is acted on or paid for.
+ */
+export function taskPersonMayOwn(task: Pick<DeveloperTaskRecord, "provider">, check: TaskPersonCheck): boolean {
+  return check.eligible && taskPersonPresent(check) && !(task.provider !== "slack" && check.channelOnly === true);
+}
+
+/** Refuses, in the one sentence, an owner role for a person who is eligible and present but holds no individual grant. Everything else about their proof is the caller's own refusal. */
+function refuseChannelOnlyOwner(task: Pick<DeveloperTaskRecord, "provider">, check: TaskPersonCheck): void {
+  if (check.eligible && taskPersonPresent(check) && !taskPersonMayOwn(task, check)) throw agentXError("CONFIG_INVALID", OWNER_NEEDS_GRANT_WORDS);
+}
+
 async function checked(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, developerId: string,
   admission?: TaskPeopleDisplayAdmission): Promise<TaskPersonCheck> {
   if (admission !== undefined) {
@@ -277,6 +357,28 @@ async function initialize(deps: TaskPeopleDependencies, task: DeveloperTaskRecor
   }
 }
 
+/** Who a read's own demotion names as its actor: nobody pressed anything. A plain string, so a reader that only checks the field is a string (an older one) still reads the event. */
+export const PEOPLE_RECONCILE_ACTOR = "system:people-reconcile";
+
+/** The audit row of a read's demotion of an owner who holds no grant of their own: the same event shape as a role change, `via: "needs_grant"`, by the reconcile itself (`PEOPLE_RECONCILE_ACTOR`). */
+function needsGrantEvent(deps: Pick<TaskPeopleDependencies, "tableName" | "now">, task: DeveloperTaskRecord, developerId: string, afterRole: StoredTaskRole): TransactItem {
+  const requestId = randomUUID();
+  const event = { ...eventKey(task.taskId, requestId), entityType: "TASK_PEOPLE_EVENT", schemaVersion: 1, requestId, actorDeveloperId: PEOPLE_RECONCILE_ACTOR, targetDeveloperId: developerId,
+    beforeRole: "owner", afterRole, createdAt: new Date(deps.now()).toISOString(), via: "needs_grant" };
+  return { Put: { TableName: deps.tableName, Item: event, ConditionExpression: "attribute_not_exists(pk)" } };
+}
+
+/** One stored owner as a pass sees them: kept, or demoted with the rows and the audit event that go in the same transaction (an owner who is eligible and present but holds no grant of their own is demoted for THAT reason, ARCH RULING (b)). */
+async function reconcileOwner(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, person: PersonEntry,
+  admission?: TaskPeopleDisplayAdmission): Promise<{ entry: PersonEntry; items: TransactItem[] }> {
+  const proof = await checked(deps, task, person.developerId, admission);
+  if (taskPersonMayOwn(task, proof)) return { entry: person, items: [] };
+  const role: StoredTaskRole = proof.eligible ? "commenter" : "denied";
+  const row = involvedStep(deps, task, person.developerId, role);
+  const event = proof.eligible && taskPersonPresent(proof) ? needsGrantEvent(deps, task, person.developerId, role) : undefined;
+  return { entry: { ...person, role }, items: [...(row === undefined ? [] : [row]), ...(event === undefined ? [] : [event])] };
+}
+
 async function reconcile(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, original: TaskPeople,
   admission?: TaskPeopleDisplayAdmission): Promise<TaskPeople> {
   let current = original;
@@ -286,14 +388,11 @@ async function reconcile(deps: TaskPeopleDependencies, task: DeveloperTaskRecord
     const demotedRows: TransactItem[] = [];
     for (const person of current.people) {
       if (person.role !== "owner") { nextEntries.push(person); continue; }
-      const proof = await checked(deps, task, person.developerId, admission);
-      if (proof.eligible && taskPersonPresent(proof)) { nextEntries.push(person); continue; }
-      const role: StoredTaskRole = proof.eligible ? "commenter" : "denied";
-      const row = involvedStep(deps, task, person.developerId, role);
-      // One transaction holds the People update and at most TRANSACTION_LIMIT - 1 deletes: a pass that would exceed it leaves the rest as owners, and the next read demotes them (never a failed read).
-      if (row !== undefined && demotedRows.length >= TRANSACTION_LIMIT - 1) { nextEntries.push(person); continue; }
-      nextEntries.push({ ...person, role });
-      if (row !== undefined) demotedRows.push(row);
+      const decided = await reconcileOwner(deps, task, person, admission);
+      // One transaction holds the People update and at most TRANSACTION_LIMIT - 1 deletes and events: a pass that would exceed it leaves the rest as owners, and the next read demotes them (never a failed read).
+      if (demotedRows.length + decided.items.length > TRANSACTION_LIMIT - 1 && decided.items.length > 0) { nextEntries.push(person); continue; }
+      nextEntries.push(decided.entry);
+      demotedRows.push(...decided.items);
     }
     const orphaned = !nextEntries.some((person) => person.role === "owner");
     if (orphaned === current.orphaned && nextEntries.every((entry, index) => entry.role === current.people[index]!.role)) return current;
@@ -421,7 +520,7 @@ async function viewOf(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, p
   const takeoverProof = enabled(deps) && open(task) && people.orphaned && callerRole !== null
     ? await checked(deps, task, caller.developerId, admission)
     : undefined;
-  const canTakeOwnership = takeoverProof?.eligible === true && taskPersonPresent(takeoverProof);
+  const canTakeOwnership = takeoverProof !== undefined && taskPersonMayOwn(task, takeoverProof);
   const thread = task.share === undefined ? undefined : SlackThreadSchema.safeParse({
     teamId: task.share.teamId, channelId: task.share.channelId, threadTs: task.share.threadTs,
   });
@@ -541,14 +640,16 @@ async function commitMutation(
   afterRole: StoredTaskRole,
   targetDeveloperId: string,
   notification?: { slackUserId: string; role: StoredTaskRole },
+  /** `via`: how the person became an owner, for a take-over (the step owner's choice reads it: the owner who took over most recently). `slot`: the workspace slot moves to them in this transaction. */
+  takeover?: { via: "take_over"; slot: SlotMove | undefined },
 ): Promise<TaskPeopleView> {
   const outcome = await viewOf(deps, task, next, caller);
   const createdAt = new Date(deps.now()).toISOString();
   const request = { ...requestKey(task.taskId, requestId), entityType: "TASK_PEOPLE_REQUEST", schemaVersion: 1, requestId, actorDeveloperId: caller.developerId, kind, payload, outcome, createdAt };
-  const event = { ...eventKey(task.taskId, requestId), entityType: "TASK_PEOPLE_EVENT", schemaVersion: 1, requestId, actorDeveloperId: caller.developerId, targetDeveloperId, beforeRole, afterRole, createdAt };
+  const event = { ...eventKey(task.taskId, requestId), entityType: "TASK_PEOPLE_EVENT", schemaVersion: 1, requestId, actorDeveloperId: caller.developerId, targetDeveloperId, beforeRole, afterRole, createdAt, ...(takeover === undefined ? {} : { via: takeover.via }) };
   if (!Number.isSafeInteger(task.workflow?.revision) || typeof task.workflow?.stage !== "string") return denied();
   const involved = involvedStep(deps, task, targetDeveloperId, afterRole);
-  const items: TransactItem[] = [
+  const items: TransactItem[] = withSlot([
     { Update: {
       TableName: deps.tableName, Key: peopleKey(task.taskId),
       UpdateExpression: "SET #revision = :nextRevision, #orphaned = :orphaned, #people = :people",
@@ -572,7 +673,7 @@ async function commitMutation(
       taskId: task.taskId, requestId, targetDeveloperId, slackUserId: notification.slackUserId, role: notification.role,
       peopleRevision: next.revision, status: "PENDING", attempts: 0, createdAt,
     }, ConditionExpression: "attribute_not_exists(pk)" } }]),
-  ];
+  ], task, takeover?.slot);
   try {
     await transact(deps, items);
     return outcome;
@@ -606,7 +707,7 @@ export async function resolveTaskPeopleAccess(
     role, peopleRevision: people.revision, ownerActorIds: owners, orphaned: people.orphaned,
     // A person the list does not name who reads only because the task is shared into a Slack channel they are in (`implicitRole`): the Slack share's own grant.
     implicit: !people.people.some((person) => person.developerId === developerId),
-    canTakeOwnership: people.orphaned && role !== null && proof?.eligible === true && taskPersonPresent(proof),
+    canTakeOwnership: people.orphaned && role !== null && proof !== undefined && taskPersonMayOwn(task, proof),
   };
 }
 
@@ -636,28 +737,42 @@ export async function resolveTaskDispatchPeople(
   deps: Pick<TaskPeopleDependencies, "documentClient" | "tableName" | "checkTaskPerson">,
   task: DeveloperTaskRecord,
 ): Promise<{ peopleRevision: number; ownerActorIds: readonly string[]; status: "ALLOWED" | "OWNERLESS" | "UNKNOWN" } | undefined> {
+  const found = await resolveTaskListOwners(deps, task);
+  if (found === undefined) return undefined;
+  return { peopleRevision: found.peopleRevision, ownerActorIds: found.ownerIds.map((developerId) => taskOwnerKey(developerId, task.taskId)), status: found.status };
+}
+
+/**
+ * The same proof as `resolveTaskDispatchPeople`, naming the owners by developer id, in the list's order: each `owner` entry of the stored list is proved live now (never taken from its stored role), and the ones
+ * that pass are returned. Undefined: the task has no People list. A step runs for one of these people (`hostedTaskAccess.checkStep`).
+ */
+export async function resolveTaskListOwners(
+  deps: Pick<TaskPeopleDependencies, "documentClient" | "tableName" | "checkTaskPerson">,
+  task: DeveloperTaskRecord,
+): Promise<{ peopleRevision: number; ownerIds: readonly string[]; /** Each owner's name as the list keeps it. */ names: ReadonlyMap<string, string>; /** Every entry the stored list calls an owner, proved or not (a press by one of them who no longer passes is refused). */ listed: readonly string[]; /** The owners whose proof could not be READ (a throw), told apart from the ones it refused. */ unread: readonly string[]; status: "ALLOWED" | "OWNERLESS" | "UNKNOWN" } | undefined> {
   const people = await loadPeople(deps, task.taskId);
   if (people === undefined) return undefined;
-  if (people.orphaned) return { peopleRevision: people.revision, ownerActorIds: [], status: "OWNERLESS" };
+  const names = new Map(people.people.map((person) => [person.developerId, person.name]));
+  const listed = people.people.filter((person) => person.role === "owner").map((person) => person.developerId);
+  if (people.orphaned) return { peopleRevision: people.revision, ownerIds: [], names, listed, unread: [], status: "OWNERLESS" };
   if (deps.checkTaskPerson === undefined) {
-    if (hostedCreatorOnly(task, people)) {
-      return { peopleRevision: people.revision, ownerActorIds: [taskOwnerKey(task.developerId, task.taskId)], status: "ALLOWED" };
-    }
-    return { peopleRevision: people.revision, ownerActorIds: [], status: "UNKNOWN" };
+    if (hostedCreatorOnly(task, people)) return { peopleRevision: people.revision, ownerIds: [task.developerId], names, listed, unread: [], status: "ALLOWED" };
+    return { peopleRevision: people.revision, ownerIds: [], names, listed, unread: [], status: "UNKNOWN" };
   }
   const owners: string[] = [];
-  let unknown = false;
+  const unread: string[] = [];
   for (const person of people.people) {
     if (person.role !== "owner") continue;
     try {
       const proof = await checkedFresh(deps, task, person.developerId);
-      if (proof.eligible && taskPersonPresent(proof)) owners.push(taskOwnerKey(person.developerId, task.taskId));
+      if (taskPersonMayOwn(task, proof)) owners.push(person.developerId);
     } catch {
-      unknown = true;
+      unread.push(person.developerId);
     }
   }
-  if (owners.length > 0) return { peopleRevision: people.revision, ownerActorIds: owners, status: "ALLOWED" };
-  return { peopleRevision: people.revision, ownerActorIds: [], status: unknown ? "UNKNOWN" : "OWNERLESS" };
+  const unknown = unread.length > 0;
+  if (owners.length > 0) return { peopleRevision: people.revision, ownerIds: owners, names, listed, unread, status: "ALLOWED" };
+  return { peopleRevision: people.revision, ownerIds: [], names, listed, unread, status: unknown ? "UNKNOWN" : "OWNERLESS" };
 }
 
 /** Only a task's own reader gets their specific proof refusal on the People view. Shared access checks always mask it. */
@@ -731,7 +846,7 @@ export async function getTaskPeopleCapabilities(
   let canTakeOwnership = false;
   if (enabled(deps) && open(task) && current.orphaned) {
     const proof = await checked(deps, task, caller.developerId);
-    canTakeOwnership = proof.eligible && taskPersonPresent(proof);
+    canTakeOwnership = taskPersonMayOwn(task, proof);
   }
   return {
     peopleRevision: current.revision,
@@ -797,6 +912,7 @@ export async function changeTaskPeople(
   const proof = await checked(deps, task, input.targetDeveloperId);
   if (!samePrincipal(mapping.identity, proof.identity) || (input.role !== "denied" && !proof.eligible)
     || (input.role === "owner" && !taskPersonPresent(proof))) return denied();
+  if (input.role === "owner") refuseChannelOnlyOwner(task, proof);
   const existing = people.people.find((person) => person.developerId === input.targetDeveloperId);
   const beforeRole = existing?.role ?? implicitRole(task, proof);
   if (existing?.role === input.role) throw agentXError("CONFIG_INVALID", "that person already has this task role");
@@ -831,13 +947,15 @@ export async function takeTaskOwnership(
   if (mapping === undefined) return denied();
   const proof = await checked(deps, task, caller.developerId);
   if (!proof.eligible || !taskPersonPresent(proof) || !samePrincipal(mapping.identity, proof.identity)) return denied();
+  refuseChannelOnlyOwner(task, proof);
   const existing = people.people.find((person) => person.developerId === caller.developerId);
   if (existing?.role === "denied") return denied();
   const beforeRole = existing?.role ?? "commenter";
   const owner: PersonEntry = taskPeopleEntryOf({ ...mapping.identity, name: proof.identity.name }, "owner");
   const nextEntries = existing === undefined ? [...people.people, owner] : people.people.map((person) => person.developerId === caller.developerId ? owner : person);
   const next: TaskPeople = { schemaVersion: 1, revision: people.revision + 1, orphaned: false, people: nextEntries };
-  return commitMutation(deps, task, caller, people, next, input.requestId, "takeOwnership", payload, beforeRole, "owner", caller.developerId);
+  return commitMutation(deps, task, caller, people, next, input.requestId, "takeOwnership", payload, beforeRole, "owner", caller.developerId, undefined,
+    { via: "take_over", slot: await slotMovePlan(deps, task, caller.developerId) });
 }
 
 /** C4: the task People reads and writes are about, read strongly (the add and candidates routes load it after the owner check). */
@@ -857,7 +975,7 @@ export async function taskOwnershipHandOverSteps(
   deps: TaskPeopleDependencies,
   task: DeveloperTaskRecord,
   input: { leaverId: string; successorId: string; removalId: string; by: string; preview?: boolean },
-): Promise<{ items: TransactItem[]; steps: number } | { skipped: TaskHandOverSkip }> {
+): Promise<{ items: TransactItem[]; steps: number; slot: SlotMove | undefined } | { skipped: TaskHandOverSkip }> {
   if (!HEX64.test(input.leaverId) || !HEX64.test(input.successorId) || !HEX64.test(input.by) || !REQUEST_ID.test(input.removalId) || input.leaverId === input.successorId) return denied();
   if (!enabled(deps) || !open(task) || !Number.isSafeInteger(task.workflow?.revision) || typeof task.workflow?.stage !== "string") return { skipped: "people_off" };
   // A People list or a person row that does not read is skipped, never a reason to keep a removed person in the company.
@@ -870,14 +988,16 @@ export async function taskOwnershipHandOverSteps(
   try { mapping = await personByDeveloper(deps, task.taskId, input.successorId); } catch { mapping = undefined; }
   let proof: TaskPersonCheck;
   try { proof = await checkedFresh(deps, task, input.successorId); } catch { return { skipped: "successor_cannot_own" }; }
-  if (!proof.eligible || !taskPersonPresent(proof) || (mapping !== undefined && !samePrincipal(mapping.identity, proof.identity))) return { skipped: "successor_cannot_own" };
+  if (!taskPersonMayOwn(task, proof) || (mapping !== undefined && !samePrincipal(mapping.identity, proof.identity))) return { skipped: "successor_cannot_own" };
   const before = people.people.find((person) => person.developerId === input.successorId);
   if (before?.role === "denied") return { skipped: "successor_cannot_own" };
   // The preview writes nothing: a successor who passes the proof now is registered on the task when the removal is made. It still counts the steps the
   // commit will write (People, META check, event, and each involved row), so the size check made BEFORE anyone is removed holds for the commit too.
+  // The workspace slot the leaver held moves to the successor in the same transaction (slotMovePlan), so the preview counts its steps too.
+  const slot = await slotMovePlan(deps, task, input.successorId, input.leaverId);
   if (input.preview === true) {
     const involved = [input.successorId, input.leaverId].filter((developerId) => involvedStep(deps, task, developerId, developerId === input.successorId ? "owner" : "denied") !== undefined).length;
-    return { items: [], steps: 3 + involved };
+    return { items: [], steps: 3 + involved + slotMarkerSteps(slot), slot };
   }
   if (mapping === undefined) return { skipped: "successor_cannot_own" };
   const owner: PersonEntry = taskPeopleEntryOf({ ...mapping.identity, name: proof.identity.name }, "owner");
@@ -886,7 +1006,7 @@ export async function taskOwnershipHandOverSteps(
   const next: TaskPeople = { schemaVersion: 1, revision: people.revision + 1, orphaned: false, people: nextEntries };
   const createdAt = new Date(deps.now()).toISOString();
   const event = { ...eventKey(task.taskId, input.removalId), entityType: "TASK_PEOPLE_EVENT", schemaVersion: 1, requestId: input.removalId, actorDeveloperId: input.by,
-    targetDeveloperId: input.successorId, beforeRole: before?.role ?? implicitRole(task, proof), afterRole: "owner", createdAt };
+    targetDeveloperId: input.successorId, beforeRole: before?.role ?? implicitRole(task, proof), afterRole: "owner", createdAt, via: "hand_over" };
   const items: TransactItem[] = [
     { Update: {
       TableName: deps.tableName, Key: peopleKey(task.taskId),
@@ -907,8 +1027,10 @@ export async function taskOwnershipHandOverSteps(
     const row = involvedStep(deps, task, developerId, role);
     if (row !== undefined) items.push(row);
   }
-  preflight([{ Put: { TableName: deps.tableName, Item: { ...peopleKey(task.taskId), ...next } } }, ...items]);
-  return { items, steps: items.length };
+  // The two counters' steps are the caller's (one transaction moves all of a person's tasks: `slotCounterSteps` once, by the number of tasks).
+  const moved = withSlot(items, task, slot, false);
+  preflight([{ Put: { TableName: deps.tableName, Item: { ...peopleKey(task.taskId), ...next } } }, ...moved]);
+  return { items: moved, steps: moved.length, slot };
 }
 
 /** Get-only authority for a stable, already initialized People list. Never reconciles. */

@@ -3,6 +3,7 @@ import { type TaskPersonProofRequest, type TaskPersonProofResponse } from "@agen
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import {
+  checkTaskPersonIdentity,
   resolveTaskPersonId,
   resolveTaskPickerPerson,
   type ProjectAccessSubject,
@@ -170,4 +171,19 @@ describe("task person identity registry", () => {
     }
   });
 
+});
+
+describe("ARCH RULING (b): the proof says whether a person passes only through the project's Slack channel", () => {
+  const checked = async (access: "granted" | "channel" | undefined) => {
+    const { deps, access: seam } = harness();
+    seam.mockImplementation(async () => access as never);
+    await resolveTaskPickerPerson(deps, task, MAYA_SLACK);
+    return checkTaskPersonIdentity(deps, task, MAYA_NATIVE);
+  };
+
+  it("a Slack person the access seam admits through a channel binding only is channel-only; one with a grant is not", async () => {
+    expect(await checked("channel")).toMatchObject({ eligible: true, channelMember: true, channelOnly: true });
+    expect(await checked("granted")).toMatchObject({ eligible: true, channelMember: true });
+    expect((await checked("granted")).channelOnly).not.toBe(true);
+  });
 });

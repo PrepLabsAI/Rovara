@@ -153,8 +153,13 @@ export const ROLLBACK_TARGET_NONE = "none";
  *   live:<40hex>,target:<40hex|none>,supersedes:<execution uuid|none>,supersedesSha:<40hex|none>
  * live = the commit the stage has released (the rollback pin); target = CODE_ROLLBACK_TARGET; supersedes and supersedesSha = the execution waiting in front of Production that this run
  * replaces and the Code commit it holds (Beta's Preflight looks; Production's always says none, the stage CLI keeps Beta's). Every part is checked before it is written, so nothing needs quoting.
+ * Beta's value carries one more part, `,trigger:<kind>` (CODE_TRIGGER_PART): which source started this run (cloud-tag@vX.Y.Z, code-push, manual or unknown), read from the execution's own record by
+ * triggerCommands. Production's value has no such part: Production joins the run Beta decided and decides nothing about Code itself.
  */
 export const CODE_CONTEXT_VARIABLE = "CODE_CTX";
+/** The name of CODE_CTX's optional last part (Beta's Preflight only) and the values it takes; `unknown` is what a lookup that did not prove one of the others says, and the Cloud Preflight refuses a from-trigger run on it. */
+export const CODE_TRIGGER_PART = "trigger";
+export const CODE_TRIGGER_KINDS = { cloudTag: "cloud-tag", codePush: "code-push", manual: "manual", unknown: "unknown" } as const;
 export const CODE_PREFLIGHT_NAMESPACE = { beta: "BetaCodePreflight", production: "ProductionCodePreflight" } as const;
 /** The account each stage's Cloud actions must be running in; the stage CLI refuses anything else (exit 3). Never written as a literal here: Beta's comes from BetaAccountId, Production's is this stack's own account. */
 export const CLOUD_EXPECTED_ACCOUNT_VARIABLE = "ROVARA_EXPECTED_DEPLOY_ACCOUNT";
@@ -180,13 +185,28 @@ export const CODE_HISTORY_LIMIT = 10;
 /** The newest vX.Y.Z tag on the Cloud trunk. A value to type on a manual run; never CLOUD_REF's default and never what a tag-push run carries. */
 export const CLOUD_REF_LATEST = "latest";
 /**
- * CLOUD_REF's default (a variable's default may not be empty), so what every triggered run carries. CodePipeline V2 cannot bind the pushed tag to a variable: a trigger has no variables, and the
- * CodeStarSourceConnection output variables (AuthorDate, BranchName, CommitId, CommitMessage, ConnectionArn, FullRepositoryName) hold no tag name. So the Cloud actions get the commit the
- * Cloud source resolved (CLOUD_SOURCE_COMMIT_VARIABLE), and the value below tells the Cloud Preflight to resolve the ref from that commit: exactly one vX.Y.Z tag on it, else refuse before any write.
+ * CLOUD_REF's default (a variable's default may not be empty), so what every triggered run carries. CodePipeline V2 cannot bind the pushed tag to a variable: a trigger has no variables, and
+ * the source's TagName output variable exists ONLY on a run a tag trigger started (verified live: a tag run's CloudGitHub source carries TagName, a Code push run's sources carry none), so
+ * an action configuration that referenced #{CloudSourceVariables.TagName} would fail every Code push run. So the Cloud actions get the commit the Cloud source resolved
+ * (CLOUD_SOURCE_COMMIT_VARIABLE), and the value below tells the Cloud Preflight to resolve the ref from that commit: exactly one vX.Y.Z tag on it, else refuse before any write.
+ * Whether the run was a tag push at all is a separate question (CODE_RELEASE_FROM_TRIGGER), answered from the execution's record (which DOES hold TagName on a tag run, read by
+ * triggerCommands), and that tag must equal the one the commit resolved to: the two answers check each other, neither is trusted alone.
  */
 export const CLOUD_REF_FROM_TRIGGER = "from-trigger";
 /** The Cloud source's commit (`#{CloudSourceVariables.CommitId}`), on Beta's Cloud Preflight action (Production's reads the ref Beta resolved): the commit the pushed tag points at when a tag push started the run. */
 export const CLOUD_SOURCE_COMMIT_VARIABLE = "CLOUD_SOURCE_COMMIT";
+/**
+ * CODE_RELEASE's default, so what every triggered run carries (a V2 trigger binds no variable, so one default has to serve both triggers). It is NOT a value the Code builds ever see:
+ * Beta's Cloud Preflight turns it into `run` or `skip` from WHICH SOURCE started the run, and only that effective value reaches the Code actions (CLOUD_PREFLIGHT_EXPORT_CODE_RELEASE).
+ *   a Cloud release tag push (the Cloud source's own tag trigger) -> skip: that run releases Cloud only, and the Code commit it happens to hold is not released by a Cloud tag;
+ *   a Code mainline push                                         -> run;
+ *   an explicit run or skip on a run started by hand              -> that value, as typed;
+ *   anything else (a run started by hand that left the default, or a trigger that cannot be told) -> refused, nothing is released.
+ * Which source started the run is read by Beta's Code Preflight (CODE_TRIGGER_PART) from the execution's own record and passed to the Cloud Preflight inside CODE_CTX.
+ */
+export const CODE_RELEASE_FROM_TRIGGER = "from-trigger";
+/** The explicit values of CODE_RELEASE, as typed on a run started by hand. */
+export const CODE_RELEASE_EXPLICIT_VALUES = ["run", "skip"] as const;
 /** CLOUD_PROD's default: a triggered run never deploys production's Cloud; the production flip sets `on` explicitly, per run. */
 export const CLOUD_PROD_DEFAULT = "off";
 /** The tags that start a run: `v1.2.3` yes, `v1.2.3-rc1` no. */
@@ -451,10 +471,10 @@ export class ReleasePipelineStack extends Stack {
         resources: [codeHistoryArn(closesGate ? "production" : "beta")],
       }));
       if (!closesGate) {
-        // Beta's Preflight names the execution waiting in front of Production (the one this run supersedes) for the promotion summary: read-only, this pipeline only.
+        // Beta's Preflight names the execution waiting in front of Production (the one this run supersedes) for the promotion summary, and reads which source started this run (triggerCommands): read-only, this pipeline only.
         preflight.addToRolePolicy(new iam.PolicyStatement({
           sid: "ReadWaitingRun",
-          actions: ["codepipeline:GetPipelineState", "codepipeline:GetPipelineExecution"],
+          actions: ["codepipeline:GetPipelineState", "codepipeline:GetPipelineExecution", "codepipeline:ListActionExecutions"],
           resources: [pipelineArn],
         }));
       }
@@ -548,8 +568,8 @@ export class ReleasePipelineStack extends Stack {
     });
     const codeRelease = new codepipeline.Variable({
       variableName: PIPELINE_VARIABLE_CODE_RELEASE,
-      defaultValue: "run",
-      description: "run releases the Code commit of this run; skip releases Cloud only (Code waits for a later run). Preflight may force skip, never run",
+      defaultValue: CODE_RELEASE_FROM_TRIGGER,
+      description: `${CODE_RELEASE_FROM_TRIGGER}: a Cloud tag push releases Cloud only, a Code push releases Code; by hand name run or skip. Preflight may force skip, never run`,
     });
     const cloudProd = new codepipeline.Variable({
       variableName: PIPELINE_VARIABLE_CLOUD_PROD,
@@ -672,8 +692,8 @@ export class ReleasePipelineStack extends Stack {
     const approvalText = [
       `Approve THIS run only: pipeline execution #{codepipeline.PipelineExecutionId}.`,
       `Production releases Code commit ${source.variables.commitId} with the Cloud source commit of this run, ${cloudSource.variables.commitId}.`,
-      `Cloud ref ${cloudRef.reference()}, Cloud production ${cloudProd.reference()}, Code release ${codeRelease.reference()}, mode ${pipelineMode.reference()}, rollback target ${rollbackTarget.reference()}.`,
-      "The Cloud tag Beta resolved and deployed is the one named in Beta's Preflight log: check it before you approve. Reject any run that is not the one you meant to release.",
+      `Cloud ref ${cloudRef.reference()}, Cloud production ${cloudProd.reference()}, Code release ${codeRelease.reference()} (${CODE_RELEASE_FROM_TRIGGER}: a Cloud tag run releases Cloud only, a Code push releases Code), mode ${pipelineMode.reference()}, rollback target ${rollbackTarget.reference()}.`,
+      "The Cloud tag Beta resolved and deployed, and whether Code was released or skipped, are in Beta's Preflight log: check them before you approve. Reject any run that is not the one you meant to release.",
     ].join(" ");
     const productionApproval = new actions.ManualApprovalAction({
       actionName: AGENTX_PRODUCTION_APPROVAL_ACTION,
@@ -876,7 +896,8 @@ export function codePreflightBuildSpec(closesGate: boolean, namesParameter: stri
           `git cat-file -e "$RELEASED_SHA^{commit}" || ${refuse("the last released Code commit is not in this clone")}`,
           // What the stage's Cloud Preflight gets: one quote-free value (the target was checked in pre_build, the others just above and in the supersession lookup).
           ...supersedesCommands(!closesGate),
-          `export ${CODE_CONTEXT_VARIABLE}="live:$RELEASED_SHA,target:${target},supersedes:$SUPERSEDES_EXEC,supersedesSha:$SUPERSEDES_SHA"`,
+          ...triggerCommands(!closesGate),
+          `export ${CODE_CONTEXT_VARIABLE}="live:$RELEASED_SHA,target:${target},supersedes:$SUPERSEDES_EXEC,supersedesSha:$SUPERSEDES_SHA${closesGate ? "" : `,${CODE_TRIGGER_PART}:$TRIGGER_KIND`}"`,
           // A rollback: the target must be in the stage's history and older than the released commit, or nothing runs. Then this clone moves to the released commit, so the
           // checks below (which are about this run's own commit) pass without applying to a commit that is not being released.
           ...rollbackTargetInHistory(historyParameter, refuse).map((body) => `${rollbackOnly} { ${body}; }`),
@@ -928,6 +949,41 @@ export function supersedesCommands(lookup: boolean): string[] {
       `[[ "$WAITING_SHA" =~ ^[0-9a-f]{40}$ ]] || WAITING_SHA=none; ` +
       `SUPERSEDES_EXEC="$WAITING_EXEC"; SUPERSEDES_SHA="$WAITING_SHA"; ` +
       `echo "NOTE: this run replaces the execution $WAITING_EXEC, which is waiting for Production"; fi`,
+  ];
+}
+/**
+ * Beta's Preflight: WHICH SOURCE started this run, for the Cloud Preflight's decision on CODE_RELEASE (CODE_RELEASE_FROM_TRIGGER). Read from this execution's own record, with this role's own
+ * read-only access to this pipeline: the execution's trigger type (get-pipeline-execution) and the output variables of the two source actions (list-action-executions). The variables reference
+ * says TagName is produced only when a tag trigger starts the run, so:
+ *   trigger type WebhookV2, the Cloud source has a vX.Y.Z TagName and the Code source has none -> cloud-tag@<tag>   (the Cloud source's tag trigger started it)
+ *   trigger type WebhookV2, neither source has a TagName                                         -> code-push       (the mainline trigger started it)
+ *   trigger type StartPipelineExecution                                                          -> manual          (a person started it; CODE_RELEASE must then be explicit)
+ *   anything else, a lookup that failed, a source that answered twice or not at all, both with a tag -> unknown   (the Cloud Preflight refuses a from-trigger run on it)
+ * A failed lookup never stops the build: an explicit CODE_RELEASE does not need the answer, and a from-trigger run is refused downstream, never read as `run`. Production's Preflight does not
+ * look (`lookup` false): it joins the run Beta decided.
+ * Verified live, read-only, on existing runs (2026-11-25): a Cloud tag run (execution cb7408c0) reports triggerType WebhookV2 (trigger detail type PUSH_TAG, tag v0.13.24); its CloudGitHub source's output
+ * variables carry TagName "v0.13.24" exactly and the GitHub (Code) source has NO TagName. A Code push run (cb39c169) reports WebhookV2 (PUSH_BRANCH, mainline) with no TagName on either source. So the source
+ * that did not start a run answers CommitId and no TagName, as assumed. A shape that differs still reads as unknown and is refused, which is safe, not silent.
+ */
+export function triggerCommands(lookup: boolean): string[] {
+  if (!lookup) return [];
+  const uuid = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+  const sourceQuery = `"actionExecutionDetails[?stageName=='Source' && status=='Succeeded'].[actionName,output.outputVariables.CommitId,output.outputVariables.TagName]"`;
+  const one = (variable: string): string => `[ "$(printf '%s\\n' "$${variable}" | wc -l)" -eq 1 ]`;
+  const pick = (action: string): string => `printf '%s\\n' "$TRIGGER_SOURCES" | awk -F'\\t' '$1=="${action}"{print $2" "$3}'`;
+  const kinds = CODE_TRIGGER_KINDS;
+  return [
+    `TRIGGER_KIND=${kinds.unknown}; TRIGGER_TYPE=; TRIGGER_SOURCES=`,
+    `if [[ "\${EXEC_ID:-}" =~ ${uuid} ]]; then ` +
+      `TRIGGER_TYPE="$(aws codepipeline get-pipeline-execution --pipeline-name ${AGENTX_RELEASE_PIPELINE_NAME} --pipeline-execution-id "$EXEC_ID" --query pipelineExecution.trigger.triggerType --output text)" || TRIGGER_TYPE=; ` +
+      `TRIGGER_SOURCES="$(aws codepipeline list-action-executions --pipeline-name ${AGENTX_RELEASE_PIPELINE_NAME} --filter "pipelineExecutionId=$EXEC_ID" --query ${sourceQuery} --output text)" || TRIGGER_SOURCES=; fi`,
+    `CLOUD_SOURCE="$(${pick("CloudGitHub")})"; CODE_SOURCE="$(${pick("GitHub")})"`,
+    'read -r CLOUD_SOURCE_SHA CLOUD_SOURCE_TAG <<< "$CLOUD_SOURCE"; read -r CODE_SOURCE_SHA CODE_SOURCE_TAG <<< "$CODE_SOURCE"',
+    `if [ "$TRIGGER_TYPE" = StartPipelineExecution ]; then TRIGGER_KIND=${kinds.manual}; ` +
+      `elif [ "$TRIGGER_TYPE" = WebhookV2 ] && ${one("CLOUD_SOURCE")} && ${one("CODE_SOURCE")} && [[ "$CLOUD_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] && [[ "$CODE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then ` +
+      `if [[ "$CLOUD_SOURCE_TAG" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+$ ]] && [ "$CODE_SOURCE_TAG" = None ]; then TRIGGER_KIND="${kinds.cloudTag}@$CLOUD_SOURCE_TAG"; ` +
+      `elif [ "$CLOUD_SOURCE_TAG" = None ] && [ "$CODE_SOURCE_TAG" = None ]; then TRIGGER_KIND=${kinds.codePush}; fi; fi`,
+    'echo "NOTE: this run was started by: $TRIGGER_KIND (trigger type ${TRIGGER_TYPE:-unreadable})"',
   ];
 }
 /**

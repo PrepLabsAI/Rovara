@@ -13,7 +13,7 @@ export function createSessionActionsService(deps: SessionActionsServiceOptions) 
   return {
     retryBlockedStep: (taskId: string, expectedRevision?: number) => retryBlockedStep(deps, taskId, expectedRevision),
     cancelTask: (taskId: string) => cancelTask(deps, taskId),
-    revisePlanWithLiveMessage: (orgId: OrgId, sessionId: SessionId, input: { taskId: string; ownerDeveloperId: string }, value: unknown) => revisePlanWithLiveMessage(deps, orgId, sessionId, input, value),
+    revisePlanWithLiveMessage: (orgId: OrgId, sessionId: SessionId, input: Parameters<typeof revisePlanWithLiveMessage>[3], value: unknown) => revisePlanWithLiveMessage(deps, orgId, sessionId, input, value),
   };
 }
 

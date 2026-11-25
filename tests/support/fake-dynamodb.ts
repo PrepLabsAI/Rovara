@@ -722,7 +722,14 @@ function applyUpdate(item: Item, expression: string, names: Names, values: Value
       const path = parser.path();
       if (keyword === "SET") {
         parser.expect("=");
-        item[path] = parser.valueExpression(item);
+        const value = parser.valueExpression(item);
+        // A nested path (`charge.member`) sets the attribute inside its parent map, as DynamoDB does (the parent must exist); a flat name sets the item's own attribute.
+        const parts = path.includes("[") ? [path] : path.split(".");
+        const parent = parts.slice(0, -1).reduce<unknown>((holder, part) => (holder !== null && typeof holder === "object" ? (holder as Item)[part] : undefined), item);
+        if (parts.length > 1) {
+          if (parent === null || typeof parent !== "object") throw new Error(`the document path provided in the update expression is invalid for update: ${path}`);
+          (parent as Item)[parts[parts.length - 1]!] = value;
+        } else item[path] = value;
       } else if (keyword === "ADD") {
         const value = parser.operand(item);
         const current = item[path];
