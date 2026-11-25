@@ -15,7 +15,7 @@ import { readTaskPlanDocument } from "../aws/task-plan-document.js";
 import { reportedChangedFiles, verifiedChangedFiles } from "../core/build-step/changed-files.js";
 import { textReaderOf } from "../core/build-step/plan-input.js";
 import type { TaskRecord } from "../core/task-flow/records.js";
-import { taskChangesOf, type PullRequestPage } from "../core/task-view/changes.js";
+import { taskChangesOf, type ChangesSources, type PullRequestPage } from "../core/task-view/changes.js";
 import type { BrokerResponse } from "../handler.js";
 import { createPageCache, type PageCache } from "./task-changes-cache.js";
 import type { TaskScreenContext } from "./task-screen-routes.js";
@@ -83,6 +83,18 @@ async function planOf(context: TaskScreenContext, task: TaskRecord): Promise<Pla
   }
 }
 
+/** Every source of files (the pull request's pages, the kept list, the worker's report) and the plan for the why: built only for a reader the decision lets read source code. */
+async function sourcesOf(context: TaskScreenContext, task: TaskRecord, cache: PageCache): Promise<ChangesSources> {
+  const { flow } = context;
+  const pullRequestPage = pageReader(context, task, cache);
+  return {
+    ...(pullRequestPage === undefined ? {} : { pullRequestPage }),
+    verified: () => verifiedChangedFiles(flow.deps, task.workspaceId, task.workflow?.candidate?.digest),
+    reported: () => reportedChangedFiles(flow.deps, task.workspaceId),
+    plan: await planOf(context, task),
+  };
+}
+
 export function readTaskChanges(context: TaskScreenContext): Promise<BrokerResponse> {
   return readTaskChangesWith(context, { cache: PAGES });
 }
@@ -90,15 +102,7 @@ export function readTaskChanges(context: TaskScreenContext): Promise<BrokerRespo
 /** The read, with its page cache supplied (the tests supply their own). Order: the read rule's decision (the mount), then its source-code part, then the cache, then the code host. */
 export async function readTaskChangesWith(context: TaskScreenContext, parts: { cache: PageCache }): Promise<BrokerResponse> {
   const task = context.decision.task;
-  const { flow } = context;
   // Source code (patches and file paths) only where the decision proved it on this request; otherwise no source of files is read at all.
-  const sourceCode = context.decision.sourceCode;
-  const pullRequestPage = sourceCode ? pageReader(context, task, parts.cache) : undefined;
-  const changes = await taskChangesOf(task, sourceCode ? {
-    ...(pullRequestPage === undefined ? {} : { pullRequestPage }),
-    verified: () => verifiedChangedFiles(flow.deps, task.workspaceId, task.workflow?.candidate?.digest),
-    reported: () => reportedChangedFiles(flow.deps, task.workspaceId),
-    plan: await planOf(context, task),
-  } : {});
+  const changes = await taskChangesOf(task, context.decision.sourceCode ? await sourcesOf(context, task, parts.cache) : {});
   return { statusCode: 200, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify({ changes }) };
 }
