@@ -1317,3 +1317,15 @@ Production guards this lane adds: the read rule (`readableTask` is `loadReadable
 | P5 | a pull request with no recorded head cached | same |
 
 5 of 5 killed.
+
+## RD-2b2 on the read rule (rebased onto 49080fbea, 2026-11-25)
+
+The changes handler reads `context.decision` (the mount asked `decideTaskRead`); `readableTask`, its own `mayReadSourceCode` and every copy of the shared-reader rule are gone. Source code (patches AND file paths, from every source) follows `decision.sourceCode`, decided per request before the page cache. The old mutants of the shared-reader fallback and of the injected gate are replaced by these (each applied alone to `core-host/task-changes-routes.ts`):
+
+| Mutant | Mutation | Killed by |
+|---|---|---|
+| R1 | `decision.sourceCode` ignored (sources always built) | rd2b2-changes-read "the source-code part of the decision" (no code host call, no path or patch from any source when the part is false, and a cache filled by an earlier reader is not handed over) |
+| R2 | the kept list and the worker's report read when the part is false (the old gate only closed the pull request's pages) | the same test (`checked.ts` must not appear) |
+| R3 | the mount does not forward `authorize` (the diff route cannot ask the rule) | "pages the pull request's files through the deployment's diff route": the route mock asks `authorize("diff")` and its answer is the task; without it no page is read |
+
+A share's answer on the changes read is the table's 403 TASK_PART_NOT_SHOWN (rd2b2 "has no shared-reader rule of its own", and the 18 x 14 table). An earlier mutant of this lane that built the pull request page reader while the part was false survived because the sources object was replaced by `{}` anyway; the sources are now built in one function (`sourcesOf`) so there is nothing redundant to mutate.

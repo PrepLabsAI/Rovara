@@ -423,6 +423,8 @@ describe("the changes route on the core host", () => {
     const seen: Array<{ path: string; person: { developerId: string; name: string }; companyId: string; method: string; taskId: unknown }> = [];
     const route = vi.fn(async (input: Parameters<NonNullable<CoreDevWiring["taskRules"]>["route"]>[0]) => {
       seen.push({ path: input.request.path, person: input.person, companyId: input.companyId, method: input.request.method, taskId: input.task["taskId"] });
+      // The diff route is given the one read rule for its own read, as the person asking: the owner is admitted to this task's diff by it.
+      expect((await input.authorize("diff", { peoplePage: async () => undefined })).task.taskId).toBe(input.task["taskId"]);
       const page = Number(new URL(input.request.path, "https://x.invalid").searchParams.get("page"));
       return { statusCode: 200, headers: {}, body: JSON.stringify(pages[page]) };
     });
