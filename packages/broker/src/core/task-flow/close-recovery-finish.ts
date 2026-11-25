@@ -10,7 +10,7 @@ import { closeClaimItems, closeReceiptItem, saveCloseReceipt, type AcceptedClose
 import { mergeCloseConditions } from "./close-conditions.js";
 import { workspaceKeys } from "./workspace-location.js";
 import { iso } from "./support.js";
-import { taskEndKey } from "./task-end.js";
+import { TASK_END_WAIT_MS, callTaskEndSeam, taskEndKey, taskEndRow, within } from "./task-end.js";
 import { runWatchKey } from "./run-watch-rows.js";
 import { projectClosedSession } from "./close-recovery-projection.js";
 
@@ -76,15 +76,15 @@ export async function projectClosedTask(deps: TaskFlowDeps, op: AcceptedClose): 
   return saveCloseReceipt(deps, op, "projection");
 }
 
-/** Unlike the best-effort legacy helper, pending host cleanup must keep this resume delivery retryable. */
+/**
+ * Unlike the best-effort legacy helper, pending host cleanup must keep this resume delivery retryable. A host that did not get its notice through (`"pending"`, or no answer within `TASK_END_WAIT_MS`) does not hold
+ * the close: the marker stays in the due-time index and `reconcileTaskEnds` sends it again.
+ */
 export async function notifyClosedTask(deps: TaskFlowDeps, op: AcceptedClose): Promise<boolean> {
   const a = op.closeAcceptance, key = taskEndKey(a.taskId);
   if (deps.taskEnded !== undefined) {
-    await deps.store.put({ item: { ...key, entityType: "TASK_END", taskId: a.taskId, cause: "closed", at: a.acceptedAt }, condition: when.absent() });
-    if ((await deps.store.get(key))?.["notifiedAt"] === undefined) {
-      await deps.taskEnded({ orgId: deps.companyId, taskId: a.taskId });
-      await deps.store.update({ key, ops: [change.set("notifiedAt", iso(deps))], condition: when.present() });
-    }
+    await deps.store.put({ item: taskEndRow(deps, a.taskId, "closed", a.acceptedAt), condition: when.absent() });
+    if ((await deps.store.get(key))?.["notifiedAt"] === undefined) await within(callTaskEndSeam(deps, a.taskId), TASK_END_WAIT_MS);
   }
   return saveCloseReceipt(deps, op, "notify");
 }

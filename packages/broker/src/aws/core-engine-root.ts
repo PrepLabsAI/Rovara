@@ -10,6 +10,8 @@ import { runPriceReader } from "../core-host/run-price-http.js";
 import { withFeedbackMergeReads } from "../core/pr-feedback/service.js";
 import { accessRetryRoute } from "./core-access-retry.js";
 import { sweepCoreIdleSlack } from "./core-idle-slack.js";
+import { withTaskEndReconcile } from "./task-end-reconcile.js";
+import { taskEndedSender } from "../core-host/task-ended-http.js";
 import { isContextSourceStage } from "@agentx/contracts";
 import { createHostedDesignReview } from "../core-host/hosted-design-review.js";
 import { DESIGN_REVIEW_PACKET_PATH, storedBindingOf } from "../core/design-review/packet-route.js";
@@ -838,7 +840,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     const store = registry.require("storage");
     const modelAccess = companyEngineModelRoute({ store, companyId, offered: engineOffered, install: gateway.modelAccess });
     const modelCheck = companyEngineModelStartCheck({ store, companyId, offered: engineOffered });
-    return { ...modelChoices.flowOptionsFor(registry, companyId, { ...gateway, modelAccess }), startModelCheck: async () => {
+    // A task's end reaches the gateway, which then refuses (and cuts) the task's calls: sent at once and sent again by the notify-deliver pass (`withTaskEndReconcile`) when it did not get through.
+    const taskEnded = taskEndedSender({ gatewayUrl, tokens: () => inputs.taskTokens?.(), now: () => now().getTime(), log: (entry) => log({ ...entry, companyId }) });
+    return { ...modelChoices.flowOptionsFor(registry, companyId, { ...gateway, modelAccess }), taskEnded, startModelCheck: async () => {
       // Read THIS company's effective model and signed price on every start. A
       // readiness fault throws before the start can mark in-use or audit a refusal.
       try {
@@ -1161,7 +1165,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         const afterMerge = createLocalAfterMerge({ flow: flow.deps, registry, companyId, now: () => now().getTime(), log });
         const provided = inputs.services?.(companyId, flow, registry, buildProvidedServiceWiring(milestones, lessons, upkeep)) ?? {};
         // R1 + L1 6.2: the milestone sweep (and, with Linear, the one-time flip of the seeded status default) runs from the always-wired `notify-deliver` pass, not from lessons' (`aws/milestone-home.ts`).
-        const withSweep = withMilestoneSweep(provided, { milestones, companyId, linear: inputs.linearIntake !== undefined, store: registry.require("storage"), now: () => now().getTime(), audit: registry.require("audit-sink"), log });
+        const withSweep = withTaskEndReconcile(withMilestoneSweep(provided, { milestones, companyId, linear: inputs.linearIntake !== undefined, store: registry.require("storage"), now: () => now().getTime(), audit: registry.require("audit-sink"), log }),
+          { flow, companyId, now: () => now().getTime(), log });
         return {
           ...withSweep, ...(lessons === undefined ? {} : { lessons: lessons.service }),
           // L6a: the project setting is off by default; the service is bound to this runtime's company.
