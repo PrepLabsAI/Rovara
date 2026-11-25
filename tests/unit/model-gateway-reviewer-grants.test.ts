@@ -27,6 +27,9 @@ import { agentRoute, REVIEWER_CEILING_REFUSED, type GatewayDependencies } from "
 import { createSignedTokenVerifier, createTaskTokenVerifier } from "../../packages/model-gateway/src/token.js";
 import { answer, call, claims, jwk, keys, kid, mint, MemorySink, now, requestBody, scope, setup } from "./model-gateway-fixture.js";
 import { companyPartition } from "../../packages/model-gateway/src/dynamo-meter.js";
+import { SnapshotPriceSource } from "../../packages/model-gateway/src/price-index.js";
+import { answerRateQuote, RATE_QUOTE_AUDIENCE } from "../../packages/model-gateway/src/rate-quote.js";
+import type { RunPrice } from "../../packages/model-gateway/src/model-gateway-token.js";
 import { sign } from "node:crypto";
 import { WireDynamo } from "./model-gateway-wire-dynamo.js";
 
@@ -648,6 +651,123 @@ describe("the hold sweep settles a dead gateway task's review at what its sessio
     await meter.reserve({ scope: sweepScope, caps: { task: 1e9, projectMonth: 1e9, companyMonth: 1e9 }, estimateMicros: 700 });
     await meter.sweepOpenHolds(now + HOLD_SWEEP_AGE_MS + 1_000, 10);
     expect(await company(meter)).toMatchObject({ spentMicros: 700, committed: 700 });
+  });
+});
+
+// GATEWAY-TIER-REVIEW-KIND: the code or security review of a change that grew above its planned tier is one more reviewer kind, with the same ceiling, binding and single use as a second review.
+describe("the tier_review kind", () => {
+  const tier = (changes: Record<string, unknown> = {}, ceilingUsd: unknown = 1, slot = "tier_code") => grant({ stp: "tier_review", reviewer: { kind: "tier_review", slot, ceilingUsd }, ...changes });
+  it("is accepted with its own step, one model, the 120 second life and a ceiling; a slot of the review's own naming is free", () => {
+    for (const slot of ["tier_code", "tier_security"]) expect(parseTaskClaims({ ...claims, ...grantClaims({ stp: "tier_review", reviewer: { kind: "tier_review", slot, ceilingUsd: 0.5 } }) })).toBeDefined();
+  });
+  it.each([
+    ["the ordinary review step instead of its kind", { stp: "review" }],
+    ["no ceiling", { reviewer: { kind: "tier_review", slot: "tier_code" } }],
+    ["a ceiling of zero", { reviewer: { kind: "tier_review", slot: "tier_code", ceilingUsd: 0 } }],
+    ["a ceiling that is not a number", { reviewer: { kind: "tier_review", slot: "tier_code", ceilingUsd: "1" } }],
+    ["a ceiling above the largest", { reviewer: { kind: "tier_review", slot: "tier_code", ceilingUsd: 1_000_001 } }],
+    ["two models", { mdl: [MODEL, "claude-opus-5-5"] }],
+    ["the ordinary 900 second life", { exp: secs + 900 }],
+  ])("is refused with %s", (_name, changes) => {
+    expect(parseTaskClaims({ ...claims, ...grantClaims({ stp: "tier_review", reviewer: { kind: "tier_review", slot: "tier_code", ceilingUsd: 1 }, ...changes }) })).toBeUndefined();
+  });
+  it("within its ceiling: served once on the company's saved source, counted in the task row and the company row", async () => {
+    const g = gateway();
+    expect((await call(g.deps, requestBody, tier())).status).toBe(200);
+    expect(g.keySent).toHaveLength(1);
+    expect(await committed(g.meter, "task")).toBeGreaterThan(0);
+    expect(await committed(g.meter, "company")).toBe(await committed(g.meter, "task"));
+  });
+  it("over its ceiling: refused with the fixed words before anything is held, claimed or sent", async () => {
+    const spy = spyStore();
+    const g = gateway({ grants: spy.store });
+    const sink = await call(g.deps, requestBody, tier({}, 0.000001));
+    expect(sink.status).toBe(REVIEWER_CEILING_REFUSED.status);
+    expect(JSON.parse(sink.text())).toEqual({ error: { type: "budget_exceeded", message: REVIEWER_CEILING_REFUSED.message } });
+    expect(g.keySent).toEqual([]);
+    await nothingHeld(g.meter);
+    expect(spy.claimed).toEqual([]);
+  });
+  it("later calls of the same review are held to the ceiling too: the one past it is refused, spending nothing more", async () => {
+    const spy = spyStore(); const first = gateway({ grants: spy.store });
+    expect((await call(first.deps, requestBody, tier())).status).toBe(200);
+    const E = spy.opened[0]!.firstDebitMicros; const ceiling = 2 * E + Math.floor(E / 2);
+    const g = gateway({ heavy: true }); const token = tier({}, ceiling / 1_000_000);
+    for (let turn = 0; turn < 2; turn++) expect((await call(g.deps, requestBody, token)).status).toBe(200);
+    const third = await call(g.deps, requestBody, token);
+    expect(third.status).toBe(401); expect(third.text()).toBe(AUTH);
+    expect(g.keySent).toHaveLength(2);
+    expect(await committed(g.meter, "task")).toBe(ceiling);
+  });
+  it("no ceiling in the grant: refused before the gateway reads anything else, nothing held or sent", async () => {
+    const spy = spyStore();
+    const g = gateway({ grants: spy.store });
+    const sink = await call(g.deps, requestBody, tier({ reviewer: { kind: "tier_review", slot: "tier_code" } }));
+    expect(sink.status).toBe(401);
+    expect(sink.text()).toBe(AUTH);
+    expect(g.keySent).toEqual([]);
+    await nothingHeld(g.meter);
+    expect(spy.claimed).toEqual([]);
+  });
+  it("the grant id is bound to its first workspace and operation (and task, kind, slot, model): any other use of it is refused", async () => {
+    const g = gateway(); const jti = randomUUID();
+    expect((await call(g.deps, requestBody, tier({ jti }))).status).toBe(200);
+    expect((await call(g.deps, requestBody, tier({ jti, ws: randomUUID() }))).status).toBe(401);
+    expect((await call(g.deps, requestBody, tier({ jti, op: randomUUID() }))).status).toBe(401);
+    expect((await call(g.deps, requestBody, tier({ jti, tid: "task_2" }))).status).toBe(401);
+    expect((await call(g.deps, requestBody, tier({ jti }, 1, "tier_security"))).status).toBe(401);
+    expect((await call(g.deps, requestBody, grant({ jti }))).status).toBe(401);
+    expect(g.keySent).toHaveLength(1);
+  });
+  it("inside the task's limit and the company's cap: refused at either, spending nothing", async () => {
+    for (const caps of [{ task: 1, projectMonth: 1e12, companyMonth: 1e12 }, { task: 1e12, projectMonth: 1e12, companyMonth: 1 }]) {
+      const g = gateway({ caps });
+      expect((await call(g.deps, requestBody, tier())).status).toBe(422);
+      expect(g.keySent).toEqual([]);
+      await nothingHeld(g.meter);
+    }
+  });
+  it("carrying a signed runPrice (as Code's hosted tier review mints it) on Rovara's AI: accepted, with the ceiling and the ws/op binding applied", async () => {
+    const catalogModel = "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
+    const prices = new SnapshotPriceSource({ load: async () => ({ version: 7, sources: { litellm: { fetchedAt: now - 100, count: 1, entries: [
+      { provider: "bedrock", model: catalogModel, kind: "chat", inputMicrosPerMTok: 1_000_000, outputMicrosPerMTok: 2_000_000, cacheReadMicrosPerMTok: 500_000, cacheWrite5mMicrosPerMTok: 1_000_000, cacheWrite1hMicrosPerMTok: 2_000_000 },
+    ] } } }), save: async () => false }, { now: () => now, overrides: [] });
+    await prices.reload();
+    const spy = spyStore();
+    const g = gateway({ grants: spy.store, overrides: { prices, chargeReceipts: { source: (_c, _m, resolved) => resolved } } });
+    g.choices.saved.set(cidA, "rovara");
+    const rovara = { ...g.deps.agentAi!.rovara!, sourceId: "operator-serving-role-us-west-2" };
+    g.deps.agentAi = { ...g.deps.agentAi!, rovara };
+    const quote = await answerRateQuote({ prices, verify: async () => ({ ...claims, aud: RATE_QUOTE_AUDIENCE }), now: () => now, sources: g.choices, keys: g.companyKeys, rovara, region: "us-west-2", switchedOn: new Set(), offeredProviders: new Set(["bedrock", "anthropic"]) },
+      { method: "GET", url: `/v1/service/companies/${cidA}/rate-quote?model=${MODEL}&runPrice=1`, headers: { authorization: "Bearer fixture" } });
+    const runPrice = (quote.body as { runPrice: RunPrice }).runPrice;
+    expect(runPrice).toBeDefined();
+    const jti = randomUUID();
+    // Accepted: Rovara's Bedrock is called once and the call is held inside the task row and the company row.
+    expect((await call(g.deps, requestBody, tier({ jti, runPrice }))).status).toBe(200);
+    expect(g.bedrockSent).toHaveLength(1); expect(g.keySent).toEqual([]);
+    expect(spy.opened).toHaveLength(1);
+    expect(await committed(g.meter, "task")).toBeGreaterThan(0);
+    expect(await committed(g.meter, "company")).toBe(await committed(g.meter, "task"));
+    // The binding still applies with the signed price: another workspace, operation or task under the same grant id is refused.
+    for (const other of [{ ws: randomUUID() }, { op: randomUUID() }, { tid: "task_2" }]) expect((await call(g.deps, requestBody, tier({ jti, runPrice, ...other }))).status).toBe(401);
+    expect(g.bedrockSent).toHaveLength(1);
+    // The ceiling still applies with the signed price: refused with the fixed words before any hold, claim or send.
+    const spy2 = spyStore();
+    const h = gateway({ grants: spy2.store, overrides: { prices, chargeReceipts: { source: (_c, _m, resolved) => resolved } } });
+    h.choices.saved.set(cidA, "rovara");
+    h.deps.agentAi = { ...h.deps.agentAi!, rovara };
+    const over = await call(h.deps, requestBody, tier({ runPrice }, 0.000001));
+    expect(over.status).toBe(REVIEWER_CEILING_REFUSED.status);
+    expect(JSON.parse(over.text())).toEqual({ error: { type: "budget_exceeded", message: REVIEWER_CEILING_REFUSED.message } });
+    expect(h.bedrockSent).toEqual([]); expect(spy2.claimed).toEqual([]);
+    await nothingHeld(h.meter);
+  });
+  it("an ended task is refused like any grant, before anything is held", async () => {
+    const g = gateway({ overrides: { ended: { isEnded: async () => true } } });
+    expect((await call(g.deps, requestBody, tier())).status).toBe(403);
+    expect(g.keySent).toEqual([]);
+    await nothingHeld(g.meter);
   });
 });
 

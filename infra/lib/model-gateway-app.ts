@@ -7,7 +7,6 @@ import { Aspects, Tags, type App } from "aws-cdk-lib";
 import { RequireCloudBoundary } from "./model-gateway-boundary.js";
 import { ENVIRONMENT_TAG_KEY, parseSourceKindsSwitch } from "./model-gateway-contracts.js";
 import {
-  MODEL_GATEWAY_BEDROCK_BYO_CONTEXT_KEY,
   MODEL_GATEWAY_CONTEXT_KEY,
   MODEL_GATEWAY_OFFERED_PRICES_CONTEXT_KEY,
   MODEL_GATEWAY_PRODUCT_CONTEXT_KEY,
@@ -78,7 +77,6 @@ export function maybeModelGateway(app: App): boolean {
     repository: images.repository,
     ...(productAiOn(app.node.tryGetContext(MODEL_GATEWAY_PRODUCT_CONTEXT_KEY), MODEL_GATEWAY_PRODUCT_CONTEXT_KEY) ? { productAi: true } : {}),
     ...rovaraAiContext(app.node.tryGetContext(MODEL_GATEWAY_ROVARA_AI_CONTEXT_KEY), app.node.tryGetContext(MODEL_GATEWAY_ROVARA_AI_EXEMPT_CONTEXT_KEY), app.node.tryGetContext(MODEL_GATEWAY_ROVARA_AI_DISABLED_CONTEXT_KEY)),
-    ...(productAiOn(app.node.tryGetContext(MODEL_GATEWAY_BEDROCK_BYO_CONTEXT_KEY), MODEL_GATEWAY_BEDROCK_BYO_CONTEXT_KEY) ? { bedrockByo: true } : {}),
     ...aiSourceKindsContext(app.node.tryGetContext(AI_SOURCE_KINDS_CONTEXT_KEY)),
     ...(productAiOn(app.node.tryGetContext(MODEL_GATEWAY_OFFERED_PRICES_CONTEXT_KEY), MODEL_GATEWAY_OFFERED_PRICES_CONTEXT_KEY) ? { offeredPrices: true } : {}),
     providerSecretNames: providerSecretNamesMode(app.node.tryGetContext(MODEL_GATEWAY_PROVIDER_SECRET_NAMES_CONTEXT_KEY)),

@@ -71,7 +71,8 @@ it.each([10, 6000, 128_000])("R2 deadline scales with applied max %s and never e
     await vi.advanceTimersByTimeAsync(duration - 1); expect(cancelled).toBe(false);
     await vi.advanceTimersByTimeAsync(1); expect(cancelled).toBe(true); await running;
     expect(f.logs).toContainEqual(expect.objectContaining({ event: "settled", estimated: true }));
-    expect((await f.deps.meter.read(scope))[0]?.spentMicros).toBe(Buffer.byteLength(JSON.stringify({ ...requestBody, max_tokens: maxTokens })) + maxTokens * 2);
+    // A call the deadline cut, with nothing received, on the company's own key: the input estimate (failed-call.ts, DEC 254zzz521), not the hold.
+    expect((await f.deps.meter.read(scope))[0]?.spentMicros).toBe(Math.ceil(Buffer.byteLength(JSON.stringify({ ...requestBody, max_tokens: maxTokens })) / 4));
   } finally { await vi.advanceTimersByTimeAsync(24 * 60 * 60_000); await running; vi.useRealTimers(); }
 });
 

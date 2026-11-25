@@ -35,9 +35,11 @@ import { kmsProductKeyService, ProductKeySealer, type KmsLike, type ProductKeyFi
 import { createSignedTokenVerifier } from "./token.js";
 import { createEvalAuthorityHandler, EVAL_AUTHORITY_PATH, EVAL_AUTHORITY_TOKEN_KIND } from "./eval-authority.js";
 import { createEvalCapHandler, EVAL_CAP_PATH, EVAL_CAP_TOKEN_KIND } from "./eval-cap.js";
+import { createTaskEndedHandler, TASK_ENDED_PATH, TASK_ENDED_TOKEN_KIND } from "./task-ended-notice.js";
 import { COMPANY_INSTRUCTIONS_PATH, COMPANY_INSTRUCTIONS_TOKEN_KIND, CompanyStoredInstructions, createCompanyInstructionsHandler, type CompanyInstructionsSource } from "./company-instructions.js";
 import { createOfferedModelsHandler, offeredModelPrice, OFFERED_MODELS_PATH, parseDisabledAgentModels, SERVICE_TOKEN_KIND } from "./offered-models.js";
 import { createUpkeepCapReadHandler, UPKEEP_CAP_READ_PATH, UPKEEP_CAP_READ_TOKEN_KIND } from "./upkeep-cap-read.js";
+import { createRunChargesHandler, RUN_CHARGES_PATH, RUN_CHARGES_TOKEN_KIND } from "./run-charges-read.js";
 import { BEDROCK_CHECK_PATH, BEDROCK_SETUP_PATH, createBedrockServiceHandlers, createVertexCheckHandler, VERTEX_CHECK_PATH, type MacVerifier } from "./service-call.js";
 import { Dynamo } from "./dynamo.js";
 import { DynamoEndedTasks, DynamoMeter } from "./dynamo-meter.js";
@@ -328,7 +330,7 @@ export async function startServe(config: ServeConfig, deps: ServeDependencies = 
     models: config.rovaraAi.models, exempt: config.rovaraAi.exempt, ...(config.rovaraAi.sourceId === undefined ? {} : { sourceId: config.rovaraAi.sourceId }),
     transport: deps.bedrockTransport ?? createBedrockTransport({ region: config.region, credentials, now }), maxOutputTokens: (id: string) => prices.maxOutputTokens("bedrock", id),
   };
-  const rovaraDefault = companyKeys === undefined || rovaraBedrock === undefined ? {} : { rovaraDefault: { ai: rovaraBedrock, sources: agentAiSources, disabled: config.agentModelsDisabled ?? parseDisabledAgentModels(undefined), switchedOn: config.aiSourceKinds ?? new Set<string>(), ...(config.bedrockByo === undefined || deps.byoBedrock === undefined ? {} : { byo: deps.byoBedrock }) } };
+  const rovaraDefault = companyKeys === undefined || rovaraBedrock === undefined ? {} : { rovaraDefault: { ai: rovaraBedrock, sources: agentAiSources, disabled: config.agentModelsDisabled ?? parseDisabledAgentModels(undefined), switchedOn: config.aiSourceKinds ?? new Set<string>() } };
   const learning = deps.learning === undefined ? undefined : createLearningRoutes({
     ...rovaraDefault,
     keys: deps.learning.keys, meter: deps.learning.meter, companyCaps: caps, lessons: new CompanyLessonsSwitch(db, config.tables.companies), transport,
@@ -345,6 +347,8 @@ export async function startServe(config: ServeConfig, deps: ServeDependencies = 
     transports: deps.answers.transports ?? { gemini: createGeminiTransport(), vertex: createVertexTransport(), openai: createOpenAiTransport() },
     ...(deps.answers.monthDefaultMicros === undefined ? {} : { monthDefaultMicros: deps.answers.monthDefaultMicros }),
   });
+  // The ended-task record: the server reads it on every agent call; the task-ended notice (task-ended-notice.ts) is the only writer.
+  const endedTasks = new DynamoEndedTasks(db, config.tables.markers, now);
   const handlerDeps: GatewayDependencies = {
     rovaraAiSetting: new InstallRovaraAi(db, config.tables.companies, now),
     ...(companyKeys === undefined ? {} : { runPriceReady: () => prices.runPriceSnapshotVersion() }),
@@ -352,7 +356,7 @@ export async function startServe(config: ServeConfig, deps: ServeDependencies = 
     // without that evidence keep legacy provisional settlement; nothing is inferred from a token.
     chargeReceipts: { source: (_claims, _model, resolved) => resolved },
     verifyToken: createTaskTokenVerifier({ registry: new StaticInstallRegistry([config.install]), readJwks: createJwksReader(deps.fetch ?? fetch), now }),
-    ended: new DynamoEndedTasks(db, config.tables.markers), meter, caps, prices, now,
+    ended: endedTasks, meter, caps, prices, now,
     // The busy answer is counted from its log line (overrun_busy); the process needs no metrics permission.
     metrics: { overrunBusy: () => undefined },
     modelLimits,
@@ -427,6 +431,11 @@ export async function startServe(config: ServeConfig, deps: ServeDependencies = 
     verify: createSignedTokenVerifier({ registry: new StaticInstallRegistry([config.install]), readJwks: createJwksReader(deps.fetch ?? fetch), now }, UPKEEP_CAP_READ_TOKEN_KIND),
     limits: upkeepLimits, meter, now,
   });
+  // GATEWAY-RUN-CHARGES-ROUTE: Code's read of one run's actual charges (run-charges-read.ts), from the agent meter's receipts, signed with the task key.
+  const runCharges = createRunChargesHandler({
+    verify: createSignedTokenVerifier({ registry: new StaticInstallRegistry([config.install]), readJwks: createJwksReader(deps.fetch ?? fetch), now }, RUN_CHARGES_TOKEN_KIND),
+    meter, now,
+  });
   const rateQuote = companyKeys === undefined ? undefined : createRateQuoteHandler({
     verify: createSignedTokenVerifier({ registry: new StaticInstallRegistry([config.install]), readJwks: createJwksReader(deps.fetch ?? fetch), now }, RATE_QUOTE_TOKEN_KIND),
     sources: agentAiSources, keys: companyKeys, prices, region: config.region, now, disabled: config.agentModelsDisabled ?? parseDisabledAgentModels(undefined), switchedOn: config.aiSourceKinds ?? new Set<string>(),
@@ -438,6 +447,11 @@ export async function startServe(config: ServeConfig, deps: ServeDependencies = 
   const companyInstructions = createCompanyInstructionsHandler({
     verify: createSignedTokenVerifier({ registry: new StaticInstallRegistry([config.install]), readJwks: createJwksReader(deps.fetch ?? fetch), now }, COMPANY_INSTRUCTIONS_TOKEN_KIND),
     rules: deps.companyInstructions ?? new CompanyStoredInstructions(db, config.tables.companies), now,
+  });
+  // Code tells the gateway a task ended (closed or merged): the record above, written once and never undone (task-ended-notice.ts), signed with the task key.
+  const taskEnded = createTaskEndedHandler({
+    verify: createSignedTokenVerifier({ registry: new StaticInstallRegistry([config.install]), readJwks: createJwksReader(deps.fetch ?? fetch), now }, TASK_ENDED_TOKEN_KIND),
+    ended: endedTasks, log: (line) => log({ ...line }), now,
   });
   const inFlight = new Set<Promise<void>>();
   let draining = false;
@@ -451,8 +465,10 @@ export async function startServe(config: ServeConfig, deps: ServeDependencies = 
       : offeredModels !== undefined && OFFERED_MODELS_PATH.test(req.url ?? "") ? offeredModels
       : rateQuote !== undefined && RATE_QUOTE_PATH.test(req.url ?? "") ? rateQuote
       : UPKEEP_CAP_READ_PATH.test(req.url ?? "") ? upkeepCapRead
+      : RUN_CHARGES_PATH.test(path ?? "") ? runCharges
       : evalAuthority !== undefined && path === EVAL_AUTHORITY_PATH ? evalAuthority
       : path === COMPANY_INSTRUCTIONS_PATH ? companyInstructions
+      : path === TASK_ENDED_PATH ? taskEnded
       : path === EVAL_CAP_PATH ? evalCap : undefined;
     const running = (service !== undefined ? service(req, res) : handler(req, res)).catch(() => { if (!res.headersSent) refuse(res); else res.destroy(); });
     inFlight.add(running); void running.finally(() => inFlight.delete(running));

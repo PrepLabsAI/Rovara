@@ -109,9 +109,9 @@ describe("Rovara's AI in the gateway stack (DEC 240)", () => {
   });
 
   it("allowed for production with product AI (Rovara-cloud#247), with no exempt companies there", () => {
-    const production = Template.fromStack(app({ ...productOn, [MODEL_GATEWAY_ROVARA_AI_CONTEXT_KEY]: MODELS }, "production").node.findChild("RovaraModelGateway") as Stack).toJSON() as { Resources: Record<string, Resource> };
+    const production = Template.fromStack(app({ ...productOn, [MODEL_GATEWAY_ROVARA_AI_CONTEXT_KEY]: MODELS, rovaraAiSourceKinds: "openai" }, "production").node.findChild("RovaraModelGateway") as Stack).toJSON() as { Resources: Record<string, Resource> };
     expect(JSON.stringify(production.Resources)).toContain("GATEWAY_ROVARA_AI_MODELS");
-    expect(() => app({ ...productOn, [MODEL_GATEWAY_ROVARA_AI_CONTEXT_KEY]: MODELS, [MODEL_GATEWAY_ROVARA_AI_EXEMPT_CONTEXT_KEY]: `org_${"a".repeat(20)}` }, "production")).toThrow(/exempt/u);
+    expect(() => app({ ...productOn, [MODEL_GATEWAY_ROVARA_AI_CONTEXT_KEY]: MODELS, [MODEL_GATEWAY_ROVARA_AI_EXEMPT_CONTEXT_KEY]: `org_${"a".repeat(20)}`, rovaraAiSourceKinds: "openai" }, "production")).toThrow(/exempt/u);
   });
 
   it("refused at synth: without product AI (company-key mode), global or another geography, bad lists", () => {

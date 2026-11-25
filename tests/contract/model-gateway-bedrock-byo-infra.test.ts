@@ -1,5 +1,5 @@
-// DEC 238 slice 1 in the gateway stack: bring your own Bedrock. Made only with -c rovaraModelGatewayBedrockByo=on beside
-// -c rovaraModelGatewayProductAi=on, refused for production at synth. Two retained pieces every customer role depends on: the
+// DEC 238 slice 1 in the gateway stack: bring your own Bedrock. No switch (DEC 254zzz520): every gateway with
+// -c rovaraModelGatewayProductAi=on, beta, production and named test environments alike, carries it. Two retained pieces every customer role depends on: the
 // Bedrock broker role at a FIXED name (only the serving role may assume it; it may only assume customers' RovaraBedrockInvoke-*
 // roles with an rvb-* external id and an org_* session name; no Bedrock rights of its own) and the external-id HMAC key (only the
 // serving role may make MACs with it). Two companies' isolation is the customer trust policy's job (bedrock-byo tests); here: the
@@ -10,17 +10,19 @@ import { describe, expect, it } from "vitest";
 import { BEDROCK_BYO_ROLE_PREFIX } from "../../packages/model-gateway/src/bedrock-byo.js";
 import { GATEWAY_ENV } from "../../packages/model-gateway/src/deploy.js";
 import { buildAgentXApp } from "../../infra/lib/app.js";
-import { BEDROCK_BYO_CUSTOMER_ROLE_PREFIX, bedrockBrokerRoleName, bedrockExternalIdKeyAlias, MODEL_GATEWAY_BEDROCK_BYO_CONTEXT_KEY, MODEL_GATEWAY_CONTEXT_KEY, MODEL_GATEWAY_ENV, MODEL_GATEWAY_PRODUCT_CONTEXT_KEY } from "../../infra/lib/model-gateway.js";
+import { BEDROCK_BYO_CUSTOMER_ROLE_PREFIX, bedrockBrokerRoleName, bedrockExternalIdKeyAlias, MODEL_GATEWAY_CONTEXT_KEY, MODEL_GATEWAY_ENV, MODEL_GATEWAY_PRODUCT_CONTEXT_KEY } from "../../infra/lib/model-gateway.js";
 
 type Resource = { Type: string; Properties: Record<string, unknown>; DeletionPolicy?: string; UpdateReplacePolicy?: string };
 type Statement = { Sid?: string; Effect: string; Action: string | string[]; Resource: unknown; Principal?: unknown; Condition?: Record<string, Record<string, unknown>> };
-const app = (context: Record<string, string>, env = "staging") => buildAgentXApp({ [MODEL_GATEWAY_CONTEXT_KEY]: env, agentxRegion: "us-west-2", ...context });
+// Production names its kinds, as the release pipeline does (a production deploy that names none is refused: the test below).
+const app = (context: Record<string, string>, env = "staging") => buildAgentXApp({ [MODEL_GATEWAY_CONTEXT_KEY]: env, agentxRegion: "us-west-2", ...(env === "production" && context[MODEL_GATEWAY_PRODUCT_CONTEXT_KEY] === "on" ? { rovaraAiSourceKinds: "openai" } : {}), ...context });
 const synth = (context: Record<string, string>, env = "staging") => Template.fromStack(app(context, env).node.findChild("RovaraModelGateway") as Stack).toJSON() as { Resources: Record<string, Resource> };
 const productOn = { [MODEL_GATEWAY_PRODUCT_CONTEXT_KEY]: "on" };
 /** The logical ids as first made: CloudFormation replaces a resource whose logical id changes. Never change these. */
 const PINNED = { broker: "BedrockBrokerRoleEF230DEA", key: "BedrockExternalIdKey85A8D0A1" };
-const on = synth({ ...productOn, [MODEL_GATEWAY_BEDROCK_BYO_CONTEXT_KEY]: "on" });
-const without = synth(productOn);
+const on = synth(productOn);
+// Without product AI (company-key mode) there is no Bedrock source and so no broker.
+const without = synth({});
 
 const byType = (t: { Resources: Record<string, Resource> }, type: string) => Object.entries(t.Resources).filter(([, r]) => r.Type === type);
 const broker = (t: { Resources: Record<string, Resource> }) => byType(t, "AWS::IAM::Role").find(([id]) => id.startsWith("BedrockBrokerRole"));
@@ -34,7 +36,7 @@ const serveEnv = (t: { Resources: Record<string, Resource> }) => {
 const serveRoleId = (t: { Resources: Record<string, Resource> }) => { const task = Object.entries(t.Resources).find(([id, r]) => r.Type === "AWS::ECS::TaskDefinition" && id.startsWith("ServeTask"))![1]; return (task.Properties.TaskRoleArn as { "Fn::GetAtt": [string, string] })["Fn::GetAtt"][0]; };
 
 describe("bring your own Bedrock in the gateway stack (DEC 238)", () => {
-  it("absent: no broker, no external-id key, no setting (the template as before)", () => {
+  it("without product AI: no broker, no external-id key, no setting (the template as before)", () => {
     expect(broker(without)).toBeUndefined();
     expect(externalIdKey(without)).toBeUndefined();
     expect(serveEnv(without)[GATEWAY_ENV.bedrockBrokerRole]).toBeUndefined();
@@ -109,9 +111,64 @@ describe("bring your own Bedrock in the gateway stack (DEC 238)", () => {
     expect(MODEL_GATEWAY_ENV.bedrockExternalIdKey).toBe(GATEWAY_ENV.bedrockExternalIdKey);
   });
 
-  it("refused without product AI, for production, or with a value other than on", () => {
-    expect(() => synth({ [MODEL_GATEWAY_BEDROCK_BYO_CONTEXT_KEY]: "on" })).toThrow(/needs rovaraModelGatewayProductAi=on/u);
-    expect(() => synth({ ...productOn, [MODEL_GATEWAY_BEDROCK_BYO_CONTEXT_KEY]: "on" }, "production")).toThrow();
-    expect(() => synth({ ...productOn, [MODEL_GATEWAY_BEDROCK_BYO_CONTEXT_KEY]: "yes" })).toThrow();
+  it("no switch: the old context key is not read (a stale -c rovaraModelGatewayBedrockByo changes nothing, in any environment)", () => {
+    for (const env of ["staging", "production"]) {
+      expect(JSON.stringify(synth({ ...productOn, rovaraModelGatewayBedrockByo: "yes" }, env))).toEqual(JSON.stringify(synth(productOn, env)));
+      expect(broker(synth({ rovaraModelGatewayBedrockByo: "on" }, env))).toBeUndefined();
+    }
+  });
+
+  it("production with product AI must name its kinds: an install naming none keeps own Bedrock for the AGENTS on, so the deploy is refused (gateway and web)", () => {
+    expect(() => buildAgentXApp({ [MODEL_GATEWAY_CONTEXT_KEY]: "production", agentxRegion: "us-west-2", ...productOn })).toThrow(/production must name its company AI sources/u);
+    expect(() => buildAgentXApp({ [MODEL_GATEWAY_CONTEXT_KEY]: "production", agentxRegion: "us-west-2", ...productOn, rovaraAiSourceKinds: "" })).toThrow(/production must name/u);
+    // The website stack's own check of the same rule stays in Rovara Cloud with that stack (Code's app makes only the gateway's stacks).
+    // Naming openai, as the pipeline does, synthesizes; staging is not held to it.
+    expect(() => buildAgentXApp({ [MODEL_GATEWAY_CONTEXT_KEY]: "production", agentxRegion: "us-west-2", ...productOn, rovaraAiSourceKinds: "openai" })).not.toThrow();
+    expect(() => synth(productOn, "staging")).not.toThrow();
+  });
+
+  // DEC 254zzz520: production carries it too. Same pieces under production's own names; the one difference from staging is the names.
+  describe("production (no guard, no switch)", () => {
+    const prod = synth(productOn, "production");
+    const prodWithout = synth({}, "production");
+
+    it("synthesizes: the broker at its fixed production name, the key under its production alias, both retained, logical ids pinned", () => {
+      const [brokerId, role] = broker(prod)!;
+      expect(brokerId).toBe(PINNED.broker);
+      expect(role.Properties.RoleName).toBe("RovaraBedrockBroker-production");
+      expect(role.DeletionPolicy).toBe("Retain");
+      expect(role.UpdateReplacePolicy).toBe("Retain");
+      const [keyId, key] = externalIdKey(prod)!;
+      expect(keyId).toBe(PINNED.key);
+      expect(key.DeletionPolicy).toBe("Retain");
+      const aliases = byType(prod, "AWS::KMS::Alias").filter(([, a]) => JSON.stringify(a.Properties.TargetKeyId).includes(keyId));
+      expect(aliases.map(([, a]) => a.Properties.AliasName)).toEqual(["alias/rovara-bedrock-external-id-production"]);
+    });
+
+    it("the same trust chain and least privilege as staging: serving role to broker (org_* session), broker to customers' RovaraBedrockInvoke-* roles in OTHER accounts (rvb-* external id, org_* session), no Bedrock rights of its own", () => {
+      const [, role] = broker(prod)!;
+      const trust = (role.Properties.AssumeRolePolicyDocument as { Statement: Statement[] }).Statement;
+      expect(trust).toEqual([{ Action: "sts:AssumeRole", Effect: "Allow", Principal: { AWS: { "Fn::GetAtt": [serveRoleId(prod), "Arn"] } }, Condition: { StringLike: { "sts:RoleSessionName": "org_*" } } }]);
+      const policies = role.Properties.Policies as Array<{ PolicyName: string; PolicyDocument: { Statement: Statement[] } }>;
+      expect(policies[0]!.PolicyDocument.Statement).toEqual([{
+        Sid: "AssumeCustomerBedrockRoles", Effect: "Allow", Action: "sts:AssumeRole",
+        Resource: { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, `:iam::*:role/${BEDROCK_BYO_CUSTOMER_ROLE_PREFIX}*`]] },
+        Condition: { StringLike: { "sts:ExternalId": "rvb-*", "sts:RoleSessionName": "org_*" }, StringNotEquals: { "aws:ResourceAccount": { Ref: "AWS::AccountId" } } },
+      }]);
+      const s = statements(prod);
+      expect(s.find((x) => x.Sid === "AssumeBedrockBroker")).toEqual({ Sid: "AssumeBedrockBroker", Effect: "Allow", Action: "sts:AssumeRole", Resource: { "Fn::GetAtt": [PINNED.broker, "Arn"] }, Condition: { StringLike: { "sts:RoleSessionName": "org_*" } } });
+      expect(s.find((x) => x.Sid === "MakeBedrockExternalIds")).toEqual({ Sid: "MakeBedrockExternalIds", Effect: "Allow", Action: "kms:GenerateMac", Resource: { "Fn::GetAtt": [PINNED.key, "Arn"] } });
+      const policy = (externalIdKey(prod)![1].Properties.KeyPolicy as { Statement: Statement[] }).Statement;
+      expect(policy[1]).toMatchObject({ Action: "kms:GenerateMac", Condition: { ArnEquals: { "aws:PrincipalArn": { "Fn::GetAtt": [serveRoleId(prod), "Arn"] } } } });
+    });
+
+    it("the serving task gets both settings; without product AI production's template has none of it", () => {
+      const e = serveEnv(prod);
+      expect(e[GATEWAY_ENV.bedrockBrokerRole]).toEqual({ "Fn::GetAtt": [PINNED.broker, "Arn"] });
+      expect(e[GATEWAY_ENV.bedrockExternalIdKey]).toEqual({ "Fn::GetAtt": [PINNED.key, "Arn"] });
+      expect(broker(prodWithout)).toBeUndefined();
+      expect(externalIdKey(prodWithout)).toBeUndefined();
+      expect(serveEnv(prodWithout)[GATEWAY_ENV.bedrockBrokerRole]).toBeUndefined();
+    });
   });
 });
