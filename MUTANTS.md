@@ -1,5 +1,7 @@
 # Server-read regression mutant evidence
 
+> **From 2026-11-25, new mutant evidence goes in `mutants/<LANE-NAME>.md`, one file per lane (see `mutants/README.md`).** This file is the index and the history up to that date. Do not append new lanes here.
+
 ## Item 3 — OPUS-F1F2 tests-only follow-up (0410a0dfd + local tests)
 
 Production code is unchanged. This delta adds/touches no production guard, refusal, money or authority line, so no new per-line remove/loosen/invert matrix applies. The two named reviewer guard removals were applied singly in one isolated scratch copy, never in the production worktree. No per-job mutant cap is asserted.
