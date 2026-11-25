@@ -1,5 +1,5 @@
 // Lane core-money-stop, the deployed side (core-host/hosted-modules.ts, core/cost/holds.ts, aws/core-engine-root.ts `coreMoneyWiring`, services/callbacks.ts): where a run stands
-// against the task's and the day's caps, the run stopped as its usage is booked, a stopped run's whole hold kept as spent (marked estimated), and unattended work refused until the
+// against the task's and the day's caps, the run stopped as its usage is booked, a lost run counted at the gateway actual figure, and unattended work refused until the
 // per-run stop is wired. Two companies throughout: nothing one does reads or moves the other's money.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
@@ -9,7 +9,7 @@ import { companyDayKey, costPartition } from "../../packages/broker/src/core/cos
 import { holdKey } from "../../packages/broker/src/core/cost/holds.js";
 import {
   COMPANY_DAY_CAP_REACHED, CORE_OUTBOX_STREAM_RELAY_VARIABLE, RUN_STOP_NOT_WIRED, SPEND_UNKNOWN, TASK_CAP_REACHED, createHostedAdmission, createHostedLedger, createHostedMoneyStop, hostedSecurityModules,
-  runSpendState, runStopWiredFrom, runsOwed, unflushedEntryId, unflushedEstimateMicros, type HostedAdmissionSettings,
+  runSpendState, runStopWiredFrom, runsOwed, unflushedEntryId, unreportedSettleEntryId, type HostedAdmissionSettings,
 } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { buildCoreRegistry, coreAdapter } from "../../packages/broker/src/core-host/registry.js";
 import { coreMoneyWiring } from "../../packages/broker/src/aws/core-engine-root.js";
@@ -135,47 +135,186 @@ describe("unattended work waits for the per-run stop", () => {
   });
 });
 
-describe("a stopped run's usage that never arrived: the whole hold is kept, marked estimated", () => {
-  it("keeps what usage drew plus all the hold still holds (never less than the hold), and marks the hold and the day", async () => {
+describe("a stopped run's usage that never arrived: counted at the gateway's actual figure, never the whole hold (LOST-RUN-ACTUAL-SPEND)", () => {
+  const entryOf = (w: ReturnType<typeof setup>, task: string, id: string) => w.store.get({ pk: costPartition(A, task), sk: `ENTRY#${id}` });
+  const stopOf = (w: ReturnType<typeof setup>, extra: Partial<Parameters<typeof createHostedMoneyStop>[0]> = {}) => createHostedMoneyStop({ store: w.store, companyId: A, settings: SETTINGS, now: () => NOW, ...extra });
+
+  it("settleFromGateway books only the actual not already in the worker's bookings, draws the hold, gives the rest back, once", async () => {
+    const w = setup();
+    const task = randomUUID();
+    const hold = await w.start(A, task);
+    const operationId = randomUUID();
+    // The worker's checkpoint for the run ($1.50) is booked; the gateway says the run cost $2.25: only $0.75 is added, never the whole $2.25 again.
+    await w.ledger.recordUsage({ companyId: A, entryId: `${CHECKPOINT_ENTRY_PREFIX}:${operationId}:abc`, at: NOW.toISOString(), taskId: task, usage: { provider: "anthropic", modelId: "m", tokens: { input: 1_500_000, output: 0, cacheRead: 0, cacheWrite: 0 } } });
+    const stop = stopOf(w);
+    await stop.settleFromGateway!(hold, { operationId, taskId: task }, { actualMicros: 2_250_000, final: true });
+    expect((await w.ledger.taskCost(A, task)).micros).toBe(2_250_000);
+    expect(await entryOf(w, task, `usage:${operationId}:settled`)).toMatchObject({ modelId: "gateway-actual", micros: 750_000 });
+    // The hold is given back: what the bookings drew is on the day once, the rest (the hold's $6 less $2.25... the task cap is $5, so the hold was $5) is released, never kept as spent.
+    expect(await w.store.get(holdKey(A, hold))).toMatchObject({ state: "released", keptMicros: 0, drawnMicros: 2_250_000 });
+    expect(await w.store.get(companyDayKey(A, DAY))).toMatchObject({ usdMicros: 2_250_000, reservedMicros: 0, loadMicros: 2_250_000 });
+    // Told again: nothing more.
+    await stop.settleFromGateway!(hold, { operationId, taskId: task }, { actualMicros: 9_000_000, final: true });
+    expect((await w.ledger.taskCost(A, task)).micros).toBe(2_250_000);
+  });
+
+  it("a worker figure above the gateway's stays (over-counting is the safe side); a gateway record of nothing adds nothing and is never $0 by itself", async () => {
+    const w = setup();
+    const task = randomUUID();
+    const hold = await w.start(A, task);
+    const operationId = randomUUID();
+    await w.ledger.recordUsage({ companyId: A, entryId: `usage:${operationId}:early`, at: NOW.toISOString(), taskId: task, usage: { provider: "anthropic", modelId: "m", tokens: { input: 2_000_000, output: 0, cacheRead: 0, cacheWrite: 0 } } });
+    await stopOf(w).settleFromGateway!(hold, { operationId, taskId: task }, { actualMicros: 500_000, final: true });
+    expect((await w.ledger.taskCost(A, task)).micros).toBe(2_000_000);
+    const other = randomUUID();
+    await stopOf(w).settleFromGateway!(hold, { operationId: other, taskId: task }, { actualMicros: 0, final: true });
+    expect(await entryOf(w, task, `usage:${other}:settled`)).toMatchObject({ micros: 0 });
+  });
+
+  it("a gateway figure that is not final is booked as an estimate (marked), a final one is not", async () => {
+    const w = setup();
+    const task = randomUUID();
+    const hold = await w.start(A, task);
+    const provisional = randomUUID();
+    await stopOf(w).settleFromGateway!(hold, { operationId: provisional, taskId: task }, { actualMicros: 1_000_000, final: false });
+    expect(await w.store.get({ pk: costPartition(A, task), sk: "TOTAL" })).toMatchObject({ micros: 1_000_000, provisionalCalls: 1 });
+    const task2 = randomUUID();
+    const hold2 = await w.start(A, task2);
+    await stopOf(w).settleFromGateway!(hold2, { operationId: randomUUID(), taskId: task2 }, { actualMicros: 1_000_000, final: true });
+    expect((await w.store.get({ pk: costPartition(A, task2), sk: "TOTAL" }))?.["provisionalCalls"]).toBeUndefined();
+  });
+
+  it("another company's hold is never touched by a settlement (the booking is this company's, on this company's task)", async () => {
+    const w = setup();
+    const task = randomUUID();
+    const holdB = await w.start(B, task);
+    const dayB = await w.store.get(companyDayKey(B, DAY));
+    await stopOf(w).settleFromGateway!(holdB, { operationId: randomUUID(), taskId: task }, { actualMicros: 1_000_000, final: true });
+    expect(await w.store.get(companyDayKey(B, DAY))).toEqual(dayB);
+    expect(await w.store.get(holdKey(B, holdB))).toMatchObject({ state: "open" });
+    for (const id of [undefined, "", "hold:org_x:abc"]) await stopOf(w).settleFromGateway!(id, { operationId: randomUUID(), taskId: task }, { actualMicros: 0, final: true });
+    expect((await w.ledger.taskCost(B, task)).micros).toBe(0);
+  });
+
+  /** The task's record, its workspace and these runs (the money stop reads a task's runs to find an earlier estimate), the way the engine writes them. */
+  const seedRuns = async (w: ReturnType<typeof setup>, task: string, ids: string[], project = "alpha") => {
+    const workspaceId = randomUUID();
+    await w.store.put({ item: { ...taskKey(task), entityType: "DEVELOPER_TASK", taskId: task, companyId: A, workspaceId, project } });
+    await w.store.put({ item: { ...workspaceKey(A, workspaceId), id: workspaceId, companyId: A } });
+    for (const id of ids) await w.store.put({ item: { ...operationKey(A, workspaceId, id), entityType: "OPERATION", id, workspaceId, companyId: A, kind: "task", status: "INTERRUPTED", fence: 1, eventSequence: 0, usageUnflushed: true, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() } });
+  };
+
+  it("keepHoldAsEstimate counts the hold's room only, for the first run, and brings the task to its cap for a second (two runs at most)", async () => {
     const w = setup();
     const task = randomUUID();
     const hold = await w.start(A, task);
     await w.book(A, task, 1_500_000);
-    const stop = createHostedMoneyStop({ store: w.store, companyId: A, settings: SETTINGS, now: () => NOW });
-    const operationId = randomUUID();
-    await stop.keepWholeHold(hold, { operationId, taskId: task });
-    expect(await w.store.get(holdKey(A, hold))).toMatchObject({ state: "settled", keptMicros: 3_500_000, drawnMicros: 1_500_000, estimated: true, estimatedFor: operationId });
-    // The unreported spend is kept at no less than the fixed estimate ($5): the hold's $3.50 room, and $1.50 more as the estimate entry. The checkpoints' $1.50 stays booked.
-    expect(await w.store.get({ pk: costPartition(A, task), sk: `ENTRY#${unflushedEntryId(operationId)}` })).toBeDefined();
-    expect((await w.ledger.taskCost(A, task)).micros).toBe(3_000_000);
-    expect(await w.store.get(companyDayKey(A, DAY))).toMatchObject({ usdMicros: 3_000_000, settledMicros: 3_500_000, estimatedMicros: 3_500_000, reservedMicros: 0, loadMicros: 6_500_000 });
-    // The next run of the task stopped without its usage (after a Retry): its hold is closed now, so a fixed estimate is booked on the task, never $0; once per run.
-    const next = randomUUID();
-    await stop.keepWholeHold(hold, { operationId: next, taskId: task });
-    expect(await w.store.get({ pk: costPartition(A, task), sk: `ENTRY#${unflushedEntryId(next)}` })).toBeDefined();
-    expect((await w.ledger.taskCost(A, task)).micros).toBe(3_000_000 + unflushedEstimateMicros(SETTINGS));
-    expect(await w.store.get(companyDayKey(A, DAY))).toMatchObject({ usdMicros: 8_000_000, loadMicros: 11_500_000 });
-    await stop.keepWholeHold(hold, { operationId: next, taskId: task });
-    expect((await w.ledger.taskCost(A, task)).micros).toBe(3_000_000 + unflushedEstimateMicros(SETTINGS));
-    expect(unflushedEstimateMicros(SETTINGS)).toBe(5_000_000);
-    expect(unflushedEstimateMicros(undefined)).toBe(6_000_000);
+    const first = randomUUID();
+    await seedRuns(w, task, [first]);
+    const stop = stopOf(w);
+    await stop.keepHoldAsEstimate!(hold, { operationId: first, taskId: task });
+    // The hold's $3.50 room, nothing topped up; the figure is $5 only because the hold was $5 and untouched room is what admission judged enough.
+    expect(await entryOf(w, task, unreportedSettleEntryId(first))).toMatchObject({ micros: 3_500_000, chargeStatus: "estimated", provider: "rovara-unflushed-estimate" });
+    expect(await w.store.get(holdKey(A, hold))).toMatchObject({ state: "released" });
+    // No room left (no hold of its own): the first unknown run books a marked $0, the second brings the task to its cap, the third adds nothing (two runs at most).
+    const w2 = setup();
+    const t2 = randomUUID();
+    await w2.book(A, t2, 1_000_000);
+    const [firstUnknown, second, third] = [randomUUID(), randomUUID(), randomUUID()];
+    await seedRuns(w2, t2, [firstUnknown, second, third]);
+    const stop2 = stopOf(w2);
+    await stop2.keepHoldAsEstimate!(undefined, { operationId: firstUnknown, taskId: t2 });
+    expect(await entryOf(w2, t2, unreportedSettleEntryId(firstUnknown))).toMatchObject({ micros: 0, chargeStatus: "estimated" });
+    expect((await w2.ledger.taskCost(A, t2)).micros).toBe(1_000_000);
+    await stop2.keepHoldAsEstimate!(undefined, { operationId: second, taskId: t2 });
+    expect((await w2.ledger.taskCost(A, t2)).micros).toBe(5_000_000);
+    await stop2.keepHoldAsEstimate!(undefined, { operationId: third, taskId: t2 });
+    expect((await w2.ledger.taskCost(A, t2)).micros).toBe(5_000_000);
   });
 
-  it("touches only the hold's own company, and does nothing for no hold or an id that is not one", async () => {
+  it("an estimate whose run is found by the earlier-estimate read stays found however many usage entries the task holds (it reads the runs' two marker ids, never a scan that can run out)", async () => {
     const w = setup();
     const task = randomUUID();
-    const holdA = await w.start(A, task);
-    const holdB = await w.start(B, task);
-    const stop = createHostedMoneyStop({ store: w.store, companyId: A, settings: SETTINGS, now: () => NOW });
-    const dayB = await w.store.get(companyDayKey(B, DAY));
-    await stop.keepWholeHold(holdA, { operationId: randomUUID(), taskId: task });
-    expect(await w.store.get(companyDayKey(B, DAY))).toEqual(dayB);
-    expect(await w.store.get(holdKey(B, holdB))).toMatchObject({ state: "open" });
-    for (const id of [undefined, "", "hold:org_x:abc", holdA.replace(A, B), holdB]) await stop.keepWholeHold(id, { operationId: randomUUID(), taskId: task });
-    // B's own hold through A's money stop: untouched; what is kept is A's estimate, on A's task.
-    expect(await w.store.get(companyDayKey(B, DAY))).toEqual(dayB);
-    expect(await w.store.get(holdKey(B, holdB))).toMatchObject({ state: "open" });
-    expect((await w.ledger.taskCost(B, task)).micros).toBe(0);
+    const [first, second] = [randomUUID(), randomUUID()];
+    await seedRuns(w, task, [first, second]);
+    const stop = stopOf(w);
+    await stop.keepHoldAsEstimate!(undefined, { operationId: first, taskId: task });
+    // 2,100 usage entries of other runs: a scan of the task's entries would run past its page bound and refuse.
+    for (let index = 0; index < 2_100; index += 1) await w.store.put({ item: { pk: costPartition(A, task), sk: `ENTRY#usage:filler-${String(index).padStart(5, "0")}:x`, entityType: "COST_ENTRY", companyId: A, taskId: task } });
+    await w.book(A, task, 1_000_000);
+    await stop.keepHoldAsEstimate!(undefined, { operationId: second, taskId: task });
+    expect((await w.ledger.taskCost(A, task)).micros).toBe(5_000_000);
+  });
+
+  it("the actual and the estimate of one run exclude each other: whichever is booked first is the figure, in either order, and the second books nothing", async () => {
+    for (const order of ["actual first", "estimate first"] as const) {
+      const w = setup();
+      const task = randomUUID();
+      const hold = await w.start(A, task);
+      const run = randomUUID();
+      await seedRuns(w, task, [run]);
+      const stop = stopOf(w);
+      const actual = () => stop.settleFromGateway!(hold, { operationId: run, taskId: task }, { actualMicros: 700_000, final: true });
+      const estimate = () => stop.keepHoldAsEstimate!(hold, { operationId: run, taskId: task });
+      if (order === "actual first") { await actual(); await estimate(); } else { await estimate(); await actual(); }
+      expect((await w.ledger.taskCost(A, task)).micros, order).toBe(order === "actual first" ? 700_000 : 5_000_000);
+      expect((await w.ledger.taskCost(A, task)).entries, order).toBe(1);
+    }
+    // Both at once: one figure.
+    const w = setup();
+    const task = randomUUID();
+    const hold = await w.start(A, task);
+    const run = randomUUID();
+    await seedRuns(w, task, [run]);
+    const stop = stopOf(w);
+    await Promise.allSettled([stop.settleFromGateway!(hold, { operationId: run, taskId: task }, { actualMicros: 700_000, final: true }), stop.keepHoldAsEstimate!(hold, { operationId: run, taskId: task })]);
+    expect((await w.ledger.taskCost(A, task)).entries).toBe(1);
+  });
+
+  it("the second estimate is bounded by the project's own lower cap, and a cap that cannot be read refuses (fails closed)", async () => {
+    const w = setup();
+    const task = randomUUID();
+    const [one, two, three] = [randomUUID(), randomUUID(), randomUUID()];
+    await seedRuns(w, task, [one, two, three]);
+    const hold = await w.start(A, task);
+    await w.book(A, task, 500_000);
+    const stop = stopOf(w, { projectTaskCap: async () => 2_000_000 });
+    await stop.keepHoldAsEstimate!(hold, { operationId: one, taskId: task });
+    const total = (await w.ledger.taskCost(A, task)).micros;
+    await stop.keepHoldAsEstimate!(undefined, { operationId: two, taskId: task });
+    expect((await w.ledger.taskCost(A, task)).micros).toBe(Math.max(total, 2_000_000));
+    const broken = stopOf(w, { projectTaskCap: async () => { throw new Error("unreadable"); } });
+    await expect(broken.keepHoldAsEstimate!(undefined, { operationId: three, taskId: task })).rejects.toThrow();
+  });
+
+  it("a task whose runs cannot be read books no estimate (fails closed, never a bound skipped)", async () => {
+    const w = setup();
+    const task = randomUUID();
+    await expect(stopOf(w).keepHoldAsEstimate!(undefined, { operationId: randomUUID(), taskId: task })).rejects.toThrow();
+    expect((await w.ledger.taskCost(A, task)).micros).toBe(0);
+  });
+
+  it("a close's plan keeps the hold as spent and tops nothing up; its run is booked UNKNOWN (awaiting usage, no dollar figure), never a marked $0, and the run still owes its settlement", async () => {
+    const w = setup();
+    const task = randomUUID();
+    const hold = await w.start(A, task);
+    await w.book(A, task, 1_500_000);
+    const operationId = randomUUID();
+    await seedRuns(w, task, [operationId]);
+    const stop = stopOf(w);
+    const planned = await stop.planUnflushed!(hold, { operationId, taskId: task });
+    expect(planned.plan.restMicros).toBe(0);
+    expect(planned.plan.covered).toBe(false);
+    await w.store.transact([...planned.items]);
+    await stop.applyUnflushed!(planned.plan, { operationId, taskId: task });
+    expect(await entryOf(w, task, unflushedEntryId(operationId))).toMatchObject({ chargeStatus: "awaiting_usage" });
+    expect(await entryOf(w, task, unflushedEntryId(operationId))).not.toHaveProperty("micros");
+    expect(await w.store.get({ pk: costPartition(A, task), sk: "TOTAL" })).toMatchObject({ unpricedEntries: 1 });
+    expect(await runsOwed(w.store, A, task), "the unknown marker is no figure: the settler still owes the run its actual").toBe(true);
+    // A plan an earlier release stored with a dollar figure books it as it said.
+    const old = randomUUID();
+    await stop.applyUnflushed!({ schemaVersion: 1, at: NOW.toISOString(), restMicros: 2_000_000, covered: false }, { operationId: old, taskId: task });
+    expect(await entryOf(w, task, unflushedEntryId(old))).toMatchObject({ micros: 2_000_000, chargeStatus: "estimated" });
   });
 
   it("a run taken as unflushed is owed until its estimate is booked (closing the task then keeps the hold); checkpoints alone never make a run booked", async () => {
@@ -197,6 +336,13 @@ describe("a stopped run's usage that never arrived: the whole hold is kept, mark
     await entry(`usage:${lost}:xyz`);
     expect(await runsOwed(store, A, taskId)).toBe(true);
     await entry(unflushedEntryId(lost));
+    expect(await runsOwed(store, A, taskId)).toBe(false);
+    // A lost run is booked by its settlement too (the gateway's actual figure), and by nothing a partial report did.
+    const settled = randomUUID();
+    await run(settled, { usageUnflushed: true });
+    await entry(`usage:${settled}:partial`);
+    expect(await runsOwed(store, A, taskId)).toBe(true);
+    await entry(`usage:${settled}:settled`);
     expect(await runsOwed(store, A, taskId)).toBe(false);
   });
 });
@@ -262,7 +408,7 @@ describe("the run is stopped as its usage is booked (the broker root's wiring an
     const queued: Array<{ companyId: string; body: Record<string, unknown> }> = [];
     const relayed: unknown[] = [];
     const delivered: unknown[] = [];
-    const stop: MoneyStop = { async keepWholeHold() {} };
+    const stop: MoneyStop = {};
     const flowFor = (companyId: OrgId) => ({
       companyId, store, callbackSigningKey: signingKey, now: () => NOW, moneyStop: stop,
       outbox: {

@@ -30,7 +30,7 @@ async function fixture(discard = true) {
   if (preview.preview === null) throw new Error("missing preview");
   const input = { requestId: randomUUID(), expectedPreviewDigest: preview.preview.digest, discard_unpublished: discard };
   const refresh = vi.fn(async () => undefined), terminate = vi.spyOn(h.machines, "terminate");
-  const holds = vi.fn(async () => undefined); h.deps.moneyStop = { flushWaitMs: 0, keepWholeHold: holds };
+  const holds = vi.fn(async () => undefined); h.deps.moneyStop = { flushWaitMs: 0 };
   // These routes never read a blob for this fixture's task, which has no model output.
   const route = createSessionRoutes({ flow: h.flow, companyId: h.deps.companyId, blobs: {} as never, origin: () => "http://local", refresh });
   const sessionPath = `/v1/app/sessions/${sessionId}/close`, devPath = `/v1/dev/tasks/${task.taskId}/close`;

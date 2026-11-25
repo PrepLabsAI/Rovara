@@ -23,7 +23,7 @@ const total = (companyId: OrgId, taskId: string, over: Record<string, unknown> =
 };
 
 const WS = "ws-spend-1";
-interface Run { id: string; workflowMode?: string; status: string; kind?: string; usageUnflushed?: true; booked?: "usage" | "checkpoint" | "none"; machineless?: true }
+interface Run { id: string; workflowMode?: string; status: string; kind?: string; usageUnflushed?: true; booked?: "usage" | "checkpoint" | "settled" | "none"; machineless?: true }
 /** The task's runs as a healthy hosted task has them: a coding run and a review run that succeeded, each with its end report booked. */
 const HEALTHY: Run[] = [{ id: "op-1", workflowMode: "IMPLEMENT", status: "SUCCEEDED" }, { id: "op-2", workflowMode: "REVIEW", status: "SUCCEEDED" }];
 
@@ -42,7 +42,8 @@ async function rowStore(rows: StoredDocument[], options: { runs?: Run[]; company
     for (const run of options.runs ?? HEALTHY) {
       at += 1;
       await memory.put({ item: { ...operationKey(owner, WS, run.id), entityType: "OPERATION", id: run.id, companyId: owner, kind: run.kind ?? "task", ...(run.workflowMode === undefined ? {} : { workflowMode: run.workflowMode }), status: run.status, ...(run.machineless === true ? {} : { machineId: "machine-1" }), createdAt: `2026-11-18T07:00:${String(at).padStart(2, "0")}.000Z`, fence: at, ...(run.usageUnflushed === true ? { usageUnflushed: true } : {}) } });
-      if (run.booked !== "none" && run.booked !== "checkpoint") await memory.put({ item: { pk: costPartition(owner, TASK), sk: `ENTRY#usage:${run.id}:abc`, entityType: "COST_ENTRY", companyId: owner, taskId: TASK } });
+      if (run.booked === "settled") await memory.put({ item: { pk: costPartition(owner, TASK), sk: `ENTRY#usage:${run.id}:settled`, entityType: "COST_ENTRY", companyId: owner, taskId: TASK } });
+      else if (run.booked !== "none" && run.booked !== "checkpoint") await memory.put({ item: { pk: costPartition(owner, TASK), sk: `ENTRY#usage:${run.id}:abc`, entityType: "COST_ENTRY", companyId: owner, taskId: TASK } });
       if (run.booked === "checkpoint") await memory.put({ item: { pk: costPartition(owner, TASK), sk: `ENTRY#usage-checkpoint:${run.id}:abc`, entityType: "COST_ENTRY", companyId: owner, taskId: TASK } });
     }
   }
@@ -158,7 +159,9 @@ describe("the hosted task spend reader (L4-TSU)", () => {
     });
 
     it("a run kept as an estimate is reported once its estimate entry is booked (SPEND-UNREPORTED-RUN: the figure then adds what its hold kept, tested in spend-unreported-run-settle.test.ts); without the entry it is not", async () => {
-      expect(await refusedFor([...HEALTHY, { id: "op-3", workflowMode: "IMPLEMENT", status: "INTERRUPTED", usageUnflushed: true, booked: "usage" }])).toEqual({ answer: 4.25, seen: [] });
+      expect(await refusedFor([...HEALTHY, { id: "op-3", workflowMode: "IMPLEMENT", status: "INTERRUPTED", usageUnflushed: true, booked: "settled" }])).toEqual({ answer: 4.25, seen: [] });
+      // A lost run is booked by its own settlement or estimate only: a partial report that reached the broker before it was lost does not make it reported in full.
+      expect(await refusedFor([...HEALTHY, { id: "op-3", workflowMode: "IMPLEMENT", status: "INTERRUPTED", usageUnflushed: true, booked: "usage" }])).toEqual({ answer: "refused", seen: ["run_unreported"] });
       expect(await refusedFor([...HEALTHY, { id: "op-3", workflowMode: "IMPLEMENT", status: "INTERRUPTED", usageUnflushed: true, booked: "none" }])).toEqual({ answer: "refused", seen: ["run_unreported"] });
     });
 

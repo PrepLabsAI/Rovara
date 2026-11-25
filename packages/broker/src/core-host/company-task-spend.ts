@@ -20,6 +20,7 @@ import { readTask, workspaceOperations } from "../core/task-flow/reads.js";
 import type { OperationRecord, TaskRecord } from "../core/task-flow/records.js";
 import { reportsUsage } from "../core/task-flow/money-stop.js";
 import { locateWorkspace } from "../core/task-flow/workspace-location.js";
+import { runIsBooked } from "./hosted-modules.js";
 
 /** The one sentence a refused read throws (fixed words: never the task, the company, the figures or the cause). */
 export const TASK_SPEND_UNKNOWN = "the task's spend could not be read";
@@ -68,8 +69,7 @@ export async function readRunLedger(store: DocumentStore, companyId: OrgId, task
     // A run that never reached a worker machine spent nothing (the same test as the money stop's `reportsUsage`); every other model run, whatever it ended as and in whatever step, must have its end
     // report booked. A succeeded run is no exception: the worker posts its result even when the broker refused the flush of its usage. A checkpoint is not an end report.
     if (run.status !== "SUCCEEDED" && !reportsUsage(run)) continue;
-    const booked = await store.query({ pk: costPartition(companyId, taskId), sk: { op: "beginsWith", prefix: `ENTRY#usage:${run.id}:` }, limit: 1 });
-    if (booked.items.length === 0) found.owing.push(run);
+    if (!await runIsBooked(store, companyId, taskId, run)) found.owing.push(run);
     // Kept as an estimate: the hold's room is outside the total, so the figure adds it (`keptEstimateMicros`).
     else if (run.usageUnflushed === true) found.estimated = true;
   }

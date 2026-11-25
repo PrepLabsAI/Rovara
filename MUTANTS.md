@@ -854,3 +854,38 @@ Review round 1 (Opus FAIL 0d9409cc3: F1 admin on a Slack entry, F2 demoted start
 | M7, `compute` | a starter demoted to viewer or commenter keeps `owner` (only a denial clears it) | tests/unit/session-features-access.test.ts and tests/journeys/session-people-key.test.ts (c3) | red (1 of 20 unit, 1 of 7 journeys) |
 | M5b, `compute` | a denied starter keeps `owner` (now seen in the journey: a company admin starter reads `owner: false`) | same unit file and the journey (c2) | red (1 of 20 unit, 1 of 7 journeys) |
 | M8, `peopleEntryOf` | an entry grants on any stored role, with no grant check (the Slack-entry and company-admin cases) | tests/unit/session-features-access.test.ts | red (2 of 20) |
+## LOST-RUN-ACTUAL-SPEND (money) mutants, exact sha 700db0b7da859aec04a08997565640773742cdc9 (the same code is 33f1aeb9c after the rebase onto 77226d70d, which only reshaped the settler's loop into `settleOneRun`)
+
+Each guard below was removed or inverted in a scratch edit (restored afterwards), and `tests/unit/lost-run-actual-spend.test.ts` + `tests/unit/core-host-money-stop.test.ts` (49 tests) were run on it:
+
+| Mutant | Result |
+|---|---|
+| `settleFromGateway` adds the gateway's whole actual instead of `max(0, actual - worker booked)` (double booking) | 4 failed |
+| a not-final gateway figure is booked at once (the wait for settled calls removed) | 1 failed |
+| the dispatcher's `deferEstimate` guard removed (it estimates before the wait) | 1 failed |
+| the two-run bound on the hold-room estimate (`hasEarlierEstimate`) removed | 3 failed |
+| a worker report after a `gateway-actual` settlement is booked (the late-report guard in `usage-booking.ts` removed) | 1 failed |
+| Retry's spend/cap read (`retry.ts`) removed | 1 failed |
+| a partial report books a lost run (`runIsBooked`'s `usageUnflushed` branch removed) | 1 failed |
+| an unreadable gateway estimates at once instead of waiting (`waitedOut ? "estimate" : "wait"` -> `"estimate"`) | 5 failed |
+
+Not mutated: the HTTP reader's per-field refusals (each has its own `it.each` case in the reader describe), the close plan's `restMicros: 0` (pinned by the close-plan case in core-host-money-stop).
+
+## LOST-RUN-ACTUAL-SPEND pre-review round (money), mutants on the review-fix commit (the sha in the commit named "pre-review fixes")
+
+Each guard removed or inverted in a scratch edit (restored afterwards); `tests/unit/lost-run-actual-spend.test.ts` + `tests/unit/core-host-money-stop.test.ts` (58 tests) run on it. Every one failed at least one test:
+
+| Mutant | Result |
+|---|---|
+| an incomplete gateway record is booked as the actual (`charge?.complete === true` removed) | 1 failed |
+| the hold is not released after the actual is booked | 2 failed |
+| worker checkpoints (`usage-checkpoint:`) not counted in what the worker booked (double booking) | 3 failed |
+| owner rounds read the ledger total, not the flow's spend figure (`hostedRoundCap` wiring) | 1 failed |
+| a non-final gateway figure is booked as final | 1 failed |
+| a route that is not served (404/501) is an hour's wait, not the estimate at the grace | 1 failed |
+| the estimate books under its own entry id (two settlers can double-book one run) | 5 failed |
+| the dispatcher estimates after the wait (`deferEstimate` never estimates) | 1 failed |
+| a run the gateway has not seen (`seen: false`) is read as a record | 2 failed |
+| a closed task's lost run is booked as a $0 estimate, not unknown (`awaiting_usage`) | 2 failed |
+| a run created before the gateway began indexing by run (`indexedSince`) is read as a final sum | 1 failed |
+| a gateway answer with NO `indexedSince` is read (the required-time check in `readRunCharges` removed) | 4 failed |

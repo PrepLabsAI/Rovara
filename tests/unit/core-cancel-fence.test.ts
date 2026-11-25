@@ -7,7 +7,7 @@ import { workspaceKeys } from "../../packages/broker/src/core/task-flow/workspac
 import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
 import { holdItems, holdKey, reservationIdOf } from "../../packages/broker/src/core/cost/holds.js";
 import { companyDayKey, costPartition } from "../../packages/broker/src/core/cost/ledger.js";
-import { createHostedLedger, createHostedMoneyStop, unflushedEntryId } from "../../packages/broker/src/core-host/hosted-modules.js";
+import { createHostedLedger, createHostedMoneyStop, unflushedEntryId, unreportedSettleEntryId } from "../../packages/broker/src/core-host/hosted-modules.js";
 
 const COMPANY = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 const DAY = "2026-11-09";
@@ -109,8 +109,9 @@ it("(c) named cancellation after a move retains spend before returning without r
   await expectRetained(w);
 });
 
+/** LOST-RUN-ACTUAL-SPEND: a run lost before its usage arrived books NOTHING; its hold stays open until the actual figure is in (the next spend read settles it from the gateway's record). */
 async function expectRetained(w: Awaited<ReturnType<typeof running>>) {
-  expect(await w.h.store.get(holdKey(COMPANY, w.reservationId))).toMatchObject({ state: "settled", keptMicros: 5_000_000, drawnMicros: 0, estimated: true, estimatedFor: w.run.operationId });
-  expect(await w.h.store.get(companyDayKey(COMPANY, DAY))).toMatchObject({ reservedMicros: 0, settledMicros: 5_000_000, estimatedMicros: 5_000_000, loadMicros: 5_000_000 });
-  expect(await w.h.store.get({ pk: costPartition(COMPANY, w.task.taskId), sk: `ENTRY#${unflushedEntryId(w.run.operationId)}` })).toMatchObject({ chargeStatus: "estimated", micros: 0 });
+  expect(await w.h.store.get(holdKey(COMPANY, w.reservationId))).toMatchObject({ state: "open", drawnMicros: 0 });
+  expect(await w.h.store.get(companyDayKey(COMPANY, DAY))).toMatchObject({ reservedMicros: 5_000_000, loadMicros: 5_000_000 });
+  expect(await w.h.store.get({ pk: costPartition(COMPANY, w.task.taskId), sk: `ENTRY#${unreportedSettleEntryId(w.run.operationId)}` })).toBeUndefined();
 }
