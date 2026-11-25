@@ -1400,6 +1400,7 @@ The checks handler reads `context.decision.task` and `decision.codeDetails` (the
 |---|---|---|
 | N1 | the notices are also put into `notTested` (the old behaviour) | rd2b1-checks-read "the security scan, what was not tested, and the review-only words" (the review-only sentence must be a note and `notTested` empty) |
 | N2 | the after-pull-request wording is never chosen (`pullRequests` ignored) | task-words "says only that the checks follow once the pull request is open (a fix round)" |
+
 ## RD-2d - the evidence file route (GET /v1/app/tasks/{taskId}/evidence/{sha}), on RD-2.0 head a65c40ce7
 
 Production guards this lane adds: the task read's own rule as the first call, the separate code-details decision, pack membership (`evidenceViewOf` + `servableEvidenceArtifact`, served kinds text and JPEG only), the retention check, the bytes re-check (`readEvidenceArtifact`: size, SHA-256, kind), the fixed headers and types, the audit line before the bytes, the base64 flag, and (`core-host/dev-routes.ts`) the `owns()` clause and the script-token refusal. All in `core-host/task-evidence-file-routes.ts` unless noted; every mutant run against `tests/unit/rd2d-evidence-file-route.test.ts` alone.
@@ -1428,3 +1429,15 @@ Production guards this lane adds: the task read's own rule as the first call, th
 | M20 disposition | `inline` without the fixed name | headers, screenshot, HTML tests |
 
 19 killed, 1 equivalent (removed as dead code). Restored tree: `tests/unit/rd2d-evidence-file-route.test.ts` 17 tests pass.
+
+## RD-2d on the read rule (rebased onto RD-2b1 on 49080fbea, 2026-11-25)
+
+The file route asks the one read rule, read "evidenceFile" (ADMITTED_BY like the checks, a share is withheld: TASK_PART_NOT_SHOWN), asked once by the mount in dev-routes.ts and handed to `readTaskEvidenceFile` as `decision`; its code-details rule is `decision.codeDetails`. The earlier mutants "task read's own rule dropped" and "mayReadCodeDetails always true" are replaced by these (each applied alone), all killed:
+
+| Mutant | Mutation | Killed by |
+|---|---|---|
+| E1 | `decision.codeDetails` not asked | rd2d "the code-details decision is its own" (a laptop: the missing-task answer and nothing of the store touched) |
+| E2 | the mount asks read "task" instead of "evidenceFile" (a share would read the file) | task-read-rule "the evidence file route asks it" (a share is told 403, the checks are not shown) |
+| E3 | `EVIDENCE_FILES_SERVED` false | rd2d "the links the checks read serves lead here" |
+
+Also in tests/unit/task-read-rule.test.ts: for every kind of person, in both configurations, the "evidenceFile" decision equals the "checks" decision (the table is the one place that says who may read what).
