@@ -5,7 +5,7 @@ import {
   E2EApplicationSelectionRecordSchema, WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, requalifyHoldKey as holdKeyOf, workflowApplicationRetryOffered,
   type E2EApplicationSelectionRecord,
 } from "../../packages/contracts/src/index.js";
-import { ApplicationRuntimeRenewed, REQUALIFY_DEFERRED_MESSAGE, assertNoRequalifyHold, isRenewalOnlyChange, isRuntimeRenewedBlock, rethrowAsDeferredIfHeld, replayPredatesRenewal, requalifyHoldFence, requalifyDrainStatus, requalifyHoldActive, requalifySetupWorkRow, requireRenewalOnlyReapproval, selectionChangedRefusal } from "../../packages/broker/src/e2e/requalify-hold.js";
+import { ApplicationRuntimeRenewed, REQUALIFY_DEFERRED_MESSAGE, assertNoRequalifyHold, isRenewalOnlyChange, isRuntimeRenewedBlock, rethrowAsDeferredIfHeld, replayPredatesRenewal, requalifyHoldFence, requalifyDrainStatus, requalifyHoldActive, requalifySetupWorkRow, selectionChangedRefusal } from "../../packages/broker/src/e2e/requalify-hold.js";
 import { E2E_REPLAY_REFUSALS } from "../../packages/contracts/src/index.js";
 import { E2E_OWNER_SENTENCES } from "../../packages/broker/src/e2e/owner-sentences.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -207,16 +207,6 @@ describe("a renewal of the test machine is not any other change of the approved 
     expect(isRuntimeRenewedBlock(`${WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX}x`)).toBe(false);
     expect(isRuntimeRenewedBlock(undefined)).toBe(false);
     expect(WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX.length).toBeLessThan(200);
-  });
-
-  it("holds Rovara's own re-approval to the renewal: other changes, and accounts the owner's re-approval would move, are refused", () => {
-    expect(() => requireRenewalOnlyReapproval(selection(), selection({ runtimeRows: renewedRows() }))).not.toThrow();
-    for (const derived of [
-      selection({ runtimeRows: renewedRows(), accountRefs: [{ applicationId: "orders", profileId: "tester", revision: 3, definitionDigest: digest("9") }] }),
-      selection({ runtimeRows: renewedRows(), intentDigest: digest("f") }),
-      selection({ runtimeRows: renewedRows({ capabilityDigest: digest("e") }) }),
-      selection(),
-    ]) expect(() => requireRenewalOnlyReapproval(selection(), derived)).toThrow(/only a renewal of the test machine is approved again automatically/);
   });
 });
 

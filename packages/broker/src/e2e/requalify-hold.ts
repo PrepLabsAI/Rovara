@@ -212,14 +212,6 @@ export function selectionChangedRefusal(recorded: E2EApplicationSelectionRecord,
 /** Whether a block reason is the renewal kind, whose approval again Rovara's own retry may do (once, by the policy's retry limit). */
 export const isRuntimeRenewedBlock = (blockReason: string | undefined): boolean => blockReason?.startsWith(WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX) === true;
 
-/**
- * The guard on Rovara's own re-approval: the selection derived again must be the approved one with only the rows renewed (and the same test accounts, which the owner's re-approval would
- * otherwise move to the latest). Anything else needs the owner, so the automatic retry refuses.
- */
-export function requireRenewalOnlyReapproval(approved: E2EApplicationSelectionRecord, derived: E2EApplicationSelectionRecord): void {
-  if (!isRenewalOnlyChange(approved, derived)) throw agentXError("CONFIG_INVALID", "this block needs the owner to approve the plan again; only a renewal of the test machine is approved again automatically");
-}
-
 // ---- replays ------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 /** Whether a round ran on runtime rows that are not the registered ones any more (a row that is gone or was requalified since). */
