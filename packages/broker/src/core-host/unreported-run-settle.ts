@@ -69,6 +69,33 @@ export async function countUnreportedRuns(store: DocumentStore, companyId: OrgId
   return count;
 }
 
+/** Whether the run ended long enough ago to be settled. An end time that cannot be read is "not yet": the grace is never skipped for it. */
+function pastGrace(run: OperationRecord, now: () => Date, graceMs: number): boolean {
+  const endedAt = Date.parse(run.updatedAt);
+  return Number.isFinite(endedAt) && now().getTime() - endedAt >= graceMs;
+}
+
+/** Settles one ended run that owes a usage report, by the case `classifyUnreportedRun` decides. Answers the case settled, or undefined when this money stop cannot settle it (the next call tries again). */
+async function settleOneRun(deps: UnreportedRunSettlerDeps, taskId: string, reservationId: string | undefined, run: OperationRecord): Promise<UnreportedRunCase | undefined> {
+  const mark = { operationId: run.id, taskId };
+  const decided = await classifyUnreportedRun(deps.store, deps.companyId, taskId, run);
+  if (decided === "kept_unbooked") {
+    // Marked as kept, but its estimate was never booked (the keep failed after the mark): complete it. The hold and the estimate entry are both once-only.
+    await deps.moneyStop.keepWholeHold(reservationId, mark);
+    return "estimate";
+  }
+  if (decided === "estimate") {
+    // (iii) nothing is knowable: the hold's room, and only that, booked as a marked estimate; the rest released.
+    if (deps.moneyStop.keepHoldAsEstimate === undefined) return undefined;
+    await deps.moneyStop.keepHoldAsEstimate(reservationId, mark);
+    return "estimate";
+  }
+  // (i) the gateway's record is in the total already, or (ii) it is provable no call was made: a $0 marker, no hold touched.
+  if (deps.moneyStop.settleUnreported === undefined) return undefined;
+  await deps.moneyStop.settleUnreported(mark, decided);
+  return decided;
+}
+
 /**
  * The settler of one company. `settle(taskId)` settles every ended run of the task that owes a usage report and is past the grace, and answers what it settled. A fault is the caller's: nothing is swallowed
  * here (the spend reader turns it into its fixed refusal), and a run not settled this time is settled by the next call.
@@ -85,27 +112,9 @@ export function createUnreportedRunSettler(deps: UnreportedRunSettlerDeps): (tas
     const settled: SettledRun[] = [];
     for (const run of ledger.owing) {
       if (run.companyId !== companyId) continue;
-      // An end time that cannot be read is "not yet": the grace is never skipped for it.
-      const endedAt = Date.parse(run.updatedAt);
-      if (!Number.isFinite(endedAt) || deps.now().getTime() - endedAt < graceMs) continue;
-      const mark = { operationId: run.id, taskId };
-      let outcome: UnreportedRunCase;
-      const decided = await classifyUnreportedRun(store, companyId, taskId, run);
-      if (decided === "kept_unbooked") {
-        // Marked as kept, but its estimate was never booked (the keep failed after the mark): complete it. The hold and the estimate entry are both once-only.
-        await deps.moneyStop.keepWholeHold(task.admissionReservationId, mark);
-        outcome = "estimate";
-      } else if (decided === "estimate") {
-        // (iii) nothing is knowable: the hold's room, and only that, booked as a marked estimate; the rest released.
-        if (deps.moneyStop.keepHoldAsEstimate === undefined) continue;
-        await deps.moneyStop.keepHoldAsEstimate(task.admissionReservationId, mark);
-        outcome = "estimate";
-      } else {
-        // (i) the gateway's record is in the total already, or (ii) it is provable no call was made: a $0 marker, no hold touched.
-        if (deps.moneyStop.settleUnreported === undefined) continue;
-        await deps.moneyStop.settleUnreported(mark, decided);
-        outcome = decided;
-      }
+      if (!pastGrace(run, deps.now, graceMs)) continue;
+      const outcome = await settleOneRun(deps, taskId, task.admissionReservationId, run);
+      if (outcome === undefined) continue;
       note({ event: "task_flow.unreported_run_settled", case: outcome, taskId });
       settled.push({ operationId: run.id, case: outcome });
     }
