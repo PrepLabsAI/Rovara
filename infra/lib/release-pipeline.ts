@@ -40,9 +40,13 @@ export const AGENTX_BETA_PROFILE = "agentx-beta";
 export const AGENTX_CODE_PREFLIGHT_PROJECT_PREFIX = "release-agentx-preflight";
 export const AGENTX_BETA_CODE_PREFLIGHT_PROJECT_NAME = `${AGENTX_CODE_PREFLIGHT_PROJECT_PREFIX}-beta`;
 export const AGENTX_PRODUCTION_CODE_PREFLIGHT_PROJECT_NAME = `${AGENTX_CODE_PREFLIGHT_PROJECT_PREFIX}-production`;
-/** The namespaces of the two source actions: their CommitId reaches every Cloud action. */
+/**
+ * The namespaces of the two source actions: their CommitId reaches every Cloud action. CodePipeline refuses a namespace that equals the name of any artifact of the pipeline
+ * ("Namespaces must be unique across the pipeline definition and cannot conflict with any artifact names"), and the Cloud source's output artifact is named `CloudSource`
+ * (its name is part of the S3 key layout the Cloud stack's grants rely on), so its namespace carries a suffix. Nothing reads a `#{CloudSourceVariables.*}` variable today.
+ */
 export const CODE_SOURCE_NAMESPACE = "CodeSource";
-export const CLOUD_SOURCE_NAMESPACE = "CloudSource";
+export const CLOUD_SOURCE_NAMESPACE = "CloudSourceVariables";
 export const AGENTX_PRODUCTION_WORKER_REPOSITORY = "agentx-worker-production";
 
 /**

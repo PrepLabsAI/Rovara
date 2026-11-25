@@ -516,7 +516,7 @@ describe("production release pipeline", () => {
           // The Cloud repository is all parameters: no owner, name, branch or connection of it is written in this repository.
           Match.objectLike({
             Name: "CloudGitHub",
-            Namespace: "CloudSource",
+            Namespace: "CloudSourceVariables",
             Configuration: {
               ConnectionArn: { Ref: "CloudConnectionArn" },
               FullRepositoryId: { "Fn::Join": ["", [{ Ref: "CloudRepoOwner" }, "/", { Ref: "CloudRepoName" }]] },
