@@ -1,11 +1,15 @@
-import { afterAll, vi } from "vitest";
+import { vi } from "vitest";
 import { syncBuiltinESMExports } from "node:module";
 import net from "node:net";
 import http from "node:http";
 import https from "node:https";
 import dns from "node:dns";
-/** Installed in beforeAll; restored after this file. No real transport, even loopback. */
-export function denyNetwork(): void {
+/**
+ * Installed in beforeAll; restored after this file. No real transport, even loopback. Use it as `beforeAll(denyNetwork)`: the function it returns
+ * is beforeAll's teardown. Code's test projects run files in one shared module state (isolate: false), so a block left in place would break the
+ * next file in the worker (#1478; an afterAll registered inside beforeAll never ran).
+ */
+export function denyNetwork(): () => void {
   const denied = (): never => { throw new Error("NetworkAttempt"); };
   const mocks: Array<{ mockRestore(): void }> = [vi.spyOn(globalThis, "fetch").mockImplementation(denied), vi.spyOn(net.Socket.prototype, "connect").mockImplementation(denied),
     vi.spyOn(http, "request").mockImplementation(denied), vi.spyOn(http, "get").mockImplementation(denied),
@@ -18,5 +22,5 @@ export function denyNetwork(): void {
     }
   }
   syncBuiltinESMExports();
-  afterAll(() => { for (const mock of mocks) mock.mockRestore(); syncBuiltinESMExports(); });
+  return () => { for (const mock of mocks) mock.mockRestore(); syncBuiltinESMExports(); };
 }
