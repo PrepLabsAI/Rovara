@@ -135,9 +135,10 @@ export class ProductionFoundationStack extends Stack {
 
       const eip = new ec2.CfnEIP(this, `NatEip${suffix}`, { domain: "vpc" });
       eip.addResourceDependency(gatewayAttachment);
-      // L4-EGR: in a named environment the NAT gateways' Elastic IPs ARE Rovara's published outbound addresses (a customer allow-lists them), so a deleted stack or a replaced resource must never
+      // L4-EGR: the NAT gateways' Elastic IPs ARE Rovara's published outbound addresses (a customer allow-lists them), so a deleted stack or a replaced resource must never
       // release one: Retain sets DeletionPolicy and UpdateReplacePolicy (a named environment's DeletionPolicy becomes RetainExceptOnCreate, infra/lib/retention.ts). The logical ids (NatEip1, NatEip2) never change: a new id would allocate a new address and drop the old one.
-      if (naming.env !== undefined) eip.applyRemovalPolicy(RemovalPolicy.RETAIN);
+      // The legacy layout (production, beta) retains them too (RETAIN-PLAN Q1, arch ruling 2026-11-24): a released address is gone for good.
+      eip.applyRemovalPolicy(RemovalPolicy.RETAIN);
       natAddresses.push(eip);
       const natGateway = new ec2.CfnNatGateway(this, `NatGateway${suffix}`, {
         allocationId: eip.attrAllocationId,

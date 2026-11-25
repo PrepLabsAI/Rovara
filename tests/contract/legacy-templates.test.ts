@@ -9,6 +9,7 @@ import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js"
 import { withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
 import { withoutApiAccessLog } from "../support/api-access-log-template.js";
 import { withoutDispatcherLessonsPeople } from "../support/dispatcher-lessons-people-template.js";
+import { withoutRetainPolicies } from "../support/retain-policies-template.js";
 import { withoutWorkerCallbackAlarm } from "../support/worker-callback-alarm-template.js";
 import { withoutWorkerEcrScope } from "../support/worker-ecr-scope-template.js";
 
@@ -25,9 +26,16 @@ const BOUNDED_STACK_PINS: Record<string, string> = {
   // 61d1eac2d6a528e2f300b5cc4773fbd6d46b31f3d860c6f6514491fbe3bafb65 holds (the test below checks it).
   // LESSONS-PORT-FIX (DEC 254zzz473, rebased onto train 29 without turn-on): re-pinned for exactly the dispatcher's DEVELOPER_SIGNIN_TABLE_NAME variable and its DispatcherLessonsPeople policy. Rule D: with those
   // taken out (withoutDispatcherLessonsPeople) train 29's pin 45259f9a0b368e97f50af3f88987e43b3b5360644d43ffd4f0f0d97222fc5b4b holds (the test below checks it).
+  // RETAIN (arch ruling 2026-11-24): re-pinned for exactly DeletionPolicy and UpdateReplacePolicy Retain on the control plane's five keys, channel state table and adapter secret, and on the foundation's two NAT
+  // addresses. Rule D: with those taken out (withoutRetainPolicies) the pins below (BOUNDED_STACK_PINS_BEFORE_RETAIN, lessons-port's dce2fd8b... and the unchanged foundation pin) hold (the test below checks it).
+  AgentXControlPlane: "0f867000498c6a24cb0a5aad7b78cf001d047962d29be8540e7144f730ed58ec",
+  AgentXProductionFoundation: "37cec1f7637591a8315345f8e5fe75bacf0f43e475e66837da41d805e743fd28",
+  AgentXSlackOrchestrator: "9ed4e1e13eeb3ecf860e61d9f2c9b332901f36190e0685fa695a390335420bf5",
+};
+// The pins recorded just before RETAIN (code/next 0074f4139): holding after exactly the nine policies are put back is the proof RETAIN changed nothing else.
+const BOUNDED_STACK_PINS_BEFORE_RETAIN: Record<string, string> = {
   AgentXControlPlane: "dce2fd8b76451211b4e08106846e906915dfdb257dccd8f6222dc09790a96b88",
   AgentXProductionFoundation: "e7c873b146a748408b545e42d2f17596c04ad229271ed7776312d312eca9ca63",
-  AgentXSlackOrchestrator: "9ed4e1e13eeb3ecf860e61d9f2c9b332901f36190e0685fa695a390335420bf5",
 };
 // Worker ECR scope lane (2026-11-23): the Foundation pin moved only by the worker role's ECR statements (narrowed read, new Deny). The pin recorded before the lane (Fix A's) is kept
 // below and re-derived in the test: Foundation minus exactly those two statement changes hashes to it.
@@ -38,7 +46,7 @@ describe("legacy production templates", () => {
   for (const stack of legacyProductionStacks()) {
     if (stack.stackName === "AgentXControlPlane") {
       it("removing only Batch F additions preserves code/next's AgentXControlPlane template", () => {
-        const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(withoutLegacyRuntimeBoundary(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(normalizedTemplate(stack))), LEGACY)))));
+        const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(withoutLegacyRuntimeBoundary(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(withoutRetainPolicies(normalizedTemplate(stack)))), LEGACY)))));
         expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("d9bfc520cf02657c1b6be9b16b821e910504a1599cb3652d7405f9c6509b4048");
       }, 120_000);
     }
@@ -48,19 +56,23 @@ describe("legacy production templates", () => {
       const pin = BOUNDED_STACK_PINS[stack.stackName];
       if (pin !== undefined) expect(createHash("sha256").update(JSON.stringify(template)).digest("hex"), `${stack.stackName} with the runtime boundary`).toBe(pin);
       else expect(JSON.stringify(template)).not.toContain("PermissionsBoundary");
-      if (stack.stackName === "AgentXControlPlane") expect(createHash("sha256").update(JSON.stringify(withoutDispatcherLessonsPeople(structuredClone(template)))).digest("hex"), "AgentXControlPlane minus only the dispatcher lessons people grant").toBe("45259f9a0b368e97f50af3f88987e43b3b5360644d43ffd4f0f0d97222fc5b4b");
+      // RETAIN, Rule D: with exactly the nine policies put back the pin recorded before RETAIN holds, for the two stacks that hold any of them.
+      const beforeRetain = BOUNDED_STACK_PINS_BEFORE_RETAIN[stack.stackName];
+      if (beforeRetain !== undefined) expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(template)))).digest("hex"), `${stack.stackName} minus only the RETAIN policies`).toBe(beforeRetain);
+      if (stack.stackName === "AgentXControlPlane") expect(createHash("sha256").update(JSON.stringify(withoutDispatcherLessonsPeople(withoutRetainPolicies(structuredClone(template))))).digest("hex"), "AgentXControlPlane minus only the dispatcher lessons people grant").toBe("45259f9a0b368e97f50af3f88987e43b3b5360644d43ffd4f0f0d97222fc5b4b");
       if (stack.stackName === "AgentXProductionFoundation") {
-        expect(createHash("sha256").update(JSON.stringify(withoutWorkerEcrScope(template))).digest("hex"), "Foundation minus only the worker ECR lane's statements").toBe(FOUNDATION_PIN_BEFORE_WORKER_ECR_SCOPE);
+        expect(createHash("sha256").update(JSON.stringify(withoutWorkerEcrScope(withoutRetainPolicies(structuredClone(template))))).digest("hex"), "Foundation minus only the worker ECR lane's statements").toBe(FOUNDATION_PIN_BEFORE_WORKER_ECR_SCOPE);
       }
       // SIGNIN-MEMBER-CONDITIONCHECK, DEC 254zzz282 B014-A: pin the new template,
       // assert the exact broker-only addition, and retain the entire historical snapshot.
       if (stack.stackName === "AgentXControlPlane") {
         // APIGW-ACCESS-LOGS (2026-11-24): the access log group and the stage setting are asserted and taken out first, so the recorded pin and snapshot below still hold. The full-template pin above
         // (BOUNDED_STACK_PINS) is the one that moved.
+        // RETAIN (Rule D): the recorded pins are taken after the nine policies are put back (withoutRetainPolicies, innermost); the snapshot below keeps them (it records Retain on the nine).
         const beforeAccessLog = withoutApiAccessLog(withoutDispatcherLessonsPeople(structuredClone(template)));
-        expect(createHash("sha256").update(JSON.stringify(beforeAccessLog)).digest("hex"), "AgentXControlPlane minus only the access log").toBe("61d1eac2d6a528e2f300b5cc4773fbd6d46b31f3d860c6f6514491fbe3bafb65");
+        expect(createHash("sha256").update(JSON.stringify(withoutApiAccessLog(withoutDispatcherLessonsPeople(withoutRetainPolicies(structuredClone(template)))))).digest("hex"), "AgentXControlPlane minus only the access log").toBe("61d1eac2d6a528e2f300b5cc4773fbd6d46b31f3d860c6f6514491fbe3bafb65");
         const withoutBoundary = withoutLegacyRuntimeBoundary(beforeAccessLog);
-        expect(createHash("sha256").update(JSON.stringify(withoutBoundary)).digest("hex")).toBe("7af9f78c71ac9c6156127490b80985a46f7f15b026c254e1e59df6e03451da3f");
+        expect(createHash("sha256").update(JSON.stringify(withoutLegacyRuntimeBoundary(withoutApiAccessLog(withoutDispatcherLessonsPeople(withoutRetainPolicies(structuredClone(template))))))).digest("hex")).toBe("7af9f78c71ac9c6156127490b80985a46f7f15b026c254e1e59df6e03451da3f");
         // Webhook lane W3 adds the webhook secret slot, its throttle and one alarm (tests/support/webhook-secret-template.ts pins them); the historical snapshot is of the rest.
         expect(withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutBoundary))).toMatchSnapshot();
       } else expect(withoutLegacyRuntimeBoundary(template)).toMatchSnapshot();
