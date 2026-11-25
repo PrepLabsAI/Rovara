@@ -5,12 +5,24 @@ import { WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, agentXError, when, type
 import type { TaskFlowDeps } from "./deps.js";
 import { dispatchRowItem } from "./dispatch-rows.js";
 import { readTask } from "./reads.js";
+import type { TaskRecord } from "./records.js";
 import { commitWorkflow, runDispatchRow } from "./stage-machine.js";
+import { requireRoomUnderCap } from "./owner-round.js";
 import { iso } from "./support.js";
 import { startPublication } from "../build-step/publish.js";
 import { startChecksRerun, startReview } from "../build-step/start.js";
 
 export const NOTHING_TO_RETRY_STEP = "There is nothing to retry: the task is not blocked at a step Rovara can run again.";
+
+/**
+ * LOST-RUN-ACTUAL-SPEND: on a deployed install an owner's Retry reads the SAME spend figure the plan Approve does (settled runs only; a run still owed its figure refuses, never reads as nothing spent) and is held to the
+ * task's live cap. A lost run counts what it actually spent, so Retry is open whenever that leaves room. The laptop (no money stop) and an automatic resume (which holds itself to the cap) are unchanged.
+ */
+async function requireRoomForOwnerRetry(deps: TaskFlowDeps, task: TaskRecord, automatic: boolean): Promise<void> {
+  const { taskCapUsd, taskSpendUsd } = deps;
+  if (automatic || deps.moneyStop === undefined || taskSpendUsd === undefined || taskCapUsd === undefined) return;
+  await requireRoomUnderCap({ roundCap: async (current) => { const limitUsd = await taskCapUsd(current); return limitUsd === undefined ? undefined : { limitUsd, spentUsd: await taskSpendUsd(current.taskId) }; } }, task);
+}
 
 export async function retryBlockedStep(deps: TaskFlowDeps, taskId: string, expectedRevision?: number, autoResume?: { expectedBlockReason: string; extra: readonly TransactItem[]; firstEvent: string }): Promise<void> {
   const task = await readTask(deps, taskId);
@@ -21,6 +33,7 @@ export async function retryBlockedStep(deps: TaskFlowDeps, taskId: string, expec
   if (autoResume !== undefined && (workflow.stage !== "IMPLEMENT" || workflow.blockReason !== autoResume.expectedBlockReason || task.stopRequest !== undefined)) throw agentXError("CONFIG_INVALID", NOTHING_TO_RETRY_STEP);
   // A blocked design review (a round, or the planner's answer to its findings) resumes through the review's own move; its blocked round's spend is already counted.
   if (autoResume === undefined && await deps.designReview?.retryBlocked(deps, task, expectedRevision)) return;
+  await requireRoomForOwnerRetry(deps, task, autoResume !== undefined);
   const ref = { taskId, workflowRevision: workflow.revision };
   const now = iso(deps);
   /** What the owner's Retry started: "STALE" means the step is not one that can be run again from where the task is. */

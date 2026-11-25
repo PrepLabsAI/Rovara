@@ -38,7 +38,7 @@ async function hostedRunStopWorld(): Promise<ReviewedFeedbackWorld> {
     const state = await runSpendState({ store: w.h.store, ledger, settings, now: () => new Date(w.clock.ms) }, request.companyId, request.subject!.id);
     return state === "within" ? { allowed: true } : { allowed: false, code: state, message: state };
   } };
-  w.h.deps.moneyStop = { keepWholeHold: async () => undefined };
+  w.h.deps.moneyStop = {};
   return w;
 }
 

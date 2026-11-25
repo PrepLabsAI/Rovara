@@ -85,6 +85,8 @@ const recoveries: Recovery[] = [
       const ended = await w.stepEnd("UNDERSTAND", running);
       expect(ended.operation.status).toBe("CANCELLED");
       expect(task(w, taskId).workflow).toMatchObject({ state: "BLOCKED", blockReason: "You stopped this step. Retry to run it again." });
+      // LOST-RUN-ACTUAL-SPEND: this stopped run sent no usage report, so the owner's Retry reads the task's spend only once the run is past the settle grace (120 s); a Retry pressed before that is refused with the spend words.
+      w.harness.world.clock.advance(130);
       return { taskId, stoppedOperation: running.invocation.operationId };
     },
     async outcome(w, { taskId, stoppedOperation }) {

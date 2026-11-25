@@ -7,8 +7,9 @@
 //      and the owner is told the way any step that needs them is (the session's "Needs you" notice). Before each model run is handed to a worker, the same reading is asked
 //      (`RUN_START_ACTION`), so a task at its cap starts no new run.
 //   2. A Stop (and a close of a task with a run going) never loses spend. The worker is asked to stop and send its usage first (`askWorkerToFlush`), and the flow waits for its end a bounded
-//      time (`USAGE_FLUSH_WAIT_MS`). When the worker's end does not come in time, the run's usage is taken as lost: the task's whole start hold is kept as spent, never less, marked
-//      estimated for reconciliation (`endUnflushed`), and the operation says so (`usageUnflushed`).
+//      time (`USAGE_FLUSH_WAIT_MS`). When the worker's end does not come in time, the run's usage is taken as lost: the operation says so (`usageUnflushed`) and NOTHING is booked as spend
+//      (LOST-RUN-ACTUAL-SPEND: Rovara counts only what was actually spent). The task's hold stays open; the actual figure comes from the model gateway's own record of the run's calls on the next
+//      read of the task's spend (core-host/unreported-run-settle.ts), which books it and then gives the hold back.
 //
 // Absent `moneyStop` (the laptop, and any install that does not wire it), Stop, close and dispatch are exactly as before.
 import { createHash } from "node:crypto";
@@ -51,8 +52,6 @@ export interface MoneyStop {
   pollMs?: number;
   /** Waits (tests drive the clock). */
   sleep?: (ms: number) => Promise<void>;
-  /** Keeps the task's whole start hold as spent, marked estimated for `operationId` (the hosted admission's holds). A hold already closed keeps what it kept. */
-  keepWholeHold(reservationId: string | undefined, mark: { operationId: string; taskId: string }): Promise<void>;
   /**
    * SPEND-UNREPORTED-RUN: books the settled figure of an ended run that sent no usage report, when that figure is KNOWN to add nothing to the task's total (`gateway_record`: the gateway's own record of the
    * run's calls is already in the total; `no_call`: it is provable that the run made no model call). Books a marker entry at $0 under the run (once: telling it again counts nothing more) and touches no hold.
@@ -65,6 +64,12 @@ export interface MoneyStop {
    * estimate alone can never turn "unknown" into "at the cap". A task with no hold of its own books a marked $0. Once per run. Marked for LOST-RUN-ACTUAL-SPEND to replace with the gateway's figure.
    */
   keepHoldAsEstimate?(reservationId: string | undefined, mark: { operationId: string; taskId: string }): Promise<void>;
+  /**
+   * LOST-RUN-ACTUAL-SPEND: books the ACTUAL spend of an ended run from the model gateway's own record of its calls (`actualMicros`: the sum of the gateway's per-call amounts; `final`: every call is settled, none
+   * is the gateway's own estimate). Only what the worker's own bookings for the run (its end report and checkpoints) do not already hold is added, so a call is never counted twice; a worker figure above the
+   * gateway's stays (over-counting is the safe side). Booked once per run (`usage:<run>:settled`), drawn from the task's hold, and the hold is then given back. Not final: the booking is marked an estimate.
+   */
+  settleFromGateway?(reservationId: string | undefined, mark: { operationId: string; taskId: string }, charge: { actualMicros: number; final: boolean }): Promise<void>;
 }
 
 /** How an ended run with no usage report was settled at $0 (the third case, an estimate, is `endUnflushed`). */
@@ -146,7 +151,7 @@ export async function askWorkerToFlush(deps: TaskFlowDeps, workspace: Pick<Works
 
 /**
  * Before a task is closed with a model run going (a deployed install): the run is asked to stop and send its usage, as a Stop does, and waited for a bounded time. A run whose end did not
- * come keeps its task's whole hold as spent, marked estimated; the close then ends it INTERRUPTED as before.
+ * come is marked `usageUnflushed` (its hold is kept as spent when the task closes, `releaseOrKeep`); the close then ends it INTERRUPTED as before.
  */
 export async function flushBeforeClose(deps: TaskFlowDeps, workspace: WorkspaceRecord | undefined): Promise<void> {
   if (deps.moneyStop === undefined || workspace === undefined || workspace.activeOperationId == null) return;
@@ -166,8 +171,9 @@ async function taskOfOperation(deps: Pick<TaskFlowDeps, "store">, operation: Pic
 }
 
 /**
- * A model run ended without its usage (a Stop or a close the worker did not answer in time, a lost worker): the operation is marked `usageUnflushed`, and the task's whole start hold is
- * kept as spent, marked estimated. Best effort: a failure here leaves the hold open, and closing the task then keeps it all the same (`releaseOrKeep`).
+ * A model run ended without its usage (a Stop or a close the worker did not answer in time, a lost worker): the operation is marked `usageUnflushed`, once. Nothing is booked and the hold stays
+ * open (LOST-RUN-ACTUAL-SPEND): the run is owed a figure, which the next read of the task's spend settles from the gateway's record (a task closed before that keeps the hold as spent, `releaseOrKeep`).
+ * Best effort: a failure leaves the run unmarked, and the spend read still finds it owing (no usage entry).
  */
 export async function endUnflushed(deps: Pick<TaskFlowDeps, "store" | "companyId" | "moneyStop" | "log">, operation: OperationRecord): Promise<void> {
   if (deps.moneyStop === undefined || !reportsUsage(operation)) return;
@@ -177,7 +183,6 @@ export async function endUnflushed(deps: Pick<TaskFlowDeps, "store" | "companyId
     if (!marked.applied) return;
     const task = await taskOfOperation(deps, operation);
     if (task === undefined || task.companyId !== deps.companyId) return;
-    await deps.moneyStop.keepWholeHold(task.admissionReservationId, { operationId: operation.id, taskId: task.taskId });
     log(deps, { event: "task_flow.usage_not_flushed", taskId: task.taskId });
   } catch (error) {
     log(deps, { event: "task_flow.usage_not_flushed_unkept", error: error instanceof Error ? error.name : "unknown" });

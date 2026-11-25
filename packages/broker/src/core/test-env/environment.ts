@@ -8,7 +8,7 @@
 //   TESTENV#LATEST             the pointer to the newest revision (the only item an approval updates).
 //
 // WHAT CHANGED FROM CLOUD, and why (the stored rows above are the same):
-//   - The approval is a subject of the approval gate (`core/decisions/approval-gate.ts`), kind `test-environment`. Cloud's own checks (a maintainer role, a fresh sign-in, a second person for a less-safe change,
+//   - The approval is a subject of the approval gate (`core/decisions/approval-gate.ts`), kind `test-environment`. Cloud's own checks (a maintainer role, a second person for a less-safe change,
 //     a confirmation card) are the Approvers seam's rules here: a less-safe change, a proposal a setup run made and any high-risk card are HIGH risk, so only the methods the approvers plug-in names as
 //     strong may approve it, and `minApprovers` says whether a second person is needed. Code's own approvers allow the local owner. The gate also gives the single-use proof and the replay of a repeated request.
 //   - Who may propose is the surface's check (the local owner's session), not a project role: Code has one owner.

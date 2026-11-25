@@ -44,6 +44,8 @@ export interface StandingFacts {
   wait?: SystemWait | undefined;
   /** A person pressed Stop and nothing has started the work again: the pill is `Stopped` (the work is kept, a retry resumes it). F2-B reads it from the task row's `personStop` mark (`facts.ts`), so every surface sees it; a host may also pass it. Absent: a stopped step reads as a blocked one does. */
   stoppedByPerson?: boolean | undefined;
+  /** LOST-RUN-ACTUAL-SPEND: the step's last run was lost through no fault of the person (the host knows: its worker machine stopped). The status then says so and offers Retry (`STATUS_LINES.runLost`, code `RUN_LOST_CODE`). */
+  runLost?: boolean | undefined;
 }
 
 export interface StripStep { key: string; title: string; phase: PhaseKey; state: StepStateKey }
@@ -182,8 +184,8 @@ function reviewBlockWords(facts: StandingFacts, base: TaskStatus, pill: PillKey 
 }
 
 /** The status of a task that waits on something the one table says in its own words: a grown change's reviews, or a blocked review that needs a person. */
-function askedStatus(facts: StandingFacts, base: TaskStatus, pill: PillKey | "decision"): TaskStatus | undefined {
-  const growth = growthStatus(facts, pill);
+function askedStatus(facts: StandingFacts, base: TaskStatus, pill: PillKey | "decision", spent: boolean): TaskStatus | undefined {
+  const growth = lostRunStatus(facts, pill, spent) ?? growthStatus(facts, pill);
   if (growth !== undefined) return growth;
   const words = reviewBlockWords(facts, base, pill);
   return words === undefined ? undefined : { state: "needs_you", ...words };
@@ -196,11 +198,17 @@ function growthStatus(facts: StandingFacts, pill: PillKey | "decision"): TaskSta
   return { state: owed.state === "needs_you" ? "needs_you" : "checking", reason: owed.reason, next: owed.next };
 }
 
+/** A blocked step whose run was lost says so (never a spending limit, never the generic block): the person did nothing, and Retry is the way on. */
+function lostRunStatus(facts: StandingFacts, pill: PillKey | "decision", spent: boolean): TaskStatus | undefined {
+  if (facts.runLost === true && pill === "decision" && facts.workflow?.state === "BLOCKED" && !spent && !facts.budgetPaused) return { state: "needs_you", ...STATUS_LINES.runLost };
+  return undefined;
+}
+
 /** The person-free status line, with the reason this rule adds to the K4 sentences: a fix round, a wait, a fuller plan. */
 function refinedStatus(facts: StandingFacts, base: TaskStatus, pill: PillKey | "decision", spent: boolean): TaskStatus {
   const workflow = facts.workflow;
   if (facts.stoppedByPerson === true && !spent && !facts.budgetPaused && !facts.failedPrepare && base.state !== "merged" && base.state !== "closed") return { state: "finished_run", ...STATUS_LINES.stoppedByPerson };
-  const asked = askedStatus(facts, base, pill);
+  const asked = askedStatus(facts, base, pill, spent);
   if (asked !== undefined) return asked;
   if (workflow?.stage === "WAIT_FOR_MERGE" && base.state === "ready_to_merge" && pill === "in_review" && facts.pullRequestReady === false) return { state: "checking", ...(facts.failedChecks ? STATUS_LINES.pullRequestChecksFailing : STATUS_LINES.pullRequestChecking) };
   // The status line and the pill agree: a task that waits on a person says so even where the old switch read the stage (review findings, a feedback card on the pull request).

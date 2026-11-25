@@ -71,7 +71,7 @@ export function citationHolds(text: string, citation: { line?: number | undefine
 }
 
 /** Comment syntax is file-specific; unknown types conservatively recognise all listed comment prefixes. */
-function isCommentLine(line: string, path: string | undefined): boolean {
+export function isCommentLine(line: string, path: string | undefined): boolean {
   const name = path?.split("/").at(-1)?.toLowerCase() ?? "";
   const extension = name.split(".").at(-1) ?? "";
   let markers: readonly string[];
@@ -119,6 +119,9 @@ export interface CitedFileReadLimits {
   /** Race every read against its own timeout, so a reader that ignores `timeoutMs` cannot hang the check (a lost race is `deadline`). Off for the setup re-read, which is unchanged. */
   enforceTimeout?: boolean | undefined;
 }
+
+/** Why a read threw: the code host's refusal of a file over its size cap is the same answer every time, not a failed read to try again. */
+const unreadReasonOf = (error: unknown): CitedFileUnreadReason => (error instanceof Error && error.message.startsWith("file too large") ? "file_too_large" : "read_failed");
 
 /** A read that gives up after `timeoutMs`, whatever the reader does; the timer never keeps the process alive. */
 async function raced<T>(read: Promise<T>, timeoutMs: number): Promise<T | typeof TIMED_OUT> {
@@ -171,8 +174,8 @@ export async function readCitedFiles(read: CitationFileReader | undefined, needs
             if (overTotal) { texts.set(key, { kind: "unread", reason: "total_bytes" }); continue; }
           }
           texts.set(key, { kind: "text", text });
-        } catch {
-          texts.set(key, { kind: "unread", reason: "read_failed" });
+        } catch (error) {
+          texts.set(key, { kind: "unread", reason: unreadReasonOf(error) });
         }
       }
     };

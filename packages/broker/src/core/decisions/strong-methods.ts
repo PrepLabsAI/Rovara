@@ -1,4 +1,4 @@
-// Lane P3 (items A3, review M2 and L1, L2): which methods may give which answer. ONE function, used by the decision gate and by the merge press, so the two cannot disagree.
+// Lane P3 (items A3, review M2 and L1, L2): which methods may give which answer. ONE function, used by the decision gate and by the unwired old merge press `pressMerge`. It is a FIXED rule for high-risk decisions, not a company setting. The live Merge button (`pressMergeAsPerson`) does not apply it.
 import type { ApprovalRequirement } from "@agentx/contracts";
 import { CHAT_METHOD_PREFIX, CODE_HOST_COMMENT_METHOD, LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
 

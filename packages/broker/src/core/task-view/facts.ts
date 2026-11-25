@@ -21,6 +21,7 @@ export interface ExtraFacts {
   failedPrepare?: boolean | undefined;
   budgetPaused?: boolean | undefined;
   stoppedByPerson?: boolean | undefined;
+  runLost?: boolean | undefined;
   wait?: SystemWait | undefined;
   reviewRound?: { round: number; max: number } | undefined;
 }
@@ -135,6 +136,6 @@ export async function standingFactsOf(deps: Pick<TaskFlowDeps, "store" | "compan
   return {
     workflow, closed: task.closedAt !== undefined, budgetPaused: extra.budgetPaused === true, failedPrepare: extra.failedPrepare === true || (preparing && !stopped), needsPerson: needsPerson || growthOwed?.state === "needs_you", planRevisionsUsed: planUsed, failedChecks,
     ...(pullRequestReady === undefined ? {} : { pullRequestReady }), ...(growthOwed === undefined ? {} : { growthOwed }), ...(reviewBlock === undefined ? {} : { reviewBlock }),
-    ...(reviewRound === undefined ? {} : { reviewRound }), ...(wait === undefined ? {} : { wait }), ...(extra.stoppedByPerson === true || stopped ? { stoppedByPerson: true } : {}),
+    ...(reviewRound === undefined ? {} : { reviewRound }), ...(wait === undefined ? {} : { wait }), ...(extra.stoppedByPerson === true || stopped ? { stoppedByPerson: true } : {}), ...(extra.runLost === true ? { runLost: true } : {}),
   };
 }

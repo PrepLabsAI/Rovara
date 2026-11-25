@@ -27,7 +27,7 @@ import { bedrockProfileListPrice, listPricesPerMillion, rateQuoteUsageMicros } f
 import {
   CORE_OUTBOX_STREAM_RELAY_VARIABLE, IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, change, when,
   type Admission, type AdmissionDecision, type AdmissionRequest, type Cost, type DocumentStore, type IdentityProvider, type MeterResult, type Metering, type ModelPrice, type ModelUsage, type OrgId, type OrgRole, type Principal,
-  type RateQuoteV1, type RunUsageCallV1, type TransactItem,
+  type RateQuoteV1, type RunUsageCallV1, type StoredDocument, type TransactItem,
 } from "@agentx/contracts";
 import { companyDayKey, createCostLedger, costPartition, utcDayOf, type CostLedger } from "../core/cost/ledger.js";
 import { CALL_HOLD_SECONDS, TASK_HOLD_SECONDS, closeHold, createLedgerHolds, dayRoomCondition, companyOfReservation, holdItems, holdStateOf, openHoldRoom, planHoldClose, readDayLoad, reservationIdOf, sweepExpiredHolds } from "../core/cost/holds.js";
@@ -35,6 +35,7 @@ import { RUN_START_ACTION, type MoneyStop, type SpendStopCode } from "../core/ta
 import { readTask, workspaceOperations } from "../core/task-flow/reads.js";
 import { DEFAULT_PLANNING_LIMIT_USD } from "../core/cost/limits.js";
 import type { CoreService } from "./core-runtime.js";
+import type { OperationRecord } from "../core/task-flow/records.js";
 import { costMicrosOf, createModelPrices, type ModelPrices } from "../core/cost/price-table.js";
 import { createHostedApprovers, approvalProofKeyOf, type HostedChatApproval } from "./hosted-approvers.js";
 import { GITHUB_LINK_PROVIDER, githubLinkReaderOver, type GithubLinkReader } from "../core/people/github-links.js";
@@ -331,21 +332,46 @@ export const unflushedEntryId = (operationId: string): string => `usage:${operat
 
 /** SPEND-UNREPORTED-RUN: the provider a $0 settlement of an ended run with no usage report is booked under (it adds nothing to the total; it makes the run count as booked). */
 export const UNREPORTED_SETTLE_PROVIDER = "rovara-unreported-settle";
-/** The entry id of that settlement: one per run (the company's once-guard counts a second try for nothing), and the run then counts as booked (`ENTRY#usage:<run>:`). */
+/** The model id of a settlement booked at the gateway's actual figure (`settleFromGateway`): a run with such an entry is closed to later worker reports. */
+export const GATEWAY_ACTUAL_MODEL_ID = "gateway-actual";
+/**
+ * The ONE entry id a run is settled under, whichever way (a $0 marker, the gateway's actual, or the hold's room as an estimate): the company's once-guard is then the mutual exclusion between the settlers, so a run is never
+ * counted twice by two of them (never an estimate AND an actual). The run then counts as booked (`ENTRY#usage:<run>:`). `unflushedEntryId` is the id earlier releases booked an estimate under, still read.
+ */
 export const unreportedSettleEntryId = (operationId: string): string => `usage:${operationId}:settled`;
 
-/** What a stopped run's unreported usage is estimated at when no open hold is left to keep: a full start's planning allowance, never more than the task cap. */
-export function unflushedEstimateMicros(settings: HostedAdmissionSettings | undefined): number {
-  const full = DEFAULT_PLANNING_LIMIT_USD.FULL * 1_000_000;
-  return settings === undefined ? full : Math.min(full, settings.taskCapMicros);
+/** The entries of one task's partition under a sort prefix, every page (a run's own bookings are few; more than `ENTRY_PAGES_MAX` pages is an error, never a partial read). */
+const ENTRY_PAGES_MAX = 20;
+async function entriesUnder(store: DocumentStore, companyId: string, taskId: string, prefix: string): Promise<StoredDocument[]> {
+  const found: StoredDocument[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < ENTRY_PAGES_MAX; page += 1) {
+    const read = await store.query({ pk: costPartition(companyId, taskId), sk: { op: "beginsWith", prefix }, limit: 100, ...(cursor === undefined ? {} : { cursor }) });
+    found.push(...read.items);
+    if (read.cursor === undefined) return found;
+    cursor = read.cursor;
+  }
+  throw new Error("the task's entries could not be read in full");
+}
+
+/** What the worker's own bookings for one run hold: its end report(s) and its checkpoints (dollars the total already counts for the run), before any settlement of ours. An unpriced entry adds nothing here. */
+export async function workerBookedMicros(store: DocumentStore, companyId: string, taskId: string, operationId: string): Promise<number> {
+  let sum = 0;
+  for (const prefix of [`ENTRY#usage:${operationId}:`, `ENTRY#usage-checkpoint:${operationId}:`]) {
+    for (const entry of await entriesUnder(store, companyId, taskId, prefix)) {
+      if (entry["entryId"] === unreportedSettleEntryId(operationId) || typeof entry["micros"] !== "number" || entry["currency"] !== "USD") continue;
+      sum += entry["micros"];
+    }
+  }
+  return sum;
 }
 
 /**
- * The flow's money stop on a deployed install, for one company: a run stopped before its usage arrived keeps its task's whole start hold as spent, marked estimated (core/cost/holds.ts
- * `closeHold`). When no hold with room is left (it was closed by an earlier stop, released, swept, or used up), a fixed estimate is booked on the task instead
- * (`usage:<operation>:unflushed`, `unflushedEstimateMicros`), so unknown spend is never $0. A hold of another company is never touched; the estimate is booked under this company.
+ * The flow's money stop on a deployed install, for one company. A run that ended without its usage is settled by the ACTUAL spend the model gateway records for its calls (`settleFromGateway`); nothing is booked as
+ * spend for it before that. Only where no actual figure can be had (no gateway reader on this install, or none within the wait) is the hold's room booked as a marked estimate (`keepHoldAsEstimate`,
+ * `usage:<operation>:settled`, the same id as the actual's, so the two exclude each other), at most two runs per task (the second brings the task to its cap). A hold of another company is never touched; the booking is under this company.
  */
-export function createHostedMoneyStop(deps: { store: DocumentStore; companyId: string; settings?: HostedAdmissionSettings | undefined; now: () => Date }, timing: Pick<MoneyStop, "flushWaitMs" | "pollMs" | "sleep"> = {}): MoneyStop {
+export function createHostedMoneyStop(deps: { store: DocumentStore; companyId: string; settings?: HostedAdmissionSettings | undefined; projectTaskCap?: ProjectTaskCap | undefined; now: () => Date }, timing: Pick<MoneyStop, "flushWaitMs" | "pollMs" | "sleep"> = {}): MoneyStop {
   // The estimate's own meter: it charges the figure the estimate carries, and nothing draws a hold (the run's hold is closed first).
   const estimates = createCostLedger({
     store: deps.store, now: deps.now, holds: createLedgerHolds(deps.store),
@@ -355,7 +381,7 @@ export function createHostedMoneyStop(deps: { store: DocumentStore; companyId: s
     ...timing,
     async settleUnreported(mark, how) {
       // The marker is the run's booked end; no hold is touched. `no_call` is a proven $0. `gateway_record` follows the receipts rule: the gateway's own calls are in the total, but nothing proves its record COMPLETE, so the
-      // marker is `awaiting_usage` (no dollar figure), exactly as a receipt-covered run's unflushed tail is (`keepWholeHold`): the spend reads again when the gateway finalizes (the reader refuses it as unpriced until then).
+      // marker is `awaiting_usage` (no dollar figure): the spend reads again when the gateway finalizes (the reader refuses it as unpriced until then).
       const base = { companyId: deps.companyId, entryId: unreportedSettleEntryId(mark.operationId), at: deps.now().toISOString(), taskId: mark.taskId };
       const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
       if (how === "gateway_record") await estimates.recordUsage({ ...base, usage: { provider: UNREPORTED_SETTLE_PROVIDER, modelId: "gateway-record", tokens } }, { status: "awaiting_usage" });
@@ -365,51 +391,64 @@ export function createHostedMoneyStop(deps: { store: DocumentStore; companyId: s
       const covered = (await deps.store.query({ pk: costPartition(deps.companyId, mark.taskId), sk: { op: "beginsWith", prefix: `ENTRY#usage-charge:${mark.operationId}:` }, limit: 1 })).items.length > 0;
       const ours = companyOfReservation(reservationId) === deps.companyId;
       const hold = await planHoldClose(deps.store, ours ? reservationId : undefined, covered ? { kind: "release" } : { kind: "settle", actualMicros: undefined, estimated: { operationId: mark.operationId } }, deps.now);
-      return { items: hold.items, plan: { schemaVersion: 1, at: deps.now().toISOString(), covered, restMicros: covered ? 0 : Math.max(0, unflushedEstimateMicros(deps.settings) - hold.remaining) } };
+      return { items: hold.items, plan: { schemaVersion: 1, at: deps.now().toISOString(), covered, restMicros: 0 } };
     },
     async applyUnflushed(plan, mark) {
+      // A task closed with a run lost: what the run spent is UNKNOWN, not a marked $0 (an `awaiting_usage` entry with no dollar figure, as a receipt-covered tail is), so the task's money view says it is not known and the run cost
+      // it teaches is partial. The settler is its reconcile owner: a read of the task's spend settles the run when the gateway's actual figure arrives. A plan an earlier release stored with a dollar figure books it as it said.
+      const known = !plan.covered && plan.restMicros > 0;
       await estimates.recordUsage({
         companyId: deps.companyId, entryId: unflushedEntryId(mark.operationId), at: plan.at, taskId: mark.taskId,
-        usage: { provider: UNFLUSHED_ESTIMATE_PROVIDER, modelId: plan.covered ? "unavailable" : "estimate", tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
-        ...(plan.covered ? {} : { reportedCost: { micros: plan.restMicros, currency: "USD" } }),
-      }, { status: plan.covered ? "awaiting_usage" : "estimated" });
+        usage: { provider: UNFLUSHED_ESTIMATE_PROVIDER, modelId: known ? "estimate" : "unavailable", tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+        ...(known ? { reportedCost: { micros: plan.restMicros, currency: "USD" } } : {}),
+      }, { status: known ? "estimated" : "awaiting_usage" });
+    },
+    async settleFromGateway(reservationId, mark, charge) {
+      // Only what the worker's bookings for the run do not hold yet is added: the gateway's record and the worker's reports describe the SAME calls, so adding both would count them twice.
+      const added = Math.max(0, charge.actualMicros - await workerBookedMicros(deps.store, deps.companyId, mark.taskId, mark.operationId));
+      await estimates.recordUsage({
+        companyId: deps.companyId, entryId: unreportedSettleEntryId(mark.operationId), at: deps.now().toISOString(), taskId: mark.taskId,
+        usage: { provider: UNREPORTED_SETTLE_PROVIDER, modelId: GATEWAY_ACTUAL_MODEL_ID, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+        reportedCost: { micros: added, currency: "USD" },
+      }, charge.final ? undefined : { status: "estimated" });
+      // The actual figure is in: what the hold still holds goes back (what was booked above drew its share first).
+      if (companyOfReservation(reservationId) === deps.companyId) await closeHold(deps.store, reservationId, { kind: "release" }, deps.now);
     },
     async keepHoldAsEstimate(reservationId, mark) {
       // Only the hold's room, as a marked estimate: the ledger draws it from the hold (the day counts it once), the entry is in the task's total (the task view shows it as an estimate), and the hold is closed.
+      // (An install with no caps, `settings` undefined, has no bound to keep.) At most two runs per task are counted this way: a task that already has such an estimate is brought to its cap by the next one (never past it by more than one more run, and no third unknown run).
       const ours = companyOfReservation(reservationId) === deps.companyId;
       const room = ours ? await openHoldRoom(deps.store, reservationId) : 0;
+      let micros = room;
+      if (deps.settings !== undefined && await hasEarlierEstimate(deps.store, deps.companyId, mark)) {
+        const cap = (await taskCapOf({ store: deps.store, settings: deps.settings, projectTaskCap: deps.projectTaskCap }, deps.companyId, mark.taskId)).micros;
+        micros = Math.max(room, cap - (await estimates.taskCost(deps.companyId, mark.taskId)).micros);
+      }
       await estimates.recordUsage({
-        companyId: deps.companyId, entryId: unflushedEntryId(mark.operationId), at: deps.now().toISOString(), taskId: mark.taskId,
+        companyId: deps.companyId, entryId: unreportedSettleEntryId(mark.operationId), at: deps.now().toISOString(), taskId: mark.taskId,
         usage: { provider: UNFLUSHED_ESTIMATE_PROVIDER, modelId: "hold-estimate", tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
-        reportedCost: { micros: room, currency: "USD" },
+        reportedCost: { micros, currency: "USD" },
       }, { status: "estimated" });
       if (ours) await closeHold(deps.store, reservationId, { kind: "release" }, deps.now);
     },
-    async keepWholeHold(reservationId, mark) {
-      // What the run's unreported spend is kept at: never less than the fixed estimate. The hold's room is kept first (the whole hold, as spent); what the room does not cover is booked
-      // as the estimate entry. A hold its checkpoints nearly used up thus never keeps only its last cents for a call that was still going.
-      // A receipt-covered operation already books each recoverable per-call R. An unflushed tail without
-      // coverage proof has no recoverable R: mark it unavailable before releasing the engine planning hold.
-      // This blocks admission and avoids adding a fabricated Full-planning amount to the known calls.
-      const covered = await deps.store.query({ pk: costPartition(deps.companyId, mark.taskId), sk: { op: "beginsWith", prefix: `ENTRY#usage-charge:${mark.operationId}:` }, limit: 1 });
-      if (covered.items.length > 0) {
-        await estimates.recordUsage({ companyId: deps.companyId, entryId: unflushedEntryId(mark.operationId), at: deps.now().toISOString(), taskId: mark.taskId, usage: { provider: UNFLUSHED_ESTIMATE_PROVIDER, modelId: "unavailable", tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } } }, { status: "awaiting_usage" });
-        if (companyOfReservation(reservationId) === deps.companyId) await closeHold(deps.store, reservationId, { kind: "release" }, deps.now);
-        return;
-      }
-      const ours = companyOfReservation(reservationId) === deps.companyId;
-      const room = ours ? await openHoldRoom(deps.store, reservationId) : 0;
-      if (ours) await closeHold(deps.store, reservationId, { kind: "settle", actualMicros: undefined, estimated: { operationId: mark.operationId } }, deps.now);
-      // Keep an estimated marker even when the hold covered all of it: the task total must
-      // not look exact simply because no additional dollars needed booking.
-      const rest = Math.max(0, unflushedEstimateMicros(deps.settings) - room);
-      await estimates.recordUsage({
-        companyId: deps.companyId, entryId: unflushedEntryId(mark.operationId), at: deps.now().toISOString(), taskId: mark.taskId,
-        usage: { provider: UNFLUSHED_ESTIMATE_PROVIDER, modelId: "estimate", tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
-        reportedCost: { micros: rest, currency: "USD" },
-      }, { status: "estimated" });
-    },
   };
+}
+
+/**
+ * Whether another run of the task was already counted as an estimate (an entry of the unflushed-estimate provider under the run's settlement id or the id earlier releases used). Read from the task's own runs by the two ids,
+ * never by scanning the task's entries. A task that cannot be read, or has more runs than `runsOwed` reads, is taken as having one (the bound only ever tightens; an unreadable task throws and refuses).
+ */
+async function hasEarlierEstimate(store: DocumentStore, companyId: string, mark: { operationId: string; taskId: string }): Promise<boolean> {
+  const task = await readTask({ store }, mark.taskId);
+  if (task === undefined || task.companyId !== companyId) throw new Error("the task's runs could not be read");
+  const runs = (await workspaceOperations({ store, companyId }, task.workspaceId)).filter((run) => run.kind === "task" && run.id !== mark.operationId);
+  if (runs.length > OWED_RUNS_MAX) return true;
+  for (const run of runs) {
+    for (const id of [unreportedSettleEntryId(run.id), unflushedEntryId(run.id)]) {
+      if ((await store.get({ pk: costPartition(companyId, mark.taskId), sk: `ENTRY#${id}` }))?.["provider"] === UNFLUSHED_ESTIMATE_PROVIDER) return true;
+    }
+  }
+  return false;
 }
 
 /** Whether the queue cancel path's fast relay (lane L9, the State table stream to the outbox relay) is deployed: the infra sets this variable to `on` with it (infra/lib/core-engine.ts, packed as `rl`). The name is the contracts' constant. */
@@ -417,11 +456,25 @@ export { CORE_OUTBOX_STREAM_RELAY_VARIABLE };
 /**
  * Whether the per-run stop is wired on this function: the infrastructure sets `ROVARA_CORE_OUTBOX_STREAM_RELAY=on` (packed `rl`, infra/lib/core-engine.ts) on the broker and the dispatcher, because the whole path
  * that stops a run at its cap is deployed with it (the cancel staged in the outbox, relayed by the State stream through the developer task notifier and by the 1-minute backstop schedule, delivered to the worker by the
- * dispatcher; a silent worker is ended by the run-watch sweep). Absent or anything but `on`: false, so `automation.run` stays refused (`run_stop_not_wired`); Stop and close still keep the whole hold as estimated
- * spend when the worker's end is late (over-counts, never under).
+ * dispatcher; a silent worker is ended by the run-watch sweep). Absent or anything but `on`: false, so `automation.run` stays refused (`run_stop_not_wired`); Stop and close still mark a run whose end is late as unflushed, and its actual figure is settled from the
+ * gateway's record on the next spend read (the hold stays open until then).
  */
 export function runStopWiredFrom(env: NodeJS.ProcessEnv): boolean {
   return env[CORE_OUTBOX_STREAM_RELAY_VARIABLE]?.trim() === "on";
+}
+
+/**
+ * Whether a model run of the task has its figure booked: an end report or an estimate (`usage:<run>:...`; a checkpoint is not an end, `usage-checkpoint:`). A run lost before its usage arrived
+ * (`usageUnflushed`) is booked only by its own settlement (`usage:<run>:settled`: its actual spend, its estimate or a proven nothing) or an estimate an earlier release booked (`usage:<run>:unflushed`): a partial report that reached the broker
+ * before it was lost does not make it reported in full.
+ */
+export async function runIsBooked(store: DocumentStore, companyId: string, taskId: string, run: Pick<OperationRecord, "id" | "usageUnflushed">): Promise<boolean> {
+  if (run.usageUnflushed === true) {
+    const [settled, kept] = await Promise.all([unreportedSettleEntryId(run.id), unflushedEntryId(run.id)].map((id) => store.get({ pk: costPartition(companyId, taskId), sk: `ENTRY#${id}` })));
+    // The `unflushed` id is an estimate an earlier release booked, or the unknown marker a close left (`awaiting_usage`): the marker is no figure, so the run still owes its settlement.
+    return settled !== undefined || (kept !== undefined && kept["chargeStatus"] !== "awaiting_usage");
+  }
+  return (await store.query({ pk: costPartition(companyId, taskId), sk: { op: "beginsWith", prefix: `ENTRY#usage:${run.id}:` }, limit: 1 })).items.length > 0;
 }
 
 /** The most of a task's runs `runsOwed` reads the ledger for; a task with more unfinished or failed runs is taken as owing. */
@@ -440,13 +493,7 @@ export async function runsOwed(store: DocumentStore, companyId: string, taskId: 
       .filter((operation) => operation.kind === "task" && operation.workflowMode !== "CHECKS" && operation.status !== "SUCCEEDED");
     if (runs.length > OWED_RUNS_MAX) return true;
     for (const run of runs) {
-      // A run whose usage never arrived (`usageUnflushed`) is booked only by its estimate; any other by an end report or an estimate (a checkpoint is not an end: `usage-checkpoint:`).
-      if (run.usageUnflushed === true) {
-        if (await store.get({ pk: costPartition(companyId, taskId), sk: `ENTRY#${unflushedEntryId(run.id)}` }) === undefined) return true;
-        continue;
-      }
-      const booked = await store.query({ pk: costPartition(companyId, taskId), sk: { op: "beginsWith", prefix: `ENTRY#usage:${run.id}:` }, limit: 1 });
-      if (booked.items.length === 0) return true;
+      if (!await runIsBooked(store, companyId, taskId, run)) return true;
     }
     return false;
   } catch {

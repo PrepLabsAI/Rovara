@@ -74,8 +74,8 @@ async function settleRow(deps: TaskFlowDeps, row: RunWatchRecord, graceMs: numbe
   }
   // The accepted close exclusively owns this run's deadline and monetary decision.
   if (await acceptedCloseForRun(deps, operation) !== undefined) return "waiting";
-  // A run stopped at its spending limit whose worker never ended it (money-stop.ts): past the flush wait, its machine is stopped, its usage is taken as lost (the task's whole hold is kept,
-  // marked estimated), and its end is recorded CANCELLED, which blocks the step with the reason.
+  // A run stopped at its spending limit whose worker never ended it (money-stop.ts): past the flush wait, its machine is stopped, its usage is taken as lost (marked unflushed; nothing is booked, the hold stays open until the actual figure is in),
+  // and its end is recorded CANCELLED, which blocks the step with the reason.
   if (spendStopOverdue(deps, operation)) {
     await deps.machines.stop(row.machineId).catch(() => undefined);
     await endUnflushed(deps, operation);
@@ -111,7 +111,7 @@ async function settleRow(deps: TaskFlowDeps, row: RunWatchRecord, graceMs: numbe
   }
   const after = await readOperation(deps, row.workspaceId, row.operationId);
   if (after === undefined || !isTerminalStatus(after.status)) return "waiting";
-  // A model run whose worker was lost never sent its usage: on a deployed install its task's whole hold is kept, marked estimated (money-stop.ts).
+  // A model run whose worker was lost never sent its usage: on a deployed install it is marked unflushed and settled at its actual figure on the next spend read (money-stop.ts).
   if (after.status === "INTERRUPTED" && after.error === RUN_LOST_MESSAGE) await endUnflushed(deps, after);
   await deps.store.delete({ key });
   // It ended some other way between the read and the write (a result got in first): the row goes, and the sweep ended nothing.

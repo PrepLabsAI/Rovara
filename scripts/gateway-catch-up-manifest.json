@@ -466,6 +466,10 @@
     }
   },
   "divergedFromCloud": {
+    "scripts/model-gateway-image.ts": {
+      "blob": "blob:31100e214139de772db50dc1682bdffad31467dd",
+      "reason": "the context hash now also covers this script's own bytes and an IMAGE_FORMAT_VERSION constant, because Cloud's release pipeline tags the gateway image by that hash and would otherwise reuse an old image after a change to how it is built (pr/gateway-image-by-content, DEC 532: the same change is made in Cloud's copy, so the two stay equal)"
+    },
     "packages/model-gateway/src/bedrock-byo-sessions.ts": {
       "blob": "blob:2a1ba455315bb36f1c81cddf192de23dd30acb1b",
       "reason": "Bedrock model check: max_tokens 0 answered by a Messages response is ready, AWS not answering is no_answer (one retry inside a 22 s budget), status, error type and company logged; byte-identical to Rovara Cloud pr/bedrock-byo-check-fixes-cloud-20261125 @ c9878e235"

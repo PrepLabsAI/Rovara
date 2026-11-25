@@ -40,7 +40,6 @@ async function compose(options: { moneyStop: boolean }) {
     stop: async (id) => { calls.push("stop"); await mirror(id.replace("ec2ws.", "")); return brokerHalf.stop(id); },
     terminate: async (id) => { calls.push("terminate"); return brokerHalf.terminate(id); },
   };
-  const kept: unknown[] = [];
   const onWait: { run?: (() => Promise<void>) | undefined } = {};
   const dispatcher: { run?: () => Promise<unknown> } = {};
   const h = createHarness({
@@ -49,7 +48,6 @@ async function compose(options: { moneyStop: boolean }) {
       ...(options.moneyStop ? { moneyStop: {
         pollMs: 1_000,
         sleep: async (ms: number) => { clock.advance(ms / 1_000); await dispatcher.run?.(); const run = onWait.run; onWait.run = undefined; await run?.(); },
-        async keepWholeHold(reservationId, mark) { kept.push({ reservationId, ...mark }); },
       } satisfies MoneyStop } : {}),
     }),
   });
@@ -84,7 +82,7 @@ async function compose(options: { moneyStop: boolean }) {
   };
   const reapTwice = async () => { await sw.reap(); await sw.reap(); };
   const terminate = () => hybrid.terminate(sessionMachineId(workspaceId));
-  return { sw, h, calls, deliveries, deleteCalls, kept, onWait, taskId: started.task.taskId, workspaceId, drain, sessionNow, deleterRuns, workspaceRecord, prepareRunning, planRunning, reapTwice, mirror, dispatcherHalf, terminate };
+  return { sw, h, calls, deliveries, deleteCalls, onWait, taskId: started.task.taskId, workspaceId, drain, sessionNow, deleterRuns, workspaceRecord, prepareRunning, planRunning, reapTwice, mirror, dispatcherHalf, terminate };
 }
 
 describe.each([{ moneyStop: true }, { moneyStop: false }])("a person's Stop on a hosted task (moneyStop wired: $moneyStop)", ({ moneyStop }) => {
@@ -112,14 +110,13 @@ describe.each([{ moneyStop: true }, { moneyStop: false }])("a person's Stop on a
     expect(c.deleterRuns()).toEqual([]);
   });
 
-  it("T2 Stop of a model run whose worker never answers (the flush wait runs out, or there is none): the same, and the hold stays estimated when the install tracks money", async () => {
+  it("T2 Stop of a model run whose worker never answers (the flush wait runs out, or there is none): the same (the run is marked unflushed when the install tracks money)", async () => {
     const c = await compose({ moneyStop });
     const plan = await c.planRunning();
     const before = await c.sessionNow();
     expect(await cancelTask(c.h.deps, c.taskId)).toEqual({ nothingRunning: false });
     expect(c.calls).toContain("stop");
     expect(c.deleteCalls).toEqual([]);
-    expect(c.kept).toHaveLength(moneyStop ? 1 : 0);
     expect(await c.sessionNow()).toMatchObject({ state: "STOPPING", volumeId: before.volumeId });
     await c.reapTwice();
     expect(await c.sessionNow()).toMatchObject({ state: "STOPPED", volumeId: before.volumeId });

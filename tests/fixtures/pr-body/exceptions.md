@@ -13,7 +13,7 @@
   - Changes Rovara instruction files (CLAUDE.md), which tell Rovara how to work in this repository; read the change.
   - Changes snapshot files (tests/orders/__snapshots__/order-page.snap), the expected output that tests compare with.
   - 1 check failed on the latest code.
-**Needs you** The 12 items below, then the normal code review. Merging needs a fresh sign-in (high risk).
+**Needs you** The 12 items below, then the normal code review.
 
 ### Check these before you approve
 

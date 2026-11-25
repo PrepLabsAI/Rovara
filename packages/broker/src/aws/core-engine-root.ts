@@ -76,6 +76,7 @@ import { headOf } from "../core/setup-agent/snapshot.js";
 import { createHostedTestEnvironmentApproval } from "../core-host/test-environment-approval.js";
 import { createCompanyTaskSpend } from "../core-host/company-task-spend.js";
 import { createUnreportedRunSettler } from "../core-host/unreported-run-settle.js";
+import { gatewayRunChargesReaderFromEnvironment } from "../core-host/gateway-run-charges-http.js";
 import { createSetupRegistryMirror } from "./setup-registry-mirror.js";
 import { hostedStandingInstructions } from "../core-host/standing-instructions.js";
 import { lifecycleAccess } from "./project-lifecycle-routes.js";
@@ -693,12 +694,13 @@ export function coreMoneyWiring(registry: Pick<AdapterRegistry, "require">, comp
  * per-task limit when lower). No caps, a task of another company, or a limit that cannot be read: throws (the round is refused, never let through).
  */
 export async function hostedRoundCap(registry: Pick<AdapterRegistry, "require">, companyId: OrgId, now: () => Date, settings: HostedAdmissionSettings | undefined, projectTaskCap: ProjectTaskCap | undefined,
-  task: { companyId: string; taskId: string; project: string }): Promise<{ limitUsd: number; spentUsd: number | undefined }> {
+  task: { companyId: string; taskId: string; project: string }, readSpend?: (taskId: string) => Promise<number | undefined>): Promise<{ limitUsd: number; spentUsd: number | undefined }> {
   if (settings === undefined || task.companyId !== companyId) throw new Error("the task cap is unavailable");
   const store = registry.require("storage");
   const ledger = createHostedLedger({ store, metering: registry.require("metering"), now });
   const cap = await taskCapOf({ store, settings, projectTaskCap }, companyId, task.taskId, task.project);
-  return { limitUsd: cap.micros / 1_000_000, spentUsd: costUsdOf(await ledger.taskCost(companyId, task.taskId)) };
+  // LOST-RUN-ACTUAL-SPEND: with the flow's own spend reader, a round reads the SAME figure the plan Approve does (settled runs, runs still owed their figure refused); without one, the ledger total as before.
+  return { limitUsd: cap.micros / 1_000_000, spentUsd: readSpend !== undefined ? await readSpend(task.taskId) : costUsdOf(await ledger.taskCost(companyId, task.taskId)) };
 }
 
 /** The most admins one notice names (a company with more is told through its first ones, by the port's sorted list). */
@@ -828,6 +830,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const previewRates = previewRateReaderFromEnvironment(env, inputs.taskTokens);
   // Task cost truth: ONE quote reader (its cache is shared) for the model-access answer (the worker prices from it) and the usage booking (its floor is priced from it).
   const quoteReader = gatewayRateQuoteReaderFromEnvironment(env, inputs.taskTokens);
+  // LOST-RUN-ACTUAL-SPEND: the gateway's own record of a run's calls, the actual figure of a run whose usage never arrived (none where the gateway or the task key is not set up: the settler then counts without it).
+  const runCharges = gatewayRunChargesReaderFromEnvironment(env, inputs.taskTokens);
   const resolveModelChoiceReader = () => (env[CORE_AGENT_MODEL_CHOICE_VARIABLE] === "on" ? inputs.offeredModels ?? offeredModelsReaderFromEnvironment(env, inputs.taskTokens) : undefined);
   const modelChoices = createCompanyModelChoices({ reader: resolveModelChoiceReader(), now: () => now().getTime() });
   // DEC 254n (1): the company's own engine model (when it set one) replaces the install's for its tasks; its start is refused unless the gateway offers it THAT company now. The list is read
@@ -943,7 +947,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     },
     runtime: (registry, companyId) => ({
       callbackSigningKey: inputs.callbackSigningKey,
-      // The per-run stop and the usage flush on Stop and close (core-money-stop): a stopped run whose usage did not arrive keeps its task's whole hold, marked estimated.
+      // The per-run stop and the usage flush on Stop and close (core-money-stop): a stopped run whose usage did not arrive is marked unflushed and books nothing; its actual figure is the gateway's record, settled on the next spend read.
       // L2b: every core step on the gateway's agent model (the token's description reads the same route).
       // Configured without the task-token signer: refused here, so no task starts. The money stop is wired in every case.
       flowOptions: { ...(inputs.taskRules === undefined ? {} : { taskSharing: { prepare: async (caller, project, wanted) => {
@@ -964,7 +968,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       // L4-TSU: what a task has cost, for automatic fixing's per-task dollar cap: the settled figure in THIS company's cost ledger, read fresh each time; anything not known to be complete throws (an ask, never "nothing spent").
       taskSpendUsd: createCompanyTaskSpend({ store: registry.require("storage"), companyId, refused: (reason) => log({ event: "core_engine.task_spend_refused", companyId, reason }),
         // SPEND-UNREPORTED-RUN: an ended run that sent no usage report is settled on this read (the gateway's record, a provable no-call, or an estimate), so the spend is never unreadable for good.
-        settle: async (taskId) => { await createUnreportedRunSettler({ store: registry.require("storage"), companyId, moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }), now, log })(taskId); } }),
+        settle: async (taskId) => { await createUnreportedRunSettler({ store: registry.require("storage"), companyId, moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, projectTaskCap, now }), now, log, ...(runCharges === undefined ? {} : { gatewayCharges: runCharges }) })(taskId); } }),
       // L4-TA6: and the cap it is held to: the task's LIVE cap, the value Admission and the run stop enforce (the install's cap lowered to the project's own limit), never autofix's larger default; unknown throws and asks.
       autofixDayBudgetHasRoom: hostedAutofixDayBudgetHasRoom({ store: registry.require("storage"), companyId, settings: admissionSettings, now }),
       taskCapUsd: hostedTaskCapUsd({ store: registry.require("storage"), companyId, settings: admissionSettings, projectTaskCap }),
@@ -972,7 +976,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       // a task started from a ticket also gets the ticket binding there. A system owner's start gets nothing added.
       startExtras: ticketSessionStartExtras(companyId, { chatThreads: inputs.chatThreads !== undefined }),
       // People is initialized lazily by its owner view. Starting work must not require the optional person-proof runtime.
-      moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }),
+      moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, projectTaskCap, now }),
       // L6a: a finished task teaches this company's estimate from the same company-scoped usage ledger as hosted spend.
       onTaskClosed: async (task, closedAt) => {
         const store = registry.require("storage");
@@ -1222,7 +1226,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           sessionCapSeconds: hostedSessionCapSeconds(),
           scriptTokens: {}, ...(attention === undefined ? {} : { unsubscribeKey: attention.unsubscribeKey }),
           ...(modelChoices.choiceFor(runtime.companyId) === undefined ? {} : { modelChoice: modelChoices.choiceFor(runtime.companyId)! }),
-          taskActions: { roundCap: async (task) => hostedRoundCap(registry, runtime.companyId, now, admissionSettings, projectTaskCap, task) },
+          taskActions: { roundCap: async (task) => hostedRoundCap(registry, runtime.companyId, now, admissionSettings, projectTaskCap, task, runtime.flow.deps.taskSpendUsd) },
           // Cloud #188 item 3: a core task's People, readers, events and plan comments, with the old task routes' own rules.
           ...(inputs.taskRules === undefined ? {} : { taskRules: createCoreTaskRuleRoutes(inputs.taskRules, runtime.flow.deps.artifacts) }),
           canReadProject: (personId, project, companyId) => projectGrant(personId, project, companyId),

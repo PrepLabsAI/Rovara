@@ -177,7 +177,7 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
       const verdict: SetupVerification = verification[item.id] ?? "unchecked";
       return {
         id: item.id, kind: item.kind, lines: lines.slice(0, 20), verdict,
-        from: item.proposed.from.slice(0, 4).map((citation) => (citation.path === undefined ? "inferred by Rovara, from no file" : `${citation.repo ?? ""}/${citation.path}${citation.line === undefined ? "" : `:${String(citation.line)}`}`)),
+        from: item.proposed.from.slice(0, 4).map((citation) => (citation.path === undefined ? "inferred by Rovara, from no file" : `${citation.repo ?? ""}/${citation.path}`)),
         usable: (item.kind === "setup" || item.kind === "tests" || item.kind === "prompt_location") && setupItemHandling(item.kind, item.proposed.value) === "settings",
       };
     });
@@ -331,7 +331,7 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
       const value = item.value;
       return {
         recipe: { startCommand: value.startCommand, port: value.port, ...(value.readyPath === undefined ? {} : { readyPath: value.readyPath }), ...(value.framework === undefined ? {} : { framework: value.framework }), routes: value.routes.map((route) => ({ path: route.path, files: [...route.files] })) },
-        from: item.from.slice(0, 4).map((citation) => (citation.path === undefined ? "inferred by Rovara, from no file" : `${citation.repo ?? ""}/${citation.path}${citation.line === undefined ? "" : `:${String(citation.line)}`}`)),
+        from: item.from.slice(0, 4).map((citation) => (citation.path === undefined ? "inferred by Rovara, from no file" : `${citation.repo ?? ""}/${citation.path}`)),
         verdict: "unchecked" as const,
       };
     },

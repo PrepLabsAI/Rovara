@@ -25,7 +25,7 @@ export interface Principal {
   /** The identity adapter that vouched for this principal, such as `local-owner`. */
   provider: string;
   /**
-   * When this person last signed in interactively (ISO time), when the identity adapter knows (lane P3, items I1 and A1). It is the adapter's own fact: a rule that wants a fresh sign-in (`ApprovalRequirement.signIn`) reads it,
+   * When this person last signed in interactively (ISO time), when the identity adapter knows (lane P3, items I1 and A1). It is the adapter's own fact: a rule an approvers plug-in states (`ApprovalRequirement.signIn`) reads it,
    * and Code's local owner has none. Never taken from anything a caller sends.
    */
   authTime?: string;
@@ -176,8 +176,8 @@ export function isValidApprovalCardRef(card: unknown): card is ApprovalCardRef {
 }
 
 /**
- * How recent an approver's sign-in must be (decision 62: a company setting, lane P3). `window`: the sign-in time (`Principal.authTime`) must be no older than `seconds`, and an approver with no sign-in time is refused.
- * `any-active`: any active company sign-in counts (the person is signed in now; for a company on its own single sign-on, so a high-risk approval needs no extra step). Only an approver adapter sets it; Code's local owner does not.
+ * How recent an approver's sign-in must be (decision 62, lane P3): an approvers plug-in may state it. The decision gate enforces it for high-risk approvals and rejections of decisions; no built-in adapter states one. The live Merge button (`pressMergeAsPerson`) does not apply it; the unwired old merge press `pressMerge` did. `window`: the sign-in time (`Principal.authTime`) must be no older than `seconds`, and an approver with no sign-in time is refused.
+ * `any-active`: any active company sign-in counts (the person is signed in now; for a company on its own single sign-on, so a high-risk approval needs no extra step). Only an approver adapter sets it; no built-in adapter does.
  */
 export type ApprovalSignInRule = { mode: "window"; seconds: number } | { mode: "any-active" };
 
@@ -213,13 +213,13 @@ export interface ApprovalRequirement {
   commentMethods?: readonly string[];
   /** The methods that may ask for changes. Asking for changes by a comment is allowed (decision 62). Absent: the local session or a code host comment. */
   changesMethods?: readonly string[];
-  /** How recent the approver's sign-in must be for a high-risk approval or a rejection (decision 62). Absent: no rule (Code). */
+  /** How recent the approver's sign-in must be for a high-risk approval or a rejection of a decision (decision 62); the live Merge button (`pressMergeAsPerson`) does not apply it, the unwired old merge press `pressMerge` did. Absent: no rule (every built-in adapter). */
   signIn?: ApprovalSignInRule;
   /**
    * More sign-in rules, each for some answers, risks and methods (decision 211, gap G1: a company window for a MEDIUM approval, a rejection or a request for changes from an outside place, and none from a browser).
    * Every rule that applies must hold, together with `signIn` (`signInRulesFor`, `checkApprovalSignInFor`). Absent: only `signIn`. The rules read `Principal.authTime`, so an identity adapter that states them
    * must set it from the person's last INTERACTIVE sign-in (never a refresh, a chat sign-in or a token's issue time).
-   * Not yet read by the decision gate or the merge press: until a later lane switches them in, an adapter that names rules here still enforces them in its own `verify`.
+   * Not read by the decision gate, nor by the live Merge button (`pressMergeAsPerson`): until a later lane switches them in, an adapter that names rules here still enforces them in its own `verify`.
    */
   signInRules?: readonly ApprovalSignInScope[];
   /**

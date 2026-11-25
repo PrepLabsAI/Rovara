@@ -266,7 +266,8 @@ describe("the review card (approve_fixture_set)", () => {
     const record = await submitOk(store);
     const { projection } = await cardFor(store, record, true);
     const [card] = projection.cards;
-    expect(card).toMatchObject({ risk: "high", friction: { freshSignIn: true } });
+    expect(card).toMatchObject({ risk: "high", friction: { expandEvidenceFirst: true, secondPerson: false } });
+    expect(card!.friction).not.toHaveProperty("freshSignIn");
     expect(card!.actions.map((action) => action.kind)).toEqual(["open"]);
     expect(card!.riskReasons).toContain("Requests with no recording are answered from the schema.");
   });

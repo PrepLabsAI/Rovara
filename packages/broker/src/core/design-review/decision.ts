@@ -1,6 +1,5 @@
 // Design review stage: what the approval gate needs to know about a design under review, kept out of the gate itself. The gate (core/decisions/approval-gate.ts) decides WHO may approve, with the approvers port and the
-// risk tier given here; a design that went through review is graded by `riskTierOf("approve_design")` from the review's facts, so a high-risk design needs the strong proof, a sign-in window and a person other than the requester
-// when the approvers plug-in says so. The rules of the review itself are these three functions: the tier, the blocker reason and the approval record the pull request's Proof section reads.
+// risk tier given here; a design that went through review is graded by `riskTierOf("approve_design")` from the review's facts, so a high-risk design needs the strong proof and, when the approvers plug-in says so, a sign-in window and a person other than the requester. The rules of the review itself are these three functions: the tier, the blocker reason and the approval record the pull request's Proof section reads.
 import { DESIGN_REVIEW_HIGH_RISK_REASONS, readDesignMeta, type DecisionRisk, type DesignReason, type TransactItem, type WorkflowSnapshot } from "@agentx/contracts";
 import { raiseRisk } from "@agentx/contracts";
 import type { LoadedDocument } from "../../developer/plan-document-reader.js";
