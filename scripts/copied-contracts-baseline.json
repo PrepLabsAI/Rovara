@@ -14,7 +14,13 @@
   "contracts/shared/model-gateway-product-bedrock.v2.json": [
     "shared"
   ],
+  "contracts/shared/model-gateway-product-vertex.v1.json": [
+    "shared"
+  ],
   "contracts/shared/model-gateway-token.v1.json": [
+    "shared"
+  ],
+  "contracts/shared/offered-agent-models.v1.json": [
     "shared"
   ],
   "contracts/shared/policy-hook.v1.json": [
@@ -51,6 +57,9 @@
     "marked"
   ],
   "packages/contracts/src/task-words.ts": [
+    "marked"
+  ],
+  "packages/model-gateway/src/charge-receipt.ts": [
     "marked"
   ]
 }

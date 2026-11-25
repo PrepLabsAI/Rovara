@@ -1,0 +1,129 @@
+{
+  "evidence": "LIVE5: providers-fast/codex-fix-live5.log:7170,7172; LIVE6: M2-LIVE-REPORT-run6.json. Generation model/provider are supplied by the existing pinned fake server, not recovered from the LIVE5 report.",
+  "observations": [
+    {
+      "run": 5,
+      "model": "openai/gpt-5-mini",
+      "usage": {
+        "prompt_tokens": 27,
+        "completion_tokens": 165,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 128
+        },
+        "cost": 0.00033675,
+        "cost_details": {
+          "upstream_inference_cost": 0.00033675,
+          "upstream_inference_prompt_cost": 6.75e-06,
+          "upstream_inference_completions_cost": 0.00033
+        }
+      },
+      "generation": {
+        "native_tokens_prompt": 27,
+        "native_tokens_completion": 165,
+        "native_tokens_reasoning": 128,
+        "native_tokens_cached": 0,
+        "total_cost": 0.00033675,
+        "num_search_results": null,
+        "web_search_engine": null,
+        "is_byok": false
+      }
+    },
+    {
+      "run": 5,
+      "model": "openai/gpt-5-nano",
+      "usage": {
+        "prompt_tokens": 27,
+        "completion_tokens": 178,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 128
+        },
+        "cost": 7.255e-05,
+        "cost_details": {
+          "upstream_inference_cost": 7.255e-05,
+          "upstream_inference_prompt_cost": 1.35e-06,
+          "upstream_inference_completions_cost": 7.12e-05
+        }
+      },
+      "generation": {
+        "native_tokens_prompt": 27,
+        "native_tokens_completion": 178,
+        "native_tokens_reasoning": 128,
+        "native_tokens_cached": 0,
+        "total_cost": 7.255e-05,
+        "num_search_results": null,
+        "web_search_engine": null,
+        "is_byok": false
+      }
+    },
+    {
+      "run": 6,
+      "model": "openai/gpt-5-mini",
+      "usage": {
+        "prompt_tokens": 27,
+        "completion_tokens": 67,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 77
+        },
+        "cost": 0.00014075,
+        "cost_details": {
+          "upstream_inference_cost": 0.00014075,
+          "upstream_inference_prompt_cost": 6.75e-06,
+          "upstream_inference_completions_cost": 0.000134
+        }
+      },
+      "generation": {
+        "native_tokens_prompt": 27,
+        "native_tokens_completion": 67,
+        "native_tokens_reasoning": 77,
+        "native_tokens_cached": 0,
+        "total_cost": 0.00014075,
+        "num_search_results": null,
+        "web_search_engine": null,
+        "is_byok": false
+      }
+    },
+    {
+      "run": 6,
+      "model": "openai/gpt-5-nano",
+      "usage": {
+        "prompt_tokens": 27,
+        "completion_tokens": 384,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 320
+        },
+        "cost": 0.00015495,
+        "cost_details": {
+          "upstream_inference_cost": 0.00015495,
+          "upstream_inference_prompt_cost": 1.35e-06,
+          "upstream_inference_completions_cost": 0.0001536
+        }
+      },
+      "generation": {
+        "native_tokens_prompt": 27,
+        "native_tokens_completion": 384,
+        "native_tokens_reasoning": 320,
+        "native_tokens_cached": 0,
+        "total_cost": 0.00015495,
+        "num_search_results": null,
+        "web_search_engine": null,
+        "is_byok": false
+      }
+    }
+  ]
+}

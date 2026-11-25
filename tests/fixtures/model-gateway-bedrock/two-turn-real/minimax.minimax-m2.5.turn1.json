@@ -1,0 +1,34 @@
+{
+ "status": 200,
+ "stop": "tool_use",
+ "blocks": [
+  {
+   "type": "text",
+   "text": ""
+  },
+  {
+   "type": "thinking",
+   "thinking": "The user wants me to call the ping tool.\n",
+   "signature": ""
+  },
+  {
+   "type": "text",
+   "text": "\n\n\n"
+  },
+  {
+   "type": "tool_use",
+   "id": "tooluse_xL0JLu2ZoSownVzZEfcQ2F",
+   "name": "ping",
+   "input": {}
+  },
+  {
+   "type": "text",
+   "text": ""
+  }
+ ],
+ "usage": {
+  "input": 175,
+  "output": 25
+ },
+ "complete": true
+}

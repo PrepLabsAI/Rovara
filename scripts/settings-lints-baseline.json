@@ -16,6 +16,7 @@
     "infra/lib/environment-release-pipeline.ts": 8,
     "infra/lib/identity.ts": 1,
     "infra/lib/installer.ts": 4,
+    "infra/lib/model-gateway.ts": 6,
     "infra/lib/model-keys.ts": 1,
     "infra/lib/openrouter.ts": 1,
     "infra/lib/permissions-boundary.ts": 1,
@@ -34,6 +35,8 @@
     "infra/lib/control-plane.ts": 4,
     "infra/lib/core-engine.ts": 1,
     "infra/lib/environment-release-pipeline.ts": 4,
+    "infra/lib/model-gateway-app.ts": 10,
+    "infra/lib/model-gateway-deployed-sha.ts": 1,
     "infra/lib/naming.ts": 1,
     "infra/lib/production-foundation.ts": 2
   },

@@ -479,3 +479,54 @@ Each mutant applied singly to the production file, tests/contract/developer-iden
 | developer/server.ts `refreshRefused` | The fixed `signin.browser_refresh_refused` line removed | killed, 1 failed |
 | same | The line also carries the raw session id | killed, 1 failed |
 | developer/canary-session.ts | `signin.canary_session` logs the raw session id | killed, 1 failed |
+| release-pipeline.ts CLOUD_PROD_DEFAULT (tag-trigger) | The variable's default turned back to `on` | killed, 1 failed |
+| release-pipeline.ts CLOUD_REF default (tag-trigger) | The variable's default turned back to `latest` | killed, 1 failed |
+| release-pipeline.ts Production stage (tag-trigger) | The transition into Production left enabled | killed, 1 failed |
+| release-pipeline.ts CLOUD_SOURCE_COMMIT (tag-trigger) | Beta's Cloud Preflight commit variable not bound to the Cloud source's CommitId | killed, 1 failed |
+
+## PROD-APPROVAL-BOUND — the Production stage opens with a manual approval per run (DEC 254zzz506)
+
+Each mutant applied singly to infra/lib/release-pipeline.ts, release-pipeline-prod-approval.test.ts and release-pipeline-tag-trigger.test.ts run, restored from a copy. All killed.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| release-pipeline.ts Production stage actions | The approval action left out of the stage | killed, 6 failed |
+| release-pipeline.ts Production stage | The transition into Production left enabled | killed, 2 failed |
+| release-pipeline.ts approvalText | The approval text without the pipeline execution id | killed, 1 failed |
+| release-pipeline.ts Production Code Preflight policy | `codepipeline:PutApprovalResult` added beside DisableStageTransition | killed, 2 failed |
+| release-pipeline.ts productionApproval | The 24-hour timeout dropped (the 7-day default) | killed, 1 failed |
+| release-pipeline.ts productionApproval | The approval at run order 2 (beside the Code Preflight, not before it) | killed, 2 failed |
+
+## PROD-APPROVAL-BOUND, Opus leftovers — the gate closes before the approval; the approval text says what the Cloud commit is
+
+The approval moved from run order 1 to run order 2, after the read-only Code Preflight that closes the transition (the earlier section's "approval at run order 2" mutant is now the design, so it is replaced by the ones below). Each mutant applied singly to infra/lib/release-pipeline.ts, release-pipeline-prod-approval.test.ts and release-pipeline-tag-trigger.test.ts run, restored from a copy. All killed.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| release-pipeline.ts productionApproval | The approval at run order 1 (beside the Code Preflight, before the gate closes) | killed, 3 failed |
+| release-pipeline.ts productionApproval | The approval at run order 4 (a Cloud action before it) | killed, 2 failed |
+| release-pipeline.ts approvalText | The old wording back ("the commit Beta resolved its Cloud ref from") | killed, 1 failed |
+| release-pipeline.ts Production Code Preflight policy | `ssm:PutParameter` added (a writer before the approval) | killed, 1 failed |
+| release-pipeline.ts Production stage actions | The approval placed first, ahead of the Code Preflight | killed, 2 failed |
+
+## PROD-APPROVAL-BOUND, read-only clone for the step before the approval
+
+The Production Code Preflight role (it runs before the owner's approval) gets two Deny statements on UseConnection unless `ProviderPermissionsRequired` is `read_only`. Each mutant applied singly to infra/lib/release-pipeline.ts, release-pipeline-prod-approval.test.ts run, restored from a copy. All killed.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| release-pipeline.ts preflightProject | The legacy-prefix (codestar-connections) Deny left out | killed, 1 failed |
+| release-pipeline.ts preflightProject | The Deny condition value `read_write` instead of `read_only` | killed, 1 failed |
+| release-pipeline.ts preflightProject | The Deny block skipped for the Production Code Preflight | killed, 1 failed |
+| release-pipeline.ts preflightProject | `StringEquals` instead of `StringNotEquals` (denies the read-only use) | killed, 1 failed |
+
+### Read-only clone, condition switched (fail-safe for availability)
+
+The two Denies now use `StringEquals ProviderPermissionsRequired = read_write` instead of `StringNotEquals read_only` (a clone whose request lacks the key is not denied, so Production cannot break at its first action; a push request carries read_write). The four mutants above were re-run against the new form; this table replaces their results (the earlier two rows for the value and the operator describe the old form). All killed.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| release-pipeline.ts preflightProject | The legacy-prefix (codestar-connections) Deny left out | killed, 1 failed |
+| release-pipeline.ts preflightProject | The Deny condition value `read_only` instead of `read_write` (denies the clone, allows the push) | killed, 1 failed |
+| release-pipeline.ts preflightProject | The Deny block skipped for the Production Code Preflight | killed, 1 failed |
+| release-pipeline.ts preflightProject | `StringNotEquals` instead of `StringEquals` (denies a request without the key) | killed, 1 failed |

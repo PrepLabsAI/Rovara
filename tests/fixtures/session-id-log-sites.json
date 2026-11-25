@@ -1,0 +1,38 @@
+{
+  "sites": {
+    "packages/broker/src/aws/dispatcher.ts": 1,
+    "packages/broker/src/core/notify/attention.ts": 2,
+    "packages/broker/src/core/notify/inbox-rows.ts": 1,
+    "packages/broker/src/core/sessions/control.ts": 1,
+    "packages/broker/src/core/sessions/projector.ts": 1,
+    "packages/broker/src/core/sessions/steer.ts": 3,
+    "packages/broker/src/core/sessions/summary.ts": 5,
+    "packages/broker/src/core/sessions/sweep.ts": 1,
+    "packages/broker/src/developer/server.ts": 3,
+    "packages/broker/src/developer/canary-session.ts": 1
+  },
+  "reasons": {
+    "packages/broker/src/aws/dispatcher.ts": "dispatch.stale_address: the sessionId is the worker-address key `<workspaceId>#<generation>` built in logStaleAddress, not a sign-in session and not a UUID, so it can never be a cookie",
+    "packages/broker/src/core/notify/attention.ts": "attention.people_failed and attention.queue_failed log change.sessionId from the session change feed: the id is an agent/task session id (`ses_` plus 20 characters, or a chain run `crn_`; contracts SessionIdSchema), never a sign-in session UUID, so the cookie path (developer-routes.ts authenticateDeveloperSessionId, a UUID read) refuses it",
+    "packages/broker/src/core/notify/inbox-rows.ts": "attention.inbox_failed: putInboxRow has one caller (attention.ts) and it passes change.sessionId from the session change feed: the id is an agent/task session id (`ses_` plus 20 characters, or a chain run `crn_`; contracts SessionIdSchema), never a sign-in session UUID, so the cookie path (developer-routes.ts authenticateDeveloperSessionId, a UUID read) refuses it",
+    "packages/broker/src/core/sessions/control.ts": "agent_session.refresh_after_control_failed logs session.sessionId (SessionId): the id is an agent/task session id (`ses_` plus 20 characters, or a chain run `crn_`; contracts SessionIdSchema), never a sign-in session UUID, so the cookie path (developer-routes.ts authenticateDeveloperSessionId, a UUID read) refuses it",
+    "packages/broker/src/core/sessions/projector.ts": "agent_session.projector_refresh_failed logs target.sessionId (SessionId): the id is an agent/task session id (`ses_` plus 20 characters, or a chain run `crn_`; contracts SessionIdSchema), never a sign-in session UUID, so the cookie path (developer-routes.ts authenticateDeveloperSessionId, a UUID read) refuses it",
+    "packages/broker/src/core/sessions/steer.ts": "the three agent_session.steer_* failure lines log a SessionId parameter: the id is an agent/task session id (`ses_` plus 20 characters, or a chain run `crn_`; contracts SessionIdSchema), never a sign-in session UUID, so the cookie path (developer-routes.ts authenticateDeveloperSessionId, a UUID read) refuses it",
+    "packages/broker/src/core/sessions/summary.ts": "the agent_session.* lines (after_refresh_failed, reopen_refused, summary_invalid, notice_record_invalid, notice_hook_failed) log a SessionId parameter: the id is an agent/task session id (`ses_` plus 20 characters, or a chain run `crn_`; contracts SessionIdSchema), never a sign-in session UUID, so the cookie path (developer-routes.ts authenticateDeveloperSessionId, a UUID read) refuses it",
+    "packages/broker/src/core/sessions/sweep.ts": "agent_session.sweep_refresh_failed logs the sessionId of an open-agent-session index row: the id is an agent/task session id (`ses_` plus 20 characters, or a chain run `crn_`; contracts SessionIdSchema), never a sign-in session UUID, so the cookie path (developer-routes.ts authenticateDeveloperSessionId, a UUID read) refuses it",
+    "packages/broker/src/developer/server.ts": "signin.session_started (authorizationCodeGrant, createSession(redeemed)), signin.refresh_grace and signin.session_revoked (revoke) log a sign-in session that a refresh token reaches. Those are code-grant sessions of the CLI or a registered client: CodeGrant has no reviewExpiresAt, so authenticateDeveloperSessionId refuses them as a cookie. A browser review session (createSession with reviewExpiresAt, same file) discards its refresh token, so no presentable token reaches revoke or the refresh grant for it, and its signin.browser_succeeded line carries no id. Fragile by construction: if a browser session ever gains a refresh token this entry is wrong.",
+    "packages/broker/src/developer/canary-session.ts": "signin.canary_session: a canary session mints amr github with no reviewExpiresAt (mintSession in this file), so authenticateDeveloperSessionId refuses the id as a cookie; the signed token is the credential. The file is added by the canary-session lane; an entry for a file that does not exist yet is harmless (the ratchet only refuses a count above the allowance)."
+  },
+  "escapes": {
+    "packages/cli/src/deploy/commands.ts": 1,
+    "packages/cli/src/init/prompts.ts": 1,
+    "packages/cli/src/main.ts": 4,
+    "packages/testing/src/isolation/leaks.ts": 4
+  },
+  "escapeReasons": {
+    "packages/cli/src/deploy/commands.ts": "createInterface({ output: process.stderr }): readline prompt output for a person at a terminal, no log entry; writes through the stream cannot carry a session id (the CLI holds no browser session)",
+    "packages/cli/src/init/prompts.ts": "createInterface({ output: process.stderr }): readline prompt output for a person at a terminal, no log entry",
+    "packages/cli/src/main.ts": "process.stdout and process.stderr handed to the command handlers as `stdout`/`stderr` dependencies (and one `.write` on the dependency); a `.write` on a name `stdout` or `stderr` is still scanned by this test, so a session id written through them is caught",
+    "packages/testing/src/isolation/leaks.ts": "captureLogs swaps console.log/info/warn/error for a collector and restores them (console[method]); it writes no entry of its own"
+  }
+}

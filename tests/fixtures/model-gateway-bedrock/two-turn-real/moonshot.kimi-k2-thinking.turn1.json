@@ -1,0 +1,34 @@
+{
+ "status": 200,
+ "stop": "tool_use",
+ "blocks": [
+  {
+   "type": "text",
+   "text": ""
+  },
+  {
+   "type": "thinking",
+   "thinking": " The user has asked me to ping a tool. What needs to be done is:\n\n1. The user has given a clear requirement: call the ping tool  \n2. This tool does not require any parameters  \n3. I need to make a function call and return the result to the user",
+   "signature": ""
+  },
+  {
+   "type": "text",
+   "text": " I'll help you call the ping tool to test connectivity."
+  },
+  {
+   "type": "tool_use",
+   "id": "functions.ping:0",
+   "name": "ping",
+   "input": {}
+  },
+  {
+   "type": "text",
+   "text": ""
+  }
+ ],
+ "usage": {
+  "input": 70,
+  "output": 82
+ },
+ "complete": true
+}

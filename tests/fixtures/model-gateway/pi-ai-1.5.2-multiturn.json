@@ -1,0 +1,272 @@
+{
+  "toolResult": {
+    "model": "claude-sonnet-4-5",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Read the project README."
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_read_1",
+            "name": "read",
+            "input": {
+              "path": "README.md",
+              "type": "file",
+              "source": "workspace",
+              "fileData": {
+                "type": "local"
+              },
+              "cachedContent": "literal argument",
+              "tools": [
+                {
+                  "type": "web_search"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "toolu_read_1",
+            "content": "{\"type\":\"file\",\"source\":\"workspace\",\"fileData\":{},\"cachedContent\":\"literal result\",\"tools\":[{\"type\":\"web_search\"}]}",
+            "is_error": false,
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      }
+    ],
+    "max_tokens": 64,
+    "stream": true,
+    "system": [
+      {
+        "type": "text",
+        "text": "You are a coding assistant.",
+        "cache_control": {
+          "type": "ephemeral"
+        }
+      }
+    ],
+    "tools": [
+      {
+        "name": "read",
+        "description": "Read a file.",
+        "eager_input_streaming": true,
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "type"
+          ]
+        },
+        "cache_control": {
+          "type": "ephemeral"
+        }
+      }
+    ]
+  },
+  "final": {
+    "model": "claude-sonnet-4-5",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Read the project README."
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_read_1",
+            "name": "read",
+            "input": {
+              "path": "README.md",
+              "type": "file",
+              "source": "workspace",
+              "fileData": {
+                "type": "local"
+              },
+              "cachedContent": "literal argument",
+              "tools": [
+                {
+                  "type": "web_search"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "toolu_read_1",
+            "content": "{\"type\":\"file\",\"source\":\"workspace\",\"fileData\":{},\"cachedContent\":\"literal result\",\"tools\":[{\"type\":\"web_search\"}]}",
+            "is_error": false
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "The README describes the project."
+          }
+        ]
+      }
+    ],
+    "max_tokens": 64,
+    "stream": true,
+    "system": [
+      {
+        "type": "text",
+        "text": "You are a coding assistant.",
+        "cache_control": {
+          "type": "ephemeral"
+        }
+      }
+    ],
+    "tools": [
+      {
+        "name": "read",
+        "description": "Read a file.",
+        "eager_input_streaming": true,
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "type"
+          ]
+        },
+        "cache_control": {
+          "type": "ephemeral"
+        }
+      }
+    ]
+  },
+  "thinking": {
+    "model": "claude-sonnet-4-5",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Read the project README."
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "I should read the README.",
+            "signature": "offline-thinking-signature"
+          },
+          {
+            "type": "redacted_thinking",
+            "data": "b3BhcXVl"
+          },
+          {
+            "type": "tool_use",
+            "id": "toolu_read_1",
+            "name": "read",
+            "input": {
+              "path": "README.md",
+              "type": "file",
+              "source": "workspace",
+              "fileData": {
+                "type": "local"
+              },
+              "cachedContent": "literal argument",
+              "tools": [
+                {
+                  "type": "web_search"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "toolu_read_1",
+            "content": "{\"type\":\"file\",\"source\":\"workspace\",\"fileData\":{},\"cachedContent\":\"literal result\",\"tools\":[{\"type\":\"web_search\"}]}",
+            "is_error": false
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "The README describes the project."
+          }
+        ]
+      }
+    ],
+    "max_tokens": 64,
+    "stream": true,
+    "system": [
+      {
+        "type": "text",
+        "text": "You are a coding assistant.",
+        "cache_control": {
+          "type": "ephemeral"
+        }
+      }
+    ],
+    "tools": [
+      {
+        "name": "read",
+        "description": "Read a file.",
+        "eager_input_streaming": true,
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "type"
+          ]
+        },
+        "cache_control": {
+          "type": "ephemeral"
+        }
+      }
+    ]
+  }
+}
