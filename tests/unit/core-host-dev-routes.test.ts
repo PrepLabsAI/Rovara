@@ -220,12 +220,12 @@ describe("the core's handlers on the deployed API", () => {
     expect((await routes.route(get(`/v1/dev/tasks/${randomUUID()}`), caller))?.statusCode).toBe(404);
   });
 
-  // RD-2.0: the task page's four new reads are mounted once and answer the fixed ROUTE_NOT_SERVED refusal (fail closed) until each lane fills its handler.
+  // RD-2.0: the task page's four new reads are mounted once; the read rule decides who may read, and a person it admits is answered the fixed ROUTE_NOT_SERVED refusal (fail closed) until each lane fills its handler.
   describe("the task page's new reads (RD-2.0)", () => {
     const READS = ["spec", "checks", "changes", "timeline"] as const;
     const notServed = { error: { code: "ROUTE_NOT_SERVED", message: ROUTE_NOT_SERVED_MESSAGE } };
 
-    it("answers ROUTE_NOT_SERVED, the row's own example refusal, the same for a real task, a missing one and another company's, and writes nothing", async () => {
+    it("answers a reader of the task ROUTE_NOT_SERVED, the row's own example refusal; a missing task and another company's are the same missing-task answer; nothing is written", async () => {
       const { world, app, companyOf, remember } = await world2();
       const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
       const own = remember(FAKE_COMPANY);
@@ -239,12 +239,13 @@ describe("the core's handlers on the deployed API", () => {
           await routes.route(get(`/v1/dev/tasks/${randomUUID()}/${read}`), own),
           await routes.route(get(`/v1/dev/tasks/${task.taskId}/${read}`), remember(OTHER)),
         ];
-        for (const answer of answers) {
-          expect(answer?.statusCode, read).toBe(404);
-          expect(JSON.parse(answer!.body), read).toEqual(notServed);
-          expect(JSON.parse(answer!.body), read).toEqual(row.example!.refusal);
-        }
-        expect(answers[0], read).toEqual({ ...answers[1], body: answers[0]!.body });
+        for (const answer of answers) expect(answer?.statusCode, read).toBe(404);
+        expect(JSON.parse(answers[0]!.body), read).toEqual(notServed);
+        expect(JSON.parse(answers[0]!.body), read).toEqual(row.example!.refusal);
+        // A missing task and another company's say the same, whatever the real task says to a reader.
+        const missing = { error: { code: "TASK_NOT_FOUND", message: "no such task" } };
+        expect(JSON.parse(answers[1]!.body), read).toEqual(missing);
+        expect(JSON.parse(answers[2]!.body), read).toEqual(missing);
         expect(answers[0]!.body, read).not.toContain(task.taskId);
         expect(row.errors).toContainEqual({ code: "ROUTE_NOT_SERVED", status: 404 });
       }

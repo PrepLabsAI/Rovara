@@ -129,6 +129,11 @@ export interface TaskAccess {
    * where the owner of the install, or the person the task runs for, acts as the task's owner (`ownerActingOf`).
    */
   ownerActing?(principal: Principal, task: { taskId: string; developerId: string; project: string; ownerKey: string }): Promise<{ actorId: string; authority?: WorkflowOwnerAuthority; items?: readonly TransactItem[] } | undefined>;
+  /**
+   * `canAct` and `canRead` themselves re-read the person's live company membership and a CURRENT project grant for everyone they admit (the hosted rule: a People entry and the task's stored person alike). The read rule
+   * (read-rule.ts) then takes the grant as proved for those two ways in and does not read it a second time. Absent: it is not proved, and the rule asks the host's live-grant seam.
+   */
+  readonly provesProjectGrant?: true;
 }
 
 /**

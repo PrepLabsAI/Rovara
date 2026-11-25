@@ -599,6 +599,8 @@ export function hostedTaskAccess(inputs: {
     return (await inputs.setupRunStanding(task.developerId, inputs.companyId, task.project)).access === "manage" ? { allowed: true } : { allowed: false, message: denied };
   };
   return {
+    // The hotfix's re-check (the stored person holds a task only while the grant is held, as a People entry does) makes `resolve` prove it for every admission: canAct, canRead and ownerActing.
+    provesProjectGrant: true,
     async checkStart(principal, project, purpose, origin) {
       // A system owner (by its id shape or its provider) is decided by the system rule alone: it is never a member and never falls through to the member rules.
       if (isSystemPrincipal(principal)) return systemStartVerdict({ companyId: inputs.companyId, systemRunsOn: await settledOn(inputs.systemRunsOn), upkeepOn: purpose === "setup_agent" ? await settledUpkeep(project) : undefined }, principal, project, purpose, origin).allowed ? { allowed: true } : { allowed: false, code: "FORBIDDEN", message: SYSTEM_OWNER_NOT_ALLOWED };
@@ -1218,7 +1220,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           taskActions: { roundCap: async (task) => hostedRoundCap(registry, runtime.companyId, now, admissionSettings, projectTaskCap, task) },
           // Cloud #188 item 3: a core task's People, readers, events and plan comments, with the old task routes' own rules.
           ...(inputs.taskRules === undefined ? {} : { taskRules: createCoreTaskRuleRoutes(inputs.taskRules, runtime.flow.deps.artifacts) }),
-          canReadProject: (personId, project) => projectGrant(personId, project),
+          canReadProject: (personId, project, companyId) => projectGrant(personId, project, companyId),
           // DEC 254zzz94: the Merge button, over the root's own grant reader, the project's pinned repositories on the registry's code host, and the project's merge method (Code's default: squash).
           merge: {
             projectGrantRole: (personId, project, companyId) => projectGrantRole(personId, project, companyId),

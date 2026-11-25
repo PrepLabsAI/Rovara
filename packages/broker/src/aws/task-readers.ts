@@ -1,6 +1,6 @@
 // Spec 067: task readers. A task's owner shares it read-only with another member of the task's project, by developer
-// ID. A reader reads the task and its events as the owner does (in the task page's viewer view) and nothing else: every
-// other task route keeps its owner-only check. A reader's access holds only while they are still a member of the project,
+// ID. A reader reads the task and its events as the owner does (in the task page's viewer view); what else a share shows is
+// the one read rule's table (core/task-flow/read-rule.ts). A reader's access holds only while they are still a member of the project,
 // checked on every read; for anyone else a shared task reads as not found, exactly as an unshared one.
 //
 // Stored on the task's own partition: `DEVTASK#<taskId>` / `READER#<developerId>`.
@@ -97,18 +97,19 @@ const view = (record: ReaderRecord, now: TaskReaderPerson | undefined): TaskRead
 });
 
 /**
- * Whether `developerId` reads `task` as a reader now: a reader record, and still a registered member of the task's project. The
- * caller has already found they are not its owner.
+ * The stored share of `developerId` on `task`, for the one read rule (core/task-flow/read-rule.ts, which decides what the share's role may see): the row's role AS STORED (any text; the rule treats a role
+ * it does not know as no share), and only while they are still a registered member of the task's project. Undefined for anyone else. The caller has already found they are not the task's own person.
  */
-export async function readsAsReader(deps: TaskReaderDependencies, task: DeveloperTaskRecord, developerId: string): Promise<boolean> {
-  if (deps.taskReaderPerson === undefined) return false;
-  if (await readerRecord(deps, task.taskId, developerId) === undefined) return false;
+export async function readerShare(deps: TaskReaderDependencies, task: DeveloperTaskRecord, developerId: string): Promise<{ role: string } | undefined> {
+  if (deps.taskReaderPerson === undefined) return undefined;
+  const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: readerKey(task.taskId, developerId), ConsistentRead: true })) as { Item?: { role?: unknown } };
+  if (typeof response.Item?.role !== "string") return undefined;
   const now = await deps.taskReaderPerson(developerId, task.project, taskCompanyId(task));
   if (now?.projectMember !== true) {
     log(deps, { event: "developer.task_reader_refused", taskId: task.taskId, reason: now === undefined ? "not_registered" : "not_project_member" });
-    return false;
+    return undefined;
   }
-  return true;
+  return { role: response.Item.role };
 }
 
 /**

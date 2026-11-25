@@ -61,6 +61,8 @@ const NOTE_MAX_CHARS = 1_000;
 const OUTSIDER_MAX = 20;
 const OUTSIDER_ITEM_MAX_CHARS = 600;
 const PATCHES_MAX_BYTES = 32_768;
+/** What the context says of a document it does not carry. */
+const DOCUMENT_NOTES = { unreadable: "The latest document could not be read.", withheld: "The person asking was shown this task's summary only: its plan is not shown to them, so do not describe it." } as const;
 const SHORTENED_NOTE = "… (shortened; the full document is on the task page)";
 const FORMER_MEMBER = "former member";
 const PERSON_LABEL = /^person p_[0-9a-f]{6}$/u;
@@ -79,8 +81,8 @@ export interface AskContextData {
   nextStep: string;
   step?: string | undefined;
   blockReason?: string | undefined;
-  /** Absent: no document yet. `unreadable`: it exists but could not be read. */
-  document?: { label: string; version: number; markdown: string } | "unreadable" | undefined;
+  /** Absent: no document yet. `unreadable`: it exists but could not be read. `withheld`: the reader was shown the task's summary only (a share): its plan, design and requirements are not given. */
+  document?: { label: string; version: number; markdown: string } | "unreadable" | "withheld" | undefined;
   pullRequests?: ReadonlyArray<{ url: string; state: string }> | undefined;
   timeline?: { statusLines?: readonly string[]; decisions?: readonly string[]; milestones?: readonly string[]; agentEvents?: readonly string[]; postedToLinear?: readonly string[] } | undefined;
   diff?: { source: "pull_request" | "working_tree"; files: ReadonlyArray<{ path: string; additions: number; deletions: number }>; patches?: ReadonlyArray<{ path: string; patch: string }> | undefined } | undefined;
@@ -154,7 +156,7 @@ function render(audience: AskAudience, data: AskContextData, nonce: string, caps
   // Document ------------------------------------------------------------------------------------------------------------------------------
   if (policy.documentBytes > 0) {
     if (data.document === undefined) lines.push("No document has been written yet.");
-    else if (data.document === "unreadable") lines.push("The latest document could not be read.");
+    else if (typeof data.document === "string") lines.push(DOCUMENT_NOTES[data.document]);
     else {
       const text = shortenMarkdown(safe(data.document.markdown).trimEnd(), Math.min(policy.documentBytes, caps.document), SHORTENED_NOTE).trimEnd();
       lines.push(`Latest document: ${oneLine(data.document.label, 60)}, version ${String(data.document.version)} (Markdown copy):`, `<task_document id="${nonce}">`, text, "</task_document>");
