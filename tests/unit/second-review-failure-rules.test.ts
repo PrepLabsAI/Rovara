@@ -4,9 +4,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { createPullRequestVerdictSource } from "../../packages/broker/src/core/build-step/pull-request-verdict.js";
 import { VERIFIED_FILES_KEPT_MAX, descriptionInputsOf, verifiedFilesKey } from "../../packages/broker/src/core/build-step/changed-files.js";
-import { prepareMerge, pressMerge, mergeViewOf, readMergeTracking } from "../../packages/broker/src/core/merge/index.js";
+import { prepareMerge, pressMergeAsPerson, mergeViewOf, readMergeTracking } from "../../packages/broker/src/core/merge/index.js";
+import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { workspaceKeys } from "../../packages/broker/src/core/task-flow/workspace-location.js";
-import type { MergeTask } from "../../packages/broker/src/core/merge/index.js";
+import type { MergeDependencies, MergeTask, PreparedMerge } from "../../packages/broker/src/core/merge/index.js";
 import { startReview } from "../../packages/broker/src/core/build-step/start.js";
 import { closeTask } from "../../packages/broker/src/core/task-flow/close.js";
 import { readTask, workspaceOperations } from "../../packages/broker/src/core/task-flow/reads.js";
@@ -15,6 +16,10 @@ import { mergeWorld, ORG as MERGE_ORG, TASK_ID as MERGE_TASK } from "../support/
 import { publicationWorld } from "../support/f4-pins-publication.js";
 import { host, ORG } from "../support/service-host.js";
 import { COMPANY, TASK_ID, WORKSPACE_ID, closeWithRunHold, endReview, failAcceptingTheStep, reviewWorld, startReviewStep } from "../support/f4-pins-world.js";
+
+/** The owner presses Merge on a prepared request: `pressMergeAsPerson`, every gate of the merge and no approver proof (the same helper shape as `pressAsOwner` in merge-world). */
+const pressAsOwner = (deps: MergeDependencies, prepared: PreparedMerge) =>
+  pressMergeAsPerson(deps, { taskId: MERGE_TASK, requestId: prepared.request.requestId, presserPersonId: localOwnerPrincipal().personId });
 
 const boom = (name: string) => Object.assign(new Error(`${name} detail that must stay out of logs`), { name });
 
@@ -177,20 +182,18 @@ describe("mergeWait: a throw propagates, so the merge is refused", () => {
     // The confirm step (merge.ts:343 readinessFromItems is the view; the press reads merge.ts:689).
     await expect(prepareMerge({ ...world.deps, mergeWait: down }, { taskId: MERGE_TASK, requestId: world.requestId() })).rejects.toThrow("MergeWaitDown");
     const prepared = await world.prepare();
-    await expect(pressMerge({ ...world.deps, mergeWait: down }, { taskId: MERGE_TASK, requestId: prepared.request.requestId, proof: world.proofFor(prepared) })).rejects.toThrow("MergeWaitDown");
+    await expect(pressAsOwner({ ...world.deps, mergeWait: down }, prepared)).rejects.toThrow("MergeWaitDown");
     // The press asks twice (the confirm step's own read, then merge.ts:689 right before the merge): a member that fails only the second time refuses at the second.
     let asked = 0;
     const second = () => { asked += 1; if (asked >= 2) throw boom("MergeWaitDown"); return undefined; };
-    await expect(pressMerge({ ...world.deps, mergeWait: second }, { taskId: MERGE_TASK, requestId: prepared.request.requestId, proof: world.proofFor(prepared) })).rejects.toThrow("MergeWaitDown");
+    await expect(pressAsOwner({ ...world.deps, mergeWait: second }, prepared)).rejects.toThrow("MergeWaitDown");
     expect(asked).toBe(2);
     expect(pr.model.getChangeRequest(String(pr.number)).state).toBe("open");
     expect((await world.trackingOf(pr))!["mergeClaim"]).toBeUndefined();
     await expect(mergeViewOf({ ...world.deps, mergeWait: down }, await world.task(), await readMergeTracking(world.store, MERGE_TASK, MERGE_ORG), undefined)).rejects.toThrow("MergeWaitDown");
-    // A refusal at the second ask comes AFTER the approval's proof was checked: that proof is spent (today), and the person approves again.
-    await expect(pressMerge({ ...world.deps, mergeWait: () => undefined }, { taskId: MERGE_TASK, requestId: prepared.request.requestId, proof: world.proofFor(prepared) })).rejects.toThrow("already used");
-    // Control: a new approval with a member that says nothing merges.
+    // Control: a new request with a member that says nothing merges.
     const again = await world.prepare();
-    const pressed = await pressMerge({ ...world.deps, mergeWait: () => undefined }, { taskId: MERGE_TASK, requestId: again.request.requestId, proof: world.proofFor(again) });
+    const pressed = await pressAsOwner({ ...world.deps, mergeWait: () => undefined }, again);
     expect(pressed.status).toBe("MERGED");
   });
 });
