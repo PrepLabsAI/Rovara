@@ -400,7 +400,10 @@ const PROJECT: ProjectDefinition = {
   repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "host-app" }],
 };
 const SERVICES = () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } });
-const WIRED: CoreDevWiring = { origin: () => "https://api.example" };
+/** The deployment's wiring: the live project grant is re-read on every read (the hosted `canReadProject`), so the read rule proves it and `decision.codeDetails` is true. */
+const WIRED: CoreDevWiring = { origin: () => "https://api.example", canReadProject: async () => true };
+/** A laptop: no live-grant seam, nothing is proved, so the read rule gives no code details (`decision.codeDetails` false). */
+const WIRED_LAPTOP: CoreDevWiring = { origin: () => "https://api.example" };
 const get = (path: string) => ({ method: "GET", path, headers: {} });
 
 /** The company's rule as a deployment wires it: the task's own person, and the named readers, may read it. */
@@ -433,6 +436,7 @@ async function world() {
     return { principal: localOwnerPrincipal({ companyId, personId }), client: "cli" };
   };
   const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
+  const laptop = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED_LAPTOP });
   const blobs = (await app.registry()).require("object-storage");
   const planWith = (proves: Record<string, string[]>) => ({ claims: [{ id: "1", text: "Health answers 200" }, { id: "2", text: "Nothing else changes" }], checks: { proposed: [chk("unit", "pytest -q", "test"), chk("build", "npm run build", "build")], proves } });
   /** A task of `companyId` started by `owner`, with a checked candidate (the fixture's digest), results (unit passes, build fails), reviews, a stored plan (one version, or `versions`: each stored in order, `approved` named by the owner), and (optionally) a kept pack and the artifacts it names. */
@@ -465,7 +469,8 @@ async function world() {
     return { taskId: task.taskId, ownerKey: record.ownerKey, workspaceId: record.workspaceId };
   };
   const read = (caller: DeployedCaller, taskId: string) => routes.route(get(`/v1/dev/tasks/${taskId}/checks`), caller);
-  return { fake, routes, readers, person, taskOf, read, blobs };
+  const readOnLaptop = (caller: DeployedCaller, taskId: string) => laptop.route(get(`/v1/dev/tasks/${taskId}/checks`), caller);
+  return { fake, routes, readers, person, taskOf, read, readOnLaptop, blobs };
 }
 
 const TAIL = Buffer.from("npm run build\nerror TS2304\n");
@@ -528,6 +533,18 @@ describe("GET /v1/dev/tasks/{id}/checks on a core task", () => {
     const answer = await w.read(owner, broken.taskId);
     expect(answer?.statusCode).toBe(200);
     expect((JSON.parse(answer!.body) as { checks: ChecksView }).checks.notTested).toEqual([PLAN_UNREADABLE_WORDS]);
+  });
+
+  it("code details follow the read rule's decision: with no live grant proved (a laptop) the states and counts are served and the links are withheld; with it proved the link is there", async () => {
+    const w = await world();
+    const owner = w.person(OWNER_ID, FAKE_COMPANY);
+    const held = await w.taskOf(owner, FAKE_COMPANY, { pack: keptPack(), stored: [{ sha256: TAIL_REF.sha256, bytes: TAIL }] });
+    const proved = (JSON.parse((await w.read(owner, held.taskId))!.body) as { checks: ChecksView }).checks;
+    expect(proved.rows[1]).toMatchObject({ id: "build", state: "failed", retention: "kept", output: { kind: "output" } });
+    const laptop = (JSON.parse((await w.readOnLaptop(owner, held.taskId))!.body) as { checks: ChecksView }).checks;
+    expect(laptop.rows[1]).toMatchObject({ id: "build", state: "failed", before: "passed", after: "failed", retention: "withheld" });
+    expect(laptop.rows[1]!.output).toBeUndefined();
+    expect(laptop.rows[0]).toMatchObject({ id: "unit", state: "passed" });
   });
 
   it("the kept pack: before and after, and the output tail is a link while the store holds it and 'expired' (no link) once it is gone", async () => {

@@ -2,10 +2,10 @@
 // stores: the workflow snapshot, the plan the owner approved, and the evidence pack kept for the current code (its output tails and screenshots as links, each one checked against the store: a file that is gone reads "expired", never a
 // dead link; and while Code does not serve the files, `EVIDENCE_FILES_SERVED`, a link carries no address and says so).
 //
-// ACCESS: the task read's own rule first (`loadReadableTask`: the member company, then the company's access rule), before anything else is read. Another company's task, a colleague who may not read the task and a missing task all answer
-// the same `TASK_NOT_FOUND`. A script token never gets here (dev-routes answers it before the mount). The reader a task's owner shared it with under the OLD rule (`sharedReaderTask`, private to dev-routes.ts) is NOT admitted here: such a
-// reader reads a missing task until the one "may read this task" function (lane RD-2.0-READ-RULE) replaces that one call; the reads stay out of F2-E's reduced admin view because this goes through the person's own read rule only.
-// Whether the reader may also see code and facts about code (test names, findings, scan items, file links) is ONE question, `mayReadCodeDetails`, asked once.
+// ACCESS is decided by the mount, once per request, by the one read rule (core/task-flow/read-rule.ts `decideTaskRead`, see task-screen-routes.ts): this handler is given `context.decision` and does no access work. Another company's task,
+// a colleague who may not read the task and a missing task all answer the same `TASK_NOT_FOUND`; a share (the reader the owner shared the task with) is told TASK_PART_NOT_SHOWN (the checks are not shown): both before this handler runs.
+// A script token never gets here (dev-routes answers it before the mount). The reads stay out of F2-E's reduced admin view because the rule is the only gate.
+// Whether the reader may also see code and facts about code (test names, findings, scan items, file links) is ONE decision, `decision.codeDetails` (read-rule.ts `mayReadCodeDetails`, a live project grant proved on this request), asked once here.
 import { type ArtifactRef, type ObjectStorage, type PlanDocument } from "@agentx/contracts";
 import { loadWorkflowDocument } from "../developer/plan-document-reader.js";
 import { textReaderOf } from "../core/build-step/plan-input.js";
@@ -13,8 +13,6 @@ import { evidenceArtifactKey } from "../core/proof/evidence-artifacts.js";
 import { evidenceViewOf, type EvidenceArtifactState } from "../core/proof/evidence-pack.js";
 import { evidencePackKey, loadEvidencePack } from "../core/proof/evidence-keep.js";
 import { EVIDENCE_FILES_SERVED, checksViewOf, unavailableChecksView, type PlanNote } from "../core/task-view/checks.js";
-import type { TaskCaller } from "../core/task-flow/deps.js";
-import { loadReadableTask } from "../core/task-flow/reads.js";
 import type { TaskRecord } from "../core/task-flow/records.js";
 import type { BrokerResponse } from "../handler.js";
 import { hostedEvidenceBlobs } from "./hosted-evidence.js";
@@ -23,15 +21,6 @@ import type { TaskScreenContext } from "./task-screen-routes.js";
 /** The most files one read checks against the store, and how many at a time (a pack may name hundreds; the page shows a few per row). A file beyond the most is "withheld", not checked. */
 const STAT_MAX = 200;
 const STAT_AT_ONCE = 8;
-
-/**
- * Whether this reader may see code and facts about code in the answer: failing test names and the files a failure points at, review findings' files and text, the security scan's items, and the links to output and screenshots.
- * ONE place. Today every reader that passed the task read rule may (it is the same company's task; the checks are what the task page of that reader already shows in the task view). The read rule that admits readers with limits
- * (RD-2.0-READ-RULE) decides here; a reader who may not still gets every state, count and id.
- */
-export function mayReadCodeDetails(reader: TaskCaller, task: Pick<TaskRecord, "companyId">): boolean {
-  return reader.principal.companyId === task.companyId;
-}
 
 /**
  * The plan to read the claims from: the newest version the owner APPROVED. No approved version is no plan (a draft is not what the owner accepted, so no claim, mapping or scenario is read from it) and says so; an approved version with
@@ -92,14 +81,14 @@ async function packIsUnreadable(evidence: ObjectStorage, record: TaskRecord, dig
 const answer = (view: unknown): BrokerResponse => ({ statusCode: 200, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify({ checks: view }) });
 
 export async function readTaskChecks(context: TaskScreenContext): Promise<BrokerResponse> {
-  const { flow, blobs, caller, taskId } = context;
-  // First, and before anything is built: the task read's own rule (throws the missing task's answer for anyone who may not read it).
-  const record = await loadReadableTask(flow.deps, caller, taskId);
+  const { flow, blobs, decision } = context;
+  // The mount asked the one read rule before this handler ran: the task is the decision's.
+  const record = decision.task;
   try {
     const evidence = hostedEvidenceBlobs({ blobs, store: flow.deps.store, companyId: flow.deps.companyId });
     const digest = record.workflow?.candidate?.digest;
     const [planned, pack] = await Promise.all([planOf(record, blobs), loadEvidencePack(evidence, { ownerKey: record.ownerKey, workspaceId: record.workspaceId, taskId: record.taskId }, digest)]);
-    const codeDetails = mayReadCodeDetails(caller, record);
+    const codeDetails = decision.codeDetails;
     // Retention is asked only of a reader who may see the links; each file is a link only while the store holds it.
     const states = pack === undefined || !codeDetails ? new Map<string, EvidenceArtifactState>() : await statesOf(evidence, record, linkedRefs(pack));
     const links = pack === undefined || !codeDetails ? undefined : evidenceViewOf(pack, record.taskId, (ref) => states.get(ref.sha256) ?? "withheld");

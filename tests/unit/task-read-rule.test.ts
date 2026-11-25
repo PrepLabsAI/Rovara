@@ -125,6 +125,7 @@ const NEW_READ_NAMES = ["spec", "checks", "changes", "timeline"] as const;
 const FILLED_READS: readonly string[] = [
   "spec", // RD-2a
   "changes", // RD-2b2
+  "checks", // RD-2b1
 ];
 
 describe("the one read rule: what the decision carries", () => {
