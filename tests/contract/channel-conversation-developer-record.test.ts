@@ -17,7 +17,7 @@ beforeAll(async () => { await loadSlackBroker(); });
 
 type Shape = "key" | "attribute" | "mismatch" | "foreign-pk";
 
-async function setup(shape: Shape) {
+async function setup(shape: Shape, record: { provider?: string; revoked?: boolean; mergedSlackId?: string } = {}) {
   const harness = createBroker({
     extra: {
       channelAdapters: { secretPrefix: "agentx/test/", secrets: { put: async () => undefined } },
@@ -38,9 +38,16 @@ async function setup(shape: Shape) {
   harness.db.set({ ...channelLinkKey(actor), entityType: "CHANNEL_LINK", actor, developerId, linkedAt: "2026-11-08T10:00:00.000Z" });
   const attribute = shape === "attribute" ? { developerId } : shape === "mismatch" ? { developerId: otherId } : {};
   harness.db.set({
-    pk: `DEVELOPER#${developerId}`, sk: "META", entityType: "DEVELOPER", ...attribute, provider: "oidc", issuer: "https://login.example.com", subject: "ada", displayName: "Ada Lovelace",
-    firstSignInAt: "2026-11-01T00:00:00.000Z", lastSignInAt: "2026-11-01T00:00:00.000Z", revoked: false,
+    pk: `DEVELOPER#${developerId}`, sk: "META", entityType: "DEVELOPER", ...attribute, provider: record.provider ?? "oidc", issuer: "https://login.example.com", subject: "ada", displayName: "Ada Lovelace",
+    firstSignInAt: "2026-11-01T00:00:00.000Z", lastSignInAt: "2026-11-01T00:00:00.000Z", revoked: record.revoked ?? false,
   });
+  if (record.mergedSlackId !== undefined) {
+    // DEC 254w: the person's Slack sign-in was merged into the surviving (GitHub) record; the link was made from a Slack or OIDC session, so it names the survivor.
+    harness.db.set({
+      pk: `DEVELOPER#${record.mergedSlackId}`, sk: "META", entityType: "DEVELOPER", provider: "slack", issuer: "https://slack.com", subject: "U0ADA0001", displayName: "Ada Lovelace",
+      firstSignInAt: "2026-11-01T00:00:00.000Z", lastSignInAt: "2026-11-01T00:00:00.000Z", revoked: false, mergedInto: developerId,
+    });
+  }
   if (shape === "foreign-pk") {
     // A store that answers a row for the asked key whose own `pk` names someone else (never a real DynamoDB answer): must refuse.
     const db = harness.db as unknown as { send: (command: unknown) => Promise<unknown> };
@@ -74,5 +81,31 @@ describe("an adapter conversation's linked developer, on the stored sign-in row 
     const { handler } = await setup(shape);
     const answer = await ensure(handler);
     expect(answer.status).toBe(403);
+  });
+});
+
+describe("an adapter conversation's linked developer whose surviving record signs in with GitHub", () => {
+  it("is accepted: GitHub is a sign-in method the broker already serves, so the linked person is active", async () => {
+    const { handler } = await setup("key", { provider: "github" });
+    const answer = await ensure(handler);
+    expect(answer.status).toBe(200);
+    expect(answer.body).toMatchObject({ outcome: "WORKSPACE", created: true });
+  });
+
+  it("is accepted for a merged person: the Slack record was merged into the GitHub survivor the link names", async () => {
+    const { handler } = await setup("key", { provider: "github", mergedSlackId: "c".repeat(64) });
+    expect((await ensure(handler)).status).toBe(200);
+  });
+
+  it("is still refused when the GitHub record is revoked (the other checks are unchanged)", async () => {
+    const { handler } = await setup("key", { provider: "github", revoked: true });
+    const answer = await ensure(handler);
+    expect(answer.status).toBe(403);
+    expect(JSON.stringify(answer.body)).toContain("no longer active");
+  });
+
+  it("is still refused when the GitHub row names another person", async () => {
+    const { handler } = await setup("mismatch", { provider: "github" });
+    expect((await ensure(handler)).status).toBe(403);
   });
 });
