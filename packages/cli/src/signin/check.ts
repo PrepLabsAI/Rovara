@@ -7,7 +7,7 @@ import type { InitSecrets } from "../init/context.js";
 import { SIGN_IN_BOT_SCOPES, missingScopes, readSlackTeamIdFromSecret, slackSecretName, slackSignInCallbackUrl, type SlackApi } from "../init/slack-app.js";
 import { plainMessage } from "../output.js";
 import { checkOidcDiscovery } from "./collect.js";
-import { oidcSecretName, readSignInSettings, readSlackTeamId } from "./settings.js";
+import { githubEverOn, oidcSecretName, readSignInSettings, readSlackTeamId } from "./settings.js";
 
 /** `warn`: ok, but not verified; shown as a warning, and it fails neither signin check nor doctor. */
 export interface SignInCheck { name: string; ok: boolean; warn?: boolean; detail: string }
@@ -72,7 +72,12 @@ function redirectCheck(answer: RedirectAnswer, callback: string, base: string): 
     : { name, ok: true, warn: true, detail: `Couldn't confirm the Slack redirect URL: ${answer.why}. If signing in on the task page works, you can ignore this warning. Otherwise run agentx login ${base} to check sign-in.` };
 }
 
-async function controlPlaneCheck(input: { settings: EnvironmentSettings; fetch: typeof fetch }, stored: { slack: boolean; oidcOn: boolean }): Promise<SignInCheck> {
+/** One method's line when the control plane and the settings disagree about it; none when they agree. */
+function methodProblem(label: string, command: string, live: boolean, stored: boolean): string[] {
+  return live === stored ? [] : [`the control plane ${live ? "offers" : "does not offer"} ${label} sign-in, but the settings say it is ${stored ? "on" : "off"}; run agentx signin ${stored ? "enable" : "disable"} ${command} again`];
+}
+
+async function controlPlaneCheck(input: { settings: EnvironmentSettings; fetch: typeof fetch }, stored: { slack: boolean; oidcOn: boolean; githubOn: boolean }): Promise<SignInCheck> {
   const url = agentXConfigurationUrl(input.settings);
   let live;
   try {
@@ -83,11 +88,11 @@ async function controlPlaneCheck(input: { settings: EnvironmentSettings; fetch: 
   }
   // F22: the issuer is the control plane's DeveloperSignInIssuer output, <ApiEndpoint>/v1/auth.
   const issuer = `${apiBase(input.settings)}/v1/auth`;
-  const liveOidc = live.methods.oidc !== null;
   const problems = [
     ...(live.issuer === issuer ? [] : [`the control plane names issuer ${live.issuer}, not ${issuer}; check that this environment's settings name its own control plane (agentx env adopt or agentx init)`]),
-    ...(live.methods.slack === stored.slack ? [] : [`the control plane ${live.methods.slack ? "offers" : "does not offer"} Slack sign-in, but the settings say it is ${stored.slack ? "on" : "off"}; run agentx signin ${stored.slack ? "enable" : "disable"} slack again`]),
-    ...(liveOidc === stored.oidcOn ? [] : [`the control plane ${liveOidc ? "offers" : "does not offer"} company sign-in, but the settings say it is ${stored.oidcOn ? "on" : "off"}; run agentx signin ${stored.oidcOn ? "enable" : "disable"} oidc again`]),
+    ...methodProblem("Slack", "slack", live.methods.slack, stored.slack),
+    ...methodProblem("company", "oidc", live.methods.oidc !== null, stored.oidcOn),
+    ...methodProblem("GitHub", "github", (live.methods.github ?? null) !== null, stored.githubOn),
   ];
   return problems.length === 0 ? { name: "control plane", ok: true, detail: "offers exactly the enabled methods" } : { name: "control plane", ok: false, detail: problems.join("; ") };
 }
@@ -128,12 +133,18 @@ async function slackChecks(input: { env: string; store: ParameterStore; secrets:
   return checks;
 }
 
+/** The settings check's line: each method's state, with GitHub only once it has ever been on (older settings never name it). */
+function settingsLine(stored: NonNullable<Awaited<ReturnType<typeof readSignInSettings>>>): string {
+  const github = githubEverOn(stored) ? `, GitHub sign-in ${stored.github === undefined ? "off" : "on"}` : "";
+  return `Slack sign-in ${stored.slack ? "on" : "off"}, company sign-in ${stored.oidc === undefined ? "off" : "on"}${github}`;
+}
+
 export async function checkDeveloperSignIn(input: { env: string; store: ParameterStore; secrets: Pick<InitSecrets, "get">; settings: EnvironmentSettings; fetch: typeof fetch; slackApi: SlackApi }): Promise<SignInCheck[]> {
   const stored = await readSignInSettings(input.store, input.env);
   if (stored === undefined) return [{ name: "settings", ok: false, detail: "developer sign-in is not set up; run agentx signin enable slack (or oidc)" }];
   const checks: SignInCheck[] = [
-    { name: "settings", ok: true, detail: `Slack sign-in ${stored.slack ? "on" : "off"}, company sign-in ${stored.oidc === undefined ? "off" : "on"}` },
-    await controlPlaneCheck(input, { slack: stored.slack, oidcOn: stored.oidc !== undefined }),
+    { name: "settings", ok: true, detail: settingsLine(stored) },
+    await controlPlaneCheck(input, { slack: stored.slack, oidcOn: stored.oidc !== undefined, githubOn: stored.github !== undefined }),
   ];
   if (stored.slack) checks.push(...await slackChecks(input));
   if (stored.oidc !== undefined) {

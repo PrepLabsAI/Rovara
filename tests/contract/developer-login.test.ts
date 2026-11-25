@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { developerTokenKey, readDeveloperConfig } from "../../packages/cli/src/developer/config.js";
 import { createCallbackListener } from "../../packages/cli/src/auth.js";
+import { whoamiText } from "../../packages/cli/src/developer/commands.js";
 import { developerLogin } from "../../packages/cli/src/developer/login.js";
 import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
 
@@ -110,11 +111,55 @@ describe("agentx login <url> (FR-011)", () => {
   it.each([
     ["an endpoint on another origin", configuration({ tokenEndpoint: "https://evil.example.test/token" }), /must be on https:\/\/abc123/],
     ["a newer major API version", configuration({ apiVersion: "2.0" }), /upgrade: npx @preplabsai\/rovara-code@latest login/],
-    ["no enabled method", configuration({ methods: { slack: false, oidc: null } }), /no developer sign-in method is enabled.*agentx signin enable/],
+    ["no enabled method", configuration({ methods: { slack: false, oidc: null } }), /^CONFIG_INVALID: no developer sign-in method is on in this AgentX: Slack, GitHub and your company sign-in are all off; ask your Rovara admin to turn one on$/],
+    ["every method listed but off, GitHub included", configuration({ methods: { slack: false, oidc: null, github: null } }), /no developer sign-in method is on in this AgentX/],
   ])("refuses %s before opening a browser (R20)", async (_name, config, message) => {
     const openBrowser = vi.fn<(url: string) => Promise<void>>();
     await expect(developerLogin({ url: URL_, allowLoopback: false, browser: true, home: await home(), tokenStore: new InMemoryTokenStore(), fetch: server({ configuration: config }), write: () => undefined, openBrowser })).rejects.toThrow(message);
     expect(openBrowser).not.toHaveBeenCalled();
+  });
+
+  // CLI-LOGIN-GITHUB: the CLI proceeds to the browser step when ANY usable method is on; the sign-in page (or the server, with one method) picks which.
+  it.each([
+    ["GitHub only (a GitHub-only install)", { slack: false, oidc: null, github: { displayName: "GitHub" } }],
+    ["Slack only", { slack: true, oidc: null }],
+    ["company sign-in (OIDC) only", { slack: false, oidc: { displayName: "Acme SSO" } }],
+    ["Slack, company sign-in and GitHub all on", { slack: true, oidc: { displayName: "Acme SSO" }, github: { displayName: "GitHub" } }],
+  ])("proceeds to the browser step and signs in when %s is on", async (_name, methods) => {
+    const dir = await home();
+    const links: string[] = [];
+    const result = await developerLogin({
+      url: URL_, allowLoopback: false, browser: true, home: dir, tokenStore: new InMemoryTokenStore(), fetch: server({ configuration: configuration({ methods }) }), write: () => undefined, timeoutMs: 60_000,
+      openBrowser: async (link) => { links.push(link); await browser({ code: "agxc_code" })(link); },
+    });
+    expect(result.env).toBe("staging");
+    expect(links).toHaveLength(1);
+    const authorize = new URL(links[0] ?? "");
+    expect(`${authorize.origin}${authorize.pathname}`).toBe(`${ISSUER}/authorize`);
+    // The flow is unchanged and names no method: the server's method page (or its only method) decides.
+    expect(authorize.searchParams.get("method")).toBeNull();
+    expect(authorize.searchParams.get("code_challenge_method")).toBe("S256");
+    expect(Object.keys((await readDeveloperConfig(dir)).environments)).toEqual(["staging"]);
+  });
+
+  it.each([["github", "GitHub"], ["slack", "Slack"], ["oidc", "your company sign-in"]])("whoami after a %s sign-in names the method as %s", (provider, words) => {
+    const text = whoamiText({ env: "staging", url: URL_, projects: { developer: { id: "a".repeat(64), name: "Maya Chen", provider }, projects: [], notices: [] } });
+    expect(text).toContain(`as Maya Chen, with ${words}.`);
+  });
+
+  it("keeps the 300 second wait for the browser sign-in", async () => {
+    const spy = vi.spyOn(globalThis, "setTimeout");
+    try {
+      const lines: string[] = [];
+      const login = developerLogin({ url: URL_, allowLoopback: false, browser: false, home: await home(), tokenStore: new InMemoryTokenStore(), fetch: server({ configuration: configuration({ methods: { slack: false, oidc: null, github: { displayName: "GitHub" } } }) }), write: (line) => lines.push(line) });
+      await vi.waitFor(() => { expect(lines.some((line) => line.includes("/authorize?"))).toBe(true); });
+      expect(spy.mock.calls.some(([, ms]) => ms === 300_000)).toBe(true);
+      const link = /https:\/\/\S+/.exec(lines.find((line) => line.includes("/authorize?")) ?? "")?.[0] ?? "";
+      await browser({ code: "agxc_code" })(link);
+      await login;
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("refuses a plain http URL outside --allow-loopback", async () => {

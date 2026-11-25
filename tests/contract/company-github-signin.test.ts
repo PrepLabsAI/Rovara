@@ -287,6 +287,20 @@ describe("GitHub sign-in (DEC 254h)", () => {
     expect(w.db.get(`DEVELOPER#${gid(1001)}`, "META")).not.toHaveProperty("slackUserId");
   });
 
+  it("a hand-built authorize link naming GitHub for a review-link sign-in is refused before any provider redirect", async () => {
+    const w = world();
+    const start = await w.http(httpEvent("GET", "/v1/auth/browser/authorize?return_to=/review/11111111-1111-4111-8111-111111111111"));
+    const offered = /href="([^"]*request=[^"]*method=(?:slack|oidc))"/.exec(start.body)?.[1];
+    expect(offered).toBeDefined();
+    const crafted = offered!.replaceAll("&amp;", "&").replace(/method=(slack|oidc)/, "method=github");
+    const refused = await w.http(httpEvent("GET", crafted));
+    expect(refused.statusCode).toBe(400);
+    expect(refused.body).toContain("Sign-in method not available");
+    expect(refused.headers.location).toBeUndefined();
+    // The request is still unspent: the offered method works from the same page.
+    expect((await w.http(httpEvent("GET", offered!.replaceAll("&amp;", "&")))).statusCode).toBe(302);
+  });
+
   it("a GitHub session outside the built-in company without the shared-method mark is refused at refresh", async () => {
     const w = world();
     await w.setup();

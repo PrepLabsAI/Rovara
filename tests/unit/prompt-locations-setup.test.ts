@@ -64,7 +64,7 @@ describe("the setup agent proposes prompt locations", () => {
   it("the agent is told about it, and told to cite the same file", () => {
     const words = setupProposalFormatLines(undefined).join("\n");
     expect(words).toContain("promptLocations");
-    expect(words).toContain("cite a line in that same file");
+    expect(words).toContain("cite that same file");
   });
 });
 

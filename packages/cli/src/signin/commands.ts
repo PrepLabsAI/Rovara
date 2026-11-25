@@ -34,9 +34,10 @@ const applyOptions = (services: SigninServices, yes: boolean): Pick<ApplySignInI
 
 /** The methods the control plane's discovery document offers, read leniently: `show` reports, it does not judge (that is `check`). */
 function offeredMethods(body: unknown): string {
-  const methods = typeof body === "object" && body !== null ? (body as { methods?: { slack?: unknown; oidc?: { displayName?: unknown } | null } }).methods : undefined;
+  const methods = typeof body === "object" && body !== null ? (body as { methods?: { slack?: unknown; github?: unknown; oidc?: { displayName?: unknown } | null } }).methods : undefined;
   const names = [
     methods?.slack === true ? "Slack" : undefined,
+    typeof methods?.github === "object" && methods.github !== null ? "GitHub" : undefined,
     typeof methods?.oidc?.displayName === "string" ? methods.oidc.displayName : undefined,
   ].filter((name): name is string => name !== undefined);
   return names.length === 0 ? "nothing" : names.join(" and ");

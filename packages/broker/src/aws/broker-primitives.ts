@@ -271,7 +271,7 @@ export function channelConversationDependencies(dependencies: AwsBrokerDependenc
       if (signInTableName === undefined) return undefined;
       const response = await dependencies.documentClient.send(new GetCommand({ TableName: signInTableName, Key: { pk: `DEVELOPER#${developerId}`, sk: "META" }, ConsistentRead: true }));
       const item = developerRecordKeyedBy(response.Item as Partial<DeveloperRecord> | undefined, developerId);
-      if (item === undefined || typeof item.developerId !== "string" || (item.provider !== "slack" && item.provider !== "oidc") || typeof item.displayName !== "string") return undefined;
+      if (item === undefined || typeof item.developerId !== "string" || (item.provider !== "slack" && item.provider !== "oidc" && item.provider !== "github") || typeof item.displayName !== "string") return undefined;
       return {
         developerId: item.developerId, provider: item.provider, displayName: item.displayName, revoked: item.revoked === true,
         ...(typeof item.slackUserId === "string" ? { slackUserId: item.slackUserId } : {}),

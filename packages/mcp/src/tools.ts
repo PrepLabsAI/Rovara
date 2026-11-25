@@ -673,7 +673,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     async handler(context) {
       const [compatibility, projects, admin, notice] = await Promise.all([context.compatibility(), context.client.projects(), context.adminSignedIn(), context.adminSignInNotice?.()]);
       const { developer } = projects;
-      const method = developer.provider === "slack" ? "your chat sign-in" : "your company sign-in";
+      const method = developer.provider === "slack" ? "your chat sign-in" : developer.provider === "github" ? "GitHub" : "your company sign-in";
       const signInKind = developer.provider === "slack" ? "chat" as const : "company" as const;
       return {
         structured: {

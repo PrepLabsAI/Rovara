@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import type { SetupProposal } from "@agentx/contracts";
 import {
-  VERIFY_CONCURRENCY, VERIFY_DEADLINE_MS, VERIFY_LINE_SLACK, VERIFY_QUOTE_MIN_CHARS, VERIFY_READ_TIMEOUT_MS, VERIFY_READS_MAX,
+  VERIFY_CONCURRENCY, VERIFY_DEADLINE_MS, VERIFY_QUOTE_MIN_CHARS, VERIFY_READ_TIMEOUT_MS, VERIFY_READS_MAX,
   verifyProposal, verifyProposalDetailed,
 } from "../../packages/broker/src/core/setup-agent/proposal-verify.js";
 import { citationHolds, type CitationFileReader } from "../../packages/broker/src/core/citations/citation-check.js";
@@ -39,12 +39,12 @@ const fixedNow = () => 1_000;
 
 describe("setup proposal verify (golden, with unique quote fallback)", () => {
   it("pins the constants", () => {
-    expect({ VERIFY_READS_MAX, VERIFY_CONCURRENCY, VERIFY_DEADLINE_MS, VERIFY_READ_TIMEOUT_MS, VERIFY_LINE_SLACK, VERIFY_QUOTE_MIN_CHARS }).toEqual({
-      VERIFY_READS_MAX: 40, VERIFY_CONCURRENCY: 4, VERIFY_DEADLINE_MS: 20_000, VERIFY_READ_TIMEOUT_MS: 8_000, VERIFY_LINE_SLACK: 3, VERIFY_QUOTE_MIN_CHARS: 8,
+    expect({ VERIFY_READS_MAX, VERIFY_CONCURRENCY, VERIFY_DEADLINE_MS, VERIFY_READ_TIMEOUT_MS, VERIFY_QUOTE_MIN_CHARS }).toEqual({
+      VERIFY_READS_MAX: 40, VERIFY_CONCURRENCY: 4, VERIFY_DEADLINE_MS: 20_000, VERIFY_READ_TIMEOUT_MS: 8_000, VERIFY_QUOTE_MIN_CHARS: 8,
     });
   });
 
-  it("fails: a quote not near the cited line, a missing file, a line past the end, and a quote that does not contain the value are unverified and final", async () => {
+  it("fails: a quote that is not in the file, a missing file and a quote that does not contain the value are unverified and final; the cited line does not matter", async () => {
     const { read } = fakeReader({ [`demo:package.json@${SHA}`]: PACKAGE });
     const result = await verifyProposalDetailed(read, proposalOf({
       setup: [
@@ -54,7 +54,7 @@ describe("setup proposal verify (golden, with unique quote fallback)", () => {
       ],
       tests: [commandsItem("value", ["npm run lint"], [cite(4, '"test": "npm test"')])],
     }), { now: fixedNow });
-    expect(result).toEqual({ items: { far: "unverified", gone: "unverified", past: "unverified", value: "unverified" }, final: true });
+    expect(result).toEqual({ items: { far: "unverified", gone: "unverified", past: "verified", value: "unverified" }, final: true });
   });
 
   it("the window accepts repeated quotes only within 3 lines either side of the cited line", async () => {
@@ -76,7 +76,7 @@ describe("setup proposal verify (golden, with unique quote fallback)", () => {
 
   it.each([
     { name: "off-by-6 unique quote accepted", quote: "run: npm ci", locations: [34], want: "verified" },
-    { name: "duplicate quote refused, including beyond the old read prefix", quote: "run: npm ci", locations: [22, 55], want: "unverified" },
+    { name: "a quote that is in the file twice holds", quote: "run: npm ci", locations: [22, 55], want: "verified" },
     { name: "missing quote refused", quote: "run: npm ci", locations: [], want: "unverified" },
     { name: "partial command prefix refused", quote: "run: pnpm ci", locations: [34], want: "unverified" },
     { name: "partial command suffix refused", quote: "run: npm cia", locations: [34], want: "unverified" },
@@ -97,26 +97,30 @@ describe("setup proposal verify (golden, with unique quote fallback)", () => {
     expect(result).toEqual({ items: { s: want }, final: true });
   });
 
-  it("keeps a nearby citation verified when a whole-file read would exceed the code-host cap", async () => {
-    const read: CitationFileReader = async (_repository, _path, _commit, options) => {
-      if (options.untilLine === undefined) throw new Error("file too large");
-      return PACKAGE;
-    };
-    expect(await verifyProposalDetailed(read, proposalOf({ setup: [commandsItem("s", ["npm ci"], [cite(3, '"ci": "npm ci"')])] }), { now: fixedNow }))
-      .toEqual({ items: { s: "verified" }, final: true });
-  });
-
-  it("a failed full-file fallback leaves only its missed citation unchecked, preserving a nearby citation of the same file", async () => {
-    const read: CitationFileReader = async (_repository, _path, _commit, options) => {
-      if (options.untilLine === undefined) throw new Error("file too large");
+  it("a file over the code host's size cap is a FINAL unchecked (its verdicts are kept, it is not fetched again on every page load); other files are unaffected", async () => {
+    const read: CitationFileReader = async (_repository, path) => {
+      if (path === "big.json") throw new Error("file too large");
       return PACKAGE;
     };
     const proposal = proposalOf({ setup: [
-      commandsItem("near", ["npm ci"], [cite(3, '"ci": "npm ci"')]),
-      commandsItem("far", ["npm run build"], [cite(3, "run: npm run build")]),
+      commandsItem("small", ["npm ci"], [cite(3, '"ci": "npm ci"')]),
+      commandsItem("big", ["npm ci"], [cite(3, '"ci": "npm ci"', { path: "big.json" })]),
     ] });
     expect(await verifyProposalDetailed(read, proposal, { now: fixedNow }))
-      .toEqual({ items: { near: "verified", far: "unchecked" }, final: false });
+      .toEqual({ items: { small: "verified", big: "unchecked" }, final: true });
+  });
+
+  it("any other failed read leaves only its citations unchecked and the result NOT final", async () => {
+    const read: CitationFileReader = async (_repository, path) => {
+      if (path === "flaky.json") throw new Error("host down");
+      return PACKAGE;
+    };
+    const proposal = proposalOf({ setup: [
+      commandsItem("small", ["npm ci"], [cite(3, '"ci": "npm ci"')]),
+      commandsItem("flaky", ["npm ci"], [cite(3, '"ci": "npm ci"', { path: "flaky.json" })]),
+    ] });
+    expect(await verifyProposalDetailed(read, proposal, { now: fixedNow }))
+      .toEqual({ items: { small: "verified", flaky: "unchecked" }, final: false });
   });
 
   it("counts whitespace-equivalent and overlapping occurrences as duplicates outside the window", () => {
@@ -162,7 +166,7 @@ describe("setup proposal verify (golden, with unique quote fallback)", () => {
     expect(calls).toEqual([]);
   });
 
-  it("one read per (repository, commit, path): the deepest line wins; a citation with no line reads the whole file; a 64-character commit is readable", async () => {
+  it("one whole-file read per (repository, commit, path), whatever line is cited; a 64-character commit is readable", async () => {
     const { read, calls } = fakeReader({ [`demo:package.json@${SHA}`]: PACKAGE, [`demo:package.json@${SHA2}`]: PACKAGE, [`demo:whole.txt@${SHA}`]: "the whole quote text" });
     const result = await verifyProposalDetailed(read, proposalOf({
       setup: [commandsItem("s", ["npm ci"], [cite(3, '"ci": "npm ci"'), cite(2, '"scripts": {')])],
@@ -171,8 +175,8 @@ describe("setup proposal verify (golden, with unique quote fallback)", () => {
     }), { now: fixedNow });
     expect(result).toEqual({ items: { s: "verified", t: "verified", c: "verified" }, final: true });
     expect(calls).toEqual([
-      { repository: "demo", path: "package.json", commit: SHA, untilLine: 8, timeoutMs: 8_000 },
-      { repository: "demo", path: "package.json", commit: SHA2, untilLine: 8, timeoutMs: 8_000 },
+      { repository: "demo", path: "package.json", commit: SHA, untilLine: undefined, timeoutMs: 8_000 },
+      { repository: "demo", path: "package.json", commit: SHA2, untilLine: undefined, timeoutMs: 8_000 },
       { repository: "demo", path: "whole.txt", commit: SHA, untilLine: undefined, timeoutMs: 8_000 },
     ]);
   });
@@ -209,7 +213,7 @@ describe("setup proposal verify (golden, with unique quote fallback)", () => {
     const { read, calls } = fakeReader({ [`demo:a.json@${SHA}`]: PACKAGE, [`demo:b.json@${SHA}`]: PACKAGE }, () => { clock += 600; });
     const many = Array.from({ length: 6 }, (_, index) => commandsItem(`m${index}`, ["npm ci"], [cite(3, '"ci": "npm ci"', { path: index === 0 ? "a.json" : "b.json" })]));
     const result = await verifyProposalDetailed(read, proposalOf({ setup: many }), { now: () => clock, deadlineMs: 500 });
-    expect(calls).toEqual([{ repository: "demo", path: "a.json", commit: SHA, untilLine: 7, timeoutMs: 500 }]);
+    expect(calls).toEqual([{ repository: "demo", path: "a.json", commit: SHA, untilLine: undefined, timeoutMs: 500 }]);
     expect(result).toEqual({ items: { m0: "verified", m1: "unchecked", m2: "unchecked", m3: "unchecked", m4: "unchecked", m5: "unchecked" }, final: false });
   });
 

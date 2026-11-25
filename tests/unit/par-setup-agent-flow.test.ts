@@ -33,6 +33,8 @@ const PROJECT = {
   repositories: [{ name: "demo", url: HOSTED, path: "repo/demo", defaultBranch: "main", credentialRef: "host-app" }],
 };
 const PACKAGE = ["{", "  \"scripts\": {", "    \"ci\": \"npm ci\",", "    \"test\": \"npm test\"", "  }", "}", ""].join("\n");
+/** A long README with the install commands in the middle: the model's answer cites the file and the quote; a line it might still write is not read. */
+const README = Array.from({ length: 120 }, (_, index) => (index === 59 ? "python3 -m venv .venv" : index === 63 ? "pip install -r requirements.txt" : `Line ${index + 1} of the guide.`)).join("\n");
 const apiKey = (): string => ["sk", "ant", "x".repeat(40)].join("-");
 const BASE = "b".repeat(40);
 
@@ -45,7 +47,10 @@ async function launch(extra: { environment?: NodeJS.ProcessEnv } = {}) {
   const model = new FakeHostModel({ url: HOSTED, id: "1", fullName: "example/demo" });
   const host = Object.defineProperties(new FakeCodeHost(model), { kind: { value: "github" } });
   // The code host answers the citation re-read with the repository's file at any commit.
-  host.fileAtRevision = async (_repository, path, _revision, _scope, options) => (path === "package.json" ? (options?.untilLine === undefined ? PACKAGE : PACKAGE.split("\n").slice(0, options.untilLine).join("\n")) : undefined);
+  host.fileAtRevision = async (_repository, path, _revision, _scope, options) => {
+    const text = path === "package.json" ? PACKAGE : path === "README.md" ? README : undefined;
+    return text === undefined ? undefined : options?.untilLine === undefined ? text : text.split("\n").slice(0, options.untilLine).join("\n");
+  };
   const opened: string[] = [];
   const registerAdapters = (registry: AdapterRegistry): void => { registry.register("code-host", "github", host); };
   const runtime: LocalRuntime = await startLocalRuntime({
@@ -217,7 +222,7 @@ describe("a setup run, from the owner's request to the use of what it found", ()
     expect(ready.body["proposal"]["browserEvidence"]).toMatchObject({ id: "browser-recipe", value: { startCommand: "npm run start", port: 3000, routes: [{ path: "/checkout", files: ["src/checkout/**"] }] } });
     expect(ready.body["verification"]["browser-recipe"]).toBe("unchecked");
     const page = await be.page("payments");
-    expect(page).toMatchObject({ source: "none", signInSaved: false, suggestion: { recipe: { startCommand: "npm run start", port: 3000, routes: [{ path: "/checkout", files: ["src/checkout/**"] }] }, from: ["demo/package.json:4"], verdict: "unchecked" } });
+    expect(page).toMatchObject({ source: "none", signInSaved: false, suggestion: { recipe: { startCommand: "npm run start", port: 3000, routes: [{ path: "/checkout", files: ["src/checkout/**"] }] }, from: ["demo/package.json"], verdict: "unchecked" } });
     // Nothing was applied: browser evidence is still off for the project, and no row was written.
     expect(await be.recipeFor("payments")).toBeUndefined();
     const link = await h.browse("/setup/payments");
@@ -401,6 +406,21 @@ describe("a setup run, from the owner's request to the use of what it found", ()
     expect((await h.post(link, form.action, { ...form.fields })).headers["location"]).toContain("n=setupdone");
     const apply = (await h.store.get({ pk: `ORG#${IMPLICIT_COMPANY_ID}#SETUP_DRAFT#payments`, sk: "APPLY" }))!;
     expect(apply["reply"]).toMatchObject({ used: ["tests-demo"], left: [{ id: "setup-demo", reason: "unverified" }] });
+  });
+
+  it("a citation is a file and its exact quote: the install item is verified wherever the quote is in the README, and a line the model wrote is not kept", async () => {
+    const h = await launch();
+    const run = await startRun(h);
+    const place = (quote: string, extra: Record<string, unknown> = {}) => ({ kind: "readme", repo: "demo", path: "README.md", commit: BASE, quote, ...extra });
+    const answer = { ...proposal(), setup: [
+      { repo: "demo", commands: ["python3 -m venv .venv", "pip install -r requirements.txt"], confidence: "high", from: [place("python3 -m venv .venv", { line: 40 }), place("pip install -r requirements.txt", { line: 44 })] },
+    ] };
+    await h.callback(run.job, "result", { status: "SUCCEEDED", result: { setupProposal: answer, setupRunSummary: SUMMARY } });
+    for (let read = 0; read < 2; read += 1) {
+      const view = await h.api(ROUTE);
+      expect(view.body).toMatchObject({ status: "ready", verified: true, verification: { "setup-demo": "verified", "tests-demo": "verified" } });
+      for (const item of view.body["proposal"]["setup"] as Array<{ from: Array<{ line?: number }> }>) for (const place of item.from) expect(place.line).toBeUndefined();
+    }
   });
 
   it("does not offer approval for a candidate whose check failed, names the failing step, and frees the project when the owner discards it", async () => {

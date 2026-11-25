@@ -108,7 +108,7 @@ class Reader {
       if (!HEX_COMMIT.test(commit)) return undefined;
       candidate["commit"] = commit;
     }
-    if (typeof entry["line"] === "number" && Number.isInteger(entry["line"]) && entry["line"] > 0 && entry["line"] <= 10_000_000) candidate["line"] = entry["line"];
+    // A line number is never kept: a citation is its file and its exact quote (a stored proposal from an older run may still carry one; the schema reads it and nothing uses it).
     if (typeof entry["quote"] === "string" && !NO_QUOTE_KINDS.has(kind)) {
       const quote = oneLineText(entry["quote"], PROVENANCE_QUOTE_MAX);
       if (quote !== "") candidate["quote"] = quote;
@@ -117,8 +117,8 @@ class Reader {
       const note = oneLineText(entry["note"], PROVENANCE_NOTE_MAX);
       if (note !== "") candidate["note"] = note;
     }
-    // A line or quote without a path says nothing the broker could re-read.
-    if (candidate["path"] === undefined) { delete candidate["line"]; delete candidate["quote"]; }
+    // A quote without a path says nothing the broker could re-read.
+    if (candidate["path"] === undefined) delete candidate["quote"];
     const parsed = ProvenanceSchema.safeParse(candidate);
     return parsed.success ? parsed.data : undefined;
   }

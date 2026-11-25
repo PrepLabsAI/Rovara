@@ -12,11 +12,17 @@
 //   - the real company must get a session (else "refused");
 //   - two canaries must be REFUSED: the real session name with a canary external id, and a canary session name with the real
 //     external id. If either gets a session the role trusts more than this company: "too_open", and nothing is saved;
-//   - then each chosen model gets one $0 check: an InvokeModel IAM authorises but Bedrock rejects as invalid (max_tokens 0). A
-//     ValidationException means "ready"; AccessDeniedException with Bedrock's model-access words "not_enabled"; any other
+//   - then each chosen model gets one check that generates nothing: an InvokeModel with max_tokens 0 (verified live: AWS answers a
+//     Claude profile with HTTP 200, an empty Messages response, stop_reason "max_tokens", 0 output tokens; about 8 input tokens are
+//     billed). A Messages response of any stop reason, or a ValidationException, means "ready"; AccessDeniedException with Bedrock's model-access words "not_enabled"; any other
 //     AccessDenied "refused" (the role's policy does not allow that model); an unknown model "not_found"; a throttle "no_quota"
 //     (a model whose quota in the account is 0 throttles even this check).
-// Results are fixed words; no AWS text and no credential leaves this module.
+//   - AWS not answering (5xx, a failed or timed-out call, a 2xx that is not the expected answer, any other status) is asked once
+//     more, and if it is still so the model is "no_answer": a fact about AWS's answer, never a state of the model.
+// The whole test has one time budget (PROBE_BUDGET_MS, inside Cloud's 25 s wait): the second ask is made only when a whole
+// model-check timeout is left, and no ask waits longer than what is left.
+// Results are fixed words; no AWS text and no credential leaves this module. The only thing logged per check is the company id
+// (org_*, never an account id), the HTTP status and Bedrock's error type (one word), the model id and the attempt (event bedrock_model_check).
 import { randomBytes } from "node:crypto";
 import { signRequest, type AwsCredentials, type CredentialSource } from "./aws.js";
 import { BEDROCK_BYO_ROLE_ARN, bedrockConnectionIds, type BedrockConnection, type BedrockModelCheck } from "./bedrock-byo.js";
@@ -24,13 +30,15 @@ import { bedrockFamily, bedrockProductPath, createBedrockProductTransport } from
 import { COMPANY } from "./model-gateway-token.js";
 import type { ProductKeyRow } from "./product-seal.js";
 import type { TokenHttp } from "./product-vertex-token.js";
-import type { ProviderTransport } from "./provider.js";
+import type { ProviderResponse, ProviderTransport } from "./provider.js";
 
 export const BEDROCK_SESSION_MARGIN_MS = 5 * 60_000;
 const SESSION_SECONDS = 3600;
 const STS_ANSWER_MAX_BYTES = 64 * 1024;
 const MAX_CACHED = 5_000;
 const MODEL_CHECK_TIMEOUT_MS = 5_000;
+/** All of one probe, so the retry can't take it past Cloud's wait of 25 s (service-call.ts SERVICE_CALL_TIMEOUT_MS). */
+export const PROBE_BUDGET_MS = 22_000;
 const MODEL_CHECK_BODY_BYTES = 8 * 1024;
 const BROKER_ROLE = /^arn:aws:iam::[0-9]{12}:role\/RovaraBedrockBroker-[a-z0-9-]{1,32}$/u;
 const AWS_REGION = /^[a-z]{2}(?:-gov)?-[a-z]+-\d$/u;
@@ -42,6 +50,8 @@ const QUOTA_ERROR_TYPES = /^(?:ThrottlingException|ServiceQuotaExceededException
 const UNKNOWN_MODEL_WORDS = /model identifier is invalid|on-demand throughput|inference profile|could not be found|not found/iu;
 
 export type AssumeResult = { ok: true; credentials: AwsCredentials } | { ok: false; reason: "refused" | "unavailable" };
+/** One log line per model check (see BedrockSessionsOptions.log). Values are numbers, booleans and short fixed words, never AWS text. */
+export type BedrockCheckLog = (line: { event: string } & Record<string, string | number | boolean>) => void;
 export interface BedrockProbe { result: "ok" | "too_open" | "refused" | "unavailable"; models?: Record<string, BedrockModelCheck> }
 /** What the agent route needs (BedrockSessions implements it). */
 export interface BedrockSessionSource {
@@ -62,9 +72,28 @@ export interface BedrockSessionsOptions {
   now?: () => number;
   /** The canary company (tests); default: a random, well-formed company id other than the real one. */
   canaryCompany?: () => string;
-  /** The Bedrock transport for the $0 model check (tests); default: bedrock-transport.ts on the customer's session. */
+  /** The Bedrock transport for the model check (tests); default: bedrock-transport.ts on the customer's session. */
   bedrock?: (region: string, credentials: CredentialSource) => ProviderTransport;
+  /** Where the model checks' status lines go (default: one JSON line on stdout, as the gateway's own log). */
+  log?: BedrockCheckLog | undefined;
 }
+/** Bedrock's error type, the one word the transport puts first on a failed answer; anything else (AWS's own words) is not logged. */
+const LOGGABLE_ERROR_TYPE = /^[A-Za-z][A-Za-z0-9]{0,63}$/u;
+const stdoutLog = (now: () => number): BedrockCheckLog => (line) => {
+  try { process.stdout.write(`${JSON.stringify({ ...line, time: new Date(now()).toISOString() })}\n`); } catch { /* Logging never stops a check. */ }
+};
+/** Whether a 2xx body is the answer its family gives to the check: a Claude Messages response (type "message", any stop reason: only Haiku 4.5's "max_tokens" was seen live), Converse's stop reason, an embedding. */
+function expectedAnswer(family: "claude" | "embedding" | "converse", text: string): boolean {
+  let value: unknown;
+  try { value = JSON.parse(text) as unknown; } catch { return false; }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const answer = value as Record<string, unknown>;
+  if (family === "claude") return answer.type === "message" && Array.isArray(answer.content);
+  if (family === "embedding") return Array.isArray(answer.embedding);
+  return typeof answer.stopReason === "string";
+}
+/** What one ask of Bedrock found. `again`: AWS did not answer in a way worth keeping (5xx, a failed call), so one more ask is made. */
+interface CheckAnswer { state: BedrockModelCheck; again: boolean; status: number; errorType: string; error?: string }
 const UNAVAILABLE: AssumeResult = { ok: false, reason: "unavailable" };
 const REFUSED: AssumeResult = { ok: false, reason: "refused" };
 const form = (fields: Record<string, string>): Buffer => Buffer.from(new URLSearchParams(fields).toString());
@@ -79,12 +108,13 @@ export class BedrockSessions implements BedrockSessionSource {
   readonly #options: BedrockSessionsOptions;
   readonly #now: () => number;
   readonly #stsHost: string;
+  readonly #log: BedrockCheckLog;
   readonly #brokers = new Map<string, AwsCredentials>();
   readonly #customers = new Map<string, { roleArn: string; credentials: AwsCredentials }>();
   readonly #pending = new Map<string, Promise<AssumeResult>>();
   constructor(options: BedrockSessionsOptions) {
     if (!BROKER_ROLE.test(options.brokerRoleArn) || !AWS_REGION.test(options.awsRegion) || typeof options.issuer !== "string" || options.issuer.length === 0) throw new Error("invalid bedrock session options");
-    this.#options = options; this.#now = options.now ?? Date.now; this.#stsHost = `sts.${options.awsRegion}.amazonaws.com`;
+    this.#options = options; this.#now = options.now ?? Date.now; this.#log = options.log ?? stdoutLog(this.#now); this.#stsHost = `sts.${options.awsRegion}.amazonaws.com`;
   }
 
   /** The customer role's session for this key-store row, assumed as the row's company. Cached per row; refusals never are. */
@@ -112,6 +142,7 @@ export class BedrockSessions implements BedrockSessionSource {
   /** The connection test for this company, before a connection is saved. Nothing is cached. */
   async probe(cid: string, connection: BedrockConnection, signal?: AbortSignal): Promise<BedrockProbe> {
     if (!COMPANY.test(cid) || !BEDROCK_BYO_ROLE_ARN.test(connection.roleArn)) return { result: "unavailable" };
+    const started = this.#now();
     try {
       // One broker session, the real company's, for every assume of the test (the broker trusts any org_* name; the CUSTOMER's
       // role is what must refuse the canaries).
@@ -129,9 +160,10 @@ export class BedrockSessions implements BedrockSessionSource {
         // Only STS's AccessDenied counts as refused: a throttle or any other error proves nothing, so the test fails closed.
         if (other.reason !== "refused") return { result: "unavailable" };
       }
-      // The models in parallel, each bounded, so the whole test stays inside Cloud's wait (service-call.ts SERVICE_CALL_TIMEOUT_MS).
+      // The models in parallel, each bounded, and all of them inside one budget so the whole test stays inside Cloud's wait.
       const ids = bedrockConnectionIds(connection);
-      const states = await Promise.all(ids.map((id) => this.#modelCheck(connection.region, real.credentials, id, signal)));
+      const deadline = started + PROBE_BUDGET_MS;
+      const states = await Promise.all(ids.map((id) => this.#modelCheck({ cid, region: connection.region, credentials: real.credentials, id, deadline }, signal)));
       return { result: "ok", models: Object.fromEntries(ids.map((id, i) => [id, states[i]!])) };
     } catch { return { result: "unavailable" }; }
   }
@@ -173,32 +205,61 @@ export class BedrockSessions implements BedrockSessionSource {
     if (accessKeyId === undefined || secretAccessKey === undefined || sessionToken === undefined || !Number.isFinite(expiresAt) || !/^[A-Z0-9]{16,128}$/u.test(accessKeyId)) return UNAVAILABLE;
     return { ok: true, credentials: { accessKeyId, secretAccessKey, sessionToken, expiresAt } };
   }
-  /** One $0 InvokeModel that IAM authorises and Bedrock rejects as invalid (max_tokens 0): nothing is generated or billed. */
-  async #modelCheck(region: string, credentials: AwsCredentials, id: string, signal?: AbortSignal): Promise<BedrockModelCheck> {
-    // Each family's own invalid request (IAM authorises it; Bedrock rejects it, nothing is generated): Claude's Anthropic body with
-    // max_tokens 0, a Titan embedding with no text, any other model's Converse with maxTokens 0.
+  /** One InvokeModel with max_tokens 0 (nothing generated). Asked once more when AWS did not answer and the probe's budget allows. */
+  async #modelCheck(target: { cid: string; region: string; credentials: AwsCredentials; id: string; deadline: number }, signal?: AbortSignal): Promise<BedrockModelCheck> {
+    // Each family's own check, one that generates nothing: Claude's Anthropic body with max_tokens 0, a Titan embedding with no
+    // text, any other model's Converse with maxTokens 0.
+    const { id } = target;
     const family = bedrockFamily(id);
     if (family === undefined) return "not_found";
     let path: string;
     try { path = bedrockProductPath(id, family === "converse" ? "converse" : "invoke"); } catch { return "not_found"; }
-    const transport = (this.#options.bedrock ?? ((r, c) => createBedrockProductTransport({ region: r, credentials: c, now: this.#now })))(region, async () => credentials);
-    const timeout = AbortSignal.timeout(MODEL_CHECK_TIMEOUT_MS);
-    const bound = signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
+    const transport = (this.#options.bedrock ?? ((r, c) => createBedrockProductTransport({ region: r, credentials: c, now: this.#now })))(target.region, async () => target.credentials);
     const body = Buffer.from(JSON.stringify(family === "claude" ? { anthropic_version: "bedrock-2023-05-31", max_tokens: 0, messages: [{ role: "user", content: "." }] }
       : family === "embedding" ? { inputText: "" } : { messages: [{ role: "user", content: [{ text: "." }] }], inferenceConfig: { maxTokens: 0 } }));
+    const ask = (): Promise<CheckAnswer> => this.#ask(transport, family, path, body, Math.max(1, Math.min(MODEL_CHECK_TIMEOUT_MS, target.deadline - this.#now())), signal);
+    let seen = await ask();
+    // One more ask on a 5xx or a failed or timed-out call (the check changes nothing), unless the caller itself gave up or a whole
+    // ask no longer fits in the probe's budget.
+    const again = seen.again && signal?.aborted !== true && target.deadline - this.#now() >= MODEL_CHECK_TIMEOUT_MS;
+    if (again) { this.#logCheck(target, 1, seen, "retry"); seen = await ask(); }
+    this.#logCheck(target, again ? 2 : 1, seen, seen.state);
+    return seen.state;
+  }
+  #logCheck(target: { cid: string; id: string }, attempt: number, seen: CheckAnswer, state: string): void {
+    // A logger that throws never changes a check's answer.
+    try { this.#log({ event: "bedrock_model_check", company: target.cid, model: target.id, attempt, status: seen.status, errorType: seen.errorType, ...(seen.error === undefined ? {} : { error: seen.error }), state }); } catch { /* Logging never stops a check. */ }
+  }
+  async #ask(transport: ProviderTransport, family: "claude" | "embedding" | "converse", path: string, body: Buffer, timeoutMs: number, signal?: AbortSignal): Promise<CheckAnswer> {
+    const timeout = AbortSignal.timeout(timeoutMs);
+    const bound = signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
     try {
       const answer = await transport({ body, headers: { "content-type": "application/json" }, key: "rovara-bedrock-check", signal: bound, path });
-      const read: Buffer[] = []; let size = 0;
-      try { for await (const part of answer.body) { read.push(Buffer.from(part)); size += part.byteLength; if (size >= MODEL_CHECK_BODY_BYTES) break; } } catch { /* Classified from the status alone. */ }
-      answer.cancel?.();
-      const words = Buffer.concat(read).subarray(0, MODEL_CHECK_BODY_BYTES).toString("utf8");
-      // A throttle (or Bedrock's quota error, which the transport names first) on a $0 check: the model has no room in this account right now. Checked before 400's "ready".
-      if (answer.status === 429 || QUOTA_ERROR_TYPES.test(words)) return "no_quota";
-      if (answer.status === 400) return UNKNOWN_MODEL_WORDS.test(words) ? "not_found" : "ready";
-      if (answer.status === 404) return "not_found";
-      if (answer.status === 403) return BEDROCK_MODEL_ACCESS_WORDS.test(words) ? "not_enabled" : "refused";
-      // A 2xx would mean a real answer was generated: Bedrock never answers max_tokens 0 so; treat it as unknown, not as ready.
-      return "unavailable";
-    } catch { return "unavailable"; }
+      const words = await readWords(answer);
+      const first = words.split("\n", 1)[0] ?? "";
+      return { ...classifyAnswer(family, answer.status, words), status: answer.status, errorType: answer.status >= 300 && LOGGABLE_ERROR_TYPE.test(first) ? first : "none" };
+    } catch (error) {
+      return { state: "no_answer", again: true, status: 0, errorType: "none", error: error instanceof Error && /^[A-Za-z]{1,40}$/u.test(error.name) ? error.name : "Error" };
+    }
   }
+}
+/** The first bytes of an answer's body (bounded), then the answer is dropped. */
+async function readWords(answer: ProviderResponse): Promise<string> {
+  const read: Buffer[] = []; let size = 0;
+  try { for await (const part of answer.body) { read.push(Buffer.from(part)); size += part.byteLength; if (size >= MODEL_CHECK_BODY_BYTES) break; } } catch { /* Classified from the status alone. */ }
+  answer.cancel?.();
+  return Buffer.concat(read).subarray(0, MODEL_CHECK_BODY_BYTES).toString("utf8");
+}
+/** What an answer says about the model; `again` when AWS itself failed (5xx), so one more ask is made. */
+function classifyAnswer(family: "claude" | "embedding" | "converse", status: number, words: string): { state: BedrockModelCheck; again: boolean } {
+  const done = (state: BedrockModelCheck, again = false) => ({ state, again });
+  // A real answer to the check: only the answer this family gives to it is a working model; any other 2xx proves nothing.
+  if (status >= 200 && status < 300) return done(expectedAnswer(family, words) ? "ready" : "no_answer");
+  // A throttle (or Bedrock's quota error, which the transport names first) on the check: the model has no room in this account right now. Checked before 400's "ready".
+  if (status === 429 || QUOTA_ERROR_TYPES.test(words)) return done("no_quota");
+  if (status === 400) return done(UNKNOWN_MODEL_WORDS.test(words) ? "not_found" : "ready");
+  if (status === 404) return done("not_found");
+  if (status === 403) return done(BEDROCK_MODEL_ACCESS_WORDS.test(words) ? "not_enabled" : "refused");
+  // AWS failed (5xx): asked once more. Any other status is not an answer about the model either.
+  return done("no_answer", status >= 500);
 }

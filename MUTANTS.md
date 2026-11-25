@@ -945,6 +945,99 @@ Measured on the lane's working tree over tests/unit/task-ended-notice.test.ts (2
 | M6, task-end.ts `announceTaskEnd` | waits for the host without the time bound | 1 of 25 | green |
 | M7, task-end.ts `reconcileTaskEnds` | the `notifiedAt` filter is dropped | SURVIVES, on purpose not killed: a delivered marker has already left the due-time index, so the filter is a second guard on a row the index no longer lists. |
 | M8, task-end.ts `reconcileTaskEnds` | no age limit | 1 of 25 | green |
+## SETUP-CITATION-LINES, real line numbers in the setup agent's read tool and a re-read that finds the quote
+
+Root cause: the setup agent's `read` tool printed file text with no line numbers (Pi `read.js` returns `truncation.content`), so the model counted lines itself and cited lines about twenty early. The worker's `read` now prints `<number><TAB><line>` (sandbox-file-tools.ts `withLineNumbers`, on for a SETUP session in pi-session.ts); the broker's re-read (proposal-verify.ts + citation-locate.ts) finds a command citation's exact quote anywhere in the file at the cited commit, nearest the cited line, shows the corrected line and records the move. Each mutant applied singly to the file named (scratch edit, restored by writing the saved source back), run against tests/unit/setup-citation-reanchor.test.ts, citation-unique-quote.test.ts, setup-proposal-verify-golden.test.ts, setup-read-numbering.test.ts, par-setup-agent-flow.test.ts and tests/integration/sandbox-file-tools.test.ts. Code sha of the mutated tree: the lane head named in briefs/arch-cleanup/SETUP-CITATION-LINES-DONE.md.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| proposal-verify.ts `locate` (anywhere in the file) | a quote with no place still holds | killed, 25 failed |
+| citation-locate.ts `quoteOccurrences` | comment lines count as places | killed, 13 failed |
+| citation-locate.ts `nearestOccurrence` | the farthest place instead of the nearest | killed, 2 failed |
+| citation-locate.ts `nearestOccurrence` | a tie takes the later place | killed, 1 failed |
+| citation-locate.ts `nearestOccurrence` | glued places as good as clean ones | killed, 1 failed |
+| proposal-verify.ts `locate` | non-command items may be found anywhere in the file | killed, 3 failed |
+| citation-locate.ts `quoteOccurrences` | case-insensitive match | killed, 2 failed |
+| proposal-verify.ts `movedTo` | no move is ever reported | killed, 30 failed |
+| proposal-verify.ts `verifyProposalDetailed` | a move is recorded for an item that is not verified | killed, 6 failed |
+| proposal-verify.ts `movedTo` | inside the old window, a far copy is a move (first run, far copy only below the cited line) | survived: the test's far copy was outside the prefix the code host was asked for |
+| same | same mutant after the test put the far copy above the cited line | killed, 1 failed |
+| proposal-verify.ts `locate` | the no-line guard removed (first run) | survived: dead code (the collapsed whole-file check in the window step already holds every line-less quote that is in the file); the guard is now `verdict: fails` and only needed for the type |
+| proposal-verify.ts `locate` | the found place's edge characters dropped (`quote clipped` tests) | killed, 4 failed |
+| proposal-verify.ts `withMovedLines` | the cited-line guard removed | killed, 1 failed |
+| agent.ts `verifiedViewOf` | kept verdicts shown without the moved lines | killed, 1 failed |
+| agent.ts `verifiedViewOf` | moved lines not stored with the verdicts | killed, 1 failed |
+| citation-locate.ts `quoteOccurrences` | only the first line of a multi-line quote checked | killed, 2 failed |
+| sandbox-file-tools.ts `withLineNumbers` | numbers start at 0 | killed, 7 failed |
+| same | an image is numbered | survived: equivalent (the binary check already keeps every real image out: PNG, JPEG, GIF and WebP headers hold a NUL byte; the image check stays as a second guard) |
+| same | a binary file is numbered | killed, 1 failed |
+| same | the closing newline gets a number | killed, 3 failed |
+| same | CR cut from the line (split on `\r?\n`) | killed, 1 failed |
+| sandbox-file-tools.ts `sandboxFileTools` | the `numberedReads` option ignored | killed, 7 failed |
+| pi-session.ts | a SETUP session is not numbered | killed, 1 failed |
+| pi-session.ts | every session is numbered | killed, 5 failed |
+
+After the complexity split of `locate` into `locateCited` / `locateInText` / `movedTo` / `movesOf` (proposal-verify.ts) and of `quoteOccurrences` (citation-locate.ts), the mutants on those lines were applied again in their new form (no-place-still-holds, comment lines count, farthest place, tie takes the later, glued as good as clean, no move reported, move for an unverified item, far copy inside the window, edges dropped, first line only of a multi-line quote): all killed (25, 13, 2, 1, 1, 30, 6, 1, 4, 2 failed).
+
+## SETUP-CITATION-LINES, DEC 254zzz537 (no line numbers at all): the rule is "the exact quote is in the file at that commit"
+
+The rows of the section above that name the numbered read tool (`withLineNumbers`, `numberedReads`, pi-session), the moved-line record (`movedTo`, `movesOf`, `withMovedLines`, the agent.ts `moved` store), the nearest place and the line window no longer apply: that code is removed. New mutants, each applied singly to the file named (scratch edit, source written back), run against tests/unit/setup-citation-quote-only.test.ts, citation-unique-quote.test.ts, setup-proposal-verify-golden.test.ts, par-setup-agent-flow.test.ts, prompt-locations-setup.test.ts and browser-evidence-suggestion.test.ts. The contracts package loads from its build, so N10 was rebuilt (`tsc -b packages/contracts`) before its run and after the restore.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| proposal-verify.ts `locateInText` (a command's quote anywhere in the file) | a quote with no place still holds | killed, 26 failed |
+| citation-locate.ts `quoteOccurrences` | comment lines count as places | killed, 14 failed |
+| citation-locate.ts `judgedOccurrence` | the first place is judged even when a clean one exists | killed, 1 failed |
+| citation-locate.ts `quoteOccurrences` | case-insensitive match | killed, 1 failed |
+| citation-locate.ts `placeOfLines` | only the first line of a multi-line quote checked | killed, 2 failed |
+| proposal-verify.ts `locateInText` | a non-command quote always holds | killed, 1 failed |
+| proposal-verify.ts `locateInText` | the found place's edge characters dropped | killed, 4 failed |
+| proposal-verify.ts `locateInText` | a stored line past 100000 fails the citation (old stored line must be ignored) | killed, 1 failed |
+| proposal-verify.ts `verifyProposalDetailed` | the file is read through a window again | killed, 17 failed |
+| proposal-verify.ts `locateInText` | the quote is looked for in the first 50 lines only | killed, 9 failed |
+| proposal-verify.ts `locationOf` | a missing file passes | killed, 2 failed |
+| setup-proposal-read.ts (reader) | a line from the model's answer is kept | killed, 2 failed (after a contracts rebuild; 135 passed before it, because the tests read the build) |
+| setup-draft.ts prompt | the prompt asks for the line number again | killed, 1 failed |
+
+## SETUP-CITATION-LINES, Sonnet pre-review round (S1 to S6)
+
+Each applied singly (scratch edit, source written back), run against tests/unit/setup-citation-quote-only.test.ts, citation-unique-quote.test.ts, setup-proposal-verify-golden.test.ts and setup-citation-comments.test.ts (S5 rows also citation-check). The comment table (citation-comments.ts) is pinned by 15 paired cases (comment refused, real code accepted) in setup-citation-comments.test.ts.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| proposal-verify.ts `hasName` (S1) | the found place's edges are not fed to the name check | killed, 7 failed |
+| proposal-verify.ts `locateInText` (S1) | names get no edges | killed, 7 failed |
+| proposal-verify.ts `locateInText` (S1) | every place counts as clean | killed, 1 failed |
+| proposal-verify.ts `locateInText` (S1) | a name is judged by the command clean rule | survived at first (no test told "slash after the name" from "dash"); killed, 1 failed after the `widgets-old` then `widgets/issues` case was added |
+| proposal-verify.ts `locationOf` (S5) | each citation builds the file's code text again | killed, 1 failed (30 citations of a 120000-line file must cost about one) |
+| proposal-verify.ts `locationOf` (S5) | an over-cap file is not final | killed, 1 failed |
+| citation-check.ts `readCitedFiles` (S5) | the 'file too large' refusal is a plain failed read | killed, 1 failed |
+
+## SETUP-CITATION-LINES, Opus security round (M1, M2, S1, S2, S3)
+
+Each applied singly (scratch edit, source written back), run against tests/unit/setup-citation-quote-only.test.ts and setup-citation-comments.test.ts.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| citation-comments.ts `codeLinesOf` (M1) | no cap on the length of a line read | killed, 2 failed |
+| citation-comments.ts `blockLine` (M1) | the line-comment search is not bounded to the block start (it rescans) | survived: equivalent under the 16 KB cap (4000 blocks x 16 KB is tens of ms); the cap is what bounds the work, and the cap mutant is killed |
+| citation-comments.ts `markerAt` users (S2) | a marker counts only after whitespace (not after `;` or `@`) | killed, 3 failed |
+| citation-comments.ts `rubyLine` (S2) | no `=begin` | killed, 1 failed |
+| citation-comments.ts `markdownLine` (S2) | indented code is not read as a script | killed, 1 failed |
+| citation-comments.ts `otherLine` (S2) | a file of an unlisted type reads no comment but a line start | killed, 4 failed |
+| citation-locate.ts `judgedOccurrence` (M2) | no cap on the places looked at | survived at first (the test's bound was 8 s, the search takes 2 s without the cap and 4 ms with it); killed, 1 failed after the bound became 1.5 s |
+| citation-locate.ts `judgedOccurrence` (S1) | no two-line limit on a match | killed, 1 failed |
+| citation-locate.ts `codeTextOf` (S1) | a blank line is dropped instead of a break token | survived: equivalent (the empty token still leaves two spaces, which no quote has, so the match is still refused) |
+| proposal-verify.ts `quotesSupport` (S3) | a bare owner/name accepted after `/`, `:` or `@` | killed, 4 failed |
+
+## SETUP-CITATION-LINES, Opus delta round (M1 again: the comment scan is one pass)
+
+The row above that called the unbounded `blockLine` marker search equivalent was wrong: with ~1280 lines just under the cap a 20 MB file took 73 s. `markerAt` and the per-comment `indexOf` are gone; `cutComments` (citation-comments.ts) is one left-to-right pass (a pattern jumps from one possible comment start to the next, each probe starts where the last ended). Measured on this Mac for Opus's input (1280 lines of 16380 characters of `/* */ `, 20 MB): .ts 162 ms, .tf 170 ms, .vue 144 ms, unlisted type 141 ms, .sql 144 ms (before: 73 s, 74 s, 65 s, 68 s, 0.7 s). Tests: those five files under 1.5 s each, plus a counter of the characters the scanner goes over (at most twice the file's size, for ten file types and eight comment shapes), plus a scan budget (64 Mi characters per verification; past it the rest of a file reads as comment).
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| citation-comments.ts `cutComments` | the pattern restarts from the end of the last block instead of where the last probe ended | killed: the test run hangs (the scan never advances), stopped by a timeout; the characters-scanned test would also fail |
+| citation-comments.ts `codeLinesOf` | no scan budget | killed, 1 failed |
 
 ## PORT-GUARD-GATEWAY-NARROW: only the model gateway's names pass the gateway words in a deployment path and the AWS-import check (2026-11-25)
 
@@ -969,3 +1062,55 @@ Every mutant is a change to `cloudWordsReason` in scripts/port-guard.ts, run aga
 | M14 | `llmgateway`, `aigateway` leave the Cloud-only list alone | survived: equivalent (the gateway rule refuses `llmgateway` and `aigateway` itself, as M3 shows from the other side) |
 
 The restored tree passes (305 of 305).
+
+## CLI-LOGIN-GITHUB (agentx login accepts a GitHub-only install), 2026-11-25, on base a0bc104f9
+
+Measured on the lane's working tree over tests/contract/developer-login.test.ts (20 tests). Each mutant was applied alone, the one file run, and the file restored.
+
+| Mutant / location | Mutation | Failing tests (of the file) | Restored |
+|---|---|---|---|
+| M1, cli/src/developer/login.ts `readConfiguration` | GitHub is ignored again (only Slack and the company sign-in count as on) | 2 of 20 | green |
+| M2, cli/src/developer/login.ts `readConfiguration` | the no-method check is dropped, so an install with every method off is accepted | 2 of 20 | green |
+## GETDEVELOPER-GITHUB (an adapter conversation's linked developer may sign in with GitHub), 2026-11-25, on base a0bc104f9
+
+Measured on the lane's working tree over tests/contract/channel-conversation-developer-record.test.ts (8 tests). The mutant was applied alone, the one file run, and the file restored.
+
+| Mutant / location | Mutation | Failing tests (of the file) | Restored |
+|---|---|---|---|
+| M1, broker/src/aws/broker-primitives.ts `channelConversationDependencies.getDeveloper` | `github` is dropped from the accepted providers again | 2 of 8 | green |
+
+## GITHUB-NOT-ON-REVIEW-LINK (a hand-built authorize link cannot take the review-link sign-in to GitHub), 2026-11-25, on base a0bc104f9
+
+Measured over tests/contract/company-github-signin.test.ts (33 tests). The mutant was applied alone, the one file run (--maxWorkers=1), and the file restored.
+
+| Mutant / location | Mutation | Failing tests (of the file) | Restored |
+|---|---|---|---|
+| M1, broker/src/developer/server.ts `authorize` | the `method=github` check for a request carrying `browserReturnTo` is dropped | 1 of 33 | green |
+## BEDROCK-BYO-CHECK-FIXES (gateway copy; same sessions tests as Rovara Cloud)
+
+| Mutant | Change | Killed by | Result |
+| --- | --- | --- | --- |
+| M1, `#modelCheck` (bedrock-byo-sessions.ts) | drop the retry | tests/unit/model-gateway-bedrock-byo-sessions.test.ts: "asks once more..." and "logs both asks..." | red (2 of 18) |
+| M2, `classifyAnswer`/`#ask` | map `no_answer` back to `unavailable` | same file: "tells each model's state...", the retry, caller-abort and retry-log tests | red (4 of 18) |
+| M7, `classifyAnswer` | any 2xx is ready | same file: "tells each model's state..." and the retry test | red (2 of 18) |
+| M11, `recheckBedrock` (product-keys.ts) | a check again saves nothing new (returns the old summary) | tests/unit/model-gateway-bedrock-byo.test.ts: "a check again re-runs the test for the SAVED connection..." | red (1 of 27) |
+
+## Pre-review round: gateway copy (Cloud 1d33e9794 bytes; append only)
+
+| Mutant | Change | Killed by | Result |
+| --- | --- | --- | --- |
+| M12, `classifyAnswer` | retry on any status of 400 or more | tests/unit/model-gateway-bedrock-byo-sessions.test.ts: "asks once more..." (401, 408, 413, 422, 424, 499 are one ask) | red (1 of 20) |
+| M13, `expectedAnswer` | a Messages answer is ready only with stop_reason max_tokens | same file: "tells each model's state..." | red (1 of 20) |
+| M14, `#modelCheck` | no budget check before the retry | same file: "does not ask again when a whole ask no longer fits..." | red (1 of 20) |
+| M18, `#logCheck` | the company id is left out of the log line | same file: the logging tests | red (2 of 20) |
+| M16, `answerBedrockCheck` | no per-company limit | tests/unit/model-gateway-bedrock-check-company-limit.test.ts | red (1 of 2) |
+| M17, `parseDoc` | an unknown stored state word is kept as it is | tests/unit/model-gateway-bedrock-byo.test.ts: "a state word a later release stored reads as no_answer..." | red (1 of 29) |
+| M17b, `validBedrockSummary` | the strict word list again | same test | red (1 of 29) |
+| M9s, `recheckBedrock` | a good re-check keeps a call-time refusal marker | same file: "a check again clears a call-time refusal marker..." | red (1 of 29) |
+
+## Product models and stale divergences (Code; append only)
+
+| Mutant | Change | Killed by | Result |
+| --- | --- | --- | --- |
+| M23, `gatewayBedrockCheck` | the answer is read only for the agents' picks (product models read unavailable) | tests/unit/model-gateway-bedrock-check-company-limit.test.ts: "tells the gateway the connection's product models..." | red (1 of 3) |
+| M25, `runProof` | the stale-divergence check is not run | tests/contract/gateway-catch-up-proof.test.ts: "fails on a divergence record that is Cloud's own pinned blob..." | red (1 of 15) |
