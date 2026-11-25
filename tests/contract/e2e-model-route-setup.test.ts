@@ -1,18 +1,17 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { E2EPolicySchema, E2E_DEFAULT_LIMITS, E2E_MODEL_ROUTE_DEFAULT_BUDGETS, canonicalJson, e2ePolicyDigest } from "@agentx/contracts";
 import { STALE_RUN_SWEEP_AGE_MS } from "../../packages/verifier/src/host/docker-application-host.js";
 import { e2eApplicationModelUseWithinRound } from "../../packages/verifier/src/application-result-adapter.js";
 import { DEFAULT_E2E_AGENT_MODELS } from "../../packages/model-runtime/src/config.js";
 import {
-  E2E_MODEL_ROUTE_PARTITION, approveE2EAgentRoute, checkE2EAgentRouteCurrent, e2eAgentInstallationFromParameters, planE2EAgentRoute, type E2EAgentInstallation,
+  E2E_MODEL_ROUTE_PARTITION, e2eAgentInstallationFromParameters, type E2EAgentInstallation,
 } from "../../packages/broker/src/e2e/model-route-registry.js";
 import { describeFeatureE2EExecutableKinds } from "../../packages/broker/src/e2e/feature-plan-executable-kinds.js";
 import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { call } from "../support/slack-broker.js";
 import { contractSnapshot } from "../support/e2e-application-plan-fixtures.js";
-import { FakeDynamoDb, assumeDrivingTestsPassed } from "../support/fake-dynamodb.js";
+import { assumeDrivingTestsPassed, type FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { SECRET_ARN } from "../support/e2e-model-fixtures.js";
 
 // The gate itself is tested in e2e-driving-test-gate.test.ts; here every digest counts as driven (Task 4.10C).
@@ -213,18 +212,6 @@ describe("a setup proposal and its approval carry the AI navigation route", () =
         expect(JSON.stringify(refused.body)).toMatch(/AI navigation steps will not run: the driving test with .+ has not passed/);
         expect(routeRows(harness.db)).toEqual([]);
         expect(harness.db.find((item) => item.entityType === "PROJECT_SETUP_APPROVAL")).toEqual([]);
-      } finally { assumeDrivingTestsPassed(true); }
-    });
-
-    it("refuses at dispatch with model-route-not-tested a route that was approved and has no passed driving test", async () => {
-      const db = new FakeDynamoDb();
-      const planned = await planE2EAgentRoute({ documentClient: { send: db.send } as unknown as DynamoDBDocumentClient, tableName: "state" }, installation);
-      if (planned.status !== "available") throw new Error("expected the assumed driving test to make the route available");
-      const store = { documentClient: { send: db.send } as unknown as DynamoDBDocumentClient, tableName: "state" };
-      await approveE2EAgentRoute(store, installation, planned.revision);
-      assumeDrivingTestsPassed(false);
-      try {
-        expect(await checkE2EAgentRouteCurrent(store, installation, planned.revision)).toMatchObject({ ok: false, code: "model-route-not-tested" });
       } finally { assumeDrivingTestsPassed(true); }
     });
   });

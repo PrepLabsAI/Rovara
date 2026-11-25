@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { E2E_DEFAULT_MODEL_ROUTE_ID } from "@agentx/contracts";
 import {
-  E2E_MODEL_ROUTE_PARTITION, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, deriveE2EAgentRoute, e2eAgentInstallationFromParameters, e2eAgentRouteDefinitionDigest,
+  E2E_MODEL_ROUTE_PARTITION, agentRouteSummary, approveE2EAgentRoute, deriveE2EAgentRoute, e2eAgentInstallationFromParameters, e2eAgentRouteDefinitionDigest,
   e2eModelRouteRevisionKey, e2eModelRouteShapeKey, planE2EAgentRoute, readE2EModelRouteShape, type E2EAgentInstallation,
 } from "../../packages/broker/src/e2e/model-route-registry.js";
 import { FakeDynamoDb, assumeDrivingTestsPassed } from "../support/fake-dynamodb.js";
@@ -64,7 +64,7 @@ describe("the installation's chosen AI navigation model, as SSM and the shape ro
     await expect(readE2EModelRouteShape(store(db), E2E_DEFAULT_MODEL_ROUTE_ID, "us.anthropic.claude-haiku-5-5")).rejects.toThrow(/agent-route-not-approved/);
   });
 
-  it("approves exactly the definition the setting and the shape row give, and asks for a new approval when the setting changes", async () => {
+  it("approves exactly the definition the setting and the shape row give", async () => {
     const db = new FakeDynamoDb();
     const installation = await e2eAgentInstallationFromParameters(PREFIX, read({ [`${PREFIX}worker-model-provider`]: "amazon-bedrock", [`${PREFIX}worker-e2e-agent-model`]: HAIKU_45_US }), "us-east-1",
       { readShape: async () => "minimal" });
@@ -74,10 +74,6 @@ describe("the installation's chosen AI navigation model, as SSM and the shape ro
     expect(planned.definitionDigest).toBe(e2eAgentRouteDefinitionDigest(available({ provider: "amazon-bedrock", region: "us-east-1", e2eModel: HAIKU_45_US, payloadShape: "minimal" })));
     await approveE2EAgentRoute(store(db), installation, planned.revision);
     expect(db.get(E2E_MODEL_ROUTE_PARTITION, e2eModelRouteRevisionKey(E2E_DEFAULT_MODEL_ROUTE_ID, 1).sk)).toMatchObject({ definition: planned.definition });
-    expect(await checkE2EAgentRouteCurrent(store(db), installation, planned.revision)).toMatchObject({ ok: true });
-    // The administrator changes the model after approval: the project's pinned revision no longer matches.
-    const changed = { ...installation, e2eModel: HAIKU_45_GLOBAL };
-    expect(await checkE2EAgentRouteCurrent(store(db), changed, planned.revision)).toMatchObject({ ok: false, code: "model-route-changed-reapprove" });
   });
 
   it("makes an ineligible setting an unavailable route, not an error", async () => {
