@@ -40,5 +40,6 @@ export function brokerCoreWorkerMachines(deps: BrokerCoreWorkerMachinesDependenc
     sign: dispatchOnly,
     post: dispatchOnly,
     ping: liveHealthUnavailable,
+    verifyMachine: dispatchOnly,
   };
 }

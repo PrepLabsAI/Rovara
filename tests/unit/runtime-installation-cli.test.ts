@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { requestRuntimeInstallChallenge } from "../../packages/cli/src/admin/runtime-installation.js";
 
 const challenge = {
@@ -40,16 +40,34 @@ describe("runtime installation challenge CLI response", () => {
     await writeFile(bindingFile, JSON.stringify(challenge.binding), { mode: 0o600 });
     try {
       const response = { requestId: "apigw:ZKx7mF3nY=", ...challenge };
-      const fetcher: typeof fetch = async () => new Response(JSON.stringify(response), { status: 201 });
+      const sent: unknown[] = [];
+      const fetcher: typeof fetch = async (_url, init) => { sent.push(init?.body); return new Response(JSON.stringify(response), { status: 201 }); };
       const result = await requestRuntimeInstallChallenge({
         controlPlaneUrl: "https://control.example", accessToken: "test-token", bindingFile,
         endpoint: challenge.endpoint, generation: challenge.generation,
-        transportCorrelationId: challenge.transportCorrelationId, profileId: challenge.profileId, outputFile,
+        transportCorrelationId: challenge.transportCorrelationId, profileId: challenge.profileId, outputFile, instanceId: "i-0123456789abcdef0",
       }, fetcher);
+      expect(JSON.parse(String(sent.at(-1)))).toMatchObject({ instanceId: "i-0123456789abcdef0", profileId: challenge.profileId });
 
       expect(result.challengeId).toBe(challenge.challengeId);
       expect(JSON.parse(await readFile(outputFile, "utf8"))).toEqual(challenge);
       expect((await stat(outputFile)).mode & 0o777).toBe(0o600);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // WORKER-DELIVERY-IDENTITY (WDI-SETUP): the standard profile's challenge names its instance, and the tool refuses before anything is sent when it does not.
+  it("refuses a standard-profile challenge without an EC2 instance id, and a malformed one, before any request", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-runtime-install-challenge-"));
+    const bindingFile = join(root, "binding.json");
+    await writeFile(bindingFile, JSON.stringify(challenge.binding), { mode: 0o600 });
+    try {
+      const fetcher = vi.fn<typeof fetch>(async () => new Response("{}", { status: 201 }));
+      const base = { controlPlaneUrl: "https://control.example", accessToken: "t", bindingFile, endpoint: challenge.endpoint, generation: challenge.generation, transportCorrelationId: challenge.transportCorrelationId, profileId: "linux-arm64-docker-v1" as const, outputFile: join(root, "c.json") };
+      await expect(requestRuntimeInstallChallenge(base, fetcher)).rejects.toThrow(/--instance-id/);
+      await expect(requestRuntimeInstallChallenge({ ...base, instanceId: "ami-0123456789abcdef0" }, fetcher)).rejects.toThrow(/--instance-id/);
+      expect(fetcher).not.toHaveBeenCalled();
     } finally {
       await rm(root, { recursive: true, force: true });
     }

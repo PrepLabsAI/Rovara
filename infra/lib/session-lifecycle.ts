@@ -26,6 +26,7 @@ import { EC2_WORKER_AMI_PARAMETER } from "./ec2-workers.js";
 import type { AgentXNaming } from "./naming.js";
 import { addBrokerName } from "./broker-names.js";
 import { deleterDefinition, provisionerDefinition } from "./session-state-machines.js";
+import { InstanceStateChange } from "./instance-state-change.js";
 
 export interface SessionLifecycleProps {
   naming: AgentXNaming;
@@ -296,6 +297,9 @@ export class SessionLifecycle extends Construct {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(props.notifyOperator);
 
+    // WORKER-DELIVERY-IDENTITY step 0 (ii): an instance that ends marks its READY session lost within seconds; the reconciler above stays as the backstop.
+    new InstanceStateChange(this, "InstanceStateChange", { naming, state: props.state });
+
     new CfnOutput(stack, "SessionProvisionerArn", { value: this.provisioner.stateMachineArn });
     new CfnOutput(stack, "SessionDeleterArn", { value: this.deleter.stateMachineArn });
   }
@@ -311,6 +315,21 @@ export class SessionLifecycle extends Construct {
     };
     dispatcher.role!.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaVPCAccessExecutionRole"));
     this.connectExecutions(dispatcher);
+    // WORKER-DELIVERY-IDENTITY (b-plus): before every POST the dispatcher asks EC2 whether the row's instance is running, at the row's address and tagged for the row's workspace
+    // (packages/broker/src/aws/machine-check.ts). Read-only, and EC2 cannot scope Describe to a resource. It is the dispatcher's only EC2 permission: no terminate, no run, no tag.
+    dispatcher.addToRolePolicy(new iam.PolicyStatement({ sid: "VerifyWorkerMachine", actions: ["ec2:DescribeInstances"], resources: ["*"] }));
+    // WDI-SETUP: a project setup delivery that could not be verified (its runtime catalog row names no instance: registered before the install tooling did) counts one SetupMachineUnverified through the
+    // dispatcher's own log line (embedded metric format), and this alarm reports it. It is ALARM while grace is being used and clears when it stops, so the day to turn grace off is visible.
+    dispatcher.addEnvironment("AGENTX_METRICS_NAMESPACE", this.naming.metricsNamespace);
+    new cloudwatch.Alarm(this, "SetupMachineUnverifiedAlarm", {
+      alarmName: this.naming.alarmName("SetupMachineUnverified"),
+      alarmDescription: "A project setup run was sent to a runtime whose catalog row names no EC2 instance, so its machine could not be checked (grace for rows registered before the install tooling named the instance). Register the runtime again with --instance-id; grace ends by itself on 2026-12-09.",
+      metric: new cloudwatch.Metric({ namespace: this.naming.metricsNamespace, metricName: "SetupMachineUnverified", statistic: "Sum", period: Duration.minutes(15) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(this.notifyOperator);
     dispatcher.addEnvironment("INVOKE_SIGNING_KEY_ARN", this.invokeSigningKey.keyArn);
     this.provisioner.grantStartExecution(dispatcher);
   }

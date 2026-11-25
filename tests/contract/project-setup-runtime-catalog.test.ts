@@ -40,4 +40,11 @@ describe("server configured project setup runtime registry", () => {
     expect(ProjectSetupRuntimeRecordSchema.safeParse({ ...parsed, runnerToolchain: { ...parsed.runnerToolchain, execPath: "/tmp/other-node" } }).success).toBe(false);
     expect(admitProjectSetupRuntime(parsed, { runtimeCatalogId: parsed.runtimeCatalogId, binding, scope: "feature-execution", now: Date.parse("2026-10-13T12:30:00.000Z") })).toBeUndefined();
   });
+
+  it("reads a row that predates the instance id, keeps one that names it, and refuses a malformed one (WDI-SETUP)", () => {
+    const old = ProjectSetupRuntimeRecordSchema.parse(record);
+    expect(old.instanceId).toBeUndefined();
+    expect(ProjectSetupRuntimeRecordSchema.parse({ ...record, instanceId: "i-0123456789abcdef0" }).instanceId).toBe("i-0123456789abcdef0");
+    for (const bad of ["", "i-xyz", "ami-0123456789abcdef0", "i-0123456789abcdef0 "]) expect(ProjectSetupRuntimeRecordSchema.safeParse({ ...record, instanceId: bad }).success, bad).toBe(false);
+  });
 });

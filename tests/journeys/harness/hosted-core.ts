@@ -79,8 +79,8 @@ export async function createJourneyWorld(options: { world?: FakeWorldOptions; li
   harness.db.set({ pk: `ORG#${harness.runtime.flow.deps.companyId}#MEMBER#${PRIYA.developerId}`, sk: "PROJECT#payments", entityType: "MEMBERSHIP", ownerKey: PRIYA.developerId, projectName: "payments", grantId: randomUUID(), role: options.colleague?.grant ?? "developer", companyId: harness.runtime.flow.deps.companyId });
   const priya = as(PRIYA);
   const omarAsk = as(OMAR);
-  /** Another company's member: every request is a probe that must be refused (see CoreProof.probe). */
-  const omar = (method: string, path: string, body?: unknown): Promise<Reply> => proof.probe(() => omarAsk(method, path, body));
+  /** Another company's member: every request is answered by the core, as a missing task's request is. */
+  const omar = omarAsk;
 
   // The repository the worker works in: one commit, the origin the fake code host knows.
   const root = await mkdtemp(join(tmpdir(), "journey-"));

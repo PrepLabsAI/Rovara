@@ -20,7 +20,7 @@ import { createTaskAuthorityAdmission } from "./task-authority-admission.js";
 import type { CoreDispatchHost } from "./worker-machines/core-dispatch-host.js";
 import { coreDispatchQueueArn, createDispatcherCoreHost, dispatcherStopInstance, hostedDispatcherFlow, withCoreDispatch } from "./worker-machines/dispatcher-core.js"; import { loadCallbackSigningKey } from "./callback-signing-key.js"; import { createDispatcherLessonsPeople } from "./worker-machines/dispatcher-people.js"; // one line: no line of dispatcher.ts moves (the company inventory pins its sites by line)
 import { createHostedMoneyStop, gatewayModelKeysModules, hostedSecurityModules, hostedTaskCapUsd, readHostedAdmissionSettings, runStopWiredFrom } from "../core-host/hosted-modules.js"; import { dispatcherProjectTaskCap } from "./engine-policy-hook.js";
-import { sessionWorkerPing, type SessionWorkerPing } from "./worker-machines/session-worker-machines.js";
+import { sessionWorkerPing, type SessionWorkerPing } from "./worker-machines/session-worker-machines.js"; import { dispatcherMachineChecks } from "./machine-check-aws.js"; let checks: ReturnType<typeof dispatcherMachineChecks> | undefined; const machineChecks = () => (checks ??= dispatcherMachineChecks({ documentClient, tableName, sessions: dispatcherSessions })); // built on first use (the State table name is required then, never an empty string)
 
 const DEFAULT_MAX_DISPATCH_ATTEMPTS = 5;
 
@@ -170,9 +170,9 @@ export function createProjectSetupDispatchLifecycle(input: { documentClient: Dyn
       const now = (input.now ?? (() => new Date()))().toISOString();
       await input.documentClient.send(new TransactWriteCommand({ TransactItems: [
         { Update: { TableName: input.tableName, Key: projectSetupExecutionKey(setupId),
-          UpdateExpression: "SET #state = :failed, updatedAt = :now, error = :error",
+          UpdateExpression: "SET #state = :failed, updatedAt = :now, #error = :error",
           ConditionExpression: "#state = :accepted OR #state = :dispatching",
-          ExpressionAttributeNames: { "#state": "state" }, ExpressionAttributeValues: { ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":failed": "FAILED", ":now": now, ":error": message.slice(0, 2_000) } } },
+          ExpressionAttributeNames: { "#state": "state", "#error": "error" }, ExpressionAttributeValues: { ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":failed": "FAILED", ":now": now, ":error": message.slice(0, 2_000) } } },
         { Update: { TableName: input.tableName, Key: projectSetupOperationKey(setupId, record.operationId),
           UpdateExpression: "SET #status = :failed, updatedAt = :now, #error = :error",
           ConditionExpression: "#status = :accepted OR #status = :dispatching OR #status = :delivered",
@@ -493,7 +493,7 @@ const deliverEc2 = createEc2Delivery({
   projectSetupBinding: createProjectSetupBindingReader({ documentClient, ...(tableName === undefined ? {} : { tableName }) }),
   binding: (workspaceId) => workspaceBinding(documentClient, tableName ?? requiredEnvironment("STATE_TABLE_NAME"), workspaceId),
   sign: signWithInvokeKey,
-  post: postToWorker,
+  post: postToWorker, verifyMachine: (machine) => machineChecks().verifyMachine(machine), failOperation: (record, error, machine) => machineChecks().failOperation(record, error, machine),
   workerFeatures: (url) => workerPingFeatures(url),
   // Reads the admission a CHECKS reference names to hold its `kind` to it. Without the artifact bucket (a deployment that has not granted it) only the kind decides.
   ...(process.env.ARTIFACT_BUCKET_NAME === undefined || process.env.ARTIFACT_BUCKET_NAME === "" ? {} : {
@@ -572,9 +572,9 @@ const workflowHandler = createDispatcherHandler({
       const now = new Date().toISOString();
       await documentClient.send(new TransactWriteCommand({ TransactItems: [
         { Update: { TableName: tableName ?? requiredEnvironment("STATE_TABLE_NAME"), Key: projectSetupExecutionKey(setupId),
-          UpdateExpression: "SET #state = :failed, updatedAt = :now, error = :error",
+          UpdateExpression: "SET #state = :failed, updatedAt = :now, #error = :error",
           ConditionExpression: "#state = :accepted OR #state = :dispatching",
-          ExpressionAttributeNames: { "#state": "state" }, ExpressionAttributeValues: { ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":failed": "FAILED", ":now": now, ":error": message.slice(0, 2_000) } } },
+          ExpressionAttributeNames: { "#state": "state", "#error": "error" }, ExpressionAttributeValues: { ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":failed": "FAILED", ":now": now, ":error": message.slice(0, 2_000) } } },
         { Update: { TableName: tableName ?? requiredEnvironment("STATE_TABLE_NAME"), Key: projectSetupOperationKey(setupId, record.operationId),
           UpdateExpression: "SET #status = :failed, updatedAt = :now, #error = :error",
           ConditionExpression: "#status = :accepted OR #status = :dispatching OR #status = :delivered",
@@ -634,7 +634,7 @@ export const handler = withCoreDispatch(workflowHandler, {
         env: process.env, callbackSigningKey, deliveryAccess: async (deps, operation, workspace) => createTaskDispatchGuard({ companyId: deps.companyId, workspacePk: workspace.pk, ttlAttribute: deps.store.ttlAttribute })({ id: operation.id, operationId: operation.id, workspaceId: operation.workspaceId, invocation: { kind: operation.dispatch.kind, fence: operation.fence } }),
         documentClient,
         clients: { dynamo: new DynamoDBClient(awsClientConfiguration), sqs, s3: new S3Client(awsClientConfiguration) },
-        machines: { sessions: dispatcherSessions, stopInstance: dispatcherStopInstance, sign: signWithInvokeKey, post: postToWorker, ping: pingWorker },
+        machines: { sessions: dispatcherSessions, stopInstance: dispatcherStopInstance, sign: signWithInvokeKey, post: postToWorker, ping: pingWorker, verifyMachine: (machine) => machineChecks().verifyMachine(machine) },
         changeVisibility: async (receiptHandle, seconds) => { await sqs.send(new ChangeMessageVisibilityCommand({ QueueUrl: queueUrl, ReceiptHandle: receiptHandle, VisibilityTimeout: seconds })); },
         // Resolve lessons separately for each runtime. The reader rechecks ownership from the workspace record, never the dispatch payload.
         flow: (registry, companyId) => {

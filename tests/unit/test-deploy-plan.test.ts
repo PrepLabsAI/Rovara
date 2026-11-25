@@ -477,7 +477,7 @@ describe("liftSynthArguments", () => {
 
 const ALL_IDS = [
   "BrokerE1355FD6", "ChannelApiEventSenderDECD5203", "ChannelApiIngress9235D30E", "DeveloperSignInFunction10B62B05", "DeveloperTaskNotifierFunction551419CC", "DispatcherD4A12972", "EvalBatchTickA4585B04",
-  "OutboxPublisherD572F72E", "PlanEvidence3615C4CB", "SessionsReaper8FEF958E", "SessionsReconciler4316A0A2", "SessionsSteps3B98DD2B", "SlackIngress5C88FFA0",
+  "OutboxPublisherD572F72E", "PlanEvidence3615C4CB", "SessionsReaper8FEF958E", "SessionsInstanceStateChangeFunctionB24AEB67", "SessionsReconciler4316A0A2", "SessionsSteps3B98DD2B", "SlackIngress5C88FFA0",
 ];
 
 describe("the control-plane-code unit", () => {
@@ -542,8 +542,9 @@ describe("assertOnlyExpectedChanges for every control-plane Lambda (change set d
   const live = JSON.parse(readFileSync(new URL("../fixtures/test-deploy/control-plane-all-code-change-set.json", import.meta.url), "utf8")) as { Changes: Change[] };
   const expectation = (logicalIds: readonly string[]) => ({ action: "Modify", logicalIds, allowedAttributes: ["Properties.Code"], allowArnReevaluations: true }) as const;
   // The fixture is a change set recorded from a TEST deploy before spec 062 added the channel API's two Lambdas, so it is judged
-  // against the Lambdas it was recorded with. Record it again after the first TEST deploy that has them, and drop this filter.
-  const RECORDED_IDS = ALL_IDS.filter((id) => !id.startsWith("ChannelApi"));
+  // against the Lambdas it was recorded with. Record it again after the first TEST deploy that has them, and drop this filter. The same holds
+  // for WORKER-DELIVERY-IDENTITY's EC2 state-change Lambda (SessionsInstanceStateChangeFunction), added after the recording.
+  const RECORDED_IDS = ALL_IDS.filter((id) => !id.startsWith("ChannelApi") && !id.startsWith("SessionsInstanceStateChange"));
   const all = expectation(RECORDED_IDS);
   const fresh = (): Change[] => structuredClone(live.Changes);
   const find = (changes: Change[], logicalId: string) => changes.find((change) => change.ResourceChange?.LogicalResourceId === logicalId)!.ResourceChange!;

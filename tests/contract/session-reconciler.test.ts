@@ -138,6 +138,41 @@ describe("reconciler: instances", () => {
     expect(third.unresponsiveInstances).toEqual([worker.instanceId]);
     expect(terminate).toHaveBeenCalledExactlyOnceWith(worker.instanceId);
   });
+
+  // WORKER-DELIVERY-IDENTITY step 0 (i): the reconciler's own terminate of an unresponsive worker used to leave the row READY (its address open to deliveries) until the next run, ten minutes on.
+  it("marks the session lost and fails its operation in the same run that terminates an unresponsive worker", async () => {
+    const worker = ready();
+    const operationId = randomUUID();
+    const { db, state, reconcile, terminate } = setup({ ping: async () => { throw new Error("timeout"); } });
+    const workspaceId = seedSession(db, "READY", worker, { status: "BUSY", activeOperationId: operationId });
+    db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}`, kind: "task", status: "RUNNING", fence: 1 });
+    state.instances = [{ instanceId: worker.instanceId, state: "running", workspaceId, launchedAt: minutesAgo(60) }];
+
+    await reconcile();
+    await reconcile();
+    // Two failures: still READY, still the worker's address, the operation still running.
+    expect(sessionOf(db, workspaceId)).toMatchObject({ state: "READY", privateIp: worker.privateIp, pingFailures: 2 });
+    expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`)).toMatchObject({ status: "RUNNING" });
+
+    const third = await reconcile();
+    expect(terminate).toHaveBeenCalledExactlyOnceWith(worker.instanceId);
+    expect(third.unresponsiveInstances).toEqual([worker.instanceId]);
+    // The same run: the row is STOPPED with no instance and no address, the volume kept, the operation failed with the fixed words, the workspace released.
+    expect(third.lostInstances).toEqual([worker.instanceId]);
+    expect(sessionOf(db, workspaceId)).toMatchObject({ state: "STOPPED", sessionState: "STOPPED", volumeId: worker.volumeId });
+    expect(sessionOf(db, workspaceId)).not.toHaveProperty("instanceId");
+    expect(sessionOf(db, workspaceId)).not.toHaveProperty("privateIp");
+    expect(sessionOf(db, workspaceId)).not.toHaveProperty("pingFailures");
+    expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`)).toMatchObject({ status: "FAILED", error: "RUNTIME_UNAVAILABLE: workspace compute was lost; retry the request" });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "READY" });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).not.toHaveProperty("activeOperationId");
+
+    // The next run, with the instance gone, has nothing left to repair (it is not lost twice) and does not terminate it again.
+    state.instances = [];
+    const next = await reconcile();
+    expect(next.lostInstances).toEqual([]);
+    expect(terminate).toHaveBeenCalledOnce();
+  });
 });
 
 describe("reconciler: pointer faults", () => {
