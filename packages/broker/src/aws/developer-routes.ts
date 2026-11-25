@@ -1,3 +1,4 @@
+import { readingMembership, rethrowMembershipReadFailure } from "../developer/membership-read.js";
 import { prepareTaskPeopleStart } from "../developer/task-people-start.js";
 import { companyMembershipFromDynamo } from "./company-check.js";
 import type { TaskPeopleDependencies } from "../developer/task-people.js";
@@ -905,7 +906,7 @@ async function clientCompany(deps: DeveloperRouteDependencies, client: SignInCli
     const companyId = await resolveCompany(deps.companies, personId);
     if (client.installLevel !== true && (client.companyId ?? IMPLICIT_COMPANY_ID) !== companyId) throw new Error("client unavailable");
     return companyId;
-  } catch { throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED); }
+  } catch (error) { rethrowMembershipReadFailure(error); throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED); }
 }
 
 /** RFC 6749 2.3.1 HTTP Basic client credentials, or undefined. */
@@ -1025,7 +1026,7 @@ async function slackWorkspaceOf(deps: DeveloperRouteDependencies, developerId: s
 async function codeCompanyOf(deps: DeveloperRouteDependencies, client: { send(command: unknown): Promise<unknown> }, developerId: string, companyId: string): Promise<Pick<AccessCheckResponse, "companyId" | "companyRole" | "companyName">> {
   const refused = () => agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
   let membership: { companyId: string; role: OrgRole } | undefined;
-  try { membership = await deps.companies?.membershipOf?.(developerId); } catch { throw refused(); }
+  try { membership = await deps.companies?.membershipOf?.(developerId); } catch (error) { rethrowMembershipReadFailure(error); throw refused(); }
   if (membership === undefined || membership.companyId !== companyId || !OrgRoleSchema.safeParse(membership.role).success) throw refused();
   const key = companyKey(companyId);
   const stored = (await client.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> }).Item;
@@ -1159,11 +1160,14 @@ async function readClientProject(deps: DeveloperRouteDependencies, developerId: 
 async function companylessSession(deps: DeveloperRouteDependencies, client: SignInClientRecord, session: SessionRecord): Promise<boolean> {
   if (deps.companies === undefined || client.installLevel !== true || client.fullAccess !== true || client.webApp !== true || (session.amr !== "oidc" && session.amr !== "slack" && session.amr !== "github") || session.companyId !== undefined) return false;
   try {
-    const membership = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: membershipKey(session.developerId), ConsistentRead: true })) as { Item?: unknown };
-    if (membership.Item !== undefined) return false;
-    const developer = await getSignIn<{ revoked?: unknown; companyless?: unknown }>(deps, `DEVELOPER#${session.developerId}`);
-    return developer?.revoked === false && developer.companyless === true;
-  } catch { return false; }
+    // Reads only: a read that FAILS is the retryable 503, never "not companyless" (membership-read.ts); any other doubt is no.
+    return await readingMembership(async () => {
+      const membership = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: membershipKey(session.developerId), ConsistentRead: true })) as { Item?: unknown };
+      if (membership.Item !== undefined) return false;
+      const developer = await getSignIn<{ revoked?: unknown; companyless?: unknown }>(deps, `DEVELOPER#${session.developerId}`);
+      return developer?.revoked === false && developer.companyless === true;
+    });
+  } catch (error) { rethrowMembershipReadFailure(error); return false; }
 }
 
 /** Only the token scopes still allowed by the registration, or all scopes for a full-access client. */
@@ -1234,6 +1238,8 @@ async function authenticateClientToken(deps: DeveloperRouteDependencies, authori
   try {
     return await verifyClientSessionAndCompany(deps, client, claims, amr, nowSeconds, options, refused);
   } catch (error) {
+    // A failed membership read is not a refusal: it answers the retryable 503 and ends nothing.
+    rethrowMembershipReadFailure(error);
     if (deps.companies !== undefined && amr === "oidc") throw refused();
     throw error;
   }

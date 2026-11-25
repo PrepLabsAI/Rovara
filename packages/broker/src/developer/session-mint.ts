@@ -2,6 +2,7 @@
 // The two steps every session start shares, factored out of the sign-in server (a pure move: server.ts calls these exactly as it ran them inline) so the beta canary's
 // session function (canary-session.ts) builds its session with the same code and never a copy: (1) "may this person hold a session for this company right now" and
 // (2) "write the SESSION row, then issue the access token". Nothing here reads a request; every input is a parameter.
+import { membershipReadFailed } from "./membership-read.js";
 import { IMPLICIT_COMPANY_ID, OrgIdSchema, type DeveloperSignInMethod, type SignInClientRecord } from "@agentx/contracts";
 import type { CompanySignInStore } from "./company-membership.js";
 import type { CodeGrant, DeveloperSignInStore, SessionRecord } from "./store.js";
@@ -56,7 +57,11 @@ export async function companyMayMint(deps: MintCheckDependencies, personId: stri
     // Company is live membership; a registered audience cannot cross its owner.
     return member !== undefined && member.revokedAt === undefined && member.companyId === candidate
       && (registered === undefined || registered.installLevel === true || member.companyId === (registered.companyId ?? IMPLICIT_COMPANY_ID));
-  } catch { return false; }
+  } catch {
+    // Everything read above is a read of membership, the company's sign-in settings or the Slack binding: a THROW is "the read failed", never "may not mint". Only a read that answers decides a refusal,
+    // so a failed read can neither refuse a person nor (at the refresh) end their session; the caller answers the retryable 503 (membership-read.ts).
+    throw membershipReadFailed();
+  }
 }
 
 /** One access token as the sign-in server issues it (server.ts `accessToken`, tokens.ts `issueAccessToken`). */

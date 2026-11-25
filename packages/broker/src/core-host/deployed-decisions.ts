@@ -1,3 +1,4 @@
+import { isMembershipReadFailure, membershipReadFailed } from "../developer/membership-read.js";
 import { hostedPrFeedbackRoutes } from "./pr-feedback-routes.js";
 import { taskOwnerView } from "../developer/task-owner-view.js";
 // Switch-on lane L11: the decision cards, the session levels and how we work on the deployed core's developer routes (`core-host/dev-routes.ts`, `CoreDevWiring`), from the company's OWN records.
@@ -67,11 +68,14 @@ export interface DeployedPeople {
 const PERSON_ID = /^[^#\s]{1,256}$/u;
 const isPrincipal = (value: unknown): value is Principal => value !== null && typeof value === "object" && typeof (value as Principal).personId === "string" && typeof (value as Principal).provider === "string" && typeof (value as Principal).companyId === "string";
 
-/** The person's live membership in THIS company, or undefined (another company's, none, revoked, malformed, or a read that failed). */
+/**
+ * The person's live membership in THIS company, or undefined (another company's, none, revoked, malformed). A read that FAILED is NOT "none": it throws the retryable membership-read failure
+ * (membership-read.ts), so no session, decision or task read answers "no such session" for a member whose row could not be read just now.
+ */
 export async function liveMemberRole(people: DeployedPeople, companyId: OrgId, personId: string): Promise<OrgRole | undefined> {
   if (typeof personId !== "string" || !PERSON_ID.test(personId)) return undefined;
   let membership: { companyId: OrgId; role: OrgRole } | undefined;
-  try { membership = await people.membershipOf(personId); } catch { return undefined; }
+  try { membership = await people.membershipOf(personId); } catch (error) { throw isMembershipReadFailure(error) ? error : membershipReadFailed(); }
   if (membership === undefined || membership === null || typeof membership !== "object" || membership.companyId !== companyId || !OrgRoleSchema.safeParse(membership.role).success) return undefined;
   return membership.role;
 }
@@ -89,17 +93,20 @@ export function hostedChatApproval(threads: Pick<ChatThreads, "channels" | "comp
   return {
     channel, key, companyOf: threads.companyOf,
     personOf: async (companyId, account) => (await personOf.call(threads, companyId, { channel: account.provider, tenant: account.tenant, userId: account.accountId }))?.personId,
-    holdsProjectGrant: async (companyId, personId, project) => (await liveMemberRole(people, companyId, personId)) !== undefined && (await liveGrant(people, personId, project)) !== undefined,
+    // A chat press is not a request whose answer can be retried as a 503: a failed read refuses the press, as before.
+    holdsProjectGrant: async (companyId, personId, project) => {
+      try { return (await liveMemberRole(people, companyId, personId)) !== undefined && (await liveGrant(people, personId, project)) !== undefined; } catch { return false; }
+    },
   };
 }
 
-/** The person's live project grant, read fresh. A failed read is no grant. */
+/** The person's live project grant, read fresh. A read that FAILED is not "no grant": it throws the retryable membership-read failure (membership-read.ts). */
 export async function liveGrant(people: DeployedPeople, personId: string, project: string): Promise<"developer" | "administrator" | undefined> {
   try {
     const role = await people.projectGrantRole(personId, project);
     return role === "developer" || role === "administrator" ? role : undefined;
-  } catch {
-    return undefined;
+  } catch (error) {
+    throw isMembershipReadFailure(error) ? error : membershipReadFailed();
   }
 }
 

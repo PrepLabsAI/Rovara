@@ -87,9 +87,10 @@ it("administrator company retries hide other-company rows and fail closed on mem
   const read = (deps: unknown, id: string) => retryGithubWebhookAsAdministrator(deps as never, admin as never, id).catch((e: { code: string; message: string; statusCode: number }) => ({ code: e.code, message: e.message, statusCode: e.statusCode }));
   expect(await read(base, ID)).toEqual(await read(base, ID.slice(0, -1) + "1"));
   expect(await read(base, ID)).toMatchObject({ code: "NOT_FOUND" });
-  for (const companyOf of [async () => undefined, async () => "private-canary", async () => { throw new Error("private-canary"); }]) {
+  for (const [index, companyOf] of [async () => undefined, async () => "private-canary", async () => { throw new Error("private-canary"); }].entries()) {
     const response = await read({ ...base, companies: { companyOf } }, ID);
-    expect(response).toMatchObject({ code: "AUTH_REQUIRED" });
+    // A reader that answers nothing or garbage is the refusal; a reader that THROWS is a failed read, the retryable 503 (membership-read.ts). Neither shows the reader's words.
+    expect(response).toMatchObject({ code: index === 2 ? "RUNTIME_UNAVAILABLE" : "AUTH_REQUIRED" });
     expect(JSON.stringify(response)).not.toContain("private-canary");
   }
 });

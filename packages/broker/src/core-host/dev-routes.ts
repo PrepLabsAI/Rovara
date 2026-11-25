@@ -1,3 +1,4 @@
+import { MEMBERSHIP_READ_FAILED_WORDS } from "../developer/membership-read.js";
 import { feedbackOwner } from "../core/pr-feedback/decide.js";
 import { isPrFeedbackPath, type createPrFeedbackRoutes } from "./pr-feedback-routes.js";
 import { committedResponse } from "../core/task-flow/committed-response.js";
@@ -725,6 +726,8 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
       if (starting && !unreadable && (membership === undefined || membership === null)) return undefined;
       // The involved list says "nothing" only when it is sure: a membership that could not be read is a fixed outage answer, never an empty list.
       if (unreadable && path === TASK_START && request.method === "GET") return errorAnswer(agentXError("RUNTIME_UNAVAILABLE", INVOLVED_UNAVAILABLE));
+      // A membership read that FAILED (any route, not only the involved list) is the retryable 503 (membership-read.ts), never the sign-in refusal or a missing task.
+      if (unreadable) return errorAnswer(agentXError("RUNTIME_UNAVAILABLE", MEMBERSHIP_READ_FAILED_WORDS));
       // Fail closed: no member company, a malformed one or an unknown role is a sign-in refusal, never the install's company.
       if (membership === undefined || membership === null || typeof membership !== "object" || typeof membership.companyId !== "string" || !ORG_ID.test(membership.companyId) || !OrgRoleSchema.safeParse(membership.role).success) return unauthenticated();
       const companyId = membership.companyId;

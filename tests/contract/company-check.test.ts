@@ -39,7 +39,8 @@ it("rejects invalid runtime readers and invalid member keys without leaking inpu
   const h = companyRouteHarness();
   for (const reader of [null, {}, { companyOf: 3 }]) {
     h.deps.companies = reader as never;
-    for (const path of paths) expect((await h.read(path)).statusCode).toBe(401);
+    // A reader that cannot be asked at all is a membership read that FAILED: fail closed (nothing served) with the retryable 503, never a sign-in refusal (membership-read.ts).
+    for (const path of paths) expect((await h.read(path)).statusCode).toBe(503);
   }
   const store = { get: vi.fn(async () => undefined) };
   const reader = companyMembershipFromStore(store);
@@ -50,7 +51,8 @@ it("rejects invalid runtime readers and invalid member keys without leaking inpu
 it("membership adapters sanitize read failures before exposing them to a caller", async () => {
   const fail = async (): Promise<never> => { throw new Error(COMPANY_A.canary); };
   for (const reader of [companyMembershipFromStore({ get: fail }), companyMembershipFromDynamo({ send: fail }, "State")]) {
-    await expect(reader.companyOf(PERSON)).rejects.toMatchObject({ code: "AUTH_REQUIRED", message: "AUTH_REQUIRED: your AgentX sign-in has ended; run agentx login <url> again" });
+    // MEMBERSHIP-READ-FAILS-SAFE: a failed read is the retryable 503 with the existing words, never "no membership" and never the store's own words.
+    await expect(reader.companyOf(PERSON)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: "RUNTIME_UNAVAILABLE: AgentX could not reach AWS just now; try again in a moment" });
   }
 });
 

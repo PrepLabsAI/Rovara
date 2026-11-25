@@ -93,7 +93,8 @@ describe("merge-up membership-resolved reads", () => {
     h.deps.companies = { companyOf: async () => { throw new Error(COMPANY_A.canary); } };
     for (const [path, method] of [[projectPath, "GET"], ["/v1/dev/access", "POST"], ...taskPaths.map((path) => [path, "GET"])] as const) {
       const response = await h.call(path, method);
-      expect(response.statusCode).toBe(401); expect(response.body).not.toContain(COMPANY_A.canary);
+      // A membership read that THROWS is the retryable 503 (membership-read.ts), never the sign-in refusal; its own words are never shown.
+      expect(response.statusCode).toBe(503); expect(response.body).not.toContain(COMPANY_A.canary);
     }
   });
   it.each([null, {}, 3, "bad-company"])("hides malformed stored project company %j", async (company) => {
@@ -195,7 +196,7 @@ describe("merge-up 2 membership-resolved reads", () => {
     expect(await routeLinkingRequest(h.deps, request, url)).toMatchObject({ projects: [{ name: "shared-project" }] });
     expect(JSON.parse((await h.call("/v1/dev/access", "POST")).body)).toMatchObject({ nameChosen: true, projects: [{ name: "shared-project", access: "administrator" }] });
     h.deps.companies = { companyOf: async () => { throw new Error(COMPANY_A.canary); } };
-    await expect(routeLinkingRequest(h.deps, request, url)).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+    await expect(routeLinkingRequest(h.deps, request, url)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
   });
 });
 
@@ -249,7 +250,7 @@ it("comment POST resolves live membership before dispatch and hides an unavailab
   const companyOf = vi.fn(async () => { throw new Error("membership-canary"); });
   h.deps.companies = { companyOf };
   const response = await h.call(`/v1/dev/tasks/${TASK}/comments`, "POST", { requestId: "company-comment", document: "plan", text: "Current" });
-  expect(response.statusCode).toBe(401);
+  expect(response.statusCode).toBe(503);
   expect(response.body).not.toContain("membership-canary");
   expect(companyOf).toHaveBeenCalledWith(PERSON);
   expect(h.db.get(`DEVTASK#${TASK}`, "COMMENTS")).toBeUndefined();

@@ -1200,3 +1200,17 @@ Measured over tests/contract/company-github-signin.test.ts (33 tests). The mutan
 | --- | --- | --- | --- |
 | M23, `gatewayBedrockCheck` | the answer is read only for the agents' picks (product models read unavailable) | tests/unit/model-gateway-bedrock-check-company-limit.test.ts: "tells the gateway the connection's product models..." | red (1 of 3) |
 | M25, `runProof` | the stale-divergence check is not run | tests/contract/gateway-catch-up-proof.test.ts: "fails on a divergence record that is Cloud's own pinned blob..." | red (1 of 15) |
+## MEMBERSHIP-READ-FAILS-SAFE, a failed membership read serves nothing, ends nothing, and is a retryable 503
+
+One rule (`developer/membership-read.ts`): a read that says "no membership / revoked" ends access as before; a read that FAILED is a 503 RUNTIME_UNAVAILABLE, never a 401, "no such task", "no such session", or a revoked session. Each mutant applied singly; run against `tests/journeys/removed-member-answer.test.ts`, `tests/unit/removed-member-refresh.test.ts`, `tests/contract/core-app-routes.test.ts`, `tests/unit/core-host-deployed-decisions.test.ts`, `tests/contract/company-check.test.ts` (and `tests/contract/company-signin-auth.test.ts` for the sign-in check's oidc branch).
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| core-app-routes.ts coreAppEntryFrom | The failed caller mapping answers 401 UNAUTHENTICATED again (the 503 turned back into a 401) | killed, 3 failed |
+| session-mint.ts companyMayMint (hotfix-head: server.ts companyMayMint) | The catch returns false again (a failed read at the refresh revokes the session, `company_changed`) | killed, 3 failed |
+| engine-boundary.ts route | The unreadable mapping answered 401 again (the core task reads then read it as "no such task") | killed, 1 failed |
+| deployed-decisions.ts liveMemberRole | A failed membership read returns undefined again ("no such session") | killed, 2 failed |
+| dev-routes.ts route | A failed membership read no longer answers 503 (falls to the sign-in refusal) | killed, 2 failed |
+| developer-routes.ts authenticateClientToken | The oidc catch turns a failed read into the 401 refusal again (the rethrow removed) | killed, 1 failed (company-signin-auth) |
+| company-check.ts membershipReader | The failed read mapped to AUTH_REQUIRED again, outside readingMembership | killed, 3 failed |
+| server.ts retryable | A membership read failure is not answered 503 (propagates) | killed, 3 failed |

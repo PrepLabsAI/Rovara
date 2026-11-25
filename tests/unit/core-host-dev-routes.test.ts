@@ -86,10 +86,11 @@ describe("the core's handlers on the deployed API", () => {
       async () => { throw new Error("down"); }, async () => undefined, async () => ({ companyId: "not-an-org", role: "owner" }), async () => ({ companyId: "", role: "owner" }),
       async () => ({ companyId: FAKE_COMPANY, role: "superuser" as never }), async () => ({ companyId: FAKE_COMPANY }) as never, async () => null as never,
     ];
-    for (const companyOf of readers) {
+    for (const [index, companyOf] of readers.entries()) {
       const answer = await createCoreDevRoutes({ app, companyOf, wiring: () => WIRED }).route({ ...get(`/v1/app/script-tokens?org=${FAKE_COMPANY}`, { "x-company": FAKE_COMPANY }), body: JSON.stringify({ companyId: FAKE_COMPANY }) }, caller);
-      expect(answer?.statusCode).toBe(401);
-      expect(JSON.parse(answer!.body)).toEqual({ error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
+      // The first reader THROWS: a failed membership read is the retryable 503 (membership-read.ts); every reader that answers (nothing, malformed) is the sign-in refusal.
+      expect(answer?.statusCode).toBe(index === 0 ? 503 : 401);
+      expect(JSON.parse(answer!.body)).toEqual(index === 0 ? { error: { code: "RUNTIME_UNAVAILABLE", message: "AgentX could not reach AWS just now; try again in a moment" } } : { error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
       expect(answer!.body).not.toContain("org_");
     }
     // A principal of one company with membership in another is refused too.
@@ -815,7 +816,8 @@ describe("a task's start on the deployed API (lane E2 step 6)", () => {
     const { app, remember } = await world2();
     const failing = createCoreDevRoutes({ app, companyOf: async () => { throw new Error("membership store down"); }, wiring: () => WIRED });
     const refused = await failing.route(post("/v1/dev/tasks", startBody()), remember(FAKE_COMPANY));
-    expect(refused?.statusCode).toBe(401);
+    // A membership read that FAILED is the retryable 503, never a fallback and never the sign-in refusal; another company's membership is still the 401 below.
+    expect(refused?.statusCode).toBe(503);
     expect(refused!.body).not.toContain("down");
     const elsewhere = createCoreDevRoutes({ app, companyOf: async () => ({ companyId: OTHER, role: "owner" }), wiring: () => WIRED });
     expect((await elsewhere.route(post("/v1/dev/tasks", startBody()), callerOf(FAKE_COMPANY)))?.statusCode).toBe(401);
