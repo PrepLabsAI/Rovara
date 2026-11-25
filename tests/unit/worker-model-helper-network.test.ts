@@ -15,7 +15,7 @@ import {
 } from "../../packages/worker/src/model-helper-network.js";
 import { planModelHostBlock } from "../../packages/worker/src/model-helper-block.js";
 import { TASK_SANDBOX_NETWORK, TaskSandbox, taskSandboxRunArgs } from "../../packages/worker/src/task-sandbox.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const WS = "0123456789abcdef";
 const OTHER_WS = "fedcba9876543210";

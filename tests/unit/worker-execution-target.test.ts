@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ProjectCommand } from "../../packages/contracts/src/index.js";
 import { NO_RUNNER_CONFIGURED, SANDBOX_TARGET, executionFor, formatExecutionTarget, parseExecutionTarget } from "../../packages/worker/src/execution-target.js";
 import { TaskSandbox } from "../../packages/worker/src/task-sandbox.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 import { programOf } from "../support/task-owner-scan.js";
 
 const IMAGE = "123456789012.dkr.ecr.us-west-2.amazonaws.com/agentx-staging/worker@sha256:" + "a".repeat(64);

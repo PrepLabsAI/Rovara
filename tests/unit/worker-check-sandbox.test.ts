@@ -11,7 +11,7 @@ import {
 } from "../../packages/worker/src/check-sandbox.js";
 import { RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL, RUN_NETWORK_WORKSPACE_LABEL, runNetworkAddresses, runNetworkHelperIp, runNetworkLabelArgs, runNetworkName } from "../../packages/worker/src/run-network.js";
 import { SealedDnsHelper } from "../../packages/worker/src/setup-dns-watch.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 import { TASK_SANDBOX_NETWORK, taskSandboxRunArgs } from "../../packages/worker/src/task-sandbox.js";
 
 const RUN = "11111111-1111-4111-8111-111111111111";

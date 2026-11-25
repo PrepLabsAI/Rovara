@@ -12,7 +12,7 @@ import { StoredProjectDefinitionSchema, prepareRegistriesOfCompany } from "../..
 import { prepareWorkspace, type PreparationManifest, type RepositoryMaterializer } from "../../packages/worker/src/prepare.js";
 import type { PrivateInstallOptions } from "../../packages/worker/src/private-install.js";
 import { REGISTRY_CONFIG_PREFIX } from "../../packages/worker/src/registry-config.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const execFileAsync = promisify(execFile);
 const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com" };

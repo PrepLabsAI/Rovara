@@ -18,7 +18,7 @@ import { createProcessCandidateGit } from "./e2e-candidate-source.js";
 import { EVAL_STAND_IN_READ_LIMITS, EvalStandInRound, buildEvalStandInPlan, readRepositoryRecordings } from "./eval-standin-round.js";
 import { createEvalDatabaseRound, observePostgresLookups, type EvalDatabaseRound } from "./verification/eval-database-observer.js";
 import { openApiHostOf } from "./standin-readers.js";
-import type { DockerCli } from "./swebench/containers.js";
+import type { DockerCli } from "./docker-cli.js";
 import { readSeedFile, seedFileDigest } from "./service-seed-file.js";
 import { EVAL_SERVICES_FAILURE_SENTENCE, type EvalServicesInput } from "./verification/eval-services.js";
 import { postgresStandInDatabase, prepareStandInDatabase, seedCommandDigest, type StandInStep } from "./verification/eval-database-prep.js";

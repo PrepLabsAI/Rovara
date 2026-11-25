@@ -5,7 +5,7 @@
 import { FAKE_HELPER_ENTRY, FAKE_FIXTURE_TARGET, FAKE_LEDGER_TARGET } from "./service-helpers.js";
 import { parseFakeLedgerSummary, type FakeLedgerSummary } from "./fake-helper.js";
 import type { ServiceSession } from "./service-runner.js";
-import type { DockerCli } from "./swebench/containers.js";
+import type { DockerCli } from "./docker-cli.js";
 
 const NODE = "/usr/local/bin/node";
 

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { BROWSER_EVIDENCE_EXECUTOR_ENTRY, BROWSER_EVIDENCE_SIGN_IN_ENV, decodeBrowserEvidenceExecutorPlan, decodeBrowserEvidenceSignInEnv, decodeBrowserEvidenceUpload, type BrowserEvidenceExecutorLine, type BrowserEvidenceRecipe, type BrowserEvidenceSignInAnswer } from "../../packages/contracts/src/index.js";
-import { createDockerCli } from "../../packages/worker/src/swebench/containers.js";
+import { createDockerCli } from "../../packages/worker/src/docker-cli.js";
 import { RunnerKillUnconfirmedError } from "../../packages/worker/src/collected-process.js";
 import { AgentFilesRestoreError, type OriginalCode } from "../../packages/worker/src/verification/original-code.js";
 import { browserEvidenceExecutorArgs, collectBrowserEvidence, parseCaptureOutput, saveBrowserEvidence, type BrowserEvidenceWorkInput } from "../../packages/worker/src/browser-evidence-run.js";

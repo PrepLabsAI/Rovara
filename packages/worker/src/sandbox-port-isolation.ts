@@ -1,6 +1,6 @@
 // Internal worker gate for the trusted sleeping task/setup containers only.
 import { agentXError } from "@agentx/contracts";
-import type { DockerCli } from "./swebench/containers.js";
+import type { DockerCli } from "./docker-cli.js";
 
 const PORT_INDEX_SOURCE = 'const fs=require("fs");const root="/sys/class/net/";const names=fs.readdirSync(root).filter(n=>fs.readFileSync(root+n+"/address","utf8").trim()===process.argv[1]);if(names.length!==1)process.exit(1);process.stdout.write(fs.readFileSync(root+names[0]+"/iflink","utf8"));';
 const ISOLATE_SOURCE = '. /opt/agentx/packages/worker/ec2/sandbox-egress.sh; se_port_isolation "$1" on';

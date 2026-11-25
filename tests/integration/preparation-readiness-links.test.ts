@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import type { ProjectDefinition } from "@agentx/contracts";
 import { describe, expect, it } from "vitest";
 import { prepareWorkspace, type RepositoryMaterializer } from "../../packages/worker/src/prepare.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const run = promisify(execFile);
 

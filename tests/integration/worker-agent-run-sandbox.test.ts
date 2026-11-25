@@ -18,7 +18,7 @@ import { prepareWorkspace } from "../../packages/worker/src/prepare.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 import type { SandboxFileRequest } from "../../packages/worker/src/sandbox-file-ops.js";
 import type { WorkerEvent } from "../../packages/worker/src/events.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 
 const run = promisify(execFile);
