@@ -25,7 +25,7 @@
 import auditSinkPlugin from "@agentx/local-adapters/audit-sink";
 import { bedrockProfileListPrice, listPricesPerMillion, rateQuoteUsageMicros } from "@agentx/model-runtime/catalog";
 import {
-  IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, change, when,
+  CORE_OUTBOX_STREAM_RELAY_VARIABLE, IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, change, when,
   type Admission, type AdmissionDecision, type AdmissionRequest, type Cost, type DocumentStore, type IdentityProvider, type MeterResult, type Metering, type ModelPrice, type ModelUsage, type OrgId, type OrgRole, type Principal,
   type RateQuoteV1, type RunUsageCallV1, type TransactItem,
 } from "@agentx/contracts";
@@ -388,11 +388,13 @@ export function createHostedMoneyStop(deps: { store: DocumentStore; companyId: s
   };
 }
 
-/** Whether the queue cancel path's fast relay (lane L9, the State table stream to the outbox relay) is deployed: the infra sets this variable to `on` with it. */
-export const CORE_OUTBOX_STREAM_RELAY_VARIABLE = "ROVARA_CORE_OUTBOX_STREAM_RELAY";
+/** Whether the queue cancel path's fast relay (lane L9, the State table stream to the outbox relay) is deployed: the infra sets this variable to `on` with it (infra/lib/core-engine.ts, packed as `rl`). The name is the contracts' constant. */
+export { CORE_OUTBOX_STREAM_RELAY_VARIABLE };
 /**
- * Whether the per-run stop is wired on this function: the queue cancel path is (this code), so it is the fast relay that decides. Until L9 lands this is false, so `automation.run` stays
- * refused (`run_stop_not_wired`); Stop and close still keep the whole hold as estimated spend when the worker's end is late (over-counts, never under).
+ * Whether the per-run stop is wired on this function: the infrastructure sets `ROVARA_CORE_OUTBOX_STREAM_RELAY=on` (packed `rl`, infra/lib/core-engine.ts) on the broker and the dispatcher, because the whole path
+ * that stops a run at its cap is deployed with it (the cancel staged in the outbox, relayed by the State stream through the developer task notifier and by the 1-minute backstop schedule, delivered to the worker by the
+ * dispatcher; a silent worker is ended by the run-watch sweep). Absent or anything but `on`: false, so `automation.run` stays refused (`run_stop_not_wired`); Stop and close still keep the whole hold as estimated
+ * spend when the worker's end is late (over-counts, never under).
  */
 export function runStopWiredFrom(env: NodeJS.ProcessEnv): boolean {
   return env[CORE_OUTBOX_STREAM_RELAY_VARIABLE]?.trim() === "on";
