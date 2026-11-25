@@ -132,14 +132,20 @@ const looksLikeUrl = (text: string) => /^https?:\/\//iu.test(text);
 
 /** A query or fragment run inside any text: from a `?` or `#` to the next space, quote or angle bracket. */
 const RUN = /[?#][^\s"'<>]*/gu;
+/** `;jsessionid=<value>` anywhere in a text (the name is kept, as for any other pair). */
+const JSESSION = /(;jsessionid=)[^\s/?#&;"'<>]+/giu;
+/** A run that is one bare token (no `key=`): a `#<jwt>` or `?<code>` of at least 16 token characters with a digit in it. A short anchor such as `#buy` is left alone. */
+const BARE_TOKEN = /^[?#](?=[\w.~+/-]*\d)[\w.~+/-]{16,}$/u;
 /**
  * Blanks the value of every `key=value` pair of every query or fragment run in a text, whatever its length, whatever the scheme (a relative `/reset?token=...`, a `wss://` address, a URL in the middle of a
  * console message), and drops userinfo in `scheme://user:pass@host`. A pair with an empty value stays as it is.
  */
 export function blankQueryText(text: string): string {
-  if (!text.includes("?") && !text.includes("#") && !text.includes("@")) return text;
+  if (!text.includes("?") && !text.includes("#") && !text.includes("@") && !/;jsessionid=/iu.test(text)) return text;
   const noUserinfo = text.replace(/(\/\/)[^\s/@"'<>]+@/gu, "$1");
-  return noUserinfo.replace(RUN, (run) => run.replace(/([^?#&;=]+)=([^&;#]*)/gu, (_pair, key: string, value: string) => (value === "" || value === TRACE_BLANKED ? `${key}=${value}` : `${key}=${TRACE_BLANKED}`)));
+  // A servlet session carried in the path (`;jsessionid=...`), whatever follows it.
+  const noSession = noUserinfo.replace(JSESSION, (_match, name: string) => `${name}${TRACE_BLANKED}`);
+  return noSession.replace(RUN, (run) => (BARE_TOKEN.test(run) ? `${run[0]}${TRACE_BLANKED}` : run.replace(/([^?#&;=]+)=([^&;#]*)/gu, (_pair, key: string, value: string) => (value === "" || value === TRACE_BLANKED ? `${key}=${value}` : `${key}=${TRACE_BLANKED}`))));
 }
 /** The values of every pair of every query or fragment run in a text. */
 function queryValuesOf(text: string): string[] {
@@ -289,6 +295,14 @@ function joinedStrings(node: unknown, into: string[] = []): string {
  * dropped. `null` when a line is not JSON or a secret survives (also split across strings). `hit` is the full scan.
  */
 export function scrubTraceLinesWith(text: string, hit: (text: string) => boolean, stats: ScrubStats = newStats(), plan?: FramePlan): string | null {
+  try { return rewriteTraceLines(text, hit, stats, plan); } catch (error) {
+    // A line nested too deep to walk is a line that cannot be made safe: refuse it, as for any other line that cannot be read.
+    if (error instanceof RangeError) return null;
+    throw error;
+  }
+}
+
+function rewriteTraceLines(text: string, hit: (text: string) => boolean, stats: ScrubStats, plan: FramePlan | undefined): string | null {
   const out: string[] = [];
   for (const line of text.split("\n")) {
     if (line.trim() === "") { out.push(line); continue; }
@@ -325,6 +339,14 @@ interface SnapshotSeen { page: string | undefined; time: number | undefined; sec
  * or symlink survives, and entries keep the archive's order.
  */
 export function scrubTrace(zip: Uint8Array, contains: (bytes: Uint8Array) => boolean, options: ScrubOptions = {}): { zip: Uint8Array; stats: ScrubStats } | null {
+  try { return scrubTraceEntries(zip, contains, options); } catch (error) {
+    // JSON nested too deep to walk (the stack runs out) cannot be made safe: null, not a throw.
+    if (error instanceof RangeError) return null;
+    throw error;
+  }
+}
+
+function scrubTraceEntries(zip: Uint8Array, contains: (bytes: Uint8Array) => boolean, options: ScrubOptions): { zip: Uint8Array; stats: ScrubStats } | null {
   const entries = readEntries(zip);
   if (entries === null) return null;
   const names = new Set<string>();
