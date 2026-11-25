@@ -2,8 +2,8 @@
 // selection is read-only and returns conditions for the caller's approval/admission transaction.
 import { createHash } from "node:crypto";
 import {
-  E2EApplicationSelectionRecordSchema, E2EPolicySchema, E2ESetupProposalSchema, Ec2RuntimeBindingSchema, ProjectDefinitionSchema, WEB_API_RUNTIME_PROFILE_ID,
-  WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, agentXError, canonicalJson, projectRevisionKey, verifyE2ESetupProposal, when,
+  E2EApplicationSelectionRecordSchema, E2EPolicySchema, E2ESetupProposalSchema, Ec2RuntimeBindingSchema, WEB_API_RUNTIME_PROFILE_ID,
+  WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, agentXError, canonicalJson, projectRevisionKey, projectUseRefusal, readStoredProject, verifyE2ESetupProposal, when,
   type E2EPolicy, type E2ESetupProposal, type E2ESourceSnapshot, type ObjectStorage, type OrgId, type PlanApprovalRef, type StoredDocument, type TransactItem,
 } from "@agentx/contracts";
 import { isExactFeatureE2ESourceSnapshot } from "../../e2e/feature-plan-planning-context.js";
@@ -28,7 +28,9 @@ export async function readApprovedApplicationSetup(objects: ObjectStorage, proje
   snapshot: E2ESourceSnapshot; setupProposal: E2ESetupProposal; setupApproval: PlanApprovalRef;
 }> {
   const refuse = (): never => { throw agentXError("RUNTIME_UNAVAILABLE", "The approved application setup source is unavailable or changed."); };
-  const definition = ProjectDefinitionSchema.parse(project["definition"]);
+  const read = readStoredProject(project["definition"]);
+  if (!read.success) return refuse();
+  const definition = read.data;
   const repository = definition.repositories.length === 1 ? definition.repositories[0] : undefined;
   const approval = project["setupApproval"] as { decision?: unknown; proposalRef?: unknown; proposalSha256?: unknown; candidateDigest?: unknown } | undefined;
   if (repository === undefined || approval?.decision !== "approve" || typeof approval.proposalRef !== "string") return refuse();
@@ -67,10 +69,13 @@ export function createApplicationSelectionReader(deps: ApplicationSelectionDeps)
     if (task.companyId !== deps.companyId) throw agentXError("RUNTIME_UNAVAILABLE", "The application project is unavailable in this company.");
     const key = projectRevisionKey(deps.companyId, task.project, task.startingRevision);
     const project = await deps.state.store.get(key);
-    const definition = ProjectDefinitionSchema.safeParse(project?.["definition"]);
+    const definition = readStoredProject(project?.["definition"]);
     if (project === undefined || !definition.success || definition.data.name !== task.project || definition.data.revision !== task.startingRevision) {
       throw agentXError("RUNTIME_UNAVAILABLE", "The pinned application project revision is unavailable.");
     }
+    // The record reads, but a rule that judges what a person typed may still bar it from being USED: asked again here, where the application plan is approved and dispatched (REGISTRY-TOLERANT-READ).
+    const barred = projectUseRefusal(definition.data);
+    if (barred !== undefined) throw barred;
     const policy = E2EPolicySchema.parse(definition.data.e2e);
     const runtimeBinding = Ec2RuntimeBindingSchema.parse(project["runtimeBinding"]);
     const setup = await readApprovedApplicationSetup(deps.objects, project, policy);

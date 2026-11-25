@@ -278,6 +278,8 @@ describe("hosted setup approval: the proof and the binding", () => {
   it("refuses an approval when the project moved on from the base revision the candidate was made from", async () => {
     const { world, person, call } = await setupWorld();
     const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { setup: [command("npm", ["install"])] });
+    // The project moved on: revision 3 exists and the catalog names it (a catalog pointer to a row that is not there is a refusal of its own, arch rule 9).
+    await world.store.put({ item: { ...projectRevisionKey(FAKE_COMPANY, "payments", 3), entityType: "PROJECT", definition: JSON.parse(JSON.stringify({ ...project("payments"), revision: 3 })) as JsonValue } });
     await world.store.put({ item: { ...orgProjectCatalogKey(FAKE_COMPANY, "payments"), entityType: "PROJECT_CATALOG", latestRevision: 3 } });
     const owner = person("p-owner", FAKE_COMPANY, "owner");
     const refused = await call(post(`${RUN}/decide`, decideBody(digest)), owner);

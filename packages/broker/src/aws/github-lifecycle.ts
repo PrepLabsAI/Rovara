@@ -17,6 +17,7 @@ import { parseGitHubRepository } from "../github-app.js";
 import { verifyGithubWebhookSignature } from "../plugins/code-host/github/signature.js";
 import { boundedCompanyReads, recordInCompany } from "./company-check.js";
 import { namedCompany, namedCompanyLatestRevisionRow } from "./company-layout.js";
+import { isProjectUnreadable } from "../core/project-left-out.js";
 import { REPOSITORY_MOVES_MAX, repositoryFullName, type GithubInstallationBindings, type LifecycleAction } from "./github-credentials.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError } from "./github-webhooks.js";
 
@@ -187,7 +188,8 @@ export async function projectsUsingInstallation(deps: { documentClient: { send(c
   for (let index = 0; index < names.length; index += READS_AT_ONCE) {
     const batch = names.slice(index, index + READS_AT_ONCE);
     const settled = await Promise.allSettled(batch.map(async (name) => {
-      if (named !== undefined) return namedCompanyLatestRevisionRow(budget.client, deps.tableName, named, name);
+      // A current revision that cannot be read (arch rule 9 refuses it) counts as using the installation, as it always did: fail closed.
+      if (named !== undefined) return namedCompanyLatestRevisionRow(budget.client, deps.tableName, named, name).catch((error: unknown) => { if (isProjectUnreadable(error)) return undefined; throw error; });
       const response = await budget.client.send(new QueryCommand({ TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
         ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":rev": "REV#" }, ConsistentRead: true, ScanIndexForward: false, Limit: 1 })) as { Items?: unknown[] };
       return response.Items?.[0];
