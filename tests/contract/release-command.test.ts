@@ -296,6 +296,9 @@ describe("release pipeline trigger", () => {
     expect(triggered("infra/lib/control-plane.ts")).toBe(true);
     expect(triggered("packages/orchestrator/src/orchestrator.ts")).toBe(true);
     expect(triggered("packages/cli/src/main.ts")).toBe(true);
+    // F3 cut 1: the published Code API package. A change only there releases (it is not an image input, so beta gets a control-plane deploy, no new worker).
+    expect(triggered("packages/code-api/src/index.ts")).toBe(true);
+    expect(triggered("packages/code-api/package.json")).toBe(true);
     expect(triggered("packages/slack-service/src/main.ts")).toBe(true);
     expect(triggered("environments/slack/Dockerfile")).toBe(true);
   });

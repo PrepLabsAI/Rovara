@@ -46,10 +46,11 @@ function allowsOf(key: ReleaseRoleKey): Allow[] {
 }
 
 describe("P1 review: production pipeline", () => {
-  it("leaves the production release pipeline's RAW template unchanged (sha256 recorded from d66d3c158 and 894278638: equal)", () => {
+  it("leaves the production release pipeline's RAW template as pinned (sha256 recorded from d66d3c158 and 894278638: equal; re-pinned by L1)", () => {
     const stack = buildAgentXApp().node.children.find((child) => child.node.id === "AgentXReleasePipeline") as Stack;
     const digest = createHash("sha256").update(JSON.stringify(Template.fromStack(stack).toJSON())).digest("hex");
-    expect(digest).toBe("01152c761e64805857a650b5473c6e80ceac9fd586f39e062df2a836f2dc72c0");
+    // L1 (2026-11-24): re-pinned from 01152c761e64805857a650b5473c6e80ceac9fd586f39e062df2a836f2dc72c0; the changed resources are listed at PRODUCTION_PIPELINE_TEMPLATE_SHA256 in environment-release-pipeline.test.ts, which holds the same pin.
+    expect(digest).toBe("63e95810236c96b19bd43940c2ac70d57ea2b7c55a6bfe5f5c001c2777b7703d");
   });
 });
 

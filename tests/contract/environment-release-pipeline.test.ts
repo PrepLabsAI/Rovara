@@ -846,7 +846,7 @@ describe("environment release pipeline: selection and the production pipeline", 
     expect(stackIds).toContain("AgentXReleasePipeline");
     const production = app.node.children.find((child) => child.node.id === "AgentXReleasePipeline") as ReleasePipelineStack;
     expect(production).toBeInstanceOf(ReleasePipelineStack);
-    // The RAW template's sha256 (a normalized template rewrites every 64-hex string, so a changed pinned tool checksum would pass), recorded from d66d3c158 and equal on this lane's code.
+    // The RAW template's sha256 (a normalized template rewrites every 64-hex string, so a changed pinned tool checksum would pass), recorded from d66d3c158 and equal on that lane's code; re-pinned by L1 below.
     const digest = createHash("sha256").update(JSON.stringify(Template.fromStack(production).toJSON())).digest("hex");
     expect(digest).toBe(PRODUCTION_PIPELINE_TEMPLATE_SHA256);
   });
@@ -868,4 +868,19 @@ function regionPattern(): string {
 }
 
 /** Recorded from the production release pipeline's normalized template before this lane changed release-pipeline.ts (a refactor that moved the shared tool-install commands to exports). */
-const PRODUCTION_PIPELINE_TEMPLATE_SHA256 = "01152c761e64805857a650b5473c6e80ceac9fd586f39e062df2a836f2dc72c0";
+// L1 (2026-11-24): re-pinned for exactly the Cloud half of the one pipeline and the Code Preflight. Pin before: 01152c761e64805857a650b5473c6e80ceac9fd586f39e062df2a836f2dc72c0. Changed resources: ReleaseBuild and BetaReleaseBuild (the
+// buildspecs: a CODE_RELEASE check and skip guard on every Code step; the production one no longer closes the gate), ReleaseBuildRoleDefaultPolicy (the ClosePromotionGate statement moved out),
+// PipelineRoleDefaultPolicy (may assume the new action roles), Pipeline (second source, the Cloud actions and a Code Preflight in each stage, three V2 variables, a Cloud tag trigger).
+// Added: BetaCodePreflight and ProductionCodePreflight (CodeBuild project, role and policy each), CloudSourceActionRole (role and policy), and one CDK action role and policy for each of the
+// 14 new actions (12 Cloud, 2 Code Preflight). Added parameters: CloudRepoOwner, CloudRepoName, CloudRepoBranch, CloudConnectionArn, CloudBetaProjectName, CloudProductionProjectName,
+// PortGuardNamesParameterName, PortGuardNamesKeyArn. Added output: ArtifactBucketName. Nothing removed.
+// L1 follow-up after the Opus review (pin before it: c46ace5e600246bccd478643c6b609bcb183c3c52ed2cada4442849a29e10640). Changed again, and only these: ReleaseBuild and BetaReleaseBuild (the buildspecs: a last command that records the
+// released Code commit), ReleaseBuildRoleDefaultPolicy and BetaReleaseBuildRoleDefaultPolicy (one RecordReleasedCode ssm:PutParameter statement each), BetaCodePreflight and
+// ProductionCodePreflight (the buildspec: the released commit is the trust anchor and the guard scans the full range from it), their two role default policies (one ReadReleasedCode
+// ssm:GetParameter statement each) and Pipeline (a fourth variable PIPELINE_MODE, and PIPELINE_MODE and ROVARA_EXPECTED_DEPLOY_ACCOUNT on the 12 Cloud actions). Nothing added or removed.
+// L1 follow-up 2 (pin before it: f831f1b1c94d538eb995700155b821ba596ace36618e42ca69f289914fd2ecdc): BetaCodePreflight and ProductionCodePreflight (the buildspec: PIPELINE_MODE default, a pre_build note that refuses any value but release or adopt) and Pipeline
+// (PIPELINE_MODE on the two CodePreflight actions). Nothing added or removed; no ROVARA_ADOPT_* anywhere.
+// L1 follow-up 3 (pin before it: 5e6b0f2ca31c79736bae0a0f6595d926ce124d0608aeb5cc53285493b569aae0): BetaCodePreflight and ProductionCodePreflight only (the buildspec: the refusal of a linear landing says how many commits and what to do). Nothing else.
+// L1 follow-up 4 (pin before it: e0570793a770024be7c9ae931556aeaff5fe8c8159e165a9120c1e8966f17b3f): ReleaseBuild and BetaReleaseBuild (the record is CODEBUILD_RESOLVED_SOURCE_VERSION, checked to be 40 hex, in one braced group), BetaCodePreflight and
+// ProductionCodePreflight (the linear-landing message says only what happened; an octopus merge has its own check and message). Nothing else; no policy, parameter or Pipeline change.
+const PRODUCTION_PIPELINE_TEMPLATE_SHA256 = "63e95810236c96b19bd43940c2ac70d57ea2b7c55a6bfe5f5c001c2777b7703d";
