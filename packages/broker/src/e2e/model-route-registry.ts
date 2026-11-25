@@ -378,21 +378,3 @@ export function createBrokerE2EDayBudget(options: BrokerE2EDayBudgetOptions): E2
     },
   };
 }
-
-/**
- * Dispatch's precheck for a group that uses the model: whether the project's day has room for the group's worst case (`need`) under the day caps. A read by key; the
- * per-call reservations above are what actually hold the caps. False gives UNKNOWN `model-route-budget-exhausted` before the run starts.
- */
-export async function e2eDayBudgetRoom(
-  options: E2EModelRouteStore & { orgId: OrgId; projectName: string; now: number },
-  need: { inputTokens: number; calls: number },
-  limits: E2EDayLimits,
-): Promise<boolean> {
-  const day = utcDay(options.now);
-  const response = await options.documentClient.send(new GetCommand({ TableName: options.tableName, Key: e2eModelBudgetKey(options.orgId, options.projectName, day), ConsistentRead: true }));
-  const item = response.Item as { inputTokens?: unknown; calls?: unknown } | undefined;
-  const earlier = await legacyDayUsage(options, options.orgId, options.projectName, day);
-  const usedTokens = (typeof item?.inputTokens === "number" ? item.inputTokens : 0) + earlier.inputTokens;
-  const usedCalls = (typeof item?.calls === "number" ? item.calls : 0) + earlier.calls;
-  return usedTokens + need.inputTokens <= limits.maxInputTokens && usedCalls + need.calls <= limits.maxCalls;
-}

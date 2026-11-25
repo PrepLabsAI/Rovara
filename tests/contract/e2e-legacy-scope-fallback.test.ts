@@ -5,7 +5,7 @@ import { E2E_MODEL_ROUTE_DEFAULT_BUDGETS, e2eApplicationAccountDefinitionDigest,
 import { planSyntheticAccountWrites } from "../../packages/broker/src/e2e/application-account-registry.js";
 import { planSetupAccountWrites, readAccountRegistryEntries } from "../../packages/broker/src/aws/e2e-account-registry.js";
 import { handleE2EModelBudgetCallback, type E2EModelBudgetDependencies, type E2EModelBudgetOperation } from "../../packages/broker/src/e2e/model-budget-endpoint.js";
-import { createBrokerE2EDayBudget, e2eDayBudgetRoom } from "../../packages/broker/src/e2e/model-route-registry.js";
+import { createBrokerE2EDayBudget } from "../../packages/broker/src/e2e/model-route-registry.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { NOW as PLAN_NOW, snapshotOf } from "../support/e2e-application-plan-fixtures.js";
 import { ORDERS_APPLICATION_ID, contractOf, ordersManifestWith, withOwnerB, withViewerRole } from "../support/e2e-account-registry-fixtures.js";
@@ -106,27 +106,6 @@ describe("the AI navigation day budget across the key move", () => {
   const scopedDay = (db: FakeDynamoDb, orgPk = testProjectPk("payments")) => db.get(orgPk, `E2E_MODEL_BUDGET#${DAY_KEY}`);
   const route = (db: FakeDynamoDb, orgId = TEST_ORG) => ({ documentClient: { send: db.send } as never, tableName: TABLE, orgId, projectName: "payments", now: DAY });
 
-  it("counts the old day row toward the day's room for the implicit company only", async () => {
-    const db = new FakeDynamoDb();
-    legacyDay(db, 9_000, 4);
-    expect(await e2eDayBudgetRoom(route(db), { inputTokens: 1_000, calls: 1 }, LIMITS)).toBe(true);
-    expect(await e2eDayBudgetRoom(route(db), { inputTokens: 1_001, calls: 1 }, LIMITS)).toBe(false);
-    expect(await e2eDayBudgetRoom(route(db), { inputTokens: 100, calls: 2 }, LIMITS)).toBe(false);
-    // Company B has the whole day, and the old key is never asked for.
-    const { reads, store } = spied(db);
-    expect(await e2eDayBudgetRoom({ ...route(db, OTHER_ORG), ...store }, { inputTokens: 10_000, calls: 5 }, LIMITS)).toBe(true);
-    expect(touchedLegacy(reads)).toBe(false);
-  });
-
-  it("adds the old and the new day rows, so spending that began before the move still counts after it", async () => {
-    const db = new FakeDynamoDb();
-    legacyDay(db, 5_000, 2);
-    db.set({ pk: testProjectPk("payments"), sk: `E2E_MODEL_BUDGET#${DAY_KEY}`, entityType: "E2E_MODEL_BUDGET", inputTokens: 4_000, calls: 2 });
-    expect(await e2eDayBudgetRoom(route(db), { inputTokens: 1_000, calls: 1 }, LIMITS)).toBe(true);
-    expect(await e2eDayBudgetRoom(route(db), { inputTokens: 1_001, calls: 1 }, LIMITS)).toBe(false);
-    expect(await e2eDayBudgetRoom(route(db), { inputTokens: 1, calls: 2 }, LIMITS)).toBe(false);
-  });
-
   it("reserves under the new key only, within the room the old row leaves, and never touches the old row", async () => {
     const db = new FakeDynamoDb();
     legacyDay(db, 7_000, 3);
@@ -137,7 +116,6 @@ describe("the AI navigation day budget across the key move", () => {
     expect(await budget.reserve(1, { maxInputTokens: 10_000, maxCalls: 4 })).toBeNull();
     expect(db.get(LEGACY_PK, `E2E_MODEL_BUDGET#${DAY_KEY}`)).toMatchObject({ inputTokens: 7_000, calls: 3 });
   });
-
 });
 
 describe("the day budget callback across the key move", () => {
