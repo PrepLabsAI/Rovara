@@ -20,6 +20,13 @@ export const GATEWAY_IMAGE_DOCKERFILE = "environments/model-gateway/Dockerfile";
 export const GATEWAY_IMAGE_PLATFORM = "linux/arm64";
 export const GATEWAY_IMAGE_DEFAULT_TAG = "rovara-model-gateway:local";
 
+/**
+ * Bump when the way the image is built changes in a way no context file shows. The context hash is also the image's tag in the release pipeline, so
+ * an image is reused whenever the hash is unchanged; this script's own bytes are mixed in too (scriptIdentity), so a change to file modes, build
+ * arguments or the platform below makes a new hash on its own. This constant is for a change that does not touch this file (a builder upgrade).
+ */
+export const IMAGE_FORMAT_VERSION = 1;
+
 /** One TOTAL limit for the whole context, whatever the tree holds. */
 export const MAX_CONTEXT_FILES = 200;
 export const MAX_CONTEXT_BYTES = 2 * 1024 * 1024;
@@ -77,8 +84,13 @@ export function entryPresent(root: string): boolean {
   return existsSync(join(root, GATEWAY_IMAGE_ENTRY_SOURCE));
 }
 
-/** Writes the context into an empty (or new) directory and returns what it holds with checksums. */
-export function assembleContext(root: string, outDir: string): ContextManifest {
+/** What this script is, for the context hash: the sha256 of its own bytes and the format version. */
+export function scriptIdentity(): string {
+  return `${createHash("sha256").update(readFileSync(fileURLToPath(import.meta.url))).digest("hex")}:${IMAGE_FORMAT_VERSION}`;
+}
+
+/** Writes the context into an empty (or new) directory and returns what it holds with checksums. The hash covers the files and `identity` (this script and its format version). */
+export function assembleContext(root: string, outDir: string, identity = scriptIdentity()): ContextManifest {
   if (existsSync(outDir) && readdirSync(outDir).length > 0) throw new ImageContextError("the output directory is not empty");
   const files = listContextFiles(root);
   const entries: ContextFile[] = [];
@@ -97,7 +109,7 @@ export function assembleContext(root: string, outDir: string): ContextManifest {
     writeFileSync(target, data);
     chmodSync(target, 0o644); // whatever the caller's umask: the image runs as another user and must be able to read every copied file
   }
-  const contextSha256 = createHash("sha256").update(entries.map((entry) => `${entry.sha256}  ${entry.path}\n`).join("")).digest("hex");
+  const contextSha256 = createHash("sha256").update(entries.map((entry) => `${entry.sha256}  ${entry.path}\n`).join("") + `script  ${identity}\n`).digest("hex");
   return { files: entries, totalBytes, contextSha256 };
 }
 

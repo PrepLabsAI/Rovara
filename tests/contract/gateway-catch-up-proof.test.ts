@@ -151,7 +151,7 @@ describe("gateway catch-up proof", () => {
     edit(tree, "packages/model-gateway/src/guard.ts", (text) => `${text}\n// a later change\n`);
     expect(await failures(tree)).toHaveLength(1);
     const changed = readFileSync(join(tree, "packages/model-gateway/src/guard.ts"));
-    const recorded: Manifest = { ...manifest, divergedFromCloud: { "packages/model-gateway/src/guard.ts": { blob: blobId(changed), reason: "test" } } };
+    const recorded: Manifest = { ...manifest, divergedFromCloud: { ...manifest.divergedFromCloud, "packages/model-gateway/src/guard.ts": { blob: blobId(changed), reason: "test" } } };
     expect(await failures(tree, recorded)).toEqual([]);
     edit(tree, "packages/model-gateway/src/guard.ts", (text) => `${text} `);
     expect(await failures(tree, recorded)).toEqual(["exact: packages/model-gateway/src/guard.ts differs from its recorded divergence"]);
