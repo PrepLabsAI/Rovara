@@ -126,10 +126,17 @@ describe("merging the agent's findings into the detectors' proposal", () => {
     const source = (field: string) => merged.draft.valueSources.find((item) => item.field === field)?.source;
     expect(source("repos[0].setupCommands[0]")).toEqual({ path: "README.md", line: 10 });
     expect(source("repos[0].setupCommands[1]")).toBe("observed:run-7#2");
-    // Never run, so there is no run to cite: the file and line the agent cited are carried instead (and `model` only when it cited none).
-    expect(source("repos[0].setupCommands[2]")).toEqual({ path: "README.md", line: 12 });
+    // Never run, so there is no run to cite, and the agent cites no line any more (DEC 254zzz537): its own reading is the source.
+    expect(source("repos[0].setupCommands[2]")).toBe("model");
     expect(merged.replacements).toEqual([]);
     expect(merged.notes.join(" ")).toMatch(/1 command from the setup run was left out/u);
+  });
+  it("a proposal STORED by an older run, whose citation still has a line, keeps that file and line as the source of a command that never ran (the field is read, nothing writes it)", async () => {
+    const proposal = await proposalOf(setupOf("uv sync --frozen", "make seed"));
+    const old = JSON.parse(JSON.stringify(proposal)) as typeof proposal;
+    for (const item of old.setup) for (const place of item.from) place.line = 12;
+    const merged = mergeAgentFindings(draftOf(), { runId: "run-7", proposal: old, journal: [entry(1, "uv sync --frozen", 0)] }, MERGE);
+    expect(merged.draft.valueSources.find((item) => item.field === "repos[0].setupCommands[1]")?.source).toEqual({ path: "README.md", line: 12 });
   });
   it("keeps `model` for a command that never ran when the agent cited no file line", async () => {
     const proposal = await proposalOf({ setup: [{ repo: "service", commands: ["uv sync --frozen", "make seed"], from: [{ kind: "inferred", repo: "service", note: "guess" }] }] });
@@ -186,7 +193,7 @@ describe("the proposal after the run", () => {
     expect(result.proposal.testCommands).toEqual(["pytest -q"]);
     expect(result.proposal.allowedDomains).toEqual(["artifactory.corp.example"]);
     expect(result.proposal.secretsNeeded.map((item) => item.name)).toEqual(["PUBLISH_TOKEN"]);
-    expect(result.proposal.secretsNeeded[0]!.foundIn).toBe(".env.example:3");
+    expect(result.proposal.secretsNeeded[0]!.foundIn).toBe(".env.example");
     expect(JSON.stringify(result.proposal)).not.toContain(secret);
     expect(result.proposal.valueSources.some((item) => item.source === "observed:run-1#2")).toBe(true);
     expect(result.replacements).toHaveLength(1);
