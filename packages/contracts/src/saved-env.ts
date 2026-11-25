@@ -19,10 +19,28 @@ export const SAVED_ENV_MAX_COMMITS = 16;
 export const SAVED_ENV_MAX_AGE_DAYS = 7;
 /** A repository idle this many days is saved as a clone only (`savedEnv.lightAfterIdleDays`). */
 export const SAVED_ENV_LIGHT_AFTER_IDLE_DAYS_DEFAULT = 7;
-/** Images kept per project: the company setting `savedEnv.keep` (default 3, 1 to 10). */
-export const SAVED_ENV_KEEP_DEFAULT = 3;
-export const SAVED_ENV_KEEP_MIN = 1;
-export const SAVED_ENV_KEEP_MAX = 10;
+/** Images kept per project: the current one and the previous one. A constant, not a company setting. */
+export const SAVED_ENV_KEEP = 2;
+
+// ---- the rebuild rules (design SAVED-IMAGES, SI-1: named here, read by the lanes that follow; nothing reads most of them yet)
+/** A project is "in use" when a task started on it within this many days; only projects in use are rebuilt on change. */
+export const SAVED_ENV_IN_USE_DAYS = 14;
+/** The wait after the 1st, 2nd and 3rd failure in a row for the same fingerprint (30 minutes, 2 hours, 8 hours). */
+export const SAVED_ENV_REBUILD_BACKOFF_MS: readonly [number, number, number] = [30 * 60_000, 2 * 3_600_000, 8 * 3_600_000];
+/** The failure in a row, for one fingerprint, that stops automatic builds for it (the 4th). */
+export const SAVED_ENV_REBUILD_STOP_AFTER = SAVED_ENV_REBUILD_BACKOFF_MS.length + 1;
+/** Rebuilds at once: per company, and over the whole install. */
+export const SAVED_ENV_COMPANY_SLOTS = 2;
+export const SAVED_ENV_INSTALL_SLOTS = 4;
+/** One non-urgent rebuild start per project in this time. */
+export const SAVED_ENV_REBUILD_SPACING_MS = 24 * 3_600_000;
+/** One urgent rebuild start per project in this time (urgent: no usable image). */
+export const SAVED_ENV_URGENT_SPACING_MS = 6 * 3_600_000;
+/** Rebuild starts per project per calendar month, inside the company's automatic-run cap. */
+export const SAVED_ENV_MONTHLY_CEILING = 40;
+/** A rebuild job's lease; the watch on its preparation ends first, so the flow (not the pass) ends a hung prepare. */
+export const SAVED_ENV_JOB_LEASE_MS = 3 * 3_600_000;
+export const SAVED_ENV_BUILD_WATCH_MS = 2 * 3_600_000 + 45 * 60_000;
 
 const Sha256Hex = z.string().regex(/^[a-f0-9]{64}$/u, "a sha256 in lowercase hex");
 /** An image is named by its digest, never by a tag: a tag can be moved. */
