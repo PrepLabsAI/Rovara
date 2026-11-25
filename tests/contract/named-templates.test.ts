@@ -26,6 +26,7 @@ import { withoutDispatcherLessonsPeople } from "../support/dispatcher-lessons-pe
 import { withoutRetainPolicies } from "../support/retain-policies-template.js";
 import { withoutWorkerCallbackAlarm } from "../support/worker-callback-alarm-template.js";
 import { withoutPublicApiAllowDomain, withoutPublicApiUrl } from "../support/public-api-url-template.js";
+import { withoutCoreOutboxStreamRelay } from "../support/core-outbox-stream-relay-template.js";
 
 skipLambdaBundling();
 // CODE-PUBLIC-URL (2026-11-24): the named control plane's external URL bases that now go through the public address helper (the sign-in issuer and its two function variables, CONTROL_PLANE_URL for the notifier,
@@ -305,7 +306,7 @@ describe("named environment templates", () => {
     if (stack.stackName === "agentx-staging-control-plane") {
       it("removing only Batch F additions preserves code/next's agentx-staging-control-plane template", () => {
         // Linear webhook guard: the Linear route's throttle and alarm are asserted and taken out too (outermost), so this recorded pin still holds.
-        const beforeBatchF = withoutLinearWebhookGuard(withoutWebhookSecretLane(withoutBatchFAdditions(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(normalizedTemplate(stack), "named")), { named: true, sites: PUBLIC_API_SITES }), { env: "staging" }), STAGING)))));
+        const beforeBatchF = withoutLinearWebhookGuard(withoutWebhookSecretLane(withoutBatchFAdditions(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(withoutCoreOutboxStreamRelay(normalizedTemplate(stack)), "named")), { named: true, sites: PUBLIC_API_SITES }), { env: "staging" }), STAGING)))));
         expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("8edf09fff29983cc3c3338a6b2d24bb27d061db29960bfa2e77a52c068618972");
       }, 120_000);
     }
@@ -324,8 +325,12 @@ describe("named environment templates", () => {
         // pins below hold as recorded (checked on the lines after the next).
         // LINEAR-WEBHOOK-GUARD (2026-11-24, rebased onto the public-URL pin): re-pinned for exactly the Linear route's stage throttle (one RouteSettings entry), its stage dependency and one alarm. Rule D: with those
         // taken out (withoutLinearWebhookGuard, asserted field by field in tests/support/linear-webhook-route-template.ts) the public-URL pin 74e8f0a3e94b69a322a78fb6c1c4e2952689f71f5af7c5bc6c0da4b4e9a38a69 holds (checked on the lines after the next).
-        expect(createHash("sha256").update(JSON.stringify(template)).digest("hex")).toBe("830e2fa7346af112695e09ceb5bab02848cc595c5598cad3347951b790898738");
-        const withoutGuard = withoutLinearWebhookGuard(structuredClone(template));
+        // CORE-RUN-STOP-RELAY (G1, 2026-11-25): re-pinned for exactly the packed setting `rl=on` on the broker and the dispatcher (outermost). Rule D: with it taken out (withoutCoreOutboxStreamRelay,
+        // tests/support/core-outbox-stream-relay-template.ts) the Linear guard pin 830e2fa7346af112695e09ceb5bab02848cc595c5598cad3347951b790898738 holds (checked on the next lines).
+        expect(createHash("sha256").update(JSON.stringify(template)).digest("hex")).toBe("9dbf7050b5448a66e1fd3e12cae432ed321209d710ea10789996304703b9e603");
+        const beforeRelay = withoutCoreOutboxStreamRelay(structuredClone(template));
+        expect(createHash("sha256").update(JSON.stringify(beforeRelay)).digest("hex"), "minus only the outbox stream relay setting").toBe("830e2fa7346af112695e09ceb5bab02848cc595c5598cad3347951b790898738");
+        const withoutGuard = withoutLinearWebhookGuard(structuredClone(beforeRelay));
         expect(createHash("sha256").update(JSON.stringify(withoutGuard)).digest("hex"), "minus only the Linear webhook guard").toBe("74e8f0a3e94b69a322a78fb6c1c4e2952689f71f5af7c5bc6c0da4b4e9a38a69");
         const beforePublicApi = withoutPublicApiUrl(structuredClone(withoutGuard), { named: true, sites: PUBLIC_API_SITES });
         expect(createHash("sha256").update(JSON.stringify(beforePublicApi)).digest("hex"), "minus only the public API URL").toBe("32f5c0957135cc03888fb1c4233d7f632cd98bb877f9464583ee87126e3c1381");

@@ -43,6 +43,8 @@ const SETTINGS = {
   coreLearningModel: "claude-haiku-5-5",
   // CODE-PUBLIC-URL: empty, an install without a public address (the common case, and today's behaviour).
   publicApiUrl: "",
+  // G1: the core outbox stream relay (packed `rl`) is on for the broker and the dispatcher.
+  coreOutboxStreamRelay: "on",
   // #1149: a named broker's settings: the legacy layout marker (installLayout) is the legacy install's alone.
 } as const satisfies Record<Exclude<BrokerSettingKey, "installLayout">, string>;
 
