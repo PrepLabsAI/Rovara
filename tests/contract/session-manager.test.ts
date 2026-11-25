@@ -191,7 +191,7 @@ describe("session manager: picking the machine size (DEC 254zb)", () => {
     await w.sessions.markVolume(w.workspaceId, 1, "vol-0123456789abcdef0");
     await w.sessions.markInstance(w.workspaceId, 1, "i-0123456789abcdef0", "10.42.128.10", { instanceType: "m6g.large" });
     await w.sessions.markReady(w.workspaceId, 1);
-    expect(await w.sessions.ensureSession({ workspaceId: w.workspaceId, binding })).toEqual({ ready: true, generation: 1, privateIp: "10.42.128.10", instanceId: "i-0123456789abcdef0", subnetId: expect.any(String), machineFallback: "x86-unavailable" });
+    expect(await w.sessions.ensureSession({ workspaceId: w.workspaceId, binding })).toEqual({ ready: true, generation: 1, privateIp: "10.42.128.10", instanceId: "i-0123456789abcdef0", subnetId: expect.any(String) as unknown, machineFallback: "x86-unavailable" });
   });
 
   it("launches the default when the picker fails, never failing the provisioning", async () => {
