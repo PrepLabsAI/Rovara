@@ -649,6 +649,8 @@ describe("L1a broker environment derivation", () => {
     // LESSONS-PORT-FIX (DEC 254zzz473): the dispatcher's DEVELOPER_SIGNIN_TABLE_NAME variable and its DispatcherLessonsPeople policy are asserted and taken out first (withoutDispatcherLessonsPeople), so every pin below holds as recorded.
     // CODE-PUBLIC-URL (2026-11-24): the PublicApiUrl parameter, condition, URL-base Fn::Ifs and packed host are asserted and taken out too (withoutPublicApiUrl, after the two above), so every pin below holds as recorded.
     // F1 L1a-1: the two deleted invitation switches are put back first too (withTaskPeopleInvitationSwitches, Rule D, tests/support/task-people-invitations-template.ts), so every pin below holds as recorded.
+    // D1-2 (declared change set, D1-PLAN section 8): the legacy template lost the three recovery Schedules (GithubWebhookRecovery, WorkflowMergeRecovery, WorkflowDispatchRecovery), the two Scheduler roles and
+    // their two DefaultPolicies; every digest below is re-pinned from the received value for exactly that removal (the ladder's steps are unchanged; the removed resources were in every older state too).
     // RETAIN (arch ruling 2026-11-24): Retain on the control plane's five keys, channel state table and adapter secret is asserted and put back to Delete first (withoutRetainPolicies, innermost), so they hold too.
     // WORKER-DELIVERY-IDENTITY (2026-11-25): the instance state-change handler, its rule and the dispatcher's one Describe statement are asserted and taken out first (withoutMachineGone, innermost), so every pin holds as recorded.
     const machineless = () => withoutMachineGone(structuredClone(legacy.toJSON()));
@@ -657,9 +659,9 @@ describe("L1a broker environment derivation", () => {
     const beforeFirstGateway = withoutLinearWebhookRoute(withoutWebhookSecretLane(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(relayless())), { named: false }) as Json & { Outputs: Record<string, unknown> }), stuckStoppingInstall()))));
     expect(beforeFirstGateway.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     delete beforeFirstGateway.Outputs.ModelRunPriceVersion;
-    expect(digest(beforeFirstGateway), "legacy without the first-gateway output retains the upstream member-check pin").toBe("fef96cf61a67a412e6d99ef4bf9567f05dd1a518d02471de8dede006a78bbc1e");
+    expect(digest(beforeFirstGateway), "legacy without the first-gateway output retains the upstream member-check pin").toBe("1250b639d05a893991c1e8820d725a7a014f97818144dd49cbc0be0e5598cc93");
     const beforeMemberCheck = withoutBrokerMemberConditionCheck(beforeFirstGateway);
-    expect(digest(beforeMemberCheck), "legacy without the first-gateway output and broker member check").toBe("e08e8a557cfcd0f1815bbfdc23a162704e0d0995d9d04b073b2b6feb30e44a09");
+    expect(digest(beforeMemberCheck), "legacy without the first-gateway output and broker member check").toBe("0b4ea671233e2f4a4f21254fa5e5f785f26e6f95377d18c0245694f0361f57ea");
     // Rule D proof: removing exactly the two capability routes retains the switch-removal pin.
     const withoutCapabilityRoutes = structuredClone(beforeMemberCheck);
     delete withoutCapabilityRoutes.Resources.ContextToolsListRoute;

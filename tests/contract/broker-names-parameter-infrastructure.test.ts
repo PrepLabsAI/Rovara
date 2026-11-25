@@ -117,7 +117,7 @@ for (const env of ["staging", "a1234567890123456789"] as const) {
       expect(Buffer.byteLength(value, "utf8")).toBeLessThanOrEqual(BROKER_NAMES_PARAMETER_MAX_BYTES - 1024);
       const decoded = decodeBrokerNamesParameter(value);
       expect(decoded).toMatchObject({ revision: variables[BROKER_NAMES_REVISION_VARIABLE] });
-      expect((decoded as { list: string }).list.split(",")).toHaveLength(21);
+      expect((decoded as { list: string }).list.split(",")).toHaveLength(20);
       // The measure the size test uses sees the same function: it carries no list.
       expect(controlPlaneOf(env, built).functions.find((entry) => entry.logicalId === brokerId)!.variables).not.toHaveProperty(BROKER_NAMES_VARIABLE);
       expect(template.Resources[parameterId]).toBeDefined();

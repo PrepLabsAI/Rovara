@@ -308,9 +308,9 @@ describe("named environment templates", () => {
       // before the existing normalizers, then preserve every old policy/snapshot assertion.
       if (stack.stackName === "agentx-staging-control-plane") {
         // APIGW-ACCESS-LOGS (2026-11-24): re-pinned for exactly the access log group and the `$default` stage AccessLogSettings. Rule D: with those two taken out the old pin
-        // 5b526b779a52869b09cb602a1d0a97545f10818f29983a879129dbf70553c745 holds (checked on the next line).
+        // 9f0fe5e3ca03e219788c8c5e0f97c0e73e77ba57032b32205c43563383384cd8 holds (checked on the next line).
         // LESSONS-PORT-FIX (DEC 254zzz473, rebased onto train 29 without turn-on): re-pinned for exactly the dispatcher's DEVELOPER_SIGNIN_TABLE_NAME variable and its DispatcherLessonsPeople policy. Rule D: with those
-        // taken out (withoutDispatcherLessonsPeople) train 29's pin ee257190b12ebbfc2e493432f8f3f130a7173a64cb80434cc87fcbc44805997e holds (checked on the next line).
+        // taken out (withoutDispatcherLessonsPeople) train 29's pin ffdf075199718f3a89fba103dd4ca260825b517ae37ac411199991660fa4e273 holds (checked on the next line).
         // CODE-PUBLIC-URL (2026-11-24): re-pinned for exactly the PublicApiUrl parameter and condition, each external URL base becoming Fn::If [HasPublicApiUrl, PublicApiUrl, the API's own host] (resolved equal while
         // the parameter is empty), the broker's packed public host and the new LinearWebhookUrl output. Rule D: with those taken out (withoutPublicApiUrl, tests/support/public-api-url-template.ts) lessons-port's and RETAIN's
         // pins below hold as recorded (checked on the lines after the next).
@@ -333,12 +333,12 @@ describe("named environment templates", () => {
         const withoutGuard = withoutLinearWebhookGuard(structuredClone(beforeRelay));
         expect(createHash("sha256").update(JSON.stringify(withoutGuard)).digest("hex"), "minus only the Linear webhook guard").toBe("74e8f0a3e94b69a322a78fb6c1c4e2952689f71f5af7c5bc6c0da4b4e9a38a69");
         const beforePublicApi = withoutPublicApiUrl(structuredClone(withoutGuard), { named: true, sites: PUBLIC_API_SITES });
-        expect(createHash("sha256").update(JSON.stringify(beforePublicApi)).digest("hex"), "minus only the public API URL").toBe("32f5c0957135cc03888fb1c4233d7f632cd98bb877f9464583ee87126e3c1381");
+        expect(createHash("sha256").update(JSON.stringify(beforePublicApi)).digest("hex"), "minus only the public API URL").toBe("55510ca3157d51e39f259378886bb522e83dfb424e0056be923b0d3bd019ce82");
         // RETAIN (arch ruling 2026-11-24): re-pinned for exactly DeletionPolicy RetainExceptOnCreate and UpdateReplacePolicy Retain on the control plane's five keys, channel state table and adapter secret.
-        // Rule D: with those put back (withoutRetainPolicies) lessons-port's pin ff86d95eeb270fd7cba3301dc0022e0f08a51794c5c4cc22f873de0e4f000ace holds (checked on the next line).
-        expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(beforePublicApi), "named"))).digest("hex"), "minus only the RETAIN policies").toBe("ff86d95eeb270fd7cba3301dc0022e0f08a51794c5c4cc22f873de0e4f000ace");
-        expect(createHash("sha256").update(JSON.stringify(withoutDispatcherLessonsPeople(withoutRetainPolicies(structuredClone(beforePublicApi), "named")))).digest("hex"), "minus only the dispatcher lessons people grant").toBe("ee257190b12ebbfc2e493432f8f3f130a7173a64cb80434cc87fcbc44805997e");
-        expect(createHash("sha256").update(JSON.stringify(withoutApiAccessLog(withoutDispatcherLessonsPeople(withoutRetainPolicies(structuredClone(beforePublicApi), "named")), { env: "staging" }))).digest("hex"), "minus only the access log").toBe("5b526b779a52869b09cb602a1d0a97545f10818f29983a879129dbf70553c745");
+        // Rule D: with those put back (withoutRetainPolicies) lessons-port's pin cbf7fffcc9cebe7ae48396f8b5fcae4735aa3fd1a15ebfcd8516bc6ec071bda6 holds (checked on the next line).
+        expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(beforePublicApi), "named"))).digest("hex"), "minus only the RETAIN policies").toBe("cbf7fffcc9cebe7ae48396f8b5fcae4735aa3fd1a15ebfcd8516bc6ec071bda6");
+        expect(createHash("sha256").update(JSON.stringify(withoutDispatcherLessonsPeople(withoutRetainPolicies(structuredClone(beforePublicApi), "named")))).digest("hex"), "minus only the dispatcher lessons people grant").toBe("ffdf075199718f3a89fba103dd4ca260825b517ae37ac411199991660fa4e273");
+        expect(createHash("sha256").update(JSON.stringify(withoutApiAccessLog(withoutDispatcherLessonsPeople(withoutRetainPolicies(structuredClone(beforePublicApi), "named")), { env: "staging" }))).digest("hex"), "minus only the access log").toBe("9f0fe5e3ca03e219788c8c5e0f97c0e73e77ba57032b32205c43563383384cd8");
         // Webhook lane W3: the webhook secret slot, its throttle and one alarm, pinned exactly in tests/support/webhook-secret-template.ts, then removed.
         // APIGW-ACCESS-LOGS (2026-11-24): the full-template pin above moved; the access log group and the stage setting are asserted and taken out, so every pin and snapshot below still holds.
         // F1 L1a-1: the snapshot below is of the template as it is now, without the two deleted invitation switches (the strippers after this read the broker's packed settings with today's table), so the

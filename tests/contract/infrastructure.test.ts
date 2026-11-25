@@ -117,47 +117,24 @@ describe("hosted Slack control-plane infrastructure", () => {
     expect(routes.some((route) => route.Properties.RouteKey === "GET /v1/internal/{proxy+}")).toBe(false);
   });
 
-  it("indexes due GitHub webhook retries and invokes the broker from a bounded recovery schedule", () => {
+  it("keeps the due-time indexes of the retired workflow engine's rows but runs no recovery schedule for them (D1)", () => {
+    // D1 deleted the three one-minute schedules of the old workflow engine (GitHub webhook recovery, workflow merge recovery, workflow dispatch recovery) and their two roles. The indexes are
+    // kept (a GSI delete is its own later lane): the rows they list are the old engine's, which nothing reads now.
     template.hasResourceProperties("AWS::DynamoDB::Table", {
       GlobalSecondaryIndexes: Match.arrayWith([Match.objectLike({
         IndexName: "github-webhook-recovery",
         KeySchema: [{ AttributeName: "webhookRecoveryPk", KeyType: "HASH" }, { AttributeName: "webhookRecoverySk", KeyType: "RANGE" }],
-      })]),
-    });
-    template.hasResourceProperties("AWS::Scheduler::Schedule", {
-      ScheduleExpression: "rate(1 minute)",
-      FlexibleTimeWindow: { Mode: "OFF" },
-      Target: Match.objectLike({ Input: '{"source":"agentx.github-webhook-recovery"}', RetryPolicy: { MaximumRetryAttempts: 2, MaximumEventAgeInSeconds: 300 } }),
-    });
-  });
-
-  it("invokes the broker every minute to recover lost workflow dispatches", () => {
-    template.hasResourceProperties("AWS::Scheduler::Schedule", { ScheduleExpression: "rate(1 minute)", FlexibleTimeWindow: { Mode: "OFF" },
-      Target: Match.objectLike({ Input: '{"source":"agentx.workflow-dispatch-recovery"}', RetryPolicy: { MaximumRetryAttempts: 2, MaximumEventAgeInSeconds: 300 } }) });
-    // The sweep reads due rows through a sparse due-time index, so rows waiting out a backoff never hide due ones.
-    template.hasResourceProperties("AWS::DynamoDB::Table", {
-      GlobalSecondaryIndexes: Match.arrayWith([Match.objectLike({
+      }), Match.objectLike({
         IndexName: "workflow-dispatch-due",
         KeySchema: [{ AttributeName: "dispatchDuePk", KeyType: "HASH" }, { AttributeName: "dispatchDueSk", KeyType: "RANGE" }],
       })]),
     });
-  });
-
-  it("lets only this account's own schedules assume the scheduler recovery roles (confused deputy)", () => {
-    const roles = Object.entries(template.findResources("AWS::IAM::Role"))
-      .filter(([id]) => id.startsWith("GithubWebhookRecoveryRole") || id.startsWith("WorkflowDispatchRecoveryRole"));
-    expect(roles).toHaveLength(2);
-    for (const [, role] of roles) {
-      expect((role as { Properties: { AssumeRolePolicyDocument: { Statement: unknown[] } } }).Properties.AssumeRolePolicyDocument.Statement).toEqual([expect.objectContaining({
-        Principal: { Service: "scheduler.amazonaws.com" },
-        Condition: {
-          StringEquals: {
-            "aws:SourceAccount": { Ref: "AWS::AccountId" },
-            "aws:SourceArn": { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":scheduler:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, ":schedule-group/default"]] },
-          },
-        },
-      })]);
+    const retiredSources = ["agentx.github-webhook-recovery", "agentx.workflow-merge-recovery", "agentx.workflow-dispatch-recovery"];
+    for (const [, schedule] of Object.entries(template.findResources("AWS::Scheduler::Schedule"))) {
+      for (const source of retiredSources) expect(JSON.stringify((schedule as { Properties: { Target?: unknown } }).Properties.Target)).not.toContain(source);
     }
+    const retiredRoles = Object.keys(template.findResources("AWS::IAM::Role")).filter((id) => id.startsWith("GithubWebhookRecoveryRole") || id.startsWith("WorkflowDispatchRecoveryRole"));
+    expect(retiredRoles).toEqual([]);
   });
 
   it("queues Slack requests in a FIFO queue with a dead-letter queue after five receives", () => {

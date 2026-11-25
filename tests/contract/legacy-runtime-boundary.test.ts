@@ -112,8 +112,8 @@ describe("legacy runtime boundary: which roles carry it", () => {
         expect(role.Properties.PermissionsBoundary, `${stackName} ${id}`).toStrictEqual({ Ref: boundary.id });
       }
     }
-    expect(roles).toBe(32);
-    expect([rolesOf("AgentXControlPlane").length, rolesOf("AgentXProductionFoundation").length, rolesOf("AgentXSlackOrchestrator").length]).toEqual([29, 2, 1]);
+    expect(roles).toBe(30);
+    expect([rolesOf("AgentXControlPlane").length, rolesOf("AgentXProductionFoundation").length, rolesOf("AgentXSlackOrchestrator").length]).toEqual([27, 2, 1]);
   });
 
   it("names the worker's instance role, the Slack task role and the Lambda roles among the bounded roles", () => {
