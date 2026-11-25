@@ -6,7 +6,7 @@ import { OrgIdSchema, OrgRoleSchema } from "@agentx/contracts";
 import { membershipKey } from "./company-check.js";
 import type { ChannelMembersInvokeResult, DeveloperCaller } from "./developer-routes.js";
 import { CompanyMember, MemberListInput, MemberPersonId, MemberReply, memberCursorPerson, type CompanyMemberReply } from "../developer/company-member-contract.js";
-import { isMembershipReadFailure, readingMembership } from "../core/membership-read.js";
+import { failedReadOr, readingMembership } from "../core/membership-read.js";
 
 const Request = z.discriminatedUnion("kind", [
   // DEC 254zzz84 (5): the removal's fences (the role the remover saw, the live successor); the identity side checks both inside its transaction.
@@ -32,7 +32,7 @@ export function companyMembersThroughLambda(deps: {
       if (member.personId !== authenticated.data.developerId || member.companyId !== input.data.companyId || member.revokedAt !== undefined || (member.role !== "admin" && member.role !== "owner")) return { ok: false, error: "not_found" };
     } catch (error) {
       // A membership read that FAILED is not "not a member": the caller's route answers the retryable 503 (membership-read.ts); a row that reads and refuses is the "not_found" it always was.
-      return isMembershipReadFailure(error) ? { ok: false, error: "unavailable" } : { ok: false, error: "not_found" };
+      return failedReadOr<CompanyMemberReply>(error, { ok: false, error: "not_found" }, { ok: false, error: "unavailable" });
     }
     try {
       // Only validated payload fields cross the boundary. Both authority fields come

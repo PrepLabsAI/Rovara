@@ -38,3 +38,8 @@ export const orIfNotMembershipFailure = <T>(fallback: T) => (error: unknown): T 
 export function rethrowMembershipReadFailure(error: unknown): void {
   if (isMembershipReadFailure(error)) throw error;
 }
+
+/** For a `catch` that answers a refusal value: `otherwise` for any error, `retry` (the retryable answer) when the error is a failed membership read. */
+export function failedReadOr<T>(error: unknown, otherwise: T, retry: T): T {
+  return isMembershipReadFailure(error) ? retry : otherwise;
+}

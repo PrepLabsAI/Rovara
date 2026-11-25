@@ -57,21 +57,21 @@ it("only the member helper constructs member payloads and derives company/actor 
       "function:companyMembersThroughLambda(deps) > function:anonymous(caller,request) > if:!authenticated.success:condition | PrefixUnaryExpression: !authenticated.success",
       "function:companyMembersThroughLambda(deps) > function:anonymous(caller,request) | VariableDeclaration: member: z.infer<typeof CompanyMember>",
       "function:companyMembersThroughLambda(deps) > function:anonymous(caller,request) > try:body;catch:catch (error) {
-        return isMembershipReadFailure(error) ? { ok: false, error: "unavailable" } : { ok: false, error: "not_found" };
+        return failedReadOr<CompanyMemberReply>(error, { ok: false, error: "not_found" }, { ok: false, error: "unavailable" });
     };finally:none | VariableDeclaration: response = await readingMembership(() => deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: membershipKey(authenticated.data.developerId), ConsistentRead: true }))) as {
         Item?: unknown;
     }",
       "function:companyMembersThroughLambda(deps) > function:anonymous(caller,request) > try:body;catch:catch (error) {
-        return isMembershipReadFailure(error) ? { ok: false, error: "unavailable" } : { ok: false, error: "not_found" };
+        return failedReadOr<CompanyMemberReply>(error, { ok: false, error: "not_found" }, { ok: false, error: "unavailable" });
     };finally:none > function:anonymous() | CallExpression: deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: membershipKey(authenticated.data.developerId), ConsistentRead: true }))",
       "function:companyMembersThroughLambda(deps) > function:anonymous(caller,request) > try:body;catch:catch (error) {
-        return isMembershipReadFailure(error) ? { ok: false, error: "unavailable" } : { ok: false, error: "not_found" };
+        return failedReadOr<CompanyMemberReply>(error, { ok: false, error: "not_found" }, { ok: false, error: "unavailable" });
     };finally:none > if:Buffer.byteLength(JSON.stringify(response)) > 409600:condition | BinaryExpression: Buffer.byteLength(JSON.stringify(response)) > 409600",
       "function:companyMembersThroughLambda(deps) > function:anonymous(caller,request) > try:body;catch:catch (error) {
-        return isMembershipReadFailure(error) ? { ok: false, error: "unavailable" } : { ok: false, error: "not_found" };
+        return failedReadOr<CompanyMemberReply>(error, { ok: false, error: "not_found" }, { ok: false, error: "unavailable" });
     };finally:none | ExpressionStatement: member = CompanyMember.parse(response.Item);",
       "function:companyMembersThroughLambda(deps) > function:anonymous(caller,request) > try:body;catch:catch (error) {
-        return isMembershipReadFailure(error) ? { ok: false, error: "unavailable" } : { ok: false, error: "not_found" };
+        return failedReadOr<CompanyMemberReply>(error, { ok: false, error: "not_found" }, { ok: false, error: "unavailable" });
     };finally:none > if:member.personId !== authenticated.data.developerId || member.companyId !== input.data.companyId || member.revokedAt !== undefined || (member.role !== "admin" && member.role !== "owner"):condition | BinaryExpression: member.personId !== authenticated.data.developerId || member.companyId !== input.data.companyId || member.revokedAt !== undefined || (member.role !== "admin" && member.role !== "owner")",
       "function:companyMembersThroughLambda(deps) > function:anonymous(caller,request) > try:body;catch:catch {
         return { ok: false, error: "unavailable" };
