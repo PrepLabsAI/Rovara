@@ -3,7 +3,7 @@ import { agentXError } from "@agentx/contracts";
 import type { DevcontainerPaths } from "./devcontainer.js";
 import type { FileMount } from "./devcontainer-file-paths.js";
 import { MAX_REQUEST_ARGUMENT_BYTES, type FileOpsErrorCode, type SandboxFileRequest, type SandboxFileResponse } from "./sandbox-file-ops.js";
-import { createDockerCli, type DockerCli } from "./swebench/containers.js";
+import { createDockerCli, type DockerCli } from "./docker-cli.js";
 
 /**
  * Where the agent's file tools run: inside a container, as a user, with a Node and the helper (sandbox-file-ops.ts) that

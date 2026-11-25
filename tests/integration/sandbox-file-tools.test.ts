@@ -22,7 +22,7 @@ import {
   type PiSessionHandle,
 } from "../../packages/worker/src/pi-session.js";
 import type { SandboxFileRequest } from "../../packages/worker/src/sandbox-file-ops.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 import { TaskSandbox } from "../../packages/worker/src/task-sandbox.js";
 import { runWorkflowFeedbackReview, runWorkflowReviews } from "../../packages/worker/src/verification/review.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";

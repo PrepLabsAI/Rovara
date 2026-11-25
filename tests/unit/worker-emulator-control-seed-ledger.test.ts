@@ -7,7 +7,7 @@ import { EmulatorLedgerError, LEDGER_LIMITS, emulatorLedgerPort, parseLedgerSumm
 import { EmulatorSeedError, buildAwsSeedDocument, seedEmulator, seedReportCovers } from "../../packages/worker/src/service-seed-aws.js";
 import { newLocalAwsCredentials, type HelperFiles } from "../../packages/worker/src/service-helpers.js";
 import type { TaskAwsResource } from "../../packages/contracts/src/test-services-aws-resources.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const RUN = "11111111-1111-4111-8111-111111111111";
 const NOW = 1_800_000_000_000;

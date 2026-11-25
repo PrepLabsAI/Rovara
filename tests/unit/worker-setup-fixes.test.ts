@@ -17,7 +17,7 @@ import { runSetupAgentInvocation } from "../../packages/worker/src/setup-agent-i
 import { assertSetupSandboxRunArgs } from "../../packages/worker/src/setup-agent.js";
 import { removeLeftoverSetupRuns, setupNetworkAddresses } from "../../packages/worker/src/setup-network.js";
 import { TASK_SANDBOX_IMAGE_ENVIRONMENT, taskSandboxRunArgs } from "../../packages/worker/src/task-sandbox.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 import type { RunNetwork } from "../../packages/worker/src/setup-network.js";
 
 const run = promisify(execFile);

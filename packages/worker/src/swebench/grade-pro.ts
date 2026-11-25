@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { TASK_PLATFORM, removeContainer, type DockerCli } from "./containers.js";
+import type { DockerCli } from "../docker-cli.js";
+import { TASK_PLATFORM, removeContainer } from "./containers.js";
 import type { GradeReport } from "./grade.js";
 
 /** Applied as Scale's own re-grader (v2/tooling/patch_replay.py) applies a model's patch. */

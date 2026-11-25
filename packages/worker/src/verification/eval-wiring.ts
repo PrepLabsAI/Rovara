@@ -28,7 +28,7 @@ import { prepareEvalStandIns, type PreparedEvalStandIns } from "../eval-stand-in
 import type { EvalServicesStarter } from "./eval-services.js";
 import { createBridgedEvalExec, createFreshEvalSandbox, freshEvalSandboxOffered, FRESH_EVAL_RUN_MAX_MS, type FreshEvalSandbox, type FreshEvalSandboxConfig } from "./eval-bridged-exec.js";
 import { createProcessCandidateGit } from "../e2e-candidate-source.js";
-import type { DockerCli } from "../swebench/containers.js";
+import type { DockerCli } from "../docker-cli.js";
 import { createEvalFinalCheckPorts, type EvalHostCapabilities } from "./eval-host.js";
 import type { EvalFinalCheckPorts } from "./eval-final-check.js";
 import type { EvalMeterOptions } from "./eval-model-access.js";

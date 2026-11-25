@@ -28,7 +28,7 @@ import { RunnerKillUnconfirmedError, TIMEOUT_KILL_GRACE_MS, runCollected, tailCo
 import type { PiSessionAdapter, PiSessionInput } from "../../packages/worker/src/pi-session.js";
 import { prepareWorkspace } from "../../packages/worker/src/prepare.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 import type { TaskShellSelection } from "../../packages/worker/src/task-sandbox.js";
 import { processEnded } from "../support/process-liveness.js";
 

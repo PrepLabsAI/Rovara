@@ -6,7 +6,7 @@ import { SEALED_DNS_STATE_FILE, type SealedDnsRecord } from "../../packages/work
 import { createServiceRedactor } from "../../packages/worker/src/service-env.js";
 import type { ServiceSession } from "../../packages/worker/src/service-runner.js";
 import { USAGE_UNKNOWN_DOMAINS_MAX, bucketCount, buildServiceUsageRecord, countResets, reduceUnknownNames, type ServiceUsageRecord } from "../../packages/worker/src/service-usage-record.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const PASSWORD = ["Zq8Wv3Lm9", "Xc2Rt5"].join("");
 const CONTROL = "Kd4Hn7Bp2Vs6Jf9";

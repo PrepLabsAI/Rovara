@@ -15,7 +15,7 @@ import type { PiSessionAdapter } from "../../packages/worker/src/pi-session.js";
 import { OperationJournal } from "../../packages/worker/src/journal.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 import { anotherOperationActive, createWorkerServerState, handleWorkerRequest, type WorkerServerState } from "../../packages/worker/src/server.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 import type { CheckRunners } from "../../packages/worker/src/verification/checks.js";
 import { sweepWorkspaceContainers, type DockerContainer } from "../../packages/worker/src/workspace-containers.js";
 import { stopWorkspaceProcesses, type ProcessEntry } from "../../packages/worker/src/workspace-processes.js";

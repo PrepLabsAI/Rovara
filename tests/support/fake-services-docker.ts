@@ -1,7 +1,7 @@
 // A fake Docker daemon for the test-services orchestrator's tests (worker/src/test-services-run.ts). It keeps the little state the orchestrator reads back: which containers exist and which networks each is on (`docker
 // inspect`, `network connect` and `disconnect`), the services networks, and the env files at the moment of each `docker exec` (the run's files are removed as soon as the exec returns, so they are read inside the call).
 import { readFileSync } from "node:fs";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 export interface FakeServicesDockerOptions {
   /** The pinned image is already on the host (`image inspect` answers). Default: yes (root pulls at boot; the worker never pulls). False: the image was not pre-pulled. */

@@ -14,7 +14,7 @@ import { setupWorkspaceKey, startRunNetwork } from "./setup-network.js";
 import { TASK_SANDBOX_IMAGE_ENVIRONMENT, gatewayEgressFor, sandboxNetworkFromEnvironment, type TaskShellSelection } from "./task-sandbox.js";
 import type { RunNetwork } from "./setup-network.js";
 import { modelSpendIsMetered, invocationModelPrice } from "./setup-agent-price.js";
-import { createDockerCli, type DockerCli } from "./swebench/containers.js";
+import { createDockerCli, type DockerCli } from "./docker-cli.js";
 import { EVAL_WORKER_IMAGE_VARIABLE } from "./verification/eval-wiring.js";
 import { runSetupEvalDryRun } from "./verification/eval-dry-run.js";
 import { testServicesConfigFromEnvironment } from "./test-services-run.js";

@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { PrepareSavedEnvBuildSchema, TestEnvironmentBodySchema, savedEnvRepositoryName, testEnvDigest, type SavedEnvBuildResult, type WorkerInvocation } from "../../packages/contracts/src/index.js";
 import { forbiddenValuesOf, rememberCredentials, runSavedEnvRebuild, workspaceBuildSandbox, type SavedEnvRebuildDependencies } from "../../packages/worker/src/saved-env/rebuild.js";
 import type { SavedEnvBuildInput, SavedEnvBuildPorts } from "../../packages/worker/src/saved-env/build.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 afterEach(() => { vi.restoreAllMocks(); });
 const COMMIT = "d".repeat(40);
