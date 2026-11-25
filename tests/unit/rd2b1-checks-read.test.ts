@@ -556,9 +556,8 @@ describe("GET /v1/dev/tasks/{id}/checks on a core task", () => {
     const held = await w.taskOf(owner, FAKE_COMPANY, { pack: keptPack(), stored: [{ sha256: TAIL_REF.sha256, bytes: TAIL }] });
     const first = (JSON.parse((await w.read(owner, held.taskId))!.body) as { checks: ChecksView }).checks;
     readsAsRow("tasks.checks", { checks: first });
-    // RD-2d does not serve the files yet: a kept file says so in fixed words and has no address (a dead link is worse than none); the row still says it is kept.
-    expect(first.rows[1]).toMatchObject({ id: "build", before: "passed", after: "failed", retention: "kept", output: { kind: "output", id: TAIL_REF.sha256, label: CHECKS_WORDS.fileNotYet } });
-    expect(first.rows[1]!.output!.href).toBeUndefined();
+    // RD-2d serves the files (the route is mounted): a kept file carries the address of that route, and the row says it is kept.
+    expect(first.rows[1]).toMatchObject({ id: "build", before: "passed", after: "failed", retention: "kept", output: { kind: "output", id: TAIL_REF.sha256, href: `/v1/app/tasks/${held.taskId}/evidence/${TAIL_REF.sha256}` } });
     // The same pack with its file gone from the store (past retention): no link, and the row says so.
     await w.blobs.delete(evidenceArtifactKey(held.ownerKey, held.workspaceId, held.taskId, TAIL_REF.sha256));
     const gone = (JSON.parse((await w.read(owner, held.taskId))!.body) as { checks: ChecksView }).checks;

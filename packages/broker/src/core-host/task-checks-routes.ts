@@ -1,6 +1,6 @@
 // RD-2b1: the task page's checks read, `GET /v1/dev/tasks/{taskId}/checks` (row `tasks.checks`, schema `TaskChecksReadSchema` in packages/code-api). It answers `{ checks }`, built by `checksViewOf` (core/task-view/checks.ts) from what the core
 // stores: the workflow snapshot, the plan the owner approved, and the evidence pack kept for the current code (its output tails and screenshots as links, each one checked against the store: a file that is gone reads "expired", never a
-// dead link; and while Code does not serve the files, `EVIDENCE_FILES_SERVED`, a link carries no address and says so).
+// dead link; the files are served by RD-2d's route, `EVIDENCE_FILES_SERVED`: a link carries its address).
 //
 // ACCESS is decided by the mount, once per request, by the one read rule (core/task-flow/read-rule.ts `decideTaskRead`, see task-screen-routes.ts): this handler is given `context.decision` and does no access work. Another company's task,
 // a colleague who may not read the task and a missing task all answer the same `TASK_NOT_FOUND`; a share (the reader the owner shared the task with) is told TASK_PART_NOT_SHOWN (the checks are not shown): both before this handler runs.

@@ -22,8 +22,8 @@ export type ReviewState = "not_run" | "running" | "passed" | "partial" | "findin
 /** The most rows, claims, links and lines one answer carries (the stored sources are bounded too; these keep the answer small whatever they hold). */
 export const CHECKS_VIEW_LIMITS = { rows: 100, acceptance: 60, screenshots: 12, notTested: 20, notes: 5, reviewFindings: 20, scanItems: 20, checksPerClaim: 20 } as const;
 
-/** Whether Code serves the files the links name (`/v1/app/tasks/{taskId}/evidence/{sha256}`, RD-2d). While it does not, a link carries no address and says so; RD-2d turns this on in the same change that mounts the route. */
-export const EVIDENCE_FILES_SERVED = false;
+/** Whether Code serves the files the links name (`/v1/app/tasks/{taskId}/evidence/{sha256}`, RD-2d, task-evidence-file-routes.ts). It does: a link carries its address. Were the route ever unmounted, setting this false makes a link say "Not available yet" and carry no address. */
+export const EVIDENCE_FILES_SERVED = true;
 
 /** The fixed words of this read (rows, reviews and missing parts); a surface shows them as they are. */
 export const CHECKS_WORDS = {
