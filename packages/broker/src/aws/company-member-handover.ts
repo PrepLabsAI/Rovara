@@ -19,6 +19,7 @@ import { OrgIdSchema, OrgRoleSchema, agentDirectoryKey, agentKey, chainDirectory
 import { DocumentAuditSink } from "@agentx/local-adapters";
 import { revokeProjectAccess } from "./admin-actions.js";
 import { ownPartitionRow, recordInCompany } from "./company-check.js";
+import { isProjectUnreadable } from "../core/project-left-out.js";
 import { grantKeyFor, grantsPkFor, latestRevisionRowFor, namedCompany, projectMemberRowKeyFor } from "./company-layout.js";
 import { involvedPartition } from "../core/task-flow/involved.js";
 import { taskOwnershipHandOverSteps, type TaskHandOverSkip, type TaskPeopleDependencies } from "../developer/task-people.js";
@@ -160,7 +161,14 @@ function companyGrant(row: Record<string, unknown> | undefined, companyId: OrgId
 
 /** Whether the project's latest revision lives in this company's own layout (a named company's partition; the legacy one naming this company). A read error throws. */
 async function projectInCompany(ctx: HandOverContext, companyId: OrgId, project: string): Promise<boolean> {
-  const revision = await latestRevisionRowFor(ctx.documentClient, ctx.tableName, companyId, project);
+  let revision;
+  try {
+    revision = await latestRevisionRowFor(ctx.documentClient, ctx.tableName, companyId, project);
+  } catch (error) {
+    // A project whose current revision cannot be read (arch rule 9) is still in the named company's own partition, where the read found it: a hand-over only moves grants, so one such project must not block the leaver's others.
+    if (!isProjectUnreadable(error) || namedCompany(companyId) === undefined) throw error;
+    return true;
+  }
   return revision !== undefined && (namedCompany(companyId) !== undefined || recordInCompany(revision, companyId));
 }
 

@@ -170,7 +170,8 @@ describe("the deployment event: the ingress opens a watch for the company's own 
     await world.store.put({ item: { ...projectMetaKey(A, PROJECT), status: "active" } });
     expect((await world.company(A).service.codeHostEvent(deployEvent())).kind).toBe("opened");
     await world.store.put({ item: { ...projectRevisionKey(A, PROJECT, 1), definition: { name: PROJECT, revision: 1 } } });
-    expect(await createProjectAfterMergeSettings(world.store).read(A, PROJECT)).toBeUndefined();
+    // A current revision that does not read is refused (arch rule 9), not read as absent; the watcher reads a throw as off and logs a fixed code.
+    await expect(createProjectAfterMergeSettings(world.store).read(A, PROJECT)).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("[project_revision_unreadable]") as string });
   });
 
   it("answers other event types and shapes it cannot use with fixed words", async () => {
