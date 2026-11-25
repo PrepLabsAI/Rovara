@@ -239,7 +239,7 @@ describe("root 4: the dispatcher (createDispatcherCoreHost)", () => {
     const world = createSessionMachinesWorld();
     const built = createDispatcherCoreHost({
       env: environment, callbackSigningKey: "k".repeat(48), documentClient: world.db, clients: { dynamo: new FakeDynamoDb({ tableName: "State" }), sqs: new FakeSqs(), s3: new FakeS3({ bucket: "artifacts" }) },
-      machines: { sessions: world.sessions, stopInstance: dispatcherStopInstance, sign: (message: Uint8Array) => world.sign(message), post: async () => ({ status: 500, body: "" }), ping: async () => undefined },
+      machines: { sessions: world.sessions, stopInstance: dispatcherStopInstance, sign: (message: Uint8Array) => world.sign(message), post: async () => ({ status: 500, body: "" }), ping: async () => undefined, verifyMachine: async () => ({ ok: true }) },
       changeVisibility: async () => undefined, log: () => undefined, now: () => new Date(),
       extraModules: createFakeWorld().modules.filter((module) => owed.has(module.point)),
       flow: { standingInstructions: null, modelAccess: null, learned: null },
