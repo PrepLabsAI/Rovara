@@ -62,4 +62,35 @@ describe("parameter-only stack updates (R6)", () => {
     await expect(legacy({ BudgetScope: "tag" })).rejects.toThrow("stack AgentXControlPlane has no BudgetScope parameter; it runs an older AgentX release, so upgrade it with agentx upgrade, then run this again");
   });
 
+  // CODE-PUBLIC-URL (DEC 254zzz505): the issuer follows PublicApiUrl, so changing it on a running stack is an issuer change and needs an explicit confirm.
+  describe("PublicApiUrl (the guard on changing it on a running install)", () => {
+    const origin = "https://api.example.dev";
+    const confirmed = (cf: ReturnType<typeof fakeCloudFormation>, changes: Record<string, string>) =>
+      updateStackParameters({ cloudFormation: cf, stackName: STACK, roleArn: ROLE, changes, confirm: async () => true, write: () => undefined, sleep: async () => undefined, pollMs: 1, confirmPublicApiUrlChange: true });
+
+    it.each([["", origin], [origin, "https://api.other.dev"], [origin, ""]])("refuses %j to %j without the confirm, naming the issuer consequences, and creates no change set", async (from, to) => {
+      const cf = fakeCloudFormation({ parameters: { PublicApiUrl: from } });
+      const refusal = run(cf, { PublicApiUrl: to });
+      await expect(refusal).rejects.toThrow(/changes its token issuer: Cloud's sealed company AI keys, spend meters and Bedrock external ids are keyed on the issuer/u);
+      await expect(refusal).rejects.toThrow(/--confirm-public-api-url-change/u);
+      expect(cf.calls.map((call) => call.name)).toEqual(["DescribeStacksCommand"]);
+    });
+
+    it("applies the change with the explicit confirm", async () => {
+      const cf = fakeCloudFormation({ parameters: { PublicApiUrl: "" } });
+      expect(await confirmed(cf, { PublicApiUrl: origin })).toEqual({ changed: true });
+      expect(cf.calls.map((call) => call.name)).toContain("CreateChangeSetCommand");
+    });
+
+    it("needs no confirm where the value does not change", async () => {
+      const cf = fakeCloudFormation({ parameters: { PublicApiUrl: origin } });
+      expect(await run(cf, { PublicApiUrl: origin })).toEqual({ changed: false });
+    });
+
+    it("does not guard another parameter", async () => {
+      const cf = fakeCloudFormation({ parameters: { PublicApiUrl: origin, SlackTeamId: "" } });
+      expect(await run(cf, { SlackTeamId: "T0TEAM1" })).toEqual({ changed: true });
+    });
+  });
+
 });

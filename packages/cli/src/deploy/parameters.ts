@@ -3,7 +3,7 @@ import { coreEngineParameters, type CoreEngineAnswers } from "./core-engine-answ
 // It turns the operator's answers, a release manifest, and the stack outputs collected so far into
 // the exact CloudFormation Parameters map for one environment stack. The caller (phase 15d's `agentx
 // init`/`agentx upgrade`) reads secrets and calls CloudFormation; this file only computes values.
-import { CONTROL_PLANE_FOUNDATION_PARAMETERS, EGRESS_ADDRESSES_PARAMETER_PATTERN, ImageDigest, NAT_EGRESS_ADDRESSES_OUTPUT, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, environmentPullThroughPrefix, environmentStackName, operatorTrustProblem } from "@agentx/contracts";
+import { CONTROL_PLANE_FOUNDATION_PARAMETERS, EGRESS_ADDRESSES_PARAMETER_PATTERN, PUBLIC_API_URL_PARAMETER, ImageDigest, NAT_EGRESS_ADDRESSES_OUTPUT, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, environmentPullThroughPrefix, environmentStackName, operatorTrustProblem } from "@agentx/contracts";
 import type { ReleaseManifest, StackPart } from "@agentx/contracts";
 import { signInStackParameters, type StoredDeveloperSignIn } from "../signin/settings.js";
 
@@ -58,6 +58,14 @@ export interface InstallAnswers {
   /** The install in the cloud: the setup page's address, for the identity stack's sign-in callback
    * and invitation email. Absent everywhere else (the template's default, empty). */
   setupPageUrl?: string;
+  /**
+   * CODE-PUBLIC-URL (DEC 254zzz505): the install's permanent public address, an https origin (empty: the API's own host). Absent: the deployed value is kept. deployEnvironment fills it in from
+   * the address stack's PublicApiOrigin output (public-api-url.ts) and gives it to the foundation (its DNS firewall must allow the host), the control plane and the Slack service.
+   * TODO(F1): becomes a settings row of F1's install layer, with its CLI key and docs generated from it.
+   */
+  publicApiUrl?: string;
+  /** CODE-PUBLIC-URL: this install is declared to have an address stack; a deploy that finds none is refused. */
+  requirePublicApiAddress?: boolean;
 }
 
 /** The shortest callback signing key the control plane accepts. */
@@ -74,7 +82,8 @@ export const SECRET_PARAMETERS: ReadonlySet<string> = new Set(["CallbackSigningK
  */
 export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>> = {
   access: [],
-  foundation: [],
+  // CODE-PUBLIC-URL: the foundation's DNS firewall allows the install's public address (the same value as the control plane's), and an upgrade keeps it.
+  foundation: [PUBLIC_API_URL_PARAMETER],
   identity: [],
   // The AI navigation model the customer chose (agentx config set models.e2eAgent): a stack parameter and not a model role, so it is not in the settings the upgrade's answers read.
   // MODEL3: the fallback model the customer chose (agentx config set models.fallback), also a parameter of the Slack stack.
@@ -103,7 +112,9 @@ export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>
     // DEC 254zk: per-company Slack bots (agentx config set slack.companyWorkspaces).
     "SlackCompanyWorkspaces",
     // Live switches check 2026-11-18: the per-company model choice (agentx config set coreEngine.agentModelChoice).
-    "CoreAgentModelChoice"],
+    "CoreAgentModelChoice",
+    // CODE-PUBLIC-URL (DEC 254zzz505): the install's permanent public address, carried by every upgrade (a rebuilt stack takes it from the address stack's output, public-api-url.ts).
+    PUBLIC_API_URL_PARAMETER],
   // DEC 254zg (a): the Slack service's copy of CompanySignIn, set together with the control plane's.
   slack: ["SlowTurnMinutes", "ModelFallback", "CompanySignIn", "SlackCompanyWorkspacesState"],
 };
@@ -167,6 +178,16 @@ function optionalOutputs(outputs: Partial<Record<DeployPart, StackOutputs>>, par
     const value = outputs[part]?.[name];
     return typeof value === "string" && value.length > 0 ? [[name, value]] : [];
   }));
+}
+
+/** CODE-PUBLIC-URL: the PublicApiUrl parameter (foundation and control plane) when the answers have a value; nothing otherwise (the deployed value is kept, or the template's empty default). */
+function publicApiUrlParameter(answers: Pick<InstallAnswers, "publicApiUrl">): Record<string, string> {
+  return answers.publicApiUrl === undefined ? {} : { [PUBLIC_API_URL_PARAMETER]: answers.publicApiUrl };
+}
+
+/** CODE-PUBLIC-URL: where the Slack service reaches the control plane: the install's public address when it has one, else the API's own endpoint. */
+function orchestratorControlPlaneUrl(answers: Pick<InstallAnswers, "publicApiUrl">, endpoint: () => string): string {
+  return answers.publicApiUrl === undefined || answers.publicApiUrl === "" ? endpoint() : answers.publicApiUrl;
 }
 
 /** The control plane's NatEgressAddresses parameter from the foundation's output of the same name, or nothing. */
@@ -341,7 +362,7 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
       return { ...base, OperatorPrincipalArn: answers.operatorPrincipalArn ?? "", ...(answers.operatorExternalId === undefined ? {} : { OperatorExternalId: answers.operatorExternalId }) };
 
     case "foundation":
-      return base;
+      return { ...base, ...publicApiUrlParameter(answers) };
 
     case "identity":
       return answers.setupPageUrl === undefined ? base : { ...base, SetupPageUrl: answers.setupPageUrl };
@@ -374,6 +395,7 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         // (sign-in off) are otherwise left untouched, and only the seven keys the control-plane
         // template declares (infra/lib/developer-signin.ts) are ever added here.
         ...(answers.developerSignIn === undefined ? {} : signInStackParameters(answers.developerSignIn)),
+        ...publicApiUrlParameter(answers),
       };
     }
 
@@ -395,7 +417,8 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         OrchestratorImageUri: slackImage,
         OrchestratorImageRepositoryName: ecrRepositoryName(slackImage, answers),
         TaskRoleArn: required(outputs, "control-plane", "SlackOrchestratorTaskRoleArn", answers.env),
-        ControlPlaneUrl: required(outputs, "control-plane", "ApiEndpoint", answers.env),
+        // CODE-PUBLIC-URL: the orchestrator reaches the control plane at the install's public address where it has one (its host is on the firewall's list), else the API's own host.
+        ControlPlaneUrl: orchestratorControlPlaneUrl(answers, () => required(outputs, "control-plane", "ApiEndpoint", answers.env)),
         SlackRequestQueueUrl: required(outputs, "control-plane", "SlackRequestQueueUrl", answers.env),
         // Spec 062: present once the control plane has the channel API.
         ...optionalOutputs(outputs, "control-plane", ["ChannelRequestQueueUrl", "ChannelEventQueueUrl", "SlackAdapterCommandsUrl", "SlackAdapterSecretName"]),

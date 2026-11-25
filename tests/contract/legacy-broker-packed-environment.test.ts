@@ -24,6 +24,8 @@ const BEFORE = [
 ];
 /** What packing adds, and nothing else: the account (ARNs and URLs are built from it), the names parameter's pointer and revision (and the names read from it), the settings, and the layout. */
 const PACKING = ["AGENTX_ACCOUNT_ID", "AGENTX_INSTALL_LAYOUT", "AGENTX_NAMES", "AGENTX_NAMES_PARAMETER", "AGENTX_NAMES_REVISION", "AGENTX_SETTINGS"];
+/** CODE-PUBLIC-URL: the public address the broker derives its issuer from (packed `pu`); empty while the install has none. */
+const PUBLIC_API = ["ROVARA_PUBLIC_API_URL"];
 /** #1171: Slack company mode's switch (packed `cw`), "disabled" while off. */
 const SLACK_COMPANY = ["SLACK_COMPANY_WORKSPACES"];
 /** #1148: what the core engine brought to the legacy install, on purpose: its switches and model settings, its queues and attention email (derived), the keys and the saved environments' roles. */
@@ -89,6 +91,8 @@ function resolverOf(template: Template, parameters: Record<string, string>) {
     }
     if (key === "Fn::GetAtt") return attribute((value as string[])[0]!, (value as string[])[1]!);
     if (key === "Fn::Join") return ((value as unknown[])[1] as unknown[]).map(resolve).join((value as unknown[])[0] as string);
+    // CODE-PUBLIC-URL: the packed public host is Select(1, Split("://", PublicApiUrl)).
+    if (key === "Fn::Select") { const [index, list] = value as [number, { "Fn::Split": [string, unknown] }]; return resolve(list["Fn::Split"][1]).split(list["Fn::Split"][0])[Number(index)]!; }
     if (key === "Fn::If") { const [name, yes, no] = value as [string, unknown, unknown]; return resolve(condition(template.Conditions![name]) ? yes : no); }
     throw new Error(`no stand-in for ${key}`);
   };
@@ -118,7 +122,7 @@ describe("production's broker, packed (#1149)", () => {
       const { env, reads, parameterName } = await bootedBroker(template, { CompanySignIn: companySignIn, CompanySelfServe: companySignIn });
       expect(parameterName).toBe("/agentx/production/broker-names");
       expect(reads).toEqual(["/agentx/production/broker-names"]);
-      expect(Object.keys(env).sort()).toEqual([...BEFORE, ...PACKING, ...CORE, ...SLACK_COMPANY, ...WEBHOOK].sort());
+      expect(Object.keys(env).sort()).toEqual([...BEFORE, ...PACKING, ...CORE, ...SLACK_COMPANY, ...WEBHOOK, ...PUBLIC_API].sort());
       expect(env.SLACK_COMPANY_WORKSPACES).toBe("disabled");
       expect(env.AGENTX_INSTALL_LAYOUT).toBe("legacy");
       expect(env.GITHUB_WEBHOOK_SECRET_ID).toBe("agentx/production/github-webhook-secret");
@@ -131,7 +135,9 @@ describe("production's broker, packed (#1149)", () => {
       // Rebuilt from the packed names, to the values the whole variables held.
       expect(env.STATE_TABLE_NAME).toMatch(/^PHYS-State/u);
       expect(env.SLACK_REQUEST_QUEUE_URL).toMatch(/^https:\/\/sqs\.us-east-1\.amazonaws\.com\/123456789012\/PHYS-SlackRequestQueue/u);
+      // CODE-PUBLIC-URL: with PublicApiUrl empty (the default) the issuer is exactly the API's own host, as before, and there is no public origin.
       expect(env.DEVELOPER_TOKEN_ISSUER).toBe("https://example.execute-api.us-east-1.amazonaws.com/v1/auth");
+      expect(env.ROVARA_PUBLIC_API_URL).toBe("");
       expect(env.DELETER_ARN).toMatch(/^arn:aws:states:us-east-1:123456789012:stateMachine:PHYS-SessionsDeleter/u);
       expect(Object.keys(JSON.parse(env.HEALTH_DEAD_LETTER_QUEUES!) as Json)).toEqual(["dispatch", "slack-requests", "developer-notices", "developer-notice-stream", "channel-events"]);
       // The four derivations identical to production's own values.
@@ -141,6 +147,18 @@ describe("production's broker, packed (#1149)", () => {
       expect(env.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID).toBe("agentx-production-e2e-mock-runtime-v1");
     }, 120_000);
   }
+
+  it("CODE-PUBLIC-URL: with PublicApiUrl set, the broker's issuer is the public address and nothing else about it changes", async () => {
+    const unset = (await bootedBroker(template, {})).env;
+    const { env } = await bootedBroker(template, { PublicApiUrl: "https://api.example.dev" });
+    expect(env.ROVARA_PUBLIC_API_URL).toBe("https://api.example.dev");
+    expect(env.DEVELOPER_TOKEN_ISSUER).toBe("https://api.example.dev/v1/auth");
+    const { DEVELOPER_TOKEN_ISSUER: issuerSet, ROVARA_PUBLIC_API_URL: publicSet, AGENTX_SETTINGS: settingsSet, ...restSet } = env;
+    const { DEVELOPER_TOKEN_ISSUER: issuerUnset, ROVARA_PUBLIC_API_URL: publicUnset, AGENTX_SETTINGS: settingsUnset, ...restUnset } = unset;
+    expect([issuerSet, publicSet]).not.toEqual([issuerUnset, publicUnset]);
+    expect(restSet).toEqual(restUnset);
+    expect(settingsSet).toBe(settingsUnset!.replace(",pu=,", ",pu=api.example.dev,"));
+  }, 120_000);
 
   it("derives nothing a named environment's name would decide differently (no metrics namespace, connector prefix or AI navigation prefix), and the core's queues under production's names", async () => {
     const { env } = await bootedBroker(template, {});

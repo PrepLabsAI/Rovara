@@ -41,6 +41,8 @@ const SETTINGS = {
   coreModelGateway: "gateway.example.dev", coreAgentModel: "claude-sonnet-4-6", slackCompanyWorkspaces: "0", companySignIn: "1", testServices: "1", savedEnvironments: "0", testServiceImages: "mirrored", coreAttentionEmail: "off",
   coreAnswersModel: "claude-haiku-5-5", coreAgentModelChoice: "on",
   coreLearningModel: "claude-haiku-5-5",
+  // CODE-PUBLIC-URL: empty, an install without a public address (the common case, and today's behaviour).
+  publicApiUrl: "",
   // #1149: a named broker's settings: the legacy layout marker (installLayout) is the legacy install's alone.
 } as const satisfies Record<Exclude<BrokerSettingKey, "installLayout">, string>;
 
@@ -95,6 +97,17 @@ describe("hydrateBrokerEnvironment: a named environment's broker", () => {
     expect(env.DEVELOPER_TOKEN_ISSUER).toBe(`https://abcdefghij.${API_HOST("cn-north-1", "amazonaws.com.cn")}/v1/auth`);
   });
 
+  // CODE-PUBLIC-URL: the issuer is the install's public address while it has one, the API's own host while it does not.
+  it("derives the issuer from the packed public address, as an https origin, when the install has one", () => {
+    const env = hydrated({ ...SCOPE, [BROKER_NAMES_VARIABLE]: names(), [BROKER_SETTINGS_VARIABLE]: settings({ ...SETTINGS, publicApiUrl: "api.example.dev" }) });
+    expect(env.ROVARA_PUBLIC_API_URL).toBe("https://api.example.dev");
+    expect(env.DEVELOPER_TOKEN_ISSUER).toBe("https://api.example.dev/v1/auth");
+  });
+  it("keeps the API's own host as the issuer, and sets no public origin, while the public address is empty", () => {
+    const env = hydrated(packed());
+    expect(env.ROVARA_PUBLIC_API_URL).toBe("");
+    expect(env.DEVELOPER_TOKEN_ISSUER).toBe(`https://abcdefghij.${API_HOST("us-west-2", "amazonaws.com")}/v1/auth`);
+  });
   it("never replaces a variable that is already set", () => {
     const env = hydrated({ ...packed(), STATE_TABLE_NAME: "given", HEALTH_DEAD_LETTER_QUEUES: "{}", CONNECTOR_SECRET_PREFIX: "given/", SLACK_TEAM_ID: "TGIVEN" });
     expect(env).toMatchObject({ STATE_TABLE_NAME: "given", HEALTH_DEAD_LETTER_QUEUES: "{}", CONNECTOR_SECRET_PREFIX: "given/", SLACK_TEAM_ID: "TGIVEN" });

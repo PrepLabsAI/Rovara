@@ -165,6 +165,9 @@ const throwingDeployer: StackDeployer = {
   outputs: () => { throw new Error("test setup: the deployer must not be called"); },
 };
 
+/** CODE-PUBLIC-URL: every deploy asks for the address stack's outputs (agentx-<env>-address); these installs have none. */
+const noAddressStack = async (): Promise<undefined> => undefined;
+
 function unexpectedAwsCall(): never {
   throw new Error("unexpected AWS call in test");
 }
@@ -691,7 +694,7 @@ describe("agentx deploy", () => {
 
     const code = await executeCli(
       ["deploy", "--mode", "install", "--engine", "cdk", "--release", releaseDir, "--answers", answersPath, "--source", "/some/source", "--yes"],
-      { ...io, deploy: safeDeployDeps({ identity: fakeIdentity, store, secrets: memorySecrets(), commandRunner: runner }) },
+      { ...io, deploy: safeDeployDeps({ identity: fakeIdentity, store, secrets: memorySecrets(), commandRunner: runner, stackOutputs: noAddressStack }) },
     );
 
     expect(code).toBe(0);
@@ -716,7 +719,7 @@ describe("agentx deploy", () => {
 
     const code = await executeCli(
       ["deploy", "--mode", "install", "--engine", "cdk", "--release", releaseDir, "--answers", answersPath, "--source", "/some/source", "--yes"],
-      { ...io, deploy: safeDeployDeps({ identity: fakeIdentity, store, secrets: memorySecrets(), commandRunner: runner }) },
+      { ...io, deploy: safeDeployDeps({ identity: fakeIdentity, store, secrets: memorySecrets(), commandRunner: runner, stackOutputs: noAddressStack }) },
     );
 
     expect(code).toBe(0);
@@ -755,7 +758,7 @@ describe("agentx deploy", () => {
 
     const code = await executeCli(
       ["deploy", "--mode", "install", "--engine", "cdk", "--release", releaseDir, "--answers", answersPath, "--source", "/some/source", "--yes"],
-      { ...io, deploy: safeDeployDeps({ identity: fakeIdentity, store, secrets: memorySecrets(), commandRunner: runner }) },
+      { ...io, deploy: safeDeployDeps({ identity: fakeIdentity, store, secrets: memorySecrets(), commandRunner: runner, stackOutputs: noAddressStack }) },
     );
 
     expect(code).toBe(0);

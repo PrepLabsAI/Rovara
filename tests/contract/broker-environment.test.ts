@@ -117,7 +117,8 @@ for (const env of ["staging", "a1234567890123456789"] as const) {
           stateMachineArn: () => resolver.ref(id),
           lambdaFunctionArn: () => resolver.getAtt(id, "Arn"),
           roleArn: () => resolver.getAtt(id, "Arn"),
-          apiIssuer: () => `${resolver.getAtt(id, "ApiEndpoint")}/v1/auth`,
+          // CODE-PUBLIC-URL: the measure resolves the packed setting to its set branch, so the install has its public address and the issuer is that address (the unset case is below).
+          apiIssuer: () => `${DEPLOY_PARAMETER_VALUES.PublicApiUrl}/v1/auth`,
         };
         const expected = builders[spec.kind]!();
         expect(hydrated[spec.variable]).toBe(expected);
@@ -129,7 +130,27 @@ for (const env of ["staging", "a1234567890123456789"] as const) {
       expect(hydrated.HEALTH_DEAD_LETTER_QUEUES).toBe(JSON.stringify(Object.fromEntries(queues.map((spec) => [spec.label, resolver.ref(logicalIdOf(names.get(spec.code)))]))));
     });
 
-    for (const spec of Object.values(BROKER_SETTINGS).filter((each) => !("switchFlag" in each) && each.code !== BROKER_SETTINGS.installLayout.code)) {
+    // CODE-PUBLIC-URL: the public address is packed as its HOST (a URL's slashes cannot be packed) while the parameter is set, and as nothing while it is empty.
+    it("ROVARA_PUBLIC_API_URL (pu) is the PublicApiUrl parameter's host, packed under its condition, and reaches the broker as an https origin", () => {
+      const packed = settings.get(BROKER_SETTINGS.publicApiUrl.code) as { "Fn::If"?: [string, unknown, unknown] };
+      expect(packed["Fn::If"]?.[0]).toBe("HasPublicApiUrl");
+      expect(packed["Fn::If"]?.[1]).toEqual({ "Fn::Select": [1, { "Fn::Split": ["://", { Ref: "PublicApiUrl" }] }] });
+      expect(packed["Fn::If"]?.[2]).toBe("");
+      expect(hydrated[BROKER_SETTINGS.publicApiUrl.variable]).toBe(DEPLOY_PARAMETER_VALUES.PublicApiUrl);
+    });
+
+    it("with PublicApiUrl empty the broker has no public origin and its issuer is the API's own host, as before", async () => {
+      const host = DEPLOY_PARAMETER_VALUES.PublicApiUrl!.slice("https://".length);
+      const unset: MutableEnvironment = { ...env0, [BROKER_SETTINGS_VARIABLE]: String((env0 as MutableEnvironment)[BROKER_SETTINGS_VARIABLE]).replace(`pu=${host}`, "pu=") };
+      expect(unset[BROKER_SETTINGS_VARIABLE]).toContain("pu=");
+      expect(unset[BROKER_SETTINGS_VARIABLE]).not.toContain(host);
+      await loadBrokerNamesParameter(unset, async () => ({ type: "String", value: parameterValue }));
+      hydrateBrokerEnvironment(unset);
+      expect(unset[BROKER_SETTINGS.publicApiUrl.variable]).toBe("");
+      expect(unset.DEVELOPER_TOKEN_ISSUER).toBe(`${resolver.getAtt(logicalIdOf(names.get(BROKER_NAMES.signInApi.code)), "ApiEndpoint")}/v1/auth`);
+    });
+
+    for (const spec of Object.values(BROKER_SETTINGS).filter((each) => !("switchFlag" in each) && each.code !== BROKER_SETTINGS.installLayout.code && each.code !== BROKER_SETTINGS.publicApiUrl.code)) {
       it(`${spec.variable} (${spec.code}) is its parameter's value`, () => {
         const parameter = (settings.get(spec.code) as { Ref?: string }).Ref;
         expect(parameter, "a setting is a parameter's value").toBeDefined();

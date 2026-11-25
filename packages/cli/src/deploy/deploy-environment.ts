@@ -11,6 +11,7 @@ import { currentLockHolder, withEnvironmentLock } from "../environments/lock.js"
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, writeEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
 import { installOrder, OPERATOR_PARAMETERS, SECRET_PARAMETERS, stackParameters, upgradeOrder, type DeployPart, type InstallAnswers, type StackOutputs } from "./parameters.js";
+import { controlPlaneUrlOf, planFromDeploy, withDeclaredPublicApiUrlFor, withPublicApiUrl } from "./public-api-url.js";
 import type { LoadedRelease } from "./release.js";
 import { callbackSigningKey, type SecretValueStore } from "./signing-key.js";
 import { GITHUB_SIGN_IN_PARAMETER_NAMES, readStoredDeveloperSignIn, SIGN_IN_PARAMETER_NAMES } from "../signin/settings.js";
@@ -43,6 +44,8 @@ export interface DeployEnvironmentInput {
   /** An upgrade reads each deployed stack's parameters here, to keep OPERATOR_PARAMETERS (Task 1 of
    * phase 15e). Required for an upgrade that deploys a part with operator parameters. */
   deployedParameters?: (stackName: string) => Promise<Record<string, string> | undefined>;
+  /** CODE-PUBLIC-URL: the operator confirms that a first or changed PublicApiUrl on a running install is an issuer change (public-api-url.ts). */
+  confirmPublicApiUrlChange?: boolean;
   /** The parameter names each part's template declares, when the engine knows them better than the
    * release does: the cdk engine's synth of its source (issue 152, prepareDeployment). Omitted, they
    * are read from the release's own templates (templateParameterNames), as the templates engine does. */
@@ -306,18 +309,22 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
 
     const outputs: Partial<Record<DeployPart, StackOutputs>> = {};
     const droppedParameters: DeployEnvironmentResult["droppedParameters"] = [];
+    // CODE-PUBLIC-URL: decided before any stack changes, so a refusal deploys nothing.
+    const publicApiUrl = await planFromDeploy({ ...input, env, deploySet });
+    const answersWithAddress: InstallAnswers = withPublicApiUrl(fullAnswers, publicApiUrl);
 
     await readDeploymentOutputs({ existing, deployer, env, fullOrder, deploySet, outputs });
 
     for (const part of fullOrder) {
       if (!deploySet.has(part)) continue;
       const stackName = environmentStackName(env, part);
-      const rawParameters = stackParameters(part, fullAnswers, outputs, { packages: engine === "templates" });
+      const rawParameters = stackParameters(part, answersWithAddress, outputs, { packages: engine === "templates" });
       // F24: only when this deploy is actually sending a stored sign-in choice to the control plane
       // are the declared parameters even consulted (every other deploy never calls `release.template`).
       let parameters = part === "control-plane" && developerSignIn !== undefined
         ? withDeclaredSignIn(rawParameters, declaredFor("control-plane"))
         : rawParameters;
+      parameters = withDeclaredPublicApiUrlFor(parameters, part, declaredFor);
       if (mode === "upgrade" && OPERATOR_PARAMETERS[part].length > 0) {
         // The F6 guard above already refused this before anything deployed. Never skip carrying the
         // parameters: skipping would reset them to the template defaults, the bug this code prevents.
@@ -387,7 +394,8 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
         "control-plane": controlPlaneStack,
         slack: slackStack,
       },
-      controlPlaneUrl: requiredOutput(outputs, "control-plane", "ApiEndpoint", env),
+      // CODE-PUBLIC-URL: the control plane's permanent address where the install has one (what `agentx login` names and the sign-in callbacks are built on), else its API endpoint, as before.
+      controlPlaneUrl: controlPlaneUrlOf(controlPlaneOutputs, () => requiredOutput(outputs, "control-plane", "ApiEndpoint", env)),
       identity: identitySettings,
       models: answers.models,
       // F16: set after install (agentx setup alerts, agentx config set alerts.address); no deploy's answers carry it.

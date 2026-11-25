@@ -43,9 +43,10 @@ export function registerUpgradeCommand(program: Command, context: UpgradeCommand
     .option("--answers-from-deployed <file>", "write the deploy answers (for agentx deploy --mode upgrade --answers) read from the deployed environment and its settings, and deploy nothing; either engine")
     .option("--worker-image <digest-ref>", "worker image by digest; an agentx built from source needs it with --engine cdk when the tag has no published release.json")
     .option("--slack-image <digest-ref>", "Slack service image by digest; an agentx built from source needs it with --engine cdk when the tag has no published release.json")
+    .option("--confirm-public-api-url-change", "confirm that setting or changing the install's PublicApiUrl (read from its address stack) changes the token issuer: Cloud's sealed company AI keys, spend meters and Bedrock external ids are keyed on it, and Cloud's CodeUrl must change in the same window", false)
     .option("--yes", "apply without asking; every change and the release notes are still printed", false)
     .option("--region <region>", "AWS region of the environment; defaults to your AWS configuration")
-    .action(async (options: { to?: string; release?: string; source?: string; allowReplace: string[]; export?: string; answersFromDeployed?: string; workerImage?: string; slackImage?: string; yes: boolean; region?: string }, command: Command) => {
+    .action(async (options: { confirmPublicApiUrlChange: boolean; to?: string; release?: string; source?: string; allowReplace: string[]; export?: string; answersFromDeployed?: string; workerImage?: string; slackImage?: string; yes: boolean; region?: string }, command: Command) => {
       const globals = command.optsWithGlobals<{ env: string; json: boolean; configDir: string }>();
       const overrides = context.overrides ?? {};
       const aws = options.region === undefined ? {} : { region: options.region };
@@ -79,6 +80,7 @@ export function registerUpgradeCommand(program: Command, context: UpgradeCommand
       };
       const result = await runUpgrade({
         env: globals.env, yes: options.yes, allowReplace: options.allowReplace,
+        confirmPublicApiUrlChange: options.confirmPublicApiUrlChange,
         ...(options.to === undefined ? {} : { to: options.to }), ...(options.release === undefined ? {} : { releaseDir: options.release }),
         ...(options.source === undefined ? {} : { source: options.source }), ...(options.export === undefined ? {} : { exportDir: options.export }),
         ...(options.answersFromDeployed === undefined ? {} : { answersFile: options.answersFromDeployed }),
