@@ -14,7 +14,8 @@ describe("the one route table", () => {
   it("holds the rows it held in dev-route-scopes.ts, in the same order", () => {
     // R1 + L1 6.2b (Code API 1.3): the three waiting-ticket rows moved from /v1/dev/projects/{project}/intake* to /v1/app/projects/{project}/intake* (179/108 became 176/111).
     // RD-2.0 (Code API 1.5): four rows for the task page's new reads (spec, checks, changes, timeline) after the proof index (176 became 180).
-    expect([DEV_ROUTES.length, APP_ROUTES.length]).toEqual([180, 111]);
+    // D1-2 (owner DEC 254zzz519): the unconnected `POST /v1/dev/tasks/{taskId}/merge` row is deleted (180 became 179). No other row moved; the digest below is the one of this table without that row.
+    expect([DEV_ROUTES.length, APP_ROUTES.length]).toEqual([179, 111]);
     expect(digest(DEV_ROUTES.map(keyOf))).toBe("7041723dc483e5627c885115dbe6c5b6a2dc3d8c6b9b4c6e482d4c25fcd0c699");
     expect(digest(APP_ROUTES.map(keyOf))).toBe("421490346858df2db699d93b15c2508795e4a4c561a2daf6fc4d1f25cc392aca");
   });

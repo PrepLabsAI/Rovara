@@ -11,8 +11,8 @@
 // can read the task; they are NOT a leak), a company admin, a colleague who may NOT read (a plain member), another company's member, another company's script token, a person the core knows no
 // company for, a caller the deployment's mapping does not know, the owner's script token, the owner of an OLD task (a real DEVTASK row with no stamp), and an install with no core entry.
 // The entry is built through the access-paused retry wrapper, as core-engine-root.ts:1420 does. Routes: every suffix the router serves (the five method shapes), the start, and the list with
-// its options. NOT in the table and NOT touched by D1-1: GET /v1/dev/tasks/start-requests/{requestId} (task-start-request-routes.ts, not the task router), and a WIRED merge (the harness wires none,
-// so every merge row is "merging from Rovara is not set up"). A second test says that every caller who may not read a task is told exactly what an id with no task is told.
+// its options. NOT in the table and NOT touched by D1-1: GET /v1/dev/tasks/start-requests/{requestId} (task-start-request-routes.ts, not the task router). The `/merge` rows are the base's "merging from Rovara is
+// not set up" in the golden; since D1-2 they must equal the unknown route's answer (see the declared change below). A second test says that every caller who may not read a task is told exactly what an id with no task is told.
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -177,8 +177,14 @@ describe("D1-1: the exact answers of every task route, for every kind of caller"
     }
     const golden = JSON.parse(readFileSync(GOLDEN, "utf8")) as Record<string, Recorded>;
     expect(Object.keys(answers).sort()).toEqual(Object.keys(golden).sort());
-    const different = Object.entries(answers).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(golden[key])).map(([key, value]) => ({ key, now: value, base: golden[key] }));
+    // DECLARED CHANGE (D1-2, owner DEC 254zzz519): the unconnected merge route `POST /v1/dev/tasks/<id>/merge` is deleted, so every `/merge` row (the golden keeps the base's fixed
+    // "merging from Rovara is not set up" answer) now answers exactly what a path the router does not serve answers: the `/nope` row of the same caller and shape. Nothing else may differ.
+    const isMerge = (key: string) => key.endsWith(" /merge");
+    const asUnknown = (key: string) => `${key.slice(0, -"/merge".length)}/nope`;
+    const different = Object.entries(answers).filter(([key, value]) => (isMerge(key) ? JSON.stringify(value) !== JSON.stringify(answers[asUnknown(key)]) : JSON.stringify(value) !== JSON.stringify(golden[key])))
+      .map(([key, value]) => ({ key, now: value, base: isMerge(key) ? answers[asUnknown(key)] : golden[key] }));
     expect(different).toEqual([]);
+    expect(Object.keys(answers).filter(isMerge).length).toBeGreaterThan(30);
     // The table is not vacuous: it holds the refusals the core now words itself, and more than one kind of answer.
     const statuses = new Set(Object.values(golden).map((answer) => answer.status));
     expect([...statuses].sort()).toEqual(expect.arrayContaining([200, 400, 404]));

@@ -25,7 +25,7 @@ export const COMPANY_CHECKED_ROUTES = ["GET /v1/dev/tasks/{taskId}", "GET /v1/de
   "GET /v1/dev/company/learning-model", "PUT /v1/dev/company/learning-model",
   // L4-EGR: two-company cases in tests/contract/company-egress-routes.test.ts.
   "GET /v1/dev/company/egress-addresses",
-  "POST /v1/dev/tasks/{taskId}/merge", "GET /v1/dev/client/projects/{id}/code-settings", "PUT /v1/dev/client/projects/{id}/code-settings",
+  "GET /v1/dev/client/projects/{id}/code-settings", "PUT /v1/dev/client/projects/{id}/code-settings",
   "GET /v1/dev/client/projects/{id}/setup-status", "PUT /v1/dev/client/projects/{id}/setup-status/skips", "PUT /v1/dev/client/projects/{id}/setup-status/eval-none",
   // Guided onboarding PR 16: two-company cases in tests/contract/project-lifecycle-routes.test.ts.
   "GET /v1/dev/client/projects/{id}/archive-preview", "POST /v1/dev/client/projects/{id}/archive", "GET /v1/dev/client/projects/{id}/restore-preview", "POST /v1/dev/client/projects/{id}/restore",

@@ -5,7 +5,6 @@ import { withoutDesignReviewMoney } from "../core/task-flow/money-view.js";
 import type { SlackWorkspaceScope ,
   TaskPeopleAddRequestSchema, TaskPeopleRoleRequestSchema,
   TaskPeopleTakeOwnershipRequestSchema} from "@agentx/contracts";
-import { routeTaskMerge, type TaskMergeWiring } from "./task-merge.js";
 import { CompanyReadItemLimit, readTaskLegacyProject, recordInCompany } from "./company-check.js";
 // Spec 025 FR-016 to FR-021: the developer task routes. Every task has its own workspace, reached
 // through the existing handlers (DeveloperTaskActions) with the task's owner key. Nothing here
@@ -258,8 +257,6 @@ export interface DeveloperTaskRouteDependencies extends Pick<TaskPeopleEffectsDe
   refreshTaskFeedback?(taskId: string): Promise<void>;
   /** The company this call is for; absent is the implicit company. A row of another company reads as missing (developer/company-rows.ts). */
   companyId?: string;
-  /** Lane W: the merge core wired for this deployment's tasks (lane E2); absent, `POST .../merge` answers a fixed "not set up". */
-  taskMerge?: TaskMergeWiring;
   /** One page (30 files) of a pull request's changed files, from GitHub; absent answers RUNTIME_UNAVAILABLE on the diff route. */
   readPullRequestDiff?(repositoryUrl: string, number: number, page: number): Promise<{ files: Array<{ filename: string; additions: number; deletions: number; patch?: string }>; more: boolean }>;
   /** Present only for a Slack-signed internal task start; the existing thread becomes the task thread. */
@@ -357,15 +354,6 @@ function parse<T>(schema: z.ZodType<T>, body: unknown, deps: Pick<DeveloperTaskR
   throw agentXError("CONFIG_INVALID", `${field}: ${issue?.message ?? "invalid"}`);
 }
 
-
-function body(request: AdaptedHttpRequest): unknown {
-  if (request.body === undefined || request.body === "") return {};
-  try {
-    return JSON.parse(request.body) as unknown;
-  } catch {
-    throw agentXError("CONFIG_INVALID", "the request body is not JSON");
-  }
-}
 
 async function get<T>(deps: Pick<DeveloperTaskRouteDependencies, "documentClient" | "tableName">, key: { pk: string; sk: string }): Promise<T | undefined> {
   const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: key, ConsistentRead: true })) as { Item?: T };
@@ -4717,7 +4705,7 @@ function answerAsMissing(taskId: string): never {
  * a task the retired spec 056 workflow started reads as missing; any other path under /v1/dev/tasks/<id> is no route.
  */
 const TASK_ROUTE_PATTERNS: readonly RegExp[] = [
-  /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|people\/candidates|people\/add|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry|plan|messages|diff|comments|merge|answers|evidence))?$/,
+  /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|people\/candidates|people\/add|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry|plan|messages|diff|comments|answers|evidence))?$/,
   /^\/v1\/dev\/tasks\/([^/]+)\/e2e-publication-context$/,
   /^\/v1\/dev\/tasks\/([^/]+)\/people\/requests\/([^/]+)$/,
   /^\/v1\/dev\/tasks\/([^/]+)\/readers(?:\/([^/]+))?$/,
@@ -4751,12 +4739,6 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
     if (await ownerOfTaskId(deps, entryTaskId, TASK_ENTRY_AREAS[operation]) === "core") return serveCoreTaskRoute(deps.coreTasks, request, caller, entryTaskId, () => Promise.resolve(answerAsMissing(entryTaskId)));
     // A task the retired spec 056 workflow started has no reader any more: it answers exactly like a missing task.
     return answerAsMissing(entryTaskId);
-  }
-  const route = /^\/v1\/dev\/tasks\/([^/]+)\/merge$/.exec(url.pathname);
-  const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
-  if (taskId !== undefined && request.method === "POST" && route !== null) {
-    // Lane W: every merge rule is the merge core's (task-merge.ts); this only refuses earlier.
-    return routeTaskMerge({ wiring: deps.taskMerge, companyId: deps.companyId ?? IMPLICIT_COMPANY_ID, taskId, personId: caller.developerId, body: body(request), now: deps.now() });
   }
   throw agentXError("NOT_FOUND", "route not found");
 }

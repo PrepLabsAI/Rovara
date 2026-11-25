@@ -171,8 +171,6 @@ export const ROUTES: readonly Route[] = [
   { method: "GET", path: "/v1/dev/tasks/{taskId}/readers", requires: "tasks:share" },
   { method: "PUT", path: "/v1/dev/tasks/{taskId}/readers/{developerId}", requires: "tasks:share" },
   { method: "DELETE", path: "/v1/dev/tasks/{taskId}/readers/{developerId}", requires: "tasks:share" },
-  // Lane W: merge a task's pull request; full access only, then the task, the company and the merge rules.
-  { method: "POST", path: "/v1/dev/tasks/{taskId}/merge", requires: "full" },
   // Decisions: approve a plan or request changes; decide on the pull-request feedback proposal.
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/decision", requires: "decisions:decide" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/feedback-decision", requires: "decisions:decide" },

@@ -14,7 +14,7 @@ import { Membership, membershipKey, boundedCompanyReads, companyReadActions, own
 import { grantsPkFor, namedCompany, namedCompanyLatestRevisionRow, namedCompanyProjectArchived } from "./company-layout.js";
 import { isProjectUnreadable, logProjectLeftOut } from "../core/project-left-out.js";
 import { slackChannelBindingPkFor } from "./slack-company-layout.js";
-import type { TaskMergeWiring } from "./task-merge.js"; import { putCodeSettings, readCodeSettings } from "./project-code-settings.js"; import { putEvalNone, putSkip, readProjectSetupStatus } from "./project-setup-status.js"; import { LIFECYCLE_NOT_FOUND, routeProjectLifecycle, type LifecycleAction } from "./project-lifecycle-routes.js";
+import { putCodeSettings, readCodeSettings } from "./project-code-settings.js"; import { putEvalNone, putSkip, readProjectSetupStatus } from "./project-setup-status.js"; import { LIFECYCLE_NOT_FOUND, routeProjectLifecycle, type LifecycleAction } from "./project-lifecycle-routes.js";
 // Spec 025 FR-009, FR-013, FR-014 and FR-016: GET projects, and the project access check the task
 // routes use. /v1/dev/* has no API Gateway authorizer (D17): the broker verifies the developer
 // access token itself, then checks the environment, the method and the sign-in session on every
@@ -255,8 +255,6 @@ export interface DeveloperRouteDependencies {
   channelLinkCodes?: { preview(personId: string, code: string): Promise<{ channel: string; maskedUserId: string } | undefined>; redeem(personId: string, code: string): ReturnType<typeof redeemLinkCode> };
   policyHook?: ProjectSettingsHook;
   companies?: CompanyMembershipReader;
-  /** Lane W: the merge core wired for this deployment's tasks (task-merge.ts). Absent: `POST /v1/dev/tasks/{id}/merge` answers a fixed "not set up". */
-  taskMerge?: TaskMergeWiring;
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
   developer: DeveloperApiConfiguration;
@@ -2569,8 +2567,6 @@ async function routeDeveloperTasksRequest(deps: DeveloperRouteDependencies, call
   if (deps.tasks === undefined) throw agentXError("NOT_FOUND", "developer tasks are not set up in this deployment");
   const checked = isCheckedTaskRead(request, url);
   const scope = checked && deps.companies !== undefined ? boundedCompanyReads(deps.documentClient) : undefined;
-  // Lane W: a merge press is company-checked too (membership, never a claim).
-  const merging = request.method === "POST" && /^\/v1\/dev\/tasks\/[^/]+\/merge$/.test(url.pathname);
   const commenting = isTaskCommentPost(request, url);
   // Reuse this route's live membership for money visibility; never read it again per task.
   let membership: Awaited<ReturnType<NonNullable<CompanyMembershipReader["membershipOf"]>>>;
@@ -2581,16 +2577,15 @@ async function routeDeveloperTasksRequest(deps: DeveloperRouteDependencies, call
       return membership?.companyId;
     },
   };
-  const companyId = checked || merging || commenting ? await resolveCompany(checkedCompanies, caller.developerId) : undefined;
+  const companyId = checked || commenting ? await resolveCompany(checkedCompanies, caller.developerId) : undefined;
   const taskDeps = developerTaskRouteDependencies(scope === undefined ? deps : { ...deps, documentClient: scope.client }, caller);
-  if ((checked || merging) && companies !== undefined) {
+  if (checked && companies !== undefined) {
     taskDeps.taskMoneyVisible = async (task) => recordInCompany(task, companyId)
       && (taskOwnerView(task)?.developerId === caller.developerId || membership?.role === "owner" || membership?.role === "admin");
   }
   const checkedDeps = wrapTaskDepsForCompanyReads(taskDeps, scope);
   const result = await routeDeveloperTaskRequest({
     ...checkedDeps, ...(companyId === undefined ? {} : { companyId }),
-    ...(merging && deps.taskMerge !== undefined ? { taskMerge: deps.taskMerge } : {}),
   }, caller, request, url);
   // Only a completed list page with an explicit continuation may consume an item-bound signal.
   scope?.check(url.pathname === "/v1/dev/tasks" && result !== null && typeof result === "object" && "nextCursor" in result);
