@@ -233,3 +233,32 @@ export function stepRetryLabel(stage: string): string {
     default: return ACTION_WORDS["step.retry"].label;
   }
 }
+
+// ---- "This looks bigger than Quick" (SWITCH-TO-FULL): the reasons of a Quick plan that looks bigger than Quick, from the stored record's codes. One sentence per code; the sentence says what the plan changes, in the person's words.
+
+/** The card's heading and its lead line (the board's "read the code" is wrong: Rovara read the plan). */
+export const QUICK_SIZE_HEADING = "This looks bigger than Quick";
+export const QUICK_SIZE_LEAD = "Rovara read the plan and found reasons to take more care:";
+/** A code this release does not know (written by a newer Code). */
+export const QUICK_SIZE_UNKNOWN_WORD = "Rovara found another reason to take more care.";
+/** The most reason lines shown; the rest become "and N more reasons". */
+export const QUICK_SIZE_LINES_MAX = 4;
+
+/** Code to sentence. `{paths}` is up to three planned paths and "and N more"; `{count}` the code files counted; `{service}` the outside service; `{design}` the fixed phrase of Understand's reading. Never the word "risky". */
+export const QUICK_SIZE_WORDS: Readonly<Record<string, string>> = {
+  data_change: "Changes the database: {paths}.",
+  infra_change: "Changes infrastructure or permissions: {paths}.",
+  many_files: "Changes {count} code files. Quick is meant for smaller changes.",
+  new_service: "Adds a service the code talks to: {service}.",
+  design_reading: "From the request: this task {design}.",
+  mid_size: "Changes {count} code files.",
+  sensitive_area: "Touches sign-in, permission or payment code: {paths}.",
+  interface_file: "Changes an interface other code depends on: {paths}.",
+  build_file: "Also changes how the app is built: {paths}.",
+  env_file: "Also changes an environment file: {paths}.",
+  git_settings_file: "Also changes git settings: {paths}.",
+  package_source_setting: "Also changes where packages come from: {paths}.",
+  setup_small: "Also changes the test setup.",
+  instruction_file: "Also changes an instruction file for Rovara or another agent: {paths}.",
+  hook_file: "Also changes an editor or tool setting: {paths}.",
+};

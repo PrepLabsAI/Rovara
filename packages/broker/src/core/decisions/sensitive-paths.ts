@@ -32,3 +32,19 @@ export function isSensitivePath(path: string): boolean {
   const name = value.split("/").at(-1) ?? "";
   return !DOCUMENT_EXTENSIONS.test(name) && name.split(/[-_.]/u).some((word) => SENSITIVE_NAME_WORDS.has(word));
 }
+
+/** The folders of the NARROW access-and-money list: who may sign in or do what, and money. The infrastructure folders (`iam`, `infra`, `terraform`, `cdk`) and `migrations` are NOT here: the "bigger than Quick" rule gives them their own codes. */
+const ACCESS_OR_MONEY_FOLDERS = /(^|\/)(auth|authn|authz|security|oauth|saml|sso|jwt|crypto|permissions|credentials|payments|billing|secrets)(\/|$)/;
+/** The file-name words of the same list (`SENSITIVE_NAME_WORDS` without `iam`, which is infrastructure). */
+const ACCESS_OR_MONEY_NAME_WORDS: ReadonlySet<string> = new Set([...SENSITIVE_NAME_WORDS].filter((word) => word !== "iam"));
+
+/**
+ * Whether a path is sign-in, permission, secret or payment code by its name: a folder of the narrow list, or a file named for one of its words. A document about a topic is not code for it. Every path this accepts is
+ * also `isSensitivePath` (a test pins it), so the plan card's "Touches sensitive paths" line and the "bigger than Quick" rule mean the same thing where they overlap.
+ */
+export function isAccessOrMoneyPath(path: string): boolean {
+  const value = normalized(path);
+  const name = value.split("/").at(-1) ?? "";
+  if (DOCUMENT_EXTENSIONS.test(name)) return false;
+  return ACCESS_OR_MONEY_FOLDERS.test(value) || name.split(/[-_.]/u).some((word) => ACCESS_OR_MONEY_NAME_WORDS.has(word));
+}
