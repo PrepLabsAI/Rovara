@@ -4,7 +4,7 @@ import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { agentXError } from "@agentx/contracts";
 import type { DeveloperCaller } from "../aws/developer-routes.js";
 import type { DeveloperTaskRouteDependencies } from "../aws/developer-tasks.js";
-import { resolveTaskPeopleAccess, type TaskRole } from "./task-people.js";
+import { resolveTaskPeopleAccess, taskListBinding, type TaskRole } from "./task-people.js";
 import { taskKey, taskOwnerKey, type DeveloperTaskRecord } from "./task-records.js";
 import { requireOwnTask } from "../aws/task-readers.js";
 import { ownerOfExistingTask } from "../aws/engine-boundary.js";
@@ -89,6 +89,16 @@ export async function resolveTaskReadAccess(deps: AccessDependencies, caller: De
 export async function resolveCoreTaskAccess(deps: AccessDependencies, caller: DeveloperCaller, task: DeveloperTaskRecord, action?: TaskAction): Promise<TaskAccess> {
   if (!TASK_ID.test(task.taskId)) throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
   return await taskAccessOfRecord(deps, caller, task, action, task.taskId);
+}
+
+/**
+ * A person the task is shared with by the stored share ("Can view", spec 067) comments as the People list's commenter does for a channel share: the role is `commenter` (it comments, never acts or decides), bound to the
+ * list's revision and owners where the task has a list. The CALLER proves the share (the one read rule's decision says `shared` for this person on this task); nothing here decides who is a share, and a task that is closed
+ * still refuses the comment itself.
+ */
+export async function sharedCommenterAccess(deps: AccessDependencies, task: DeveloperTaskRecord): Promise<TaskAccess> {
+  const binding = await taskListBinding(deps, task);
+  return { task, role: "commenter", ownerActorIds: binding.ownerActorIds ?? [taskOwnerKey(task.developerId, task.taskId)], ...(binding.peopleRevision === undefined ? {} : { peopleRevision: binding.peopleRevision }) };
 }
 
 /** The person reads only because the task is shared into a Slack channel they are in (the People list does not name them). */

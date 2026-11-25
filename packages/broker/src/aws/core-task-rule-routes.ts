@@ -174,7 +174,9 @@ async function documentRoute(rest: string, deps: DeveloperTaskRouteDependencies,
   }
   if (rest === "comments") {
     // A read of the comments asks the one rule (the old People page rule is its seam); a POST is a comment, judged by the comment action's own rule inside `createCorePlanComment`.
-    if (request.method === "POST") return json(await createCorePlanComment(deps, caller, task, bodyOf(request)));
+    // The comment is judged by the comment action's own rule (the People list's, which gives the Slack channel share its commenter role). A person the task is shared with by the stored share ("Can view") comments too (owner
+    // decision 254zzz558): asked of the one read rule only after the People rule said "no such task", and only the stored share's decision counts.
+    if (request.method === "POST") return json(await createCorePlanComment(deps, caller, task, bodyOf(request), async () => (await authorize("comments", { peoplePage: () => pageRule(deps, caller, task) }).catch(() => undefined))?.mode === "shared"));
     return json(await listCorePlanComments(deps, await authorize("comments", { peoplePage: () => pageRule(deps, caller, task) })));
   }
   return undefined;

@@ -12,7 +12,7 @@ import { GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dyn
 import { z } from "zod";
 import {
   AppNoteSchema, COMMENT_RATE, CommentTargetSchema, IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, PAGE_API_BODY_MAX_BYTES, WORKFLOW_THREAD_NOTES_MAX,
-  agentXError, cleanCommentText, redactText,
+  AgentXError, agentXError, cleanCommentText, redactText,
   type AppNote, type CommentDocument, type CommentTarget, type TaskComment,
 } from "@agentx/contracts";
 import type { DeveloperCaller } from "../aws/developer-routes.js";
@@ -23,7 +23,7 @@ import { NOTE_KEEP_SECONDS, NOTE_SK_PREFIX, noteKey } from "../core/sessions/not
 import type { TaskReadDecision } from "../core/task-flow/read-rule.js";
 import { rowCompany, rowInCompany } from "./company-rows.js";
 import { createTaskComment, currentStepDocument, listTaskComments, pageRefusal, takeRate, type PageActor } from "./page-comments.js";
-import { resolveCoreTaskAccess, resolveTaskAccess, taskOpen, type TaskAccess } from "./task-access.js";
+import { resolveCoreTaskAccess, resolveTaskAccess, sharedCommenterAccess, taskOpen, type TaskAccess } from "./task-access.js";
 import { taskAccessFence, } from "./task-people.js";
 import { taskKey } from "./task-records.js";
 
@@ -136,12 +136,25 @@ export async function listCorePlanComments(deps: RouteDeps, decision: TaskReadDe
 }
 
 /** The existing comment POST for a task already read by the core in the caller's company. */
-export async function createCorePlanComment(deps: RouteDeps, caller: DeveloperCaller, task: TaskAccess["task"], value: unknown): Promise<PlanCommentCreateResponse> {
+export async function createCorePlanComment(deps: RouteDeps, caller: DeveloperCaller, task: TaskAccess["task"], value: unknown, sharedWith?: () => Promise<boolean>): Promise<PlanCommentCreateResponse> {
   if (!rowInCompany(task as unknown as Record<string, unknown>, deps.companyId)) throw agentXError("TASK_NOT_FOUND", NOT_FOUND_TASK);
-  const actor: PageActor = { ...await resolveCoreTaskAccess(deps, caller, task, "comment"), caller };
+  const actor: PageActor = { ...await commentAccessOf(deps, caller, task, sharedWith), caller };
   const input = parseInput(CreateCommentSchema, value, "comment");
   const comment = await postComment(deps, actor, { requestId: input.requestId, document: input.document, text: input.text, ...(input.anchor === undefined ? {} : { anchor: input.anchor }), ...(input.replyTo === undefined ? {} : { parentId: input.replyTo }) });
   return { comment: planCommentView(comment) };
+}
+
+/**
+ * Who may comment: the People rule first (a listed person, or the Slack channel share as the implicit commenter). Only when it says "no such task" is the stored share asked (`sharedWith`: the one read rule's decision for this
+ * person is `shared`, owner decision 254zzz558: a person the task is shared with can comment); a person with no share keeps the People rule's own refusal, word for word.
+ */
+async function commentAccessOf(deps: RouteDeps, caller: DeveloperCaller, task: TaskAccess["task"], sharedWith: (() => Promise<boolean>) | undefined): Promise<TaskAccess> {
+  try {
+    return await resolveCoreTaskAccess(deps, caller, task, "comment");
+  } catch (error) {
+    if (sharedWith === undefined || !(error instanceof AgentXError) || error.code !== "TASK_NOT_FOUND" || !(await sharedWith())) throw error;
+    return await sharedCommenterAccess(deps, task);
+  }
 }
 
 function latestVersionOf(task: TaskAccess["task"], document: CommentDocument): number {
