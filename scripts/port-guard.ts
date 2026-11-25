@@ -42,8 +42,9 @@
 // pattern, never the text it matched. Exit status: 0 clean, 1 findings, 2 the guard could not run (bad range, git or gitleaks missing).
 //
 // Node runs this file directly, so only erasable syntax and only Node's own modules. Usage, from inside the lane's worktree:
-//   node scripts/port-guard.ts [--range <base>..<tip>] [--allow-guard-edits] [--public-base refs/remotes/origin/mainline] [--boundary <file>] [--accepted <file>]      (default range: origin/code/next..HEAD)
+//   node scripts/port-guard.ts [--range <base>..<tip>] [--allow-guard-edits] [--public-base refs/remotes/origin/mainline] [--boundary <file>] [--accepted <file>] [--require-private-names]      (default range: origin/code/next..HEAD)
 // The controller's extended name list (one regular expression per line) is read from the file named by PORT_GUARD_PRIVATE_NAMES, if set.
+// --require-private-names (or PORT_GUARD_REQUIRE_PRIVATE_NAMES=1) makes a missing, unreadable or empty list exit 2 instead of a degraded run; the release pipeline's step uses it.
 //
 // No name is written in this file or in its tests: the protected words are salted hashes (see NameSource), and the tests use invented names.
 import { spawnSync } from "node:child_process";
@@ -1090,6 +1091,8 @@ const INLINE_ALLOW = new RegExp(join("gitleaks", ":", "allow"), "i");
 
 const GUARD_FILES = [
   /^scripts\/port-guard\.ts$/i,
+  /^scripts\/port-guard-pipeline\.ts$/i,
+  /^infra\/lib\/port-guard-step\.ts$/i,
   /^scripts\/boundary-allowlist\.json$/i,
   /^scripts\/port-guard-accepted\.json$/i,
   /^tests\/[^/]+\/port-guard[^/]*$/i,
@@ -1527,10 +1530,29 @@ export const DEFAULT_RANGE = "origin/code/next..HEAD";
 /** The one revision --public-base accepts: public mainline as fetched from origin. */
 export const PUBLIC_BASE = "refs/remotes/origin/mainline";
 
+/**
+ * The names a run checks. The controller's extended list lives outside the repository. Interactively, without it only the hashed list is checked and the
+ * output says so. When it is required (--require-private-names, or PORT_GUARD_REQUIRE_PRIVATE_NAMES=1, which the release pipeline's step sets), a missing,
+ * unreadable or empty list is a GuardError (exit 2) and never a degraded run: no silent fallback to the built-in list. The count is printed, never a pattern.
+ */
+function namesForRun(required: boolean): NameSource {
+  const file = process.env.PORT_GUARD_PRIVATE_NAMES;
+  if (file === undefined || file === "") {
+    if (required) throw new GuardError("the extended name list is required and PORT_GUARD_PRIVATE_NAMES is not set");
+    console.log("port-guard: note: the extended name list was not loaded (PORT_GUARD_PRIVATE_NAMES is not set); only the built-in hashed list was checked.");
+    return DEFAULT_NAMES;
+  }
+  const patterns = loadPrivatePatterns(file);
+  if (required && patterns.length === 0) throw new GuardError("the extended name list is required and holds no patterns");
+  if (required) console.log(`port-guard: note: the extended name list was loaded (${patterns.length} pattern${patterns.length === 1 ? "" : "s"}).`);
+  return { ...DEFAULT_NAMES, patterns };
+}
+
 export function main(argv: readonly string[]): number {
   let range = DEFAULT_RANGE;
   let allowGuardEdits = false;
   let publicBase: string | undefined;
+  let requirePrivateNames = process.env.PORT_GUARD_REQUIRE_PRIVATE_NAMES === "1";
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!;
     if (arg === "--range") {
@@ -1543,6 +1565,7 @@ export function main(argv: readonly string[]): number {
       i += 1;
     } else if (arg.startsWith("--range=")) range = arg.slice("--range=".length);
     else if (arg === "--allow-guard-edits") allowGuardEdits = true;
+    else if (arg === "--require-private-names") requirePrivateNames = true;
     else if (arg === "--public-base") {
       const value = argv[i + 1];
       if (value === undefined || value.startsWith("-")) {
@@ -1571,7 +1594,7 @@ export function main(argv: readonly string[]): number {
       i += 1;
     }
     else if (arg === "--help" || arg === "-h") {
-      console.log("usage: node scripts/port-guard.ts [--range <base>..<tip>] [--allow-guard-edits] [--public-base refs/remotes/origin/mainline] [--boundary <file>] [--accepted <file>]\n(default range: " + DEFAULT_RANGE + ")");
+      console.log("usage: node scripts/port-guard.ts [--range <base>..<tip>] [--allow-guard-edits] [--public-base refs/remotes/origin/mainline] [--boundary <file>] [--accepted <file>] [--require-private-names]\n(default range: " + DEFAULT_RANGE + ")");
       return 0;
     } else {
       console.error(`port-guard: unknown argument ${arg}`);
@@ -1581,14 +1604,7 @@ export function main(argv: readonly string[]): number {
   try {
     const root = spawnSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" });
     if (root.status !== 0) throw new GuardError("run the guard from inside the lane's worktree");
-    // The controller's extended name list lives outside the repository; without it only the hashed list is checked.
-    const privateList = process.env.PORT_GUARD_PRIVATE_NAMES;
-    let names = DEFAULT_NAMES;
-    if (privateList === undefined || privateList === "") {
-      console.log("port-guard: note: the extended name list was not loaded (PORT_GUARD_PRIVATE_NAMES is not set); only the built-in hashed list was checked.");
-    } else {
-      names = { ...DEFAULT_NAMES, patterns: loadPrivatePatterns(privateList) };
-    }
+    const names = namesForRun(requirePrivateNames);
     const result = runGuard({ cwd: root.stdout.trim(), range, allowGuardEdits, names, accepted: loadAccepted(), ...(publicBase === undefined ? {} : { publicBase }) });
     for (const note of result.notes ?? []) console.log(`port-guard: note: ${note}`);
     for (const warning of result.warnings ?? []) console.log(`port-guard: warning: ${warning}`);
