@@ -5,9 +5,10 @@
 import { denyNetwork } from "./model-gateway-no-network.js";
 beforeAll(denyNetwork);
 import { createHmac, randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, it } from "vitest";
 import { BedrockExternalIds, type BedrockConnection } from "../../packages/model-gateway/src/bedrock-byo.js";
-import { BedrockSessions, BEDROCK_SESSION_MARGIN_MS } from "../../packages/model-gateway/src/bedrock-byo-sessions.js";
+import { BedrockSessions, BEDROCK_SESSION_MARGIN_MS, PROBE_BUDGET_MS } from "../../packages/model-gateway/src/bedrock-byo-sessions.js";
 import type { TokenHttpRequest } from "../../packages/model-gateway/src/product-vertex-token.js";
 import type { ProviderRequest, ProviderTransport } from "../../packages/model-gateway/src/provider.js";
 
@@ -21,6 +22,8 @@ const ROLE_B = `arn:aws:iam::222222222222:role/RovaraBedrockInvoke-${B}`;
 const SONNET = "us.anthropic.claude-sonnet-5-5";
 const HAIKU = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
 const START = Date.parse("2026-11-16T00:00:00Z");
+/** What AWS really answered (HTTP 200) to InvokeModel on us.anthropic.claude-haiku-4-5-20251001-v1:0 with max_tokens 0, run in a Bedrock account on 2026-11-25 (the owner's own call). */
+const REAL_MAX_TOKENS_0_ANSWER = readFileSync(new URL("../fixtures/model-gateway-bedrock/invoke-max-tokens-0-haiku-4-5.json", import.meta.url), "utf8");
 const connection = (roleArn: string, models: Record<string, string> = { "claude-sonnet-5-5": SONNET }): BedrockConnection => ({ scheme: "assume_role", roleArn, region: "eu-west-1", models, allowGlobal: false });
 
 type Trust = "strict" | "no_external_id" | "no_session_name" | "refuse";
@@ -57,12 +60,12 @@ function fakeAws(clock: { at: number }) {
   };
   return { http, externalIds, roles, calls, set down(v: boolean) { down = v; }, set fail(f: typeof fail) { fail = f; } };
 }
-function sessions(options: { bedrock?: (region: string, creds: () => Promise<{ accessKeyId: string }>) => ProviderTransport } = {}) {
+function sessions(options: { bedrock?: (region: string, creds: () => Promise<{ accessKeyId: string }>) => ProviderTransport; log?: (line: Record<string, string | number | boolean>) => void } = {}) {
   const clock = { at: START };
   const aws = fakeAws(clock);
   const s = new BedrockSessions({
     http: aws.http, aws: async () => ({ accessKeyId: "AKIATASK0000000000", secretAccessKey: "x" }), brokerRoleArn: BROKER, awsRegion: "us-west-2", issuer: ISS,
-    externalIds: aws.externalIds, now: () => clock.at, canaryCompany: () => CANARY, ...(options.bedrock === undefined ? {} : { bedrock: options.bedrock }),
+    externalIds: aws.externalIds, now: () => clock.at, canaryCompany: () => CANARY, log: options.log ?? (() => undefined), ...(options.bedrock === undefined ? {} : { bedrock: options.bedrock }),
   });
   return { s, aws, clock };
 }
@@ -160,9 +163,9 @@ describe("the connection test", () => {
       { roleArn: ROLE_A, session: A, externalId: await aws.externalIds.of(ISS, CANARY), signedBy: ANY_SIGNER },
       { roleArn: ROLE_A, session: CANARY, externalId: await aws.externalIds.of(ISS, A), signedBy: ANY_SIGNER },
     ]);
-    // The model check: InvokeModel, max_tokens 0 (nothing generated, nothing billed).
+    // The model check: InvokeModel, max_tokens 0 (AWS answers 200 with no output: 0 output tokens billed).
     expect(sent.map((r) => r.path).sort()).toEqual([`/model/${encodeURIComponent(HAIKU)}/invoke`, `/model/${encodeURIComponent(SONNET)}/invoke`].sort());
-    for (const r of sent) expect(JSON.parse(Buffer.from(r.body).toString("utf8"))).toMatchObject({ max_tokens: 0 });
+    for (const r of sent) expect(JSON.parse(Buffer.from(r.body).toString("utf8"))).toEqual({ anthropic_version: "bedrock-2023-05-31", max_tokens: 0, messages: [{ role: "user", content: "." }] });
   });
 
   it("too open when the role ignores the external id, or ignores the session name", async () => {
@@ -218,18 +221,108 @@ describe("the connection test", () => {
       [answer(429, '{"message":"Too many tokens, please wait before trying again."}'), "no_quota"],
       [answer(400, 'ServiceQuotaExceededException\n{"message":"quota"}'), "no_quota"],
       [answer(400, 'ThrottlingException\nToo many tokens'), "no_quota"],
-      [answer(503, "{}"), "unavailable"],
+      // AWS's real answer to max_tokens 0 (a 200 Messages response with no output) is a working model.
+      [answer(200, REAL_MAX_TOKENS_0_ANSWER), "ready"],
+      // A 2xx that is not that shape proves nothing: AWS did not answer the check. Never ready, never a model state.
+      [answer(200, '{"content":[{"type":"text","text":"."}]}'), "no_answer"],
+      // Any stop reason of a Messages answer is a working model (only Haiku 4.5's "max_tokens" was seen live; a model that stops otherwise must not read "check again" forever).
+      [answer(200, '{"type":"message","content":[],"stop_reason":"end_turn"}'), "ready"],
+      [answer(200, '{"type":"message","content":[{"type":"text","text":""}],"stop_reason":"stop_sequence"}'), "ready"],
+      [answer(200, '{"type":"message","stop_reason":"max_tokens"}'), "no_answer"],
+      [answer(200, '{"type":"error","content":[]}'), "no_answer"],
+      [answer(200, "not json"), "no_answer"],
+      [answer(200, "{}"), "no_answer"],
+      [answer(204, ""), "no_answer"],
+      // AWS not answering is never a model state.
+      [answer(503, "{}"), "no_answer"],
+      [answer(408, "{}"), "no_answer"],
+      [answer(424, "{}"), "no_answer"],
       // review: narrow. Only the error type the transport names FIRST (or a 429) is no_quota; AWS words that merely mention a throttle or a quota are not.
       [answer(400, 'ValidationException\n{"message":"max_tokens must be at least 1 (see ThrottlingException and quota docs)"}'), "ready"],
       [answer(403, 'AccessDeniedException\n{"message":"User: x is not authorized to perform: bedrock:InvokeModel (ServiceQuotaExceededException)"}'), "refused"],
-      [answer(503, 'ServiceUnavailableException\n{"message":"throttled upstream"}'), "unavailable"],
-      [answer(200, '{"content":[]}'), "unavailable"],
-      [async () => { throw new Error("socket"); }, "unavailable"],
+      [answer(503, 'ServiceUnavailableException\n{"message":"throttled upstream"}'), "no_answer"],
+      [async () => { throw new Error("socket"); }, "no_answer"],
     ];
     for (const [transport, state] of cases) {
       const { s } = sessions({ bedrock: () => transport });
       expect((await s.probe(A, connection(ROLE_A))).models, state).toEqual({ [SONNET]: state });
     }
+  });
+
+  it("asks once more when AWS answers 5xx or the call fails, and takes the second answer; a 4xx is never asked twice", async () => {
+    const run = async (...steps: ProviderTransport[]) => {
+      let calls = 0;
+      const { s } = sessions({ bedrock: () => async (request) => { const step = steps[Math.min(calls, steps.length - 1)]!; calls += 1; return step(request); } });
+      const probe = await s.probe(A, connection(ROLE_A));
+      return { state: probe.models?.[SONNET], calls };
+    };
+    const boom: ProviderTransport = async () => { throw new Error("socket"); };
+    const real = answer(200, REAL_MAX_TOKENS_0_ANSWER);
+    expect(await run(answer(503), real)).toEqual({ state: "ready", calls: 2 });
+    expect(await run(boom, answer(400, "ValidationException\n{}"))).toEqual({ state: "ready", calls: 2 });
+    expect(await run(answer(500), answer(403, "AccessDeniedException\n{}"))).toEqual({ state: "refused", calls: 2 });
+    // Still failing on the second ask: AWS did not answer. Exactly two asks, never a third.
+    expect(await run(answer(503), answer(502))).toEqual({ state: "no_answer", calls: 2 });
+    expect(await run(boom, boom)).toEqual({ state: "no_answer", calls: 2 });
+    // Anything AWS did answer is final on the first ask.
+    for (const status of [200, 400, 403, 404, 429]) expect((await run(answer(status, status === 200 ? REAL_MAX_TOKENS_0_ANSWER : "{}"))).calls, String(status)).toBe(1);
+    // An odd 200 is final too (not a 5xx): asked once, no_answer.
+    expect(await run(answer(200, "{}"))).toEqual({ state: "no_answer", calls: 1 });
+    // Only a 5xx or a failed call is asked again: every other status is one ask (a retry on "any 4xx" or "any status over 400" would be caught here).
+    for (const status of [401, 408, 413, 422, 424, 499]) expect(await run(answer(status, "{}")), String(status)).toEqual({ state: "no_answer", calls: 1 });
+  });
+
+  it("a check the caller itself aborted is not asked again: no_answer after one ask", async () => {
+    const stopper = new AbortController();
+    let calls = 0;
+    const { s } = sessions({ bedrock: () => async () => { calls += 1; stopper.abort(); throw new Error("aborted"); } });
+    const probe = await s.probe(A, connection(ROLE_A), stopper.signal);
+    expect(probe.models).toEqual({ [SONNET]: "no_answer" });
+    expect(calls).toBe(1);
+  });
+
+  it("does not ask again when a whole ask no longer fits in the probe's budget (the retry can't take the probe past Cloud's wait)", async () => {
+    const holder: { clock?: { at: number } } = {};
+    let calls = 0;
+    const { s, clock } = sessions({ bedrock: () => async () => { calls += 1; holder.clock!.at += PROBE_BUDGET_MS - 2_000; throw new Error("socket"); } });
+    holder.clock = clock;
+    expect((await s.probe(A, connection(ROLE_A))).models).toEqual({ [SONNET]: "no_answer" });
+    // 20 s of the 22 s budget were used by the first ask: less than one 5 s ask is left.
+    expect(calls).toBe(1);
+    // With the budget left, the same failure is asked twice.
+    calls = 0;
+    const fresh = sessions({ bedrock: () => async () => { calls += 1; throw new Error("socket"); } });
+    expect((await fresh.s.probe(A, connection(ROLE_A))).models).toEqual({ [SONNET]: "no_answer" });
+    expect(calls).toBe(2);
+  });
+
+  it("a logger that throws never changes a check's answer", async () => {
+    const { s } = sessions({ log: () => { throw new Error("log down"); }, bedrock: () => answer(200, REAL_MAX_TOKENS_0_ANSWER) });
+    expect((await s.probe(A, connection(ROLE_A))).models).toEqual({ [SONNET]: "ready" });
+  });
+
+  it("logs each model check's company, HTTP status and Bedrock's error type, never AWS's words, an account id or an ARN", async () => {
+    const lines: Array<Record<string, string | number | boolean>> = [];
+    const words = 'AccessDeniedException\n{"message":"User: arn:aws:sts::111111111111:assumed-role/RovaraBedrockInvoke-org_x/org_x is not authorized to perform: bedrock:InvokeModel on resource: arn:aws:bedrock:eu-west-1:111111111111:inference-profile/x"}';
+    const { s } = sessions({ log: (line) => lines.push(line), bedrock: () => answer(403, words) });
+    expect((await s.probe(A, connection(ROLE_A))).models).toEqual({ [SONNET]: "refused" });
+    const checks = lines.filter((line) => line.event === "bedrock_model_check");
+    expect(checks).toEqual([{ event: "bedrock_model_check", company: A, model: SONNET, attempt: 1, status: 403, errorType: "AccessDeniedException", state: "refused" }]);
+    // The company id (org_*) ties a line to a company; nothing else of the customer's (account id, role ARN, AWS's words) is logged.
+    const text = JSON.stringify(lines);
+    for (const never of ["111111111111", "assumed-role", "not authorized", "arn:aws", ROLE_A]) expect(text).not.toContain(never);
+  });
+
+  it("logs both asks when it retries, and a failed call as an error name only", async () => {
+    const lines: Array<Record<string, string | number | boolean>> = [];
+    let n = 0;
+    const { s } = sessions({ log: (line) => lines.push(line), bedrock: () => async (request) => { n += 1; if (n === 1) { const e = new Error("connect ECONNRESET 111111111111"); e.name = "TimeoutError"; throw e; } return answer(503, 'ServiceUnavailableException\n{"message":"try later"}')(request); } });
+    expect((await s.probe(A, connection(ROLE_A))).models).toEqual({ [SONNET]: "no_answer" });
+    expect(lines.filter((line) => line.event === "bedrock_model_check")).toEqual([
+      { event: "bedrock_model_check", company: A, model: SONNET, attempt: 1, status: 0, errorType: "none", error: "TimeoutError", state: "retry" },
+      { event: "bedrock_model_check", company: A, model: SONNET, attempt: 2, status: 503, errorType: "ServiceUnavailableException", state: "no_answer" },
+    ]);
+    expect(JSON.stringify(lines)).not.toMatch(/ECONNRESET|111111111111|try later/u);
   });
 
   it("an STS outage or a malformed company is unavailable", async () => {

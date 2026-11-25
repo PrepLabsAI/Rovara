@@ -223,6 +223,61 @@ describe("the key store: the company's own Bedrock", () => {
     expect(await s.store.companyBedrock(ISS, A)).toMatchObject({ sourceId: BEDROCK_SOURCE_ID });
   });
 
+  it("a model AWS did not answer is kept as no_answer (never clamped to unavailable, which is a model state), and the connection is still saved", async () => {
+    const s = storeWith(async (_cid, c) => ({ result: "ok", models: { [Object.values(c.models)[0]!]: "no_answer" } }));
+    const v = await s.store.connect({ ...change(A, 0), sourceId: BEDROCK_SOURCE_ID, provider: "bedrock", key: conn() });
+    expect(v.sources[0]!.bedrock?.checks).toEqual({ [SONNET]: "no_answer" });
+    expect(await s.store.companyBedrock(ISS, A)).toMatchObject({ sourceId: BEDROCK_SOURCE_ID });
+    // The stored word reads back (a document with it is valid).
+    expect((await s.store.view(ISS, A, PRODUCT_COMPANY_OWNER)).sources[0]!.bedrock?.checks).toEqual({ [SONNET]: "no_answer" });
+  });
+
+  it("a check again re-runs the test for the SAVED connection: new states and time, a new revision, the same key and role claim", async () => {
+    let answerWith: "not_enabled" | "ready" | "no_answer" = "no_answer";
+    const s = storeWith(async (_cid, c) => ({ result: "ok", models: { [Object.values(c.models)[0]!]: answerWith } }));
+    const first = await s.store.connect({ ...change(A, 0), sourceId: BEDROCK_SOURCE_ID, provider: "bedrock", key: conn() });
+    const resolution = await s.store.companyBedrock(ISS, A);
+    const connectedAt = first.sources[0]!.bedrock!.checkedAt;
+    s.at.now += 90_000; answerWith = "ready";
+    const again = await s.store.recheckBedrock({ ...change(A, first.revision), sourceId: BEDROCK_SOURCE_ID });
+    expect(s.asked).toHaveLength(2);
+    expect(s.asked[1]).toEqual({ cid: A, connection: { scheme: "assume_role", roleArn: ROLE_A, region: "us-west-2", models: { "claude-sonnet-5-5": SONNET }, allowGlobal: false } });
+    expect(again.revision).toBe(first.revision + 1);
+    expect(again.sources[0]!.bedrock).toMatchObject({ roleArn: ROLE_A, checks: { [SONNET]: "ready" }, checkedAt: connectedAt + 90_000 });
+    // No new key version, no new claim: the same sealed connection still opens for the same row.
+    expect(await s.store.companyBedrock(ISS, A)).toEqual(resolution);
+    expect(parseBedrockConnect((await s.store.useKey(ISS, A, resolution!))!)).toMatchObject({ roleArn: ROLE_A });
+    expect(await code(s.store.connect({ ...change(B, 0), sourceId: BEDROCK_SOURCE_ID, provider: "bedrock", key: conn() }))).toBe("role_in_use");
+  });
+
+  it("a check again keeps the product models, is fenced by the revision and refuses what is not a connected Bedrock", async () => {
+    const NOVA = "us.amazon.nova-pro-v1:0";
+    const s = storeWith(OK);
+    expect(await code(s.store.recheckBedrock({ ...change(A, 0), sourceId: BEDROCK_SOURCE_ID }))).toBe("not_found");
+    const first = await s.store.connect({ ...change(A, 0), sourceId: BEDROCK_SOURCE_ID, provider: "bedrock", key: conn({ productModels: [NOVA] }) });
+    expect(await code(s.store.recheckBedrock({ ...change(A, first.revision + 5), sourceId: BEDROCK_SOURCE_ID }))).toBe("stale");
+    expect(await code(s.store.recheckBedrock({ ...change(A, first.revision), sourceId: "src_other" }))).toBe("not_found");
+    const again = await s.store.recheckBedrock({ ...change(A, first.revision), sourceId: BEDROCK_SOURCE_ID });
+    expect(s.asked.at(-1)!.connection.productModels).toEqual([NOVA]);
+    expect(Object.keys(again.sources[0]!.bedrock!.checks).sort()).toEqual([NOVA, SONNET].sort());
+    // Company B never reaches A's connection.
+    expect(await code(s.store.recheckBedrock({ ...change(B, 0), sourceId: BEDROCK_SOURCE_ID }))).toBe("not_found");
+    // A project maintainer can't re-run a company source.
+    expect(await code(s.store.recheckBedrock({ ...change(A, again.revision), actor: { id: "e".repeat(64), role: "project_maintainer" }, sourceId: BEDROCK_SOURCE_ID }))).toBe("forbidden");
+  });
+
+  it("a check again that finds the role too open, refused or the test down saves nothing and keeps the last result", async () => {
+    for (const [result, expected] of [["too_open", "aws_too_open"], ["refused", "aws_refused"], ["unavailable", "unavailable"]] as const) {
+      let next: BedrockCheck = OK;
+      const s = storeWith((cid, c) => next(cid, c));
+      const first = await s.store.connect({ ...change(A, 0), sourceId: BEDROCK_SOURCE_ID, provider: "bedrock", key: conn() });
+      next = async () => ({ result });
+      s.at.now += 60_000;
+      expect(await code(s.store.recheckBedrock({ ...change(A, first.revision), sourceId: BEDROCK_SOURCE_ID })), result).toBe(expected);
+      expect(await s.store.view(ISS, A, PRODUCT_COMPANY_OWNER)).toEqual(first);
+    }
+  });
+
   it("saves nothing when the role is too open, refused or the test is unavailable; without a test it refuses before anything", async () => {
     for (const [result, expected] of [["too_open", "aws_too_open"], ["refused", "aws_refused"], ["unavailable", "unavailable"]] as const) {
       const s = storeWith(async () => ({ result }));
@@ -303,6 +358,34 @@ describe("the key store: the company's own Bedrock", () => {
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
     const [onA, onB] = [await s.store.companyBedrock(ISS, A), await s.store.companyBedrock(ISS, B)];
     expect([onA, onB].filter((x) => x !== undefined)).toHaveLength(1);
+  });
+
+  it("a state word a later release stored reads as no_answer, and the document is still read (older releases reject it: the rollback floor)", async () => {
+    const s = storeWith(OK);
+    await s.store.connect({ ...change(A, 0), sourceId: BEDROCK_SOURCE_ID, provider: "bedrock", key: conn() });
+    const key = [...s.table.rows.keys()].find((k) => k.endsWith("#doc#_company"))!;
+    const row = s.table.rows.get(key)!;
+    const withWord = (word: string) => { const doc = structuredClone(row.item) as { sources: Array<{ bedrock: { checks: Record<string, string> } }> }; doc.sources[0]!.bedrock.checks[SONNET] = word; s.table.rows.set(key, { ...row, item: doc }); };
+    withWord("some_future_word");
+    const view = await s.store.view(ISS, A, PRODUCT_COMPANY_OWNER);
+    expect(view.sources[0]!.bedrock?.checks).toEqual({ [SONNET]: "no_answer" });
+    expect(await s.store.companyBedrock(ISS, A)).toMatchObject({ sourceId: BEDROCK_SOURCE_ID });
+    // A known word is kept as it is, and a value that is not a plain state word is still refused (never guessed).
+    withWord("not_enabled");
+    expect((await s.store.view(ISS, A, PRODUCT_COMPANY_OWNER)).sources[0]!.bedrock?.checks).toEqual({ [SONNET]: "not_enabled" });
+    for (const bad of ["Not Enabled", "", "x".repeat(40), "arn:aws:iam::111111111111:role/x"]) { withWord(bad); expect(await code(s.store.view(ISS, A, PRODUCT_COMPANY_OWNER)), bad).toBe("unavailable"); }
+  });
+
+  it("a check again clears a call-time refusal marker: the role answered the test", async () => {
+    const s = storeWith(OK);
+    const first = await s.store.connect({ ...change(A, 0), sourceId: BEDROCK_SOURCE_ID, provider: "bedrock", key: conn() });
+    const resolution = (await s.store.companyBedrock(ISS, A))!;
+    await s.store.recordWarning(ISS, A, resolution, 403);
+    const warned = await s.store.view(ISS, A, PRODUCT_COMPANY_OWNER);
+    expect(warned.sources[0]!.warning).toMatchObject({ status: 403 });
+    const again = await s.store.recheckBedrock({ ...change(A, warned.revision), sourceId: BEDROCK_SOURCE_ID });
+    expect(again.sources[0]!.warning).toBeUndefined();
+    expect(first.revision).toBeLessThan(again.revision);
   });
 
   it("a stored document whose Bedrock summary is malformed is unavailable, never guessed", async () => {

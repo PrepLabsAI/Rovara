@@ -157,6 +157,17 @@ describe("gateway catch-up proof", () => {
     expect(await failures(tree, recorded)).toEqual(["exact: packages/model-gateway/src/guard.ts differs from its recorded divergence"]);
   });
 
+  it("fails on a divergence record that is Cloud's own pinned blob (stale: it would hide Cloud's next change), and on a record for a file the manifest does not carry", async () => {
+    const tree = plantTree();
+    const path = "packages/model-gateway/src/server.ts";
+    const stale: Manifest = { ...manifest, divergedFromCloud: { ...manifest.divergedFromCloud, [path]: { blob: manifest.exact[path]!, reason: "test" } } };
+    expect(await failures(tree, stale)).toEqual([`divergedFromCloud: ${path} records Cloud's own pinned blob (a stale divergence: remove the entry)`]);
+    const unknown: Manifest = { ...manifest, divergedFromCloud: { ...manifest.divergedFromCloud, "packages/model-gateway/src/not-there.ts": { blob: blobId(Buffer.from("x")), reason: "test" } } };
+    expect(await failures(tree, unknown)).toEqual(["divergedFromCloud: packages/model-gateway/src/not-there.ts is not a file the manifest carries"]);
+    // The real records (every one a real change) stay clean.
+    expect(await failures(tree)).toEqual([]);
+  });
+
   it("puts a hunk's Cloud lines back where Code's numbering has moved", () => {
     const hunks = [
       { cloudStart: 2, cloudCount: 1, cloudSha256: "", code: [], cloud: ["b"] },
@@ -171,9 +182,9 @@ describe("gateway catch-up proof", () => {
     const clean = spawnSync(process.execPath, [script, "check"], { cwd: repo, encoding: "utf8" });
     expect([clean.status, clean.stdout.trim().split("\n").pop()]).toEqual([0, "gateway catch-up proof: PASS"]);
     const tree = plantTree();
-    edit(tree, "packages/model-gateway/src/process.ts", (text) => text.replace("a", "b"));
+    edit(tree, "packages/model-gateway/src/server.ts", (text) => text.replace("a", "b"));
     const broken = spawnSync(process.execPath, [script, "check", "--root", tree], { cwd: repo, encoding: "utf8" });
     expect(broken.status).toBe(1);
-    expect(broken.stdout).toContain("FAIL exact: packages/model-gateway/src/process.ts differs from Cloud at afb494e75");
+    expect(broken.stdout).toContain("FAIL exact: packages/model-gateway/src/server.ts differs from Cloud at afb494e75");
   });
 });

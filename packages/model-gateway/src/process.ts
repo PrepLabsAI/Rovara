@@ -591,7 +591,7 @@ function deployedRoutes(config: ServeConfig, deps: ServeDependencies, shared: { 
   if (config.bedrockByo !== undefined && (wantsByo || deps.product === undefined)) {
     if (typeof kms.generateMac !== "function") throw new Error("bring your own Bedrock needs a KMS that can make MACs");
     bedrockExternalIds = new BedrockExternalIds({ generateMac: (input) => kms.generateMac!(input) }, config.bedrockByo.externalIdKeyArn);
-    bedrockSessions = new BedrockSessions({ http: deps.bedrockHttp ?? createTokenHttp(), aws: shared.credentials, brokerRoleArn: config.bedrockByo.brokerRoleArn, awsRegion: config.region, issuer: config.install.issuer, externalIds: bedrockExternalIds, now });
+    bedrockSessions = new BedrockSessions({ http: deps.bedrockHttp ?? createTokenHttp(), aws: shared.credentials, brokerRoleArn: config.bedrockByo.brokerRoleArn, awsRegion: config.region, issuer: config.install.issuer, externalIds: bedrockExternalIds, now, log: deps.log });
   }
   let product: NonNullable<ServeDependencies["product"]> | undefined;
   let vertexTokens: VertexTokens | undefined;

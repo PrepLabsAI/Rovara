@@ -13,7 +13,7 @@ import { parseEndpointConnect, serializeEndpointConnection } from "./endpoint-so
 import { COMPANY, PERSON, PROJECT, record, whole } from "./model-gateway-token.js";
 import type { ProductKeyFingerprinter, ProductKeySealer } from "./product-seal.js";
 import { parseVertexConnect, serializeVertexCredential, validVertexSummary, vertexSummary, type VertexCredential, type VertexSummary } from "./product-vertex-credential.js";
-import { bedrockConnectionIds, bedrockRoleClaim, bedrockSummary, parseBedrockConnect, serializeBedrockConnection, validBedrockSummary, type BedrockConnection, type BedrockModelCheck, type BedrockSummary } from "./bedrock-byo.js";
+import { bedrockConnectionIds, bedrockRoleClaim, bedrockSummary, knownBedrockChecks, parseBedrockConnect, serializeBedrockConnection, validBedrockSummary, type BedrockConnection, type BedrockModelCheck, type BedrockSummary } from "./bedrock-byo.js";
 import type { OpenAiKeyCheck } from "./openai-key-check.js";
 
 export const PRODUCT_COMPANY_OWNER = "_company";
@@ -249,7 +249,10 @@ function parseDoc(value: unknown): OwnerDoc {
     || !d.removed.every((r: unknown) => { const x = record(r); return x !== undefined && source(x.source) && whole(x.removedAt) && whole(x.recoverUntil); })
     || (d.caps !== undefined && !validCapsValue(d.caps)) || (d.ceiling !== undefined && !validCeiling(d.ceiling))
     || (d.evalBudget !== undefined && !validEvalBudget(d.evalBudget)) || (d.evalApproval !== undefined && !validStoredEvalApproval(d.evalApproval))) throw new ProductKeyError("unavailable");
-  return structuredClone(d) as unknown as OwnerDoc;
+  const doc = structuredClone(d) as unknown as OwnerDoc;
+  // A state word a later release stored (this one does not know it) reads as "no_answer"; older releases reject the document, hence the rollback floor.
+  for (const s of [...doc.sources, ...doc.removed.map((r) => r.source)]) if (s.bedrock !== undefined) s.bedrock = knownBedrockChecks(s.bedrock);
+  return doc;
 }
 /** Gemini (AI Studio) keys are one printable token. Vertex credentials are JSON (product-vertex-credential.ts). */
 const validGeminiKey = (key: unknown): key is string => typeof key === "string" && /^[\x21-\x7e]{8,512}$/u.test(key);
@@ -450,6 +453,26 @@ export class ProductKeyStore {
       ];
     });
   }
+  /**
+   * Runs the Bedrock connection test again for the SAVED connection of this source and records each model's new state and the time.
+   * The connection and its key are not touched (no new version, no new role claim); the document's revision moves, so a stale caller is refused.
+   * A role found too open or refused changes nothing: the error says so and the last saved result stays.
+   */
+  async recheckBedrock(change: Change & { sourceId: string }): Promise<ProductKeysView> {
+    this.#check(change);
+    if (!PRODUCT_SOURCE_ID.test(change.sourceId)) throw new ProductKeyError("invalid");
+    if (this.options.bedrockCheck === undefined) throw new ProductKeyError("unavailable");
+    return this.#mutate(change, "recheck", { sourceId: change.sourceId }, async (doc, now) => {
+      const source = doc.sources.find((s) => s.sourceId === change.sourceId);
+      if (source === undefined || source.provider !== "bedrock" || source.bedrock === undefined || source.currentVersion === undefined) throw new ProductKeyError("not_found");
+      const saved = source.bedrock;
+      const connection: BedrockConnection = { scheme: "assume_role", roleArn: saved.roleArn, region: saved.region, models: saved.models, allowGlobal: saved.allowGlobal, ...(saved.productModels === undefined ? {} : { productModels: saved.productModels }) };
+      source.bedrock = bedrockSummary(connection, await this.#bedrockCheck(change.cid, connection), now);
+      // The role answered the test (as for a rotate): a refusal recorded at call time no longer describes it.
+      delete source.warning;
+      return [];
+    });
+  }
   /** Removal schedules the key's deletion with a 7-day recovery window. A company source stops answering for every linked project at once. */
   async remove(change: Change & { sourceId: string }): Promise<ProductKeysView> {
     this.#check(change);
@@ -570,7 +593,7 @@ export class ProductKeyStore {
     const checks: Record<string, BedrockModelCheck> = {};
     for (const id of bedrockConnectionIds(connection)) {
       const state = answer.models?.[id];
-      checks[id] = state === "ready" || state === "not_enabled" || state === "refused" || state === "not_found" || state === "no_quota" ? state : "unavailable";
+      checks[id] = state === "ready" || state === "not_enabled" || state === "refused" || state === "not_found" || state === "no_quota" || state === "no_answer" ? state : "unavailable";
     }
     return checks;
   }
