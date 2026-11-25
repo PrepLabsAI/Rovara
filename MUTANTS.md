@@ -284,3 +284,98 @@ Each mutant applied singly, tests/unit/machine-check.test.ts, tests/contract/wor
 | machine-check-aws.ts `failOperation` | A cancel fails the active operation even when this call did not move the row | killed, 1 failed |
 | same | A cancel fails the active operation even when it is not the cancel's target | killed, 1 failed |
 | ec2-delivery.ts `machineToCheck` | A setup run held to the wrong subnets | killed, 2 failed |
+
+
+## CANARY-SESSION: the beta canary person's session function (2026-11-25)
+
+Measured on lane commit 8d4eb149b (pr/canary-session-20261125 on code/next 97fdae1c0; the lane was then rebased onto 7f0c40e6f and squashed, so the same code is now 4c7344d65). Each mutant was applied alone to the file named, then `tests/contract/canary-session.test.ts` and `tests/contract/canary-session-infrastructure.test.ts` were run together (81 tests), then the file was restored with `git checkout`. The session start the function shares with the sign-in server (session-mint.ts) is proven unchanged for real sign-ins by tests/contract/company-signin-goldens.test.ts (unchanged, green).
+
+| Mutant / location | Mutation | Failing tests (of 81) | Restored |
+|---|---|---|---|
+| M1, developer/canary-session.ts `CanaryRequest` | the request schema is loose (a subject, company, amr or lifetime in the request is accepted) | 10 | green |
+| M2, `canarySessionConfigFromEnvironment` | the pinned-issuer check is dropped | 2 | green |
+| M3, `checkPerson` | a company with two plain members still mints | 1 | green |
+| M4, `mint` | the answer carries a refresh token | 4 | green |
+| M5, `mint` | the session row is marked administrator | 1 | green |
+| M6, `mint` | the rate counter is not consulted | 1 | green |
+| M7, `mint` | the session lives 7 days instead of 30 minutes | 3 | green |
+| M8, `checkPerson` | the member-role check is dropped (an admin may be minted) | 1 | green |
+| M9, `checkPerson` | the GitHub-provider check on the person's row is dropped | 1 | green |
+| M10, `checkPerson` | the shared-method check (a company with its own sign-in) is dropped | 1 | green |
+| M11, `mint` | a row written whose token failed is not revoked | 2 | green |
+| M12, `end` | canary-end revokes nothing | 4 | green |
+| M13, `mint` | the access token is added to the audit log line | 2 | green |
+| M14, `checkPerson` | the company record is not checked | 2 | green |
+| M15, `CanaryMintStore.recorded` | an unreadable counter item is read as empty (silent fallback) | 1 | green |
+| I1, infra/lib/canary-session.ts | a second principal gets an invoke permission | 3 | green |
+| I2, infra/lib/canary-session.ts | the function's resources lose the condition | 3 | green |
+| I3, infra/lib/canary-session.ts | `staging` is added to the environment's allowed values | 2 | green |
+| I4, infra/lib/canary-session.ts | the template rule's assertion can never fail | 1 | green |
+| I5, infra/lib/canary-session.ts | the role may read any person's row (`DEVELOPER#*`) | 2 | green |
+| I6, infra/lib/canary-session.ts | the role may also read a secret | 1 | green |
+| I7, infra/lib/developer-signin.ts | the token key's deny never names the canary role | 1 | green |
+
+No mutant survived.
+
+Note (CANARY-SESSION, same day): after the measurement the lane was squashed into 4c7344d65, with one change to measured code: developer/session-mint.ts `companyMayMint` is split into three small functions (the complexity limit). M10 (the shared-method check) was re-run on the split code: killed (1 test). The other results stand for developer/canary-session.ts, infra/lib/canary-session.ts and infra/lib/developer-signin.ts, which did not change in behaviour.
+
+## CANARY-SESSION, arch ruling and Sonnet pre-review round (2026-11-25)
+
+Measured on the working tree that was committed as the commit adding this section (parent beb7c52bf; every file but MUTANTS.md is identical to the commit), each mutant applied alone and restored from the file's own text, then `tests/contract/canary-session.test.ts`, `canary-session-infrastructure.test.ts` and `canary-session-production.test.ts` run together (94 tests). The contracts mutants (P1, P2) rebuilt `tsc -b` before the run and after the restore. This replaces the earlier 22-row table for the same code (the parameters were renamed and cut from five to four; every earlier row is re-run below under its new anchor).
+
+| Mutant / location | Mutation | Failing tests (of 94) | Restored |
+|---|---|---|---|
+| M1, developer/canary-session.ts `CanaryRequest` | loose request schema (subject, company, amr or lifetime accepted) | 10 | green |
+| M2, `canarySessionConfigFromEnvironment` | the issuer consistency check is dropped | 2 | green |
+| M3, `checkPerson` | two plain members still mint | 1 | green |
+| M4, `mint` | the answer carries a refresh token | 4 | green |
+| M5, `mint` | the row is marked administrator | 1 | green |
+| M6, `mint` | the rate counter is skipped | 1 | green |
+| M7, `mint` | the session lives 7 days | 3 | green |
+| M8, `checkPerson` | the member-role check is dropped | 1 | green |
+| M9, `checkPerson` | the GitHub-provider check is dropped | 1 | green |
+| M10, `checkPerson` | the shared-method check is dropped | 1 | green |
+| M11, `mint` | a failed token leaves the row live | 2 | green |
+| M12, `end` | canary-end revokes nothing | 5 | green |
+| M13, `mint` | the access token is added to the log line | 2 | green |
+| M14, `checkPerson` | the company record is not checked | 2 | green |
+| M15, `CanaryMintStore.recorded` | an unreadable counter item is read as empty | 1 | green |
+| M16 (pre-review S5), config | the handler's `CANARY_ENVIRONMENT !== "beta"` clause is dropped | 4 | green |
+| M17 (S5), `checkPerson` | a roster with more members than one page is accepted | 1 (first run: SURVIVED, because the test's roster was empty and refused for that reason; the test now shows exactly the canary person with more following, then killed) | green |
+| M18 (S5), `recorded` | canary-end skips the previous hour | 1 | green |
+| M19 (S4), `clear` | the clear is unconditional (a record made meanwhile is lost) | 6 | green |
+| M20 (S4), `end` | canary-end gives up after one pass | 1 | green |
+| I1, infra/lib/canary-session.ts | a second principal may invoke | 3 | green |
+| I2 | the function's resources lose the condition | 5 | green |
+| I4 | the template rule can never fail | 1 | green |
+| I5 | the role may read any person row | 2 | green |
+| I6 | the role also reads a secret | 1 | green |
+| I7, infra/lib/developer-signin.ts | the token key deny never names the canary role | 2 | green |
+| I8 (S5), `leading()` | the `Null` guard on the leading-keys condition is dropped | 1 | green |
+| I9 | the mint alarm threshold is 70 | 1 | green |
+| I10 | an alarm does not tell the alerts topic | 1 | green |
+| I11 | the mint log event name does not match the log line | 1 | green |
+| P1, contracts canary-session-placement.ts | the environment pattern also allows `staging` | 3 | green |
+| P2 | the step role pattern allows any role name (S1) | 1 | green |
+| R1, scripts/release-production.ts `assertNoCanaryPlacement` | the beta exemption applies to every profile | 1 | green |
+| R2 | a release naming CanarySession parameters is allowed | 1 | green |
+| R3 | only the environment parameter is looked at on the live stack | 1 | green |
+| R4 | the check is not called | 1 | green |
+| R5 | the check runs after the repository is created | 1 | green |
+
+No mutant survives in the final tree. Not mutated, with the reason: "canary-end revokes every session of the person instead of the recorded ones" (S5): the store has no call that lists a person's sessions, so that mutant cannot be written without new store code; the test "touches no other session of the person" stands.
+
+## CANARY-SESSION, Opus review round (2026-11-25): account-based release exemption, step role as a name
+
+Measured on the working tree committed as the commit adding this section (parent 3fbe5988a; every file but MUTANTS.md is identical to the commit), each mutant applied alone and restored from the file's own text, then the three canary test files (95 tests). This supersedes rows R1 to R5 of the previous section for the release check: the exemption no longer reads a profile name.
+
+| Mutant / location | Mutation | Failing tests (of 95) | Restored |
+|---|---|---|---|
+| A1, scripts/release-production.ts `assertNoCanaryPlacement` | every account is exempt | 1 | green |
+| A2 | an unknown beta account (variable absent) counts as beta | 1 | green |
+| A3, `betaAccountFromEnvironment` | the beta account is any 12 digits in the variable text (no ARN shape) | 1 | green |
+| A4, the call site | the caller identity's account is replaced by the beta account (compared with itself) | 1 | green |
+| N1, contracts canary-session-placement.ts | the step role parameter also accepts an ARN of any account | 1 | green |
+| N2, infra/lib/canary-session.ts | the permission's principal is the typed value as is, not the ARN built with this stack's own account | 1 | green |
+
+No mutant survives.

@@ -1,4 +1,4 @@
-522 record kinds: 157 company-scoped, 19 install-wide, 346 needs-company. 278 routes: 100 company-scoped, 9 install-wide, 169 needs-company.
+523 record kinds: 157 company-scoped, 20 install-wide, 346 needs-company. 278 routes: 100 company-scoped, 9 install-wide, 169 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -1377,6 +1377,7 @@ proofHoldKey and proofOverrideKey reuse the existing pk:DEVTASK family; historyK
 | record | entity:COMPANY_INVITE_LOG; pk:COMPANY_INVITE_LOG | install-wide | sign-in table | no | - | DEC 254a: install audit row per invite create, revoke and use and per self-serve switch change, in the same transaction; code ids and opaque person/company ids only. |
 | record | entity:COMPANY_SELF_SERVE_SETTING; pk:COMPANY_SELF_SERVE | install-wide | sign-in table | no | - | DEC 254a: the operator's self-serve switch (absent = open); rechecked inside the create transaction. |
 | record | pk:COMPANY_SELF_CREATE_RATE | install-wide | sign-in table | no | - | DEC 253z: per-person, per-hour try counter for self-serve create, TTL expiresAt; no company data. |
+| record | pk:CANARY_MINT | install-wide | sign-in table | no | - | CANARY-SESSION: per-hour mint counter of the beta canary session function (one fixed person, one fixed company, 20 mints an hour) and the session ids it started, TTL expiresAt; no company data, exists only where that function does (beta). |
 
 | record | entity:COMPANY_SIGNIN_ISSUER | company-scoped | sign-in table | no | - | T3 companyIssuerKey uses companyScoped(companyId, "SIGNIN_ISSUER"); strict records cannot select a secret name; provider cache is keyed by company and rereads settings. |
 | record | entity:COMPANY_SLACK_WORKSPACE_VIEW | company-scoped | State table | no | - | T4b FIX-1: ORG#company#SLACK_WORKSPACES / TEAM#team, non-secret binding projection written with an authoritative conditional transaction. Only bounded company-partition Query on request paths; operator backfill snapshot-checked. Writer walk, collisions, bounds and dryRun: slack-workspace-binding.test.ts. Partition family pk:ORG retains its existing mixed-family classification. |
