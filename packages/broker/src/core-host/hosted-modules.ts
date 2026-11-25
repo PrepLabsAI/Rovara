@@ -25,7 +25,7 @@
 import auditSinkPlugin from "@agentx/local-adapters/audit-sink";
 import { bedrockProfileListPrice, listPricesPerMillion, rateQuoteUsageMicros } from "@agentx/model-runtime/catalog";
 import {
-  IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, change, when,
+  CORE_OUTBOX_STREAM_RELAY_VARIABLE, IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, change, when,
   type Admission, type AdmissionDecision, type AdmissionRequest, type Cost, type DocumentStore, type IdentityProvider, type MeterResult, type Metering, type ModelPrice, type ModelUsage, type OrgId, type OrgRole, type Principal,
   type RateQuoteV1, type RunUsageCallV1, type TransactItem,
 } from "@agentx/contracts";
@@ -329,6 +329,11 @@ export const UNFLUSHED_ESTIMATE_PROVIDER = "rovara-unflushed-estimate";
 /** The entry id of that estimate: one per run, so a second try books nothing more, and the run then counts as booked (`runsOwed`). */
 export const unflushedEntryId = (operationId: string): string => `usage:${operationId}:unflushed`;
 
+/** SPEND-UNREPORTED-RUN: the provider a $0 settlement of an ended run with no usage report is booked under (it adds nothing to the total; it makes the run count as booked). */
+export const UNREPORTED_SETTLE_PROVIDER = "rovara-unreported-settle";
+/** The entry id of that settlement: one per run (the company's once-guard counts a second try for nothing), and the run then counts as booked (`ENTRY#usage:<run>:`). */
+export const unreportedSettleEntryId = (operationId: string): string => `usage:${operationId}:settled`;
+
 /** What a stopped run's unreported usage is estimated at when no open hold is left to keep: a full start's planning allowance, never more than the task cap. */
 export function unflushedEstimateMicros(settings: HostedAdmissionSettings | undefined): number {
   const full = DEFAULT_PLANNING_LIMIT_USD.FULL * 1_000_000;
@@ -344,10 +349,18 @@ export function createHostedMoneyStop(deps: { store: DocumentStore; companyId: s
   // The estimate's own meter: it charges the figure the estimate carries, and nothing draws a hold (the run's hold is closed first).
   const estimates = createCostLedger({
     store: deps.store, now: deps.now, holds: createLedgerHolds(deps.store),
-    metering: { async price() { return null; }, async record(entry) { return { cost: entry.usage.provider === UNFLUSHED_ESTIMATE_PROVIDER ? entry.reportedCost ?? null : null, source: "unknown" }; } },
+    metering: { async price() { return null; }, async record(entry) { return { cost: entry.usage.provider === UNFLUSHED_ESTIMATE_PROVIDER || entry.usage.provider === UNREPORTED_SETTLE_PROVIDER ? entry.reportedCost ?? null : null, source: "unknown" }; } },
   });
   return {
     ...timing,
+    async settleUnreported(mark, how) {
+      // The marker is the run's booked end; no hold is touched. `no_call` is a proven $0. `gateway_record` follows the receipts rule: the gateway's own calls are in the total, but nothing proves its record COMPLETE, so the
+      // marker is `awaiting_usage` (no dollar figure), exactly as a receipt-covered run's unflushed tail is (`keepWholeHold`): the spend reads again when the gateway finalizes (the reader refuses it as unpriced until then).
+      const base = { companyId: deps.companyId, entryId: unreportedSettleEntryId(mark.operationId), at: deps.now().toISOString(), taskId: mark.taskId };
+      const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+      if (how === "gateway_record") await estimates.recordUsage({ ...base, usage: { provider: UNREPORTED_SETTLE_PROVIDER, modelId: "gateway-record", tokens } }, { status: "awaiting_usage" });
+      else await estimates.recordUsage({ ...base, usage: { provider: UNREPORTED_SETTLE_PROVIDER, modelId: "no-call", tokens }, reportedCost: { micros: 0, currency: "USD" } });
+    },
     async planUnflushed(reservationId, mark) {
       const covered = (await deps.store.query({ pk: costPartition(deps.companyId, mark.taskId), sk: { op: "beginsWith", prefix: `ENTRY#usage-charge:${mark.operationId}:` }, limit: 1 })).items.length > 0;
       const ours = companyOfReservation(reservationId) === deps.companyId;
@@ -360,6 +373,17 @@ export function createHostedMoneyStop(deps: { store: DocumentStore; companyId: s
         usage: { provider: UNFLUSHED_ESTIMATE_PROVIDER, modelId: plan.covered ? "unavailable" : "estimate", tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
         ...(plan.covered ? {} : { reportedCost: { micros: plan.restMicros, currency: "USD" } }),
       }, { status: plan.covered ? "awaiting_usage" : "estimated" });
+    },
+    async keepHoldAsEstimate(reservationId, mark) {
+      // Only the hold's room, as a marked estimate: the ledger draws it from the hold (the day counts it once), the entry is in the task's total (the task view shows it as an estimate), and the hold is closed.
+      const ours = companyOfReservation(reservationId) === deps.companyId;
+      const room = ours ? await openHoldRoom(deps.store, reservationId) : 0;
+      await estimates.recordUsage({
+        companyId: deps.companyId, entryId: unflushedEntryId(mark.operationId), at: deps.now().toISOString(), taskId: mark.taskId,
+        usage: { provider: UNFLUSHED_ESTIMATE_PROVIDER, modelId: "hold-estimate", tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+        reportedCost: { micros: room, currency: "USD" },
+      }, { status: "estimated" });
+      if (ours) await closeHold(deps.store, reservationId, { kind: "release" }, deps.now);
     },
     async keepWholeHold(reservationId, mark) {
       // What the run's unreported spend is kept at: never less than the fixed estimate. The hold's room is kept first (the whole hold, as spent); what the room does not cover is booked
@@ -388,11 +412,13 @@ export function createHostedMoneyStop(deps: { store: DocumentStore; companyId: s
   };
 }
 
-/** Whether the queue cancel path's fast relay (lane L9, the State table stream to the outbox relay) is deployed: the infra sets this variable to `on` with it. */
-export const CORE_OUTBOX_STREAM_RELAY_VARIABLE = "ROVARA_CORE_OUTBOX_STREAM_RELAY";
+/** Whether the queue cancel path's fast relay (lane L9, the State table stream to the outbox relay) is deployed: the infra sets this variable to `on` with it (infra/lib/core-engine.ts, packed as `rl`). The name is the contracts' constant. */
+export { CORE_OUTBOX_STREAM_RELAY_VARIABLE };
 /**
- * Whether the per-run stop is wired on this function: the queue cancel path is (this code), so it is the fast relay that decides. Until L9 lands this is false, so `automation.run` stays
- * refused (`run_stop_not_wired`); Stop and close still keep the whole hold as estimated spend when the worker's end is late (over-counts, never under).
+ * Whether the per-run stop is wired on this function: the infrastructure sets `ROVARA_CORE_OUTBOX_STREAM_RELAY=on` (packed `rl`, infra/lib/core-engine.ts) on the broker and the dispatcher, because the whole path
+ * that stops a run at its cap is deployed with it (the cancel staged in the outbox, relayed by the State stream through the developer task notifier and by the 1-minute backstop schedule, delivered to the worker by the
+ * dispatcher; a silent worker is ended by the run-watch sweep). Absent or anything but `on`: false, so `automation.run` stays refused (`run_stop_not_wired`); Stop and close still keep the whole hold as estimated
+ * spend when the worker's end is late (over-counts, never under).
  */
 export function runStopWiredFrom(env: NodeJS.ProcessEnv): boolean {
   return env[CORE_OUTBOX_STREAM_RELAY_VARIABLE]?.trim() === "on";

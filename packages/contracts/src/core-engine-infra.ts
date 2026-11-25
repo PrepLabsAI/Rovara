@@ -34,6 +34,15 @@ export const CORE_JOB_SCHEDULES: readonly CoreJobSchedule[] = [
 ];
 
 /**
+ * Core run stop relay (lane CORE-RUN-STOP-RELAY, G1): the variable the infrastructure sets to `on` where the core's outbox stream relay is deployed (the State table's stream reader, the developer
+ * task notifier, invokes the core broker with each outbox insert: infra/lib/developer-task-notifier.ts; the broker relays it: aws/core-outbox-stream.ts; the 1-minute `outbox-relay-backstop` schedule
+ * is the fallback). The core's hosted admission declares `enforcesCost: true` (so work with no one present may start) only where it reads exactly `on` (core-host/hosted-modules.ts `runStopWiredFrom`).
+ * Packed for the broker and the dispatcher as the setting `coreOutboxStreamRelay` (broker-environment.ts), a constant: the relay is part of the same template, never an operator choice.
+ */
+export const CORE_OUTBOX_STREAM_RELAY_VARIABLE = "ROVARA_CORE_OUTBOX_STREAM_RELAY";
+export const CORE_OUTBOX_STREAM_RELAY_ON = "on";
+
+/**
  * Core switch-on blocker (2026-11-17): where the core engine's model calls go on an AWS install, as stack parameters of their own, so `agentx upgrade` keeps them like the other core
  * settings (a template overlay was dropped by every upgrade). Both the broker and the dispatcher get them packed in AGENTX_SETTINGS (broker-environment.ts: a URL's slashes cannot
  * be packed, so the stack holds the gateway's HOST and the function gets `https://<host>`), and core-host/gateway-model-access.ts reads the variables. Both empty (the default):

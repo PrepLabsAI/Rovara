@@ -102,7 +102,9 @@ describe("an EC2 worker authenticating invocations", () => {
     const request = post(invocation, header(claimsFor(invocation)));
     const refused = await handleWorkerRequest(request, state);
     expect(refused.status).toBe(401);
-    await expect(refused.json()).resolves.toEqual({ error: "invocation is not authorized", reason });
+    // A token for another workspace or generation (signed, so from the dispatcher) is told whose machine this is; every other refusal is the fixed body alone.
+    const whose = reason === "wrong_workspace" || reason === "wrong_generation" ? { workspaceId: authentication.workspaceId, generation: authentication.generation } : {};
+    await expect(refused.json()).resolves.toEqual({ error: "invocation is not authorized", reason, ...whose });
     expect(request.bodyUsed).toBe(false);
     expect(await journal.get(invocation.operationId)).toBeUndefined();
     expect(execute).not.toHaveBeenCalled();

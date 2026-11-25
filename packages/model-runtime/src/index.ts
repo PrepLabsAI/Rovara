@@ -7,6 +7,8 @@ import { TRANSPORTS, carriesUnsignedReasoning, requestCompat } from "./transport
 import { TOOL_DECLARATIONS_MISSING_WORDS, toolBlocksWithoutTools } from "./tool-history.js";
 import { ModelBudgetExhaustedError, ModelNotAllowedError, budgetExhaustedMarker, budgetScopeOfProxyBody, modelNotAllowedMarker, type ModelBudgetScope } from "./budget.js";
 export { ModelBudgetExhaustedError, ModelNotAllowedError, budgetExhaustedFromMarker, modelNotAllowedFromMarker, type ModelBudgetScope } from "./budget.js";
+import { markFailedBeforeResponse } from "./failed-before-response.js";
+export { MODEL_CALL_FAILED_BEFORE_RESPONSE, failedBeforeResponse, type FailedBeforeResponse } from "./failed-before-response.js";
 export { readOpenRouterKey, readProviderKey, openRouterRouting, openRouterModel, requireKeyedModel } from "./config.js";
 // The governed e2e model route (M1.4): its own surface, never reached through the coding-task fallback above.
 export * from "./e2e-route.js";
@@ -420,6 +422,9 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
   // Set when the model gateway answered 429 in its fixed quota sentence (a Bedrock throttle: the model's AWS quota is used up or set to 0).
   let quotaUsedUp = false;
   let installPaused = false;
+  // Set once a response whose stream may carry content was handed on (an OK answer with a body). An error before it is a call that failed BEFORE any response: the provider returned nothing, with or
+  // without an HTTP status, and the failed message says so by a stable code (`markFailedBeforeResponse`), never by its words.
+  let streamBegan = false;
   // Set when the model gateway answered 409 `run_price_authorization_required`: the run's price authorization no longer fits the call. A stop, never a retry (see observedFetch).
   let runPriceRefused = false;
   // Set when the model gateway answered one of its fixed company stops (GATEWAY_STOPS; today 403 `company_limit_not_set`, DEC 254zzz491). A stop, never a retry, in Code's fixed sentence (never the gateway's body).
@@ -452,6 +457,7 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
       return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
     }
     if (!response.ok || !response.body) return response;
+    streamBegan = true;
     // Observe only the serving model and router provider identifiers; never record request/response bodies.
     const decoder = new TextDecoder();
     let pending = "";
@@ -528,7 +534,10 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
           return await fallBack(plan.fallback, refusal);
         }
         started = true;
-        if (event.type === "error") event.error.errorMessage = errorText(safeError(provider, event.reason === "aborted", failureStatus, chatgpt, exhausted, route !== undefined, notEnabled, notOffered, quotaUsedUp));
+        if (event.type === "error") {
+          event.error.errorMessage = errorText(safeError(provider, event.reason === "aborted", failureStatus, chatgpt, exhausted, route !== undefined, notEnabled, notOffered, quotaUsedUp));
+          if (event.reason !== "aborted" && !streamBegan) markFailedBeforeResponse(event.error, failureStatus);
+        }
         if (event.type === "done" || event.type === "error") {
           const message = event.type === "done" ? event.message : event.error;
           // Pi retains the response in the transcript. This record also identifies the serving model
@@ -551,6 +560,7 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
         content: [], timestamp: Date.now(), stopReason: aborted ? "aborted" : "error", errorMessage: errorText(error instanceof ToolDeclarationsMissing ? TOOL_DECLARATIONS_MISSING_WORDS : error instanceof ModelNotAllowedError && !aborted ? modelNotAllowedMarker(error.text) : safeError(provider, aborted, failureStatus, chatgpt, exhausted ?? (error instanceof ModelBudgetExhaustedError ? error.scope : undefined), route !== undefined, notEnabled, notOffered, quotaUsedUp)),
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
       };
+      if (!aborted && !streamBegan) markFailedBeforeResponse(message, failureStatus);
       output.push({ type: "error", reason: aborted ? "aborted" : "error", error: message });
       output.end(message);
     }

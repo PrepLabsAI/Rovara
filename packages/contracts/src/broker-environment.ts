@@ -15,7 +15,7 @@
  * The infrastructure (infra/lib/broker-names.ts) and the broker both take these tables, so a name added to one cannot be missing from the other.
  * tests/contract/lambda-environment-size.test.ts holds the broker under its ceiling with the longest names: a value that can be derived is derived, not added as a variable.
  */
-import { ATTENTION_EMAIL_FUNCTION_VARIABLE, coreAttentionEmailFunctionName, coreDispatchDeadLetterName, coreDispatchQueueName, coreLessonsReflectDeadLetterName, coreLessonsReflectQueueName, CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, CORE_AGENT_MODEL_CHOICE_VARIABLE, CORE_AGENT_MODEL_VARIABLE, CORE_ANSWERS_MODEL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_LEARNING_MODEL_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE } from "./core-engine-infra.js";
+import { ATTENTION_EMAIL_FUNCTION_VARIABLE, CORE_OUTBOX_STREAM_RELAY_VARIABLE, coreAttentionEmailFunctionName, coreDispatchDeadLetterName, coreDispatchQueueName, coreLessonsReflectDeadLetterName, coreLessonsReflectQueueName, CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, CORE_AGENT_MODEL_CHOICE_VARIABLE, CORE_AGENT_MODEL_VARIABLE, CORE_ANSWERS_MODEL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_LEARNING_MODEL_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE } from "./core-engine-infra.js";
 import { PUBLIC_API_URL_VARIABLE } from "./public-api-url.js";
 import {
   environmentAlarmPrefix,
@@ -199,6 +199,8 @@ export const BROKER_SETTINGS = {
   coreLessons: { code: "cl", variable: "ROVARA_CORE_LESSONS" },
   // L4-P1 (owner DEC 254zzl): the per-company flag of system-started runs (the stack parameter CoreSystemRuns, default off).
   coreSystemRuns: { code: "sy", variable: "ROVARA_CORE_SYSTEM_RUNS" },
+  // CORE-RUN-STOP-RELAY (G1): "on" where the core's outbox stream relay is deployed, so the admission declares enforcesCost (a run is stopped at its cap), for the broker and the dispatcher. A constant, set in infra/lib/core-engine.ts.
+  coreOutboxStreamRelay: { code: "rl", variable: CORE_OUTBOX_STREAM_RELAY_VARIABLE },
   // Core switch-on blocker (2026-11-17): the model gateway's host and agent model (the stack parameters CoreModelGatewayHost and CoreAgentModel), packed
   // to make room for the gateway settings in the broker's 4 KB.
   /** DEC 254o (b), L2-2: Slack company mode for workspaces other than SLACK_TEAM_ID (stack parameter SlackCompanyWorkspaces; the broker also needs COMPANY_SIGNIN=enabled). */

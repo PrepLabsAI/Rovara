@@ -14,7 +14,7 @@ import { projectIncarnationUpdate } from "../project-incarnation.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
-  PROMPT_LOCATIONS_MAX, ProjectDefinitionSchema, SETUP_TIMEOUT, TEST_TIMEOUT, agentXError, canonicalJson, change, formatCommandLine, noAutomatedTestsOf, noAutomatedTestsOfRow, orgProjectCatalogKey, parseCommandLine, projectMetaKey, projectRevisionKey, promptLocationKey, promptLocationsOf, setupItemsOf, when,
+  PROMPT_LOCATIONS_MAX, ProjectDefinitionSchema, SETUP_TIMEOUT, TEST_TIMEOUT, agentXError, canonicalJson, change, formatCommandLine, noAutomatedTestsOf, noAutomatedTestsOfRow, orgProjectCatalogKey, parseCommandLine, projectMetaKey, projectRevisionKey, promptLocationKey, promptLocationsOf, readStoredProject, setupItemsOf, when,
   type DocumentKey, type DocumentStore, type NoAutomatedTests, type OrgId, type Principal, type ProjectCommand, type ProjectDefinition, type PromptLocation, type SetupVerification, type TransactItem, type UpdateOp,
 } from "@agentx/contracts";
 import { SubjectRefusal, type AppliedDecision, type DecisionAttempt, type DecisionSubject, type LoadedSubject } from "../decisions/approval-gate.js";
@@ -350,7 +350,7 @@ export async function readSetupApply(deps: Pick<SetupApplyDeps, "flow" | "store"
   if (raw === undefined || raw["entityType"] !== "SETUP_APPLY") return undefined;
   const row = raw as unknown as SetupApplyRow;
   const revision = await deps.store.get(projectRevisionKey(deps.companyId, project, row.candidateRevision));
-  const definition = ProjectDefinitionSchema.safeParse((revision as { definition?: unknown } | undefined)?.definition);
+  const definition = readStoredProject((revision as { definition?: unknown } | undefined)?.definition);
   if (!definition.success) return undefined;
   const checkState = await setupStateOfCheck(deps.flow, row.check, definition.data);
   // Each command as the person would type it (quoted where it needs it) and whole: the approver must see all of what will run.
@@ -409,7 +409,7 @@ async function snapshotOfApproved(flow: Pick<TaskFlowDeps, "store" | "companyId"
   }
   async function readIt(): Promise<Awaited<ReturnType<typeof takeSetupSnapshot>>> {
     const stored = await flow.store.get(projectRevisionKey(flow.companyId, row.project, row.candidateRevision));
-    const definition = ProjectDefinitionSchema.safeParse((stored as { definition?: unknown } | undefined)?.definition);
+    const definition = readStoredProject((stored as { definition?: unknown } | undefined)?.definition);
     if (!definition.success) return undefined;
     return await takeSetupSnapshot({ companyId: flow.companyId, codeHosts: flow.codeHosts }, { definition: definition.data, setupRevision: row.candidateRevision, at, commits: row.baseCommits! });
   }

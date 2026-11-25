@@ -1,6 +1,6 @@
 // Lane L9-wire: the TaskFactsSource L6b's sessions read, over the task flow's records (L6a). The sessions module ships no adapter on purpose: the run status is
 // derived from operation records only the task flow knows, so the wiring lane writes this thin function once.
-import type { DeveloperTaskStatus, TaskStatus } from "@agentx/contracts";
+import { redactBlockReason, type DeveloperTaskStatus, type TaskStatus } from "@agentx/contracts";
 import { developerIdOf } from "../../core/sessions/create.js";
 import type { SessionTaskFacts, TaskFactsSource, TaskRunStatus } from "../../core/sessions/facts.js";
 import { readTask, taskViewOf } from "../../core/task-flow/reads.js";
@@ -56,7 +56,7 @@ export function createTaskFactsSource(deps: Pick<TaskFlowDeps, "store" | "compan
       return {
         companyId, taskId, project: task.project, ownerDeveloperId: developerIdOf({ provider: task.provider, personId: task.developerId }),
         ...(task.closedAt === undefined ? {} : { closedAt: task.closedAt }),
-        ...(workflow === undefined ? {} : { workflow: { stage: workflow.stage, state: workflow.state, ...(workflow.outcome === undefined ? {} : { outcome: workflow.outcome }), ...(workflow.blockReason === undefined ? {} : { blockReason: workflow.blockReason }) } }),
+        ...(workflow === undefined ? {} : { workflow: { stage: workflow.stage, state: workflow.state, ...(workflow.outcome === undefined ? {} : { outcome: workflow.outcome }), ...(workflow.blockReason === undefined ? {} : { blockReason: redactBlockReason(workflow.blockReason, 500) }) } }),
         runStatus: RUN_STATUS[view.status] ?? "IDLE",
         ...(failed === undefined ? {} : { failureCategory: failed.category }),
         ...(failed?.stage === "setup" ? { failedPrepare: {} } : {}),

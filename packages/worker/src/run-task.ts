@@ -1534,7 +1534,7 @@ async function runTask(
         outcome = "FAILED";
         taskFailure = loopStop ?? asError(error);
         try {
-          await emit("error", { message: taskFailure.message });
+          await emit("error", { message: redactText(taskFailure.message) });
         } catch (reportingError) {
           evidenceFailure = reportingError;
         }

@@ -6,11 +6,11 @@ import { ChangeMessageVisibilityCommand, SQSClient } from "@aws-sdk/client-sqs";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
 import { machineSizePicker, optionalPicker } from "./worker-machines/machine-size-pick.js";
 import { GetCommand, DynamoDBDocumentClient, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { WORKER_POST_TIMEOUT_MS, CORE_DISPATCH_QUEUE_URL_VARIABLE, Ec2RuntimeBindingSchema, ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, agentXError, projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey, workspaceSessionKey, type WorkerInvocation } from "@agentx/contracts";
+import { WORKER_POST_TIMEOUT_MS, CORE_DISPATCH_QUEUE_URL_VARIABLE, Ec2RuntimeBindingSchema, ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, agentXError, redactText, DISPATCH_GAVE_UP_WORDS, type DispatchGaveUpCode, projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey, workspaceSessionKey, type WorkerInvocation } from "@agentx/contracts";
 import { requiredEnvironment, type DurableOutboxRecord, type Ec2OutboxRecord } from "./lambda.js";
 import type { Ec2Delivery } from "./ec2-delivery.js";
 import { failOutboxOperation } from "./outbox-failure.js";
-import { createEc2Delivery } from "./ec2-delivery.js";
+import { DeliveryFailure, DeliveryRefusal, createEc2Delivery } from "./ec2-delivery.js";
 import { createWorkflowE2EAdmissionAgentStepsReader, createWorkflowE2EAdmissionModelChoiceReader, createWorkflowE2EAdmissionNeedsModelFreeLimitsReader, createWorkflowE2EAdmissionSchemaReader } from "./workflow-e2e-admission-schema.js";
 import { appendOperationEvent } from "./operation-events.js";
 import { ProjectSetupSessionManager, SessionManager, workspaceBinding } from "./sessions.js";
@@ -199,7 +199,7 @@ export function createProjectSetupBindingReader(input: { documentClient: DynamoD
 
 export interface DispatchLogEntry {
   level: "warn" | "error";
-  event: "dispatch.attempt_failed" | "dispatch.terminal_transition_failed";
+  event: "dispatch.attempt_failed" | "dispatch.terminal_transition_failed" | "dispatch.stale_address";
   operationId?: string;
   workspaceId?: string;
   outboxId?: string;
@@ -211,6 +211,14 @@ export interface DispatchLogEntry {
   errorCode?: string;
   httpStatusCode?: number;
   errorMessage?: string;
+  /** `dispatch.stale_address` only: the worker that answered belongs to another workspace than the record's (see `logStaleAddress`). */
+  workerWorkspaceId?: string;
+  workerGeneration?: number | "unknown";
+  /** `dispatch.stale_address` only: the worker's fixed word (`wrong_workspace` or `wrong_generation`). */
+  workerReason?: string;
+  sessionId?: string;
+  instanceId?: string;
+  privateIp?: string;
 }
 
 export function createDispatcherHandler(dependencies: {
@@ -249,10 +257,10 @@ export function createDispatcherHandler(dependencies: {
         if (invocation.kind === "project-setup-smoke") {
           if (record.operationId !== invocation.operationId || record.workspaceId !== invocation.workspaceId
             || invocation.payload.transportCorrelationId !== invocation.workspaceId) {
-            throw agentXError("CONFIG_INVALID", "project setup outbox identity does not match its authenticated invocation");
+            throw new DeliveryRefusal("CONFIG_INVALID", "project setup outbox identity does not match its authenticated invocation");
           }
-          if (dependencies.guardProjectSetupDispatch === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "project setup smoke authority is not configured");
-          if (dependencies.projectSetupLifecycle === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "project setup operation storage is not configured");
+          if (dependencies.guardProjectSetupDispatch === undefined) throw new DeliveryRefusal("RUNTIME_UNAVAILABLE", "project setup smoke authority is not configured");
+          if (dependencies.projectSetupLifecycle === undefined) throw new DeliveryRefusal("RUNTIME_UNAVAILABLE", "project setup operation storage is not configured");
           if (await dependencies.guardProjectSetupDispatch(record, { remainingTimeMs }) === "PARKED") continue;
         } else if (await dependencies.guardTaskDispatch?.(record, { remainingTimeMs }) === "PARKED") continue;
         const setup = invocation.kind === "project-setup-smoke" ? dependencies.projectSetupLifecycle : undefined;
@@ -263,12 +271,12 @@ export function createDispatcherHandler(dependencies: {
           continue;
         }
         if (record.deploymentMode === "ec2-ebs") {
-          if (dependencies.deliverEc2 === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "this dispatcher cannot reach ec2-ebs workers");
+          if (dependencies.deliverEc2 === undefined) throw new DeliveryRefusal("RUNTIME_UNAVAILABLE", "this dispatcher cannot reach ec2-ebs workers");
           // A record parked until its session is ready is acknowledged without using an attempt.
           const delivery = await dependencies.deliverEc2(record, invocation, { remainingTimeMs });
           if (typeof delivery === "object") {
             if (invocation.kind !== "resume" || dependencies.completeWorkflowE2EReadiness === undefined) {
-              throw agentXError("RUNTIME_UNAVAILABLE", "an internal readiness dispatch is not authorized");
+              throw new DeliveryRefusal("RUNTIME_UNAVAILABLE", "an internal readiness dispatch is not authorized");
             }
             await dependencies.completeWorkflowE2EReadiness(record, delivery.readinessGeneration);
             continue;
@@ -279,7 +287,7 @@ export function createDispatcherHandler(dependencies: {
           }
           continue;
         }
-        throw agentXError("RUNTIME_UNAVAILABLE", "retired deployment mode cannot execute work; register an ec2-ebs project");
+        throw new DeliveryRefusal("RUNTIME_UNAVAILABLE", "retired deployment mode cannot execute work; register an ec2-ebs project");
       } catch (error) {
         const terminal = record !== undefined && attempt >= maxAttempts && !isTaskDispatchGuardRetryError(error);
         logDispatchFailure(dependencies.log, {
@@ -296,6 +304,7 @@ export function createDispatcherHandler(dependencies: {
           maxAttempts,
           terminal,
         });
+        logStaleAddress(dependencies.log, error, record, { messageId: message.messageId, attempt, maxAttempts, terminal });
         if (terminal && record) {
           try {
             const setup = record.invocation.kind === "project-setup-smoke" ? dependencies.projectSetupLifecycle : undefined;
@@ -765,17 +774,22 @@ function parseMaximumAttempts(value: string | undefined): number {
   return parsed;
 }
 
+/**
+ * The reason a dispatch that was given up ends the operation with, read by everyone who can open the task: fixed words and a stable code from the one table (`DISPATCH_GAVE_UP_WORDS`), the number of tries,
+ * and the HTTP status a worker answered with. The text of the error itself (an SDK message, up to 512 characters of the worker's HTTP body, an ARN, an address) is never part of it: it goes to the log
+ * (`errorLogFields`), bounded and scrubbed. The broker's own refusal words (`DeliveryRefusal`, written in the broker's code) are kept: they say what to do ("retry once it restarts").
+ */
 function terminalDispatchError(error: unknown, attempts: number): string {
-  const fields = errorLogFields(error);
-  const details = [
-    fields.errorName,
-    fields.errorCode,
-    fields.httpStatusCode === undefined ? undefined : `HTTP ${fields.httpStatusCode}`,
-  ].filter((value): value is string => value !== undefined).join("/");
-  return [
-    `RUNTIME_UNAVAILABLE: worker dispatch failed after ${attempts} attempts${details ? ` (${details})` : ""}`,
-    fields.errorMessage,
-  ].filter((value): value is string => value !== undefined).join(": ").slice(0, 16_384);
+  const code = dispatchGaveUpCode(error);
+  const status = error instanceof DeliveryFailure && error.httpStatus !== undefined ? ` HTTP ${error.httpStatus}` : "";
+  const words = error instanceof DeliveryRefusal ? redactText(error.message.slice(error.code.length + 2)) : DISPATCH_GAVE_UP_WORDS[code];
+  return `RUNTIME_UNAVAILABLE: worker dispatch failed after ${attempts} attempts (${code}${status}): ${words}`.slice(0, 16_384);
+}
+
+function dispatchGaveUpCode(error: unknown): DispatchGaveUpCode {
+  if (error instanceof DeliveryRefusal) return "WORKER_REFUSED";
+  if (error instanceof DeliveryFailure) return error.httpStatus === undefined ? "WORKER_NOT_REACHED" : "WORKER_ANSWERED_ERROR";
+  return "WORKER_START_FAILED";
 }
 
 function errorLogFields(error: unknown): Pick<
@@ -785,22 +799,49 @@ function errorLogFields(error: unknown): Pick<
   if (!error || typeof error !== "object") return { errorName: typeof error };
   const candidate = error as Record<string, unknown>;
   const metadata = candidate.$metadata;
-  const status = metadata && typeof metadata === "object"
-    ? (metadata as Record<string, unknown>).httpStatusCode
-    : undefined;
+  const status = error instanceof DeliveryFailure ? error.httpStatus
+    : metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>).httpStatusCode : undefined;
+  // The worker's own words (a delivery failure's `upstreamText`) are for this log line alone.
+  const text = error instanceof Error ? (error instanceof DeliveryFailure && error.upstreamText !== undefined ? `${error.message}: ${error.upstreamText}` : error.message) : undefined;
   return {
     errorName: error instanceof Error ? error.name : "object",
     ...(typeof candidate.code === "string" ? { errorCode: candidate.code } : {}),
     ...(typeof status === "number" ? { httpStatusCode: status } : {}),
-    ...(error instanceof Error ? { errorMessage: sanitizeErrorMessage(error.message) } : {}),
+    ...(text === undefined ? {} : { errorMessage: sanitizeErrorMessage(text) }),
   };
 }
 
+/** What a log line may hold of an error's text: the secrets redactText knows, then the older fixed list, cut to 512 characters (after the scrub, so a cut cannot leave half a secret). */
 function sanitizeErrorMessage(message: string): string {
-  return message
+  return redactText(message)
     .replace(/\b(?:xapp|xoxb|xoxp|xoxa|xoxr|AKIA)[A-Za-z0-9_-]+\b/gu, "<redacted>")
     .replace(/\bBearer\s+\S+/giu, "Bearer <redacted>")
     .slice(0, 512);
+}
+
+/**
+ * INTERIM SIGNAL for the stale-address edge: a worker that answers 401 `wrong_workspace` belongs to another workspace, and one that answers `wrong_generation` is another machine of this workspace, so the session
+ * row's address was reused or replaced (the machine of this record's workspace is not there). One structured error line with both sides (the dispatching record's workspace and the one the worker reports in its
+ * answer, "unknown" if it does not), the session (workspace and generation as the session row has them, and the generation the worker reports), the instance (the session read does not carry it: "unknown")
+ * and the address. The dispatch is NOT marked "machine gone" here: that needs the session read and an instance check this path does not have, and a wrong mark could orphan a live instance (the
+ * reconciler owns that). The queue retries it as any failed attempt. The line is counted by a metric filter and alarm in infra/lib/control-plane.ts.
+ */
+const STALE_ADDRESS_REASONS: ReadonlySet<string> = new Set(["wrong_workspace", "wrong_generation"]);
+function logStaleAddress(
+  logger: ((entry: DispatchLogEntry) => void) | undefined,
+  error: unknown,
+  record: DurableOutboxRecord | undefined,
+  attempt: Pick<DispatchLogEntry, "messageId" | "attempt" | "maxAttempts" | "terminal">,
+): void {
+  const reason = error instanceof DeliveryFailure ? error.workerReason : undefined;
+  if (!(error instanceof DeliveryFailure) || reason === undefined || !STALE_ADDRESS_REASONS.has(reason) || error.where === undefined) return;
+  const reported = error.workerIdentity;
+  logDispatchFailure(logger, {
+    level: "error", event: "dispatch.stale_address", errorName: error.name, ...attempt, workerReason: reason,
+    ...(record === undefined ? {} : { operationId: record.operationId, workspaceId: record.workspaceId, outboxId: record.id }),
+    workerWorkspaceId: reported.workspaceId ?? "unknown", workerGeneration: reported.generation ?? "unknown",
+    sessionId: `${record?.workspaceId ?? "unknown"}#${error.where.generation}`, instanceId: "unknown", privateIp: error.where.privateIp,
+  });
 }
 
 function logDispatchFailure(

@@ -1,5 +1,5 @@
 // The existing feedback review view, over core-owned evidence and live owner access.
-import { agentXError, WorkflowSnapshotSchema, workflowFeedbackCheckChanges, workflowSelectedChecks, type WorkflowFeedbackReviewReport, type WorkflowSnapshot } from "@agentx/contracts";
+import { agentXError, redactBlockReason, WorkflowSnapshotSchema, workflowFeedbackCheckChanges, workflowSelectedChecks, type WorkflowFeedbackReviewReport, type WorkflowSnapshot } from "@agentx/contracts";
 import type { TaskCaller, TaskFlowDeps } from "../core/task-flow/deps.js";
 import { feedbackOwner } from "../core/pr-feedback/decide.js";
 import { readFeedbackReportArtifact } from "../core/pr-feedback/validate.js";
@@ -40,7 +40,7 @@ function checkChanges(workflow: WorkflowSnapshot, findings: WorkflowFeedbackRevi
 function workflowViewFields(workflow: WorkflowSnapshot, operation: Record<string, unknown> | undefined) {
   return { ...(workflow.outcome === undefined ? {} : { workflowOutcome: workflow.outcome }),
     ...(workflow.state === "COMPLETE" && (workflow.stage === "MERGED" || workflow.stage === "CLOSED") ? { canvasCleanupStatus: workflow.canvasCloseout?.status === "COMPLETE" ? "COMPLETE" : "RETRYING" } : {}),
-    ...(workflow.blockReason === undefined ? {} : { blockReason: workflow.blockReason }), ...(operation === undefined ? {} : { activeOperation: operation }), nextAction: nextAction(workflow, operation) };
+    ...(workflow.blockReason === undefined ? {} : { blockReason: redactBlockReason(workflow.blockReason, 500) }), ...(operation === undefined ? {} : { activeOperation: operation }), nextAction: nextAction(workflow, operation) };
 }
 
 export async function readPrFeedbackView(deps: TaskFlowDeps, caller: TaskCaller, taskId: string): Promise<Record<string, unknown>> {

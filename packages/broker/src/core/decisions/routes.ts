@@ -8,7 +8,7 @@
 // decided, needs the confirmation page (a fresh sign-in), or refused. Only a decided answer is recorded and reported as approved; a surface never says "Approved" for anything else.
 // Mounting is one call (routeDecisionCards).
 import {
-  DECISION_CARDS_MAX, DECISION_RUN_LIMIT_KINDS, DecisionApproveBodySchema, DecisionCardIdSchema, DecisionOpenedBodySchema, DecisionRejectBodySchema, DecisionRequestChangesBodySchema, agentXError, approveReasonProblem, planChoicesProblem, type DecisionPlanAnswer,
+  DECISION_CARDS_MAX, DECISION_RUN_LIMIT_KINDS, DecisionApproveBodySchema, DecisionCardIdSchema, DecisionOpenedBodySchema, DecisionRejectBodySchema, DecisionRequestChangesBodySchema, agentXError, approveReasonProblem, planChoicesProblem, spendUnreadableWords, type DecisionPlanAnswer,
   type DecisionAnswered, type DecisionCard, type DecisionCardsView, type DecisionEvidenceOpenedAnswer, type DecisionNeedsConfirmation, type DecisionRefusalReason, type DecisionRejectReason, type DecisionTab, type DecisionTabId,
 } from "@agentx/contracts";
 import { StatusReply } from "./status-reply.js";
@@ -102,6 +102,8 @@ export const DECISION_REFUSALS: Record<DecisionRefusalReason, { code: "FORBIDDEN
   second_person_required: { code: "FORBIDDEN", message: "Someone else has to decide this." },
   not_ready: { code: "MERGE_NOT_READY", message: "This isn't ready to be decided yet." },
   unsupported: { code: "CONFIG_INVALID", message: DECISION_FULL_PAGE_MESSAGE },
+  // SPEND-UNREPORTED-RUN item 3: the real reason, in the one words table (contracts/task-words.ts). The code stays MERGE_NOT_READY (409): a client that knows no new code reads it as it always read a card that cannot be decided yet.
+  spend_unreadable: { code: "MERGE_NOT_READY", message: spendUnreadableWords() },
 };
 
 async function project<C extends DecisionCaller>(deps: DecisionRouteDependencies<C>, caller: C): Promise<Projection> {

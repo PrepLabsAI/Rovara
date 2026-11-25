@@ -16,7 +16,7 @@ import { buildAgentXApp } from "../../infra/lib/app.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { hydrateBrokerEnvironment, type MutableEnvironment } from "../../packages/broker/src/aws/broker-environment.js";
 import { loadBrokerNamesParameter } from "../../packages/broker/src/aws/broker-names-parameter.js";
-import { brokerNamesParameterOf } from "../support/broker-environment-template.js";
+import { brokerNamesParameterOf, packedPiecesOf } from "../support/broker-environment-template.js";
 import { DEPLOY_PARAMETER_VALUES, RESOLVER_ACCOUNT, RESOLVER_REGION, controlPlaneOf } from "../support/lambda-environment-size.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
@@ -36,18 +36,11 @@ const brokerOf = (template: { Resources: Record<string, { Type: string; Properti
   return ((entry[1].Properties?.Environment as { Variables?: Variables } | undefined)?.Variables) ?? {};
 };
 
-/** The pieces of a packed variable's Fn::Join, as `code -> the intrinsic that gives its value`. */
+/** The pieces of a packed variable's Fn::Join, as `code -> the intrinsic that gives its value` (a literal value, such as `rl=on`, as the literal). */
 function packedPieces(raw: unknown): Map<string, unknown> {
   const join = (raw as { "Fn::Join"?: [string, unknown[]] })["Fn::Join"];
   if (join === undefined || join[0] !== "") throw new Error("a packed variable is one Fn::Join with no separator");
-  const pieces = new Map<string, unknown>();
-  const parts = join[1];
-  for (let index = 0; index < parts.length; index += 2) {
-    const code = /^,?([a-z]{2})=$/u.exec(String(parts[index]))?.[1];
-    if (code === undefined) throw new Error(`unexpected piece ${String(parts[index])}`);
-    pieces.set(code, parts[index + 1]);
-  }
-  return pieces;
+  return packedPiecesOf(raw);
 }
 
 /** The logical id (less its hash) each packed code must point at: a swapped pair of codes would otherwise build valid but wrong values. */
@@ -150,7 +143,7 @@ for (const env of ["staging", "a1234567890123456789"] as const) {
       expect(unset.DEVELOPER_TOKEN_ISSUER).toBe(`${resolver.getAtt(logicalIdOf(names.get(BROKER_NAMES.signInApi.code)), "ApiEndpoint")}/v1/auth`);
     });
 
-    for (const spec of Object.values(BROKER_SETTINGS).filter((each) => !("switchFlag" in each) && each.code !== BROKER_SETTINGS.installLayout.code && each.code !== BROKER_SETTINGS.publicApiUrl.code)) {
+    for (const spec of Object.values(BROKER_SETTINGS).filter((each) => !("switchFlag" in each) && each.code !== BROKER_SETTINGS.installLayout.code && each.code !== BROKER_SETTINGS.publicApiUrl.code && each.code !== BROKER_SETTINGS.coreOutboxStreamRelay.code)) {
       it(`${spec.variable} (${spec.code}) is its parameter's value`, () => {
         const parameter = (settings.get(spec.code) as { Ref?: string }).Ref;
         expect(parameter, "a setting is a parameter's value").toBeDefined();
@@ -160,6 +153,12 @@ for (const env of ["staging", "a1234567890123456789"] as const) {
         expect(hydrated[spec.variable]).toBe(expected);
       });
     }
+
+    // CORE-RUN-STOP-RELAY (G1): the outbox stream relay's setting is a constant, not a parameter's value: packed as the literal `on` (infra/lib/core-engine.ts), hydrated as the variable the hosted admission reads.
+    it(`${BROKER_SETTINGS.coreOutboxStreamRelay.variable} (${BROKER_SETTINGS.coreOutboxStreamRelay.code}) is the constant on`, () => {
+      expect(settings.get(BROKER_SETTINGS.coreOutboxStreamRelay.code)).toBe("on");
+      expect(hydrated[BROKER_SETTINGS.coreOutboxStreamRelay.variable]).toBe("on");
+    });
 
     // DEC 254zg (a), 254zk: a switch flag is its switch's condition as "1" or "0", and the broker reads it as "enabled" or "disabled" (the measure takes Fn::If's first branch).
     for (const spec of Object.values(BROKER_SETTINGS).filter((each) => "switchFlag" in each)) {
