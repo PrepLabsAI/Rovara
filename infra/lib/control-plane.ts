@@ -43,6 +43,7 @@ import { CoreEngine, TEST_SERVICES_PARAMETER, TEST_SERVICE_IMAGES_PARAMETER } fr
 import { CompanySecrets } from "./company-secrets.js";
 import { SlackCompanyTokenReader } from "./slack-company-token-reader.js";
 import { addGithubWebhookSecret, GITHUB_WEBHOOK_ROUTE, guardGithubWebhookRoute } from "./github-webhook.js";
+import { guardLinearWebhookRoute, LINEAR_WEBHOOK_ROUTE } from "./linear-webhook.js";
 import { SavedEnvImages } from "./saved-env-images.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
 import { connectDispatcherLessonsPeople } from "./dispatcher-lessons-people.js";
@@ -914,15 +915,18 @@ export class ControlPlaneStack extends Stack {
       target: `integrations/${integration.ref}`,
       authorizationType: "NONE",
     });
-    // Guided onboarding PR 7: the Linear OAuth app signs its webhook bodies itself; the broker verifies the HMAC, the timestamp and the workspace's binding. Named environments only.
+    // Guided onboarding PR 7: the Linear OAuth app signs its webhook bodies itself; the broker verifies the HMAC, the timestamp and the workspace's binding.
+    // DEC 254zzz488: created for the legacy install (beta, production) too, under the same ID and key; nothing else in the path is named-only (the broker reads the app's
+    // settings from <connector prefix>linear-oauth-app, which the legacy connector-secret read grant covers; pinned by tests/contract/linear-webhook-route.test.ts).
+    const linearWebhookRoute = new apigwv2.CfnRoute(this, "LinearWebhookRoute", {
+      apiId: api.ref,
+      routeKey: LINEAR_WEBHOOK_ROUTE,
+      target: `integrations/${integration.ref}`,
+      authorizationType: "NONE",
+    });
+    // CODE-PUBLIC-URL: the Linear webhook had no output; the operator pastes this into the Linear app. Built by the public-URL helper. Named environments only: the output is the one
+    // thing the legacy layout does not carry (a new legacy output would move every legacy pin; the legacy URL is the ApiEndpoint output plus the route path).
     if (naming.env !== undefined) {
-      new apigwv2.CfnRoute(this, "LinearWebhookRoute", {
-        apiId: api.ref,
-        routeKey: "POST /v1/linear/webhooks",
-        target: `integrations/${integration.ref}`,
-        authorizationType: "NONE",
-      });
-      // CODE-PUBLIC-URL: the Linear webhook had no output; the operator pastes this into the Linear app (the route exists in named environments only).
       new CfnOutput(this, "LinearWebhookUrl", { value: publicApiUrl(api, "/v1/linear/webhooks") });
     }
     // GitHub signs webhook bodies itself; the broker verifies its HMAC and linked repository scope.
@@ -997,6 +1001,8 @@ export class ControlPlaneStack extends Stack {
     });
     // Webhook lane W3: the public GitHub webhook route's throttle and its alarm (infra/lib/github-webhook.ts).
     guardGithubWebhookRoute(this, naming, api.ref, defaultStage, githubWebhookRoute, notifyOperator);
+    // Linear webhook guard: the Linear route's throttle and its alarm, the same as GitHub's (infra/lib/linear-webhook.ts).
+    guardLinearWebhookRoute(this, naming, api.ref, defaultStage, linearWebhookRoute, notifyOperator);
     broker.addPermission("ApiInvoke", {
       principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
       sourceArn: `arn:${this.partition}:execute-api:${this.region}:${this.account}:${api.ref}/*/*/*`,

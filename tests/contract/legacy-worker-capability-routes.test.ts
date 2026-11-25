@@ -64,7 +64,8 @@ describe("worker-capability routes on the legacy install", () => {
     for (const [id, routeKey] of Object.entries(LEGACY_ROUTES_BEFORE)) {
       expect(legacy[id]?.Properties?.RouteKey, id).toBe(routeKey);
     }
-    expect(Object.keys(legacy).sort()).toStrictEqual([...Object.keys(LEGACY_ROUTES_BEFORE), ...NEW_ROUTES.map(([id]) => id)].sort());
+    // DEC 254zzz488: the legacy install also has the Linear app's webhook route (tests/contract/linear-webhook-route.test.ts pins it).
+    expect(Object.keys(legacy).sort()).toStrictEqual([...Object.keys(LEGACY_ROUTES_BEFORE), ...NEW_ROUTES.map(([id]) => id), "LinearWebhookRoute"].sort());
   });
 
   it("has unique route keys", () => {

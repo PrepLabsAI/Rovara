@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import { STARTBUILD_OVERRIDE_KEYS, brokerCodeBuildStartStatements, withoutBrokerCodeBuildStart } from "../support/broker-codebuild-start-template.js";
 import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js";
+import { withoutLinearWebhookGuard } from "../support/linear-webhook-route-template.js";
 import { stuckStoppingInstall, withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
 import { withoutApiAccessLog } from "../support/api-access-log-template.js";
 import { withoutPublicApiUrl } from "../support/public-api-url-template.js";
@@ -194,8 +195,8 @@ function withoutBrokerMemberConditionCheck(template: TemplateJson): TemplateJson
 
 describe("broker membership condition-check grant", () => {
   it("adds only the exact member-key statement to the broker; every other action, resource and principal stays pinned", () => {
-    // Webhook lane W3 + DEC 254zzz432: the webhook secret slot and the stuck-stopping alarm are asserted and taken out too, so both pins below still hold.
-    const before = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(structuredClone(namedRaw)), { named: true }), { env: "staging" }), stuckStoppingInstall("staging")))));
+    // Webhook lane W3 + DEC 254zzz432: the webhook secret slot and the stuck-stopping alarm are asserted and taken out too, so both pins below still hold. Linear webhook guard: so are the Linear route's throttle and alarm (outermost).
+    const before = withoutLinearWebhookGuard(withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(structuredClone(namedRaw)), { named: true }), { env: "staging" }), stuckStoppingInstall("staging"))))));
     // The providers branch also adds this exact capability output. Keep a measured
     // combined pin, then remove only the asserted output to retain the upstream pin.
     expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("c15528809bc3dac1d2d2caf3cce7776a14d387dbf10b607732ae86ac28b468af");
@@ -397,6 +398,8 @@ describe("developer sign-in infrastructure (named environments)", () => {
     expect(stage.Properties.RouteSettings).toEqual({
       // Webhook lane W3: the public GitHub webhook route shares this stage map (github-webhook-secret-infrastructure.test.ts checks it in both templates).
       "POST /v1/github/webhooks": { ThrottlingBurstLimit: 100, ThrottlingRateLimit: 20, DetailedMetricsEnabled: true },
+      // Linear webhook guard: the public Linear webhook route too, the same numbers (linear-webhook-route.test.ts checks it in both templates).
+      "POST /v1/linear/webhooks": { ThrottlingBurstLimit: 100, ThrottlingRateLimit: 20, DetailedMetricsEnabled: true },
       "ANY /v1/auth/{proxy+}": { ThrottlingBurstLimit: 50, ThrottlingRateLimit: 20 },
       "ANY /v1/dev/{proxy+}": { ThrottlingBurstLimit: 50, ThrottlingRateLimit: 20 },
       "ANY /review/{proxy+}": { ThrottlingBurstLimit: 50, ThrottlingRateLimit: 20 },
@@ -711,8 +714,8 @@ describe("task-token key and membership IAM", () => {
 
   it("changes only the named task key, alias, two env vars, public read and membership list item", () => {
     // ENV-ROOM 2 is checked in full by broker-names-parameter-infrastructure.test.ts; its shape is asserted and it is taken out first, so the digest still pins everything else.
-    // Webhook lane W3 + DEC 254zzz432: as above, so the digest below still holds.
-    const remainder = withoutWebhookSecretLane(withoutBrokerNamesParameter(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(structuredClone(named)), { named: true }), { env: "staging" }), stuckStoppingInstall("staging"))))));
+    // Webhook lane W3 + DEC 254zzz432: as above, so the digest below still holds. Linear webhook guard: its throttle and alarm are taken out too (the route itself is asserted and taken out just below).
+    const remainder = withoutLinearWebhookGuard(withoutWebhookSecretLane(withoutBrokerNamesParameter(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(structuredClone(named)), { named: true }), { env: "staging" }), stuckStoppingInstall("staging")))))));
     withoutCoreModelAccessRoute(remainder);
     // Guided onboarding PR 7: the Linear app's webhook route (no authorizer; the broker verifies the HMAC). Its shape is asserted here, then it is taken out so the digest still pins everything else.
     expect(remainder.Resources["LinearWebhookRoute"]).toMatchObject({ Type: "AWS::ApiGatewayV2::Route", Properties: { RouteKey: "POST /v1/linear/webhooks", AuthorizationType: "NONE" } });
