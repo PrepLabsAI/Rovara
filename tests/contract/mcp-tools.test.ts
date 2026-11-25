@@ -572,6 +572,15 @@ describe("versions (FR-048, R23, ruling S1)", () => {
     expect(result.structuredContent).not.toHaveProperty("channel_user");
   });
 
+  it("says GitHub for a GitHub sign-in, and keeps sign_in_kind company (an added kind would be an interface change)", async () => {
+    const projects = async () => ({ developer: { id: "d".repeat(64), name: "Lee Park", provider: "github" as const }, projects: [], notices: [] });
+    const mcp = await connect({ projects }, { compatibility: async () => ({ env: "staging", apiVersion: "1.2" }) });
+    const result = await mcp.callTool({ name: "agentx_whoami", arguments: {} });
+    expect(result.structuredContent).toMatchObject({ sign_in_method: "github", sign_in_provider: "github", sign_in_kind: "company" });
+    expect(text(result)).toContain("as Lee Park with GitHub.");
+    expect(text(result)).not.toContain("company sign-in");
+  });
+
   const configured = (apiVersion: string) => ({ configuration: vi.fn(async () => ({ env: "staging", apiVersion, baseUrl: "https://agentx.example.test" })) });
 
   it("needs minor version 2: a 1.0 control plane asks for an AgentX upgrade (ruling S1)", async () => {

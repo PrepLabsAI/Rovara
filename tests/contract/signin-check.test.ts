@@ -11,7 +11,7 @@ const redirectTo = (location: string) => new Response("", { status: 302, headers
 const CLIENT_SECRET = "fedcba9876543210fedcba9876543210";
 const scopes = ["channels:read", "groups:read", "im:write", "users:read", "users:read.email"];
 
-function fetchFor(options: { methods?: { slack: boolean; oidc: null | { displayName: string } }; issuer?: string; slackAuthorize?: Response; discovery?: boolean }): typeof fetch & { urls: string[] } {
+function fetchFor(options: { methods?: { slack: boolean; oidc: null | { displayName: string }; github?: null | { displayName: string } }; issuer?: string; slackAuthorize?: Response; discovery?: boolean }): typeof fetch & { urls: string[] } {
   const urls: string[] = [];
   const fetchFn = async (input: string | URL | Request) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
@@ -75,6 +75,35 @@ describe("agentx signin check (FR-046, R5)", () => {
       "Slack redirect URL": "Slack does not list https://abc.execute-api.us-east-1.amazonaws.com/v1/auth/callback/slack as a redirect URL; add it on OAuth & Permissions",
     });
     expect(checks.every((check, index) => index === 0 || !check.ok)).toBe(true);
+  });
+
+  describe("GitHub sign-in", () => {
+    const githubStored = async (fetchOptions: Parameters<typeof fetchFor>[0]) => {
+      const store = new MemoryParameterStore();
+      await writeSignInSettings(store, {
+        schemaVersion: 1, env: "staging", slack: false, updatedAt: "2026-09-27T00:00:00.000Z", updatedBy: HOLDER,
+        github: { clientId: "Iv1.abc", clientSecretName: "agentx/staging/developer-github" },
+      });
+      const checks = await checkDeveloperSignIn({ env: "staging", store, secrets: memoryInitSecrets({}), settings: stagingSettings, slackApi: api(), fetch: fetchFor(fetchOptions) });
+      return Object.fromEntries(checks.map((check) => [check.name, check]));
+    };
+
+    it("names GitHub in the settings line and accepts a control plane that offers it", async () => {
+      const found = await githubStored({ methods: { slack: false, oidc: null, github: { displayName: "GitHub" } } });
+      expect(found.settings).toMatchObject({ ok: true, detail: "Slack sign-in off, company sign-in off, GitHub sign-in on" });
+      expect(found["control plane"]).toMatchObject({ ok: true, detail: "offers exactly the enabled methods" });
+    });
+
+    it("flags a control plane that does not offer GitHub (the company layer is off, or it is not deployed)", async () => {
+      const found = await githubStored({ methods: { slack: false, oidc: null } });
+      expect(found["control plane"]).toMatchObject({ ok: false, detail: "the control plane does not offer GitHub sign-in, but the settings say it is on; run agentx signin enable github again" });
+    });
+
+    it("flags a control plane that offers GitHub when the settings say it is off", async () => {
+      const { store, secrets } = await setup(complete, { teamId: "T0TEAM" });
+      const checks = await checkDeveloperSignIn({ env: "staging", store, secrets, settings: stagingSettings, slackApi: api(), fetch: fetchFor({ methods: { slack: true, oidc: null, github: { displayName: "GitHub" } } }) });
+      expect(checks.find((check) => check.name === "control plane")).toMatchObject({ ok: false, detail: "the control plane offers GitHub sign-in, but the settings say it is off; run agentx signin disable github again" });
+    });
   });
 
   async function redirectCheckFor(slackAuthorize: Response | undefined, fetchOverride?: typeof fetch) {

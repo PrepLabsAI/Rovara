@@ -1063,6 +1063,29 @@ Every mutant is a change to `cloudWordsReason` in scripts/port-guard.ts, run aga
 
 The restored tree passes (305 of 305).
 
+## CLI-LOGIN-GITHUB (agentx login accepts a GitHub-only install), 2026-11-25, on base a0bc104f9
+
+Measured on the lane's working tree over tests/contract/developer-login.test.ts (20 tests). Each mutant was applied alone, the one file run, and the file restored.
+
+| Mutant / location | Mutation | Failing tests (of the file) | Restored |
+|---|---|---|---|
+| M1, cli/src/developer/login.ts `readConfiguration` | GitHub is ignored again (only Slack and the company sign-in count as on) | 2 of 20 | green |
+| M2, cli/src/developer/login.ts `readConfiguration` | the no-method check is dropped, so an install with every method off is accepted | 2 of 20 | green |
+## GETDEVELOPER-GITHUB (an adapter conversation's linked developer may sign in with GitHub), 2026-11-25, on base a0bc104f9
+
+Measured on the lane's working tree over tests/contract/channel-conversation-developer-record.test.ts (8 tests). The mutant was applied alone, the one file run, and the file restored.
+
+| Mutant / location | Mutation | Failing tests (of the file) | Restored |
+|---|---|---|---|
+| M1, broker/src/aws/broker-primitives.ts `channelConversationDependencies.getDeveloper` | `github` is dropped from the accepted providers again | 2 of 8 | green |
+
+## GITHUB-NOT-ON-REVIEW-LINK (a hand-built authorize link cannot take the review-link sign-in to GitHub), 2026-11-25, on base a0bc104f9
+
+Measured over tests/contract/company-github-signin.test.ts (33 tests). The mutant was applied alone, the one file run (--maxWorkers=1), and the file restored.
+
+| Mutant / location | Mutation | Failing tests (of the file) | Restored |
+|---|---|---|---|
+| M1, broker/src/developer/server.ts `authorize` | the `method=github` check for a request carrying `browserReturnTo` is dropped | 1 of 33 | green |
 ## BEDROCK-BYO-CHECK-FIXES (gateway copy; same sessions tests as Rovara Cloud)
 
 | Mutant | Change | Killed by | Result |

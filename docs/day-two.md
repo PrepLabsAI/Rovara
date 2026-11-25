@@ -280,9 +280,9 @@ managed, so a Python project's setup command should make a virtual environment
 
 ## Developer sign-in
 
-- `agentx --env <env> signin show`: which methods are on, and what the control plane offers.
-- `agentx --env <env> signin enable slack|oidc`: turns a method on; shows the change and asks.
-- `agentx --env <env> signin disable slack|oidc`: turns a method off; everyone signed in with it
+- `agentx --env <env> signin show`: which methods (Slack, company sign-in, GitHub) are on, and what the control plane offers.
+- `agentx --env <env> signin enable slack|oidc|github`: turns a method on; shows the change and asks.
+- `agentx --env <env> signin disable slack|oidc|github`: turns a method off; everyone signed in with it
   is signed out at once.
 - `agentx --env <env> signin check`: checks every piece sign-in needs, and says what to fix.
 

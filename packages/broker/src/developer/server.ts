@@ -405,6 +405,11 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     const requestId = query.get("request");
     if (requestId !== null) {
       const method = query.get("method");
+      // DEC 254h: the review-link browser sign-in never uses GitHub (its session check reads Slack and company sign-in only). A hand-built link naming it gets
+      // the same answer as any method this sign-in does not offer, before any provider redirect.
+      if (method === "github") {
+        try { if ((await store.getAuthRequest(requestId))?.browserReturnTo !== undefined) return methodUnavailable(); } catch { return methodUnavailable(); }
+      }
       if (deps.company !== undefined && (method === "slack" || method === "oidc" || method === "github")) {
         try {
           const pending = await store.getAuthRequest(requestId);
