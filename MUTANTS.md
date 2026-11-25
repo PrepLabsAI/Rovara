@@ -1062,3 +1062,10 @@ Every mutant is a change to `cloudWordsReason` in scripts/port-guard.ts, run aga
 | M14 | `llmgateway`, `aigateway` leave the Cloud-only list alone | survived: equivalent (the gateway rule refuses `llmgateway` and `aigateway` itself, as M3 shows from the other side) |
 
 The restored tree passes (305 of 305).
+
+
+### GRANT-SIGNATURE-CANONICAL: a repository grant verifies only as the string it was issued as
+
+| Mutant | Change | Killed by | Result |
+| --- | --- | --- | --- |
+| G1, `RepositoryGrantService.verify` | the signature is compared as decoded bytes again (three other spellings of the same signature verify) | `tests/unit/core-e2e-publication-callback.test.ts` (the sibling-spellings test) | red (1 of 87) |
