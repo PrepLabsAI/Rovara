@@ -424,6 +424,14 @@ function graphRelatedTests(changed: readonly string[], testSources: ReadonlyMap<
   return [...found].sort();
 }
 
+/** Where the journey tests live: every test file under it is part of every affected run (A1). The directory is the rule, so a journey is added by adding a file and cannot be dropped by editing a list. */
+export const JOURNEY_DIRECTORY = "tests/journeys/";
+
+/** The journey test files among the known test sources (the plan reads them from the checkout, never from a list). */
+export function journeyTests(testSources: ReadonlyMap<string, string>): string[] {
+  return [...testSources.keys()].filter((path) => path.startsWith(JOURNEY_DIRECTORY) && path.endsWith(".test.ts")).sort();
+}
+
 /**
  * The test files a change can reach. When `sourceGraph` is supplied (CI runs), traverses the file-level runtime reverse-import graph through
  * package exports plus exact-path text matches for contract tests that read files as text. Without `sourceGraph`, falls back to package-name matching.
@@ -518,7 +526,8 @@ export function planCi(input: PlanInput): Plan {
     deviceRequired,
     release: changed.length === 0 || changed.some((file) => anyMatch(file, RELEASE_PATTERNS)),
     // Deletions, trims and restores need the registry check even without a direct import edge.
-    extraTests: tests === "changed" ? [...new Set([...extraTests, "tests/contract/pinned-tests-boundary.test.ts"])].sort() : [],
+    // The journey tests (tests/journeys/, A1) run in every affected run, whatever the change reaches. They are added after the too-many check above, so they never turn an affected run into the whole suite.
+    extraTests: tests === "changed" ? [...new Set([...extraTests, "tests/contract/pinned-tests-boundary.test.ts", ...journeyTests(input.testSources)])].sort() : [],
   };
 }
 
@@ -678,6 +687,11 @@ function testFiles(dir: string): Map<string, string> {
   return sources;
 }
 
+/** The test sources the plan reads, exactly as the CI run builds them: every `*.test.ts` under `tests/` and `packages/` of the checkout it runs in (paths relative to the repository root, the working directory). */
+export function readTestSources(): Map<string, string> {
+  return new Map([...testFiles("tests"), ...testFiles("packages")]);
+}
+
 /** The workspace packages under packages/, with the workspace packages each depends on. */
 export function readPackages(root: string): PackageInfo[] {
   interface Manifest { name: string; dependencies?: Record<string, string>; devDependencies?: Record<string, string> }
@@ -727,7 +741,7 @@ if (process.argv[1]?.endsWith("ci-plan.ts")) {
     labels,
     title: process.env.CI_TITLE ?? "",
     changed,
-    testSources: new Map([...testFiles("tests"), ...testFiles("packages")]),
+    testSources: readTestSources(),
     packages,
     sourceGraph: buildSourceGraph(".", packages, changed),
     forceLinux: process.env.CI_FORCE_LINUX === "true",
