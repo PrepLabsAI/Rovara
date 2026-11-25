@@ -455,3 +455,27 @@ Tests: `tests/unit/worker-eval-bedrock-route.test.ts`, `tests/unit/worker-eval-f
 | M11 `eval-bridged-exec.ts`: the helper's row for Bedrock loses `routesTo` | killed (1 test) |
 | M12 `eval-bridged-exec.ts`: the sandbox environment has no Bedrock branch | killed (2 tests) |
 | M13 `eval-gateway-access.ts`: a Bedrock frame under a foreign scope is taken by the Bedrock lane | killed (1 test) |
+
+## SESSION-HARDEN — browser sessions never refresh; sign-in session ids are logged as a short hash
+
+Each mutant applied singly to the production file, tests/contract/developer-identity-server.test.ts run, restored from a copy. All killed.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| developer/store.ts `refreshableBy` (called by `refreshTokenGrant`) | The `reviewExpiresAt` refusal removed (a browser session refreshes) | killed, 1 failed |
+| same | The refusal limited to a GitHub session (earlier form, in server.ts) | killed, 1 failed |
+| developer/server.ts `revoke` | `signin.session_revoked` logs the raw session id | killed, 1 failed |
+| developer/server.ts `refreshTokenGrant` | `signin.refresh_grace` logs the raw session id | killed, 1 failed |
+| developer/server.ts `authorizationCodeGrant` | `signin.session_started` logs the raw session id | killed, 1 failed |
+| developer/session-log-id.ts `sessionLogId` | The hash is the full 64 hex instead of 12 | killed, 1 failed |
+
+## SESSION-HARDEN round 2 — canary logs a session hash; a browser sign-in writes no refresh-token row; a refused browser refresh is logged
+
+Each mutant applied singly to the production file, tests/contract/developer-identity-server.test.ts, developer-signin-store.test.ts and canary-session.test.ts run, restored from a copy. All killed.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| developer/server.ts browser return | The browser sign-in calls `createSession` again (a refresh-token row is written) | killed, 1 failed |
+| developer/server.ts `refreshRefused` | The fixed `signin.browser_refresh_refused` line removed | killed, 1 failed |
+| same | The line also carries the raw session id | killed, 1 failed |
+| developer/canary-session.ts | `signin.canary_session` logs the raw session id | killed, 1 failed |
