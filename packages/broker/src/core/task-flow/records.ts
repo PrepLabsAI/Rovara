@@ -53,6 +53,11 @@ export type TaskRecord = Omit<DeveloperTaskRecord, "provider" | "charge"> & {
    * it holds while nothing has started the work again (the step the stop blocked is revision + 1; a retry moves past it). A sibling attribute: released readers of the task row ignore it. Never read by the old engine.
    */
   personStop?: { at: string; revision?: number };
+  /**
+   * SF-1a: how big the Quick plan looked when it was written (`core/decisions/quick-size.ts`): codes and counts, never sentences. Written once with the plan, in the same commit; a sibling attribute because released readers of the
+   * workflow are strict. Read only through `readQuickSize` (contracts), which is tolerant: absent or unreadable is "no record", and nothing recomputes it.
+   */
+  quickSize?: unknown;
   /** A setup run: who pressed Stop and when. Written before the cancel, so the end can tell a person's stop from any other cancel. */
   setupAgentStop?: { by: string; at: string };
   /** L4-T5: when a setup run's worker last talked to the broker (noted at most once a minute). A run silent for 10 minutes reads as stopped. */

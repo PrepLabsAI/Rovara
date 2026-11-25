@@ -283,6 +283,8 @@ const isVendored = (path: string): boolean => /(^|\/)(vendor|vendors|third[-_]pa
 const PACKAGE_SOURCE_FILES = /(?:^|\/)(?:\.npmrc|\.yarnrc(?:\.ya?ml)?|\.pnpmfile\.c?js|pip\.(?:conf|ini)|\.pypirc|nuget\.config|bunfig\.toml|\.condarc|\.gemrc|\.bundle\/config|\.cargo\/config(?:\.toml)?|\.mvn\/settings\.xml|settings\.xml|uv\.toml|\.uv\/|poetry\.toml|\.terraformrc|\.netrc)$/u;
 /** Git's own settings files. */
 const GIT_SETTINGS_FILES = /(?:^|\/)(?:\.gitmodules|\.gitattributes)$/u;
+/** An environment file (`.env`, `.env.example`, `.env.local`). */
+const ENV_FILE_PATH = /(?:^|\/)\.env[^/]*$/u;
 /**
  * The words in a changed line that point a package manager at another source: index and registry settings with `-` or `_`, and the environment variables that do the same (`PIP_INDEX_URL`, `NPM_CONFIG_REGISTRY`, `UV_INDEX`, `GOPROXY`).
  * In real source code only the command-line forms count (a variable called `index_url` in a program is not a setting).
@@ -719,7 +721,7 @@ function readFile(file: TierFile, head: HeadFacts | undefined, promptLocations?:
     if (isInfraPath(name)) reading.risky.push(reasonFor("infra_file"));
     if (GIT_SETTINGS_FILES.test(normal)) reading.risky.push(reasonFor("git_settings_file"));
     if (PACKAGE_SOURCE_FILES.test(normal)) reading.risky.push(reasonFor("package_source_setting"));
-    if (/(?:^|\/)\.env[^/]*$/u.test(normal)) reading.risky.push(reasonFor("env_file"));
+    if (ENV_FILE_PATH.test(normal)) reading.risky.push(reasonFor("env_file"));
     if (/(?:^|\/)\.(?:docker|npm|helm|cf|gcloud|vercel)ignore$/u.test(normal)) reading.risky.push(reasonFor("ignore_file"));
     if (isScannerIgnorePath(name)) reading.standard.push(reasonFor("scanner_ignore_file"));
     if (isDocsBuildConfigPath(name)) reading.standard.push(reasonFor("docs_build_config"));
@@ -1000,6 +1002,46 @@ export function tierFromDiff(input: DiffInput, context: TierContext): ChangeTier
   };
 }
 
+// ---- the files a change counts
+
+/** Test data and fixtures outside a test folder (`isTestPath` covers `tests/`, `__tests__/`, `spec/` and `.test`/`.spec` files, not `src/fixtures/seed.sql`). */
+const FIXTURE_PATH = /(^|\/)(fixtures?|__fixtures__|testdata)\//u;
+/** Generated output and snapshots: nobody reads them as a change. (The vendored folders are `isVendored`'s.) */
+const GENERATED_PATH = /(^|\/)(generated|__generated__|__snapshots__)\//u;
+
+/** Whether a path is a test or test data: a test path (`isTestPath`) or a fixtures / testdata folder. */
+export const isTestOrFixturePath = (path: string): boolean => {
+  const normal = normalizedTierPath(path);
+  return isTestPath(normal) || FIXTURE_PATH.test(normal);
+};
+/** Whether a path is an environment file, a git settings file or a package-source setting: the files `estimateTier` calls risky by name, shown by the "bigger than Quick" rule as lines only. */
+export const isEnvFilePath = (path: string): boolean => ENV_FILE_PATH.test(normalizedTierPath(path));
+export const isGitSettingsPath = (path: string): boolean => GIT_SETTINGS_FILES.test(normalizedTierPath(path));
+export const isPackageSourcePath = (path: string): boolean => PACKAGE_SOURCE_FILES.test(normalizedTierPath(path));
+
+/**
+ * The files a person counts when they ask "how big is this change": the distinct planned paths that are code and settings. NOT counted: documents (`isDocsPath`, the same test `estimateTier` skips them with) and any
+ * other prose file, lock files, vendored and generated folders, and tests and test data. Counted across every repository of the task (the plan's paths are one list). `estimateTier`'s own count (which includes tests, and
+ * drives its 3-file "standard") is not changed; the two share the docs and lock tests, and a test pins that.
+ */
+export function countedFilesOf(paths: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const counted: string[] = [];
+  for (const raw of paths) {
+    const path = raw.trim();
+    if (path.length === 0 || seen.has(path)) continue;
+    seen.add(path);
+    const normal = normalizedTierPath(path);
+    if (isDocsPath(path) || isLockfile(normal) || fileTypeOf(path) === "prose") continue;
+    if (isVendored(path) || GENERATED_PATH.test(normal) || isTestOrFixturePath(path)) continue;
+    counted.push(path);
+  }
+  return counted;
+}
+
+/** The modules of some paths (`moduleOf`), counted once each. */
+export const moduleCountOf = (paths: readonly string[]): number => new Set(paths.map(moduleOf)).size;
+
 // ---- the estimate
 
 /** Words in a request that hint at a sensitive area. A hint raises the estimate to at least standard; it never refuses a request (and the diff decides the tier that counts). */
@@ -1037,7 +1079,7 @@ export function estimateTier(input: EstimateInput, context: TierContext): Change
     if (isInfraPath(path)) risky.push(reasonFor("infra_file"));
     if (GIT_SETTINGS_FILES.test(normal)) risky.push(reasonFor("git_settings_file"));
     if (PACKAGE_SOURCE_FILES.test(normal)) risky.push(reasonFor("package_source_setting"));
-    if (/(?:^|\/)\.env[^/]*$/u.test(normal)) risky.push(reasonFor("env_file"));
+    if (ENV_FILE_PATH.test(normal)) risky.push(reasonFor("env_file"));
     if (isDocsPath(path)) { kinds.add("docs"); continue; }
     if (isLockfile(normal)) { kinds.add("dependency"); continue; }
     files += 1;

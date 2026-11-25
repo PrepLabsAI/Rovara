@@ -52,7 +52,7 @@ import { textReaderOf } from "../build-step/plan-input.js";
 import { buildOperation, assertPromptFits, applicationAdmissionFields } from "./accept.js";
 import type { TaskFlowDeps } from "./deps.js";
 import { dispatchRowItem, dueDispatchRows, rescheduleRowItem, resolveRowItem } from "./dispatch-rows.js"; import { questionEntriesOf } from "../task-log/entries.js"; import { taskLogItems } from "../task-log/store.js";
-import { dispatchRowKey, taskKey } from "./keys.js";
+import { dispatchRowKey, taskKey } from "./keys.js"; import { quickSizeOps } from "./quick-size-record.js";
 import { commentsForPlanningStep } from "../plan/comments.js";
 import { structuredPlanContextOf, structuredPlanDispatch } from "../plan/context.js";
 import { planUnreadablePrompt } from "../plan/process.js";
@@ -656,10 +656,10 @@ export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationR
       const toCode = skippedHere && next.stage === "IMPLEMENT" && next.state === "READY";
       // A version 2 coding plan is read by a second step before a person sees it: the check is a row like every automatic step, written with the plan.
       const toCheck = next.stage === "PLAN_CRITIQUE" && next.state === "READY";
-      // What the run is expected to cost, from the cost of the project's earlier runs (or the default for the path), kept on the task beside the plan: the plan page, the decision card's risk, the session and the tools read it.
-      const estimate = await planRunEstimate(deps, task, next);
+      // What the run is expected to cost, from the cost of the project's earlier runs (or the default for the path), kept on the task beside the plan: the plan page, the decision card's risk, the session and the tools read it. SF-1a: beside it, how big a Quick plan looks (`quickSize`, record only: nothing offers from it yet), written in the same commit.
+      const estimate = await planRunEstimate(deps, task, next); const sizeOps = await quickSizeOps(deps, task, next, { artifact: outcome.artifact, plan: outcome.cites?.plan });
       const row = toCheck ? dispatchRowItem(deps, task.taskId, next.revision, "CRITIQUE", iso(deps)) : toCode ? dispatchRowItem(deps, task.taskId, next.revision, "IMPLEMENT", iso(deps)) : undefined;
-      const committed = await commitWorkflow(deps, task, next, row === undefined ? [] : [row], [...(task.planUnreadable === undefined ? [] : [change.remove("planUnreadable")]), ...(estimate === undefined ? [] : [change.set("runEstimate", estimate as unknown as JsonValue)])]);
+      const committed = await commitWorkflow(deps, task, next, row === undefined ? [] : [row], [...(task.planUnreadable === undefined ? [] : [change.remove("planUnreadable")]), ...(estimate === undefined ? [] : [change.set("runEstimate", estimate as unknown as JsonValue)]), ...sizeOps]);
       if (committed && toCheck) await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind: "CRITIQUE" });
       if (committed && toCode) {
         log(deps, { event: "task_flow.planning_skipped", taskId: task.taskId, level: next.flow?.tier?.level, kinds: next.flow?.tier?.kinds, skipped: next.flow?.skippedSteps, reasons: next.flow?.tier?.reasons.map((reason) => reason.code) });

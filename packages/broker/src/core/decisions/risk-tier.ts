@@ -8,14 +8,33 @@ import { plainLine } from "./text.js";
 
 /** A plan that touches more files than this, or is expected to cost more than these amounts, is at least medium (then high). Money steps match the approval ladder: a lead decides up to $10, an admin up to $100. */
 export const DECISION_PLAN_FILES_MEDIUM = 25;
+/** The "bigger than Quick" rule's own file counts (`quick-size.ts`; they count code files only, `countedFilesOf`, and are a different question from the card's 25): more than 15 is a strong reason (owner O2), more than 8 a medium one. */
+export const QUICK_FILES_STRONG = 15;
+export const QUICK_FILES_MEDIUM = 8;
 export const DECISION_PLAN_COST_MEDIUM_USD = 25;
 export const DECISION_PLAN_COST_HIGH_USD = 100;
 export const DECISION_SPEND_LOW_MAX_USD = 10;
 export const DECISION_SPEND_MEDIUM_MAX_USD = 100;
 
-/** The paths that change who may do what, where the code runs or how data is shaped: infrastructure, IAM, migrations. */
-const INFRA_PATH = /(^|\/)(infra|infrastructure|terraform|cdk|iam|migrations)(\/|$)|\.(tf|sql)$|(^|\/)(cdk\.json|template\.ya?ml)$|(^|\/)dockerfile$/u;
-export const isInfraPath = (path: string): boolean => INFRA_PATH.test(path.replaceAll("\\", "/").replace(/^(?:\.\/)+/u, "").toLowerCase());
+/**
+ * The paths that change who may do what, where the code runs or how data is shaped: infrastructure, IAM, migrations. One regex in three exported parts (SF-1a), so the plan card and the "bigger than Quick" rule
+ * read the same words: the data part (migrations folders, `.sql`), the infrastructure part (infra, terraform, cdk, iam, `.tf`, `cdk.json`, `template.yaml`) and the build part (`Dockerfile`). `isInfraPath` is their union,
+ * exactly the regex it always was.
+ */
+const DATA_PATH = /(^|\/)migrations(\/|$)|\.sql$/u;
+const INFRASTRUCTURE_PATH = /(^|\/)(infra|infrastructure|terraform|cdk|iam)(\/|$)|\.tf$|(^|\/)(cdk\.json|template\.ya?ml)$/u;
+const BUILD_FILE_PATH = /(^|\/)dockerfile$/u;
+const riskPath = (path: string): string => path.replaceAll("\\", "/").replace(/^(?:\.\/)+/u, "").toLowerCase();
+/** A migrations folder or a `.sql` file. */
+export const isDataChangePath = (path: string): boolean => DATA_PATH.test(riskPath(path));
+/** Infrastructure, terraform, cdk or IAM files (no `Dockerfile`, no migrations). */
+export const isInfraChangePath = (path: string): boolean => INFRASTRUCTURE_PATH.test(riskPath(path));
+/** A `Dockerfile` (a base-image bump is the usual change). */
+export const isBuildFilePath = (path: string): boolean => BUILD_FILE_PATH.test(riskPath(path));
+export const isInfraPath = (path: string): boolean => {
+  const value = riskPath(path);
+  return DATA_PATH.test(value) || INFRASTRUCTURE_PATH.test(value) || BUILD_FILE_PATH.test(value);
+};
 
 export interface TierResult { risk: DecisionRisk; reasons: string[]; /** A high card that also needs a second person (a less-safe setting, a spend over the admin amount). */ secondPerson: boolean }
 

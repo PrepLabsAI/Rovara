@@ -806,6 +806,48 @@ The two Denies now use `StringEquals ProviderPermissionsRequired = read_write` i
 | release-pipeline.ts preflightProject | The Deny block skipped for the Production Code Preflight | killed, 1 failed |
 | release-pipeline.ts preflightProject | `StringNotEquals` instead of `StringEquals` (denies a request without the key) | killed, 1 failed |
 
+## SF-1a — the "bigger than Quick" record (code of ca9450f2c; the iam and contracts rows re-run on f4f4b8a26)
+
+46 mutants applied singly, each file restored with git checkout / the original text, run against tests/unit/quick-size-rule.test.ts and tests/unit/quick-size-record.test.ts (contracts mutants rebuild packages/contracts first, because the tests read its dist). 44 killed, 2 equivalent.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| quick-size.ts `many` | more than 15 counted files loosened to 15 or more | killed |
+| quick-size.ts `mid_size` | more than 8 loosened to 8 or more; `&& !many` removed (listed beside many_files) | killed (2) |
+| quick-size.ts class | pair needs two different medium codes loosened to one; display-only lines counted as strong | killed (2) |
+| quick-size.ts pair | the Set of codes replaced by a list | equivalent: each medium code is listed once, so the list is already distinct |
+| quick-size.ts `design_reading` | Skip check removed; review-off check removed; high-risk filter removed; `needed === true` removed | killed (4) |
+| quick-size.ts `new_service` | kind `variable` counted as a service | killed |
+| quick-size.ts unread | the early return for an unread plan removed | killed |
+| quick-size.ts path codes | `data_change` and `sensitive_area` read from all named paths (tests and test data included); display lines read test files | killed (3) |
+| change-tier.ts `countedFilesOf` | lock files, other prose, vendored folders, generated folders, tests counted; paths not deduplicated; fixture test removed from `isTestOrFixturePath` | killed (7) |
+| change-tier.ts `countedFilesOf` | `isDocsPath` skipped no more | equivalent: every path `isDocsPath` accepts is also prose, which is skipped next |
+| sensitive-paths.ts `isAccessOrMoneyPath` | document exclusion removed; `iam` kept in the name words (re-run on f4f4b8a26) | killed (2) |
+| risk-tier.ts | `iam` dropped from the infrastructure part; the build part dropped from the `isInfraPath` union | killed (2) |
+| quick-size-record.ts `quickPlanAtGate` | Quick-only check removed; the stage check removed | killed (2) |
+| quick-size-record.ts `quickSizeOps` | the setting asked for every plan; a failed read counted as "can run"; a missing seam counted as "can run"; digest bound wrong; a fault thrown into the plan write | killed (5) |
+| stage-machine.ts plan write | the record dropped from the plan's commit; the record written in a second write after the commit | killed (2) |
+| design-review/steps.ts `reviewCanRun` | mode `never` read as can run; the stage switch not read | killed (2) |
+| contracts quick-size.ts (re-run on f4f4b8a26) | unknown class accepted; plan digest not required; `triggered` not tied to the class; unknown codes dropped by a closed list; paths not capped | killed (5) |
+| contracts task-words.ts (re-run on f4f4b8a26) | sequential replace (plan text read as a placeholder); prototype names taken as codes; non-design names reach the phrase table | killed (3) |
+
+SF-1a, after the complexity split of `quickSizeOf` (e7b661bd9): the 13 mutants of quick-size.ts (many_files, mid_size x2, pair, display-as-strong, design_reading x4, new_service, unread, data_change, sensitive_area, display-reads-tests) were re-applied to the split code and all 13 were killed again. The "Set of codes replaced by a list" row no longer exists: the split code lists each medium code once and counts entries (`medium.length >= 2`), which the `>= 1` mutant covers.
+
+SF-1a, after `quickSizeSentence` moved from task-words.ts (kept type-only by its test) to contracts/src/quick-size.ts: the 8 contracts mutants (reader x5, sentence filler x3) were re-applied there, each with a rebuild of packages/contracts, and all 8 were killed again.
+
+## SF-1a — after the Sonnet pre-review fixes (code and tests of 4f8bd33c3)
+
+The earlier SF-1a rows above were run on ca9450f2c, f4f4b8a26, e7b661bd9 and the contracts move before 05cebd961 (the head the pre-review read). These 17 mutants touch the lines the review fixes changed, applied singly to 4f8bd33c3 and run against tests/unit/quick-size-rule.test.ts and tests/unit/quick-size-record.test.ts (contracts mutants rebuild packages/contracts first). 16 killed first time, 1 survived and was killed by 4f8bd33c3's added assertion (so all 17 killed).
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| quick-size.ts `isHostLikePath` (S1) | the address test removed; host-like paths kept in `named`; host-like text paths counted as `textOnly` | killed (2), survived then killed (1) |
+| quick-size-record.ts `quickSizeOps` (S2) | no removal for a Quick plan with no gate; removal also for a Full plan; no removal after a fault; `kept` not carried (writer and builder) | killed (5) |
+| contracts `readKept` (S2) | kept read without its request id | killed |
+| quick-size-record.ts / quick-size.ts (S3) | a failed read recorded as off, not unseen; `settingUnread` dropped from the record; unseen also marked off | killed (3) |
+| quick-size-record.ts `within` (S4) | the setting read not bounded; the stored-plan read not bounded | killed (2) |
+| contracts reader / words (N3, N5) | an unread record may trigger; "0 code files" shown | killed (2) |
+| quick-size.ts `mediumReasons` (N4) | a CI file counted as sign-in code | killed |
 ## PROJECT-GRANT-RECHECK, channel access holds an old-engine task only (arch ruling a, 2026-11-25)
 
 Killed by tests/contract/task-owner-engine-channel.test.ts (7 tests).
