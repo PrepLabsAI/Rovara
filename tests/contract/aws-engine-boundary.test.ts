@@ -113,7 +113,7 @@ describe("reading the stamp", () => {
     expect(stampReads).toEqual([]);
     const stamped = new FakeDynamoDb(), stampedWorkspace = randomUUID(), stampedTask = randomUUID();
     pointerTo(stamped, stampedWorkspace, stampedTask);
-    stamped.set({ ...engineStampKey(stampedTask), coreEngine: CORE });
+    stamped.set({ ...coreTaskMarkKey(stampedTask), coreEngine: CORE });
     expect(await isCoreWorkspace(table(stamped), stampedWorkspace)).toBe(true);
   });
 

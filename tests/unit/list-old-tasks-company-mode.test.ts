@@ -132,7 +132,7 @@ describe("the task list when a task's mark cannot be read", () => {
   it("a mark item that is there but is garbage is skipped and logged (task id and error name only), and the other rows are listed", async () => {
     const db = new FakeDynamoDb();
     const { newest, middle, oldest } = rows(db);
-    db.set({ ...engineStampKey(middle), entityType: "TASK_ENGINE", coreEngine: "garbage" });
+    db.set({ ...coreTaskMarkKey(middle), entityType: "TASK_ENGINE", coreEngine: "garbage" });
     const logged: Array<Record<string, unknown>> = [];
     const page = await listLogged(db, "?limit=50", logged);
     expect(page.tasks.map((row) => row.taskId)).toEqual([newest, oldest]);
