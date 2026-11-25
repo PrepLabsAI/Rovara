@@ -683,51 +683,7 @@ function feedbackReviewStarted(workflow: WorkflowSnapshot): string | undefined {
 
 
 /** The Retry review button of a failed PR feedback review's card. */
-export const FEEDBACK_REVIEW_RETRY_ACTION = "agentx_feedback_review_retry";
-
-/**
- * Why a PR feedback review failed, in the owner's words, by the check its stored reason names. The reason holds only
- * AgentX's own words, and this never shows it: an unknown reason reads as an answer that couldn't be read.
- */
-export function feedbackReviewFailurePlainReason(blockReason: string | undefined, status?: string): string {
-  const reason = blockReason ?? "";
-  if (status === "INTERRUPTED" || /^review was cancelled/.test(reason)) return "the review was stopped before it finished";
-  if (reason === "review timed out") return "the review timed out";
-  if (/^candidate changed (?:before|during) review$/.test(reason)) return "the code changed during the review";
-  if (reason === "review could not verify the exact candidate") return "the review couldn't check the code";
-  if (/not accounted for|answered more than once|names a comment or bundle that was not supplied/.test(reason)) return "the reviewer didn't answer every comment";
-  if (/^reviewer output: fixProposal\.(?:replacementChecks|obsoleteChecks)/.test(reason)) return "the reviewer proposed a check change AgentX can't use";
-  if (/^reviewer output: .*fixProposal/.test(reason)) return "the reviewer's proposal was incomplete";
-  // An answer that was read but broke a rule is named by the rule; only an answer that could not be read says so.
-  if (/^reviewer output: finding \d+ is uncertain but not left for the owner$/.test(reason)) return "the reviewer was unsure but didn't leave the choice to you";
-  if (/^reviewer output: (?:finding \d+ (?:field .+ is missing or invalid|does not have the required fields)|finding IDs are not unique)$/.test(reason)) return "the reviewer's answer was missing details";
-  return "the reviewer's answer couldn't be read";
-}
-
-/**
- * A failed PR feedback review, said once by its report: which pull requests, why in plain words, and the owner's ways
- * on (Retry review here, or merge or close on GitHub). The button names the task, the step and the failed report, so a
- * stale press is refused.
- */
-export function feedbackReviewFailedMessage(input: {
-  taskId: string; revision: number; reviewDigest: string; blockReason: string | undefined;
-  /** The report's status: anything but complete (failed, blocked, interrupted). */
-  status?: string;
-  pullRequests: ReadonlyArray<{ number: number; url: string }>;
-}): WorkflowMessage {
-  const names = pullRequestNames(input.pullRequests, (pullRequest) => (pullRequest.url === "" ? `PR #${pullRequest.number}` : link(pullRequest.url, `PR #${pullRequest.number}`)));
-  const which = input.pullRequests.length === 1 ? "the pull request" : "the pull requests";
-  const text = `I couldn't review the feedback on ${names}: ${feedbackReviewFailurePlainReason(input.blockReason, input.status)}. You can retry the review, or merge or close ${which} on GitHub.`;
-  return {
-    text,
-    blocks: [
-      { type: "section", text: { type: "mrkdwn", text } },
-      { type: "actions", elements: [{ type: "button", action_id: FEEDBACK_REVIEW_RETRY_ACTION, style: "primary", text: { type: "plain_text", text: "Retry review" },
-        value: JSON.stringify({ taskId: input.taskId, revision: input.revision, reviewDigest: input.reviewDigest }) }] },
-    ],
-  };
-}
-/**
+export const FEEDBACK_REVIEW_RETRY_ACTION = "agentx_feedback_review_retry";/**
  * Why pushing the fix failed, in the owner's words, by its recorded cause, and what follows: the merge is still followed,
  * except after the pull request changed on GitHub (a merge of someone else's head never completes the task).
  */

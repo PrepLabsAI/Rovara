@@ -406,36 +406,6 @@ export async function taskView(
     ...(spent === undefined ? {} : { spent }),
   };
 }
-
-
-
-
-
-
-
-
-
-/**
- * R4: the index row keeps the last status the API saw, so the task list and WORKSPACE_LIMIT's
- * open-task list stay current. Best effort: a failed write only costs a stale index row. A CLOSED
- * row never changes again: a read that derived its status before a close must not undo it.
- * `updatedAt` is the task view's, so the list and the view agree.
- */
-export async function syncIndex(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, status: DeveloperTaskStatus, updatedAt: string = iso(deps)): Promise<void> {
-  try {
-    await deps.documentClient.send(new UpdateCommand({
-      TableName: deps.tableName,
-      Key: taskIndexKey(task.developerId, task.createdAt, task.taskId),
-      UpdateExpression: "SET #status = :status, updatedAt = :now",
-      ConditionExpression: "attribute_exists(pk) AND #status <> :status AND #status <> :closed",
-      ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: { ":status": status, ":closed": "CLOSED", ":now": updatedAt },
-    }));
-  } catch (error) {
-    if (!isConditional(error)) log(deps, { event: "developer.task_index_sync_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
-  }
-}
-
 const whole = (value: string | null, fallback: number, min: number, max: number, name: string): number => {
   if (value === null) return fallback;
   const parsed = /^\d{1,3}$/.test(value) ? Number(value) : Number.NaN;
