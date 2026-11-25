@@ -6,9 +6,10 @@ import { companyRouteHarness, PERSON, TIME } from "../support/company-route-harn
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import { GithubInstallationBindings } from "../../packages/broker/src/aws/github-credentials.js";
 import { GitHubAppCredentialProvider } from "../../packages/broker/src/plugins/code-host/github/client.js";
-import { CONNECT_ADMIN_ONLY, CONNECT_NOT_SET_UP, GITHUB_TAKEN, START_AGAIN } from "../../packages/broker/src/aws/github-connect-routes.js";
+import { CONNECT_ADMIN_ONLY, CONNECT_NOT_SET_UP, GITHUB_TAKEN, routeGithubConnect, START_AGAIN } from "../../packages/broker/src/aws/github-connect-routes.js";
 import { USER_AUTHORIZATION_LIMITS } from "../../packages/broker/src/plugins/code-host/github/user-authorization.js";
 import { COMPANY_A_ID as A, COMPANY_B_ID as B } from "../../packages/testing/src/isolation/two-company.js";
+import { sessionBindingOf } from "../../packages/broker/src/developer/session-binding.js";
 
 const PERSON_B = "e".repeat(64);
 const APP_ID = "4242";
@@ -108,7 +109,7 @@ describe("start", () => {
     expect(answer.body.authorizeUrl).toBe(`https://github.com/login/oauth/authorize?client_id=Iv1.client&state=${state}`);
     expect(answer.body.expiresAt).toBe(new Date(Date.parse(TIME) + 600_000).toISOString());
     const stored = w.db.get(`GITHUB_CONNECT#${createHash("sha256").update(state).digest("hex")}`, "META");
-    expect(stored).toMatchObject({ companyId: A, personId: PERSON, sessionId: "session", provider: "github-install", status: "live" });
+    expect(stored).toMatchObject({ companyId: A, personId: PERSON, sessionBinding: sessionBindingOf("session"), provider: "github-install", status: "live" });
     expect(JSON.stringify([...w.db.items.values()])).not.toContain(state);
     expect(JSON.stringify(answer.body)).not.toContain(CLIENT_SECRET);
   });
@@ -365,7 +366,7 @@ describe("review round 1: every spend condition, GitHub control edges and limits
     const answers = await Promise.all([w.claim({ state, code: "c1", installationId: 101 }), w.claim({ state, code: "c2", installationId: 101 })]);
     expect(answers.map((answer) => answer.status).sort()).toEqual([200, 403]);
   });
-  it.each([["status", "used"], ["provider", "github-install-ticket"], ["companyId", B], ["personId", PERSON_B], ["sessionId", "other-session"], ["expiresAt", 1]] as const)(
+  it.each([["status", "used"], ["provider", "github-install-ticket"], ["companyId", B], ["personId", PERSON_B], ["sessionBinding", sessionBindingOf("other-session")], ["expiresAt", 1]] as const)(
     "a state whose %s changes between its read and its spend is refused", async (field, value) => {
       const w = world(); const state = await w.startState();
       const send = w.db.send.bind(w.db);
@@ -421,5 +422,55 @@ describe("review round 1: every spend condition, GitHub control edges and limits
     // Moved to another company (live there): still not named on this company's page.
     w.db.set({ ...w.db.get(membershipKey(PERSON).pk, membershipKey(PERSON).sk)!, revokedAt: undefined, companyId: B });
     expect((await w.read()).body.installations).toEqual([expect.objectContaining({ connectedBy: { kind: "person", personId: PERSON } })]);
+  });
+});
+
+// Session-id-at-rest: the sign-in session id is the browser's login cookie, so a state or ticket row keeps a digest of it (never the id), and the spend compares digests.
+describe("the session at rest", () => {
+  const COOKIE = "cookie-0123456789abcdef-secret";
+  const rowOf = (w: ReturnType<typeof world>, state: string) => w.db.get(`GITHUB_CONNECT#${createHash("sha256").update(state).digest("hex")}`, "META")!;
+  const connectRows = (w: ReturnType<typeof world>) => JSON.stringify([...w.db.items.values()].filter((item) => String((item as { pk?: string }).pk).startsWith("GITHUB_CONNECT#")));
+  it("mints a digest of the session and never the id; the same session spends it, another session does not", async () => {
+    const w = world(); w.as(PERSON, A, "admin", COOKIE);
+    const state = await w.startState();
+    const row = rowOf(w, state);
+    expect(row).toMatchObject({ sessionBinding: sessionBindingOf(COOKIE) });
+    expect(row).not.toHaveProperty("sessionId");
+    expect(connectRows(w)).not.toContain(COOKIE);
+    w.as(PERSON, A, "admin", "another-session");
+    expect((await w.claim({ state, code: "alice-code", installationId: 101 })).body.error).toEqual(uniform);
+    expect(rowOf(w, state)).toMatchObject({ status: "live" });
+    w.as(PERSON, A, "admin", COOKIE);
+    expect((await w.claim({ state, code: "alice-code", installationId: 101 })).status).toBe(200);
+    expect(connectRows(w)).not.toContain(COOKIE);
+  });
+  it("a row an older build wrote (the raw id, no digest) is refused with the start-again words and is not spent", async () => {
+    const w = world(); w.as(PERSON, A, "admin", COOKIE);
+    const state = await w.startState();
+    const { sessionBinding: _digest, ...rest } = rowOf(w, state); void _digest;
+    w.db.set({ ...rest, sessionId: COOKIE });
+    const answer = await w.claim({ state, code: "alice-code", installationId: 101 });
+    expect(answer.status).toBe(403); expect(answer.body.error).toEqual(uniform);
+    expect(w.github.requests).toHaveLength(0);
+    expect(rowOf(w, state)).toMatchObject({ status: "live", sessionId: COOKIE });
+  });
+});
+
+describe("a caller with no sign-in session (a registered service's own token)", () => {
+  const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> again";
+  const direct = (w: ReturnType<typeof world>, path: string, body: unknown, sessionId: string | undefined) => {
+    const ctx = { documentClient: w.db, tableName: "State", signInTableName: "SignIn", now: w.deps.now, wiring: w.deps.developer.githubConnect! };
+    const caller = { developerId: PERSON, sessionId, amr: "slack", name: "Ada" } as unknown as Parameters<typeof routeGithubConnect>[1];
+    return routeGithubConnect(ctx, caller, A, { method: "POST", path, headers: {}, requestId: "r", body: JSON.stringify(body) }, new URL(path, "https://broker.example.test"));
+  };
+  const states = (w: ReturnType<typeof world>) => [...w.db.items.values()].filter((row) => (row as { entityType?: string }).entityType === "GITHUB_CONNECT_STATE");
+  it.each([["empty", ""], ["missing", undefined]] as const)("an %s session id is refused before any state is minted, and cannot spend one", async (_name, sessionId) => {
+    const w = world(); w.as(PERSON, A);
+    await expect(direct(w, "/v1/dev/company/github/connect", {}, sessionId)).rejects.toMatchObject({ code: "AUTH_REQUIRED", message: expect.stringContaining(SIGN_IN_AGAIN) as string });
+    expect(states(w)).toEqual([]);
+    const state = await w.startState();
+    await expect(direct(w, "/v1/dev/company/github/claim", { state, code: "alice-code", installationId: 101 }, sessionId)).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+    expect(states(w)).toHaveLength(1); expect(states(w)[0]).toMatchObject({ status: "live" });
+    expect(w.github.requests).toHaveLength(0);
   });
 });

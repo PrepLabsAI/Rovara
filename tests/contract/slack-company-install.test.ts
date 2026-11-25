@@ -6,7 +6,7 @@ import { ON_THE_WEBSITE_MESSAGE } from "@agentx/contracts";
 import { companyRouteHarness, PERSON, TIME } from "../support/company-route-harness.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import {
-  companyInstallKey, handleSlackWorkspaceRemoved, SLACK_ADMIN_ONLY, SLACK_COMPANY_HAS_WORKSPACE, SLACK_ENTERPRISE_REFUSED, SLACK_INSTALL_BOT_SCOPES,
+  companyInstallKey, handleSlackWorkspaceRemoved, routeSlackInstall, SLACK_ADMIN_ONLY, SLACK_COMPANY_HAS_WORKSPACE, SLACK_ENTERPRISE_REFUSED, SLACK_INSTALL_BOT_SCOPES,
   SLACK_NOT_CONNECTED, SLACK_NOT_SET_UP, SLACK_OWNER_ONLY, SLACK_WORKSPACE_TAKEN, START_AGAIN, type SlackInstallWiring,
 } from "../../packages/broker/src/aws/slack-company-install.js";
 import { handleSlackInstallRequest, slackInstallSecretsFromSecretsManager, slackInstallThroughLambda, type SlackInstallIdentityDependencies } from "../../packages/broker/src/aws/slack-install-identity.js";
@@ -16,6 +16,7 @@ import { createSlackWorkspaceTokens } from "../../packages/broker/src/aws/slack-
 import { createSlackAdapterFront, createSlackIngressHandler, type SlackIngressDependencies } from "../../packages/broker/src/aws/slack-ingress.js";
 import { SLACK_BOT_SCOPES } from "../../packages/cli/src/init/slack-app.js";
 import { COMPANY_A_ID as A, COMPANY_B_ID as B } from "../../packages/testing/src/isolation/two-company.js";
+import { sessionBindingOf } from "../../packages/broker/src/developer/session-binding.js";
 
 const PERSON_B = "e".repeat(64);
 const CALLBACK = "https://app.rovara.test/api/connect/slack/callback";
@@ -153,7 +154,7 @@ describe("start", () => {
     expect(Object.fromEntries(url.searchParams)).toEqual({ client_id: CLIENT_ID, scope: SLACK_INSTALL_BOT_SCOPES.join(","), redirect_uri: CALLBACK, state });
     expect(answer.body.expiresAt).toBe(new Date(Date.parse(TIME) + 600_000).toISOString());
     expect(w.db.get(`SLACK_INSTALL_STATE#${createHash("sha256").update(state).digest("hex")}`, "META"))
-      .toMatchObject({ companyId: A, personId: PERSON, sessionId: "session", provider: "slack-install", status: "live", redirectUri: CALLBACK });
+      .toMatchObject({ companyId: A, personId: PERSON, sessionBinding: sessionBindingOf("session"), provider: "slack-install", status: "live", redirectUri: CALLBACK });
     expect(JSON.stringify([...w.db.items.values()])).not.toContain(state);
     expect(answer.raw).not.toContain(CLIENT_SECRET);
     expect(answer.body).not.toHaveProperty("signedInWorkspace");
@@ -697,5 +698,54 @@ describe("review round 2 (removal races)", () => {
     } };
     expect((await w.disconnect()).status).toBe(503);
     expect(w.db.get("SLACK_TEAM#T0ACME", "BINDING")).toMatchObject({ companyId: A });
+  });
+});
+
+// Session-id-at-rest: the sign-in session id is the browser's login cookie, so the state row keeps a digest of it (never the id), and the spend compares digests.
+describe("the session at rest", () => {
+  const COOKIE = "cookie-0123456789abcdef-secret";
+  const rowOf = (w: ReturnType<typeof world>, state: string) => w.db.get(`SLACK_INSTALL_STATE#${createHash("sha256").update(state).digest("hex")}`, "META")!;
+  it("mints a digest of the session and never the id; the same session spends it, another session does not", async () => {
+    const w = world(); w.as(PERSON, A, "admin", COOKIE);
+    const state = (await w.start()).body.state as string;
+    const row = rowOf(w, state);
+    expect(row).toMatchObject({ sessionBinding: sessionBindingOf(COOKIE) });
+    expect(row).not.toHaveProperty("sessionId");
+    expect(JSON.stringify(row)).not.toContain(COOKIE);
+    w.as(PERSON, A, "admin", "another-session");
+    expect((await w.complete({ state, code: "acme-code" })).body.error).toEqual(uniform);
+    expect(rowOf(w, state)).toMatchObject({ status: "live" });
+    w.as(PERSON, A, "admin", COOKIE);
+    expect((await w.complete({ state, code: "acme-code" })).status).toBe(200);
+    expect(JSON.stringify(rowOf(w, state))).not.toContain(COOKIE);
+  });
+  it("a row an older build wrote (the raw id, no digest) is refused with the start-again words, spends nothing and is not widened", async () => {
+    const w = world(); w.as(PERSON, A, "admin", COOKIE);
+    const state = (await w.start()).body.state as string;
+    const { sessionBinding: _digest, ...rest } = rowOf(w, state); void _digest;
+    w.db.set({ ...rest, sessionId: COOKIE });
+    const answer = await w.complete({ state, code: "acme-code" });
+    expect(answer.status).toBe(403); expect(answer.body.error).toEqual(uniform);
+    expect(w.slack.exchanged).toEqual([]);
+    expect(rowOf(w, state)).toMatchObject({ status: "live", sessionId: COOKIE });
+  });
+});
+
+describe("a caller with no sign-in session (a registered service's own token)", () => {
+  const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> again";
+  const direct = (w: ReturnType<typeof world>, path: string, body: unknown, sessionId: string | undefined) => {
+    const ctx = { documentClient: w.db, tableName: "State", signInTableName: "SignIn", now: w.nowMs, wiring: w.wiring };
+    const caller = { developerId: PERSON, sessionId, amr: "slack", name: "Ada" } as unknown as Parameters<typeof routeSlackInstall>[1];
+    return routeSlackInstall(ctx, caller, A, { method: "POST", path, headers: {}, requestId: "r", body: JSON.stringify(body) }, new URL(path, "https://broker.example.test"));
+  };
+  const states = (w: ReturnType<typeof world>) => [...w.db.items.values()].filter((row) => (row as { entityType?: string }).entityType === "SLACK_INSTALL_STATE");
+  it.each([["empty", ""], ["missing", undefined]] as const)("an %s session id is refused before any state is minted, and cannot spend one", async (_name, sessionId) => {
+    const w = world(); w.as(PERSON, A);
+    await expect(direct(w, "/v1/dev/company/slack/install", { redirectUri: CALLBACK }, sessionId)).rejects.toMatchObject({ code: "AUTH_REQUIRED", message: expect.stringContaining(SIGN_IN_AGAIN) as string });
+    expect(states(w)).toEqual([]);
+    const state = (await w.start()).body.state as string;
+    await expect(direct(w, "/v1/dev/company/slack/install/complete", { state, code: "acme-code" }, sessionId)).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+    expect(states(w)).toHaveLength(1); expect(states(w)[0]).toMatchObject({ status: "live" });
+    expect(w.slack.exchanged).toEqual([]);
   });
 });

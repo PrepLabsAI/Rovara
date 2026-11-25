@@ -33,6 +33,7 @@ import { membershipKey } from "../aws/company-check.js";
 import { ownerKeyForSubject } from "../aws/lambda.js";
 import type { CompanySignInStore } from "./company-membership.js";
 import type { SignInProvider } from "./providers.js";
+import { SESSION_BINDING_PATTERN, sameSessionBinding, sessionBindingOf } from "./session-binding.js";
 import { endedByAdmin, type DeveloperRecord, type DeveloperSignInStore, type SessionRecord } from "./store.js";
 import { pkceChallengeMatches, sha256Hex } from "./tokens.js";
 
@@ -75,7 +76,7 @@ const ProvedIdentity = z.object({
 type Proved = z.infer<typeof ProvedIdentity>;
 const LinkRow = z.object({
   entityType: z.literal("SIGNIN_LINK"), id: z.string().regex(LINK_ID), developerId: z.string().regex(/^[a-f0-9]{64}$/),
-  sessionId: z.string().min(1), companyId: OrgIdSchema, method: z.enum(["slack", "github"]), nonce: z.string().min(1), challenge: z.string().min(43),
+  sessionBinding: z.string().regex(SESSION_BINDING_PATTERN), companyId: OrgIdSchema, method: z.enum(["slack", "github"]), nonce: z.string().min(1), challenge: z.string().min(43),
   returnTo: z.string().url(), clientState: z.string().min(1), expiresAt: z.number().int(), consumedAt: z.string().optional(), verifiedAt: z.string().optional(),
   identity: ProvedIdentity.optional(), codeHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), attemptAt: z.string().optional(), finishedAt: z.string().optional(),
 }).strict();
@@ -223,7 +224,7 @@ export function createSignInLinks(options: SignInLinkOptions) {
       const nonce = randomBytes(32).toString("base64url");
       const authorizeUrl = await options.provider(method).authorizeUrl({ state: id, nonce, redirectUri: options.endpoint(`/callback/${method}`) });
       await documentClient.send(new PutCommand({ TableName: tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
-        pk: `SIGNIN_LINK#${id}`, sk: "META", entityType: "SIGNIN_LINK", id, developerId, sessionId, companyId: member.companyId, method, nonce, challenge, returnTo,
+        pk: `SIGNIN_LINK#${id}`, sk: "META", entityType: "SIGNIN_LINK", id, developerId, sessionBinding: sessionBindingOf(sessionId), companyId: member.companyId, method, nonce, challenge, returnTo,
         clientState: state, expiresAt: seconds() + SIGN_IN_LINK_SECONDS,
       } }));
       options.log({ event: "signin.link_started", developerId, method });
@@ -240,14 +241,14 @@ export function createSignInLinks(options: SignInLinkOptions) {
       if ("ok" in live) return live;
       const link = await linkOf(linkId);
       // The link is this very session's and person's, proved by its callback, unexpired and never tried before.
-      if (link === undefined || link.developerId !== developerId || link.sessionId !== sessionId || link.verifiedAt === undefined || link.identity === undefined
+      if (link === undefined || link.developerId !== developerId || !sameSessionBinding(link.sessionBinding, sessionBindingOf(sessionId)) || link.verifiedAt === undefined || link.identity === undefined
         || link.codeHash === undefined || link.attemptAt !== undefined || link.finishedAt !== undefined || link.expiresAt <= seconds()) return refuse("signin.link_refused", developerId, "link_not_usable");
       // One attempt per link: a wrong code or verifier spends it.
       const attemptAt = iso();
       try {
         await documentClient.send(new UpdateCommand({ TableName: tableName, Key: { pk: `SIGNIN_LINK#${linkId}`, sk: "META" }, UpdateExpression: "SET attemptAt = :at",
-          ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(attemptAt) AND attribute_exists(verifiedAt) AND sessionId = :sid AND developerId = :dev AND expiresAt > :now",
-          ExpressionAttributeValues: { ":at": attemptAt, ":sid": sessionId, ":dev": developerId, ":now": seconds() } }));
+          ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(attemptAt) AND attribute_exists(verifiedAt) AND sessionBinding = :sid AND developerId = :dev AND expiresAt > :now",
+          ExpressionAttributeValues: { ":at": attemptAt, ":sid": sessionBindingOf(sessionId), ":dev": developerId, ":now": seconds() } }));
       } catch (error) {
         if (conditionFailed(error)) return refuse("signin.link_refused", developerId, "link_not_usable");
         throw error;
