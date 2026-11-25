@@ -271,6 +271,8 @@ export interface CoreDevWiring {
     holdsOwnTask?(input: { person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown> }): Promise<boolean>;
     /** DEC 254zzz44 (a): the person's stored share (spec 067) on this task: its role as stored, while they are still a member of its project, read live. The read rule (core/task-flow/read-rule.ts) decides what it shows. */
     sharedReader(input: { person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown> }): Promise<{ role: string } | undefined>;
+    /** The old People page rule (the plan comments' and the diff's), as the read rule's seam: resolves when it admits, throws its refusal when it does not, says `viaChannelShare` for a person who reads only because the task is shared into their Slack channel. The rule asks it for the Slack channel share on every part of the page (owner decision 254zzz558). Absent: no channel share. */
+    peoplePage?(input: { person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown> }): Promise<void | { holdsOwnTask: true } | { viaChannelShare: true }>;
   };
   /** L4-U5b: what the inbox's project notices (`GET /v1/app/inbox/project-notices`) are checked against, live: whether the person still administers the project, and the project's open repair card. Absent: that route lists nothing. */
   projectNotices?: { administers(orgId: string, developerId: string, project: string): Promise<boolean>; setupRead?(orgId: string, project: string): Promise<{ key: string; failedStep: string; fixReady: boolean } | undefined> } | undefined;
@@ -424,6 +426,8 @@ function decideRead(target: Mounted, caller: DeployedCaller, role: OrgRole | und
   const rules = target.wiring.taskRules;
   const seams: TaskReadSeams = {
     ...(rules === undefined ? {} : { sharedReader: (person, task) => rules.sharedReader({ person, companyId: target.runtime.companyId, task }) }),
+    // The People page rule, for the ways in that ask it (the diff, the comments, and the Slack channel share on the rest of the page); a caller's own seam of the same name (the aws routes') takes its place.
+    ...(rules?.peoplePage === undefined ? {} : { peoplePage: (task) => rules.peoplePage!({ person: { developerId: caller.principal.personId, name: caller.principal.displayName }, companyId: target.runtime.companyId, task }) }),
     // The person's current project grant IN THE TASK'S COMPANY (the company the mount checked their live membership of), re-read for every way in: a person moved to another company between two reads never has that
     // company's same-named grant counted.
     ...liveGrantSeam(target),

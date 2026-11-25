@@ -53,6 +53,8 @@ export interface CoreTaskRuleRoutes {
   route(input: CoreTaskRuleRouteInput): Promise<BrokerResponse>;
   /** DEC 254zzz44 (a): the stored share (spec 067, `readerShare`) of this person on a task of this company: its role as stored, while they are still a member of the task's project. The read rule decides what it shows. */
   sharedReader(input: Pick<CoreTaskRuleRouteInput, "person" | "companyId" | "task">): Promise<{ role: string } | undefined>;
+  /** The old People page rule (`pageRule`) as the read rule's seam, for a person and a task of this company: resolves when it admits, throws its refusal, says `viaChannelShare` for a person who reads only because the task is shared into their channel. */
+  peoplePage(input: Pick<CoreTaskRuleRouteInput, "person" | "companyId" | "task">): Promise<void | { holdsOwnTask: true } | { viaChannelShare: true }>;
   /**
    * The task's own person's live hold on their task (the hotfix's test, one implementation: the grant, or the access that let them start it, a bound-channel member where the project lets channel members use it), read now,
    * for a task of this company. The read rule's live-grant seam asks it for the task's own person; anyone else it asks for the grant. A read that fails is "no".
@@ -204,6 +206,10 @@ export function createCoreTaskRuleRoutes(depsFor: (person: { developerId: string
       if (input.task["companyId"] !== input.companyId || typeof task.taskId !== "string") return false;
       const deps: DeveloperTaskRouteDependencies = { ...ruleDependencies(depsFor(input.person, input.companyId), artifacts), companyId: input.companyId };
       return await holdsOwnTask(deps, task, input.person.developerId);
+    },
+    async peoplePage(input) {
+      const { deps, caller } = peopleOf(input);
+      return await pageRule(deps, caller, input.task as unknown as DeveloperTaskRecord);
     },
     async sharedReader(input) {
       const task = input.task as unknown as DeveloperTaskRecord;

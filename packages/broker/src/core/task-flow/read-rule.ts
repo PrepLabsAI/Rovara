@@ -10,6 +10,8 @@
 //   - A share admits a person to the task, and then `SHARED_PARTS` says per read whether that part is shown to that role; a part that is not shown answers TASK_PART_NOT_SHOWN with the
 //     words below (never the missing task's answer for a person the page shows the task to).
 //   - `money` and `sourceCode` are part of the decision, so a handler cannot show either by accident.
+//   - OWNER DECISION 254zzz558 (option A): a person a task is SHARED with (the stored share, "Can view"; or the Slack channel it is shared into) reads the WHOLE task page, the code changes included, and can comment; a person with no
+//     share is refused as before. So the share cells below are all "shown", and `ADMITTED_BY` lets both kinds of share into every part of the page (not the task read, the events or the timeline, which they already had or which are not part of this decision).
 import { AgentXError, agentXError, type OrgRole, type Principal } from "@agentx/contracts";
 import { taskOwnerView } from "../../developer/task-owner-view.js";
 import { taskNotFound } from "./access.js";
@@ -65,7 +67,7 @@ export interface TaskReadSeams {
   liveGrant?(person: { personId: string }, task: TaskRecord): Promise<boolean>;
 }
 
-export type Basis = "developer" | "acts" | "reads" | "page" | "shared";
+export type Basis = "developer" | "acts" | "reads" | "page" | "shared" | "channel";
 
 /**
  * The ways each read admits a person, in order: the one table of who may read what. `shared` is asked only after `reads` said not found, and a lookup that fails is "no". `developer` is the task's stored person. (Today's answers: the golden of tests/contract/rd-2-0-read-rule-golden.test.ts.)
@@ -74,15 +76,16 @@ const ADMITTED_BY: Readonly<Record<TaskRead, readonly Basis[]>> = {
   task: ["reads", "shared"], answers: ["reads", "shared"], readable: ["reads"], merge: ["reads"],
   // The events are for everyone the task is shown to (a co-owner, the People list's commenters and viewers, a share); the readers routes stay the task's person and a share (told only the owner may share).
   events: ["developer", "reads", "shared"], share: ["developer", "shared"],
-  diff: ["page"], comments: ["page"], plan: ["acts"], evidence: ["acts"],
-  spec: ["reads", "shared"], checks: ["reads", "shared"], changes: ["reads", "shared"], timeline: ["reads", "shared"], evidenceFile: ["reads", "shared"],
+  // The page rule (People) first; then the stored share and, for the parts the page rule does not already cover, the Slack channel share (`channel`: only a person the People list does not name, who reads because the task is shared into a channel they are in).
+  diff: ["page", "shared"], comments: ["page", "shared"], plan: ["acts", "shared", "channel"], evidence: ["acts", "shared", "channel"],
+  spec: ["reads", "shared", "channel"], checks: ["reads", "shared", "channel"], changes: ["reads", "shared", "channel"], timeline: ["reads", "shared"], evidenceFile: ["reads", "shared", "channel"],
 };
 
-/** What each shared role is shown, per read. Exhaustive over `SHARED_ROLES` and every read: a role or read with no cell does not compile. Only a read that `ADMITTED_BY` lets a share into is ever asked. The viewer is shown the summary (the task, its events, its timeline); the plan, the checks and the code changes wait for the owner's answer (Q1). */
+/** What each shared role is shown, per read. Exhaustive over `SHARED_ROLES` and every read: a role or read with no cell does not compile. Only a read that `ADMITTED_BY` lets a share into is ever asked. The viewer is shown the whole task page, the code changes included (the owner's answer to Q1, DEC 254zzz558, option A). A `"withheld"` cell still answers TASK_PART_NOT_SHOWN with `SHARED_WORDS`. */
 const SHARED_PARTS: Readonly<Record<SharedRole, Readonly<Record<TaskRead, "shown" | "withheld">>>> = {
   viewer: {
     task: "shown", answers: "shown", readable: "shown", merge: "shown", events: "shown", share: "shown", diff: "shown", comments: "shown", plan: "shown", evidence: "shown",
-    spec: "withheld", checks: "withheld", changes: "withheld", timeline: "shown", evidenceFile: "withheld",
+    spec: "shown", checks: "shown", changes: "shown", timeline: "shown", evidenceFile: "shown",
   },
 };
 
@@ -95,14 +98,21 @@ const SHARED_WORDS = {
 const sharedWords = (read: TaskRead): string => `${SHARED_WORDS.lead} ${SHARED_WORDS.parts[read] ?? SHARED_WORDS.fallback}`;
 
 /**
- * WHAT A SLACK SHARE GRANTS (the owner's open question, RD-2-0-READ-RULE-PLAN.md): a person with NO project grant who reads a task only because it is shared into a bound Slack channel they are in (the old page rule's
- * implicit commenter: a stored People list, the person registered on it, the project letting channel members use it, live membership of the share's channel) is shown, per read, what this table says. Today: the plan
- * comments and the diff. Each read is its OWN cell, so the owner's answer is one line: `"withheld"` makes that read refuse such a person as a missing task. The grant is not asked of them (they have none, by design);
- * a decision for them never carries source code or code details (no grant was proved), whatever the diff cell says.
+ * WHAT A SLACK SHARE GRANTS (the owner's answer, DEC 254zzz558, option A): a person with NO project grant who reads a task only because it is shared into a bound Slack channel they are in (the old page rule's
+ * implicit commenter: a stored People list, the person registered on it, the project letting channel members use it, live membership of the share's channel) reads the whole task page, the code changes included, and can
+ * comment (the comment is judged by the comment action's own rule, which gives this person the People list's commenter role). Each read is its OWN cell, so a later answer is one line: `"withheld"` makes that read refuse such
+ * a person as a missing task. The grant is not asked of them (they have none, by design); their decision carries source code and code details exactly because this table says the code is theirs to see (the diff cell is "shown").
+ * A person with no share is not here at all. The task read, the events and the timeline are not part of this table (not asked of the page rule).
  */
-const CHANNEL_SHARE_PARTS: Readonly<Partial<Record<TaskRead, "shown" | "withheld">>> = {
+export const CHANNEL_SHARE_PARTS: Readonly<Partial<Record<TaskRead, "shown" | "withheld">>> = {
   comments: "shown",
   diff: "shown",
+  plan: "shown",
+  evidence: "shown",
+  spec: "shown",
+  checks: "shown",
+  changes: "shown",
+  evidenceFile: "shown",
 };
 
 /** The refusal of a read for a person who is not shown the task. The words differ by read as they did before the rules were one (a client that matched them still reads them). */
@@ -119,7 +129,8 @@ export function maySeeTaskMoney(input: { companyId: string; membershipCompanyId:
 /**
  * Whether THIS reader may read THIS task's source code: the patches AND the file paths of its changes (a path can reveal the structure of code; counts stay shown). The repository's own access in this codebase is the
  * person's live project grant (there is no per-person repository check), and it is true ONLY where that grant was re-read THIS request: by the live-grant seam for every way of being admitted (the stored person of a task with
- * no People list included), or by the stored share's own live project membership. No seam (a laptop), no proof, no source code. A task of another company never has it.
+ * no People list included), or by the stored share's own live project membership, or (the owner's decision 254zzz558) by the Slack channel share, whose own table (`CHANNEL_SHARE_PARTS`) says the code is theirs to see: a person with
+ * no grant who reads only because the task is shared into their channel. No seam (a laptop), no proof, no source code. A task of another company never has it.
  *
  * It is decided per reader and per task INSIDE `decideTaskRead`, so it runs on every request BEFORE any answer cache is consulted: a cache (the changes read's) must be keyed by the task and its pull request heads only,
  * hold the full answer, and be filtered through the CURRENT request's `decision.sourceCode` on every hit, so a reader who may not read source is never handed a cached diff or path list.
@@ -189,11 +200,25 @@ const ADMIT: Readonly<Record<Basis, (ask: Ask) => Promise<Admission>>> = {
     if ("viaChannelShare" in proof) return CHANNEL_SHARE_PARTS[input.read] === "shown" ? { mode: "page", channelShare: true } : undefined;
     return { mode: "page", grantProved: true };
   },
+  // The Slack channel share, for the reads the page rule is not listed on: asked only after every other way said no, and only a person the People list does not name (`viaChannelShare`) is admitted by it; a People entry is the core's own rule's.
+  channel: async ({ input, task }) => {
+    if (CHANNEL_SHARE_PARTS[input.read] !== "shown" || input.seams?.peoplePage === undefined) return undefined;
+    try {
+      const proof = await input.seams.peoplePage(task);
+      return proof !== undefined && "viaChannelShare" in proof ? { mode: "page", channelShare: true } : undefined;
+    } catch (error) {
+      if (isPageRefusal(error)) return undefined;
+      throw error;
+    }
+  },
   shared: async ({ deps, input, task }) => {
     const sharedRole = await storedShare(deps, input, task);
     return sharedRole === undefined ? undefined : { mode: "shared", sharedRole };
   },
 };
+
+/** The old page rule's own "no" (the task is not shown to this person); any other failure of it stays a failure. */
+const isPageRefusal = (error: unknown): boolean => error instanceof AgentXError && (error.code === "TASK_NOT_FOUND" || error.code === "TASK_ACCESS_DENIED");
 
 /**
  * The decision for one read: who the person is to the task and what they may see, or a refusal. Throws TASK_NOT_FOUND for anyone no way admits (the same as for a task that does not exist),
@@ -217,11 +242,22 @@ async function scriptDecision(ask: Ask): Promise<TaskReadDecision | undefined> {
   return await grantFor(ask, "acts") === "no" ? undefined : decisionOf(ask, { mode: "script" }, false);
 }
 
-/** The first way of being admitted that holds, in the read's order, as a decision; a share that is admitted but not shown this part is told so. */
+/**
+ * The first way of being admitted that holds, in the read's order, as a decision; a share that is admitted but not shown this part is told so. The People page rule says "no" by throwing its own refusal: where a way
+ * after it (the stored share) may still admit the person, that refusal is kept and the next way is asked; if none admits, the page rule's own refusal is thrown, in its own words, as before.
+ */
 async function firstAdmission(ask: Ask): Promise<TaskReadDecision | undefined> {
   const { input } = ask;
-  for (const basis of ADMITTED_BY[input.read]) {
-    const admitted = await ADMIT[basis](ask);
+  const ways = ADMITTED_BY[input.read];
+  let pageRefusal: unknown;
+  for (const [index, basis] of ways.entries()) {
+    let admitted: Admission;
+    try {
+      admitted = await ADMIT[basis](ask);
+    } catch (error) {
+      if (basis === "page" && index < ways.length - 1 && isPageRefusal(error)) { pageRefusal = error; continue; }
+      throw error;
+    }
     if (admitted === undefined) continue;
     // EVERY way in but the stored share (which proves its own project membership) re-reads the person's live company membership and current project grant now: no path assumes the grant was proved,
     // the task's stored person with no People list included.
@@ -229,13 +265,15 @@ async function firstAdmission(ask: Ask): Promise<TaskReadDecision | undefined> {
     if (grant === "no") continue;
     // A share admits a person to the task; each part is then shown or not by the share's role.
     if (admitted.sharedRole !== undefined && SHARED_PARTS[admitted.sharedRole][input.read] === "withheld") throw agentXError("TASK_PART_NOT_SHOWN", sharedWords(input.read));
-    return decisionOf(ask, admitted, grant === "yes");
+    return decisionOf(ask, admitted, grant === "yes" || grant === "exempt");
   }
+  if (pageRefusal !== undefined) throw pageRefusal;
   return undefined;
 }
 
 /** The decision for a person admitted this way: the task, how, and what they may be shown (money, source code and the checks' code details are decided here, for this reader and this task, on every request). */
 function decisionOf({ deps, input, task }: Ask, admitted: NonNullable<Admission>, grantProved: boolean): TaskReadDecision {
+  // `grantProved` is true where the live grant was re-read this request, or where the way in is the Slack channel share (its table says the code is the share's: no grant is asked of that person).
   const principal = input.caller.principal;
   const reader = { grantProved, principal };
   return {
