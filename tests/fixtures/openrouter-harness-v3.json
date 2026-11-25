@@ -1,0 +1,13 @@
+{
+  "source": "providers-fast/ALL-MODELS-REPORT.json, 2026-11-22; recorded identity and endpoint prices; tests synthesize bounded HTTP receipts",
+  "model": "google/gemini-4-neon",
+  "actual": "google/gemini-4-neon-20261118",
+  "pricing": {
+    "prompt": "0.0000015",
+    "completion": "0.0000075",
+    "internal_reasoning": "0.0000075",
+    "request": "0",
+    "input_cache_read": "0",
+    "input_cache_write": "0"
+  }
+}

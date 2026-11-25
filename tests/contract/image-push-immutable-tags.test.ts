@@ -66,7 +66,8 @@ describe("no infra file declares an ECR repository with mutable tags", () => {
   it("every ImageTagMutability in infra/ is IMMUTABLE", () => {
     const found = execFileSync("git", ["grep", "-n", "-E", "imageTagMutability:", "--", "infra"], { encoding: "utf8" }).trim().split("\n");
     expect(found.length).toBeGreaterThan(0);
-    for (const line of found) expect(line, line).toMatch(/imageTagMutability: "IMMUTABLE"/u);
+    // The L1 form ("IMMUTABLE") or the L2 enum (ecr.TagMutability.IMMUTABLE, the model gateway's images repository, #1478): the same template value.
+    for (const line of found) expect(line, line).toMatch(/imageTagMutability: (?:"IMMUTABLE"|ecr\.TagMutability\.IMMUTABLE)/u);
     expect(readFileSync("infra/lib/test-service-mirror.ts", "utf8")).toContain('imageTagMutability: "IMMUTABLE"');
   });
 });
