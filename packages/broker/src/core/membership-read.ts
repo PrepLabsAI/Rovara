@@ -31,6 +31,9 @@ export async function readingMembership<T>(read: () => Promise<T>): Promise<T> {
   }
 }
 
+/** `.catch(orIfNotMembershipFailure(fallback))`: the fallback for any error EXCEPT a failed membership read, which goes on up as the retryable 503. */
+export const orIfNotMembershipFailure = <T>(fallback: T) => (error: unknown): T => { rethrowMembershipReadFailure(error); return fallback; };
+
 /** For a `catch` that used to turn any error into "no membership": a failed read goes on up as the retryable answer. */
 export function rethrowMembershipReadFailure(error: unknown): void {
   if (isMembershipReadFailure(error)) throw error;

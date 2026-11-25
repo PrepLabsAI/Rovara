@@ -4,7 +4,7 @@
 // (channel members, channel names for R10, 25d's email lookup and bot token check, and 25e's
 // admin-ended sessions and channel by name).
 // Nothing here logs or echoes a secret, a code, a token or a caught error's message.
-import { isMembershipReadFailure, membershipReadFailed } from "./membership-read.js";
+import { isMembershipReadFailure, membershipReadFailed } from "../core/membership-read.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { CompanyJoin } from "./company-membership.js";
 import type { CompanySignInAuditInput, CompanySignInCause, CompanySignInMethod } from "./company-signin-audit.js";

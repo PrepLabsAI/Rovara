@@ -1,4 +1,4 @@
-import { readingMembership, rethrowMembershipReadFailure } from "../developer/membership-read.js";
+import { readingMembership, rethrowMembershipReadFailure } from "../core/membership-read.js";
 import { prepareTaskPeopleStart } from "../developer/task-people-start.js";
 import { companyMembershipFromDynamo } from "./company-check.js";
 import type { TaskPeopleDependencies } from "../developer/task-people.js";
@@ -1926,7 +1926,7 @@ export function developerTaskRouteDependencies(
   // C2 (plan 4.1, decisions D1, D3): the web proof's reads, none of them Slack's. The developer record and the membership are the sign-in table's
   // own rows (the reviewed reader every sign-in uses); the grant is the project's in the TASK'S company, by grant only (no channel list, no Slack id).
   const developerRecord = async (targetDeveloperId: string): Promise<DeveloperRecord | undefined> => {
-    const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: { pk: `DEVELOPER#${targetDeveloperId}`, sk: META }, ConsistentRead: true })) as { Item?: DeveloperRecord };
+    const response = await readingMembership(() => deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: { pk: `DEVELOPER#${targetDeveloperId}`, sk: META }, ConsistentRead: true }))) as { Item?: DeveloperRecord };
     return developerRecordKeyedBy(response.Item, targetDeveloperId); // the id lives only in the row's key (real rows have no `developerId` attribute); a disagreeing attribute refuses
   };
   const definitionReads = new Map<string, ReturnType<typeof latestDefinition>>();
@@ -1934,10 +1934,10 @@ export function developerTaskRouteDependencies(
     // C4: one bounded page of the project's side of its grants (admin-actions.ts projectMemberKey rows); each id is proved live before use.
     // DEC 254zzz80: in the TASK'S company's own partition for a named company (company-layout.ts); the legacy rows otherwise.
     projectMemberIds: async (project, limit, companyId) => {
-      const response = await deps.documentClient.send(new QueryCommand({
+      const response = await readingMembership(() => deps.documentClient.send(new QueryCommand({
         TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :developer)",
         ExpressionAttributeValues: { ":pk": projectMemberKey(project, "", companyId).pk, ":developer": "DEVELOPER#" }, ConsistentRead: true, Limit: limit,
-      })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
+      }))) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
       const ids = (response.Items ?? []).map((item) => typeof item.sk === "string" && item.sk.startsWith("DEVELOPER#") ? item.sk.slice("DEVELOPER#".length) : "");
       return { ids, complete: response.LastEvaluatedKey === undefined };
     },
@@ -1945,7 +1945,7 @@ export function developerTaskRouteDependencies(
       // Only an install with the company layer has live memberships; without it there is no web proof (unavailable, a refusal).
       if ((deps.companies ?? deps.developer.companies) === undefined) throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
       const key = membershipKey(targetDeveloperId);
-      const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> };
+      const response = await readingMembership(() => deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: key, ConsistentRead: true }))) as { Item?: Record<string, unknown> };
       if (response.Item !== undefined && (response.Item.pk !== key.pk || response.Item.sk !== key.sk)) throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
       return strictLiveMembership(response.Item, targetDeveloperId);
     },
@@ -1961,7 +1961,7 @@ export function developerTaskRouteDependencies(
       }
       const revision = await pending;
       if (revision === undefined) throw agentXError("PROJECT_NOT_FOUND", "task person project was not found");
-      const memberships = await grantRowsOf<{ pk?: string; sk?: string; projectName: string; role?: string }>(deps, targetDeveloperId, companyId, WEB_PROOF_GRANT_ROWS_MAX);
+      const memberships = await readingMembership(() => grantRowsOf<{ pk?: string; sk?: string; projectName: string; role?: string }>(deps, targetDeveloperId, companyId, WEB_PROOF_GRANT_ROWS_MAX));
       const result = evaluateProjectAuthority({ project, revision: { revision: revision.revision, definition: { developerTasks: revision.developerTasks } }, memberships, bindings: [] });
       if (result.kind === "allowed") return result.access === "granted";
       if (result.kind === "denied" && result.reason === "project-access") return false;
@@ -2005,7 +2005,7 @@ export function developerTaskRouteDependencies(
         const revision = await latestDefinition(deps, project, workspace?.companyId);
         if (revision === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX`);
         const [memberships, allBindings] = await Promise.all([
-          grantRowsOf<{ projectName: string; role?: string }>(deps, subject.developerId, workspace?.companyId),
+          readingMembership(() => grantRowsOf<{ projectName: string; role?: string }>(deps, subject.developerId, workspace?.companyId)),
           bindingsOf(deps, workspace),
         ]);
         const result = evaluateProjectAuthority({
@@ -2159,10 +2159,10 @@ async function companyPreapprovalRoute(deps: DeveloperRouteDependencies, request
   const companyId = await resolveCompany(deps.companies, caller.developerId);
   let member: z.infer<typeof Membership>;
   try {
-    const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: membershipKey(caller.developerId), ConsistentRead: true })) as { Item?: unknown };
+    const response = await readingMembership(() => deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: membershipKey(caller.developerId), ConsistentRead: true }))) as { Item?: unknown };
     member = Membership.parse(response.Item);
     if (member.personId !== caller.developerId || member.companyId !== companyId || member.revokedAt !== undefined) throw new Error("membership unavailable");
-  } catch { throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN); }
+  } catch (error) { rethrowMembershipReadFailure(error); throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN); }
   if (member.role !== "admin" && member.role !== "owner") throw notFound();
   if (isResend && caller.webApp !== true) throw agentXError("FORBIDDEN", "resending an invite is done in the Rovara web app");
   let forwarded: CompanyPreapprovalRequest;

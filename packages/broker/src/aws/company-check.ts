@@ -1,6 +1,6 @@
 // R4: membership is an internal, replaceable person -> company read. T3 writes the
 // sign-in-table membership. A token's company is never membership.
-import { membershipReadFailed, isMembershipReadFailure, readingMembership } from "../developer/membership-read.js";
+import { membershipReadFailed, isMembershipReadFailure, readingMembership } from "../core/membership-read.js";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import type { DeveloperTaskActions } from "./developer-task-actions.js";

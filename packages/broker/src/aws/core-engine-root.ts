@@ -1,4 +1,4 @@
-import { readingMembership } from "../developer/membership-read.js";
+import { readingMembership } from "../core/membership-read.js";
 import { hostedAutofixDayBudgetHasRoom } from "../core-host/autofix-day-budget.js";
 import type { E2ESourceSnapshot } from "@agentx/contracts";
 import { hostedAuthorityStore } from "./core-e2e-authority-store.js";

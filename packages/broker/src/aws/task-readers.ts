@@ -4,7 +4,7 @@
 // checked on every read; for anyone else a shared task reads as not found, exactly as an unshared one.
 //
 // Stored on the task's own partition: `DEVTASK#<taskId>` / `READER#<developerId>`.
-import { rethrowMembershipReadFailure } from "../developer/membership-read.js";
+import { rethrowMembershipReadFailure } from "../core/membership-read.js";
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import {
   TASK_READERS_MAX,

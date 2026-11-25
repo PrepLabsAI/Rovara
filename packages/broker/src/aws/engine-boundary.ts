@@ -1,4 +1,4 @@
-import { MEMBERSHIP_READ_FAILED_WORDS } from "../developer/membership-read.js";
+import { MEMBERSHIP_READ_FAILED_WORDS, rethrowMembershipReadFailure } from "../core/membership-read.js";
 import type { ActionOffer, TaskMoneyV1 } from "@agentx/contracts";
 import type { TaskActionAnswer, TaskActionInput } from "../core-host/task-action-routes.js";
 import { logWorkspacePointerIntegrity } from "../core/task-flow/workspace-pointer.js";
@@ -276,9 +276,9 @@ export function coreTaskEntryFrom(
     ...(taskActions === undefined ? {} : {
       async taskActions(caller: CoreEntryCaller, taskId: string) {
         let deployed: DeployedCaller | undefined;
-        try { deployed = await deployedCallerOf(caller); } catch { return undefined; }
+        try { deployed = await deployedCallerOf(caller); } catch (error) { rethrowMembershipReadFailure(error); return undefined; }
         if (deployed === undefined) return undefined;
-        try { return await taskActions(deployed, taskId); } catch { return undefined; }
+        try { return await taskActions(deployed, taskId); } catch (error) { rethrowMembershipReadFailure(error); return undefined; }
       },
     }),
     ...(taskAction === undefined ? {} : {
@@ -296,9 +296,9 @@ export function coreTaskEntryFrom(
     ...(taskReadable === undefined ? {} : {
       async taskReadable(caller: CoreEntryCaller, taskId: string) {
         let deployed: DeployedCaller | undefined;
-        try { deployed = await deployedCallerOf(caller); } catch { return false; }
+        try { deployed = await deployedCallerOf(caller); } catch (error) { rethrowMembershipReadFailure(error); return false; }
         if (deployed === undefined) return false;
-        try { return (await taskReadable(deployed, taskId)) === true; } catch { return false; }
+        try { return (await taskReadable(deployed, taskId)) === true; } catch (error) { rethrowMembershipReadFailure(error); return false; }
       },
     }),
     ...(chatDecision === undefined ? {} : {
@@ -321,9 +321,9 @@ export function coreTaskEntryFrom(
     ...(taskMoney === undefined ? {} : {
       async taskMoney(caller: CoreEntryCaller, taskId: string) {
         let deployed: DeployedCaller | undefined;
-        try { deployed = await deployedCallerOf(caller); } catch { return undefined; }
+        try { deployed = await deployedCallerOf(caller); } catch (error) { rethrowMembershipReadFailure(error); return undefined; }
         if (deployed === undefined) return undefined;
-        try { return await taskMoney(deployed, taskId); } catch { return undefined; }
+        try { return await taskMoney(deployed, taskId); } catch (error) { rethrowMembershipReadFailure(error); return undefined; }
       },
     }),
     ...(recordThread === undefined ? {} : {

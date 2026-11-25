@@ -1,4 +1,4 @@
-import { isMembershipReadFailure, membershipReadFailed } from "../developer/membership-read.js";
+import { isMembershipReadFailure, membershipReadFailed, orIfNotMembershipFailure } from "../core/membership-read.js";
 import { hostedPrFeedbackRoutes } from "./pr-feedback-routes.js";
 import { taskOwnerView } from "../developer/task-owner-view.js";
 // Switch-on lane L11: the decision cards, the session levels and how we work on the deployed core's developer routes (`core-host/dev-routes.ts`, `CoreDevWiring`), from the company's OWN records.
@@ -329,7 +329,7 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
       // Lead 4 PCF: the feature line. Only the task's own person is ever listed this card (`ownTask`), so a person who sees it may approve it; "Change" also needs the filing rule of
       // `POST /v1/app/tasks/{id}/feature` (the starter, or a manager: an owner, an admin or the project's administrator, read live), and "create" the live company owner or admin.
       const mayFile = await deps.access.canAct(viewer.principal, task).catch(() => false);
-      const manager = viewer.admin || (await liveGrant(people, viewer.principal.personId, task.project).catch(() => undefined)) === "administrator";
+      const manager = viewer.admin || (await liveGrant(people, viewer.principal.personId, task.project).catch(orIfNotMembershipFailure(undefined))) === "administrator";
       const planFeature = await readPlanFeature({ store: deps.store, companyId, now: nowMs }, task, { mayFile, manager, admin: viewer.admin });
       return {
         ...(planFeature === undefined ? {} : { planFeature }),

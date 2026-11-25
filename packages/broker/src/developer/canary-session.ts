@@ -4,7 +4,7 @@
 // or {kind:"canary-end"}, and every other shape is refused with nothing written. The session is the one a GitHub sign-in builds (session-mint.ts), with a shorter life and no
 // refresh token ever leaving this file. Who may call it is the Lambda resource policy alone (infra/lib/canary-session.ts: one permission, the canary stack's step role).
 // Nothing here logs or returns a token (except the one answer), a refresh token, a reason or an id of anyone but the session and the canary person.
-import { isMembershipReadFailure } from "./membership-read.js";
+import { isMembershipReadFailure } from "../core/membership-read.js";
 import { GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import { IMPLICIT_COMPANY_ID, OrgIdSchema } from "@agentx/contracts";

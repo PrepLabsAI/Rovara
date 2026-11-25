@@ -2,7 +2,7 @@
 // The two steps every session start shares, factored out of the sign-in server (a pure move: server.ts calls these exactly as it ran them inline) so the beta canary's
 // session function (canary-session.ts) builds its session with the same code and never a copy: (1) "may this person hold a session for this company right now" and
 // (2) "write the SESSION row, then issue the access token". Nothing here reads a request; every input is a parameter.
-import { membershipReadFailed } from "./membership-read.js";
+import { membershipReadFailed } from "../core/membership-read.js";
 import { IMPLICIT_COMPANY_ID, OrgIdSchema, type DeveloperSignInMethod, type SignInClientRecord } from "@agentx/contracts";
 import type { CompanySignInStore } from "./company-membership.js";
 import type { CodeGrant, DeveloperSignInStore, SessionRecord } from "./store.js";

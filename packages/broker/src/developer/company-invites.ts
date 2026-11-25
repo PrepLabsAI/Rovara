@@ -1,7 +1,7 @@
 // DEC 254a: operator invite codes, the self-serve switch, and DEC 253z's self-serve company create. Sign-in table only;
 // the sign-in Lambda makes every write here. A code is stored only as its SHA-256 (the CLI makes the code and sends the
 // hash); no row, answer or log line ever holds the code. Every write commits with its audit row in one transaction.
-import { readingMembership } from "./membership-read.js";
+import { readingMembership } from "../core/membership-read.js";
 import { randomUUID } from "node:crypto";
 import { GetCommand, QueryCommand, TransactWriteCommand, UpdateCommand, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";

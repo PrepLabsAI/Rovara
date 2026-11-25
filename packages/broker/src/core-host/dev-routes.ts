@@ -1,4 +1,4 @@
-import { MEMBERSHIP_READ_FAILED_WORDS } from "../developer/membership-read.js";
+import { MEMBERSHIP_READ_FAILED_WORDS, rethrowMembershipReadFailure } from "../core/membership-read.js";
 import { feedbackOwner } from "../core/pr-feedback/decide.js";
 import { isPrFeedbackPath, type createPrFeedbackRoutes } from "./pr-feedback-routes.js";
 import { committedResponse } from "../core/task-flow/committed-response.js";
@@ -693,7 +693,8 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
         const spent = cap.spentUsd;
         const money = await moneyOf(target, record, cap);
         return { money, runLimitUsd: cap.limitUsd, ...(typeof spent === "number" && Number.isFinite(spent) && spent >= 0 ? { costUsd: spent } : {}) };
-      } catch {
+      } catch (error) {
+        rethrowMembershipReadFailure(error);
         return undefined;
       }
     },
@@ -706,7 +707,8 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
         // The one read rule's "readable" read (the company, then the company's read access): the same refusal as a missing task for anyone it does not show the task to.
         await decideRead(target, caller, membership.role, { read: "readable", taskId });
         return true;
-      } catch {
+      } catch (error) {
+        rethrowMembershipReadFailure(error);
         return false;
       }
     },
