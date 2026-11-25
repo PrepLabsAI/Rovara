@@ -1246,3 +1246,12 @@ The document read is now narrower (the bytes and digest only, `loadWorkflowDocum
 | N13 core/task-flow/reads.ts (not this lane's file; mutated and restored) | `TASK_ACCESS_DENIED` from `canRead` not mapped to not-found | "the People list's own read rule ..." |
 
 Not mutation-tested: `redactText` on the design question's `id`, `recommended` and option ids (the stored schema caps them at 16 characters, so no secret pattern fits; the redaction is for the literal rule only).
+
+### RD-2a Opus leftovers (S1, N1, N2) - 2 more, both killed (tests/unit/rd2a-spec-read.test.ts)
+
+| Mutant | Mutation | Killed by |
+|---|---|---|
+| P1 layerOf | the catch rethrows (a reader that throws fails the whole read) | "a document reader that THROWS ... makes the layer unreadable" |
+| P2 specOf | `waitingDocumentDigest` offered for any waited-on layer, not only one whose bytes were read and verified | the Markdown test and the tampered / approved-but-unreadable tests |
+
+N2 (`answer` of a changed decision passed through `redactText`) has no test: the stored option id is capped short by its schema, so no secret pattern fits (the redaction is for the literal rule).

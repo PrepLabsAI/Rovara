@@ -82,7 +82,7 @@ async function commentCounts(store: SpecReads["store"], taskId: string): Promise
 function decisionsOf(plan: PlanDocument, layer: string, state: SpecLayerState, approval: ReturnType<typeof decisionOn>): Decision[] {
   return plan.decisions.map((decision) => {
     const picked = approval?.answerOverrides?.find((answer) => answer.decisionId === decision.id)?.optionId;
-    if (state === "approved" && picked !== undefined) return { ...decision, layer, status: "changed_by_reviewer", answer: picked };
+    if (state === "approved" && picked !== undefined) return { ...decision, layer, status: "changed_by_reviewer", answer: redactText(picked) };
     if (state === "approved") return { ...decision, layer, status: "agreed", answer: decision.recommended };
     return { ...decision, layer, status: "proposed" };
   });
@@ -146,9 +146,9 @@ export async function specOf(reads: SpecReads, task: TaskRecord): Promise<{ spec
   ];
   const steps = built.find((entry) => entry.layer.document === "plan");
   const bigger = workflow.path === "QUICK" && steps?.plan !== undefined && (["waiting", "written", "changes_requested"] as SpecLayerState[]).includes(steps.state) ? biggerThanQuickOf(steps.plan) : [];
-  // Not offered for a document the page cannot show: a decision on bytes nobody can read is not one to invite.
+  // Offered only for a document the page can show (its bytes were read and verified): no invitation to decide on bytes nobody can read, or that were never checked (a Markdown-era document).
   const waitedOn = built.find((entry) => entry.layer.document === currentDocumentType(workflow));
-  const digest = atGate(task) && waitedOn?.state !== "unreadable" ? waitingDocumentDigest(workflow) : undefined;
+  const digest = atGate(task) && waitedOn?.layer.content !== undefined ? waitingDocumentDigest(workflow) : undefined;
   return {
     spec: {
       taskId: task.taskId, path: workflow.path === "FULL" ? "full" : "quick", layers: built.map((entry) => entry.layer), decisions,

@@ -310,6 +310,8 @@ describe("GET /v1/dev/tasks/{id}/spec", () => {
     const steps = layerOf(await w.spec(owner, taskId), "steps")!;
     expect(steps).toMatchObject({ state: "waiting", version: 1, sha256: digest });
     expect(steps["content"]).toBeUndefined();
+    // Its bytes were never fetched or checked, so no decision on it is invited.
+    expect((await w.spec(owner, taskId)).waitingDocumentDigest).toBeUndefined();
   });
 
   it("model text is redacted before it is served", async () => {
@@ -394,6 +396,19 @@ describe("GET /v1/dev/tasks/{id}/spec", () => {
     const answer = await specOf({ store: w.fake.store, read: async (key, max) => { keys.push(key); const bytes = await w.blobs.get(key, max); return bytes === undefined ? undefined : new TextDecoder().decode(bytes); } }, task);
     expect(keys).toEqual([task.workflow!.artifacts[0]!.objectKey]);
     expect(answer.spec.layers![0]).toMatchObject({ state: "waiting" });
+  });
+
+  it("a document reader that THROWS (a store error, an object over the byte cap) makes the layer unreadable, not a failed read, and no digest is offered", async () => {
+    const w = await world();
+    const owner = w.person(OWNER_ID, FAKE_COMPANY);
+    const taskId = await w.taskOf(owner, "QUICK");
+    await w.write(taskId, "plan", quickPlan(), { stage: "waiting" });
+    const task = await w.record(taskId);
+    const answer = await specOf({ store: w.fake.store, read: async () => { throw new Error("the store is down"); } }, task);
+    expect(answer.spec.layers![0]).toMatchObject({ layer: "steps", state: "unreadable", approved: false, version: 1 });
+    expect(answer.spec.layers![0]!.content).toBeUndefined();
+    expect(answer.spec.decisions).toEqual([]);
+    expect(answer.spec.waitingDocumentDigest).toBeUndefined();
   });
 
   it("bigger-than-Quick is for a Quick task only: a Full task with a big coding plan lists none", async () => {
