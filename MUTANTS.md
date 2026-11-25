@@ -56,3 +56,53 @@ Measured on Code lane commit 47fb34900 (the lane rebased onto L1/L9b-code 6336ff
 | Cloud C5 | the role's Allow also holds `s3:DeleteObject` | 8 of 40 | green |
 
 No new money or authority line other than the IAM grants above; the template pin (environment-release-pipeline*.test.ts) and the `AgentXReleasePipeline` snapshot hold the synthesized result, and the pin was recomputed against the rebased base (the base's own template still matches the pin recorded before this lane, `291ca547...`).
+
+
+## GRANT-EXCHANGE-G1 (Git exchange: liveness, count, audit, log; two commits on base 97fdae1c0, mutants re-measured on the second)
+
+Tests: core `tests/unit/core-e2e-publication-callback.test.ts` with `tests/unit/core-close-recovery.test.ts` (the core's exchange, `packages/broker/src/services/repository-exchange.ts`), legacy `tests/contract/legacy-git-exchange.test.ts` (`packages/broker/src/aws/legacy-repository-exchange.ts` and `assertLegacyPushAuthority` in `packages/broker/src/aws/broker.ts`). Each mutant was applied alone to a scratch edit of the file, the named tests were run (`--maxWorkers=2`), and the file was restored from a copy. `tsc -b` was not re-run per mutant. Earlier rounds of this lane found survivors and fake-rejected mutants (a stale workspace object in the first tests; a mutated DynamoDB expression the fake rejects; after the Sonnet pre-review's fixes, a workspace check that was done twice, so removing either copy went unseen, and a legacy publish case that the new clone fence now hid): each was fixed by a test, by dropping the duplicate check (the workspace is now checked only in the transaction that takes the slot) or by a corrected mutant, and the whole list was re-run. The rows below are the final results.
+
+| Mutant | Result |
+| --- | --- |
+| core: CANCEL_REQUESTED refusal removed | killed (3 tests) |
+| core: not-live (ended) refusal removed | killed (4 tests) |
+| core: closing run refusal removed | killed (3 tests) |
+| core: push authority call removed | killed (12 tests) |
+| core: cap condition removed from the count | killed (2 tests) |
+| core: status condition removed from the count | killed (1 test) |
+| core: cap per repository (x repositories) made x1 | killed (3 tests) |
+| core: push audit failure swallowed (fail open) | killed (1 test) |
+| core: clone audit failure refused (fail closed) | killed (1 test) |
+| core: push not audited at all | killed (3 tests) |
+| core: coverage check removed before the count | killed (2 tests) |
+| core: log carries the nonce, not its hash (grant id) | killed (7 tests) |
+| access: grant id is not a hash of the nonce | killed (2 tests) |
+| legacy: CANCEL_REQUESTED refusal removed | killed (2 tests) |
+| legacy: not-live (ended) refusal removed | killed (4 tests) |
+| legacy: closing workspace refusal removed | killed (2 tests) |
+| legacy: authority call removed | killed (9 tests) |
+| legacy: cap condition removed | killed (2 tests) |
+| legacy: status condition removed from the count | killed (1 test) |
+| legacy: coverage check removed | killed (2 tests) |
+| legacy authority: fence compare removed | killed (2 tests) |
+| legacy authority: active operation compare removed | killed (3 tests) |
+| legacy authority: closed task refusal removed | killed (2 tests) |
+| legacy authority: pull request head compare removed | killed (1 test) |
+| legacy authority: workflow candidate compare removed | killed (1 test) |
+| legacy authority: publish without candidate not checked | killed (1 test) |
+| legacy authority: maintain not checked | killed (2 tests) |
+| core: the request's repository address is logged before the grant verifies | killed (1 test) |
+| core: the count's transaction does not check the workspace fence | killed (3 tests) |
+| core: the count's transaction does not check the active operation | killed (3 tests) |
+| core: the count's transaction does not check a closing workspace | killed (4 tests) |
+| core: a slot is never given back | killed (2 tests) |
+| core: a slot is not given back after a failed mint | killed (1 test) |
+| core: a slot is not given back after a failed audit | killed (1 test) |
+| core: the issued row is not written | killed (2 tests) |
+| core: a failed mint is not told apart (the host error passes through) | killed (1 test) |
+| legacy: a slot is never given back | killed (1 test) |
+| legacy: the request's repository address is logged before the grant verifies | killed (1 test) |
+| legacy: the cap is one repository's, not the grant's | killed (1 test) |
+| legacy authority: a clone is not held to the workspace fence | killed (2 tests) |
+
+The journeys (`tests/journeys/web-task.test.ts`, the two "Git exchange" cases) hold the same property end to end on the real core and are not mutated here; they run in every pull request run.
