@@ -2,6 +2,7 @@
 // The retry of a blocked Understand or Plan step. L6a leaves "the retry entry point for a BLOCKED Understand/Plan" to the sessions (L6b): a blocked step becomes READY again at the next
 // revision, with a dispatch row in the same commit, and the row is run at once (the recovery sweep does it otherwise).
 import { WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, agentXError, when, type TransactItem } from "@agentx/contracts";
+import { taskOwnerKey } from "../../developer/task-records.js";
 import type { TaskFlowDeps } from "./deps.js";
 import { dispatchRowItem } from "./dispatch-rows.js";
 import { readTask } from "./reads.js";
@@ -11,6 +12,15 @@ import { requireRoomUnderCap } from "./owner-round.js";
 import { iso } from "./support.js";
 import { startPublication } from "../build-step/publish.js";
 import { startChecksRerun, startReview } from "../build-step/start.js";
+
+/**
+ * The actor the checks rerun is recorded under: the task's CURRENT owner (the person its next step runs for), not the person who started it. A host that names no owner (the local one), or one that does not allow the
+ * step now, leaves the workflow's own owner, as it always was.
+ */
+export async function retryActorOf(deps: TaskFlowDeps, task: { taskId: string; developerId: string; project: string; workflow?: { ownerId: string } | undefined }): Promise<string> {
+  const verdict = await deps.access.checkStep(task);
+  return verdict.allowed && verdict.owner !== undefined ? taskOwnerKey(verdict.owner.personId, task.taskId) : task.workflow?.ownerId ?? taskOwnerKey(task.developerId, task.taskId);
+}
 
 export const NOTHING_TO_RETRY_STEP = "There is nothing to retry: the task is not blocked at a step Rovara can run again.";
 
@@ -24,7 +34,7 @@ async function requireRoomForOwnerRetry(deps: TaskFlowDeps, task: TaskRecord, au
   await requireRoomUnderCap({ roundCap: async (current) => { const limitUsd = await taskCapUsd(current); return limitUsd === undefined ? undefined : { limitUsd, spentUsd: await taskSpendUsd(current.taskId) }; } }, task);
 }
 
-export async function retryBlockedStep(deps: TaskFlowDeps, taskId: string, expectedRevision?: number, autoResume?: { expectedBlockReason: string; extra: readonly TransactItem[]; firstEvent: string }): Promise<void> {
+export async function retryBlockedStep(deps: TaskFlowDeps, taskId: string, expectedRevision?: number, autoResume?: { expectedBlockReason: string; extra: readonly TransactItem[]; firstEvent: string }, by?: string): Promise<void> {
   const task = await readTask(deps, taskId);
   const workflow = task?.workflow;
   if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.state !== "BLOCKED") throw agentXError("CONFIG_INVALID", NOTHING_TO_RETRY_STEP);
@@ -34,12 +44,12 @@ export async function retryBlockedStep(deps: TaskFlowDeps, taskId: string, expec
   // A blocked design review (a round, or the planner's answer to its findings) resumes through the review's own move; its blocked round's spend is already counted.
   if (autoResume === undefined && await deps.designReview?.retryBlocked(deps, task, expectedRevision)) return;
   await requireRoomForOwnerRetry(deps, task, autoResume !== undefined);
-  const ref = { taskId, workflowRevision: workflow.revision };
+  const ref = { taskId, workflowRevision: workflow.revision, by };
   const now = iso(deps);
   /** What the owner's Retry started: "STALE" means the step is not one that can be run again from where the task is. */
   const started = async (): Promise<string> => {
     switch (workflow.stage) {
-      case "VERIFY": return startChecksRerun(deps, ref, { requestId: `retry-${taskId}-${String(workflow.revision)}`, actorId: workflow.ownerId });
+      case "VERIFY": return startChecksRerun(deps, ref, { requestId: `retry-${taskId}-${String(workflow.revision)}`, actorId: await retryActorOf(deps, task) });
       case "REVIEW": return startReview(deps, ref, { retry: true });
       case "PULL_REQUEST": return startPublication(deps, ref, { ownerRetry: true });
       default: return "STALE";
@@ -55,7 +65,7 @@ export async function retryBlockedStep(deps: TaskFlowDeps, taskId: string, expec
     const { blockReason: _reason, pullRequestUpdateFailure: _failure, ...open } = workflow;
     void _reason; void _failure;
     const due = WorkflowSnapshotSchema.parse({ ...open, revision: workflow.revision + 1, stage: "PULL_REQUEST", state: "READY", updatedAt: now });
-    if (!(await commitWorkflow(deps, task, due, [dispatchRowItem(deps, taskId, due.revision, "PUBLISH", now)]))) throw agentXError("CONFIG_INVALID", "The task changed while you were retrying. Read it again.");
+    if (!(await commitWorkflow(deps, task, due, [dispatchRowItem(deps, taskId, due.revision, "PUBLISH", now, now, undefined, undefined, undefined, by)]))) throw agentXError("CONFIG_INVALID", "The task changed while you were retrying. Read it again.");
     await runDispatchRow(deps, { taskId, workflowRevision: due.revision, kind: "PUBLISH" });
     return;
   }
@@ -65,7 +75,7 @@ export async function retryBlockedStep(deps: TaskFlowDeps, taskId: string, expec
   const next = WorkflowSnapshotSchema.parse({ ...rest, revision: workflow.revision + 1, state: "READY", updatedAt: now });
   // The plan check is run again (the critiques kept so far stay): Cloud's Retry plan check.
   const kind = workflow.stage === "UNDERSTAND" ? "UNDERSTAND" as const : workflow.stage === "PLAN" ? "PLAN" as const : workflow.stage === "PLAN_CRITIQUE" ? "CRITIQUE" as const : "IMPLEMENT" as const;
-  const dispatch = dispatchRowItem(deps, taskId, next.revision, kind, now, now, undefined, undefined, autoResume?.firstEvent);
+  const dispatch = dispatchRowItem(deps, taskId, next.revision, kind, now, now, undefined, undefined, autoResume?.firstEvent, by);
   if (!(await commitWorkflow(deps, task, next, [dispatch, ...(autoResume?.extra ?? [])], [], autoResume === undefined ? undefined : when.notExists("stopRequest")))) throw agentXError("CONFIG_INVALID", "The task changed while you were retrying. Read it again.");
   await runDispatchRow(deps, { taskId, workflowRevision: next.revision, kind, ...(autoResume?.firstEvent === undefined ? {} : { firstEvent: autoResume.firstEvent }) });
 }

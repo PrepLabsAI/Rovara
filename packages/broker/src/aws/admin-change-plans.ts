@@ -18,7 +18,7 @@ import {
 import { adminSlackScope, adminProjects, channelLabels, getStateItem, latestProjectRecord, privateChannelsFor, queryAllItems, workspaceOwner, type AdminReadDependencies } from "./admin-reads.js";
 import { hashJson } from "./broker-shared.js";
 import type { CredentialRegistry } from "./credentials.js";
-import { COMPANY_IMPORT_MEMBERS_MAX, IMPLICIT_COMPANY_ID, companyInviteCodeId, type CompanyImportPreview } from "@agentx/contracts";
+import { COMPANY_IMPORT_MEMBERS_MAX, IMPLICIT_COMPANY_ID, CHANNEL_ACCESS_AFTER_REVOKE_WORDS, companyInviteCodeId, type CompanyImportPreview } from "@agentx/contracts";
 import { resolveAdminCompany } from "./company-check.js";
 import { planCompanyImport, planCompanyImportUndo, type CompanyImportReads } from "./install-company-import.js";
 
@@ -395,7 +395,7 @@ const planRevoke: Planner = async (deps, identity, input) => {
   if (current?.role !== "developer") throw agentXError("NOT_FOUND", `${describeDeveloper(resolved)} has no grant for ${input.project}, so there is nothing to revoke`);
   const project = input.project;
   const channelMembersMayUse = developerTaskPolicy(latest.definition).channelMembersMayUse;
-  const channels = channelMembersMayUse ? ` If they are a member of one of ${project}'s Slack channels, they keep access through it.` : "";
+  const channels = channelMembersMayUse ? CHANNEL_ACCESS_AFTER_REVOKE_WORDS : "";
   return {
     effect: `Revoke the granted access of ${describeDeveloper(resolved)}${notSignedIn(resolved, false)} to project ${project}. Their running tasks keep running.${channels}`,
     details: { developerId: resolved.developerId, via: resolved.via, project },

@@ -53,7 +53,7 @@ describe("the phases and steps", () => {
 describe("the pills", () => {
   it("are the mock's words plus the owner's three, each with a tone and an icon, and no two share words", () => {
     expect(PILL_KEYS.map((key) => PILLS[key].words)).toEqual(["Needs you", "Needs the task owner", "Rovara is working", "Rovara is fixing it", "Waiting", "In review", "Stopped", "Merged", "Closed"]);
-    expect(Object.values(NEEDS_ROLE_WORDS)).toEqual(["Needs the task owner", "Needs a company admin"]);
+    expect(Object.values(NEEDS_ROLE_WORDS)).toEqual(["Needs the task owner", "Needs a project admin", "Needs a company admin"]);
     for (const key of PILL_KEYS) { expect(PILL_TONES, key).toContain(PILLS[key].tone); expect(PILLS[key].icon.length, key).toBeGreaterThan(0); }
     const words = [...PILL_KEYS.filter((key) => key !== "needs_role").map((key) => PILLS[key].words), ...Object.values(NEEDS_ROLE_WORDS)];
     expect(new Set(words).size).toBe(words.length);

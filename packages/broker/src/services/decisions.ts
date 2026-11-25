@@ -17,7 +17,7 @@ import { createDecisionActions } from "../core/decisions/local-actions.js";
 import { WORKFLOW_DOCUMENT_KIND, createWorkflowDocumentSubject, currentDocumentType, type WorkflowSubjectOptions } from "../core/decisions/workflow-subject.js";
 import { checkDesignApproval, designApprovalRecordItems, gradeApprovalRisk } from "../core/design-review/decision.js";
 import { loadPlanDocument, planFactsOf } from "../core/plan/document.js";
-import { dispatchRowItem } from "../core/task-flow/dispatch-rows.js";
+import { pressedRowItem } from "../core/task-flow/dispatch-rows.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 import { planFeedbackKey } from "../core/task-flow/stage-machine.js";
 import { breakdownForApproval } from "../core/work-breakdown/plan-graph.js";
@@ -53,15 +53,15 @@ export function createDecisionService(options: DecisionServiceOptions): Decision
   // The decision's own steps (coding starts, the design's approval record), as they were before work events.
   const decided = ({ taskId, before, after, attempt, at, approver, risk }: Pick<Parameters<NonNullable<WorkflowSubjectOptions["onDecided"]>>[0], "taskId" | "before" | "after" | "attempt" | "at" | "approver" | "risk">): readonly TransactItem[] => {
     // The plan was approved: coding starts with no one asking, as a row like every automatic step.
-    if (after.stage === "IMPLEMENT" && after.state === "READY" && before.stage !== "IMPLEMENT") return [dispatchRowItem(flow, taskId, after.revision, "IMPLEMENT", at)];
+    if (after.stage === "IMPLEMENT" && after.state === "READY" && before.stage !== "IMPLEMENT") return [pressedRowItem(flow, taskId, after.revision, "IMPLEMENT", at, approver.personId)];
     if (after.stage !== "PLAN" || after.state !== "READY" || before.stage === "PLAN") return [];
     // An approved design leaves its approval record under its digest (who, at what tier, the blockers and the reason) for the pull request's Proof section.
     const approval = designApprovalRecordItems({ taskId, before, after, attempt, approverId: approver.personId, approverLabel: approver.displayName ?? approver.personId, risk, at });
-    if (approval.length > 0) return [...approval, dispatchRowItem(flow, taskId, after.revision, "PLAN", at)];
+    if (approval.length > 0) return [...approval, pressedRowItem(flow, taskId, after.revision, "PLAN", at, approver.personId)];
     const text = (attempt.reason ?? "").trim();
     return [
       ...(text === "" ? [] : [{ kind: "put" as const, item: { ...planFeedbackKey(taskId, after.revision), entityType: "PLAN_FEEDBACK", text, createdAt: at } }]),
-      dispatchRowItem(flow, taskId, after.revision, "PLAN", at),
+      pressedRowItem(flow, taskId, after.revision, "PLAN", at, approver.personId),
     ];
   };
   // Slice A4: a decision is a workflow change like any other, so its work events (the wait that ended, the send-back it is) join its transaction, when the flow writes them.

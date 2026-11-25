@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { CHANNEL_ACCESS_AFTER_REVOKE_WORDS } from "@agentx/contracts";
 import { planChange, stateHash, type PlanDependencies } from "../../packages/broker/src/aws/admin-change-plans.js";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { createAdminReadBroker } from "../support/admin-read-broker.js";
@@ -149,5 +150,17 @@ describe("the workspace limits (E19, FR-053)", () => {
     expect(plan.effect).toContain("Slack member U0PERSON09 (2 open), and 4 more.");
     expect(plan.effect).toContain("The organization is at or over its new limit.");
     expect(plan.details).toMatchObject({ organizationCount: 28, over: 14 });
+  });
+});
+
+describe("ARCH RULING (b): what a revoked person keeps through the project's Slack channel", () => {
+  it("says the channel still lets them read and comment but never own a task, in the words-table sentence", async () => {
+    const { deps, identity, db } = await harness();
+    db.set({ pk: `MEMBER#${MAYA.developerId}`, sk: "PROJECT#payments", entityType: "MEMBERSHIP", ownerKey: MAYA.developerId, projectName: "payments", role: "developer" });
+    const plan = await planChange(deps, identity, { kind: "revoke_project_access", project: "payments", developer: MAYA.developerId });
+    expect(plan.effect).not.toContain("they keep access through it");
+    expect((plan.snapshot as { channelMembersMayUse?: boolean }).channelMembersMayUse).toBe(true);
+    expect(plan.effect).toContain(CHANNEL_ACCESS_AFTER_REVOKE_WORDS);
+    expect(plan.effect).toContain("Through the project's Slack channel they can still read the plan comments and code changes of tasks shared there, and comment. They cannot open, start or own tasks.");
   });
 });

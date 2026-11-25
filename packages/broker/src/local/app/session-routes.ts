@@ -6,7 +6,7 @@ import {
   AgentXError, IntentAnswerRefusal, TaskCloseActionSchema, SESSION_ACTIONS, SessionIdSchema, WorkflowTransitionError, agentSessionKey, agentXError,
   type AgentSessionRecord, type OrgId, type SessionId,
 } from "@agentx/contracts";
-import { AGENT_SESSION_CONTRACT_VERSION, OWNER_LEFT_PROJECT_WORDS } from "@agentx/contracts";
+import { AGENT_SESSION_CONTRACT_VERSION, OWNER_LEFT_PROJECT_WORDS, OWNER_UNREADABLE_WORDS, chargedToWords } from "@agentx/contracts";
 import { closeHasDigest } from "../../core/task-flow/close-acceptance.js";
 import { parseBody } from "../../core/task-flow/owner-round.js";
 import type { ControlResult } from "../../core/sessions/control.js";
@@ -27,6 +27,8 @@ import { createLocalSessionControl } from "./host.js";
 import { answerUnderstandQuestions } from "./answers.js";
 import { developerTaskView } from "./task-view.js";
 import { taskOwnerView } from "../../developer/task-owner-view.js";
+import { currentPress } from "../../core/task-flow/current-press.js";
+import { gatewayChargesMember } from "../../core/cost/task-payer.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
 import type { SecondReview } from "../../core/second-review/index.js";
 
@@ -70,7 +72,10 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
   const followerDeps = { store, members: deps.members, ...(flow.deps.now === undefined ? {} : { now: flow.deps.now }) };
   /** A row of the list, with the person's own level on that session. */
   const maySeeMoney = (task: TaskRecord, you: SessionAccess, caller: TaskCaller): boolean => caller.scriptToken === undefined && caller.principal.companyId === deps.companyId && task.companyId === deps.companyId
-    && (you.orgAdmin || you.companyRole === "member" && taskOwnerView(task)?.developerId === caller.principal.personId);
+    && (you.orgAdmin || you.companyRole === "member" && !you.listedBelowOwner && taskOwnerView(task)?.developerId === caller.principal.personId);
+  /** The money is the payer's too: a member who owns the task and is the person its next step is charged to (a task handed or taken over to them) sees its figures, as the starter did. */
+  const isPayer = (task: TaskRecord, you: SessionAccess, caller: TaskCaller, payer: { personId: string } | undefined): boolean => caller.scriptToken === undefined && you.owner && you.companyRole === "member"
+    && caller.principal.companyId === deps.companyId && task.companyId === deps.companyId && payer?.personId === caller.principal.personId;
   const summaryFor = (session: AgentSessionRecord, revealMoney: boolean) => {
     if (revealMoney) return session.summary;
     const { costUsd: _spent, runLimitUsd: _limit, stopAtUsd: _stop, ...summary } = session.summary;
@@ -95,23 +100,47 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
   });
 
   /**
-   * The words an admin reads when the task's owner no longer holds the task's project (read now, from the one words table). The owner is named by the task record; the hosted members seam proves a person by a principal,
-   * so the owner's is rebuilt from the task and the reader's own (same company and sign-in), and believed only when it names the session's effective owner. Undefined: for the owner, with no members seam (a laptop), or
-   * when the owner cannot be named; and while the owner holds the project.
+   * The words a reader who is not the owner reads when NOBODY who owns the task still has access to its project (read now, from the one words table): the starter's grant is looked at first (the cheap read: a task whose
+   * starter still holds the project is never flagged), and then the host's own step rule: it allows the step (and names the owner) while someone who owns the task passes, and refuses when none does. The owner is named by
+   * the task record; the hosted members seam proves a person by a principal, so the starter's is rebuilt from the task and the reader's own (same company and sign-in), and believed only when it names the session's
+   * starter. Undefined: for an owner, with no members seam (a laptop), when the starter cannot be named, and while someone who owns the task holds the project.
    */
   const ownerLeft = async (session: AgentSessionRecord, you: SessionAccess, task: TaskRecord | undefined, caller: TaskCaller): Promise<string | undefined> => {
     const personId = task === undefined ? undefined : taskOwnerView(task)?.developerId;
     const members = deps.members;
-    if (members === undefined || you.owner || session.kind !== "task" || session.project === undefined || personId === undefined) return undefined;
-    const principal = { ...caller.principal, personId, displayName: you.effectiveOwner.name, roles: ["member"] };
-    if (developerIdOf(principal) !== you.effectiveOwner.developerId) return undefined;
-    try { return await members.projectGrant({ companyId: session.orgId, developerId: you.effectiveOwner.developerId, principal }, session.project) === undefined ? OWNER_LEFT_PROJECT_WORDS : undefined; } catch { return undefined; }
+    if (members === undefined || you.owner || session.kind !== "task" || session.project === undefined || personId === undefined || task === undefined) return undefined;
+    const principal = { ...caller.principal, personId, displayName: session.owner.name, roles: ["member"] };
+    if (developerIdOf(principal) !== session.owner.developerId) return undefined;
+    try {
+      if (await members.projectGrant({ companyId: session.orgId, developerId: session.owner.developerId, principal }, session.project) !== undefined) return undefined;
+      const step = await flow.deps.access.checkStep(task);
+      // The starter's own rule (a task with no People list) refuses in its own words; a list refuses in the one no-owner sentence; only "could not read" says nothing.
+      return !step.allowed && step.message !== OWNER_UNREADABLE_WORDS ? OWNER_LEFT_PROJECT_WORDS : undefined;
+    } catch { return undefined; }
+  };
+
+  /** Who the task's next step is charged to, by the host's own step rule (the task's current owner): undefined for a task that has ended, for a host that names none, and for a read that does not answer. */
+  const payerOf = async (task: TaskRecord): Promise<{ personId: string; name: string } | undefined> => {
+    // Only where the gateway charges a member (the step's requester) is anyone named: a project-paid, Linear, event or schedule task says nothing of who pays (core/cost/task-payer.ts, the same guard).
+    if (task.closedAt !== undefined || !gatewayChargesMember(task)) return undefined;
+    try {
+      const step = await flow.deps.access.checkStep(task, await currentPress(flow.deps, task));
+      return step.allowed && step.owner !== undefined ? { personId: step.owner.personId, name: step.owner.name ?? "a member" } : undefined;
+    } catch { return undefined; }
+  };
+
+  /** The pressing owner as the host's owner rule names them for the task (the actor the change is recorded under, and the People fence of the move): `{ acting }`, or nothing where the host names none (a laptop). */
+  const actingOf = async (taskId: string, caller: TaskCaller): Promise<{ acting?: NonNullable<Awaited<ReturnType<NonNullable<typeof flow.deps.access.ownerActing>>>> }> => {
+    const task = await readTask(flow.deps, taskId);
+    const acting = task === undefined || flow.deps.access.ownerActing === undefined ? undefined
+      : await flow.deps.access.ownerActing(caller.principal, { taskId: task.taskId, developerId: task.developerId, project: task.project, ownerKey: task.workflow?.ownerId ?? task.ownerKey });
+    return acting === undefined ? {} : { acting };
   };
 
   /** A row of the list for this person: the tile, with the words when the task's owner no longer holds its project. */
   const tileFor = async (session: AgentSessionRecord, level: string, you: SessionAccess, task: TaskRecord | undefined, caller: TaskCaller): Promise<Record<string, unknown>> => {
     const left = await ownerLeft(session, you, task, caller);
-    return { ...tile(session, level, task !== undefined && maySeeMoney(task, you, caller)), ...(left === undefined ? {} : { ownerLeft: left }) };
+    return { ...tile(session, level, task !== undefined && (maySeeMoney(task, you, caller) || (you.owner && isPayer(task, you, caller, await payerOf(task))))), ...(left === undefined ? {} : { ownerLeft: left }) };
   };
 
   const view = async (session: AgentSessionRecord, you: SessionAccess, caller: TaskCaller): Promise<Record<string, unknown>> => {
@@ -119,15 +148,17 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
     const task = await readTask(flow.deps, session.subject.taskId);
     if (task === undefined || task.companyId !== deps.companyId) throw agentXError("NOT_FOUND", "There is no such session.");
     const snapshot = sessionSnapshot(session);
-    const revealMoney = maySeeMoney(task, you, caller);
+    // The payer is the task's CURRENT owner (what the starter's steps already spent stays with the starter); the starter while nobody has changed it.
+    const payer = await payerOf(task);
+    const revealMoney = maySeeMoney(task, you, caller) || isPayer(task, you, caller, payer);
     return JSON.parse(JSON.stringify({
       contractVersion: AGENT_SESSION_CONTRACT_VERSION, sessionId: session.sessionId, kind: session.kind, mode: session.mode, title: session.title, project: session.project, agent: session.agent,
       owner: session.owner, startedBy: session.startedBy, where: session.where, status: session.summary.status, step: session.summary.step, peek: session.summary.peek, lastRunFailed: session.summary.lastRunFailed,
-      cost: { ...(revealMoney ? { spentUsd: session.summary.costUsd, ...(session.summary.runLimitUsd === undefined ? {} : { runLimitUsd: session.summary.runLimitUsd }) } : {}), payer: { kind: "member", name: session.owner.name } },
+      cost: { ...(revealMoney ? { spentUsd: session.summary.costUsd, ...(session.summary.runLimitUsd === undefined ? {} : { runLimitUsd: session.summary.runLimitUsd }) } : {}), payer: { kind: "member", name: payer?.name ?? session.owner.name } },
       approvals: [], followers: session.followerCount, viewingNow: await viewingNow(store, session, (flow.deps.now?.() ?? new Date()).getTime()),
       you: {
         level: you.level, owner: you.owner, following: you.owner || (await store.get(agentSessionKey(session.orgId, session.sessionId, `FOLLOWER#${developerIdOf(caller.principal)}`))) !== undefined,
-        actions: actionsFor(you, snapshot.actions), ...(await ownerLeft(session, you, task, caller) === undefined ? {} : { ownerLeft: OWNER_LEFT_PROJECT_WORDS }), ...(you.mayAsk && deps.ask !== undefined ? { live: { ask: true } } : {}),
+        actions: actionsFor(you, snapshot.actions), ...(await ownerLeft(session, you, task, caller) === undefined ? {} : { ownerLeft: OWNER_LEFT_PROJECT_WORDS }), ...(revealMoney && payer !== undefined ? { chargedTo: chargedToWords(payer.name) } : {}), ...(you.mayAsk && deps.ask !== undefined ? { live: { ask: true } } : {}),
       },
       link: `${deps.origin()}/v1/app/sessions/${session.sessionId}`, bindings: await sessionBindingsOf(store, session.orgId, session.sessionId), legs: session.legs, revision: session.revision, createdAt: session.createdAt, updatedAt: session.updatedAt, endedAt: session.endedAt,
       body: { kind: "task", task: await developerTaskView(task, await taskViewOf(flow.deps, task), deps.blobs, deps.secondReview?.taskView(task, task.workflow?.candidate?.digest), undefined, revealMoney) },
@@ -233,7 +264,8 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
         // Only the task's effective owner may press (their own live message asked for the change).
         requireLevelOf(you, "edit", "revise its plan");
         if (!you.owner) throw agentXError("SESSION_LEVEL_REQUIRED", `Only ${you.effectiveOwner.name} can revise this plan with their message.`);
-        await revisePlanWithLiveMessage(flow.deps, orgId, sessionId, { taskId: session.subject.taskId, ownerDeveloperId: you.effectiveOwner.developerId }, body);
+        // The press is recorded under the pressing owner as the host's rule names them (the task's current owner), with the People fence.
+        await revisePlanWithLiveMessage(flow.deps, orgId, sessionId, { taskId: session.subject.taskId, ownerDeveloperId: you.effectiveOwner.developerId, by: caller.principal.personId, ...await actingOf(session.subject.taskId, caller) }, body);
         return json(200, { session: await see((await sessions.get(orgId, sessionId)) ?? session) });
       }
       throw agentXError("NOT_FOUND", "route not found");
@@ -268,7 +300,7 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
     const taskId = session.subject.kind === "task" ? session.subject.taskId : undefined;
     if (taskId === undefined) throw agentXError("NOT_FOUND", "There is no such session.");
     await answerUnderstandQuestions(flow.deps, {
-      taskId, round: typeof body["round"] === "number" ? body["round"] : -1, answers: body["answers"], by: { name: caller.principal.displayName }, source: caller.client === "mcp" || caller.client === "cli" ? caller.client : "app",
+      taskId, round: typeof body["round"] === "number" ? body["round"] : -1, answers: body["answers"], by: { name: caller.principal.displayName, personId: caller.principal.personId }, source: caller.client === "mcp" || caller.client === "cli" ? caller.client : "app",
     });
   }
 }

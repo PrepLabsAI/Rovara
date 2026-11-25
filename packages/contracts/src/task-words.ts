@@ -55,7 +55,7 @@ export const ROLE_KEYS = ["task_owner", "co_owner", "project_admin", "company_ad
 export type RoleKey = (typeof ROLE_KEYS)[number];
 export const ROLE_WORDS: Readonly<Record<RoleKey, string>> = { task_owner: "task owner", co_owner: "co-owner", project_admin: "project admin", company_admin: "company admin" };
 /** The words of the `needs_role` pill, by the role that is needed. */
-export const NEEDS_ROLE_WORDS: Readonly<Partial<Record<RoleKey, string>>> = { task_owner: "Needs the task owner", company_admin: "Needs a company admin" };
+export const NEEDS_ROLE_WORDS: Readonly<Partial<Record<RoleKey, string>>> = { task_owner: "Needs the task owner", project_admin: "Needs a project admin", company_admin: "Needs a company admin" };
 
 /** The pill rows: words (the `needs_role` row's are in `NEEDS_ROLE_WORDS`), the tone a surface colours it by and the icon key it draws. A surface never maps a key to words: it draws the words Code serves. */
 export const PILLS: Readonly<Record<PillKey, { words: string; tone: PillTone; icon: string }>> = {
@@ -134,10 +134,33 @@ export const STATUS_LINES = {
 } as const;
 
 /**
- * What an admin who can still see a task reads when its owner no longer has access to the task's project (they were removed from it): nobody is waiting on that person, and what the reader can do today. Served by the
- * session view and the work list; a surface never words it itself. Taking such a task over is not offered yet.
+ * The ONE "no owner" sentence: what a task says when nobody who owns it still has access to its project (its starter was removed from the project, every co-owner is gone, or the People list names no owner who passes the
+ * live proof), so the next step was refused and nobody can decide for it. It is the reason the workflow is blocked with (the step's own refusal) and what an admin who can still see the task reads on the session view and the
+ * work list; it reads as "Needs a project admin" (`NEEDS_ROLE_WORDS.project_admin`). A surface never words it itself. Whoever is listed on the task's People may take it over; nobody is left to decide it otherwise.
  */
 export const OWNER_LEFT_PROJECT_WORDS = "The owner of this task no longer has access to this project, so nobody can decide it for them. A project admin or company admin can stop it, or merge its pull request.";
+
+/** The step's refusal when who owns the task could not be read just now (a People or proof read failed): a retry asks again. Never "no owner": nobody has been found to lack access. */
+export const OWNER_UNREADABLE_WORDS = "Rovara could not check who owns this task just now, so it did not start the next step. Press Retry in a moment.";
+
+/**
+ * ARCH RULING (b), DEC 254zzz523: a task OWNER needs an INDIVIDUAL project grant (the owner is the step's requester, the one the model gateway charges). Someone who reaches the project only through its Slack
+ * channel may be a commenter or a viewer, never an owner. The one refusal sentence for every place that would make such a person an owner: a role change, a take-over, a hand-over, and what People shows.
+ */
+export const OWNER_NEEDS_GRANT_WORDS = "Only someone added to this project can own a task. A project admin can add them to the project first.";
+
+/** The task page's history line for a read's demotion of an owner who holds no grant of their own (nobody did it, so no actor is named; they keep the channel, so it is never "lost access"). */
+export const ownerNeedsGrantHistoryWords = (name: string): string => `${name} is now a commenter: only someone added to this project can own a task.`;
+
+/**
+ * The rest of a revoke-access plan's effect when the project lets its Slack channel's members in: what that channel access still gives the person, and what it never does (it never makes them an owner).
+ * True as the channel-only person's tests show it (tests/contract/channel-only-person-new-engine.test.ts): they read the plan comments and the code changes of a task SHARED into the channel, and comment; they cannot open,
+ * start or own a task. The ONE place the sentence lives, so an owner's answer on shares changes it here.
+ */
+export const CHANNEL_ACCESS_AFTER_REVOKE_WORDS = " Through the project's Slack channel they can still read the plan comments and code changes of tasks shared there, and comment. They cannot open, start or own tasks.";
+
+/** Who pays for the task's next step, as the session view says it (the name is the current owner's display name, cut and made safe by the caller). The one sentence every surface shows for it. */
+export const chargedToWords = (name: string): string => `Charged to ${name}`;
 
 /** The one-line notices that are not a status (nobody is asked): a company admin who is not the task's owner stopped the owner's task. The name is the admin's display name, cut and made safe by the caller. */
 export const NOTICE_WORDS = {

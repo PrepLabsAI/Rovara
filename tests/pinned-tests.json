@@ -356,6 +356,12 @@
       "minimumTests": 5,
       "reason": "PROJECT-GRANT-RECHECK (arch question 3): what a channel-only person (no grant, in the project's bound Slack channel) can do on the new engine: open a task by link, hold any People role (viewer, commenter, owner), start a task or act from its Slack thread are all refused (grant only); the page's plan comments and diff still admit them as a commenter (resolveCoreTaskAccess, the channel-commenter rule), and the core's events and readers routes refuse them. The floor is the file's 5 runnable declarations, and deleting or trimming one is a reviewed edit.",
       "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/journeys/task-takeover-a.test.ts",
+      "minimumTests": 7,
+      "reason": "TASK-TAKEOVER PR A (briefs/arch-cleanup/TASK-TAKEOVER-A-DONE.md): a task's next step runs for its CURRENT owner, not for the person who started it, and the one charged is the owner. (a) the company-removal hand-over end to end: an in-flight People-list task, the starter removed with a named successor, the next step runs for the successor; (b) the orphaned-list Take ownership by a listed person, then the next step runs for them; (c) after a hand-over the session says who is charged, the starter's earlier steps stay with the starter, the leaver reads nothing; (d) nobody who owns the task still has the project: the step is refused in the one no-owner sentence; (e) a step is charged to the person who pressed it, and refused when that person lost the project by dispatch; (f) with two live owners the non-decider's Retry is charged to them; (g) a Slack person with no grant of their own cannot start a task on any start path (web and CLI route, Slack thread, the checkStart the tracker and chat thread ask). Real hosted wiring, a real worker, the company member routes and the task page's People confirm. The floor is the file's 7 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
     }
   ],
   "pendingRestore": []

@@ -228,6 +228,8 @@ export interface DispatchRowRecord {
   planPrompt?: string;
   /** Fixed first event for an automatic retry of an exact blocked workflow step. */
   firstEvent?: string;
+  /** The person whose press made this step due (an owner's approval, send-back, retry, answers, findings): the step is charged to them while they are still an owner who passes. A sibling attribute: absent means nobody pressed (a step the system continued). */
+  by?: string;
   /** A CRITIQUE row: who approved running the design review without a price (the cost hold's "run it anyway"). Only this lets a round start from the hold. */
   costApprovedBy?: string;
   /** An AUTOFIX row: how the block it looks at came about when no finished run wrote it (the run was lost, or its start was tried until the budget ran out). */

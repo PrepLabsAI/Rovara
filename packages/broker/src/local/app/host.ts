@@ -31,8 +31,8 @@ export function createSessionControlHost(deps: TaskFlowDeps, options: { expected
       return prepareTaskCloseAcceptance(deps, { principal, client: "app" }, taskId, input, sessionId);
     },
 
-    async retryWorkflow(taskId) {
-      await retryBlockedStep(deps, taskId, options.expectedRevision);
+    async retryWorkflow(taskId, _requestId, by) {
+      await retryBlockedStep(deps, taskId, options.expectedRevision, undefined, by);
     },
 
     /**
