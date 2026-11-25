@@ -96,6 +96,27 @@ describe("reading the stamp", () => {
     integrity.mockRestore();
   });
 
+  // D1 pre-review MUST-3: a workspace with no company discovery pointer is the core's only when the task its pointer names is stamped.
+  it("a legacy workspace is the core's only when its task pointer names a stamped task: no pointer, an unstamped task or a malformed task id is not", async () => {
+    const pointerTo = (db: FakeDynamoDb, workspaceId: string, taskId: unknown) => db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "DEVELOPER_TASK", taskId });
+    const none = new FakeDynamoDb();
+    expect(await isCoreWorkspace(table(none), randomUUID())).toBe(false);
+    const unstamped = new FakeDynamoDb(), unstampedWorkspace = randomUUID();
+    pointerTo(unstamped, unstampedWorkspace, randomUUID());
+    expect(await isCoreWorkspace(table(unstamped), unstampedWorkspace)).toBe(false);
+    const malformed = new FakeDynamoDb(), malformedWorkspace = randomUUID();
+    pointerTo(malformed, malformedWorkspace, "not-a-task-id");
+    const stampReads: string[] = [];
+    const watched = { send: async (command: unknown) => { const key = (command as { input?: { Key?: { pk?: string } } }).input?.Key?.pk ?? ""; if (key.startsWith("TASK_ENGINE#")) stampReads.push(key); return malformed.send(command as never); } };
+    expect(await isCoreWorkspace({ documentClient: watched, tableName: "state" }, malformedWorkspace)).toBe(false);
+    // a malformed id is answered without asking for any stamp
+    expect(stampReads).toEqual([]);
+    const stamped = new FakeDynamoDb(), stampedWorkspace = randomUUID(), stampedTask = randomUUID();
+    pointerTo(stamped, stampedWorkspace, stampedTask);
+    stamped.set({ ...engineStampKey(stampedTask), coreEngine: CORE });
+    expect(await isCoreWorkspace(table(stamped), stampedWorkspace)).toBe(true);
+  });
+
   it("reads the core's answer: a value for 200, the closed-list error otherwise, and fixed words for anything it cannot read (never echoed)", () => {
     expect(coreAnswerValue({ statusCode: 200, headers: {}, body: "{\"task\":{\"taskId\":\"t\"}}" })).toEqual({ task: { taskId: "t" } });
     expect(() => coreAnswerValue({ statusCode: 404, headers: {}, body: JSON.stringify({ error: { code: "TASK_NOT_FOUND", message: "task not found" } }) })).toThrow(expect.objectContaining({ code: "TASK_NOT_FOUND" }));

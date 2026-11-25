@@ -612,6 +612,19 @@ describe("ec2-ebs delivery", () => {
 
   });
 
+  // D1-2 pre-review S1: an outbox record the retired old workflow engine queued as its internal E2E warm-up never reaches the worker as an ordinary `resume`.
+  it("refuses a record that carries the retired E2E readiness marker, before any session or POST, and still delivers the same record without it", async () => {
+    const marked = { ...recordFor(), workflowE2EReadiness: { purpose: "WORKFLOW_E2E_READINESS" } } as unknown as Ec2OutboxRecord;
+    const d = delivery();
+    await expect(d.deliver(marked, marked.invocation)).rejects.toMatchObject({ message: expect.stringContaining("CALLBACK_FORBIDDEN") as string });
+    expect(d.post).not.toHaveBeenCalled();
+    expect(d.progress).not.toHaveBeenCalled();
+    const { workflowE2EReadiness: _marker, ...plain } = marked;
+    void _marker;
+    await d.deliver(plain, plain.invocation);
+    expect(d.post).toHaveBeenCalledOnce();
+  });
+
   it("fails an attempt when the worker refuses, and when the workspace has no ec2-ebs binding", async () => {
     const refused = delivery({ post: async () => ({ status: 401, body: "{\"reason\":\"expired\"}" }) });
     const record = recordFor();

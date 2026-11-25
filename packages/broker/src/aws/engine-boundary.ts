@@ -75,6 +75,11 @@ async function readItem(table: EngineStateTable, key: { pk: string; sk: string }
   return response.Item;
 }
 
+/** A mark item that is there but is not a mark (garbage): unlike a failed read, which says nothing about the task, this one is a fact about the item. */
+export class EngineStampUnreadableError extends Error {
+  constructor() { super("a task's engine stamp could not be read"); this.name = "EngineStampUnreadableError"; }
+}
+
 /**
  * The task's mark (undefined: none, which is no core task's). A read that fails throws, and so does a mark item that is there but cannot be read as one: only the core's start writes that
  * item, so it is never taken for "not the core's".
@@ -83,7 +88,7 @@ export async function readTaskStamp(table: EngineStateTable, taskId: string): Pr
   const item = await readItem(table, engineStampKey(taskId));
   if (item === undefined) return undefined;
   const stamp = stampOf(item);
-  if (stamp === undefined) throw new Error("a task's engine stamp could not be read");
+  if (stamp === undefined) throw new EngineStampUnreadableError();
   return stamp;
 }
 

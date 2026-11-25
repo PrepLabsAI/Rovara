@@ -112,3 +112,60 @@ describe("the task list in company mode with old rows newest", () => {
     expect(() => scope.check(true)).not.toThrow();
   });
 });
+
+// D1-2 pre-review MUST-2 and S2 (DEC 254zzz502): a mark item that is garbage is skipped and logged, a mark read that FAILED is never taken for "old".
+describe("the task list when a task's mark cannot be read", () => {
+  const stampGet = (command: unknown): string | undefined => {
+    const input = (command as { input?: { Key?: { pk?: string; sk?: string } } }).input;
+    return input?.Key?.sk === "STAMP" ? input.Key.pk : undefined;
+  };
+  const listLogged = (client: { send(command: unknown): Promise<unknown> }, query: string, logged: Array<Record<string, unknown>>) => routeDeveloperTaskRequest({ documentClient: client, tableName: "state", companyId: COMPANY, developer: {}, taskReaderPerson: HOLDS_PROJECT, log: (line: Record<string, unknown>) => { logged.push(line); } } as never, caller,
+    { method: "GET", path: `/v1/dev/tasks${query}`, headers: {} } as never, new URL(`/v1/dev/tasks${query}`, "https://agentx.invalid")) as Promise<{ tasks: Array<{ taskId: string }>; nextCursor?: string }>;
+  const rows = (db: FakeDynamoDb) => {
+    const [newest, middle, oldest] = [randomUUID(), randomUUID(), randomUUID()];
+    seed(db, newest, "2026-11-03T00:00:00.000Z", true);
+    seed(db, middle, "2026-11-02T00:00:00.000Z", true);
+    seed(db, oldest, "2026-11-01T00:00:00.000Z", true);
+    return { newest, middle, oldest };
+  };
+
+  it("a mark item that is there but is garbage is skipped and logged (task id and error name only), and the other rows are listed", async () => {
+    const db = new FakeDynamoDb();
+    const { newest, middle, oldest } = rows(db);
+    db.set({ ...engineStampKey(middle), entityType: "TASK_ENGINE", coreEngine: "garbage" });
+    const logged: Array<Record<string, unknown>> = [];
+    const page = await listLogged(db, "?limit=50", logged);
+    expect(page.tasks.map((row) => row.taskId)).toEqual([newest, oldest]);
+    expect(page.nextCursor).toBeUndefined();
+    expect(logged).toEqual([{ event: "developer.task_list_mark_unreadable", taskId: middle, error: "EngineStampUnreadableError" }]);
+  });
+
+  it("a mark read that FAILS never hides the task: the page ends before its row with the cursor at the last good row, and the next call lists it", async () => {
+    const db = new FakeDynamoDb();
+    const { newest, middle, oldest } = rows(db);
+    let failing = true;
+    const flaky = { send: async (command: unknown) => { if (failing && stampGet(command) === `TASK_ENGINE#${middle}`) throw new Error("ProvisionedThroughputExceededException"); return db.send(command as never); } };
+    const logged: Array<Record<string, unknown>> = [];
+    const first = await listLogged(flaky, "?limit=50", logged);
+    expect(first.tasks.map((row) => row.taskId)).toEqual([newest]);
+    expect(first.nextCursor).toBeDefined();
+    expect(logged).toEqual([]);
+    // the same failure with no progress to resume from is a retryable error, never a page without the task
+    await expect(listLogged(flaky, `?limit=50&cursor=${first.nextCursor}`, logged)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    failing = false;
+    const rest = await listLogged(flaky, `?limit=50&cursor=${first.nextCursor}`, logged);
+    expect(rest.tasks.map((row) => row.taskId)).toEqual([middle, oldest]);
+  });
+
+  it("a company read limit raised by a mark read still ends the page with a cursor at the last row fully examined", async () => {
+    const db = new FakeDynamoDb();
+    const { newest, middle } = rows(db);
+    const limited = { send: async (command: unknown) => { if (stampGet(command) === `TASK_ENGINE#${middle}`) throw agentXError("CONFIG_INVALID", "company read limit exceeded"); return db.send(command as never); } };
+    const page = await listLogged(limited, "?limit=50", []);
+    expect(page.tasks.map((row) => row.taskId)).toEqual([newest]);
+    expect(page.nextCursor).toBeDefined();
+    // with no progress to resume from it is the budget's own error, not the retryable one a failed read gets
+    const first = { send: async (command: unknown) => { if (stampGet(command) === `TASK_ENGINE#${newest}`) throw agentXError("CONFIG_INVALID", "company read limit exceeded"); return db.send(command as never); } };
+    await expect(listLogged(first, "?limit=50", [])).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+  });
+});

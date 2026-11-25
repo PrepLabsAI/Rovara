@@ -116,6 +116,9 @@ export interface Ec2DeliveryDependencies {
 export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
   return async (record: Ec2OutboxRecord, invocation: WorkerInvocation, context?: { remainingTimeMs: () => number }): Promise<Ec2Delivery> => {
     const remainingTimeMs = context?.remainingTimeMs ?? dependencies.remainingTimeMs;
+    // D1-2 (pre-review S1): a record queued by the retired old workflow engine's internal E2E warm-up (it carries the readiness marker) "must never reach the worker"; the marker is no longer judged here, and `resume` is an
+    // ordinary worker invocation now, so such a record still in flight at deploy is refused rather than sent on as a real resume.
+    if (record.workflowE2EReadiness !== undefined) throw deliveryRefusal("CALLBACK_FORBIDDEN", "the internal E2E readiness operation is retired and cannot be delivered");
     const guardCurrentAuthority = async () => {
       if (invocation.kind === "project-setup-smoke") {
         if (dependencies.guardProjectSetupDispatch === undefined) throw deliveryRefusal("RUNTIME_UNAVAILABLE", "project setup smoke authority is not configured");

@@ -47,7 +47,7 @@ import { listTaskComments, type SlackRequestQueue } from "../developer/page-comm
 import { pageCommentsPrompt, promptComments } from "../developer/owner-answers.js";
 import type { TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
 
-import { involvedOnCore, isCoreTask, isCoreTaskThatExists, serveCoreTaskRoute, startOnCore, taskEntryOperation, type CoreTaskEntry } from "./engine-boundary.js";
+import { EngineStampUnreadableError, involvedOnCore, isCoreTask, isCoreTaskThatExists, serveCoreTaskRoute, startOnCore, taskEntryOperation, type CoreTaskEntry } from "./engine-boundary.js";
 import { missingTaskWords } from "../core-host/task-route-answer.js";
 import { type WorkflowSnapshot } from "@agentx/contracts";
 import { workflowDocumentName } from "../developer/workflow-messages.js";
@@ -513,6 +513,9 @@ async function listRowDetail(deps: DeveloperTaskRouteDependencies, caller: Devel
   return parsed.success ? parsed.data : {};
 }
 
+/** A task's mark could not be read because the read failed (not because the mark is garbage). */
+class MarkReadFailed extends Error {}
+
 const isCompanyReadLimit = (error: unknown): boolean => error instanceof CompanyReadItemLimit || (error instanceof AgentXError && error.code === "CONFIG_INVALID" && error.message.includes("company read limit exceeded"));
 
 async function listTasks(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, url: URL): Promise<{ tasks: Array<DeveloperTaskListItem & DeveloperTaskListDetail>; nextCursor?: string }> {
@@ -546,10 +549,12 @@ async function listTasks(deps: DeveloperTaskRouteDependencies, caller: Developer
       const rows = response.Items ?? [];
       for (const [position, row] of rows.entries()) {
         // DEC 254zzz502: an index row whose task has no core mark (its stamp item) is a task the retired old workflow started: it is no longer listed (its records are kept, not deleted). The mark is read per row.
-        // A mark that cannot be read (a damaged item, or a failed read) is no core task's: the row is skipped and the person's list is not lost (PROJECT-GRANT-RECHECK: fail closed, per task). A company read bound still ends the page.
+        // A mark item that is there but is garbage is no core task's: the row is skipped and the person's list is not lost (PROJECT-GRANT-RECHECK: fail closed, per task). A mark read that FAILED says nothing about
+        // the task, so it is never taken for "old": the page ends before the row (see the catch below), and a company read bound still ends the page.
         const core = await isCoreTask(deps, row.taskId).catch((markError: unknown) => {
           if (isCompanyReadLimit(markError)) throw markError;
-          log(deps, { event: "developer.task_list_mark_unreadable", taskId: row.taskId, error: markError instanceof Error ? markError.name : "unknown" });
+          if (!(markError instanceof EngineStampUnreadableError)) throw new MarkReadFailed();
+          log(deps, { event: "developer.task_list_mark_unreadable", taskId: row.taskId, error: markError.name });
           return false;
         });
         if (!core) {
@@ -591,6 +596,11 @@ async function listTasks(deps: DeveloperTaskRouteDependencies, caller: Developer
     // never an error, as long as the page made progress (DEC 254zzz502, D1-2 test review S2).
     const outOfBudget = isCompanyReadLimit(error);
     if (outOfBudget && completed !== after && completed !== undefined) return { tasks, nextCursor: encodeCursor(completed) };
+    // A failed mark read ends the page before its row, the cursor staying at the last row fully examined, so the row is read again by the next call and never skipped; with no progress yet it is a retryable error.
+    if (error instanceof MarkReadFailed) {
+      if (completed !== after && completed !== undefined) return { tasks, nextCursor: encodeCursor(completed) };
+      throw agentXError("RUNTIME_UNAVAILABLE", "The task list could not be read right now; try again");
+    }
     throw error;
   }
   return { tasks };
