@@ -36,6 +36,8 @@ async function memberOf(company: NonNullable<MintCheckDependencies["company"]>, 
   const member = await company.membership(personId);
   if (member !== undefined || !legacySeat || company.join === undefined) return member;
   const joined = await company.join({ personId, companyId: IMPLICIT_COMPANY_ID });
+  // A join that could not READ or WRITE is not "not a member": the caller answers the retryable 503 and ends nothing (membership-read.ts).
+  if (!joined.ok && joined.readFailed === true) throw membershipReadFailed();
   return joined.ok ? joined.membership : undefined;
 }
 

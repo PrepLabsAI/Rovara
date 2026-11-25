@@ -100,8 +100,9 @@ it.each(paths.flatMap((path) => damages.map((damage) => ({ path, damage }))))("$
   }
   const answer = await h.run();
   // Existing admin-ending wording remains on the CLI/browser path.
-  // A membership read that THROWS is not a refusal: the client path answers the retryable 503 (nothing served, nothing ended). A read that answers (missing, revoked, malformed) refuses as before.
-  expect(answer).toEqual(damage === "member-read" && path === "client" ? { status: 503, message: "RUNTIME_UNAVAILABLE: AgentX could not reach AWS just now; try again in a moment" }
+  // A read that THROWS (the membership row, the company's sign-in settings, the identity row) is not a refusal: every path (CLI, browser, client) answers the retryable 503, nothing served and nothing ended.
+  // A read that answers (missing, revoked, malformed) refuses as before; the session row's own read is not this lane's and still refuses.
+  expect(answer).toEqual(["member-read", "issuer-read", "developer-read"].includes(damage) ? { status: 503, message: "RUNTIME_UNAVAILABLE: AgentX could not reach AWS just now; try again in a moment" }
     : damage === "developer-ended" && path !== "client" ? { status: 401, message: "AUTH_REQUIRED: an AgentX admin ended your sign-in; run agentx login <url> again" } : h.refused);
   expect(JSON.stringify(answer)).not.toContain("private-canary");
 });

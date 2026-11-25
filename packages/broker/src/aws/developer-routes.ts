@@ -510,9 +510,10 @@ async function getSignIn<T>(deps: DeveloperRouteDependencies, pk: string): Promi
 async function requireSessionSurvivor(deps: DeveloperRouteDependencies, session: SessionRecord, refused: () => Error): Promise<void> {
   if (session.signedInId === undefined) return;
   try {
-    const walk = await mergeSurvivor((id) => getSignIn(deps, `DEVELOPER#${id}`), session.signedInId);
+    // A hop whose read FAILS is not a revoked hop: it answers the retryable 503 and ends nothing (membership-read.ts); a walk that refuses (a revoked hop, a cycle, another survivor) is the refusal.
+    const walk = await mergeSurvivor((id) => readingMembership(() => getSignIn(deps, `DEVELOPER#${id}`)), session.signedInId);
     if (walk.survivorId !== session.developerId) throw refused();
-  } catch { throw refused(); }
+  } catch (error) { rethrowMembershipReadFailure(error); throw refused(); }
 }
 
 /** Reuse consistent sign-in identity reads within one verifier/request, never across requests. */
@@ -564,7 +565,7 @@ async function companyOidcSession(deps: DeveloperRouteDependencies, session: Ses
     }).safeParse(deps.serverReadBudget === undefined ? await scope.read(async () => session) : session);
     if (!parsed.success) throw new Error("session record");
     const key = companyIssuerKey(companyId);
-    const response = await scope.client.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: key, ConsistentRead: true })) as { Item?: unknown };
+    const response = await readingMembership(() => scope.client.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: key, ConsistentRead: true }))) as { Item?: unknown };
     // DEC 254b (a): a company with no issuer row signs in only through the install's own OIDC (the shared method), and only a session the sign-in
     // server marked so; the install's switch and since time then hold, as for the built-in company. A company with any issuer row never takes it.
     if (response.Item === undefined) {
@@ -576,12 +577,16 @@ async function companyOidcSession(deps: DeveloperRouteDependencies, session: Ses
     const issuer = CompanyIssuerRecord.extend({ pk: z.literal(key.pk), sk: z.literal("OIDC") }).safeParse(response.Item);
     if (!issuer.success || !issuer.data.enabled || (issuer.data.requiredValues.length > 0 && issuer.data.requiredClaim === undefined)
       || startedBeforeMethodOn(session.startedAt, Math.max(issuer.data.enabledSince, issuer.data.since ?? 0))) throw new Error("issuer policy");
-    const developer = await getSignIn<DeveloperRecord>({ ...deps, documentClient: scope.client }, `DEVELOPER#${session.developerId}`);
+    const developer = await readingMembership(() => getSignIn<DeveloperRecord>({ ...deps, documentClient: scope.client }, `DEVELOPER#${session.developerId}`));
     if (developer === undefined || developer.provider !== "oidc"
       || developer.issuer !== issuer.data.issuer.replace(/\/+$/, "") || developer.revoked !== false) throw new Error("issuer identity");
     scope.check();
     return developer;
-  } catch { throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN); }
+  } catch (error) {
+    // The session company's membership, the company's sign-in settings and the identity row are reads: one that FAILED is the retryable 503 (membership-read.ts), never "your sign-in has ended".
+    rethrowMembershipReadFailure(error);
+    throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  }
 }
 
 export async function authenticateDeveloper(deps: DeveloperRouteDependencies, claims: Record<string, unknown> | undefined): Promise<DeveloperCaller> {

@@ -333,8 +333,14 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     return [...enabledMethods(deps).filter((method) => method === "slack"), "oidc"];
   };
   /** Recheck live membership at each mint (session-mint.ts holds the check: the canary's session function runs the same code). */
-  function companyMayMint(personId: string, amr: DeveloperSignInMethod, companyId: string | undefined, registered: SignInClientRecord | undefined, legacy = false, installMethod?: true): Promise<boolean> {
-    return mayMint({ company: deps.company, slackCompany, companyless: companylessMayMint }, personId, amr, companyId, registered, legacy, installMethod);
+  async function companyMayMint(personId: string, amr: DeveloperSignInMethod, companyId: string | undefined, registered: SignInClientRecord | undefined, legacy = false, installMethod?: true): Promise<boolean> {
+    try {
+      return await mayMint({ company: deps.company, slackCompany, companyless: companylessMayMint }, personId, amr, companyId, registered, legacy, installMethod);
+    } catch (error) {
+      // Kind only, never the cause: a permanent 503 (a corrupt row, a misconfigured reader) must be visible, and a passing one is the retryable answer (membership-read.ts).
+      if (isMembershipReadFailure(error)) deps.log({ event: "signin.membership_read_failed", amr });
+      throw error;
+    }
   }
   /**
    * DEC 253z: a person with no company may hold a session only from the install's own OIDC sign-in, to the install-level web app with full access,
@@ -885,7 +891,15 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   }
 
   async function authorizationCodeGrant(form: URLSearchParams, methods: DeveloperSignInMethod[], client: SignInClientRecord | undefined): Promise<HttpResult> {
-    const redeemed = await store.redeemCode({ code: form.get("code") ?? "", verifier: form.get("code_verifier") ?? "", redirectUri: form.get("redirect_uri") ?? "" });
+    // The membership reads run on the code's grant BEFORE the code is burned: a read that FAILS answers the retryable 503 with the code still usable (a retry works). Only a failure is acted on here;
+    // a refusal is answered after the redemption below, exactly as before, so an unverified caller learns nothing about the person from a refused check.
+    const code = form.get("code") ?? "";
+    const peeked = await store.peekCode(code);
+    if (peeked !== undefined && peeked.clientId === client?.clientId) {
+      await stillSeated(peeked.signedInId, peeked.developerId);
+      await companyMayMint(peeked.developerId, peeked.amr, peeked.companyId, client, false, peeked.installMethod);
+    }
+    const redeemed = await store.redeemCode({ code, verifier: form.get("code_verifier") ?? "", redirectUri: form.get("redirect_uri") ?? "" });
     if (redeemed === undefined) return oauthError(400, ...INVALID_CODE);
     // A code is redeemed only by the client it was issued to (it is burned either way).
     if (redeemed.clientId !== client?.clientId) return oauthError(400, ...INVALID_CODE);
