@@ -692,7 +692,7 @@ export class DocumentLessonStore implements LessonStore {
   async manifests(key: ScopeKey, taskId: string): Promise<LoadManifest[]> {
     // A replay copy's loads are filed under `EVALLOAD#` (so a live counter's scan never meets them); a read for that one task meets both.
     const items = [...await this.queryPrefix(key, `LOAD#${taskId}#`, { entityType: "LESSON_LOAD" }), ...await this.queryPrefix(key, `EVALLOAD#${taskId}#`, { entityType: "LESSON_LOAD" })];
-    return items.map((item) => dropInternal(item) as unknown as LoadManifest).filter((m) => m.taskId === taskId).sort((a, b) => a.at - b.at);
+    return items.map((item) => dropInternal(item) as unknown as LoadManifest).filter((m) => m.taskId === taskId && Array.isArray(m.lessons)).sort((a, b) => (typeof a.at === "number" ? a.at : 0) - (typeof b.at === "number" ? b.at : 0));
   }
   async updateManifest(manifest: LoadManifest): Promise<void> {
     await this.writeRefs(manifest);

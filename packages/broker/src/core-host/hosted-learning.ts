@@ -78,6 +78,7 @@ export function hostedLessonsLearning(
       gatewayUrl: settings.gatewayUrl,
       ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      now,
       async token(call) {
         // The company is the port's, never the call's: another company's workspace, or a call with no project of ours, gets no token.
         if (call.workspaceId !== companyId) return undefined;
