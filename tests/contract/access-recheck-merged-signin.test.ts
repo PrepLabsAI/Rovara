@@ -214,7 +214,6 @@ describe.each(paths)("shared merged sign-in guard: %s", (path) => {
 
   it("fails closed on an unreadable identity after a successful request", async () => {
     const w = pathWorld(path);
-    const refused = await w.refusal();
     expect((await w.check()).status).toBe(200);
     const writes = w.writes.length;
     w.db.injectFault({ command: "GetCommand", match: (input) => (input.Key as { pk?: string }).pk === `DEVELOPER#${FIRST}`, error: { name: "ServiceUnavailable" } });

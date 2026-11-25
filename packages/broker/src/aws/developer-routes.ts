@@ -828,7 +828,7 @@ async function grantsOf(deps: DeveloperRouteDependencies, caller: ProjectAccessS
  * with more grant rows than the web proof reads) stays a refusal and is never mistaken for a failed read.
  */
 function markedReads(deps: DeveloperRouteDependencies): DeveloperRouteDependencies {
-  return { ...deps, documentClient: { send: (command: unknown) => readingMembership(() => deps.documentClient.send(command)) } as DeveloperRouteDependencies["documentClient"] };
+  return { ...deps, documentClient: { send: (command: unknown) => readingMembership(() => deps.documentClient.send(command)) } };
 }
 
 /**
