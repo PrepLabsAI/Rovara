@@ -11,7 +11,7 @@ import { statSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, openReviewFindings, type WorkflowSnapshot } from "../../packages/contracts/src/index.js";
+import { REASON_WORDS, STATUS_LINES, WORKFLOW_BLOCK_REASONS, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, openReviewFindings, type WorkflowSnapshot } from "../../packages/contracts/src/index.js";
 import { createJourneyWorld, type JourneyWorld } from "./harness/hosted-core.js";
 import { findings, reviewerSteps, type ReviewerScript } from "./harness/reviews.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
@@ -28,6 +28,13 @@ async function flowOf(w: JourneyWorld, taskId: string): Promise<WorkflowSnapshot
   const read = await w.maya("GET", `/v1/dev/tasks/${taskId}`);
   expect(read.status, JSON.stringify(read.body).slice(0, 300)).toBe(200);
   return (read.body.task as { workflow: WorkflowSnapshot }).workflow;
+}
+/** What the owner reads of the task's standing (F2-B): the status line (state, reason, next) and the pill with the moves offered, from the task read. */
+async function standingOf(w: JourneyWorld, taskId: string) {
+  const read = await w.maya("GET", `/v1/dev/tasks/${taskId}`);
+  expect(read.status, JSON.stringify(read.body).slice(0, 300)).toBe(200);
+  const task = read.body.task as { statusView: { state: string; reason?: string; next?: string }; standing: { pill: { words: string }; actions: Array<{ id: string }> } };
+  return { status: task.statusView, pill: task.standing.pill.words, actions: task.standing.actions.map((action) => action.id) };
 }
 /** What Rovara recorded about why it stopped and asked the owner (the ask card's record on the task row). */
 const askOf = (w: JourneyWorld, taskId: string) => (w.harness.db.get(`DEVTASK#${taskId}`, "META") as { autofixAsk?: { reason: string; codes: string[]; workflowRevision: number } } | undefined)?.autofixAsk;
@@ -280,15 +287,24 @@ describe("journey 14: reviews in depth", () => {
     const waiting = await flowOf(w, taskId);
     expect({ stage: waiting.stage, state: waiting.state, reviewRuns: operationsOf(w, "REVIEW") }, "the reviews are due, not started").toEqual({ stage: "REVIEW", state: "WAITING", reviewRuns: [] });
     // The recovery sweep tries again with a growing wait, then gives up and says so (the sweep is the deployment's own schedule; the clock is the world's).
+    let trying: Awaited<ReturnType<typeof standingOf>> | undefined;
     for (let sweep = 0; sweep < 12 && (await flowOf(w, taskId)).state === "WAITING"; sweep += 1) {
       w.harness.world.clock.advance(16 * 60_000);
       await w.harness.runtime.flow.sweepOnce();
+      // After the first failed retry and while the sweep still has attempts left (F2-B): the owner reads Waiting with the table's fixed words, is asked nothing, and the storage error's text is not shown.
+      if (sweep === 0 && (await flowOf(w, taskId)).state === "WAITING") trying = await standingOf(w, taskId);
     }
+    expect({ state: trying?.status.state, reason: trying?.status.reason, pill: trying?.pill, retry: trying?.actions.includes("task.review") }, "still trying: waiting, nobody is asked").toEqual({ state: "checking", reason: REASON_WORDS.waitStartReviews, pill: "Waiting", retry: false });
+    expect(JSON.stringify(trying), "the storage error is not shown while trying").not.toContain("ProvisionedThroughputExceededException");
     const gaveUp = await flowOf(w, taskId);
-    // stage-machine.ts:457-466: after DISPATCH_ROW_ATTEMPTS_MAX failed starts the row is given up and the owner reads "Rovara could not start the <step>: <the error's own message>". The old engine's fixed words
-    // (WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, "AgentX couldn't start the reviews automatically. Use Retry reviews to try again.") are not the core's; the core's carry the storage error's text (see A1-9-DONE.md).
-    expect({ stage: gaveUp.stage, state: gaveUp.state, reason: gaveUp.blockReason }, "what the owner reads once Rovara gives up").toEqual({ stage: "REVIEW", state: "BLOCKED",
-      reason: "Rovara could not start the reviews: DynamoDB asked to slow down (ProvisionedThroughputExceededException) on transaction" });
+    // stage-machine.ts:457-466 (F2-B): after DISPATCH_ROW_ATTEMPTS_MAX failed starts the row is given up and the owner reads the table's fixed words (WORKFLOW_BLOCK_REASONS.reviewsCouldNotStart: "Rovara could not start the reviews. Press Retry.");
+    // the storage error's own text stays in the dispatch row and the log, never in what a person reads.
+    expect({ stage: gaveUp.stage, state: gaveUp.state, reason: gaveUp.blockReason }, "what the owner reads once Rovara gives up").toEqual({ stage: "REVIEW", state: "BLOCKED", reason: WORKFLOW_BLOCK_REASONS.reviewsCouldNotStart });
+    expect(gaveUp.blockReason, "the raw storage text is not what the owner reads").not.toMatch(/DynamoDB|ProvisionedThroughput/u);
+    const gaveUpStanding = await standingOf(w, taskId);
+    expect(gaveUpStanding, "Needs you, in the table's words, with Retry offered").toMatchObject({ status: { state: "needs_you", reason: STATUS_LINES.reviewsCouldNotStart.reason, next: STATUS_LINES.reviewsCouldNotStart.next }, pill: "Needs you" });
+    expect(gaveUpStanding.actions, "Retry reviews is offered").toContain("task.review");
+    expect(JSON.stringify(gaveUpStanding), "no raw storage text anywhere in what the owner reads").not.toMatch(/DynamoDB|ProvisionedThroughput/u);
     expect({ reviewRuns: operationsOf(w, "REVIEW"), pullRequests: w.harness.world.host.model.changeRequests.length }, "nothing ran, nothing was sent to the code host").toEqual({ reviewRuns: [], pullRequests: 0 });
     // The table answers again; the owner's Retry starts the reviews, which run on the same code and open the pull request.
     stopRefusing();
@@ -333,15 +349,18 @@ describe("journey 14: reviews in depth", () => {
     world.proof.assertAllCore();
   }, 180_000);
 
-  it("KNOWN GAP (F2-B required case): a blocked review shows the owner no decision card and the task read says only 'the code review did not pass'; flips when standing returns Needs you and the review-could-not-finish reason", async () => {
+  it("a blocked review (its answer unreadable) is Needs you for the owner: the status line says the review could not finish and to retry it, Retry reviews is offered; the task read's own block reason is still the generic one, and the owner's decision list holds no card for it", async () => {
     world = await createJourneyWorld();
     const taskId = await reviewed(world, { CODE: ["PROSE", "PROSE"] });
     const read = (await world.maya("GET", `/v1/dev/tasks/${taskId}`)).body.task as { status: string; workflow: WorkflowSnapshot };
-    // TODAY: the task read's words are the generic block reason, though the review never gave a verdict (its own failure reason, INVALID_JSON, is on the review, not in the words), and the task's status reads SUCCEEDED
-    // while it waits for the owner at the reviews.
+    // The workflow's own block reason is unchanged (the review never gave a verdict; its failure reason, INVALID_JSON, is on the review), and the task's status reads SUCCEEDED while it waits for the owner at the reviews.
     expect({ status: read.status, stage: read.workflow.stage, state: read.workflow.state, reason: read.workflow.blockReason, failure: read.workflow.reviews!.find((review) => review.role === "CRITIC")?.failureReason },
       "the task read").toEqual({ status: "SUCCEEDED", stage: "REVIEW", state: "BLOCKED", reason: "the code review did not pass", failure: "INVALID_JSON" });
-    // TODAY: the owner's list of decisions waiting for them does not hold it (the ask is recorded on the task row only).
+    // F2-B: what the owner is told is the table's words, Needs you, with Retry reviews offered (an unfinished review: no send back, no stop).
+    const standing = await standingOf(world, taskId);
+    expect({ status: standing.status, pill: standing.pill }, "the owner is told why a person is needed").toEqual({ status: { state: "needs_you", reason: STATUS_LINES.reviewCouldNotFinish.reason, next: STATUS_LINES.reviewCouldNotFinish.next, nextOthers: STATUS_LINES.reviewCouldNotFinish.nextOthers }, pill: "Needs you" });
+    expect(standing.actions, "Retry reviews is offered").toContain("task.review");
+    // The owner's list of decisions waiting for them does not hold it (the ask is recorded on the task row only).
     const cards = await world.maya("GET", "/v1/app/decisions");
     expect(cards.status).toBe(200);
     expect((cards.body.cards as Array<{ taskId?: string }>).filter((card) => card.taskId === taskId), "no decision card for the blocked review").toEqual([]);
