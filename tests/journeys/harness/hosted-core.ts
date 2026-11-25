@@ -26,6 +26,10 @@ import { call } from "../../support/slack-broker.js";
 import { fakeLinear, LINEAR_APP, LINEAR_WEBHOOK_SECRET, testSealer, type FakeLinearUser, type FakeWorkspace } from "../../support/fake-linear-oauth.js";
 import { LinearConnections } from "../../../packages/broker/src/aws/linear-connections.js";
 import { companyMembershipFromDynamo } from "../../../packages/broker/src/aws/company-check.js";
+import { companyMemberActionsThroughLambda } from "../../../packages/broker/src/aws/company-member-forwarding.js";
+import { CompanySignInStore } from "../../../packages/broker/src/developer/company-membership.js";
+import { companyOperator } from "../../../packages/broker/src/developer/company-operator.js";
+import { ownerKeyForSubject } from "../../../packages/broker/src/aws/lambda.js";
 import { createCoreProof } from "./core-proof.js";
 
 export { MAYA, OMAR };
@@ -36,7 +40,7 @@ const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, 
 type Json = Record<string, unknown>;
 export interface Reply { status: number; body: Json }
 
-export async function createJourneyWorld(options: { modelGateway?: { url: string; model: string }; world?: FakeWorldOptions; linear?: boolean; page?: boolean; colleague?: { role: "member" | "admin"; grant: "developer" | "administrator" }; workerTimeouts?: { reviewMs?: number }; chatPerson?: NonNullable<Parameters<typeof createCoreBrowserBroker>[0]>["chatPerson"] } = {}) {
+export async function createJourneyWorld(options: { modelGateway?: { url: string; model: string }; world?: FakeWorldOptions; linear?: boolean; page?: boolean; members?: boolean; colleague?: { role: "member" | "admin"; grant: "developer" | "administrator" }; workerTimeouts?: { reviewMs?: number }; chatPerson?: NonNullable<Parameters<typeof createCoreBrowserBroker>[0]>["chatPerson"] } = {}) {
   const proof = createCoreProof();
   // Linear (journeys 3 and 4): the company's connection over the broker's table, the fake Linear behind the fetch seam, and the webhook route on the broker's front.
   const linearLogs: Array<Record<string, unknown>> = [];
@@ -53,10 +57,13 @@ export async function createJourneyWorld(options: { modelGateway?: { url: string
   // `companies`, broker.ts:15993). The shared fixture gives it only with Linear on, so a page journey asks for it, over the same table.
   const pageTable: { current?: { send(command: unknown, options?: unknown): Promise<unknown> } } = {};
   const lazyPageTable = { send: (command: unknown, sendOptions?: unknown) => pageTable.current!.send(command, sendOptions) };
+  // The company's member routes (journey 16: a removal with a hand-over): the broker's own member helper over the same sign-in table, the way the deployed Lambda answers it.
+  const memberActions = options.members !== true ? undefined : companyMemberActionsThroughLambda({ documentClient: lazyPageTable, tableName: "signin", invoke: async (payload) => ({
+    Payload: Buffer.from(JSON.stringify(await companyOperator({ store: new CompanySignInStore({ documentClient: lazyPageTable, tableName: "signin", now: Date.now }), now: Date.now, log: () => undefined }, JSON.parse(Buffer.from(payload).toString("utf8")) as unknown))) }) });
   /** What the core logged, in order (a journey that proves a line was written reads it; no line carries a secret). */
   const coreLogs: Array<Record<string, unknown>> = [];
-  const harness = await createCoreBrowserBroker({ wrapCore: (root) => proof.wrap(root), ...(options.chatPerson === undefined ? {} : { chatPerson: options.chatPerson }), realJobServices: true, log: (entry) => { coreLogs.push(entry); }, ...(options.modelGateway === undefined ? {} : { modelGateway: options.modelGateway }), ...(options.world === undefined ? {} : { world: options.world }), ...(linearOption === undefined ? {} : { linear: linearOption }),
-    ...(options.page !== true ? {} : { developerExtra: { companies: companyMembershipFromDynamo(lazyPageTable, "signin"), taskPeopleConfiguration: { peopleChangesEnabled: true } } }) });
+  const harness = await createCoreBrowserBroker({ wrapCore: (root) => proof.wrap(root), ...(options.chatPerson === undefined ? {} : { chatPerson: options.chatPerson }), ...(options.members === true ? { taskPeopleProof: true } : {}), realJobServices: true, log: (entry) => { coreLogs.push(entry); }, ...(options.modelGateway === undefined ? {} : { modelGateway: options.modelGateway }), ...(options.world === undefined ? {} : { world: options.world }), ...(linearOption === undefined ? {} : { linear: linearOption }),
+    ...(options.page !== true && options.members !== true ? {} : { developerExtra: { companies: companyMembershipFromDynamo(lazyPageTable, "signin"), taskPeopleConfiguration: { peopleChangesEnabled: true }, ...(memberActions === undefined ? {} : { companyMembers: memberActions }) } }) });
   pageTable.current = harness.db;
   const handler = proof.track(harness.handler);
   // The web app's sign-in client is an install-level client (the company routes of Linear's connection and links need it).
@@ -80,6 +87,24 @@ export async function createJourneyWorld(options: { modelGateway?: { url: string
   harness.db.set({ pk: `COMPANY_MEMBER#${PRIYA.developerId}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: PRIYA.developerId, companyId: harness.runtime.flow.deps.companyId, role: options.colleague?.role ?? "member", joinedAt: "2026-11-01T00:00:00.000Z" });
   harness.db.set({ pk: `ORG#${harness.runtime.flow.deps.companyId}#MEMBER#${PRIYA.developerId}`, sk: "PROJECT#payments", entityType: "MEMBERSHIP", ownerKey: PRIYA.developerId, projectName: "payments", grantId: randomUUID(), role: options.colleague?.grant ?? "developer", companyId: harness.runtime.flow.deps.companyId });
   const priya = as(PRIYA);
+  /**
+   * A second kind of person: one who signed in on the web (an `oidc` sign-in, so the task People proof can name them: its web proof needs a developer id that is its own sign-in subject's key). A company member with
+   * the project grant asked for; the same rows the sign-in, the membership and the grant write. Returns the person and their web client.
+   */
+  const addWebPerson = (input: { name: string; subject: string; role?: "member" | "admin" | "owner"; grant?: "developer" | "administrator" }): { who: Developer; ask: ReturnType<typeof as> } => {
+    const issuer = "https://signin.example.test";
+    const developerId = ownerKeyForSubject(issuer, input.subject);
+    const who: Developer = { developerId, name: input.name, provider: "oidc", sessionId: `s-${input.subject}` };
+    const companyId = harness.runtime.flow.deps.companyId;
+    // The sign-in server's session rows for a company's person: a uuid session id, the company, and the install's own sign-in method (the company has no issuer of its own).
+    const session = { developerId, amr: "oidc", companyId, installMethod: true, startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 604_800 };
+    harness.db.set({ pk: `SESSION#${who.sessionId}`, sk: "META", sessionId: randomUUID(), ...session });
+    harness.db.set({ pk: `SESSION#${WEB_CLIENT.clientId}-${who.sessionId}`, sk: "META", sessionId: randomUUID(), clientId: WEB_CLIENT.clientId, ...session });
+    harness.db.set({ pk: `DEVELOPER#${developerId}`, sk: "META", entityType: "DEVELOPER", developerId, provider: "oidc", issuer, subject: input.subject, displayName: input.name, firstSignInAt: "x", lastSignInAt: "x", revoked: false });
+    harness.db.set({ pk: `COMPANY_MEMBER#${developerId}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: developerId, companyId, role: input.role ?? "member", joinedAt: "2026-11-01T00:00:00.000Z" });
+    if (input.grant !== undefined) harness.db.set({ pk: `ORG#${companyId}#MEMBER#${developerId}`, sk: "PROJECT#payments", entityType: "MEMBERSHIP", ownerKey: developerId, projectName: "payments", grantId: randomUUID(), role: input.grant, companyId });
+    return { who, ask: as(who) };
+  };
   const omarAsk = as(OMAR);
   /** Another company's member: every request is answered by the core, as a missing task's request is. */
   const omar = omarAsk;
@@ -204,9 +229,9 @@ export async function createJourneyWorld(options: { modelGateway?: { url: string
   }
 
   /** The owner approves the plan on the web: the decision card the web app lists, its digest, the approve press (the real decision routes, no row written). */
-  async function approvePlan(taskId: string): Promise<void> {
+  async function approvePlan(taskId: string, owner: typeof maya = maya): Promise<void> {
     const read = async () => {
-      const listed = await maya("GET", "/v1/app/decisions");
+      const listed = await owner("GET", "/v1/app/decisions");
       expect(listed.status, JSON.stringify(listed.body)).toBe(200);
       return listed;
     };
@@ -218,8 +243,8 @@ export async function createJourneyWorld(options: { modelGateway?: { url: string
     expect(card, "the plan is waiting for the owner as a decision card").toBeDefined();
     const shownDigest = (listed.body.digests as Record<string, string>)[card!.id];
     const path = card!.id.replace(":", "/");
-    if (card!.risk === "medium") expect((await maya("POST", `/v1/app/decisions/${path}/evidence-opened`, { shownDigest, requestId: randomUUID() })).status).toBe(200);
-    const approved = await maya("POST", `/v1/app/decisions/${path}/approve`, { shownDigest, requestId: randomUUID() });
+    if (card!.risk === "medium") expect((await owner("POST", `/v1/app/decisions/${path}/evidence-opened`, { shownDigest, requestId: randomUUID() })).status).toBe(200);
+    const approved = await owner("POST", `/v1/app/decisions/${path}/approve`, { shownDigest, requestId: randomUUID() });
     expect(approved.status, JSON.stringify(approved.body)).toBe(200);
   }
 
@@ -386,7 +411,7 @@ export async function createJourneyWorld(options: { modelGateway?: { url: string
   })();
 
   return {
-    harness, proof, linear, coreLogs, handler, as, maya, priya, omar, omarAsk, root, repository, baseCommit, faux, handPosted, taskRow,
+    harness, proof, linear, coreLogs, handler, as, addWebPerson, maya, priya, omar, omarAsk, root, repository, baseCommit, faux, handPosted, taskRow,
     prepare, holdPrepare, runStep, startStep, stepEnd, approvePlan, publish, postWorkerCallback, exchangeGrant, refuseWrites, dispatchOnly, pumpDispatcher, tampered, tamperWithResults: (transform: ((body: Json) => Json) | undefined) => { resultTransform = transform; }, runJobs, linkGithubAsConnected, linkColleagueGithub, saveMergeRules,
     async close() { for (const step of cleanups.splice(0).reverse()) await step(); },
   };

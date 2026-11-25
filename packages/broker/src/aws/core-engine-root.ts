@@ -60,6 +60,7 @@ import { CORE_DISPATCH_QUEUE, codeAdapterModules, type CodeModuleDeps } from "..
 import { resolveTaskPeopleAccess, type TaskPeopleDependencies, type CheckTaskPerson } from "../developer/task-people.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
 import { taskOwnerKey } from "../developer/task-records.js";
+import { listedStepVerdict } from "./hosted-step-owner.js";
 import { isWholeLimit, MAX_PER_PERSON, MAX_PER_ORGANIZATION, readWorkspaceLimits } from "../developer/limits.js";
 import { costUsdOf } from "../core/cost/ledger.js";
 import { estimatePathOf, recordRunCost, runCostInputOf } from "../core/cost/estimate.js";
@@ -623,9 +624,14 @@ export function hostedTaskAccess(inputs: {
         items: [{ kind: "check", key: { pk: `DEVTASK#${task.taskId}`, sk: "PEOPLE" }, condition: allowed.revision === undefined ? when.absent() : when.eq("revision", allowed.revision) }],
       };
     },
-    async checkStep(task) {
+    async checkStep(task, by) {
       // A task whose developer is a system owner takes the system rule (the task's own stored row, read now), never the member rules.
       if (isSystemOwnerId(task.developerId)) return checkSystemOwnerStep(task);
+      // A task with a People list runs for its CURRENT owner, never for its starter (hosted-step-owner.ts): the starter's own standing is not asked at all. A setup run or wiki build keeps the starter's own rule below.
+      const store = inputs.storage === undefined ? undefined : await inputs.storage();
+      const stored = store === undefined ? undefined : await store.get({ pk: `DEVTASK#${task.taskId}`, sk: "META" });
+      const listed = await listedStepVerdict({ store, companyId: inputs.companyId, people: inputs.people, liveMember, projectGrant: inputs.projectGrant }, task, stored, by);
+      if (listed !== undefined) return listed;
       if ((await liveMember(task.developerId)) === undefined) return { allowed: false, message: NOT_A_MEMBER_HERE };
       // A setup run (the stored task says so) runs on the setup run's rule: an owner or admin of the company, or the project's administrator, read now. Any other task: the grant.
       const managed = await checkManagedPurposeStep(task);

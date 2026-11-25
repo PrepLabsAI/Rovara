@@ -10,7 +10,7 @@ import { SURFACE_OF_ANSWER_SOURCE, answerEntriesOf } from "../../core/task-log/e
 import { taskLogItems } from "../../core/task-log/store.js";
 
 export async function answerUnderstandQuestions(
-  deps: TaskFlowDeps, input: { taskId: string; round: number; answers: unknown; by: { name: string }; source: "app" | "cli" | "mcp"; expectedRevision?: number },
+  deps: TaskFlowDeps, input: { taskId: string; round: number; answers: unknown; by: { name: string; personId?: string }; source: "app" | "cli" | "mcp"; expectedRevision?: number },
 ): Promise<void> {
   const task = await readTask(deps, input.taskId);
   const workflow = task?.workflow;
@@ -31,7 +31,7 @@ export async function answerUnderstandQuestions(
       });
     } catch { return []; }
   })();
-  if (!(await commitWorkflow(deps, task, next, [dispatchRowItem(deps, task.taskId, next.revision, "UNDERSTAND", now), ...logged]))) throw agentXError("CONFIG_INVALID", "The task changed while you were answering. Read it again.");
+  if (!(await commitWorkflow(deps, task, next, [dispatchRowItem(deps, task.taskId, next.revision, "UNDERSTAND", now, now, undefined, undefined, undefined, input.by.personId), ...logged]))) throw agentXError("CONFIG_INVALID", "The task changed while you were answering. Read it again.");
   await deps.taskLog?.changed(task.taskId);
   await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind: "UNDERSTAND" });
 }

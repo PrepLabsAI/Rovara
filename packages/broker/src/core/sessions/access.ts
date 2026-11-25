@@ -67,6 +67,8 @@ export interface SessionAccess {
   projectRole?: SessionProjectRole;
   /** A company owner or admin, on a task or chain session: they may stop it (`view` plus Stop). */
   orgAdmin: boolean;
+  /** The task's People list names the person with a role that is not owner (a commenter, a viewer, or a denial): a starter the list moved on from, who no longer sees the task's money. */
+  listedBelowOwner?: true;
   companyRole: SessionCompanyRole;
   /** Whether the person may ask about this session now (decisions 103, 104). */
   mayAsk: boolean;
@@ -122,7 +124,14 @@ export type PeopleRole = "owner" | "commenter" | "viewer" | "denied";
 const PEOPLE_ROLES: ReadonlySet<string> = new Set(["owner", "commenter", "viewer", "denied"]);
 
 /** One person's People entry: its role, and whether it is a `web` identity's entry (web task channel C1/C2), which must be re-proved live. */
-export interface PeopleEntryOfItem { role: PeopleRole; web: boolean }
+export interface PeopleEntryOfItem { role: PeopleRole; web: boolean; /** The entry's own name, cleaned for a session (a person named by the list). */ name?: string }
+
+/** The entry's own name, cleaned for a session, as a spreadable part (none when it has no usable name). */
+function nameOfEntry(entry: unknown): { name?: string } {
+  const name = (entry as { name?: unknown }).name;
+  const cleaned = typeof name === "string" ? cleanSessionName(name) : undefined;
+  return cleaned === undefined ? {} : { name: cleaned };
+}
 
 /**
  * A People item: undefined for none, "unreadable" for one that does not parse (a denial for everyone). The entries are keyed by the person's SIGN-IN id (the `developerId` the list stores: a hosted principal's `personId`),
@@ -141,7 +150,7 @@ export function peopleOfItem(item: Item | undefined): Map<string, PeopleEntryOfI
     const web = Object.hasOwn(person, "method");
     if (web && taskPeopleEntryKind(person) !== "web") return "unreadable";
     if (roles.has(person.developerId)) return "unreadable";
-    roles.set(person.developerId, { role: person.role as PeopleRole, web });
+    roles.set(person.developerId, { role: person.role as PeopleRole, web, ...nameOfEntry(entry) });
   }
   return roles;
 }
@@ -172,7 +181,7 @@ function effectiveOwnerOf(session: AgentSessionRecord, task: Item | undefined): 
 // ---- the level
 
 interface Computed {
-  level: "none" | SessionLevel; owner: boolean; effectiveOwner: { developerId: string; name: string }; projectRole: SessionProjectRole | undefined; orgAdmin: boolean; denied: boolean;
+  level: "none" | SessionLevel; owner: boolean; effectiveOwner: { developerId: string; name: string }; projectRole: SessionProjectRole | undefined; orgAdmin: boolean; denied: boolean; listedBelowOwner: boolean;
   /** The project role a person really holds (a grant, or a role found elsewhere), never the maintainership a company owner or admin is given: the only role that opens Ask at `view`. */
   heldRole: SessionProjectRole | undefined;
 }
@@ -183,6 +192,28 @@ function ownsSession(person: SessionPerson, effectiveOwner: { developerId: strin
   return session.subject.kind !== "task" || (grantRole !== undefined && WEB_PEOPLE_GRANTS.has(grantRole));
 }
 
+/** The task's People list as the session rules read it: undefined for no list or no task. */
+async function peopleOfTask(deps: SessionAccessDependencies, session: AgentSessionRecord, task: Item | undefined): Promise<ReturnType<typeof peopleOfItem>> {
+  if (task === undefined || session.subject.kind !== "task") return undefined;
+  return peopleOfItem(await deps.store.get({ pk: `DEVTASK#${session.subject.taskId}`, sk: "PEOPLE" }));
+}
+
+/**
+ * Whether the person owns the session, and who its owner is for them. The session's own owner (the starter, or the taker once the task was taken over) owns it while they hold the project grant. OWNERSHIP FOLLOWS THE
+ * PEOPLE LIST once the task has one that names the session's starter and no longer calls them an owner (a hand-over, a take-over, a starter the list denied): the starter does not own the session any more, even with the
+ * grant back, and the people the list names owners do (each under the same live grant test), as themselves. (A People entry is keyed by the person's sign-in id, the task's own `developerId` and a principal's
+ * `personId`; a session names people by a hash of it.)
+ */
+function ownershipOf(input: { person: SessionPerson; session: AgentSessionRecord; task: Item | undefined; people: ReturnType<typeof peopleOfItem>; grantRole: SessionProjectRole | undefined; effectiveOwner: { developerId: string; name: string } }): { owner: boolean; effectiveOwner: { developerId: string; name: string } } {
+  const { person, session, task, people, grantRole, effectiveOwner } = input;
+  const own = { owner: ownsSession(person, effectiveOwner, session, grantRole), effectiveOwner };
+  const starterEntry = people instanceof Map && typeof task?.["developerId"] === "string" ? people.get(task["developerId"]) : undefined;
+  if (!(people instanceof Map) || task === undefined || isTakenOver(task) || starterEntry === undefined || starterEntry.role === "owner") return own;
+  const mine = person.principal === undefined ? undefined : people.get(person.principal.personId);
+  const owns = mine?.role === "owner" && grantRole !== undefined && WEB_PEOPLE_GRANTS.has(grantRole);
+  return owns ? { owner: true, effectiveOwner: { developerId: person.developerId, name: mine.name ?? UNNAMED_MEMBER } } : { owner: false, effectiveOwner };
+}
+
 /**
  * The task's People entry that applies to the person now: `denied`, `unreadable` (a list that does not read, or one the person has no key to be found in), a role, `unlisted` (a list exists and gives this person nothing),
  * or undefined (the task has no list at all). The list names a person by their SIGN-IN id (`principal.personId`), the id the People writers store and the members seam proves; the session's own hashed id
@@ -191,8 +222,7 @@ function ownsSession(person: SessionPerson, effectiveOwner: { developerId: strin
  * A stored role is never trusted alone (C2, C1 review L4): it grants only while the person, already a live member of this company (the members seam), holds a developer or administrator GRANT of their own on the task's
  * project, for a `web` and a `slack` entry alike (plan 4.1 rules 3 and 4; the task path asks `projectGrant` for every People role). A company owner's or admin's implied maintainership is no grant. A denial always applies.
  */
-async function peopleEntryOf(store: Pick<DocumentStore, "get">, person: SessionPerson, taskId: string, grantRole: SessionProjectRole | undefined): Promise<PeopleRole | "unreadable" | "unlisted" | undefined> {
-  const people = peopleOfItem(await store.get({ pk: `DEVTASK#${taskId}`, sk: "PEOPLE" }));
+function peopleEntryOf(people: ReturnType<typeof peopleOfItem>, person: SessionPerson, grantRole: SessionProjectRole | undefined): PeopleRole | "unreadable" | "unlisted" | undefined {
   if (people === undefined || people === "unreadable") return people;
   const key = person.principal?.personId;
   if (key === undefined) return "unreadable";
@@ -235,18 +265,20 @@ async function compute(deps: SessionAccessDependencies, person: SessionPerson, c
     const found = await deps.store.get(taskKey(session.subject.taskId));
     if (found !== undefined && (found["orgId"] ?? found["companyId"]) === session.orgId) task = found;
   }
-  const effectiveOwner = effectiveOwnerOf(session, task);
   const projectRoles = session.project === undefined ? undefined : await roleOn(session.project);
   const projectRole = projectRoles?.effective;
   const grantRole = projectRoles?.grant;
+  // The task's People list, read once (the same row the entry rules below read).
+  const people = await peopleOfTask(deps, session, task);
   // The owner of a TASK session (the starter, or the taker) owns it only while they still hold a project grant, read now: the test a People entry meets below. A person removed from the project keeps their old task as
-  // nothing (no read, no steer, no stop, no close); a company admin who is not the owner, and a current maintainer, still reach it by their own rule.
-  let owner = ownsSession(person, effectiveOwner, session, grantRole);
+  // nothing (no read, no steer, no stop, no close); a company admin who is not the owner, and a current maintainer, still reach it by their own rule. Once the task's People list has moved on, ownership follows it.
+  const owned = ownershipOf({ person, session, task, people, grantRole, effectiveOwner: effectiveOwnerOf(session, task) });
   const orgAdmin = isAdmin && session.kind !== "local";
   // The task's People list, when it has one, says who owns the task as the task path does: the session's owner (the starter, or the taker) keeps owning it only with an `owner` entry, so a starter another owner
   // demoted to commenter or viewer, or denied, holds no owner level here (their level below comes from what is left).
-  const entry = task !== undefined && session.subject.kind === "task" ? await peopleEntryOf(deps.store, person, session.subject.taskId, grantRole) : undefined;
-  if (entry !== undefined && entry !== "owner") owner = false;
+  const entry = task !== undefined && session.subject.kind === "task" ? peopleEntryOf(people, person, grantRole) : undefined;
+  const owner = owned.owner && (entry === undefined || entry === "owner");
+  const effectiveOwner = owned.effectiveOwner;
 
   let level: "none" | SessionLevel = owner ? "edit" : "none";
   if (session.kind === "task" && session.project !== undefined) {
@@ -275,7 +307,8 @@ async function compute(deps: SessionAccessDependencies, person: SessionPerson, c
   if (!owner && projectRole === "viewer" && RANK[level] > RANK.view) level = "view";
   // An auditor reads and works on nothing, whatever it owns or is shared.
   if (!isWriterRole(companyRole) && RANK[level] > RANK.view) level = "view";
-  return { level, owner, effectiveOwner, projectRole, orgAdmin, denied, heldRole: isAdmin ? grantRole : projectRole };
+  const listedBelowOwner = entry === "commenter" || entry === "viewer" || entry === "denied";
+  return { level, owner, effectiveOwner, projectRole, orgAdmin, denied, listedBelowOwner, heldRole: isAdmin ? grantRole : projectRole };
 }
 
 /** Whether the computed access may ask about the session (decisions 103, 104). */
@@ -290,7 +323,7 @@ function mayAskOf(session: AgentSessionRecord, companyRole: SessionCompanyRole, 
 function finish(session: AgentSessionRecord, companyRole: SessionCompanyRole, computed: Computed): SessionAccess {
   if (computed.level === "none") throw notFound();
   return {
-    session, level: computed.level, owner: computed.owner, effectiveOwner: computed.effectiveOwner, orgAdmin: computed.orgAdmin, companyRole, mayAsk: mayAskOf(session, companyRole, computed),
+    session, level: computed.level, owner: computed.owner, effectiveOwner: computed.effectiveOwner, orgAdmin: computed.orgAdmin, ...(computed.listedBelowOwner ? { listedBelowOwner: true as const } : {}), companyRole, mayAsk: mayAskOf(session, companyRole, computed),
     ...(computed.projectRole === undefined ? {} : { projectRole: computed.projectRole }),
   };
 }

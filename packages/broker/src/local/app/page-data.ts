@@ -373,7 +373,7 @@ export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "compan
       if (!retryableBlock(workflow)) return { ok: false, reason: "refused", message: NOTHING_TO_RETRY_STEP };
       try {
         // Through the session's control when it has one, so a Retry from the page is audited, written on the timeline and counted like any other.
-        if (task.sessionId === undefined) await retryBlockedStep(deps.flow, input.taskId, input.revision);
+        if (task.sessionId === undefined) await retryBlockedStep(deps.flow, input.taskId, input.revision, undefined, deps.owner.personId);
         else {
           const result = await createLocalSessionControl(deps.flow, { expectedRevision: input.revision }).retry(deps.owner, deps.companyId, task.sessionId, { requestId: randomUUID() });
           if (result.status === "refused") return { ok: false, reason: "refused", message: result.message };
@@ -413,7 +413,7 @@ export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "compan
       const waiting = (await readTask(deps.flow, input.taskId))?.workflow;
       if (waiting?.designReview?.status === "waiting_answers" && deps.designAnswers !== undefined) return deps.designAnswers({ taskId: input.taskId, revision: input.revision, answers: input.answers });
       try {
-        await answerUnderstandQuestions(deps.flow, { taskId: input.taskId, round: input.round, answers: input.answers, by: { name: deps.owner.displayName }, source: "app", expectedRevision: input.revision });
+        await answerUnderstandQuestions(deps.flow, { taskId: input.taskId, round: input.round, answers: input.answers, by: { name: deps.owner.displayName, personId: deps.owner.personId }, source: "app", expectedRevision: input.revision });
       } catch (error) {
         const message = error instanceof Error ? error.message.replace(/^[A-Z_]+: /u, "") : "That was not accepted.";
         return { ok: false, reason: /changed|Read it again|no longer/iu.test(message) ? "stale" : "refused", message };

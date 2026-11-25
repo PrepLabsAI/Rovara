@@ -22,7 +22,7 @@ import { ownPartitionRow, recordInCompany } from "./company-check.js";
 import { isProjectUnreadable } from "../core/project-left-out.js";
 import { grantKeyFor, grantsPkFor, latestRevisionRowFor, namedCompany, projectMemberRowKeyFor } from "./company-layout.js";
 import { involvedPartition } from "../core/task-flow/involved.js";
-import { taskOwnershipHandOverSteps, type TaskHandOverSkip, type TaskPeopleDependencies } from "../developer/task-people.js";
+import { slotCounterSteps, taskOwnershipHandOverSteps, type TaskHandOverSkip, type TaskPeopleDependencies } from "../developer/task-people.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
 
 type Write = NonNullable<TransactWriteCommandInput["TransactItems"]>[number];
@@ -259,6 +259,26 @@ async function openTasks(ctx: HandOverContext, companyId: OrgId, leaverId: strin
 }
 
 /**
+ * The workspace slots that move with a hand-over's tasks, by the counter pair: one item is written once in a transaction, so each pair's two counters move ONCE, by the number of tasks. `close` adds those steps to the
+ * commit's (`steps`), or, for the preview, answers how many it would add.
+ */
+function slotLedger(tableName: string) {
+  const slots = new Map<string, { fromId: string; toId: string; count: number }>();
+  return {
+    add(slot: { fromId: string; toId: string } | undefined): void {
+      if (slot === undefined) return;
+      const known = slots.get(`${slot.fromId}>${slot.toId}`);
+      if (known === undefined) slots.set(`${slot.fromId}>${slot.toId}`, { fromId: slot.fromId, toId: slot.toId, count: 1 }); else known.count += 1;
+    },
+    close(commit: boolean, steps: Write[]): number {
+      const counters = [...slots.values()].flatMap((slot) => slotCounterSteps(tableName, slot.fromId, slot.toId, slot.count));
+      if (commit) steps.push(...counters);
+      return commit ? 0 : counters.length;
+    },
+  };
+}
+
+/**
  * What would move, and (with `commit`) the steps that move it. `commit` also registers the successor on each task first (registration grants nothing; it is the
  * task person row a People entry needs). The preview never writes.
  */
@@ -269,18 +289,21 @@ export async function planHandOver(ctx: HandOverContext, input: { companyId: str
   const projects = await administeredProjects(ctx, companyId, input.leaverId, input.successorId);
   const steps: Write[] = [...agents, ...chains, ...projects.steps];
   let tasks = 0, tasksLeft = 0, taskSteps = 0;
+  const slots = slotLedger(ctx.tableName);
   const asked = { leaverId: input.leaverId, successorId: input.successorId, removalId: input.removalId, by: input.by };
   for (const task of await openTasks(ctx, companyId, input.leaverId)) {
     if (ctx.tasks === undefined) { tasksLeft++; continue; }
     // The successor is registered only on a task that would be handed to them (registration grants nothing, but it is a row the task did not need otherwise).
     const would = await taskOwnershipHandOverSteps(ctx.tasks.deps, task, { ...asked, preview: true });
     if ("skipped" in would) { if (would.skipped !== ("not_their_task" satisfies TaskHandOverSkip)) tasksLeft++; continue; }
-    if (!input.commit) { tasks++; taskSteps += would.steps; continue; }
+    if (!input.commit) { tasks++; taskSteps += would.steps; slots.add(would.slot); continue; }
     try { await ctx.tasks.register(task, input.successorId); } catch { /* not registrable now: the steps below skip the task */ }
     const handOver = await taskOwnershipHandOverSteps(ctx.tasks.deps, task, asked);
-    if ("items" in handOver) { tasks++; taskSteps += handOver.items.length; steps.push(...handOver.items); continue; }
+    if ("items" in handOver) { tasks++; taskSteps += handOver.items.length; steps.push(...handOver.items); slots.add(handOver.slot); continue; }
     if (handOver.skipped !== ("not_their_task" satisfies TaskHandOverSkip)) tasksLeft++;
   }
+  // The slots' two counters, once per pair by the number of tasks (a counter is one item); the preview counts them as the commit writes them.
+  taskSteps += slots.close(input.commit, steps);
   // The record's finish, the audit record, the pending row's delete and a finish receipt share the transaction; the preview counts the task steps the commit will write.
   if (steps.length + (input.commit ? 0 : taskSteps) + 4 > HANDOVER_LIMITS.transactionSteps) throw new HandOverTooBig();
   return { agents: agents.length, chains: chains.length, projects: projects.count, tasks, tasksLeft, steps };

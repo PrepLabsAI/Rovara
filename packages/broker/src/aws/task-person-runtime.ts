@@ -285,7 +285,7 @@ function identityDependencies(input: {
       if (result.kind === "allowed") {
         if (result.witness === undefined) throw unavailable();
         input.onProjectAuthority(result.witness);
-        return;
+        return result.access;
       }
       if (result.kind === "denied" && result.reason === "project-access") throw refused();
       if (result.kind === "not-found") throw agentXError("PROJECT_NOT_FOUND", "task person project was not found");

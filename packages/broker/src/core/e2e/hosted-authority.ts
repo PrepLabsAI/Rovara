@@ -134,10 +134,13 @@ export function createHostedE2EAuthority(deps: HostedAuthorityDeps): E2EAuthorit
       if (creatorAuthority === false) return false;
       const { creator, verdict } = creatorAuthority;
       async function readCreatorAuthority() {
-        const verdict = await deps.access.checkStep({ taskId: task.taskId, developerId: task.developerId, project: task.project });
+        // The round was admitted under one person's proof; that person is the one asked after, so another owner's later decision or press does not flip a valid round to refused (they are named as the presser).
+        const verdict = await deps.access.checkStep({ taskId: task.taskId, developerId: task.developerId, project: task.project }, admission.creatorAuthority?.developerId);
         if (!verdict.allowed) return reject("current-creator-can-only-view-project");
-        const creator = await deps.creator(task);
-        if (creator === undefined || creator.companyId !== task.companyId || creator.proof.developerId !== task.developerId || creator.proof.project !== task.project
+        // The proof is the CURRENT owner's (the person the task runs for now), not the starter's: a task handed over or taken over after the round was admitted no longer matches its admitted proof, and needs a fresh round.
+        const ownerId = verdict.owner?.personId ?? task.developerId;
+        const creator = await deps.creator({ ...task, developerId: ownerId });
+        if (creator === undefined || creator.companyId !== task.companyId || creator.proof.developerId !== ownerId || creator.proof.project !== task.project
           || creator.items.length === 0 || creator.items.some((item) => item.kind !== "check")
           || admission.creatorAuthority === undefined || canonicalJson(admission.creatorAuthority) !== canonicalJson(creator.proof)) return reject("creator-membership-proof-changed-or-unavailable");
         return { creator, verdict };

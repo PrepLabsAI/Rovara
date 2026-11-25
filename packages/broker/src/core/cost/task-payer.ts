@@ -26,6 +26,15 @@ function ruleMemberOf(task: { developerId: string; project: string; origin?: Tas
   return payer.kind === "member" ? payer.developerId : undefined;
 }
 
+/**
+ * Whether the model gateway charges a MEMBER (the step's requester) for this task's runs: the same guard `memberPayerOf` applies, without the starter-only checks (a task handed over has runs for several members). False for a
+ * setup run or wiki build (`purpose`), a Linear task, and any origin whose payer the shared rule says is not a member (a project-paid, event, schedule or chain origin): a surface says nothing of who pays then.
+ */
+export function gatewayChargesMember(task: PayerTask & { developerId?: string; project?: string }): boolean {
+  if (task.purpose !== undefined || typeof task.developerId !== "string" || typeof task.project !== "string") return false;
+  try { return ruleMemberOf({ developerId: task.developerId, project: task.project, origin: task.origin }) === task.developerId; } catch { return false; }
+}
+
 /** The task's member as a payer, or undefined. */
 export function memberPayerOf(task: PayerTask, operations: readonly Pick<OperationRecord, "kind" | "requester">[]): MoneyPayer | undefined {
   try {

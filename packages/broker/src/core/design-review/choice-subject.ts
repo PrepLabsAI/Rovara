@@ -113,6 +113,8 @@ export function createDesignChoiceSubject(options: DesignChoiceSubjectOptions): 
       const estimate = workflow.designReview?.estimateUsd === undefined ? {} : { estimateUsd: workflow.designReview.estimateUsd };
       // The review's own record names the task's owner (an actor id the contract accepts); who the approvers port let through is in the gate's own record of the decision.
       const approver = workflow.ownerId;
+      // The person the approvers port let through: the round this choice makes due is charged to them.
+      const presser = approvers[0]?.personId;
       // The choice is also recorded in the decision history under the card it answers, in the layout both installs share: the choice word is the record's reason, and the developer is the person the approvers port let through.
       const decisionRow: TransactItem = {
         kind: "put", condition: when.absent(),
@@ -124,14 +126,14 @@ export function createDesignChoiceSubject(options: DesignChoiceSubjectOptions): 
       try {
         if (offered.choice === "run_unpriced") {
           // The hold stays as it is, so the card does not change under the person; the round starts from it, with who approved on the row (the round's start moves WAITING to RUNNING with `costApproved`).
-          const extra: TransactItem[] = [designRowItem(deps, taskId, expectedRevision, "CRITIQUE", at, approver), decisionRow];
+          const extra: TransactItem[] = [designRowItem(deps, taskId, expectedRevision, "CRITIQUE", at, approver, presser), decisionRow];
           return { ops: [change.set("updatedAt", at)], extra, result: { choice: offered.choice } };
         }
         const next = offered.choice === "raise_cap" ? raiseDesignReviewCap(workflow, { expectedRevision, capUsd: offered.newCapUsd, by, ...estimate, now: at })
           : offered.choice === "lower_tier" ? lowerDesignReviewTier(workflow, { expectedRevision, tier: offered.tier, by, now: at })
             : skipDesignReview(workflow, { expectedRevision, by, now: at });
-        const row = next.stage === "PLAN_CRITIQUE" && next.state === "READY" ? designRowItem(deps, taskId, next.revision, "CRITIQUE", at)
-          : offered.choice === "skip" && next.stage === "PLAN" && next.state === "READY" ? dispatchRowItem(deps, taskId, next.revision, "PLAN", at) : undefined;
+        const row = next.stage === "PLAN_CRITIQUE" && next.state === "READY" ? designRowItem(deps, taskId, next.revision, "CRITIQUE", at, undefined, presser)
+          : offered.choice === "skip" && next.stage === "PLAN" && next.state === "READY" ? dispatchRowItem(deps, taskId, next.revision, "PLAN", at, at, undefined, undefined, undefined, presser) : undefined;
         return { ops: [...workflowWriteOps(workflow, next).ops, change.set("updatedAt", at)], extra: [decisionRow, ...(row === undefined ? [] : [row]), ...designWaitArmItems(deps, taskId, next, Date.parse(at)), ...flowWorkEventItems({ enabled: options.flow.workEvents, orgId: options.flow.companyId, project: loaded.request.projectName ?? "", before: workflow, after: next, room: 40 })], result: { choice: offered.choice, workflow: next } };
       } catch (error) {
         if (error instanceof WorkflowTransitionError) throw new SubjectRefusal("invalid_outcome", error.message);

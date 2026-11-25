@@ -30,7 +30,7 @@ export interface SessionControlHost {
   /** Pure accepted-close plan, including the session receipt/event/audit. Control commits it before resume. */
   planCloseTask?(taskId: string, input: CloseIntent, principal: Principal, sessionId: SessionId): Promise<SessionClosePlan>;
   /** The task's own workflow retry, at the task's revision now; idempotent by `requestId`. Throws when the workflow is not blocked. */
-  retryWorkflow(taskId: string, requestId: string): Promise<void>;
+  retryWorkflow(taskId: string, requestId: string, by?: string): Promise<void>;
   /**
    * Gives a person's message to the agent: live to the running step when the worker takes one (through the worker machines port), else as a note the next step reads. Answers where it went. Idempotent by
    * `messageId`. Never carries authority: the text is information.
@@ -235,7 +235,7 @@ export function createSessionControl(deps: ControlDependencies) {
         return refuse("nothing_to_retry", isEnded(session) && session.summary.status === "failed" ? FAILED_TASK_NEEDS_NEW_TASK : NOTHING_TO_RETRY);
       }
       if (session.subject.kind !== "task" || deps.host === undefined) return refuse("unavailable", NOT_AVAILABLE);
-      await deps.host.retryWorkflow(session.subject.taskId, input.requestId);
+      await deps.host.retryWorkflow(session.subject.taskId, input.requestId, principal.personId);
       const request: ControlRequest = { action: "retry", by: developerIdOf(principal), at: now().toISOString() };
       const event: SessionEvent = { eventId: sessionEventId("retried", input.requestId), at: request.at, type: "retried", actor: actorOf(principal), text: `${nameOf(principal)} retried this.` };
       const repeated = await commit(session, input.requestId, request, [], event, { action: "session.retried", person: principal });

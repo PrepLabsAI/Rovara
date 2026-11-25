@@ -1,7 +1,7 @@
 // F2-A: the facts `stateOf` reads, gathered for one task from what the core already holds: the task record (its workflow, its plan self-check), the merge tracking in the store, and the registry's state-only offers (whether a
 // decision waits). Merge tracking is read from the STORE, never from the task view's optional `mergeTracking` member (the view serves it only on v2 full reads). A host adds the few facts the record does not hold (a prepare that
 // failed, the budget pause, a wait on the system, the review round it serves) through `extra`.
-import { DECISION_MOVES, WORKFLOW_BLOCK_REASONS, openReviewFindings, type DocumentStore, type OrgId, type WorkflowSnapshot } from "@agentx/contracts";
+import { DECISION_MOVES, OWNER_LEFT_PROJECT_WORDS, WORKFLOW_BLOCK_REASONS, openReviewFindings, type DocumentStore, type OrgId, type WorkflowSnapshot } from "@agentx/contracts";
 import { planRevisionsUsed } from "../../developer/plan-self-check.js";
 import { DEFAULT_CI_MODE, readyToMerge } from "../merge/merge-tracking.js";
 import { growthOwedOf, owedLevelOf, type GrowthOwed } from "../merge/grown-owed.js";
@@ -15,6 +15,11 @@ import { workspaceOperations } from "../task-flow/reads.js";
 import type { TaskRecord } from "../task-flow/records.js";
 import { readWorkspace } from "../task-flow/stage-machine.js";
 import type { StandingFacts, SystemWait } from "./state.js";
+
+/** A step refused because nobody who owns the task still has its project waits on a project admin, not on an owner who is not there (`needs_role`: "Needs a project admin"). */
+function projectAdminAsk(workflow: WorkflowSnapshot | undefined): { askedRole?: "project_admin" } {
+  return workflow?.state === "BLOCKED" && workflow.blockReason === OWNER_LEFT_PROJECT_WORDS ? { askedRole: "project_admin" } : {};
+}
 
 /** What a host knows that the stored task does not say. Everything the stored task and its workspace do say (a prepare that failed, a person's Stop, the review round of a custom sequence) is read by `standingFactsOf` itself, so every surface sees it. */
 export interface ExtraFacts {
@@ -136,5 +141,6 @@ export async function standingFactsOf(deps: Pick<TaskFlowDeps, "store" | "compan
     workflow, closed: task.closedAt !== undefined, budgetPaused: extra.budgetPaused === true, failedPrepare: extra.failedPrepare === true || (preparing && !stopped), needsPerson: needsPerson || growthOwed?.state === "needs_you", planRevisionsUsed: planUsed, failedChecks,
     ...(pullRequestReady === undefined ? {} : { pullRequestReady }), ...(growthOwed === undefined ? {} : { growthOwed }), ...(reviewBlock === undefined ? {} : { reviewBlock }),
     ...(reviewRound === undefined ? {} : { reviewRound }), ...(wait === undefined ? {} : { wait }), ...(extra.stoppedByPerson === true || stopped ? { stoppedByPerson: true } : {}),
+    ...projectAdminAsk(workflow),
   };
 }
