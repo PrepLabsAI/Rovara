@@ -5,13 +5,13 @@
 //   (d1) a company-sign-in CLI session (shared sign-in method), not only the Slack-typed one;
 //   (d2) a task with a People list: its viewer (a web-proof person) and its owner;
 //   (d2) a task shared to a reader;
-//   (d3) the lessons, knowledge and erase routes (a member), and (d4) the company admin routes (an admin): members, audit, events, invites.
+//   (d3) the lessons, knowledge and erase routes (a member), (d4) the company admin routes (an admin): members, audit, events, invites, (d5) a person with no company at the access check, and (d6) a project administrator who is not the owner at the merge state.
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { taskSessionId } from "../../packages/broker/src/core/sessions/create.js";
 import { createJourneyWorld, MAYA, type JourneyWorld } from "./harness/hosted-core.js";
 import { bearerRequest } from "./harness/surviving.js";
-import type { Developer } from "../support/developer-task-broker.js";
+import { WEB_CLIENT, clientBearer, type Developer } from "../support/developer-task-broker.js";
 import { planUntilCard, startTask } from "./harness/task.js";
 
 let world: JourneyWorld | undefined;
@@ -119,6 +119,32 @@ describe("route families, each with ONE failed membership or grant read", () => 
       { route: "person erase", method: "POST", path: `/v1/app/people/${PRIYA_ID}/erase`, body: { requestId: randomUUID() } },
     ];
     const broken = await sweep(w, "lessons / knowledge / erase", asWeb(w, w.maya), routes, { mustServe: false });
+    expect(broken).toEqual([]);
+    w.proof.assertAllCore({ callbacks: false });
+  }, 400_000);
+
+  it("(d5) a person with NO company (no membership row): the access check is served or the retryable 503, never the 401 that signs a person without a company out", async () => {
+    const { w } = await worldWithTask();
+    const NEW: Developer = { developerId: "7".repeat(64), name: "New Person", provider: "oidc", sessionId: "s-new" };
+    w.harness.db.set({ pk: `SESSION#web-app-${NEW.sessionId}`, sk: "META", sessionId: `web-app-${NEW.sessionId}`, developerId: NEW.developerId, amr: "oidc", clientId: "web-app", startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 604_800 });
+    w.harness.db.set({ pk: `DEVELOPER#${NEW.developerId}`, sk: "META", entityType: "DEVELOPER", developerId: NEW.developerId, provider: "oidc", issuer: "https://x.example", subject: "new", displayName: NEW.name, firstSignInAt: "2026-11-01T00:00:00.000Z", lastSignInAt: "2026-11-01T00:00:00.000Z", revoked: false, companyless: true });
+    const ask: Ask = async (method, path, body) => {
+      const since = w.proof.seen.length;
+      const r = await w.handler({ version: "2.0", rawPath: path.split("?")[0]!, rawQueryString: path.split("?")[1] ?? "", headers: { authorization: await clientBearer(NEW, WEB_CLIENT, `${WEB_CLIENT.clientId}-${NEW.sessionId}`) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), requestContext: { requestId: randomUUID(), http: { method } } });
+      frontAnswers(w, since);
+      return { status: r.statusCode, text: String(r.body) };
+    };
+    const broken = await sweep(w, "no company", ask, [{ route: "access check", method: "POST", path: "/v1/dev/access", body: {} }]);
+    expect(broken).toEqual([]);
+    w.proof.assertAllCore({ callbacks: false });
+  }, 400_000);
+
+  it("(d6) a project administrator who is not the task's owner asks its merge state: served as with every read working, or the retryable 503; never 'no such task'", async () => {
+    world = await createJourneyWorld({ page: true, colleague: { role: "member" as const, grant: "administrator" as const } });
+    const w = world;
+    const taskId = await startTask(w);
+    await planUntilCard(w, taskId);
+    const broken = await sweep(w, "project administrator merge state", asWeb(w, w.priya), [{ route: "merge state", method: "GET", path: `/v1/app/tasks/${taskId}/merge` }]);
     expect(broken).toEqual([]);
     w.proof.assertAllCore({ callbacks: false });
   }, 400_000);

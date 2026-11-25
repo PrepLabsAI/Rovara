@@ -52,3 +52,54 @@ describe("the mint check", () => {
     await expect(companyMayMint(deps, person, "oidc", IMPLICIT_COMPANY_ID, undefined, true)).rejects.toSatisfy(isMembershipReadFailure);
   });
 });
+
+describe("the refresh of a merged or connected sign-in (stillSeated) and the company's sign-in settings", () => {
+  async function mergedMember() {
+    const h = signinCompanyWorld(); await h.create(COMPANY_A.orgId);
+    const signed = await h.signInCompany(COMPANY_A.orgId, SHARED_RAW_IDS.user);
+    const token = await h.exchange(new URL(signed.headers.location!).searchParams.get("code")!);
+    expect(token.status, JSON.stringify(token.body)).toBe(200);
+    const session = h.db.find((row) => String(row.pk).startsWith("SESSION#"))[0]!;
+    const survivor = h.db.find((row) => String(row.pk).startsWith("DEVELOPER#") && row.sk === "META")[0]!;
+    const alias = "b".repeat(64);
+    h.db.set({ ...survivor, pk: `DEVELOPER#${alias}`, mergedInto: String(survivor.pk).slice("DEVELOPER#".length) });
+    h.db.set({ ...session, signedInId: alias });
+    return { h, alias, refreshToken: token.body.refresh_token as string };
+  }
+  const sessions = (h: Awaited<ReturnType<typeof mergedMember>>["h"]) => h.db.find((row) => String(row.pk).startsWith("SESSION#")).map((row) => row.revokedReason);
+
+  it("control: a session whose sign-in is merged into the person renews", async () => {
+    const { h, refreshToken } = await mergedMember();
+    expect((await h.refresh(refreshToken)).status).toBe(200);
+  });
+
+  it("a merge-walk hop whose read FAILS is the retryable 503 and the session is kept; the SAME token renews once the read is back", async () => {
+    const { h, alias, refreshToken } = await mergedMember();
+    h.db.injectFault({ command: "GetCommand", match: (input) => (input.Key as { pk: string }).pk === `DEVELOPER#${alias}`, error: { name: "ProvisionedThroughputExceededException", message: "throttled" }, times: 1 });
+    const blip = await h.refresh(refreshToken);
+    expect([blip.status, blip.body.error]).toEqual([503, "temporarily_unavailable"]);
+    expect(sessions(h), "nothing is revoked by a failed read").toEqual([undefined]);
+    expect((await h.refresh(refreshToken)).status).toBe(200);
+  });
+
+  it("a merge-walk hop that ANSWERS 'revoked' still ends the session (sign_in_unlinked)", async () => {
+    const { h, alias, refreshToken } = await mergedMember();
+    h.db.set({ ...h.db.get(`DEVELOPER#${alias}`, "META")!, revoked: true });
+    expect((await h.refresh(refreshToken)).status).toBe(400);
+    expect(sessions(h)).toEqual(["sign_in_unlinked"]);
+  });
+
+  it("the company's sign-in settings (issuer row) that cannot be READ at a refresh are the retryable 503 and the session is kept", async () => {
+    const h = signinCompanyWorld(); await h.create(COMPANY_A.orgId);
+    const signed = await h.signInCompany(COMPANY_A.orgId, SHARED_RAW_IDS.user);
+    const token = await h.exchange(new URL(signed.headers.location!).searchParams.get("code")!);
+    const refreshToken = token.body.refresh_token as string;
+    const read = h.company.read.bind(h.company);
+    h.company.read = async (key) => { if (key.pk.endsWith("SIGNIN_ISSUER")) throw new Error("the store failed"); return read(key); };
+    const blip = await h.refresh(refreshToken);
+    expect([blip.status, blip.body.error]).toEqual([503, "temporarily_unavailable"]);
+    expect(sessions({ db: h.db } as never)).toEqual([undefined]);
+    h.company.read = read;
+    expect((await h.refresh(refreshToken)).status).toBe(200);
+  });
+});

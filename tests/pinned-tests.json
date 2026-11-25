@@ -317,8 +317,8 @@
     },
     {
       "path": "tests/journeys/membership-read-families.test.ts",
-      "minimumTests": 4,
-      "reason": "MEMBERSHIP-READ-FAILS-SAFE (briefs/arch-cleanup/REMOVED-MEMBER-ANSWER-FINDINGS.md): ONE failed membership or grant read at each read of each request, for the route families the owner-task journey does not drive: a company-sign-in CLI session, a task shared to a reader, the lessons, knowledge and erase routes, the company admin routes; each is served as with every read working or answers the retryable 503, never 401, no such task or No such project. The floor is the file's 4 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "minimumTests": 6,
+      "reason": "MEMBERSHIP-READ-FAILS-SAFE (briefs/arch-cleanup/REMOVED-MEMBER-ANSWER-FINDINGS.md): ONE failed membership or grant read at each read of each request, for the route families the owner-task journey does not drive: a company-sign-in CLI session, a task shared to a reader, the lessons, knowledge and erase routes, the company admin routes, a person with no company; each is served as with every read working or answers the retryable 503, never 401, no such task or No such project. The floor is the file's 6 runnable declarations, and deleting or trimming one is a reviewed edit.",
       "decision": "DEC 254zzz522; DEC 254zzz459"
     },
     {
@@ -343,6 +343,12 @@
       "path": "tests/contract/web-proof-read-failure.test.ts",
       "minimumTests": 5,
       "reason": "MEMBERSHIP-READ-FAILS-SAFE: the web proof of a task People-list person over the real route wiring: a failed read of the identity record, the membership row or the grant rows is the retryable 503, never a refusal; a revoked membership still refuses. The floor is the file's 5 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz522; DEC 254zzz459"
+    },
+    {
+      "path": "tests/contract/task-view-read-failure.test.ts",
+      "minimumTests": 2,
+      "reason": "MEMBERSHIP-READ-FAILS-SAFE: a task view's money-visibility read that FAILED is the retryable 503, never a 200 served without the money; any other failure of the seam still hides the money. The floor is the file's 2 runnable declarations, and deleting or trimming one is a reviewed edit.",
       "decision": "DEC 254zzz522; DEC 254zzz459"
     },
     {

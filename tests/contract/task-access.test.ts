@@ -114,6 +114,19 @@ describe("resolveTaskAccess when the membership read FAILED (MEMBERSHIP-READ-FAI
   });
 });
 
+describe("resolveTaskAccess on a task with a People list when the web proof's read FAILED (MEMBERSHIP-READ-FAILS-SAFE)", () => {
+  it("is the retryable 503 for the owner and for another person, never 'no such task': the access catch lets the failure through", async () => {
+    for (const person of [PRIYA, SAM]) {
+      const fixture = pageTask();
+      fixture.addVersion("plan", pagePlan());
+      fixture.db.set({ pk: `DEVTASK#${fixture.taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false, people: [{ developerId: PRIYA.developerId, slackUserId: PRIYA.slackUserId, name: "Priya", role: "owner" }] });
+      (fixture.deps as { checkTaskPerson?: unknown }).checkTaskPerson = async () => { throw membershipReadFailed(); };
+      const error = await refusal(resolveTaskAccess(fixture.deps, person, fixture.taskId, "read"));
+      expect([person.developerId, error.code]).toEqual([person.developerId, "RUNTIME_UNAVAILABLE"]);
+    }
+  });
+});
+
 describe("resolveTaskAccess", () => {
   it("the owner, a channel member who can use the project, and everyone else", async () => {
     const fixture = pageTask();
