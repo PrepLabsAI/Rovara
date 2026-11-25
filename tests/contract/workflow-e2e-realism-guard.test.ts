@@ -1,25 +1,9 @@
-// Review focus 1: the journey suites never turn the harness's realism off. Any opt-out (DynamoDB map order or expression
-// checks, GitHub's head lag) in tests/integration/workflow-e2e/** fails here; the harness itself refuses lag(0).
-import { readdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
+// Review focus 1: the harness never lets GitHub's head lag be turned off. (The check that the journey suites under
+// tests/integration/workflow-e2e/** turned no realism off went with those suites, #1350: they drove the retired spec 056 workflow.)
 import { describe, expect, it } from "vitest";
 import { FakeGitHub } from "../support/workflow-e2e-github.js";
 
-const SUITES = join(import.meta.dirname, "..", "integration", "workflow-e2e");
-const OPT_OUTS = [/realism\s*:/, /mapOrder\s*:/, /validateExpressions\s*:/, /lag\s*:\s*false/, /prHeadReads\s*:\s*0\b/, /consistency\s*:\s*"strong"/];
-
 describe("workflow E2E realism", () => {
-  it("no journey suite turns realism off", async () => {
-    const files = (await readdir(SUITES, { recursive: true })).filter((file) => String(file).endsWith(".ts"));
-    expect(files.length).toBeGreaterThan(0);
-    const found: string[] = [];
-    for (const file of files) {
-      const text = await readFile(join(SUITES, String(file)), "utf8");
-      for (const pattern of OPT_OUTS) if (pattern.test(text)) found.push(`${String(file)}: ${pattern.source}`);
-    }
-    expect(found).toEqual([]);
-  });
-
   it("refuses to turn GitHub's head lag off through lag()", () => {
     const github = new FakeGitHub();
     expect(() => github.lag({ prHeadReads: 0 })).toThrow(/realism: \{ lag: false \}/);

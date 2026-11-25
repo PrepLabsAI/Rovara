@@ -30,10 +30,6 @@ describe("the test runner's configuration", () => {
     expect(nightlyOnlyFiles).toContain("tests/unit/worker-env-detect-redos.test.ts");
     expect(nightlyOnlyFiles).not.toContain("tests/unit/worker-env-detect-hardening.test.ts");
     expect(nightlyOnlyFiles).toContain("tests/unit/local-up-flow.test.ts");
-    // Every workflow-e2e suite, read from the folder, so a new one is nightly-only too.
-    const workflowE2e = readdirSync("tests/integration/workflow-e2e").filter((name) => name.endsWith(".test.ts")).map((name) => `tests/integration/workflow-e2e/${name}`);
-    expect(workflowE2e.length).toBeGreaterThan(10);
-    expect(nightlyOnlyFiles).toEqual(expect.arrayContaining(workflowE2e));
     expect(config.test?.exclude).toEqual(expect.arrayContaining(nightlyOnlyFiles));
     expect(nightlyConfig.test?.include).toEqual([...nightlyOnlyFiles, ...postDeployFiles]);
     expect(nightlyConfig.test?.passWithNoTests).toBe(false);
@@ -42,8 +38,7 @@ describe("the test runner's configuration", () => {
 
   // #1242: the integration journeys that belong after a beta environment never run on code merge, not even in an affected run.
   it("leaves the post-deploy journeys out of every pull request and push run, affected runs included, and runs them nightly", async () => {
-    expect(postDeployFiles).toContain("tests/integration/slack-workflow-e2e.test.ts");
-    // #1272: and six more integration journeys.
+    // #1272: six integration journeys (#1350 removed slack-workflow-e2e, which drove the retired spec 056 workflow).
     for (const file of [
       "tests/unit/stage-selection-adversarial.test.ts",
       "tests/integration/pull-request-publication.test.ts",
