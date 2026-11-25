@@ -216,6 +216,7 @@ export * from "./onboarding.js";
 export * from "./setup-draft.js";
 export * from "./seed-command.js";
 export * from "./setup-run.js";
+export * from "./setup-result.js";
 export * from "./setup-agent-web.js";
 export * from "./setup-proposal.js";
 export * from "./setup-proposal-read.js";
@@ -442,6 +443,8 @@ export * from "./runner.js";
 
 
 export * from "./task-status.js";
+export * from "./task-words.js";
+export * from "./task-standing.js";
 export * from "./notification-prefs.js";
 export * from "./work-event.js";
 export * from "./work-event-node.js";

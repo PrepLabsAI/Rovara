@@ -36,6 +36,7 @@ import { GITHUB_ISSUER, githubSignInProvider } from "../../packages/broker/src/d
 import { emailIndexKey } from "../../packages/broker/src/developer/store.js";
 import { resolveDeveloper } from "../../packages/broker/src/aws/admin-actions.js";
 import { authorizeQuery, httpEvent } from "../support/developer-fakes.js";
+import { withoutRetainPolicies, withoutRetainPolicy } from "../support/retain-policies-template.js";
 import { fakeGithub, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, type FakeGithubUser } from "../support/fake-github.js";
 import { B, SECRET, sharedSignInWorld, WEB, X, type SharedSignInWorld } from "../support/company-shared-signin-world.js";
 
@@ -196,10 +197,13 @@ describe("broker membership condition-check grant", () => {
     const before = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(structuredClone(namedRaw)), { env: "staging" }), stuckStoppingInstall("staging")))));
     // The providers branch also adds this exact capability output. Keep a measured
     // combined pin, then remove only the asserted output to retain the upstream pin.
-    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("23e7a69839d8b913eb1c601b320f5ba05c6416f324a22b6abede4901020ebee6");
+    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("c15528809bc3dac1d2d2caf3cce7776a14d387dbf10b607732ae86ac28b468af");
+    // RETAIN (arch ruling 2026-11-24, Rule D): with exactly the nine policies put back (withoutRetainPolicies) the pins recorded before it hold.
+    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(before), "named")).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("23e7a69839d8b913eb1c601b320f5ba05c6416f324a22b6abede4901020ebee6");
     expect(before.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     delete before.Outputs.ModelRunPriceVersion;
-    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("e051a59b71fd9cd8188851b57c0dc738b10fb98acc33a4225639f33336669466");
+    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("676178f11842d08c2207a07a41e4faf872d2f4763f23aaa66e3ecc1b3018c22e");
+    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(before), "named")).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("e051a59b71fd9cd8188851b57c0dc738b10fb98acc33a4225639f33336669466");
     const afterTuples = accessTuples(namedRaw);
     const beforeTuples = accessTuples(before);
     const broker = "role:BrokerServiceRole";
@@ -687,8 +691,9 @@ describe("task-token key and membership IAM", () => {
     const [id, key] = signingKey(named, "DeveloperSignInTaskTokenKey");
     expect(key.Properties).toMatchObject({ KeySpec: "RSA_2048", KeyUsage: "SIGN_VERIFY", PendingWindowInDays: 7, Description: "Signs AgentX staging task tokens" });
     expect(key.Properties.EnableKeyRotation ?? false).toBe(false);
-    expect(key.DeletionPolicy).toBe("Delete");
-    expect(key.UpdateReplacePolicy).toBe("Delete");
+    // RETAIN (arch ruling 2026-11-24): the key outlives its stack (retention.ts: RetainExceptOnCreate in a named environment); see retain-stateful-resources.test.ts.
+    expect(key.DeletionPolicy).toBe("RetainExceptOnCreate");
+    expect(key.UpdateReplacePolicy).toBe("Retain");
     expect(ofType(named, "AWS::KMS::Alias").filter(([, r]) => r.Properties.AliasName === "alias/agentx/staging/task-tokens").map(([, r]) => r.Properties.TargetKeyId)).toEqual([{ "Fn::GetAtt": [id, "Arn"] }]);
     // #1148: the legacy (production) template has its own task key too, for the core engine's model gateway.
     expect(ofType(legacy, "AWS::KMS::Alias").map(([, r]) => r.Properties.AliasName)).toContain("alias/agentx/production/task-tokens");
@@ -808,16 +813,21 @@ describe("task-token key and membership IAM", () => {
     // b28 first-gateway fix: every current broker advertises its capability before a gateway
     // is configured. Pin the complete new template AND prove this exact output is its only delta.
     expect(remainder.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
-    expect(createHash("sha256").update(text).digest("hex")).toBe("9d3f6f734b745c5d93a2d5a4fb79505c9c91a9bab4e5d9ecdbe1f0cb9070eac5");
+    expect(createHash("sha256").update(text).digest("hex")).toBe("185703cb9f7d43c6b9bf301e25dfc84923d7dbf3135f9115fd53d278dbd7f0ac");
+    // RETAIN (Rule D): with exactly the policies put back the recorded pins hold (six of the seven: this chain takes the task token key out with the core engine).
+    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(remainder), "named", { expectSeven: 6 })).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("9d3f6f734b745c5d93a2d5a4fb79505c9c91a9bab4e5d9ecdbe1f0cb9070eac5");
     const beforeFirstGateway = structuredClone(remainder);
     delete beforeFirstGateway.Outputs.ModelRunPriceVersion;
     const beforeText = JSON.stringify(beforeFirstGateway).replace(/[a-f0-9]{64}/g, "<asset-hash>");
-    expect(createHash("sha256").update(beforeText).digest("hex")).toBe("f555abd801f394036cebef13b345e8025c88fb38bec7272a7aab3abf0649577d");
+    expect(createHash("sha256").update(beforeText).digest("hex")).toBe("f0cf92b1219ee72d2c095476d1826b9c6baa41f3a4d0a2d16470a966848c2f07");
+    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(beforeFirstGateway), "named", { expectSeven: 6 })).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("f555abd801f394036cebef13b345e8025c88fb38bec7272a7aab3abf0649577d");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {
     const [, key] = signingKey(named, "DeveloperSignInTokenKey");
-    expect(createHash("sha256").update(JSON.stringify(key)).digest("hex")).toBe("985e0782f6f8b959676a82fb7253a1b6d909109a2dbef0db16678f35e0640b47");
+    expect(createHash("sha256").update(JSON.stringify(key)).digest("hex")).toBe("cd9c0b50d5ef25fbc57cacd52fde843c68e3a1a493a2b94a322ee4b659818be2");
+    // RETAIN (Rule D): the key is the base's byte for byte once its two policies are put back.
+    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicy(structuredClone(key), "named"))).digest("hex")).toBe("985e0782f6f8b959676a82fb7253a1b6d909109a2dbef0db16678f35e0640b47");
   });
 
   it("allows only the broker to sign task tokens and only DeveloperIdentity to sign developer tokens, including an overprivileged probe", () => {

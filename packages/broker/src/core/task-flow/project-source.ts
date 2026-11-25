@@ -1,6 +1,7 @@
 // Lane L6a, task flow core: registered projects read from the document store, by Cloud's keys (`projectRevisionKey`, `orgProjectCatalogKey`).
 import {
   ProjectDefinitionSchema,
+  noAutomatedTestsOfRow,
   orgProjectCatalogKey,
   projectMetaKey,
   projectPk,
@@ -15,7 +16,8 @@ import type { ProjectRevision, ProjectSource } from "./deps.js";
 function revisionOf(document: StoredDocument | undefined, meta: StoredDocument | undefined): ProjectRevision | undefined {
   if (document === undefined || meta?.status === "deleted") return undefined;
   const parsed = ProjectDefinitionSchema.safeParse(document.definition);
-  return parsed.success ? { definition: parsed.data, ...(meta?.status === "archived" ? { archived: true } : {}) } : undefined;
+  const noTests = noAutomatedTestsOfRow(document);
+  return parsed.success ? { definition: parsed.data, ...(meta?.status === "archived" ? { archived: true } : {}), ...(noTests === undefined ? {} : { noAutomatedTests: noTests }) } : undefined;
 }
 
 /** Reads project revisions from the store. A record that does not parse as a project is treated as absent (the start then says the project does not exist). */

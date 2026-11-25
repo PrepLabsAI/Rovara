@@ -1,7 +1,7 @@
 // Recording a night: the baseline, the already-failing and flaky sets, the coverage map bound to its digest, the classification beside the baseline, and the rows of nights that did not finish.
 import { describe, expect, it } from "vitest";
 import {
-  CoverageMapSchema, DocumentStoreError, NIGHTLY_STEP_WORDS, NightlyBaselineSchema, NightlyResultSchema, StoredNightlyHealthSchema, agentXError, projectPk,
+  CoverageMapSchema, DocumentStoreError, NIGHTLY_STEP_WORDS, NightlyBaselineSchema, NightlyResultSchema, StoredNightlyHealthSchema, agentXError, orgProjectCatalogKey, projectPk, projectRevisionKey,
   type DocumentStore,
 } from "@agentx/contracts";
 import { NIGHTLY_ENVIRONMENT_CAUSES, NIGHTLY_HEALTH_STEPS, NIGHTLY_UNCLEAR_CAUSES } from "../../packages/broker/src/core/test-env/nightly-health.js";
@@ -219,5 +219,37 @@ describe("the coverage map store over object storage", () => {
     expect(await maps.get("org_bbbbbbbbbbbbbbbbbbbb", PROJECT, digest)).toBeUndefined();
     expect(nightlyMapKey(ORG, PROJECT, digest).startsWith(nightlyMapsOfProject(ORG, PROJECT))).toBe(true);
     expect(await maps.get(ORG, PROJECT, "f".repeat(64))).toBeUndefined();
+  });
+});
+
+// DEC 254zzz495 (N3): a night in which no test ran is healthy for a project whose approved setup has no test command, but only while the night's own approved environment has no test-kind check. Proved THROUGH recordNightlyResult
+// (the exemption is `!hasTestCheck(environment) && projectHasNoAutomatedTests`), not only through `hasTestCheck`: dropping the environment half would hide a real "the test step collected nothing".
+describe("the no-automated-tests exemption, through recordNightlyResult", () => {
+  const FACT = { at: "2026-11-24T10:00:00.000Z", looked: ["tests_folder"] };
+  const steps = NIGHTLY_STEP_WORDS.map((step) => ({ step, status: "passed" }));
+  const smokeOnly = { repos: [{ repositoryId: "svc", setupCommands: [], checks: [{ id: "smoke", label: "Smoke", command: { cwd: "service", executable: "make", args: ["smoke"], timeoutSeconds: 600 }, kind: "smoke" }] }] };
+  // A night in which no test ran: nothing collected, nothing skipped; one check, which runs tests (the environment names a test check) or does not (it names none).
+  const emptyNight = (runsTests: boolean) => ({
+    tests: { total: 0, passed: 0, failed: 0, skipped: 0 }, failed: [], flaky: [],
+    health: { steps, checks: [{ runsTests, started: true, timedOut: false, reportApproved: false, reportWritten: false, testsCollected: 0 }], tests: { total: 0, passed: 0, failures: 0, errors: 0, skipped: 0 } },
+  });
+  async function nightOf(environmentExtra: Record<string, unknown>, runsTests: boolean, withFact: boolean) {
+    const h = await nightlyWorld({}, environmentExtra);
+    const definition = { name: PROJECT, revision: 1, setup: [], readiness: [], orchestratorInstructions: "Delegate work.", repositories: [{ name: "svc", url: "https://github.com/example/svc.git", path: "service", defaultBranch: "main", credentialRef: "host-app" }] };
+    await h.store.put({ item: { ...projectRevisionKey(ORG, PROJECT, 1), entityType: "PROJECT", definition, ...(withFact ? { noAutomatedTests: FACT } : {}) } });
+    await h.store.put({ item: { ...orgProjectCatalogKey(ORG, PROJECT), entityType: "PROJECT_CATALOG", latestRevision: 1 } });
+    const data = result(await started(h), emptyNight(runsTests));
+    await recordNightlyResult(h.deps, h.mapStore, { orgId: ORG, project: PROJECT, result: data.result, coverageMap: data.coverageMap });
+    return (await readLatestNightlyHealth(h.deps, ORG, PROJECT))?.health;
+  }
+
+  it("an environment with no test-kind check and a project with the fact: the empty night is healthy", async () => {
+    expect(await nightOf(smokeOnly, false, true)).toMatchObject({ class: "passed" });
+  });
+  it("the same night without the fact is not (the fact is read from the project's live revision row)", async () => {
+    expect(await nightOf(smokeOnly, false, false)).toMatchObject({ class: "environment", cause: "no_tests_collected" });
+  });
+  it("an environment WITH a test-kind check and a project with the fact: a test step that collected nothing is still the environment's fault", async () => {
+    expect(await nightOf({}, true, true)).toMatchObject({ class: "environment", cause: "no_tests_collected" });
   });
 });

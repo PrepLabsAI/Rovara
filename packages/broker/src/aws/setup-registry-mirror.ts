@@ -25,6 +25,8 @@ export interface SetupRegistryMirror {
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
+/** The no-automated-tests fact is a revision-row attribute beside `definition`; the hosted checklist reads it from the old PROJECT# row for a project not in a named company, so the mirrored row carries it as the core row has it. */
+const noTestsFactOf = (core: Record<string, unknown>): { noAutomatedTests?: JsonValue } => (core["noAutomatedTests"] === undefined ? {} : { noAutomatedTests: core["noAutomatedTests"] as JsonValue });
 const moved = (): SubjectRefusal => new SubjectRefusal("invalid", SETUP_REGISTRY_MOVED);
 
 /** The mirror for one company's decisions (reads and writes only through `store`, the registry's table). */
@@ -76,6 +78,7 @@ export function createSetupRegistryMirror(options: { store: Pick<DocumentStore, 
       const legacyRow = {
         ...projectKey(project, candidateRevision), entityType: "PROJECT", ...(base["companyId"] === undefined ? {} : { companyId: base["companyId"] as string }),
         ...(core["candidate"] === undefined ? {} : { candidate: core["candidate"] as JsonValue }), definition: coreDefinition as JsonValue, ...carried,
+        ...noTestsFactOf(core),
       } as StoredDocument;
       const sameCompany = base["companyId"] === undefined ? when.notExists("companyId") : when.eq("companyId", base["companyId"] as string);
       return [

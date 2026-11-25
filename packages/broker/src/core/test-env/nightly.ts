@@ -27,6 +27,7 @@ import {
   StoredNightlyHealthSchema,
   agentXError,
   canonicalJson,
+  noAutomatedTestsOf,
   projectPk,
   when,
   type CoverageMapData,
@@ -44,6 +45,7 @@ import { mintTrustedBaselineRun, recordBaselineRow } from "./baseline-cache.js";
 import { baselineCacheEnabled } from "./switch.js";
 import { readApprovedTestEnvironment } from "./environment.js";
 import { classifyNightlyHealth } from "./nightly-health.js";
+import { createStoreProjectSource } from "../task-flow/project-source.js";
 import { recordNightUnavailable, sameDayRetryOf } from "./night-status.js";
 
 const HOUR_MS = 3_600_000;
@@ -296,6 +298,24 @@ export interface MapStore {
 
 export const coverageMapDigest = (map: CoverageMapData): string => sha(CoverageMapSchema.parse(map));
 
+/** Whether the night's own approved environment defines a test-kind check. Then "the test step collected nothing" is a real fault, whatever the project's setup says. */
+export const hasTestCheck = (environment: { repos: ReadonlyArray<{ checks: ReadonlyArray<{ kind: string }> }> }): boolean => environment.repos.some((repo) => repo.checks.some((check) => check.kind === "test"));
+
+/** DEC 254zzz495 (N3): whether the project's approved setup has no test command, from the broker's own record of its latest revision. A read that fails reads as "has tests", the stricter way. */
+export async function projectHasNoAutomatedTests(deps: Pick<TestEnvDeps, "store">, orgId: OrgId, project: string): Promise<boolean> {
+  try {
+    const latest = await createStoreProjectSource(deps.store, orgId).latest(project);
+    return latest !== undefined && noAutomatedTestsOf({ readiness: latest.definition.readiness, noAutomatedTests: latest.noAutomatedTests }) !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+/** The exemption the night's health gets: the project's live revision has the fact AND the night's own approved environment has no test-kind check (a real "the test step collected nothing" is never hidden). */
+async function nightHasNoAutomatedTests(deps: Pick<TestEnvDeps, "store">, orgId: OrgId, project: string, environment: Parameters<typeof hasTestCheck>[0]): Promise<boolean> {
+  return !hasTestCheck(environment) && await projectHasNoAutomatedTests(deps, orgId, project);
+}
+
 /** What `recordNightlyResult` tells its optional listener once the baseline is stored (the project's health, where it is wired, is bound to it). */
 export interface NightlyRecorded { orgId: OrgId; project: string; slotId: string; baseline: NightlyBaseline; health: StoredNightlyHealth | undefined }
 
@@ -303,7 +323,7 @@ export interface NightlyRecorded { orgId: OrgId; project: string; slotId: string
  * What the night's step words say, classified by the broker's own rules: nothing the worker says in words is read. Undefined for a result that carries no step words (an older worker), which then
  * stores nothing new. A report whose counts are not the result's own counts disagrees with itself and reads as unclear, never as passed.
  */
-export function nightlyHealthOf(result: NightlyResult, context: { noSmokeCheck?: boolean } = {}): StoredNightlyHealth | undefined {
+export function nightlyHealthOf(result: NightlyResult, context: { noSmokeCheck?: boolean; noAutomatedTests?: boolean } = {}): StoredNightlyHealth | undefined {
   if (result.health === undefined) return undefined;
   const { ranFrom, ...report } = result.health;
   const agrees = report.tests.total === result.tests.total && report.tests.passed === result.tests.passed && report.tests.skipped === result.tests.skipped && report.tests.failures + report.tests.errors === result.tests.failed;
@@ -354,7 +374,7 @@ export async function recordNightlyResult(
   });
   // The health sits BESIDE the baseline, not inside it: an older broker still reads the baseline. A result without step words stores exactly what it always did.
   // A skipped smoke step is fine only when the approved environment of THIS night's revision defines no smoke check (read here, from the broker's own record).
-  const health = nightlyHealthOf(result, { noSmokeCheck: !env.environment.repos.some((repo) => repo.checks.some((check) => check.kind === "smoke")) });
+  const health = nightlyHealthOf(result, { noSmokeCheck: !env.environment.repos.some((repo) => repo.checks.some((check) => check.kind === "smoke")), noAutomatedTests: await nightHasNoAutomatedTests(deps, input.orgId, input.project, env.environment) });
   const healthField = health === undefined ? {} : { health };
   const history = { ...keyOf(input.orgId, input.project, `TESTENV#BASELINE#${result.finishedAt}`), entityType: "TEST_ENV_BASELINE", orgId: input.orgId, project: input.project, baseline, ...healthField, ...(result.coverageMapSkipped === undefined ? {} : { coverageMapSkipped: result.coverageMapSkipped }), slowest: result.slowest, durationMs: result.durationMs, ...expiryOf(now + BASELINE_TTL_MS) };
   await deps.store.put({ item: documentOf(history) });

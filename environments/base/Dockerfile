@@ -6,6 +6,7 @@ FROM public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63
 WORKDIR /opt/agentx
 COPY package.json package-lock.json tsconfig.json tsconfig.base.json ./
 COPY packages/model-runtime/package.json packages/model-runtime/package.json
+COPY packages/code-api/package.json packages/code-api/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/verifier/package.json packages/verifier/package.json
 COPY packages/gateway/package.json packages/gateway/package.json
@@ -23,6 +24,7 @@ COPY infra/package.json infra/package.json
 RUN npm ci --ignore-scripts
 
 COPY packages/model-runtime packages/model-runtime
+COPY packages/code-api packages/code-api
 COPY packages/contracts packages/contracts
 COPY packages/verifier packages/verifier
 COPY packages/worker packages/worker
@@ -120,6 +122,7 @@ WORKDIR /opt/agentx
 COPY --from=build /opt/agentx/package-lock.json ./package-lock.json
 COPY --from=build /opt/agentx/node_modules ./node_modules
 COPY --from=build /opt/agentx/packages/model-runtime ./packages/model-runtime
+COPY --from=build /opt/agentx/packages/code-api ./packages/code-api
 COPY --from=build /opt/agentx/packages/contracts ./packages/contracts
 COPY --from=build /opt/agentx/packages/verifier ./packages/verifier
 COPY --from=build /opt/agentx/packages/worker ./packages/worker

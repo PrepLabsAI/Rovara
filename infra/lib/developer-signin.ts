@@ -143,8 +143,8 @@ export class DeveloperSignIn extends Construct {
       keySpec: kms.KeySpec.RSA_2048,
       keyUsage: kms.KeyUsage.SIGN_VERIFY,
       pendingWindow: Duration.days(7),
-      // Access tokens live one hour, so nothing outlives the key for long.
-      removalPolicy: RemovalPolicy.DESTROY,
+      // Access tokens live one hour, but the key's public half is the install's sign-in JWKS: a replaced key signs every session out at once. Retained: never deleted with its stack.
+      removalPolicy: RemovalPolicy.RETAIN,
     });
 
     // Named environments publish a stable task kid before a gateway is enabled. #1148: the legacy deployment (production) too, for the core engine's model gateway (legacyNaming's alias).
@@ -155,7 +155,8 @@ export class DeveloperSignIn extends Construct {
       keySpec: kms.KeySpec.RSA_2048,
       keyUsage: kms.KeyUsage.SIGN_VERIFY,
       pendingWindow: Duration.days(7),
-      removalPolicy: RemovalPolicy.DESTROY,
+      // Retained: the public half is published in the install's JWKS (the model gateway verifies task tokens against it); never deleted with its stack.
+      removalPolicy: RemovalPolicy.RETAIN,
     });
 
     // Hosted wiring (c): the policy hook's question key, a separate key from the task key (plan v3.2 7.5: a question can never pass for a task token, or the other way round).
@@ -167,8 +168,8 @@ export class DeveloperSignIn extends Construct {
       keySpec: kms.KeySpec.RSA_2048,
       keyUsage: kms.KeyUsage.SIGN_VERIFY,
       pendingWindow: Duration.days(7),
-      // A question lives six minutes: nothing outlives the key for long.
-      removalPolicy: RemovalPolicy.DESTROY,
+      // A question lives six minutes, but a replaced key fails in-flight questions. Retained: never deleted with its stack.
+      removalPolicy: RemovalPolicy.RETAIN,
     });
 
     const oidcSecretName = `agentx/${props.env}/developer-oidc`;

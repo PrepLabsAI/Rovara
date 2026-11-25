@@ -1,30 +1,7 @@
 // UX2 slice 2 item 1: ONE status model. Every surface that says where a task or session stands (the task page header and pipeline strip, Home, Live, the sidebar, Slack, the MCP tools and
 // the CLI) reads this one contract: a state, its one human word, a reason sentence where the state needs one, and the next step. No surface shows a raw code (STARTING, task_failed, CLOSED).
 import { z } from "zod";
-
-/** The states, in the order a task moves through them. `needs_you` and `failed` always carry a reason sentence. */
-export const TASK_STATUS_STATES = [
-  "understanding", "planning", "reviewing_design", "building", "checking", "needs_you", "paused_budget", "ready_to_merge", "merged", "closed", "failed",
-  // Review I4: a task with no workflow whose run finished waits for its owner's next request; that is not a block, so it is not "Needs you".
-  "finished_run",
-] as const;
-export type TaskStatusState = (typeof TASK_STATUS_STATES)[number];
-
-/** The one human word of each state. `needs_you` and `failed` are followed by ": <reason>" (`taskStatusText`). */
-export const TASK_STATUS_WORDS: Record<TaskStatusState, string> = {
-  understanding: "Understanding the request",
-  planning: "Planning",
-  reviewing_design: "Reviewing the design",
-  building: "Building",
-  checking: "Checking",
-  needs_you: "Needs you",
-  paused_budget: "Paused: needs more budget",
-  ready_to_merge: "Ready to merge",
-  merged: "Merged",
-  closed: "Closed",
-  failed: "Failed",
-  finished_run: "Finished its run",
-};
+import { TASK_STATUS_STATES, TASK_STATUS_WORDS, type TaskStatusState } from "./task-words.js";
 
 /** The states that are over: nothing more happens on the task. */
 export const TASK_STATUS_ENDED: readonly TaskStatusState[] = ["merged", "closed"];

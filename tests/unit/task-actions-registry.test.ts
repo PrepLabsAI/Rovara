@@ -197,7 +197,7 @@ describe("stop", () => {
   it("is offered to the owner while a step runs, with no confirm, and is recorded as a stop request in Slack's name", async () => {
     const running = await seed({ workflow: WorkflowSnapshotSchema.parse({ ...blockedReview(), stage: "IMPLEMENT", state: "RUNNING", blockReason: undefined }), access: hostedOwnerAccess() });
     const offered = (await stateOffers(envOf(running), await taskOf(running.h))).find((offer) => offer.id === "task.stop");
-    expect(offered).toMatchObject({ label: "Stop", needsDialog: false, risk: "routine" });
+    expect(offered).toMatchObject({ label: "Stop here and keep the work", needsDialog: false, risk: "routine" });
     const result = await performRegistryAction(envOf(running), ownerCaller(running), press("task.stop", offered!.binding));
     expect(result.status).toBe("done");
     expect(running.h.audit.find((event) => event.action === "task.stop_requested")).toMatchObject({ details: { via: "slack" } });

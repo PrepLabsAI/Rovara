@@ -1560,11 +1560,11 @@ async function routeClientSetupStatus(deps: DeveloperRouteDependencies, request:
   const companyId = await resolveCompany(deps.companies, person.developerId);
   // DEC 254zzz80: a named company's revision from its own partition; the legacy row keeps its stored-company check.
   const named = namedCompany(companyId);
-  const row = named !== undefined ? await namedCompanyLatestRevisionRow(scope.client, deps.tableName, named, project) as { definition?: { revision?: unknown; repositories?: unknown } } | undefined
+  const row = named !== undefined ? await namedCompanyLatestRevisionRow(scope.client, deps.tableName, named, project) as { definition?: { revision?: unknown; repositories?: unknown; readiness?: unknown }; noAutomatedTests?: unknown } | undefined
     : (await scope.client.send(new QueryCommand({
       TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
       ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
-    })) as { Items?: Array<{ definition?: { revision?: unknown; repositories?: unknown } }> }).Items?.[0];
+    })) as { Items?: Array<{ definition?: { revision?: unknown; repositories?: unknown; readiness?: unknown }; noAutomatedTests?: unknown }> }).Items?.[0];
   const definition = row?.definition;
   if ((named === undefined ? !recordInCompany(row, companyId) : row === undefined) || definition === undefined || typeof definition.revision !== "number") throw agentXError("NOT_FOUND", "project not found");
   // With no company layer there is no company to belong to: the person must be one who may use the project.
@@ -1595,7 +1595,7 @@ async function routeClientSetupStatus(deps: DeveloperRouteDependencies, request:
   }
   if (request.method !== "GET") throw agentXError("NOT_FOUND", "route not found");
   const status = await readProjectSetupStatus({
-    documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: effectiveCompany, project, definition: { revision: definition.revision, repositories: definition.repositories },
+    documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: effectiveCompany, project, definition: { revision: definition.revision, repositories: definition.repositories, readiness: definition.readiness }, noAutomatedTests: row?.noAutomatedTests,
     viewer: { companyRole: role ?? null, projectAdmin },
     readers: { channels: () => projectChannelLinks({ ...deps, documentClient: scope.client }, project, companyId), ...linearTeamReader(deps, companyId, project) },
   });

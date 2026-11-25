@@ -158,6 +158,23 @@ function utf8ByteLength(text: string): number {
   return new TextEncoder().encode(text).byteLength;
 }
 
+// ---- a setup that ends with no tests or no commands (DEC 254zzz495, N3)
+
+/**
+ * The words of the two normal ends that are not a failure and not a dead end. `readyNoTests`: the approved (or waiting) setup has no test command; its chip is Ready. `noCommands`: the run found nothing it could verify;
+ * the person can still use the project without setup or tests. The pull-request note is a later lane's (N4), so the body promises tasks only. Pure text, browser-safe.
+ */
+export const SETUP_READY_NO_TESTS_WORDS = {
+  headline: "Ready, no automated tests",
+  body: (project: string): string => `Rovara installed ${project} and found no tests. Tasks run normally.`,
+  looked: (places: readonly string[]): string => `Looked for tests in: ${places.join(", ")}. None found.`,
+} as const;
+export const SETUP_NO_COMMANDS_WORDS = {
+  title: "Rovara found no commands it could verify",
+  body: (project: string): string => `You can still use ${project}. Tasks run without an install step, and Rovara tells you when something it needed was missing.`,
+  use: "Use without setup or tests",
+} as const;
+
 /** A host the run needs: one card per host per project. `journalN` is the command that led to it, `from` the repository line that named it; both are optional and only point. */
 export const SetupHostAskSchema = z
   .object({
