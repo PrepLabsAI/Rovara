@@ -139,7 +139,7 @@ import { createFeedbackReviewWeb } from "./feedback-review-web.js";
 import { TASK_PAGE, TASK_PEOPLE_CONFIRMATION, TASK_STATUS, createTaskWeb } from "./task-web.js";
 import { TASK_PAGE_API_PREFIX, createTaskWebApi } from "./task-web-api.js";
 import { getTaskE2EArtifact } from "./task-e2e-artifact.js";
-import { coreAnswerValue, type CoreTaskEntry } from "./engine-boundary.js";
+import { coreAnswerValue, ownerOfExistingTask, type CoreTaskEntry } from "./engine-boundary.js";
 import type { CoreAppEntry } from "./core-app-routes.js";
 import type { BrokerResponse } from "../handler.js"; import { profileDisplayName } from "../developer/github-profile.js";
 import type { CompanyImportRegistry } from "./company-import-forwarding.js"; import { routeSignInLinks, type SignInLinkForward } from "./sign-in-link-routes.js";
@@ -1299,9 +1299,9 @@ function memberActions(deps: DeveloperRouteDependencies) {
 /**
  * Spec 067: a registered, not removed person, with their name and whether they hold a grant on `project`. With `ownTask` (the task's own person asking whether they still hold their task) it also
  * answers `mayStart`: the SAME live test the task start meets, `checkProjectAccess`: the grant, or fresh bound-channel membership while the project lets channel members use it and the person is
- * Slack-linked. Read now, nothing kept; a read that fails (Slack unreachable, a refusal) is "no", as at the start. A reader never gets it (a reader needs the grant itself).
+ * Slack-linked, for an OLD-engine task only (no engine stamp; a core task's own person needs the grant). Read now, nothing kept; a read that fails (Slack unreachable, a refusal, the stamp) is "no", as at the start. A reader never gets it (a reader needs the grant itself).
  */
-async function taskReaderPerson(deps: DeveloperRouteDependencies, developerId: string, project: string, taskCompany?: string, options?: { ownTask?: true }): Promise<{ name: string; projectMember: boolean; mayStart?: boolean } | undefined> {
+async function taskReaderPerson(deps: DeveloperRouteDependencies, developerId: string, project: string, taskCompany?: string, options?: { ownTask?: true; taskId?: string }): Promise<{ name: string; projectMember: boolean; mayStart?: boolean } | undefined> {
   const person = await getSignIn<Pick<DeveloperRecord, "revoked" | "displayName" | "slackUserId">>(deps, `DEVELOPER#${developerId}`);
   if (person === undefined || person.revoked === true) return undefined;
   const name = person.displayName ?? "Unknown";
@@ -1309,6 +1309,9 @@ async function taskReaderPerson(deps: DeveloperRouteDependencies, developerId: s
     if (options?.ownTask !== true) return { name, projectMember: held };
     if (held) return { name, projectMember: held, mayStart: true };
     try {
+      // Channel access holds an OLD-engine task only: the one the engine stamp (`TASK_ENGINE#<id>`, written by the core's own start) is missing for. A core task's own person needs the grant, as its start
+      // and every step do (core-engine-root.ts); no task id, a stamp that is there, or a stamp that cannot be read: grant only.
+      if (options.taskId === undefined || await ownerOfExistingTask(deps, options.taskId) !== "workflow") return { name, projectMember: held, mayStart: false };
       await checkProjectAccess(deps, { developerId, ...(person.slackUserId === undefined ? {} : { slackUserId: person.slackUserId }) }, project);
       return { name, projectMember: held, mayStart: true };
     } catch { return { name, projectMember: held, mayStart: false }; }
