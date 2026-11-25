@@ -465,5 +465,26 @@
       "why": "compares the gateway with Cloud's server (company-store.ts) and Cloud's UI client, which Code does not hold"
     }
   },
-  "divergedFromCloud": {}
+  "divergedFromCloud": {
+    "packages/model-gateway/src/bedrock-byo-sessions.ts": {
+      "blob": "blob:2a1ba455315bb36f1c81cddf192de23dd30acb1b",
+      "reason": "Bedrock model check: max_tokens 0 answered by a Messages response is ready, AWS not answering is no_answer (one retry inside a 22 s budget), status, error type and company logged; byte-identical to Rovara Cloud pr/bedrock-byo-check-fixes-cloud-20261125 @ c9878e235"
+    },
+    "packages/model-gateway/src/bedrock-byo.ts": {
+      "blob": "blob:2965a44a9ca6f77926c432c207de1157e96f4fac",
+      "reason": "adds the model-check word no_answer and reads a stored word this release does not know as no_answer; byte-identical to Rovara Cloud pr/bedrock-byo-check-fixes-cloud-20261125 @ c9878e235"
+    },
+    "packages/model-gateway/src/product-keys.ts": {
+      "blob": "blob:7e2c79cca5ca424e14ca1f57f9475482b26c8f42",
+      "reason": "keeps no_answer, reads unknown stored state words as no_answer, adds recheckBedrock (Check again for the saved connection); byte-identical to Rovara Cloud pr/bedrock-byo-check-fixes-cloud-20261125 @ c9878e235"
+    },
+    "packages/model-gateway/src/process.ts": {
+      "blob": "blob:1b57263f5ea83938702e48f6e304814e3b098aa2",
+      "reason": "passes the gateway's log to the Bedrock sessions (model-check status lines); byte-identical to Rovara Cloud pr/bedrock-byo-check-fixes-cloud-20261125 @ c9878e235"
+    },
+    "packages/model-gateway/src/service-call.ts": {
+      "blob": "blob:11e1ad832e4e09470fa50e21f0fe8f4bb961b8fa",
+      "reason": "a per-company limit (one probe at a time, 6 a minute) inside the Bedrock check handler; byte-identical to Rovara Cloud pr/bedrock-byo-check-fixes-cloud-20261125 @ c9878e235"
+    }
+  }
 }
