@@ -31,6 +31,8 @@ export interface BrokerResponse {
   statusCode: number;
   headers: Record<string, string>;
   body: string;
+  /** The body is binary (a stored screenshot) carried as base64 for the gateway, which decodes it. Set only by the evidence file route. */
+  isBase64Encoded?: true;
 }
 
 export function createBrokerHandler(dependencies: {

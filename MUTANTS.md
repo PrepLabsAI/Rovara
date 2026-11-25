@@ -1400,3 +1400,31 @@ The checks handler reads `context.decision.task` and `decision.codeDetails` (the
 |---|---|---|
 | N1 | the notices are also put into `notTested` (the old behaviour) | rd2b1-checks-read "the security scan, what was not tested, and the review-only words" (the review-only sentence must be a note and `notTested` empty) |
 | N2 | the after-pull-request wording is never chosen (`pullRequests` ignored) | task-words "says only that the checks follow once the pull request is open (a fix round)" |
+## RD-2d - the evidence file route (GET /v1/app/tasks/{taskId}/evidence/{sha}), on RD-2.0 head a65c40ce7
+
+Production guards this lane adds: the task read's own rule as the first call, the separate code-details decision, pack membership (`evidenceViewOf` + `servableEvidenceArtifact`, served kinds text and JPEG only), the retention check, the bytes re-check (`readEvidenceArtifact`: size, SHA-256, kind), the fixed headers and types, the audit line before the bytes, the base64 flag, and (`core-host/dev-routes.ts`) the `owns()` clause and the script-token refusal. All in `core-host/task-evidence-file-routes.ts` unless noted; every mutant run against `tests/unit/rd2d-evidence-file-route.test.ts` alone.
+
+| Mutant | Mutation | Failing tests |
+|---|---|---|
+| M1 access rule | `loadReadableTask` replaced by a raw `readTask` | other company / colleague / admin answer, another task's file, two companies |
+| M2 code-details decision | the `mayReadCodeDetails` line removed | "the code-details decision is its own" |
+| M3 pack membership | any sha taken as an available link | non-reader answers, unlisted sha, no kept pack (4 tests) |
+| M4 retention | the "gone from the store" branch removed | "stays two objects", "past its retention" |
+| M5 text type | `text/html` for command output | headers test, HTML-looking output test |
+| M6 nosniff | header removed | headers, screenshot, HTML tests |
+| M7 audit | the audit write removed | audit line, non-reader audit list, retention test |
+| M8 audit failure | swallowed (file served) | "an audit that cannot be written serves no file" |
+| M9 kind allow-list | `api_sample_json` added | "another task's file, an object the pack does not name ... a kind this route does not serve" |
+| M10 base64 | `isBase64Encoded` dropped | screenshot decodes to the stored bytes |
+| M11 dev-routes `owns()` | the new clause removed | 12 tests (no answer) |
+| M12 dev-routes script token | path not refused for a script token | "a script token never reaches a file" |
+| M13 method | any method owned | "owns GET on exactly this path" |
+| M14 no-store | header removed | headers, screenshot |
+| M15 content policy | header removed | headers, HTML-looking output |
+| M16 store fault | a failing `stat` reads as "expired" | "a store that cannot answer says so" |
+| M17 kind re-check (`read.kind !== link.kind`) | removed | SURVIVED: equivalent (`readEvidenceArtifact` derives its kind from the same link); the dead comparison was deleted instead |
+| M18 company bound | store bound to another company | 11 tests |
+| M19 audit details | digest left out of the line | audit line test |
+| M20 disposition | `inline` without the fixed name | headers, screenshot, HTML tests |
+
+19 killed, 1 equivalent (removed as dead code). Restored tree: `tests/unit/rd2d-evidence-file-route.test.ts` 17 tests pass.

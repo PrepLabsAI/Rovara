@@ -29,7 +29,8 @@ export type TaskRead =
   /** `GET .../plan` */ | "plan"
   /** `GET .../evidence` */ | "evidence"
   /** `GET .../comments`: the plan comments (the old People page rule, as the diff) */ | "comments"
-  /** the task page's new reads (RD-2.0) */ | "spec" | "checks" | "changes" | "timeline";
+  /** the task page's new reads (RD-2.0) */ | "spec" | "checks" | "changes" | "timeline"
+  /** `GET /v1/app/tasks/{id}/evidence/{sha}` (RD-2d): the file behind a link of the checks read (command output, a screenshot); a part of the checks, so a share is not shown it */ | "evidenceFile";
 
 /**
  * How the person was admitted (NOT who they are: a handler that wants "the owner" asks `mode === "owner"` and gets the task's own person on every read, and a co-owner only where the owner rule is the way in).
@@ -74,14 +75,14 @@ const ADMITTED_BY: Readonly<Record<TaskRead, readonly Basis[]>> = {
   // The events are for everyone the task is shown to (a co-owner, the People list's commenters and viewers, a share); the readers routes stay the task's person and a share (told only the owner may share).
   events: ["developer", "reads", "shared"], share: ["developer", "shared"],
   diff: ["page"], comments: ["page"], plan: ["acts"], evidence: ["acts"],
-  spec: ["reads", "shared"], checks: ["reads", "shared"], changes: ["reads", "shared"], timeline: ["reads", "shared"],
+  spec: ["reads", "shared"], checks: ["reads", "shared"], changes: ["reads", "shared"], timeline: ["reads", "shared"], evidenceFile: ["reads", "shared"],
 };
 
 /** What each shared role is shown, per read. Exhaustive over `SHARED_ROLES` and every read: a role or read with no cell does not compile. Only a read that `ADMITTED_BY` lets a share into is ever asked. The viewer is shown the summary (the task, its events, its timeline); the plan, the checks and the code changes wait for the owner's answer (Q1). */
 const SHARED_PARTS: Readonly<Record<SharedRole, Readonly<Record<TaskRead, "shown" | "withheld">>>> = {
   viewer: {
     task: "shown", answers: "shown", readable: "shown", merge: "shown", events: "shown", share: "shown", diff: "shown", comments: "shown", plan: "shown", evidence: "shown",
-    spec: "withheld", checks: "withheld", changes: "withheld", timeline: "shown",
+    spec: "withheld", checks: "withheld", changes: "withheld", timeline: "shown", evidenceFile: "withheld",
   },
 };
 
@@ -89,7 +90,7 @@ const SHARED_PARTS: Readonly<Record<SharedRole, Readonly<Record<TaskRead, "shown
 const SHARED_WORDS = {
   lead: "The owner shared this task's summary with you.",
   fallback: "This part is not shown.",
-  parts: { spec: "The plan is not shown.", checks: "The checks are not shown.", changes: "The code changes are not shown." } as Partial<Record<TaskRead, string>>,
+  parts: { spec: "The plan is not shown.", checks: "The checks are not shown.", changes: "The code changes are not shown.", evidenceFile: "The checks are not shown." } as Partial<Record<TaskRead, string>>,
 };
 const sharedWords = (read: TaskRead): string => `${SHARED_WORDS.lead} ${SHARED_WORDS.parts[read] ?? SHARED_WORDS.fallback}`;
 

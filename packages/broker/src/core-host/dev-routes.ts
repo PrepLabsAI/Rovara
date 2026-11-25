@@ -54,6 +54,7 @@ import type { TaskRecord } from "../core/task-flow/records.js";
 import { loadOwnedTask, readTask, taskViewOf } from "../core/task-flow/reads.js";
 import { decideTaskRead, maySeeTaskMoney as roleMaySeeTaskMoney, type TaskRead, type TaskReadDecision, type TaskReadSeams } from "../core/task-flow/read-rule.js";
 import { coreTaskRuleOf } from "./task-rule-paths.js";
+import { readTaskEvidenceFile, taskEvidenceFileRoute } from "./task-evidence-file-routes.js";
 import { routeTaskScreen, taskScreenRoute } from "./task-screen-routes.js";
 import { involvedListOptions, listInvolvedTasks, wantsInvolved } from "../core/task-flow/involved.js";
 import type { TaskActionsOptions } from "../core/task-flow/owner-round.js";
@@ -340,7 +341,7 @@ function owns(path: string, method: string, query: string): boolean {
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
   if (isSetupRunPath(path, method) || isSetupCheckPath(path, method) || isWikiMapPath(path, method) || isReportPath(path, method)) return true;
   if (isKnownFailingPath(path, method) || isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method) || isEvalCheckPath(path, method) || isBrowserTestingPath(path, method) || isAgentDirectoryPath(path, method) || isSystemRunsPath(path, method) || isPackageRegistriesPath(path, method) || isTicketUpdatesPath(path, method) || isIntakePath(path, method)) return true;
-  return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path) || parityTaskRoute(path, method) !== undefined || isPrFeedbackPath(path, method) || taskScreenRoute(path, method) !== undefined;
+  return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path) || parityTaskRoute(path, method) !== undefined || isPrFeedbackPath(path, method) || taskScreenRoute(path, method) !== undefined || taskEvidenceFileRoute(path, method) !== undefined;
 }
 /** Neither decisions surface relies on sign-in time or methods (DEC 254zzz73). */
 function decisionCallerOf(caller: DeployedCaller, companyId: string): DeployedDecisionCaller {
@@ -619,6 +620,10 @@ function taskSurfaceAnswer(target: Mounted, request: BrokerRequest, taskCaller: 
   // RD-2.0: the task page's new reads (spec, checks, changes, timeline), one mount; each answers ROUTE_NOT_SERVED until its lane fills its handler (task-screen-routes.ts).
   const screen = taskScreenRoute(path, request.method);
   if (screen !== undefined) return routeTaskScreen({ flow: target.runtime.flow, blobs: target.blobs, caller: taskCaller, request, ...(target.wiring.taskRules === undefined ? {} : { taskRules: target.wiring.taskRules }), authorize: (read, task, seams) => decideRead(target, caller, membership.role, { read, task, ...(seams === undefined ? {} : { seams }) }), decide: (read) => decideRead(target, caller, membership.role, { read, taskId: screen.taskId }) }, screen);
+  // RD-2d: the file behind a link of the checks read (GET /v1/app/tasks/{taskId}/evidence/{sha256}): task-evidence-file-routes.ts holds every rule.
+  const file = taskEvidenceFileRoute(path, request.method);
+  // The one read rule decides who may read it (a share is not shown the checks, so not their files); the route is given the decision and holds no access rule of its own.
+  if (file !== undefined) return decideRead(target, caller, membership.role, { read: "evidenceFile", taskId: file.taskId }).then((decision) => readTaskEvidenceFile({ flow: target.runtime.flow, blobs: target.blobs, caller: taskCaller, audit: auditOf(target, caller), now: () => nowOf(target), decision, ...file }));
   const parity = parityTaskRoute(path, request.method);
   if (parity === undefined) return undefined;
   return routeParityTask({
@@ -736,7 +741,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
       if (caller.scriptToken !== undefined && TASK_ANSWERS.test(path)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
       // A script token reaches task reads or the two scoped wiki reads; never sessions, decisions, playbooks or token management.
       // An owner's move on a task is never a script token's, and its answer must not tell a token which task ids exist: it reads like a missing task (the boundary's own answer).
-      if (caller.scriptToken !== undefined && (feedbackOrParity(path, request.method) || TASK_ACTION.test(path) || TASK_CANCEL.test(path) || TASK_PAGE_FINDINGS.test(path) || isHostedMergePath(path, request.method) || coreTaskRuleOf(path, request.method) !== undefined)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
+      if (caller.scriptToken !== undefined && (feedbackOrParity(path, request.method) || TASK_ACTION.test(path) || TASK_CANCEL.test(path) || TASK_PAGE_FINDINGS.test(path) || isHostedMergePath(path, request.method) || taskEvidenceFileRoute(path, request.method) !== undefined || coreTaskRuleOf(path, request.method) !== undefined)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
       // A task's proof index is refused to a script token too, but only AFTER the task is looked up (below): refusing it here, by path alone, told another company's token that the id is a real task (403) where an
       // id with no task reads as a missing task (404). Every other path left here names no task id.
       if (caller.scriptToken !== undefined && !TASK_READ.test(path) && !TASK_EVIDENCE.test(path) && scriptTokenRoute(request.method, path)?.permission !== "wiki") return errorAnswer(agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS));

@@ -461,6 +461,9 @@ export const ROUTES: readonly Route[] = [
   // (DEC 254zzz91), the task owner / co-owner / project admin / company admin rule, Rovara's checks and GitHub's mergeable state. Additive: no existing row changed.
   { method: "GET", path: "/v1/app/tasks/{taskId}/merge", requires: "tasks:read" },
   { method: "POST", path: "/v1/app/tasks/{taskId}/merge", requires: "full" },
+  // RD-2d: the file behind a link of the checks read (core-host/task-evidence-file-routes.ts): one stored file of the task's CURRENT evidence pack (command output as text/plain, a screenshot as image/jpeg), served after the
+  // task read's own rule; anyone who may not read the task, and any digest the pack does not name, reads exactly as a missing task. Carries only `requires`, so it rides along unversioned (no schema, no new code).
+  { method: "GET", path: "/v1/app/tasks/{taskId}/evidence/{sha}", requires: "tasks:read" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a live owner or admin to make a token or erase).
   // #1175: the company's per-step agent model choice (core-host/agent-model-routes.ts): full access only, then the core reads the live role (any member reads,
   // an owner or admin changes). Without these rows the broker answered 404 before auth, and Cloud's "AI and spending" step could never finish.
