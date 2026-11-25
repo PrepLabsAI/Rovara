@@ -35,7 +35,7 @@
     "infra/lib/control-plane.ts": 4,
     "infra/lib/core-engine.ts": 1,
     "infra/lib/environment-release-pipeline.ts": 4,
-    "infra/lib/model-gateway-app.ts": 10,
+    "infra/lib/model-gateway-app.ts": 9,
     "infra/lib/model-gateway-deployed-sha.ts": 1,
     "infra/lib/naming.ts": 1,
     "infra/lib/production-foundation.ts": 2

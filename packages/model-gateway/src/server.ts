@@ -32,7 +32,7 @@ import { AnswerBrokeError, CALL_HARD_CEILING_MS, callDurationMs, MAX_RESPONSE_BY
 import { AUTH_ERROR, TASK_TOKEN_SECONDS, consumeReviewerGrant, type TaskClaims, type TaskTokenVerifier } from "./token.js";
 import { closeReviewSession, REVIEW_SESSION_CLOSE_GRACE_MS, REVIEW_SESSION_SECONDS, type ReviewerGrantStore } from "./reviewer-grants.js";
 import { hasUsage, settleAmount, validUsage } from "./reported-cost.js";
-import { failedCallMicros, failedCallPhase, providerErrorReason, type FailedCallCause, type FailedCallPhase, type ProviderErrorReason, type StreamProgress } from "./failed-call.js";
+import { cutCallMicros, failedCallPhase, FAILED_CALL_RECEIVED_BYTES_PER_TOKEN, mayReasonUnseen, providerErrorReason, type FailedCallCause, type FailedCallPhase, type ProviderErrorReason, type StreamProgress } from "./failed-call.js";
 import type { ResolvedPrice } from "./price.js";
 import type { EstimatedSettlement } from "./meter.js";
 import type { TokenUsage } from "./usage.js";
@@ -187,7 +187,8 @@ export interface GatewayRoute {
   readonly stopsWithTask?: false;
   /**
    * true: the provider is Bedrock on Rovara's own account. A call that fails after it was sent, with no usage reported, settles at what was used
-   * (nothing before any stream event; the input estimate, plus the output seen) instead of the full hold (failed-call.ts). Absent: the hold.
+   * (nothing before any stream event; the input estimate, plus the output seen) instead of the full hold (failed-call.ts). Absent: the hold for
+   * a stream the provider broke; a call WE cut (client left, deadline, task ended) settles at what was used on every route (cutCallMicros).
    */
   readonly settlesFailedCalls?: true | undefined;
   /** A permanent cap refusal from the meter, in the route's own words. Absent: 422 budget_exceeded with `prefix`. */
@@ -421,7 +422,7 @@ function companyKeyAgentRoute(deps: GatewayDependencies, keys: LearningKeySource
       if (choice !== undefined) {
         let resolved: ResolvedAgentSource;
         // DEC 254zzz263: saved choice/order wins; no choice defaults to company-billed Rovara AI.
-        try { resolved = await resolveAgentSource({ sources: choice.sources, ...(choice.rovara === undefined ? {} : { exempt: choice.rovara.exempt }), keys, ...(choice.byo === undefined ? {} : { byo: choice.byo }) }, claims.iss, claims.cid, signal); } catch { return AGENT_UNAVAILABLE; }
+        try { resolved = await resolveAgentSource({ sources: choice.sources, ...(choice.rovara === undefined ? {} : { exempt: choice.rovara.exempt }), keys }, claims.iss, claims.cid, signal); } catch { return AGENT_UNAVAILABLE; }
         via = resolved.via;
         if (resolved.source !== undefined) {
           // DEC 254zzz84(4): the company's saved order, first choice first. Without a saved fallback this is the first choice alone, exactly as before.
@@ -650,15 +651,17 @@ export async function handleGateway(deps: GatewayDependencies, request: GatewayR
   // How a call that failed after it was sent ended (failed-call.ts): who stopped it, how far it got, and what the hold counted as input.
   let failure: { cause: FailedCallCause; phase: FailedCallPhase } | undefined;
   let providerFault = false; let stoppedByUs = false; let received = 0; let streamed = false;
-  let failureInput: { bytes: number; fixedTokens: number; media: MediaEstimate | undefined; plainInput: boolean } | undefined;
+  let failureInput: { bytes: number; fixedTokens: number; media: MediaEstimate | undefined; plainInput: boolean; reasoningUnseen: boolean } | undefined;
   let answerBroke = false;
   // The settle, run once: early for a route that sends its cost in the head, else in the finally. Its result says what was written.
   let settled: { ok: boolean; micros: number; estimated: boolean } | undefined; let settling = false;
   // How far the answer got: the larger of what the usage reader saw in the stream passed on and what the transport saw as it read it (reasoning and held text included).
-  const streamProgress = (): StreamProgress => {
+  // UNDEFINED when neither counts progress (the OpenAI, Gemini and product-Bedrock readers do not): the caller then uses the bytes received, never "nothing came" (an under-count).
+  const streamProgress = (): StreamProgress | undefined => {
     let a: StreamProgress | undefined; let b: StreamProgress | undefined;
     try { a = usage?.progress?.(); } catch { a = undefined; }
     try { b = provider?.progress?.(); } catch { b = undefined; }
+    if (a === undefined && b === undefined) return undefined;
     return { events: Math.max(a?.events ?? 0, b?.events ?? 0), outputBytes: Math.max(a?.outputBytes ?? 0, b?.outputBytes ?? 0) };
   };
   const settleOnce = async (): Promise<{ ok: boolean; micros: number; estimated: boolean } | undefined> => {
@@ -669,6 +672,14 @@ export async function handleGateway(deps: GatewayDependencies, request: GatewayR
       if (charge !== undefined && settlementReported === undefined) {
         try { const reported = provider?.reportedCostMicros?.(); if (typeof reported === "number" && Number.isSafeInteger(reported) && reported > 0) settlementReported = reported; } catch { /* Missing evidence remains provisional. */ }
       }
+      // A call WE cut (client left, deadline, task ended: cause "aborted") on the company's own key that had ALREADY read the provider's complete usage
+      // (the stream's last usage event, or a whole answer read in full before the client left) settles at that ACTUAL usage (DEC 254zzz521), never an estimate.
+      // OpenRouter only with its complete reported cost (tokens alone cannot release its fees: that call is an estimate of use below). Rovara's own Bedrock is unchanged.
+      if (failure?.cause === "aborted" && route.settlesFailedCalls !== true && !completed && settlementUsage === undefined && usage !== undefined) {
+        let routerCostKnown = route.provider !== "openrouter";
+        if (!routerCostKnown) { try { routerCostKnown = settlementReported !== undefined && provider?.reportedCostComplete?.() !== false; } catch { routerCostKnown = false; } }
+        if (routerCostKnown) { try { const known = usage.finish(); if (known !== undefined && validUsage(known) && hasUsage(known)) settlementUsage = known; } catch { /* Unreadable usage is no usage: the estimate of use below. */ } }
+      }
       // Tokens cannot release OpenRouter request/cache fees, but remain evidence of an above-hold debit.
       let retainMissingUsage = callClaims?.runPrice !== undefined && (!validUsage(settlementUsage) || !hasUsage(settlementUsage));
       if (route.provider === "openrouter") {
@@ -676,20 +687,21 @@ export async function handleGateway(deps: GatewayDependencies, request: GatewayR
         try { complete = provider?.reportedCostComplete?.() !== false; } catch { /* An unreadable provenance keeps the hold. */ }
         if (settlementReported === undefined || !complete || unexpectedRouterWrite(settlementUsage)) retainMissingUsage = true;
       }
-      // A failed OpenRouter call that RECEIVED its complete, final reported cost (the usage chunk arrived after the answer ended, then the stream broke) settles at that cost
+      // A failed OpenRouter call that RECEIVED its complete, final reported cost (the usage chunk arrived after the answer ended, then the stream broke, or WE cut the call after it) settles at that cost
       // when it is within the hold; above the hold it keeps the known-debit rule (estimated, above the hold, alarm and source stop) as before, logged `failed: true`.
-      // Only when the PROVIDER's stream broke and no token usage was read (a stream the gateway cut for its own reasons, e.g. a price that expired mid-call, keeps the hold),
-      // and not for a cache write the route forbids (it keeps the debit rule above). A call with no / incomplete reported cost keeps the hold.
+      // Only when the PROVIDER's stream broke or WE cut it, and no token usage was read (a fault of the gateway's own keeps the hold),
+      // and not for a cache write the route forbids (it keeps the debit rule above). A call with no / incomplete reported cost is an estimate of use below (a provider-broken stream keeps the hold).
       let failedWithReportedCost = false;
-      if (route.provider === "openrouter" && failure?.cause === "provider" && !completed && (settlementUsage === undefined || !hasUsage(settlementUsage)) && charge?.billing === "external_provider" && settlementReported !== undefined && !unexpectedRouterWrite(settlementUsage)) {
+      if (route.provider === "openrouter" && (failure?.cause === "provider" || failure?.cause === "aborted") && !completed && (settlementUsage === undefined || !hasUsage(settlementUsage)) && charge?.billing === "external_provider" && settlementReported !== undefined && !unexpectedRouterWrite(settlementUsage)) {
         try { failedWithReportedCost = provider?.reportedCostComplete?.() === true && provider.reportedCostFinal?.() === true; } catch { failedWithReportedCost = false; }
       }
       let estimateRecord: EstimatedSettlement | undefined;
-      // A call that failed after it was sent and reported no usage: what was used, not the hold (a free call is the not-sent receipt below).
+      // A call that failed after it was sent and reported no usage: what was used, not the hold (a free call is the not-sent receipt below). Rovara's own Bedrock: any failure
+      // after the send; every other route (the company's own key): a call WE cut (cutCallMicros), the one place the task-end cut, a client disconnect and the deadline settle.
       let failedMicros: number | undefined;
-      if (route.settlesFailedCalls === true && failure !== undefined && cost > 0 && !completed && settlementUsage === undefined && settlementPrice !== undefined && failureInput !== undefined) {
-        const measured = usage?.actualInputTokens?.();
-        failedMicros = failedCallMicros({ ...failure, inputBytes: failureInput.bytes, fixedInputTokens: failureInput.fixedTokens, media: failureInput.media, ...(measured === undefined ? {} : { inputTokens: measured }), outputBytes: failure.phase === "after_output" ? Math.max(streamProgress().outputBytes, streamed ? 0 : received) : 0, wholeAnswer: !streamed && provider !== undefined, price: settlementPrice, plainInput: failureInput.plainInput, reservationMicros: reservedMicros });
+      if (failure !== undefined && cost > 0 && !completed && settlementUsage === undefined && !failedWithReportedCost && settlementPrice !== undefined && failureInput !== undefined) {
+        const measured = usage?.actualInputTokens?.(); const progress = streamProgress();
+        failedMicros = cutCallMicros({ ownBedrock: route.settlesFailedCalls === true, ...failure, inputBytes: failureInput.bytes, fixedInputTokens: failureInput.fixedTokens, media: failureInput.media, ...(measured === undefined ? {} : { inputTokens: measured }), outputBytes: failure.phase === "after_output" ? Math.max(progress?.outputBytes ?? 0, progress === undefined || !streamed ? received : 0) : 0, ...(progress === undefined ? { outputBytesPerToken: FAILED_CALL_RECEIVED_BYTES_PER_TOKEN } : {}), reasoningUnseen: failureInput.reasoningUnseen, wholeAnswer: !streamed && provider !== undefined, price: settlementPrice, plainInput: failureInput.plainInput, reservationMicros: reservedMicros });
       }
       if (failedMicros !== undefined) {
         cost = failedMicros; estimated = failedMicros > 0;
@@ -895,6 +907,8 @@ export async function handleGateway(deps: GatewayDependencies, request: GatewayR
     if (rovaraPurpose && charge === undefined) { await respond(503, "unavailable", "model access unavailable"); return; }
     const reserved = grant !== undefined && !customerReview && session?.bind === bind ? { ok: true as const, reservation: undefined } : await route.meter.reserve({ scope, caps, estimateMicros: grant === undefined || customerReview ? estimate : ceilingMicros, appliedMaxOutputTokens,
       routeClass: route.product ? "product" : "agent",
+      // GATEWAY-RUN-CHARGES-ROUTE: every hold of a task call is findable by its run, so the run's charges are read whole or not at all.
+      run: { operationId: claims.op },
       ...(route.payer === "bedrock_byo" ? { customerSource: "bedrock_byo" as const } : route.provider === "openrouter" ? { customerSource: "openrouter" as const } : {}), ...(charge === undefined ? {} : { charge: { receipt: charge, kind: guarded.priceKind ?? "chat", requestFingerprint: createHash("sha256").update(guarded.bytes).digest("hex") }, ...(claims.runPrice !== undefined || customerBedrock ? {} : { provisional: { requestBytes: inputBytes, toolInputAllowanceTokens: guarded.hasTools ? TOOL_INPUT_ALLOWANCE_TOKENS : 0, maxOutputTokens: guarded.maxTokens, price } }) }), ...(line === undefined ? {} : { line }),
       ...(grant === undefined || customerReview ? {} : { sweepAfter: now() + (REVIEW_SESSION_SECONDS * 1000) + REVIEW_SESSION_CLOSE_GRACE_MS, review: { jti: claims.jti.toLowerCase() } }),
       ...(!overrunCapable ? {} : { overrun: { deadlineSeconds: Math.floor(deadline / 1000), tokenExpiresSeconds: admissionExpiresSeconds } }),
@@ -915,7 +929,7 @@ export async function handleGateway(deps: GatewayDependencies, request: GatewayR
     if (grant !== undefined && (!customerReview || session === undefined)) held = reserved.reservation;
     reservedMicros = estimate;
     streamed = guarded.streaming;
-    failureInput = { bytes: guarded.bytes.length - (guarded.images?.dataBytes ?? 0) - (guarded.media?.dataBytes ?? 0), fixedTokens: guarded.images?.tokens ?? 0, media: guarded.media, plainInput: guarded.inputBounded && !guarded.usesPromptCache };
+    failureInput = { bytes: guarded.bytes.length - (guarded.images?.dataBytes ?? 0) - (guarded.media?.dataBytes ?? 0), fixedTokens: guarded.images?.tokens ?? 0, media: guarded.media, plainInput: guarded.inputBounded && !guarded.usesPromptCache, reasoningUnseen: mayReasonUnseen(route.provider, guarded.model, guarded.bytes) };
     // One non-overlapping, deadline-bounded poll also stops streams stalled between chunks.
     const pollEnded = async (): Promise<void> => {
       try { if (await taskEnded()) abort(); } catch { abort(); }

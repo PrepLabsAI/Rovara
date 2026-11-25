@@ -274,52 +274,55 @@ async function missingBedrockAdapter(durable: boolean) {
   w.deps.upkeep = { limitFor: async () => 1_000_000_000 };
   return { ...w, kit, opened };
 }
-for (const durable of [false, true]) for (const mode of ["agent", "nonstream", "setup_draft", "nightly"] as const) it(`missing Bedrock adapter refuses ${mode} without a Rovara receipt or ledger line (${durable})`, async () => {
+for (const durable of [false, true]) for (const mode of ["agent", "nonstream", "setup_draft", "nightly"] as const) it(`DEC 254zzz525: a connected Bedrock role with no saved choice changes nothing: ${mode} goes to Rovara's AI, billed as before; the role is never read, opened or assumed (${durable})`, async () => {
   const w = await missingBedrockAdapter(durable);
   const result = await call(w.deps, { ...body, stream: mode !== "nonstream" }, mint({ mdl: [alias], ...(mode === "setup_draft" ? { stp: "setup_draft" } : {}), ...(mode === "nightly" ? { src: "nightly" } : {}) }));
-  // Assert money side effects first: the pre-fix route sends and settles on the wrong payer.
-  expect(w.sent).not.toHaveBeenCalled();
-  expect(w.holds).toEqual([]); expect(w.settlements).not.toHaveBeenCalled();
-  if (w.wire !== undefined) expect(w.wire.items("ledger")).toEqual([]);
-  else expect((w.meter as InMemoryMeter).billedCalls(claims.iss, claims.cid)).toEqual([]);
-  expect(result.status).toBe(AGENT_SOURCE_NOT_OFFERED.status);
-  expect(JSON.parse(result.text())).toMatchObject({ error: { type: AGENT_SOURCE_NOT_OFFERED.code } });
+  expect(result.status).toBe(200);
+  expect(w.sent).toHaveBeenCalledTimes(1);
+  expect(w.settlements.mock.calls[0]![0].receipt).toMatchObject({ billing: "customer", source: { kind: "rovara_ai" } });
   expect(w.opened).not.toHaveBeenCalled(); expect(w.assumed).not.toHaveBeenCalled();
-  expect((await w.meter.read(scope)).every(row => row.committed === 0)).toBe(true);
 });
-it("missing Bedrock adapter refuses offered models using metadata only", async () => {
+it("DEC 254zzz525: the same company with an EXPLICIT bedrock_byo choice and no adapter is refused (never Rovara's AI), nothing held or sent", async () => {
+  for (const durable of [false, true]) {
+    const w = await missingBedrockAdapter(durable);
+    w.deps.agentAi = { ...w.deps.agentAi!, sources: { sourceFor: async () => "bedrock_byo" } };
+    const result = await call(w.deps, body, mint({ mdl: [alias] }));
+    expect(result.status).toBe(AGENT_SOURCE_NOT_OFFERED.status);
+    expect(JSON.parse(result.text())).toMatchObject({ error: { type: AGENT_SOURCE_NOT_OFFERED.code } });
+    expect(w.sent).not.toHaveBeenCalled(); expect(w.holds).toEqual([]); expect(w.settlements).not.toHaveBeenCalled();
+    expect(w.opened).not.toHaveBeenCalled(); expect(w.assumed).not.toHaveBeenCalled();
+    if (w.wire !== undefined) expect(w.wire.items("ledger")).toEqual([]);
+  }
+});
+it("DEC 254zzz525: offered models and the rate quote for a company with a connected role and no choice are Rovara AI's, from metadata only", async () => {
   const w = await missingBedrockAdapter(false);
   const sources = w.deps.agentAi!.sources, keys = w.deps.agentKeys!, rovara = w.deps.agentAi!.rovara!;
   const offered = await answerOfferedModels({ sources, keys, rovara, disabled: new Set(), verify: async () => ({ ...claims, aud: "rovara-model-gateway-offered-models" }) }, { method: "GET", url: `/v1/service/companies/${claims.cid}/offered-models`, headers: { authorization: "Bearer fixture" } });
-  expect(offered).toMatchObject({ status: 403, body: { error: { type: AGENT_SOURCE_NOT_OFFERED.code } } });
+  expect(offered).toMatchObject({ status: 200, body: { models: [{ model: alias }] } });
   expect(w.opened).not.toHaveBeenCalled(); expect(w.sent).not.toHaveBeenCalled();
 });
-it("missing Bedrock adapter never quotes Rovara AI using metadata only", async () => {
-  const w = await missingBedrockAdapter(false);
-  const sources = w.deps.agentAi!.sources, keys = w.deps.agentKeys!, rovara = w.deps.agentAi!.rovara!;
-  const prices = new SnapshotPriceSource({ load: async () => ({ version: 1, sources: { litellm: { fetchedAt: now - 1, count: 1, entries: [{ provider: "bedrock", model: id, kind: "chat", ...price }] } } }), save: async () => false }, { now: () => now, overrides: [] }); await prices.reload();
-  const quote = await answerRateQuote({ sources, keys, rovara, prices, now: () => now, region: "us-west-2", switchedOn: new Set(), offeredProviders: new Set(["bedrock"]), verify: async () => ({ ...claims, aud: RATE_QUOTE_AUDIENCE }) }, { method: "GET", url: `/v1/service/companies/${claims.cid}/rate-quote?model=${alias}&runPrice=1`, headers: { authorization: "Bearer fixture" } });
-  expect(quote).toEqual({ status: 200, body: { state: "unavailable", reason: "missing_price" } });
-  expect(w.opened).not.toHaveBeenCalled(); expect(w.sent).not.toHaveBeenCalled();
-});
-it("missing Bedrock adapter with unreadable metadata refuses before hold or send", async () => {
+it("DEC 254zzz525: an unreadable Bedrock connection is irrelevant to a company with no choice (Rovara's AI, as today)", async () => {
   const w = await missingBedrockAdapter(true);
   vi.spyOn(w.kit.store, "companyBedrock").mockRejectedValue(new Error("metadata unavailable"));
-  expect((await call(w.deps, body, mint({ mdl: [alias] }))).status).toBe(503);
-  expect(w.holds).toEqual([]); expect(w.settlements).not.toHaveBeenCalled();
-  expect(w.wire!.items("ledger")).toEqual([]); expect(w.opened).not.toHaveBeenCalled(); expect(w.sent).not.toHaveBeenCalled();
+  expect((await call(w.deps, body, mint({ mdl: [alias] }))).status).toBe(200);
+  expect(w.sent).toHaveBeenCalledTimes(1); expect(w.opened).not.toHaveBeenCalled(); expect(w.assumed).not.toHaveBeenCalled();
 });
 
-for (const purpose of ["answers", "learning"] as const) it(`missing Bedrock adapter preserves ${purpose} no_provider for an exempt company`, async () => {
-  const w = await missingBedrockAdapter(false);
-  const ai = w.deps.agentAi!.rovara!;
-  const common = { keys: w.deps.agentKeys!, meter: w.meter, companyCaps: new FixedCapsSource(caps), modelLimits: w.deps.modelLimits, transport: w.sent,
-    rovaraDefault: { ai: { ...ai, exempt: new Set([claims.cid]) }, sources: w.deps.agentAi!.sources } };
-  if (purpose === "answers") w.deps.answers = createAnswersRoutes({ ...common, limits: { limitFor: async () => 1_000_000_000 } });
-  else w.deps.learning = createLearningRoutes({ ...common, lessons: { isOn: async () => true } });
-  const sink = new MemorySink();
-  await handleGateway(w.deps, { method: "POST", url: purpose === "answers" ? ANSWERS_PATH : LEARNING_PATH, headers: { "content-type": "application/json", "x-api-key": mint({ mdl: [alias], stp: purpose === "answers" ? ANSWERS_STEP : LEARNING_STEP }) }, body: (async function* () { yield Buffer.from(JSON.stringify({ ...body, stream: true })); })() }, sink);
-  expect(sink.status).toBe(403);
-  expect(sink.headers[purpose === "answers" ? ANSWERS_PAUSE_HEADER : LEARNING_PAUSE_HEADER]).toBe("no_provider");
-  expect(w.sent).not.toHaveBeenCalled(); expect(w.opened).not.toHaveBeenCalled(); expect(w.settlements).not.toHaveBeenCalled();
+for (const purpose of ["answers", "learning"] as const) it(`DEC 254zzz525: ${purpose} for a company with a connected role and no choice behave exactly as for the same company without the role (Rovara's AI route, no no_provider pause)`, async () => {
+  const run = async (withRole: boolean) => {
+    const w = await missingBedrockAdapter(false);
+    if (!withRole) vi.spyOn(w.kit.store, "companyBedrock").mockResolvedValue(undefined);
+    const ai = w.deps.agentAi!.rovara!;
+    const common = { keys: w.deps.agentKeys!, meter: w.meter, companyCaps: new FixedCapsSource(caps), modelLimits: w.deps.modelLimits, transport: w.sent,
+      rovaraDefault: { ai, sources: w.deps.agentAi!.sources } };
+    if (purpose === "answers") w.deps.answers = createAnswersRoutes({ ...common, limits: { limitFor: async () => 1_000_000_000 } });
+    else w.deps.learning = createLearningRoutes({ ...common, lessons: { isOn: async () => true } });
+    const sink = new MemorySink();
+    await handleGateway(w.deps, { method: "POST", url: purpose === "answers" ? ANSWERS_PATH : LEARNING_PATH, headers: { "content-type": "application/json", "x-api-key": mint({ mdl: [alias], stp: purpose === "answers" ? ANSWERS_STEP : LEARNING_STEP }) }, body: (async function* () { yield Buffer.from(JSON.stringify({ ...body, stream: true })); })() }, sink);
+    expect(w.opened).not.toHaveBeenCalled(); expect(w.assumed).not.toHaveBeenCalled();
+    return { status: sink.status, text: sink.text(), pause: sink.headers[purpose === "answers" ? ANSWERS_PAUSE_HEADER : LEARNING_PAUSE_HEADER] };
+  };
+  const withRole = await run(true), without = await run(false);
+  expect(withRole).toEqual(without);
+  expect(withRole.pause).not.toBe("no_provider");
 });

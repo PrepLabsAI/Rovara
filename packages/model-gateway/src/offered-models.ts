@@ -243,7 +243,7 @@ export async function answerOfferedModels(options: OfferedModelsHandlerOptions, 
   // The same resolution as the agent route's admission (agent-ai.ts resolveAgentSource), so the list is what its very next call accepts.
   let resolved: Awaited<ReturnType<typeof resolveAgentSource>>;
   try {
-    resolved = await resolveAgentSource({ sources: options.sources, ...(options.rovara?.exempt === undefined || options.keys === undefined ? {} : { exempt: options.rovara.exempt }), keys: options.keys ?? NO_KEYS, ...(options.byo === undefined ? {} : { byo: options.byo }) }, claims.iss, claims.cid);
+    resolved = await resolveAgentSource({ sources: options.sources, ...(options.rovara?.exempt === undefined || options.keys === undefined ? {} : { exempt: options.rovara.exempt }), keys: options.keys ?? NO_KEYS }, claims.iss, claims.cid);
   } catch { return ANSWERS.unavailable; }
   // DEC 254zzz84(4): with a saved fallback, every usable source of the company's order in turn (the agent route admits the first that serves the call's model),
   // its models in order, each once. Without one, the first choice alone, exactly as before. A read that fails anywhere is the fixed 503 (never a partial list).

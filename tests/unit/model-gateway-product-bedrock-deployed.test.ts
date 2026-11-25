@@ -12,6 +12,7 @@ import { FixedCapsSource } from "../../packages/model-gateway/src/caps.js";
 import { GATEWAY_ENV } from "../../packages/model-gateway/src/deploy.js";
 import { Dynamo } from "../../packages/model-gateway/src/dynamo.js";
 import { DynamoProductKeyTable } from "../../packages/model-gateway/src/dynamo-product-keys.js";
+import { agentSourceSwitchedOn } from "../../packages/model-gateway/src/agent-ai.js";
 import { readGatewayConfig, startServe, type RunningGateway, type ServeConfig } from "../../packages/model-gateway/src/process.js";
 import { BedrockExternalIds } from "../../packages/model-gateway/src/bedrock-byo.js";
 import { ProductKeyStore } from "../../packages/model-gateway/src/product-keys.js";
@@ -71,7 +72,7 @@ const url = `/v1/product/bedrock/model/${encodeURIComponent(CLAUDE)}/converse`;
 const body = { messages: [{ role: "user", content: [{ text: "hi" }] }], inferenceConfig: { maxTokens: 20 } };
 const answer = Buffer.from(JSON.stringify({ output: {}, usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 } }));
 
-async function started(options: { byo: boolean }) {
+async function started(options: { byo: boolean; kinds?: string }) {
   const wire = new WireDynamo([...Object.values(TABLES), ...Object.values(PRODUCT)], { namespaceTables: true });
   const db = new Dynamo({ region: "us-west-2", credentials: async () => ({ accessKeyId: "AKIDEXAMPLE", secretAccessKey: "test-secret-not-real" }), transport: wire.transport });
   const kms = fakeKms();
@@ -86,7 +87,7 @@ async function started(options: { byo: boolean }) {
   }
   const sts: Array<{ roleArn: string; session: string; externalId?: string }> = [];
   const sent: Array<{ region: string; request: ProviderRequest; accessKeyId: string }> = [];
-  const config = { ...(readGatewayConfig({ ...ENV, ...(options.byo ? {} : { [GATEWAY_ENV.bedrockBrokerRole]: undefined, [GATEWAY_ENV.bedrockExternalIdKey]: undefined }) }) as ServeConfig), port: 0 };
+  const config = { ...(readGatewayConfig({ ...ENV, ...(options.kinds === undefined ? {} : { [GATEWAY_ENV.aiSourceKinds]: options.kinds }), ...(options.byo ? {} : { [GATEWAY_ENV.bedrockBrokerRole]: undefined, [GATEWAY_ENV.bedrockExternalIdKey]: undefined }) }) as ServeConfig), port: 0 };
   const gateway = await startServe(config, {
     db, kms, now: () => now, listen: false, log: () => undefined, caps: new FixedCapsSource(caps), credentials: async () => ({ accessKeyId: "AKIATASK0000000000", secretAccessKey: "x" }),
     fetch: async () => new Response(JSON.stringify({ keys: [jwk] }), { status: 200 }),
@@ -124,6 +125,13 @@ describe("the deployed product route on a company's own Bedrock", () => {
     // Held and settled on the product tables, and the one combined company row.
     await t.gateway.drain();
     expect(t.wire.items(PRODUCT.meter).length).toBeGreaterThan(0);
+  });
+  it("production-shaped (the install names only openai, as production's row does): the product route still serves a company's saved role, and the agents' own-Bedrock source is not switched on", async () => {
+    const t = await started({ byo: true, kinds: "openai" });
+    expect((await post(t.gateway.server, url, mint({ cid: A }), body)).statusCode).toBe(200);
+    expect(t.sent).toHaveLength(1);
+    // The agent side reads the same set: own Bedrock for the agents needs `bedrock` among the named kinds (and production may not name it).
+    expect(agentSourceSwitchedOn("bedrock_byo", new Set(["openai"]))).toBe(false);
   });
   it("is off without bring-your-own Bedrock: the path is 404 and nothing is read from the key table", async () => {
     const t = await started({ byo: false });

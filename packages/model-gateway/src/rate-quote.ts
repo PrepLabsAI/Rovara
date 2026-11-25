@@ -2,7 +2,7 @@
 import { openRouterPolicy, type OpenRouterTariff } from "./openrouter-policy.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createHash } from "node:crypto";
-import { resolveAgentSource, agentSourceSwitchedOn, type AgentSourcePorts } from "./agent-ai.js";
+import { resolveAgentSource, agentSourceSwitchedOn, type AgentSourcePorts, type ByoBedrock } from "./agent-ai.js";
 import type { SnapshotPriceSource } from "./price-index.js";
 import { resolvePrice, dearerPrice } from "./price.js";
 import { completePrice, type RateKey } from "./price-tiers.js";
@@ -32,6 +32,8 @@ export interface RateQuoteOptions extends AgentSourcePorts {
   disabled?: ReadonlySet<string>;
   now?: () => number;
   switchedOn: ReadonlySet<string>;
+  /** The company's own Bedrock connection (a chosen `bedrock_byo` is quoted from it; never a default, DEC 254zzz525). */
+  byo?: Pick<ByoBedrock, "connection">;
   /** Provider transports actually installed on the agent route. */
   offeredProviders: ReadonlySet<string>;
   rovara?: { sourceId?: string; models: ReadonlyMap<string, string>; exempt: ReadonlySet<string> };
@@ -53,7 +55,7 @@ export async function answerRateQuote(options: RateQuoteOptions, request: { meth
   const model = url.searchParams.get("model");
   if (model === null || !/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,255}$/u.test(model) || [...url.searchParams.keys()].some((k) => k !== "model" && k !== "runPrice") || url.searchParams.getAll("model").length !== 1 || url.searchParams.getAll("runPrice").length > 1 || (url.searchParams.has("runPrice") && url.searchParams.get("runPrice") !== "1")) return unavailable;
   try {
-    const resolved = await resolveAgentSource({ sources: options.sources, keys: options.keys, ...(options.rovara === undefined ? {} : { exempt: options.rovara.exempt }), ...(options.byo === undefined ? {} : { byo: options.byo }) }, claims.iss, claims.cid);
+    const resolved = await resolveAgentSource({ sources: options.sources, keys: options.keys, ...(options.rovara === undefined ? {} : { exempt: options.rovara.exempt }) }, claims.iss, claims.cid);
     const order = [resolved.source ?? "anthropic_key", ...(resolved.fallback ?? [])];
     let selected: { source: string; provider: string; modelId: string; region: string; id: string; revision: string; aliases?: string[] } | undefined;
     for (const source of order) {

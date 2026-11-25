@@ -32,8 +32,9 @@ describe("C-1 own-key backfill", () => {
     const w = await world(); await w.connect(A); await w.connect(B, "bedrock");
     w.wire.calls.length = 0;
     const plan = await planAgentOwnKeyBackfill(w.input);
-    expect(plan.candidates.map(({ companyId, source }) => ({ companyId, source }))).toEqual([{ companyId: A, source: "anthropic_key" }, { companyId: B, source: "bedrock_byo" }]);
-    expect(plan.candidates).toHaveLength(2);
+    // DEC 254zzz525: a company with only a Bedrock role (B) is not a candidate: a role is never written as a choice.
+    expect(plan.candidates.map(({ companyId, source }) => ({ companyId, source }))).toEqual([{ companyId: A, source: "anthropic_key" }]);
+    expect(plan.candidates).toHaveLength(1);
     expect(w.wire.calls.every((call) => call.operation === "GetItem")).toBe(true);
     expect(w.wire.calls.every((call) => call.keys.every((key) => key.sk === "AGENT_AI" || key.sk.startsWith("doc#")))).toBe(true);
     expect(await w.saved(A)).toBeUndefined(); expect(await w.saved(B)).toBeUndefined(); expect(await w.saved(C)).toBeUndefined();
@@ -42,10 +43,10 @@ describe("C-1 own-key backfill", () => {
   it("applies only missing choices; a rerun makes zero write attempts and keeps source/version/timestamp intact", async () => {
     const w = await world(); await w.connect(A); await w.connect(B, "bedrock");
     const plan = await planAgentOwnKeyBackfill(w.input);
-    expect(await applyAgentOwnKeyBackfill(w.input, plan)).toEqual({ written: 2, conflicted: 0 });
+    expect(await applyAgentOwnKeyBackfill(w.input, plan)).toEqual({ written: 1, conflicted: 0 });
     const before = await w.saved(A);
     expect(before).toMatchObject({ companyId: A, source: "anthropic_key", version: 1, updatedBy: "backfill:DEC254zzz279" });
-    expect(await w.saved(B)).toMatchObject({ source: "bedrock_byo", version: 1 });
+    expect(await w.saved(B)).toBeUndefined();
     w.wire.calls.length = 0;
     const again = await planAgentOwnKeyBackfill(w.input);
     expect(again.candidates).toEqual([]);
@@ -74,14 +75,29 @@ describe("C-1 own-key backfill", () => {
     expect(await w.saved(A)).toEqual(chosen);
   });
 
-  it("a credential removed after preview prevents application, including Bedrock gaining a preferred Anthropic key", async () => {
-    for (const provider of ["anthropic", "bedrock"]) {
-      const w = await world(); await w.connect(A, provider);
-      const plan = await planAgentOwnKeyBackfill(w.input);
-      if (provider === "anthropic") await w.connect(A, provider, 2, false); else await w.connect(A);
-      expect(await applyAgentOwnKeyBackfill(w.input, plan)).toEqual({ written: 0, conflicted: 1 });
-      expect(await w.saved(A)).toBeUndefined();
-    }
+  it("a credential removed after preview prevents application", async () => {
+    const w = await world(); await w.connect(A, "anthropic");
+    const plan = await planAgentOwnKeyBackfill(w.input);
+    await w.connect(A, "anthropic", 2, false);
+    expect(await applyAgentOwnKeyBackfill(w.input, plan)).toEqual({ written: 0, conflicted: 1 });
+    expect(await w.saved(A)).toBeUndefined();
+  });
+
+  it("DEC 254zzz525: a bedrock_byo row the old backfill wrote reads as NO choice (Rovara's AI, or the own Anthropic key); a person's own bedrock_byo choice and a backfilled anthropic_key row stay choices", async () => {
+    const w = await world();
+    const sources = new CompanyAgentAiSource(w.db, companyTable);
+    const row = (cid: string, source: string, updatedBy: string) => w.db.put(companyTable, { pk: `COMPANY#${cid}`, sk: "AGENT_AI", companyId: cid, source, version: 1, updatedAt: "2026-11-01T00:00:00.000Z", updatedBy });
+    await row(A, "bedrock_byo", "backfill:DEC254zzz279"); await row(B, "bedrock_byo", "d".repeat(64)); await row(C, "anthropic_key", "backfill:DEC254zzz279");
+    expect(await sources.orderFor(A)).toBeUndefined();
+    expect(await sources.sourceFor(A)).toBeUndefined();
+    expect(await sources.orderFor(B)).toEqual({ source: "bedrock_byo", fallback: [] });
+    expect(await sources.orderFor(C)).toEqual({ source: "anthropic_key", fallback: [] });
+    expect(await resolveAgentSource({ sources, keys: { connected: async () => false } }, iss, A)).toEqual({ source: "rovara", via: "default" });
+    expect(await resolveAgentSource({ sources, keys: { connected: async () => true } }, iss, A)).toEqual({ source: "anthropic_key", via: "own_key" });
+    expect(await resolveAgentSource({ sources, keys: { connected: denied } }, iss, B)).toEqual({ source: "bedrock_byo", via: "chosen" });
+    // The backfill itself never plans over (or rewrites) such a row, and a new run still writes no bedrock_byo.
+    await w.connect(A, "bedrock");
+    expect((await planAgentOwnKeyBackfill(w.input)).candidates).toEqual([]);
   });
 
   it("Anthropic wins when both are connected; removed or another issuer's keys never qualify a company", async () => {

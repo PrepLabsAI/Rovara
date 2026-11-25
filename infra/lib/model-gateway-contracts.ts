@@ -1,6 +1,6 @@
 /**
  * The AWS-side names and the AI source-kind switch the model gateway's stacks are built with, as Rovara Cloud wrote them
- * (Rovara Cloud's packages/contracts: resource-prefix.ts, environments.ts, model-sources.ts at 7d999ade3). The gateway moved
+ * (Rovara Cloud's packages/contracts: resource-prefix.ts, environments.ts, model-sources.ts at afb494e75). The gateway moved
  * into Code (#1478) without moving its resources: its stacks keep the `rovara-cloud-<env>-gateway*` names, the `/rovara-cloud/<env>/`
  * settings and IAM path and the `RovaraCloud` metric namespace, so these values must not change. Code's own contracts name Code's
  * resources under `agentx`; the two are kept apart on purpose.
@@ -44,11 +44,18 @@ export function parseSourceKindsSwitch(value: string | undefined): CustomSourceK
   return kinds as CustomSourceKind[];
 }
 
-/** Rovara-cloud#308: the company AI source kinds production may switch on, each only after its real-key check passed. */
-export const PRODUCTION_SOURCE_KINDS: readonly CustomSourceKind[] = ["openai"];
+/**
+ * Rovara-cloud#308: the company AI source kinds production may switch on, each only after its real-key check passed. `bedrock` (the
+ * company's own Bedrock for its agents, source `bedrock_byo`) joined by the owner's DEC 254zzz524 (beta proof first); its real-key check
+ * is the beta proof (RF-5-OWNER-STEPS). Every other kind stays for named test environments. A production deploy naming any other kind is refused before anything is made.
+ */
+export const PRODUCTION_SOURCE_KINDS: readonly CustomSourceKind[] = ["openai", "bedrock"];
 /** Whether production may carry this setting: every kind it names is one of PRODUCTION_SOURCE_KINDS. */
 export function productionSourceKindsAllowed(value: string | undefined): boolean {
   return parseSourceKindsSwitch(value).every((kind) => PRODUCTION_SOURCE_KINDS.includes(kind));
 }
 /** The fixed refusal for a production deploy naming a kind production may not switch on. */
 export const PRODUCTION_SOURCE_KINDS_REFUSAL = `production may switch on only these company AI sources: ${PRODUCTION_SOURCE_KINDS.join(", ")}; the others are for named test environments until a Cloud release carries them`;
+
+/** DEC 254zzz520: a production deploy with product AI must name its kinds (an install naming none keeps own Bedrock for the agents on, which production may not have). */
+export const PRODUCTION_SOURCE_KINDS_NAMED_REFUSAL = `production must name its company AI sources (-c rovaraAiSourceKinds=${PRODUCTION_SOURCE_KINDS.join(",")}): an install that names none leaves the agents' own-Bedrock source on`;

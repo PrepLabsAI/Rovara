@@ -133,7 +133,9 @@ export function createProductRoutes(options: ProductRouteOptions): ProductRouteR
   options.evalStages?.bind({
     meter: options.meter,
     caps: { capsFor: async (scope, signal) => (options.meter.combinedCompany === true ? productCaps.capsFor(scope, signal) : UNAVAILABLE_CAPS) },
-    connected: async (claims) => (await options.keys.resolve(claims.iss, claims.cid, claims.pid, "gemini")) !== undefined || (vertexOn && (await options.keys.resolve(claims.iss, claims.cid, claims.pid, "vertex")) !== undefined),
+    // A project with only Bedrock counts: its own saved role, or a link to the company's saved role (resolve answers a link only while the company's source is current).
+    connected: async (claims) => (await options.keys.resolve(claims.iss, claims.cid, claims.pid, "gemini")) !== undefined || (vertexOn && (await options.keys.resolve(claims.iss, claims.cid, claims.pid, "vertex")) !== undefined)
+      || (bedrockOn && (await options.keys.resolve(claims.iss, claims.cid, claims.pid, "bedrock")) !== undefined),
     blocked: (claims) => options.overrun.isBlocked(claims.iss, claims.cid, claims.tid),
     block: (claims) => options.overrun.block(claims.iss, claims.cid, claims.tid),
   });

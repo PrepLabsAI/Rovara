@@ -22,7 +22,7 @@ import {
   aws_sns as sns,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import { METRICS_NAMESPACE_ROOT, PRODUCTION_SOURCE_KINDS_REFUSAL, RESOURCE_PREFIX, environmentSettingsPrefix, parseSourceKindsSwitch, productionSourceKindsAllowed } from "./model-gateway-contracts.js";
+import { METRICS_NAMESPACE_ROOT, PRODUCTION_SOURCE_KINDS_NAMED_REFUSAL, PRODUCTION_SOURCE_KINDS_REFUSAL, RESOURCE_PREFIX, environmentSettingsPrefix, parseSourceKindsSwitch, productionSourceKindsAllowed } from "./model-gateway-contracts.js";
 import { applyCloudBoundary, byoCustomerAssumeConditions } from "./model-gateway-boundary.js";
 import { GATEWAY_SERVICE_ARN_OUTPUT, addDeployedCloudSha } from "./model-gateway-deployed-sha.js";
 
@@ -80,12 +80,6 @@ export const MODEL_GATEWAY_ROVARA_AI_DISABLED_CONTEXT_KEY = "rovaraModelGatewayR
  * step models card. Turn it on only once the Code install's release accepts the optional price field. Absent: the template is exactly as without it.
  */
 export const MODEL_GATEWAY_OFFERED_PRICES_CONTEXT_KEY = "rovaraModelGatewayOfferedPrices";
-/**
- * Bring your own Bedrock (DEC 238), only with MODEL_GATEWAY_PRODUCT_CONTEXT_KEY on: `-c rovaraModelGatewayBedrockByo=on` adds the
- * fixed-name, retained Bedrock broker role and the external-id HMAC key. Refused for production at synth. Absent: the template is
- * exactly as without it.
- */
-export const MODEL_GATEWAY_BEDROCK_BYO_CONTEXT_KEY = "rovaraModelGatewayBedrockByo";
 /**
  * How the provider key secrets are named. Absent (or "generated"): CloudFormation generates each secret's name, so a stack that
  * failed on create and was deleted can be made again (a deleted secret keeps its NAME reserved for its recovery window, which
@@ -316,8 +310,6 @@ export interface ModelGatewayProps extends StackProps {
   readonly productAi?: boolean;
   /** Rovara's AI for agents (MODEL_GATEWAY_ROVARA_AI_CONTEXT_KEY). Needs productAi. Default off. */
   readonly rovaraAi?: RovaraAiProps;
-  /** Bring your own Bedrock (MODEL_GATEWAY_BEDROCK_BYO_CONTEXT_KEY). Needs productAi. Default off. */
-  readonly bedrockByo?: boolean;
   /** DEC 254t: the switched-on company AI source kinds (app.ts AI_SOURCE_KINDS_CONTEXT_KEY, checked there). Needs productAi. Absent: not set (none). */
   readonly aiSourceKinds?: string;
   /** DEC 254zzz96 (2): publish list prices on the offered-models answer. Absent: off. */
@@ -546,11 +538,15 @@ export class ModelGatewayStack extends Stack {
     if (props.rovaraAi?.exempt !== undefined && env === "production") throw new Error("Rovara's AI exempt companies are for named test environments, never production");
     const product = props.productAi === true ? this.productAi(env, issuer, serveRole, moneyActions, companyKeysOnly) : undefined;
     const rovaraAi = props.rovaraAi === undefined ? undefined : this.rovaraAi(props.rovaraAi, product !== undefined, serveRole);
-    if (props.bedrockByo === true && env === "production") throw new Error("bring your own Bedrock is for named test environments until a Cloud release carries it");
-    const bedrockByo = props.bedrockByo === true ? this.bedrockByo(env, product !== undefined, serveRole) : undefined;
+    // Bring your own Bedrock (DEC 238, DEC 254zzz520): no switch. With product AI (company-key mode) the gateway always carries the retained
+    // broker role and the external-id key; a company's saved, sealed role is what turns it on for that company (none saved: 404 not_set_up).
+    const bedrockByo = product === undefined ? undefined : this.bedrockByo(env, serveRole);
     // DEC 254t: company-key mode only (product AI). Rovara-cloud#308: production may switch on only PRODUCTION_SOURCE_KINDS (OpenAI).
     if (props.aiSourceKinds !== undefined && product === undefined) throw new Error("company AI source kinds need the product AI additions (rovaraModelGatewayProductAi=on)");
     if (env === "production" && !productionSourceKindsAllowed(props.aiSourceKinds)) throw new Error(PRODUCTION_SOURCE_KINDS_REFUSAL);
+    // DEC 254zzz520: an install that names NO kinds keeps own Bedrock for the AGENTS on (agent-ai.ts PRE_SWITCH_ONLY_WITHOUT_KINDS), and production carries the
+    // broker role whenever product AI is on: so a production deploy must name its kinds (the release pipeline always does, with "openai").
+    if (env === "production" && product !== undefined && parseSourceKindsSwitch(props.aiSourceKinds).length === 0) throw new Error(PRODUCTION_SOURCE_KINDS_NAMED_REFUSAL);
     const openRouterEnabled = parseSourceKindsSwitch(props.aiSourceKinds).includes("openrouter");
 
     // Network: two zones, public subnets and no NAT gateway. Tasks take only the load balancer's traffic; DynamoDB through a
@@ -780,8 +776,7 @@ export class ModelGatewayStack extends Stack {
    *   - the external-id HMAC key: each company's external id is an HMAC under it, so replacing it would change every id. Only the
    *     serving role may GenerateMac with it (Cloud asks the gateway: service-call.ts BEDROCK_SETUP_PATH).
    */
-  private bedrockByo(env: string, productOn: boolean, serveRole: iam.Role) {
-    if (!productOn) throw new Error(`${MODEL_GATEWAY_BEDROCK_BYO_CONTEXT_KEY} needs ${MODEL_GATEWAY_PRODUCT_CONTEXT_KEY}=on (the company picks its agents' AI in company-key mode)`);
+  private bedrockByo(env: string, serveRole: iam.Role) {
     const broker = new iam.Role(this, "BedrockBrokerRole", {
       roleName: bedrockBrokerRoleName(env),
       assumedBy: new iam.ArnPrincipal(serveRole.roleArn).withConditions({ StringLike: { "sts:RoleSessionName": "org_*" } }),
