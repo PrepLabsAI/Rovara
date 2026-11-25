@@ -689,7 +689,9 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
       // A script token reaches task reads or the two scoped wiki reads; never sessions, decisions, playbooks or token management.
       // An owner's move on a task is never a script token's, and its answer must not tell a token which task ids exist: it reads like a missing task (the boundary's own answer).
       if (caller.scriptToken !== undefined && (feedbackOrParity(path, request.method) || TASK_ACTION.test(path) || TASK_CANCEL.test(path) || TASK_PAGE_FINDINGS.test(path) || isHostedMergePath(path, request.method) || coreTaskRuleOf(path, request.method) !== undefined)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
-      if (caller.scriptToken !== undefined && !TASK_READ.test(path) && scriptTokenRoute(request.method, path)?.permission !== "wiki") return errorAnswer(agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS));
+      // A task's proof index is refused to a script token too, but only AFTER the task is looked up (below): refusing it here, by path alone, told another company's token that the id is a real task (403) where an
+      // id with no task reads as a missing task (404). Every other path left here names no task id.
+      if (caller.scriptToken !== undefined && !TASK_READ.test(path) && !TASK_EVIDENCE.test(path) && scriptTokenRoute(request.method, path)?.permission !== "wiki") return errorAnswer(agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS));
       const target: Mounted = await mount(companyId);
       const taskCaller = taskCallerOf(caller);
       try {
@@ -732,6 +734,8 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           // Exactly the task read's rule (the flow's owned read: the company, then the company's access rule; another company's task, or none, answers the same "not found"), then the pack kept for
           // exactly the task's current code, as the proof page reads it. A pack that is missing or cannot be read leaves only what Rovara recorded itself.
           const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, evidence[1]!);
+          // Only now: someone who may not read the task has been told it is missing; the task's own owner's script token is told what a script token cannot do.
+          if (caller.scriptToken !== undefined && scriptTokenRoute(request.method, path)?.permission !== "wiki") throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
           // The pack is read through the company-bound store (the key must name a workspace of this company and its owner), not the shared bucket as it is.
           const pack = await loadEvidencePack(hostedEvidenceBlobs({ blobs: target.blobs, store: target.runtime.flow.deps.store, companyId: target.runtime.companyId }), { ownerKey: record.ownerKey, workspaceId: record.workspaceId, taskId: record.taskId }, record.workflow?.candidate?.digest);
           return json(200, proofIndexOf(record.taskId, record.workflow, pack));
