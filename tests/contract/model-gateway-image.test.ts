@@ -1,10 +1,11 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
-  assembleContext, dockerBuildArguments, entryPresent, GATEWAY_IMAGE_DOCKERFILE, GATEWAY_IMAGE_ENTRY, GATEWAY_IMAGE_ENTRY_SOURCE, ImageContextError, listContextFiles, main, MAX_CONTEXT_BYTES, MAX_CONTEXT_FILES,
+  assembleContext, dockerBuildArguments, entryPresent, IMAGE_FORMAT_VERSION, scriptIdentity, GATEWAY_IMAGE_DOCKERFILE, GATEWAY_IMAGE_ENTRY, GATEWAY_IMAGE_ENTRY_SOURCE, ImageContextError, listContextFiles, main, MAX_CONTEXT_BYTES, MAX_CONTEXT_FILES,
 } from "../../scripts/model-gateway-image.js";
 
 // CI-style check of the model gateway's image build, offline: no docker, no registry, no AWS. It builds the exact context, proves the
@@ -55,6 +56,14 @@ describe("the model gateway image context", () => {
     const again = assembleContext(root, join(scratch, "context-b"));
     expect(again.contextSha256).toBe(manifest.contextSha256);
     expect(manifest.contextSha256).toMatch(/^[0-9a-f]{64}$/u);
+  });
+
+  it("the context hash also covers this script and its format version: another script or a bumped version is another hash (the release pipeline tags the image by it)", () => {
+    const base = assembleContext(root, join(scratch, "id-a")).contextSha256;
+    const bumped = assembleContext(root, join(scratch, "id-b"), `${scriptIdentity().split(":")[0]}:${IMAGE_FORMAT_VERSION + 1}`).contextSha256;
+    const edited = assembleContext(root, join(scratch, "id-c"), `${"0".repeat(64)}:${IMAGE_FORMAT_VERSION}`).contextSha256;
+    expect(new Set([base, bumped, edited]).size).toBe(3);
+    expect(scriptIdentity()).toBe(`${createHash("sha256").update(readFileSync(join(root, "scripts/model-gateway-image.ts"))).digest("hex")}:${IMAGE_FORMAT_VERSION}`);
   });
 
   it("refuses a folder that is not empty, a missing file, a link and a source that is not TypeScript", () => {

@@ -465,5 +465,10 @@
       "why": "compares the gateway with Cloud's server (company-store.ts) and Cloud's UI client, which Code does not hold"
     }
   },
-  "divergedFromCloud": {}
+  "divergedFromCloud": {
+    "scripts/model-gateway-image.ts": {
+      "blob": "blob:31100e214139de772db50dc1682bdffad31467dd",
+      "reason": "the context hash now also covers this script's own bytes and an IMAGE_FORMAT_VERSION constant, because Cloud's release pipeline tags the gateway image by that hash and would otherwise reuse an old image after a change to how it is built (pr/gateway-image-by-content, DEC 532: the same change is made in Cloud's copy, so the two stay equal)"
+    }
+  }
 }
