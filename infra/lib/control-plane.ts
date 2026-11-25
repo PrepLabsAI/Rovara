@@ -35,6 +35,7 @@ import {
 import type { Construct } from "constructs";
 import { CORE_DISPATCHER_TIMEOUT_SECONDS, CORE_BROKER_TIMEOUT_SECONDS, E2E_ARTIFACT_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, OUTBOX_PENDING_INDEX, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX, TEST_SERVICES_SETTING_VARIABLE, TEST_SERVICE_IMAGES_SETTING_VARIABLE, EGRESS_ADDRESSES_PARAMETER_PATTERN, EGRESS_ADDRESSES_VARIABLE, NAT_EGRESS_ADDRESSES_OUTPUT, WORKER_SANDBOX_EGRESS_DEFAULT, WORKER_SANDBOX_EGRESS_SETTING_VARIABLE, WORKER_SANDBOX_EGRESS_VALUES } from "@agentx/contracts";
 import { API_ACCESS_LOG_FORMAT } from "./api-access-log.js";
+import { inApiAddressStack } from "./api-address.js";
 import { EgressAlarms } from "./egress-alarms.js";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { ChannelAdapters } from "./channel-adapters.js";
@@ -88,7 +89,8 @@ function unlistedAlarms(scope: Construct, prefix: string, egressPrefix: string =
   return scope.node.root.node.findAll().flatMap((construct) => {
     // CloudWatch returns a composite alarm only to a DescribeAlarms grant on *, which the broker has not.
     if (construct instanceof cloudwatch.CfnCompositeAlarm) return [`the health probe cannot read composite alarm ${construct.node.path}`];
-    if (!(construct instanceof cloudwatch.CfnAlarm)) return [];
+    // The address stack's certificate-expiry alarm (api-address.ts) is the address stack's own, to its own topic: not an install health alarm.
+    if (!(construct instanceof cloudwatch.CfnAlarm) || inApiAddressStack(construct)) return [];
     // The foundation's egress alarms keep the live names agentx-<env>-blocked-dns-spike and agentx-<env>-nat-egress-spike-<az>, which the probe's single-word suffixes
     // cannot list. They notify the alerts topic and are not on the admin health route.
     // Only those names: any other alarm inside EgressAlarms is still refused. The legacy production install's health alarms are AgentX<suffix>, but its egress alarms (when its
