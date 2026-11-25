@@ -193,7 +193,7 @@ describe("no role this template creates can approve, open the gate, or start, re
     }
     expect(granted.filter((pattern) => pattern === "*" || /^codepipeline:\*$/iu.test(pattern))).toEqual([]);
     expect(granted.filter((pattern) => pattern.toLowerCase().startsWith("codepipeline:")).sort()).toEqual([
-      "codepipeline:DisableStageTransition", "codepipeline:GetPipelineExecution", "codepipeline:GetPipelineState",
+      "codepipeline:DisableStageTransition", "codepipeline:GetPipelineExecution", "codepipeline:GetPipelineState", "codepipeline:ListActionExecutions",
     ]);
   });
 

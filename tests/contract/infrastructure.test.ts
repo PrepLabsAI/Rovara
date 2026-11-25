@@ -558,7 +558,7 @@ describe("production release pipeline", () => {
 
   it("declares the five V2 variables with defaults, so a push or a tag can start a run", () => {
     const variables = pipelineProperties().Variables;
-    expect(variables.map((variable) => [variable.Name, variable.DefaultValue])).toEqual([["CLOUD_REF", "from-trigger"], ["CODE_RELEASE", "run"], ["CLOUD_PROD", "off"], ["PIPELINE_MODE", "release"], ["CODE_ROLLBACK_TARGET", "none"]]);
+    expect(variables.map((variable) => [variable.Name, variable.DefaultValue])).toEqual([["CLOUD_REF", "from-trigger"], ["CODE_RELEASE", "from-trigger"], ["CLOUD_PROD", "off"], ["PIPELINE_MODE", "release"], ["CODE_ROLLBACK_TARGET", "none"]]);
     expect(variables[0]!.Description).toContain("older tag is a Cloud rollback");
     expect(variables[1]!.Description).toContain("Preflight may force skip");
     // CLOUD_PROD defaults OFF so no trigger deploys production's Cloud; the run that promotes starts with CLOUD_PROD=on (a per-run choice, not a switch).
@@ -677,7 +677,7 @@ describe("production release pipeline", () => {
       expect(history?.Action).toEqual("ssm:GetParameter");
       expect(JSON.stringify(history?.Resource)).toContain(`parameter/agentx/release/code-history/${stageName}`);
     }
-    expect(policyOf("BetaCodePreflightRole").find((statement) => statement.Sid === "ReadWaitingRun")?.Action).toEqual(["codepipeline:GetPipelineState", "codepipeline:GetPipelineExecution"]);
+    expect(policyOf("BetaCodePreflightRole").find((statement) => statement.Sid === "ReadWaitingRun")?.Action).toEqual(["codepipeline:GetPipelineState", "codepipeline:GetPipelineExecution", "codepipeline:ListActionExecutions"]);
     expect(policyOf("ProductionCodePreflightRole").flatMap(actionsOf)).not.toContain("codepipeline:GetPipelineState");
     // Nothing that releases Code can read or change the pipeline, and no role but Beta's Preflight reads executions.
     for (const roleMatch of ["ReleaseBuildRole", "BetaReleaseBuildRole"]) {
@@ -746,8 +746,10 @@ describe("production release pipeline", () => {
       expect(Object.keys(spec.env.variables)).toContain("PORT_GUARD_NAMES_PARAMETER");
       // L9b's additions (CODE_LIVE_SHA and the waiting run for the Cloud actions, the rollback checks and range) are asserted in release-pipeline-l9b-rollback.test.ts;
       // the L1 commands are asserted here as they were.
+      // PIPELINE-CODE-RELEASE-BY-TRIGGER's commands (Beta only) are asserted in release-pipeline-code-release-by-trigger.test.ts.
+      const isTrigger = (command: string): boolean => /^(TRIGGER_KIND=|CLOUD_SOURCE=|read -r CLOUD_SOURCE_SHA|if \[ "\$TRIGGER_TYPE"|if \[\[ "\$\{EXEC_ID:-\}"|echo "NOTE: this run was started by)/u.test(command);
       const isL9b = (command: string): boolean =>
-        /^(SUPERSEDES_EXEC=|export CODE_CTX|WAITING_EXEC=|if \[\[ "\$WAITING_EXEC")/u.test(command) || command.startsWith('[ "$CODE_ROLLBACK_TARGET" = none ] ||');
+        /^(SUPERSEDES_EXEC=|export CODE_CTX|WAITING_EXEC=|if \[\[ "\$WAITING_EXEC")/u.test(command) || isTrigger(command) || command.startsWith('[ "$CODE_ROLLBACK_TARGET" = none ] ||');
       const build = spec.phases.build!.commands.filter((command) => !isL9b(command));
       // (a) never from the code being released: a detached worktree of the PREVIOUSLY RELEASED commit (read from this stage's record) runs the guard over released..commit,
       // so an edit of the guard, anywhere in the landing, is judged by the old guard. R4: the checks that refuse come first.
