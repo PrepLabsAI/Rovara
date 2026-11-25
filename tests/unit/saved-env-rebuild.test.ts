@@ -35,10 +35,10 @@ describe("starting a rebuild", () => {
     const w = savedWorld();
     const { job } = await queued(w);
     const marker = (await w.h.store.get(startMarkerKey(job.jobId)))!;
-    const given = await leaseForDispatch(w.deps, ids, textOf(marker, "operationId"));
+    const given = await leaseForDispatch(w.deps, ids, textOf(marker, "operationId"), job.jobId);
     expect(given).toMatchObject({ ok: true, job: { jobId: job.jobId, leaseToken: job.leaseToken } });
-    expect(await leaseForDispatch(w.deps, ids, "another-operation")).toEqual({ ok: false, reason: "nothing_to_dispatch" });
-    expect(await leaseForDispatch(w.deps, ids)).toEqual({ ok: false, reason: "nothing_to_dispatch" });
+    expect(await leaseForDispatch(w.deps, ids, "another-operation", job.jobId)).toEqual({ ok: false, reason: "nothing_to_dispatch" });
+    expect(await leaseForDispatch(w.deps, ids, "", job.jobId)).toEqual({ ok: false, reason: "nothing_to_dispatch" });
   });
 
   it("starts nothing, and ends the queued job, for a reason that will not mend: no owner, no base image, a moved approval", async () => {
