@@ -25,6 +25,7 @@ import { FAUX_MODEL, fauxModelRuntime } from "../../support/faux-model.js";
 import { call } from "../../support/slack-broker.js";
 import { fakeLinear, LINEAR_APP, LINEAR_WEBHOOK_SECRET, testSealer, type FakeLinearUser, type FakeWorkspace } from "../../support/fake-linear-oauth.js";
 import { LinearConnections } from "../../../packages/broker/src/aws/linear-connections.js";
+import { companyMembershipFromDynamo } from "../../../packages/broker/src/aws/company-check.js";
 import { createCoreProof } from "./core-proof.js";
 
 export { MAYA, OMAR };
@@ -35,7 +36,7 @@ const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, 
 type Json = Record<string, unknown>;
 export interface Reply { status: number; body: Json }
 
-export async function createJourneyWorld(options: { world?: FakeWorldOptions; linear?: boolean; colleague?: { role: "member" | "admin"; grant: "developer" | "administrator" } } = {}) {
+export async function createJourneyWorld(options: { world?: FakeWorldOptions; linear?: boolean; page?: boolean; colleague?: { role: "member" | "admin"; grant: "developer" | "administrator" }; workerTimeouts?: { reviewMs?: number } } = {}) {
   const proof = createCoreProof();
   // Linear (journeys 3 and 4): the company's connection over the broker's table, the fake Linear behind the fetch seam, and the webhook route on the broker's front.
   const linearLogs: Array<Record<string, unknown>> = [];
@@ -48,7 +49,13 @@ export async function createJourneyWorld(options: { world?: FakeWorldOptions; li
     const connections = new LinearConnections({ documentClient: ports.db, tableName: "state", sealer: testSealer(), fetch: server.fetch, now: ports.now, app, log, sleep: async () => undefined });
     return { connections, app, fetch: server.fetch, log };
   };
-  const harness = await createCoreBrowserBroker({ wrapCore: (root) => proof.wrap(root), realJobServices: true, ...(options.world === undefined ? {} : { world: options.world }), ...(linearOption === undefined ? {} : { linear: linearOption }) });
+  // The task page (journey 15): its comment and suggestion API finds a core task through the caller's live company, which the deployed broker has (COMPANY_SIGNIN=enabled gives the developer routes
+  // `companies`, broker.ts:15993). The shared fixture gives it only with Linear on, so a page journey asks for it, over the same table.
+  const pageTable: { current?: { send(command: unknown, options?: unknown): Promise<unknown> } } = {};
+  const lazyPageTable = { send: (command: unknown, sendOptions?: unknown) => pageTable.current!.send(command, sendOptions) };
+  const harness = await createCoreBrowserBroker({ wrapCore: (root) => proof.wrap(root), realJobServices: true, ...(options.world === undefined ? {} : { world: options.world }), ...(linearOption === undefined ? {} : { linear: linearOption }),
+    ...(options.page !== true ? {} : { developerExtra: { companies: companyMembershipFromDynamo(lazyPageTable, "signin"), taskPeopleConfiguration: { peopleChangesEnabled: true } } }) });
+  pageTable.current = harness.db;
   const handler = proof.track(harness.handler);
   // The web app's sign-in client is an install-level client (the company routes of Linear's connection and links need it).
   harness.db.set({ ...harness.db.get("SIGNIN_CLIENTS", "CLIENT#web-app")!, pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", installLevel: true });
@@ -118,7 +125,7 @@ export async function createJourneyWorld(options: { world?: FakeWorldOptions; li
       if (invocation.kind === "cancel") return executeWorkerCancelInvocation(invocation, cancellationController, journal);
       const sinks = sinksFor(invocation);
       return runTaskInvocation(invocation, { rootPath: workerWorkspace, model: FAUX_MODEL, piAdapter: createDefaultPiSessionAdapter({ modelRuntime: async () => ({ runtime: modelRuntime, model: FAUX_MODEL }) }),
-        ...sinks, log: () => undefined, cancellationController });
+        ...sinks, log: () => undefined, cancellationController, ...(options.workerTimeouts === undefined ? {} : { timeouts: options.workerTimeouts }) });
     },
   }, { onTerminal: async (result, invocation) => postWorkerTerminalResult(sinksFor(invocation), result, invocation, () => undefined), retrySleep: async () => undefined },
   { publicKey: workerKeys.publicKey, workspaceId, generation: 1 });
@@ -292,6 +299,23 @@ export async function createJourneyWorld(options: { world?: FakeWorldOptions; li
     return () => { live = false; };
   }
 
+  /**
+   * The core's table refuses every write that `match` accepts (DynamoDB throttling) until the returned function is called: the way a journey makes a step fail to START without touching any row. `match` reads the
+   * request as the wire sends it (attribute values typed, so a document's mode is `"workflowMode":{"S":"REVIEW"}`).
+   */
+  function refuseWrites(match: (request: string) => boolean): () => void {
+    const wire = harness.storeWire;
+    const send = wire.send.bind(wire) as (command: { input?: unknown }, options?: unknown) => Promise<unknown>;
+    let refusing = true;
+    (wire as { send: unknown }).send = async (command: { constructor: { name: string }; input?: unknown }, options?: unknown) => {
+      if (refusing && command.constructor.name === "TransactWriteItemsCommand" && match(JSON.stringify(command.input))) {
+        throw Object.assign(new Error("Rate exceeded"), { name: "ProvisionedThroughputExceededException" });
+      }
+      return send(command, options);
+    };
+    return () => { refusing = false; };
+  }
+
   /** A callback to the worker routes with a capability the caller names (the worker's own, or a wrong one): the real route and the real authorisation. */
   function postWorkerCallback(workspace: string, operationId: string, action: string, capability: string, body: unknown): Promise<Reply> {
     return call(handler, { method: "POST", path: `/v1/internal/workspaces/${workspace}/operations/${operationId}/${action}`, headers: { "x-agentx-callback-capability": capability }, body });
@@ -338,7 +362,7 @@ export async function createJourneyWorld(options: { world?: FakeWorldOptions; li
 
   return {
     harness, proof, linear, handler, as, maya, priya, omar, omarAsk, root, repository, baseCommit, faux, handPosted, taskRow,
-    prepare, runStep, startStep, stepEnd, approvePlan, publish, postWorkerCallback, dispatchOnly, pumpDispatcher, tampered, tamperWithResults: (transform: ((body: Json) => Json) | undefined) => { resultTransform = transform; }, runJobs, linkGithubAsConnected, linkColleagueGithub, saveMergeRules,
+    prepare, runStep, startStep, stepEnd, approvePlan, publish, postWorkerCallback, refuseWrites, dispatchOnly, pumpDispatcher, tampered, tamperWithResults: (transform: ((body: Json) => Json) | undefined) => { resultTransform = transform; }, runJobs, linkGithubAsConnected, linkColleagueGithub, saveMergeRules,
     async close() { for (const step of cleanups.splice(0).reverse()) await step(); },
   };
 }

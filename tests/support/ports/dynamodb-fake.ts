@@ -823,6 +823,7 @@ export class FakeDynamoDb implements DynamoDbSender {
 
   #emit(old: Item | undefined, next: Item | undefined, expired: boolean): void {
     if (old !== undefined && next !== undefined && itemEqual(old, next)) return; // DynamoDB writes no record for a write that changed nothing
+    if (old === undefined && next === undefined) return; // a delete of an item that is not there changes nothing (a transaction may hold one, as the review retry's does), so DynamoDB writes no record for it
     const any = (next ?? old)!;
     this.#sequence += 1n;
     const record: DynamoStreamRecord = {
