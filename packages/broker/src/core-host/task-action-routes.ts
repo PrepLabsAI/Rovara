@@ -15,10 +15,11 @@ import { WORKFLOW_DOCUMENT_CARD_KINDS } from "../core/decisions/performer.js";
 import { projectDecisionCards } from "../core/decisions/project.js";
 import { WORKFLOW_DOCUMENT_KIND } from "../core/decisions/workflow-subject.js";
 import { developerIdOf } from "../core/sessions/create.js";
-import { actionsFor, describeAction, performRegistryAction, type ActionCaller, type ActionEnv, type MergeHost, type PeopleHost, type PlanFacts, type PlanHost } from "../core/task-actions/index.js";
+import { describeAction, performRegistryAction, type ActionCaller, type ActionEnv, type MergeHost, type PeopleHost, type PlanFacts, type PlanHost } from "../core/task-actions/index.js";
 import { refusal } from "../core/task-actions/judge.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 import { readTask } from "../core/task-flow/reads.js";
+import { taskStandingFor, type TaskStanding } from "../core/task-view/index.js";
 import type { TaskRecord } from "../core/task-flow/records.js";
 import type { ChatThreads } from "./chat-threads.js";
 import { chatApprovalMethod, chatPressToken } from "./hosted-chat-approval.js";
@@ -178,6 +179,11 @@ export function createTaskActionRoutes(options: TaskActionRoutesOptions) {
     return { deps, options: { roundCap }, ...(plan === undefined ? {} : { plan }), ...(merge === undefined ? {} : { merge }), ...(people === undefined ? {} : { people }) };
   }
 
+  async function standingOf(target: TaskActionMount, membership: CompanyMembership, deployed: DeployedCaller, task: TaskRecord): Promise<TaskStanding | undefined> {
+    const env = envOf(target, membership, target.runtime.flow.deps, undefined);
+    return env === undefined ? undefined : taskStandingFor(env, callerOf(deployed, membership.role), task);
+  }
+
   async function membershipOf(deployed: DeployedCaller): Promise<CompanyMembership | undefined> {
     const membership = await options.companyOf(deployed).catch(() => undefined);
     return membership !== undefined && typeof membership.companyId === "string" && ORG_ID.test(membership.companyId) && deployed.principal.companyId === membership.companyId ? membership : undefined;
@@ -199,11 +205,24 @@ export function createTaskActionRoutes(options: TaskActionRoutesOptions) {
       const membership = await membershipOf(deployed);
       if (membership === undefined) return undefined;
       const target = await options.mount(membership.companyId);
-      const env = envOf(target, membership, target.runtime.flow.deps, undefined);
-      const task = env === undefined ? undefined : await readTask(target.runtime.flow.deps, taskId);
-      if (env === undefined || task === undefined || task.companyId !== membership.companyId) return undefined;
-      return actionsFor(env, callerOf(deployed, membership.role), task);
+      const task = await readTask(target.runtime.flow.deps, taskId);
+      if (task === undefined || task.companyId !== membership.companyId) return undefined;
+      // F2-B: the offers are the standing's own `actions` (the same call, not a copy); a person with no standing is offered nothing.
+      const served = await standingOf(target, membership, deployed, task);
+      return served === undefined ? (envOf(target, membership, target.runtime.flow.deps, undefined) === undefined ? undefined : []) : served.standing.actions;
     },
+
+    /** F2-B: where one task stands for this person now (the one rule `taskStandingFor`: pill, step, the person-free status line, the offers), or undefined when the deployment does not serve the registry for this person's company or the person has no standing. */
+    async taskStanding(deployed: DeployedCaller, taskId: string): Promise<TaskStanding | undefined> {
+      const membership = await membershipOf(deployed);
+      if (membership === undefined) return undefined;
+      const target = await options.mount(membership.companyId);
+      const task = await readTask(target.runtime.flow.deps, taskId);
+      return task === undefined || task.companyId !== membership.companyId ? undefined : standingOf(target, membership, deployed, task);
+    },
+
+    /** F2-B: the same, for a task a route has already read, with the membership it already resolved (the web task read serves it with every answer). */
+    standingFor: standingOf,
 
     /** A chat press, or the describe of one. Always an answer (a refusal is one); a throw means nothing was done and the chat may press again. */
     async taskAction(deployed: DeployedCaller, input: TaskActionInput): Promise<TaskActionAnswer> {

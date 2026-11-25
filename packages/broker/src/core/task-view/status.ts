@@ -11,6 +11,8 @@ export interface StatusFacts {
   workflow?: { stage: string; state: string; outcome?: string | undefined; blockReason?: string | undefined } | undefined;
   failedPrepare?: { at?: string | undefined } | undefined;
   budgetPaused?: boolean | undefined;
+  /** A person pressed Stop and nothing has started the work again (the standing's own fact): the line says the run finished and waits, never that a person is needed. */
+  stoppedByPerson?: boolean | undefined;
   failureCategory?: string | undefined;
 }
 
@@ -41,6 +43,7 @@ export function statusOfTask(facts: StatusFacts, status: SessionStatus, input: S
     return { state: "closed", ...STATUS_LINES.endedClosed };
   }
   if (facts.budgetPaused === true) return { state: "paused_budget", ...STATUS_LINES.spendStopped };
+  if (facts.stoppedByPerson === true) return { state: "finished_run", ...STATUS_LINES.stoppedByPerson };
   if (workflow === undefined) return taskStatusFromSession({ status, ...(input.lastRunFailed === undefined ? {} : { lastRunFailed: input.lastRunFailed }), ...(input.step === undefined ? {} : { step: input.step }) });
   return workflowStatus(workflow);
 }

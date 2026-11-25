@@ -17,12 +17,13 @@ describe("the one route table", () => {
     expect(digest(APP_ROUTES.map(keyOf))).toBe("421490346858df2db699d93b15c2508795e4a4c561a2daf6fc4d1f25cc392aca");
   });
 
-  it("is the developer rows then the app rows, each row once, and no row carries more than method, path and scope yet", () => {
+  it("is the developer rows then the app rows, each row once, and only the rows that carry a schema carry more than method, path and scope (F2-B: `tasks.read` names its `standing`)", () => {
     expect(ROUTES).toEqual([...DEV_ROUTES, ...APP_ROUTES]);
     expect(DEV_ROUTES.every((route) => route.path.startsWith("/v1/dev/"))).toBe(true);
     expect(APP_ROUTES.every((route) => route.path.startsWith("/v1/app/"))).toBe(true);
     expect(new Set(ROUTES.map((route) => `${route.method} ${route.path}`)).size).toBe(ROUTES.length);
-    for (const route of ROUTES) expect(Object.keys(route).sort(), keyOf(route)).toEqual(["method", "path", "requires"]);
+    for (const route of ROUTES) expect(Object.keys(route).sort(), keyOf(route)).toEqual(route.response === undefined ? ["method", "path", "requires"] : ["id", "method", "path", "requires", "response"]);
+    expect(ROUTES.filter((route) => route.response !== undefined).map(routeIdOf)).toEqual(["tasks.read"]);
   });
 
   it("names each row `METHOD path` until a row names itself, and every id is unique", () => {
@@ -42,7 +43,7 @@ describe("the one route table", () => {
     const concrete = (path: string) => path.replace(/\{[A-Za-z]+\}/g, "x1");
     for (const route of DEV_ROUTES) expect(DEV_ROUTES, keyOf(route)).toContain(broker.devRouteOf(route.method, concrete(route.path)));
     for (const route of APP_ROUTES) expect(APP_ROUTES, keyOf(route)).toContain(broker.appRouteOf(route.method, concrete(route.path)));
-    expect(broker.devRouteOf("GET", "/v1/dev/tasks/t1")).toEqual({ method: "GET", path: "/v1/dev/tasks/{taskId}", requires: "tasks:read" });
+    expect(broker.devRouteOf("GET", "/v1/dev/tasks/t1")).toMatchObject({ method: "GET", path: "/v1/dev/tasks/{taskId}", requires: "tasks:read" });
     expect(broker.devRouteOf("GET", "/v1/dev/not-a-route")).toBeUndefined();
     expect(broker.appRouteOf("GET", "/v1/app/decisions")).toEqual({ method: "GET", path: "/v1/app/decisions", requires: "decisions:decide" });
   });

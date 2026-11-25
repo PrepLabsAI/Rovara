@@ -121,6 +121,12 @@ export function ciAllowsReady(ci: MergeTrackingItem["ci"], mode: ProjectCiMode):
  * only where the project's mode says it does not rely on CI (`sandbox_only`). Unreadable CI never counts.
  */
 export const ciCountsAsPassing = (ci: MergeTrackingItem["ci"], mode: ProjectCiMode): boolean => ci === "passing" || (ci === "none" && mode === "sandbox_only");
+
+/** Whether a pull request is ready for a person to merge, from what tracking read (the one reading: the attention reader, the session summary and the task standing say "ready to merge" by it). */
+export function readyToMerge(item: Pick<MergeTrackingItem, "state" | "draft" | "ci" | "review" | "branch" | "headByRovara">, ciMode: ProjectCiMode = DEFAULT_CI_MODE): boolean {
+  // A review that was asked for and has not come is not "ready": ready needs the reviews approved, or none asked for.
+  return item.state === "open" && !item.draft && ciCountsAsPassing(item.ci, ciMode) && (item.review === "approved" || item.review === "not_requested") && item.branch !== "conflicted" && item.headByRovara;
+}
 /** The start of a person's head's missing-check wait, kept for the head it was seen on only. */
 export function missingSinceOf(item: Pick<MergeTrackingItem, "headSha" | "ciMissingSince"> | undefined, head: string): number | undefined {
   if (item === undefined || item.headSha !== head || item.ciMissingSince === undefined) return undefined;

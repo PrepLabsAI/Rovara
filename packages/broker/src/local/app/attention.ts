@@ -6,7 +6,7 @@ import {
   type MergeTrackingItem, type TaskStatus, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import type { AttentionView } from "../../core/local-pages/views.js";
-import { DEFAULT_CI_MODE, ciCountsAsPassing, type ProjectCiMode } from "../../core/merge/merge-tracking.js";
+import { readyToMerge, type ProjectCiMode } from "../../core/merge/merge-tracking.js";
 import { readMergeTracking } from "../../core/merge/store.js";
 import { proofHoldLine, type ProofHoldReason } from "@agentx/contracts";
 import { readProofHold } from "../../core/merge/proof-hold.js";
@@ -23,11 +23,7 @@ const RETRY_STAGES = new Set(["UNDERSTAND", "PLAN", "PLAN_CRITIQUE", "IMPLEMENT"
 export const retryableBlock = (workflow: WorkflowSnapshot): boolean =>
   workflow.state === "BLOCKED" && (RETRY_STAGES.has(workflow.stage) || (workflow.stage === "WAIT_FOR_MERGE" && workflow.blockReason === WORKFLOW_BLOCK_REASONS.pullRequestUpdateFailed));
 
-/** Whether a pull request is ready for a person to merge, from what tracking read (the same words the session says). */
-export function readyToMerge(item: Pick<MergeTrackingItem, "state" | "draft" | "ci" | "review" | "branch" | "headByRovara">, ciMode: ProjectCiMode = DEFAULT_CI_MODE): boolean {
-  // A review that was asked for and has not come is not "ready": ready needs the reviews approved, or none asked for.
-  return item.state === "open" && !item.draft && ciCountsAsPassing(item.ci, ciMode) && (item.review === "approved" || item.review === "not_requested") && item.branch !== "conflicted" && item.headByRovara;
-}
+export { readyToMerge };
 
 const CI_WORDS: Record<MergeTrackingItem["ci"], string> = { none: `${CI_STATE_WORDS.none}: no checks run on it`, unreadable: CI_STATE_WORDS.unreadable, required_missing: CI_STATE_WORDS.required_missing, pending: "its checks are running", passing: "its checks pass", failing: "its checks are failing" };
 const REVIEW_WORDS: Record<MergeTrackingItem["review"], string> = { not_requested: "no review asked for yet", requested: "waiting for a review", approved: "approved", changes_requested: "changes were requested" };

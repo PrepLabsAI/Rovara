@@ -1,7 +1,7 @@
 // UX2 slice 2 item 1: ONE status model. Every surface that says where a task or session stands (the task page header and pipeline strip, Home, Live, the sidebar, Slack, the MCP tools and
 // the CLI) reads this one contract: a state, its one human word, a reason sentence where the state needs one, and the next step. No surface shows a raw code (STARTING, task_failed, CLOSED).
 import { z } from "zod";
-import { TASK_STATUS_STATES, TASK_STATUS_WORDS, type TaskStatusState } from "./task-words.js";
+import { STATUS_LINES, TASK_STATUS_STATES, TASK_STATUS_WORDS, type TaskStatusState } from "./task-words.js";
 
 /** The states that are over: nothing more happens on the task. */
 export const TASK_STATUS_ENDED: readonly TaskStatusState[] = ["merged", "closed"];
@@ -77,7 +77,8 @@ export function taskStatusFromSession(summary: { status: string; lastRunFailed?:
     case "needs_person": return { state: "needs_you", reason: "a person needs to decide what happens next" };
     case "paused": return { state: "paused_budget", reason: "it reached its spending limit" };
     case "waiting": return summary.lastRunFailed === true ? { state: "failed", reason: "the last run stopped with an error", next: "Retry it, or close the task." } : { state: "finished_run", next: "Send more work, or close the task." };
-    case "stopped": return { state: "needs_you", reason: "it was stopped before it finished", next: "Retry it, or close the task." };
+    // A stop a person made: the legacy status has no "stopped" state, so it says the run finished and waits (`finished_run`), agreeing with the Stopped pill of the standing (F2-B). Not "Needs you": the person who pressed Stop is not asked.
+    case "stopped": return { state: "finished_run", ...STATUS_LINES.stoppedByPerson };
     case "succeeded": return { state: "closed" };
     case "failed": return { state: "failed", reason: "the run stopped with an error" };
     case "cancelled": return { state: "closed" };

@@ -16,7 +16,7 @@
 import { createHash } from "node:crypto";
 import { applicationNoticeText } from "../e2e/application-notices.js";
 import {
-  OrgIdSchema, DOCUMENT_STORE_LIMITS, EmailError, INDEX_EXPIRY_ATTRIBUTE, NOTIFY_BATCH_MINUTES, NOTIFY_ITEMS_MAX, UPKEEP_NOTICE_WORDS, agentSessionKey, change, defaultNotifyChannel, effectiveNotify, hideEmailAddresses, isPlainEmailAddress, isRealtimeNotice,
+  NOTICE_WORDS, OrgIdSchema, DOCUMENT_STORE_LIMITS, EmailError, INDEX_EXPIRY_ATTRIBUTE, NOTIFY_BATCH_MINUTES, NOTIFY_ITEMS_MAX, UPKEEP_NOTICE_WORDS, agentSessionKey, change, defaultNotifyChannel, effectiveNotify, hideEmailAddresses, isPlainEmailAddress, isRealtimeNotice,
   sessionTaskStatus, taskStatusText, upkeepMonthOf, upkeepSubjectId, upkeepSubjectOf, when,
   type AgentSessionRecord, type ChannelAdapter, type ChannelEvent, type ConversationRef, type DocumentStore, type EmailSender, type OrgId, type RealtimeEntry, type RealtimePublisher, type RegistryView,
   type SessionSummary, type StoredDocument, type UpkeepPauseReason,
@@ -25,6 +25,7 @@ import type { SessionChange } from "../sessions/summary.js";
 import { SessionStore } from "../sessions/store.js";
 import { upkeepExpiryOf, upkeepNoticeKey } from "../upkeep/keys.js";
 import { attentionEmail, type AttentionEmailLinks } from "./email-text.js";
+import { PENDING_PK, STOPPED_BY_ADMIN, pendingRowKey } from "./pending-keys.js";
 import { NOTIFY_TARGETS_MAX, notifyTargetKey as targetKey, readNotifyPrefs, type NotifyTarget } from "./prefs.js";
 import { digestSlotDay, holdOf } from "./schedule.js"; import { projectNoticeRow, putInboxRow } from "./inbox-rows.js";
 import { tenantIsCompanys, type ChannelCompanyOf } from "../channel/company.js";
@@ -45,13 +46,13 @@ export type AttentionKind = "needs_you" | "paused" | "ready" | "failed" | "done"
  * held for quiet hours, tried again and told through the same chats and email as a task notice; it has no session, so nothing is read for it and it makes no inbox row. The words are fixed here: no name, no text.
  */
 export type AdminNoticeKind = "knowledge_read";
-type PendingKind = AttentionKind | AdminNoticeKind;
+type PendingKind = AttentionKind | AdminNoticeKind | typeof STOPPED_BY_ADMIN;
 export const ADMIN_NOTICE_KINDS: readonly AdminNoticeKind[] = ["knowledge_read"];
 export const ADMIN_NOTICE_LINE: Readonly<Record<AdminNoticeKind, { title: string; status: string }>> = {
   knowledge_read: { title: "Team knowledge", status: "An AI tool was given an unusual amount of team knowledge today. The audit record has the details." },
 };
 
-export const PENDING_PK = "NOTIFY_PENDING";
+export { PENDING_PK };
 const PENDING_KEEP_SECONDS = 3 * 86_400;
 const SENT_KEEP_SECONDS = 86_400;
 /** The most people one message names (the owner and the people needed). */
@@ -69,7 +70,7 @@ export const ATTENTION_READ_MAX = 2000;
 
 /** The row of what was last sent to a person (exported for the person erase). */
 export const notifySentKey = (orgId: string, developerId: string) => ({ pk: `NOTIFY_SENT#${orgId}`, sk: `DEV#${developerId}` });
-const pendingKey = (orgId: string, developerId: string, sessionId: string, kind: PendingKind) => ({ pk: PENDING_PK, sk: `${orgId}#${developerId}#${sessionId}#${kind}` });
+const pendingKey: (orgId: string, developerId: string, sessionId: string, kind: PendingKind) => { pk: string; sk: string } = pendingRowKey;
 
 /** The kind of message a status calls for, or undefined for a status nobody is told about. */
 export function attentionKindOf(summary: Pick<SessionSummary, "status" | "lastRunFailed"> & { display?: unknown }): AttentionKind | undefined {
@@ -387,12 +388,12 @@ export function batchEventId(orgId: string, developerId: string, target: string,
 /** The email route's key among a person's targets (a chat target's key always has a `:`). */
 export const EMAIL_TARGET = "email";
 
-interface PendingRow { key: { pk: string; sk: string }; orgId: OrgId; developerId: string; sessionId: string; kind: PendingKind; at: string; done: Set<string> }
+interface PendingRow { key: { pk: string; sk: string }; orgId: OrgId; developerId: string; sessionId: string; kind: PendingKind; at: string; done: Set<string>; /** `stopped_by_admin` only: the admin's name as the stop wrote it. */ stoppedBy?: string }
 
 function pendingRowOf(item: StoredDocument, nowSeconds: number): PendingRow | undefined {
   const { orgId, developerId, sessionId, kind, at, sk } = item;
   if (typeof orgId !== "string" || typeof developerId !== "string" || typeof sessionId !== "string" || typeof at !== "string" || typeof sk !== "string") return undefined;
-  if (typeof kind !== "string" || ![...["needs_you", "paused", "ready", "failed", "done", "upkeep_paused", "setup_broken"], ...ADMIN_NOTICE_KINDS].includes(kind) || sk !== `${orgId}#${developerId}#${sessionId}#${kind}`) return undefined;
+  if (typeof kind !== "string" || ![...["needs_you", "paused", "ready", "failed", "done", "upkeep_paused", "setup_broken", STOPPED_BY_ADMIN], ...ADMIN_NOTICE_KINDS].includes(kind) || sk !== `${orgId}#${developerId}#${sessionId}#${kind}`) return undefined;
   // A project notice's or an upkeep row's subject must be its own kind of subject (and a task's row never one): a row that is neither reads as nothing.
   if ((kind === "upkeep_paused") !== (upkeepSubjectOf(sessionId) !== undefined)) return undefined;
   if ((kind === "setup_broken") !== (setupBrokenSubjectOf(sessionId) !== undefined)) return undefined;
@@ -402,7 +403,8 @@ function pendingRowOf(item: StoredDocument, nowSeconds: number): PendingRow | un
   const done = new Set(Array.isArray(item["doneTargets"]) ? item["doneTargets"].filter((entry): entry is string => typeof entry === "string") : []);
   // The email is sent at most once: a row claimed for an email (the hosted product's `emailClaimed`, written before the send) or marked sent counts as sent.
   if (item["emailSent"] === true || typeof item["emailClaimed"] === "number") done.add(EMAIL_TARGET);
-  return { key: { pk: PENDING_PK, sk }, orgId: orgId, developerId, sessionId, kind: kind as PendingKind, at, done };
+  const stoppedBy = item["stoppedBy"];
+  return { key: { pk: PENDING_PK, sk }, orgId: orgId, developerId, sessionId, kind: kind as PendingKind, at, done, ...(kind === STOPPED_BY_ADMIN && typeof stoppedBy === "string" ? { stoppedBy } : {}) };
 }
 
 /** One person's marker: when it last sent anything, per target how many tries failed in a row and when it may try again, and the local day whose digest was last sent. */
@@ -452,6 +454,23 @@ async function withApplicationNoticeSummaries(deps: AttentionDeliveryDependencie
     if (summary !== "") summaries.push(summary);
   }
   return summaries.length > 0 ? `${text}\n${summaries.join("\n")}`.slice(0, maxLength) : text;
+}
+
+const isNoticeKind = (kind: string): kind is AdminNoticeKind | typeof STOPPED_BY_ADMIN => kind === "knowledge_read" || kind === STOPPED_BY_ADMIN;
+
+/**
+ * The line of a notice that is not a task's status. The admin notice has no session: it is told only to a person who is an admin now (read at delivery; no reader means no one), in its own fixed words. F2-B: an admin's stop is told to the
+ * task's owner only, once, in plain words from the shared table, while the session is still open and theirs; not a "needs you": nobody is asked. Undefined (the row goes) for anyone else or an ended session.
+ */
+async function noticeLineOf(deps: { sessions: SessionStore; adminNotice: AttentionDeliveryDependencies["adminNotice"]; access: AttentionDeliveryDependencies["access"]; link: AttentionDeliveryDependencies["link"] }, orgId: OrgId, developerId: string, row: PendingRow): Promise<Line | undefined> {
+  if (row.kind === "knowledge_read") {
+    const still = deps.adminNotice === undefined ? false : await deps.adminNotice(orgId, developerId).catch(() => false);
+    return still ? { ...ADMIN_NOTICE_LINE[row.kind], kind: row.kind } : undefined;
+  }
+  const session = await deps.sessions.get(orgId, row.sessionId);
+  const access = session === undefined ? undefined : await (deps.access ?? (async (_org, person, found) => (found.owner.developerId === person ? { owner: true } : undefined)))(orgId, developerId, session).catch(() => undefined);
+  if (session === undefined || access?.owner !== true || session.endedAt !== undefined) return undefined;
+  return { title: oneLine(session.title, TITLE_MAX) || "A task", status: oneLine(NOTICE_WORDS.stoppedByAdmin(oneLine(hideEmailAddresses(row.stoppedBy ?? ""), 80)), 200), link: deps.link?.(session), kind: STOPPED_BY_ADMIN };
 }
 
 /**
@@ -505,7 +524,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
     if (hold !== "none") {
       sendable = [];
       for (const row of rows) {
-        const urgent = deps.urgent === undefined || row.kind === "knowledge_read" ? false : await deps.urgent(orgId, { developerId, sessionId: row.sessionId, kind: row.kind }).catch(() => false);
+        const urgent = deps.urgent === undefined || isNoticeKind(row.kind) ? false : await deps.urgent(orgId, { developerId, sessionId: row.sessionId, kind: row.kind }).catch(() => false);
         if (urgent === true) sendable.push(row);
       }
       outcome.held += rows.length - sendable.length;
@@ -537,11 +556,10 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
         current.push({ row, line: { title: oneLine(subject.project, TITLE_MAX) || "A project", status: UPKEEP_NOTICE_WORDS[subject.reason], link: deps.upkeep.link?.(subject.project), kind: "upkeep_paused" } });
         continue;
       }
-      // An admin notice has no session: it is told only to a person who is an admin now (read at delivery; no reader means no one), in its own fixed words.
-      if (row.kind === "knowledge_read") {
-        const still = deps.adminNotice === undefined ? false : await deps.adminNotice(orgId, developerId).catch(() => false);
-        if (!still) { stale.push(row); continue; }
-        current.push({ row, line: { ...ADMIN_NOTICE_LINE[row.kind], kind: row.kind } });
+      // A notice that is not a task's status (the admin notice, an admin's stop) is told by its own checks, in its own fixed words.
+      if (isNoticeKind(row.kind)) {
+        const line = await noticeLineOf({ sessions, adminNotice: deps.adminNotice, access: deps.access, link: deps.link }, orgId, developerId, row);
+        if (line === undefined) stale.push(row); else current.push({ row, line });
         continue;
       }
       if (row.kind === "setup_broken") {
@@ -629,7 +647,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
       }
       const lines = [...new Map(owed.map(({ row, line }) => [row.sessionId, line])).values()];
       const shown = lines.slice(0, NOTIFY_ITEMS_MAX), more = lines.length - shown.length;
-      const allFailed = lines.every((line) => line.kind === "failed"), allDone = lines.every((line) => line.kind === "done"), allNotice = lines.every((line) => line.kind === "knowledge_read");
+      const allFailed = lines.every((line) => line.kind === "failed"), allDone = lines.every((line) => line.kind === "done"), allNotice = lines.every((line) => isNoticeKind(line.kind));
       let ok = false, refused = false;
       if (tkey === EMAIL_TARGET) {
         const mail = attentionEmail(shown, more, digest ? "digest" : allDone ? "done" : allNotice ? "notice" : "attention", typeof deps.emailLinks === "function" ? deps.emailLinks(orgId, developerId) : deps.emailLinks);

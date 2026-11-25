@@ -298,6 +298,7 @@ describe("taskStandingFor: a pull request waits, and the failed-checks fact read
 
   it("is In review for the owner and an admin who both may merge, and for a colleague who may not; merge is never a Needs you move", async () => {
     const world = await seed({ workflow: waitingForMerge(), access: access() });
+    await seedTracking(world, {});
     const task = await taskOf(world.h);
     const env = envOf(world, { merge: mergeHost(["local-owner", "an-admin"]) });
     const who = PERSONAS(world);
@@ -311,6 +312,32 @@ describe("taskStandingFor: a pull request waits, and the failed-checks fact read
     expect(idsOf((await taskStandingFor(env, who["owner"]!, task))!.standing)).toContain("task.merge");
     expect(idsOf((await taskStandingFor(env, who["liveAdmin"]!, task))!.standing)).toContain("task.merge");
     expect(idsOf((await taskStandingFor(env, who["colleague"]!, task))!.standing)).not.toContain("task.merge");
+  });
+
+  it("says Ready to merge only when the pull request is ready (B2): tracking not read, pending or failing checks, a draft, a review asked for, a conflict or a head someone else pushed all read Checking, the pill stays In review", async () => {
+    const world = await seed({ workflow: waitingForMerge(), access: access() });
+    const task = await taskOf(world.h);
+    const owner = PERSONAS(world)["owner"]!;
+    const read = async () => (await taskStandingFor(envOf(world), owner, task))!;
+    // nothing read yet: not ready
+    expect((await read()).statusView).toMatchObject({ state: "checking", reason: "the pull request is not ready to merge yet" });
+    for (const [name, overrides, reason] of [
+      ["checks pending", { ci: "pending" }, "the pull request is not ready to merge yet"],
+      ["checks failing", { ci: "failing", failingChecks: ["unit"] }, "the pull request's checks are failing"],
+      ["a draft", { draft: true }, "the pull request is not ready to merge yet"],
+      ["a review asked for and not come", { review: "requested" }, "the pull request is not ready to merge yet"],
+      ["a conflict with its base", { branch: "conflicted" }, "the pull request is not ready to merge yet"],
+      ["someone else's push", { headByRovara: false }, "the pull request is not ready to merge yet"],
+    ] as const) {
+      await seedTracking(world, overrides);
+      const served = await read();
+      expect(served.statusView, name).toMatchObject({ state: "checking", reason });
+      expect(served.standing.pill.key, name).toBe("in_review");
+    }
+    await seedTracking(world, {});
+    const ready = await read();
+    expect(ready.statusView.state).toBe("ready_to_merge");
+    expect(ready.standing.pill.key).toBe("in_review");
   });
 
   it("marks the Verify step failed when tracking says an open pull request's checks fail, and not when they pass or the pull request is closed", async () => {
@@ -348,9 +375,8 @@ describe("taskStandingFor: a person's own Stop reads Stopped", () => {
     expect((await taskStandingFor(envOf(world), PERSONAS(world)["owner"]!, task))!.standing.pill.key).toBe("needs_you");
   });
 
-  // KNOWN GAP (F2-B supplies the fact: from the stop action's record if one exists, else a sibling attribute beside the task). The core stores no mark of a person's Stop today, so a task stopped through the real Stop press reads as a
-  // stopped step does. This test states the target end to end and is expected to FAIL until the host passes `stoppedByPerson`; when F2-B wires it, this starts passing and `it.fails` flags it: change it to `it`.
-  it.fails("KNOWN GAP: a task stopped through the real Stop press reads Stopped to its owner, with no fact passed by the caller", async () => {
+  // F2-B supplies the fact: the real Stop writes `personStop` on the task row with its claim, and `standingFactsOf` reads it, so a task stopped through the real Stop press reads Stopped to its owner with no fact passed by the caller.
+  it("a task stopped through the real Stop press reads Stopped to its owner, with no fact passed by the caller", async () => {
     const world = await seed({ workflow: running(), access: access() });
     const owner = PERSONAS(world)["owner"]!;
     const task = await taskOf(world.h);

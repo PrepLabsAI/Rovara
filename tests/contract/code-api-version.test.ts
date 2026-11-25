@@ -11,6 +11,8 @@ const DIGESTS: Readonly<Record<string, string>> = {
   "1.2": "49913e532fa3c49d0bbe01199b1756de4bfc19265f68a41036c6a18d987e5ad3",
   // 1.3 (R1 + L1 6.2b): the code LINEAR_TEAM_TAKEN, appended (409). The three intake rows that moved from /v1/dev to /v1/app carry no schema and no webAppOnly, so they are not in the digest.
   "1.3": "93e0ed04e8c4a8c2a878027c951ad5c786ea724531b4ebedf9444f45022fc889",
+  // 1.4 (F2-B): the row `tasks.read` (GET /v1/dev/tasks/{taskId}) now names itself and carries a tolerant response schema naming `standing` (where the task stands for the person reading it). Code first: older clients ignore the member.
+  "1.4": "23d876ecf8aabc9571137f1c00408a6934f4c112f04c3ceb71c861ef843c2bc6",
 };
 
 const schemaOf = (schema: z.ZodType | undefined) => (schema === undefined ? null : z.toJSONSchema(schema));
