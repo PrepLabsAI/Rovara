@@ -14,6 +14,7 @@ import { Dynamo } from "../../packages/model-gateway/src/dynamo.js";
 import { EVAL_AUTHORITY_AUDIENCE, EVAL_AUTHORITY_PATH, storedApproverOf } from "../../packages/model-gateway/src/eval-authority.js";
 import { EVAL_CAP_AUDIENCE, EVAL_CAP_PATH } from "../../packages/model-gateway/src/eval-cap.js";
 import { COMPANY_INSTRUCTIONS_AUDIENCE, COMPANY_INSTRUCTIONS_PATH } from "../../packages/model-gateway/src/company-instructions.js";
+import { TASK_ENDED_AUDIENCE, TASK_ENDED_PATH } from "../../packages/model-gateway/src/task-ended-notice.js";
 import { DynamoMeter } from "../../packages/model-gateway/src/dynamo-meter.js";
 import { DynamoProductKeyTable } from "../../packages/model-gateway/src/dynamo-product-keys.js";
 import { GatewayConfigError, readGatewayConfig, startServe, type RunningGateway, type ServeConfig } from "../../packages/model-gateway/src/process.js";
@@ -198,6 +199,39 @@ describe("deployed product route (started process)", () => {
       expect((await capCall(t.gateway.server, `org_${"b".repeat(20)}`)).statusCode).toBe(404);
       // A task token (x-api-key) never opens it.
       expect((await request(t.gateway.server, EVAL_CAP_PATH, { company: claims.cid, project: pid })).statusCode).toBe(401);
+      expect(t.sent).toHaveLength(0);
+    }
+  });
+
+  it("serves Code's task-ended notice: it writes ENDED#<task> in the markers table and the task's next agent call is refused 403 task_ended, with or without the product route", async () => {
+    const noticeCall = (server: RunningGateway["server"], company: string = claims.cid, task: string = agentScope.tid, tokenCompany: string = claims.cid) => {
+      const at = now / 1000;
+      const input = [{ alg: "RS256", typ: "rovara-service+jwt", kid }, { iss: claims.iss, aud: TASK_ENDED_AUDIENCE, jti: randomUUID(), iat: at, nbf: at - 30, exp: at + 60, cid: tokenCompany }].map((v) => Buffer.from(JSON.stringify(v)).toString("base64url")).join(".");
+      const token = `${input}.${sign("RSA-SHA256", Buffer.from(input), keys.privateKey).toString("base64url")}`;
+      const req = Object.assign(Readable.from([Buffer.from(JSON.stringify({ company, task }))]), { method: "POST", url: TASK_ENDED_PATH, headers: { "content-type": "application/json", authorization: `Bearer ${token}` } });
+      const res = new FakeResponse();
+      const done = new Promise<FakeResponse>((resolve) => res.once("close", () => resolve(res)));
+      server.emit("request", req, res);
+      return done;
+    };
+    for (const product of [true, false]) {
+      const t = await started({ product });
+      const ended = () => t.wire.items(TABLES.markers).filter((row) => String(row.sk).startsWith("ENDED#"));
+      expect((await request(t.gateway.server, "/v1/messages", {})).text()).not.toContain("task_ended");
+      // Another company's notice is refused and writes nothing.
+      expect((await noticeCall(t.gateway.server, `org_${"b".repeat(20)}`)).statusCode).toBe(403);
+      expect(ended()).toEqual([]);
+      const yes = await noticeCall(t.gateway.server);
+      expect([yes.statusCode, JSON.parse(yes.text())]).toEqual([200, { company: claims.cid, task: agentScope.tid, ended: true }]);
+      expect(ended()).toHaveLength(1);
+      const after = await request(t.gateway.server, "/v1/messages", {});
+      expect([after.statusCode, after.text()]).toEqual([403, expect.stringContaining("task_ended")]);
+      // A repeat is the same answer; another task of the same company is not ended.
+      expect((await noticeCall(t.gateway.server)).statusCode).toBe(200);
+      expect(ended()).toHaveLength(1);
+      expect((await request(t.gateway.server, "/v1/messages", {}, { "x-api-key": mint({ tid: "task_2" }) })).text()).not.toContain("task_ended");
+      // A task token (x-api-key) never opens the notice route.
+      expect((await request(t.gateway.server, TASK_ENDED_PATH, { company: claims.cid, task: "task_2" })).statusCode).toBe(401);
       expect(t.sent).toHaveLength(0);
     }
   });

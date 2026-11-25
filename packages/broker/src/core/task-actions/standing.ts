@@ -6,6 +6,7 @@
 import { AgentXError } from "@agentx/contracts";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { loadTaskAsOwner } from "../task-flow/owner-round.js";
+import { decideTaskRead } from "../task-flow/read-rule.js";
 import type { TaskRecord } from "../task-flow/records.js";
 import type { ActionCaller, Standing, WhoRule } from "./types.js";
 
@@ -22,7 +23,8 @@ export async function standingOf(deps: TaskFlowDeps, caller: ActionCaller, task:
     if (!(error instanceof AgentXError)) throw error;
   }
   if (admin) return { kind: "admin" };
-  const reads = deps.access.canRead === undefined ? await deps.access.canAct(caller.principal, task) : await deps.access.canRead(caller.principal, task).catch(() => false);
+  // A reader: the one read rule's "readable" read (a failure of it is "no standing", as every failure of this lookup always was).
+  const reads = await decideTaskRead(deps, { caller: { principal: caller.principal }, task, read: "readable" }).then(() => true, () => false);
   return reads ? { kind: "reader" } : undefined;
 }
 

@@ -8,7 +8,7 @@ import { ProductKeyStore } from "./product-keys.js";
 import { ProductKeySealer } from "./product-seal.js";
 
 export interface BackfillInput { db: Dynamo; companyTable: string; productTable: string; issuer: string; companies: readonly string[] }
-interface Candidate { companyId: string; source: "anthropic_key" | "bedrock_byo"; documents: Array<{ key: Key; version: number }> }
+interface Candidate { companyId: string; source: "anthropic_key"; documents: Array<{ key: Key; version: number }> }
 export interface BackfillPlan { issuer: string; companyTable: string; productTable: string; candidates: Candidate[] }
 const forbidden = async (): Promise<never> => { throw new Error("backfill cannot access secrets"); };
 
@@ -34,11 +34,10 @@ export async function planAgentOwnKeyBackfill(input: BackfillInput): Promise<Bac
       },
       sealer: new ProductKeySealer({ generateDataKey: forbidden, unwrapDataKey: forbidden }), fingerprint: forbidden,
     });
-    // Preserve the former own-key precedence: Anthropic before the company's Bedrock.
+    // Preserve the former own-key default: a connected own Anthropic key. DEC 254zzz525: a connected Bedrock role is never written as a choice
+    // (own Bedrock is used only when the company chooses it itself), so the company's Bedrock is not even read here.
     const anthropic = await store.learningSource(input.issuer, companyId, "anthropic");
-    const bedrock = anthropic === undefined ? await store.companyBedrock(input.issuer, companyId) : undefined;
-    const source = anthropic !== undefined ? "anthropic_key" : bedrock !== undefined ? "bedrock_byo" : undefined;
-    if (source !== undefined) plan.candidates.push({ companyId, source, documents });
+    if (anthropic !== undefined) plan.candidates.push({ companyId, source: "anthropic_key", documents });
   }
   return plan;
 }

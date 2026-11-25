@@ -53,7 +53,7 @@ describe("off unless configured", () => {
     for (const bad of ["true", "1", "off", "", true]) expect(() => productAiOn(bad, "x")).toThrow(/must be "on" or absent/u);
     expect(() => synth({ [MODEL_GATEWAY_PRODUCT_CONTEXT_KEY]: "yes" })).toThrow(/must be "on" or absent/u);
     // Rovara-cloud#247: production's gateway carries product AI too (its engine's models come through Rovara's AI, which needs it).
-    const production = Template.fromStack(buildAgentXApp({ [MODEL_GATEWAY_CONTEXT_KEY]: "production", agentxRegion: "us-east-1", [MODEL_GATEWAY_PRODUCT_CONTEXT_KEY]: "on" }).node.findChild("RovaraModelGateway") as Stack).toJSON() as { Parameters: Record<string, unknown> };
+    const production = Template.fromStack(buildAgentXApp({ [MODEL_GATEWAY_CONTEXT_KEY]: "production", agentxRegion: "us-east-1", [MODEL_GATEWAY_PRODUCT_CONTEXT_KEY]: "on", rovaraAiSourceKinds: "openai" }).node.findChild("RovaraModelGateway") as Stack).toJSON() as { Parameters: Record<string, unknown> };
     expect(production.Parameters).toHaveProperty("CloudSettingsRoleArn");
   });
   it("adds the OpenRouter over-reservation alarm and metric filter when OpenRouter is configured", () => {
@@ -137,12 +137,16 @@ describe("on: the serving role's grants (exact)", () => {
     expect(s.OpenProductKeys).toEqual({ Sid: "OpenProductKeys", Effect: "Allow", Action: "kms:Decrypt", Resource: arnOf(idStarting("AWS::KMS::Key", "ProductKeysKey")), Condition: { StringEquals: { "kms:EncryptionContext:purpose": "rovara-product-ai-key", "kms:EncryptionContext:install": issuer } } });
     expect(s.VerifyCloudCalls).toEqual({ Sid: "VerifyCloudCalls", Effect: "Allow", Action: "kms:VerifyMac", Resource: arnOf(idStarting("AWS::KMS::Key", "ProductKeysMacKey")) });
     expect(s.AssumeVertexFederation).toEqual({ Sid: "AssumeVertexFederation", Effect: "Allow", Action: "sts:AssumeRole", Resource: arnOf(idStarting("AWS::IAM::Role", "VertexFederationRole")), Condition: { StringLike: { "sts:RoleSessionName": "org_*" } } });
+    // Bring-your-own Bedrock (DEC 254zzz520, always with product AI): exactly two more statements, pinned in model-gateway-bedrock-byo-infra.test.ts.
+    expect(s.AssumeBedrockBroker).toMatchObject({ Action: "sts:AssumeRole", Condition: { StringLike: { "sts:RoleSessionName": "org_*" } } });
+    expect(s.MakeBedrockExternalIds).toMatchObject({ Action: "kms:GenerateMac", Resource: arnOf(idStarting("AWS::KMS::Key", "BedrockExternalIdKey")) });
     // Nothing else was added, and the agent grants are unchanged.
-    expect(serveStatements().map(statement => statement.Sid).sort()).toEqual(["AssumeVertexFederation", "DecryptProviderKeys", "EvalStagesCompanyKeys", "MarkersCompanyKeys", "MeterAndLedgerCompanyKeys", "OpenProductKeys", "ProductAndLearningMarkersCompanyKeys", "ProductAndLearningMeterCompanyKeys", "ProductKeysCompanyKeys", "QueryOpenHolds", "QueryPendingCorrections", "QueryProductIndexes", "ReadCompanyBudgets", "ReadInstallRovaraAi", "ReadPrices", "ReadProviderKeys", "VerifyCloudCalls"]);
+    expect(serveStatements().map(statement => statement.Sid).sort()).toEqual(["AssumeBedrockBroker", "AssumeVertexFederation", "DecryptProviderKeys", "EvalStagesCompanyKeys", "MakeBedrockExternalIds", "MarkersCompanyKeys", "MeterAndLedgerCompanyKeys", "OpenProductKeys", "ProductAndLearningMarkersCompanyKeys", "ProductAndLearningMeterCompanyKeys", "ProductKeysCompanyKeys", "QueryOpenHolds", "QueryPendingCorrections", "QueryProductIndexes", "ReadCompanyBudgets", "ReadInstallRovaraAi", "ReadPrices", "ReadProviderKeys", "VerifyCloudCalls"]);
     // No DeleteItem on any money table, the key table or the stage table; no GenerateDataKey or Encrypt for the gateway.
     const all = serveStatements();
     for (const st of all.filter((x) => [x.Action].flat().includes("dynamodb:DeleteItem"))) expect(JSON.stringify(st.Resource)).not.toMatch(/ProductKeys|EvalStages|Meter|Ledger/u);
-    expect(JSON.stringify(all)).not.toMatch(/"kms:GenerateDataKey|"kms:Encrypt"|"kms:GenerateMac"|"sts:\*"|"\*:\*"/u);
+    // GenerateMac is the Bedrock external-id key's alone (the gateway never makes MACs with any other key).
+    expect(JSON.stringify(all.filter((x) => x.Sid !== "MakeBedrockExternalIds"))).not.toMatch(/"kms:GenerateDataKey|"kms:Encrypt"|"kms:GenerateMac"|"sts:\*"|"\*:\*"/u);
   });
   it("the Vertex federation role: no permissions at all; its trust names only the serving role, with a company session name", () => {
     const role = idStarting("AWS::IAM::Role", "VertexFederationRole");

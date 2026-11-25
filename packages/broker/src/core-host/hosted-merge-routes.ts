@@ -25,7 +25,8 @@ import {
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 import type { TaskRecord } from "../core/task-flow/records.js";
-import { loadReadableTask, readTask } from "../core/task-flow/reads.js";
+import { readTask } from "../core/task-flow/reads.js";
+import { decideTaskRead } from "../core/task-flow/read-rule.js";
 import { taskNotFound } from "../core/task-flow/access.js";
 import { SCOPE_HELD, mergeViewOf, pressMergeAsPerson, requiredPullRequests, type MergeDependencies } from "../core/merge/merge.js";
 import { readMergeTracking } from "../core/merge/store.js";
@@ -119,7 +120,7 @@ async function standingOf(input: HostedMergeInput, wiring: HostedMergeWiring, ta
   const grant = await wiring.projectGrantRole(principal.personId, task.project, companyId).catch(() => undefined);
   if (grant === "administrator") return { task, may: "project-admin" };
   // Not one of them: a reader of the task is told so; anyone else reads exactly as for a missing task.
-  await loadReadableTask(flow, { principal }, taskId);
+  await decideTaskRead(flow, { caller: { principal }, task, read: "merge" });
   return { task, may: undefined };
 }
 

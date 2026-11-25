@@ -14,8 +14,8 @@ const DIGESTS: Readonly<Record<string, string>> = {
   // 1.4 (F2-B): the row `tasks.read` (GET /v1/dev/tasks/{taskId}) now names itself and carries a tolerant response schema naming `standing` (where the task stands for the person reading it). Code first: older clients ignore the member.
   "1.4": "23d876ecf8aabc9571137f1c00408a6934f4c112f04c3ceb71c861ef843c2bc6",
   // 1.5 (RD-2.0): the task page's reads. The six that were served unlisted (events, plan, people, diff, comments, the proof index) name themselves and carry tolerant response schemas; four new rows (spec, checks, changes, timeline) with schemas and the
-  // not-served refusal; the code ROUTE_NOT_SERVED (404), appended. Code first: an older client never calls the new rows and ignores a schema it does not read.
-  "1.5": "c35c1ba82ef00289fa682c6d13cd64133ac2657491fb0e6b80ee94326353447d",
+  // not-served refusal; the code ROUTE_NOT_SERVED (404), appended; the read rule adds the code TASK_PART_NOT_SHOWN (403), appended, and lists it on the spec, checks and changes rows (digest recomputed: 1.5 is unreleased). Code first: an older client never calls the new rows and ignores a schema it does not read.
+  "1.5": "57877feaca923f6f862507a78c1439528eaf78145ef38f0dd3387cf2af4e1fb6",
 };
 
 const schemaOf = (schema: z.ZodType | undefined) => (schema === undefined ? null : z.toJSONSchema(schema));

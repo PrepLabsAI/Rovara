@@ -202,6 +202,24 @@
       "deletedBy": "8f1be0a80"
     },
     {
+      "path": "tests/unit/core-host-parity.test.ts",
+      "minimumTests": 18,
+      "reason": "Per-root parity of late-bound deps keys and service names (a reviewed fixture): the safety net for the F4 engine restructuring.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/unit/second-review-failure-rules.test.ts",
+      "minimumTests": 12,
+      "reason": "Per-hook failure rules and per-site order pinned as today's behaviour: the safety net for the F4 engine restructuring.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/unit/second-review-money-exits.test.ts",
+      "minimumTests": 10,
+      "reason": "Every second-review money exit (incl. the dispatcher's sweep-only exit) pinned as today's behaviour: the safety net for the F4 engine restructuring.",
+      "decision": "DEC 254zzz459"
+    },
+    {
       "path": "tests/journeys/journey-gate.test.ts",
       "minimumTests": 9,
       "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): the gate that fails when a journey lacks a file or a named known gap, or is skipped, or runs outside every affected run. A whole task on the real core and real worker, in every pull request run; the floor is the file's 9 runnable declarations, and deleting or trimming one is a reviewed edit.",
@@ -319,6 +337,24 @@
       "path": "tests/contract/task-owner-channel-access.test.ts",
       "minimumTests": 9,
       "reason": "PROJECT-GRANT-RECHECK (briefs/arch-cleanup/PROJECT-GRANT-RECHECK-DONE.md, channel-access starters): the task's own person holds it by the SAME live test the start meets (checkProjectAccess): a grant, or fresh bound-channel membership while the project lets channel members use it and the person is Slack-linked. A channel-access starter lists and owns their task; one who left the channel, whose project turned channel use off, whose Slack is unreachable or who has no Slack link loses it; a grant removed while still in the channel keeps it; neither access gives nothing. The floor is the file's 9 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/journeys/session-people-key.test.ts",
+      "minimumTests": 7,
+      "reason": "SESSION-PEOPLE-KEY (briefs/arch-cleanup/SESSION-PEOPLE-KEY-DONE.md): a task's People entry decides a person's level in the task's session, found by the person's sign-in id (the id the list stores), not the session's hashed id. A project maintainer, a project contributor and the starter marked denied are refused every session read and act (read, log, steer, stop, retry, answer, revise the plan, follow) as a missing session; a commenter holds use, an owner edit, and a person with no entry keeps exactly their project level. The floor is the file's 7 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz522"
+    },
+    {
+      "path": "tests/contract/task-owner-engine-channel.test.ts",
+      "minimumTests": 7,
+      "reason": "PROJECT-GRANT-RECHECK (briefs/arch-cleanup/PROJECT-GRANT-RECHECK-DONE.md, arch ruling a): channel access holds an OLD-engine task only. A new-engine (core) task's own person holds it by the project grant alone, as its start and steps do: a person removed from the project but still in the bound channel is not listed and reads no events or readers of it, with the removed person's own 404. The engine is the stored engine stamp (TASK_ENGINE#<id>); a stamp that is there but unreadable, or a failed read, is grant only; a stamp whose flow stays on the workflow is old-engine; the old-engine counterpart keeps its task. The floor is the file's 7 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/contract/channel-only-person-new-engine.test.ts",
+      "minimumTests": 5,
+      "reason": "PROJECT-GRANT-RECHECK (arch question 3): what a channel-only person (no grant, in the project's bound Slack channel) can do on the new engine: open a task by link, hold any People role (viewer, commenter, owner), start a task or act from its Slack thread are all refused (grant only); the page's plan comments and diff still admit them as a commenter (resolveCoreTaskAccess, the channel-commenter rule), and the core's events and readers routes refuse them. The floor is the file's 5 runnable declarations, and deleting or trimming one is a reviewed edit.",
       "decision": "DEC 254zzz459"
     }
   ],

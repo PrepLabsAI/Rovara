@@ -18,6 +18,7 @@ export * from "./outcome.js";
 export * from "./owner-note.js";
 export * from "./owner-round.js";
 export * from "./project-source.js";
+export * from "./read-rule.js";
 export * from "./reads.js";
 export * from "./records.js";
 export * from "./results.js";

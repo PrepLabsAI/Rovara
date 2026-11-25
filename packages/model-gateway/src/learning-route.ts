@@ -23,7 +23,7 @@ import type { EndpointModel } from "./endpoint-source.js";
 //            LEARNING_PAUSE_HEADER header (one of LEARNING_PAUSE_REASONS). Faults (an unreadable switch or budget) are 503/502,
 //            never a pause.
 import type { ChargeReceiptV1 } from "./charge-receipt.js";
-import { agentSourceSwitchedOn, resolveAgentSource, type AgentAiSourceReader, type ByoBedrock, type RovaraAi } from "./agent-ai.js";
+import { agentSourceSwitchedOn, resolveAgentSource, type AgentAiSourceReader, type RovaraAi } from "./agent-ai.js";
 import { validCaps, type Caps, type CapsScope, type CapsSource } from "./caps.js";
 import { guardRequest, type GuardFailure, type ModelLimitsSource } from "./guard.js";
 import { guardOpenAi, OpenAiUsageCollector } from "./learning-openai.js";
@@ -118,7 +118,7 @@ export interface LearningKeySource {
  * Rovara AI; saved choices win. Only the configured exempt list is free. Signed exact prices, receipts and both caps apply.
  * Own-source adapter expansion follows separately; an unsupported selected source refuses without changing payer.
  */
-export interface RovaraDefaultOptions { ai: RovaraAi; sources: AgentAiSourceReader; byo?: Pick<ByoBedrock, "connection">; disabled?: ReadonlySet<string>; switchedOn?: ReadonlySet<string> }
+export interface RovaraDefaultOptions { ai: RovaraAi; sources: AgentAiSourceReader; disabled?: ReadonlySet<string>; switchedOn?: ReadonlySet<string> }
 export interface LearningRouteOptions {
   rovaraDefault?: RovaraDefaultOptions;
   keys: LearningKeySource;
@@ -224,7 +224,7 @@ export function createLearningRoutes(options: LearningRouteOptions): LearningRou
             if (options.lessons !== undefined && (await options.lessons.isOn(claims.cid, signal)) !== true) return paused("lessons_off");
             const ai = options.rovaraDefault;
             if (provider === "anthropic" && ai !== undefined) {
-              const resolved = await resolveAgentSource({ sources: ai.sources, keys: options.keys, ...(ai.byo === undefined ? {} : { byo: ai.byo }) }, claims.iss, claims.cid, signal);
+              const resolved = await resolveAgentSource({ sources: ai.sources, keys: options.keys }, claims.iss, claims.cid, signal);
               if (resolved.source === "rovara") {
                 if (!agentSourceSwitchedOn("rovara", ai.switchedOn ?? new Set<string>())) return paused("no_provider");
                 rovara = { ai: ai.ai, marker: `rovara-ai-${randomUUID()}` };

@@ -60,7 +60,8 @@ describe("the one route table", () => {
     }
     for (const id of ["tasks.spec", "tasks.checks", "tasks.changes", "tasks.timeline"]) {
       const row = ROUTES.find((route) => routeIdOf(route) === id)!;
-      expect(row.errors, id).toEqual([{ code: "TASK_NOT_FOUND", status: 404 }, { code: "ROUTE_NOT_SERVED", status: 404 }]);
+      // The read rule: a task shared for its summary is told the plan, the checks and the code changes are not shown (403), the timeline is shown.
+      expect(row.errors, id).toEqual([{ code: "TASK_NOT_FOUND", status: 404 }, { code: "ROUTE_NOT_SERVED", status: 404 }, ...(id === "tasks.timeline" ? [] : [{ code: "TASK_PART_NOT_SHOWN", status: 403 }])]);
       expect(row.example?.refusal, id).toEqual({ error: { code: "ROUTE_NOT_SERVED", message: ROUTE_NOT_SERVED_MESSAGE } });
     }
   });

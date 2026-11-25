@@ -106,7 +106,7 @@ describe("People on a task made by real core start", () => {
     const w = await world("cloud", false, true);
     const path = `/v1/dev/tasks/${w.task.taskId}/people`;
     const routes = createCoreTaskRuleRoutes(() => w.people as unknown as DeveloperTaskRouteDependencies);
-    const answer = await routes.route({ request: { method: "GET", path, headers: {} }, path, person: { developerId: w.developerId, name: "Owner" }, companyId: w.h.deps.companyId, task: w.task as unknown as Record<string, unknown>, store: w.h.store });
+    const answer = await routes.route({ request: { method: "GET", path, headers: {} }, path, person: { developerId: w.developerId, name: "Owner" }, companyId: w.h.deps.companyId, task: w.task as unknown as Record<string, unknown>, store: w.h.store, authorize: async () => { throw new Error("the read rule was asked"); } });
     expect(answer.statusCode).toBe(200);
     expect(JSON.parse(answer.body)).toMatchObject({ view: { canManage: true, people: [{ you: true, role: "owner", method: "cloud" }] } });
     readsAsRow("tasks.people", JSON.parse(answer.body));
@@ -358,7 +358,7 @@ describe("People identity on a sign-in row shaped like the stored data (the id o
   const viewOf = async (w: Awaited<ReturnType<typeof world>>) => {
     const path = `/v1/dev/tasks/${w.task.taskId}/people`;
     const routes = createCoreTaskRuleRoutes(() => w.people as unknown as DeveloperTaskRouteDependencies);
-    return routes.route({ request: { method: "GET", path, headers: {} }, path, person: { developerId: w.developerId, name: "Owner" }, companyId: w.h.deps.companyId, task: w.task as unknown as Record<string, unknown>, store: w.h.store });
+    return routes.route({ request: { method: "GET", path, headers: {} }, path, person: { developerId: w.developerId, name: "Owner" }, companyId: w.h.deps.companyId, task: w.task as unknown as Record<string, unknown>, store: w.h.store, authorize: async () => { throw new Error("the read rule was asked"); } });
   };
 
   it.each(["attribute", "key"] as const)("the owner opens People: exactly one entry, the creator, role owner (record shape=%s)", async shape => {

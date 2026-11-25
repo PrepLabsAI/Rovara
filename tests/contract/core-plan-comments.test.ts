@@ -1,4 +1,5 @@
 // The retired comment routes keep their schemas, guards and records for core tasks.
+import type { TaskReadDecision } from "../../packages/broker/src/core/task-flow/read-rule.js";
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { decideWorkflow, submitPlanCritique, WorkflowSnapshotSchema, type JsonValue, type WorkerInvocation, sharedTaskKey } from "@agentx/contracts";
@@ -34,7 +35,8 @@ describe("plan comment parity on core", () => {
     const routes = createCoreTaskRuleRoutes(() => h.deps);
     const path = `/v1/dev/tasks/${h.taskId}/comments`;
     const call = (method: string, body?: unknown) => routes.route({ request: { method, path, headers: {}, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }, path,
-      person: { developerId: PRIYA.developerId, name: PRIYA.name }, companyId: COMPANY, task: h.row(), store: { query: async () => ({ items: [] }) } });
+      person: { developerId: PRIYA.developerId, name: PRIYA.name }, companyId: COMPANY, task: h.row(), store: { query: async () => ({ items: [] }) }, // The read rule is the host's; this parity case is for the comments themselves (the rule's table and its refusals are tests/unit/task-read-rule.test.ts).
+      authorize: async () => ({ task: h.row() } as unknown as TaskReadDecision) });
     const first = JSON.parse((await call("POST", { requestId: "root", document: "plan", text: "Above", anchor: "claim:2.1" })).body) as { comment: { commentId: string } };
     const reply = JSON.parse((await call("POST", { requestId: "reply", document: "plan", text: "Agreed", replyTo: first.comment.commentId })).body) as { comment: { commentId: string } };
     expect(h.db.get(`DEVTASK#${h.taskId}`, `COMMENT#${reply.comment.commentId}`)).toMatchObject({ parentId: first.comment.commentId, target: { kind: "claim", id: "2.1" } });

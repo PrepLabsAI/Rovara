@@ -8,9 +8,9 @@ import { validCaps, type Caps } from "./caps.js";
 import { GATEWAY_COMPANY_KEY_PREFIX, GATEWAY_LEDGER_INDEXES, GATEWAY_METER_INDEXES, GATEWAY_OPEN_PARTITION, GATEWAY_PENDING_PARTITION } from "./deploy.js";
 import { CALL_HARD_CEILING_MS } from "./provider.js";
 import { TransactionRefused, type Dynamo, type Expr, type Item, type Plain, type TransactAction } from "./dynamo.js";
-import type { EndedTasks } from "./ended.js";
-import { SWEEP_AFTER_MAX_MS, validLine } from "./meter.js";
-import type { BillLine, CorrectionInput, CorrectionResult, EstimatedCall, EstimatedSettlement, ExpiryInput, Meter, MeterItem, MeterRow, MeterScope, Reservation, ReserveInput, ReserveResult } from "./meter.js";
+import type { EndedTaskRecorder, EndedTasks } from "./ended.js";
+import { checkRunReceipt, RUN_CALLS_MAX, runKeyPrefix, startedBeforeIndex, SWEEP_AFTER_MAX_MS, validLine, validRunScope } from "./meter.js";
+import type { BillLine, CorrectionInput, CorrectionResult, EstimatedCall, EstimatedSettlement, ExpiryInput, Meter, MeterItem, MeterRow, MeterScope, Reservation, ReserveInput, ReserveResult, RunChargesRead, RunScope } from "./meter.js";
 import { COMPANY, PERSON, PROJECT, TASK, TASK_TOKEN_SECONDS, record, whole } from "./model-gateway-token.js";
 import type { PendingPage } from "./pending-page.js";
 import { CORRECTION_RUN_MAX, CORRECTION_RUN_MS, DAY_MS, PENDING_RETENTION_DAYS } from "./price-constants.js";
@@ -23,10 +23,13 @@ import { MEDIA_USAGE_KEYS, type TokenUsage } from "./usage.js";
  *
  *   meter table   CO#[iss,cid] / ROW#[item...]   spend rows (task; person, project, company per month)
  *                 CO#[iss,cid] / HOLD#<id>       one per reservation: open, then settled (kept, never deleted)
+ *                 CO#[iss,cid] / RUN#[task,run]#<id>  one per reservation made for a run (ReserveInput.run), written in the SAME transaction as its hold:
+ *                                                the run's calls are the items under one prefix (runCharges). Calls held before this item existed have none.
+ *                 CO#META#run-index / SINCE      one per environment, written once (markRunIndex): when those items began. Its key starts with the company prefix, so the serving role's grant covers it.
  *   ledger table  CO#[iss,cid] / CALL#<id>       one per settled call; an estimated call is "pending" (in both pending
  *                                                indexes) until corrected or expired
  *   markers table CO#[iss,cid] / INFLIGHT        the company's one estimated-price call in flight (expires)
- *                 CO#[iss,cid] / ENDED#<task>    an ended task (written by the task-ended notice, a later lane)
+ *                 CO#[iss,cid] / ENDED#<task>    an ended task (written by the task-ended notice, task-ended-notice.ts; expires)
  *
  * Every write that moves money is one conditional transaction, so two servers never lose or double an update: a reservation
  * adds to each row only while the row is still under its cap; a settle moves a hold to spend only while the hold is open; a
@@ -160,6 +163,8 @@ export class DynamoMeter implements Meter {
   readonly #holds = new WeakMap<object, { pk: string; id: string }>();
   /** Where the next hold sweep resumes (an open-holds index position); undefined: from the oldest. */
   #sweepAfter: string | undefined;
+  /** This process has seen the run-index marker (markRunIndex). */
+  #runIndexMarked = false;
   readonly #combined: { meter: string; markers: string } | undefined;
   constructor(options: DynamoMeterOptions) {
     this.#db = options.db; this.#t = options.tables; this.#now = options.now ?? Date.now; this.#beforeWrite = options.beforeWrite ?? (() => undefined);
@@ -225,8 +230,11 @@ export class DynamoMeter implements Meter {
     if (input.provisional !== undefined && !validProvisionalContext(input.provisional)) return { ok: false, reason: "busy" };
     if (input.line !== undefined && !validLine(input.line)) return { ok: false, reason: "busy" };
     if (input.review !== undefined && !(typeof input.review.jti === "string" && /^[0-9a-f-]{36}$/u.test(input.review.jti))) return { ok: false, reason: "busy" };
+    if (input.run !== undefined && (!validRunScope(input.scope, input.run.operationId) || (input.charge !== undefined && input.charge.receipt.operationId !== input.run.operationId))) return { ok: false, reason: "busy" };
     // Fail closed: a combined meter without the combined company cap holds nothing.
     if (this.#combined !== undefined && caps.combinedCompanyMonth === undefined) return { ok: false, reason: "busy" };
+    // The environment's "runs are indexed since" marker exists before the first run item does (a failure here never refuses the call: the next reserve, or the first read of a run, writes it).
+    if (input.run !== undefined && !this.#runIndexMarked) { try { await this.markRunIndex(); this.#runIndexMarked = true; } catch { /* retried */ } }
     const now = this.#now();
     if (input.sweepAfter !== undefined && (!whole(input.sweepAfter) || input.sweepAfter > now + SWEEP_AFTER_MAX_MS)) return { ok: false, reason: "busy" };
     // The sweep reads a hold's age from openFrom: a long hold (an eval stage) is not swept before its own end.
@@ -296,6 +304,8 @@ export class DynamoMeter implements Meter {
         ...(input.line === undefined ? {} : { line: { source: input.line.source, charge: input.line.charge, model: input.line.model } }),
         ...(input.review === undefined ? {} : { review: input.review.jti }),
       } });
+      // The run's index item: in the hold's own transaction, so a hold that exists is always found by its run (GATEWAY-RUN-CHARGES-ROUTE). Read tolerantly: only `callId` is read.
+      if (input.run !== undefined) actions.push({ kind: "Put", table: this.#t.meter, item: { pk, sk: `${runKeyPrefix(scope.tid, input.run.operationId)}${id}`, callId: id, createdAt: now }, condition: (e) => `attribute_not_exists(${e.name("pk")})` });
       if (expiresSeconds !== undefined) {
         const expires = expiresSeconds;
         actions.push({ kind: "Put", table: this.#markers, item: { pk, sk: INFLIGHT, owner: id, expiresSeconds: expires, expiresAt: expires },
@@ -324,6 +334,54 @@ export class DynamoMeter implements Meter {
       return { ok: true, reservation };
     }
     return { ok: false, reason: "busy" };
+  }
+
+  /**
+   * One run's calls (Meter.runCharges): the `RUN#` items under the run's prefix name every hold taken for it; each hold says whether the call is still open (its receipt is then the hold's own, `awaiting_usage`),
+   * else the ledger row holds the call's latest receipt. Every read is consistent. A hold with no index item cannot exist (one transaction); an index item with no hold, a closed hold with no ledger receipt, or a
+   * receipt that is not this run's makes the whole read unreadable (a throw), never a smaller figure.
+   */
+  async runCharges(scope: RunScope, operationId: string): Promise<RunChargesRead> {
+    if (!validRunScope(scope, operationId)) throw new Error("run charges unavailable");
+    const pk = companyPartition(scope.iss, scope.cid), low = runKeyPrefix(scope.tid, operationId);
+    const since = await this.markRunIndex();
+    const rows = await this.#db.query(this.#t.meter, { limit: RUN_CALLS_MAX + 1, key: (e) => `${e.name("pk")} = ${e.value(pk)} AND ${e.name("sk")} BETWEEN ${e.value(low)} AND ${e.value(`${low.slice(0, -1)}$`)}` });
+    if (rows.length === 0) return { found: false };
+    if (rows.length > RUN_CALLS_MAX) throw new Error("run charges unavailable");
+    const ids = rows.map((row) => { const id = row.callId; if (typeof id !== "string" || !/^[0-9a-f-]{36}$/u.test(id) || row.sk !== `${low}${id}`) throw new Error("run charges unavailable"); return id; });
+    const created = rows.map((row) => row.createdAt);
+    if (!created.every(whole)) throw new Error("run charges unavailable");
+    const first = Math.min(...created);
+    let complete = true;
+    const receipts: ChargeReceiptV1[] = [];
+    for (let at = 0; at < ids.length; at += 8) {
+      receipts.push(...await Promise.all(ids.slice(at, at + 8).map(async (id) => {
+        const hold = readHold(await this.#db.get(this.#t.meter, { pk, sk: `HOLD#${id}` }), this.#combined !== undefined);
+        if (hold === undefined || hold.scope.iss !== scope.iss || hold.scope.cid !== scope.cid || hold.scope.tid !== scope.tid) throw new Error("run charges unavailable");
+        if (hold.status === "open") {
+          // Still open (or a settle that has not landed): the run is not complete.
+          if (hold.charge === undefined) throw new Error("run charges unavailable");
+          complete = false;
+          return checkRunReceipt(readSettlementReceipt(hold.charge.receipt), scope, operationId, id);
+        }
+        const call = await this.#db.get(this.#t.ledger, { pk, sk: `CALL#${id}` });
+        if (call === undefined || call.receipt === undefined) throw new Error("run charges unavailable");
+        return checkRunReceipt(readSettlementReceipt(call.receipt), scope, operationId, id);
+      })));
+    }
+    return { found: true, complete, receipts, indexedSince: since, startedBeforeIndex: startedBeforeIndex(first, since) };
+  }
+
+  /**
+   * When `RUN#` indexing began in this environment: the marker item, written once, by the first reserve for a run (and, failing that, by the first read of a run), never overwritten. A marker that does not
+   * read is unreadable (a throw): a run is never read without knowing from when its record can be trusted.
+   */
+  async markRunIndex(): Promise<number> {
+    const key = { pk: `${GATEWAY_COMPANY_KEY_PREFIX}META#run-index`, sk: "SINCE" };
+    let marker = await this.#db.get(this.#t.meter, key);
+    if (marker === undefined) { await this.#db.put(this.#t.meter, { ...key, since: this.#now() }, (e) => `attribute_not_exists(${e.name("pk")})`); marker = await this.#db.get(this.#t.meter, key); }
+    if (marker === undefined || !whole(marker.since)) throw new Error("run charges unavailable");
+    return marker.since;
   }
 
   /**
@@ -771,9 +829,28 @@ function parsePosition(cursor: string | undefined, scope: string): readonly [num
   return [parsed[1], parsed[2]];
 }
 
-/** The ended-task list in the markers table. A read that fails throws, and the server stops the call (fail closed). */
-export class DynamoEndedTasks implements EndedTasks {
-  constructor(private readonly db: Dynamo, private readonly table: string) {}
+/**
+ * How long an ended-task row is kept (DynamoDB TTL on `expiresAt`, epoch seconds). A task token lives TASK_TOKEN_SECONDS (900 s) and a call at most
+ * CALL_HARD_CEILING_MS, so no call of an ended task can still be admitted or streaming a day after its end; seven days is the margin for a
+ * notice that is redelivered late (it only writes the row again: the task is still ended).
+ */
+export const ENDED_TASK_RETENTION_SECONDS = 7 * 24 * 3600;
+
+/**
+ * The ended-task list in the markers table. A read that fails throws, and the server stops the call (fail closed).
+ * Readers look only at whether the row exists (every other attribute is ignored), so the row may grow new attributes.
+ */
+export class DynamoEndedTasks implements EndedTasks, EndedTaskRecorder {
+  constructor(private readonly db: Dynamo, private readonly table: string, private readonly now: () => number = Date.now) {}
+  /**
+   * Records that a task ended: one conditional put that only writes where no row exists, so a repeat notice changes nothing (not even the expiry) and
+   * a task is never un-ended. Returns whether this call wrote the row. A fault throws (the notice is then answered 503 and sent again).
+   */
+  async record(issuer: string, company: string, task: string, signal?: AbortSignal): Promise<boolean> {
+    if (typeof issuer !== "string" || issuer.length === 0 || issuer.length > 2048 || !COMPANY.test(company) || !TASK.test(task)) throw new AwsNotSentError();
+    const at = this.now();
+    return this.db.put(this.table, { pk: companyPartition(issuer, company), sk: `ENDED#${task}`, task, endedAt: at, expiresAt: Math.floor(at / 1000) + ENDED_TASK_RETENTION_SECONDS }, (e) => `attribute_not_exists(${e.name("pk")})`, signal === undefined ? {} : { signal });
+  }
   async isEnded(issuer: string, company: string, task: string, signal?: AbortSignal): Promise<boolean> {
     if (typeof issuer !== "string" || issuer.length === 0 || issuer.length > 2048 || !COMPANY.test(company) || !TASK.test(task)) throw new AwsNotSentError();
     const item = await this.db.get(this.table, { pk: companyPartition(issuer, company), sk: `ENDED#${task}` }, { consistent: false, ...(signal === undefined ? {} : { signal }) });
