@@ -42,7 +42,9 @@ async function mutateLineage(deps: ThreadDocumentDeps, taskId: string, revision:
     const next = mutate(prior, artifact);
     if (prior !== undefined && sameJsonContent(prior, next)) return prior;
     const version = typeof task["canvasLineageVersion"] === "number" ? task["canvasLineageVersion"] : 0;
-    const written = await deps.store.update({ key: taskKey(taskId), ops: [change.set("workflow", json({ ...workflow, canvasLineage: [...(workflow.canvasLineage ?? []).filter((entry) => entry.key !== key), next], canvasLineageVersion: version + 1 })), change.set("canvasLineageVersion", version + 1)],
+    // Only the lineage fields: a whole-workflow write here would undo a flow write (skippedSteps) made since the read, which keeps the revision (#1432).
+    const lineage = JSON.parse(JSON.stringify([...(workflow.canvasLineage ?? []).filter((entry) => entry.key !== key), next])) as never;
+    const written = await deps.store.update({ key: taskKey(taskId), ops: [change.set(["workflow", "canvasLineage"], lineage), change.set(["workflow", "canvasLineageVersion"], version + 1), change.set("canvasLineageVersion", version + 1)],
       condition: when.and(when.eq("companyId", deps.companyId), when.eq("workflow.revision", revision), when.notExists("closedAt"), versionCondition("canvasLineageVersion", version)) });
     if (written.applied) return next;
   }
