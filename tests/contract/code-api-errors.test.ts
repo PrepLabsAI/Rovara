@@ -39,6 +39,8 @@ const CODES_IN_ORDER: ReadonlyArray<readonly [string, number]> = [
   ["EXTERNAL_ACCOUNT_LINK_EXISTS", 409], ["COMMITTED_REFRESH_NEEDED", 409],
   ["TASK_ACTION_NOT_OFFERED", 409], ["TASK_ACTION_STALE", 409], ["TASK_ACTION_NEEDS_INPUT", 400], ["TASK_ACTION_NEEDS_WEB", 403],
   ["LINEAR_TEAM_TAKEN", 409],
+  // RD-2.0 (Code API 1.5).
+  ["ROUTE_NOT_SERVED", 404],
 ];
 
 describe("the Code API's refusal codes (moved from contracts, no change)", () => {
