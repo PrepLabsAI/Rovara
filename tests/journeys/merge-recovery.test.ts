@@ -70,4 +70,29 @@ describe("journey 12: merge recovery", () => {
     expect(merged.body, JSON.stringify(merged)).toMatchObject({ status: "MERGED" });
     world.proof.assertAllCore();
   }, 180_000);
+
+  it("the host refuses AFTER Rovara claimed the merge (nothing merged): the owner is told in words, and the same press (same request id) goes through once the host agrees", async () => {
+    world = await createJourneyWorld();
+    const { taskId, pullRequest } = await openPullRequest(world);
+    await world.linkGithubAsConnected(MAYA, "maya-gh");
+    await hostReady(world, pullRequest);
+    const ready = await world.maya("GET", `/v1/app/tasks/${taskId}/merge`);
+    expect(ready.body, JSON.stringify(ready.body)).toMatchObject({ mayMerge: true, ready: true });
+    // The code host says no only when Rovara asks it to merge (every Rovara check before that passed): a branch rule Rovara cannot see.
+    const model = world.harness.world.host.model;
+    const merge = model.merge.bind(model);
+    let refusals = 1;
+    model.merge = (...args: Parameters<typeof merge>) => (refusals-- > 0 ? { outcome: "refused", reason: "not_mergeable", hostMessage: "A branch rule needs one more review." } : merge(...args));
+    const requestId = randomUUID();
+    const press = () => world!.maya("POST", `/v1/app/tasks/${taskId}/merge`, { requestId, expectedHeads: ready.body.heads, risk: ready.body.risk });
+    const refused = await press();
+    const told = refused.body.error as { code: string; message: string };
+    expect({ status: refused.status, code: told.code }, JSON.stringify(refused.body)).toEqual({ status: 409, code: "MERGE_NOT_READY" });
+    expect(told.message, "the owner is told what the host said").toContain("A branch rule needs one more review.");
+    expect(pullRequest.draft.state, "nothing merged").toBe("open");
+    const again = await press();
+    expect(again.body, JSON.stringify(again.body)).toMatchObject({ status: "MERGED" });
+    expect(pullRequest.draft.state).toBe("merged");
+    world.proof.assertAllCore();
+  }, 180_000);
 });

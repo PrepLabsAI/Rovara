@@ -14,7 +14,7 @@
 //    comment method never counts) and, when the adapter sets `signIn` (a company setting), a sign-in that satisfies it.
 //  - The audit fact commits with the claim through W0's `AuditSink.stage`, as Cloud's ledger row did.
 //  - Everything provider-specific is behind the `CodeHost` port; people, settings, the task record, the timeline and the milestones are seams (seams.ts).
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { providerOf } from "../../plugins/routing.js";
 import {
   withoutOwnRovaraCheck,
@@ -399,7 +399,7 @@ const HOST_WILL_NOT_MERGE = "Rovara can't merge on this repository's code host. 
 const NOT_APPROVED = "Nobody approved this merge, so nothing was merged.";
 const SIGN_IN_NOT_FRESH = "This high-risk merge needs a recent sign-in. Sign in again and press Merge, so nothing was merged.";
 const NEEDS_MORE_APPROVERS = "This merge needs more than one approver, which Rovara Code can't collect yet, so nothing was merged.";
-const PROOF_USED = "This approval was already used. Ask for a new one.";
+const PROOF_USED = M.approvalUsed;
 
 export interface MergeSubject {
   taskId: string;
@@ -556,13 +556,16 @@ export async function pressMerge(
   const strong = strictMethodsFor("approve", prepared.risk.level, prepared.requirement);
   if (strong !== undefined && !strong.includes(input.proof.method)) throw agentXError("FORBIDDEN", NOT_APPROVED);
   if (prepared.requirement.minApprovers !== 1) throw agentXError("FORBIDDEN", NEEDS_MORE_APPROVERS);
-  const verdict = await deps.approvers.verify(prepared.request, input.proof);
+  // The use of the proof is written by the merge's own claim (`claimMerge`), when the merge proceeds: `verify` is only a check here, so any refusal before that claim leaves the same approval usable.
+  const verdict = await deps.approvers.verify({ ...prepared.request, useRecordedByCaller: true }, input.proof);
   if (!verdict.approved) {
     // A proof for what the person saw, when what would be merged is something else now, is "it changed", not "nobody approved": the person checks and approves again.
     if (verdict.reason === "other_content" || verdict.reason === "other_revision") throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
     if (verdict.reason === "proof_already_used") throw agentXError("FORBIDDEN", PROOF_USED);
     throw agentXError("FORBIDDEN", NOT_APPROVED);
   }
+  // An approval a merge already used stays refused whatever the adapter remembers (a restart forgets its memory): read from the same rows the claim writes.
+  await refuseUsedProof(deps, prepared.request.companyId, input.proof);
   if (!prepared.requirement.methods.includes(verdict.method)) throw agentXError("FORBIDDEN", NOT_APPROVED);
   if (strong !== undefined && !strong.includes(verdict.method)) throw agentXError("FORBIDDEN", NOT_APPROVED);
   // The company's sign-in rule (decision 62): a high-risk merge needs the approver's sign-in to satisfy it. Fails closed on a missing sign-in time.
@@ -836,6 +839,18 @@ const tokenUseKey = (companyId: string, proof: ApprovalProof): { pk: string; sk:
   pk: companyScoped(companyId, "MERGE_PROOF_TOKEN"), sk: createHash("sha256").update(JSON.stringify([proof.method, proof.token])).digest("hex"),
 });
 
+/** The rows that hold the use of a proof: its own, and (for a proof that names one act, not a standing local session) the row of what it IS. */
+const proofUseKeys = (companyId: string, proof: ApprovalProof): Array<{ pk: string; sk: string }> => [proofUseKey(companyId, proof), ...(proof.method === LOCAL_SESSION_METHOD ? [] : [tokenUseKey(companyId, proof)])];
+
+/** Refuses a proof a merge already used. The claim's transaction is the guarantee; this read only refuses early and in plain words. */
+async function refuseUsedProof(deps: MergeDependencies, companyId: OrgId, proof: ApprovalProof): Promise<void> {
+  const rows = await Promise.all(proofUseKeys(companyId, proof).map((key) => deps.store.get(key)));
+  if (rows.some((row) => row !== undefined)) throw agentXError("FORBIDDEN", PROOF_USED);
+}
+
+/** A fresh audit fact id for each claim: the claim's own condition (one holder) and the proof's use rows keep one press from merging twice, and a press given back after a host refusal (`releaseMergeClaim`, the approval or the same request id) must be able to claim again, leaving one audit fact for each try. */
+const factSalt = (): string => `\n${randomUUID()}`;
+
 type ClaimResult = { claimed: true; at: string } | { claimed: false; reason: "held" | "proof_used" };
 
 /**
@@ -849,7 +864,7 @@ async function claimMerge(
 ): Promise<ClaimResult> {
   const now = deps.now();
   const at = new Date(now).toISOString();
-  const eventId = createHash("sha256").update(`pull_request.merge_requested\n${audit.occurrence}\n${pr.repositoryId}\n${String(pr.number)}`).digest("hex");
+  const eventId = createHash("sha256").update(`pull_request.merge_requested\n${audit.occurrence}\n${pr.repositoryId}\n${String(pr.number)}${factSalt()}`).digest("hex");
   const staged = deps.audit.stage({
     eventId, companyId: task.orgId, at, actor: { type: "person", id: by }, action: "pull_request.merge_requested", subject: { type: "change_request", id: `${pr.repositoryKey}#${String(pr.number)}` },
     // Which approval merged: its request and proof ids and its method. Never the token.
@@ -884,12 +899,18 @@ async function claimMerge(
 /**
  * Lets go of the claim after the host said no (nothing was merged, so nobody else needs to wait for the claim to age): only the claim this run made, found by who and when, so a claim somebody
  * else took since stays. Best effort: a claim that stays only costs the next press the wait it always cost. A host failure whose outcome is unknown keeps its claim (the next run finds out).
+ * `used`: when this claim wrote the use of the proof (the first of the run), the proof is given back in the SAME transaction (only the use rows this claim wrote, found by when), so the person presses Merge again on the same approval. The proof is bound to the
+ * task, the pull requests and their exact heads (the digest), so a freed proof can only retry that exact merge. If the claim was lost to another run, nothing is released and the proof stays used.
  */
-async function releaseMergeClaim(deps: MergeDependencies, task: { taskId: string; orgId: OrgId }, pr: { repositoryId: string; number: number }, claim: { by: string; at: string }): Promise<void> {
-  await deps.store.update({
-    key: mergeTrackingKey(task.taskId, pr.repositoryId, pr.number), ops: [change.remove(["mergeClaim"]), change.add(["version"], 1)],
-    condition: when.and(when.present(), when.eq("orgId", task.orgId), when.eq("taskId", task.taskId), when.eq(["mergeClaim", "by"], claim.by), when.eq(["mergeClaim", "at"], claim.at)),
-  }).catch(() => undefined);
+async function releaseMergeClaim(
+  deps: MergeDependencies, task: { taskId: string; orgId: OrgId }, pr: { repositoryId: string; number: number }, claim: { by: string; at: string }, used?: { proof: ApprovalProof | undefined; wroteUse: boolean },
+): Promise<void> {
+  const condition = when.and(when.present(), when.eq("orgId", task.orgId), when.eq("taskId", task.taskId), when.eq(["mergeClaim", "by"], claim.by), when.eq(["mergeClaim", "at"], claim.at));
+  const ops = [change.remove(["mergeClaim"]), change.add(["version"], 1)];
+  const key = mergeTrackingKey(task.taskId, pr.repositoryId, pr.number);
+  const freeProof = used?.wroteUse === true ? used.proof : undefined;
+  if (freeProof === undefined) { await deps.store.update({ key, ops, condition }).catch(() => undefined); return; }
+  await deps.store.transact([{ kind: "update", key, ops, condition }, ...proofUseKeys(task.orgId, freeProof).map((use) => ({ kind: "delete" as const, key: use, condition: when.eq("usedAt", claim.at) }))]).catch(() => undefined);
 }
 
 const hashNumber = (seed: string): number => Number.parseInt(createHash("sha256").update(seed).digest("hex").slice(0, 6), 16) % 1_000_000;
@@ -926,6 +947,7 @@ async function mergeTask(
       // Another run holds the claim, or tracking has no item for the pull request yet: whichever it is, a later run finds out (the pull request merged, the claim gone stale).
       throw agentXError("RUNTIME_UNAVAILABLE", "Rovara is already merging this pull request.");
     }
+    const wroteUse = !proofUsed;
     proofUsed = true;
     const result = await step.codeHost.merge!(changeRequestRef(url, entry.number), { revision: headSha, method: settings.mergeMethod }, scope);
     if (result.outcome === "merged" || result.outcome === "already_merged") {
@@ -939,8 +961,9 @@ async function mergeTask(
       }
       continue;
     }
-    // The host said no: nothing merged, so the claim goes at once and a second press right after is not told Rovara is already merging.
-    await releaseMergeClaim(deps, tracked, entry, { by: who.decidedBy, at: claim.at });
+    // The host said no: nothing merged, so the claim goes at once and a second press right after is not told Rovara is already merging. The approval goes back too when this was the claim that used it up (the first of the run: nothing
+    // of this run is merged yet; a refusal of a later pull request, after a merge, keeps it used).
+    await releaseMergeClaim(deps, tracked, entry, { by: who.decidedBy, at: claim.at }, { proof: who.proof, wroteUse });
     const why = refusalWords(result);
     if (merged.length === 0) {
       throw agentXError("MERGE_NOT_READY", result.reason === "head_changed" ? M.changedAfterConfirm : M.notMerged(entry.repositoryId, why));

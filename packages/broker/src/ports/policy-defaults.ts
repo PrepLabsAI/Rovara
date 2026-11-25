@@ -149,10 +149,17 @@ export interface LocalOwnerApproversOptions {
   now?: () => Date;
 }
 
+/** Remembers an accepted proof in the adapter's memory. A caller that records the use itself (`useRecordedByCaller`, the merge press) is not marked: a refusal before its act would burn a proof that never merged anything. Bounded: a long-running process forgets the oldest; the caller's transaction is the real guarantee. */
+function rememberProof(used: Set<string>, request: ApprovalRequest, proof: ApprovalProof): void {
+  if (request.useRecordedByCaller === true) return;
+  used.add(approvalProofKey(proof));
+  if (used.size > 10_000) used.delete(used.values().next().value as string);
+}
+
 /**
  * Decision 45.3: in Code a person's approval is proved by the local machine owner (their local session), or by a comment from a
  * repository collaborator with write permission on the change request. One approver is enough, and the person who asked may approve.
- * A proof is good for the one request, revision and digest it names, until the request expires, and once (in this process).
+ * A proof is good for the one request, revision and digest it names, until the request expires, and once (in this process). A caller that records the use itself (`ApprovalRequest.useRecordedByCaller`, the merge press) is not marked here: its own transaction is the use.
  * Owner decision 211 (port gaps G1-G4): the local owner takes each new part's absent value on purpose. It names no scoped sign-in rule (it has no sign-in time), offers no sole-approver exception (one approver
  * is already enough), never claims a part of a proof (no `claimId`, no `commitClaim`/`releaseClaim`; `parts` are ignored, never a stand-in for the token), and binds proofs by request, revision and digest, not by
  * `card`.
@@ -210,11 +217,7 @@ export function createLocalOwnerApprovers(options: LocalOwnerApproversOptions = 
       } else {
         return refuse("unknown_method");
       }
-      if (verdict.approved) {
-        used.add(approvalProofKey(proof));
-        // Bounded: a long-running process forgets the oldest; the caller's transaction is the real guarantee.
-        if (used.size > 10_000) used.delete(used.values().next().value as string);
-      }
+      if (verdict.approved) rememberProof(used, request, proof);
       return verdict;
     },
   };
