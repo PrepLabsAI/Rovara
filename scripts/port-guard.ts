@@ -1101,6 +1101,8 @@ const GUARD_FILES = [
   /^tests\/support\/pinned-tests\.ts$/i,
   /^tests\/contract\/pinned-tests-[^/]*$/i,
   /^\.github\/workflows\/ci\.yml$/i,
+  // The release pipeline's Code Preflight buildspec runs this guard with the private name list on disk (L14 review, condition b): a change that drops or alters the step is reviewed by hand.
+  /^infra\/lib\/release-pipeline\.ts$/i,
   // What decides what a CI run covers and whether it passed (DEC 242): the plan, the gate, and what makes a "full" run the whole suite (the test configuration, the list
   // of native-only files it leaves out, and the shard split). On a pull request CI runs the base branch's plan and gate, but the test configuration and the shard split
   // are the pull request's own, so a change to any of them is reviewed by hand.
