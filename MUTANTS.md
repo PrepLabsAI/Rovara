@@ -1255,3 +1255,7 @@ Not mutation-tested: `redactText` on the design question's `id`, `recommended` a
 | P2 specOf | `waitingDocumentDigest` offered for any waited-on layer, not only one whose bytes were read and verified | the Markdown test and the tampered / approved-but-unreadable tests |
 
 N2 (`answer` of a changed decision passed through `redactText`) has no test: the stored option id is capped short by its schema, so no secret pattern fits (the redaction is for the literal rule).
+
+## RD-2a on the read rule (rebased onto 49080fbea, 2026-11-25)
+
+The spec handler no longer reads the task or asks any access rule: the mount asks `decideTaskRead` once and hands `context.decision` (core-host/task-screen-routes.ts); `readTaskSpec` reads `context.decision.task`. The earlier mutant "handler without the read rule" is now a mount mutant (RD-2.0-READ-RULE M-series: `routeTaskScreen` that skips `context.decide`), killed by `tests/unit/task-read-rule.test.ts` (the 18 x 14 table on the real routes, spec cells) and the golden (`tests/contract/rd-2-0-read-rule-golden.test.ts`, the four admitted persons' spec cells are listed in `CHANGED`). A share's spec answer is the table's 403 TASK_PART_NOT_SHOWN (ship B), pinned by the same table.

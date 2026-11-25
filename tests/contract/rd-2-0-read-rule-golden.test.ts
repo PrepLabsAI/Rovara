@@ -26,6 +26,9 @@ for (const persona of ["shared reader", "admin and shared"]) CHANGED[`${persona}
 for (const persona of ["shared reader", "admin and shared"]) {
   for (const read of ["spec", "checks", "changes"]) CHANGED[`${persona} | ${read}`] = { now: { status: 403, code: "TASK_PART_NOT_SHOWN", message: `The owner shared this task's summary with you. ${PART_WORDS[read]!}` }, why: "new refusal: a share is not shown this part (ship B, Q1)" };
 }
+// FILLED READS (not a read-rule change): a lane that fills a stub moves every cell the rule ADMITS from the placeholder's ROUTE_NOT_SERVED to the served answer.
+// RD-2a (spec):
+for (const persona of ["owner", "co-owner", "commenter", "viewer"]) CHANGED[`${persona} | spec`] = { now: { status: 200, shape: "spec" }, why: "RD-2a fills the spec read: a person the rule admits is served" };
 
 describe("RD-2.0-READ-RULE: every read answers every kind of person as it did on the base (but the named cells)", () => {
   it("matches the recorded answers", async () => {

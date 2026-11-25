@@ -112,8 +112,8 @@ for (const hosted of [false, true]) describe(`the one read rule: the same table 
         const want = expectedOf(persona.name, rule);
         // The answers read hands a share no plan text (option B), so the scripted answer that cites the plan cannot be verified for it: "not found" is the share's answer there.
         const expectedRoute = want === "refused" || (route === "answers" && want === "shared") ? "refused" : want === "part" ? "part" : "admitted";
-        // The four new reads are stubs until their lanes fill them: a person admitted is told the fixed ROUTE_NOT_SERVED (so "admitted" is that answer here).
-        if (NEW_READ_NAMES.includes(route as never) && got === "admitted" && answer.code !== "ROUTE_NOT_SERVED") { wrong.push(`${persona.name} | ${route}: ${JSON.stringify(answer)}`); continue; }
+        // The four new reads are stubs until their lanes fill them: a person admitted is told the fixed ROUTE_NOT_SERVED (so "admitted" is that answer here); a filled read answers 200.
+        if (NEW_READ_NAMES.includes(route as never) && got === "admitted" && (FILLED_READS.includes(route) ? answer.status !== 200 : answer.code !== "ROUTE_NOT_SERVED")) { wrong.push(`${persona.name} | ${route}: ${JSON.stringify(answer)}`); continue; }
         if (got !== expectedRoute) wrong.push(`${persona.name} | ${route}: function ${want}, route ${got} ${JSON.stringify(answer)}`);
       }
     }
@@ -121,6 +121,10 @@ for (const hosted of [false, true]) describe(`the one read rule: the same table 
   }, 120_000);
 });
 const NEW_READ_NAMES = ["spec", "checks", "changes", "timeline"] as const;
+/** The new reads whose lane has filled the stub: a person admitted is served (200), not told ROUTE_NOT_SERVED. */
+const FILLED_READS: readonly string[] = [
+  "spec", // RD-2a
+];
 
 describe("the one read rule: what the decision carries", () => {
   it("money follows the company role rule (the stored owner as a member, or a company owner or admin), never a co-owner, a reader or a share alone; a script token has none", async () => {

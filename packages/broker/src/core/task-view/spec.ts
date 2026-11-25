@@ -7,7 +7,7 @@
 //  - NO silent fallback (arch rule 9): a structured document whose current version cannot be read or fails its digest is a layer with state `unreadable` and no content; an older version is never served in its place.
 //  - Stored comments are read tolerantly (arch rule 8): by the few members read here, never through the strict schema, so a field a later version adds cannot make a comment vanish from the count.
 //  - No comparison against error message text (arch rule 6): what failed is told from the stored snapshot (the artifact's own `format`), not from the words of an error.
-// The caller has already read the task with the task read's own rule (`loadReadableTask`); nothing here checks who is asking.
+// The mount has already asked the one read rule (`decideTaskRead`, core/task-flow/read-rule.ts); nothing here checks who is asking.
 import { TASK_COMMENT_ITEMS_MAX, planHasSetupChanges, redactText, type DocumentStore, type PlanDocument, type WorkflowArtifact, type WorkflowSnapshot } from "@agentx/contracts";
 import type { TaskSpecRead } from "@preplabsai/rovara-code-api";
 import { redactedPlan } from "../../aws/task-plan-document.js";
