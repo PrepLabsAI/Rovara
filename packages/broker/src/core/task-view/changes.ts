@@ -26,6 +26,8 @@ export const CHANGES_PATCH_TOTAL_MAX_CHARS = 1_000_000;
 /** What one file's "why" holds and the longest text in it. */
 export const CHANGES_WHY_PER_FILE_MAX = 6;
 export const CHANGES_WHY_TEXT_MAX = 160;
+/** The most time one answer spends reading pull request pages; past it the pages left are not read and the answer says files are not listed. */
+export const CHANGES_TIME_BUDGET_MS = 20_000;
 const PATH_MAX = 500;
 const NAME_MAX = 200;
 const ID_MAX = 64;
@@ -51,6 +53,8 @@ export interface ChangesSources {
   reported?: (() => Promise<ListedFiles | undefined>) | undefined;
   /** The task's current plan, for the "why". */
   plan?: PlanDocument | undefined;
+  /** The most time the pages of one answer may take (default `CHANGES_TIME_BUDGET_MS`). */
+  budgetMs?: number | undefined;
 }
 
 export interface ChangesTask {
@@ -90,6 +94,11 @@ export function plainLine(value: unknown, max: number): string | undefined {
   const line = redactText(value.replace(UNSAFE_CHARACTERS, " ")).trim();
   return line === "" ? undefined : line.length > max ? line.slice(0, max) : line;
 }
+
+/** A patch body made safe for any client: control (except line breaks and tabs), C1, direction-override and separator characters become a space, then secrets are redacted. Line structure is kept. */
+// eslint-disable-next-line no-control-regex
+const UNSAFE_PATCH_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu;
+export const plainPatch = (patch: string): string => redactText(patch.replace(UNSAFE_PATCH_CHARACTERS, " "));
 
 /** A path as the join compares it: no leading `./`, forward slashes. */
 const normalizedPath = (path: string): string => path.replaceAll("\\", "/").replace(/^(?:\.\/)+/u, "");
@@ -173,11 +182,22 @@ export function whyIndexOf(plan: PlanDocument | undefined, designReview: Workflo
   return index;
 }
 
+/** The why index and whether the task spans more than one repository (a plan step names a path, not a repository, so its steps and checks are not attached then). */
+interface WhyContext { index: WhyIndex; multiRepository: boolean }
+
+/** Never throws: a plan or review that cannot be read as expected gives no why (the read is tolerant). `repositories` are the ones the answer's files come from. */
+function whyContextOf(task: ChangesTask, sources: ChangesSources): WhyContext {
+  const repositories = new Set((task.workflow?.pullRequests ?? []).map((pullRequest) => pullRequest.repositoryId));
+  try { return { index: whyIndexOf(sources.plan, task.workflow?.designReview), multiRepository: repositories.size > 1 }; } catch { return { index: new Map(), multiRepository: false }; }
+}
+
 /** The why of one file: entries for its path (or the path it was renamed from), a finding only for its own repository, steps before checks before findings, at most `CHANGES_WHY_PER_FILE_MAX`. */
-function whyOf(index: WhyIndex, file: { path: string; repository?: string | undefined; renamedFrom?: string | undefined }): ChangedFileView["why"] {
+function whyOf(why: WhyContext, file: { path: string; repository?: string | undefined; renamedFrom?: string | undefined }): ChangedFileView["why"] {
+  const index = why.index;
   if (index.size === 0) return [];
   const found = [...(index.get(normalizedPath(file.path)) ?? []), ...(file.renamedFrom === undefined ? [] : index.get(normalizedPath(file.renamedFrom)) ?? [])]
-    .filter((entry) => entry.repository === undefined || file.repository === undefined || entry.repository === file.repository);
+    // A step and the checks that prove it name a path only: in a task that spans repositories they could belong to any of them, so they are left out (a finding names its repository).
+    .filter((entry) => entry.repository === undefined ? !why.multiRepository : file.repository === undefined || entry.repository === file.repository);
   const order: Record<WhyKind, number> = { step: 0, check: 1, finding: 2 };
   const seen = new Set<string>();
   return found.sort((left, right) => order[left.kind] - order[right.kind])
@@ -188,58 +208,82 @@ function whyOf(index: WhyIndex, file: { path: string; repository?: string | unde
 // ---- the files
 
 /** What the pages read so far, shared across the pull requests of one answer. */
-interface PageState { files: ChangedFileView[]; notListed: number; read: boolean; patchChars: number; pagesLeft: number }
+interface PageState { files: ChangedFileView[]; notListed: number; read: boolean; patchChars: number; pagesLeft: number; deadline: number; unreadable: number }
 
-/** One page, or `undefined` when it cannot be read (a throw is the same: the reason is never kept). */
-async function readPage(sources: ChangesSources, pullRequest: { repository: string; number: number }, page: number): Promise<PullRequestPage | undefined> {
-  try { return await sources.pullRequestPage?.(pullRequest, page); } catch { return undefined; }
+/** One page, or `undefined` when it cannot be read or the answer's time is spent (a throw is the same: the reason is never kept). */
+async function readPage(state: PageState, sources: ChangesSources, pullRequest: { repository: string; number: number }, page: number): Promise<PullRequestPage | undefined> {
+  const remaining = state.deadline - Date.now();
+  if (remaining <= 0 || sources.pullRequestPage === undefined) return undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      sources.pullRequestPage(pullRequest, page),
+      new Promise<undefined>((resolve) => { timer = setTimeout(() => { resolve(undefined); }, remaining); }),
+    ]);
+  } catch {
+    return undefined;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
-/** One file of a page as the answer lists it: patch kept only within the limits (a file past them says `truncated` and keeps its counts). */
+/** One file of a page as the answer lists it: patch made safe first, then kept only within the limits (a file past them says `truncated` and keeps its counts). */
 function pageFileView(state: PageState, file: PullRequestPageFile, path: string, repository: string, why: ChangedFileView["why"]): ChangedFileView {
   const view: ChangedFileView = { path, repository, ...optionalCounts(file.additions, file.deletions), why };
-  const patch = file.tooLong === true || file.patch === undefined || file.patch === "" ? undefined : file.patch;
+  const patch = file.tooLong === true || file.patch === undefined || file.patch === "" ? undefined : plainPatch(file.patch);
   const tooBig = patch !== undefined && (patch.length > CHANGES_PATCH_MAX_CHARS || state.patchChars + patch.length > CHANGES_PATCH_TOTAL_MAX_CHARS);
   if (file.tooLong === true || tooBig) view.truncated = true;
-  else if (patch !== undefined) { state.patchChars += patch.length; view.patch = redactText(patch); }
+  else if (patch !== undefined) { state.patchChars += patch.length; view.patch = patch; }
   return view;
 }
 
-function addPageFiles(state: PageState, page: PullRequestPage, pullRequest: { repositoryId: string }, repository: string, why: WhyIndex): void {
+function addPageFiles(state: PageState, page: PullRequestPage, pullRequest: { repositoryId: string }, repository: string, why: WhyContext): void {
   for (const file of page.files) {
     const path = plainLine(file.path, PATH_MAX);
-    if (path === undefined) continue;
-    if (state.files.length >= CHANGES_FILES_MAX) { state.notListed += 1; continue; }
+    // A file with no usable name, or past the cap, is counted as not listed.
+    if (path === undefined || state.files.length >= CHANGES_FILES_MAX) { state.notListed += 1; continue; }
     state.files.push(pageFileView(state, file, path, repository, whyOf(why, { path: file.path, repository: pullRequest.repositoryId })));
   }
 }
 
-/** Every page of one pull request, until its last page, a page that cannot be read, or the page cap (what was read stays; the answer says some files are not listed). */
-async function readPullRequest(state: PageState, sources: ChangesSources, pullRequest: { repositoryId: string; number: number }, repository: string, why: WhyIndex): Promise<void> {
+/** Whether this was the pull request's last page to read: its own last page, or the cap is full (no more pages are read then, each is a code-host call; one more file is known to exist when the page said so). */
+function isLastPage(state: PageState, page: PullRequestPage): boolean {
+  if (state.files.length < CHANGES_FILES_MAX) return !page.more;
+  if (page.more) state.notListed += 1;
+  return true;
+}
+
+/** Every page of one pull request, until its last page, the file cap, a page that cannot be read, the page cap or the time budget (what was read stays; the answer says some files are not listed). */
+async function readPullRequest(state: PageState, sources: ChangesSources, pullRequest: { repositoryId: string; number: number }, repository: string, why: WhyContext): Promise<void> {
   for (let page = 1; ; page += 1) {
     if (state.pagesLeft === 0) { state.notListed += 1; return; }
     state.pagesLeft -= 1;
-    const got = await readPage(sources, { repository: pullRequest.repositoryId, number: pullRequest.number }, page);
+    const got = await readPage(state, sources, { repository: pullRequest.repositoryId, number: pullRequest.number }, page);
     if (got === undefined) {
-      if (page > 1) state.notListed += 1;
+      // A first page that cannot be read leaves the whole pull request out: counted, so the answer never reads as complete (it only matters when another pull request was read).
+      if (page === 1) state.unreadable += 1; else state.notListed += 1;
       return;
     }
     state.read = true;
     addPageFiles(state, got, pullRequest, repository, why);
-    if (!got.more) return;
+    if (isLastPage(state, got)) return;
   }
 }
 
-async function pagesOf(task: ChangesTask, sources: ChangesSources, why: WhyIndex): Promise<PageState> {
-  const state: PageState = { files: [], notListed: 0, read: false, patchChars: 0, pagesLeft: CHANGES_PAGES_MAX };
+async function pagesOf(task: ChangesTask, sources: ChangesSources, why: WhyContext): Promise<PageState> {
+  const state: PageState = { files: [], notListed: 0, read: false, patchChars: 0, pagesLeft: CHANGES_PAGES_MAX, deadline: Date.now() + (sources.budgetMs ?? CHANGES_TIME_BUDGET_MS), unreadable: 0 };
   const seen = new Set<string>();
   for (const pullRequest of (task.workflow?.pullRequests ?? []).slice(0, CHANGES_PULL_REQUESTS_MAX)) {
     const repository = plainLine(pullRequest.repositoryId, NAME_MAX);
     const key = `${pullRequest.repositoryId}#${pullRequest.number}`;
     if (repository === undefined || seen.has(key) || sources.pullRequestPage === undefined) continue;
     seen.add(key);
+    // With the cap already full a further pull request is not read; it is counted.
+    if (state.files.length >= CHANGES_FILES_MAX) { state.notListed += 1; continue; }
     await readPullRequest(state, sources, pullRequest, repository, why);
   }
+  // A pull request whose first page could not be read, in an answer that has files from another, is counted: the list is not whole.
+  if (state.read) state.notListed += state.unreadable;
   return state;
 }
 
@@ -248,15 +292,16 @@ function optionalCounts(additions: unknown, deletions: unknown): { additions?: n
   return { ...(added === undefined ? {} : { additions: added }), ...(removed === undefined ? {} : { deletions: removed }) };
 }
 
-function listedFiles(list: ListedFiles, why: WhyIndex): { files: ChangedFileView[]; notListed: number } {
+function listedFiles(list: ListedFiles, why: WhyContext): { files: ChangedFileView[]; notListed: number } {
   const files: ChangedFileView[] = [];
   let notListed = 0;
+  const scope: WhyContext = { ...why, multiRepository: why.multiRepository || new Set(list.files.map((file) => file.repository)).size > 1 };
   for (const file of list.files) {
     const path = plainLine(file.path, PATH_MAX);
-    if (path === undefined) continue;
-    if (files.length >= CHANGES_FILES_MAX) { notListed += 1; continue; }
+    // A file with no usable name, or past the cap, is counted as not listed.
+    if (path === undefined || files.length >= CHANGES_FILES_MAX) { notListed += 1; continue; }
     const repository = plainLine(file.repository, NAME_MAX);
-    files.push({ path, ...(repository === undefined ? {} : { repository }), ...optionalCounts(file.added, file.removed), why: whyOf(why, { path: file.path, repository: file.repository, renamedFrom: file.renamedFrom }) });
+    files.push({ path, ...(repository === undefined ? {} : { repository }), ...optionalCounts(file.added, file.removed), why: whyOf(scope, { path: file.path, repository: file.repository, renamedFrom: file.renamedFrom }) });
   }
   // A list the code host or the worker cut short says so: at least one file is not listed.
   return { files, notListed: notListed === 0 && !list.complete ? 1 : notListed };
@@ -289,7 +334,7 @@ function withFiles(base: Pick<TaskChangesView, "taskId" | "pullRequests">, sourc
 
 /** The Changes tab's answer for one task. Never throws for a source that cannot answer: that source is left out (and the answer says which kind of list it is). */
 export async function taskChangesOf(task: ChangesTask, sources: ChangesSources): Promise<TaskChangesView> {
-  const why = whyIndexOf(sources.plan, task.workflow?.designReview);
+  const why = whyContextOf(task, sources);
   const base = { taskId: task.taskId, pullRequests: pullRequestsOf(task) };
   const fromPullRequests = await pagesOf(task, sources, why);
   if (fromPullRequests.read && fromPullRequests.files.length > 0) return withFiles(base, "pull_request", fromPullRequests.files, fromPullRequests.notListed);

@@ -14,6 +14,7 @@ import { loadReadableTask } from "../core/task-flow/reads.js";
 import type { TaskRecord } from "../core/task-flow/records.js";
 import { taskChangesOf, type PullRequestPage } from "../core/task-view/changes.js";
 import type { BrokerResponse } from "../handler.js";
+import { createPageCache, type PageCache } from "./task-changes-cache.js";
 import type { TaskScreenContext } from "./task-screen-routes.js";
 
 /** What the diff route says in place of a patch it will not show whole (developer/task-code-routes.ts `DIFF_PATCH_TOO_LONG`; a test pins that the two are the same words). */
@@ -33,15 +34,22 @@ const readableTask = (context: TaskScreenContext): Promise<TaskRecord> => loadRe
  * lane that makes the "may read this task" function (RD-2.0-READ-RULE) sets this per mode: for the changes read, source code follows the REPOSITORY's access, and a shared reader may not be a member of the repository. Nothing else in
  * this file decides it; the page reader below is only built when this says yes, and the rest of the answer (the kept lists, the why) carries no diff content.
  */
-function mayReadSourceCode(): boolean {
+export function mayReadSourceCode(): boolean {
   return true;
 }
 
+/** Pages are kept for a short while (45 s) so a reload does not ask the code host again; see task-changes-cache.ts. */
+const PAGES = createPageCache({ ttlMs: 45_000, max: 30 });
+
 /** One page of one pull request's files through the deployment's diff route; `undefined` when it cannot be read (not wired, refused, the code host down, an answer of another shape). */
-function pageReader(context: TaskScreenContext, task: TaskRecord): ((pullRequest: { repository: string; number: number }, page: number) => Promise<PullRequestPage | undefined>) | undefined {
+function pageReader(context: TaskScreenContext, task: TaskRecord, cache: PageCache): ((pullRequest: { repository: string; number: number }, page: number) => Promise<PullRequestPage | undefined>) | undefined {
   const { taskRules, caller, flow } = context;
   if (taskRules === undefined) return undefined;
-  return async (pullRequest, page) => {
+  const headOf = (pullRequest: { repository: string; number: number }): string => {
+    const recorded = task.workflow?.pullRequests?.find((entry) => entry.repositoryId === pullRequest.repository && entry.number === pullRequest.number);
+    return recorded?.headSha ?? recorded?.candidateDigest ?? "";
+  };
+  const fetchPage = async (pullRequest: { repository: string; number: number }, page: number): Promise<PullRequestPage | undefined> => {
     const path = `/v1/dev/tasks/${task.taskId}/diff`;
     const query = `repository=${encodeURIComponent(pullRequest.repository)}&number=${pullRequest.number}&page=${page}`;
     try {
@@ -64,6 +72,7 @@ function pageReader(context: TaskScreenContext, task: TaskRecord): ((pullRequest
       return undefined;
     }
   };
+  return (pullRequest, page) => cache.once(`${flow.deps.companyId}|${task.taskId}|${pullRequest.repository}#${pullRequest.number}@${headOf(pullRequest)}|${page}`, () => fetchPage(pullRequest, page));
 }
 
 /** The task's current plan, for the "why"; a plan that is missing, old or cannot be verified is no plan (the why is then empty). */
@@ -75,10 +84,15 @@ async function planOf(context: TaskScreenContext, task: TaskRecord): Promise<Pla
   }
 }
 
-export async function readTaskChanges(context: TaskScreenContext): Promise<BrokerResponse> {
+export function readTaskChanges(context: TaskScreenContext): Promise<BrokerResponse> {
+  return readTaskChangesWith(context, { mayReadSourceCode, cache: PAGES });
+}
+
+/** The read, with its source-code gate and page cache supplied (the tests supply their own; the route uses `mayReadSourceCode` and the module's cache). Order: the task read's rule, then the gate, then the cache, then the code host. */
+export async function readTaskChangesWith(context: TaskScreenContext, parts: { mayReadSourceCode(): boolean; cache: PageCache }): Promise<BrokerResponse> {
   const task = await readableTask(context);
   const { flow } = context;
-  const pullRequestPage = mayReadSourceCode() ? pageReader(context, task) : undefined;
+  const pullRequestPage = parts.mayReadSourceCode() ? pageReader(context, task, parts.cache) : undefined;
   const changes = await taskChangesOf(task, {
     ...(pullRequestPage === undefined ? {} : { pullRequestPage }),
     verified: () => verifiedChangedFiles(flow.deps, task.workspaceId, task.workflow?.candidate?.digest),

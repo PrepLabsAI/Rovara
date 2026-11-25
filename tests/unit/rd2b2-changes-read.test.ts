@@ -5,14 +5,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { ROUTES, ROUTE_NOT_SERVED_MESSAGE, routeIdOf } from "@preplabsai/rovara-code-api";
-import { canonicalPlanJson, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
+import { canonicalPlanJson, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type PlanDocument, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { taskKey, operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { WORKSPACE_DIFF_ARTIFACT, artifactRowKey, verifiedFilesKey } from "../../packages/broker/src/core/build-step/changed-files.js";
 import { workspaceKeys } from "../../packages/broker/src/core/task-flow/workspace-location.js";
 import { artifactObjectKey } from "../../packages/broker/src/services/callbacks.js";
 import {
-  CHANGES_FILES_MAX, CHANGES_PAGES_MAX, CHANGES_PATCH_MAX_CHARS, CHANGES_PATCH_TOTAL_MAX_CHARS, CHANGES_WHY_PER_FILE_MAX, plainLine, taskChangesOf,
+  CHANGES_FILES_MAX, CHANGES_PAGES_MAX, CHANGES_PATCH_MAX_CHARS, CHANGES_PATCH_TOTAL_MAX_CHARS, CHANGES_WHY_PER_FILE_MAX, plainLine, plainPatch, taskChangesOf,
   type ChangesSources, type ChangesTask, type PullRequestPage, type PullRequestPageFile,
 } from "../../packages/broker/src/core/task-view/changes.js";
 import { DIFF_ROUTE_PATCH_TOO_LONG } from "../../packages/broker/src/core-host/task-changes-routes.js";
@@ -20,6 +20,8 @@ import { DIFF_PATCH_TOO_LONG, type TaskDiffResponse } from "../../packages/broke
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { createCompanyArtifactReader } from "../../packages/broker/src/core-host/company-artifact-reader.js";
+import { readTaskChangesWith } from "../../packages/broker/src/core-host/task-changes-routes.js";
+import { createPageCache } from "../../packages/broker/src/core-host/task-changes-cache.js";
 import { createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 import { readsAsRow } from "../support/code-api-row-read.js";
@@ -85,10 +87,43 @@ describe("the changes view: a pull request's files", () => {
   it("lists at most CHANGES_FILES_MAX files and reads at most CHANGES_PAGES_MAX pages, and says files are left out", async () => {
     const source = serving(pagesOf(400));
     const view = await taskChangesOf(taskWith({ pullRequests: [pullRequest(7)] }), { pullRequestPage: source.read });
-    expect(source.asked.length).toBe(CHANGES_PAGES_MAX);
+    // Reading stops at the page where the cap fills (7 pages of 30 = 210): 10 files of it are not listed, and the page said there is more.
+    expect(source.asked.length).toBe(7);
+    expect(source.asked.length).toBeLessThanOrEqual(CHANGES_PAGES_MAX);
     expect(view.files.length).toBe(CHANGES_FILES_MAX);
-    // 10 pages of 30 are read (300 files): 100 are read and not listed, and at least one more page exists.
-    expect(view.filesNotListed).toBe(300 - CHANGES_FILES_MAX + 1);
+    expect(view.filesNotListed).toBe(10 + 1);
+  });
+
+  it("reads at most CHANGES_PAGES_MAX pages when files are few per page, and does not start another pull request once the cap is full", async () => {
+    const tiny = Array.from({ length: 12 }, () => ({ files: [file("a.ts")], more: true }));
+    const source = serving(tiny);
+    const view = await taskChangesOf(taskWith({ pullRequests: [pullRequest(7)] }), { pullRequestPage: source.read });
+    expect(source.asked.length).toBe(CHANGES_PAGES_MAX);
+    expect(view.filesNotListed).toBe(1);
+    const full = serving(pagesOf(400));
+    const two = await taskChangesOf(taskWith({ pullRequests: [pullRequest(7), pullRequest(8)] }), { pullRequestPage: full.read });
+    expect(full.asked.every((entry) => entry.number === 7)).toBe(true);
+    expect(two.filesNotListed).toBe(10 + 1 + 1);
+  });
+
+  it("a pull request whose first page cannot be read is counted when another pull request gave files, so the answer never reads as complete", async () => {
+    const source: NonNullable<ChangesSources["pullRequestPage"]> = async (pr) => pr.number === 8 ? undefined : { files: [file("a.ts")], more: false };
+    const bFirst = await taskChangesOf(taskWith({ pullRequests: [pullRequest(8), pullRequest(7)] }), { pullRequestPage: source });
+    const bLast = await taskChangesOf(taskWith({ pullRequests: [pullRequest(7), pullRequest(8)] }), { pullRequestPage: source });
+    for (const view of [bFirst, bLast]) expect(view).toMatchObject({ source: "pull_request", files: [{ path: "a.ts" }], filesNotListed: 1 });
+  });
+
+  it("stops reading pages when the time budget is spent: the page in flight is given up, what was read stays, the rest is counted", async () => {
+    const slow: NonNullable<ChangesSources["pullRequestPage"]> = async (_pr, page) => {
+      if (page === 1) return { files: [file("a.ts")], more: true };
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      return { files: [file("late.ts")], more: false };
+    };
+    const view = await taskChangesOf(taskWith({ pullRequests: [pullRequest(7)] }), { pullRequestPage: slow, budgetMs: 40 });
+    expect(view.files.map((entry) => entry.path)).toEqual(["a.ts"]);
+    expect(view.filesNotListed).toBe(1);
+    const none = await taskChangesOf(taskWith({ pullRequests: [pullRequest(7)] }), { pullRequestPage: slow, budgetMs: 0 });
+    expect(none.files).toEqual([]);
   });
 
   it("keeps a patch under the per-file limit, drops a longer one (truncated, no patch), and spends a total budget across the answer", async () => {
@@ -187,6 +222,21 @@ describe("the changes view: the why", () => {
     expect(paged.files[0]!.why.map((item) => item.id)).toEqual(["1", "2.1", "unit", "other", "f1"]);
   });
 
+  it("attaches a plan step and its checks only when the repository is unambiguous: with files from two repositories only a finding (which names its repository) is shown", async () => {
+    const single = await taskChangesOf(task, { plan, verified: async () => listed("src/health.ts") });
+    expect(single.files[0]!.why.map((item) => item.kind)).toContain("step");
+    const two = await taskChangesOf(task, { plan, verified: async () => ({ files: [{ repository: "demo", path: "src/health.ts" }, { repository: "api", path: "src/health.ts" }], complete: true }) });
+    expect(two.files.map((entry) => entry.why.map((item) => item.id))).toEqual([["f1"], ["f2"]]);
+    const prs = await taskChangesOf(taskWith({ designReview, pullRequests: [pullRequest(7), pullRequest(3, "api")] }), { plan, pullRequestPage: serving([{ files: [file("src/health.ts")], more: false }]).read });
+    expect(prs.files.map((entry) => entry.why.map((item) => item.id))).toEqual([["f1"], ["f2"]]);
+  });
+
+  it("a plan or review of an unexpected shape gives no why, never an error", async () => {
+    const broken = { ...plan, checks: { proposed: [], proves: { unit: "1" } } } as unknown as PlanDocument;
+    const view = await taskChangesOf(taskWith({ designReview: { rounds: [{ findings: [{ id: "f", text: "t" }] }] } }), { plan: broken, verified: async () => listed("src/health.ts") });
+    expect(view.files).toMatchObject([{ path: "src/health.ts", why: [] }]);
+  });
+
   it("shows at most CHANGES_WHY_PER_FILE_MAX entries for a file and no why without a plan or a review", async () => {
     const many = planDocument({
       claims: Array.from({ length: 12 }, (_, index) => ({ id: String(index + 1), text: `Step ${index + 1}`, evidence: [{ kind: "code" as const, path: "src/a.ts", startLine: 1, endLine: 2 }] })),
@@ -215,6 +265,24 @@ describe("the changes view: customer text is made safe", () => {
     expect(view.files[2]!.path.length).toBe(500);
     expect(plainLine("   ", 10)).toBeUndefined();
     expect(plainLine(7, 10)).toBeUndefined();
+  });
+
+  it("makes a patch body safe too: control, C1 and direction characters out, line breaks and tabs kept, secrets redacted, and the size is judged on the safe text", async () => {
+    const patch = `@@ -1 +1 @@\n+\tconst a = 1;\u202e hidden\u0000\u001b[31m\u0085\n+const k = "${FAKE_KEY}";`;
+    const view = await taskChangesOf(taskWith({ pullRequests: [pullRequest(7)] }), { pullRequestPage: serving([{ files: [file("a.ts", { patch })], more: false }]).read });
+    const shown = view.files[0]!.patch!;
+    expect(shown).toBe(plainPatch(patch));
+    // eslint-disable-next-line no-control-regex
+    expect(shown).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202e]/u);
+    expect(shown).toContain("\n+\tconst a = 1;");
+    expect(shown).not.toContain(FAKE_KEY);
+  });
+
+  it("counts a file whose name is empty after cleaning, in a page and in a kept list", async () => {
+    const paged = await taskChangesOf(taskWith({ pullRequests: [pullRequest(7)] }), { pullRequestPage: serving([{ files: [file("\u0007\u202e "), file("ok.ts")], more: false }]).read });
+    expect(paged).toMatchObject({ files: [{ path: "ok.ts" }], filesNotListed: 1 });
+    const kept = await taskChangesOf(taskWith({}), { verified: async () => ({ files: [{ repository: "demo", path: "  " }, { repository: "demo", path: "ok.ts" }], complete: true }) });
+    expect(kept).toMatchObject({ files: [{ path: "ok.ts" }], filesNotListed: 1 });
   });
 
   it("a count that is not a whole non-negative number is left out, and a pull request address that is not https is not served", async () => {
@@ -289,7 +357,9 @@ describe("the changes route on the core host", () => {
   });
 
   it("another company's caller, a colleague, a company admin who is not a reader and a missing task all get the same answer, and nothing is written", async () => {
-    const h = await host();
+    const route = vi.fn(async () => ({ statusCode: 200, headers: {}, body: "{}" }));
+    const h = await host({ taskRules: { route, readsAsReader: async () => true } });
+    await h.setWorkflow({ pullRequests: [pullRequest(7)] });
     const before = JSON.stringify(await h.world.store.get(taskKey(h.task.taskId)));
     const missing = await h.routes.route(get(`/v1/dev/tasks/${randomUUID()}/changes`), h.owner);
     expect(missing?.statusCode).toBe(404);
@@ -301,6 +371,8 @@ describe("the changes route on the core host", () => {
       expect(answer!.body).not.toContain(h.task.taskId);
     }
     expect(JSON.stringify(await h.world.store.get(taskKey(h.task.taskId)))).toBe(before);
+    // The code host is never asked for anyone refused, and the old shared-reader rule is not consulted either.
+    expect(route).not.toHaveBeenCalled();
   });
 
   it("has no shared-reader rule of its own: a person the old rule would admit reads no such task here (the one read rule will admit them), and a script token never gets here", async () => {
@@ -376,6 +448,48 @@ describe("the changes route on the core host", () => {
     }
   });
 
+  it("the source-code gate: when it says no the code host is never asked, no patch is served, and the answer comes from the kept list", async () => {
+    const route = vi.fn(async () => ({ statusCode: 200, headers: {}, body: JSON.stringify({ files: [{ path: "src/leak.ts", additions: 1, deletions: 0, patch: "+x" }], more: false }) }));
+    const rules = { route, readsAsReader: async () => false };
+    const h = await host({ taskRules: rules });
+    const digest = "c".repeat(64);
+    await h.setWorkflow({ pullRequests: [pullRequest(7)], candidate: { digest } });
+    const location = await workspaceKeys(h.runtime.flow.deps, h.stored["workspaceId"] as string);
+    await h.world.store.put({ item: { ...verifiedFilesKey(location.workspaceKey, digest), entityType: "VERIFIED_FILES", candidateDigest: digest, complete: true, verifiedAt: "2026-11-15T10:00:00.000Z", files: [{ repository: "demo", path: "src/checked.ts", added: 3, removed: 1 }] } });
+    const context = { flow: h.runtime.flow, blobs: h.objects, caller: { principal: localOwnerPrincipal({ companyId: FAKE_COMPANY, personId: "owner-person" }) }, taskId: h.task.taskId, request: get(`/v1/dev/tasks/${h.task.taskId}/changes`), taskRules: rules };
+    const closed = await readTaskChangesWith(context, { mayReadSourceCode: () => false, cache: createPageCache({ ttlMs: 1000, max: 5 }) });
+    expect(route).not.toHaveBeenCalled();
+    const body = JSON.parse(closed.body) as { changes: { files: Array<Record<string, unknown>> } };
+    expect(body.changes.files).toMatchObject([{ path: "src/checked.ts" }]);
+    expect(JSON.stringify(body)).not.toContain("leak.ts");
+    for (const entry of body.changes.files) expect(entry).not.toHaveProperty("patch");
+    const open = await readTaskChangesWith(context, { mayReadSourceCode: () => true, cache: createPageCache({ ttlMs: 1000, max: 5 }) });
+    expect(route).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(open.body)).toMatchObject({ changes: { files: [{ path: "src/leak.ts", patch: "+x" }] } });
+  });
+
+  it("asks the code host once for the same pages: a reload and a request at the same time share them, a failed page is never remembered", async () => {
+    let calls = 0;
+    const route = vi.fn(async (input: Parameters<NonNullable<CoreDevWiring["taskRules"]>["route"]>[0]) => {
+      calls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const page = Number(new URL(input.request.path, "https://x.invalid").searchParams.get("page"));
+      return { statusCode: 200, headers: {}, body: JSON.stringify({ files: [{ path: `src/p${page}.ts`, additions: 1, deletions: 0, patch: "+x" }], more: page < 2 }) };
+    });
+    const h = await host({ taskRules: { route, readsAsReader: async () => false } });
+    await h.setWorkflow({ pullRequests: [pullRequest(7)] });
+    const ask = () => h.routes.route(get(`/v1/dev/tasks/${h.task.taskId}/changes`), h.owner);
+    const [first, second] = await Promise.all([ask(), ask()]);
+    expect(first!.body).toBe(second!.body);
+    expect(calls).toBe(2);
+    await ask();
+    expect(calls).toBe(2);
+    // A new head is a new key.
+    await h.setWorkflow({ pullRequests: [{ ...pullRequest(7), headSha: "d".repeat(40) }] });
+    await ask();
+    expect(calls).toBe(4);
+  });
+
   it("a diff answer that is not a 200 is not used, even with a page-shaped body, and nothing of it is served", async () => {
     const page = { repository: "demo", number: 7, page: 1, more: false, files: [{ path: "src/leak.ts", additions: 1, deletions: 0, patch: "+x" }] };
     const h = await host({ taskRules: { route: async () => ({ statusCode: 403, headers: {}, body: JSON.stringify(page) }), readsAsReader: async () => false } });
@@ -388,5 +502,26 @@ describe("the changes route on the core host", () => {
 
   it("the diff route's own words for a patch that is too long are the words this read watches for", () => {
     expect(DIFF_ROUTE_PATCH_TOO_LONG).toBe(DIFF_PATCH_TOO_LONG);
+  });
+});
+
+describe("the page cache", () => {
+  it("keeps a page for its time, shares a load in flight, forgets a failure and drops the oldest past its size", async () => {
+    let now = 0;
+    const cache = createPageCache({ ttlMs: 100, max: 2, now: () => now });
+    const load = vi.fn(async () => "page");
+    expect(await Promise.all([cache.once("a", load), cache.once("a", load)])).toEqual(["page", "page"]);
+    expect(load).toHaveBeenCalledTimes(1);
+    now = 99; await cache.once("a", load); expect(load).toHaveBeenCalledTimes(1);
+    now = 100; await cache.once("a", load); expect(load).toHaveBeenCalledTimes(2);
+    const failing = vi.fn(async () => undefined);
+    await cache.once("b", failing); await cache.once("b", failing);
+    expect(failing).toHaveBeenCalledTimes(2);
+    const throwing = vi.fn(async (): Promise<string> => { throw new Error("down"); });
+    expect(await cache.once("c", throwing)).toBeUndefined();
+    await cache.once("x", load); await cache.once("y", load); await cache.once("z", load);
+    const after = load.mock.calls.length;
+    await cache.once("x", load);
+    expect(load.mock.calls.length).toBe(after + 1);
   });
 });

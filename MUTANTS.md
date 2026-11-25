@@ -1287,3 +1287,21 @@ Production guards this lane adds: the read rule (`readableTask` is `loadReadable
 | M20 | a non-200 diff answer accepted | SURVIVED the first test set (a failing answer has no page-shaped body); killed by the added "a diff answer that is not a 200 is not used ..." |
 
 19 of 20 killed by tests; M16 is an equivalent mutant (no plan evidence kind but `code` has a path).
+
+### RD-2b2 round 2 (Sonnet pre-review: 2 must-fix, 6 should-fix), same method, `tests/unit/rd2b2-changes-read.test.ts`
+
+| Mutant | Mutation | Killed by |
+|---|---|---|
+| N1 | a pull request whose first page cannot be read is not counted (MF1) | "a pull request whose first page cannot be read is counted ..." |
+| N2 | a patch body not made safe (control, C1, direction characters; MF2) | "makes a patch body safe too ..." |
+| N3 | pages still read once the 200-file cap is full | the cap tests (7 pages asked; no second pull request read) |
+| N4 | the source-code gate ignored (the diff is fetched although the gate says no) | "the source-code gate: when it says no the code host is never asked ..." |
+| N5 | plan steps and checks attached in a multi-repository task | "attaches a plan step and its checks only when the repository is unambiguous ..." |
+| N6 | a plan or review of an unexpected shape throws instead of giving no why | "a plan or review of an unexpected shape gives no why ..." |
+| N7 | pages not cached / not shared | "asks the code host once for the same pages ..." |
+| N8 | the pull request's head left out of the cache key | same |
+| N9 | the time budget ignored | "stops reading pages when the time budget is spent ..." |
+| N10 | a file with no usable name not counted | "counts a file whose name is empty after cleaning ..." |
+| N11 | the cache remembers a failed page | "keeps a page for its time ..." and the fallback test |
+
+11 of 11 killed.
