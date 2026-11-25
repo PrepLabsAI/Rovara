@@ -5,6 +5,7 @@ import { canonicalJson, createCandidateManifest, when, WORKFLOW_AUTO_PUBLISH_FAI
 import type { ApplicationE2ESeams } from "../../packages/broker/src/core/e2e/application-seams.js";
 import { createCallbackHandler } from "../../packages/broker/src/services/callbacks.js";
 import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
+import { siblingSpellings, tamperedGrant } from "../support/grant-tamper.js";
 import { startPublication, openPullRequest, recordPublished } from "../../packages/broker/src/core/build-step/publish.js";
 import { recordMaintained, updatePullRequest } from "../../packages/broker/src/core/build-step/maintain.js";
 import { pullRequestRecordKey } from "../../packages/broker/src/core/build-step/records.js";
@@ -651,7 +652,7 @@ describe("repository credential exchange: liveness, count, audit and log", () =>
     expect(await w.post(grant, "push", "https://github.com/acme/other")).toEqual({ status: 403, code: "FORBIDDEN" });
     expect(w.refusals()).toHaveLength(2);
     for (const line of w.refusals()) { expect(line).toMatchObject({ reason: "not-covered", grantId: GRANT_ID }); expect(line).not.toHaveProperty("repository"); }
-    expect(await w.post(grant.replace(/.$/u, "x"), "push", hostile)).toEqual({ status: 403, code: "FORBIDDEN" });
+    expect(await w.post(tamperedGrant(grant), "push", hostile)).toEqual({ status: 403, code: "FORBIDDEN" });
     expect(JSON.stringify(w.lines)).not.toContain("HOSTILESECRET");
     expect(JSON.stringify(w.lines)).not.toContain("evil.example");
     expect((await w.post(grant, "push")).status).toBe(200);
@@ -660,10 +661,38 @@ describe("repository credential exchange: liveness, count, audit and log", () =>
 
   it("a grant that fails verification is refused and logged as such, before anything is read or counted", async () => {
     const w = await exchangeWorld();
-    expect((await w.post(w.grantFor().replace(/.$/u, "x"))).status).toBe(403);
+    expect((await w.post(tamperedGrant(w.grantFor()))).status).toBe(403);
     expect(await w.countOf()).toBeUndefined();
     expect(w.refusals()[0]).toMatchObject({ reason: "grant" });
     expect(w.refusals()[0]).not.toHaveProperty("grantId");
+  });
+
+  // The signature is 43 base64url characters; the last carries 4 bits and 2 unused ones, so a decoder that ignores them reads three OTHER last characters as the same bytes. A grant verifies only as the string it was issued as.
+  it("a grant whose signature differs only in the unused bits of its last character is refused: nothing is read, counted or minted, and the refusal is logged as a grant failure", async () => {
+    const w = await exchangeWorld();
+    const grant = w.grantFor();
+    const siblings = siblingSpellings(grant);
+    expect(siblings).toHaveLength(3);
+    for (const sibling of siblings) {
+      const [, issued] = grant.split("."); const [, spelled] = sibling.split(".");
+      expect(Buffer.from(spelled!, "base64url").equals(Buffer.from(issued!, "base64url")), "(the premise) the decoder reads it as the same bytes").toBe(true);
+    }
+    // The route looks the operation up from the path before it reads the grant; what must NOT follow is anything more: a sibling spelling reads exactly what a grant that is plain garbage reads, and writes nothing.
+    const reads = vi.spyOn(w.h.store, "get");
+    const writes = vi.spyOn(w.h.store, "transact");
+    expect((await w.post("garbage.garbage")).status).toBe(403);
+    const readsOfGarbage = reads.mock.calls.length;
+    reads.mockClear();
+    for (const sibling of siblings) expect((await w.post(sibling)).status).toBe(403);
+    expect(reads.mock.calls.length).toBe(readsOfGarbage * siblings.length);
+    expect(writes).not.toHaveBeenCalled();
+    writes.mockRestore();
+    expect(w.resolve).not.toHaveBeenCalled();
+    expect(await w.countOf()).toBeUndefined();
+    expect(w.refusals()).toHaveLength(4);
+    for (const line of w.refusals()) { expect(line).toMatchObject({ reason: "grant" }); expect(line).not.toHaveProperty("grantId"); }
+    reads.mockRestore();
+    expect((await w.post(grant)).status).toBe(200);
   });
 
   it("a request the grant does not name (a push on a clone-only grant, another repository) is refused before it is counted", async () => {

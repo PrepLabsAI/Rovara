@@ -1141,3 +1141,10 @@ All of M1 to M24 above were run again after the refactor (the same mutations, ex
 | M51, `hostedTaskAccess.checkStart` | a member with no project grant may start | journey (g) | red (1 of 7) |
 | M52, task page history | a `needs_grant` demotion reads as a role change ("X made Y commenter") | `tests/contract/task-people-needs-grant-history.test.ts` | red (1 of 1) |
 | M53, `needsGrantEvent` | the demotion names the demoted person as its own actor | rules suite | red (1 of 29) |
+
+
+### GRANT-SIGNATURE-CANONICAL: a repository grant verifies only as the string it was issued as
+
+| Mutant | Change | Killed by | Result |
+| --- | --- | --- | --- |
+| G1, `RepositoryGrantService.verify` | the signature is compared as decoded bytes again (three other spellings of the same signature verify) | `tests/unit/core-e2e-publication-callback.test.ts` (the sibling-spellings test) | red (1 of 87) |
