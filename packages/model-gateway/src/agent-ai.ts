@@ -26,6 +26,9 @@ import type { ProviderTransport } from "./provider.js";
 import { PRODUCT_DEFAULT_CAPS, type ProductKeyStore } from "./product-keys.js";
 import type { ProductKeyRow } from "./product-seal.js";
 
+/** DEC 254zzz525: whether a stored AGENT_AI row is the old backfill's `bedrock_byo` (never an explicit company choice). Cloud's company-store.ts holds the same rule. */
+export const BACKFILL_UPDATED_BY = /^backfill:/u;
+export const backfilledBedrockChoice = (source: unknown, updatedBy: unknown): boolean => source === "bedrock_byo" && typeof updatedBy === "string" && BACKFILL_UPDATED_BY.test(updatedBy);
 export const AGENT_AI_SOURCES = ["rovara", "anthropic_key", "bedrock_byo", "openai_key", "openrouter_key", "custom_endpoint"] as const;
 export type AgentAiSource = typeof AGENT_AI_SOURCES[number];
 
@@ -58,8 +61,13 @@ export const AGENT_SOURCE_OF_KIND: Readonly<Record<AiSourceKind, string>> = Obje
 /**
  * The company sources that were live before the per-install switch (DEC 236 and DEC 238). They keep working exactly as before, switch
  * or no switch: turning them off on an install that uses them would stop its agents. Whether to gate them too is an owner question.
+ * `bedrock_byo` is pre-switch only on an install that names NO kinds at all (an install from before the switch). Once an install names
+ * its kinds (beta and production always do), own Bedrock for the agents needs `bedrock` among them, and production may not name it
+ * (PRODUCTION_SOURCE_KINDS): DEC 254zzz520 covers the product route (the customer's tests), not the agents.
  */
 export const PRE_SWITCH_AGENT_SOURCES: readonly string[] = ["anthropic_key", "bedrock_byo"];
+/** The pre-switch sources that stay live only on an install that names no kinds (see PRE_SWITCH_AGENT_SOURCES). */
+export const PRE_SWITCH_ONLY_WITHOUT_KINDS: readonly string[] = ["bedrock_byo"];
 
 /**
  * GATEWAY_AI_SOURCE_KINDS: comma-separated supported kinds, no spaces, no repeats. Absent or empty: none switched on. Anything else
@@ -77,7 +85,7 @@ export function parseAiSourceKinds(value: string | undefined): Set<AiSourceKind>
  * as before); any other source only when its kind is switched on. An unknown source never.
  */
 export function agentSourceSwitchedOn(source: string, switchedOn: ReadonlySet<string>): boolean {
-  if (source === "rovara" || PRE_SWITCH_AGENT_SOURCES.includes(source)) return true;
+  if (source === "rovara" || (PRE_SWITCH_AGENT_SOURCES.includes(source) && (switchedOn.size === 0 || !PRE_SWITCH_ONLY_WITHOUT_KINDS.includes(source)))) return true;
   const kind = AI_SOURCE_KINDS.find((k) => AGENT_SOURCE_OF_KIND[k] === source);
   return kind !== undefined && switchedOn.has(kind);
 }
@@ -122,6 +130,8 @@ export class CompanyAgentAiSource implements AgentAiSourceReader {
     if (item === undefined) return undefined;
     const source = record(item)?.source;
     if (item.companyId !== cid || typeof source !== "string" || !(AGENT_AI_SOURCES as readonly string[]).includes(source)) throw new Error("agent ai source unavailable");
+    // DEC 254zzz525: a `bedrock_byo` row the DEC 254zzz279 backfill wrote ("backfill:..." as its writer) is not a choice the company made: it reads as no choice (Rovara's AI as the default).
+    if (backfilledBedrockChoice(source, record(item)?.updatedBy)) return undefined;
     const stored = record(item)?.fallback;
     const fallback = stored === undefined ? [] : validFallback(stored, source as AgentAiSource);
     if (fallback === undefined) throw new Error("agent ai source unavailable");
@@ -136,20 +146,21 @@ export interface ResolvedAgentSource {
   /** DEC 254zzz84(4): the saved order's sources after `source`, only when the company saved some (absent: no fallback, exactly as before). */
   fallback?: AgentAiSource[];
 }
-/** Controller R-1: Anthropic precedes Bedrock, matching the backfill; only an unconnected company defaults to Rovara AI. */
-export function defaultAgentSource(input: { keyConnected: boolean; bedrockConnected: boolean }): { source: AgentAiSource | undefined; via: "own_key" | "default" } {
+/**
+ * Controller R-1, narrowed by DEC 254zzz525: without a saved choice a connected own Anthropic key is kept; EVERYTHING else defaults to Rovara AI.
+ * A connected own Bedrock role alone never changes the default: own Bedrock is used only when the company explicitly chooses it.
+ */
+export function defaultAgentSource(input: { keyConnected: boolean }): { source: AgentAiSource | undefined; via: "own_key" | "default" } {
   if (input.keyConnected) return { source: "anthropic_key", via: "own_key" };
-  if (input.bedrockConnected) return { source: "bedrock_byo", via: "own_key" };
   return { source: "rovara", via: "default" };
 }
 export interface AgentSourcePorts {
   sources: AgentAiSourceReader;
   /** Operator billing exemptions only; never eligibility for the default. */
   exempt?: ReadonlySet<string>;
-  keys: Pick<LearningKeySource, "connected" | "bedrockConnected">;
-  byo?: Pick<ByoBedrock, "connection">;
+  keys: Pick<LearningKeySource, "connected">;
 }
-/** Saved source/order first. Without one, preserve this issuer/company's own connections, even after backfill. Read faults throw before any hold or send. */
+/** Saved source/order first. Without one, only a connected own Anthropic key is preserved (DEC 254zzz525: a connected Bedrock role never is); otherwise Rovara AI. Read faults throw before any hold or send. */
 export async function resolveAgentSource(ports: AgentSourcePorts, iss: string, cid: string, signal?: AbortSignal): Promise<ResolvedAgentSource> {
   if (ports.sources.orderFor !== undefined) {
     const order = await ports.sources.orderFor(cid, signal);
@@ -159,12 +170,7 @@ export async function resolveAgentSource(ports: AgentSourcePorts, iss: string, c
     if (saved !== undefined) return { source: saved, via: "chosen" };
   }
   const keyConnected = (await ports.keys.connected(iss, cid, "anthropic", signal)) === true;
-  // An unavailable adapter says nothing about saved connections. Preserve the payer from metadata;
-  // admission then refuses bedrock_byo as not offered, before any hold, credential read or send.
-  const bedrockConnected = !keyConnected && (ports.byo === undefined
-    ? (await ports.keys.bedrockConnected?.(iss, cid)) === true
-    : (await ports.byo.connection(iss, cid, signal)) !== undefined);
-  return defaultAgentSource({ keyConnected, bedrockConnected });
+  return defaultAgentSource({ keyConnected });
 }
 
 /** Rovara's AI as the agent route uses it. */

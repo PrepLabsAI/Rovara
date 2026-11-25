@@ -5,7 +5,7 @@
 //     propose -> confirm step. The People rows of a task are the task's own whichever engine runs it, and the core's owner and read rules already read them (aws/core-engine-root.ts `hostedTaskAccess`).
 //   - Readers (spec 067): `GET .../readers`, `PUT` and `DELETE .../readers/{developerId}`. The old rule: the task's own person (its developer id) lists, shares and unshares; a reader it is shared with is told only
 //     the owner may; anyone else reads no such task. The same reader rows and functions (aws/task-readers.ts).
-//   - The events timeline: `GET .../events` ({ events }). The old rule: the task's own person, or a reader it is shared with who is still a member of its project; anyone else reads no such task. A core task
+//   - The events timeline: `GET .../events` ({ events }). Who may read: the one read rule (core/task-flow/read-rule.ts). A core task
 //     has no workflow operation events, so its timeline is made from what the core records: its log (core/task-log: milestones, the plan summary, questions and answers, pull requests) and its workflow's
 //     decisions, newest `limit` (default 10, at most 50), oldest first, each one line of fixed words around redacted, cut text.
 //   - Plan comments: `GET .../comments` ({ comments }). The old rule (task-code-routes.ts `accessFor` with `read`, through `resolveCoreTaskAccess`, the same function) and the same comment rows.
@@ -19,10 +19,12 @@ import type { z } from "zod";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskRouteDependencies } from "./developer-tasks.js";
-import { grantTaskReader, listTaskReaders, readsAsReader, revokeTaskReader } from "./task-readers.js";
+import { grantTaskReader, holdsOwnTask, listTaskReaders, readerShare, revokeTaskReader } from "./task-readers.js";
 import { getTaskPeople } from "../developer/task-people.js";
 import { addTaskWebPerson, confirmTaskPeopleProposal, getTaskPeopleCandidates, getTaskPeopleProposal, proposeTaskOwnership, proposeTaskPeopleRole } from "../developer/task-people-effects.js";
-import { createCorePlanComment, listCorePlanComments, readCoreTaskDiff } from "../developer/task-code-routes.js";
+import { createCorePlanComment, listCorePlanComments, readCoreTaskDiffPage } from "../developer/task-code-routes.js";
+import { resolveCoreTaskAccess } from "../developer/task-access.js";
+import type { TaskReadDecision, TaskReadSeams, TaskRead } from "../core/task-flow/read-rule.js";
 import type { ArtifactReader } from "../core/task-flow/deps.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
 import { readTaskLog } from "../core/task-log/store.js";
@@ -40,12 +42,22 @@ export interface CoreTaskRuleRouteInput {
   task: Record<string, unknown>;
   /** The company's own store (its task log). */
   store: Pick<DocumentStore, "query">;
+  /**
+   * The ONE read rule (core/task-flow/read-rule.ts `decideTaskRead`), bound by the core host to this caller and task: whether this person may read this task for `read`. Resolves with the decision, throws the refusal.
+   * `seams` adds the old rules only this file can build (the People page rule of the diff).
+   */
+  authorize(read: TaskRead, seams?: TaskReadSeams): Promise<TaskReadDecision>;
 }
 
 export interface CoreTaskRuleRoutes {
   route(input: CoreTaskRuleRouteInput): Promise<BrokerResponse>;
-  /** DEC 254zzz44 (a): the old task read's reader rule (spec 067, `readsAsReader`) for a task of this company: shared with this person, who is still a member of its project. */
-  readsAsReader(input: Pick<CoreTaskRuleRouteInput, "person" | "companyId" | "task">): Promise<boolean>;
+  /** DEC 254zzz44 (a): the stored share (spec 067, `readerShare`) of this person on a task of this company: its role as stored, while they are still a member of the task's project. The read rule decides what it shows. */
+  sharedReader(input: Pick<CoreTaskRuleRouteInput, "person" | "companyId" | "task">): Promise<{ role: string } | undefined>;
+  /**
+   * The task's own person's live hold on their task (the hotfix's test, one implementation: the grant, or the access that let them start it, a bound-channel member where the project lets channel members use it), read now,
+   * for a task of this company. The read rule's live-grant seam asks it for the task's own person; anyone else it asks for the grant. A read that fails is "no".
+   */
+  holdsOwnTask(input: Pick<CoreTaskRuleRouteInput, "person" | "companyId" | "task">): Promise<boolean>;
   /** S1: the People moves of the task action registry, in process (the same People functions the routes call): the view, and taking over a task nobody owns (the propose step, then the confirm step, each re-reading the revision and the person's right). */
   people: {
     view(input: Pick<CoreTaskRuleRouteInput, "person" | "companyId" | "task">): Promise<TaskPeopleView>;
@@ -135,16 +147,34 @@ function ruleDependencies(deps: DeveloperTaskRouteDependencies, artifacts: Artif
   } } };
 }
 
-async function coreComments(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, task: DeveloperTaskRecord, request: Parameters<CoreTaskRuleRoutes["route"]>[0]["request"]) {
-  return request.method === "POST" ? createCorePlanComment(deps, caller, task, bodyOf(request)) : listCorePlanComments(deps, caller, task);
+/**
+ * The old People page rule as the read rule's seam: it admits or throws its refusal. It says `holdsOwnTask` when it admitted the task's own person by their stored id (the legacy branch: a task with no People
+ * list, which re-reads their hold on the task, `requireOwnTask`), so the rule does not read that hold a second time. A People entry (a revision is on the access) is admitted with no grant read.
+ */
+export async function pageRule(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, task: DeveloperTaskRecord): Promise<void | { holdsOwnTask: true } | { viaChannelShare: true }> {
+  // A core task is read as the person the core read: NO Slack identity reaches the old page rule, so its legacy branch (a channel member read from the cached, ten-minute membership list) can never be reached for a
+  // plan comments or a diff read. A channel member who reads a shared core task is the People list's implicit commenter, whose channel membership the page rule reads LIVE.
+  const { slackUserId: _slack, ...core } = caller;
+  void _slack;
+  const access = await resolveCoreTaskAccess(deps, core, task, "read");
+  if (access.viaChannelShare === true) return { viaChannelShare: true };
+  if (access.peopleRevision === undefined && task.developerId === caller.developerId) return { holdsOwnTask: true };
 }
 
 /**
  * The old routes, for a core task. `depsFor` builds, for this person, exactly the dependencies the developer routes build for their task routes (`developerTaskRouteDependencies`), with the caller's company.
  */
-async function documentRoute(rest: string, deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, task: DeveloperTaskRecord, url: URL, request: CoreTaskRuleRouteInput["request"]): Promise<BrokerResponse | undefined> {
-  if (rest === "diff") return json(await readCoreTaskDiff(deps, caller, task, url));
-  if (rest === "comments") return json(await coreComments(deps, caller, task, request));
+async function documentRoute(rest: string, deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, task: DeveloperTaskRecord, url: URL, request: CoreTaskRuleRouteInput["request"], authorize: CoreTaskRuleRouteInput["authorize"]): Promise<BrokerResponse | undefined> {
+  if (rest === "diff") {
+    // The one read rule decides; the People page rule (the old gate of this read) is its one seam here, so the rule keeps one implementation.
+    const decision = await authorize("diff", { peoplePage: () => pageRule(deps, caller, task) });
+    return json(await readCoreTaskDiffPage(deps, decision, url));
+  }
+  if (rest === "comments") {
+    // A read of the comments asks the one rule (the old People page rule is its seam); a POST is a comment, judged by the comment action's own rule inside `createCorePlanComment`.
+    if (request.method === "POST") return json(await createCorePlanComment(deps, caller, task, bodyOf(request)));
+    return json(await listCorePlanComments(deps, await authorize("comments", { peoplePage: () => pageRule(deps, caller, task) })));
+  }
   return undefined;
 }
 
@@ -169,11 +199,17 @@ export function createCoreTaskRuleRoutes(depsFor: (person: { developerId: string
         if (proposed.status === "PENDING") await confirmTaskPeopleProposal(effects(deps), caller, taskId, input.requestId);
       },
     },
-    async readsAsReader(input) {
+    async holdsOwnTask(input) {
       const task = input.task as unknown as DeveloperTaskRecord;
       if (input.task["companyId"] !== input.companyId || typeof task.taskId !== "string") return false;
       const deps: DeveloperTaskRouteDependencies = { ...ruleDependencies(depsFor(input.person, input.companyId), artifacts), companyId: input.companyId };
-      return await readsAsReader(deps, task, input.person.developerId);
+      return await holdsOwnTask(deps, task, input.person.developerId);
+    },
+    async sharedReader(input) {
+      const task = input.task as unknown as DeveloperTaskRecord;
+      if (input.task["companyId"] !== input.companyId || typeof task.taskId !== "string") return undefined;
+      const deps: DeveloperTaskRouteDependencies = { ...ruleDependencies(depsFor(input.person, input.companyId), artifacts), companyId: input.companyId };
+      return await readerShare(deps, task, input.person.developerId);
     },
     async route(input) {
       const served = coreTaskRuleOf(input.path, input.request.method);
@@ -192,14 +228,12 @@ export function createCoreTaskRuleRoutes(depsFor: (person: { developerId: string
       if (rest === "people/role") return json({ change: await proposeTaskPeopleRole(effects(deps), caller, taskId, parse(TaskPeopleRoleRequestSchema, bodyOf(input.request), log, "people/role")) });
       if (rest === "people/take-ownership") return json({ change: await proposeTaskOwnership(effects(deps), caller, taskId, parse(TaskPeopleTakeOwnershipRequestSchema, bodyOf(input.request), log, "people/take-ownership")) });
       if (rest.startsWith("people/requests/")) return json({ change: await getTaskPeopleProposal(effects(deps), caller, taskId, safeDecode(rest.slice("people/requests/".length))) });
-      const document = await documentRoute(rest, deps, caller, task, url, input.request);
+      const document = await documentRoute(rest, deps, caller, task, url, input.request, (read, seams) => input.authorize(read, seams));
       if (document !== undefined) return document;
-      // Readers and the timeline: the task's own person, or (to read) a reader it is shared with who is still a project member; anyone else reads no such task, in the old owner check's words.
-      const owner = task.developerId === caller.developerId;
-      const reader = !owner && await readsAsReader(deps, task, caller.developerId);
-      if (!owner && !reader) throw agentXError("TASK_NOT_FOUND", `no task ${taskId} of yours`);
+      // Readers and the timeline: the one read rule says who may (the task's own person, or a reader it is shared with who is still a project member; anyone else reads no such task, in the old owner check's words).
+      const decision = await input.authorize(rest === "events" ? "events" : "share");
       if (rest === "events") return json({ events: await coreTimeline(input.store, input.companyId, task, whole(url.searchParams.get("limit"), DEVELOPER_EVENTS_DEFAULT, 1, DEVELOPER_EVENTS_MAX, "limit")) });
-      if (!owner) throw agentXError("FORBIDDEN", "only the task's owner can share it");
+      if (decision.mode !== "owner") throw agentXError("FORBIDDEN", "only the task's owner can share it");
       if (rest === "readers") return json(await listTaskReaders(deps, task));
       const developerId = safeDecode(rest.slice("readers/".length));
       if (input.request.method === "PUT") return json(await grantTaskReader(deps, task, caller.developerId, developerId, bodyOf(input.request)));

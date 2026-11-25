@@ -93,6 +93,7 @@ import {
   HOSTED_IDENTITY_PROVIDER, createHostedHoldSweep, createHostedLedger, createHostedMoneyStop, hostedSecurityModules, hostedTaskCapUsd, readHostedAdmissionSettings, runSpendState, runStopWiredFrom, taskCapOf, type HostedAdmissionSettings, type HostedIdentityOptions, type ProjectTaskCap,
 } from "../core-host/hosted-modules.js";
 import { USAGE_EVENT_TYPE, createUsageBooking } from "../core-host/usage-booking.js";
+import { wireHostedTierReview } from "../core-host/hosted-tier-review.js";
 import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
 import { createLessonsSlackSwitchApi, type LessonsSlackSwitchApi } from "../core-host/lessons-slack-switch-api.js";
 import { createKnowledgeSwitchApi, type KnowledgeSwitchApi } from "../core-host/knowledge-switch-api.js";
@@ -540,6 +541,9 @@ export function hostedTaskAccess(inputs: {
     const membership = await inputs.membershipOf(personId);
     return membership !== undefined && membership.companyId === inputs.companyId ? membership : undefined;
   };
+  // The task's own stored person (a task with no People list) passes only while they STILL hold the project grant, read now: the very test a People entry meets below. A person removed from the project keeps
+  // their old task as nothing: no read, no act (a project owner or admin takes it over through People, never through this path).
+  const storedPerson = async (principal: Principal, task: { developerId: string; project: string }) => principal.personId === task.developerId && await inputs.projectGrant(principal.personId, task.project, inputs.companyId) ? { revision: undefined, ownerIds: [] as readonly string[] } : undefined;
   const resolveStoredTaskAccess = async (
     principal: Principal,
     task: { developerId: string; project: string; taskId: string },
@@ -553,7 +557,7 @@ export function hostedTaskAccess(inputs: {
     const people = inputs.people === undefined ? undefined : await resolveTaskPeopleAccess(inputs.people, stored as unknown as DeveloperTaskRecord, principal.personId);
     if (people === undefined) {
       if (await store.get({ pk: `DEVTASK#${task.taskId}`, sk: "PEOPLE" }) !== undefined) return undefined;
-      return principal.personId === task.developerId ? { revision: undefined, ownerIds: [] as readonly string[] } : undefined;
+      return storedPerson(principal, task);
     }
     if (people.orphaned || !roles.includes(people.role) || !await inputs.projectGrant(principal.personId, task.project, inputs.companyId)) return undefined;
     return { revision: people.peopleRevision, ownerIds: people.ownerActorIds };
@@ -561,7 +565,7 @@ export function hostedTaskAccess(inputs: {
   /** The caller's live access to the task, for the roles asked (owners only for every act; owners, commenters and viewers for a read). Undefined: none. Every check re-reads the live proof. */
   const resolve = (principal: Principal, task: { developerId: string; project: string; taskId?: string }, roles: readonly string[]) => taskAccessOrHidden(async () => {
     if (principal.companyId !== inputs.companyId || await liveMember(principal.personId) === undefined) return undefined;
-    if (task.taskId === undefined || inputs.storage === undefined) return principal.personId === task.developerId ? { revision: undefined, ownerIds: [] as readonly string[] } : undefined;
+    if (task.taskId === undefined || inputs.storage === undefined) return storedPerson(principal, task);
     return resolveStoredTaskAccess(principal, { ...task, taskId: task.taskId }, roles, inputs.storage);
   });
   const owner = (principal: Principal, task: { developerId: string; project: string; taskId?: string }) => resolve(principal, task, ["owner"]);
@@ -595,6 +599,8 @@ export function hostedTaskAccess(inputs: {
     return (await inputs.setupRunStanding(task.developerId, inputs.companyId, task.project)).access === "manage" ? { allowed: true } : { allowed: false, message: denied };
   };
   return {
+    // The hotfix's re-check (the stored person holds a task only while the grant is held, as a People entry does) makes `resolve` prove it for every admission: canAct, canRead and ownerActing.
+    provesProjectGrant: true,
     async checkStart(principal, project, purpose, origin) {
       // A system owner (by its id shape or its provider) is decided by the system rule alone: it is never a member and never falls through to the member rules.
       if (isSystemPrincipal(principal)) return systemStartVerdict({ companyId: inputs.companyId, systemRunsOn: await settledOn(inputs.systemRunsOn), upkeepOn: purpose === "setup_agent" ? await settledUpkeep(project) : undefined }, principal, project, purpose, origin).allowed ? { allowed: true } : { allowed: false, code: "FORBIDDEN", message: SYSTEM_OWNER_NOT_ALLOWED };
@@ -1113,6 +1119,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           report.failed += idle.failed;
           return report;
         };
+        // TIER-GROWTH-MERGE: the code and security reviews a change that grew must pass on its current head, over the gateway's agent route as the task's own paid call (the meter is the task's cap and the admission).
+        wireHostedTierReview({ env, taskTokens: inputs.taskTokens, flow: flow.deps, companyId, now, booking: createUsageBooking({ store: registry.require("storage"), metering: registry.require("metering"), now }),
+          taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task) });
         flow.deps.secondReview = createHostedReviewers({ flow: flow.deps, registry, companyId, offered: engineOffered, taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task) }).secondReview;
         createHostedDesignReview({ flow: flow.deps, registry, companyId, offered: engineOffered,
           taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task),
@@ -1211,7 +1220,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           taskActions: { roundCap: async (task) => hostedRoundCap(registry, runtime.companyId, now, admissionSettings, projectTaskCap, task) },
           // Cloud #188 item 3: a core task's People, readers, events and plan comments, with the old task routes' own rules.
           ...(inputs.taskRules === undefined ? {} : { taskRules: createCoreTaskRuleRoutes(inputs.taskRules, runtime.flow.deps.artifacts) }),
-          canReadProject: (personId, project) => projectGrant(personId, project),
+          canReadProject: (personId, project, companyId) => projectGrant(personId, project, companyId),
           // DEC 254zzz94: the Merge button, over the root's own grant reader, the project's pinned repositories on the registry's code host, and the project's merge method (Code's default: squash).
           merge: {
             projectGrantRole: (personId, project, companyId) => projectGrantRole(personId, project, companyId),
@@ -1423,7 +1432,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         authenticateToken: scriptTokenAuthenticator({
           lessonsSwitch: switchValue, now: () => now().getTime(),
           // The token is checked against the SHARED registry's store (every key is company-scoped) BEFORE any company runtime is built: a made-up company id in an unverified header builds nothing.
-          companyOf: async () => { const registry = await app.registry(); return { store: registry.require("storage"), audit: registry.require("audit-sink"), identity: registry.require("identity") }; },
+          companyOf: async (tokenCompany) => { const registry = await app.registry(); return { store: registry.require("storage"), audit: registry.require("audit-sink"), identity: registry.require("identity"),
+            // The creator's project, read live at every use of the token (this company's grant, or an owner's or admin's role): a project they lost stops working for the token.
+            projectGrant: async (personId, project, role) => role === "owner" || role === "admin" || await projectGrant(personId, project, tokenCompany) }; },
         }),
         // Who is told about an unusual amount of reading: the company's owners now (the people port's ownerIds; company admins who are not owners are not told until the port lists them), by the id notices are addressed by. A list that cannot be completed tells nobody (the audit record still says it).
         adminsOf,

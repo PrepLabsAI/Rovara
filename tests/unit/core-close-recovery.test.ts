@@ -213,7 +213,7 @@ describe("accepted close recovery", () => {
     await w.h.flow.close(w.h.owner, w.task.taskId, w.input);
     let follower = 0;
     const exchange = vi.fn(async () => ({ token: "fixture" }));
-    const handler = createCallbackHandler({ flow: w.h.deps, blobs: {} as never, grants: { exchange, inspect: () => { throw new Error("unused"); } }, bookUsage: (op, events) => w.booking.bookOperationEvents(op, events), async onEvents() { follower++; } });
+    const handler = createCallbackHandler({ flow: w.h.deps, blobs: {} as never, grants: { exchange, inspect: () => ({ grantId: "fixture-id", version: 3, ownerKey: "owner", projectName: "payments", workspaceId: w.task.workspaceId, operationId: w.run.id, expiresAt: 4_000_000_000, repositories: [{ credentialRef: "host-app", repositoryUrl: "https://example.com/repo", access: "clone" as const }] }) }, bookUsage: (op, events) => w.booking.bookOperationEvents(op, events), async onEvents() { follower++; } });
     const token = new CallbackCapabilities(Buffer.from(w.h.deps.callbackSigningKey)).issue({ workspaceId: w.task.workspaceId, operationId: w.run.id, fence: w.run.fence, actions: ["events", "result", "artifacts"], expiresInSeconds: 600 });
     const post = (action: string, body: unknown) => handler({ method: "POST", path: `/v1/internal/workspaces/${w.task.workspaceId}/operations/${w.run.id}/${action}`, headers: { [CAPABILITY_HEADER]: token }, body: JSON.stringify(body) });
     expect((await post("events", { events: w.usage })).statusCode).toBe(200);

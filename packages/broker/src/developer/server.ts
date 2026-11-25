@@ -69,7 +69,8 @@ import { ProviderNotConfiguredError, ProviderUnavailableError, slackWorkspaceHin
 import type { SlackDirectory } from "./slack-directory.js";
 import { createSignInLinks } from "./sign-in-links.js";
 import { companyMayMint as mayMint, mintSession } from "./session-mint.js";
-import { endedByAdmin, startedBeforeMethodOn, type AuthRequestRecord, type CodeGrant, type DeveloperRecord, type DeveloperSignInStore, type SessionRecord } from "./store.js";
+import { sessionLogId } from "./session-log-id.js";
+import { endedByAdmin, refreshableBy, startedBeforeMethodOn, type AuthRequestRecord, type CodeGrant, type DeveloperRecord, type DeveloperSignInStore, type SessionRecord } from "./store.js";
 import { issueAccessToken, pkceChallengeMatches, type TokenSigner, type PublicSigningJwk, type SigningKeyPurpose } from "./tokens.js";
 import type { CompanySignInStore } from "./company-membership.js";
 import type { CompanyInviteStore } from "./company-invites.js";
@@ -246,6 +247,12 @@ function joinRefusal(reason: Extract<CompanyJoin, { ok: false }>["reason"], byIn
   return { cause: reason, params: { error: "access_denied", error_description: text } };
 }
 
+/** A refused refresh. A browser sign-in session has no refresh token (none is written), so a presented one for it is the "impossible" case: say so in one fixed line, with no id. */
+function refreshRefused(log: (entry: Record<string, unknown>) => void, session: SessionRecord, ended: HttpResult): HttpResult {
+  if (session.reviewExpiresAt !== undefined) log({ event: "signin.browser_refresh_refused" });
+  return ended;
+}
+
 export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependencies) {
   const { config, store } = deps;
   const endpoint = (path: string) => `${config.issuer}${path}`;
@@ -387,7 +394,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
 
   async function revoke(sessionId: string, reason: string): Promise<void> {
     await store.revokeSession(sessionId, reason);
-    deps.log({ event: "signin.session_revoked", sessionId, reason });
+    deps.log({ event: "signin.session_revoked", session: sessionLogId(sessionId), reason });
   }
 
   async function authorize(query: URLSearchParams): Promise<HttpResult> {
@@ -832,7 +839,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       }
       // A fixed 30 days from sign-in, with no renewal: the session record ends then, whatever the cookie says.
       const endsAt = Math.floor(deps.now() / 1000) + SESSION_MAX_AGE_SECONDS;
-      const { session } = await store.createSession({ developerId, amr: method, ...(merged && signedInId !== developerId ? { signedInId } : {}),
+      const { session } = await store.createBrowserSession({ developerId, amr: method, ...(merged && signedInId !== developerId ? { signedInId } : {}),
         ...(slackUserId === undefined ? {} : { slackUserId }),
         reviewExpiresAt: endsAt, endsAt,
         ...(companyId === undefined || (companyId === IMPLICIT_COMPANY_ID && request.companyId === undefined) ? {} : { companyId }),
@@ -882,7 +889,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     const developer = await store.getDeveloper(redeemed.developerId);
     if (developer === undefined || developer.revoked) return oauthError(400, "invalid_grant", "your Rovara sign-in was turned off by an administrator; contact an administrator");
     const { refreshToken, access } = await mintSession(store, redeemed, (session) => accessToken(session, client),
-      (session) => deps.log({ event: "signin.session_started", method: redeemed.amr, developerId: redeemed.developerId, sessionId: session.sessionId, ...(client === undefined ? {} : { clientId: client.clientId }) }));
+      (session) => deps.log({ event: "signin.session_started", method: redeemed.amr, developerId: redeemed.developerId, session: sessionLogId(session.sessionId), ...(client === undefined ? {} : { clientId: client.clientId }) }));
     return tokens(access, refreshToken);
   }
 
@@ -896,8 +903,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     }
     // "active", or "recently_rotated": the same token presented again inside the grace window.
     const { session } = lookup;
-    // Spec 063: a refresh token works only for the client it was issued to, and not across a removal and re-registration.
-    if (session.clientId !== client?.clientId) return ended;
+    if (!refreshableBy(session, client?.clientId)) return refreshRefused(deps.log, session, ended);
     if (!await companyMayMint(session.developerId, session.amr, session.companyId, client, true, session.installMethod)) {
       await revoke(session.sessionId, "company_changed"); return ended;
     }
@@ -954,7 +960,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       return ended;
     }
     if ("ended" in rotated) return ended;
-    if (lookup.kind === "recently_rotated") deps.log({ event: "signin.refresh_grace", sessionId: session.sessionId });
+    if (lookup.kind === "recently_rotated") deps.log({ event: "signin.refresh_grace", session: sessionLogId(session.sessionId) });
     return tokens(access, rotated.refreshToken);
   }
 

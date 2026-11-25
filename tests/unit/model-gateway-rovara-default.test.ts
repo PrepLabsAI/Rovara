@@ -73,10 +73,9 @@ const nothingSent = (g: G) => { expect(g.rovaraSent).toEqual([]); expect(g.keySe
 
 describe("the pure default: preserve connected own keys (R-1)", () => {
   it("covers every combination", () => {
-    expect(defaultAgentSource({ keyConnected: false, bedrockConnected: false })).toEqual({ source: "rovara", via: "default" });
-    expect(defaultAgentSource({ keyConnected: true, bedrockConnected: false })).toEqual({ source: "anthropic_key", via: "own_key" });
-    expect(defaultAgentSource({ keyConnected: false, bedrockConnected: true })).toEqual({ source: "bedrock_byo", via: "own_key" });
-    expect(defaultAgentSource({ keyConnected: true, bedrockConnected: true })).toEqual({ source: "anthropic_key", via: "own_key" });
+    // DEC 254zzz525: a connected Bedrock role is not an input: it never makes a default.
+    expect(defaultAgentSource({ keyConnected: false })).toEqual({ source: "rovara", via: "default" });
+    expect(defaultAgentSource({ keyConnected: true })).toEqual({ source: "anthropic_key", via: "own_key" });
   });
 });
 
@@ -94,7 +93,7 @@ describe("agent route: no saved choice", () => {
     expect(JSON.stringify(g.logs)).not.toMatch(/customer-key|hello|rovara-ai-[0-9a-f]{8}/u);
   });
 
-  it.each(["anthropic_key", "bedrock_byo"] as const)("R-1: %s connected after backfill with no saved choice uses its own account and produces no Rovara receipt or bill line", async (source) => {
+  it.each(["anthropic_key"] as const)("R-1: %s connected after backfill with no saved choice uses its own account and produces no Rovara receipt or bill line", async (source) => {
     const g = gateway({ exempt: [] });
     // The backfill left this company without a row because it had nothing connected.
     expect(await g.choices.sourceFor(cidB)).toBeUndefined();
@@ -114,7 +113,7 @@ describe("agent route: no saved choice", () => {
     expect(await g.choices.sourceFor(cidB)).toBeUndefined();
   });
 
-  it.each(["anthropic_key", "bedrock_byo"] as const)("R-1: disconnected %s without a choice returns to company-billed Rovara AI under its caps", async (source) => {
+  it.each(["anthropic_key"] as const)("R-1: disconnected %s without a choice returns to company-billed Rovara AI under its caps", async (source) => {
     const g = gateway({ exempt: [] });
     const connection = source === "anthropic_key" ? g.companyKeys.connectedTo : g.bedrockConnected;
     connection.add(cidB); connection.delete(cidB);
@@ -124,6 +123,19 @@ describe("agent route: no saved choice", () => {
     const blocked = gateway({ exempt: [], caps: { companyMonth: 0 } });
     expect((await call(blocked.deps, requestBody, mint({ cid: cidB }))).status).toBe(422);
     nothingSent(blocked);
+  });
+
+  it("DEC 254zzz525: a connected Bedrock role with no saved choice and no own key is NOT used: Rovara's AI as today (billed to the company), the role never read; an explicit choice is what turns it on", async () => {
+    const g = gateway({ exempt: [] });
+    g.bedrockConnected.add(cidB);
+    expect((await call(g.deps, requestBody, mint({ cid: cidB }))).status).toBe(200);
+    expect(g.rovaraSent).toHaveLength(1); expect(g.byoSent).toEqual([]); expect(g.byoReads).toEqual([]); expect(g.keySent).toEqual([]);
+    expect(g.meter.billedCalls(claims.iss, cidB)).toMatchObject([{ line: { source: "rovara_ai", charge: "customer" } }]);
+    expect(sources(g)).toEqual([{ event: "agent_source", company: cidB, source: "rovara", via: "default" }]);
+    // The company then explicitly chooses its own Bedrock: now the role is used, and Rovara's AI is not.
+    g.choices.saved.set(cidB, "bedrock_byo");
+    expect((await call(g.deps, requestBody, mint({ cid: cidB }))).status).toBe(200);
+    expect(g.byoSent).toHaveLength(1); expect(g.rovaraSent).toHaveLength(1);
   });
 
   it("R-1: Anthropic precedes Bedrock when both are connected without a choice", async () => {
@@ -240,9 +252,11 @@ describe("agent route: faults fail closed", () => {
     expect((await call(g.deps)).status).toBe(503); nothingSent(g);
   });
 
-  it("an unreadable Bedrock connection refuses before any send", async () => {
+  it("an unreadable Bedrock connection is irrelevant with no choice (Rovara's AI, role never read); with an explicit bedrock_byo choice it refuses before any send", async () => {
     const g = gateway(); g.byo.connection = async () => { throw new Error("unreadable"); };
-    expect((await call(g.deps)).status).toBe(503); nothingSent(g);
+    expect((await call(g.deps)).status).toBe(200); expect(g.rovaraSent).toHaveLength(1); expect(g.byoSent).toEqual([]);
+    const h = gateway(); h.byo.connection = async () => { throw new Error("unreadable"); }; h.choices.saved.set(cidA, "bedrock_byo");
+    expect((await call(h.deps)).status).toBe(503); nothingSent(h);
   });
 });
 
@@ -266,7 +280,7 @@ describe("agent route: two companies", () => {
     expect(g.rovaraSent).toHaveLength(1);
     expect(g.keySent).toEqual([]); expect(g.byoSent).toEqual([]);
     expect(g.companyKeys.reads).toEqual([]);
-    expect(g.byoReads).toEqual([cidA]);
+    expect(g.byoReads).toEqual([]);
   });
 
   it("A's saved choice never moves B, and the exempt list is per company id (C is not exempt)", async () => {
@@ -345,26 +359,25 @@ describe("offered models follow the same default (they must equal what the agent
 });
 
 describe("resolveAgentSource", () => {
-  it("saved choices skip connection discovery; every no-choice company checks its own connections", async () => {
-    const keys = new CompanyKeys(); const choices = new Choices(); let byoReads = 0;
-    const byo = { connection: async () => { byoReads += 1; return undefined; } };
+  it("saved choices skip connection discovery; every no-choice company checks its own Anthropic key and never a Bedrock role (DEC 254zzz525)", async () => {
+    const keys = new CompanyKeys(); const choices = new Choices();
     choices.saved.set(cidA, "openai_key");
-    expect(await resolveAgentSource({ sources: choices, exempt: new Set([cidA, cidB]), keys, byo }, claims.iss, cidA)).toEqual({ source: "openai_key", via: "chosen" });
-    expect(await resolveAgentSource({ sources: choices, exempt: new Set([cidA]), keys, byo }, claims.iss, cidB)).toEqual({ source: "rovara", via: "default" });
-    expect(await resolveAgentSource({ sources: choices, keys, byo }, claims.iss, cidB)).toEqual({ source: "rovara", via: "default" });
-    expect(keys.asked).toEqual([`${cidB}/anthropic`, `${cidB}/anthropic`]); expect(byoReads).toBe(2);
+    expect(await resolveAgentSource({ sources: choices, exempt: new Set([cidA, cidB]), keys }, claims.iss, cidA)).toEqual({ source: "openai_key", via: "chosen" });
+    expect(await resolveAgentSource({ sources: choices, exempt: new Set([cidA]), keys }, claims.iss, cidB)).toEqual({ source: "rovara", via: "default" });
+    expect(await resolveAgentSource({ sources: choices, keys }, claims.iss, cidB)).toEqual({ source: "rovara", via: "default" });
+    expect(keys.asked).toEqual([`${cidB}/anthropic`, `${cidB}/anthropic`]);
   });
 });
 
 // ---- answers and learning (the company-key purposes) ----
-function purposeGateway(purpose: "answers" | "learning", options: { exempt?: string[]; companyMonth?: number; answersLimit?: number | undefined; noRovara?: boolean; bedrockStatus?: number; models?: Map<string, string>; byoFails?: boolean } = {}) {
+function purposeGateway(purpose: "answers" | "learning", options: { exempt?: string[]; companyMonth?: number; answersLimit?: number | undefined; noRovara?: boolean; bedrockStatus?: number; models?: Map<string, string> } = {}) {
   const customer = new CompanyKeys(); const choices = new Choices(); const bedrockConnected = new Set<string>();
   const ownSent: ProviderRequest[] = []; const rovaraSent: ProviderRequest[] = []; const agentKeyReads: string[] = [];
   const agentMeter = new InMemoryMeter(() => now);
   const meter = new InMemoryMeter(() => now, undefined, undefined, { combineCompanyWith: agentMeter });
   const companyCaps = new FixedCapsSource({ ...baseCaps, companyMonth: options.companyMonth ?? 1_000_000_000 });
   const rovara: RovaraAi = { sourceId: "operator-source", models: options.models ?? new Map([[MODEL, BEDROCK_ID]]), exempt: new Set(options.exempt ?? [cidA]), transport: async (request) => { rovaraSent.push(request); return options.bedrockStatus === undefined ? { status: 200, body: answer() } : { status: options.bedrockStatus, body: (async function* () { yield Buffer.from("{}"); })() }; } };
-  const rovaraDefault = options.noRovara === true ? {} : { rovaraDefault: { ai: rovara, sources: choices, byo: { connection: async (iss: string, cid: string) => options.byoFails === true ? Promise.reject(new Error("unreadable")) : bedrockConnected.has(cid) ? { row: { iss, cid, owner: "_company", sourceId: "src_bedrock", versionId: "11111111-1111-4111-8111-111111111111" }, connection: conn(cid) } : undefined } as never } };
+  const rovaraDefault = options.noRovara === true ? {} : { rovaraDefault: { ai: rovara, sources: choices } };
   const transport: ProviderTransport = async (request) => { ownSent.push(request); return { status: 200, body: answer() }; };
   const common = { keys: customer, meter, companyCaps, modelLimits: { maxOutputTokens: () => 128_000 }, transport, transports: { openai: transport }, ...rovaraDefault };
   const routes = purpose === "answers"
@@ -443,11 +456,12 @@ for (const purpose of ["answers", "learning"] as const) {
       }
     });
 
-    it("an exempt company with its own Bedrock connected and no choice is paused as before (answers never ran on Bedrock)", async () => {
+    it("DEC 254zzz525: an exempt company with its own Bedrock connected and no choice is served by Rovara's AI exactly as without the role (the role changes no default)", async () => {
       const g = purposeGateway(purpose); g.bedrockConnected.add(cidA);
       const sink = await ask(g.deps, purpose);
-      expect(sink.headers[purpose === "answers" ? ANSWERS_PAUSE_HEADER : "x-rovara-lessons-pause"]).toBe("no_provider");
-      expect(g.rovaraSent).toEqual([]);
+      expect(sink.headers[purpose === "answers" ? ANSWERS_PAUSE_HEADER : "x-rovara-lessons-pause"]).toBeUndefined();
+      expect(sink.status).toBe(200);
+      expect(g.rovaraSent).toHaveLength(1);
     });
 
     it("an exempt company that explicitly returned to Rovara's AI is served by it", async () => {
@@ -474,16 +488,14 @@ for (const purpose of ["answers", "learning"] as const) {
       for (const r of await h.meter.read({ iss: claims.iss, cid: cidA, pid: claims.pid, tid: claims.tid })) expect(r.committed).toBe(0);
     });
 
-    it("a key-connected or Bedrock read fault for an exempt company is a 503, nothing sent (never a guess onto Rovara's AI)", async () => {
+    it("a key-connected read fault for an exempt company is a 503, nothing sent (never a guess onto Rovara's AI)", async () => {
       const g = purposeGateway(purpose);
       g.customer.connectedTo.clear();
       const connected = g.customer.connected.bind(g.customer);
       g.customer.connected = async () => { throw new Error("down"); };
       expect((await ask(g.deps, purpose)).status).toBe(503);
       g.customer.connected = connected;
-      const h = purposeGateway(purpose, { byoFails: true });
-      expect((await ask(h.deps, purpose)).status).toBe(503);
-      expect(g.rovaraSent).toEqual([]); expect(h.rovaraSent).toEqual([]);
+      expect(g.rovaraSent).toEqual([]);
     });
 
     it("a Bedrock refusal of Rovara's own role is Rovara's to fix: 503, never charged", async () => {

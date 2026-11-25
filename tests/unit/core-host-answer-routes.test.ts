@@ -245,7 +245,7 @@ it("mounted Answers and history use task-page read authority and recheck it", as
   const taskId = "11111111-1111-4111-8111-111111111111";
   await fake.store.put({ item: { pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", taskId, companyId: FAKE_COMPANY, project: "alpha", title: "Private task", requestText: "PRIVATE-TASK-REQUEST", developerId: "somebody-else" } });
   const model = scriptedModel([answer([{ text: "The task is starting.", cites: [{ kind: "task_state", quote: "No document has been written yet." }] }])]);
-  const routes = createCoreDevRoutes({ app, companyOf: async () => ({ companyId: FAKE_COMPANY, role: "owner" }), wiring: () => ({ origin: () => "https://api.example", scriptTokens: { enabled: () => true }, taskRules: { route: async () => ({ statusCode: 404, headers: {}, body: "" }), readsAsReader: async () => readable.shared }, answers: { standing: async () => ({ access: "view" }), repositories: async () => ({ handles: handles(FAKE_COMPANY), names: ["web"] }), model: () => model } }) });
+  const routes = createCoreDevRoutes({ app, companyOf: async () => ({ companyId: FAKE_COMPANY, role: "owner" }), wiring: () => ({ origin: () => "https://api.example", scriptTokens: { enabled: () => true }, taskRules: { route: async () => ({ statusCode: 404, headers: {}, body: "" }), sharedReader: async () => (readable.shared ? { role: "viewer" } : undefined) }, answers: { standing: async () => ({ access: "view" }), repositories: async () => ({ handles: handles(FAKE_COMPANY), names: ["web"] }), model: () => model } }) });
   const caller = { principal: person, client: "cli" } as DeployedCaller;
   const post = () => routes.route({ method: "POST", path: PATH, headers: {}, body: JSON.stringify(ask({ taskId })) }, caller);
   const get = () => routes.route({ method: "GET", path: `/v1/app/projects/alpha/tasks/${taskId}/answers`, headers: {}, body: "" }, caller);
@@ -256,7 +256,8 @@ it("mounted Answers and history use task-page read authority and recheck it", as
   expect(model.turns.at(-1)!.transcript).not.toContain("PRIVATE-TASK-REQUEST");
   expect(JSON.parse((await get())!.body)).toEqual({ entries: [], more: false });
   readable.shared = true;
-  expect((JSON.parse((await post())!.body) as Record<string, unknown>)["outcome"]).toBe("answered");
+  // A share is admitted to the task but is shown its summary only: the frame carries none of the plan text (and so the answer that cites it is not found).
+  expect((JSON.parse((await post())!.body) as Record<string, unknown>)["outcome"]).toBe("not_found");
   readable.failed = true;
   expect((JSON.parse((await post())!.body) as Record<string, unknown>)["outcome"]).toBe("not_found");
   expect(model.turns.at(-1)!.transcript).not.toContain("PRIVATE-TASK-REQUEST");

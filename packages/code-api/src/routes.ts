@@ -57,6 +57,8 @@ export function routeIdOf(route: Pick<Route, "id" | "method" | "path">): string 
 
 /** RD-2.0: what a read the table lists but Code does not serve yet may answer, and its example refusal (the same words for every task). */
 const NOT_SERVED_ERRORS: readonly RouteRefusal[] = [{ code: "TASK_NOT_FOUND", status: 404 }, { code: "ROUTE_NOT_SERVED", status: 404 }];
+/** The reads a task shared for its summary does not show (the read rule's table): spec, checks and changes answer such a reader TASK_PART_NOT_SHOWN (403). */
+const PART_NOT_SHOWN_ERRORS: readonly RouteRefusal[] = [...NOT_SERVED_ERRORS, { code: "TASK_PART_NOT_SHOWN", status: 403 }];
 const NOT_SERVED_REFUSAL = { error: { code: "ROUTE_NOT_SERVED", message: ROUTE_NOT_SERVED_MESSAGE } } as const;
 
 /**
@@ -134,9 +136,9 @@ export const ROUTES: readonly Route[] = [
   // Cloud's Proof tab: the task's proof index (what the proof page shows as checked for its current code, and its failing tests), under the task read's own rule.
   { id: "tasks.evidence.list", method: "GET", path: "/v1/dev/tasks/{taskId}/evidence", requires: "tasks:read", response: TaskEvidenceListSchema, example: { response: TASK_EXISTING_READ_EXAMPLES.evidence } },
   // RD-2.0: the new reads of the task page, each in one answer (core-host/task-screen-routes.ts mounts them; each answers ROUTE_NOT_SERVED until its lane fills it: RD-2a spec, RD-2b1 checks, RD-2b2 changes, RD-2c timeline). Under the task read's own rule.
-  { id: "tasks.spec", method: "GET", path: "/v1/dev/tasks/{taskId}/spec", requires: "tasks:read", response: TaskSpecReadSchema, errors: NOT_SERVED_ERRORS, example: { response: TASK_SPEC_EXAMPLE, refusal: NOT_SERVED_REFUSAL } },
-  { id: "tasks.checks", method: "GET", path: "/v1/dev/tasks/{taskId}/checks", requires: "tasks:read", response: TaskChecksReadSchema, errors: NOT_SERVED_ERRORS, example: { response: TASK_CHECKS_EXAMPLE, refusal: NOT_SERVED_REFUSAL } },
-  { id: "tasks.changes", method: "GET", path: "/v1/dev/tasks/{taskId}/changes", requires: "tasks:read", response: TaskChangesReadSchema, errors: NOT_SERVED_ERRORS, example: { response: TASK_CHANGES_EXAMPLE, refusal: NOT_SERVED_REFUSAL } },
+  { id: "tasks.spec", method: "GET", path: "/v1/dev/tasks/{taskId}/spec", requires: "tasks:read", response: TaskSpecReadSchema, errors: PART_NOT_SHOWN_ERRORS, example: { response: TASK_SPEC_EXAMPLE, refusal: NOT_SERVED_REFUSAL } },
+  { id: "tasks.checks", method: "GET", path: "/v1/dev/tasks/{taskId}/checks", requires: "tasks:read", response: TaskChecksReadSchema, errors: PART_NOT_SHOWN_ERRORS, example: { response: TASK_CHECKS_EXAMPLE, refusal: NOT_SERVED_REFUSAL } },
+  { id: "tasks.changes", method: "GET", path: "/v1/dev/tasks/{taskId}/changes", requires: "tasks:read", response: TaskChangesReadSchema, errors: PART_NOT_SHOWN_ERRORS, example: { response: TASK_CHANGES_EXAMPLE, refusal: NOT_SERVED_REFUSAL } },
   { id: "tasks.timeline", method: "GET", path: "/v1/dev/tasks/{taskId}/timeline", requires: "tasks:read", response: TaskTimelineReadSchema, errors: NOT_SERVED_ERRORS, example: { response: TASK_TIMELINE_EXAMPLE, refusal: NOT_SERVED_REFUSAL } },
   // Tasks: start.
   { method: "POST", path: "/v1/dev/tasks", requires: "tasks:start" },

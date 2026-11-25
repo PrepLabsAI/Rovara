@@ -6,6 +6,7 @@
 // on changes (`decisionDigest`), so a pass that saw nothing new writes nothing, and the workflow snapshot changes only when a decision changes the workflow.
 //
 // Merge tracking never presses merge: a person always does (owner decision 1). It marks a draft ready and asks for reviewers; fixes and syncs are other tasks' deciders.
+import { owedLevelOf } from "./grown-owed.js";
 import { createHash } from "node:crypto";
 import { providerOf } from "../../plugins/routing.js";
 import {
@@ -899,7 +900,8 @@ async function trackOne(
     const where = deps.origin !== undefined && task.sessionId !== undefined ? `: ${sessionLink(deps.origin, task.sessionId)}` : ".";
     return deps.milestones.items({
       kind: "approved", orgId: task.orgId, taskId: task.taskId, ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }), at: stamp,
-      text: `Approved by ${inertLine(announce.login)}. Ready to merge${where}`, pullRequests: [{ repository: pullRequest.repositoryId, number: pullRequest.number, url: pullRequest.url }],
+      // A change that grew is not ready until the higher level's reviews ran on its head (the merge view says so): the approval is told, "ready" is not.
+      text: owedLevelOf(task.workflow) === undefined ? `Approved by ${inertLine(announce.login)}. Ready to merge${where}` : `Approved by ${inertLine(announce.login)}${where}`, pullRequests: [{ repository: pullRequest.repositoryId, number: pullRequest.number, url: pullRequest.url }],
     }, announce.n, { definitionVersion: task.workflow.definitionVersion });
   };
 

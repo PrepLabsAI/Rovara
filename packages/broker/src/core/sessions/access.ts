@@ -125,7 +125,8 @@ const PEOPLE_ROLES: ReadonlySet<string> = new Set(["owner", "commenter", "viewer
 export interface PeopleEntryOfItem { role: PeopleRole; web: boolean }
 
 /**
- * A People item: undefined for none, "unreadable" for one that does not parse (a denial for everyone). A person listed twice keeps their last entry.
+ * A People item: undefined for none, "unreadable" for one that does not parse (a denial for everyone). The entries are keyed by the person's SIGN-IN id (the `developerId` the list stores: a hosted principal's `personId`),
+ * never by the session's hashed person id. A person listed twice makes the whole list unreadable, as the People reader itself refuses it (`parsePeople`): a later `viewer` entry must not undo an earlier `denied` one.
  * C2 (C1 review L4): an entry carrying a sign-in `method` is a `web` identity's entry; it must parse as one, or the whole item is unreadable. Every other
  * entry reads exactly as before.
  */
@@ -139,6 +140,7 @@ export function peopleOfItem(item: Item | undefined): Map<string, PeopleEntryOfI
     if (typeof person !== "object" || person === null || typeof person.developerId !== "string" || typeof person.role !== "string" || !PEOPLE_ROLES.has(person.role)) return "unreadable";
     const web = Object.hasOwn(person, "method");
     if (web && taskPeopleEntryKind(person) !== "web") return "unreadable";
+    if (roles.has(person.developerId)) return "unreadable";
     roles.set(person.developerId, { role: person.role as PeopleRole, web });
   }
   return roles;
@@ -175,6 +177,31 @@ interface Computed {
   heldRole: SessionProjectRole | undefined;
 }
 
+/** Whether the person owns the session: they are its effective owner, and for a task's session they still hold a project grant (read now), as a People entry must. */
+function ownsSession(person: SessionPerson, effectiveOwner: { developerId: string }, session: AgentSessionRecord, grantRole: SessionProjectRole | undefined): boolean {
+  if (person.developerId !== effectiveOwner.developerId) return false;
+  return session.subject.kind !== "task" || (grantRole !== undefined && WEB_PEOPLE_GRANTS.has(grantRole));
+}
+
+/**
+ * The task's People entry that applies to the person now: `denied`, `unreadable` (a list that does not read, or one the person has no key to be found in), a role, `unlisted` (a list exists and gives this person nothing),
+ * or undefined (the task has no list at all). The list names a person by their SIGN-IN id (`principal.personId`), the id the People writers store and the members seam proves; the session's own hashed id
+ * (`person.developerId`) is never an entry's key, and no writer ever stored one. A person asked about with no principal (a follower's re-check has only the hash) has no key to look the list up with, so a list that
+ * exists reads as unreadable for them: fail closed, never "no entry".
+ * A stored role is never trusted alone (C2, C1 review L4): it grants only while the person, already a live member of this company (the members seam), holds a developer or administrator GRANT of their own on the task's
+ * project, for a `web` and a `slack` entry alike (plan 4.1 rules 3 and 4; the task path asks `projectGrant` for every People role). A company owner's or admin's implied maintainership is no grant. A denial always applies.
+ */
+async function peopleEntryOf(store: Pick<DocumentStore, "get">, person: SessionPerson, taskId: string, grantRole: SessionProjectRole | undefined): Promise<PeopleRole | "unreadable" | "unlisted" | undefined> {
+  const people = peopleOfItem(await store.get({ pk: `DEVTASK#${taskId}`, sk: "PEOPLE" }));
+  if (people === undefined || people === "unreadable") return people;
+  const key = person.principal?.personId;
+  if (key === undefined) return "unreadable";
+  const found = people.get(key);
+  if (found === undefined) return "unlisted";
+  if (found.role === "denied") return "denied";
+  return grantRole !== undefined && WEB_PEOPLE_GRANTS.has(grantRole) ? found.role : "unlisted";
+}
+
 async function compute(deps: SessionAccessDependencies, person: SessionPerson, companyRole: SessionCompanyRole, session: AgentSessionRecord, options: SessionAccessOptions): Promise<Computed> {
   const readOnly = options.readOnlyPath === true;
   const isAdmin = isAdminRole(companyRole);
@@ -209,11 +236,17 @@ async function compute(deps: SessionAccessDependencies, person: SessionPerson, c
     if (found !== undefined && (found["orgId"] ?? found["companyId"]) === session.orgId) task = found;
   }
   const effectiveOwner = effectiveOwnerOf(session, task);
-  const owner = person.developerId === effectiveOwner.developerId;
   const projectRoles = session.project === undefined ? undefined : await roleOn(session.project);
   const projectRole = projectRoles?.effective;
   const grantRole = projectRoles?.grant;
+  // The owner of a TASK session (the starter, or the taker) owns it only while they still hold a project grant, read now: the test a People entry meets below. A person removed from the project keeps their old task as
+  // nothing (no read, no steer, no stop, no close); a company admin who is not the owner, and a current maintainer, still reach it by their own rule.
+  let owner = ownsSession(person, effectiveOwner, session, grantRole);
   const orgAdmin = isAdmin && session.kind !== "local";
+  // The task's People list, when it has one, says who owns the task as the task path does: the session's owner (the starter, or the taker) keeps owning it only with an `owner` entry, so a starter another owner
+  // demoted to commenter or viewer, or denied, holds no owner level here (their level below comes from what is left).
+  const entry = task !== undefined && session.subject.kind === "task" ? await peopleEntryOf(deps.store, person, session.subject.taskId, grantRole) : undefined;
+  if (entry !== undefined && entry !== "owner") owner = false;
 
   let level: "none" | SessionLevel = owner ? "edit" : "none";
   if (session.kind === "task" && session.project !== undefined) {
@@ -233,19 +266,10 @@ async function compute(deps: SessionAccessDependencies, person: SessionPerson, c
   }
 
   let denied = false;
-  if (task !== undefined && session.subject.kind === "task") {
-    const people = peopleOfItem(await deps.store.get({ pk: `DEVTASK#${session.subject.taskId}`, sk: "PEOPLE" }));
-    const found = people === undefined || people === "unreadable" ? people : people.get(person.developerId);
-    // C2 (C1 review L4): a stored role is never trusted alone for a `web` entry. It grants only while the person, already a live member of this
-    // company (the members seam, above), holds a live developer or administrator grant on the task's project: the same live rule as the People
-    // proof (plan 4.1 rules 3 and 4). A denial always applies. A `slack` entry reads exactly as before.
-    const entry = found === undefined || found === "unreadable" ? found
-      : found.web && found.role !== "denied" && (grantRole === undefined || !WEB_PEOPLE_GRANTS.has(grantRole)) ? undefined : found.role;
-    if (entry === "denied" || entry === "unreadable") { level = orgAdmin ? "view" : "none"; denied = true; }
-    else if (entry === "owner") level = best(level, isTakenOver(task) ? "none" : "edit");
-    else if (entry === "commenter") level = best(level, "use");
-    else if (entry === "viewer") level = best(level, "view");
-  }
+  if (entry === "denied" || entry === "unreadable") { level = orgAdmin ? "view" : "none"; denied = true; }
+  else if (entry === "owner") level = best(level, task !== undefined && isTakenOver(task) ? "none" : "edit");
+  else if (entry === "commenter") level = best(level, "use");
+  else if (entry === "viewer") level = best(level, "view");
 
   // A project viewer who is not the owner only watches, whatever a share or a People entry says.
   if (!owner && projectRole === "viewer" && RANK[level] > RANK.view) level = "view";

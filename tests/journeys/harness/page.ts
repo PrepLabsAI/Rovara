@@ -77,5 +77,17 @@ export function removeFromCompany(world: JourneyWorld, who: Developer): void {
   world.harness.db.set({ ...row, revokedAt: new Date().toISOString(), revokedBy: "operator" });
 }
 
+/**
+ * A request of a person who is out of the company. Each broker call it makes is refused one of two ways, and it is held to it: the core answers it itself (the real-core proof counts it as the core's), or the broker's SIGN-IN
+ * check refuses it with a 401 before any engine is asked (recorded as `signInRefused` records it: by design the core never sees it, and the real-core check fails unless it is a 401). A call neither the core answered
+ * nor a 401 refused fails the journey's real-core check; no other exemption exists (the old A1 `probe` is gone).
+ */
+export async function asRemovedPerson<T>(world: JourneyWorld, request: () => Promise<T>): Promise<T> {
+  const seenBefore = world.proof.seen.length;
+  const reply = await request();
+  for (const call of world.proof.seen.slice(seenBefore)) if (!call.answeredByCore) call.kind = "sign-in";
+  return reply;
+}
+
 /** The comments stored on a task (one row each), for "nothing is stored" checks. */
 export const storedComments = (world: JourneyWorld, taskId: string) => world.harness.db.find((row) => row.pk === `DEVTASK#${taskId}` && row.entityType === "TASK_COMMENT");

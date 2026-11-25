@@ -1,6 +1,6 @@
 // Spec 067: task readers. A task's owner shares it read-only with another member of the task's project, by developer
-// ID. A reader reads the task and its events as the owner does (in the task page's viewer view) and nothing else: every
-// other task route keeps its owner-only check. A reader's access holds only while they are still a member of the project,
+// ID. A reader reads the task and its events as the owner does (in the task page's viewer view); what else a share shows is
+// the one read rule's table (core/task-flow/read-rule.ts). A reader's access holds only while they are still a member of the project,
 // checked on every read; for anyone else a shared task reads as not found, exactly as an unshared one.
 //
 // Stored on the task's own partition: `DEVTASK#<taskId>` / `READER#<developerId>`.
@@ -15,6 +15,7 @@ import {
   type TaskReadersResponse,
 } from "@agentx/contracts";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
+import { recordInCompany } from "./company-check.js";
 import { taskCompanyId } from "../developer/task-person-identity.js";
 
 export interface TaskReaderPerson {
@@ -22,6 +23,11 @@ export interface TaskReaderPerson {
   name: string;
   /** Whether they hold a grant on the project (a developer or an administrator of it). */
   projectMember: boolean;
+  /**
+   * Only when asked with `ownTask` (and the task's id): whether they may use the project as a task START does now (`checkProjectAccess`): a grant, or, for an OLD-engine task (no engine stamp), fresh
+   * bound-channel membership while the project lets channel members use it. Never given to a reader (a reader needs the grant, `projectMember`).
+   */
+  mayStart?: boolean;
 }
 
 export interface TaskReaderDependencies {
@@ -33,7 +39,7 @@ export interface TaskReaderDependencies {
    * A registered, not removed person and whether they are a member of `project` in the task's company (`taskCompany`, DEC 254zzz98 review L2: a live member of that company, with
    * its grant); undefined for anyone else. Without it, tasks can't be shared.
    */
-  taskReaderPerson?(developerId: string, project: string, taskCompany?: string): Promise<TaskReaderPerson | undefined>;
+  taskReaderPerson?(developerId: string, project: string, taskCompany?: string, options?: { ownTask?: true; taskId?: string }): Promise<TaskReaderPerson | undefined>;
 }
 
 interface ReaderRecord {
@@ -91,18 +97,59 @@ const view = (record: ReaderRecord, now: TaskReaderPerson | undefined): TaskRead
 });
 
 /**
- * Whether `developerId` reads `task` as a reader now: a reader record, and still a registered member of the task's project. The
- * caller has already found they are not its owner.
+ * The stored share of `developerId` on `task`, for the one read rule (core/task-flow/read-rule.ts, which decides what the share's role may see): the row's role AS STORED (any text; the rule treats a role
+ * it does not know as no share), and only while they are still a registered member of the task's project. Undefined for anyone else. The caller has already found they are not the task's own person.
  */
-export async function readsAsReader(deps: TaskReaderDependencies, task: DeveloperTaskRecord, developerId: string): Promise<boolean> {
-  if (deps.taskReaderPerson === undefined) return false;
-  if (await readerRecord(deps, task.taskId, developerId) === undefined) return false;
+export async function readerShare(deps: TaskReaderDependencies, task: DeveloperTaskRecord, developerId: string): Promise<{ role: string } | undefined> {
+  if (deps.taskReaderPerson === undefined) return undefined;
+  const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: readerKey(task.taskId, developerId), ConsistentRead: true })) as { Item?: { role?: unknown } };
+  if (typeof response.Item?.role !== "string") return undefined;
   const now = await deps.taskReaderPerson(developerId, task.project, taskCompanyId(task));
   if (now?.projectMember !== true) {
     log(deps, { event: "developer.task_reader_refused", taskId: task.taskId, reason: now === undefined ? "not_registered" : "not_project_member" });
-    return false;
+    return undefined;
   }
-  return true;
+  return { role: response.Item.role };
+}
+
+/**
+ * Whether `developerId` is the task's own stored person AND still a live member of the task's company with the access that let them START it, read now: the project grant, or (the start's own test,
+ * `checkProjectAccess`) fresh bound-channel membership while the project lets channel members use it. A person removed from the project or the company, who left the channel, or whose project turned
+ * channel use off keeps no hold on their old task through the stored id alone. A read that fails, or no way to ask, is "no".
+ */
+export async function holdsOwnTask(deps: Pick<TaskReaderDependencies, "taskReaderPerson">, task: DeveloperTaskRecord, developerId: string): Promise<boolean> {
+  return await ownTaskHold(deps, task, developerId) !== false;
+}
+
+/**
+ * How the task's own person holds it now: "grant" (the project grant, the only way a NEW-engine task is held: its start and every step need it), "channel" (an OLD-engine task, no engine stamp, by the start's
+ * own test, which also admits bound-channel membership), or false. The engine is read from the task's stamp inside `taskReaderPerson` (a stamp that is there, or cannot be read, is grant only).
+ */
+async function ownTaskHold(deps: Pick<TaskReaderDependencies, "taskReaderPerson">, task: DeveloperTaskRecord, developerId: string): Promise<"grant" | "channel" | false> {
+  if (task.developerId !== developerId || deps.taskReaderPerson === undefined) return false;
+  try {
+    const now = await deps.taskReaderPerson(developerId, task.project, taskCompanyId(task), { ownTask: true, taskId: task.taskId });
+    return now?.projectMember === true ? "grant" : now?.mayStart === true ? "channel" : false;
+  } catch { return false; }
+}
+
+/** The same test as `holdsOwnTask`, as a refusal: the task's own person who no longer holds the project reads as "no such task" (the caller's own words). */
+export async function requireOwnTask(deps: Pick<TaskReaderDependencies, "taskReaderPerson">, task: DeveloperTaskRecord, developerId: string, refusal: () => Error): Promise<void> {
+  if (!await holdsOwnTask(deps, task, developerId)) throw refusal();
+}
+
+/**
+ * Whether a task of the person's own task INDEX lists as theirs: in a company, a task of the caller's, in that company, whose project they still hold as a start would (read now; a grant once per project for one page, in `held`).
+ * With no company layer, as it always was (everything the index names).
+ */
+export async function listsAsOwn(deps: Pick<TaskReaderDependencies, "taskReaderPerson"> & { companyId?: string | undefined }, task: DeveloperTaskRecord | undefined, developerId: string, held: Map<string, boolean>): Promise<boolean> {
+  if (deps.companyId === undefined) return true;
+  if (task === undefined || task.developerId !== developerId || !recordInCompany(task, deps.companyId)) return false;
+  // A project the person holds by a grant holds for every task of it (read once per page); a hold by the channel is per task (it depends on the task's engine), so it is never kept.
+  if (held.get(task.project) === true) return true;
+  const hold = await ownTaskHold(deps, task, developerId);
+  if (hold === "grant") held.set(task.project, true);
+  return hold !== false;
 }
 
 /** `GET …/readers`: the owner's list. The caller is the owner. */

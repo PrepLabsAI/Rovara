@@ -25,6 +25,63 @@ d06ffc50cb2850f327d3eb47e274e7a258732dc4513be9889567636bba2a3421  tests/support/
 
 Evidence applies to this uncommitted tests-only delta on the head above. L6/9d owns the commit, final-head lane gate, lead 4 Opus delta review and staging proof. No current gate stamp or review verdict is claimed.
 
+## RD-2.0 - contract rows for the task page reads (commit 567630b57 plus the S2/S3 follow-up)
+
+Production guards this lane adds: the `owns()` clause and the mount hunk in `core-host/dev-routes.ts`, GET-only and the anchored path regex in `core-host/task-screen-routes.ts`, the stub's fixed `ROUTE_NOT_SERVED` refusal (`task-spec-routes.ts`, the other three stubs are the same line), the code's 404 status (`packages/code-api/src/errors.ts`), and the existing script-token line that keeps a token off the four paths. Each mutant was applied singly to the working tree, one targeted run, then the file was restored with `git checkout -- <file>`.
+
+| Mutant / location | Mutation | Failing test (all in tests/unit/core-host-dev-routes.test.ts, "the task page's new reads (RD-2.0)", unless noted) |
+|---|---|---|
+| M1 dev-routes.ts `owns()` | drop `\|\| taskScreenRoute(path, method) !== undefined` | both tests: no answer (undefined) instead of 404 / 403 |
+| M2 task-screen-routes.ts `taskScreenRoute` | GET-only check removed | "serves GET only": POST/PUT answered instead of left to the old broker |
+| M3 task-screen-routes.ts `PATH` | drop the `$` anchor | "serves GET only": `/specs` and `/spec/x` answered |
+| M4 task-spec-routes.ts | stub resolves 200 `{}` instead of refusing | "answers ROUTE_NOT_SERVED ...": 200 instead of 404 |
+| M5 code-api errors.ts | remove `ROUTE_NOT_SERVED` from the 404 group | code-api-errors "lists every code in its order", code-api-version digest, and the dev-routes test (409 instead of 404) |
+| M6 dev-routes.ts script-token line | let the four paths past the token refusal | "serves GET only ... keeps a script token out": 404 instead of 403 |
+| M7 dev-routes.ts `taskSurfaceAnswer` | remove the `routeTaskScreen` line | "answers ROUTE_NOT_SERVED ...": undefined instead of 404 |
+| M8 task-spec-routes.ts | code `NOT_FOUND` instead of `ROUTE_NOT_SERVED` | "answers ROUTE_NOT_SERVED ...": body differs from the row's example refusal |
+
+All 8 killed; the restored tree passes (17 files, 539 tests, `tsc -b` clean). Evidence applies to this lane's commits; the final-head gate and review belong to 9d.
+
+## RD-2.0-READ-RULE - the one read rule (commit 1 9f1dbfedc, commit 2 1c14abfdc; all 14 mutants re-applied on 3c53c33eb, the head after the gate fixes)
+
+Production guards this lane adds: the company check first and every basis in `core/task-flow/read-rule.ts` (`ADMITTED_BY`, `SHARED_PARTS`, `SHARED_ROLES`, `maySeeTaskMoney`, `mayReadSourceCode`, `mayReadCodeDetails`), the stored share's live project check (`aws/task-readers.ts` `readerShare`), and the events route's call of the rule (`aws/core-task-rule-routes.ts`). Each mutant was applied singly to the working tree, one targeted run (`tests/unit/task-read-rule.test.ts`, `tests/contract/rd-2-0-read-rule-golden.test.ts`, `tests/unit/core-host-task-web-routes.test.ts`), then the file was restored with `git checkout -- <file>`.
+
+| Mutant / location | Mutation | Killed by |
+|---|---|---|
+| M1 read-rule.ts company check | dropped (a task of another company is judged by the seams) | core-host-task-web-routes (5 tests: taskReadable, task read, merge standing...), the table |
+| M2 task-readers.ts `readerShare` | a share is admitted without the live project membership | the real-routes table and the golden ("left the project") |
+| M3 read-rule.ts `storedShare` | an unknown stored role is treated as viewer | the table ("unknown role"), the real routes, the golden |
+| M4 read-rule.ts `maySeeTaskMoney` | money for every member (the stored-owner test dropped) | the decision's money table and the golden (task view shapes) |
+| M5 read-rule.ts | a withheld part answers the missing task's 404 instead of TASK_PART_NOT_SHOWN | the table ("shared reader", "admin and shared") and the golden |
+| M6 core-task-rule-routes.ts | the events route skips the read rule | the real-routes table and the golden (a stranger reads the events) |
+| M7 read-rule.ts `ADMITTED_BY.task` | the stored share is asked before the core's own rule | core-host-task-web-routes ("never asks for the owner...") and the table |
+| M8 read-rule.ts `reads` | any canRead failure becomes "no" (so the share is asked) | core-host-task-web-routes ("a core read that fails for another reason stays a failure") and the table |
+| M9 read-rule.ts `mayReadSourceCode` | the old page rule carries source code | the decision's source-code flags |
+| M10 read-rule.ts `ADMITTED_BY.diff` | the diff admits a share (survived the first run: the page seam throws its refusal first; killed by the new test that binds no page seam) | "the diff and the plan and proof never admit a stored share" |
+| M11 read-rule.ts `ADMITTED_BY.share` | the readers routes admit the core read rule (a co-owner told "only the owner can share") | the table ("share" column) |
+| M12 read-rule.ts `ADMITTED_BY.events` | the events drop the core read rule | the table and the golden's named widening cells |
+| M13 read-rule.ts `mayReadCodeDetails` | code details for every reader | the decision's flags (`codeDetails` equals `sourceCode`) |
+| M14 read-rule.ts `ADMITTED_BY.plan` | the plan admits a share | the table ("shared reader", "admin and shared") |
+
+All 14 killed on 3c53c33eb (M10 survived on the first run, before its test existed); the restored tree passes. Evidence applies to this lane's commits; the final-head gate and review belong to 9d.
+
+## RD-2.0-READ-RULE pre-review fixes (head cdd50103e: the plan GET, the live grant re-read, the answers frame, plan comments, the actions standing)
+
+New production guards: the plan GET's call of the rule (`core-host/parity-task-routes.ts`), the live company membership and project grant re-read for every way in (`core/task-flow/read-rule.ts` `liveGrantOf`), the answers frame's withheld documents (`core/answers/task-context.ts`), the plan comments' gate (`aws/core-task-rule-routes.ts`), the actions standing's reader check (`core/task-actions/standing.ts`), the merge standing's grant re-read for the task's owner (`core-host/hosted-merge-routes.ts`), the stored person's mode and the share-lookup log. Each mutant applied singly on cdd50103e, one targeted run (the table, the golden, core-host-task-web-routes), restored with `git checkout -- <file>`. M9 (source code without the grant proof) was re-expressed for the new `grantProved` flag and killed again.
+
+| Mutant / location | Mutation | Killed by |
+|---|---|---|
+| M15 parity-task-routes.ts | the plan GET reads the task and asks no rule | the real-routes table (a stranger, a share and the starters read the plan route) |
+| M16 read-rule.ts `grant === "no"` | no live grant re-read for any way in | the table's two starters on every read (function and routes), the starters test |
+| M17 task-context.ts | the answers frame hands a share the plan text | the table's answers cell for a share, the golden's named cells, the answers test |
+| M18 core-task-rule-routes.ts | the plan comments skip the rule | the real-routes table (comments for a stranger and a share) |
+| M19 standing.ts | a refusal of the rule counts as a reader | the actions standing test |
+| M20 hosted-merge-routes.ts | the task's owner is not re-checked for the grant at the merge standing | the starters on the real merge route |
+| M21 read-rule.ts | the task's own person reads as "reader" | the table (every "o" cell) |
+| M22 read-rule.ts | a failing share lookup is not logged | the log test |
+| M9 read-rule.ts `mayReadSourceCode` | source code without the grant proof | the decision's source-code flags |
+
+All killed; the restored tree passes.
 ## MERGE-APPROVAL-NOT-SPENT-ON-REFUSAL (lane commit 0ba8a3b9c, round 2 on top of it)
 
 Tests: `tests/unit/core-merge-approval-not-spent.test.ts` and `tests/unit/core-merge-press-hardening.test.ts`, run together (22 tests) after each mutant of `packages/broker/src/core/merge/merge.ts` (each restored from a copy; `tsc -b` not re-run per mutant).
@@ -56,6 +113,110 @@ Measured on Code lane commit 47fb34900 (the lane rebased onto L1/L9b-code 6336ff
 | Cloud C5 | the role's Allow also holds `s3:DeleteObject` | 8 of 40 | green |
 
 No new money or authority line other than the IAM grants above; the template pin (environment-release-pipeline*.test.ts) and the `AgentXReleasePipeline` snapshot hold the synthesized result, and the pin was recomputed against the rebased base (the base's own template still matches the pin recorded before this lane, `291ca547...`).
+
+
+## GRANT-EXCHANGE-G1 (Git exchange: liveness, count, audit, log; two commits on base 97fdae1c0, mutants re-measured on the second)
+
+Tests: core `tests/unit/core-e2e-publication-callback.test.ts` with `tests/unit/core-close-recovery.test.ts` (the core's exchange, `packages/broker/src/services/repository-exchange.ts`), legacy `tests/contract/legacy-git-exchange.test.ts` (`packages/broker/src/aws/legacy-repository-exchange.ts` and `assertLegacyPushAuthority` in `packages/broker/src/aws/broker.ts`). Each mutant was applied alone to a scratch edit of the file, the named tests were run (`--maxWorkers=2`), and the file was restored from a copy. `tsc -b` was not re-run per mutant. Earlier rounds of this lane found survivors and fake-rejected mutants (a stale workspace object in the first tests; a mutated DynamoDB expression the fake rejects; after the Sonnet pre-review's fixes, a workspace check that was done twice, so removing either copy went unseen, and a legacy publish case that the new clone fence now hid): each was fixed by a test, by dropping the duplicate check (the workspace is now checked only in the transaction that takes the slot) or by a corrected mutant, and the whole list was re-run. The rows below are the final results.
+
+| Mutant | Result |
+| --- | --- |
+| core: CANCEL_REQUESTED refusal removed | killed (3 tests) |
+| core: not-live (ended) refusal removed | killed (4 tests) |
+| core: closing run refusal removed | killed (3 tests) |
+| core: push authority call removed | killed (12 tests) |
+| core: cap condition removed from the count | killed (2 tests) |
+| core: status condition removed from the count | killed (1 test) |
+| core: cap per repository (x repositories) made x1 | killed (3 tests) |
+| core: push audit failure swallowed (fail open) | killed (1 test) |
+| core: clone audit failure refused (fail closed) | killed (1 test) |
+| core: push not audited at all | killed (3 tests) |
+| core: coverage check removed before the count | killed (2 tests) |
+| core: log carries the nonce, not its hash (grant id) | killed (7 tests) |
+| access: grant id is not a hash of the nonce | killed (2 tests) |
+| legacy: CANCEL_REQUESTED refusal removed | killed (2 tests) |
+| legacy: not-live (ended) refusal removed | killed (4 tests) |
+| legacy: closing workspace refusal removed | killed (2 tests) |
+| legacy: authority call removed | killed (9 tests) |
+| legacy: cap condition removed | killed (2 tests) |
+| legacy: status condition removed from the count | killed (1 test) |
+| legacy: coverage check removed | killed (2 tests) |
+| legacy authority: fence compare removed | killed (2 tests) |
+| legacy authority: active operation compare removed | killed (3 tests) |
+| legacy authority: closed task refusal removed | killed (2 tests) |
+| legacy authority: pull request head compare removed | killed (1 test) |
+| legacy authority: workflow candidate compare removed | killed (1 test) |
+| legacy authority: publish without candidate not checked | killed (1 test) |
+| legacy authority: maintain not checked | killed (2 tests) |
+| core: the request's repository address is logged before the grant verifies | killed (1 test) |
+| core: the count's transaction does not check the workspace fence | killed (3 tests) |
+| core: the count's transaction does not check the active operation | killed (3 tests) |
+| core: the count's transaction does not check a closing workspace | killed (4 tests) |
+| core: a slot is never given back | killed (2 tests) |
+| core: a slot is not given back after a failed mint | killed (1 test) |
+| core: a slot is not given back after a failed audit | killed (1 test) |
+| core: the issued row is not written | killed (2 tests) |
+| core: a failed mint is not told apart (the host error passes through) | killed (1 test) |
+| legacy: a slot is never given back | killed (1 test) |
+| legacy: the request's repository address is logged before the grant verifies | killed (1 test) |
+| legacy: the cap is one repository's, not the grant's | killed (1 test) |
+| legacy authority: a clone is not held to the workspace fence | killed (2 tests) |
+
+The journeys (`tests/journeys/web-task.test.ts`, the two "Git exchange" cases) hold the same property end to end on the real core and are not mutated here; they run in every pull request run.
+# TIER-GROWTH-MERGE (lane pr/tier-growth-merge-20261125): a grown change merges only after the higher tier's reviews ran on the current head
+
+Shape (a): the tier pass (`tier-checks.ts`) runs the higher tier's code and security reviews for every grown task (not only the lighter flow), records `recordTierReview` for the head, and the merge view, the press, the standing and the session summary read ONE reader (`core/merge/grown-owed.ts`). Each mutant below was applied singly to a clean tree, the named tests were run (Node 22.23.2, `--maxWorkers=1`), and the line was restored.
+
+| Mutant / production location | Mutation | Killed by |
+|---|---|---|
+| M1 core/merge/merge.ts `readinessFromItems` | `base.ready && owed !== undefined ? notReady(owed.words) : base` becomes `base` (the view says ready while owed) | tests/unit/change-tier-merge-gate.test.ts: 4 fail (BAR, risky, lower tier/older head, skipped at small) |
+| M2 core/merge/grown-owed.ts `growthOwedOf` | a review record for ANY head clears the debt | the same file: BAR (stale review after a push), lower tier/older head, risky |
+| M3 core/merge/grown-owed.ts `growthOwedOf` | a record at level small clears a debt of standard/risky | "grown to risky: a standard review is not enough", lower tier/older head |
+| M4 core/merge/merge.ts `tierGate` | `owed` forced false (the final gate ignores the debt) | "the gate itself ... never merges it without the review" |
+| M5 services/merge-tracking.ts `trackRow` | a grown task is never scheduled for the tier pass | tests/journeys/tier-growth.test.ts: 6 of 7 fail |
+| M6 build-step/tier-review-calls.ts `oneReview` | the spending-limit refusal reads as an outage (no cap words, no Needs you) | tier-growth journey CAP case |
+| M7 build-step/tier-checks.ts `runTierChecks` | a grown normal-flow task is "not owed" whatever the record says (no reviews run) | tier-growth journey: 6 of 7 fail |
+
+The bar tests: `tests/unit/change-tier-merge-gate.test.ts` "a grown change on the normal flow" (BAR; grown to risky; the gate itself; the reader's states) and the journey `tests/journeys/tier-growth.test.ts` (seven cases on the real core and worker).
+
+## TIER-GROWTH-MERGE, hosted wiring (core-host/hosted-tier-review.ts, wired in aws/core-engine-root.ts)
+
+The grown tier's reviews run on the hosted root as the task's own paid call over the gateway's agent route (a task token for the review step with the task's payer, one model, the gateway's current price), under `tierReviewMeter` (admission, task cap room, worst-case price). Tests: tests/journeys/tier-growth.test.ts through the hosted root (only the network is faked; no reviewer is put in the core's deps) and tests/unit/hosted-tier-review.test.ts. Each mutant applied singly, the named test run, the line restored.
+
+| Mutant / production location | Mutation | Killed by |
+|---|---|---|
+| M8 hosted-tier-review.ts `meter` | `worst <= room` becomes `true` (the call's worst-case price is not held against the task's room) | journey CAP case |
+| M9 hosted-tier-review.ts `call` | the usage booking is skipped | journey "rates standard" case (the two bookings on the task's ledger) |
+| M10 hosted-tier-review.ts | the token's step is not `review` | journey "rates standard" case (step, payer and one model asserted on every call) |
+
+## TIER-GROWTH-MERGE, pre-review fixes (money lines of core-host/hosted-tier-review.ts and the typed refusals)
+
+The meter prices the request body as sent (or, without the prompt, the patch's characters at their widest plus framing) and answers by reason; `call` re-checks its own worst case against the room before sending; a 2xx is booked whether or not it reads; nothing is repeated after a request may have reached the model; a booking that failed refuses the task's next call. Each mutant applied singly, the named test run, restored.
+
+| Mutant / production location | Mutation | Killed by |
+|---|---|---|
+| M11 hosted-tier-review.ts `call` | the worst-case-against-room check before sending is removed | tests/unit/hosted-tier-review-call.test.ts "sends nothing when its own worst case ... does not fit" |
+| M12 hosted-tier-review.ts `call` | an answer that cannot be read is not booked | the same file, "books a 2xx whose answer cannot be read" |
+| M13 tier-review-calls.ts `callWithDeadline` | a failure after the request was sent is retried (a second paid call) | the same test (one request only) |
+| M15 hosted-tier-review.ts `FALLBACK_BYTES_PER_CHAR` | the meter without the prompt prices a character as one byte | tests/unit/hosted-tier-review-meter.test.ts (the pre-review's probe) |
+| M16 hosted-tier-review.ts `meter` | an unbooked usage no longer refuses the task's next call | hosted-tier-review-call.test.ts "keeps a booking that failed" |
+
+## TIER-GROWTH-MERGE, the tier_review reviewer kind (core-host/hosted-tier-review.ts)
+
+The hosted call mints a reviewer grant of the Cloud gateway's `tier_review` kind: step = kind, exactly kind/slot/ceilingUsd, the call's priced worst case as the ceiling, one model, 120 s, a fresh jti, the task's own workspace and latest operation, the signed price. Applied singly, run, restored.
+
+| Mutant | Mutation | Killed by |
+|---|---|---|
+| M17 hosted-tier-review.ts | the ceiling is twice the priced worst case | tests/unit/hosted-tier-review-call.test.ts "mints a tier_review reviewer grant" |
+| M18 hosted-tier-review.ts | the step is `review`, not the kind | the same test |
+
+## TIER-GROWTH-MERGE, after the Opus review (a request that may have reached the model is never repeated; a 422 is read by its code)
+
+| Mutant | Mutation | Killed by |
+|---|---|---|
+| M19 hosted-tier-review.ts `provablyNotSent` | any non-abort fetch failure counts as "never sent" (retried, unbooked) | hosted-tier-review-call.test.ts "a socket cut after the request was written" |
+| M20 hosted-tier-review.ts `GATEWAY_REFUSALS` | a 502 counts as a gateway refusal before the model (unbooked) | the same file, "a 502 may come after the model was called" |
+| M21 hosted-tier-review.ts `refuseBeforeSend` | every 422 reads as the spending limit | the same file, "a 422 is the spending limit only by its code" |
 ## REDACT-BLOCK-REASON (security stopgap): guard mutants, round 2
 
 Each mutant was applied singly to the production file in the lane worktree (the file restored from its saved text after each run; `git diff` shows no mutant left behind), then the named test file was run once with `vitest run <file> --maxWorkers=1`. "Killed" = the run failed on the named assertion; the restored file passed. Two mutants survived their first test and led to a new test (M3, M9); the table shows the final kill. The `redactText` patterns themselves (packages/contracts, consumed built) are covered by positive and negative cases in tests/unit/redact-text-gaps.test.ts, not by this table.
@@ -141,6 +302,69 @@ Each mutant was applied singly to the production file in the lane worktree, the 
 | M11 - lessons/load-record.ts `recordLessonLoad` | The use rows are not written. | 2 failed |
 
 Also checked: the lease test's worker clock is passed to the gateway model (`now`). With the test clock placed before the real date, removing that option fails 5 of 6 tests, with it all pass (the same condition as a real clock moving past the fixed test epoch).
+
+
+## PROJECT-GRANT-RECHECK: the stored person holds a task only with the live project grant (2026-11-25)
+
+| Mutant | Change | Killed by | Result |
+| --- | --- | --- | --- |
+| M1, `hostedTaskAccess.resolve` | the stored-person branches skip `inputs.projectGrant` | tests/journeys/project-grant-recheck.test.ts | red (3 of 6) |
+| M2, `taskAccessOfRecord` | the legacy owner skips `holdsOwnTask` | same file (Code's task page rows) | red (1 of 6) |
+| M3, `core-task-rule-routes` | events and readers: `owner = task.developerId === caller` | same file (events, readers) | red (1 of 6) |
+| M4, `sessions/access.ts` | the owner of a task session needs no grant | same file (session stop, tell, close) | red (1 of 6) |
+| M5, `lessons-api.ts` | the off-roster own-task exception is back | tests/unit/core-host-lessons-api.test.ts | red (1 of 57) |
+| M6, `developer-tasks.ts listTasks` | the own list ignores the grant | same file as M1 (task list) | red (1 of 6) |
+| M7, `script-tokens/authenticate.ts` | the token's project is not re-checked live | tests/unit/script-token-project-grant.test.ts | red (3 of 3) |
+
+## RD-2.0-READ-RULE rebased onto PROJECT-GRANT-RECHECK (merge of 84d7b51fe)
+
+The hotfix's live grant re-check (`hostedTaskAccess.resolve`: the stored person holds a task only while the project grant is held, as a People entry does) is the base truth for the company's own rule. The read rule takes the grant as proved for `reads` and `acts` where the rule says so (`TaskAccess.provesProjectGrant`, set by `hostedTaskAccess`) and asks its live-grant seam once for every other way in (the old page rule, the stored person on the events and the readers routes), so no person's grant is read twice. The hotfix's `holdsOwnTask` call on the events route is replaced by the same seam (one implementation); its page-rule and session-rule re-checks stay for the old page routes and sessions. Each mutant applied singly on the merge, one targeted run, restored with `git checkout -- <file>`.
+
+| Mutant / location | Mutation | Killed by |
+|---|---|---|
+| M23 read-rule.ts `grantFor` | every way in counts as grant-proved | the two starters on every read (8 tests) |
+| M24 core-engine-root.ts | the hosted rule no longer says it proves the grant | the "one grant check, not two" test |
+
+Both killed; the restored tree passes.
+
+## RD-2.0-READ-RULE round 3 pre-review fixes (head f034f9123: the live grant in the task's company, fail closed without a seam, the table in the production configuration)
+
+The hotfix's own mutant (the stored person on the events and the readers routes trusted) at its new place, the host not binding the live-grant seam, and the guards added in this round. Each mutant applied singly on f034f9123, one targeted run (the table in both configurations, the golden, core-host-task-web-routes), restored with `git checkout -- <file>`.
+
+| Mutant / location | Mutation | Killed by |
+|---|---|---|
+| M25 read-rule.ts `grantFor` | the stored person (`developer` basis: events, readers routes) counted as grant-proved (the hotfix's M3 at its new place) | 11 tests: the table on both configurations, the starters, the journeys' source-code and re-read tests |
+| M26 dev-routes.ts `decideRead` | the host no longer binds the live-grant seam | the real-routes table (starters on events, diff, comments), the diff route test |
+| M27 read-rule.ts `grantFor` | the old page rule (`page` basis: the diff, the comments) counted as grant-proved | 10 tests: the table, the starters, the diff route test |
+| M28 dev-routes.ts | the seam does not pass the task's company | "the live grant is read in the TASK'S company" (a person moved to another company between two reads) |
+| M29 read-rule.ts `liveGrantOf` | a missing seam on a rule that proves the grant admits | "a host that proves the grant but binds no live-grant seam admits nobody ..." |
+
+All killed; the restored tree passes.
+## PROJECT-GRANT-RECHECK, channel-access starters (2026-11-25)
+
+All killed by tests/contract/task-owner-channel-access.test.ts (9 tests).
+
+| Mutant | Change | Result |
+| --- | --- | --- |
+| C1, `taskReaderPerson` own-task answer | a person with no grant is `mayStart` with no `checkProjectAccess` call | red (6 of 9: leave, channel use off, Slack down, no Slack link, grant-removed-then-leaves, neither) |
+| C2, `taskReaderPerson` own-task answer | a failed or refused start check answers `mayStart: true` (fail open) | red (6 of 9) |
+| C3, `taskReaderPerson` own-task answer | the start check is asked as a fixed Slack user, not the person's own link | red (1 of 9: no Slack link) |
+| C4, `holdsOwnTask` | reads `projectMember` only (the first hotfix) | red (3 of 9: the red commit) |
+
+## RD-2.0-READ-RULE merged with the FINAL project-grant hotfix (d8c5b04a1): the channel branch routed once
+
+The hotfix's own-task test (`holdsOwnTask`: the grant, or the access that let the person start the task, a bound-channel member where the project lets channel members use it) is the ONE test for the task's own person. The read rule's live-grant seam asks it for the stored person (`taskRules.holdsOwnTask`) and asks the project grant, in the task's company, for everyone else; the page rule's own re-check of the stored person (a task with no People list) is reported by the page seam and not read a second time. Each mutant applied singly on b3f6ce1c5, one targeted run, restored with `git checkout -- <file>`.
+
+| Mutant / location | Mutation | Killed by |
+|---|---|---|
+| M30 dev-routes.ts `liveGrantOf` | the channel branch is undone: the stored person is asked by the grant alone | "the hotfix's channel branch is kept, and read once" (a channel starter is refused on events, diff, comments) |
+| M31 read-rule.ts `firstAdmission` | the page rule's own re-check of the stored person is not trusted, so the hold is read twice | the same test (the hold on their task must be read once per way in) |
+
+Both killed; the restored tree passes.
+
+### Correction (RD-2.0-READ-RULE, after the combined Opus review of 152cbb7db): M28 above
+
+The row for M28 said the "moved to another company" test killed it. On 152cbb7db it did NOT: since round 5 the task's own person goes to the hotfix's own-task test (which passes the task's company itself), and that test moved only the owner, so it never reached the line M28 changes (`dev-routes.ts liveGrantOf`: `grant(person.personId, task.project, target.runtime.companyId)` for everyone who is not the task's own person). Fix: a second test moves a People COMMENTER (let in by the page rule and the read rule, asked for the grant by that line) to the other company, which holds a same-named grant, and expects TASK_NOT_FOUND on the diff, the comments, the task and the events. Run on the head after the fix: with `grant(person.personId, task.project)` (the company dropped) exactly that test goes red and the owner test stays green; restored, both pass. The M28 row stands corrected: killed by "the same for a person the grant is asked of by the PROJECT GRANT".
 ## RD-2.0 - contract rows for the task page reads (commit 567630b57 plus the S2/S3 follow-up)
 
 Production guards this lane adds: the `owns()` clause and the mount hunk in `core-host/dev-routes.ts`, GET-only and the anchored path regex in `core-host/task-screen-routes.ts`, the stub's fixed `ROUTE_NOT_SERVED` refusal (`task-spec-routes.ts`, the other three stubs are the same line), the code's 404 status (`packages/code-api/src/errors.ts`), and the existing script-token line that keeps a token off the four paths. Each mutant was applied singly to the working tree, one targeted run, then the file was restored with `git checkout -- <file>`.
@@ -285,6 +509,57 @@ Each mutant applied singly, tests/unit/machine-check.test.ts, tests/contract/wor
 | same | A cancel fails the active operation even when it is not the cancel's target | killed, 1 failed |
 | ec2-delivery.ts `machineToCheck` | A setup run held to the wrong subnets | killed, 2 failed |
 
+## SI-LEASE-HANDOFF (the dispatcher hands a rebuild its lease token), code head e36884e49
+
+Each mutant applied singly to the production file; tests/unit/saved-env-dispatch-lease.test.ts, aws-core-dispatch-host.test.ts, saved-env-rebuild.test.ts and saved-env-registry.test.ts run (103 tests), restored with git checkout.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| dispatch.ts `savedEnvBuildWithLease` | The token is dropped from the invocation | killed, 4 failed |
+| same | A token stored in the payload wins over the registry's | killed, 1 failed |
+| same | The token is written to a log line | killed, 1 failed |
+| same | The job id asked for is the operation's id (not the stored job's) | killed, 5 failed |
+| same | The project asked for is empty | killed, 5 failed |
+| same | The operation asked for is the workspace's id | killed, 3 failed |
+| same | The worker-feature check removed (the token is taken for a worker that cannot build) | killed, 1 failed |
+| same | No seam wired: the build is sent without a token | killed, 1 failed |
+| same | A refused lease: the build is sent without a token | killed, 5 failed |
+| same | A lost write race is not retried (1 try) | killed, 1 failed |
+| same | After the tries the build is sent without a token | killed, 1 failed |
+| dispatch.ts prepare branch | Every preparation asks for a lease, not only a rebuild's | killed, 1 failed |
+| saved-env.ts `leaseForDispatch` | The named job id is not compared (another job is marked taken) | killed, 2 failed |
+| same | An expired lease is still handed over | killed, 2 failed |
+| saved-env-dispatch-lease.ts `savedEnvDispatchLeaseOf` | The company asked for is the implicit one, not the seam's | killed, 1 failed |
+| `savedEnvDispatchLeaseFor` | A seam is made with the switch off | killed, 2 failed |
+| `savedEnvDispatchLeaseOf` | An empty operation id accepted | first survived (the test's earlier call had already taken the token); killed, 1 failed, by the added test |
+| same | The result carries the whole job, not the token | killed, 3 failed |
+| same | The job-id belt on the registry's answer removed | equivalent (`leaseForDispatch` already answers only for the named job); kept as a belt |
+| dispatcher-core.ts | The dispatcher does not wire the seam | killed, 1 failed |
+
+SI-LEASE-HANDOFF re-run: the lease step moved out of dispatch.ts into task-flow/saved-env-lease-step.ts (complexity ratchet), called from `preparedProject`. All 20 mutants above re-applied on code head 7c3ed5b68 (the dispatch.ts rows now apply to saved-env-lease-step.ts; "every preparation asks" removes the `savedEnvBuild === undefined` guard): 19 killed, only the job-id belt (equivalent) survives.
+
+## SI-LEASE-HANDOFF, pre-review round (M1, S1-S3), code head 17fb72182
+
+Each mutant applied singly; tests/unit/saved-env-dispatch-lease.test.ts, aws-core-dispatch-host, saved-env-rebuild, saved-env-registry and saved-env-ending run (114-116 tests), restored with git checkout.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| saved-env-lease-step.ts `savedEnvBuildFields` | The stored job-id guard removed | first survived (the check before the start refuses first); killed by the added direct tests of the step |
+| `beforeMachine` | The check before the start never runs | killed, 7 failed |
+| `savedEnvPrecheck` | A refusal is ignored | killed, 4 failed |
+| same | A registry that cannot be read ends the operation (not a retry) | killed, 1 failed |
+| same | No seam lets it through | killed, 1 failed |
+| `savedEnvBuildFields` | A fault after the claim ends the operation | killed, 1 failed |
+| same | An exhausted lost race ends the operation | killed, 1 failed |
+| same | The pause between tries removed | first survived (timing); killed by the added pacing test |
+| saved-env-dispatch-lease.ts `check` | The check takes (marks the job taken) | killed, 3 failed |
+| saved-env.ts `leasableJob` | A job given to another operation is given again | killed, 6 failed |
+| same | The named job id is not compared | killed, 3 failed |
+| same | The run-time id guard removed | killed, 1 failed |
+| saved-env-dispatch-lease.ts `wellFormed` | The id guard removed there only | killed, 1 failed (the project id is only guarded here) |
+| both guards | Removed at once | killed, 3 failed |
+
+SI-LEASE-HANDOFF Opus leftovers (N1): `beforeMachine` call in dispatch.ts, "the retry before the start is capped like the standing-instruction read": the cap replaced by `true` (retried without end) is killed by the added test (1 failed).
 
 ## CANARY-SESSION: the beta canary person's session function (2026-11-25)
 
@@ -436,6 +711,49 @@ The earlier SI-2 table above was run on 138b4422f, before the starter and rebuil
 | check.ts `closeSetupCheck` | purpose guard removed; slots not released on close (S2) | killed (2) |
 | usage.ts | the two-hour cap for every kind | killed |
 | saved-env-rebuild.ts `readRebuildFacts` | commit count; approved check; "not handed to a worker" check removed | killed (3) |
+## RF-5-BEDROCK-ROUTE-A (lane commit 848b016b1, stacked on OE-c1 ee74af1b8)
+
+Tests: `tests/unit/worker-eval-bedrock-route.test.ts`, `tests/unit/worker-eval-fresh-sandbox.test.ts` and `tests/unit/product-bedrock-bridge.test.ts`, run together (90 tests) after each mutant of the named source file. M8 was run after rebuilding `packages/contracts` (the tests read its `dist`).
+
+| Mutant | Result |
+| --- | --- |
+| M1 `eval-gateway-access.ts`: a Bedrock path is no longer routed to the Bedrock lane (it falls to the Gemini route) | killed (17 tests) |
+| M2 `eval-gateway-access.ts`: Bedrock calls are no longer taken one at a time | killed (1 test) |
+| M3 `eval-gateway-access.ts`: the Bedrock lane skips the released / stopped / held-count-used guard | killed (2 tests) |
+| M4 `eval-gateway-access.ts`: a Bedrock call stopped before its settle no longer leaves the cost unknown | killed (1 test) |
+| M5 `eval-wiring.ts`: the Bedrock model pin does not accept the SDK's `%3A` | killed (3 tests) |
+| M6 `eval-wiring.ts`: the Bedrock model pin loses its end anchor (a longer path matches) | killed (1 test) |
+| M7 `eval-cost.ts`: the approval sentence ignores the Bedrock row (no "counted by the company's gateway cap") | killed (1 test) |
+| M8 `eval-discovery-report.ts`: the Bedrock row accepts any model name | killed (2 tests) |
+| M9 `model-sandbox-env.ts`: the bridge token segment and row id are not checked | killed (2 tests) |
+| M10 `eval-bridged-exec.ts`: the bridge reads a Bedrock row as a Gemini row (wrong error shape) | killed (1 test) |
+| M11 `eval-bridged-exec.ts`: the helper's row for Bedrock loses `routesTo` | killed (1 test) |
+| M12 `eval-bridged-exec.ts`: the sandbox environment has no Bedrock branch | killed (2 tests) |
+| M13 `eval-gateway-access.ts`: a Bedrock frame under a foreign scope is taken by the Bedrock lane | killed (1 test) |
+
+## SESSION-HARDEN — browser sessions never refresh; sign-in session ids are logged as a short hash
+
+Each mutant applied singly to the production file, tests/contract/developer-identity-server.test.ts run, restored from a copy. All killed.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| developer/store.ts `refreshableBy` (called by `refreshTokenGrant`) | The `reviewExpiresAt` refusal removed (a browser session refreshes) | killed, 1 failed |
+| same | The refusal limited to a GitHub session (earlier form, in server.ts) | killed, 1 failed |
+| developer/server.ts `revoke` | `signin.session_revoked` logs the raw session id | killed, 1 failed |
+| developer/server.ts `refreshTokenGrant` | `signin.refresh_grace` logs the raw session id | killed, 1 failed |
+| developer/server.ts `authorizationCodeGrant` | `signin.session_started` logs the raw session id | killed, 1 failed |
+| developer/session-log-id.ts `sessionLogId` | The hash is the full 64 hex instead of 12 | killed, 1 failed |
+
+## SESSION-HARDEN round 2 — canary logs a session hash; a browser sign-in writes no refresh-token row; a refused browser refresh is logged
+
+Each mutant applied singly to the production file, tests/contract/developer-identity-server.test.ts, developer-signin-store.test.ts and canary-session.test.ts run, restored from a copy. All killed.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| developer/server.ts browser return | The browser sign-in calls `createSession` again (a refresh-token row is written) | killed, 1 failed |
+| developer/server.ts `refreshRefused` | The fixed `signin.browser_refresh_refused` line removed | killed, 1 failed |
+| same | The line also carries the raw session id | killed, 1 failed |
+| developer/canary-session.ts | `signin.canary_session` logs the raw session id | killed, 1 failed |
 | release-pipeline.ts CLOUD_PROD_DEFAULT (tag-trigger) | The variable's default turned back to `on` | killed, 1 failed |
 | release-pipeline.ts CLOUD_REF default (tag-trigger) | The variable's default turned back to `latest` | killed, 1 failed |
 | release-pipeline.ts Production stage (tag-trigger) | The transition into Production left enabled | killed, 1 failed |
@@ -530,3 +848,51 @@ The earlier SF-1a rows above were run on ca9450f2c, f4f4b8a26, e7b661bd9 and the
 | quick-size-record.ts `within` (S4) | the setting read not bounded; the stored-plan read not bounded | killed (2) |
 | contracts reader / words (N3, N5) | an unread record may trigger; "0 code files" shown | killed (2) |
 | quick-size.ts `mediumReasons` (N4) | a CI file counted as sign-in code | killed |
+## PROJECT-GRANT-RECHECK, channel access holds an old-engine task only (arch ruling a, 2026-11-25)
+
+Killed by tests/contract/task-owner-engine-channel.test.ts (7 tests).
+
+| Mutant | Change | Result |
+| --- | --- | --- |
+| E1, `taskReaderPerson` own-task answer | the engine check is dropped (a core task is held by the channel too) | red (4 of 7: removed-but-in-channel core task, both stamp-unreadable cases, the mixed page) |
+| E2, same | a stamp read that fails or cannot be read counts as an old-engine task (fail open) | red (2 of 7) |
+| E3, `listsAsOwn` | a channel hold is kept for the whole project (the `held` map) | red (1 of 7: one page with an old-engine and a core task of one project) |
+| E4, same check | the engine is not asked at all, channel branch always on | red (4 of 7) |
+
+## RD-2.0-READ-RULE merged with the new hotfix (d32a69fbc) and THE SLACK SHARE decided in the read rule (head 7643579f5)
+
+What a Slack share grants (a person with no grant, not on the People list, in the channel the task is shared into: the old page rule's implicit commenter) is decided ONLY in `read-rule.ts` `CHANNEL_SHARE_PARTS`, each read its own cell (today: the plan comments and the diff, as before the rule). The page rule says who it admitted (`viaChannelShare`), the rule exempts that person from the grant seam and never gives them source code. The old page rule's cached channel-membership branch is unreachable for those reads: the page rule seam strips the Slack identity (`core-task-rule-routes.ts pageRule`); the branch itself stays for the workflow engine's tasks and the hotfix's pinned test. Each mutant applied singly on 7643579f5, one targeted run, restored with `git checkout -- <file>`.
+
+| Mutant / location | Mutation | Killed by |
+|---|---|---|
+| M32 read-rule.ts `CHANNEL_SHARE_PARTS` | the diff cell withheld | the table row "channel share member" on the function and the real routes, both configurations |
+| M33 read-rule.ts `CHANNEL_SHARE_PARTS` | the comments cell withheld | the same row |
+| M34 read-rule.ts `firstAdmission` | a person admitted by the Slack share counted as grant-proved (source code) | "THE SLACK SHARE ..." (no source code, no code details) |
+| M35 core-task-rule-routes.ts `pageRule` | the Slack identity kept (the cached channel branch reachable) | "the old page rule's cached channel-membership branch cannot be reached ..." |
+| M36 read-rule.ts `firstAdmission` | the Slack share asked for the grant (narrowed from today) | the table row, function and routes |
+
+All killed; the restored tree passes.
+| session-binding.ts (session-id-at-rest) | `sameSessionBinding` always true; `sessionBindingOf` returns the raw id | killed (2) |
+| the six state-row families (slack-company-install, github-connect-routes, github-account-link-routes, linear-connections + linear-connect/account-link-routes, sign-in-links) | the row keeps the raw `caller.sessionId` in place of the digest | killed (all six) |
+| same | the spend's in-code digest compare removed alone | survived: equivalent (the DynamoDB condition on the digest still refuses; the two layers are redundant by design) |
+| same | the in-code compare AND the condition's digest value both neutralised (condition compares the row with itself) | killed (all six) |
+| slack-company-install.ts, github-connect-routes.ts, linear-connect-routes.ts `sessionBindingOfCaller` | the empty/missing session-id guard removed | killed (2 each) |
+
+## SESSION-PEOPLE-KEY: a task's People entry is found by the person's sign-in id in the session levels (2026-11-25)
+
+| Mutant | Change | Killed by | Result |
+| --- | --- | --- | --- |
+| M1, `sessions/access.ts compute` | the entry is looked up by the session's hashed id again (`person.developerId`) | tests/journeys/session-people-key.test.ts and tests/unit/session-features-access.test.ts | red (4 of 5 journeys, 7 of 18 unit) |
+| M2, `peopleOfItem` | a person listed twice keeps the last entry (a later `viewer` undoes a `denied`) | tests/unit/session-features-access.test.ts | red (1 of 18) |
+| M3, `compute` | a person asked about with no principal reads as "no entry" (not unreadable) | same file | red (1 of 18) |
+| M4, `compute` | a `slack` entry grants with no live project role | same file | red (1 of 18) |
+| M5, `compute` | a denied starter keeps `owner` | same file | red (1 of 18) |
+| M6, `compute` | a denial applies only while the person still holds a grant | same file | red (1 of 18) |
+
+Review round 1 (Opus FAIL 0d9409cc3: F1 admin on a Slack entry, F2 demoted starter):
+
+| Mutant | Change | Killed by | Result |
+| --- | --- | --- | --- |
+| M7, `compute` | a starter demoted to viewer or commenter keeps `owner` (only a denial clears it) | tests/unit/session-features-access.test.ts and tests/journeys/session-people-key.test.ts (c3) | red (1 of 20 unit, 1 of 7 journeys) |
+| M5b, `compute` | a denied starter keeps `owner` (now seen in the journey: a company admin starter reads `owner: false`) | same unit file and the journey (c2) | red (1 of 20 unit, 1 of 7 journeys) |
+| M8, `peopleEntryOf` | an entry grants on any stored role, with no grant check (the Slack-entry and company-admin cases) | tests/unit/session-features-access.test.ts | red (2 of 20) |

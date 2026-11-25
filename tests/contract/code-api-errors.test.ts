@@ -41,6 +41,8 @@ const CODES_IN_ORDER: ReadonlyArray<readonly [string, number]> = [
   ["LINEAR_TEAM_TAKEN", 409],
   // RD-2.0 (Code API 1.5).
   ["ROUTE_NOT_SERVED", 404],
+  // RD-2.0 read rule (Code API 1.5).
+  ["TASK_PART_NOT_SHOWN", 403],
 ];
 
 describe("the Code API's refusal codes (moved from contracts, no change)", () => {

@@ -250,21 +250,24 @@ describe("POST /v1/app/sessions/{id}/answers needs the owner's level", () => {
     const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, members: sessionMembers }) });
     const caller = (personId: string): DeployedCaller => ({ principal: { ...localOwnerPrincipal({ companyId: FAKE_COMPANY, personId }), roles: ["member"] }, client: "cli" });
     const owner = caller(OWNER_ID);
+    grants.set(developerIdOf(owner.principal), "contributor"); // the task's owner is a member who holds the project (a live grant is re-checked; a person off the project owns nothing)
     const runtime = await app.runtimeFor(FAKE_COMPANY);
     const deps = runtime.flow.deps;
     const { task } = await runtime.flow.start({ principal: owner.principal, client: "test", origin: "app" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true });
     let record = (await readTask(deps, task.taskId))!;
     if (record.workflow?.state === "READY") { expect(await commitWorkflow(deps, record, startWorkflowUnderstand(record.workflow, new Date(world.clock.now).toISOString()))).toBe(true); record = (await readTask(deps, task.taskId))!; }
     expect(await commitWorkflow(deps, record, recordIntentAssessment(record.workflow, { expectedRevision: record.workflow!.revision, assessment: { kind: "questions", restatement: "Add a health endpoint.", questions: QUESTIONS }, now: new Date(world.clock.now).toISOString() }))).toBe(true);
-    const people = async (entries: Array<[DeployedCaller, string]>) => world.store.put({ item: { pk: `DEVTASK#${task.taskId}`, sk: "PEOPLE", schemaVersion: 1, people: entries.map(([who, role]) => ({ developerId: developerIdOf(who.principal), role })) } });
+    const people = async (entries: Array<[DeployedCaller, string]>) => world.store.put({ item: { pk: `DEVTASK#${task.taskId}`, sk: "PEOPLE", schemaVersion: 1, people: entries.map(([who, role]) => ({ developerId: who.principal.personId, role })) } });
     const answer = (who: DeployedCaller) => routes.route(post(`/v1/app/sessions/${taskSessionId(task.taskId)}/answers`, { requestId: randomUUID(), round: 1, answers: ANSWERS }), who);
     const answered = async () => (await readTask(deps, task.taskId))!.workflow!.intent!.answers.length;
     return { caller, owner, people, answer, answered, grants };
   }
 
   it.each(["commenter", "viewer"])("refuses a People %s (SESSION_LEVEL_REQUIRED), nothing answered", async (role) => {
-    const { caller, people, answer, answered } = await sessionWorld();
+    const { caller, people, answer, answered, grants } = await sessionWorld();
     const them = caller(`person-${role}-0000000001`);
+    // A People entry (listed by the person's sign-in id) grants only to a person who holds a live role on the project.
+    grants.set(developerIdOf(them.principal), "contributor");
     await people([[them, role]]);
     const reply = await answer(them);
     expect(reply?.statusCode).toBe(403);

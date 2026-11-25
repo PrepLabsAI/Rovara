@@ -10,7 +10,7 @@ import type { TaskCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { createAnswerCodeSource, type AnswerRepositoryHandle } from "../../core/answers/code-source.js";
 import type { AnswerModel } from "../../core/answers/ports.js";
 import { createAnswerService, type AnswerServiceDeps } from "../../core/answers/service.js";
-import { loadReadableTask } from "../../core/task-flow/reads.js";
+import { decideTaskRead } from "../../core/task-flow/read-rule.js";
 import { developerIdOf } from "../../core/sessions/create.js";
 import { createWikiStore } from "../../core/wiki/store.js";
 import { codeHostForRecord } from "../../plugins/routing.js";
@@ -52,7 +52,7 @@ export function createLocalProjectAnswers(options: LocalProjectAnswersOptions): 
         const service = createAnswerService({
           companyId, store: options.store, wiki: createWikiStore({ store: options.store, companyId, now: options.now }), now: options.now, log: options.log, model: options.model, briefing: options.briefing,
           access: { mayAsk: async () => isOwner(caller) },
-          tasks: { read: async (_personId, taskId) => loadReadableTask(options.flow, caller, taskId), artifacts: options.flow.artifacts },
+          tasks: { read: async (_personId, taskId) => (await decideTaskRead(options.flow, { caller, taskId, read: "answers" })).task, artifacts: options.flow.artifacts },
           async code(name) {
             const latest = await options.flow.projects.latest(name);
             if (latest === undefined) return undefined;

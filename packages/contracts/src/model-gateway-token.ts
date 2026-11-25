@@ -56,7 +56,7 @@ export const TaskTokenClaimsSchema = z.object({
   mdl: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/u)).min(1).max(16),
   runPrice: RunPriceSchema.optional(),
   /** One reviewer model; cid/pid/tid/ws/op bind the task. Gateway must atomically open or debit the bound jti session before spending. */
-  reviewer: z.object({ kind: z.enum(["second_review", "design_review"]), slot: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/u), ceilingUsd: z.number().finite().positive().max(1_000_000) }).strict().optional(),
+  reviewer: z.object({ kind: z.enum(["second_review", "design_review", "tier_review"]), slot: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/u), ceilingUsd: z.number().finite().positive().max(1_000_000) }).strict().optional(),
 }).strict().superRefine((claims, context) => {
   if (claims.runPrice !== undefined && (claims.runPrice.companyId !== claims.cid || claims.mdl.length !== 1 || claims.runPrice.model !== claims.mdl[0])) context.addIssue({ code: "custom", path: ["runPrice"], message: "price must bind the company and one allowed model" });
   if (claims.reviewer !== undefined && (claims.mdl.length !== 1 || claims.stp !== claims.reviewer.kind || (claims.reviewer.kind === "second_review" && claims.reviewer.slot !== "second_review") || claims.exp - claims.iat !== REVIEWER_GRANT_SECONDS)) {
@@ -78,7 +78,7 @@ export function taskTokenClaimsFor(input: Omit<TaskTokenClaims, "aud" | "nbf" | 
 }
 
 /** After signature/issuer verification only. The gateway's callback MUST atomically open or debit the SAME bound jti session (including concurrent requests), preserve its original ceiling, and refuse closed/exhausted sessions or any use beyond 600 s from first use. Token renewal never opens another session. */
-export async function consumeReviewerGrant(claims: TaskTokenClaims, expected: Pick<TaskTokenClaims, "cid" | "pid" | "tid" | "ws" | "op"> & { kind: "second_review" | "design_review"; slot: string; model: string }, nowSeconds: number, consume: (jti: string, expiresAt: number) => Promise<boolean>): Promise<boolean> {
+export async function consumeReviewerGrant(claims: TaskTokenClaims, expected: Pick<TaskTokenClaims, "cid" | "pid" | "tid" | "ws" | "op"> & { kind: "second_review" | "design_review" | "tier_review"; slot: string; model: string }, nowSeconds: number, consume: (jti: string, expiresAt: number) => Promise<boolean>): Promise<boolean> {
   const parsed = parseTaskTokenClaims(claims);
   if (parsed?.reviewer === undefined || !Number.isSafeInteger(nowSeconds) || nowSeconds < parsed.iat || nowSeconds >= parsed.exp || parsed.cid !== expected.cid || parsed.pid !== expected.pid || parsed.tid !== expected.tid || parsed.ws !== expected.ws || parsed.op !== expected.op || parsed.reviewer.kind !== expected.kind || parsed.reviewer.slot !== expected.slot || parsed.mdl[0] !== expected.model) return false;
   try { return (await consume(parsed.jti, parsed.exp)) === true; } catch { return false; }

@@ -6,6 +6,7 @@ import type { DeveloperCaller } from "../aws/developer-routes.js";
 import type { DeveloperTaskRouteDependencies } from "../aws/developer-tasks.js";
 import { resolveTaskPeopleAccess, type TaskRole } from "./task-people.js";
 import { taskKey, taskOwnerKey, type DeveloperTaskRecord } from "./task-records.js";
+import { requireOwnTask } from "../aws/task-readers.js";
 import { ownerOfExistingTask } from "../aws/engine-boundary.js";
 
 export type { TaskRole } from "./task-people.js";
@@ -37,12 +38,14 @@ export interface TaskAccess {
   role: TaskRole;
   peopleRevision?: number;
   ownerActorIds: readonly string[];
+  /** The person is not on the task's People list: they read only because the task is shared into a Slack channel they are in (a commenter). The read rule decides what that grants (`CHANNEL_SHARE_PARTS`). */
+  viaChannelShare?: true;
 }
 
 const TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export type AccessDependencies = Pick<DeveloperTaskRouteDependencies,
-  "documentClient" | "tableName" | "checkAccess" | "channelMember" | "slackTeamId" | "log" | "now" | "taskPeopleConfiguration" | "checkTaskPerson" | "workspaceForTask" | "coreTasks">;
+  "documentClient" | "tableName" | "checkAccess" | "channelMember" | "slackTeamId" | "log" | "now" | "taskPeopleConfiguration" | "checkTaskPerson" | "workspaceForTask" | "coreTasks" | "taskReaderPerson">;
 
 const log = (deps: Pick<DeveloperTaskRouteDependencies, "log">, entry: Record<string, unknown>) =>
   (deps.log ?? ((line) => console.log(JSON.stringify({ component: "broker", ...line }))))(entry);
@@ -73,7 +76,10 @@ export async function resolveTaskReadAccess(deps: AccessDependencies, caller: De
   if (answer?.statusCode !== 200) throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
   const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: taskKey(taskId), ConsistentRead: true })) as { Item?: DeveloperTaskRecord };
   if (response.Item === undefined) throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
-  return resolveCoreTaskAccess(deps, caller, response.Item, "read");
+  // A core task's page access never reads the old cached channel membership (the legacy branch of `taskAccessOfRecord` is for the workflow engine's tasks): the person is the one the core read, with no Slack identity.
+  const { slackUserId: _slack, ...core } = caller;
+  void _slack;
+  return resolveCoreTaskAccess(deps, core, response.Item, "read");
 }
 
 /**
@@ -83,6 +89,11 @@ export async function resolveTaskReadAccess(deps: AccessDependencies, caller: De
 export async function resolveCoreTaskAccess(deps: AccessDependencies, caller: DeveloperCaller, task: DeveloperTaskRecord, action?: TaskAction): Promise<TaskAccess> {
   if (!TASK_ID.test(task.taskId)) throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
   return await taskAccessOfRecord(deps, caller, task, action, task.taskId);
+}
+
+/** The person reads only because the task is shared into a Slack channel they are in (the People list does not name them). */
+function channelShareOf(people: { implicit: boolean }): { viaChannelShare?: true } {
+  return people.implicit ? { viaChannelShare: true } : {};
 }
 
 async function taskAccessOfRecord(deps: AccessDependencies, caller: DeveloperCaller, task: DeveloperTaskRecord, action: TaskAction | undefined, taskId: string): Promise<TaskAccess> {
@@ -96,7 +107,7 @@ async function taskAccessOfRecord(deps: AccessDependencies, caller: DeveloperCal
           || (action === "takeOwnership" && !people.canTakeOwnership)
           || ((action === "peopleManage" || action === "takeOwnership") && deps.taskPeopleConfiguration?.peopleChangesEnabled !== true)) throw notFound();
       }
-      return { task, role: people.role, peopleRevision: people.peopleRevision, ownerActorIds: people.ownerActorIds };
+      return { task, role: people.role, peopleRevision: people.peopleRevision, ownerActorIds: people.ownerActorIds, ...channelShareOf(people) };
     }
   } catch {
     throw notFound();
@@ -104,6 +115,9 @@ async function taskAccessOfRecord(deps: AccessDependencies, caller: DeveloperCal
   const legacyOwners = [taskOwnerKey(task.developerId, task.taskId)];
   const legacyPeopleAction = action === "peopleManage" || action === "takeOwnership";
   if (task.developerId === caller.developerId) {
+    // The stored person (a task with no People list) keeps it only while a LIVE member of the task's company who still holds the project grant (the test a People entry meets and a reader meets):
+    // removed from the project or the company, the task reads as not found for them.
+    await requireOwnTask(deps, task, caller.developerId, notFound);
     if (legacyPeopleAction || (action !== undefined && action !== "read" && action !== "peopleRead" && !taskOpen(task))) throw notFound();
     return { task, role: "owner", ownerActorIds: legacyOwners };
   }

@@ -594,7 +594,7 @@ export async function resolveTaskPeopleAccess(
   deps: TaskPeopleDependencies,
   task: DeveloperTaskRecord,
   developerId: string,
-): Promise<{ role: TaskRole; peopleRevision: number; ownerActorIds: readonly string[]; orphaned: boolean; canTakeOwnership: boolean } | undefined> {
+): Promise<{ role: TaskRole; peopleRevision: number; ownerActorIds: readonly string[]; orphaned: boolean; canTakeOwnership: boolean; implicit: boolean } | undefined> {
   const stored = await loadPeople(deps, task.taskId);
   if (stored === undefined) return undefined;
   const people = await reconcile(deps, task, stored);
@@ -604,6 +604,8 @@ export async function resolveTaskPeopleAccess(
   const proof = people.orphaned ? await checked(deps, task, developerId) : undefined;
   return {
     role, peopleRevision: people.revision, ownerActorIds: owners, orphaned: people.orphaned,
+    // A person the list does not name who reads only because the task is shared into a Slack channel they are in (`implicitRole`): the Slack share's own grant.
+    implicit: !people.people.some((person) => person.developerId === developerId),
     canTakeOwnership: people.orphaned && role !== null && proof?.eligible === true && taskPersonPresent(proof),
   };
 }

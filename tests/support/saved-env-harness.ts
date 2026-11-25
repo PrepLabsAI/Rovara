@@ -5,6 +5,7 @@ import { createAdapterRegistry, createFakeImageRegistry, type FakeImageRegistry 
 import type { BuildSystem } from "@agentx/contracts";
 import { documentOf, type TestEnvDeps } from "../../packages/broker/src/core/test-env/deps.js";
 import { testEnvLatestKey, testEnvProveKey, testEnvRevisionKey } from "../../packages/broker/src/core/test-env/environment.js";
+import { savedEnvDispatchLeaseOf } from "../../packages/broker/src/core/test-env/saved-env-dispatch-lease.js";
 import { createSavedEnvDeps } from "../../packages/broker/src/core/test-env/saved-env-real.js";
 import type { TreeEntryListing, KeyHost } from "../../packages/broker/src/core/test-env/saved-env-key.js";
 import { COMPANY, createHarness, type Harness, type HarnessOptions } from "./task-flow-harness.js";
@@ -72,6 +73,8 @@ export function savedWorld(options: { harness?: HarnessOptions; env?: NodeJS.Pro
     test, flow: h.deps, registry, adapters, keyHost: () => keyHost, headOf: async () => heads.value, baseImageDigest: async () => base.digest, envName: "local",
     env: { ROVARA_SAVED_ENVIRONMENTS: "1", ...options.env }, ownerFor: async () => owner.value, log: () => undefined,
   })!;
+  // The hosted dispatcher's wiring in miniature: the flow's dispatcher asks the same registry for a rebuild's lease (saved-env-dispatch-lease.ts). A test that wants an install with no seam deletes it.
+  h.deps.savedEnvLease = savedEnvDispatchLeaseOf(deps, COMPANY);
   return { h, registry, files, heads, keyHostCalls, deps, test, adapters, base, owner };
 }
 

@@ -20,6 +20,7 @@ import type { DeveloperTaskRouteDependencies } from "../aws/developer-tasks.js";
 import { isConditional } from "../aws/broker-shared.js";
 import { plainName } from "../aws/task-web.js";
 import { NOTE_KEEP_SECONDS, NOTE_SK_PREFIX, noteKey } from "../core/sessions/notes.js";
+import type { TaskReadDecision } from "../core/task-flow/read-rule.js";
 import { rowCompany, rowInCompany } from "./company-rows.js";
 import { createTaskComment, currentStepDocument, listTaskComments, pageRefusal, takeRate, type PageActor } from "./page-comments.js";
 import { resolveCoreTaskAccess, resolveTaskAccess, taskOpen, type TaskAccess } from "./task-access.js";
@@ -126,13 +127,12 @@ export async function listPlanComments(deps: RouteDeps, caller: DeveloperCaller,
 }
 
 /**
- * Core task web routes (Cloud #188 item 3): `GET /v1/dev/tasks/{id}/comments` for a task the CORE owns, whose record the core has read and checked against the caller's live company. The very same rule as above (the
- * company of the row, then the task routes' own `read` access, through `resolveCoreTaskAccess`) and the same answer.
+ * Core task web routes (Cloud #188 item 3): `GET /v1/dev/tasks/{id}/comments` for a task the CORE owns, for a person the one read rule admitted (read "comments", whose seam is the task routes' own `read` access, through
+ * `resolveCoreTaskAccess`): the same answer as before. The decision is the argument, so it cannot be called without having asked the rule.
  */
-export async function listCorePlanComments(deps: RouteDeps, caller: DeveloperCaller, task: TaskAccess["task"]): Promise<PlanCommentsResponse> {
-  if (!rowInCompany(task as unknown as Record<string, unknown>, deps.companyId)) throw agentXError("TASK_NOT_FOUND", NOT_FOUND_TASK);
-  const access = await resolveCoreTaskAccess(deps, caller, task, "read");
-  return { comments: liveComments(await listTaskComments(deps, access.task.taskId)).map(planCommentView) };
+export async function listCorePlanComments(deps: RouteDeps, decision: TaskReadDecision): Promise<PlanCommentsResponse> {
+  if (!rowInCompany(decision.task, deps.companyId)) throw agentXError("TASK_NOT_FOUND", NOT_FOUND_TASK);
+  return { comments: liveComments(await listTaskComments(deps, decision.task.taskId)).map(planCommentView) };
 }
 
 /** The existing comment POST for a task already read by the core in the caller's company. */
@@ -363,10 +363,13 @@ export async function readTaskDiff(deps: RouteDeps, caller: DeveloperCaller, tas
   return readDiffPage(deps, query.data, opened);
 }
 
-/** The same diff for a core task: live read authority, then only a PR the workflow recorded. */
-export async function readCoreTaskDiff(deps: RouteDeps, caller: DeveloperCaller, task: TaskAccess["task"], url: URL): Promise<TaskDiffResponse> {
-  if (!rowInCompany(task as unknown as Record<string, unknown>, deps.companyId)) throw agentXError("TASK_NOT_FOUND", NOT_FOUND_TASK);
-  await resolveCoreTaskAccess(deps, caller, task, "read");
+/**
+ * The same diff for a core task, for a person the one read rule admitted (core/task-flow/read-rule.ts, read "diff", whose seam is `resolveCoreTaskAccess`): only a pull request the workflow recorded.
+ * Nothing here decides who may read; the decision is the argument, so it cannot be called without having asked the rule.
+ */
+export async function readCoreTaskDiffPage(deps: RouteDeps, decision: TaskReadDecision, url: URL): Promise<TaskDiffResponse> {
+  const task = decision.task;
+  if (!rowInCompany(task, deps.companyId)) throw agentXError("TASK_NOT_FOUND", NOT_FOUND_TASK);
   const query = DiffQuerySchema.safeParse({ repository: url.searchParams.get("repository") ?? undefined, number: whole(url.searchParams.get("number")), page: url.searchParams.has("page") ? whole(url.searchParams.get("page")) : 1 });
   if (!query.success) throw agentXError("CONFIG_INVALID", "the diff request is invalid");
   const opened = task.workflow?.pullRequests?.find((pr) => pr.repositoryId === query.data.repository && pr.number === query.data.number);

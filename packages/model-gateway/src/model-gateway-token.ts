@@ -105,8 +105,11 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/u;
 const BUILTIN_AGENTS = new Set(["rovara-code", "ticket-triage", "root-cause-analyst", "code-reviewer", "deploy-reviewer", "service-reviewer"]);
 export type Payer = { kind: "member"; developerId: string } | { kind: "project"; project: string } | { kind: "agent"; agentId: string } | { kind: "chain"; chainId: string };
-/** DEC 254zzz41: one reviewer model for one task and one review kind. The signed cid/pid/tid/ws/op bind the task; the gateway consumes the jti once. */
-export const REVIEWER_KINDS = ["second_review", "design_review"] as const;
+/**
+ * DEC 254zzz41: one reviewer model for one task and one review kind. The signed cid/pid/tid/ws/op bind the task; the gateway consumes the jti once.
+ * `tier_review`: the code or security review a change that grew above its planned tier must pass; the same per-call ceiling, binding and single use as the others.
+ */
+export const REVIEWER_KINDS = ["second_review", "design_review", "tier_review"] as const;
 export type ReviewerKind = typeof REVIEWER_KINDS[number];
 export interface ReviewerGrant { kind: ReviewerKind; slot: string; ceilingUsd: number }
 /**

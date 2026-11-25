@@ -1,0 +1,469 @@
+{
+  "about": "Proof that Code's copy of the model gateway equals Rovara Cloud's gateway at the commit below, byte for byte, except for the declared differences. Run: node scripts/gateway-catch-up-proof.ts check (CI; needs no Cloud checkout) or ... check --cloud <clone of Rovara Cloud> (also re-reads Cloud's tree). A deliberate later change to a file in Code is recorded under `divergedFromCloud` (path, the new blob, the reason) in the same pull request; nothing else may differ. Blob ids are written as blob:<40 hex> so a secret scanner does not mistake them for keys.",
+  "cloudCommit": "afb494e7551609c6b325f6b4140bf7e06df9098c",
+  "exact": {
+    "contracts/shared/model-gateway-product-ai.v1.json": "blob:1f40c62ef5d27b5486451fe306f438d9a275adf8",
+    "contracts/shared/model-gateway-product-bedrock.v2.json": "blob:27ca0a6d8aaea2dc072b95da4d04845c0eb00649",
+    "contracts/shared/model-gateway-product-vertex.v1.json": "blob:ff07d5e71d393aebc54494fbbb61a7fd91963eb5",
+    "contracts/shared/model-gateway-token.v1.json": "blob:06478003b1365a4d50e0f7ce3e0246d323dff2c3",
+    "environments/model-gateway/Dockerfile": "blob:49c5b467af1ccec3f4463c7a1e2ca9f7e0056cd0",
+    "environments/model-gateway/toolchain/package-lock.json": "blob:da2f46c48cf2f2f0afcdd0b7f21e5f246fe13afa",
+    "environments/model-gateway/toolchain/package.json": "blob:9cdbbf8fdb8ce203727282c1e0af79fb7f558f49",
+    "packages/model-gateway/package.json": "blob:f95c7eb0beaa148ef6c5415769b077c9ef05cc54",
+    "packages/model-gateway/src/agent-ai.ts": "blob:14dd876edd9d1f394139f29eb1f0697657b8f437",
+    "packages/model-gateway/src/agent-openai.ts": "blob:5f288c2e4fcf2eec3be4dc41c993f0754f14f53b",
+    "packages/model-gateway/src/agent-own-key-backfill.ts": "blob:75734b1585b555a0711e5db58fa6e10634643984",
+    "packages/model-gateway/src/answers-route.ts": "blob:b10cf25415fcabbf417db11d91f2d6508d53e9ea",
+    "packages/model-gateway/src/aws-kms.ts": "blob:9b921fc7bc4b796d45071c149e0e22c27852cb8d",
+    "packages/model-gateway/src/aws.ts": "blob:707330480a669336e2aff46288083e296d6a8124",
+    "packages/model-gateway/src/bedrock-byo-sessions.ts": "blob:705f98c150cf008b69d1080734f3245c2626d51d",
+    "packages/model-gateway/src/bedrock-byo.ts": "blob:54601f8fb75719508b2feac65e0bbdb6ffc103fd",
+    "packages/model-gateway/src/bedrock-converse.ts": "blob:6f0e80d5c0de0f840a94f1536929a2872a4d5e9b",
+    "packages/model-gateway/src/bedrock-event-stream.ts": "blob:ce00f973ea3dbe44d8d73e5dd894563ddbf82b90",
+    "packages/model-gateway/src/bedrock-transport.ts": "blob:c7ad48eda8e911f6042cbd7dfc2b183064170097",
+    "packages/model-gateway/src/caps.ts": "blob:929e8f5db628850c9b2981d4850709206bfe1d8e",
+    "packages/model-gateway/src/charge-producer.ts": "blob:af51d2eb22f8d460bd9faaa45d4b73b18f69c8e6",
+    "packages/model-gateway/src/charge-receipt.ts": "blob:abd17a4169f8178c9dbcb7c607a9ad73f2b77571",
+    "packages/model-gateway/src/charge-settlement.ts": "blob:d23b35f6dec914033cff7741343942a4cfd5cd0e",
+    "packages/model-gateway/src/company-caps.ts": "blob:e51399428cbb9f53077a3e605b03307adabe11de",
+    "packages/model-gateway/src/company-instructions.ts": "blob:999da00a9d32f04a1f3a86c646e4aebc3cfe8dfd",
+    "packages/model-gateway/src/correction.ts": "blob:ee10415c9929f786d80c56e9f19027a0cf3194d8",
+    "packages/model-gateway/src/deploy.ts": "blob:af9a271352048cef3128332ff47ada420ade97a3",
+    "packages/model-gateway/src/dynamo-eval-stages.ts": "blob:1dd8794dc491a943266fffab13f8df6829c03318",
+    "packages/model-gateway/src/dynamo-meter.ts": "blob:f2c05e1b2d4b5f7d93d163662463ce4693ba7a80",
+    "packages/model-gateway/src/dynamo-prices.ts": "blob:729ae497465363bc0c28905afa1b8b991048ac27",
+    "packages/model-gateway/src/dynamo-product-keys.ts": "blob:147f2958bfafde8adfd4ada94e16aad100a8bcdb",
+    "packages/model-gateway/src/dynamo-product-overrun.ts": "blob:f0fd6267560565b89e6ea539d3eb6272d6a9b29a",
+    "packages/model-gateway/src/dynamo.ts": "blob:e32f9aac23bb5e357467305b16fce5e31e29d151",
+    "packages/model-gateway/src/ended.ts": "blob:38bc1c3df2ee0c716aa611e5a30302c5fe0bb172",
+    "packages/model-gateway/src/endpoint-guard.ts": "blob:5418b77915e1c1d9dc6aca15fc53cf1018e4f955",
+    "packages/model-gateway/src/endpoint-source.ts": "blob:177fa4d57a9e4ce7a5efbd84b808c85934175fbb",
+    "packages/model-gateway/src/estimate.ts": "blob:7fdae773ad821c8d6614ceb34883a69833312626",
+    "packages/model-gateway/src/eval-approvals.ts": "blob:c8b101273d80562749b5d5377c5be4359f559a3e",
+    "packages/model-gateway/src/eval-authority.ts": "blob:9d2f4343efc1f746ca02196508edb8a50d3674f2",
+    "packages/model-gateway/src/eval-cap.ts": "blob:eeb8cd0e03bb118f3d7da028e7df4be08cccda42",
+    "packages/model-gateway/src/failed-call.ts": "blob:f5172ebbfe1154d0d4ef1f3d457a384061dad088",
+    "packages/model-gateway/src/guard.ts": "blob:d99568c222b3a7bd258ec3432383b9dc0bd2ed48",
+    "packages/model-gateway/src/index.ts": "blob:17676b69b81680ef16c0a4c873cf2cb5af21db89",
+    "packages/model-gateway/src/inline-image.ts": "blob:80f337467ea0b681ddc9417c22af19f8ee949805",
+    "packages/model-gateway/src/installs.ts": "blob:43b985356a3a7060811abc589e2cbb3f7a14fab8",
+    "packages/model-gateway/src/learning-keys.ts": "blob:d7232c42a7c3c15661885f24a2dd274cd5bfe7b9",
+    "packages/model-gateway/src/learning-openai.ts": "blob:cfb44b8acab8387653334d6730658d72a55b5c01",
+    "packages/model-gateway/src/learning-route.ts": "blob:f9fa2d77624b95f8ae7739f30fc44344604a5a83",
+    "packages/model-gateway/src/main.ts": "blob:7386d7e75d725ed9257dc4562768271da9c1a812",
+    "packages/model-gateway/src/media-price.ts": "blob:253a48365350ffb655a610ce273c06a0ffb52cdc",
+    "packages/model-gateway/src/meter.ts": "blob:bda18760aab85d3dcbfab7e7ed25f680e24a85d0",
+    "packages/model-gateway/src/model-gateway-token.ts": "blob:67dcc35082df16c991aa2d77ccd3132374564b42",
+    "packages/model-gateway/src/offered-models.ts": "blob:abd6ae8582c9bdeb5a9ef48eb840559e76fafd69",
+    "packages/model-gateway/src/openai-key-check.ts": "blob:3363478ebcbfbe97afeed803dad36b0f197a9765",
+    "packages/model-gateway/src/openrouter-policy.ts": "blob:90a2239c8f161ed8f6d2cf230db2d66acd5a096e",
+    "packages/model-gateway/src/pending-page.ts": "blob:93ea33e314b06ded0930a0fa0520dd2cb68ff3c3",
+    "packages/model-gateway/src/price-classify.ts": "blob:9b5b47225f9eee54a3eb80dba727dd399b862035",
+    "packages/model-gateway/src/price-constants.ts": "blob:ddf9d55493d962f0f5729872ab329d2a4981453b",
+    "packages/model-gateway/src/price-identity.ts": "blob:92c09a43a7717957e18e275cbfe28e8c453e45fa",
+    "packages/model-gateway/src/price-index.ts": "blob:bcec1766c0d7eadecbbf92f16faec92dcd98f596",
+    "packages/model-gateway/src/price-overrides.ts": "blob:6734e5401e1486eba28ffa43bbc9e56492d97fee",
+    "packages/model-gateway/src/price-refresh.ts": "blob:872006aae48481bd8f1fe4409d9d2171d57ecbf4",
+    "packages/model-gateway/src/price-sanity.ts": "blob:159c842af62dada1a5a6ed4c1588ea25b937ce66",
+    "packages/model-gateway/src/price-snapshot.ts": "blob:10a7d04df42d848d14a2898752cf421c6b00a0a7",
+    "packages/model-gateway/src/price-sources.ts": "blob:d58b9ae9751970244dddd45597418a928e2854c6",
+    "packages/model-gateway/src/price-tiers.ts": "blob:2f90a484506c50252d3eba79ea670d93e1346bc7",
+    "packages/model-gateway/src/price.ts": "blob:09332d18f184f58c12ef351fcbde448b6ba5c171",
+    "packages/model-gateway/src/process.ts": "blob:d98646f9fd6e43e0620e557de46bed3da1bbff1b",
+    "packages/model-gateway/src/product-bedrock.ts": "blob:24f7d6d4967ffe5a3139e059be69ceab675e5c80",
+    "packages/model-gateway/src/product-bridge.ts": "blob:20c40ac2b222fcbaeff9e0b1f0c670b3a058e42c",
+    "packages/model-gateway/src/product-eval.ts": "blob:98cb7ed0b9b90b38c08d4004d346d1456d6a9894",
+    "packages/model-gateway/src/product-gemini.ts": "blob:b9920e2cc9498db92f550959b662e8817949d8a8",
+    "packages/model-gateway/src/product-keys.ts": "blob:ff714015a6e12e46f4cb5cda0223a4ad5079ee1c",
+    "packages/model-gateway/src/product-policy.ts": "blob:b00d33747842637080fa8b17c73e45bbb90df50c",
+    "packages/model-gateway/src/product-route.ts": "blob:c70c950902f9256ae599ca7acdeff93f6ca296e0",
+    "packages/model-gateway/src/product-seal.ts": "blob:0e9ad5f7b75951f71d632142d46c6059415522ad",
+    "packages/model-gateway/src/product-vertex-credential.ts": "blob:dd088d2da2d2b6060074ee445c3c3c0832a2cd3c",
+    "packages/model-gateway/src/product-vertex-token.ts": "blob:2718b073b37cc85bdae05c2037f3332cca07293a",
+    "packages/model-gateway/src/product-vertex.ts": "blob:eef262fd1a0f0e436061473674989a208327d173",
+    "packages/model-gateway/src/provider.ts": "blob:de6de5d8090ac9af1a6130524cd398cdd8daaf45",
+    "packages/model-gateway/src/provisional.ts": "blob:e3d8b0dd400ef5dfa10983acf7f53d96a35d4369",
+    "packages/model-gateway/src/rate-quote.ts": "blob:828fc729a230eeb9f1fdc1b151520fd2d35d3c15",
+    "packages/model-gateway/src/reported-cost.ts": "blob:d462c99c51c777cf7369a3bca96e75641e743328",
+    "packages/model-gateway/src/reviewer-grants.ts": "blob:d3376049eec08054923465b9d3179888718a71a3",
+    "packages/model-gateway/src/rovara-ai-call.ts": "blob:2862194729321a8f5c6dac50f22615861d19da9f",
+    "packages/model-gateway/src/rovara-ai-stop.ts": "blob:ae6f1a933afc4130066af5396052dd334707eb8c",
+    "packages/model-gateway/src/run-charges-read.ts": "blob:6cfd98b4d305c2b7f5cb9a8654ef0f23208a901a",
+    "packages/model-gateway/src/run-price.ts": "blob:571273866db45a0be719194afb056679a5249b35",
+    "packages/model-gateway/src/secrets.ts": "blob:f8cab4235ff7156ed49bba0e43f2bca416af6ee2",
+    "packages/model-gateway/src/server.ts": "blob:6a3b3318145cb04a1420aa044f5f6ef784717b61",
+    "packages/model-gateway/src/service-call.ts": "blob:bca15a3329cb0ff6efbcc118df452389e213e697",
+    "packages/model-gateway/src/source-stop-cli.ts": "blob:b6cbf1e0b45fe240fc699cd43aae1d7f323b4ee5",
+    "packages/model-gateway/src/source-stop.ts": "blob:1405f2f9431d29dd0afd60fa938a13310f1de3de",
+    "packages/model-gateway/src/task-ended-notice.ts": "blob:355f5772b70f2f167051fc1fbf1706e917433bc0",
+    "packages/model-gateway/src/token.ts": "blob:21547efadfd897bc04d3d5559d209795a552cd95",
+    "packages/model-gateway/src/upkeep-cap-read.ts": "blob:67e5af34b4ae44a782abaccdc96145b3f6181647",
+    "packages/model-gateway/src/upkeep-cap.ts": "blob:703dbafdd477584818e3b9e1f95fef687d48925f",
+    "packages/model-gateway/src/usage.ts": "blob:de679f928b8dd1996c10268b65e16036580c6ee0",
+    "packages/model-gateway/tsconfig.json": "blob:48793c3fb6813b585758a2425a582a051572a0b9",
+    "scripts/model-gateway-image.ts": "blob:905d943684b59458c68575c466de17d33ab4cdd2",
+    "tests/fixtures/model-gateway-bedrock/converse-256/deepseek.v3.2.bin": "blob:afe9f7a127dae93a47a5c87f484c2ec11e7414c7",
+    "tests/fixtures/model-gateway-bedrock/converse-256/minimax.minimax-m2.5.bin": "blob:d0ba296afbe3024c3ed436f2876e0db98bd7c7a8",
+    "tests/fixtures/model-gateway-bedrock/converse-256/moonshot.kimi-k2-thinking.bin": "blob:0135b54f2f047b8453dedaf2108265d387370a34",
+    "tests/fixtures/model-gateway-bedrock/converse-256/openai.gpt-oss-120b-1_0.bin": "blob:574a542f15e7a85765d291db1eaf64934bb35639",
+    "tests/fixtures/model-gateway-bedrock/converse-256/openai.gpt-oss-20b-1_0.bin": "blob:74ef6987403902791a6da70f3f8c41f5066eb73d",
+    "tests/fixtures/model-gateway-bedrock/converse-256/us.amazon.nova-pro-v1_0.bin": "blob:9dbce49e82f03d8c9a266956f918fa6b0ff9064e",
+    "tests/fixtures/model-gateway-bedrock/converse-256/us.moonshotai.kimi-k3.1.bin": "blob:5cbc5a6e315da3a176db921600e922eb37cb1a35",
+    "tests/fixtures/model-gateway-bedrock/converse-256/us.moonshotai.kimi-k3.bin": "blob:2c5bb56206aa19cb9c50f3d0d6613e766e1e52be",
+    "tests/fixtures/model-gateway-bedrock/converse/deepseek.v3-v1_0.bin": "blob:0ad0e71cd800703be750d26df3515d6d9f6e6f56",
+    "tests/fixtures/model-gateway-bedrock/converse/mistral.devstral-2-123b.bin": "blob:7108bdf6397c049cd5dbd8b5a27aa8b55bd19e6f",
+    "tests/fixtures/model-gateway-bedrock/converse/mistral.mistral-large-3-675b-instruct.bin": "blob:5512742b985e90d60ec7a653ef80a5c1fa4daf3c",
+    "tests/fixtures/model-gateway-bedrock/converse/moonshotai.kimi-k2.5.bin": "blob:54684c3318b1c441b6e227cadf0dd0fe70c6ada5",
+    "tests/fixtures/model-gateway-bedrock/converse/qwen.qwen3-235b-a22b-2507-v1_0.bin": "blob:1cb1cbd3e46dd2c53194f04231d4cc94a490940c",
+    "tests/fixtures/model-gateway-bedrock/converse/qwen.qwen3-coder-30b-a3b-v1_0.bin": "blob:5e30a426ed649bff95cb0711b1d0f3eb736e40c3",
+    "tests/fixtures/model-gateway-bedrock/converse/qwen.qwen3-coder-480b-a35b-v1_0.bin": "blob:e262e6ffb8c96ebdbd80ce888d1d2aa5070a2bdc",
+    "tests/fixtures/model-gateway-bedrock/converse/us.amazon.nova-2-lite-v1_0.bin": "blob:904cecb8512cc782632706c8077be04de0f75546",
+    "tests/fixtures/model-gateway-bedrock/converse/zai.glm-4.7.bin": "blob:3cd5147c7d1146351ca26ab99e5f4211046d7a2f",
+    "tests/fixtures/model-gateway-bedrock/converse/zai.glm-5.bin": "blob:fe4cfc702992360e1b701ff22e3390b974e97b83",
+    "tests/fixtures/model-gateway-bedrock/invoke-with-response-stream-haiku-4-5.bin": "blob:f7e424c87bd7485e623ee555b2e9842342caf0e2",
+    "tests/fixtures/model-gateway-bedrock/two-turn-real/deepseek.v3.2.turn1.json": "blob:a1d66ff22e292313509059c1ada6d0705d9eeb61",
+    "tests/fixtures/model-gateway-bedrock/two-turn-real/minimax.minimax-m2.5.turn1.json": "blob:bd7adcff2b92ee57bb614ed331b956835b66f4f9",
+    "tests/fixtures/model-gateway-bedrock/two-turn-real/minimax.minimax-m2.5.turn2.json": "blob:a35ad54bf104cfe3aa0999d4d8701611dc8c3a0a",
+    "tests/fixtures/model-gateway-bedrock/two-turn-real/moonshot.kimi-k2-thinking.turn1.json": "blob:dc87c0f9548931fb566a65adec4158ed3ba04e39",
+    "tests/fixtures/model-gateway-bedrock/two-turn-real/moonshot.kimi-k2-thinking.turn2.json": "blob:3972984429c5bb83f33baeca54c2b55186148e16",
+    "tests/fixtures/model-gateway-bedrock/two-turn-real/us.moonshotai.kimi-k3.1.turn1.json": "blob:25585c230ec6da917f7cd24d1720fa6bf2e1bdc2",
+    "tests/fixtures/model-gateway-bedrock/two-turn-real/us.moonshotai.kimi-k3.1.turn2.json": "blob:0faf46455e04b6ffbcf957e9d054376a4e2801da",
+    "tests/fixtures/model-gateway-bedrock/two-turn-real/us.moonshotai.kimi-k3.turn1.json": "blob:c2238b96e7ccdd2ab80fef0feed9ee0339529ec1",
+    "tests/fixtures/model-gateway-bedrock/two-turn-real/us.moonshotai.kimi-k3.turn2.json": "blob:ce897bbb336a5b756e888eb6c87e237d5f3a7614",
+    "tests/fixtures/model-gateway-prices/aws.json": "blob:aec0567035442e926e06e23db8f4579f42190546",
+    "tests/fixtures/model-gateway-prices/litellm.json": "blob:e604e272f8fc4be243dd2d05535ac1c6c03a07a7",
+    "tests/fixtures/model-gateway-prices/openrouter-bounded-20261120.json": "blob:b1aec29e014c7db2158d49a7333746f91c83439b",
+    "tests/fixtures/model-gateway-prices/openrouter-discovery-absent-zero-20261121.json": "blob:e7dfca9a47c71115a664e43dadbbc281cf84a95b",
+    "tests/fixtures/model-gateway-prices/openrouter-live5-live6.json": "blob:1e51afb07a1dc8e99cde376db304a976ce2a8023",
+    "tests/fixtures/model-gateway-prices/openrouter-run8-refusal.json": "blob:73a9ec8179b57ddbbdcae852585c94676c389f1b",
+    "tests/fixtures/model-gateway-prices/openrouter.json": "blob:b576148c055bcddecc16eb58ae7a1524ec5c2610",
+    "tests/fixtures/model-gateway/pi-ai-1.5.2-anthropic-messages.json": "blob:a4130a355454c36ece5ba649bc5b199433828eae",
+    "tests/fixtures/model-gateway/pi-ai-1.5.2-multiturn.json": "blob:ebebd9da926407c8e8c582712839ff868d7499d1",
+    "tsconfig.base.json": "blob:43312eb889ffc9771300a4399052f92f9a1baa5f",
+    "tests/unit/agent-own-key-backfill.test.ts": "blob:9e54e46757b822221a10f7e9cd675f93f5fae9dd",
+    "tests/unit/model-gateway-byo-money.test.ts": "blob:10bd5e63aba6b1b4e0a0980e105e0554dff9abfc",
+    "tests/unit/model-gateway-cut-call-actual.test.ts": "blob:9e90924eb54817d302fcdd942f3e5a3e5df07cf4",
+    "tests/unit/model-gateway-deployed-product.test.ts": "blob:53f418f35e3e70f3d705b27ac6b6aa6193d30e5c",
+    "tests/unit/model-gateway-openrouter-reviewed-v3-review.test.ts": "blob:caef7e847cdc473c388d0978ee232a6aa84a8dd0",
+    "tests/unit/model-gateway-product-bedrock-deployed.test.ts": "blob:5cf7a135ff1feb9bab94ad448bd60a0691171750",
+    "tests/unit/model-gateway-product-bedrock-eval-hold.test.ts": "blob:24a38454142aa0ba54ce44767cf27c02f78cc258",
+    "tests/unit/model-gateway-reviewer-grants.test.ts": "blob:55e41506d3191f375ef07e59b977ceddf66d84c2",
+    "tests/unit/model-gateway-round2.test.ts": "blob:69e89337c7828a688f6c7bad679be2102b0fb3df",
+    "tests/unit/model-gateway-run-charges-read.test.ts": "blob:94e4da0253bcfda710c310a2415763fd0ee025fa",
+    "tests/unit/model-gateway-task-ended-notice.test.ts": "blob:7300f859686478bc875a2911f4f28b018a516ec7"
+  },
+  "adapted": {
+    "infra/lib/model-gateway.ts": {
+      "cloudPath": "infra/lib/model-gateway.ts",
+      "cloudBlob": "blob:7c09495d04002c341b01786f3ac30d21b6f6cbdd",
+      "hunks": [
+        {
+          "cloudStart": 25,
+          "cloudCount": 3,
+          "cloudSha256": "ac65885a81ed2256af6eba4456efbf87cfb6399877fb29a0fda5ee398fcdc379",
+          "code": [
+            "import { METRICS_NAMESPACE_ROOT, PRODUCTION_SOURCE_KINDS_NAMED_REFUSAL, PRODUCTION_SOURCE_KINDS_REFUSAL, RESOURCE_PREFIX, environmentSettingsPrefix, parseSourceKindsSwitch, productionSourceKindsAllowed } from \"./model-gateway-contracts.js\";",
+            "import { applyCloudBoundary, byoCustomerAssumeConditions } from \"./model-gateway-boundary.js\";",
+            "import { GATEWAY_SERVICE_ARN_OUTPUT, addDeployedCloudSha } from \"./model-gateway-deployed-sha.js\";"
+          ],
+          "cloud": [
+            "import { METRICS_NAMESPACE_ROOT, PRODUCTION_SOURCE_KINDS_NAMED_REFUSAL, PRODUCTION_SOURCE_KINDS_REFUSAL, RESOURCE_PREFIX, environmentSettingsPrefix, parseSourceKindsSwitch, productionSourceKindsAllowed } from \"@agentx/contracts\";",
+            "import { applyCloudBoundary, byoCustomerAssumeConditions } from \"./cloud-boundary.js\";",
+            "import { GATEWAY_SERVICE_ARN_OUTPUT, addDeployedCloudSha } from \"./deployed-cloud-sha.js\";"
+          ]
+        },
+        {
+          "cloudStart": 300,
+          "cloudCount": 1,
+          "cloudSha256": "4da432ee29e705703fbc4a9a86b7797e215fac9ce4c65aa7a0fbdda477de3510",
+          "code": [
+            "    // Last, so the template keeps its section order; the aspect puts it on every role at synth (model-gateway-boundary.ts)."
+          ],
+          "cloud": [
+            "    // Last, so the template keeps its section order; the aspect puts it on every role at synth (cloud-boundary.ts)."
+          ]
+        },
+        {
+          "cloudStart": 764,
+          "cloudCount": 1,
+          "cloudSha256": "4b86a37423bfd4f1f12d9bd29a0687e99d2db05e859e295db3247f74adfaa322",
+          "code": [
+            "    // The release pipeline's own outputs, only when it names the commit (model-gateway-deployed-sha.ts): the deployed sha and the service its settled gate reads."
+          ],
+          "cloud": [
+            "    // The release pipeline's own outputs, only when it names the commit (deployed-cloud-sha.ts): the deployed sha and the service its settled gate reads."
+          ]
+        },
+        {
+          "cloudStart": 766,
+          "cloudCount": 1,
+          "cloudSha256": "4da432ee29e705703fbc4a9a86b7797e215fac9ce4c65aa7a0fbdda477de3510",
+          "code": [
+            "    // Last, so the template keeps its section order; the aspect puts it on every role at synth (model-gateway-boundary.ts)."
+          ],
+          "cloud": [
+            "    // Last, so the template keeps its section order; the aspect puts it on every role at synth (cloud-boundary.ts)."
+          ]
+        }
+      ]
+    },
+    "infra/lib/model-gateway-boundary.ts": {
+      "cloudPath": "infra/lib/cloud-boundary.ts",
+      "cloudBlob": "blob:fb80af392ba1de78c6d23f8321d7814fcfde2895",
+      "hunks": [
+        {
+          "cloudStart": 4,
+          "cloudCount": 1,
+          "cloudSha256": "ed650883a0aa862b648724d6ffad047e488f160e3b194f5af2f76910332670c8",
+          "code": [
+            "import { RESOURCE_PREFIX, environmentSettingsPrefix } from \"./model-gateway-contracts.js\";"
+          ],
+          "cloud": [
+            "import { RESOURCE_PREFIX, environmentSettingsPrefix } from \"@agentx/contracts\";"
+          ]
+        }
+      ]
+    },
+    "infra/lib/model-gateway-deployed-sha.ts": {
+      "cloudPath": "infra/lib/deployed-cloud-sha.ts",
+      "cloudBlob": "blob:11fe4dc083bce0c4d99a56c9a126fae14cf63d87",
+      "hunks": []
+    },
+    "tests/unit/model-gateway-bedrock-byo-route.test.ts": {
+      "cloudPath": "tests/unit/model-gateway-bedrock-byo-route.test.ts",
+      "cloudBlob": "blob:be68ed7e5cbe188532e466376ad88d921553d649",
+      "hunks": [
+        {
+          "cloudStart": 17,
+          "cloudCount": 1,
+          "cloudSha256": "b2f96095b9981ab8d829e60388c243e06f76d7d19d177730eb8c7413d4e3360c",
+          "code": [
+            "import { loadSwitches } from \"../../infra/lib/model-gateway-switches.js\";"
+          ],
+          "cloud": [
+            "import { loadSwitches } from \"../../ops/pipeline/switches.js\";"
+          ]
+        }
+      ]
+    },
+    "tests/contract/model-gateway-bedrock-byo-infra.test.ts": {
+      "cloudPath": "tests/contract/model-gateway-bedrock-byo-infra.test.ts",
+      "cloudBlob": "blob:d2b6a0adb5ba7c80a37b87487db0bc2ef7e132a2",
+      "hunks": [
+        {
+          "cloudStart": 30,
+          "cloudCount": 1,
+          "cloudSha256": "57de3c30b29c8818b8eaee15ab629773596975e4e387b564bf22bf890cdf9292",
+          "code": [
+            "// The role boundary (model-gateway-boundary.ts) is a ManagedPolicy attached to no role: a ceiling, not a grant, so it is not read here."
+          ],
+          "cloud": [
+            "// The role boundary (cloud-boundary.ts) is a ManagedPolicy attached to no role: a ceiling, not a grant, so it is not read here."
+          ]
+        },
+        {
+          "cloudStart": 43,
+          "cloudCount": 1,
+          "cloudSha256": "62fbb634ddc300f712f9a6263c407e74695cb579b010b21981d1c7a448b6b24c",
+          "code": [
+            "    // Outside the role boundary, which names the broker and customers' roles as a ceiling for every gateway (model-gateway-boundary.ts)."
+          ],
+          "cloud": [
+            "    // Outside the role boundary, which names the broker and customers' roles as a ceiling for every gateway (cloud-boundary.ts)."
+          ]
+        },
+        {
+          "cloudStart": 124,
+          "cloudCount": 1,
+          "cloudSha256": "9aebdfd0ae8446e48c5b5d85243f67e9965062b5e753a459245636ab334c88c5",
+          "code": [
+            "    // The website stack's own check of the same rule stays in Rovara Cloud with that stack (Code's app makes only the gateway's stacks)."
+          ],
+          "cloud": [
+            "    expect(() => buildAgentXApp({ rovaraCloudApp: \"production\", agentxRegion: \"us-west-2\", ...productOn })).toThrow(/production must name/u);"
+          ]
+        }
+      ]
+    },
+    "tests/contract/model-gateway-product-infra.test.ts": {
+      "cloudPath": "tests/contract/model-gateway-product-infra.test.ts",
+      "cloudBlob": "blob:121d7c41eba90d252719b6b00e86b101b0730fe2",
+      "hunks": [
+        {
+          "cloudStart": 11,
+          "cloudCount": 1,
+          "cloudSha256": "92e2dc60a6db5c93638c6821da31450f1fa23255718a7696a40ac9cec8630c36",
+          "code": [],
+          "cloud": [
+            "import { defaultBoundaryStatements, serviceRoleStatements, type PolicyStatementJson } from \"../../packages/contracts/src/access-policies.js\";"
+          ]
+        },
+        {
+          "cloudStart": 13,
+          "cloudCount": 2,
+          "cloudSha256": "9799e1692c55f52fad22cf1c76a585597138ffa213822444f64785d42d8a3983",
+          "code": [
+            "import { buildAgentXApp } from \"../../infra/lib/app.js\";",
+            "import { AI_SOURCE_KINDS_CONTEXT_KEY, productAiOn } from \"../../infra/lib/model-gateway-app.js\";"
+          ],
+          "cloud": [
+            "import { iamWildcardMatches } from \"../../packages/model-gateway/src/product-policy.js\";",
+            "import { AI_SOURCE_KINDS_CONTEXT_KEY, buildAgentXApp, productAiOn } from \"../../infra/lib/app.js\";"
+          ]
+        },
+        {
+          "cloudStart": 21,
+          "cloudCount": 1,
+          "cloudSha256": "967253bb44870bd2ca23d21dfa068b710b2ffc726f8d2185b5902ca19d9d4938",
+          "code": [
+            "/** The gateway template (staging) in Rovara Cloud at d7d1edbb8, before this change (rule description reworded for EC2, 2026-11-16): SHA-256 of its JSON, less the role boundary (2026-11-17). Re-pinned 2026-11-17 for the alarm topic allow, fixed alarm names and the PricesStale math alarm. Re-pinned for the common customer-source overage alarm filter and description (controller round B, DEC 254zzz253). */"
+          ]
+        },
+        {
+          "cloudStart": 178,
+          "cloudCount": 23,
+          "cloudSha256": "58ab98af29eea23d2fdf043e773f457433a83052be5bd8af9daacd5e5d37df59",
+          "code": [
+            "// The offline simulation of Cloud's agentx deploy role and boundary (Cloud's contracts access-policies.ts) stays in Rovara Cloud with",
+            "// those contracts; Code's access-policies describe Code's own roles (#1478)."
+          ]
+        },
+        {
+          "cloudStart": 202,
+          "cloudCount": 17,
+          "cloudSha256": "7af9880c1721811d9482de19f82e8639bce9fb463fd218a30eafeb47718716b9",
+          "code": []
+        }
+      ],
+      "codeBlob": "blob:e31bde9397737f18a2d08854e0deb58056d970bd"
+    },
+    "tests/contract/model-gateway-rovara-ai-infra.test.ts": {
+      "cloudPath": "tests/contract/model-gateway-rovara-ai-infra.test.ts",
+      "cloudBlob": "blob:dee70eb3be492604dac20866684fc9b5c71628d9",
+      "hunks": [
+        {
+          "cloudStart": 10,
+          "cloudCount": 1,
+          "cloudSha256": "a0479cdbabd1b7c79a1bb455f6575c4c111aa661be64b8a0216f84139a95b7ba",
+          "code": [
+            "import { buildAgentXApp } from \"../../infra/lib/app.js\";",
+            "import { rovaraAiContext } from \"../../infra/lib/model-gateway-app.js\";"
+          ],
+          "cloud": [
+            "import { buildAgentXApp, rovaraAiContext } from \"../../infra/lib/app.js\";"
+          ]
+        },
+        {
+          "cloudStart": 24,
+          "cloudCount": 1,
+          "cloudSha256": "57de3c30b29c8818b8eaee15ab629773596975e4e387b564bf22bf890cdf9292",
+          "code": [
+            "// The role boundary (model-gateway-boundary.ts) is a ManagedPolicy attached to no role: a ceiling, not a grant, so it is not read here."
+          ],
+          "cloud": [
+            "// The role boundary (cloud-boundary.ts) is a ManagedPolicy attached to no role: a ceiling, not a grant, so it is not read here."
+          ]
+        }
+      ]
+    },
+    "tests/unit/model-gateway-rovara-default.test.ts": {
+      "cloudPath": "tests/unit/model-gateway-rovara-default.test.ts",
+      "cloudBlob": "blob:44a3ed876cb36a1bd6b5f53e16182c67cdc223af",
+      "hunks": [
+        {
+          "cloudStart": 161,
+          "cloudCount": 1,
+          "cloudSha256": "7ada7d0db81dfbd5644093fd177ccbafd36a6dc23a86a57b0306566420312953",
+          "code": [
+            "    const demo = \"org_dddddddddddddddddddd\"; // An internal staging company (placeholder id)."
+          ]
+        }
+      ],
+      "codeBlob": "blob:778176651ca635065fdc9975622c39e22966aebe"
+    }
+  },
+  "linePins": {
+    "infra/lib/model-gateway-contracts.ts": {
+      "cloudPath": "packages/contracts/src/model-sources.ts",
+      "cloudBlob": "blob:42df873bb6e98902d6d111a8b24b3aea9644fc70",
+      "lines": [
+        "export const CUSTOM_SOURCE_KINDS = [\"anthropic\", \"openai\", \"openrouter\", \"bedrock\", \"endpoint\"] as const;",
+        "export const PRODUCTION_SOURCE_KINDS: readonly CustomSourceKind[] = [\"openai\", \"bedrock\"];",
+        "export const PRODUCTION_SOURCE_KINDS_REFUSAL = `production may switch on only these company AI sources: ${PRODUCTION_SOURCE_KINDS.join(\", \")}; the others are for named test environments until a Cloud release carries them`;",
+        "export const PRODUCTION_SOURCE_KINDS_NAMED_REFUSAL = `production must name its company AI sources (-c rovaraAiSourceKinds=${PRODUCTION_SOURCE_KINDS.join(\",\")}): an install that names none leaves the agents' own-Bedrock source on`;",
+        "export function parseSourceKindsSwitch(value: string | undefined): CustomSourceKind[] {",
+        "  if (value === undefined || value === \"\") return [];",
+        "  const kinds = value.split(\",\");",
+        "  return kinds as CustomSourceKind[];",
+        "export function productionSourceKindsAllowed(value: string | undefined): boolean {",
+        "  return parseSourceKindsSwitch(value).every((kind) => PRODUCTION_SOURCE_KINDS.includes(kind));"
+      ],
+      "absent": [],
+      "pairs": [
+        {
+          "code": "  if (kinds.length > CUSTOM_SOURCE_KINDS.length || new Set(kinds).size !== kinds.length || !kinds.every((kind) => (CUSTOM_SOURCE_KINDS as readonly string[]).includes(kind))) throw new Error(\"invalid AI source kinds\");",
+          "cloud": "  if (kinds.length > SOURCE_KINDS_SWITCH_MAX || new Set(kinds).size !== kinds.length || !kinds.every((kind) => (CUSTOM_SOURCE_KINDS as readonly string[]).includes(kind))) throw new Error(\"invalid AI source kinds\");"
+        }
+      ],
+      "cloudOnly": [
+        "const SOURCE_KINDS_SWITCH_MAX = CUSTOM_SOURCE_KINDS.length;"
+      ]
+    },
+    "infra/lib/model-gateway-app.ts": {
+      "cloudPath": "infra/lib/app.ts",
+      "cloudBlob": "blob:23f2b60ef95e19988b4607b0c8af2f9187771484",
+      "lines": [],
+      "absent": [
+        "MODEL_GATEWAY_BEDROCK_BYO_CONTEXT_KEY",
+        "bedrockByo"
+      ]
+    }
+  },
+  "switches": {
+    "cloudPath": "ops/pipeline/switches.json",
+    "cloudBlob": "blob:ce3c27b52b9502ca806fd8ec92409c221852c8d2",
+    "environments": {
+      "beta": "openai,bedrock",
+      "production": "openai"
+    }
+  },
+  "declaredNotPorted": {
+    "scripts/agent-own-key-backfill.mjs": {
+      "cloudBlob": "blob:855f926df1f59a3f71f0cefc278718d4c0c477f8",
+      "why": "Cloud-only operator script or lint program; unchanged in Cloud since the copy point and not part of the gateway Code deploys"
+    },
+    "scripts/model-gateway-measure.ts": {
+      "cloudBlob": "blob:b0f3b42b7a8ab65cc223ef8e19089ca22dfa5f6b",
+      "why": "Cloud-only operator script or lint program; unchanged in Cloud since the copy point and not part of the gateway Code deploys"
+    },
+    "scripts/model-gateway-prices-live-check.ts": {
+      "cloudBlob": "blob:6813043de688b13b7dce20f760d8305904e847c7",
+      "why": "Cloud-only operator script or lint program; unchanged in Cloud since the copy point and not part of the gateway Code deploys"
+    },
+    "scripts/model-gateway-rovara-ai-stop.mjs": {
+      "cloudBlob": "blob:13e5aa809aaaa91a69be94309c19efea00d56089",
+      "why": "Cloud-only operator script or lint program; unchanged in Cloud since the copy point and not part of the gateway Code deploys"
+    },
+    "scripts/model-gateway-source-stop-clear.mjs": {
+      "cloudBlob": "blob:fd0cfc20b77d864c3d12538caf7eb344ea2ce1fa",
+      "why": "Cloud-only operator script or lint program; unchanged in Cloud since the copy point and not part of the gateway Code deploys"
+    },
+    "tsconfig.lint/pkg-model-gateway.json": {
+      "cloudBlob": "blob:8c186abffea90dc36dd5379ec9966f7f1f20befa",
+      "why": "Cloud-only operator script or lint program; unchanged in Cloud since the copy point and not part of the gateway Code deploys"
+    },
+    "tests/unit/agent-own-key-backfill-cli.test.ts": {
+      "cloudBlob": "blob:98b54abd8550d7b3dd1f331701c2873216298c3d",
+      "why": "runs scripts/agent-own-key-backfill.mjs, a Cloud operator script that stays in Rovara Cloud"
+    },
+    "tests/unit/ai-source-switch.test.ts": {
+      "cloudBlob": "blob:92502e0f1a7f2ea4b0c332c54351c3596ef5ee4a",
+      "why": "synthesizes Cloud's website stack and imports Cloud's server package, which Code does not hold"
+    },
+    "tests/contract/model-gateway-agent-ai-default.test.ts": {
+      "cloudBlob": "blob:17397032f52ecfe5dd3f847e4674c156b2d3e0f0",
+      "why": "compares the gateway with Cloud's server (company-store.ts) and Cloud's UI client, which Code does not hold"
+    }
+  },
+  "divergedFromCloud": {}
+}
