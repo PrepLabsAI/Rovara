@@ -144,6 +144,8 @@ export const AgentXErrorCodeSchema = z.enum([
   "TASK_ACTION_STALE",
   "TASK_ACTION_NEEDS_INPUT",
   "TASK_ACTION_NEEDS_WEB",
+  // R1 + L1 6.2b (409, the default status): the Linear team picked for a project is already another project of the company's (a ticket would start work in both). Appended at the end: no code changes meaning or moves.
+  "LINEAR_TEAM_TAKEN",
 ]);
 
 /** A confirmed write whose current task view could not be read; never a pre-commit refusal. */

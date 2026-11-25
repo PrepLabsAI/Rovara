@@ -83,8 +83,11 @@ const COMMENT_CURSORS_MAX = 20;
 const COMMENTS_QUERY = `query($id: String!, $first: Int!, $after: String, $filter: CommentFilter) { viewer { id } issue(id: $id) { identifier url comments(first: $first, after: $after, filter: $filter) { pageInfo { hasNextPage endCursor } nodes { id body createdAt updatedAt user { id } botActor { id } } } } }`;
 const STATE_TYPES: readonly string[] = ["triage", "backlog", "unstarted", "started", "completed", "canceled"];
 const ASKED_QUERY = `query($filter: IssueFilter!, $first: Int!) { viewer { id } issues(first: $first, filter: $filter) { nodes { id identifier title description url project { id name url } parent { id identifier title url }
-creator { displayName } labels { nodes { id name } } history(first: 25) { pageInfo { hasNextPage endCursor } nodes { createdAt actor { id } botActor { id } addedLabelIds removedLabelIds toAssigneeId fromAssigneeId } } } } }`;
-const HISTORY_PAGE_QUERY = `query($id: String!, $after: String) { issue(id: $id) { history(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { createdAt actor { id } botActor { id } addedLabelIds removedLabelIds toAssigneeId fromAssigneeId } } } }`;
+creator { displayName } labels { nodes { id name } } history(first: 25) { pageInfo { hasNextPage endCursor } nodes { id createdAt actor { id } botActor { id } addedLabelIds removedLabelIds toAssigneeId fromAssigneeId } } } } }`;
+const HISTORY_PAGE_QUERY = `query($id: String!, $after: String) { issue(id: $id) { history(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { id createdAt actor { id } botActor { id } addedLabelIds removedLabelIds toAssigneeId fromAssigneeId } } } }`;
+/** One issue by id, with who made each change to its labels and assignee (R1 + L1 6.2b: the hosted doorbell reads exactly the issue a delivery names). */
+const ISSUE_ASKED_QUERY = `query($id: String!) { viewer { id } issue(id: $id) { id identifier title description url team { id } project { id name url } parent { id identifier title url }
+creator { displayName } assignee { id } labels { nodes { id name } } history(first: 25) { pageInfo { hasNextPage endCursor } nodes { id createdAt actor { id } botActor { id } addedLabelIds removedLabelIds toAssigneeId fromAssigneeId } } } }`;
 /** The most further pages of one issue's history read to see all of it (100 entries each). An issue with more is not read to the end, so nobody is credited for it. */
 export const LINEAR_HISTORY_PAGES_MAX = 5;
 
@@ -93,7 +96,7 @@ export const LINEAR_HISTORY_PAGES_MAX = 5;
  * It is credited only when that last change is an ADD of the label (or the assignment to the key's account): a later removal, a tie, or an entry whose time cannot be read means the label that is on the
  * issue now was put there by something not seen, so nobody is credited and the ticket waits for the owner. `hasMore` (the history was not read to its end) is the same.
  */
-export function linearActOf(entries: readonly unknown[], hasMore: boolean, act: { labelIds: ReadonlySet<string>; assignedTo?: string | undefined }): { kind: "bot" | "account"; accountId?: string; at: string } | undefined {
+export function linearActOf(entries: readonly unknown[], hasMore: boolean, act: { labelIds: ReadonlySet<string>; assignedTo?: string | undefined }): { kind: "bot" | "account"; accountId?: string; at: string; /** Linear's id of the history entry (the change), when it gave one. */ entryId?: string } | undefined {
   if (hasMore) return undefined;
   const touches: Array<{ at: number; add: boolean; entry: Record<string, unknown> }> = [];
   for (const raw of entries) {
@@ -115,13 +118,38 @@ export function linearActOf(entries: readonly unknown[], hasMore: boolean, act: 
   if (last.length !== 1 || !last[0]!.add) return undefined;
   const entry = last[0]!.entry;
   const at = new Date(latest).toISOString();
-  if (str(rec(entry["botActor"])["id"]) !== undefined) return { kind: "bot", at };
+  const entryId = str(entry["id"]);
+  const withId = entryId === undefined ? {} : { entryId };
+  if (str(rec(entry["botActor"])["id"]) !== undefined) return { kind: "bot", at, ...withId };
   const accountId = str(rec(entry["actor"])["id"]);
-  return accountId === undefined ? undefined : { kind: "account", accountId, at };
+  return accountId === undefined ? undefined : { kind: "account", accountId, at, ...withId };
+}
+
+/** One workflow status of a Linear team: its type (the broad stage) and its position among the team's statuses. */
+export interface LinearWorkflowState { id?: string; name: string; type: string | undefined; position: number | undefined }
+const workflowStateOf = (node: Record<string, unknown>): LinearWorkflowState | undefined => {
+  const name = str(node["name"]);
+  if (name === undefined) return undefined;
+  const id = str(node["id"]);
+  const type = str(node["type"]);
+  return { ...(id === undefined ? {} : { id }), name, type: type !== undefined && STATE_TYPES.includes(type) ? type : undefined, position: typeof node["position"] === "number" && Number.isFinite(node["position"]) ? node["position"] : undefined };
+};
+/** How far along a state type is (the order Linear's board reads left to right; a finished state is the end). */
+const STATE_TYPE_RANK: Readonly<Record<string, number>> = { triage: 0, backlog: 1, unstarted: 2, started: 3, completed: 4, canceled: 4 };
+/**
+ * Whether moving from `from` to `to` goes forward: by the type's rank, then by the status's position inside the same type ("In Progress" and "In Review" are both `started`). Never out of `completed` or `canceled`.
+ * Anything not known (a state with no type or no position) is not forward: fail closed, nothing is written into the customer's workflow on a guess.
+ */
+export function isForward(from: LinearWorkflowState | undefined, to: LinearWorkflowState): boolean {
+  if (from?.type === undefined || to.type === undefined || from.type === "completed" || from.type === "canceled") return false;
+  const [now, next] = [STATE_TYPE_RANK[from.type], STATE_TYPE_RANK[to.type]];
+  if (now === undefined || next === undefined) return false;
+  if (next !== now) return next > now;
+  return from.position !== undefined && to.position !== undefined && to.position > from.position;
 }
 
 /** What Rovara asks Linear, over the owner's API key: the shape `linearTracker` takes as access. */
-export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<LinearTrackerAccess, "reply" | "readIssue" | "asked" | "moveIssue" | "listComments">> {
+export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<LinearTrackerAccess, "reply" | "readIssue" | "asked" | "askedIssue" | "moveIssue" | "listComments">> {
   const fetchImpl = options.fetch ?? fetch;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const ownIsRovara = options.ownAccountIsRovara === true;
@@ -163,8 +191,8 @@ export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<
     }
   }
 
-  const issueOf = async (key: string): Promise<{ id: string; identifier: string; url: string; teamStates: Array<{ id: string; name: string }>; stateName: string } | undefined> => {
-    const read = await call("query($id: String!) { issue(id: $id) { id identifier url state { name } team { states(first: 100) { nodes { id name } } } } }", { id: key });
+  const issueOf = async (key: string): Promise<{ id: string; identifier: string; url: string; teamStates: LinearWorkflowState[]; stateName: string; state: LinearWorkflowState | undefined } | undefined> => {
+    const read = await call("query($id: String!) { issue(id: $id) { id identifier url state { name type position } team { states(first: 100) { nodes { id name type position } } } } }", { id: key });
     if ("errors" in read) {
       if (isNotFoundAnswer(read.errors)) return undefined;
       if (isPermissionAnswer(read.errors)) throw new TrackerWriteRefusedError("needs_write_access");
@@ -175,9 +203,10 @@ export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<
     const identifier = str(issue["identifier"]);
     const url = str(issue["url"]);
     if (id === undefined || identifier === undefined || url === undefined) return undefined;
+    const current = rec(issue["state"]);
     return {
-      id, identifier, url, stateName: str(rec(issue["state"])["name"]) ?? "",
-      teamStates: arr(rec(rec(issue["team"])["states"])["nodes"]).map(rec).flatMap((node) => (str(node["id"]) !== undefined && str(node["name"]) !== undefined ? [{ id: str(node["id"])!, name: str(node["name"])! }] : [])),
+      id, identifier, url, stateName: str(current["name"]) ?? "", state: workflowStateOf(current),
+      teamStates: arr(rec(rec(issue["team"])["states"])["nodes"]).map(rec).flatMap((node) => { const state = workflowStateOf(node); return state === undefined ? [] : [state]; }),
     };
   };
 
@@ -312,6 +341,33 @@ export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<
     return { comments: [] };
   };
 
+  /** An issue's history in full (the first page came with it; the rest is read, a few pages at most): `more` is true when it was not read to its end, and then nobody is credited. */
+  const historyOf = async (issue: Record<string, unknown>, fallbackId: string, signal: AbortSignal): Promise<{ entries: unknown[]; more: boolean }> => {
+    let entries = arr(rec(issue["history"])["nodes"]);
+    let more = rec(rec(issue["history"])["pageInfo"])["hasNextPage"] !== false;
+    let after = str(rec(rec(issue["history"])["pageInfo"])["endCursor"]);
+    for (let page = 0; more && page < LINEAR_HISTORY_PAGES_MAX; page += 1) {
+      const next = await call(HISTORY_PAGE_QUERY, { id: str(issue["id"]) ?? fallbackId, after: after ?? null }, signal).catch(() => undefined);
+      const history = next === undefined || "errors" in next ? undefined : rec(rec(next.data["issue"])["history"]);
+      if (history === undefined) break;
+      entries = [...entries, ...arr(history["nodes"])];
+      more = rec(history["pageInfo"])["hasNextPage"] === true;
+      after = str(rec(history["pageInfo"])["endCursor"]);
+      if (!more) break;
+    }
+    return { entries, more };
+  };
+  const parentOf = (issue: Record<string, unknown>): { parent?: TrackerAskedItem["parent"] } => {
+    const project = rec(issue["project"]), parentIssue = rec(issue["parent"]);
+    const raw = str(project["id"]) === undefined
+      ? { kind: "parent_issue", id: str(parentIssue["id"]), title: cut(str(parentIssue["title"]) ?? "", 200), url: str(parentIssue["url"]) }
+      : { kind: "project", id: str(project["id"]), title: cut(str(project["name"]) ?? "", 200), url: str(project["url"]) };
+    const parsed = TrackerParentSchema.safeParse(raw);
+    return parsed.success ? { parent: parsed.data } : {};
+  };
+  const actorOf = (found: ReturnType<typeof linearActOf>, viewer: string | undefined, tenant: string): TrackerAskedItem["actor"] =>
+    found === undefined ? undefined : found.kind === "bot" ? { kind: "bot" } : found.accountId === viewer && ownIsRovara ? { kind: "rovara" } : { kind: "person", account: { provider: "linear", tenant, accountId: found.accountId! } };
+
   const asked: NonNullable<LinearTrackerAccess["asked"]> = async ({ label, assignedToRovara, limit, signal }) => {
     const wanted: unknown[] = [];
     const open = { state: { type: { nin: ["completed", "canceled"] } } };
@@ -340,52 +396,77 @@ export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<
       if (identifier === undefined || url === undefined || normalizeIssueKey(identifier) === undefined) continue;
       const labelIds = new Set(arr(rec(issue["labels"])["nodes"]).filter((node) => label !== undefined && str(rec(node)["name"])?.toLowerCase() === label.toLowerCase()).flatMap((node) => str(rec(node)["id"]) ?? []));
       // Who did it: the entry that LAST changed the label (or the assignment), from the issue's whole history. A history cut short (more than a few pages), a newer removal or a tie credits nobody.
-      let entries = arr(rec(issue["history"])["nodes"]);
-      let more = rec(rec(issue["history"])["pageInfo"])["hasNextPage"] !== false;
-      let after = str(rec(rec(issue["history"])["pageInfo"])["endCursor"]);
-      for (let page = 0; more && page < LINEAR_HISTORY_PAGES_MAX; page += 1) {
-        const next = await call(HISTORY_PAGE_QUERY, { id: str(issue["id"]) ?? identifier, after: after ?? null }, signal).catch(() => undefined);
-        const history = next === undefined || "errors" in next ? undefined : rec(rec(next.data["issue"])["history"]);
-        if (history === undefined) break;
-        entries = [...entries, ...arr(history["nodes"])];
-        more = rec(history["pageInfo"])["hasNextPage"] === true;
-        after = str(rec(history["pageInfo"])["endCursor"]);
-        if (!more) break;
-      }
+      const { entries, more } = await historyOf(issue, identifier, signal);
       const found = linearActOf(entries, more, { labelIds, ...(assignedToRovara === true && viewer !== undefined ? { assignedTo: viewer } : {}) });
-      const actor: TrackerAskedItem["actor"] = found === undefined ? undefined : found.kind === "bot" ? { kind: "bot" }
-        : found.accountId === viewer && ownIsRovara ? { kind: "rovara" } : { kind: "person", account: { provider: "linear", tenant: "", accountId: found.accountId! } };
+      const actor = actorOf(found, viewer, "");
       items.push({
         ref: { tracker: "linear", id: normalizeIssueKey(identifier)!, url },
         title: cut(str(issue["title"]) ?? identifier, 300), body: cut(str(issue["description"]) ?? "", BODY_MAX_CHARS),
         ...(str(rec(issue["creator"])["displayName"]) === undefined ? {} : { reporter: str(rec(issue["creator"])["displayName"])! }),
         ...(actor === undefined ? {} : { actor }),
         ...(found === undefined ? {} : { occurredAt: found.at }),
-        ...(() => {
-          const project = rec(issue["project"]), parentIssue = rec(issue["parent"]);
-          const raw = str(project["id"]) === undefined
-            ? { kind: "parent_issue", id: str(parentIssue["id"]), title: cut(str(parentIssue["title"]) ?? "", 200), url: str(parentIssue["url"]) }
-            : { kind: "project", id: str(project["id"]), title: cut(str(project["name"]) ?? "", 200), url: str(project["url"]) };
-          const parsed = TrackerParentSchema.safeParse(raw);
-          return parsed.success ? { parent: parsed.data } : {};
-        })(),
+        ...parentOf(issue),
       });
     }
     return items;
   };
 
-  const moveIssue: NonNullable<LinearTrackerAccess["moveIssue"]> = async (key, statusName) => {
+  /**
+   * One issue by id for the hosted doorbell (R1 + L1 6.2b): its team as LINEAR says (never a delivery body's word), and, when it asks for work NOW (it carries `label`, or it is assigned to this token's own account), the item with who
+   * made the latest such act, when, and the history entry (the change) that was. An act whose history was not read to its end, or was undone, credits nobody and carries no change. `workspace` is the connected workspace's id, stamped on the
+   * actor's account (the link rows are per workspace). Undefined: no such issue.
+   */
+  const askedIssue: NonNullable<LinearTrackerAccess["askedIssue"]> = async ({ issueId, label, workspace, signal }) => {
+    const answer = await call(ISSUE_ASKED_QUERY, { id: issueId }, signal).catch((error: unknown) => {
+      if (error instanceof TrackerWriteRefusedError) throw new TrackerSearchError(error.reason === "not_connected" ? "CONNECTION_MISSING" : "CONNECTION_REFUSED");
+      if (error instanceof Error && (error as { code?: string }).code === "TOO_MANY_REQUESTS") throw new TrackerSearchError("RATE_LIMITED");
+      throw new TrackerSearchError("SEARCH_FAILED");
+    });
+    if ("errors" in answer) {
+      if (isNotFoundAnswer(answer.errors)) return undefined;
+      throw new TrackerSearchError(isRateLimitAnswer(answer.errors) ? "RATE_LIMITED" : isPermissionAnswer(answer.errors) ? "CONNECTION_REFUSED" : "SEARCH_FAILED");
+    }
+    const issue = rec(answer.data["issue"]);
+    const identifier = str(issue["identifier"]);
+    const url = str(issue["url"]);
+    const teamId = str(rec(issue["team"])["id"]);
+    if (identifier === undefined || url === undefined || teamId === undefined || normalizeIssueKey(identifier) === undefined) return undefined;
+    const viewer = str(rec(answer.data["viewer"])["id"]);
+    const labelIds = new Set(arr(rec(issue["labels"])["nodes"]).filter((node) => str(rec(node)["name"])?.toLowerCase() === label.toLowerCase()).flatMap((node) => str(rec(node)["id"]) ?? []));
+    const assigned = viewer !== undefined && str(rec(issue["assignee"])["id"]) === viewer;
+    if (labelIds.size === 0 && !assigned) return { teamId, item: undefined };
+    const { entries, more } = await historyOf(issue, identifier, signal);
+    // Each kind of act on its own (a later removal of one does not hide the other), then the latest of the two that still stand.
+    const byLabel = labelIds.size === 0 ? undefined : linearActOf(entries, more, { labelIds });
+    const byAssignment = !assigned ? undefined : linearActOf(entries, more, { labelIds: new Set(), assignedTo: viewer });
+    const chosen = [byLabel === undefined ? undefined : { found: byLabel, act: { kind: "label" as const, value: label } }, byAssignment === undefined ? undefined : { found: byAssignment, act: { kind: "assignee" as const, value: "rovara" } }]
+      .flatMap((entry) => (entry === undefined ? [] : [entry])).sort((a, b) => Date.parse(b.found.at) - Date.parse(a.found.at))[0];
+    const actor = actorOf(chosen?.found, viewer, workspace);
+    const reporter = str(rec(issue["creator"])["displayName"]);
+    return { teamId, item: {
+      ref: { tracker: "linear", id: normalizeIssueKey(identifier)!, url }, title: cut(str(issue["title"]) ?? identifier, 300), body: cut(str(issue["description"]) ?? "", BODY_MAX_CHARS),
+      ...(reporter === undefined ? {} : { reporter }), ...(actor === undefined ? {} : { actor }),
+      ...(chosen === undefined ? {} : { occurredAt: chosen.found.at }),
+      ...(chosen?.found.entryId === undefined ? {} : { change: { id: chosen.found.entryId, act: chosen.act } }),
+      ...parentOf(issue),
+    } };
+  };
+
+  const moveIssue: NonNullable<LinearTrackerAccess["moveIssue"]> = async (key, statusName, workspace) => {
     const issue = await issueOf(key);
-    if (issue === undefined) throw new TrackerWriteRefusedError("not_found");
+    // An issue of another workspace than the ticket's own is no issue (the company reconnected to another workspace, where the same key is an unrelated issue): refused, nothing moved.
+    if (issue === undefined || (workspace !== undefined && workspaceOfIssueUrl(issue.url) !== workspace)) throw new TrackerWriteRefusedError("not_found");
     if (issue.stateName.toLowerCase() === statusName.toLowerCase()) return "moved";
-    const state = issue.teamStates.find((node) => node.name.toLowerCase() === statusName.toLowerCase());
-    if (state === undefined) return "no_such_status";
-    const written = await call("mutation($id: String!, $state: String!) { issueUpdate(id: $id, input: { stateId: $state }) { success } }", { id: issue.id, state: state.id });
+    const target = issue.teamStates.find((node) => node.name.toLowerCase() === statusName.toLowerCase());
+    if (target === undefined) return "no_such_status";
+    // Forward only: a ticket is never moved out of a finished state, and never back to an earlier one (a person who moved it further, or a merge that already closed it, is left as they put it).
+    if (!isForward(issue.state, target)) return "not_forward";
+    const written = await call("mutation($id: String!, $state: String!) { issueUpdate(id: $id, input: { stateId: $state }) { success } }", { id: issue.id, state: target.id });
     if (!("errors" in written) && rec(written.data["issueUpdate"])["success"] === true) return "moved";
     // A permission answer is Linear refusing the write; anything else may pass.
     if ("errors" in written && isPermissionAnswer(written.errors)) throw new TrackerWriteRefusedError("needs_write_access");
     throw unavailable();
   };
 
-  return { reply: { reply, edit }, readIssue, asked, moveIssue, listComments };
+  return { reply: { reply, edit }, readIssue, asked, askedIssue, moveIssue, listComments };
 }

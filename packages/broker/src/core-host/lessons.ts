@@ -114,6 +114,11 @@ export interface CoreLessonsOptions {
   channelMemberRule?: ChannelMemberRule;
   /** Sends the `thread_messages` command for a deployment whose Slack adapter is not in the registry (a signed webhook adapter). Absent: the registry's in-process `channel` adapter, and none means no Slack source. */
   slackThreadCommand?: Parameters<typeof slackThreadSource>[0]["sendCommand"];
+  /**
+   * R1 + L1 6.2: the company's milestones host, when the deployment builds one outside lessons (the ticket write-back and the chat thread register on it whether or not lessons are on). Lessons REGISTER on it and do not
+   * own it: its sweep (`deliverDue`) runs from the deployment's own scheduled pass, not from lessons'. Absent (a laptop, a test): lessons build and sweep their own, as before.
+   */
+  milestones?: DocumentMilestones | undefined;
   now: () => number;
   log?: (entry: Record<string, unknown>) => void;
 }
@@ -241,7 +246,7 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
     now, log,
   });
 
-  const milestones = createDocumentMilestones({ store: deps.store, now, companyId, log: (event, fields) => log(`milestones.${event}`, fields) });
+  const milestones = options.milestones ?? createDocumentMilestones({ store: deps.store, now, companyId, log: (event, fields) => log(`milestones.${event}`, fields) });
   milestones.register(host.milestone);
 
   async function projectNames(): Promise<string[]> {
@@ -275,7 +280,8 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
       if (!enabled()) return { skipped: "lessons_off" };
       const started = now();
       const deadlineAt = started + budgetMs;
-      const delivered = await milestones.deliverDue().catch((error: unknown) => { log("milestones_failed", { error: error instanceof Error ? error.name : "unknown" }); return { attempted: 0 }; });
+      // The sweep of a host lessons did not build belongs to whoever built it (the deployment's own pass), so it is told once, not twice.
+      const delivered = options.milestones !== undefined ? { attempted: 0 } : await milestones.deliverDue().catch((error: unknown) => { log("milestones_failed", { error: error instanceof Error ? error.name : "unknown" }); return { attempted: 0 }; });
       // The upkeep goes first while there is time: it is bounded and cheap. Reflection then takes what is left, one message at a time (each reflection's deadline is the time left).
       let nightly = false;
       if (deadlineAt - now() > budgetMs / 2) {

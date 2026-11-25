@@ -39,12 +39,21 @@ export const DISCONNECT_OWNER_ONLY = "Only a company owner can disconnect Linear
 export const DISCONNECT_UNAVAILABLE = "Linear could not be disconnected just now; try again.";
 export const TEAM_ADMIN_ONLY = "Only a company owner or admin, or the project's admin, can choose its Linear team.";
 export const PROJECT_NOT_FOUND = "project not found";
+/** A team starts work in one project: another project of the company already picked it. */
+async function refuseTeamOfAnotherProject(connections: Pick<LinearConnectWiring["connections"], "teamPicks">, companyId: string, project: string, teamId: string): Promise<void> {
+  let picks: Awaited<ReturnType<LinearConnectWiring["connections"]["teamPicks"]>>;
+  try { picks = await connections.teamPicks(companyId); } catch { throw agentXError("RUNTIME_UNAVAILABLE", STATUS_UNAVAILABLE); }
+  if (picks.some((other) => other.project !== project && other.teamId.toLowerCase() === teamId.toLowerCase())) throw agentXError("LINEAR_TEAM_TAKEN", TEAM_TAKEN);
+}
+
+/** The team is another project's. */
+export const TEAM_TAKEN = "That Linear team is already used by another project. A team can start work in one project only.";
 export const TEAM_NOT_FOUND = "That Linear team was not found in the company's Linear workspace.";
 export const TEAMS_UNAVAILABLE = "Linear's teams could not be read just now; try again.";
 const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> again";
 
 export interface LinearConnectWiring {
-  connections: Pick<LinearConnections, "mintState" | "spendState" | "connection" | "bindAndStore" | "accessToken" | "teamPick" | "setTeam" | "clearTeam" | "disconnect">;
+  connections: Pick<LinearConnections, "mintState" | "spendState" | "connection" | "bindAndStore" | "accessToken" | "teamPick" | "teamPicks" | "setTeam" | "clearTeam" | "disconnect">;
   /** The app's settings (client id and secret, redirect, webhook secret), or undefined when not set up. */
   app: () => Promise<LinearAppSettings | undefined>;
   /** The Linear HTTP seam (tests: a fake Linear). */
@@ -276,6 +285,8 @@ async function projectRoute(ctx: LinearConnectContext, member: z.infer<typeof Me
   // The team must be one the company's OWN token sees now: a team id from anywhere else (another company's workspace) is not found.
   const team = (await companyTeams(ctx, companyId)).find((candidate) => candidate.id === parsed.data.teamId);
   if (team === undefined) throw agentXError("NOT_FOUND", TEAM_NOT_FOUND);
+  // A team starts work in ONE project: a ticket in a team two projects pick would start (and be paid for) twice.
+  await refuseTeamOfAnotherProject(connections, companyId, project, team.id);
   // Whether this is the project's first team (a read that fails counts as "had one": nothing is seeded).
   const hadTeam = ctx.onFirstTeam === undefined ? true : await connections.teamPick(companyId, project).then((pick) => pick !== undefined, () => true);
   try { await connections.setTeam(companyId, project, team, personId, connection); }

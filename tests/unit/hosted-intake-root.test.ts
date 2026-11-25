@@ -84,4 +84,14 @@ describe("the core root's hosted intake", () => {
     const plain = (await unwired.app.runtimeFor(A)).flow.deps.milestones as unknown as { register(h: typeof handler): () => void };
     expect(() => plain.register(handler)).not.toThrow();
   });
+
+  // R1 + L1 6.2: the write-back is the company's, not lessons': no lessons switch, and the handler is still on the company's milestones.
+  it("registers the ticket write-back on the company's milestones with lessons OFF too, and a company with no handler to register has no milestones", async () => {
+    const handler = { name: "ticket_updates", on: async () => undefined };
+    const { root: built } = root({});
+    const milestones = (await built.app.runtimeFor(A)).flow.deps.milestones as unknown as { register(h: typeof handler): () => void };
+    expect(() => milestones.register(handler)).toThrow("already registered");
+    const { root: unwired } = root({}, { linear: false });
+    expect((await unwired.app.runtimeFor(A)).flow.deps.milestones).toBeUndefined();
+  });
 });

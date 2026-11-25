@@ -58,6 +58,8 @@ export interface CoreServiceWiring {
   humanEdit?: HumanEditSink | undefined;
   /** HW5: write the chat thread's moments (the plan waits for review, the task was closed) when a session that follows a thread changes. Needs the company's milestones; absent: none are written. */
   threadMoments?: boolean | undefined;
+  /** R1 + L1 6.2: write a ticket's own plan-ready and closed moments (the ticket write-back is wired for the company). Needs the company's milestones; absent: none are written. */
+  ticketMoments?: boolean | undefined;
   threadRefresh?: ((orgId: OrgId, sessionId: string, store: DocumentStore) => Promise<void>) | undefined;
 }
 

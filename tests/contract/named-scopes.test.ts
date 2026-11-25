@@ -188,7 +188,7 @@ async function setUp(mode: "linking" | "developer") {
     linearLink: { connections: {} as never, links: new MemoryDocumentStore(), app: async () => undefined, fetch: vi.fn() as never, log: () => undefined },
     // L2-4: the waiting-ticket routes need the core's intake to exist; this one holds no tickets, so only the route table's answer is tested here.
     coreTasks: { route: previewCore },
-    coreIntake: { intakeFor: async () => undefined, waiting: async () => ({ items: [], sources: [] }), start: async () => ({ outcome: "not_found" }), seedTicketUpdates: async () => "no_intake", dismiss: async () => false },
+    coreIntake: { intakeFor: async () => undefined, mayStart: async () => false, waiting: async () => ({ items: [], sources: [] }), start: async () => ({ outcome: "not_found" }), seedTicketUpdates: async () => "no_intake", dismiss: async () => false },
     // Guided onboarding PR 14: the company engine model route needs its wiring to exist; this gateway offers nothing readable, so only the route table's answer is tested here.
     companyEngineModel: { offered: async () => { throw new Error("none"); }, installModel: () => undefined, log: () => undefined },
     // DEC 254zzz63: the company learning model route, the same way.

@@ -276,10 +276,6 @@ export const ROUTES: readonly Route[] = [
   { method: "PUT", path: "/v1/dev/company/learning-model", requires: "full" },
   // L4-EGR: Rovara's fixed outbound addresses (read only; a live owner or admin of the company).
   { method: "GET", path: "/v1/dev/company/egress-addresses", requires: "full" },
-  // L2-4: a project's waiting tickets (Linear app intake on the core); full access only (the route also checks the company owner/admin or the project's admin, live).
-  { method: "GET", path: "/v1/dev/projects/{project}/intake", requires: "full" },
-  { method: "POST", path: "/v1/dev/projects/{project}/intake/{itemId}/start", requires: "full" },
-  { method: "POST", path: "/v1/dev/projects/{project}/intake/{itemId}/dismiss", requires: "full" },
   // The CLI's own routes, which no named scope opens.
   { method: "GET", path: "/v1/dev/workspaces", requires: "full" },
   { method: "GET", path: "/v1/dev/channel-links", requires: "full" },
@@ -416,6 +412,10 @@ export const ROUTES: readonly Route[] = [
   { method: "PUT", path: "/v1/app/projects/{project}/ci-eval-check", requires: "full" },
   // Audit gap 11b: a project's ticket-sharing settings (core-host/ticket-updates-routes.ts, the laptop's local/app/intake.ts route): full access only, then any live role on the project reads; a live company
   // owner or admin, or the project's administrator, changes them.
+  // R1 + L1 6.2b: a project's waiting tickets (Linear app intake on the core) at the one address the laptop, MCP and CLI use (core-host/intake-routes.ts); full access only, and the route checks the live standing on the project.
+  { method: "GET", path: "/v1/app/projects/{project}/intake", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/intake/{itemId}/start", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/intake/{itemId}/dismiss", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/intake/updates", requires: "full" },
   { method: "PUT", path: "/v1/app/projects/{project}/intake/updates", requires: "full" },
   // Lead 4 PCF: the plan card's "Change" lists the open features to pick from; the same people as the filing above (the task's starter, a maintainer, an owner or admin).

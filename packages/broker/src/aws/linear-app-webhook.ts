@@ -7,14 +7,12 @@
 //   3. the same body is taken once (a replay inside the window is a no-op);
 //   4. `organizationId` is routed to the company it is bound to (LINEAR_WORKSPACE#<id>); an unknown workspace is a 200 no-op with the SAME answer as a delivered one (no oracle);
 //   5. "OAuthApp revoked": the company's connection is marked disconnected and its tokens dropped;
-//   6. Issue and Comment events: only then routed to the company's projects whose picked team is the event's team, each handed to `deliver` (company, project, team, type,
-//      action, the parsed body, the delivery itself). Nothing in the body names a company or a project; only the binding and the company's own picks do. PR 20's `deliver`
-//      (linear-app-intake.ts) puts each into the project's tracker intake; a company that is not connected gets a log line and nothing else.
+//   6. Issue events (created and updated; R1 + L1 6.2b: Comment events are not routed, they cost a connection read each and started nothing): only then routed to the company's projects whose picked team is the
+//      event's team, each handed to `deliver` (company, project, team, type, action, the parsed body). Nothing in the body names a company or a project; only the binding and the company's own picks do. The
+//      body is only a doorbell: `deliver` (linear-app-intake.ts) reads the one issue it names from Linear and decides from that answer. A company that is not connected gets a log line and nothing else.
 // The per-project hook secret path (an API-key project's own Linear webhook, `linearTracker({ hook })`) is untouched: it verifies with the same function and its own secret.
 import { z } from "zod";
-import type { RawDelivery } from "@agentx/contracts";
 import { verifyLinearSignature } from "../plugins/tracker/linear/webhook.js";
-import { linearDeliveryOf } from "./linear-app-intake.js";
 import type { LinearAppSettings, LinearConnections } from "./linear-connections.js";
 
 export const LINEAR_WEBHOOK_PATH = "/v1/linear/webhooks";
@@ -27,13 +25,11 @@ export interface LinearProjectEvent {
   companyId: string;
   project: string;
   teamId: string;
-  type: "Issue" | "Comment";
+  type: "Issue";
   action: string;
   body: unknown;
   /** The Linear workspace the delivery is from (the company's bound one). */
   organizationId: string;
-  /** The delivery as received (the raw body and its signature header), so the intake verifies it again with the per-project hook's own code (PR 20). */
-  delivery: RawDelivery;
 }
 
 export interface LinearWebhookWiring {
@@ -56,16 +52,14 @@ const unavailable = (): LinearWebhookAnswer => ({ status: 503, body: { error: { 
 const Id = z.string().regex(/^[A-Za-z0-9-]{1,100}$/);
 const Envelope = z.object({ type: z.string().max(64), action: z.string().max(64), organizationId: Id, webhookTimestamp: z.number().int().positive() }).passthrough();
 const IssueTeam = z.object({ data: z.object({ teamId: Id.optional(), team: z.object({ id: Id.optional() }).passthrough().optional() }).passthrough() }).passthrough();
-const CommentTeam = z.object({ data: z.object({ issue: z.object({ teamId: Id.optional(), team: z.object({ id: Id.optional() }).passthrough().optional() }).passthrough().optional() }).passthrough() }).passthrough();
 const Revoked = z.object({ oauthClientId: z.string().max(128).optional() }).passthrough();
 
-function teamOf(type: "Issue" | "Comment", body: unknown): string | undefined {
-  if (type === "Issue") {
-    const parsed = IssueTeam.safeParse(body);
-    return parsed.success ? parsed.data.data.teamId ?? parsed.data.data.team?.id : undefined;
-  }
-  const parsed = CommentTeam.safeParse(body);
-  return parsed.success ? parsed.data.data.issue?.teamId ?? parsed.data.data.issue?.team?.id : undefined;
+/** An issue created or updated: the only events that ring the doorbell. */
+const isBell = (type: string, action: string): type is "Issue" => type === "Issue" && (action === "create" || action === "update");
+
+function teamOf(body: unknown): string | undefined {
+  const parsed = IssueTeam.safeParse(body);
+  return parsed.success ? parsed.data.data.teamId ?? parsed.data.data.team?.id : undefined;
 }
 
 /**
@@ -115,7 +109,7 @@ export async function handleLinearAppWebhook(wiring: LinearWebhookWiring, input:
       await wiring.connections.markRevoked(envelope.data.organizationId);
       return OK;
     }
-    if (type !== "Issue" && type !== "Comment") return OK;
+    if (!isBell(type, action)) return OK;
     // 6. Only a connected company's projects, and only those whose picked team is the event's.
     const connection = await wiring.connections.connection(companyId);
     if (connection === undefined || connection.status !== "connected" || connection.organizationId !== envelope.data.organizationId) {
@@ -123,12 +117,12 @@ export async function handleLinearAppWebhook(wiring: LinearWebhookWiring, input:
       wiring.log({ companyId, event: "linear.webhook_not_connected", reason: connection === undefined ? "not_connected" : connection.status !== "connected" ? connection.status : "other_workspace", type, action });
       return OK;
     }
-    const teamId = teamOf(type, parsedBody);
+    const teamId = teamOf(parsedBody);
     if (teamId === undefined) return OK;
     const projects = (await wiring.connections.teamPicks(companyId)).filter((pick) => pick.teamId.toLowerCase() === teamId.toLowerCase()).map((pick) => pick.project);
     for (const project of projects) {
       if (wiring.deliver === undefined) wiring.log({ companyId, event: "linear.webhook_routed", project, type, action });
-      else await wiring.deliver({ companyId, project, teamId, type, action, body: parsedBody, organizationId: envelope.data.organizationId, delivery: linearDeliveryOf(input.rawBody, input.headers) });
+      else await wiring.deliver({ companyId, project, teamId, type, action, body: parsedBody, organizationId: envelope.data.organizationId });
     }
     return OK;
   } catch {

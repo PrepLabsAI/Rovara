@@ -167,6 +167,10 @@ describe("the knowledge routes at the developer router", () => {
     const withPreview = all.filter((row) => !added.includes(row) && row !== inviteResend && !serverReads.includes(row) && !linearLinks.includes(row));
     const others = withPreview.filter((row) => row !== preview && row !== closePreview);
     expect(others).toHaveLength(DEV_ROUTES.length - 14);
+    // R1 + L1 6.2b (rule D): the three hosted-only `/v1/dev/projects/{project}/intake*` rows moved to the one `/v1/app` address (the MCP and CLI's own). They are put back where they stood, so this pin proves exactly those three rows are gone and every other row is unchanged.
+    const movedIntake = ["GET /v1/dev/projects/{project}/intake full", "POST /v1/dev/projects/{project}/intake/{itemId}/start full", "POST /v1/dev/projects/{project}/intake/{itemId}/dismiss full"];
+    expect(all.filter((row) => movedIntake.includes(row))).toEqual([]);
+    others.splice(others.indexOf("GET /v1/dev/company/egress-addresses full") + 1, 0, ...movedIntake);
     expect(createHash("sha256").update(others.join("\n")).digest("hex")).toBe(OTHER_ROWS_DIGEST);
     // L4-JA7 (rule D): the pin above moved only by the four hosted knowledge-switch rows; with exactly those removed the digest is the one the table had before.
     const switchRows = others.filter((row) => row.includes("/lessons/local-tools "));

@@ -251,6 +251,9 @@ describe("the health route's grants (A13)", () => {
       // Webhook lane W0: the GitHub delivery rows (GITHUB_DELIVERY#, kept 7 days: GitHub lets an operator redeliver for 3), the replay-guard rows (GITHUB_BODY#<sha256>) and the per-installation minute counters
       // (GITHUB_RL#), each a numeric epoch-SECONDS expiry, then expired. Not durable records: a delivery's effect is stored on the task, and these rows only say "seen".
       "packages/broker/src/aws/github-core-webhooks.ts", "packages/broker/src/aws/github-webhooks.ts",
+      // R1 + L1 6.2b: the hourly tracker-start counter (one TRACKER_START_CAP row per company, person and hour, expiring two hours after it is written). Not a durable record: it only bounds how many
+      // tasks one person's tracker acts start in an hour; no other record shares the key (core/intake/trigger.ts).
+      "packages/broker/src/core/intake/trigger.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);

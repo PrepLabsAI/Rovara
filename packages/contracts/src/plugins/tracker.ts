@@ -154,9 +154,9 @@ export interface Tracker {
   setStatus?(ref: TrackerItemRef, status: NeutralStatus, scope: HostScope): Promise<void>;
   /**
    * Optional: moves the item to the status the tracker calls `name` (a project's own words: "In Review"), matched without regard to case. "moved" when it is there now; "no_such_status" when the tracker has no such
-   * status for this item. A refusal (no write access, no such item) is a `TrackerWriteRefusedError`.
+   * status for this item; "not_forward" when the item is already further along (or finished), so it was left where it is. A refusal (no write access, no such item) is a `TrackerWriteRefusedError`.
    */
-  setStatusByName?(ref: TrackerItemRef, name: string, scope: HostScope): Promise<"moved" | "no_such_status">;
+  setStatusByName?(ref: TrackerItemRef, name: string, scope: HostScope): Promise<"moved" | "no_such_status" | "not_forward">;
   /**
    * Optional: what is asked for now in a place, oldest change last, at most `query.limit`, with who made the act from the tracker's own history. The poll calls it on a timer (`capabilities.intake`). A failure is a
    * `TrackerSearchError` with one of the fixed codes; any other throw is read as `SEARCH_FAILED`.

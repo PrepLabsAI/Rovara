@@ -10,7 +10,7 @@ type Event = { rawPath?: string; requestContext?: { http?: { method?: string } }
 
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 /** What a person's browser or tool asks of a task, and what a worker calls back; the paths the core serves. Anything else (sign-in, the plain task list) is "other" and not held to the rule. */
-const PERSON = [/^\/v1\/dev\/projects\/[^/]+\/intake(\/.*)?$/u, new RegExp(`^/v1/dev/tasks$`), new RegExp(`^/v1/dev/tasks/${UUID}(/.*)?$`), /^\/v1\/app\/(decisions|tasks|sessions)(\/.*)?$/u];
+const PERSON = [/^\/v1\/app\/projects\/[^/]+\/intake(\/.*)?$/u, new RegExp(`^/v1/dev/tasks$`), new RegExp(`^/v1/dev/tasks/${UUID}(/.*)?$`), /^\/v1\/app\/(decisions|tasks|sessions)(\/.*)?$/u];
 const CALLBACK = new RegExp(`^/v1/internal/workspaces/${UUID}/operations/${UUID}/[a-z0-9-]+$`);
 
 export function kindOf(method: string, path: string): SeenRequest["kind"] {
