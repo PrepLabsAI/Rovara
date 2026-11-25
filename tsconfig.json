@@ -1,6 +1,7 @@
 {
   "files": [],
   "references": [
+    { "path": "packages/code-api" },
     { "path": "packages/contracts" },
     { "path": "packages/verifier" },
     { "path": "packages/model-runtime" },

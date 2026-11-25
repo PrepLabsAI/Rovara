@@ -27,6 +27,8 @@ more (`--jobs 1` runs them one after the other). Run `npm run typecheck` first: 
 declarations. `node scripts/lint-shards.ts --only <shard>[,<shard>]` lints some shards, and `--list` names them. A plain
 `npx eslint <file>` still works and uses the whole-repository program (tsconfig.lint.json).
 
+Run `npm run build` (`tsc -b`) once after `npm ci` before running an operator script from `scripts/` that imports `packages/*/src` (`preflight`, `eval`, `ec2-preflight`, the `test-deploy*` family, `test-model-canary`, `test-qualify-runtime`, `test-services-mirror`, `saved-env-builder-copy`): the Code API package (`packages/code-api`) is loaded from its built `dist/`, which a fresh checkout does not have. `scripts/release-production.ts` is the exception: the release builds run it straight after `npm ci`, so it loads nothing from `packages/` until its own build step (`tests/contract/release-fresh-checkout.test.ts`).
+
 The latest results are the CI runs on each pull request. Docker and AWS are not required for this
 local suite.
 

@@ -1,6 +1,7 @@
 // Spec 025 phase 25a: the developer sign-in's shared names and wire shapes. The CLI parses server
 // responses with the non-strict schemas here, so a newer control plane can add fields.
 import { z } from "zod";
+import { CODE_API_VERSION } from "@preplabsai/rovara-code-api";
 import { OrgIdSchema } from "./browser-ids.js";
 import { ProjectRoleSchema } from "./app-projects.js";
 import { EnvironmentNameSchema } from "./environments.js";
@@ -11,7 +12,8 @@ import { DeveloperTaskPolicySchema } from "./project-node.js";
 import { SlackChannelIdSchema, SlackTeamIdSchema, SlackUserIdSchema } from "./slack.js";
 import { WorkspaceStatusSchema } from "./workspace.js";
 
-export const DEVELOPER_API_VERSION = "1.2";
+/** The Code API's version: one number, defined in @preplabsai/rovara-code-api (version.ts) and kept here under its old name. */
+export const DEVELOPER_API_VERSION = CODE_API_VERSION;
 export const AGENTX_CLI_CLIENT_ID = "agentx-cli";
 export const DEVELOPER_TOKEN_AUDIENCE = "agentx-developer";
 export const DEVELOPER_ACCESS_TOKEN_SECONDS = 3600;

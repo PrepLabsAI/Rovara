@@ -1,0 +1,25 @@
+{
+  "name": "@preplabsai/rovara-code-api",
+  "version": "0.1.0",
+  "description": "The contracts of Rovara Code's API that a client may build against: the route table, the refusal codes and the API version.",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./errors": {
+      "types": "./dist/errors.d.ts",
+      "default": "./dist/errors.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "peerDependencies": {
+    "zod": "^4.6.6"
+  },
+  "devDependencies": {
+    "zod": "4.6.6"
+  }
+}

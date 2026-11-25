@@ -39,3 +39,7 @@ tests/eval/results/
 
 work-item-state.lock
 graph-state.lock
+
+# e2e run leftovers
+.tmp-e2e-*/
+tests/.tmp-e2e-*/
