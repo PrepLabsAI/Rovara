@@ -709,6 +709,17 @@ The two Denies now use `StringEquals ProviderPermissionsRequired = read_write` i
 | release-pipeline.ts preflightProject | The Deny condition value `read_only` instead of `read_write` (denies the clone, allows the push) | killed, 1 failed |
 | release-pipeline.ts preflightProject | The Deny block skipped for the Production Code Preflight | killed, 1 failed |
 | release-pipeline.ts preflightProject | `StringNotEquals` instead of `StringEquals` (denies a request without the key) | killed, 1 failed |
+
+## PROJECT-GRANT-RECHECK, channel access holds an old-engine task only (arch ruling a, 2026-11-25)
+
+Killed by tests/contract/task-owner-engine-channel.test.ts (7 tests).
+
+| Mutant | Change | Result |
+| --- | --- | --- |
+| E1, `taskReaderPerson` own-task answer | the engine check is dropped (a core task is held by the channel too) | red (4 of 7: removed-but-in-channel core task, both stamp-unreadable cases, the mixed page) |
+| E2, same | a stamp read that fails or cannot be read counts as an old-engine task (fail open) | red (2 of 7) |
+| E3, `listsAsOwn` | a channel hold is kept for the whole project (the `held` map) | red (1 of 7: one page with an old-engine and a core task of one project) |
+| E4, same check | the engine is not asked at all, channel branch always on | red (4 of 7) |
 | session-binding.ts (session-id-at-rest) | `sameSessionBinding` always true; `sessionBindingOf` returns the raw id | killed (2) |
 | the six state-row families (slack-company-install, github-connect-routes, github-account-link-routes, linear-connections + linear-connect/account-link-routes, sign-in-links) | the row keeps the raw `caller.sessionId` in place of the digest | killed (all six) |
 | same | the spend's in-code digest compare removed alone | survived: equivalent (the DynamoDB condition on the digest still refuses; the two layers are redundant by design) |
