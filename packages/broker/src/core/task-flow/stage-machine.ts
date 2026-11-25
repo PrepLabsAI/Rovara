@@ -66,7 +66,7 @@ import { UNDERSTAND_SKIPS, afterUnderstand, restoredForPlanning, smallPlanRoute,
 import { isExplicitPath } from "../../rovara-code/explicit-path.js";
 import type { StepOutcome } from "./outcome.js";
 import { knowledgeCommitToStore } from "../meta-repo/prepare-meta.js";
-import { SETUP_AGENT_FEATURE, WIKI_BUILD_FEATURE } from "@agentx/contracts";
+import { SETUP_AGENT_FEATURE, WIKI_BUILD_FEATURE, redactBlockReason } from "@agentx/contracts";
 import { setupAgentWireOf } from "../setup-agent/agent.js";
 import { endSetupAgentTask } from "../setup-agent/end.js";
 import { endWikiBuildTask } from "../wiki-build/end.js";
@@ -592,7 +592,7 @@ export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationR
     const what = operation.workflowMode === "UNDERSTAND" ? "reading the request" : "planning";
     // The step stopped because the owner's live message asks for a change outside the approved plan: the owner decides (Retry plans again with that message), and each message says so on its row.
     const reapproval = isReapprovalStop(ended.error);
-    await blockTaskWorkflow(deps, task.taskId, workflow.revision, reapproval ? WORKFLOW_BLOCK_REASONS.liveSteerReapproval : `Rovara stopped while ${what}${ended.error === undefined ? "" : `: ${ended.error}`}`.slice(0, 500));
+    await blockTaskWorkflow(deps, task.taskId, workflow.revision, reapproval ? WORKFLOW_BLOCK_REASONS.liveSteerReapproval : redactBlockReason(`Rovara stopped while ${what}${ended.error === undefined ? "" : `: ${ended.error}`}`, 500));
     if (reapproval) await settleLiveSteerReapproval({ store: deps.store, ...(deps.now === undefined ? {} : { now: deps.now }), ...(deps.log === undefined ? {} : { log: deps.log }) }, task, ended.error);
     return;
   }

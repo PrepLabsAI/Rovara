@@ -265,3 +265,30 @@ describe("session manager: deletion", () => {
     await expect(sessions.deleteSession(workspaceId)).rejects.toThrow(/WORKSPACE_BUSY/);
   });
 });
+
+describe("session manager: the failure a parked operation ends with (REDACT-BLOCK-REASON)", () => {
+  // Built at run time: no key-shaped literal is in this file.
+  const secret = ["ghp_", "Ab12".repeat(9)].join("");
+
+  it("stores the provisioner's error text redacted, before it is cut, as the operation's error", async () => {
+    const { db, sessions, workspaceId } = setup();
+    const { operationId, outboxId } = seedOperation(db, workspaceId);
+    await sessions.ensureSession({ workspaceId, binding, waitingOutboxId: outboxId });
+    expect(db.get(`OUTBOX#${outboxId}`, "OUTBOX")).toMatchObject({ status: "WAITING_FOR_SESSION" });
+    await sessions.markFailed(workspaceId, 1, `boot script failed: git clone https://x-access-token:${secret}@github.com/org/repo (password Tr0ub4dor&3)`);
+    const stored = (db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`) as { error?: string }).error ?? "";
+    expect(stored).toMatch(/^RUNTIME_UNAVAILABLE: workspace compute failed to start: boot script failed: git clone https:\/\/\[REDACTED\]@github\.com/u);
+    expect(stored).not.toContain(secret);
+    expect(stored).not.toContain("Tr0ub4dor");
+  });
+
+  it("keeps the words of a failure with nothing secret in it, and still cuts to 16 KiB after redacting", async () => {
+    const { db, sessions, workspaceId } = setup();
+    const { operationId, outboxId } = seedOperation(db, workspaceId);
+    await sessions.ensureSession({ workspaceId, binding, waitingOutboxId: outboxId });
+    await sessions.markFailed(workspaceId, 1, `could not attach the volume ${"x".repeat(20_000)}`);
+    const stored = (db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`) as { error?: string }).error ?? "";
+    expect(stored.startsWith("RUNTIME_UNAVAILABLE: workspace compute failed to start: could not attach the volume xxx")).toBe(true);
+    expect(stored).toHaveLength(16_384);
+  });
+});

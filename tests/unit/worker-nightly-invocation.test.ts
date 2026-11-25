@@ -97,6 +97,34 @@ describe("the nightly invocation", () => {
   });
 });
 
+describe("the failure event", () => {
+  // Built at run time: no key-shaped literal is in this file.
+  const secret = ["ghp_", "Ab12".repeat(9)].join("");
+  it("is redacted before it is written, and cut to 300 characters after the redaction (REDACT-BLOCK-REASON scope 2)", async () => {
+    const d = deps();
+    d.all.ports!.now = () => { throw new Error(`git fetch failed for https://x-access-token:${secret}@github.com/org/repo (password Tr0ub4dor&3) ${"x".repeat(400)}`); };
+    await expect(runNightlyInvocation(invocation(), d.all, manifest())).rejects.toThrow();
+    const message = String(d.events.find((event) => event.type === "error")?.payload["message"]);
+    expect(message).toContain("[REDACTED]");
+    expect(message).not.toContain(secret);
+    expect(message).not.toContain("Tr0ub4dor");
+    expect(message.length).toBeLessThanOrEqual(300);
+    // A secret that starts just before the cut is not left half-shown.
+    const straddle = deps();
+    straddle.all.ports!.now = () => { throw new Error(`${"y".repeat(285)} ${secret}`); };
+    await expect(runNightlyInvocation(invocation(), straddle.all, manifest())).rejects.toThrow();
+    const cut = String(straddle.events.find((event) => event.type === "error")?.payload["message"]);
+    expect(cut).not.toContain("ghp_");
+    expect(cut.length).toBeLessThanOrEqual(300);
+  });
+  it("keeps the words of an error with nothing secret in it", async () => {
+    const d = deps();
+    d.all.ports!.now = () => { throw new Error("the night could not read the report"); };
+    await expect(runNightlyInvocation(invocation(), d.all, manifest())).rejects.toThrow();
+    expect(d.events.find((event) => event.type === "error")?.payload["message"]).toBe("the night could not read the report");
+  });
+});
+
 describe("the callback body", () => {
   const bigMap = (): CoverageMapData => ({ builtAt: new Date(Date.UTC(2026, 10, 5, 6, 0, 0)).toISOString(), files: Object.fromEntries(Array.from({ length: 3 }, (_, f) => [`src/f${String(f)}.py`, Array.from({ length: 5_000 }, (__, i) => `tests/test_${String(f)}.py::${"t".repeat(470)}${String(i).padStart(5, "0")}`)])) });
   it("a map that would not fit the control plane's request limit is not sent: the result is, without the map or its reference and with the word 'too_large', and a note says so", async () => {

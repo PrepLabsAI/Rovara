@@ -160,7 +160,7 @@ import {
   openReviewFindings,
   resolveWorkflowReviewFindings,
   workflowFindingAccepted,
-  workflowFindingProblem, GENERAL_FAKE_MADE_NOTE,
+  workflowFindingProblem, GENERAL_FAKE_MADE_NOTE, redactBlockReason, withRedactedBlockReason,
   type DeveloperSignInMethod,
 } from "@agentx/contracts";
 import { z } from "zod";
@@ -810,7 +810,7 @@ export async function getWorkflowFeedbackReview(deps: DeveloperTaskRouteDependen
     ...(workflow.state === "COMPLETE" && (workflow.stage === "MERGED" || workflow.stage === "CLOSED")
       ? { canvasCleanupStatus: workflow.canvasCloseout?.status === "COMPLETE" ? "COMPLETE" : "RETRYING" }
       : {}),
-    ...(workflow.blockReason === undefined ? {} : { blockReason: workflow.blockReason }),
+    ...(workflow.blockReason === undefined ? {} : { blockReason: redactBlockReason(workflow.blockReason, 500) }),
     ...(activeOperation === undefined ? {} : { activeOperation }), nextAction,
     ...(decision === undefined ? {} : { decision: {
       decision: decision.decision, at: decision.at, selectedFindingIds: decision.selectedFindingIds,
@@ -1238,7 +1238,7 @@ export async function taskView(
     project: task.project,
     status: derived.status,
     ...taskStartupView(derived, workspace, operations),
-    ...(workflow === undefined ? {} : { workflow: withoutDesignReviewMoney(workflow, revealMoney) }),
+    ...(workflow === undefined ? {} : { workflow: withRedactedBlockReason(withoutDesignReviewMoney(workflow, revealMoney)) }),
     ...(e2ePresentation === undefined ? {} : { e2ePresentation }),
     ...(derived.failure === undefined ? {} : { failure: derived.failure }),
     startingRevision: task.startingRevision,
@@ -1351,7 +1351,7 @@ async function listRowDetail(deps: DeveloperTaskRouteDependencies, caller: Devel
   const round = asked !== undefined && (await deps.coreTasks?.taskReadable?.(caller, task.taskId).catch(() => false)) === true ? asked : undefined;
   const detail: DeveloperTaskListDetail = {
     ...await listStartupView(deps, caller, task, engine, startup, listedStatus).catch(() => ({})),
-    ...(workflow === undefined ? {} : { workflow: { stage: workflow.stage, state: workflow.state, revision: workflow.revision, path: workflow.path, ...(workflow.blockReason === undefined ? {} : { blockReason: workflow.blockReason }) } }),
+    ...(workflow === undefined ? {} : { workflow: { stage: workflow.stage, state: workflow.state, revision: workflow.revision, path: workflow.path, ...(workflow.blockReason === undefined ? {} : { blockReason: redactBlockReason(workflow.blockReason, 500) }) } }),
     ...(pulls.length === 0 ? {} : { pullRequests: pulls }),
     ...(spent === undefined ? {} : { costUsd: spent }),
     ...(money?.money === undefined ? {} : { money: money.money }),
