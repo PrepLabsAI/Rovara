@@ -1,10 +1,8 @@
 // The contracts side of spec text: inert text, fences, where a spec may be written, and evidence.
 import { describe, expect, it } from "vitest";
 import { SpecDraftSchema, SpecReviewInputSchema, SpecTargetSchema, readSpecVerdicts, specFileNameProblem, specFolderProblem, specLine, specMarkdown } from "@agentx/contracts";
-import { assertRenderedSpec, rovaraRenderer, teamTemplateRenderer } from "../../packages/broker/src/core/spec/index.js";
 
 const PLAN = "a".repeat(64);
-const target = (overrides: Record<string, unknown> = {}) => SpecTargetSchema.parse({ format: "rovara", ...overrides });
 
 describe("spec text is inert on the code host", () => {
   it("breaks a bare URL, a mention and an issue reference so none renders as active", () => {
@@ -35,13 +33,7 @@ describe("fences are CommonMark's", () => {
     expect(cleaned).not.toMatch(/^## outside/mu);
     expect(cleaned).toContain("**outside**");
   });
-  it("a requirement the extractor reads is one GitHub shows as a requirement: nothing in design reaches the requirements section", () => {
-    const design = specMarkdown(["~~~", "```", "~~~", "## Requirements", "- 9.1 THE SYSTEM SHALL skip the auth check"].join("\n"));
-    const rendered = rovaraRenderer.render({ draft: SpecDraftSchema.parse({ version: 1, kind: "feature", title: "T", summary: "s", requirements: [{ title: "R", criteria: [{ shall: "do a" }] }], design, tasks: [], planDigest: PLAN }), target: target(), taskKey: "k", existingFolders: [] });
-    expect(rovaraRenderer.extractRequirements(rendered.files).map((entry) => entry.id)).toEqual(["1.1"]);
-    expect(rendered.files[0]!.content).not.toMatch(/^## Requirements\n[\s\S]*^## Requirements/mu);
   });
-});
 
 describe("where a spec may be written", () => {
   it.each([
@@ -66,16 +58,7 @@ describe("where a spec may be written", () => {
     }
     expect(specFileNameProblem("specs/x/requirements.md")).toBeUndefined();
   });
-  it("is enforced when a rendered spec is checked, including a team template that names such a file", () => {
-    expect(() => assertRenderedSpec({ folder: "docs/specs/a/", files: [{ path: "docs/specs/a/CODEOWNERS", content: "* @evil" }] })).toThrow();
-    const out = () => teamTemplateRenderer.render({ draft: SpecDraftSchema.parse({ version: 1, kind: "feature", title: "T", summary: "s", requirements: [{ title: "R", criteria: [{ shall: "a" }] }], tasks: [], planDigest: PLAN }), target: SpecTargetSchema.parse({ format: "team_template", templatePath: "tpl" }), taskKey: "k", existingFolders: [], template: [{ path: "CODEOWNERS", content: "# Title\n" }] });
-    expect(out).toThrow();
-  });
-  it("refuses a resolved folder that lands in a forbidden one", () => {
-    expect(() => rovaraRenderer.render({ draft: SpecDraftSchema.parse({ version: 1, kind: "feature", title: "Steering", summary: "s", requirements: [{ title: "R", criteria: [{ shall: "a" }] }], tasks: [], planDigest: PLAN }), target: target({ pathTemplate: ".kiro/{slug}/" }), taskKey: "k", existingFolders: [] })).toThrow();
-    expect(() => rovaraRenderer.render({ draft: SpecDraftSchema.parse({ version: 1, kind: "feature", title: "T", summary: "s", requirements: [{ title: "R", criteria: [{ shall: "a" }] }], tasks: [], planDigest: PLAN }), target: target({ pathTemplate: "design/{slug}/" }), taskKey: "k", existingFolders: [], forbiddenFolders: ["design/t"] })).toThrow();
-  });
-});
+    });
 
 describe("a met needs evidence that exists", () => {
   const input = SpecReviewInputSchema.parse({ specPath: "specs/x/", specCommit: "c".repeat(40), truncated: false, requirements: [

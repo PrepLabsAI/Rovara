@@ -8,7 +8,6 @@ import { guardPack } from "../../packages/broker/src/core/proof/evidence-guard.j
 import { evidenceRiskSignal } from "../../packages/broker/src/core/proof/evidence-risk.js";
 import { assessRisk, type RiskInput } from "../../packages/broker/src/core/proof/risk.js";
 import { recomputeRisk } from "../../packages/broker/src/core/proof/pull-request-body.js";
-import { evidenceRiskOfTask as riskOfTask, securityCheckIdsOf } from "../../packages/broker/src/core/proof/evidence-risk-input.js";
 import { EVIDENCE_OP, EVIDENCE_TASK, evidenceWorld } from "../support/evidence-keep-world.js";
 import { scanTextForTests } from "../support/evidence-scan.js";
 
@@ -26,7 +25,6 @@ async function keep(checks: unknown[], entries: CheckEntry[], policyKinds?: Read
   await keepEvidence(w.deps, { orgId: "org-a", task: TASK, operationId: OP, candidateDigest: DIGEST, checks: entries, ...(policyKinds === undefined ? {} : { policyKinds }) });
   return loadEvidencePack(w.deps.store.blobs, TASK, DIGEST);
 }
-const evidenceRiskOfTask = (reader: Parameters<typeof riskOfTask>[0], task: unknown, digest: string | undefined, security: readonly string[] = [], on = false) => riskOfTask(reader, task as typeof TASK, digest, security, on);
 const prLine = (pack: EvidencePack) => evidenceLines({ pack, mode: "summary" }, DIGEST, 0).lines[0] ?? "";
 
 describe("scanner findings and migrations in the pack", () => {
@@ -111,47 +109,12 @@ describe("the risk rule", () => {
     expect(evidenceRiskSignal(undefined, code.digest)).toBeUndefined();
   });
 
-  it("with no port (the proof switch off) nothing is read and there is no signal; a port that fails is no signal; a port is asked for exactly this code", async () => {
-    expect(await evidenceRiskOfTask(undefined, TASK, code.digest)).toBeUndefined();
-    const asked: Array<string | undefined> = [];
-    const port = { async pack(_task: unknown, digest: string | undefined) { asked.push(digest); return pack("security", { high: 1 }); } };
-    expect(await evidenceRiskOfTask(port, TASK, undefined)).toBeUndefined();
-    expect(asked).toEqual([]);
-    expect(await evidenceRiskOfTask(port, TASK, code.digest)).toEqual({ highNewFindings: 1 });
-    expect(asked).toEqual([code.digest]);
-    expect(await evidenceRiskOfTask({ pack: async () => { throw new Error("down"); } }, TASK, code.digest)).toBeUndefined();
-    expect(await evidenceRiskOfTask({ pack: async () => pack("security", { high: 1 }, OTHER) }, TASK, code.digest)).toBeUndefined();
-  });
 
   // EV-2 (Sonnet re-check of evidence-p3p4) and S-1 (Opus review of proof-fixes): when the approved policy has a security check, a scan that could not be checked must not leave the change Low.
-  describe("a security check whose scan could not be checked", () => {
-    const SEC = ["readiness:0"];
-    const unavailable = { highNewFindings: 0, evidenceUnavailable: true as const };
-    const withoutFindings = () => { const base = pack("security", {}); return { ...base, checks: base.checks.map((check) => Object.fromEntries(Object.entries(check).filter(([name]) => name !== "findings"))) } as unknown as EvidencePack; };
-
-    it("is evidenceUnavailable when the pack is there but the security check has no findings (dropped as inconsistent or untrusted, or the scan wrote nothing that could be read) or is not in the pack at all (S-1)", async () => {
-      expect(await evidenceRiskOfTask({ pack: async () => withoutFindings() }, TASK, code.digest, SEC)).toEqual(unavailable);
-      expect(await evidenceRiskOfTask({ pack: async () => pack("security", {}) }, TASK, code.digest, ["readiness:3"])).toEqual(unavailable);
-      // A new high finding in one security check still counts when another one is unavailable.
-      const two = { ...pack("security", { high: 1 }), checks: [...pack("security", { high: 1 }).checks, { ...withoutFindings().checks[0]!, checkId: "readiness:1" }] } as EvidencePack;
-      expect(await evidenceRiskOfTask({ pack: async () => two }, TASK, code.digest, ["readiness:0", "readiness:1"])).toEqual({ highNewFindings: 1, evidenceUnavailable: true });
-      expect(assessRisk(input({ evidence: { highNewFindings: 1, evidenceUnavailable: true } })).level).toBe("high");
-    });
-
-    it("fails closed when the caller has no evidence port while the proof switch is on and a security check is expected; with the switch off there is no port and no signal", async () => {
-      expect(await evidenceRiskOfTask(undefined, TASK, code.digest, SEC, true)).toEqual(unavailable);
-      expect(await evidenceRiskOfTask(undefined, TASK, code.digest, SEC, false)).toBeUndefined();
-      expect(await evidenceRiskOfTask(undefined, TASK, code.digest, [], true)).toBeUndefined();
-      expect(await evidenceRiskOfTask(undefined, TASK, undefined, SEC, true)).toBeUndefined();
-    });
-
-    it("the security checks of a policy are named by the id the worker reports (readiness:<index> in selected order)", () => {
-      const check = (id: string, kind?: string) => ({ id, label: id, ...(kind === undefined ? {} : { kind }) });
-      const policy = { required: [check("unit", "test"), check("sast", "security")], optional: [check("deps", "security"), check("lint", "lint")], selectedOptionalIds: ["deps", "lint"], proposed: [] };
-      expect(securityCheckIdsOf(policy as never)).toEqual(["readiness:1", "readiness:2"]);
-      expect(securityCheckIdsOf({ ...policy, required: [check("unit", "test")], optional: [], selectedOptionalIds: [] } as never)).toEqual([]);
-      expect(securityCheckIdsOf(undefined)).toEqual([]);
-    });
+  it("a security scan that could not be checked (evidenceUnavailable) is never Low: Medium alone, High with a new high finding", () => {
+    // The producer of this signal (evidenceRiskOfTask) was deleted in lane D4b; the risk rule that reads it is kept as a fail-closed rule, so it keeps this one test.
+    expect(assessRisk(input({ evidence: { highNewFindings: 0, evidenceUnavailable: true } })).level).toBe("medium");
+    expect(assessRisk(input({ evidence: { highNewFindings: 1, evidenceUnavailable: true } })).level).toBe("high");
   });
 
   it("recomputeRisk gives the recorded level of the code with the signal, and is the same object-for-object without it", async () => {

@@ -1,4 +1,4 @@
-525 record kinds: 155 company-scoped, 19 install-wide, 351 needs-company. 281 routes: 103 company-scoped, 9 install-wide, 169 needs-company.
+520 record kinds: 155 company-scoped, 19 install-wide, 346 needs-company. 281 routes: 103 company-scoped, 9 install-wide, 169 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -63,7 +63,6 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | pk:APPROVAL_PROOF | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:ASKRATE | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:AUTHREQ; entity:AUTH_REQUEST | install-wide | sign-in table | no | - | Random sign-in handle remains install-wide. Optional companyId selects the issuer; live membership, never this field, authorizes minting. Absent mode preserves bytes. |
-| record | pk:AUTOMATIC_RUN_WATCH | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:CHANGE | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:CHANNEL_EVENT | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:CHATGPT_CONNECTIONS | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
@@ -140,7 +139,6 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | pk:SLACK_INTAKE; entity:SLACK_INTAKE | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:SLACK_LIMIT | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:SLACK_THREAD | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
-| record | pk:SPECPR | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:SWEBENCH | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:SWEBENCH_RUN; entity:SWEBENCH_RUN | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | pk:TASK_INVITE | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
@@ -442,8 +440,6 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | entity:SHARED_TASK | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:SIGN_IN_CLIENT | company-scoped | sign-in table | no | - | T3: global client-id namespace; runtime company ownership (absent means implicit), operator install-level exception; audience and writes serialized by registry revision. |
 | record | entity:SIGN_IN_CLIENT_REGISTRY; pk:SIGNIN_CLIENTS | install-wide | sign-in table | no | - | T3 ANSWER-2: opaque registry revision serializes the global client-id/audience namespace; no person or secret data. |
-| record | entity:SPEC_REVIEW | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
-| record | entity:SPEC_STATE | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:SWEBENCH_CHANNEL | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:SWEBENCH_SLOT | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:TASK_ACCESS_PAUSE | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
@@ -470,7 +466,6 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | entity:TEST_ENV_NIGHTLY_ACTIVE | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:TEST_ENV_NIGHTLY_DAY | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:TEST_ENV_NIGHTLY_SLOT | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
-| record | entity:TEST_ENV_OWN_SETTINGS_WRITE | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:TEST_ENV_PIN | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:TEST_ENV_PROPOSAL | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:TEST_ENV_PROVE | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
@@ -884,8 +879,6 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | packages/broker/src/context-sources/quotes.ts:50 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |
 | packages/broker/src/context-sources/store.ts:52 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |
 | packages/broker/src/core/agents/store.ts:105 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |
-| packages/broker/src/core/automatic-runs/end.ts:46 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
-| packages/broker/src/core/automatic-runs/view.ts:27 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |
 | packages/broker/src/core/automation/run-seam.ts:187 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |
 | packages/broker/src/core/build-step/publish.ts:118 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
 | packages/broker/src/core/chains/runner.ts:122 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |
@@ -935,14 +928,12 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | packages/broker/src/core/setup-agent/host-ask.ts:92 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |
 | packages/broker/src/core/setup-agent/host-ask.ts:243 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |
 | packages/broker/src/core/setup-agent/journal.ts:64 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |
-| packages/broker/src/core/spec/review-record.ts:35 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
 | packages/broker/src/core/task-flow/dispatch-rows.ts:34 | scoped-key (not a hit) | company-scoped | Index query reviewed conservatively; prove all producer partitions and consumer scopes in T1/T8. |
 | packages/broker/src/core/task-flow/project-source.ts:36 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |
 | packages/broker/src/core/task-flow/reads.ts:48 | in-scope fixed | company-scoped | Per-row company check, runtime scope validation, bounded reads and continuation/completion tests in dynamodb-two-company. |
 | packages/broker/src/core/task-flow/reads.ts:113 | in-scope fixed | company-scoped | Per-row company check, runtime scope validation, bounded reads and continuation/completion tests in dynamodb-two-company. |
 | packages/broker/src/core/task-flow/run-watch.ts:46 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |
 | packages/broker/src/core/task-flow/stage-machine.ts:297 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
-| packages/broker/src/core/test-env/candidate-check.ts:81 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |
 | packages/broker/src/core/test-env/draft.ts:249 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |
 | packages/broker/src/core/test-env/environment.ts:286 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |
 | packages/broker/src/core/test-env/local-view.ts:65 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |
@@ -1070,8 +1061,6 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | forwarding | packages/broker/src/core/after-merge/records.ts:51:90:computed | [attribute] | Runtime property name forwarding of the store's expiry attribute; family-bearing pk/entityType constructors are inventoried separately. | mainPartition, queuePartition |
 | forwarding | packages/broker/src/core/agents/store.ts:109:58:pk | agentDirectoryKey(orgId, "agt_x").pk | Projects the partition supplied by the named key constructor; no new family. | agentDirectoryKey, agentKey, agentNameKey |
 | forwarding | packages/broker/src/core/automatic-runs/cap.ts:26:94:sk | sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | projectPk |
-| forwarding | packages/broker/src/core/automatic-runs/end.ts:70:42:pk | watch.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | automaticRunWatchKey, projectPk |
-| forwarding | packages/broker/src/core/automatic-runs/end.ts:70:56:sk | watch.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | automaticRunWatchKey, projectPk |
 | forwarding | packages/broker/src/core/automation/authority.ts:15:127:sk | approvalProofKey(proof) | Runtime sort component forwarded within the feeding partition; not an independent record family. | approvalProofKey, proofUseKey |
 | forwarding | packages/broker/src/core/automation/kit.ts:52:41:entityType | entityType | Generic runtime entityType forwarding; preserves caller/loaded record identity rather than assigning a new record family. | agentRequestKey |
 | forwarding | packages/broker/src/core/automation/run-seam.ts:109:124:sk | requestId | Runtime sort component forwarded within the feeding partition; not an independent record family. | openRunKey |
@@ -1133,7 +1122,6 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | forwarding | packages/broker/src/core/sessions/steer.ts:178:43:pk | agentSessionKey(session.orgId, session.sessionId, "META").pk | Projects the partition supplied by the named key constructor; no new family. | agentSessionKey, messageKey, noteKey, sessionQueuedSteersKey, taskKey |
 | forwarding | packages/broker/src/core/sessions/steer.ts:303:82:sk | String(item["sk"]) | Runtime sort component forwarded within the feeding partition; not an independent record family. | agentSessionKey, messageKey, noteKey, sessionQueuedSteersKey, taskKey |
 | forwarding | packages/broker/src/core/sessions/sweep.ts:23:43:pk | pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | openAgentSessionKey |
-| forwarding | packages/broker/src/core/spec/state.ts:42:3:pk | z.string() | Runtime schema declaration, not a stored key constructor; ratcheted explicitly. | specPullRequestKey, specStateKey |
 | forwarding | packages/broker/src/core/task-flow/dispatch-rows.ts:53:12:pk | row.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | dispatchPartition, dispatchRowKey |
 | forwarding | packages/broker/src/core/task-flow/dispatch-rows.ts:53:24:sk | row.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | dispatchPartition, dispatchRowKey |
 | forwarding | packages/broker/src/core/task-flow/involved.ts:117:75:sk | sk | Web task channel C5: the cursor a client hands back, a JSON field named sk holding the last examined row's sort key; it is not a stored key and is checked against the row pattern before any use (decodeCursor). | involvedPartition |
@@ -1567,7 +1555,6 @@ Every route below is `full` in the route table (DEC ANSWER-4), re-reads the call
 | forwarding | packages/broker/src/core/task-flow/stage-machine.ts:95:12:pk | workspace.pk | T1: preserves the resolved workspace partition, or an existing caller record/key; implicit legacy only through workspace-location. | workspacePartition, workspaceKey, locateWorkspace, legacyWorkspaceKey; task-flow-company-keys.test.ts and task-flow-key-backfill.test.ts |
 | forwarding | packages/broker/src/core/task-flow/workspace-location.ts:23:47:pk | meta.pk | T1: preserves the resolved workspace partition, or an existing caller record/key; implicit legacy only through workspace-location. | workspacePartition, workspaceKey, locateWorkspace, legacyWorkspaceKey; task-flow-company-keys.test.ts and task-flow-key-backfill.test.ts |
 | forwarding | packages/broker/src/core/task-flow/workspace-location.ts:23:60:sk | sk | T1: preserves the resolved workspace partition, or an existing caller record/key; implicit legacy only through workspace-location. | workspacePartition, workspaceKey, locateWorkspace, legacyWorkspaceKey; task-flow-company-keys.test.ts and task-flow-key-backfill.test.ts |
-| forwarding | packages/broker/src/core/test-env/candidate-check.ts:79:44:pk | (await workspaceKeys({ store: deps.store, companyId: orgId }, workspaceId)).workspaceKey.pk | T1: preserves the resolved workspace partition, or an existing caller record/key; implicit legacy only through workspace-location. | workspacePartition, workspaceKey, locateWorkspace, legacyWorkspaceKey; task-flow-company-keys.test.ts and task-flow-key-backfill.test.ts |
 | forwarding | packages/broker/src/core/setup-agent/eval-health-launch.ts:46:20:pk | workspace.pk | T1: preserves the resolved workspace partition, or an existing caller record/key; implicit legacy only through workspace-location. | workspacePartition, workspaceKey, locateWorkspace, legacyWorkspaceKey; task-flow-company-keys.test.ts and task-flow-key-backfill.test.ts |
 | forwarding | packages/broker/src/core/test-env/saved-env-rebuild.ts:108:18:pk | workspace.pk | T1: preserves the resolved workspace partition, or an existing caller record/key; implicit legacy only through workspace-location. | workspacePartition, workspaceKey, locateWorkspace, legacyWorkspaceKey; task-flow-company-keys.test.ts and task-flow-key-backfill.test.ts |
 | forwarding | packages/broker/src/local/app/app.ts:434:44:pk | (await workspaceKeys({ store, companyId }, task.workspaceId)).workspaceKey.pk | T1: preserves the resolved workspace partition, or an existing caller record/key; implicit legacy only through workspace-location. | workspacePartition, workspaceKey, locateWorkspace, legacyWorkspaceKey; task-flow-company-keys.test.ts and task-flow-key-backfill.test.ts |

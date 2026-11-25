@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findServiceContract, type AdapterRead, type ContractAdapter } from "../../packages/broker/src/core/test-env/service-contract.js";
-import { generateServiceMock, serviceMockConfigSchema } from "../../packages/broker/src/core/test-env/service-contract-mock.js";
+import { findServiceContract, generateServiceMock, serviceMockConfigSchema, type AdapterRead, type ContractAdapter } from "@agentx/contracts";
 
 // A second, made-up service: its fixture is plain "key=value" lines (not JSON), it has no inference source, and it has its own error case.
 // It exists to prove the generic interface (contract source -> answer shape -> labelled mock config) is not tied to SageMaker or to JSON.
