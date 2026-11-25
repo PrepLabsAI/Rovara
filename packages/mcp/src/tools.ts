@@ -2,7 +2,7 @@
 // now and the hosted endpoint later use the same definitions (FR-027). Descriptions are written
 // for the AI tool that reads them: when to use the tool, and what to do next.
 import {
-  CI_STATE_WORDS, DEFAULT_DEVELOPER_TASK_POLICY, blockReasonSentence, DEVELOPER_EVENTS_DEFAULT, DEVELOPER_EVENTS_MAX, DEVELOPER_TASK_LIST_DEFAULT, DEVELOPER_TASK_LIST_MAX,
+  CI_STATE_WORDS, DEFAULT_DEVELOPER_TASK_POLICY, blockReasonSentence, redactBlockReason, DEVELOPER_EVENTS_DEFAULT, DEVELOPER_EVENTS_MAX, DEVELOPER_TASK_LIST_DEFAULT, DEVELOPER_TASK_LIST_MAX,
   DEVELOPER_WAIT_MAX_SECONDS, DeveloperInstructionsSchema, DeveloperTaskStatusSchema, SHARED_BY_POLICY, VIEW_ONLY_BY_POLICY, WORKFLOW_BLOCK_REASONS, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, WORKFLOW_REVIEW_FAILURE_REASONS,
   E2ESharedViewSchema, inertName, isBranchConflictAskReason, isBranchSyncBlockReason, isBranchSyncGiveUpReason, isCiFixBlockReason, knownTaskView, openReviewFindings, workflowIsReviewOnly, workflowKeepPullRequestsOffered, type DeveloperTaskClientView,
   TaskPeopleRoleSchema, RUN_CONTEXT_KINDS, RUN_INPUT_TEXT_MAX_BYTES, ApprovalIdSchema, RunInputSchema, type RunInput, type StartAgentSelection,
@@ -21,7 +21,7 @@ import { WIKI_TOOLS } from "./wiki-tools.js";
 import { waitForTask } from "./wait.js";
 
 /** Why a step is blocked, as a sentence (the one formatter, so a reason stored in lower case reads right); `fallback` says it when no reason was stored. */
-const blockedBecause = (reason: string | undefined, fallback: string): string => blockReasonSentence(reason ?? fallback);
+const blockedBecause = (reason: string | undefined, fallback: string): string => blockReasonSentence(redactBlockReason(reason ?? fallback, 500));
 
 export interface ToolContext {
   client: ControlPlaneClient;
@@ -243,7 +243,7 @@ function taskOutput(shown: DeveloperTaskClientView, timedOut?: boolean): Record<
         stage: task.workflow.stage, state: task.workflow.state, revision: task.workflow.revision,
         path: task.workflow.path,
         ...(task.workflow.reviewPhase === undefined ? {} : { review_phase: task.workflow.reviewPhase }),
-        ...(task.workflow.blockReason === undefined ? {} : { block_reason: task.workflow.blockReason }),
+        ...(task.workflow.blockReason === undefined ? {} : { block_reason: redactBlockReason(task.workflow.blockReason, 500) }),
         ...(task.workflow.candidate === undefined ? {} : { candidate_digest: task.workflow.candidate.digest }),
         ...(blockingFindings.length === 0 ? {} : { blocking_findings: blockingFindings }),
         ...(task.workflow.verification === undefined ? {} : { verification: {
@@ -393,10 +393,10 @@ export function nextFor(shown: DeveloperTaskClientView): string {
   }
   // Plan 6 Task 17: Rovara could not keep the branch up to date (it still conflicts after its tries, or the base changed CI workflow files, which it can't push): a person updates the branch on GitHub.
   if (task.workflow?.state === "BLOCKED" && task.workflow.stage === "WAIT_FOR_MERGE" && (isBranchConflictAskReason(task.workflow.blockReason) || isBranchSyncGiveUpReason(task.workflow.blockReason))) {
-    return `${blockReasonSentence(task.workflow.blockReason!)} To let Rovara try once more, use agentx_retry_workflow with expected_revision ${task.workflow.revision}. Or update the branch on GitHub, or close the task.`;
+    return `${blockReasonSentence(redactBlockReason(task.workflow.blockReason!, 500))} To let Rovara try once more, use agentx_retry_workflow with expected_revision ${task.workflow.revision}. Or update the branch on GitHub, or close the task.`;
   }
   if (task.workflow?.state === "BLOCKED" && task.workflow.stage === "WAIT_FOR_MERGE" && isBranchSyncBlockReason(task.workflow.blockReason)) {
-    return `${blockReasonSentence(task.workflow.blockReason!)} Rovara keeps watching the pull request for its merge; it does not change the branch again.`;
+    return `${blockReasonSentence(redactBlockReason(task.workflow.blockReason!, 500))} Rovara keeps watching the pull request for its merge; it does not change the branch again.`;
   }
   if (task.workflow?.state === "BLOCKED") return `The workflow is blocked. ${blockedBecause(task.workflow.blockReason, "required evidence is missing")} Review it before continuing.`;
   // After the draft pull request opens, the task waits for its merge on GitHub; PR feedback is decided here or in Slack.

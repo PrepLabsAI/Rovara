@@ -1,7 +1,7 @@
 import { workspaceKeys, locateWorkspace } from "./workspace-location.js";
 // Lane L6a, task flow core: a worker's terminal result. This is the entry the callback API calls once it has checked the worker's capability
 // and read what the worker sent (Cloud's `terminal-result.ts`, whose artifact reading is not ported: it hands the flow a `StepOutcome`).
-import { agentXError, companyScoped, change, when, type Condition, type TransactItem } from "@agentx/contracts";
+import { agentXError, companyScoped, change, when, redactText, type Condition, type TransactItem } from "@agentx/contracts";
 import type { TaskFlowDeps } from "./deps.js";
 import { preparationResultItems, releasePreparationAdmission } from "./prepare-result.js";
 import { taskIndexKey } from "./keys.js";
@@ -56,7 +56,8 @@ export async function recordOperationResult(deps: TaskFlowDeps, result: Operatio
       key: location.operationKey(operation.id),
       ops: [
         change.set("status", status), change.set("updatedAt", now),
-        ...(error === undefined ? [] : [change.set("error", error.slice(0, 16_384))]),
+        // Redacted when it is recorded, as the worker redacts it when it sends it: what a worker's end reports is shown to everyone who can open the task.
+        ...(error === undefined ? [] : [change.set("error", redactText(error).slice(0, 16_384))]),
         ...(result.outcome === undefined ? [] : [change.set("result", toDocument({ outcome: result.outcome }))]),
       ],
       condition: when.and(...recovery.operation, when.eq("fence", operation.fence), when.not(when.or(when.eq("status", "SUCCEEDED"), when.eq("status", "FAILED"), when.eq("status", "CANCELLED"), when.eq("status", "INTERRUPTED")))),

@@ -46,5 +46,30 @@ export function withoutWorkerCallbackAlarm<T>(input: T): T {
   });
   delete resources[alarms[0]!];
   delete resources[filters[0]!];
+  return withoutDispatchStaleAddressAlarm(input);
+}
+
+/**
+ * REDACT-BLOCK-REASON (interim signal for the stale-address edge): the dispatcher logs one `dispatch.stale_address` line when a worker answers 401 wrong_workspace. Two more resources count it, same shape as the
+ * worker's above: a metric filter on the dispatcher's log group and the DispatchStaleAddress alarm. Checked to be exactly this, then taken out (called by `withoutWorkerCallbackAlarm`, so every template pin that
+ * already takes the worker's pair out takes this pair out too).
+ */
+export function withoutDispatchStaleAddressAlarm<T>(input: T): T {
+  const resources = (input as { Resources: Record<string, Resource> }).Resources;
+  const alarms = Object.keys(resources).filter((id) => id.startsWith("DispatchStaleAddressAlarm"));
+  const filters = Object.keys(resources).filter((id) => id.startsWith("DispatchStaleAddressMetric"));
+  expect(alarms).toHaveLength(1);
+  expect(filters).toHaveLength(1);
+  const alarm = resources[alarms[0]!]!;
+  expect(alarm.Type).toBe("AWS::CloudWatch::Alarm");
+  expect(alarm.Properties).toMatchObject({ MetricName: "DispatchStaleAddress", Statistic: "Sum", Period: 300, Threshold: 1, EvaluationPeriods: 1, ComparisonOperator: "GreaterThanOrEqualToThreshold", TreatMissingData: "notBreaching" });
+  const filter = resources[filters[0]!]!;
+  expect(filter.Type).toBe("AWS::Logs::MetricFilter");
+  expect(filter.Properties).toMatchObject({
+    FilterPattern: "{ $.event = \"dispatch.stale_address\" }",
+    MetricTransformations: [{ MetricName: "DispatchStaleAddress", MetricNamespace: alarm.Properties["Namespace"], MetricValue: "1" }],
+  });
+  delete resources[alarms[0]!];
+  delete resources[filters[0]!];
   return input;
 }

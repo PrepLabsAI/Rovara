@@ -505,6 +505,20 @@ describe("the AWS readers see only workflow rows", () => {
   });
 
 
+  it("?detail=1 shows a core task's block reason stored raw redacted (the row's workflow detail is built from the stored workflow, there being no hosted task view for a core task)", async () => {
+    const { db, task, dev } = await coreWorld({ actions: true, roundCap: async () => ({ limitUsd: 7.5, spentUsd: 1.25 }) });
+    // Built at run time: no key-shaped literal is in this file.
+    const secret = ["ghp_", "Ab12".repeat(9)].join("");
+    const stored = db.get(`DEVTASK#${task.taskId}`, "META") as Record<string, unknown> & { pk: string; sk: string; workflow: Record<string, unknown> };
+    db.set({ ...stored, developerId: MAYA.developerId, workflow: { ...stored.workflow, state: "BLOCKED", blockReason: `Rovara stopped while planning: clone failed https://x-access-token:${secret}@github.com/org/repo` } });
+    db.set({ pk: `DEVELOPER#${MAYA.developerId}`, sk: `TASK#2026-11-15T00:00:00.000Z#${task.taskId}`, entityType: "DEVELOPER_TASK_INDEX", taskId: task.taskId, title: "Core work", project: "payments", status: "RUNNING", shared: false, createdAt: "2026-11-15T00:00:00.000Z", updatedAt: "2026-11-15T00:00:00.000Z" });
+    const listed = await dev(MAYA, "GET", "/v1/dev/tasks?detail=1");
+    expect(listed.status).toBe(200);
+    const [listedRow] = DeveloperTaskDetailedListResponseSchema.parse(listed.body).tasks;
+    expect(listedRow?.workflow?.blockReason).toMatch(/^Rovara stopped while planning: clone failed https:\/\/\[REDACTED\]@github\.com/u);
+    expect(JSON.stringify(listed.body)).not.toContain(secret);
+  });
+
   it("the core's money read for a list row answers only the task's owner in their own company; anyone else gets nothing", async () => {
     const { task, coreTasks, routes, owner } = await coreWorld({ actions: true, roundCap: async () => ({ limitUsd: 9, spentUsd: 2 }) });
     expect(await coreTasks.taskMoney!({ developerId: MAYA.developerId, sessionId: "s", name: "Maya" }, task.taskId)).toMatchObject({ costUsd: 2, runLimitUsd: 9, money: { taskId: task.taskId, state: "unavailable" } });

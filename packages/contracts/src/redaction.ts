@@ -162,12 +162,45 @@ const TEXT_PATTERNS: ReadonlyArray<[RegExp, string]> = [
   ],
   // curl -u user:password
   [/((?<!\S)(?:-u|--user)(?:[ \t]{1,8}|=)['"]?[^\s:'"]{1,256}:)[^\s'"]{1,512}/g, `$1${REDACTED}`],
+  // Provider tokens with a fixed prefix. Each needs a long random-looking run after the prefix (and, where the prefix is a plain word, a digit and a capital letter in it), so the bare prefix, a
+  // short word that starts with it and a snake_case name such as vercel_deployment_environment are kept.
+  // A payment provider's webhook signing secret (whsec_ and base64 text).
+  [/(?<![A-Za-z0-9])whsec_(?=[A-Za-z0-9+/=_-]{0,511}[0-9A-Z])[A-Za-z0-9+/=_-]{16,512}/g, REDACTED],
+  // Notion: the older `secret_` (43 letters and digits) and the newer `ntn_` integration tokens.
+  [/(?<![A-Za-z0-9])ntn_[A-Za-z0-9]{30,256}/g, REDACTED],
+  [/(?<![A-Za-z0-9])secret_(?=[A-Za-z0-9]{0,255}[0-9])(?=[A-Za-z0-9]{0,255}[A-Z])[A-Za-z0-9]{40,256}/g, REDACTED],
+  // Vercel: `vcp_` access tokens and `vercel_` (blob and integration) tokens.
+  [/(?<![A-Za-z0-9])vcp_[A-Za-z0-9]{30,256}/g, REDACTED],
+  [/(?<![A-Za-z0-9])vercel_(?=[A-Za-z0-9_]{0,255}[0-9])(?=[A-Za-z0-9_]{0,255}[A-Z])[A-Za-z0-9_]{24,256}/g, REDACTED],
+  // DigitalOcean personal, OAuth and refresh tokens: dop_v1_, doo_v1_ and dor_v1_ and hex.
+  [/(?<![A-Za-z0-9])do[opr]_v1_[a-f0-9]{40,128}/g, REDACTED],
+  // A monitoring DSN: https://<public key>@<host>/<numeric project id>. The key before the @ is the secret; a name such as git@host or a path that is not a project number is kept.
+  [/(?<![A-Za-z0-9+.-])(https?:\/\/)[A-Za-z0-9]{16,64}@(?=[A-Za-z0-9.-]{1,253}(?::\d{1,5})?\/\d{1,20}(?![A-Za-z0-9]))/g, `$1${REDACTED}@`],
+  // A signed-URL value that is not in a query string: x-amz-signature=<hex> or "X-Amz-Signature": "<hex>" in a header echo, a log line or a pasted request.
+  [/((?<![A-Za-z0-9_-])x-amz-(?:signature|security-token|credential)["']?[ \t]{0,8}[=:][ \t]{0,8}["']?)[^&#\s"']{1,4096}/gi, `$1${REDACTED}`],
+  // sig= and signature= outside a query string need a long signature-shaped value, so "signature=ok" and "sig=3" are kept.
+  [/((?<![A-Za-z0-9_-])(?:x-goog-signature|signature|sig)["']?=["']?)[A-Za-z0-9%+/=_-]{20,4096}/gi, `$1${REDACTED}`],
+  // An HTTP Digest challenge or response (WWW-Authenticate, Proxy-Authenticate, Authorization): its parameters (nonce, cnonce, response, opaque) to the end of the line.
+  [/((?<![A-Za-z0-9])[Dd]igest[ \t]{1,8})(?=(?:username|realm|nonce|response|cnonce|opaque|uri|qop|nc|algorithm)[ \t]{0,4}=)[^\r\n]{1,4096}/g, `$1${REDACTED}`],
+  // An AWS secret access key (40 letters, digits, / and +) after its name in prose, with no : or = ("SecretAccessKey <value>", "the secret key is <value>").
+  [/((?<![A-Za-z0-9_])secret[ _-]?(?:access[ _-]?)?key(?:[ \t]{1,8}(?:is|was))?[ \t]{1,8}["']?)[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+=])/gi, `$1${REDACTED}`],
   // Query and fragment parameters matched by precise name, so keyword, monkey and zip_code are kept.
   [
     /([?&#;](?:(?:[A-Za-z0-9]{1,32}[_-]){0,4}(?:token|secret|password|passwd|pwd|signature|credential|apikey|(?:api|access|private|secret|subscription)[_-]?key)|code|key|sig|pass|auth)=)[^&#\s]{1,4096}/gi,
     `$1${REDACTED}`,
   ],
 ];
+
+// "password hunter2", "the password is Tr0ub4dor!" and "passphrase s3cret-phrase": the word and the value that follows with no : or =. Only a value of 6 to 128 characters that has a digit or a
+// symbol in it is taken for a password, so "password reset", "password must be", "password is incorrect" and "password policy" are kept; a path, a URL and a quoted phrase are never matched.
+const PASSWORD_PROSE = new RegExp(
+  String.raw`(?<![A-Za-z0-9_])((?:${ci("password")}|${ci("passwd")}|${ci("passphrase")})(?:[ \t]{1,8}(?:is|was))?[ \t]{1,8})([^\s"'<>,;()[\]{}\\/]{6,128})(?![^\s"'<>,;()[\]{}\\/])`,
+  "g",
+);
+
+function redactPasswordProse(text: string): string {
+  return text.replace(PASSWORD_PROSE, (whole: string, head: string, value: string) => (/[0-9!@#$%^&*+=~]/.test(value) && !/^[=:]/.test(value) ? `${head}${REDACTED}` : whole));
+}
 
 // "Basic <base64 of user:password>" anywhere, even when it is all letters.
 const BASIC_PAIR = new RegExp(String.raw`(?<![A-Za-z0-9])(${ci("basic")}[ \t]{1,8})([A-Za-z0-9+/]{4,4096}={0,2})(?![A-Za-z0-9+/=])`, "g");
@@ -381,11 +414,26 @@ function redactFlags(text: string): string {
 export function redactText(text: string): string {
   let current = redactPrivateKeys(text);
   for (const [pattern, replacement] of TEXT_PATTERNS) current = current.replace(pattern, replacement);
+  current = redactPasswordProse(current);
   current = current.replace(BASIC_PAIR, (whole: string, prefix: string, value: string) => (isBasicPair(value) ? `${prefix}${REDACTED}` : whole));
   current = redactUrlUserInfo(current);
   current = redactXml(current);
   current = redactFlags(current);
   return redactKeyValues(current);
+}
+
+/**
+ * A task's block reason as it is stored and as it is shown: redacted, then (when `max` is given) cut. It is redacted before it is cut, so a cut never leaves half of a secret in view. The words the engine
+ * writes itself pass through unchanged. A reason stored before this was written is redacted when it is read; nothing stored is rewritten.
+ */
+export function redactBlockReason(reason: string, max?: number): string {
+  const redacted = redactText(reason);
+  return max === undefined ? redacted : redacted.slice(0, max);
+}
+
+/** A workflow (or any object that may hold a `blockReason`) with its block reason redacted and cut to the 500 characters a stored reason may have (redaction can lengthen a text, so the cut is applied after it); the same object when it has none. */
+export function withRedactedBlockReason<T extends { blockReason?: string | undefined }>(workflow: T): T {
+  return workflow.blockReason === undefined ? workflow : { ...workflow, blockReason: redactBlockReason(workflow.blockReason, 500) };
 }
 
 const SHORT_PASSWORD_FLAG_CLIENT = /^(?:.*\/)?(?:mysql|mysqldump|mysqladmin|mariadb|mongo|mongosh|mongodump|mongorestore|sshpass|login)$/;
