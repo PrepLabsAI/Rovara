@@ -13,6 +13,7 @@ import {
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
 import { NAT_EGRESS_ADDRESSES_OUTPUT } from "@agentx/contracts";
+import { declarePublicApiUrl, publicApiHostEntry } from "./public-api-url.js";
 import { AgentDnsFirewall, DNS_FIREWALL_CONTEXT_KEY, DNS_FIREWALL_MODE_OUTPUT, EGRESS_ALLOW_DOMAINS_CONTEXT_KEY, EGRESS_ALLOW_DOMAINS_OUTPUT, dnsFirewallMode, installAgentAllowDomains, parseExtraAllowDomains } from "./agent-dns-firewall.js";
 import { EgressAlarms, alertsTopicFromName } from "./egress-alarms.js";
 import { Ec2WorkerFoundation } from "./ec2-workers.js";
@@ -225,7 +226,10 @@ export class ProductionFoundationStack extends Stack {
     const firewallMode = dnsFirewallMode(this.node.tryGetContext(DNS_FIREWALL_CONTEXT_KEY), naming.env === undefined);
     if (firewallMode !== "off") {
       const firewallEnv = naming.env ?? naming.environmentTagValue;
-      const baseAllowDomains = installAgentAllowDomains(props.deploymentRegion, Aws.ACCOUNT_ID);
+      // CODE-PUBLIC-URL (rev 9.2): the install's permanent public address is one exact name on the base list while the foundation's PublicApiUrl (the same value as the control plane's) is set.
+      // The parameter exists only where the firewall does, so a legacy install without one has the template it always had.
+      const publicApi = declarePublicApiUrl(this);
+      const baseAllowDomains = installAgentAllowDomains(props.deploymentRegion, Aws.ACCOUNT_ID, publicApiHostEntry(publicApi));
       const extraAllowDomains = parseExtraAllowDomains(this.node.tryGetContext(EGRESS_ALLOW_DOMAINS_CONTEXT_KEY), baseAllowDomains);
       const dnsFirewall = new AgentDnsFirewall(this, "AgentDnsFirewall", {
         env: firewallEnv,

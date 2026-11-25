@@ -5,5 +5,5 @@
 //
 // CODE_API_MIN_CLIENT ("major.minor") is the oldest version of this package a client may be built against and still be served. Code raises it only after the client side has stopped using what is
 // being removed (see README.md, "Skew"). A test pins a digest of the contract surface and fails when the surface changes without a bump here.
-export const CODE_API_VERSION = "1.2";
+export const CODE_API_VERSION = "1.5";
 export const CODE_API_MIN_CLIENT = "1.2";

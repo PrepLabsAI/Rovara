@@ -3,7 +3,8 @@
 // (core-parity-route-ownership.test.ts) keep running over the same rows.
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { APP_ROUTES, CLIENT_SCOPES, DEV_ROUTES, ROUTES, routeIdOf } from "@preplabsai/rovara-code-api";
+import { z } from "zod";
+import { APP_ROUTES, CLIENT_SCOPES, DEV_ROUTES, ROUTES, ROUTE_NOT_SERVED_MESSAGE, routeIdOf } from "@preplabsai/rovara-code-api";
 import * as broker from "../../packages/broker/src/aws/dev-route-scopes.js";
 
 const keyOf = (route: { method: string; path: string; requires: string }) => `${route.method} ${route.path} ${route.requires}`;
@@ -11,17 +12,57 @@ const digest = (rows: readonly string[]) => createHash("sha256").update(rows.joi
 
 describe("the one route table", () => {
   it("holds the rows it held in dev-route-scopes.ts, in the same order", () => {
-    expect([DEV_ROUTES.length, APP_ROUTES.length]).toEqual([179, 108]);
-    expect(digest(DEV_ROUTES.map(keyOf))).toBe("35d7796eb4934166a2e6be86190c0609865b3c9f5d66adfad9e58b97c823968a");
-    expect(digest(APP_ROUTES.map(keyOf))).toBe("6c92cc6017ce24bbf0bad3b9ef5df0e0d4f27e0cd5f138019fd9eb6b6fdab2ce");
+    // R1 + L1 6.2b (Code API 1.3): the three waiting-ticket rows moved from /v1/dev/projects/{project}/intake* to /v1/app/projects/{project}/intake* (179/108 became 176/111).
+    // RD-2.0 (Code API 1.5): four rows for the task page's new reads (spec, checks, changes, timeline) after the proof index (176 became 180).
+    expect([DEV_ROUTES.length, APP_ROUTES.length]).toEqual([180, 111]);
+    expect(digest(DEV_ROUTES.map(keyOf))).toBe("7041723dc483e5627c885115dbe6c5b6a2dc3d8c6b9b4c6e482d4c25fcd0c699");
+    expect(digest(APP_ROUTES.map(keyOf))).toBe("421490346858df2db699d93b15c2508795e4a4c561a2daf6fc4d1f25cc392aca");
   });
 
-  it("is the developer rows then the app rows, each row once, and no row carries more than method, path and scope yet", () => {
+  it("is the developer rows then the app rows, each row once, and only the rows that carry a schema carry more than method, path and scope (F2-B: `tasks.read`; RD-2.0: the ten task reads)", () => {
     expect(ROUTES).toEqual([...DEV_ROUTES, ...APP_ROUTES]);
     expect(DEV_ROUTES.every((route) => route.path.startsWith("/v1/dev/"))).toBe(true);
     expect(APP_ROUTES.every((route) => route.path.startsWith("/v1/app/"))).toBe(true);
     expect(new Set(ROUTES.map((route) => `${route.method} ${route.path}`)).size).toBe(ROUTES.length);
-    for (const route of ROUTES) expect(Object.keys(route).sort(), keyOf(route)).toEqual(["method", "path", "requires"]);
+    // A row with a schema names itself and may add its refusals and one example; any other row is method, path and scope.
+    for (const route of ROUTES) {
+      const keys = Object.keys(route).sort();
+      if (route.response === undefined) expect(keys, keyOf(route)).toEqual(["method", "path", "requires"]);
+      else expect(["id", "method", "path", "requires", "response"].every((key) => keys.includes(key)) && keys.every((key) => ["id", "method", "path", "requires", "response", "errors", "example"].includes(key)), keyOf(route)).toBe(true);
+    }
+    expect(ROUTES.filter((route) => route.response !== undefined).map(routeIdOf)).toEqual([
+      "tasks.read", "tasks.events", "tasks.plan", "tasks.people", "tasks.diff", "tasks.comments", "tasks.evidence.list", "tasks.spec", "tasks.checks", "tasks.changes", "tasks.timeline",
+    ]);
+  });
+
+  it("pins the ten task page reads: each a GET under the task read's scope, with a tolerant response schema and an example that parses with it; the four new reads list the not-served refusal and carry it as their example refusal", () => {
+    const paths: Record<string, string> = {
+      "tasks.events": "events", "tasks.plan": "plan", "tasks.people": "people", "tasks.diff": "diff", "tasks.comments": "comments", "tasks.evidence.list": "evidence",
+      "tasks.spec": "spec", "tasks.checks": "checks", "tasks.changes": "changes", "tasks.timeline": "timeline",
+    };
+    for (const [id, tail] of Object.entries(paths)) {
+      const row = ROUTES.find((route) => routeIdOf(route) === id)!;
+      expect([row.method, row.path, row.requires], id).toEqual(["GET", `/v1/dev/tasks/{taskId}/${tail}`, "tasks:read"]);
+      expect(z.toJSONSchema(row.response!), id).toBeDefined();
+      expect(row.example?.response, id).toBeDefined();
+      expect(row.response!.safeParse(row.example!.response).success, id).toBe(true);
+      // Tolerant: an empty answer and an answer with an unknown member both read (every member optional, unknown ones pass through).
+      expect(row.response!.safeParse({}).success, `${id} empty`).toBe(true);
+      expect(row.response!.safeParse({ ...(row.example!.response as object), aNewerMember: { x: 1 } }).success, `${id} unknown member`).toBe(true);
+    }
+    // The four new shapes also read a member served as null (a lane's "none") as absent: with every scalar of the example set to null (lists and objects kept, so the null is inside list entries too; a list of plain values stays as it is), and with every list set to null, the answer still parses.
+    const scalarsNull = (value: unknown): unknown => Array.isArray(value) ? (value as unknown[]).map((entry) => (entry !== null && typeof entry === "object" ? scalarsNull(entry) : entry)) : value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([key, member]) => [key, scalarsNull(member)])) : null;
+    const listsNull = (value: unknown): unknown => Array.isArray(value) ? null : value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([key, member]) => [key, listsNull(member)])) : value;
+    for (const id of ["tasks.spec", "tasks.checks", "tasks.changes", "tasks.timeline"]) {
+      const row = ROUTES.find((route) => routeIdOf(route) === id)!;
+      expect(row.response!.safeParse(scalarsNull(row.example!.response)).success, `${id} null scalars`).toBe(true);
+      expect(row.response!.safeParse(listsNull(row.example!.response)).success, `${id} null lists`).toBe(true);
+    }
+    for (const id of ["tasks.spec", "tasks.checks", "tasks.changes", "tasks.timeline"]) {
+      const row = ROUTES.find((route) => routeIdOf(route) === id)!;
+      expect(row.errors, id).toEqual([{ code: "TASK_NOT_FOUND", status: 404 }, { code: "ROUTE_NOT_SERVED", status: 404 }]);
+      expect(row.example?.refusal, id).toEqual({ error: { code: "ROUTE_NOT_SERVED", message: ROUTE_NOT_SERVED_MESSAGE } });
+    }
   });
 
   it("names each row `METHOD path` until a row names itself, and every id is unique", () => {
@@ -41,7 +82,7 @@ describe("the one route table", () => {
     const concrete = (path: string) => path.replace(/\{[A-Za-z]+\}/g, "x1");
     for (const route of DEV_ROUTES) expect(DEV_ROUTES, keyOf(route)).toContain(broker.devRouteOf(route.method, concrete(route.path)));
     for (const route of APP_ROUTES) expect(APP_ROUTES, keyOf(route)).toContain(broker.appRouteOf(route.method, concrete(route.path)));
-    expect(broker.devRouteOf("GET", "/v1/dev/tasks/t1")).toEqual({ method: "GET", path: "/v1/dev/tasks/{taskId}", requires: "tasks:read" });
+    expect(broker.devRouteOf("GET", "/v1/dev/tasks/t1")).toMatchObject({ method: "GET", path: "/v1/dev/tasks/{taskId}", requires: "tasks:read" });
     expect(broker.devRouteOf("GET", "/v1/dev/not-a-route")).toBeUndefined();
     expect(broker.appRouteOf("GET", "/v1/app/decisions")).toEqual({ method: "GET", path: "/v1/app/decisions", requires: "decisions:decide" });
   });

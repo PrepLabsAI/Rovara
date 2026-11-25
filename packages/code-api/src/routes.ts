@@ -1,11 +1,18 @@
 // The Code API's ONE route table (F3 cut 1, DEC 254zzz459/468): every route Rovara Code's developer API serves, by method and path, with what a caller's token needs to reach it.
 // Moved here unchanged from packages/broker/src/aws/dev-route-scopes.ts (the rows and their comments are the same text, in the same order); the broker keeps only the selectors over
-// these rows (devRouteOf, appRouteOf) and the worker rows, which are not part of this API. This file imports nothing but the scopes: it is data, and a browser may load it.
+// these rows (devRouteOf, appRouteOf) and the worker rows, which are not part of this API. This file imports nothing but the scopes and the standing's reader (zod schemas): it is data, and a browser may load it.
 //
 // A request whose method and path match no row is refused before anyone is authenticated (fail closed), so a new route is unreachable until it is given a row. A sign-in client's token
 // reaches a row only with the row's scope; the Rovara CLI's own token reaches every row, as before. Migration plan v3.2, lane ID part 1 (DEC 214 decision 7): named scopes.
-import type { z } from "zod";
+import { z } from "zod";
 import type { ClientScope } from "./scopes.js";
+import { ROUTE_NOT_SERVED_MESSAGE } from "./errors.js";
+import { TASK_CHANGES_EXAMPLE, TaskChangesReadSchema } from "./task-changes.js";
+import { TASK_CHECKS_EXAMPLE, TaskChecksReadSchema } from "./task-checks.js";
+import { TASK_EXISTING_READ_EXAMPLES, TaskCommentsReadSchema, TaskDiffReadSchema, TaskEventsReadSchema, TaskEvidenceListSchema, TaskPeopleReadSchema, TaskPlanReadSchema } from "./task-existing-reads.js";
+import { TASK_SPEC_EXAMPLE, TaskSpecReadSchema } from "./task-spec.js";
+import { TaskStandingWireSchema } from "./task-standing.js";
+import { TASK_TIMELINE_EXAMPLE, TaskTimelineReadSchema } from "./task-timeline.js";
 
 /**
  * What a row needs from a sign-in client's token:
@@ -47,6 +54,10 @@ export interface Route {
 export function routeIdOf(route: Pick<Route, "id" | "method" | "path">): string {
   return route.id ?? `${route.method} ${route.path}`;
 }
+
+/** RD-2.0: what a read the table lists but Code does not serve yet may answer, and its example refusal (the same words for every task). */
+const NOT_SERVED_ERRORS: readonly RouteRefusal[] = [{ code: "TASK_NOT_FOUND", status: 404 }, { code: "ROUTE_NOT_SERVED", status: 404 }];
+const NOT_SERVED_REFUSAL = { error: { code: "ROUTE_NOT_SERVED", message: ROUTE_NOT_SERVED_MESSAGE } } as const;
 
 /**
  * The /v1/dev/* rows (the developer API) first, then the core engine's /v1/app/* rows (Lane L12, served on the broker's HTTP API only while the core switch serves), each group in the order it
@@ -108,18 +119,25 @@ export const ROUTES: readonly Route[] = [
   // Tasks: read.
   { method: "GET", path: "/v1/dev/projects", requires: "tasks:read" },
   { method: "GET", path: "/v1/dev/tasks", requires: "tasks:read" },
-  { method: "GET", path: "/v1/dev/tasks/{taskId}", requires: "tasks:read" },
-  { method: "GET", path: "/v1/dev/tasks/{taskId}/events", requires: "tasks:read" },
-  { method: "GET", path: "/v1/dev/tasks/{taskId}/plan", requires: "tasks:read" },
-  { method: "GET", path: "/v1/dev/tasks/{taskId}/people", requires: "tasks:read" },
+  // F2-B: the task read carries `standing` (where the task stands for the person reading it). The answer is read tolerantly: only `standing` is named here, every other member passes through, and a standing that does not read leaves the answer as it is.
+  { id: "tasks.read", method: "GET", path: "/v1/dev/tasks/{taskId}", requires: "tasks:read", response: z.object({ task: z.object({ standing: TaskStandingWireSchema.optional().catch(undefined) }).passthrough() }).passthrough() },
+  // RD-2.0: the task page's reads. The six that Code already served now name themselves and carry a tolerant response schema (task-existing-reads.ts); the four new ones (spec, checks, changes, timeline) are listed after the proof index below.
+  { id: "tasks.events", method: "GET", path: "/v1/dev/tasks/{taskId}/events", requires: "tasks:read", response: TaskEventsReadSchema, example: { response: TASK_EXISTING_READ_EXAMPLES.events } },
+  { id: "tasks.plan", method: "GET", path: "/v1/dev/tasks/{taskId}/plan", requires: "tasks:read", response: TaskPlanReadSchema, example: { response: TASK_EXISTING_READ_EXAMPLES.plan } },
+  { id: "tasks.people", method: "GET", path: "/v1/dev/tasks/{taskId}/people", requires: "tasks:read", response: TaskPeopleReadSchema, example: { response: TASK_EXISTING_READ_EXAMPLES.people } },
   { method: "GET", path: "/v1/dev/tasks/{taskId}/people/requests/{requestId}", requires: "tasks:read" },
   { method: "GET", path: "/v1/dev/tasks/{taskId}/workflow/feedback", requires: "tasks:read" },
   // #644: comments and steering notes, a pull request's diff, plan-document comments.
   { method: "GET", path: "/v1/dev/tasks/{taskId}/messages", requires: "tasks:read" },
-  { method: "GET", path: "/v1/dev/tasks/{taskId}/diff", requires: "tasks:read" },
-  { method: "GET", path: "/v1/dev/tasks/{taskId}/comments", requires: "tasks:read" },
+  { id: "tasks.diff", method: "GET", path: "/v1/dev/tasks/{taskId}/diff", requires: "tasks:read", response: TaskDiffReadSchema, example: { response: TASK_EXISTING_READ_EXAMPLES.diff } },
+  { id: "tasks.comments", method: "GET", path: "/v1/dev/tasks/{taskId}/comments", requires: "tasks:read", response: TaskCommentsReadSchema, example: { response: TASK_EXISTING_READ_EXAMPLES.comments } },
   // Cloud's Proof tab: the task's proof index (what the proof page shows as checked for its current code, and its failing tests), under the task read's own rule.
-  { method: "GET", path: "/v1/dev/tasks/{taskId}/evidence", requires: "tasks:read" },
+  { id: "tasks.evidence.list", method: "GET", path: "/v1/dev/tasks/{taskId}/evidence", requires: "tasks:read", response: TaskEvidenceListSchema, example: { response: TASK_EXISTING_READ_EXAMPLES.evidence } },
+  // RD-2.0: the new reads of the task page, each in one answer (core-host/task-screen-routes.ts mounts them; each answers ROUTE_NOT_SERVED until its lane fills it: RD-2a spec, RD-2b1 checks, RD-2b2 changes, RD-2c timeline). Under the task read's own rule.
+  { id: "tasks.spec", method: "GET", path: "/v1/dev/tasks/{taskId}/spec", requires: "tasks:read", response: TaskSpecReadSchema, errors: NOT_SERVED_ERRORS, example: { response: TASK_SPEC_EXAMPLE, refusal: NOT_SERVED_REFUSAL } },
+  { id: "tasks.checks", method: "GET", path: "/v1/dev/tasks/{taskId}/checks", requires: "tasks:read", response: TaskChecksReadSchema, errors: NOT_SERVED_ERRORS, example: { response: TASK_CHECKS_EXAMPLE, refusal: NOT_SERVED_REFUSAL } },
+  { id: "tasks.changes", method: "GET", path: "/v1/dev/tasks/{taskId}/changes", requires: "tasks:read", response: TaskChangesReadSchema, errors: NOT_SERVED_ERRORS, example: { response: TASK_CHANGES_EXAMPLE, refusal: NOT_SERVED_REFUSAL } },
+  { id: "tasks.timeline", method: "GET", path: "/v1/dev/tasks/{taskId}/timeline", requires: "tasks:read", response: TaskTimelineReadSchema, errors: NOT_SERVED_ERRORS, example: { response: TASK_TIMELINE_EXAMPLE, refusal: NOT_SERVED_REFUSAL } },
   // Tasks: start.
   { method: "POST", path: "/v1/dev/tasks", requires: "tasks:start" },
   // Tasks: act on a task the person may act on.
@@ -276,10 +294,6 @@ export const ROUTES: readonly Route[] = [
   { method: "PUT", path: "/v1/dev/company/learning-model", requires: "full" },
   // L4-EGR: Rovara's fixed outbound addresses (read only; a live owner or admin of the company).
   { method: "GET", path: "/v1/dev/company/egress-addresses", requires: "full" },
-  // L2-4: a project's waiting tickets (Linear app intake on the core); full access only (the route also checks the company owner/admin or the project's admin, live).
-  { method: "GET", path: "/v1/dev/projects/{project}/intake", requires: "full" },
-  { method: "POST", path: "/v1/dev/projects/{project}/intake/{itemId}/start", requires: "full" },
-  { method: "POST", path: "/v1/dev/projects/{project}/intake/{itemId}/dismiss", requires: "full" },
   // The CLI's own routes, which no named scope opens.
   { method: "GET", path: "/v1/dev/workspaces", requires: "full" },
   { method: "GET", path: "/v1/dev/channel-links", requires: "full" },
@@ -416,6 +430,10 @@ export const ROUTES: readonly Route[] = [
   { method: "PUT", path: "/v1/app/projects/{project}/ci-eval-check", requires: "full" },
   // Audit gap 11b: a project's ticket-sharing settings (core-host/ticket-updates-routes.ts, the laptop's local/app/intake.ts route): full access only, then any live role on the project reads; a live company
   // owner or admin, or the project's administrator, changes them.
+  // R1 + L1 6.2b: a project's waiting tickets (Linear app intake on the core) at the one address the laptop, MCP and CLI use (core-host/intake-routes.ts); full access only, and the route checks the live standing on the project.
+  { method: "GET", path: "/v1/app/projects/{project}/intake", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/intake/{itemId}/start", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/intake/{itemId}/dismiss", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/intake/updates", requires: "full" },
   { method: "PUT", path: "/v1/app/projects/{project}/intake/updates", requires: "full" },
   // Lead 4 PCF: the plan card's "Change" lists the open features to pick from; the same people as the filing above (the task's starter, a maintainer, an owner or admin).

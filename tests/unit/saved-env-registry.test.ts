@@ -173,23 +173,24 @@ describe("recording a build", () => {
     expect(await recordBuild(w.deps, ids, { ...lease, result: { ok: true, imageDigest: "latest" } })).toEqual({ ok: false, reason: "bad_result" });
   });
 
-  it("the row keeps at most N images even when the registry cannot be walked", async () => {
-    const { w, lease } = await queued({ keep: 2, registry: { list: async () => { throw new Error("denied"); } } });
+  it("the row keeps at most two images (the current and the previous) even when the registry cannot be walked", async () => {
+    const { w, lease } = await queued({ registry: { list: async () => { throw new Error("denied"); } } });
     seed(w, { ...w.store.rows.get("org-1#proj-1")!, images: [imageOf(dig(3)), imageOf(dig(1))] });
     const recorded = await recordBuild(w.deps, ids, { ...lease, result: resultOf({ digest: dig(4) }) });
     expect(recorded.ok).toBe(true);
     expect(w.store.rows.get("org-1#proj-1")!.images.map((image) => image.digest)).toEqual([dig(4), dig(3)]);
   });
 
-  it("keeps the newest N images: a fourth build drops the oldest from the row and the registry", async () => {
+  it("keeps the newest two images: a fourth build drops the older ones from the row and the registry", async () => {
     const images: RegistryImage[] = [1, 2, 3].map((n) => ({ digest: dig(n), tags: ["t"], pushedAt: iso(T0 - (4 - n) * 3_600_000) }));
     const { w, lease } = await queued({ images: [...images, { digest: dig(4), tags: ["t"], pushedAt: iso(T0) }] });
     seed(w, { ...w.store.rows.get("org-1#proj-1")!, images: images.map((i) => imageOf(i.digest)).reverse() });
     // the seeded row keeps the job
     const recorded = await recordBuild(w.deps, ids, { ...lease, result: resultOf({ digest: dig(4) }) });
     expect(recorded.ok).toBe(true);
-    expect(w.store.rows.get("org-1#proj-1")!.images.map((image) => image.digest)).toEqual([dig(4), dig(3), dig(2)]);
-    expect(w.calls.deleted).toEqual([[dig(1)]]);
+    expect(w.store.rows.get("org-1#proj-1")!.images.map((image) => image.digest)).toEqual([dig(4), dig(3)]);
+    expect(w.calls.deleted).toHaveLength(1);
+    expect([...w.calls.deleted[0]!].sort()).toEqual([dig(1), dig(2)].sort());
   });
 });
 
@@ -199,18 +200,19 @@ describe("the manage walk: the row decides what stays", () => {
   it("keeps exactly the images the row names; deletes every other digest past the grace, those past the 30 day ceiling and untagged ones older than a day; drops what the registry no longer holds", async () => {
     const listed: RegistryImage[] = [
       { digest: dig(1), tags: ["a"], pushedAt: iso(T0 - 1 * 3_600_000) },
-      { digest: dig(2), tags: ["a"], pushedAt: iso(T0 - 2 * DAY) },
-      { digest: dig(3), tags: ["a"], pushedAt: iso(T0 - 31 * DAY) },
+      { digest: dig(2), tags: ["a"], pushedAt: iso(T0 - 31 * DAY) },
+      { digest: dig(3), tags: ["a"], pushedAt: iso(T0 - 2 * DAY) },
       { digest: dig(4), tags: [], pushedAt: iso(T0 - 2 * DAY) },
       { digest: dig(5), tags: ["a"], pushedAt: iso(T0 - 3 * DAY) },
       { digest: dig(6), tags: ["a"], pushedAt: iso(T0 - 4 * DAY) },
     ];
-    const w = world({ images: listed, keep: 3 });
+    const w = world({ images: listed });
     seed(w, { images: [imageOf(dig(1), recent), imageOf(dig(2), recent), imageOf(dig(3), recent), imageOf(dig(9), recent)], health: "healthy" });
-    expect(await walk(w.deps, ids)).toEqual({ ok: true, deleted: 4 });
-    expect(w.calls.deleted[0]!.sort()).toEqual([dig(3), dig(4), dig(5), dig(6)].sort());
-    expect(w.store.rows.get("org-1#proj-1")!.images.map((image) => image.digest)).toEqual([dig(1), dig(2)]);
-    expect(w.store.log.some((entry) => entry.action === "images_deleted" && entry.count === 4 && entry.reason === "walk")).toBe(true);
+    expect(await walk(w.deps, ids)).toEqual({ ok: true, deleted: 5 });
+    // dig(2) is NAMED by the row but past the 30 day ceiling: the ceiling beats the name; dig(3) is simply not named
+    expect(w.calls.deleted[0]!.sort()).toEqual([dig(2), dig(3), dig(4), dig(5), dig(6)].sort());
+    expect(w.store.rows.get("org-1#proj-1")!.images.map((image) => image.digest)).toEqual([dig(1)]);
+    expect(w.store.log.some((entry) => entry.action === "images_deleted" && entry.count === 5 && entry.reason === "walk")).toBe(true);
   });
 
   it("the ceiling deletes the newest image too when it is that old, and the project reads as needing repair", async () => {

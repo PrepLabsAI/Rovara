@@ -9,7 +9,8 @@ import { resolvePolicy } from "../../packages/contracts/src/policy.js";
 // The approved git blob id for packages/contracts/src/ports/policy.ts. Hashing the file in-process (git's blob format) works in CI's shallow checkout, where the base commit is not fetched.
 // Was a2e7075fe49e2436ef10476ee1abe356349a566c (base c93edabcb). Moved by PR #607 (owner decision 211, identity port gaps G1-G4): an additive Approvers port change only, optional fields and optional methods plus
 // pure helpers; `outcome` now names the same union through `ApprovalAnswer`, and `ApprovalVerdict` gains optional fields. Any later change to the port moves this pin again, on purpose.
-const BASE_POLICY_PORT_BLOB = "8900876620af844b7248fdf751e426d059e9d095";
+// Moved from 8900876620af844b7248fdf751e426d059e9d095 by MERGE-APPROVAL-NOT-SPENT: one additive optional field, `ApprovalRequest.useRecordedByCaller` (a caller that records the use of a proof itself); nothing existing changed.
+const BASE_POLICY_PORT_BLOB = "2b9c2e84e38956fe27d0afae980760b8b95c4c01";
 it("keeps the existing policy port byte-identical to the approved base", () => {
   const bytes = readFileSync("packages/contracts/src/ports/policy.ts");
   const blob = createHash("sha1").update(`blob ${String(bytes.length)}\0`).update(bytes).digest("hex");

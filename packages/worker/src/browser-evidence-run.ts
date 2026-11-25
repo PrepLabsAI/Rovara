@@ -19,7 +19,7 @@ import { executorContainerArgs, runBrowserEvidence, verifyExecutorSeccompProfile
 import { isWorkspaceUnsafe, type OriginalCode, type OriginalCodeRepository } from "./verification/original-code.js";
 import { candidateChanges } from "./verification/diff.js";
 import type { CheckRunners } from "./verification/checks.js";
-import type { DockerCli } from "./swebench/containers.js";
+import type { DockerCli } from "./docker-cli.js";
 
 /** The sandbox container name a `--network container:` may name: what a task sandbox is called, nothing with a separator or an option in it. */
 const CONTAINER_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/u;

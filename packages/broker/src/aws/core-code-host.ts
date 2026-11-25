@@ -18,6 +18,7 @@
 import { agentXError, HostScopeSchema, orgProjectCatalogPk, type DocumentStore, type HostScope, type OrgId } from "@agentx/contracts";
 import { parseGitHubRepository } from "../plugins/code-host/github/client.js";
 import { createStoreProjectSource } from "../core/task-flow/project-source.js";
+import { isProjectUnreadable, logProjectLeftOut } from "../core/project-left-out.js";
 import { githubAppClient, type GitHubAppCredentialProviderOptions } from "../plugins/code-host/github/app-client.js";
 import type { GitHubActionsProvider } from "../plugins/check-runner/github-actions/index.js";
 import type { GitHubCodeHostProvider } from "../plugins/code-host/github/provider.js";
@@ -87,7 +88,15 @@ export function companyRepositoriesFromStore(store: () => Promise<Pick<DocumentS
         if (expired()) throw new Error("catalog too slow");
         const name = names[next]!;
         next += 1;
-        const revision = await source.latest(name);
+        let revision;
+        try {
+          revision = await source.latest(name);
+        } catch (error) {
+          // ONE project whose current revision cannot be read (arch rule 9) names no repository: only ITS OWN repository operations are refused (NOT_A_COMPANY_REPOSITORY). It never takes every project of the company down with it.
+          if (!isProjectUnreadable(error)) throw error;
+          logProjectLeftOut(companyId, name);
+          continue;
+        }
         // A catalog row whose project has no readable revision names no repository.
         for (const repository of revision?.definition.repositories ?? []) {
           const key = githubRepositoryKey(repository.url);

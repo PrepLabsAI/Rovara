@@ -22,7 +22,7 @@ import { containerBashOperations, runContainerCommand, type ContainerCommandOpti
 import { withDetachedWorking, type CheckSandboxPlan, type WorkingPhaseNetwork } from "./check-sandbox.js";
 import { withServiceEnvFile, type ServiceEnvironment, type ServiceRedactor } from "./service-env.js";
 import type { HelperFiles } from "./service-helpers.js";
-import type { DockerCli } from "./swebench/containers.js";
+import type { DockerCli } from "./docker-cli.js";
 import { matchTestCommand } from "@agentx/contracts";
 import { tailCollector } from "./collected-process.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";

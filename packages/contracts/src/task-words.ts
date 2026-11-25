@@ -89,9 +89,14 @@ export const REASON_WORDS = {
   waitMachine: "No machine is free; Rovara will try again",
   waitRateLimit: "The AI provider is limiting requests; Rovara will try again",
   waitAllowance: "The daily allowance is used up; the work goes on when it resets",
+  // A step whose start failed and the sweep is still trying again (attempts 1 to 7): the task is waiting, not stuck, and nobody is asked yet.
+  waitStartReviews: "Starting the reviews, trying again",
+  waitStartStep: "Starting the next step, trying again",
   waitSlack: "Rovara is waiting for Slack to answer the access check",
   stoppedFinished: "the run finished and nothing is running; the work is kept",
   unavailable: "Status unavailable",
+  // SPEND-UNREPORTED-RUN case (iii): a run that sent no usage report and could not be measured otherwise is counted at what admission held for it, marked as an estimate until the exact figure is in.
+  spendEstimated: "Part of this task's spend is an estimate until the exact figure is in",
 } as const;
 
 /** The reason and next lines of the person-free status (the old K4 sentences, moved here: one place). `nextOthers` is what anyone who is not the one needed reads. */
@@ -109,14 +114,47 @@ export const STATUS_LINES = {
   planWaiting: { reason: "the plan is waiting for approval", next: "Review it and approve, or ask for changes.", nextOthers: "Waiting for the task owner." },
   questionsWaiting: { reason: "questions about the request need answers", next: "Answer them.", nextOthers: "Waiting for the task owner." },
   readyToMerge: { next: "Ready to merge: review the pull request and merge it.", nextOthers: "The pull request is in review." },
+  // A pull request that waits but is not ready to merge yet (its checks, review or branch say so): the status is `checking`, never "Ready to merge".
+  pullRequestChecking: { reason: "the pull request is not ready to merge yet", next: "Rovara keeps watching; it tells you when the pull request is ready to merge.", nextOthers: "The pull request is in review." },
+  pullRequestChecksFailing: { reason: "the pull request's checks are failing", next: "Rovara keeps watching; it tells you when the pull request is ready to merge.", nextOthers: "The pull request is in review." },
+  // A blocked review says WHY a person is needed: the reviewers found problems with the change, or the review could not finish (unreadable, timed out).
+  reviewFoundProblems: { reason: "the review found problems with the change", next: "Accept or fix each problem, or send it back to coding.", nextOthers: "Waiting for the task owner." },
+  reviewsCouldNotStart: { reason: "Rovara could not start the reviews", next: "Press Retry.", nextOthers: "Waiting for the task owner." },
+  reviewCouldNotFinish: { reason: "the review could not finish", next: "Retry the review.", nextOthers: "Waiting for the task owner." },
   understanding: { next: "A plan follows once the request is understood." },
   planning: { next: "You review the plan when it is ready." },
   building: { next: "Checks and a pull request follow." },
   checking: { next: "A pull request is opened once the checks pass." },
+  // SPEND-UNREPORTED-RUN item 3: what a decision card says when the task's spend cannot be read yet (the stable code is `spend_unreadable`, in `DECISION_REFUSAL_REASONS`): the real reason and what happens next,
+  // never "This isn't ready to be decided yet". Rovara settles an ended run that sent no usage report by itself, so the next step is waiting, not an action.
+  spendUnreadable: { reason: "Rovara could not read this task's spend yet", next: "Rovara settles the spend on its own. Try again in a little while." },
 } as const;
+
+/** The one-line notices that are not a status (nobody is asked): a company admin who is not the task's owner stopped the owner's task. The name is the admin's display name, cut and made safe by the caller. */
+export const NOTICE_WORDS = {
+  stoppedByAdmin: (name: string): string => `${name === "" ? "A company admin" : name} stopped your task`,
+} as const;
+
+/** The one sentence a card refusal for the spend that could not be read says: the reason, then what happens next. Served by every surface that refuses on it (the decision card and, from F2-B, the task standing). */
+export const spendUnreadableWords = (): string => `${STATUS_LINES.spendUnreadable.reason}, so it cannot start more work on this task. ${STATUS_LINES.spendUnreadable.next}`;
 
 /** "<sentence> (round 2 of 3)". */
 export const roundWords = (sentence: string, round: number, max: number): string => `${sentence} (round ${String(round)} of ${String(max)})`;
+
+// ---- a step the platform gave up starting (fixed sentences with a stable code; never the text of an error)
+
+/**
+ * The codes of a worker dispatch that was tried until it gave up (`aws/dispatcher.ts`), with the words a person reads for each. The text of the error behind it (an SDK message, a worker's HTTP body) goes to the
+ * dispatcher's log only. `WORKER_REFUSED` carries the broker's own refusal words with it (a worker too old for the step) when it has them; the words here are the fallback.
+ */
+export const DISPATCH_GAVE_UP_CODES = ["WORKER_REFUSED", "WORKER_ANSWERED_ERROR", "WORKER_NOT_REACHED", "WORKER_START_FAILED"] as const;
+export type DispatchGaveUpCode = (typeof DISPATCH_GAVE_UP_CODES)[number];
+export const DISPATCH_GAVE_UP_WORDS: Readonly<Record<DispatchGaveUpCode, string>> = {
+  WORKER_REFUSED: "Rovara's checks of the worker machine refused this step.",
+  WORKER_ANSWERED_ERROR: "The worker machine answered with an error.",
+  WORKER_NOT_REACHED: "Rovara could not ask the worker machine what it can do.",
+  WORKER_START_FAILED: "Rovara could not start this step on a worker machine.",
+};
 
 // ---- the decision moves
 

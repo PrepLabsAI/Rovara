@@ -301,6 +301,7 @@ export const CONTROL_PLANE_LAMBDAS = {
   },
   "sessions-reaper": { logicalId: "SessionsReaper8FEF958E", entry: "packages/broker/src/aws/session-reaper.ts" },
   "sessions-reconciler": { logicalId: "SessionsReconciler4316A0A2", entry: "packages/broker/src/aws/session-reconciler.ts" },
+  "instance-state-change": { logicalId: "SessionsInstanceStateChangeFunctionB24AEB67", entry: "packages/broker/src/aws/instance-state-change-lambda.ts" },
 } as const satisfies Record<string, LambdaSpec>;
 /**
  * Repo-built control-plane Lambdas that test-deploy does not move, with why. A contract test requires every

@@ -29,7 +29,7 @@ function fakeFetch(answer: (call: Call) => { status?: number; body?: unknown; he
 }
 
 describe("the Linear adapter over the owner's key", () => {
-  const ISSUE = { id: "iss-1", identifier: "ENG-1", url: "https://linear.app/acme/issue/ENG-1/refunds", state: { name: "Todo" }, team: { states: { nodes: [{ id: "s1", name: "In Progress" }, { id: "s2", name: "Done" }] } } };
+  const ISSUE = { id: "iss-1", identifier: "ENG-1", url: "https://linear.app/acme/issue/ENG-1/refunds", state: { name: "Todo", type: "unstarted", position: 0 }, team: { states: { nodes: [{ id: "s0", name: "Todo", type: "unstarted", position: 0 }, { id: "s1", name: "In Progress", type: "started", position: 1 }, { id: "s2", name: "Done", type: "completed", position: 3 }] } } };
   const access = (fetchImpl: typeof fetch, options: { ownAccountIsRovara?: boolean; key?: string | undefined } = {}) => createLinearApiAccess({
     apiKey: async () => ("key" in options ? options.key : KEY), companyId: "org_aaaaaaaaaaaaaaaaaaaa", fetch: fetchImpl, sleep: async () => undefined, ...(options.ownAccountIsRovara === undefined ? {} : { ownAccountIsRovara: options.ownAccountIsRovara }),
   });
@@ -125,6 +125,55 @@ describe("the Linear adapter over the owner's key", () => {
     expect(await tracker.setStatusByName!({ tracker: "linear", id: "ENG-1", url: ISSUE.url }, "in progress", SCOPE)).toBe("moved");
     expect((calls.at(-1)!.body as { variables: { state: string } }).variables.state).toBe("s1");
     expect(await tracker.setStatusByName!({ tracker: "linear", id: "ENG-1", url: ISSUE.url }, "Shipped", SCOPE)).toBe("no_such_status");
+  });
+
+  // R1 + L1 6.2 (plan 0.1 #8): the move is forward only, for the laptop's key as for a company's token (the same `moveIssue`). Rank by the status's type, then by its position inside the type
+  // ("In Progress" and "In Review" are both `started`); never out of a finished state; a state whose type or position is not known is not moved on a guess.
+  describe("a status move goes forward only", () => {
+    const STATES = [
+      { id: "b", name: "Backlog", type: "backlog", position: 0 }, { id: "t", name: "Todo", type: "unstarted", position: 1 }, { id: "p", name: "In Progress", type: "started", position: 2 },
+      { id: "r", name: "In Review", type: "started", position: 3 }, { id: "d", name: "Done", type: "completed", position: 4 }, { id: "c", name: "Canceled", type: "canceled", position: 5 },
+    ];
+    const moveFrom = async (current: Record<string, unknown>, target: string, states: unknown[] = STATES) => {
+      const { fetch: impl, calls } = fakeFetch((call) => ((call.body as { query: string }).query.includes("issueUpdate") ? { body: { data: { issueUpdate: { success: true } } } } : { body: { data: { issue: { ...ISSUE, state: current, team: { states: { nodes: states } } } } } }));
+      const answer = await linearTracker(access(impl)).setStatusByName!({ tracker: "linear", id: "ENG-1", url: ISSUE.url }, target, SCOPE);
+      const writes = calls.filter((call) => (call.body as { query: string }).query.includes("issueUpdate"));
+      return { answer, written: writes.map((call) => (call.body as { variables: { state: string } }).variables.state) };
+    };
+
+    it("moves ahead: backlog or todo to In Progress, In Progress to In Review, In Review to Done", async () => {
+      expect(await moveFrom(STATES[0]!, "In Progress")).toEqual({ answer: "moved", written: ["p"] });
+      expect(await moveFrom(STATES[1]!, "in progress")).toEqual({ answer: "moved", written: ["p"] });
+      expect(await moveFrom(STATES[2]!, "In Review")).toEqual({ answer: "moved", written: ["r"] });
+      expect(await moveFrom(STATES[3]!, "Done")).toEqual({ answer: "moved", written: ["d"] });
+    });
+
+    it("never moves back, and never out of Done or Canceled; nothing is written", async () => {
+      expect(await moveFrom(STATES[3]!, "In Progress")).toEqual({ answer: "not_forward", written: [] });
+      expect(await moveFrom(STATES[2]!, "Todo")).toEqual({ answer: "not_forward", written: [] });
+      expect(await moveFrom(STATES[4]!, "In Review")).toEqual({ answer: "not_forward", written: [] });
+      expect(await moveFrom(STATES[4]!, "In Progress")).toEqual({ answer: "not_forward", written: [] });
+      expect(await moveFrom(STATES[5]!, "In Progress")).toEqual({ answer: "not_forward", written: [] });
+    });
+
+    it("a ticket already in the status asked for is as it should be (no write), and a missing name is still said", async () => {
+      expect(await moveFrom(STATES[4]!, "done")).toEqual({ answer: "moved", written: [] });
+      expect(await moveFrom(STATES[2]!, "Shipped")).toEqual({ answer: "no_such_status", written: [] });
+    });
+
+    it("a state whose type or position is not known is not moved on a guess", async () => {
+      expect(await moveFrom({ name: "Todo" }, "In Progress")).toEqual({ answer: "not_forward", written: [] });
+      expect(await moveFrom(STATES[2]!, "In Review", [{ id: "r", name: "In Review", type: "started" }])).toEqual({ answer: "not_forward", written: [] });
+      expect(await moveFrom({ name: "In Progress", type: "started", position: 2 }, "In Review", [{ id: "r", name: "In Review", type: "weird", position: 3 }])).toEqual({ answer: "not_forward", written: [] });
+    });
+
+    // Review 6.2a: a finished ticket stays finished even toward a status of the same rank further right (Done to Canceled, Done to another completed status such as "Released").
+    it("never moves between finished states either: Done to Canceled, or Done to a later completed status, writes nothing", async () => {
+      const finished = [...STATES, { id: "x", name: "Released", type: "completed", position: 6 }];
+      expect(await moveFrom(STATES[4]!, "Canceled", finished)).toEqual({ answer: "not_forward", written: [] });
+      expect(await moveFrom(STATES[4]!, "Released", finished)).toEqual({ answer: "not_forward", written: [] });
+      expect(await moveFrom(STATES[5]!, "Released", finished)).toEqual({ answer: "not_forward", written: [] });
+    });
   });
 
   it("refuses an item of another tracker and an id that is not an issue key", async () => {

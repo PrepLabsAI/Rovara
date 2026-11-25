@@ -25,7 +25,7 @@ import { writeUpgradeBundle } from "./export.js";
 import { cdkDiffRisks, cdkReviewedDeployer, guardData, upgradeConfirm } from "./review.js";
 import { notesText, refusePrereleaseTarget, upgradeDirection, type ReleaseNotes } from "./target.js";
 
-export interface UpgradeOptions { env: string; to?: string; releaseDir?: string; source?: string; yes: boolean; allowReplace: string[]; exportDir?: string; images?: { worker?: string; slack?: string };
+export interface UpgradeOptions { /** CODE-PUBLIC-URL: confirm that a first or changed PublicApiUrl is an issuer change (--confirm-public-api-url-change). */ confirmPublicApiUrlChange?: boolean | undefined; env: string; to?: string; releaseDir?: string; source?: string; yes: boolean; allowReplace: string[]; exportDir?: string; images?: { worker?: string; slack?: string };
   /** `--answers-from-deployed <file>`: write the deploy answers read from the environment, deploy nothing. */
   answersFile?: string }
 
@@ -280,6 +280,7 @@ export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependenc
         // checks that and writes the new settings there.
         await deployEnvironment({
           mode: "upgrade", engine: settings.engine, answers, release, deployer, store: deps.store, secrets: prepared.secrets, holder: caller.arn, parts, lockHeld: true,
+          confirmPublicApiUrlChange: options.confirmPublicApiUrlChange === true,
           onEvent: (event) => deps.write(progressLine(event)),
           ...(settings.engine === "templates" ? { confirm: review.confirm } : {}),
           deployedParameters: async (stackName) => (await deps.stacks.describe(stackName))?.parameters,

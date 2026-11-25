@@ -59,6 +59,8 @@ export function linearCompanyWiring(input: {
   connectorSecretPrefix: string; fetch?: typeof fetch; log: (entry: Record<string, unknown>) => void;
   /** L2-4: each company's tracker intake (the core root's `intake.intakeFor`), asked at delivery time. Absent: every routed event logs `linear.intake_not_wired`. */
   intakeFor?: LinearAppIntakeWiring["intakeFor"];
+  /** Whether the core root is built yet: a delivery before that is answered 503 (Linear retries), never dropped (R1 + L1 6.2b). */
+  rootBuilt?: LinearAppIntakeWiring["rootBuilt"];
   /** R1 + L1: the raw DynamoDB client the link rows' document store is built over (as GitHub's link routes). Absent: no link routes, and a disconnect has no links to remove. */
   dynamo?: GithubLinkClients["dynamo"];
 }): LinearCompanyWiring | undefined {
@@ -72,7 +74,7 @@ export function linearCompanyWiring(input: {
     connections,
     connect: { connections, app, fetch: fetchImpl, log: input.log, ...(links === undefined ? {} : { links }) },
     ...(links === undefined ? {} : { link: { connections, links, app, fetch: fetchImpl, log: input.log } }),
-    webhook: { connections, app, now: Date.now, log: input.log, deliver: linearAppIntakeDeliver({ connections, app, fetch: fetchImpl, log: input.log, ...(input.intakeFor === undefined ? {} : { intakeFor: input.intakeFor }) }) },
+    webhook: { connections, app, now: Date.now, log: input.log, deliver: linearAppIntakeDeliver({ connections, app, fetch: fetchImpl, log: input.log, ...(input.intakeFor === undefined ? {} : { intakeFor: input.intakeFor }), ...(input.rootBuilt === undefined ? {} : { rootBuilt: input.rootBuilt }) }) },
   };
 }
 

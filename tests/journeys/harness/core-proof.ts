@@ -5,12 +5,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { BrokerCoreRoot } from "../../../packages/broker/src/aws/core-engine-root.js";
 
-export interface SeenRequest { method: string; path: string; status: number; answeredByCore: boolean; kind: "person" | "callback" | "probe" | "other" }
+export interface SeenRequest { method: string; path: string; status: number; answeredByCore: boolean; kind: "person" | "callback" | "sign-in" | "other" }
 type Event = { rawPath?: string; requestContext?: { http?: { method?: string } } };
 
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 /** What a person's browser or tool asks of a task, and what a worker calls back; the paths the core serves. Anything else (sign-in, the plain task list) is "other" and not held to the rule. */
-const PERSON = [/^\/v1\/dev\/projects\/[^/]+\/intake(\/.*)?$/u, new RegExp(`^/v1/dev/tasks$`), new RegExp(`^/v1/dev/tasks/${UUID}(/.*)?$`), /^\/v1\/app\/(decisions|tasks|sessions)(\/.*)?$/u];
+const PERSON = [/^\/v1\/app\/projects\/[^/]+\/intake(\/.*)?$/u, new RegExp(`^/v1/dev/tasks$`), new RegExp(`^/v1/dev/tasks/${UUID}(/.*)?$`), /^\/v1\/app\/(decisions|tasks|sessions)(\/.*)?$/u];
 const CALLBACK = new RegExp(`^/v1/internal/workspaces/${UUID}/operations/${UUID}/[a-z0-9-]+$`);
 
 export function kindOf(method: string, path: string): SeenRequest["kind"] {
@@ -29,17 +29,17 @@ export interface CoreProof {
   /** Fails with the request named when a person-facing request or a worker callback was not answered by the core. */
   assertAllCore(options?: { callbacks?: boolean }): void;
   /**
-   * Runs a request the journey makes as a PROBE: a person who must be refused (another company's member). Today the core declines a company it does not serve for that task and the old
-   * developer routes answer "no such task", so a probe is not held to "answered by the core" but must be refused (4xx), and is listed. Known gap: after the old routes go, the core answers it.
+   * Runs a request the broker's SIGN-IN check refuses before any engine is asked (an ended, revoked or borrowed session): by design the core never sees it, so it is not held to "answered by the core",
+   * but it MUST be refused with a 401, and is listed. This is the only exemption; another company's member or a colleague is never one (the core answers them, D1-1).
    */
-  probe<T>(request: () => Promise<T>): Promise<T>;
+  signInRefused<T extends { status: number }>(request: () => Promise<T>): Promise<T>;
   /** For the proof's own test only: the core declines requests whose path matches, as an engine that did not serve them would. */
   decline(pattern: RegExp): void;
 }
 
 export function createCoreProof(): CoreProof {
   const current = new AsyncLocalStorage<SeenRequest>();
-  const probing = new AsyncLocalStorage<true>();
+  const signingIn = new AsyncLocalStorage<true>();
   const seen: SeenRequest[] = [];
   const declined: RegExp[] = [];
   const mark = (): void => { const record = current.getStore(); if (record !== undefined) record.answeredByCore = true; };
@@ -55,7 +55,7 @@ export function createCoreProof(): CoreProof {
   };
   return {
     seen,
-    probe: (request) => probing.run(true, request),
+    signInRefused: (request) => signingIn.run(true, request),
     decline: (pattern) => { declined.push(pattern); },
     wrap: (root) => ({
       ...root,
@@ -76,16 +76,16 @@ export function createCoreProof(): CoreProof {
     track: (handler) => (async (event: Event) => {
       const method = event.requestContext?.http?.method ?? "GET";
       const path = event.rawPath ?? "";
-      const record: SeenRequest = { method, path, status: 0, answeredByCore: false, kind: probing.getStore() === true ? "probe" : kindOf(method, path) };
+      const record: SeenRequest = { method, path, status: 0, answeredByCore: false, kind: signingIn.getStore() === true ? "sign-in" : kindOf(method, path) };
       seen.push(record);
       const response = await current.run(record, () => handler(event as never));
       record.status = response.statusCode;
       return response;
     }) as never,
     assertAllCore: (options = {}) => {
-      const unrefused = seen.filter((request) => request.kind === "probe" && request.status < 400);
-      if (unrefused.length > 0) throw new Error(`a probe that must be refused was not: ${unrefused.map((request) => `${request.method} ${request.path} -> ${request.status}`).join("; ")}`);
-      const strays = seen.filter((request) => request.kind !== "other" && request.kind !== "probe" && !request.answeredByCore);
+      const unrefused = seen.filter((request) => request.kind === "sign-in" && request.status !== 401);
+      if (unrefused.length > 0) throw new Error(`a request that must be refused at sign-in was not: ${unrefused.map((request) => `${request.method} ${request.path} -> ${request.status}`).join("; ")}`);
+      const strays = seen.filter((request) => request.kind !== "other" && request.kind !== "sign-in" && !request.answeredByCore);
       if (strays.length > 0) {
         throw new Error(`the old handler answered, not the core: ${strays.map((request) => `${request.method} ${request.path} -> ${request.status}`).join("; ")}`);
       }

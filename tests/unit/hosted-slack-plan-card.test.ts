@@ -381,10 +381,11 @@ describe("the wiring (guards on the source, beside the behaviour above)", () => 
 
   it("the hosted root registers the hosted thread handler, gives the notice service the thread's wiring, and links the admins' setup notice", () => {
     const root = read("packages/broker/src/aws/core-engine-root.ts");
-    expect(root).toMatch(/lessons\.milestones\.register\(hostedThreadHandler\(\{\s+threads, registry, companyId, deps: flow\.deps/u);
+    expect(root).toMatch(/\bmilestones\.register\(hostedThreadHandler\(\{\s+threads, registry, companyId, deps: flow\.deps/u);
+    expect(root).not.toMatch(/lessons\.milestones\.register/u);
     // Batch b18: the thread notification shares one notification object with the attention email's seams (#1030 beside #994's email).
     expect(root).toContain("...(inputs.chatThreads === undefined ? {} : hostedThreadNotification({ threads: inputs.chatThreads");
-    expect(root).toContain("threadMoments: lessons !== undefined");
+    expect(root).toContain("threadMoments: milestones !== undefined");
     expect(root).toContain("startExtras: ticketSessionStartExtras(companyId, { chatThreads: inputs.chatThreads !== undefined })");
     expect(root).toContain("setupLink: (project) => projectPageUrl(originOf(), project)");
     const broker = read("packages/broker/src/aws/broker.ts");
@@ -397,8 +398,8 @@ describe("the wiring (guards on the source, beside the behaviour above)", () => 
     expect(source).toContain("plan: { gate: { requirement: (orgId, kind, subjectId) => gate.requirement(orgId, kind, subjectId) } }");
     expect(source).not.toMatch(/gate\.decide|gate\.verify/u);
     const jobs = read("packages/broker/src/aws/core-job-services.ts");
-    expect(jobs).toContain("options.threadMoments === true && deps.milestones !== undefined");
-    expect(jobs).toContain("ticketBindings: false, companyId");
+    expect(jobs).toContain("(!input.threadMoments && !input.ticketMoments) || input.milestones === undefined");
+    expect(jobs).toContain("...(input.threadMoments ? { follows: threadFollows({ store }) } : {}), ticketBindings: input.ticketMoments, companyId");
   });
 });
 

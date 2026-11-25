@@ -11,7 +11,7 @@ import type { PreparationManifest } from "./prepare.js";
 import type { BuildSandbox } from "./saved-env/build.js";
 import { liveTaskSandboxes, workspaceBuildSandbox } from "./saved-env/rebuild.js";
 import { sharesWorkspace } from "./setup-agent-prove.js";
-import type { DockerCli } from "./swebench/containers.js";
+import type { DockerCli } from "./docker-cli.js";
 import { TaskSandbox } from "./task-sandbox.js";
 
 const PROVE_MS = 40 * 60_000;

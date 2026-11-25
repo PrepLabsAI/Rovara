@@ -557,7 +557,7 @@ describe("web/API runtime registration (linux-arm64-web-api-v1)", () => {
       for (const [profileId, lifetime] of [["linux-arm64-web-api-v1", 60 * 60_000], ["linux-arm64-docker-v1", 5 * 60_000]] as const) {
         stored.clear();
         const challenge = await issueRuntimeInstallChallenge(deps, admin, { binding: webApiChallenge(at).binding, endpoint: "http://10.0.2.15:8080", generation: 3,
-          transportCorrelationId: webApiChallenge(at).transportCorrelationId, profileId });
+          transportCorrelationId: webApiChallenge(at).transportCorrelationId, profileId, ...(profileId === "linux-arm64-docker-v1" ? { instanceId: "i-0123456789abcdef0" } : {}) });
         expect(Date.parse(challenge.expiresAt) - Date.parse(challenge.issuedAt)).toBe(lifetime);
         const [row] = [...stored.values()];
         expect(row).toMatchObject({ expiresAt: challenge.expiresAt, ttl: Math.ceil(Date.parse(challenge.expiresAt) / 1000) });

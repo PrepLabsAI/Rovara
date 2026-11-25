@@ -29,7 +29,7 @@ import { buildModelReplyBundle, modelReplyBundleBytes, modelReplyBundleDigest } 
 import { MODEL_DUMMY_KEY, MODEL_HELPER_BASE_URL, MODEL_METADATA_PORT } from "../model-sandbox-env.js";
 import { CHECK_SANDBOX_HOSTNAME, SINKHOLE_ALIAS, checkSandboxHostsFile, checkSandboxNames, checkSandboxResolvConf, readSealedDnsRecord, sealedDnsHelperRunArgs, waitForSealedDnsHelper, type RunHostEntry, type SealedDnsRecord } from "../check-sandbox.js";
 import { RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL, RUN_NETWORK_WORKSPACE_LABEL, runNetworkHelperIp, type ServicesNetwork } from "../run-network.js";
-import type { DockerCli } from "../swebench/containers.js";
+import type { DockerCli } from "../docker-cli.js";
 import { SANDBOX_INIT, TASK_SANDBOX_LABEL, TASK_SANDBOX_NETWORK, TASK_SANDBOX_WORKSPACE_LABEL, gatewayEgressFor, sandboxNetworkFromEnvironment } from "../task-sandbox.js";
 import { readContainedReport } from "./report-file.js";
 import { EVAL_PYTHON_USER_BASE, useSavedEnvironment, type UseSavedEnvironmentInput } from "./eval-environment.js";

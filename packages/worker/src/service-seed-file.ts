@@ -22,7 +22,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { open, readlink, realpath, stat } from "node:fs/promises";
 import { resolve, sep } from "node:path";
-import type { DockerCli } from "./swebench/containers.js";
+import type { DockerCli } from "./docker-cli.js";
 import { HELPER_CREDENTIAL_PATTERNS } from "./service-helpers.js";
 
 /** The most a seed file may hold. */

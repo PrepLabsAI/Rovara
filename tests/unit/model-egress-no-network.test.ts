@@ -104,6 +104,8 @@ const F1C_CALLERS: ReadonlySet<string> = new Set([
   "packages/worker/src/product-gateway-egress.ts",
   // EVAL-WIRE-CHANGED-PROMPT-CLASSIFIER (#796): reads egress frames only to classify them locally against F4/F8 (no transport, no host, no network).
   "packages/worker/src/verification/eval-changed-prompt.ts",
+  // E1-0 (arch growth checks): the copied-contracts baseline is a data listing of every copied contract file's path (it lists packages/contracts/src/model-egress/address.ts as one entry); it holds no code and calls nothing.
+  "scripts/copied-contracts-baseline.json",
 ]);
 
 describe("no callers yet", () => {

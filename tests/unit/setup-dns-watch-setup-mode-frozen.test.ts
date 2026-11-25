@@ -18,7 +18,8 @@ const SETUP_MODE_SHA256 = "068992ab451f0058868d3731dc57ba927bb4f6a8075cec5e2fec4
 const HELPER_SOURCE = new URL("../../packages/worker/src/setup-dns-watch-helper.ts", import.meta.url);
 const HELPER_SHA256 = "822da350f1a8864ec02edcd008564b13bf0eb303d43f955e21250c544df61c55";
 const NETWORK_SOURCE = new URL("../../packages/worker/src/setup-network.ts", import.meta.url);
-const NETWORK_SHA256 = "5ba47b5940e5ad5b0c9826d7e875de8938906f376ce7b6238c19fba77eecca0e";
+// Replaces 5ba47b59...: import path only (OE-c1 Docker client move: `import type { DockerCli } from "./docker-cli.js"` instead of "./swebench/containers.js"), no behaviour change.
+const NETWORK_SHA256 = "515b98576aa834cee9205aa41786f21f8d53d50ff7a6e8412a1806a24a962cac";
 
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 

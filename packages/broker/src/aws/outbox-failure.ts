@@ -182,12 +182,12 @@ export async function failActiveOperation(
   documentClient: Pick<DynamoDBDocumentClient, "send">,
   tableName: string,
   workspaceId: string,
-  error: string,
+  error: string, onlyOperationId?: string, // onlyOperationId: end the active operation only when it is this one (a cancel's target); one that replaced it is not the caller's to end
 ): Promise<string | undefined> {
   const resolved = await readWorkspaceMeta(documentClient, tableName, workspaceId);
   if (resolved === undefined) return undefined;
   const operationId = resolved.item["activeOperationId"];
-  if (typeof operationId !== "string") return undefined;
+  if (!isWantedOperation(operationId, onlyOperationId)) return undefined;
   const operation = (await documentClient.send(new GetCommand({
     TableName: tableName,
     Key: { pk: resolved.key.pk, sk: `OPERATION#${operationId}` },
@@ -245,4 +245,9 @@ async function markLostGroundingRound(documentClient: Pick<DynamoDBDocumentClien
   } catch {
     console.log(JSON.stringify({ component: "broker", event: "workflow.lost_grounding_mark_failed", operationId, workspaceId }));
   }
+}
+
+/** An active operation id the caller may end: there is one, and it is the one the caller named (when it named one). */
+function isWantedOperation(active: unknown, only: string | undefined): active is string {
+  return typeof active === "string" && (only === undefined || active === only);
 }

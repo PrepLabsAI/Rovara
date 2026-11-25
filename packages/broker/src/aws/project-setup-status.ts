@@ -25,7 +25,7 @@
 import { randomUUID } from "node:crypto";
 import { GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  IMPLICIT_COMPANY_ID, OrgIdSchema, ProjectSetupEvalNoneBodySchema, ProjectSetupSkipBodySchema, SETUP_SKIPPABLE_ROWS, SETUP_STATUS_ROWS, SetupJournalEntrySchema, SetupProposalSchema, ProjectDefinitionSchema, agentXError, NoAutomatedTestsSchema, noAutomatedTestsOf, setupResultOf, companyScoped, projectRevisionKey, redactAndCap, workspaceProjectIndexValue,
+  IMPLICIT_COMPANY_ID, OrgIdSchema, ProjectSetupEvalNoneBodySchema, ProjectSetupSkipBodySchema, SETUP_SKIPPABLE_ROWS, SETUP_STATUS_ROWS, SetupJournalEntrySchema, SetupProposalSchema, agentXError, readStoredProject, NoAutomatedTestsSchema, noAutomatedTestsOf, setupResultOf, companyScoped, projectRevisionKey, redactAndCap, workspaceProjectIndexValue,
   type DocumentKey, type DocumentStore, type OrgId, type ProjectSetupChecklist, type SetupJournalEntry, type SetupProposal, type SetupApproval, type SetupRowState, type SetupSkippableRow, type SetupStatusRow, type StoredDocument,
   WORKSPACE_PROJECT_INDEX,
 } from "@agentx/contracts";
@@ -349,7 +349,7 @@ const checkOf = (state: { status: NonNullable<ApprovalRead["check"]>["status"]; 
  */
 async function keptApproval(flow: TaskFlowDeps, store: DocumentStore, companyId: OrgId, project: string, earlier: { revision: number; at: string }): Promise<{ check: NonNullable<ApprovalRead["check"]> } | undefined> {
   const stored = await store.get(projectRevisionKey(companyId, project, earlier.revision));
-  const definition = ProjectDefinitionSchema.safeParse(stored?.["definition"]);
+  const definition = readStoredProject(stored?.["definition"]);
   if (stored === undefined || !definition.success || definition.data.revision !== earlier.revision) return undefined;
   return { check: checkOf(await setupStateOf(flow, project, definition.data)) };
 }

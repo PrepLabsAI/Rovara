@@ -17,6 +17,7 @@ import { coreTaskEntryFrom, type CoreTaskEntry } from "../../packages/broker/src
 import { createCoreTaskRuleRoutes } from "../../packages/broker/src/aws/core-task-rule-routes.js";
 import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { MAYA, OMAR, bearerFor, createDeveloperTaskBroker, grantProject, type Developer } from "../support/developer-task-broker.js";
+import { readsAsRow } from "../support/code-api-row-read.js";
 import { pagePlan, pageTask } from "../support/page-tasks.js";
 import { loadSlackBroker } from "../support/slack-broker.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
@@ -164,6 +165,7 @@ describe("the events timeline of a core task (the core's log and decisions)", ()
     const events = (answer.body as { events: Array<{ at: string; kind: string; text: string }> }).events;
     expect(events.map((event) => event.at)).toEqual(["2026-11-15T10:00:00.000Z", "2026-11-15T10:01:00.000Z", "2026-11-15T10:02:00.000Z", "2026-11-15T10:04:00.000Z"]);
     expect(events.map((event) => event.kind)).toEqual(["status", "message", "message", "status"]);
+    readsAsRow("tasks.events", answer.body);
     expect(events[0]!.text).toBe("Task started");
     expect(events[2]!.text).toBe("Answer from Maya Chen: /health");
     expect(events[3]!.text).toBe("Approved: Looks right.");
@@ -210,6 +212,7 @@ describe("plan comments and People on a core task (the old routes' own functions
     const root = first.body["comment"] as { commentId: string };
     expect(await h.dev(MAYA, "POST", path, { requestId: "reply", document: "plan", text: "Keep the button visible", replyTo: root.commentId })).toMatchObject({ status: 200, body: { comment: { replyTo: root.commentId, anchor: "claim:2.1" } } });
     const fresh = await h.dev(MAYA, "GET", path);
+    readsAsRow("tasks.comments", fresh.body);
     const comments = fresh.body["comments"] as Array<{ replyTo?: string; anchor?: string }>;
     expect(comments.find((comment) => comment.replyTo === root.commentId)).toMatchObject({ anchor: "claim:2.1" });
     await h.dev(MAYA, "PUT", `/v1/dev/tasks/${h.task.taskId}/readers/${TESS.developerId}`, { requestId: randomUUID(), role: "viewer" });

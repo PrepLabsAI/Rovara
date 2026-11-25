@@ -21,7 +21,7 @@ import type { PreparationManifest } from "../prepare.js";
 import type { RepositoryCredentialProvider } from "../repository-credentials.js";
 import { credentialShapedVariables } from "../setup-agent.js";
 import { TaskSandbox, TASK_SANDBOX_LABEL } from "../task-sandbox.js";
-import type { DockerCli } from "../swebench/containers.js";
+import type { DockerCli } from "../docker-cli.js";
 import { buildRepositoriesOf, proveAndBuildSavedImage, realBuildPorts, type BuildSandbox, type SavedEnvBuildInput, type SavedEnvBuildPorts } from "./build.js";
 
 /** The most the Prove run may take inside a rebuild (the build's own deadlines add to this). */

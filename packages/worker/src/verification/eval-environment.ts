@@ -16,7 +16,7 @@ import { join } from "node:path";
 import type { EvalEnvironment } from "@agentx/contracts";
 import { SAVED_ENV_NEVER_SHIPPED_UNTRACKED, SAVED_ENV_UNTRACKED_FOLDER_NAMES } from "../saved-env/build.js";
 import { extractSavedEnvSeed, type SavedEnvUseOptions } from "../saved-env/use.js";
-import type { DockerCli } from "../swebench/containers.js";
+import type { DockerCli } from "../docker-cli.js";
 
 /** The most entries one overlay walks, and the deepest folder it enters: a hostile or runaway image cannot make the worker walk forever. */
 export const EVAL_OVERLAY_ENTRIES_MAX = 400_000;

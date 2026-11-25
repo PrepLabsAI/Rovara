@@ -5,19 +5,19 @@
 //     the member, and the install's ticket fence key (derived from the callback signing key, so a ticket's author cannot guess the fence);
 //   - who a Linear account is: the company's own account links (linear-account-links.ts), counted only while the company is connected to that Linear workspace, then the person read
 //     live; any other account is nobody, so the ticket waits;
-//   - the waiting list and "Start" / "Not this one" for the routes (hosted-intake-routes.ts, which decide WHO may); "Start" runs as the member who pressed it, through the same engine
+//   - the waiting list and "Start" / "Not this one" for the routes (core-host/intake-routes.ts, which decide WHO may); "Start" runs as the member who pressed it, through the same engine
 //     path the laptop uses (`startWaitingIntake`), so the member's own right to start work on the project is checked again by the start;
 //   - the ticket write-back: the ticket updates handler with the company's OWN Linear connection (`linearCompanyTracker(companyId)`), registered on that company's milestones. No
 //     install-wide tracker is ever used for a company's tickets.
 // A company whose new tasks do not start on the core has no intake here (`intakeFor` is undefined, so the webhook logs `linear.intake_not_wired` and nothing starts).
 import { createHash, createHmac } from "node:crypto";
 import {
-  NEW_HOSTED_TICKET_UPDATES, OrgIdSchema, companyLog, type AuditSink, type DocumentStore, type IdentityProvider, type IntakeWaitingList, type OrgId, type Principal, type Tracker,
+  OrgIdSchema, companyLog, type AuditSink, type DocumentStore, type IdentityProvider, type IntakeWaitingList, type OrgId, type Principal, type Tracker,
 } from "@agentx/contracts";
 import { dismissIntakeItem, intakePortsOf, listWaitingIntakeItems, readIntakeItem, startWaitingIntake, type IntakePorts } from "../core/intake/index.js";
 import type { MomentTable } from "../core/ticket-updates/moments.js";
 import { ticketUpdatesHandler, type TicketUpdatesDependencies } from "../core/ticket-updates/handler.js";
-import { refreshTicketThread, seedTicketUpdatesIfUnset, ticketStartedShared } from "../core/ticket-updates/index.js";
+import { HOSTED_SEED_TICKET_UPDATES, refreshTicketThread, seedTicketUpdatesIfUnset, ticketStartedShared } from "../core/ticket-updates/index.js";
 import { taskLogMilestoneHandler } from "../core/task-log/milestones.js";
 import type { TaskLogHooks } from "../core/task-log/hooks.js";
 import { taskSharedOf } from "../core/task-log/task-shared.js";
@@ -31,7 +31,7 @@ import type { TaskFlow } from "../core/task-flow/flow.js";
 import { waitingViewOf } from "../local/app/intake.js";
 import { createSessionStartExtras } from "../local/app/session-start.js";
 import { isSystemPrincipal } from "../core/system-runs/access.js";
-import { hostedLinearResolver } from "./linear-account-links.js";
+import { linearLinkResolver } from "./linear-account-links.js";
 import { linearCompanyTracker } from "./linear-app-intake.js";
 import type { LinearConnections } from "./linear-connections.js";
 
@@ -66,15 +66,20 @@ export type HostedIntakeStart =
 
 /** What the routes call, for a company and project they have already checked the caller against. */
 export interface HostedIntake {
-  /** The engine's ports for one company's deliveries (no presser), or undefined: no intake for that company here. */
-  intakeFor(companyId: OrgId): Promise<IntakePorts | undefined>;
+  /**
+   * The engine's ports for one company's deliveries (no presser), or undefined: no intake for that company here. `actAt` (R1 + L1 6.2b): the time of the act the ports are for; a Linear account linked AFTER it is not the
+   * member's consent for that act, so it resolves to nobody (the ticket waits as unlinked).
+   */
+  intakeFor(companyId: OrgId, options?: { actAt?: string | undefined }): Promise<IntakePorts | undefined>;
+  /** Whether this member, read live, may start work on the project (the engine's `mayStart`): what makes Start available to them. */
+  mayStart(companyId: OrgId, project: string, personId: string): Promise<boolean>;
   /** The project's waiting tickets (the laptop's list shape; a hosted project has no polled sources). */
   waiting(companyId: OrgId, project: string): Promise<IntakeWaitingList>;
   /** "Start" by this member: the work is theirs. */
   start(companyId: OrgId, project: string, itemId: string, personId: string): Promise<HostedIntakeStart>;
   /**
-   * A project that just got its first tracker team (the one place a hosted project first gets tracker intake): when it has NO ticket-updates settings saved, saves the new-hosted-project default (`NEW_HOSTED_TICKET_UPDATES`,
-   * level "full"), once, conditionally, so a saved choice (even a saved status_only) is never overwritten and two adds at once save once. "no_intake": this company's tasks do not start on the core, so nothing is saved.
+   * A project that just got its first tracker team (the one place a hosted project first gets tracker intake): when it has NO ticket-updates settings saved, saves the new-hosted-project default (`HOSTED_SEED_TICKET_UPDATES`,
+   * level "full", the ticket's status moved as the work goes), once, conditionally, so a saved choice (even a saved status_only) is never overwritten and two adds at once save once. "no_intake": this company's tasks do not start on the core, so nothing is saved.
    */
   seedTicketUpdates(companyId: OrgId, project: string, personId: string): Promise<"seeded" | "kept" | "no_intake">;
   /** "Not this one" by this member. `false`: no such waiting ticket. */
@@ -103,13 +108,19 @@ const ITEM_ID = /^[a-f0-9]{32}$/u;
 const auditId = (kind: string, ...parts: string[]): string => `evt_intake_${kind}_${createHash("sha256").update(parts.join("\u0000")).digest("hex").slice(0, 40)}`;
 
 export function createHostedIntake(deps: HostedIntakeDeps): HostedIntake {
-  const portsOf = (companyId: OrgId, company: HostedIntakeCompany, presser?: Principal): IntakePorts => {
+  const portsOf = (companyId: OrgId, company: HostedIntakeCompany, presser?: Principal, actAt?: string): IntakePorts => {
     const log = companyLog(companyId, deps.log);
     const principalOf = (orgId: OrgId, personId: string) => company.identity.getPrincipal(orgId, personId);
+    const linked = linearLinkResolver({ store: company.store, connections: deps.connections, principalOf });
+    // An act older than the member's link is not their consent (a late link must not start a ticket that was already waiting): such an account is nobody for this act.
+    const resolveExternalAccount = async (orgId: string, account: Parameters<typeof linked>[1]) => {
+      const found = await linked(orgId, account);
+      return found === undefined || (actAt !== undefined && Date.parse(found.linkedAt) > Date.parse(actAt)) ? undefined : found.principal;
+    };
     return intakePortsOf({
       store: company.store, companyId, now: deps.now,
       log: (event, fields) => { log({ component: "intake", event, ...fields }); },
-      identity: { getPrincipal: principalOf, resolveExternalAccount: hostedLinearResolver({ store: company.store, connections: deps.connections, principalOf }) },
+      identity: { getPrincipal: principalOf, resolveExternalAccount },
       access: company.access, flow: company.flow, fenceKey: deps.fenceKey,
       ...(presser === undefined ? {} : { owner: presser }),
       ...(company.milestones === undefined ? {} : { milestones: company.milestones }),
@@ -119,9 +130,16 @@ export function createHostedIntake(deps: HostedIntakeDeps): HostedIntake {
   };
   const companyOf = async (companyId: OrgId): Promise<HostedIntakeCompany | undefined> => deps.companyFor(OrgIdSchema.parse(companyId));
   return {
-    async intakeFor(companyId) {
+    async intakeFor(companyId, options = {}) {
       const company = await companyOf(companyId);
-      return company === undefined ? undefined : portsOf(companyId, company);
+      return company === undefined ? undefined : portsOf(companyId, company, undefined, options.actAt);
+    },
+    async mayStart(companyId, project, personId) {
+      const company = await companyOf(companyId);
+      if (company === undefined) return false;
+      const presser = await company.identity.getPrincipal(companyId, personId);
+      if (presser === undefined || presser.companyId !== companyId || presser.personId !== personId) return false;
+      return await portsOf(companyId, company, presser).mayStart(companyId, developerIdOf(presser), project);
     },
     async waiting(companyId, project) {
       const company = await companyOf(companyId);
@@ -153,7 +171,7 @@ export function createHostedIntake(deps: HostedIntakeDeps): HostedIntake {
     async seedTicketUpdates(companyId, project, personId) {
       const company = await companyOf(companyId);
       if (company === undefined) return "no_intake";
-      return seedTicketUpdatesIfUnset({ store: company.store, now: deps.now }, { orgId: OrgIdSchema.parse(companyId), project, settings: NEW_HOSTED_TICKET_UPDATES, by: personId });
+      return seedTicketUpdatesIfUnset({ store: company.store, now: deps.now }, { orgId: OrgIdSchema.parse(companyId), project, settings: HOSTED_SEED_TICKET_UPDATES, by: personId });
     },
     async dismiss(companyId, project, itemId, personId) {
       if (!ITEM_ID.test(itemId)) return false;

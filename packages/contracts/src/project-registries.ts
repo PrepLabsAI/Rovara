@@ -102,6 +102,22 @@ export const ProjectRegistriesSchema = z.array(ProjectRegistrySchema).max(REGIST
   }
 });
 
+/**
+ * REGISTRY-TOLERANT-READ (arch rule 8): what a STORED project's `registries` reads as. A revision written before the company package token (c1f5aab4c) may hold a generic `npm`/`pypi`/`maven` entry (a name, an url and a
+ * `credentialRef`, with or without one). The company's token replaced it, so the stored read DROPS those entries (the project reads, and no credential is used for them: setup installs from that host only with the
+ * company's own token, or from the public registries) and keeps every CodeArtifact entry to the same rules as before. Only the STORED read does this: `ProjectRegistriesSchema` (a person's new input, an edit) still refuses a
+ * generic entry with GENERIC_REGISTRY_REFUSED. A value that is not a list reads as it does for the strict schema (a refusal).
+ */
+export const StoredProjectRegistriesSchema = z.preprocess(
+  (value) => (Array.isArray(value) ? value.filter((entry) => !isGenericRegistryEntry(entry)) : value),
+  ProjectRegistriesSchema,
+);
+
+/** Whether a stored registry entry is one of the generic kinds (`npm`, `pypi`, `maven`) a project can no longer name. */
+export function isGenericRegistryEntry(entry: unknown): boolean {
+  return typeof entry === "object" && entry !== null && typeof (entry as { kind?: unknown }).kind === "string" && (REGISTRY_FORMATS as readonly string[]).includes((entry as { kind: string }).kind);
+}
+
 export function formatOf(entry: ProjectRegistry): RegistryFormat {
   return entry.format;
 }

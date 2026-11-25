@@ -9,7 +9,7 @@
 // Linear's trigger source (work started by the payer rules of an assignment) is NOT moved onto this adapter; the neutral start is a member's act (`core/intake`).
 import { createHash } from "node:crypto";
 import {
-  agentXError, HostScopeSchema, SubjectCommentSchema, TrackerEventSchema, TrackerItemSchema, TrackerParentSchema,
+  agentXError, HostScopeSchema, SubjectCommentSchema, TrackerEventSchema, TrackerWriteRefusedError, TrackerItemSchema, TrackerParentSchema,
   type HostScope, type NeutralStatus, type RawDelivery, type SubjectCommentsPage, type Tracker, type TrackerAskedItem, type TrackerAskedQuery, type TrackerCapabilities, type TrackerCommentOptions, type TrackerCommentResult, type TrackerEvent, type TrackerEvents, type TrackerItem,
   type TrackerItemRef, type UntrustedText,
 } from "@agentx/contracts";
@@ -84,11 +84,16 @@ export interface LinearTrackerAccess {
    */
   asked?: ((input: { label?: string | undefined; assignedToRovara?: true | undefined; limit: number; signal: AbortSignal }) => Promise<readonly TrackerAskedItem[]>) | undefined;
   /**
+   * One issue by id, for the hosted doorbell: its team (Linear's word) and, when it asks for work now (the `label`, or assigned to this token's own account), the item with who made the latest such act, when, and the change it was.
+   * `workspace` is stamped on the actor's account. Undefined: no such issue. Not part of the Tracker port: a company's access gives it, the neutral `askedFor` stays what a laptop polls with.
+   */
+  askedIssue?: ((input: { issueId: string; label: string; workspace: string; signal: AbortSignal }) => Promise<{ teamId: string; item: TrackerAskedItem | undefined } | undefined>) | undefined;
+  /**
    * One page (numbered from 1, at most 100) of an issue's comments, those created after `since` when given; `nextPage` when there are more. Fetch only. Absent: the adapter has no `comments`. Undefined: no such issue.
    */
   listComments?: ((orgId: OrgId, key: string, query: { since?: string | undefined; page?: number | undefined; workspace?: string | undefined }) => Promise<{ comments: readonly LinearCommentRead[]; nextPage?: number | undefined } | undefined>) | undefined;
   /** Moves an issue to the workflow status named (matched without regard to case). Absent: the adapter has no `setStatusByName`. A refusal is a `TrackerWriteRefusedError`. */
-  moveIssue?: ((key: string, statusName: string) => Promise<"moved" | "no_such_status">) | undefined;
+  moveIssue?: ((key: string, statusName: string, workspace?: string) => Promise<"moved" | "no_such_status" | "not_forward">) | undefined;
   /** The organization an install's system scope speaks for (a single-company install has exactly one). Absent: a system scope has no organization, so nothing is written or read for it. */
   installOrg?: (() => OrgId | undefined) | undefined;
 }
@@ -261,7 +266,11 @@ export function linearTracker(access: LinearTrackerAccess = {}): Tracker {
     tracker.setStatusByName = async (ref: TrackerItemRef, name: string, scope: HostScope) => {
       orgOf(scope);
       if (name.trim() === "" || name.length > 100) throw agentXError("CONFIG_INVALID", "the status name is empty or too long");
-      return move(keyOf(ref), name.trim());
+      // The issue found must be in the ticket's own workspace (an issue key repeats across workspaces), as for a comment.
+      // A link that is set but is not a Linear issue link names no workspace to check against: refused, never moved on a guess.
+      const workspace = ref.url === undefined ? undefined : workspaceOfIssueUrl(ref.url);
+      if (ref.url !== undefined && workspace === undefined) throw new TrackerWriteRefusedError("not_found");
+      return move(keyOf(ref), name.trim(), workspace);
     };
   }
   if (access.asked !== undefined) {

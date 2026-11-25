@@ -105,6 +105,8 @@ async function setup(options: { lessons?: string; gateway?: boolean; answer?: (n
 type Setup = Awaited<ReturnType<typeof setup>>;
 
 const lessonsJob = (root: Setup["root"]) => root.app.handleScheduledJob({ source: "agentx.core-job", job: "lessons" });
+/** The always-wired notices job: since R1 + L1 6.2 it is also where the company's milestones are swept (lessons' pass no longer retries them). */
+const noticeJob = (root: Setup["root"]) => root.app.handleScheduledJob({ source: "agentx.core-job", job: "notify-deliver" });
 const reportOf = (result: unknown, company: string) => ((result as { companies: Array<{ companyId: string; outcome: string; report?: Record<string, unknown> }> }).companies).find((entry) => entry.companyId === company);
 
 const reflectedIn = (result: unknown): number => ((result as { companies: Array<{ report?: { reflected?: number } }> }).companies).reduce((sum, entry) => sum + (entry.report?.reflected ?? 0), 0);
@@ -141,7 +143,7 @@ async function servedCompany(s: Setup, companyId: OrgId, personId: string): Prom
 
 describe("(a) the lessons job is wired on the hosted root", () => {
 
-  it("a milestone a handler failed on (a Slack thread or Linear write-back that failed once) is told again by the pass", async () => {
+  it("a milestone a handler failed on (a Slack thread or Linear write-back that failed once) is told again by the notices job's milestone sweep, not by lessons' pass", async () => {
     const s = await setup({ lessons: "on" });
     await servedCompany(s, A, MEMBER_A);
     const runtime = await s.root.app.runtimeFor(A);
@@ -153,11 +155,14 @@ describe("(a) the lessons job is wired on the hosted root", () => {
     await runtime.flow.deps.store.transact(codeMilestoneItems({ kind: "pr_ready", orgId: A, taskId, at, text: "ready" }, 1));
     await runtime.flow.deps.milestones!.deliver(taskId);
     expect(heard).toEqual(["pr_ready"]);
-    // Not due yet: the pass retries nothing.
-    expect(reportOf(await lessonsJob(s.root), A)?.report).toMatchObject({ milestones: 0 });
+    // Not due yet: the sweep retries nothing.
+    expect(reportOf(await noticeJob(s.root), A)?.report).toMatchObject({ milestones: 0 });
     expect(heard).toEqual(["pr_ready"]);
     s.world.clock.advance(120);
-    expect(reportOf(await lessonsJob(s.root), A)?.report).toMatchObject({ milestones: 1 });
+    // Lessons' own pass does not sweep a host it did not build (it would tell the same milestone twice).
+    expect(reportOf(await lessonsJob(s.root), A)?.report).toMatchObject({ milestones: 0 });
+    expect(heard).toEqual(["pr_ready"]);
+    expect(reportOf(await noticeJob(s.root), A)?.report).toMatchObject({ milestones: 1 });
     expect(heard).toEqual(["pr_ready", "pr_ready"]);
     const rows = await queryAll(runtime.flow.deps.store, { pk: `DEVTASK#${taskId}`, sk: { op: "beginsWith", prefix: "CODE_MILESTONE#" } });
     expect(rows[0]).toMatchObject({ done_slack_thread: true });

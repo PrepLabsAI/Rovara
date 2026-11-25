@@ -2,12 +2,12 @@
 // now and the hosted endpoint later use the same definitions (FR-027). Descriptions are written
 // for the AI tool that reads them: when to use the tool, and what to do next.
 import {
-  CI_STATE_WORDS, DEFAULT_DEVELOPER_TASK_POLICY, blockReasonSentence, DEVELOPER_EVENTS_DEFAULT, DEVELOPER_EVENTS_MAX, DEVELOPER_TASK_LIST_DEFAULT, DEVELOPER_TASK_LIST_MAX,
+  CI_STATE_WORDS, DEFAULT_DEVELOPER_TASK_POLICY, blockReasonSentence, redactBlockReason, DEVELOPER_EVENTS_DEFAULT, DEVELOPER_EVENTS_MAX, DEVELOPER_TASK_LIST_DEFAULT, DEVELOPER_TASK_LIST_MAX,
   DEVELOPER_WAIT_MAX_SECONDS, DeveloperInstructionsSchema, DeveloperTaskStatusSchema, SHARED_BY_POLICY, VIEW_ONLY_BY_POLICY, WORKFLOW_BLOCK_REASONS, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, WORKFLOW_REVIEW_FAILURE_REASONS,
   E2ESharedViewSchema, inertName, isBranchConflictAskReason, isBranchSyncBlockReason, isBranchSyncGiveUpReason, isCiFixBlockReason, knownTaskView, openReviewFindings, workflowIsReviewOnly, workflowKeepPullRequestsOffered, type DeveloperTaskClientView,
   TaskPeopleRoleSchema, RUN_CONTEXT_KINDS, RUN_INPUT_TEXT_MAX_BYTES, ApprovalIdSchema, RunInputSchema, type RunInput, type StartAgentSelection,
   INTENT_NOT_WAITING_MESSAGE, INTENT_QUESTIONS_MAX, SessionIdSchema, CRITIC_NOT_CHECKED_LINE, CRITIC_STOPPED_AT_LIMIT_LINE, CRITIC_STOPPED_AT_SPENDING_LIMIT_LINE, formatMinutes, type WorkflowCritique,
-  sessionTaskStatus, taskStatusNext, taskStatusText, formatRunLimitUsd, runLimitRaiseText, diagnosisProposalLine, modelSelectionLines,
+  sessionTaskStatus, taskStatusNext, taskStatusText, TASK_STATUS_WORDS, formatRunLimitUsd, runLimitRaiseText, diagnosisProposalLine, modelSelectionLines,
 } from "@agentx/contracts";
 import { z } from "zod";
 import type { AdminControlPlaneClient } from "./admin-client.js";
@@ -21,7 +21,7 @@ import { WIKI_TOOLS } from "./wiki-tools.js";
 import { waitForTask } from "./wait.js";
 
 /** Why a step is blocked, as a sentence (the one formatter, so a reason stored in lower case reads right); `fallback` says it when no reason was stored. */
-const blockedBecause = (reason: string | undefined, fallback: string): string => blockReasonSentence(reason ?? fallback);
+const blockedBecause = (reason: string | undefined, fallback: string): string => blockReasonSentence(redactBlockReason(reason ?? fallback, 500));
 
 export interface ToolContext {
   client: ControlPlaneClient;
@@ -112,6 +112,8 @@ function agentSelection(input: Record<string, unknown>, text: string): { agent?:
 const TaskShape = {
   task_id: z.string(), title: z.string(), project: z.string(), status: DeveloperTaskStatusSchema,
   status_text: z.string().describe("where the task stands, in words (the same words as the app)"), next_step: z.string().optional(),
+  pill: z.string().optional().describe("the label the web page shows for this task and this person (Needs you, In review, Stopped, ...), from the standing the server serves; absent from older servers"),
+  current_step: z.string().optional().describe("the step of the pipeline the task is at, in the page's own title; absent from older servers and for a finished task"),
   session: z.string().optional().describe("the task's session ID, for agentx_get_session and the other session tools"),
   session_url: z.string().optional().describe("the task's page in the Rovara web app; give it to the person to follow or decide the task there"),
   failure: z.object({ category: z.string(), stage: z.string().optional(), message: z.string() }).optional(),
@@ -202,6 +204,7 @@ function taskOutput(shown: DeveloperTaskClientView, timedOut?: boolean): Record<
   return {
     task_id: task.taskId, title: task.title, project: task.project, status: task.status, status_text: taskStatusWords(task),
     ...(taskNextStep(task) === undefined ? {} : { next_step: taskNextStep(task) }),
+    ...taskStandingOutput(task),
     ...taskSessionOutput(task),
     ...(task.failure === undefined ? {} : { failure: task.failure }),
     starting_revision: task.startingRevision, client: task.client,
@@ -243,7 +246,7 @@ function taskOutput(shown: DeveloperTaskClientView, timedOut?: boolean): Record<
         stage: task.workflow.stage, state: task.workflow.state, revision: task.workflow.revision,
         path: task.workflow.path,
         ...(task.workflow.reviewPhase === undefined ? {} : { review_phase: task.workflow.reviewPhase }),
-        ...(task.workflow.blockReason === undefined ? {} : { block_reason: task.workflow.blockReason }),
+        ...(task.workflow.blockReason === undefined ? {} : { block_reason: redactBlockReason(task.workflow.blockReason, 500) }),
         ...(task.workflow.candidate === undefined ? {} : { candidate_digest: task.workflow.candidate.digest }),
         ...(blockingFindings.length === 0 ? {} : { blocking_findings: blockingFindings }),
         ...(task.workflow.verification === undefined ? {} : { verification: {
@@ -393,10 +396,10 @@ export function nextFor(shown: DeveloperTaskClientView): string {
   }
   // Plan 6 Task 17: Rovara could not keep the branch up to date (it still conflicts after its tries, or the base changed CI workflow files, which it can't push): a person updates the branch on GitHub.
   if (task.workflow?.state === "BLOCKED" && task.workflow.stage === "WAIT_FOR_MERGE" && (isBranchConflictAskReason(task.workflow.blockReason) || isBranchSyncGiveUpReason(task.workflow.blockReason))) {
-    return `${blockReasonSentence(task.workflow.blockReason!)} To let Rovara try once more, use agentx_retry_workflow with expected_revision ${task.workflow.revision}. Or update the branch on GitHub, or close the task.`;
+    return `${blockReasonSentence(redactBlockReason(task.workflow.blockReason!, 500))} To let Rovara try once more, use agentx_retry_workflow with expected_revision ${task.workflow.revision}. Or update the branch on GitHub, or close the task.`;
   }
   if (task.workflow?.state === "BLOCKED" && task.workflow.stage === "WAIT_FOR_MERGE" && isBranchSyncBlockReason(task.workflow.blockReason)) {
-    return `${blockReasonSentence(task.workflow.blockReason!)} Rovara keeps watching the pull request for its merge; it does not change the branch again.`;
+    return `${blockReasonSentence(redactBlockReason(task.workflow.blockReason!, 500))} Rovara keeps watching the pull request for its merge; it does not change the branch again.`;
   }
   if (task.workflow?.state === "BLOCKED") return `The workflow is blocked. ${blockedBecause(task.workflow.blockReason, "required evidence is missing")} Review it before continuing.`;
   // After the draft pull request opens, the task waits for its merge on GitHub; PR feedback is decided here or in Slack.
@@ -465,9 +468,22 @@ const PLAIN_STATUS_WORDS: Record<string, string> = {
 export function taskStatusWords(task: Pick<DeveloperTaskClientView, "status" | "statusView">): string {
   return plainText(task.statusView === undefined ? PLAIN_STATUS_WORDS[task.status] ?? "Status unavailable" : taskStatusText(task.statusView), "Status unavailable");
 }
+/** The next step without the words the status line already said: "Ready to merge" is `status_text`, so its next step "Ready to merge: review the pull request and merge it." reads "Review the pull request and merge it." (F2-B: the status line and its next step were doubled). */
+function withoutRepeatedLead(next: string, status: { state: string }): string {
+  const lead = `${(TASK_STATUS_WORDS as Record<string, string>)[status.state] ?? ""}: `;
+  if (lead === ": " || !next.startsWith(lead) || next.length === lead.length) return next;
+  const rest = next.slice(lead.length);
+  return `${rest.charAt(0).toUpperCase()}${rest.slice(1)}`;
+}
 const taskNextStep = (task: Pick<DeveloperTaskClientView, "statusView">): string | undefined => {
   const next = task.statusView === undefined ? undefined : taskStatusNext(task.statusView, true);
-  return next === undefined ? undefined : plainText(next, "");
+  return next === undefined ? undefined : plainText(withoutRepeatedLead(next, task.statusView!), "");
+};
+/** F2-B: where the task stands for this person, in the served standing's own words (the pill, the step it is at); nothing is added for a server that does not serve it. */
+const taskStandingOutput = (task: Pick<DeveloperTaskClientView, "standing">): Record<string, string> => {
+  const standing = task.standing;
+  if (standing === undefined) return {};
+  return { pill: plainText(standing.pill.words, ""), ...(standing.step === undefined ? {} : { current_step: plainText(standing.step.title, "") }) };
 };
 
 /** The second review's lines (reviewer text: data), and where the owner acknowledges that an `on` review did not run: on the task page, never through a tool. */

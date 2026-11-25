@@ -5,10 +5,10 @@
 //   defaultHeads     the head of each repository's default branch, through whatever code host the install gives (`headOf`), or undefined when any cannot be read;
 //   currentKey       the environment key of the default branches AT the heads the registry read: worked out from the code host's tree listing (blob ids of the key files, `saved-env-key.ts`), the approved
 //                    environment (revision, key-file globs, secret names) and the base image digest the install says. Anything missing gives undefined, and the registry then queues nothing (`no_key`): it fails closed;
-//   keep / lightAfterIdleDays  the defaults (the company settings are not stored yet);
+//   lightAfterIdleDays  the default (the company setting is not stored yet);
 //   onQueued         starts the job the registry queued (`saved-env-triggers.ts`).
 import {
-  SAVED_ENV_KEEP_DEFAULT, SAVED_ENV_LIGHT_AFTER_IDLE_DAYS_DEFAULT, testEnvDigest, testEnvIsProved, workerProjectDefinition,
+  SAVED_ENV_LIGHT_AFTER_IDLE_DAYS_DEFAULT, testEnvDigest, testEnvIsProved, workerProjectDefinition,
   type ImageRegistry, type RegistryView,
 } from "@agentx/contracts";
 import type { ProjectSource, TaskFlowDeps } from "../task-flow/deps.js";
@@ -54,7 +54,6 @@ export interface SavedEnvWiring {
   baseImageDigest(): Promise<string | undefined>;
   /** The environment name in repository names. Default `local`. */
   envName?: string;
-  keep?: (orgId: string) => Promise<number>;
   lightAfterIdleDays?: (orgId: string, projectId: string) => Promise<number>;
   ownerFor?: Parameters<typeof savedEnvOnQueued>[0]["ownerFor"];
   env?: NodeJS.ProcessEnv;
@@ -105,7 +104,6 @@ export function createSavedEnvCleanupDeps(wiring: SavedEnvWiring): SavedEnvDeps 
       return expectedEnvironmentKey(wiring.keyHost(orgId, project), { orgId, repositories, commits: heads, detectorGlobs: inputs.detectorGlobs, testEnvRevision: inputs.revision, secretNames: inputs.secretNames, baseImageDigest: inputs.baseImageDigest }, keyCache);
     },
     defaultHeads: (orgId, project) => savedEnvDefaultHeads({ projects: wiring.flow.projects, headOf: (repository) => wiring.headOf(orgId, repository, project) }, project),
-    keep: wiring.keep ?? (async () => SAVED_ENV_KEEP_DEFAULT),
     lightAfterIdleDays: wiring.lightAfterIdleDays ?? (async () => SAVED_ENV_LIGHT_AFTER_IDLE_DAYS_DEFAULT),
     now,
   };

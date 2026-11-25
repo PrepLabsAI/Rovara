@@ -306,7 +306,7 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
           : { ...base(key), type: "progress", data: { text: `A pull request is ready for review for "${title}".${milestone.verdict === undefined ? "" : ` ${milestone.verdict}.`}${links.map((link) => `\n${link}`).join("")}${evalLine === undefined ? "" : `\n${evalLine}`}${trust === undefined ? "" : `\n${trust}`}${e2e === "" ? "" : `\n${e2e}`}`.slice(0, adapter.capabilities.maxTextLength) } }));
         // S1: where the adapter takes the registry's presses, what the task offers once its pull request is ready (merge, close, ...) follows as buttons, judged again at each press.
         const next = `${key}#actions`;
-        await sendRegistryNextMessage({ capabilities: adapter.capabilities, served: deps.taskActions, task: task as unknown as TaskRecord, taskUrl: deps.taskUrl?.(taskId, taskWhere),
+        await sendRegistryNextMessage({ capabilities: adapter.capabilities, served: deps.taskActions, task: task as unknown as TaskRecord, taskUrl: deps.taskUrl?.(taskId, taskWhere), statusDeps: { store: deps.store, companyId: orgId },
           send: (deliver) => send(orgId, sessionId, next, deliver), deliver: (data) => tell({ ...base(next), type: "message", data }) });
         return;
       }

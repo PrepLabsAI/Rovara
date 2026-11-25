@@ -53,7 +53,22 @@ export interface MoneyStop {
   sleep?: (ms: number) => Promise<void>;
   /** Keeps the task's whole start hold as spent, marked estimated for `operationId` (the hosted admission's holds). A hold already closed keeps what it kept. */
   keepWholeHold(reservationId: string | undefined, mark: { operationId: string; taskId: string }): Promise<void>;
+  /**
+   * SPEND-UNREPORTED-RUN: books the settled figure of an ended run that sent no usage report, when that figure is KNOWN to add nothing to the task's total (`gateway_record`: the gateway's own record of the
+   * run's calls is already in the total; `no_call`: it is provable that the run made no model call). Books a marker entry at $0 under the run (once: telling it again counts nothing more) and touches no hold.
+   * The third case, nothing knowable, is `endUnflushed`'s (the hold's amount kept as an estimate).
+   */
+  settleUnreported?(mark: { operationId: string; taskId: string }, how: UnreportedSettlement): Promise<void>;
+  /**
+   * SPEND-UNREPORTED-RUN, case (iii) (arch ruling): nothing about the run's spend is knowable, so the task's hold ROOM, and only that, is booked on the task as an ESTIMATE marked as such (entry
+   * `usage:<run>:unflushed`, drawn from the hold so the day counts it once), and the hold is then closed. NOT topped up to a fixed estimate: what admission judged enough for the run is what is counted, so the
+   * estimate alone can never turn "unknown" into "at the cap". A task with no hold of its own books a marked $0. Once per run. Marked for LOST-RUN-ACTUAL-SPEND to replace with the gateway's figure.
+   */
+  keepHoldAsEstimate?(reservationId: string | undefined, mark: { operationId: string; taskId: string }): Promise<void>;
 }
+
+/** How an ended run with no usage report was settled at $0 (the third case, an estimate, is `endUnflushed`). */
+export type UnreportedSettlement = "gateway_record" | "no_call";
 
 export interface UnflushedPlan { schemaVersion: 1; at: string; restMicros: number; covered: boolean }
 
@@ -145,7 +160,7 @@ export async function flushBeforeClose(deps: TaskFlowDeps, workspace: WorkspaceR
 }
 
 /** The task a workspace's operation belongs to. */
-async function taskOfOperation(deps: TaskFlowDeps, operation: Pick<OperationRecord, "workspaceId" | "companyId">) {
+async function taskOfOperation(deps: Pick<TaskFlowDeps, "store">, operation: Pick<OperationRecord, "workspaceId" | "companyId">) {
   const taskId = (await deps.store.get((await workspaceKeys({ store: deps.store, companyId: operation.companyId }, operation.workspaceId)).taskPointerKey()))?.["taskId"];
   return typeof taskId === "string" && taskId !== "" ? await readTask(deps, taskId) : undefined;
 }
@@ -154,7 +169,7 @@ async function taskOfOperation(deps: TaskFlowDeps, operation: Pick<OperationReco
  * A model run ended without its usage (a Stop or a close the worker did not answer in time, a lost worker): the operation is marked `usageUnflushed`, and the task's whole start hold is
  * kept as spent, marked estimated. Best effort: a failure here leaves the hold open, and closing the task then keeps it all the same (`releaseOrKeep`).
  */
-export async function endUnflushed(deps: TaskFlowDeps, operation: OperationRecord): Promise<void> {
+export async function endUnflushed(deps: Pick<TaskFlowDeps, "store" | "companyId" | "moneyStop" | "log">, operation: OperationRecord): Promise<void> {
   if (deps.moneyStop === undefined || !reportsUsage(operation)) return;
   try {
     // Once per run: a run already taken as unflushed has kept its hold or its estimate.

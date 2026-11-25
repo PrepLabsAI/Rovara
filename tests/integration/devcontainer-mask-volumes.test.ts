@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ensureDevcontainer, removeLeftoverMaskVolumes, type DevcontainerCli, type DevcontainerTarget } from "../../packages/worker/src/devcontainer.js";
 import type { ContainerInspection } from "../../packages/worker/src/devcontainer-policy.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 import { sweepWorkspaceContainers, type DockerApi, type DockerContainer } from "../../packages/worker/src/workspace-containers.js";
 
 const SELF = "a".repeat(64);

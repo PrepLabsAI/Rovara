@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseSwebenchCommand, swebenchAgentLimits, swebenchInstanceIdFits } from "@agentx/contracts";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 import { findRepository } from "../../packages/worker/src/swebench/containers.js";
 import { gradeProPrediction, proTestCounts } from "../../packages/worker/src/swebench/grade-pro.js";
 import { loadProTask, SWEBENCH_PRO_COMMIT, verifierTimeout } from "../../packages/worker/src/swebench/pro-task.js";

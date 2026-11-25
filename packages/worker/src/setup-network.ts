@@ -25,7 +25,7 @@ import { createHash } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { agentXError } from "@agentx/contracts";
-import type { DockerCli } from "./swebench/containers.js";
+import type { DockerCli } from "./docker-cli.js";
 import { workspaceKey } from "./task-sandbox.js";
 
 export const DOCKER_CALL_TIMEOUT_MS = 60_000;

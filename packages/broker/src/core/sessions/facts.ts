@@ -24,6 +24,8 @@ export interface SessionTaskFacts {
   failureCategory?: string | undefined;
   /** The workspace could not be prepared (the repository would not clone). */
   failedPrepare?: { at?: string | undefined } | undefined;
+  /** A person pressed Stop and nothing has started the work again (the standing rule's own fact, `core/task-view`): the session reads stopped, not as a task that needs its owner. */
+  stoppedByPerson?: boolean | undefined;
   /** The task waits for money (the Admission seam refused it, or the hosted product's budget paused it). */
   budgetPaused?: boolean | undefined;
   /** The one line that says what step the task is on ("Coding plan", "Waiting for approval"), from the task flow's own words. */

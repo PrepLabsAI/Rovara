@@ -145,6 +145,12 @@ export interface ApprovalRequest {
    * secret would leave it replayable. Methods without one-time parts are unaffected (`verify` stays single-shot and read-only).
    */
   settlesClaims?: true;
+  /**
+   * Set by a caller that records the use of a proof itself, in its own transaction, at the point its act actually proceeds (the merge press: the claim of the first pull request writes the use of the proof). An adapter
+   * that remembers an accepted proof in its own memory must NOT do so for such a request: `verify` stays a check, so a refusal before the act leaves the same proof usable, and the caller's transaction is the one
+   * place the proof is used up. An adapter that does not remember proofs, or that claims them (`settlesClaims`), ignores it.
+   */
+  useRecordedByCaller?: true;
 }
 
 /** An answer to an approval request. */

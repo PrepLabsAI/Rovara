@@ -139,10 +139,10 @@ function setupApply(h: Harness, company: string, project: string, opts: { state:
  * L4-T2b: a setup a person approved earlier, as a rejected or still-waiting newer proposal's row leaves it: the approved revision (the project's latest, so what tasks use), the catalog row that names it and the project's own
  * check mark (`setupCheck`, the mark a start reads), with `check` being that mark's workspace state. Returns the row field to merge into the newer proposal's row (`earlierApproval`).
  */
-function earlierApproval(h: Harness, company: string, project: string, check: "ready" | "checking" | "failed" | "none", at = new Date(NOW - 3_600_000).toISOString()): { earlierApproval: { revision: number; at: string } } {
+function earlierApproval(h: Harness, company: string, project: string, check: "ready" | "checking" | "failed" | "none", at = new Date(NOW - 3_600_000).toISOString(), definitionExtra: Record<string, unknown> = {}): { earlierApproval: { revision: number; at: string } } {
   const command = (executable: string, args: string[]) => ({ cwd: "repo/api", executable, args, timeoutSeconds: 600 });
   const definition = { name: project, revision: 2, setup: [command("npm", ["ci"])], readiness: [command("npm", ["test"])], orchestratorInstructions: "Delegate work.",
-    repositories: [{ name: "api", url: "https://github.com/acme/api.git", path: "repo/api", defaultBranch: "main", credentialRef: "host-app" }] };
+    repositories: [{ name: "api", url: "https://github.com/acme/api.git", path: "repo/api", defaultBranch: "main", credentialRef: "host-app" }], ...definitionExtra };
   h.db.set({ ...projectRevisionKey(company, project, 2), entityType: "PROJECT", definition });
   h.db.set({ ...orgProjectCatalogKey(company, project), entityType: "PROJECT_CATALOG", latestRevision: 2 });
   const workspaceId = randomUUID();
@@ -221,7 +221,10 @@ describe("the checklist's rows, each from its own records", () => {
     expect(wide.items[0]).toEqual({ name: "r0", defaultBranch: "main" });
     const named = companyA();
     named.db.set({ pk: `ORG#${A}#PROJECT#empty`, sk: "REV#000000000001", entityType: "PROJECT", definition: { name: "empty", revision: 1, repositories: [{ nope: true }] } });
-    expect((await named.call("GET", PATH("empty"))).status).toBe(404);
+    // A named company's CURRENT revision that does not read is refused with the stable sentence (arch rule 9), not reported as a project that does not exist.
+    const refused = await named.call("GET", PATH("empty"));
+    expect(refused.status).toBe(400);
+    expect(JSON.stringify(refused.body)).toContain("[project_revision_unreadable]");
   });
 
   it("setup run: running", async () => {
@@ -591,6 +594,16 @@ describe("Done means approved (L4-T2)", () => {
         expect(run, state).toMatchObject({ state: "done", status: "ready", approval: "approved", check: { status: "ready" }, approvedAt: earlier.earlierApproval.at, newerProposal: "rejected" });
         expect(run.check?.failedStep).toBeUndefined();
       }
+    });
+
+    it("the approved revision holds a generic package registry entry a released version wrote: it still reads (arch rule 8), so the approval and its check still show", async () => {
+      const h = companyA();
+      setupRun(h, A, "alpha", READY());
+      const generic = [{ kind: "npm", name: "acme-npm", url: "https://npm.acme.dev/", credentialRef: "acme-npm-token" }, { kind: "pypi", name: "acme-pypi", url: "https://pypi.acme.dev/simple/" }];
+      const earlier = earlierApproval(h, A, "alpha", "ready", undefined, { registries: generic });
+      rejected(h, "rejected", earlier);
+      const run = (await h.ok()).setupRun;
+      expect(run).toMatchObject({ state: "done", approval: "approved", check: { status: "ready" }, approvedAt: earlier.earlierApproval.at, newerProposal: "rejected" });
     });
 
     it("approved, then a re-run's candidate is still waiting: done, with the newer proposal needing you (whatever its own check says)", async () => {
@@ -1308,9 +1321,16 @@ describe("what did not change", () => {
     const linearLinks = ["GET /v1/dev/me/tracker-accounts/linear full", "DELETE /v1/dev/me/tracker-accounts/linear full", "POST /v1/dev/me/tracker-accounts/linear/link full", "POST /v1/dev/me/tracker-accounts/linear/link/claim full",
       "GET /v1/dev/company/linear/people full", "DELETE /v1/dev/company/linear/people/{personId} full"];
     expect(rows.filter((row) => linearLinks.includes(row))).toEqual(linearLinks);
-    const withPreview = rows.filter((row) => !added.some((path) => row === `${path} full`) && row !== inviteResend && !serverReads.includes(row) && !linearLinks.includes(row));
+    // RD-2.0 (rule D): the four new task page reads (spec, checks, changes, timeline) are additive, task-read scope; removing exactly those 4 rows gives back the pin below.
+    const taskPageReads = ["spec", "checks", "changes", "timeline"].map((read) => `GET /v1/dev/tasks/{taskId}/${read} tasks:read`);
+    expect(rows.filter((row) => taskPageReads.includes(row))).toEqual(taskPageReads);
+    const withPreview = rows.filter((row) => !added.some((path) => row === `${path} full`) && row !== inviteResend && !serverReads.includes(row) && !linearLinks.includes(row) && !taskPageReads.includes(row));
     const existing = withPreview.filter((row) => row !== preview && row !== closePreview);
-    expect(existing).toHaveLength(DEV_ROUTES.length - 15);
+    expect(existing).toHaveLength(DEV_ROUTES.length - 19);
+    // R1 + L1 6.2b (rule D): the three hosted-only `/v1/dev/projects/{project}/intake*` rows moved to the one `/v1/app` address (the MCP and CLI's own). They are put back where they stood, so this pin proves exactly those three rows are gone and every other row is unchanged.
+    const movedIntake = ["GET /v1/dev/projects/{project}/intake full", "POST /v1/dev/projects/{project}/intake/{itemId}/start full", "POST /v1/dev/projects/{project}/intake/{itemId}/dismiss full"];
+    expect(rows.filter((row) => movedIntake.includes(row))).toEqual([]);
+    existing.splice(existing.indexOf("GET /v1/dev/company/egress-addresses full") + 1, 0, ...movedIntake);
     // A digest of every other row, in order: any change to an existing route fails here and must be reviewed.
     expect(createHash("sha256").update(existing.join("\n")).digest("hex")).toBe(EXISTING_ROUTES_DIGEST);
     // L4-JA7 (rule D): the pin above moved only by the four hosted knowledge-switch rows; with exactly those removed the digest is the one the table had before.

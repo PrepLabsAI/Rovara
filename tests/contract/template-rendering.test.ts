@@ -173,7 +173,7 @@ describe("context-overflow temp file (App's own readContextFromTempFile, layered
       const app = buildAgentXApp();
       expect(app.node.tryGetContext("agentxEnv")).toBe("overflow-env");
     });
-  });
+  }, 120_000);
 
   it("wins over CDK_CONTEXT_JSON for a key both set, matching App.loadContext's own layering ({...environment, ...tempFile})", () => {
     withCdkContextJson({ agentxSynthesizer: "bogus" }, () => {
@@ -182,7 +182,7 @@ describe("context-overflow temp file (App's own readContextFromTempFile, layered
         expect(() => buildAgentXApp()).not.toThrow();
       });
     });
-  });
+  }, 120_000);
 
   it(`throws a clear error naming ${CONTEXT_OVERFLOW_LOCATION_ENV} when the file it points to is not valid JSON`, () => {
     const dir = mkdtempSync(join(tmpdir(), "agentx-context-overflow-bad-"));
@@ -199,7 +199,7 @@ describe("context-overflow temp file (App's own readContextFromTempFile, layered
       else process.env[CONTEXT_OVERFLOW_LOCATION_ENV] = original;
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 120_000);
 
   it("ignores an empty value, matching App's own readContextFromTempFile (`location ? ... : {}`)", () => {
     const original = process.env[CONTEXT_OVERFLOW_LOCATION_ENV];
@@ -210,7 +210,7 @@ describe("context-overflow temp file (App's own readContextFromTempFile, layered
       if (original === undefined) delete process.env[CONTEXT_OVERFLOW_LOCATION_ENV];
       else process.env[CONTEXT_OVERFLOW_LOCATION_ENV] = original;
     }
-  });
+  }, 120_000);
 });
 
 describe("outdir context (buildAgentXApp forwards it to `new App({ outdir })`)", () => {

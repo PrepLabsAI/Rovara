@@ -6,6 +6,7 @@ import { SIGN_IN_CLIENTS_PK } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
 import { addBrokerName, addBrokerSetting, addDerivedBrokerVariable } from "./broker-names.js";
 import { addRouteSettings } from "./route-settings.js";
+import { publicApiHostSetting, publicApiIssuer } from "./public-api-url.js";
 import { packagedFunction } from "./control-plane.js";
 import { COMPANY_SELF_SERVE_VARIABLE, companySignInParameters, type CompanySignInParameters, type CompanySignInSwitch } from "./company-signin.js";
 
@@ -28,7 +29,7 @@ export interface DeveloperSignInParameters {
 }
 
 export interface DeveloperTaskParameters {
-  taskPeopleChangesEnabled: CfnParameter; taskPeoplePublicInvitationsEnabled: CfnParameter; taskPeoplePrivateInvitationsEnabled: CfnParameter;
+  taskPeopleChangesEnabled: CfnParameter;
   workflowDependenciesEnabled: CfnParameter;
   /** Spec 025 E16: whether an admin may confirm a change in the AI tool's own pop-up. */
   mcpConfirmElicitation: CfnParameter;
@@ -55,8 +56,6 @@ export function developerSignInParameters(stack: Stack, options: { tasks: boolea
   if (!options.tasks) return signIn;
   const tasks: DeveloperTaskParameters = {
     taskPeopleChangesEnabled: new CfnParameter(stack, "TaskPeopleChangesEnabled", { type: "String", default: "false", allowedValues: ["true", "false"], description: "Whether task people role changes are enabled in this environment" }),
-    taskPeoplePublicInvitationsEnabled: new CfnParameter(stack, "TaskPeoplePublicInvitationsEnabled", { type: "String", default: "false", allowedValues: ["true", "false"], description: "Whether task people may invite members to public channels in this environment" }),
-    taskPeoplePrivateInvitationsEnabled: new CfnParameter(stack, "TaskPeoplePrivateInvitationsEnabled", { type: "String", default: "false", allowedValues: ["true", "false"], description: "Whether task people may invite members to private channels in this environment" }),
     workflowDependenciesEnabled: new CfnParameter(stack, "WorkflowDependenciesEnabled", { type: "String", default: "false", allowedValues: ["true", "false"], description: "Whether bounded serial task work breakdowns are enabled in this environment" }),
     mcpConfirmElicitation: new CfnParameter(stack, "McpConfirmElicitation", { type: "String", default: "enabled", allowedValues: ["enabled", "disabled"], description: "enabled: an admin may confirm a change from an AI tool in the tool's own pop-up; disabled: only the Slack Confirm button (or the CLI)" }),
   };
@@ -124,7 +123,8 @@ export class DeveloperSignIn extends Construct {
     const p = props.parameters;
     // Spec 064: without the task settings (the legacy deployment) the broker serves account linking only.
     const tasks = p.tasks;
-    const issuer = `${props.api.attrApiEndpoint}/v1/auth`;
+    // CODE-PUBLIC-URL: the issuer follows the install's public address (the raw API host while PublicApiUrl is empty), so a rebuilt API keeps it.
+    const issuer = publicApiIssuer(props.api);
 
     const table = this.table = new dynamodb.Table(this, "Table", {
       partitionKey: { name: "pk", type: dynamodb.AttributeType.STRING },
@@ -427,6 +427,8 @@ export class DeveloperSignIn extends Construct {
     const broker = props.broker;
     // ENV-ROOM (broker-names.ts): in a named environment, the names packed and the constrained settings packed; the legacy template passes each whole, as before.
     addBrokerName(broker, props.naming, "signInApi", props.api.ref, issuer);
+    // CODE-PUBLIC-URL: the broker rebuilds the issuer from the API id above; where the install has a public address it gets that address too (packed: the host), and derives the issuer from it.
+    addBrokerSetting(broker, props.naming, "publicApiUrl", publicApiHostSetting(stack));
     broker.addEnvironment("AGENTX_ENV", props.env);
     addBrokerName(broker, props.naming, "signInTable", table.tableName, table.tableName);
     addBrokerName(broker, props.naming, "identityFunction", fn.functionName, fn.functionArn);

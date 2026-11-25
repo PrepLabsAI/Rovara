@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { SETUP_AGENT_LIMITS_DEFAULT } from "../../packages/contracts/src/index.js";
 import { runSetupAgentInvocation } from "../../packages/worker/src/setup-agent-invocation.js";
 import { SETUP_ISOLATION_ENVIRONMENT, SETUP_ISOLATION_UNAVAILABLE_MESSAGE, setupIsolationUnavailable } from "../../packages/worker/src/setup-isolation.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 // The launcher (boot.sh's agentx-worker-start, from the firewall unit's state file) tells the worker whether the setup run's firewall rules are in place. Without them a setup run (the only mode on a `rvbs<slot>` bridge) is refused with one fixed sentence; nothing else changes.
 const EC2_NAMED = { AGENTX_RUNTIME: "ec2", AGENTX_ENVIRONMENT_KIND: "named", AGENTX_SANDBOX_IMAGE: `i@sha256:${"b".repeat(64)}` } as const;

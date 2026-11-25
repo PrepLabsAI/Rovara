@@ -165,6 +165,7 @@ describe("R2-F1 lane 1: a named company's revisions come from its own partition"
     w.db.delete(orgProjectCatalogKey(A, "demo-tasklog").pk, orgProjectCatalogKey(A, "demo-tasklog").sk);
     expect(latest((await w.read(OWNER, "demo-tasklog")).body)).toEqual({ latestRevision: 2, branch: "branch-r2" });
     w.db.set({ ...revisionKeyFor(A, "demo-tasklog", 4), entityType: "PROJECT", definition: { name: "demo-tasklog", revision: 4 } });
+    // The project's current revision does not parse: it is not swapped for revision 2. The project LIST leaves it out (one corrupt project never fails every other), so the access check that fronts this read says it is not there.
     expect((await w.read(OWNER, "demo-tasklog")).status).toBe(404);
     expect((await w.access(OWNER)).body.projects).toEqual([]);
   });
@@ -260,9 +261,11 @@ describe("R2-F1 lane 1: a named company's revisions come from its own partition"
     const w = world();
     w.project(A, "demo-tasklog", 2);
     expect((await w.call(OWNER, "GET", "/v1/dev/client/projects/demo-tasklog/archive-preview")).status).toBe(200);
-    // The catalog names revision 5, which has no usable row: the read falls back to revision 2, which the catalog does not name.
+    // The catalog names revision 5, which has no usable row: the read does not fall back to revision 2, which the catalog does not name; it is refused with the stable sentence (arch rule 9).
     w.db.set({ ...orgProjectCatalogKey(A, "demo-tasklog"), entityType: "PROJECT_CATALOG", latestRevision: 5 });
-    expect((await w.call(OWNER, "GET", "/v1/dev/client/projects/demo-tasklog/archive-preview")).status).toBe(404);
+    const refused = await w.call(OWNER, "GET", "/v1/dev/client/projects/demo-tasklog/archive-preview");
+    expect(refused.status).toBe(400);
+    expect(JSON.stringify(refused.body)).toContain("CONFIG_INVALID");
   });
 
   it("archive and restore: a named company's own-partition project; a waiting candidate does not block the archive, a moved catalog makes it stale", async () => {
@@ -347,6 +350,24 @@ describe("R2-F1 lane 1: stored-data readers of a named company's revisions", () 
     w.db.set({ pk: "PROJECT_CATALOG", sk: "PROJECT#old-app", entityType: "PROJECT_CATALOG", name: "old-app", latestRevision: 1 });
     w.db.set({ pk: "PROJECT#old-app", sk: rev(1), entityType: "PROJECT", definition: definition("old-app", 1, "old") });
     expect([...(await projectsByRepository(w.db, "State", undefined, budget(w.db))).entries()]).toEqual([["old/rovara-old-app", ["old-app"]]]);
+  });
+
+  it("one project whose current revision cannot be read marks nothing and is logged; the company's other projects still mark (arch rule 9)", async () => {
+    const w = world();
+    w.project(A, "demo-tasklog", 2, "acme");
+    w.project(A, "demo-inventory", 1, "acme-inv");
+    w.grant(A, OWNER, "demo-tasklog"); w.grant(A, OWNER, "demo-inventory");
+    w.db.set({ ...revisionKeyFor(A, "demo-inventory", 1), entityType: "PROJECT", definition: { name: "demo-inventory", revision: 1 } });
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((line: unknown) => { lines.push(String(line)); });
+    try {
+      expect([...(await projectsByRepository(w.db, "State", A, budget(w.db))).entries()]).toEqual([["acme/rovara-demo-tasklog", ["demo-tasklog"]]]);
+      // The project LIST (the access answer) leaves it out the same way.
+      expect(((await w.access(OWNER)).body.projects as Array<{ name: string }>).map((entry) => entry.name)).toEqual(["demo-tasklog"]);
+    } finally { spy.mockRestore(); }
+    const events = lines.flatMap((line) => { try { return [JSON.parse(line) as Record<string, unknown>]; } catch { return []; } }).filter((entry) => entry["event"] === "project.left_out_unreadable_revision");
+    expect(events.length).toBeGreaterThanOrEqual(1);
+    expect(events.every((entry) => entry["project"] === "demo-inventory" && entry["companyId"] === A && entry["rule"] === "project_revision_unreadable")).toBe(true);
   });
 
   it("a GitHub disconnect's project check (projectsUsingInstallation): a named company's own catalog and revisions, never the install catalog", async () => {

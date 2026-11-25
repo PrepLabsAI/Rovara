@@ -11,7 +11,7 @@
 // One request id is one stop (the legacy cancel's rule, ruling F14): the id is kept under the task's request key, with the step it targets and a `task.stop_requested` audit line, in one
 // transaction BEFORE the stop runs, so a
 // repeat (or a race of two) stops nothing more and answers the task as it is now; the same id used for another action on the task is refused.
-import { DeveloperTaskActionRequestSchema, agentXError, when, type OrgRole, type TransactItem } from "@agentx/contracts";
+import { DeveloperTaskActionRequestSchema, INDEX_EXPIRY_ATTRIBUTE, agentXError, change, when, type OrgRole, type TransactItem } from "@agentx/contracts";
 import { recordAudit, stageAudit } from "./admission.js";
 import { taskNotFound } from "./access.js";
 import { cancelTask } from "./cancel.js";
@@ -21,8 +21,30 @@ import { readTask } from "./reads.js";
 import type { TaskRecord } from "./records.js";
 import { readWorkspace } from "./stage-machine.js";
 import { readSetupCheck, stopSetupCheck } from "../setup-agent/check-stop.js";
-import { hashJson, newId } from "./support.js";
+import { hashJson, iso, newId } from "./support.js";
+import { STOPPED_BY_ADMIN, pendingRowKey } from "../notify/pending-keys.js";
+import { developerIdOf } from "../sessions/create.js";
+import { taskKey } from "./keys.js";
 import { locateWorkspace, workspaceKeys } from "./workspace-location.js";
+
+/** The task row's mark of a person's Stop (`TaskRecord.personStop`): when, and the workflow revision it was made at (none for a task with no workflow). */
+function personStopItem(deps: TaskFlowDeps, task: TaskRecord): TransactItem {
+  return { kind: "update", key: taskKey(task.taskId), ops: [change.set("personStop", { at: iso(deps), ...(task.workflow === undefined ? {} : { revision: task.workflow.revision }) })], condition: when.present() };
+}
+
+/**
+ * F2-B: when a company admin who is not the task's owner stops the owner's task, the owner is told ONCE (a pending row of the attention queue, written in the stop's own claim, so one stop request is one notice), in plain words
+ * and with no "needs you". The owner's own stop, and a co-owner's, tell nobody. A task with no session has nowhere to tell. The name is the admin's display name; delivery makes it safe.
+ */
+function ownerNoticeItems(deps: TaskFlowDeps, task: TaskRecord, caller: StopCaller, authority: StopAuthority): TransactItem[] {
+  if (authority !== "company-admin" || task.sessionId === undefined) return [];
+  const developerId = developerIdOf({ provider: task.provider, personId: task.developerId });
+  const nowMs = (deps.now?.() ?? new Date()).getTime();
+  return [{ kind: "put", item: {
+    ...pendingRowKey(task.companyId, developerId, task.sessionId, STOPPED_BY_ADMIN), entityType: "NOTIFY_PENDING", orgId: task.companyId, developerId, sessionId: task.sessionId, kind: STOPPED_BY_ADMIN,
+    at: new Date(nowMs).toISOString(), stoppedBy: caller.principal.displayName, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + 3 * 86_400,
+  } }];
+}
 
 export const STOP_NOT_YOURS = "Only the task's owner or a company admin can stop this task.";
 /** The legacy cancel's own words for a closed task (aws/developer-tasks.ts CLOSED_TASK), so the route answers as it always has. */
@@ -101,6 +123,9 @@ export async function stopTaskOnRequest(deps: TaskFlowDeps, caller: StopCaller, 
   if (first !== undefined) return await answerRepeat(first);
   const claim = await deps.store.transact([
     { kind: "put", item: { ...requestKey, entityType: "IDEMPOTENCY", action: "cancel", payloadHash: CANCEL_PAYLOAD_HASH, taskId: task.taskId, requestId: request.requestId, operationId: workspace?.activeOperationId ?? null }, condition: when.absent() },
+    // F2-B: the mark that a person stopped it (the standing reads Stopped while nothing has started the work again). Written with the claim, so a stop that was claimed is one that is marked.
+    personStopItem(deps, task),
+    ...ownerNoticeItems(deps, task, caller, authority),
     // The owner's live access fence (a People revision) joins the claim, so a change of who owns the task between the check and the claim refuses it.
     ...standing.fence,
     ...stageAudit(deps, { eventId: `task.stop_requested:${task.taskId}:${request.requestId}`, actor: { type: "person", id: caller.principal.personId }, action: "task.stop_requested", subject: { type: "task", id: task.taskId }, details: { project: task.project, by: authority } }),
@@ -145,6 +170,7 @@ export async function stopWorkspaceAsAdministrator(deps: TaskFlowDeps, workspace
   await authorize(task.project);
   if (task.closedAt !== undefined) return { taskId: task.taskId, nothingRunning: true };
   await recordAudit(deps, { eventId: `task.stop_requested:${task.taskId}:admin:${newId(deps)}`, actor: { type: "person", id: administrator.id }, action: "task.stop_requested", subject: { type: "task", id: task.taskId }, details: { project: task.project, by: "install-admin" } });
+  await deps.store.transact([personStopItem(deps, task)]);
   const answer = await cancelTask(deps, task.taskId);
   return { taskId: task.taskId, nothingRunning: answer.nothingRunning };
 }

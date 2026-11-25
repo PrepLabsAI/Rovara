@@ -47,6 +47,8 @@ function delivery(overrides: Partial<Ec2DeliveryDependencies> = {}, without: Rea
     progress,
     applicationPlanNotNegotiated,
     planQualityNotNegotiated,
+    verifyMachine: async () => ({ ok: true }),
+    failOperation: async () => undefined,
     now: () => NOW,
     ...overrides,
   };
@@ -166,7 +168,7 @@ describe("ec2-ebs delivery", () => {
     const complete = createWorkflowE2EReadinessCompleter({ documentClient: documentClient as never, tableName: "state" });
     const post = vi.fn<Ec2DeliveryDependencies["post"]>(async () => ({ status: 200, body: "{}" }));
     const deliver = createEc2Delivery({
-      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined,
+      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined, verifyMachine: async () => ({ ok: true }), failOperation: async () => undefined,
       sessions: { ensureSession: async () => ({ ready: true, generation, privateIp: "10.42.128.10" }) },
       binding: async () => binding, sign: kmsSign, post, progress: async () => undefined, now: () => NOW,
       validateWorkflowE2EReadiness: validate,
@@ -1009,7 +1011,9 @@ describe("ec2-ebs delivery", () => {
         it(`${kind}: fails the attempt, posting nothing, when the worker's /ping does not answer`, async () => {
           const { deliver, post } = delivery({ workerFeatures: async () => { throw new Error("timeout"); } });
           const record = projectRecord(kind, models);
-          await expect(deliver(record, record.invocation)).rejects.toThrow(/RUNTIME_UNAVAILABLE: could not ask the EC2 worker .*timeout/);
+          // The message is fixed words; the cause is kept apart, for the dispatcher's log.
+          const failure = await deliver(record, record.invocation).catch((error: unknown) => error);
+          expect(failure).toMatchObject({ message: "RUNTIME_UNAVAILABLE: could not ask the EC2 worker which invocation fields it parses", upstreamText: "timeout" });
           expect(post).not.toHaveBeenCalled();
         });
 
@@ -1062,7 +1066,23 @@ describe("ec2-ebs delivery", () => {
   it("fails an attempt when the worker refuses, and when the workspace has no ec2-ebs binding", async () => {
     const refused = delivery({ post: async () => ({ status: 401, body: "{\"reason\":\"expired\"}" }) });
     const record = recordFor();
-    await expect(refused.deliver(record, record.invocation)).rejects.toThrow(/RUNTIME_UNAVAILABLE: EC2 worker returned HTTP 401/);
+    // The worker's own words (its HTTP body) are not in the message: they are carried apart, for the dispatcher's log only.
+    const refusal = await refused.deliver(record, record.invocation).catch((error: unknown) => error);
+    expect(refusal).toMatchObject({ message: "RUNTIME_UNAVAILABLE: EC2 worker returned HTTP 401", httpStatus: 401, upstreamText: "{\"reason\":\"expired\"}" });
+    // A worker of another workspace answers its fixed 401: the failure says so (`workerReason`) and where the delivery was sent, for the dispatcher's stale-address log line.
+    const stale = delivery({ post: async () => ({ status: 401, body: "{\"error\":\"invocation is not authorized\",\"reason\":\"wrong_workspace\"}" }) });
+    const staleFailure = await stale.deliver(record, record.invocation).catch((error: unknown) => error) as { workerReason?: string; where?: { privateIp: string; generation: number } };
+    expect(staleFailure.workerReason).toBe("wrong_workspace");
+    const named = await delivery({ post: async () => ({ status: 401, body: "{\"error\":\"invocation is not authorized\",\"reason\":\"wrong_generation\",\"workspaceId\":\"9f1d2c3b-4a59-4687-8695-a4b3c2d1e0f9\",\"generation\":3}" }) }).deliver(record, record.invocation).catch((error: unknown) => error) as { workerReason?: string; workerIdentity: { workspaceId?: string; generation?: number } };
+    expect(named.workerReason).toBe("wrong_generation");
+    expect(named.workerIdentity).toEqual({ workspaceId: "9f1d2c3b-4a59-4687-8695-a4b3c2d1e0f9", generation: 3 });
+    expect((staleFailure as unknown as { workerIdentity: unknown }).workerIdentity).toEqual({});
+    expect(staleFailure.where).toMatchObject({ privateIp: expect.stringMatching(/^\d+\.\d+\.\d+\.\d+$/u) as string, generation: expect.any(Number) as number });
+    // Any other 401 reason, a non-JSON body and a non-401 status are not that signal.
+    for (const [status, body] of [[401, "{\"reason\":\"expired\"}"], [401, "<html>"], [403, "{\"reason\":\"wrong_workspace\"}"]] as const) {
+      const other = await delivery({ post: async () => ({ status, body }) }).deliver(record, record.invocation).catch((error: unknown) => error) as { workerReason?: string };
+      expect(status === 403 ? undefined : other.workerReason).toBe(body.includes("expired") ? "expired" : undefined);
+    }
     const unbound = delivery({ binding: async () => undefined });
     await expect(unbound.deliver(record, record.invocation)).rejects.toThrow(/CONFIG_INVALID/);
   });
@@ -1207,7 +1227,7 @@ describe("ec2-ebs delivery through the real session manager", () => {
     db.set({ pk: `OUTBOX#${record.id}`, sk: "OUTBOX", ...record });
     const post = vi.fn<Ec2DeliveryDependencies["post"]>(async () => ({ status: 200, body: "{}" }));
     const deliver = createEc2Delivery({
-      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined,
+      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined, verifyMachine: async () => ({ ok: true }), failOperation: async () => undefined,
       sessions,
       binding: (workspaceId) => workspaceBinding(db, "state", workspaceId),
       sign: kmsSign,
@@ -1249,7 +1269,7 @@ describe("ec2-ebs delivery through the real session manager", () => {
     const markFailed = vi.fn(async () => undefined);
     const markDelivered = vi.fn(async () => undefined);
     const deliver = createEc2Delivery({
-      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined,
+      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined, verifyMachine: async () => ({ ok: true }), failOperation: async () => undefined,
       sessions,
       binding: (workspaceId) => workspaceBinding(fixture.db, "state", workspaceId),
       sign: kmsSign,

@@ -163,7 +163,12 @@ export const ProjectSetupSessionSchema = z.object({
   state: z.enum(["PROVISIONING", "READY", "FAILED", "STOPPED"]),
   generation: z.number().int().positive(),
   privateIp: z.ipv4().optional(),
+  /** WORKER-DELIVERY-IDENTITY (WDI-SETUP): the runtime catalog row's instance, copied when the session is created; present only while READY and only with an address. The dispatcher asks EC2 about it before every POST. */
+  instanceId: z.string().regex(/^i-[0-9a-f]{8,17}$/, "invalid instance ID").optional(),
 }).strict().superRefine((session, context) => {
+  if (session.instanceId !== undefined && (session.state !== "READY" || session.privateIp === undefined)) {
+    context.addIssue({ code: "custom", path: ["instanceId"], message: "instanceId is present only while the setup session is READY, with its address" });
+  }
   if ((session.state === "READY") !== (session.privateIp !== undefined)) {
     context.addIssue({ code: "custom", path: ["privateIp"], message: "privateIp is present exactly while the setup session is READY" });
   }

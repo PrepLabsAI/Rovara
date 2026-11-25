@@ -46,10 +46,13 @@ function allowsOf(key: ReleaseRoleKey): Allow[] {
 }
 
 describe("P1 review: production pipeline", () => {
-  it("leaves the production release pipeline's RAW template unchanged (sha256 recorded from d66d3c158 and 894278638: equal)", () => {
+  it("leaves the production release pipeline's RAW template as pinned (sha256 recorded from d66d3c158 and 894278638: equal; re-pinned by L1 and L9b)", () => {
     const stack = buildAgentXApp().node.children.find((child) => child.node.id === "AgentXReleasePipeline") as Stack;
     const digest = createHash("sha256").update(JSON.stringify(Template.fromStack(stack).toJSON())).digest("hex");
-    expect(digest).toBe("01152c761e64805857a650b5473c6e80ceac9fd586f39e062df2a836f2dc72c0");
+    // L1 (2026-11-24): re-pinned from 01152c761e64805857a650b5473c6e80ceac9fd586f39e062df2a836f2dc72c0; the changed resources are listed at PRODUCTION_PIPELINE_TEMPLATE_SHA256 in environment-release-pipeline.test.ts, which holds the same pin.
+    // PH-S3-PREFIXES (2026-11-25): re-pinned from 291ca54736e9e0f05f06fcbed1c04e118baea14d90ab4e5867786548eb1cdc80; see PRODUCTION_PIPELINE_TEMPLATE_SHA256 in environment-release-pipeline.test.ts for the three changed resources (re-pinned again when the own-prefix s3:AbortMultipartUpload was added).
+    // PIPELINE-NAMESPACE-FIX (2026-11-25): re-pinned from 5d132f12052ae5d438250549e7edca670208048e96421b91b4688586219eb679; only the Cloud source action's Namespace changed (see PRODUCTION_PIPELINE_TEMPLATE_SHA256 in environment-release-pipeline.test.ts).
+    expect(digest).toBe("a1a1b3c352ec39a5cdb923036fb981ad32e749c770beb6d00119dfa968fbbecd");
   });
 });
 

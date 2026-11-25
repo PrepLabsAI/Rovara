@@ -12,7 +12,7 @@ import { assertNoInstallSecrets } from "../../packages/worker/src/install-secret
 import { PACKAGE_CACHE_DIRECTORY, PACKAGE_CACHE_MARKER, packageCacheEnvironment } from "../../packages/worker/src/package-cache.js";
 import { privateInstallApplies, runPrivateInstallStep, splitRegistries, type PrivateInstallEntry, type PrivateInstallInput, type PrivateInstallOptions } from "../../packages/worker/src/private-install.js";
 import { RegistryTokenLeakError } from "../../packages/worker/src/registry-guard.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const execFileAsync = promisify(execFile);
 const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com" };

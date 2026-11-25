@@ -209,14 +209,20 @@
     },
     {
       "path": "tests/journeys/merge-recovery.test.ts",
-      "minimumTests": 3,
-      "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journey 12, merge recovery (merged without a webhook, merged at an unchecked head, a refused press). A whole task on the real core and real worker, in every pull request run; the floor is the file's 3 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "minimumTests": 4,
+      "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journey 12, merge recovery (merged without a webhook, merged at an unchecked head, a refused press, a host refusal after the claim then the same press). A whole task on the real core and real worker, in every pull request run; the floor is the file's 4 runnable declarations, and deleting or trimming one is a reviewed edit.",
       "decision": "DEC 254zzz459"
     },
     {
       "path": "tests/journeys/pr-feedback.test.ts",
       "minimumTests": 2,
       "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journey 11, PR feedback (dismiss with a note; approve the recommended fix and the fix starts). A whole task on the real core and real worker, in every pull request run; the floor is the file's 2 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/journeys/pr-feedback-rounds.test.ts",
+      "minimumTests": 4,
+      "reason": "A1-10 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journey 11b, PR feedback beyond the first round (a second round after a pushed fix, a stale card refused, a refused push, a hostile comment only ever data). A whole task on the real core and real worker, in every pull request run; the floor is the file's 4 runnable declarations. Deleting or trimming it re-opens the D1 gap G-C.",
       "decision": "DEC 254zzz459"
     },
     {
@@ -232,6 +238,12 @@
       "decision": "DEC 254zzz459"
     },
     {
+      "path": "tests/journeys/resilience-recovery.test.ts",
+      "minimumTests": 12,
+      "reason": "A1-10 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journey 13b, resilience beyond the silent worker (a code host that fails to answer, the same comment read twice or at once, a conflicting write, two presses of one Approve, a fix pushed before its machine was lost, failed planning and coding runs, a merge seen again, a worker too old to push, a branch reset). A whole task on the real core and real worker, in every pull request run; the floor is the file's 12 runnable declarations. Deleting or trimming it re-opens the D1 gap G-D.",
+      "decision": "DEC 254zzz459"
+    },
+    {
       "path": "tests/journeys/web-task.test.ts",
       "minimumTests": 7,
       "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journeys 1, 5 (web) and 9 (a web task start to close, quick and full path, default and self-approval merge rules, stop, another company). A whole task on the real core and real worker, in every pull request run; the floor is the file's 7 runnable declarations, and deleting or trimming one is a reviewed edit.",
@@ -241,6 +253,42 @@
       "path": "tests/journeys/linear.test.ts",
       "minimumTests": 3,
       "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journeys 3a, 3b and 4 (Linear: a linked member, an unlinked ticket that waits, an admin starts it). A whole task on the real core and real worker, in every pull request run; the floor is the file's 3 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/journeys/reviews.test.ts",
+      "minimumTests": 12,
+      "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journey 14, reviews in depth (a review that cannot finish and the owner's Retry, one report of two, reviews that cannot start, a security finding is never advisory, more findings than Resolve takes, an accepted finding raised again on new code, an older issue noted, a change too large to show the reviewers, a review-only task with a missing report, a too-large change refused, and the F2-B known gap: a blocked review has no decision card). A whole task on the real core and real worker, in every pull request run; the floor is the file's 12 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/journeys/page.test.ts",
+      "minimumTests": 6,
+      "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journey 15, the task page for a core task (sign-in expiry and revocation, who sees what, CSRF and Origin, deep links, comment limits, and the G1 proof for a removed member). DELETED WITH CODE'S TASK PAGE (DEC 254zzz511): D1-3 removes this row with the file; it does not gate D1. A whole task on the real core and real worker, in every pull request run; the floor is the file's 6 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/journeys/mcp.test.ts",
+      "minimumTests": 1,
+      "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): G-F, the MCP parity table (each recovery tool does what its web action does: send back, close, retry, retry opening the pull request; one declaration runs every row once per path). A whole task on the real core and real worker, in every pull request run; the floor is the file's 1 runnable declaration, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/unit/github-webhook-install-cases.test.ts",
+      "minimumTests": 6,
+      "reason": "G-G (D1-PLAN 5.3, DEC 254zzz459): the install and webhook cases that survive the old engine, on the route with the real secret loader and the real core branch: no webhook secret, the webhook added after the pull request opened, a rotated secret, an event the App is not subscribed to, and a project registered again under DynamoDB's map order. The floor is the file's 6 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/journeys/surviving-surfaces.test.ts",
+      "minimumTests": 2,
+      "reason": "A1-12 (DEC 254zzz459: journey tests in the merge gate; DEC 254zzz511: journey 15 drives Code's own task page, which D1-3 deletes): the behaviour that page covered and that outlives it, proved on the surfaces that stay, on the real core. The comment limits of createTaskComment through POST /v1/dev/tasks/{id}/comments (2,000 characters, 30 per 10 minutes, 20 replies), authenticateSession on a /v1/dev route (a session's end, a revoked session, a revoked person, an admin's end). The floor is the file's 2 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/contract/review-window-link.test.ts",
+      "minimumTests": 2,
+      "reason": "A1-12 (DEC 254zzz459; DEC 254zzz511): the 30-day review window on the channel link page /review/link/{code} (29 days and 23 hours on it opens and links, at 30 days it is a signed-out page and a confirmation is refused, nothing linked; a revoked sign-in, a revoked person and a session with no review window are signed out at once). It is the proof of authenticateDeveloperSessionId's window that stays when D1-3 deletes Code's own task page and D1 deletes the PR-feedback page. The floor is the file's 2 runnable declarations, and deleting or trimming one is a reviewed edit.",
       "decision": "DEC 254zzz459"
     }
   ],

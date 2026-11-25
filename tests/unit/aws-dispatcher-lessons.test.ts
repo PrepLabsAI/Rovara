@@ -47,6 +47,16 @@ async function world(companyId = A) {
   return { store, send, writes, options, learned: createDispatcherLearned(options) };
 }
 
+/** R4-0: the dispatcher now writes the load record (manifest, its references, the operation's reference, the use rows). Every other write is still none. */
+const LOAD_RECORD_TYPES = new Set(["LESSON_LOAD", "LESSON_LOAD_REF", "LESSON_USE", "LESSON_REF"]);
+type Writes = { writes: Array<{ mock: { calls: unknown[][] } }> };
+const putsOf = (w: Writes, keep: (entityType: string) => boolean) => (w.writes[0]!.mock.calls as unknown as Array<[{ item: { pk: string; entityType?: string } }]>).filter(([call]) => keep(call.item.entityType ?? ""));
+function expectNoWritesBeyondLoadRecord(w: Writes): void {
+  expect(putsOf(w, (type) => !LOAD_RECORD_TYPES.has(type))).toEqual([]);
+  for (const other of w.writes.slice(1)) expect(other).not.toHaveBeenCalled();
+}
+const knowledgePuts = (w: Writes) => putsOf(w, (type) => type === "KNOWLEDGE_GIVEN");
+
 describe("read-only dispatcher lessons", () => {
   it("composes the hosted reader only for a covered company and passes its lessons through readVisible", async () => {
     const w = await world();
@@ -75,17 +85,17 @@ describe("read-only dispatcher lessons", () => {
       expect(await off!.standingInstructions!.forOperation({ project: "p", mode: "PLAN" })).toBeUndefined();
     }
     expect(w.send).not.toHaveBeenCalled();
-    for (const write of w.writes) expect(write).not.toHaveBeenCalled();
+    expectNoWritesBeyondLoadRecord(w);
   });
 
-  it("uses the workspace company with identical raw ids, never a payload company, and writes nothing", async () => {
+  it("uses the workspace company with identical raw ids, never a payload company, and writes only its load record", async () => {
     for (const company of [A, B]) {
       const w = await world(company);
       setLearnedLessonsGate(() => false);
       const answer = await w.learned({ ...request, companyId: company === A ? B : A } as typeof request);
       expect(answer.learnedContext?.lessons.map((lesson) => lesson.id)).toEqual([company === A ? "les_aaaa1111" : "les_bbbb1111"]);
       expect(JSON.stringify(answer)).not.toContain(company === A ? "B private advice" : "A advice");
-      for (const write of w.writes) expect(write).not.toHaveBeenCalled();
+      expectNoWritesBeyondLoadRecord(w);
       expect(w.send).toHaveBeenCalledTimes(2);
       expect(w.send.mock.calls[0]![0].input).toMatchObject({ ConsistentRead: true, Key: { pk: `WORKSPACE#${WS}`, sk: "META" } });
     }
@@ -107,7 +117,7 @@ describe("read-only dispatcher lessons", () => {
     const w = await world(B);
     const learned = createDispatcherLearned({ ...w.options, companyId: A });
     await expect(learned(request)).rejects.toMatchObject({ message: `RUNTIME_UNAVAILABLE: ${DISPATCHER_LESSONS_UNAVAILABLE}` });
-    for (const write of w.writes) expect(write).not.toHaveBeenCalled();
+    expectNoWritesBeyondLoadRecord(w);
   });
   it("loads lessons from an own older source task without a workflow, and withholds a foreign source", async () => {
     const w = await world();
@@ -122,7 +132,7 @@ describe("read-only dispatcher lessons", () => {
     await w.store.put({ item: { ...source, companyId: B } });
     for (const write of w.writes) write.mockClear();
     expect(await w.learned(request)).toEqual({});
-    for (const write of w.writes) expect(write).not.toHaveBeenCalled();
+    expectNoWritesBeyondLoadRecord(w);
   });
   it("offers only approved, live lessons in the task's company and project", async () => {
     const w = await world();
@@ -178,7 +188,7 @@ describe("read-only dispatcher lessons", () => {
     expect(performance.now() - started).toBeLessThan(2_500);
     const ids = get.mock.calls.map(([key]) => JSON.stringify(key));
     expect(new Set(ids).size).toBe(ids.length);
-    for (const write of w.writes) expect(write).not.toHaveBeenCalled();
+    expectNoWritesBeyondLoadRecord(w);
   });
   it("refuses ONE total read cap across individually valid heads and member reads, without a partial result", async () => {
     const w = await world();
@@ -187,7 +197,7 @@ describe("read-only dispatcher lessons", () => {
     const learned = createDispatcherLearned({ ...w.options, people: { ...w.options.people, resolveMember: resolve } });
     await expect(learned(request)).rejects.toMatchObject({ message: `RUNTIME_UNAVAILABLE: ${DISPATCHER_LESSONS_UNAVAILABLE}` });
     expect(resolve.mock.calls.length).toBeLessThan(100);
-    for (const write of w.writes) expect(write).not.toHaveBeenCalled();
+    expectNoWritesBeyondLoadRecord(w);
   });
   it("refuses a total byte cap across individually smaller documents", async () => {
     const w = await world();
@@ -227,7 +237,7 @@ describe("read-only dispatcher lessons", () => {
     release();
     await vi.advanceTimersByTimeAsync(1);
     expect(get).not.toHaveBeenCalled();
-    for (const write of w.writes) expect(write).not.toHaveBeenCalled();
+    expectNoWritesBeyondLoadRecord(w);
   });
 });
 
@@ -245,17 +255,17 @@ describe("read-only dispatcher lessons: the knowledge briefing (lead 4 L4-AK2)",
     return w;
   }
 
-  it("gives a worker that lists the feature the look-up of THIS company's project, writes nothing, and never another company's lesson", async () => {
+  it("gives a worker that lists the feature the look-up of THIS company's project, writes only its two records, and never another company's lesson", async () => {
     for (const company of [A, B]) {
       const w = await scopedWorld(company);
       const answer = await w.learned(BOTH);
       expect(answer.knowledgeContext?.stage).toBe("PLAN");
       expect(answer.knowledgeContext?.pull?.units.map((u) => u.id)).toEqual([company === A ? "les_aaaa1111" : "les_bbbb1111"]);
       expect(JSON.stringify(answer)).not.toContain(company === A ? "B private advice" : "Retry network calls");
-      // The one write this reader makes (L4-AK2b) is the ids-only delivery record, in the company's own partition; no update, delete or transaction.
-      const [put, ...others] = w.writes;
-      expect(put!.mock.calls.map(([call]) => (call as { item: { pk: string } }).item.pk)).toEqual([companyScoped(company, "KNOWLEDGE_GIVEN")]);
-      for (const write of others) expect(write).not.toHaveBeenCalled();
+      // The writes this reader makes: the load record (R4-0) and the ids-only delivery record (L4-AK2b), in the company's own partition; no update, delete or transaction.
+      expect(knowledgePuts(w).map(([call]) => call.item.pk)).toEqual([companyScoped(company, "KNOWLEDGE_GIVEN")]);
+      expect(putsOf(w, (type) => !LOAD_RECORD_TYPES.has(type) && type !== "KNOWLEDGE_GIVEN")).toEqual([]);
+      for (const write of w.writes.slice(1)) expect(write).not.toHaveBeenCalled();
     }
   });
 
@@ -334,7 +344,7 @@ describe("read-only dispatcher lessons: the delivery record and the measured fac
     expect(answer.learnedContext?.lessons.map((lesson) => lesson.id)).toEqual(["les_aaaa1111"]);
     expect(answer.knowledgeContext).toBeUndefined();
     expect(Date.now() - started).toBeLessThan(DISPATCHER_PULL_MS + 600);
-    expect(w.writes[0]).not.toHaveBeenCalled();
+    expect(knowledgePuts(w)).toEqual([]);
     expect(await w.store.get({ pk: companyScoped(A, "KNOWLEDGE_GIVEN"), sk: TASK })).toBeUndefined();
   });
 
@@ -378,16 +388,20 @@ describe("read-only dispatcher lessons: the delivery record and the measured fac
       expect(JSON.stringify(await w.store.get({ pk: companyScoped(A, "KNOWLEDGE_GIVEN"), sk: TASK }))).toBe(first);
     });
 
+    // The delivery record only: a store fault or a slow write of it is "no record" and never a lost briefing or lessons. (The load record is not optional: see the load record's own tests.)
+    const onlyKnowledgeRecord = (store: MemoryDocumentStore, fail: () => Promise<never>) => {
+      vi.spyOn(store, "put").mockImplementation((request) => (request.item["entityType"] === "KNOWLEDGE_GIVEN" ? fail() : MemoryDocumentStore.prototype.put.call(store, request)));
+    };
     it("a store fault or a write that never finishes is no record, never a lost briefing or lessons", async () => {
       const broken = await scopedWorld();
-      vi.spyOn(broken.store, "put").mockRejectedValue(new Error("private store cause"));
+      onlyKnowledgeRecord(broken.store, () => Promise.reject(new Error("private store cause")));
       const answer = await broken.learned(BOTH);
       expect(answer.learnedContext?.lessons.map((lesson) => lesson.id)).toEqual(["les_aaaa1111"]);
       expect(answer.knowledgeContext?.pull?.units).toHaveLength(1);
       expect(JSON.stringify(answer)).not.toContain("private store cause");
       vi.useFakeTimers();
       const slow = await scopedWorld();
-      vi.spyOn(slow.store, "put").mockImplementation(() => new Promise(() => undefined));
+      onlyKnowledgeRecord(slow.store, () => new Promise<never>(() => undefined));
       const pending = slow.learned(BOTH);
       await vi.advanceTimersByTimeAsync(DISPATCHER_RECORD_MS + 1);
       const late = await pending;
@@ -403,7 +417,7 @@ describe("read-only dispatcher lessons: the delivery record and the measured fac
       await w.store.put({ item: { ...(await w.store.get(lessonKey(A, "payments", "les_aaaa1111")))!, scope: {} } });
       w.writes[0]!.mockClear();
       expect((await w.learned(BOTH)).knowledgeContext).toBeUndefined();
-      expect(w.writes[0]).not.toHaveBeenCalled();
+      expect(knowledgePuts(w)).toEqual([]);
       expect(await w.store.get({ pk: companyScoped(A, "KNOWLEDGE_GIVEN"), sk: TASK })).toBeUndefined();
     });
 
@@ -419,7 +433,7 @@ describe("read-only dispatcher lessons: the delivery record and the measured fac
       await pending;
       release();
       await vi.advanceTimersByTimeAsync(50);
-      expect(w.writes[0]).not.toHaveBeenCalled();
+      for (const write of w.writes) expect(write).not.toHaveBeenCalled();
     });
 
     it("a briefing finished with no room left in the dispatch deadline goes without a record (the write never runs past the call)", async () => {
@@ -432,7 +446,7 @@ describe("read-only dispatcher lessons: the delivery record and the measured fac
       const answer = await w.learned(BUILD);
       expect(factLines(answer)).toHaveLength(1);
       expect(answer.learnedContext?.lessons).toHaveLength(1);
-      expect(w.writes[0]).not.toHaveBeenCalled();
+      expect(knowledgePuts(w)).toEqual([]);
     });
 
     it("lets the worker's report be kept and validated on a hosted step: ids it was not given are removed, another stage or another company or another operation is dropped", async () => {
@@ -569,7 +583,7 @@ describe("read-only dispatcher lessons: the delivery record and the measured fac
       const answer = await w.learned({ ...request, workflowMode: "IMPLEMENT" });
       expect(answer.knowledgeContext).toBeUndefined();
       expect(answer.learnedContext?.lessons.map((lesson) => lesson.id)).toEqual(["les_aaaa1111"]);
-      expect(w.writes[0]).not.toHaveBeenCalled();
+      expect(knowledgePuts(w)).toEqual([]);
     });
   });
 });
@@ -621,7 +635,7 @@ describe("read-only dispatcher lessons: the project's signals rank lessons as th
       for (const [kind, n] of [["for", 2], ["against", 2]] as const) for (let i = 0; i < n; i += 1) await evidence.note({ workspaceId: A, project: "payments", lessonId: SECOND, kind, weight: 1, at: now - DAY, id: `${kind}-${String(i)}` });
       for (const write of w.writes) write.mockClear();
       const ids = await order(w);
-      for (const write of w.writes) expect(write).not.toHaveBeenCalled();
+      expectNoWritesBeyondLoadRecord(w);
       return ids;
     };
     // Clean merges (prior 0.9): the untried lesson is worth more than an even record. Mostly reverted (prior 0.1): the even record is worth more than nothing.
@@ -669,7 +683,7 @@ describe("read-only dispatcher lessons: the project's signals rank lessons as th
     } finally { Object.assign(limits, saved); }
   });
 
-  it("it reads only this company's partitions for this project, never writes, and reads nothing when nothing loads", async () => {
+  it("it reads only this company's partitions for this project, writes nothing of its own, and reads nothing when nothing loads", async () => {
     const w = await world();
     await pair(w);
     const asked = vi.spyOn(w.store, "query");
@@ -677,7 +691,7 @@ describe("read-only dispatcher lessons: the project's signals rank lessons as th
     expect(asked.mock.calls.length).toBeGreaterThan(0);
     for (const [request] of asked.mock.calls) expect(request.pk).toContain(A);
     for (const [request] of asked.mock.calls) expect(request.pk).toContain("payments");
-    for (const write of w.writes) expect(write).not.toHaveBeenCalled();
+    expectNoWritesBeyondLoadRecord(w);
     // A project whose mode does not load reads no signals.
     const off = await world();
     await pair(off);

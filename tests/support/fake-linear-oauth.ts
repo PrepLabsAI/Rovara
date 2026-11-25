@@ -18,6 +18,7 @@ export const WORKSPACE_C: FakeWorkspace = { id: "cccc3333-0000-4000-8000-0000000
 
 const WINDOW_MS = 30 * 60_000;
 
+export type FakeLinearHistoryEntry = { id: string; createdAt: string; actorId?: string; botId?: string; addedLabelIds?: string[]; removedLabelIds?: string[]; toAssigneeId?: string; fromAssigneeId?: string };
 export interface FakeLinearUser { id: string; name: string }
 interface Grant { workspace: FakeWorkspace; user: FakeLinearUser; current: string; previous?: { token: string; until: number }; access: Set<string>; revoked: boolean }
 
@@ -35,7 +36,10 @@ export function fakeLinear(now: () => number) {
   const requests: Array<{ url: string; body: string; authorization: string }> = [];
   let refreshCalls = 0;
   const apiKeys = new Map<string, FakeWorkspace>();
-  const issues = new Map<string, { id: string; identifier: string; title: string; description: string; labels: string[] }>();
+  /** One change in an issue's history, as Linear's `IssueHistory` has it (R1 + L1 6.2b: who changed the labels or the assignee, and when). */
+  interface FakeHistoryEntry { id: string; createdAt: string; actorId?: string; botId?: string; addedLabelIds?: string[]; removedLabelIds?: string[]; toAssigneeId?: string; fromAssigneeId?: string }
+  const issues = new Map<string, { id: string; identifier: string; title: string; description: string; labels: string[]; teamId?: string; assigneeId?: string; history?: FakeHistoryEntry[] }>();
+  const askedReads: string[] = [];
   const comments: Array<{ workspace: string; authorization: string; id: string; issueId: string; body: string }> = [];
   let refreshGate: Promise<void> | undefined;
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -95,6 +99,18 @@ export function fakeLinear(now: () => number) {
       if (keyWorkspace === undefined && (grant === undefined || grant.revoked)) return json({ errors: [{ message: "Authentication required" }] }, 401);
       const workspace = keyWorkspace ?? grant!.workspace;
       const { query, variables } = JSON.parse(body) as { query: string; variables: Record<string, unknown> };
+      // R1 + L1 6.2b: the doorbell's one read: the issue by id with its team, labels, assignee and the history of who changed them (the viewer is the token's own account).
+      if (query.includes("issue(id: $id)") && query.includes("history(first: 25)")) {
+        const found = issues.get(`${workspace.id}:${String(variables["id"])}`);
+        askedReads.push(String(variables["id"]));
+        const viewerId = grant?.user.id ?? "api-key-user";
+        if (found === undefined) return json({ errors: [{ message: "Entity not found: Issue", extensions: { code: "NOT_FOUND" } }] });
+        return json({ data: { viewer: { id: viewerId }, issue: { id: found.id, identifier: found.identifier, title: found.title, description: found.description, url: `https://linear.app/${workspace.urlKey}/issue/${found.identifier}/x`,
+          team: { id: found.teamId ?? "team-a-eng" }, project: null, parent: null, creator: { displayName: "Dana" }, assignee: found.assigneeId === undefined ? null : { id: found.assigneeId },
+          labels: { nodes: found.labels.map((name) => ({ id: `lbl-${name}`, name })) },
+          history: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: (found.history ?? []).map((entry) => ({ id: entry.id, createdAt: entry.createdAt, actor: entry.actorId === undefined ? null : { id: entry.actorId }, botActor: entry.botId === undefined ? null : { id: entry.botId },
+            addedLabelIds: entry.addedLabelIds ?? [], removedLabelIds: entry.removedLabelIds ?? [], toAssigneeId: entry.toAssigneeId ?? null, fromAssigneeId: entry.fromAssigneeId ?? null })) } } } });
+      }
       // PR 20: the tracker's reads and comment writes, each only within the caller's own workspace.
       if (query.includes("issue(id: $id)")) {
         const found = issues.get(`${workspace.id}:${String(variables["id"])}`);
@@ -117,12 +133,14 @@ export function fakeLinear(now: () => number) {
     return json({ error: "not linear" }, 404);
   });
   return {
-    fetch, requests, revoked, revokeCalls, grants, comments,
+    fetch, requests, revoked, revokeCalls, grants, comments, askedReads,
+    /** The issue as stored (a test changes its labels, assignee or history as a person in Linear would). */
+    issueOf(workspace: FakeWorkspace, id: string) { return issues.get(`${workspace.id}:${id}`); },
     answerRevokeWith(value: number | "down") { revokeAnswer = value; },
     /** A per-project Linear API key for `workspace` (the path PR 20's goldens compare with). */
     apiKeyFor(workspace: FakeWorkspace): string { const key = ["lin", "api", String(++counter), randomBytes(6).toString("hex")].join("_"); apiKeys.set(key, workspace); return key; },
     /** An issue in `workspace`, readable by its key (`ENG-1`) or its id. */
-    addIssue(workspace: FakeWorkspace, issue: { id: string; identifier: string; title: string; description?: string; labels?: string[] }) {
+    addIssue(workspace: FakeWorkspace, issue: { id: string; identifier: string; title: string; description?: string; labels?: string[]; teamId?: string; assigneeId?: string; history?: FakeHistoryEntry[] }) {
       const full = { description: "", labels: [], ...issue };
       issues.set(`${workspace.id}:${issue.identifier}`, full); issues.set(`${workspace.id}:${issue.id}`, full);
     },

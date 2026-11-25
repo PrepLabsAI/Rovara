@@ -15,7 +15,15 @@ import {
   AGENTX_BETA_BUILD_ROLE_NAME,
   AGENTX_BETA_RELEASE_PROJECT_NAME,
   AGENTX_BETA_RELEASE_ROLE_NAME,
+  AGENTX_BETA_CODE_PREFLIGHT_PROJECT_NAME,
+  AGENTX_PRODUCTION_CODE_PREFLIGHT_PROJECT_NAME,
+  CLOUD_BETA_ACTIONS_PROJECT_STUB,
+  CLOUD_PRODUCTION_ACTIONS_PROJECT_STUB,
   PROMOTION_GATE_REASON,
+  PIPELINE_MODE_NOTE,
+  CODE_HISTORY_PARAMETER,
+  rollbackReleaseChecks,
+  ROLLBACK_TARGET_CHECK,
   ReleasePipelineStack,
 } from "../../infra/lib/release-pipeline.js";
 import { BetaDomainStack } from "../../infra/lib/beta-domain.js";
@@ -284,8 +292,8 @@ describe("control-plane infrastructure", () => {
     // Broker, outbox publisher, dispatcher, Slack ingress, the EC2 session steps (#83), idle
     // reaper (#85) and reconciler (#86), the eval batch tick (spec 052), and the channel API and its event sender
     // (spec 062 Phase 7d: the built-in Slack adapter), and developer sign-in for account linking (spec 064). #1148: and the core engine's attention email sender
-    // (which exists only while CoreAttentionEmail is on).
-    template.resourceCountIs("AWS::Lambda::Function", 13);
+    // (which exists only while CoreAttentionEmail is on). WORKER-DELIVERY-IDENTITY step 0: and the EC2 instance state-change handler.
+    template.resourceCountIs("AWS::Lambda::Function", 14);
     expect(json).not.toContain("ZipFile");
     expect(json).not.toContain("not packaged");
     expect(json).toContain("STATE_TABLE_NAME");
@@ -330,8 +338,8 @@ describe("control-plane infrastructure", () => {
     const stack = new ControlPlaneStack(app, "LoggedControlPlane");
     const template = Template.fromStack(stack);
 
-    // One per Lambda, plus the EC2 session provisioner's and deleter's (#83). #1148: the attention email sender's too. Code train 23: the HTTP API's access log group.
-    template.resourceCountIs("AWS::Logs::LogGroup", 16);
+    // One per Lambda, plus the EC2 session provisioner's and deleter's (#83). #1148: the attention email sender's too. Code train 23: the HTTP API's access log group. WORKER-DELIVERY-IDENTITY step 0: the instance state-change handler's.
+    template.resourceCountIs("AWS::Logs::LogGroup", 17);
     template.allResourcesProperties("AWS::Logs::LogGroup", {
       RetentionInDays: 30,
     });
@@ -444,41 +452,248 @@ describe("production release pipeline", () => {
   }>;
   const statements = policies.flatMap((policy) => policy.Properties.PolicyDocument.Statement);
   const actionsOf = (statement: Statement) => [statement.Action].flat();
+  interface PipelineAction {
+    Name: string;
+    RunOrder: number;
+    Namespace?: string;
+    Configuration: Record<string, unknown>;
+    InputArtifacts: Array<{ Name: string }>;
+    OutputArtifacts: Array<{ Name: string }>;
+  }
+  interface PipelineProperties {
+    Stages: Array<{ Name: string; Actions: PipelineAction[] }>;
+    Variables: Array<{ Name: string; DefaultValue: string; Description: string }>;
+  }
+  /** An action's environment variables; a value that holds a template reference reads `<Ref Name>` (the CDK renders such a list as a join). */
+  const actionVariables = (action: PipelineAction): Record<string, { value: string; type: string }> => {
+    const raw = action.Configuration.EnvironmentVariables as string | { "Fn::Join": [string, unknown[]] };
+    const text = typeof raw === "string" ? raw : raw["Fn::Join"][1].map((part) => (typeof part === "string" ? part : `<Ref ${(part as { Ref: string }).Ref}>`)).join("");
+    return Object.fromEntries((JSON.parse(text) as Array<{ name: string; value: string; type: string }>).map((variable) => [variable.name, variable]));
+  };
+  const pipelineProperties = (): PipelineProperties =>
+    (Object.values(template.findResources("AWS::CodePipeline::Pipeline"))[0] as { Properties: PipelineProperties }).Properties;
+  const stagePlan = (): string[] =>
+    pipelineProperties().Stages.map((stage) => `${stage.Name}:${stage.Actions.map((action) => `${action.RunOrder}:${action.Name}`).join(",")}`);
 
-  it("starts a V2 pipeline only for filtered mainline pushes, with a full Git clone, beta first and production behind a disabled transition", () => {
+  it("starts a V2 pipeline for filtered mainline pushes and for Cloud release tags, with both full clones, beta first and production behind a disabled transition", () => {
     template.hasResourceProperties("AWS::CodePipeline::Pipeline", {
       PipelineType: "V2",
       // #1242: a run waiting at the disabled transition is replaced by a newer one only in SUPERSEDED mode, so a promotion takes beta's newest commit.
       ExecutionMode: "SUPERSEDED",
       DisableInboundStageTransitions: [{ StageName: "Production", Reason: PROMOTION_GATE_REASON }],
-      Triggers: [{
-        ProviderType: "CodeStarSourceConnection",
-        GitConfiguration: {
-          SourceActionName: "GitHub",
-          Push: [{
-            Branches: { Includes: ["mainline"] },
-            FilePaths: { Includes: [...AGENTX_RELEASE_TRIGGER_PATHS] },
-          }],
+      Triggers: [
+        {
+          ProviderType: "CodeStarSourceConnection",
+          GitConfiguration: {
+            SourceActionName: "GitHub",
+            Push: [{
+              Branches: { Includes: ["mainline"] },
+              FilePaths: { Includes: [...AGENTX_RELEASE_TRIGGER_PATHS] },
+            }],
+          },
         },
-      }],
+        {
+          ProviderType: "CodeStarSourceConnection",
+          GitConfiguration: {
+            SourceActionName: "CloudGitHub",
+            Push: [{ Tags: { Includes: ["v*.*.*"], Excludes: ["v*-*"] } }],
+          },
+        },
+      ],
       Stages: Match.arrayWith([Match.objectLike({
         Name: "Source",
-        Actions: [Match.objectLike({
-          Configuration: {
-            ConnectionArn: { Ref: "GitHubConnectionArn" },
-            FullRepositoryId: "PrepLabsAI/Rovara",
-            BranchName: "mainline",
-            OutputArtifactFormat: "CODEBUILD_CLONE_REF",
-          },
-        })],
+        Actions: [
+          Match.objectLike({
+            Name: "GitHub",
+            Namespace: "CodeSource",
+            Configuration: {
+              ConnectionArn: { Ref: "GitHubConnectionArn" },
+              FullRepositoryId: "PrepLabsAI/Rovara",
+              BranchName: "mainline",
+              OutputArtifactFormat: "CODEBUILD_CLONE_REF",
+            },
+          }),
+          // The Cloud repository is all parameters: no owner, name, branch or connection of it is written in this repository.
+          Match.objectLike({
+            Name: "CloudGitHub",
+            Namespace: "CloudSourceVariables",
+            Configuration: {
+              ConnectionArn: { Ref: "CloudConnectionArn" },
+              FullRepositoryId: { "Fn::Join": ["", [{ Ref: "CloudRepoOwner" }, "/", { Ref: "CloudRepoName" }]] },
+              BranchName: { Ref: "CloudRepoBranch" },
+              OutputArtifactFormat: "CODEBUILD_CLONE_REF",
+            },
+          }),
+        ],
       })]),
     });
     template.resourceCountIs("AWS::KMS::Key", 0);
-    const [pipeline] = Object.values(template.findResources("AWS::CodePipeline::Pipeline")) as Array<{
-      Properties: { Stages: Array<{ Name: string; Actions: Array<{ Name: string; Configuration: { ProjectName: unknown } }> }> };
-    }>;
-    expect(pipeline?.Properties.Stages.map((stage) => `${stage.Name}:${stage.Actions.map((action) => action.Name).join(",")}`))
-      .toEqual(["Source:GitHub", "Beta:ReleaseBeta", "Production:ReleaseProduction"]);
+    expect(stagePlan()).toEqual([
+      "Source:1:GitHub,1:CloudGitHub",
+      "Beta:1:CodePreflight,2:Preflight,3:CloudImage,4:CloudGateway,5:GatewayCheck,6:ReleaseBeta,7:CloudWebApp,8:CloudProof",
+      "Production:1:CodePreflight,2:Preflight,3:CloudImage,4:CloudGateway,5:GatewayCheck,6:ReleaseProduction,7:CloudWebApp,8:CloudProof",
+    ]);
+  });
+
+  it("puts Preflight first in each stage (the Code half, then the Cloud half), the gateway before Code and web and app after it, in strict run order", () => {
+    const stages = pipelineProperties().Stages;
+    for (const [name, release, preflightProject] of [["Beta", "ReleaseBeta", AGENTX_BETA_CODE_PREFLIGHT_PROJECT_NAME], ["Production", "ReleaseProduction", AGENTX_PRODUCTION_CODE_PREFLIGHT_PROJECT_NAME]] as const) {
+      const stage = stages.find((candidate) => candidate.Name === name)!;
+      const orders = stage.Actions.map((action) => action.RunOrder);
+      expect(new Set(orders).size, `${name}: no two actions may share a run order`).toBe(orders.length);
+      expect(orders).toEqual([...orders].sort((a, b) => a - b));
+      const names = stage.Actions.map((action) => action.Name);
+      expect(names.slice(0, 2)).toEqual(["CodePreflight", "Preflight"]);
+      expect(names.indexOf("GatewayCheck")).toBeLessThan(names.indexOf(release));
+      expect(names.indexOf("CloudGateway")).toBeLessThan(names.indexOf("GatewayCheck"));
+      expect(names.indexOf(release)).toBeLessThan(names.indexOf("CloudWebApp"));
+      expect(names.indexOf("CloudWebApp")).toBeLessThan(names.indexOf("CloudProof"));
+      expect(JSON.stringify(stage.Actions[0]!.Configuration.ProjectName)).toContain(`${name}CodePreflight`);
+      template.hasResourceProperties("AWS::CodeBuild::Project", { Name: preflightProject });
+    }
+  });
+
+  it("declares the five V2 variables with defaults, so a push or a tag can start a run", () => {
+    const variables = pipelineProperties().Variables;
+    expect(variables.map((variable) => [variable.Name, variable.DefaultValue])).toEqual([["CLOUD_REF", "latest"], ["CODE_RELEASE", "run"], ["CLOUD_PROD", "on"], ["PIPELINE_MODE", "release"], ["CODE_ROLLBACK_TARGET", "none"]]);
+    expect(variables[0]!.Description).toContain("older tag is a Cloud rollback");
+    expect(variables[1]!.Description).toContain("Preflight may force skip");
+    // CLOUD_PROD is a per-run choice that defaults ON (no default-off switch): the cutover's beta-only run starts the execution with CLOUD_PROD=off.
+    expect(variables[2]!.Description).toContain("not a switch");
+    // R2: an adoption run can go through the pipeline; the default is a release run.
+    expect(variables[3]!.Description).toContain("adopt only checks");
+    // L9b: a rollback run names the Code commit to deploy (none = no Code rollback; a variable's default may not be empty).
+    expect(variables[3]!.Description).toContain("rollback deploys an earlier released Code commit");
+    expect(variables[4]!.Description).toContain("must be in the stage release history");
+  });
+
+  it("runs every Cloud action in the named private project, with the Cloud clone first and the stage CLI's inputs as variables", () => {
+    template.hasParameter("CloudBetaProjectName", { Type: "String", Default: CLOUD_BETA_ACTIONS_PROJECT_STUB, AllowedPattern: "^release-[A-Za-z0-9_-]{1,120}$" });
+    template.hasParameter("CloudProductionProjectName", { Type: "String", Default: CLOUD_PRODUCTION_ACTIONS_PROJECT_STUB, AllowedPattern: "^release-[A-Za-z0-9_-]{1,120}$" });
+    // The legacy runtime boundary denies codebuild:* on project/release-*, and the broker starts only agentx-* projects.
+    for (const name of [CLOUD_BETA_ACTIONS_PROJECT_STUB, CLOUD_PRODUCTION_ACTIONS_PROJECT_STUB, AGENTX_BETA_CODE_PREFLIGHT_PROJECT_NAME, AGENTX_PRODUCTION_CODE_PREFLIGHT_PROJECT_NAME]) {
+      expect(name).toMatch(/^release-/u);
+      expect(name).not.toMatch(/^agentx-/iu);
+    }
+    expect(new RegExp("^release-[A-Za-z0-9_-]{1,120}$", "u").test("agentx-anything")).toBe(false);
+    const expectedSteps = [
+      ["Preflight", "preflight"], ["CloudImage", "image"], ["CloudGateway", "gateway"], ["GatewayCheck", "gateway-check"], ["CloudWebApp", "web-app"], ["CloudProof", "proof"],
+    ] as const;
+    let previousState: string | undefined;
+    for (const [stageName, environment, parameter] of [["Beta", "beta", "CloudBetaProjectName"], ["Production", "production", "CloudProductionProjectName"]] as const) {
+      // PH-S3-PREFIXES: a state artifact is State<Beta|Prod><Action> (the Cloud roles may write exactly their environment's prefix; see release-pipeline-s3-prefixes.test.ts).
+      const prefix = environment === "beta" ? "StateBeta" : "StateProd";
+      const stageActions = pipelineProperties().Stages.find((stage) => stage.Name === stageName)!.Actions;
+      const cloudActions = expectedSteps.map(([name]) => stageActions.find((action) => action.Name === name)!);
+      for (const [index, [name, step]] of expectedSteps.entries()) {
+        const action = cloudActions[index]!;
+        expect(action.Configuration.ProjectName, `${stageName} ${name}`).toEqual({ Ref: parameter });
+        expect(action.Configuration.PrimarySource, `${stageName} ${name}`).toBe("CloudSource");
+        const inputs = action.InputArtifacts.map((artifact) => artifact.Name);
+        // The Cloud clone, the Code clone, then the previous Cloud action's state (none only for the very first action, Beta's Preflight).
+        expect(inputs.slice(0, 2), `${stageName} ${name}`).toEqual(["CloudSource", "Source"]);
+        expect(inputs[2], `${stageName} ${name}`).toBe(previousState);
+        expect(inputs.length).toBe(previousState === undefined ? 2 : 3);
+        expect(action.OutputArtifacts.map((artifact) => artifact.Name), `${stageName} ${name}`).toEqual([`${prefix}${name}`]);
+        const variables = actionVariables(action);
+        expect(variables.STAGE_ENV?.value).toBe(environment);
+        expect(variables.STAGE_STEP?.value).toBe(step);
+        expect(variables.PIPELINE_STATE_ARTIFACT?.value).toBe(previousState);
+        expect(variables.CLOUD_REF?.value).toBe("#{variables.CLOUD_REF}");
+        expect(variables.CODE_RELEASE?.value).toBe("#{variables.CODE_RELEASE}");
+        expect(variables.CLOUD_PROD?.value).toBe("#{variables.CLOUD_PROD}");
+        expect(variables.PIPELINE_MODE?.value).toBe("#{variables.PIPELINE_MODE}");
+        // R3: the account this stage must run in, never a literal: beta's from the BetaAccountId parameter, production's this stack's own account.
+        expect(variables.ROVARA_EXPECTED_DEPLOY_ACCOUNT?.value, `${stageName} ${name}`).toBe(environment === "beta" ? "<Ref BetaAccountId>" : "<Ref AWS::AccountId>");
+        expect(variables.EXEC_ID?.value).toBe("#{codepipeline.PipelineExecutionId}");
+        expect(variables.CODE_SHA?.value).toBe("#{CodeSource.CommitId}");
+        for (const variable of Object.values(variables)) expect(variable.type).toBe("PLAINTEXT");
+        previousState = `${prefix}${name}`;
+      }
+      // Only Preflight exports the effective CODE_RELEASE, through its own namespace.
+      expect(cloudActions[0]!.Namespace).toBe(`${stageName}Preflight`);
+      for (const action of cloudActions.slice(1)) expect(action.Namespace).toBeUndefined();
+    }
+    // Production's Preflight reads beta's LAST state: the Cloud sha and gateway digest beta proved.
+    const productionPreflight = pipelineProperties().Stages.find((stage) => stage.Name === "Production")!.Actions.find((action) => action.Name === "Preflight")!;
+    expect(productionPreflight.InputArtifacts.map((artifact) => artifact.Name)).toEqual(["CloudSource", "Source", "StateBetaCloudProof"]);
+    // The pipeline may start exactly the named Cloud projects, found through the parameters.
+    const startable = JSON.stringify(statements.filter((statement) => [statement.Action].flat().includes("codebuild:StartBuild")).map((statement) => statement.Resource));
+    expect(startable).toContain('{"Ref":"CloudBetaProjectName"}');
+    expect(startable).toContain('{"Ref":"CloudProductionProjectName"}');
+  });
+
+  it("exposes no adoption override: PIPELINE_MODE is the only switch, shown as a note in every Preflight, and nothing named ROVARA_ADOPT_* is a variable, an action input or anywhere in the template", () => {
+    const names = [
+      ...pipelineProperties().Variables.map((variable) => variable.Name),
+      ...pipelineProperties().Stages.flatMap((stage) => stage.Actions).flatMap((action) =>
+        action.Configuration.EnvironmentVariables === undefined ? [] : Object.keys(actionVariables(action))),
+    ];
+    expect(names.filter((name) => /ROVARA_ADOPT|ADOPT_DEPLOYED/iu.test(name))).toEqual([]);
+    expect(pipelineProperties().Variables.map((variable) => variable.Name)).toEqual(["CLOUD_REF", "CODE_RELEASE", "CLOUD_PROD", "PIPELINE_MODE", "CODE_ROLLBACK_TARGET"]);
+    expect(JSON.stringify(template.toJSON())).not.toMatch(/ROVARA_ADOPT/u);
+    // Both Code Preflights get the mode, refuse any value but release or adopt, and say which it is.
+    for (const stageName of ["Beta", "Production"]) {
+      const preflight = pipelineProperties().Stages.find((stage) => stage.Name === stageName)!.Actions.find((action) => action.Name === "CodePreflight")!;
+      expect(actionVariables(preflight).PIPELINE_MODE?.value).toBe("#{variables.PIPELINE_MODE}");
+    }
+    for (const name of [AGENTX_BETA_CODE_PREFLIGHT_PROJECT_NAME, AGENTX_PRODUCTION_CODE_PREFLIGHT_PROJECT_NAME]) {
+      const spec = preflightSpec(name);
+      expect(spec.env.variables.PIPELINE_MODE).toBe("release");
+      expect(spec.phases.pre_build!.commands).toEqual([PIPELINE_MODE_NOTE, ROLLBACK_TARGET_CHECK]);
+      expect(PIPELINE_MODE_NOTE).toBe('case "$PIPELINE_MODE" in release|adopt|rollback) echo "NOTE: pipeline mode is $PIPELINE_MODE" ;; *) echo "PIPELINE_MODE must be release, adopt or rollback, got: $PIPELINE_MODE" >&2; exit 1;; esac');
+    }
+  });
+
+  it("L9b: gives each stage's Cloud PREFLIGHT (only) its Code context as one variable, names the Code Preflights' export, and keeps the rollback rights narrow", () => {
+    const stage = (name: string) => pipelineProperties().Stages.find((candidate) => candidate.Name === name)!;
+    for (const [stageName, namespace, beta] of [["Beta", "BetaCodePreflight", true], ["Production", "ProductionCodePreflight", false]] as const) {
+      const preflight = stage(stageName).Actions.find((action) => action.Name === "CodePreflight")!;
+      // The Code Preflight exports through its own namespace (the Cloud Preflight's is BetaPreflight / ProductionPreflight), and takes the mode and the target.
+      expect(preflight.Namespace).toBe(namespace);
+      expect(actionVariables(preflight).CODE_ROLLBACK_TARGET?.value).toBe("#{variables.CODE_ROLLBACK_TARGET}");
+      expect(actionVariables(preflight).EXEC_ID?.value).toBe(beta ? "#{codepipeline.PipelineExecutionId}" : undefined);
+      const spec = preflightSpec(beta ? AGENTX_BETA_CODE_PREFLIGHT_PROJECT_NAME : AGENTX_PRODUCTION_CODE_PREFLIGHT_PROJECT_NAME) as unknown as { env: { variables: Record<string, string>; "exported-variables": string[] } };
+      expect(spec.env["exported-variables"]).toEqual(["CODE_CTX"]);
+      expect(spec.env.variables.CODE_ROLLBACK_TARGET).toBe("none");
+      // CodePipeline caps an action's configuration value at 1000 characters: ONE short variable, to the Cloud Preflight only; the later steps read it from the stage CLI's state.
+      for (const action of stage(stageName).Actions.filter((candidate) => candidate.Configuration.PrimarySource === "CloudSource")) {
+        const variables = actionVariables(action);
+        expect(Object.keys(variables).filter((name) => /^(CODE_CTX|CODE_LIVE_SHA|PIPELINE_SUPERSEDES|CODE_ROLLBACK_TARGET)$/u.test(name)), `${stageName} ${action.Name}`).toEqual(action.Name === "Preflight" ? ["CODE_CTX"] : []);
+        if (action.Name === "Preflight") expect(variables.CODE_CTX?.value).toBe(`#{${namespace}.CODE_CTX}`);
+      }
+      // The Code Preflight runs first, so its export exists before any Cloud action reads it.
+      expect(preflight.RunOrder).toBe(1);
+    }
+    // The history is read by both Preflights (read-only, own stage), and the waiting run only by Beta's, read-only on this pipeline.
+    for (const [roleMatch, stageName] of [["BetaCodePreflightRole", "beta"], ["ProductionCodePreflightRole", "production"]] as const) {
+      const history = policyOf(roleMatch).find((statement) => statement.Sid === "ReadCodeHistory");
+      expect(history?.Action).toEqual("ssm:GetParameter");
+      expect(JSON.stringify(history?.Resource)).toContain(`parameter/agentx/release/code-history/${stageName}`);
+    }
+    expect(policyOf("BetaCodePreflightRole").find((statement) => statement.Sid === "ReadWaitingRun")?.Action).toEqual(["codepipeline:GetPipelineState", "codepipeline:GetPipelineExecution"]);
+    expect(policyOf("ProductionCodePreflightRole").flatMap(actionsOf)).not.toContain("codepipeline:GetPipelineState");
+    // Nothing that releases Code can read or change the pipeline, and no role but Beta's Preflight reads executions.
+    for (const roleMatch of ["ReleaseBuildRole", "BetaReleaseBuildRole"]) {
+      expect(policyOf(roleMatch).flatMap(actionsOf).filter((action) => action.startsWith("codepipeline:")), roleMatch).toEqual([]);
+    }
+  });
+
+  it("takes the effective CODE_RELEASE from the stage's own Preflight into each Code release, and the Cloud repository from parameters only", () => {
+    for (const [stageName, actionName, namespace] of [["Beta", "ReleaseBeta", "BetaPreflight"], ["Production", "ReleaseProduction", "ProductionPreflight"]] as const) {
+      const action = pipelineProperties().Stages.find((stage) => stage.Name === stageName)!.Actions.find((candidate) => candidate.Name === actionName)!;
+      const variables = JSON.parse(String(action.Configuration.EnvironmentVariables)) as Array<{ name: string; value: string }>;
+      // L9b: the mode and the rollback target come from the pipeline's own variables, so the release can refuse a Cloud-side `skip` that would leave a requested rollback undone.
+      expect(variables).toEqual([
+        { name: "CODE_RELEASE", value: `#{${namespace}.CODE_RELEASE_EFFECTIVE}`, type: "PLAINTEXT" },
+        { name: "PIPELINE_MODE", value: "#{variables.PIPELINE_MODE}", type: "PLAINTEXT" },
+        { name: "CODE_ROLLBACK_TARGET", value: "#{variables.CODE_ROLLBACK_TARGET}", type: "PLAINTEXT" },
+      ]);
+      expect(action.InputArtifacts.map((artifact) => artifact.Name)).toEqual(["Source"]);
+    }
+    // Nothing of the private side is written in the public template: no account id, no API host, no domain; the Cloud side is the parameters' values.
+    const text = JSON.stringify(template.toJSON());
+    expect(text).not.toMatch(/\b[0-9]{12}\b|execute-api|rovara\.dev/u);
   });
 
   it("gives the transition into Production a reason CodePipeline accepts", () => {
@@ -497,14 +712,113 @@ describe("production release pipeline", () => {
     return parts.map((part) => (typeof part === "string" ? part : "<token>")).join("");
   };
 
-  it("closes the gate first in the production release, so one promotion lets in one commit", () => {
-    const buildSpec = buildSpecOf(AGENTX_RELEASE_PROJECT_NAME);
-    const install = buildSpec.indexOf('"install"');
-    const close = buildSpec.indexOf("aws codepipeline disable-stage-transition --pipeline-name AgentXProductionRelease --stage-name Production --transition-type Inbound");
-    expect(close).toBeGreaterThan(install);
-    expect(close).toBeLessThan(buildSpec.indexOf("node_version="));
-    expect(statements.find((statement) => statement.Sid === "ClosePromotionGate")?.Action).toEqual("codepipeline:DisableStageTransition");
-    expect(buildSpec).not.toContain("--profile");
+  const preflightSpec = (name: string) => JSON.parse(buildSpecOf(name)) as { env: { variables: Record<string, string> }; phases: Record<string, { commands: string[] }> };
+  const GATE_COMMAND = `aws codepipeline disable-stage-transition --pipeline-name AgentXProductionRelease --stage-name Production --transition-type Inbound --reason "${PROMOTION_GATE_REASON}"`;
+  const policyOf = (roleMatch: string) => (Object.values(template.findResources("AWS::IAM::Policy")) as Array<{ Properties: { Roles: unknown; PolicyDocument: { Statement: Statement[] } } }>)
+    .filter((policy) => JSON.stringify(policy.Properties.Roles).includes(roleMatch)).flatMap((policy) => policy.Properties.PolicyDocument.Statement);
+
+  it("closes the gate as the FIRST command of the production Code Preflight, before anything is installed, so one promotion lets in one commit", () => {
+    const spec = preflightSpec(AGENTX_PRODUCTION_CODE_PREFLIGHT_PROJECT_NAME);
+    expect(spec.phases.install!.commands[0]).toBe(GATE_COMMAND);
+    expect(spec.phases.install!.commands.indexOf(GATE_COMMAND)).toBeLessThan(spec.phases.install!.commands.findIndex((command) => command.startsWith("node_version=")));
+    // Beta's Preflight never closes it, and neither release project does any more.
+    for (const name of [AGENTX_BETA_CODE_PREFLIGHT_PROJECT_NAME, AGENTX_RELEASE_PROJECT_NAME, AGENTX_BETA_RELEASE_PROJECT_NAME]) expect(buildSpecOf(name), name).not.toContain("disable-stage-transition");
+    expect(buildSpecOf(AGENTX_RELEASE_PROJECT_NAME)).not.toContain("--profile");
+    // The right moved with the command: only the production Preflight's role may close the transition.
+    expect(policyOf("ProductionCodePreflightRole").find((statement) => statement.Sid === "ClosePromotionGate")?.Action).toEqual("codepipeline:DisableStageTransition");
+    for (const roleMatch of ["BetaCodePreflightRole", "ReleaseBuildRole", "BetaReleaseBuildRole"]) {
+      expect(policyOf(roleMatch).flatMap(actionsOf), roleMatch).not.toContain("codepipeline:DisableStageTransition");
+    }
+  });
+
+  it("runs the port guard with the private name list in both Code Preflights, whatever the CI proof or CODE_RELEASE say, from the previously released commit (L14 review a to d, L1 review R4)", () => {
+    template.hasParameter("PortGuardNamesParameterName", { Type: "String" });
+    template.hasParameter("PortGuardNamesKeyArn", { Type: "String", AllowedPattern: Match.stringLikeRegexp("kms") });
+    for (const name of [AGENTX_BETA_CODE_PREFLIGHT_PROJECT_NAME, AGENTX_PRODUCTION_CODE_PREFLIGHT_PROJECT_NAME]) {
+      const spec = preflightSpec(name);
+      // Only the parameter's NAME reaches the build, as a plain variable; the value is fetched inside the step.
+      expect(Object.keys(spec.env.variables)).toContain("PORT_GUARD_NAMES_PARAMETER");
+      // L9b's additions (CODE_LIVE_SHA and the waiting run for the Cloud actions, the rollback checks and range) are asserted in release-pipeline-l9b-rollback.test.ts;
+      // the L1 commands are asserted here as they were.
+      const isL9b = (command: string): boolean =>
+        /^(SUPERSEDES_EXEC=|export CODE_CTX|WAITING_EXEC=|if \[\[ "\$WAITING_EXEC")/u.test(command) || command.startsWith('[ "$CODE_ROLLBACK_TARGET" = none ] ||');
+      const build = spec.phases.build!.commands.filter((command) => !isL9b(command));
+      // (a) never from the code being released: a detached worktree of the PREVIOUSLY RELEASED commit (read from this stage's record) runs the guard over released..commit,
+      // so an edit of the guard, anywhere in the landing, is judged by the old guard. R4: the checks that refuse come first.
+      const parameter = name === AGENTX_BETA_CODE_PREFLIGHT_PROJECT_NAME ? "/agentx/release/code-released/beta" : "/agentx/release/code-released/production";
+      expect(build[0]).toBe(`RELEASED_SHA="$(aws ssm get-parameter --name ${parameter} --query Parameter.Value --output text)" || { echo "port-guard: the last released Code commit could not be read; refusing to run the release" >&2; exit 2; }`);
+      expect(build.slice(1, 6).every((command) => command.endsWith("exit 2; }"))).toBe(true);
+      expect(build.slice(1, 6).map((command) => command.split(" ||")[0])).toEqual([
+        '[[ "$RELEASED_SHA" =~ ^[0-9a-f]{40}$ ]]',
+        'git cat-file -e "$RELEASED_SHA^{commit}"',
+        'git merge-base --is-ancestor "$RELEASED_SHA" HEAD',
+        '[ "$(git rev-parse HEAD)" = "$RELEASED_SHA" ]',
+        '[ "$(git rev-parse HEAD)" = "$RELEASED_SHA" ]',
+      ]);
+      expect(build[4]).toContain("-le 3");
+      expect(build[4]).toContain("octopus merge");
+      expect(build[5]).toContain("not merged as one change");
+      expect(build.slice(6)).toEqual([
+        "git update-ref refs/heads/release-tip HEAD",
+        'git worktree add --detach /tmp/port-guard-trusted "$RELEASED_SHA"',
+        "cd /tmp/port-guard-trusted",
+        "set +x",
+        'test -n "$PORT_GUARD_NAMES_PARAMETER" || { echo "port-guard: PORT_GUARD_NAMES_PARAMETER is not set; refusing to run without the private name list" >&2; exit 2; }',
+        "node scripts/port-guard-pipeline.ts --range HEAD..release-tip --allow-guard-edits",
+      ]);
+      // (d) unconditional: no CI proof, no --skip-checks, no CODE_RELEASE test anywhere in the project.
+      const text = buildSpecOf(name);
+      expect(text).not.toMatch(/release-ci-proof|skip-checks|CODE_RELEASE|RELEASE_CHECKS/u);
+      // The tools the guard needs are installed before it runs.
+      expect(spec.phases.install!.commands.join("\n")).toContain("gitleaks");
+    }
+    // (c) the read grant: that one parameter, and decrypt with that one key through SSM, on both Preflight roles; nothing else secret.
+    for (const roleMatch of ["BetaCodePreflightRole", "ProductionCodePreflightRole"]) {
+      const statements = policyOf(roleMatch);
+      const read = statements.find((statement) => statement.Sid === "ReadPortGuardNames");
+      expect(read?.Action).toEqual("ssm:GetParameter");
+      expect(JSON.stringify(read?.Resource)).toContain('{"Ref":"PortGuardNamesParameterName"}');
+      const decrypt = statements.find((statement) => statement.Sid === "DecryptPortGuardNames");
+      expect(decrypt?.Action).toEqual("kms:Decrypt");
+      expect(decrypt?.Resource).toEqual({ Ref: "PortGuardNamesKeyArn" });
+      expect(JSON.stringify(decrypt)).toContain("kms:ViaService");
+      // Plus the record of the last released Code commit (R4), read-only and only this stage's.
+      // Plus this stage's release history (L9b), read-only.
+      expect(statements.flatMap(actionsOf).filter((action) => /secretsmanager|ssm:|kms:/u.test(action)).sort()).toEqual(["kms:Decrypt", "ssm:GetParameter", "ssm:GetParameter", "ssm:GetParameter"]);
+      const record = statements.find((statement) => statement.Sid === "ReadReleasedCode");
+      expect(record?.Action).toEqual("ssm:GetParameter");
+      expect(JSON.stringify(record?.Resource)).toContain(roleMatch.startsWith("Beta") ? "parameter/agentx/release/code-released/beta" : "parameter/agentx/release/code-released/production");
+    }
+    // The release builds write that record, only theirs, and only that right.
+    for (const [roleMatch, stage] of [["BetaReleaseBuildRole", "beta"], ['"ReleaseBuildRole', "production"]] as const) {
+      const record = policyOf(roleMatch).find((statement) => statement.Sid === "RecordReleasedCode");
+      expect(record?.Action).toEqual("ssm:PutParameter");
+      expect(JSON.stringify(record?.Resource)).toContain(`parameter/agentx/release/code-released/${stage}`);
+      // Plus the stage's release history, written by the same step (L9b): read to prepend, then written; nothing else of SSM.
+      const history = policyOf(roleMatch).find((statement) => statement.Sid === "RecordCodeHistory");
+      expect(history?.Action).toEqual(["ssm:GetParameter", "ssm:PutParameter"]);
+      expect(JSON.stringify(history?.Resource)).toContain(`parameter/agentx/release/code-history/${stage}`);
+      expect(policyOf(roleMatch).flatMap(actionsOf).filter((action) => action.startsWith("ssm:")).sort()).toEqual(["ssm:GetParameter", "ssm:PutParameter", "ssm:PutParameter"]);
+    }
+  });
+
+  it("skips every Code step when Preflight says CODE_RELEASE=skip, refuses any other value, and still leaves the manifest file", () => {
+    for (const name of [AGENTX_RELEASE_PROJECT_NAME, AGENTX_BETA_RELEASE_PROJECT_NAME]) {
+      const buildSpec = JSON.parse(buildSpecOf(name)) as { env: { variables: Record<string, string> }; phases: Record<string, { commands: string[] }> };
+      // The buildspec's own value is for a build started by hand; the pipeline's action overrides it.
+      expect(buildSpec.env.variables.CODE_RELEASE).toBe("run");
+      const install = buildSpec.phases.install!.commands;
+      expect(install[0]).toBe('case "$CODE_RELEASE" in run|skip) ;; *) echo "CODE_RELEASE must be run or skip, got: $CODE_RELEASE" >&2; exit 1;; esac');
+      // Every tool install, npm ci and the release itself sit behind the skip test; nothing else runs in a skipped build.
+      for (const command of install.slice(2).filter((command) => !Object.values(CODE_HISTORY_PARAMETER).flatMap(rollbackReleaseChecks).includes(command))) expect(command, `${name}: ${command}`).toMatch(/^\[ "\$CODE_RELEASE" = skip \] \|\| \{ .* \}$/u);
+      expect(buildSpec.phases.pre_build!.commands).toEqual(['[ "$CODE_RELEASE" = skip ] || { npm ci; }']);
+      const build = buildSpec.phases.build!.commands;
+      expect(build).toHaveLength(1);
+      expect(build[0]).toMatch(/^if \[ "\$CODE_RELEASE" = skip \]; then mkdir -p cdk\.out && printf '\{"codeRelease":"skip"\}\\n' > cdk\.out\/agentx-production-release\.json; else if node scripts\/release-ci-proof\.ts /u);
+      expect(build[0]).toMatch(/npm run release:prod -- .*; fi$/u);
+      // The proof and the release stay in one else branch, in their old order.
+      expect(build[0]!.indexOf("release-ci-proof")).toBeLessThan(build[0]!.indexOf("npm run release:prod"));
+    }
   });
 
   it("runs the beta release in the beta account, as its release role, after CI's proof in this account", () => {
@@ -677,8 +991,8 @@ describe("Slack interactivity infrastructure (spec 014)", () => {
     // Broker, outbox publisher, dispatcher, Slack ingress, the EC2 session steps (#83), idle
     // reaper (#85) and reconciler (#86), the eval batch tick (spec 052), and the channel API and its event sender
     // (spec 062 Phase 7d: the built-in Slack adapter), and developer sign-in for account linking (spec 064). #1148: and the core engine's attention email sender
-    // (which exists only while CoreAttentionEmail is on).
-    template.resourceCountIs("AWS::Lambda::Function", 13);
+    // (which exists only while CoreAttentionEmail is on). WORKER-DELIVERY-IDENTITY step 0: and the EC2 instance state-change handler.
+    template.resourceCountIs("AWS::Lambda::Function", 14);
   });
 });
 

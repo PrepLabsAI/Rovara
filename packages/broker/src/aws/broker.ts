@@ -363,7 +363,7 @@ import { slackRefusalMessage } from "./slack-refusals.js";
 import { STOP_WHILE_PUBLISHING_REFUSAL } from "../developer/workflow-actions.js";
 import { approvedFeedbackFixes, withFeedbackFixes, withStatusLines } from "../developer/pull-request-feedback-section.js";
 import { projectKey, requireProject } from "./project-records.js";
-import { admitProjectSetupRuntime, projectSetupBindingDigest, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "./project-setup-runtime-catalog.js";
+import { admitProjectSetupRuntime, projectSetupBindingDigest, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema, setupSessionInstance } from "./project-setup-runtime-catalog.js";
 import { projectSetupTerminalAuthorityChecks } from "./project-setup-terminal-conditions.js";
 import { verifyProjectSetupCapability } from "./project-setup-capability.js";
 import { issueProjectSetupCapability } from "./project-setup-capability.js";
@@ -2899,7 +2899,7 @@ async function createProjectSetupAdmissionRows(
     deadlineAt: setupRunContext.deadlineAt, evidenceByteLimit, createdAt: now.toISOString(),
     ...(retry ? { retryOfExecutionId: retry.retryOfExecutionId, retryActorKey: identity.ownerKey } : {}) });
   const session = ProjectSetupSessionSchema.parse({ schemaVersion: 1, setupExecutionId, subjectId, transportCorrelationId,
-    approvalRevision: 1, bindingDigest: runtime.bindingDigest, state: "READY", generation: runtime.generation, privateIp: endpoint.hostname });
+    approvalRevision: 1, bindingDigest: runtime.bindingDigest, state: "READY", generation: runtime.generation, privateIp: endpoint.hostname, ...setupSessionInstance(runtime) });
   const operation = { ...projectSetupOperationKey(setupExecutionId, operationId), entityType: "PROJECT_SETUP_OPERATION",
     ...ProjectSetupOperationSchema.parse({ schemaVersion: 1, setupExecutionId, operationId, transportCorrelationId, fence,
       status: "ACCEPTED", createdAt: now.toISOString(), updatedAt: now.toISOString() }) };
@@ -15973,7 +15973,9 @@ const linear = linearCompanyWiring({ env: process.env, documentClient, tableName
   connectorSecretPrefix: process.env.CONNECTOR_SECRET_PREFIX ?? CONNECTOR_SECRET_PREFIX, log: brokerLogLine, dynamo: dynamoClient,
   // L2-4: each company's tracker intake from the core root (built below; asked only at delivery time).
   // Batch 12 (#872 builds the core root on the first request, after the callback key is read): the root built then; no delivery reaches this before it.
-  intakeFor: async (companyId) => await builtCoreRoot?.intake?.intakeFor(companyId) });
+  intakeFor: async (companyId, options) => await builtCoreRoot?.intake?.intakeFor(companyId, options),
+  // R1 + L1 6.2b: a delivery before the root is built is answered 503 so Linear tries again; once it is built, a company with no intake is a quiet skip.
+  rootBuilt: () => builtCoreRoot !== undefined });
 // Guided onboarding PR 14 (DEC 254n item 1): the company engine model route's read of the gateway's live list for one company; set only where the gateway's origin is.
 const companyEngineModelOffered = adminOfferedModelsFromEnvironment(process.env, () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)));
 /** Set only in named environments with developer sign-in (infra/lib/developer-signin.ts). */
@@ -16116,7 +16118,7 @@ function buildBrokerHandler(callbackSigningKey: string) {
     codeSettings: codeSettingsReader({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }),
     // `taskPeople` (the task People list the merge requesters are read from, aws/hosted-merge-people.ts) is REQUIRED by the job services: a root built without it throws.
     services: (companyId, flow, registry, wiring) => createHostedBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!,
-      settings: companyCodeSettingsReader({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }, companyId), taskPeople: { documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }, ...(wiring.humanEdit === undefined ? {} : { humanEdit: wiring.humanEdit }), ...(wiring.threadMoments === true ? { threadMoments: true } : {}), ...(wiring.threadRefresh === undefined ? {} : { threadRefresh: wiring.threadRefresh }),
+      settings: companyCodeSettingsReader({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }, companyId), taskPeople: { documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }, ...(wiring.humanEdit === undefined ? {} : { humanEdit: wiring.humanEdit }), ...(wiring.threadMoments === true ? { threadMoments: true } : {}), ...(wiring.ticketMoments === true ? { ticketMoments: true } : {}), ...(wiring.threadRefresh === undefined ? {} : { threadRefresh: wiring.threadRefresh }),
       // The email seams travel with the upkeep notice's (#959); L4-AK1H: a queued admin notice (unusual team knowledge reading) is told only to someone who is an admin now (the core root answers once built; before that: no one).
       notification: { ...(wiring.notification ?? {}), ...(wiring.upkeep === undefined ? {} : { upkeep: wiring.upkeep }), adminNotice: async (orgId, developerId) => (await builtCoreRoot?.adminNotice?.(orgId, developerId)) === true },
     }),

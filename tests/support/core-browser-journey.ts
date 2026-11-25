@@ -141,7 +141,7 @@ export function journeyProjectDefinition(definition: ProjectDefinition, runnable
 }
 
 type DeveloperTaskBrokerHarness = Awaited<ReturnType<typeof createDeveloperTaskBroker>>;
-export interface CoreBrowserBrokerHarness extends DeveloperTaskBrokerHarness { core: BrokerCoreRoot; world: FakeWorld; runtime: CoreRuntime; channel: FakeChannelAdapter }
+export interface CoreBrowserBrokerHarness extends DeveloperTaskBrokerHarness { core: BrokerCoreRoot; world: FakeWorld; runtime: CoreRuntime; channel: FakeChannelAdapter; storeWire: WireDynamo; wire: WireDynamo }
 
 export async function createCoreBrowserBroker(options: CoreBrowserBrokerOptions = {}): Promise<CoreBrowserBrokerHarness> {
   let core: BrokerCoreRoot | undefined;
@@ -150,6 +150,8 @@ export async function createCoreBrowserBroker(options: CoreBrowserBrokerOptions 
   // Linear's pieces need the table client and the core's store, which exist only inside the broker's own construction below: they are reached through these.
   let tableRef: { send(command: unknown, options?: unknown): Promise<unknown> } | undefined;
   let storeRef: DocumentStore | undefined;
+  // The core's own table (the one its store writes to), for a journey that makes the table refuse some writes (journey 14: reviews that cannot start).
+  let storeWire: ReturnType<typeof wireClient> | undefined;
   const lazyTable = { send: (command: unknown, sendOptions?: unknown) => tableRef!.send(command, sendOptions) };
   const lazyStore = new Proxy({} as DocumentStore, { get: (_target, field) => { const value = (storeRef as unknown as Record<PropertyKey, unknown>)[field]; return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(storeRef) : value; } });
   const linear = options.linear?.({ db: lazyTable, now: () => world?.clock.now ?? Date.now() });
@@ -166,7 +168,8 @@ export async function createCoreBrowserBroker(options: CoreBrowserBrokerOptions 
     ...(options.developerExtra === undefined && linear === undefined ? {} : { developerExtra: { ...options.developerExtra, ...linearDeveloper } }),
     ...(options.brokerExtra === undefined && linear === undefined ? {} : { brokerExtra: { ...options.brokerExtra, ...linearBroker } }),
     coreRoot: ({ db, s3, callbackSigningKey }) => {
-      const store = new DynamoDocumentStore({ client: wireClient(db), tableName: "state", indexes: stateTableIndexes(), retryBaseMs: 1 });
+      storeWire = wireClient(db);
+      const store = new DynamoDocumentStore({ client: storeWire, tableName: "state", indexes: stateTableIndexes(), retryBaseMs: 1 });
       tableRef = db;
       storeRef = store;
       const objects = new S3ObjectStorage({ client: { send: (command) => s3.send(command as Parameters<typeof s3.send>[0]) }, bucket: "artifacts" });
@@ -208,7 +211,7 @@ export async function createCoreBrowserBroker(options: CoreBrowserBrokerOptions 
   const runtime = await core.app.runtimeFor(JOURNEY_COMPANY);
   await runtime.flow.deps.store.put({ item: { ...projectRevisionKey(JOURNEY_COMPANY, definition.name, definition.revision), entityType: "PROJECT", runtimeBinding, definition: JSON.parse(canonicalJson(definition)) as JsonValue } });
   await runtime.flow.deps.store.put({ item: { ...orgProjectCatalogKey(JOURNEY_COMPANY, definition.name), entityType: "PROJECT_CATALOG", latestRevision: definition.revision } });
-  return { ...harness, core, world, runtime, channel };
+  return { ...harness, core, world, runtime, channel, storeWire: storeWire!, wire: storeWire! };
 }
 
 /** Use the actual decision card and its digest; never manufacture approval/workflow rows. */
@@ -236,7 +239,7 @@ export async function takeCoreInvocation(harness: Awaited<ReturnType<typeof crea
     await harness.runtime.flow.dispatchOnce({ waitSeconds: 0 });
     const rows = harness.db.find((row) => row.entityType === "OPERATION" && row.workspaceId === workspaceId && typeof row.machineId === "string");
     for (const row of rows) {
-      const found = harness.world.machines.delivered(String(row.machineId)).find((invocation) => !(typeof after === "string" ? invocation.operationId === after : after?.has(invocation.operationId) === true) && (mode === "prepare" ? invocation.kind === "prepare" : mode === "publish" ? invocation.kind === "publish" : invocation.kind === "task" && invocation.payload.workflowMode === mode));
+      const found = harness.world.machines.delivered(String(row.machineId)).find((invocation) => !(typeof after === "string" ? invocation.operationId === after : after?.has(invocation.operationId) === true) && (mode === "prepare" ? invocation.kind === "prepare" : mode === "publish" ? invocation.kind === "publish" : mode === "maintain" ? invocation.kind === "maintain" : invocation.kind === "task" && invocation.payload.workflowMode === mode));
       if (found !== undefined) return { invocation: found, machineId: String(row.machineId) };
     }
     harness.world.clock.advance(5);

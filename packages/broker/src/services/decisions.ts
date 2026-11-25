@@ -122,16 +122,14 @@ export function createDecisionService(options: DecisionServiceOptions): Decision
 
 
 /** Approving a coding plan starts paid work. Every surface uses the same live cap and spend, never a limit supplied in the approval body. */
-async function checkPlanRunLimit(flow: TaskFlowDeps, task: TaskRecord): Promise<void> {
+export async function checkPlanRunLimit(flow: TaskFlowDeps, task: TaskRecord): Promise<void> {
   if (flow.taskCapUsd === undefined) return;
   let cap: number | undefined;
   let spent: number | undefined;
-  try {
-    cap = await flow.taskCapUsd(task);
-    spent = await flow.taskSpendUsd?.(task.taskId);
-  } catch {
-    throw new SubjectRefusal("invalid_outcome", SPEND_UNKNOWN);
-  }
-  if (cap === undefined || spent === undefined || !Number.isFinite(cap) || cap < 0 || !Number.isFinite(spent) || spent < 0) throw new SubjectRefusal("invalid_outcome", SPEND_UNKNOWN);
+  try { cap = await flow.taskCapUsd(task); } catch { throw new SubjectRefusal("invalid_outcome", SPEND_UNKNOWN); }
+  // The spend that cannot be read has a stable code of its own: the card then says the real reason (the one words table), where `invalid_outcome` reads "isn't ready to be decided yet" for every other refusal.
+  try { spent = await flow.taskSpendUsd?.(task.taskId); } catch { throw new SubjectRefusal("spend_unreadable", SPEND_UNKNOWN); }
+  if (cap === undefined || !Number.isFinite(cap) || cap < 0) throw new SubjectRefusal("invalid_outcome", SPEND_UNKNOWN);
+  if (spent === undefined || !Number.isFinite(spent) || spent < 0) throw new SubjectRefusal("spend_unreadable", SPEND_UNKNOWN);
   if (spent >= cap) throw new SubjectRefusal("invalid_outcome", "This task has used its run limit, so Rovara will not start more work on it. Start a new task.");
 }
