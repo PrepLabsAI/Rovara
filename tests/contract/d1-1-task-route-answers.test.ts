@@ -177,6 +177,9 @@ describe("D1-1: the exact answers of every task route, for every kind of caller"
     }
     const golden = JSON.parse(readFileSync(GOLDEN, "utf8")) as Record<string, Recorded>;
     expect(Object.keys(answers).sort()).toEqual(Object.keys(golden).sort());
+    // DECLARED CHANGE (upstream, found at the D1-2 rebase onto e4b80f981): nine rows whose answer is a 200 task view (the owner, colleague, admin and script token reads of a task, and the start's answer) changed
+    // their body hash because trains 48 (F2-B, the task standing served from the one rule) and 54 (RD-2.0, the task read's rows) added fields to that view; no refusal row moved and no status changed. Those nine hashes
+    // were re-recorded on this tree (the refusals, which are what the table is for, are byte for byte the base's).
     // DECLARED CHANGE (D1-2, owner DEC 254zzz519): the unconnected merge route `POST /v1/dev/tasks/<id>/merge` is deleted, so every `/merge` row (the golden keeps the base's fixed
     // "merging from Rovara is not set up" answer) now answers exactly what a path the router does not serve answers: the `/nope` row of the same caller and shape. Nothing else may differ.
     const isMerge = (key: string) => key.endsWith(" /merge");

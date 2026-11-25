@@ -106,16 +106,6 @@
             "Evaluation": "Dynamic",
             "ChangeSource": "ResourceAttribute",
             "CausingEntity": "DeveloperSignInFunction10B62B05.Arn"
-          },
-          {
-            "Target": {
-              "Attribute": "Properties",
-              "Name": "PolicyDocument",
-              "RequiresRecreation": "Never"
-            },
-            "Evaluation": "Dynamic",
-            "ChangeSource": "ResourceAttribute",
-            "CausingEntity": "PlanEvidence3615C4CB.Arn"
           }
         ]
       }
@@ -347,30 +337,6 @@
         "Action": "Modify",
         "LogicalResourceId": "OutboxPublisherD572F72E",
         "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-OutboxPublisherD572F72E",
-        "ResourceType": "AWS::Lambda::Function",
-        "Replacement": "False",
-        "Scope": [
-          "Properties"
-        ],
-        "Details": [
-          {
-            "Target": {
-              "Attribute": "Properties",
-              "Name": "Code",
-              "RequiresRecreation": "Never"
-            },
-            "Evaluation": "Static",
-            "ChangeSource": "DirectModification"
-          }
-        ]
-      }
-    },
-    {
-      "Type": "Resource",
-      "ResourceChange": {
-        "Action": "Modify",
-        "LogicalResourceId": "PlanEvidence3615C4CB",
-        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-PlanEvidence3615C4CB",
         "ResourceType": "AWS::Lambda::Function",
         "Replacement": "False",
         "Scope": [

@@ -6,6 +6,7 @@ import {
   IMPLICIT_COMPANY_ID, change, codeMilestoneKey, companyScoped, mergeTrackingDecisionDigest, mergeTrackingKey, when,
   type ApprovalProof, type AuditEvent, type AuditSink, type CodeHost, type CodeMilestone, type MergeTrackingItem, type TransactItem, type WorkflowSnapshot,
 } from "../../packages/contracts/src/index.js";
+import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createLocalOwnerApprovers, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { FakeCodeHost, FakeHostModel } from "@agentx/broker/fakes";
@@ -125,6 +126,8 @@ export async function mergeWorld(options: MergeWorldOptions = {}): Promise<Merge
     pullRequests: workflowPrs, updatedAt: stamp,
     ...(options.withoutTier === true ? {} : { flow: { rulesVersion: 1, tier: { level: "risky", kinds: ["code_config"], source: "diff", reasons: [], at: stamp } } }), risk: { level: "low", reasons: ["A small change with no sensitive paths."], candidateDigest: CANDIDATE },
   };
+  // D1-2: the merge sweep reads only tasks that carry the core's mark (the old workflow's rows are left alone).
+  await store.put({ item: plain({ ...engineStampKey(TASK_ID), entityType: "TASK_ENGINE", orgId: ORG, taskId: TASK_ID, coreEngine: { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "cc=on", stampedAt: stamp } }) });
   await store.put({ item: plain({
     ...taskRecordKey(TASK_ID), entityType: "DEVELOPER_TASK", taskId: TASK_ID, orgId: ORG, project: "web", startingRevision: 1, workspaceId: "ws-1", sessionId: SESSION_ID,
     ownerId: "owner-1", ownerName: "Priya", workflow,

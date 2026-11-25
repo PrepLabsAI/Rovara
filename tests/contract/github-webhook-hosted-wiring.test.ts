@@ -105,9 +105,9 @@ describe("the core branch is live on the host-shaped broker (clientProjects.bind
     expect(w.sentSince().filter((name) => name !== "GetCommand")).toEqual([]);
   });
 
-  it("an installation nobody bound is the legacy handler's (it ignores the delivery with 202) and wakes nothing", async () => {
+  it("an installation nobody bound is ignored with 202 (the old workflow's handler that used to take it is deleted, D1-2) and wakes nothing", async () => {
     const w = await hostedWorld({ bindInstallation: false });
-    expect(answerOf(await w.invoke("issue_comment", issueComment(7)))).toMatchObject({ status: 202, body: { ignored: true } });
+    expect(answerOf(await w.invoke("issue_comment", issueComment(7)))).toMatchObject({ status: 202, body: { delivery: "IGNORED" } });
     expect(w.tracking()["lastHintKind"]).toBeUndefined();
   });
 
@@ -118,46 +118,21 @@ describe("the core branch is live on the host-shaped broker (clientProjects.bind
   });
 });
 
-describe("the legacy path still serves legacy tasks on the same broker", () => {
-  it("a legacy-linked pull request on a binding of the built-in company reaches the legacy handler (reserved delivery, no core wake)", async () => {
-    const w = await hostedWorld({ bindInstallation: IMPLICIT_COMPANY_ID });
+// D1-2: the old workflow's webhook handler is deleted. A pull request nothing on the core links is answered 202 IGNORED whatever the old link rows say, on every kind of installation,
+// with no delivery row reserved and the core not woken.
+describe("a pull request event the core does not take is ignored on the same broker", () => {
+  const cases: Array<[string, Parameters<typeof hostedWorld>[0]]> = [
+    ["a binding of the built-in company", { bindInstallation: IMPLICIT_COMPANY_ID }],
+    ["an installation with no binding row (no backfill yet)", { bindInstallation: false, marker: false }],
+    ["an installation bound to a NAMED company", {}],
+    ["an installation with no binding row after the backfill marker", { bindInstallation: false }],
+  ];
+  it.each(cases)("%s: 202 IGNORED, no delivery row, no wake", async (_name, options) => {
+    const w = await hostedWorld(options);
     const answer = answerOf(await w.invoke("pull_request", { ...base, action: "opened", pull_request: { number: 1 } }));
-    expect(answer.body).not.toHaveProperty("ignored");
-    expect(answer.body).not.toMatchObject({ delivery: "IGNORED" });
-    expect(w.deliveryRow(1)).toBeDefined();
-    expect(w.deliveryRow(1)).not.toHaveProperty("core");
+    expect(answer).toMatchObject({ status: 202, body: { delivery: "IGNORED" } });
+    expect(w.deliveryRow(1)).toBeUndefined();
     expect(w.tracking()["lastHintKind"]).toBeUndefined();
-  });
-
-  it("a legacy-linked pull request from an installation with no binding row (no backfill yet) reaches the legacy handler too", async () => {
-    const w = await hostedWorld({ bindInstallation: false, marker: false });
-    const answer = answerOf(await w.invoke("pull_request", { ...base, action: "opened", pull_request: { number: 1 } }));
-    expect(answer.body).not.toHaveProperty("ignored");
-    expect(w.deliveryRow(1)).toBeDefined();
-    expect(w.deliveryRow(1)).not.toHaveProperty("core");
-  });
-
-  it("a legacy task of the built-in company (no companyId) on an installation bound to a NAMED company reaches the legacy handler, not a core company_mismatch", async () => {
-    const w = await hostedWorld();
-    const answer = answerOf(await w.invoke("pull_request", { ...base, action: "opened", pull_request: { number: 1 } }));
-    expect(answer.body).not.toMatchObject({ delivery: "IGNORED" });
-    expect(answer.body).not.toHaveProperty("ignored");
-    expect(w.deliveryRow(1)).toBeDefined();
-    expect(w.deliveryRow(1)).not.toHaveProperty("core");
-  });
-
-  it("a legacy task on an installation with NO binding row after the backfill marker reaches the legacy handler, not a core unknown_installation", async () => {
-    const w = await hostedWorld({ bindInstallation: false });
-    const answer = answerOf(await w.invoke("pull_request", { ...base, action: "opened", pull_request: { number: 1 } }));
-    expect(answer.body).not.toMatchObject({ delivery: "IGNORED" });
-    expect(answer.body).not.toHaveProperty("ignored");
-    expect(w.deliveryRow(1)).toBeDefined();
-    expect(w.deliveryRow(1)).not.toHaveProperty("core");
-  });
-
-  it("a legacy event the core branch does not take (a pull request nothing links, on an unbound installation) is the legacy 202 not_linked", async () => {
-    const w = await hostedWorld({ bindInstallation: false, marker: false });
-    expect(answerOf(await w.invoke("pull_request", { ...base, action: "opened", pull_request: { number: 55 } }))).toMatchObject({ status: 202, body: { ignored: true, reason: "not_linked" } });
   });
 });
 

@@ -3,7 +3,7 @@ import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it } from "vitest";
 import { E2E_MODEL_ROUTE_DEFAULT_BUDGETS, e2eApplicationAccountDefinitionDigest, OrgIdSchema, type E2EModelDayBudgetRequest } from "@agentx/contracts";
 import { planSyntheticAccountWrites } from "../../packages/broker/src/e2e/application-account-registry.js";
-import { accountRegistryFences, planSetupAccountWrites, readAccountRegistryEntries } from "../../packages/broker/src/aws/e2e-account-registry.js";
+import { planSetupAccountWrites, readAccountRegistryEntries } from "../../packages/broker/src/aws/e2e-account-registry.js";
 import { handleE2EModelBudgetCallback, type E2EModelBudgetDependencies, type E2EModelBudgetOperation } from "../../packages/broker/src/e2e/model-budget-endpoint.js";
 import { createBrokerE2EDayBudget, e2eDayBudgetRoom } from "../../packages/broker/src/e2e/model-route-registry.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -41,7 +41,6 @@ describe("the account registry across the key move", () => {
   const changed = contractOf(ordersManifestWith((e2e) => { withOwnerB(e2e); withViewerRole("auditor")(e2e); }));
   const snapshotOfContract = (...edits: Array<(e2e: Parameters<typeof withOwnerB>[0]) => void>) =>
     snapshotOf({ "package.json": ordersManifestWith((e2e) => { withOwnerB(e2e); for (const edit of edits) edit(e2e); }) });
-  const PROFILES = ["synthetic", "orders-owner", "orders-viewer", "orders-owner-b"];
 
   /** The rows the old layout held for the four synthetic profiles of the fixture contract at revision 1, under the unscoped partition. */
   function seedLegacy(db: FakeDynamoDb, now = T0) {
@@ -53,7 +52,6 @@ describe("the account registry across the key move", () => {
     }
     return writes;
   }
-  const pairs = PROFILES.map((profileId) => ({ applicationId: ORDERS_APPLICATION_ID, profileId }));
   const scopedLatest = (profile: string) => ({ pk: testProjectPk("payments"), sk: `E2E_ACCOUNT_LATEST#${ORDERS_APPLICATION_ID}#${profile}` });
   const transact = (db: FakeDynamoDb, items: unknown[]) => db.send(new TransactWriteCommand({ TransactItems: items as never }));
 
@@ -96,25 +94,6 @@ describe("the account registry across the key move", () => {
     const other = await readAccountRegistryEntries({ documentClient: { send: db.send } as never, tableName: TABLE }, OTHER_ORG, "payments", [{ applicationId: ORDERS_APPLICATION_ID, profileId: "orders-viewer" }], { earlierFor: () => true });
     expect(other.entries[0]!.definition.revision).toBe(2);
     expect(other.entries[0]!.earlier).toEqual([]);
-  });
-
-  it("fences an account read from the old key: the transaction fails once the account has a row under the new key,", async () => {
-    const db = new FakeDynamoDb();
-    seedLegacy(db);
-    const store = { documentClient: { send: db.send } as never, tableName: TABLE };
-    const { entries } = await readAccountRegistryEntries(store, TEST_ORG, "payments", pairs);
-    const refs = entries.map((entry) => ({ applicationId: entry.definition.applicationId, profileId: entry.definition.profileId }));
-    const fences = accountRegistryFences({ orgId: TEST_ORG, tableName: TABLE, projectId: "payments", refs: refs as never, entries });
-    const probe = { Put: { TableName: TABLE, Item: { pk: "PROBE", sk: "ROW", entityType: "PROBE" } } };
-    expect(fences.length).toBeGreaterThan(0);
-    await transact(db, [...fences, probe]);
-    expect(db.get("PROBE", "ROW")).toBeDefined();
-    // A registration moved one account to the new key meanwhile: the earlier read is stale.
-    const viewer = entries.find((entry) => entry.definition.profileId === "orders-viewer")!;
-    db.set({ ...scopedLatest("orders-viewer"), entityType: "E2E_ACCOUNT_LATEST", ...viewer.latest });
-    db.delete("PROBE", "ROW");
-    await expect(transact(db, [...fences, probe])).rejects.toThrow();
-    expect(db.get("PROBE", "ROW")).toBeUndefined();
   });
 });
 

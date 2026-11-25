@@ -1,6 +1,11 @@
 import ts from "typescript";
 
-type Pin = { path: string; minimumTests: number; reason: string; decision: string; "replaced-by"?: string; restoreTarget?: number };
+/**
+ * A reviewed change to a pin that history would otherwise refuse (D1-2, DEC 254zzz457: a test goes with its subject). `lowered`: `minimumTests` is the new floor and `from` the floor it
+ * replaced. `retired`: the pin is a tombstone: it binds no file and no count, and keeps its last floor (`from`) so history stays readable. Both carry the deciding decision and a reason.
+ */
+type Reviewed = { kind: "lowered" | "retired"; from: number; decision: string; reason: string };
+type Pin = { path: string; minimumTests: number; reason: string; decision: string; "replaced-by"?: string; restoreTarget?: number; reviewed?: Reviewed };
 type PendingRestore = Pin & { restoringLane: string; deletedBy: string };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -11,8 +16,13 @@ function testPath(value: unknown): value is string {
   return typeof value === "string" && /^tests\/(?:[\w-]+\/)*[\w-]+\.test\.tsx?$/.test(value);
 }
 
+function isReviewed(value: unknown): value is Reviewed {
+  return record(value) && (value.kind === "lowered" || value.kind === "retired") && Number.isSafeInteger(value.from) && Number(value.from) >= 1 &&
+    typeof value.decision === "string" && /^DEC [0-9a-z]+$/.test(value.decision) && typeof value.reason === "string" && value.reason.trim() !== "";
+}
+
 function isPin(value: unknown): value is Pin {
-  return record(value) && testPath(value.path) && Number.isSafeInteger(value.minimumTests) && Number(value.minimumTests) >= 1 &&
+  return record(value) && (value.reviewed === undefined || (isReviewed(value.reviewed) && (value.reviewed.kind === "retired" ? value.minimumTests === value.reviewed.from : Number(value.minimumTests) < value.reviewed.from))) && testPath(value.path) && Number.isSafeInteger(value.minimumTests) && Number(value.minimumTests) >= 1 &&
     typeof value.reason === "string" && value.reason.trim() !== "" && typeof value.decision === "string" && value.decision.trim() !== "" &&
     (value["replaced-by"] === undefined || (testPath(value["replaced-by"]) && value["replaced-by"] !== value.path)) &&
     (value.restoreTarget === undefined || (Number.isSafeInteger(value.restoreTarget) && Number(value.restoreTarget) >= 1));
@@ -42,7 +52,10 @@ export function validatePinnedHistory(current: unknown, prior: unknown): string[
   const findings = before.flatMap((pin) => {
     const next = byPath.get(pin.path);
     if (!next) return [`${pin.path}: historical pin removed; retain it with replaced-by when moving`];
-    return next.minimumTests < pin.minimumTests ? [`${pin.path}: minimum lowered from ${pin.minimumTests} to ${next.minimumTests}`] : [];
+    // A reviewed retirement keeps the floor it had; a reviewed lowering names the floor it replaced, EXACTLY (a free number could excuse any drop). One lowering per change: a second one names the new floor.
+    if (next.reviewed?.kind === "retired") return next.reviewed.from === pin.minimumTests ? [] : [`${pin.path}: retired with a floor of ${next.reviewed.from}, not the held ${pin.minimumTests}`];
+    if (next.minimumTests < pin.minimumTests) return next.reviewed?.kind === "lowered" && next.reviewed.from === pin.minimumTests ? [] : [`${pin.path}: minimum lowered from ${pin.minimumTests} to ${next.minimumTests}`];
+    return [];
   });
   const pendingByPath = new Map(pendingAfter.map((pin) => [pin.path, pin]));
   for (const pin of pendingBefore) {
@@ -135,6 +148,14 @@ export function validatePinnedTests(registry: unknown, readSource: (path: string
       continue;
     }
     const pin = value;
+    // A retired pin is a tombstone: it binds no file (the file may be gone) and no count.
+    if (pin.reviewed?.kind === "retired") {
+      if (historical.has(pin.path) || pin["replaced-by"] !== undefined) findings.push(`${pin.path}: duplicate pinned path or replacement`);
+      // Only a test file that is gone can be retired: a live file is never unpinned by editing the registry.
+      if (readSource(pin.path) !== undefined) findings.push(`${pin.path}: retired, but the test file still exists`);
+      historical.add(pin.path);
+      continue;
+    }
     const target = pin["replaced-by"] ?? pin.path;
     if (historical.has(pin.path) || effective.has(target)) findings.push(`${pin.path}: duplicate pinned path or replacement`);
     historical.add(pin.path);

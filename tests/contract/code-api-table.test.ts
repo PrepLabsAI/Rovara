@@ -16,7 +16,7 @@ describe("the one route table", () => {
     // RD-2.0 (Code API 1.5): four rows for the task page's new reads (spec, checks, changes, timeline) after the proof index (176 became 180).
     // D1-2 (owner DEC 254zzz519): the unconnected `POST /v1/dev/tasks/{taskId}/merge` row is deleted (180 became 179). No other row moved; the digest below is the one of this table without that row.
     expect([DEV_ROUTES.length, APP_ROUTES.length]).toEqual([179, 111]);
-    expect(digest(DEV_ROUTES.map(keyOf))).toBe("7041723dc483e5627c885115dbe6c5b6a2dc3d8c6b9b4c6e482d4c25fcd0c699");
+    expect(digest(DEV_ROUTES.map(keyOf))).toBe("50d4111fb426355a956f2101b7045cd11f4605e86aea6322d2b6f522b9d5a720");
     expect(digest(APP_ROUTES.map(keyOf))).toBe("421490346858df2db699d93b15c2508795e4a4c561a2daf6fc4d1f25cc392aca");
   });
 

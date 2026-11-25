@@ -190,7 +190,7 @@ import { companyInstructionsModules } from "../core-host/company-instructions-ht
 import { createCompanyModelChoices, type OfferedModelsReader } from "../core-host/gateway-model-selection.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
-import { ownerOfWorkspace } from "./engine-boundary.js";
+import { isCoreWorkspace } from "./engine-boundary.js";
 import { workspaceCompanyReader } from "./worker-machines/workspace-company.js";
 import { digestPilotOf, switchCovers } from "../core-host/flags.js";
 
@@ -1694,7 +1694,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       if (settingsBlocked && coreContextWorkerRouteOf(request.method, request.path.split("?")[0] ?? "") !== undefined) return callbackAnswer(503, "CORE_SWITCH_BLOCKED", CORE_SETTINGS_REFUSAL_WORDS);
       const context = await handleCoreContextTools(request, {
         capabilities: { verify: (token, action) => new CallbackCapabilities(Buffer.from(inputs.callbackSigningKey)).verify(token, action) },
-        ownerOfWorkspace: (workspaceId) => ownerOfWorkspace(table, workspaceId),
+        isCoreWorkspace: (workspaceId) => isCoreWorkspace(table, workspaceId),
         companyOfWorkspace,
         runtimeFor: async (companyId) => ({ flow: (await app.runtimeFor(companyId)).flow.deps, teamSearch: teamRecords.get(companyId)?.search }),
       });
@@ -1705,7 +1705,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       if (packetRequest && packetWorkspace === undefined) return callbackAnswer(403, "CALLBACK_FORBIDDEN", "this operation cannot read that packet");
       const workspaceId = packetWorkspace ?? modelAccessWorkspaceOf(request) ?? CORE_CALLBACK.exec(request.path.split("?")[0] ?? "")?.[1];
       if (workspaceId === undefined) return undefined;
-      if (await ownerOfWorkspace(table, workspaceId) !== "core") return packetRequest ? callbackAnswer(403, "CALLBACK_FORBIDDEN", "this operation cannot read that packet") : undefined;
+      if (!await isCoreWorkspace(table, workspaceId)) return packetRequest ? callbackAnswer(403, "CALLBACK_FORBIDDEN", "this operation cannot read that packet") : undefined;
       return await dispatchCoreWorkspaceCallback(request, workspaceId);
     },
     async handleEvent(event, options) {

@@ -84,9 +84,9 @@ describe("the hold: new rounds and setup runs wait while a switch is in progress
 });
 
 describe("the hold as a condition inside a start's own transaction", () => {
-  it("is the item every start transaction carries: the four system starts of a CHECKS operation (checks, baseline, grounding, replay) and the setup run's admission", () => {
-    // The checks start is exercised end to end (contract test); the others share its shape, and a start without the item would let a round begin on the old machine.
-    expect(readFileSync("packages/broker/src/aws/developer-tasks.ts", "utf8").split("requalifyHoldFence(deps.tableName").length - 1).toBe(4);
+  it("is the item the setup run's admission carries; the four system starts of a CHECKS operation (checks, baseline, grounding, replay) went with the old workflow engine (D1-2)", () => {
+    // A start without the item would let a round begin on the old machine.
+    expect(readFileSync("packages/broker/src/aws/developer-tasks.ts", "utf8").split("requalifyHoldFence(deps.tableName").length - 1).toBe(0);
     const broker = readFileSync("packages/broker/src/aws/broker.ts", "utf8");
     expect(broker).toContain("requalifyHoldFence(dependencies.tableName, Date.now())] };");
     // Both setup transactions (the registration and the admin retry) report a refused fence as the fixed reason.

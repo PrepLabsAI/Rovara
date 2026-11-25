@@ -8,7 +8,7 @@
 // Every function answers `undefined` for anything that is not the core's (an unstamped task or workspace, or an install without the core's entry): the broker then runs exactly what it ran
 // before. Kept out of broker.ts so its call sites there stay one line each. The Slack paths live in slack-core-stop.ts (the Slack boundary keeps Slack names in Slack modules).
 import { AgentXError, agentXError } from "@agentx/contracts";
-import { isSetupCheckWorkspace, ownerOfWorkspace, type CoreTaskEntry, type EngineStateTable } from "./engine-boundary.js";
+import { isCoreWorkspace, isSetupCheckWorkspace, type CoreTaskEntry, type EngineStateTable } from "./engine-boundary.js";
 
 /** A Stop the core ran for a core task: the core's cancel names no workflow operation. */
 /** A setup check's stop names no task (`taskId` absent). */
@@ -20,16 +20,16 @@ export type CoreStopOutcome = { outcome: "CANCEL_REQUESTED"; workspaceId?: strin
  */
 export async function coreAdminStop(table: EngineStateTable, entry: CoreTaskEntry | undefined, identity: { isAdministrator: boolean; ownerKey: string }, workspaceId: string,
   requireAdministrator: (project: string) => Promise<void>): Promise<CoreStopOutcome | { outcome: "NOTHING_RUNNING"; workspaceId: string } | undefined> {
-  if (entry?.stopWorkspaceForAdmin === undefined || !await isCoreWorkspace(table, workspaceId)) return undefined;
+  if (entry?.stopWorkspaceForAdmin === undefined || !await isCoreOrSetupCheckWorkspace(table, workspaceId)) return undefined;
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
   const stopped = await entry.stopWorkspaceForAdmin(workspaceId, { id: identity.ownerKey }, requireAdministrator);
   return stopped.nothingRunning ? { outcome: "NOTHING_RUNNING", workspaceId } : { outcome: "CANCEL_REQUESTED", workspaceId, ...(stopped.taskId === undefined ? {} : { taskId: stopped.taskId }) };
 }
 
 /** A core task's workspace, or a setup check's (a workspace with no task, whose own record names this company: the core's too, so its stop is the core's). */
-async function isCoreWorkspace(table: EngineStateTable, workspaceId: string): Promise<boolean> {
+async function isCoreOrSetupCheckWorkspace(table: EngineStateTable, workspaceId: string): Promise<boolean> {
   try {
-    return await ownerOfWorkspace(table, workspaceId) === "core";
+    return await isCoreWorkspace(table, workspaceId);
   } catch (error) {
     if (error instanceof AgentXError && error.code === "NOT_FOUND" && await isSetupCheckWorkspace(table, workspaceId)) return true;
     throw error;

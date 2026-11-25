@@ -16,14 +16,14 @@ import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-sec
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { ChangeMessageVisibilityCommand, SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { INDEX_EXPIRY_ATTRIBUTE, isPlanUnreadableBlockReason, NUDGE_WINDOW_MS, sameJsonContent, AdminChangePendingRecordSchema, planClaimCount, planSummaryLines, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, describeWorkflowCheckChanges, redactText, workflowCheckCommandText, workflowFeedbackCheckChanges, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, taskGraphDigest, type PendingChange, type PlanClaim, type PlanDocument, type WorkflowArtifact, type WorkflowCheck, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, isPlanUnreadableBlockReason, NUDGE_WINDOW_MS, sameJsonContent, AdminChangePendingRecordSchema, planClaimCount, planSummaryLines, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, adminChangeKey, describeWorkflowCheckChanges, redactText, workflowCheckCommandText, workflowFeedbackCheckChanges, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, taskGraphDigest, type PendingChange, type PlanClaim, type PlanDocument, type WorkflowArtifact, type WorkflowCheck, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@agentx/contracts";
 import { adminChangeExpiredMessage, adminChangeMessage, adminChangeOutcomeMessage } from "../developer/change-messages.js";
 import { loadWorkflowDocument } from "../developer/plan-artifacts.js";
 import { PLAN_UNREADABLE_CATEGORIES, planCheckSummary, planUnreadableCategory } from "../developer/plan-check-summary.js";
 import { SELF_CHECK_NOT_APPLICABLE, loadPlanSelfCheck, planRevisionsUsed, type PlanSelfCheckView } from "../developer/plan-self-check.js";
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
 import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, STOPPED_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
-import { answeredWorkflowCard, cleanLine, documentSummaryLines, feedbackReviewFailedMessage, planReviewLink, slackSectionTexts, slackText, workflowDocumentType, workflowMessage, workflowMessageKey, type WorkflowMessageContext } from "../developer/workflow-messages.js";
+import { answeredWorkflowCard, cleanLine, documentSummaryLines, planReviewLink, slackSectionTexts, slackText, workflowDocumentType, workflowMessage, workflowMessageKey, type WorkflowMessageContext } from "../developer/workflow-messages.js";
 import { AUTOFIX_CARD_HOLD_MS, AutoFixAskSchema, autoFixCardLines } from "../developer/autofix-messages.js";
 import { deriveTaskStatus, failureCategory, plannerRepliesKey, taskKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type OperationFacts, type TaskShare } from "../developer/task-records.js";
 import { isConditional } from "./broker-shared.js";
@@ -135,9 +135,8 @@ async function deliverPeopleNotification(deps: NotifierDependencies, notice: Not
     ExpressionAttributeNames: { "#status": "status" },
     ExpressionAttributeValues: { ":sending": "SENDING", ":expected": row.status, ":attempt": attempt, ":previous": row.attempts, ":until": deps.now() + 30_000 },
   }));
-  const base = deps.reviewUrlBase;
-  const taskUrl = base === undefined ? undefined : new URL(`/review/${notice.taskId}/task`, base).href;
-  const text = `You now have the ${row.role} role on an AgentX task.${taskUrl === undefined ? "" : ` ${taskUrl}`}`;
+  // D1-2: Code's own task page is deleted (DEC 254zzz511), so this notice names no page to open.
+  const text = `You now have the ${row.role} role on an AgentX task.`;
   try {
     const posted = await deps.post({ ...taskScope(deps, await noticeTask(deps, notice)), channel: row.slackUserId, text });
     try {
@@ -634,20 +633,10 @@ interface Reply {
   approval?: WorkflowArtifact;
 }
 
-/** The trusted AgentX task page, when the notifier knows its base and it is a plain https origin. */
+/** D1-2: Code's own task page is deleted (DEC 254zzz511); no notice links to it, so no message sends anyone to a page that answers 404. */
 function taskPageUrl(deps: NotifierDependencies, taskId: string): string | undefined {
-  return taskPageUrlFromBase(deps.reviewUrlBase, taskId);
-}
-
-function taskPageUrlFromBase(reviewUrlBase: string | undefined, taskId: string): string | undefined {
-  if (reviewUrlBase === undefined) return undefined;
-  try {
-    const base = new URL(reviewUrlBase);
-    if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash) return undefined;
-    return new URL(`/review/${encodeURIComponent(taskId)}/task`, base).href;
-  } catch {
-    return undefined;
-  }
+  void deps; void taskId;
+  return undefined;
 }
 
 /** Slack's answers that mean this workspace cannot create a Canvas at all: the task page is linked instead. */
@@ -967,44 +956,13 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
   }
 }
 
+/**
+ * D1-2: the old workflow's PR feedback review card (its Approve and Request changes buttons are retired, and its detail page `/review/<task>` is deleted, DEC 254zzz511). Nothing writes a
+ * `github_feedback` notice any more; one already waiting is dropped, so no person is sent to a page that answers 404. (The core's own feedback cards are the core's.)
+ */
 async function feedbackReviewNotification(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, notice: Notice) {
-  const workflow = task.workflow;
-  const review = workflow?.feedbackReview;
-  const reviewRef = review?.reviewRef;
-  if (notice.kind !== "github_feedback" || review?.status !== "PENDING" || reviewRef === undefined || reviewRef.sha256 !== notice.feedbackReviewDigest) return undefined;
-  if (reviewRef.status !== "COMPLETE") {
-    // Said from the report's own reference: its stored reason is AgentX's words only, and is shown in plain words.
-    const opened = workflow!.pullRequests ?? [];
-    return feedbackReviewFailedMessage({ taskId: task.taskId, revision: workflow!.revision, reviewDigest: reviewRef.sha256, status: reviewRef.status, blockReason: reviewRef.blockReason,
-      pullRequests: review.bundleRefs.map((bundle) => ({ number: bundle.number,
-        url: opened.find((pullRequest) => pullRequest.repositoryId === bundle.repositoryId && pullRequest.number === bundle.number)?.url ?? "" })) });
-  }
-  if (reviewRef.status !== "COMPLETE") return undefined;
-  if (deps.readArtifact === undefined || deps.reviewUrlBase === undefined) throw new Error("feedback review notice is not configured");
-  const bytes = await deps.readArtifact(reviewRef.objectKey);
-  if (createHash("sha256").update(bytes, "utf8").digest("hex") !== reviewRef.sha256) throw new Error("feedback review artifact integrity check failed");
-  const report = WorkflowFeedbackReviewReportSchema.parse(JSON.parse(bytes));
-  if (report.taskId !== task.taskId || report.status !== "COMPLETE" || report.proposalDigest !== reviewRef.proposalDigest
-    || JSON.stringify(report.bundleDigests) !== JSON.stringify(review.bundleRefs.map(bundle => bundle.sha256))) {
-    throw new Error("feedback review artifact binding failed");
-  }
-  const base = new URL(deps.reviewUrlBase);
-  if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash) throw new Error("feedback review base URL is invalid");
-  const findings = report.findings;
-  const highestPriority = findings.some(finding => finding.recommended && finding.priority === "MUST_FIX") ? "MUST_FIX"
-    : findings.some(finding => finding.recommended && finding.priority === "SHOULD_FIX") ? "SHOULD_FIX"
-      : findings.some(finding => finding.recommended && finding.priority === "OPTIONAL") ? "OPTIONAL" : undefined;
-  return feedbackReviewSlackMessage({
-    taskId: task.taskId, revision: workflow!.revision, reviewDigest: reviewRef.sha256, proposalDigest: reviewRef.proposalDigest,
-    bundleDigests: review.bundleRefs.map(bundle => bundle.sha256),
-    totalComments: review.bundleRefs.reduce((total, bundle) => total + bundle.comments.length, 0),
-    recommendedFindingIds: findings.filter(finding => finding.recommended).map(finding => finding.id), highestPriority,
-    // The reviewer is told to put its question and options in the proposal's summary; its rationale stands in when it gave none.
-    ownerQuestions: findings.filter(finding => finding.proposedDisposition === "OWNER_DECISION")
-      .map(finding => ({ findingId: finding.id, question: finding.fixProposal?.summary ?? finding.rationale })),
-    checkChanges: feedbackCardCheckChanges(workflow!.checkPolicy, findings.filter(finding => finding.recommended)),
-    detailUrl: new URL(`/review/${encodeURIComponent(task.taskId)}`, base).href,
-  });
+  void deps; void task; void notice;
+  return undefined;
 }
 
 /**
@@ -1958,7 +1916,7 @@ export function createAwsNotifierHandler(workspaces?: SlackCallerWorkspaces) {
     peopleChangesEnabled: process.env.AGENTX_TASK_PEOPLE_CHANGES_ENABLED === "true",
     workflowE2EBlocks: async (task, operations) => {
       void operations;
-      return workflowE2ENotifierBlocks({ task, taskPageUrl: taskPageUrlFromBase(reviewUrlBase, task.taskId),
+      return workflowE2ENotifierBlocks({ task, taskPageUrl: undefined,
         readPrivateObject: async (key, maxBytes) => {
           if (maxBytes > 262_144 || !/^private\/[^/]+\/[^/]+\/workflow-e2e-display\/[a-f0-9]{64}\.json$/u.test(key)) return undefined;
           const response = await s3.send(new GetObjectCommand({ Bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), Key: key }));

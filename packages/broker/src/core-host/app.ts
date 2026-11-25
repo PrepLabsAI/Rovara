@@ -4,12 +4,12 @@
 //
 // Entry points:
 //   - `engineForNewTask(company)`: where a new task starts (always `core`). The start route asks this; `core` sends the start to the company's runtime.
-//   - `engineOfTask(store, taskId, area)`: where an EXISTING task's area runs (its stamp: an unstamped task is a spec 056 workflow task, #1274).
+//   - Whether an EXISTING task is the core's is its mark (aws/engine-boundary.ts `isCoreTask`), not asked of this object (D1-2c).
 //   - `handleScheduledJob(event)`: a schedule's event (`agentx.core-job`) runs one row of the jobs table, per company, isolated.
 //   - `relayOutbox(companies)`: the stream reader's hook on outbox inserts.
 import type { AdapterRegistry, DocumentStore, OrgId } from "@agentx/contracts";
 import { createCoreRuntime, serviceGaps, type CoreRuntime, type CoreRuntimeOptions } from "./core-runtime.js";
-import { engineForNewTask, engineOfStoredTask, listCoreInUse, type Engine } from "./engine-stamp.js";
+import { engineForNewTask, listCoreInUse, type Engine } from "./engine-stamp.js";
 import { CORE_AREAS, CORE_ENGINE_ON, coreAreaOn, type CoreArea, type CoreEngineFlags, type CoreSwitch } from "./flags.js";
 import { CORE_JOBS, isCoreJobEvent, runPerCompany, type CompanyRunReport, type CoreJob } from "./jobs.js";
 import { buildCoreRegistry, type CoreAdapterContext, type CoreAdapterModule } from "./registry.js";
@@ -49,7 +49,6 @@ export interface CoreHostAppOptions {
 export interface CoreHostApp {
   readonly flags: CoreEngineFlags;
   engineForNewTask(companyId: string): Engine;
-  engineOfTask(store: Parameters<typeof engineOfStoredTask>[0], taskId: string, area: CoreArea): Promise<Engine>;
   /** The sealed registry (built once). */
   registry(): Promise<AdapterRegistry>;
   /** The core for one company (built once). */
@@ -128,8 +127,6 @@ export function createCoreHostApp(options: CoreHostAppOptions): CoreHostApp {
   return {
     flags,
     engineForNewTask: (companyId) => engineForNewTask(flags, companyId),
-    // An existing task's engine is its stamp.
-    engineOfTask: (store, taskId, area) => engineOfStoredTask(store, taskId, area),
     registry,
     runtimeFor,
     async handleScheduledJob(event, run) {

@@ -8,7 +8,6 @@ import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-act
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { WEB_PROOF_GRANT_ROWS_MAX, developerTaskRouteDependencies, type DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { companyMembershipFromDynamo } from "../../packages/broker/src/aws/company-check.js";
-import { TASK_PAGE_API, createTaskWebApi } from "../../packages/broker/src/aws/task-web-api.js";
 import {
   checkTaskPersonIdentity, listTaskWebCandidates, registerTaskWebPerson, type ProjectAccessSubject, type TaskPersonIdentityDependencies,
 } from "../../packages/broker/src/developer/task-person-identity.js";
@@ -276,59 +275,5 @@ describe("add (POST people/add) through propose -> confirm", () => {
     expect(TaskPeopleAddRequestSchema.safeParse({ requestId: REQUEST, expectedPeopleRevision: 3, developerId: WREN_ID, role: "denied" }).success).toBe(false);
     expect(TaskPeopleAddRequestSchema.safeParse({ requestId: REQUEST, expectedPeopleRevision: 3, developerId: "x", role: "viewer" }).success).toBe(false);
     expect(TaskPeopleAddRequestSchema.safeParse({ requestId: REQUEST, expectedPeopleRevision: 3, developerId: WREN_ID, role: "viewer", companyId: COMPANY_B }).success).toBe(false);
-  });
-});
-
-describe("the task page API (people/candidates, people/add)", () => {
-  const ORIGIN = "https://code.example.test";
-  const CSRF = "c".repeat(43);
-  const SESSION_ID = "22222222-2222-4222-8222-222222222222";
-  const cookie = `__Host-agentx_review_session=${SESSION_ID}; __Host-agentx_review_csrf=${CSRF}`;
-  const api = (suffix: string) => `/review/${TASK_A}/task/api/${suffix}`;
-  const pageDeps = (overrides: Record<string, unknown> = {}) => {
-    const calls: Array<{ name: string; input?: unknown; caller: DeveloperCaller }> = [];
-    return {
-      calls,
-      deps: {
-        origin: ORIGIN,
-        authenticateSession: async (sessionId: string) => (sessionId === SESSION_ID ? GALE_CALLER : undefined),
-        taskState: async () => ({ revision: 4, waiting: false, stage: "Coding plan", documents: [], commentSeq: 0, canRead: true, canComment: true, canSuggest: false, canDecide: false, canAsk: false, canManagePeople: true, canTakeOwnership: false }),
-        listComments: async () => ({ comments: [] }),
-        createComment: async () => ({}) as never, editComment: async () => ({}) as never, deleteComment: async () => ({}) as never,
-        setSuggestion: async () => ({}) as never, decide: async () => ({ revision: 5 }),
-        getPeopleCandidates: async (who: DeveloperCaller) => { calls.push({ name: "candidates", caller: who }); return { candidates: [{ developerId: WREN_ID, name: "Wren Cloud" }], complete: true }; },
-        addPeople: async (who: DeveloperCaller, _taskId: string, input: unknown) => { calls.push({ name: "add", caller: who, input }); return { status: "PENDING" as const, requestId: REQUEST, confirmationUrl: `${ORIGIN}/review/${TASK_A}/task/people/confirm/${REQUEST}`, expiresAt: new Date(T0).toISOString() }; },
-        ...overrides,
-      } as never,
-    };
-  };
-  const call = async (deps: never, request: { method: string; path: string; body?: string; headers: Record<string, string> }) => {
-    const response = await createTaskWebApi(deps)({ requestId: "r", ...request }, new URL(`${ORIGIN}${request.path}`));
-    return { status: response.statusCode, json: JSON.parse(response.body) as Record<string, unknown> };
-  };
-
-  it("serves the candidates read (GET only) with the session's own caller", async () => {
-    expect(TASK_PAGE_API.test(api("people/candidates"))).toBe(true);
-    const h = pageDeps();
-    await expect(call(h.deps, { method: "GET", path: api("people/candidates"), headers: { cookie } })).resolves.toMatchObject({ status: 200, json: { candidates: [{ developerId: WREN_ID, name: "Wren Cloud" }] } });
-    expect(h.calls).toEqual([{ name: "candidates", caller: GALE_CALLER }]);
-    expect((await call(h.deps, { method: "POST", path: api("people/candidates"), body: "{}", headers: { cookie, origin: ORIGIN, "x-agentx-csrf": CSRF, "content-type": "application/json" } })).status).toBe(405);
-  });
-
-  it("takes an addition only same-origin with the CSRF header and a strict body", async () => {
-    const h = pageDeps();
-    const body = JSON.stringify({ requestId: REQUEST, expectedPeopleRevision: 3, developerId: WREN_ID, role: "commenter" });
-    const headers = { cookie, origin: ORIGIN, "x-agentx-csrf": CSRF, "content-type": "application/json" };
-    await expect(call(h.deps, { method: "POST", path: api("people/add"), body, headers })).resolves.toMatchObject({ status: 202, json: { status: "PENDING", requestId: REQUEST } });
-    expect(h.calls).toEqual([{ name: "add", caller: GALE_CALLER, input: JSON.parse(body) as unknown }]);
-    expect((await call(h.deps, { method: "POST", path: api("people/add"), body, headers: { ...headers, origin: "https://evil.example" } })).status).toBe(403);
-    expect((await call(h.deps, { method: "POST", path: api("people/add"), body, headers: { ...headers, "x-agentx-csrf": "d".repeat(43) } })).status).toBe(403);
-    expect((await call(h.deps, { method: "POST", path: api("people/add"), body: JSON.stringify({ ...JSON.parse(body), companyId: COMPANY_B }), headers })).status).toBe(400);
-    expect(h.calls).toHaveLength(1);
-  });
-
-  it("answers not found when the deployment wires no addition", async () => {
-    const h = pageDeps({ getPeopleCandidates: undefined, addPeople: undefined });
-    expect((await call(h.deps, { method: "GET", path: api("people/candidates"), headers: { cookie } })).status).toBe(404);
   });
 });

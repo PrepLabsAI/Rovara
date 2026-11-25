@@ -417,9 +417,9 @@ describe("the one read rule: no second copy of the rule", () => {
     expect(where(/\baccess\??\.canRead\b/u)).toEqual(["core/task-flow/read-rule.ts"]);
   });
 
-  it("the old People page rule (`resolveCoreTaskAccess`, `resolveTaskReadAccess`) is asked only by the files that bind it as the rule's seam and by the old page routes: a new reader of it fails here", () => {
+  it("the old People page rule (`resolveCoreTaskAccess`) is asked only by the files that bind it as the rule's seam: a new reader of it fails here (D1-2: `resolveTaskReadAccess` and the old page routes that asked it are deleted)", () => {
     expect(where(/\b(resolveCoreTaskAccess|resolveTaskReadAccess)\b/u)).toEqual([
-      "aws/core-task-rule-routes.ts", "aws/developer-tasks.ts", "aws/task-e2e-artifact.ts", "developer/page-comment-access.ts", "developer/task-access.ts", "developer/task-code-routes.ts",
+      "aws/core-task-rule-routes.ts", "developer/task-access.ts", "developer/task-code-routes.ts",
     ]);
   });
 

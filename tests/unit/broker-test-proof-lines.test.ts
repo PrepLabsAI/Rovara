@@ -1,10 +1,8 @@
 // TESTPROOF: the pull request shows one or two lines about test-proof.json, only when it is bound to the task's current candidate.
-import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { createCandidateManifest, createWorkflowSnapshot, WorkflowSnapshotSchema, AGENT_REPLIES_UNCONFIRMED_WORDS, type TestProof } from "../../packages/contracts/src/index.js";
-import { loadTestProofLines, testProofPullRequestLines } from "../../packages/broker/src/developer/test-proof-lines.js";
-import { workflowPullRequestStatusLines } from "../../packages/broker/src/aws/developer-tasks.js";
-import { expectLinearScalingAsync } from "../support/scaling.js";
+import { type TestProof } from "../../packages/contracts/src/index.js";
+import { testProofPullRequestLines } from "../../packages/broker/src/developer/test-proof-lines.js";
+import { expectLinearScaling } from "../support/scaling.js";
 
 const inert = (line: string) => line.replaceAll("@", "@‍").replace(/<[^>]*>/gu, "").trim();
 const DIGEST = "a".repeat(64);
@@ -28,98 +26,31 @@ describe("test proof lines for the pull request", () => {
   it("is silent when no test changed", () => {
     expect(testProofPullRequestLines({ ...proof([]), status: "no_changed_tests", note: "no_changed_tests" }, DIGEST, inert)).toEqual([]);
   });
-
-  it("is part of the pull request status lines when given, and leaves them as they were when not", () => {
-    const now = new Date().toISOString();
-    const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }]);
-    const workflow = WorkflowSnapshotSchema.parse({ ...createWorkflowSnapshot({ taskId: randomUUID(), ownerId: "b".repeat(64), now }), revision: 5, stage: "PULL_REQUEST", state: "READY", candidate,
-      verification: { candidateDigest: candidate.digest, producer: "t", environmentId: "w", recordedAt: now, results: [{ checkId: "required-1", status: "PASS" }] },
-      reviews: ["CRITIC", "SECURITY"].map((role) => ({ operationId: randomUUID(), candidateDigest: candidate.digest, role, provider: "t", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: now })) });
-    const plain = workflowPullRequestStatusLines(workflow);
-    expect(workflowPullRequestStatusLines(workflow, ["Test proof: 1 check fails on the original code and passes now"])).toEqual([...plain, "Test proof: 1 check fails on the original code and passes now"]);
-  });
-
-  it("does not count a review that could not run as passed in the pull request text", () => {
-    const now = new Date().toISOString();
-    const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }]);
-    const workflow = WorkflowSnapshotSchema.parse({ ...createWorkflowSnapshot({ taskId: randomUUID(), ownerId: "b".repeat(64), now }), revision: 5, stage: "PULL_REQUEST", state: "READY", candidate,
-      verification: { candidateDigest: candidate.digest, producer: "t", environmentId: "w", recordedAt: now, results: [{ checkId: "required-1", status: "PASS" }] },
-      reviews: ["CRITIC", "SECURITY"].map((role) => ({ operationId: randomUUID(), candidateDigest: candidate.digest, role, provider: "t", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: now })) });
-    const failed = { ...workflow, reviews: workflow.reviews!.map((review) => review.role === "CRITIC" ? { ...review, status: "UNKNOWN", failureReason: "SESSION_FAILED" } : review) } as never;
-    const lines = workflowPullRequestStatusLines(failed);
-    expect(lines.join("\n")).toContain("code review could not finish");
-    expect(lines.join("\n")).not.toContain("code review passed");
-  });
-
-  it("reads the newest test-proof.json bound to the current candidate from the task's own operations, and no other task's", async () => {
-    const task = { ownerKey: "owner", workspaceId: "ws" };
-    const objects = new Map<string, string>([
-      ["private/owner/ws/op-1/a1", JSON.stringify(proof([item("proves_change")], OLD_DIGEST))],
-      ["private/owner/ws/op-2/a2", JSON.stringify(proof([item("proves_change")]))],
-      ["private/other/ws/op-3/a3", JSON.stringify(proof([item("does_not_prove")]))],
-    ]);
-    const actions = {
-      operations: async () => [
-        { id: "op-1", kind: "task", status: "SUCCEEDED", createdAt: "2026-10-27T01:00:00.000Z" },
-        { id: "op-2", kind: "task", status: "SUCCEEDED", createdAt: "2026-10-27T02:00:00.000Z" },
-        { id: "op-3", kind: "task", status: "SUCCEEDED", createdAt: "2026-10-27T03:00:00.000Z" },
-      ],
-      artifacts: async (_ws: string, operationId: string) => [{ name: "test-proof.json", objectKey: `private/${operationId === "op-3" ? "other" : "owner"}/ws/${operationId}/a${operationId.slice(-1)}` }],
-      readArtifact: async (key: string) => objects.get(key) ?? "",
-    };
-    expect(await loadTestProofLines(actions, task, DIGEST, inert)).toEqual(["Test proof: 1 check fails on the original code and passes now"]);
-    expect(await loadTestProofLines(actions, task, "c".repeat(64), inert)).toEqual([]);
-    expect(await loadTestProofLines({ ...actions, readArtifact: async () => { throw new Error("S3 down"); } }, task, DIGEST, inert)).toEqual([]);
-  });
-});
-
-
-describe("v1 reply provenance", () => {
-  const task = { ownerKey: "owner", workspaceId: "ws" };
-  const facts = (checkId = "readiness:0", taskMade = 1) => [{ checkId, taskMade, counted: 0 }];
-  const load = async (newest: unknown, older: unknown = proof([item("proves_change")])) => {
-    const reads: string[] = [];
-    const listings: string[] = [];
-    const lines = await loadTestProofLines({
-      operations: async () => ["old", "new"].map((id, i) => ({ id, kind: "task", status: "SUCCEEDED", createdAt: `2026-11-14T0${i}:00:00.000Z` })),
-      artifacts: async (_ws, id) => { listings.push(id); return [{ name: "test-proof.json", objectKey: `private/owner/ws/${id}/proof` }]; },
-      readArtifact: async (key) => { reads.push(key); const value = key.includes("/new/") ? newest : older; return typeof value === "string" ? value : JSON.stringify(value); },
-    }, task, DIGEST, inert);
-    return { lines, reads, listings };
-  };
-  const countLine = "Test proof: 1 check fails on the original code and passes now";
-  it("qualifies only a marked proving check on the newest candidate", async () => {
-    const value = { ...proof([item("proves_change"), item("does_not_prove", "vacuous")]), scriptedReplies: facts() };
-    const result = await load(value);
-    expect(result.lines).toEqual([`${AGENT_REPLIES_UNCONFIRMED_WORDS}: ${countLine}`, "Warning: 1 check also passes on the original code, so it does not prove the change (vacuous)"]);
-    expect(result.reads).toEqual(["private/owner/ws/new/proof"]);
-    // an independent reply (parked by DEC 192a) never counts: the same words as replies written in this task
-    expect((await load({ ...proof([item("proves_change")]), scriptedReplies: [{ checkId: "readiness:0", taskMade: 0, counted: 0, independent: 1 }] })).lines).toEqual([`${AGENT_REPLIES_UNCONFIRMED_WORDS}: ${countLine}`]);
-    for (const scriptedReplies of [undefined, [], facts("readiness:0", 0), facts("readiness:1"), [{ checkId: "readiness:0", taskMade: 0, counted: 0, independent: 0 }]]) {
-      expect((await load({ ...proof([item("proves_change")]), scriptedReplies })).lines).toEqual([countLine]);
-    }
-    expect((await load({ ...proof([item("does_not_prove", "vacuous")]), scriptedReplies: facts() })).lines).toEqual(["Warning: 1 check also passes on the original code, so it does not prove the change (vacuous)"]);
-    expect((await load({ ...proof([item("proves_change")], OLD_DIGEST), scriptedReplies: facts() })).lines).toEqual([countLine]);
-  });
-  it("uses fixed qualifier words without leaking hostile proving labels and bounds large input", async () => {
+  // Re-pointed (D1-2 test review E4): this was proved through the deleted v1 loader; the live reader the core's PR text uses is testProofPullRequestLines (core/proof/proof-table.ts).
+  it("says the vacuous check without leaking a hostile proving label, refuses an oversize label whole, and scales linearly", () => {
     const secret = `gh${"p"}_${"q".repeat(36)}`;
     const hostile = `[nested [link]](https://evil.example) ![image][ref]\n[ref]: https://evil.example\n@team #123 <img>\n# heading\n> quote\n---\n\`\`\`\n~~~\n\u200b\u202e\ufe0f ${secret}`;
-    const value = { ...proof([item("proves_change", hostile)]), scriptedReplies: facts() };
-    expect((await load(value)).lines).toEqual([`${AGENT_REPLIES_UNCONFIRMED_WORDS}: ${countLine}`]);
-    // Scaling checks: the cost of refusing an oversize label must not grow faster than the label (8N stays at or under 256 KiB so it stays in CPU cache; the full 1 MiB label is checked once below), nor that of 200 checks faster than their number.
+    // with an identity `inert`, so what is checked is the function's own sanitising (backticks, angle brackets, newlines, the secret), not the caller's
+    const lines = testProofPullRequestLines(proof([item("does_not_prove", hostile)]), DIGEST, (line) => line);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("does not prove the change");
+    // no secret, no markup that could reshape the description, and one line
+    for (const forbidden of [secret, "<", ">", "`", "\n"]) expect(lines[0], forbidden).not.toContain(forbidden);
+    // the cost of refusing an oversize label does not grow faster than the label, and the 1 MiB label is refused whole (the proof is then ignored)
     let refused: string[] | undefined;
-    await expectLinearScalingAsync((size) => {
-      const oversize = { ...value, items: [item("proves_change", hostile + "x".repeat(size))] };
-      return async () => { refused = (await load(oversize)).lines; };
+    expectLinearScaling((size) => {
+      const oversize = proof([item("does_not_prove", hostile + "x".repeat(size))]);
+      return () => { refused = testProofPullRequestLines(oversize, DIGEST, inert); };
     }, { n: 32_768, label: "refusing an oversize proof label" });
     expect(refused).toEqual([]);
-    expect((await load({ ...value, items: [item("proves_change", hostile + "x".repeat(1_048_576))] })).lines).toEqual([]);
+    expect(testProofPullRequestLines(proof([item("does_not_prove", hostile + "x".repeat(1_048_576))]), DIGEST, inert)).toEqual([]);
+    // 200 checks are said once, in one line, and the cost scales with their number
     let counted: string[] | undefined;
-    await expectLinearScalingAsync((count) => {
+    expectLinearScaling((count) => {
       const items = Array.from({ length: count }, (_, i) => item("proves_change", "x".repeat(1024), { checkId: `readiness:${i}` }));
-      const many = { ...proof(items), scriptedReplies: items.map(({ checkId }) => ({ checkId, taskMade: 1, counted: 0 })) };
-      return async () => { counted = (await load(many)).lines; };
+      const many = proof(items);
+      return () => { counted = testProofPullRequestLines(many, DIGEST, inert); };
     }, { n: 25, unitBytes: 1200, label: "200 proof checks" });
-    expect(counted).toEqual([`${AGENT_REPLIES_UNCONFIRMED_WORDS}: Test proof: 200 checks fail on the original code and pass now`]);
+    expect(counted).toEqual(["Test proof: 200 checks fail on the original code and pass now"]);
   });
 });

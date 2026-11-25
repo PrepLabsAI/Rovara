@@ -193,6 +193,8 @@ it("shares one recovery-index read across company passes in a scheduled invocati
   const otherId = "33333333-3333-4333-8333-333333333333";
   const original = (await w.h.store.get({ pk: `DEVTASK#${TASK_ID}`, sk: "META" }))!;
   await w.h.store.put({ item: { ...original, pk: `DEVTASK#${otherId}`, taskId: otherId, companyId: B } });
+  const { engineStampKey } = await import("../../packages/broker/src/core-host/engine-stamp.js");
+  await w.h.store.put({ item: { ...(await w.h.store.get(engineStampKey(TASK_ID)))!, ...engineStampKey(otherId), taskId: otherId } });
   await w.h.store.put({ item: { ...recoveryRowKey(otherId), taskId: otherId, kind: "tracking", nextAttemptAt: 0 } });
   const query = vi.spyOn(w.h.store, "query");
   const services = [ORG, B].map((companyId) => createBrokerCoreServices({ companyId, flow: { ...w.h.flow, deps: { ...w.h.deps, companyId } }, registry: w.registry,

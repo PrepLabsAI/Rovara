@@ -59,7 +59,7 @@ describe("pinned test guard", () => {
       "tests/unit/core-host-dev-routes.test.ts": 59,
       "tests/contract/developer-token-verifier.test.ts": 10,
       "tests/contract/vitest-config.test.ts": 6,
-      "tests/contract/task-people.test.ts": 36,
+      "tests/contract/task-people.test.ts": 34,
       "tests/contract/admin-change-plans.test.ts": 12,
       "tests/contract/admin-change-routes.test.ts": 43,
       "tests/contract/signin-workspace-hint.test.ts": 15,
@@ -177,6 +177,32 @@ describe("pinned test guard", () => {
   it("cannot hide a deletion by dropping a registry row or lowering its floor", () => {
     expect(validatePinnedHistory(registry([{ ...pin, path: "tests/new.test.ts" }]), registry())).toEqual([`${path}: historical pin removed; retain it with replaced-by when moving`]);
     expect(validatePinnedHistory(registry(), registry([{ ...pin, minimumTests: 2 }]))).toEqual([`${path}: minimum lowered from 2 to 1`]);
+  });
+
+  // D1-2 (DEC 254zzz457): the one reviewed way a floor goes down or a pin stops binding a file, kept visible in the registry.
+  it("allows a floor to be lowered, or a pin retired, only with a reviewed entry that names the held floor exactly (and a retired pin only for a file that is gone)", () => {
+    const before = registry([{ ...pin, minimumTests: 4 }]);
+    const reviewed = (kind: "lowered" | "retired", from: number) => ({ kind, from, decision: "DEC 254zzz457", reason: "the subject was deleted" });
+    // unreviewed lowering and removal stay refused
+    expect(validatePinnedHistory(registry([{ ...pin, minimumTests: 3 }]), before)).toEqual([`${path}: minimum lowered from 4 to 3`]);
+    expect(validatePinnedHistory(registry([{ ...pin, path: "tests/contract/other.test.ts" }]), before)).toEqual([`${path}: historical pin removed; retain it with replaced-by when moving`]);
+    // a reviewed lowering naming exactly the held floor is accepted
+    expect(validatePinnedHistory(registry([{ ...pin, minimumTests: 3, reviewed: reviewed("lowered", 4) }]), before)).toEqual([]);
+    // ... but not one naming a floor above it (a free number), below it, or one that does not lower
+    for (const from of [100, 5, 3]) {
+      expect(validatePinnedHistory(registry([{ ...pin, minimumTests: 2, reviewed: reviewed("lowered", from) }]), before), `from ${from}`).toEqual([`${path}: minimum lowered from 4 to 2`]);
+    }
+    expect(validate(registry([{ ...pin, minimumTests: 3, reviewed: reviewed("lowered", 3) }]))).toEqual(["Invalid pinned test entry 0"]);
+    // a reviewed retirement keeps the held floor and binds no file ...
+    const retired = registry([{ ...pin, minimumTests: 4, reviewed: reviewed("retired", 4) }]);
+    expect(validatePinnedHistory(retired, before)).toEqual([]);
+    // ... but only for a test file that is gone: a live file is never unpinned by editing the registry
+    expect(validate(retired, {})).toEqual([]);
+    expect(validate(retired, { [path]: body })).toEqual([`${path}: retired, but the test file still exists`]);
+    // ... and a retirement naming another floor than its own is no valid pin (a retired pin keeps its floor)
+    expect(validatePinnedHistory(registry([{ ...pin, minimumTests: 4, reviewed: reviewed("retired", 9) }]), before)).toEqual(["Invalid pinned test registry history"]);
+    // an entry that is not a well-formed review is no pin at all
+    expect(validate(registry([{ ...pin, reviewed: { kind: "lowered", from: 5, reason: "x" } }]))).toEqual(["Invalid pinned test entry 0"]);
   });
 
   it("allows a historical pin to move explicitly and its floor to grow", () => {

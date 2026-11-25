@@ -4,10 +4,12 @@ import { randomUUID } from "node:crypto";
 import { DISPATCH_GAVE_UP_CODES, DISPATCH_GAVE_UP_WORDS, WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED } from "@agentx/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { createDispatcherHandler, type DispatchLogEntry } from "../../packages/broker/src/aws/dispatcher.js";
-import { COMBINED_CHECKS_WORKER_REFUSAL, DeliveryFailure, DeliveryRefusal } from "../../packages/broker/src/aws/ec2-delivery.js";
+import { DeliveryFailure, DeliveryRefusal } from "../../packages/broker/src/aws/ec2-delivery.js";
 
 // Built at run time: no key-shaped literal is in this file.
 const token = (): string => ["ghp_", "Ab12".repeat(9)].join("");
+// D1-2: the combined-checks refusal sentence went with the old workflow engine's application admissions; any broker-written refusal sentence stands for it here.
+const COMBINED_CHECKS_WORKER_REFUSAL = "This worker can't run combined browser and API checks yet; retry once it restarts.";
 const ARN = "arn:aws:sqs:us-east-1:111122223333:other-company-queue";
 const PRIVATE_IP = "10.0.3.14";
 

@@ -3,7 +3,6 @@ import { PLAN_DRY_RUN_CLASSES, PlanQualityFindingSchema, type PlanDryRunClass, t
 import type { PlanDryRunOutcome } from "./plan-dry-run-results.js";
 import { notTriedOf, type PlanNotTriedClass } from "./plan-check-tried.js";
 import { planDryRunWarnings } from "./plan-dry-run-results.js";
-import type { PlanQualityContext } from "./plan-quality.js";
 
 /**
  * Plan self-check wiring (the pure half): what the broker keeps of a plan's quality check, when it asks the planner to
@@ -151,40 +150,6 @@ export function planRevisionPrompt(findings: readonly PlanQualityFinding[]): str
   ].join("\n");
 }
 
-/** The part of the planning context the rules read, as the broker keeps it on the planning operation. */
-export const PlanQualityContextSchema = z.object({
-  targets: z.array(z.object({ targetId: z.string().max(200), kind: z.string().max(40) }).strict()).max(64),
-  mockFixtures: z.array(z.object({ componentId: z.string().max(200), requestedTargetIds: z.array(z.string().max(200)).max(64) }).strict()).max(64),
-  executableKinds: z.array(z.object({ kind: z.string().max(40), steps: z.array(z.string().max(60)).max(64), assertions: z.array(z.string().max(60)).max(64) }).strict()).max(8).optional(),
-  unavailableReasons: z.array(z.object({ targetId: z.string().max(200), reason: z.string().max(80) }).strict()).max(64).optional(),
-}).strict();
-
-/** The planning context as the rules read it, or undefined when the planner was given none (no E2E policy, or its context was unknown). */
-export function planQualityContextOf(context: {
-  status: string;
-  targets?: ReadonlyArray<{ targetId: string; kind: string }>;
-  mockFixtures?: ReadonlyArray<{ componentId: string; requestedTargetIds: readonly string[] }>;
-  executableKinds?: ReadonlyArray<{ kind: string; steps: readonly string[]; assertions: readonly string[] }> | undefined;
-  unavailableReasons?: ReadonlyArray<{ targetId: string; reason: string }> | undefined;
-} | undefined): PlanQualityContext | undefined {
-  if (context === undefined || context.status !== "available" || context.targets === undefined || context.mockFixtures === undefined) return undefined;
-  const parsed = PlanQualityContextSchema.safeParse({
-    targets: context.targets.map((target) => ({ targetId: target.targetId, kind: target.kind })),
-    mockFixtures: context.mockFixtures.map((fixture) => ({ componentId: fixture.componentId, requestedTargetIds: [...fixture.requestedTargetIds] })),
-    ...(context.executableKinds === undefined ? {} : { executableKinds: context.executableKinds.map((entry) => ({ kind: entry.kind, steps: [...entry.steps], assertions: [...entry.assertions] })) }),
-    ...(context.unavailableReasons === undefined ? {} : { unavailableReasons: context.unavailableReasons.map((entry) => ({ targetId: entry.targetId, reason: entry.reason })) }),
-  });
-  return parsed.success ? parsed.data : undefined;
-}
-
-/** The context a planning operation recorded, read back; anything that does not parse reads as "unknown" (the rules that need it are skipped). */
-export function recordedPlanQualityContext(value: unknown): PlanQualityContext | undefined {
-  const parsed = PlanQualityContextSchema.safeParse(value);
-  return parsed.success ? parsed.data : undefined;
-}
-
-/** T7c: how long a plan is held back for its check on the current app, from the moment it is held. */
-export const PLAN_GROUNDING_HOLD_MS = 15 * 60_000;
 
 /** The coding plan a task holds back while its must-not-change checks run on the current app (kept on the task row until the one finish clears it). */
 export interface PlanGroundingHold {
@@ -194,32 +159,4 @@ export interface PlanGroundingHold {
   heldAt: string; deadlineAt: string;
 }
 
-const GROUNDING_REASON_WORDS: Readonly<Record<string, string>> = {
-  "worker-too-old": "the runner is too old for this check",
-  "not-exported": "the current code was not available to the runner",
-  "runtime-not-ready": "the test environment was not ready",
-  "accounts-not-ready": "the test accounts were not ready",
-  "refused": "the check was refused for this plan",
-  "start-failed": "the check could not be started",
-  "run-failed": "the check run failed",
-  "unverified": "its result could not be verified",
-  "timed-out": "it ran out of time",
-  "ai-only": "these checks use AI navigation, which is not run before approval",
-  "disabled": "it is turned off",
-  "stopped": "it was stopped",
-};
 
-/** The note for a plan whose current-app check did not give a result: a fixed sentence per fixed reason. */
-export function groundingNotCheckedNote(reason: string): PlanSelfCheckNote {
-  return { code: "grounding-not-checked", ownerSentence: `Not checked against the current app: ${GROUNDING_REASON_WORDS[reason] ?? "it could not be run"}.` };
-}
-
-/** The note for scenarios that ran on the current app but could not be decided either way. */
-export function groundingUndecidedNote(count: number): PlanSelfCheckNote {
-  return { code: "grounding-undecided", ownerSentence: `${count === 1 ? "One check" : `${count} checks`} on the current app could not be decided either way.` };
-}
-
-/** What a held plan's check on the current app came to: scenarios that failed on the unchanged app (as findings) and ones undecided, or a fixed reason it gave no result. */
-export type GroundingOutcome =
-  | { kind: "checked"; findings: PlanQualityFinding[]; undecided: number }
-  | { kind: "unavailable"; reason: string };

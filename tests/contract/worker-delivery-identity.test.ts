@@ -68,7 +68,7 @@ function setup() {
     sign: (message) => world.sign(message),
     post, verifyMachine, failOperation,
     progress: async () => undefined,
-    applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined,
+    
     now: () => NOW,
   });
   return { world, workspaceA, workspaceB, record, ec2, lines, network, post, failOperation, deliver };
@@ -205,7 +205,7 @@ describe("the check before every POST", () => {
       sessions: fixture.world.sessions, binding: async () => BINDING, sign,
       post: async () => { order.push("post"); return { status: 200, body: "{}" }; },
       verifyMachine: async () => { order.push("verify"); return { ok: true }; }, failOperation: async () => undefined,
-      progress: async () => undefined, applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined, now: () => NOW,
+      progress: async () => undefined, now: () => NOW,
     });
     expect(await fresh(record, record.invocation)).toBe("DELIVERED");
     expect(order).toEqual(["sign", "verify", "post"]);
@@ -256,7 +256,7 @@ describe("the project setup path (WDI-SETUP)", () => {
       guardProjectSetupDispatch: async () => "ALLOWED",
       sign: async () => new Uint8Array([1]), post, workerFeatures: async () => ["project.setupSmoke"],
       verifyMachine, failOperation: (failed, error) => failProjectSetupOperation(db, TABLE, failed, error),
-      progress: async () => undefined, applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined, now: () => NOW,
+      progress: async () => undefined, now: () => NOW,
     });
     // The session's own binding digest is checked by ensureSession: use the digest of this binding.
     db.set({ ...db.get(...Object.values(projectSetupSessionKey(setupId)) as [string, string])!, bindingDigest: projectSetupBindingDigest(binding) });

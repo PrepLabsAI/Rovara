@@ -6,8 +6,6 @@ import {
   generalFakesPayloadOf, generalFakesRoundLine, proofHolds, workerProjectDefinition, type TestProof,
 } from "@agentx/contracts";
 import { withGeneralFakeFacts } from "../../packages/worker/src/verification/test-proof.js";
-import { MOCK_PROOF_PREFIX } from "../../packages/broker/src/core/proof/proof-table.js";
-import { loadTestProofLines } from "../../packages/broker/src/developer/test-proof-lines.js";
 import { definition } from "../support/task-flow-harness.js";
 
 const DIGEST = "1".repeat(64);
@@ -74,20 +72,4 @@ describe("never proof", () => {
     expect(proofHolds({ facts: { proof: proof({ madeByRovara: [{ checkId: "readiness:0", served: 1 }] }) }, mode: "hold" }).provenCount).toBe(0);
   });
 
-  const task = { ownerKey: "owner-key", workspaceId: "ws-1" };
-  const key = "private/owner-key/ws-1/op-1/test-proof.json";
-  const actions = (stored: unknown) => ({
-    operations: async () => [{ id: "op-1", kind: "task", status: "SUCCEEDED", createdAt: "2026-11-15T10:00:00.000Z" }] as never,
-    artifacts: async () => [{ name: "test-proof.json", objectKey: key }],
-    readArtifact: async () => JSON.stringify(stored),
-  });
-
-
-
-  it("the v1 pull request line says first that it rests on a Rovara-made mock, and an unreadable part gives no line", async () => {
-    const inert = (line: string) => line;
-    expect(await loadTestProofLines(actions(proof()), task, DIGEST, inert)).toEqual(["Test proof: 1 check fails on the original code and passes now"]);
-    expect(await loadTestProofLines(actions(proof({ madeByRovara: [{ checkId: "readiness:0", served: 1 }] })), task, DIGEST, inert)).toEqual([`${MOCK_PROOF_PREFIX}Test proof: 1 check fails on the original code and passes now`]);
-    expect(await loadTestProofLines(actions({ ...proof(), madeByRovara: "broken" }), task, DIGEST, inert)).toEqual([]);
-  });
 });

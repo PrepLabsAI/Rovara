@@ -7,7 +7,6 @@ import { adaptHttpApiEvent } from "../../packages/broker/src/aws/lambda.js";
 import { handleGithubWebhookRoute, GITHUB_WEBHOOK_MAX_BYTES } from "../../packages/broker/src/aws/github-webhook-route.js";
 import { GITHUB_DELIVERY_TTL_SECONDS, GITHUB_WEBHOOK_PER_MINUTE, hintTrackingRow, resetGithubWebhookWindows } from "../../packages/broker/src/aws/github-core-webhooks.js";
 import { GithubInstallationBindings } from "../../packages/broker/src/aws/github-credentials.js";
-import { handleGithubWebhook, listDueGithubWebhookDeliveries, reserveGithubWebhookDelivery } from "../../packages/broker/src/aws/github-webhooks.js";
 import { stampItem } from "../../packages/broker/src/core-host/engine-stamp.js";
 import { recoveryRowKey, taskRecordKey } from "../../packages/broker/src/core/merge/store.js";
 import { githubWorkflowPullRequestKey } from "../../packages/broker/src/developer/task-records.js";
@@ -38,14 +37,16 @@ function seed(db: FakeDynamoDb, input: Seed): void {
   const url = `https://github.com/${repo}/pull/${input.number}`;
   db.set({ ...taskRecordKey(input.taskId), companyId: input.company, project: "demo", startingRevision: 1, ...(input.ended === true ? { closedAt: "2026-11-22T00:00:00.000Z" } : {}),
     workflow: { stage: "WAIT_FOR_MERGE", pullRequests: [{ repositoryId: "demo", number: input.number, url, candidateDigest: DIGEST }] } });
-  if (input.engine !== undefined) db.set(stampItem(input.company, input.taskId, { engine: input.engine, areas: { flow: input.engine, build: input.engine, merge: input.engine }, flags: "fixture", stampedAt: "2026-11-22T00:00:00.000Z" }).item);
+  // D1-2c: a task of the retired workflow engine carries no mark at all; only a core task has the stamp item.
+  if (input.engine === "workflow") db.delete(`TASK_ENGINE#${input.taskId}`, "STAMP");
+  if (input.engine === "core") db.set(stampItem(input.company, input.taskId, { engine: input.engine, areas: { flow: input.engine, build: input.engine, merge: input.engine }, flags: "fixture", stampedAt: "2026-11-22T00:00:00.000Z" }).item);
   db.set({ ...githubWorkflowPullRequestKey(repo, input.number), entityType: "GITHUB_WORKFLOW_PR", repositoryFullName: repo, repositoryId: "demo", number: input.number, url, taskId: input.taskId, workspaceId: "workspace", candidateDigest: DIGEST });
   db.set({ ...projectRevisionKey(input.company, "demo", 1), definition: { repositories: [{ name: "demo", url: `https://github.com/${input.pinned ?? repo}.git` }] } });
   if (input.sha !== undefined) db.set({ ...prHeadKey(input.company, repo, input.sha), entityType: "PR_HEAD", orgId: input.company, taskId: input.taskId, repositoryId: "demo", number: input.number });
   if (input.tracking !== null) db.set({ ...recoveryRowKey(input.taskId), entityType: "WORKFLOW_MERGE_RECOVERY", kind: "tracking", taskId: input.taskId, nextAttemptAt: NOW + 240_000, attempts: 0, quiet: 3, ...input.tracking });
 }
 
-async function world(options: { perMinute?: number; legacyUnscoped?: boolean } = {}) {
+async function world(options: { perMinute?: number } = {}) {
   const db = new FakeDynamoDb();
   const bindings = new GithubInstallationBindings(db, "state");
   await bindings.backfill(async () => []);
@@ -62,8 +63,8 @@ async function world(options: { perMinute?: number; legacyUnscoped?: boolean } =
     state.sequence += 1;
     const headers = { "x-github-event": event, "x-github-delivery": extra.deliveryId ?? `550e8400-e29b-41d4-a716-${String(state.sequence).padStart(12, "0")}`,
       "x-hub-signature-256": `sha256=${createHmac("sha256", extra.signWith ?? extra.secret ?? SECRET).update(raw).digest("hex")}`, ...extra.headers };
-    return handleGithubWebhookRoute({ headers, body: raw, secret, isSecretMissing: () => false, now: () => state.now, log: (entry) => logs.push(entry), legacy,
-      ...(extra.core === false ? {} : { core: { documentClient: db, tableName: "state", bindings, ...(options.perMinute === undefined ? {} : { perMinute: options.perMinute }), ...(options.legacyUnscoped === true ? { legacyUnscoped: true } : {}) } }) });
+    return handleGithubWebhookRoute({ headers, body: raw, secret, isSecretMissing: () => false, now: () => state.now, log: (entry) => logs.push(entry), installation: legacy,
+      ...(extra.core === false ? {} : { core: { documentClient: db, tableName: "state", bindings, ...(options.perMinute === undefined ? {} : { perMinute: options.perMinute }) } }) });
   };
   const row = (taskId = TASK_A) => db.get(recoveryRowKey(taskId).pk, recoveryRowKey(taskId).sk)!;
   const snapshot = () => JSON.stringify(db.find(() => true).sort((x, y) => `${String(x.pk)}|${String(x.sk)}`.localeCompare(`${String(y.pk)}|${String(y.sk)}`)));
@@ -238,7 +239,7 @@ describe("the signature is checked on the raw body, before any work", () => {
       const w = await world();
       const raw = JSON.stringify(payload);
       const request = adaptHttpApiEvent(eventOf(shape, event, raw, sign(raw, signWith)));
-      const answer = await handleGithubWebhookRoute({ headers: request.headers, body: request.body, secret: async () => SECRET, isSecretMissing: () => false, now: () => NOW, log: (entry) => w.logs.push(entry), legacy: w.legacy,
+      const answer = await handleGithubWebhookRoute({ headers: request.headers, body: request.body, secret: async () => SECRET, isSecretMissing: () => false, now: () => NOW, log: (entry) => w.logs.push(entry), installation: w.legacy,
         core: { documentClient: w.db, tableName: "state", bindings: w.bindings } });
       return { answer, w };
     };
@@ -259,101 +260,6 @@ describe("the signature is checked on the raw body, before any work", () => {
     });
   });
 
-  describe("signed deliveries the legacy handler refuses: ignored (202), conflict (409) or rejected (403), every one logged (HTTP v2 event shape)", () => {
-    const D = "c95a50d8-e79b-11f1-9a76-3cdc2bdcb8fe";
-    const prComment = (overrides: Record<string, unknown> = {}) => ({ action: "created", installation: { id: 77 }, repository: { id: 42, full_name: "example/demo" }, issue: { number: 7, pull_request: { url: "https://api.github.com/x" } },
-      comment: { id: 1, body: "private words", html_url: "https://github.com/example/demo/pull/7#issuecomment-1", updated_at: "2026-11-23T12:00:00Z", user: { login: "reviewer" } }, ...overrides });
-    // No core bindings: the delivery goes to the legacy handler (real handleGithubWebhook over the fake table), as on an install without them.
-    const legacyRoute = async (event: string, payload: unknown, options: { signWith?: string; deliveryId?: string; raw?: string; authorize?: boolean | "not_linked"; world?: Awaited<ReturnType<typeof world>> } = {}) => {
-      const w = options.world ?? await world();
-      const raw = options.raw ?? JSON.stringify(payload);
-      const signature = `sha256=${createHmac("sha256", options.signWith ?? SECRET).update(raw).digest("hex")}`;
-      const request = adaptHttpApiEvent({ rawPath: "/v1/github/webhooks", body: raw, requestContext: { http: { method: "POST" }, requestId: "v2" },
-        headers: { "x-github-delivery": options.deliveryId ?? D, "x-github-event": event, "x-hub-signature-256": signature } });
-      const answer = await handleGithubWebhookRoute({ headers: request.headers, body: request.body, secret: async () => SECRET, isSecretMissing: () => false, now: () => NOW, log: (entry) => w.logs.push(entry),
-        legacy: (secret) => handleGithubWebhook({ documentClient: w.db, tableName: "state", rawBody: raw, headers: request.headers, secret, now: () => new Date(NOW).toISOString(),
-          authorizeRepository: async () => options.authorize ?? true, process: async () => undefined }) });
-      return { answer, w };
-    };
-    const noDeliveryRow = (w: Awaited<ReturnType<typeof world>>) => expect(w.db.find((item) => String(item.pk).startsWith("GITHUB_DELIVERY#"))).toEqual([]);
-
-    it("(a) a comment on a PLAIN ISSUE (not a pull request) is 202 ignored with an info line, and writes nothing", async () => {
-      const { answer, w } = await legacyRoute("issue_comment", prComment({ issue: { number: 7 } }));
-      expect(answer).toEqual({ status: 202, body: { ignored: true, reason: "payload_unsupported" } });
-      expect(w.logs).toEqual([{ event: "github_webhook.ignored", level: "info", hook: "issue_comment", action: "created", reason: "payload_unsupported", deliveryId: D }]);
-      expect(JSON.stringify(w.logs)).not.toContain("private words");
-      expect(w.writesSince()).toEqual([]);
-      noDeliveryRow(w);
-    });
-
-    it("(a) a payload that does not parse, and an event the legacy path does not take, are 202 ignored too", async () => {
-      const bad = await legacyRoute("pull_request", { nonsense: true });
-      expect(bad.answer).toEqual({ status: 202, body: { ignored: true, reason: "payload_unsupported" } });
-      expect(bad.w.logs).toEqual([{ event: "github_webhook.ignored", level: "info", hook: "pull_request", reason: "payload_unsupported", deliveryId: D }]);
-      const unsupported = await legacyRoute("check_suite", checkSuite("completed"));
-      expect(unsupported.answer).toEqual({ status: 202, body: { ignored: true, reason: "event_unsupported" } });
-      expect(unsupported.w.logs).toEqual([{ event: "github_webhook.ignored", level: "info", hook: "check_suite", reason: "event_unsupported", deliveryId: D }]);
-      expect(unsupported.w.writesSince()).toEqual([]);
-    });
-
-    it("(b) a signed delivery for a repository or pull request NO Rovara task tracks is 202 ignored (not_linked) with an info line, and writes nothing", async () => {
-      const { answer, w } = await legacyRoute("issue_comment", prComment(), { authorize: "not_linked" });
-      expect(answer).toEqual({ status: 202, body: { ignored: true, reason: "not_linked" } });
-      expect(w.logs).toEqual([{ event: "github_webhook.ignored", level: "info", hook: "issue_comment", action: "created", reason: "not_linked", deliveryId: D }]);
-      expect(w.writesSince()).toEqual([]);
-      noDeliveryRow(w);
-    });
-
-    it("(b) a link that exists but disagrees with the live scope is a real violation: 403 with a warn line, nothing written", async () => {
-      const { answer, w } = await legacyRoute("issue_comment", prComment(), { authorize: false });
-      expect(answer.status).toBe(403);
-      expect(JSON.stringify(answer.body)).toContain("outside the registered installation and repository scope");
-      expect(w.logs).toEqual([{ event: "github_webhook.refused", level: "warn", hook: "issue_comment", action: "created", reason: "scope_mismatch", deliveryId: D }]);
-      expect(w.writesSince()).toEqual([]);
-      noDeliveryRow(w);
-    });
-
-    it.each([["check_run", { action: "completed" }], ["check_suite", checkSuite("completed")], ["status", { state: "success" }]])("%s on the legacy path says event unsupported (202 ignored), never the scope text", async (event, payload) => {
-      const { answer, w } = await legacyRoute(event, payload, { authorize: false });
-      expect(answer).toEqual({ status: 202, body: { ignored: true, reason: "event_unsupported" } });
-      expect(JSON.stringify(answer)).not.toContain("scope");
-      expect(w.logs).toEqual([{ event: "github_webhook.ignored", level: "info", hook: event, reason: "event_unsupported", deliveryId: D }]);
-    });
-
-    it("(c) a REUSED delivery id with DIFFERENT content is 409 with a warn line; the same content again is still a duplicate", async () => {
-      const w = await world();
-      expect((await legacyRoute("issue_comment", prComment(), { world: w })).answer).toMatchObject({ status: 200, body: { delivery: "ACCEPTED" } });
-      expect((await legacyRoute("issue_comment", prComment(), { world: w })).answer).toMatchObject({ status: 200, body: { delivery: "DUPLICATE" } });
-      w.logs.length = 0;
-      const other = await legacyRoute("issue_comment", prComment({ comment: { id: 2, body: "changed", html_url: "https://github.com/example/demo/pull/7#issuecomment-2", user: { login: "reviewer" } } }), { world: w });
-      expect(other.answer.status).toBe(409);
-      expect(other.answer.body).toMatchObject({ error: { code: "CONFLICT" } });
-      expect(w.logs).toEqual([{ event: "github_webhook.conflict", level: "warn", hook: "issue_comment", action: "created", reason: "delivery_id_reused", deliveryId: D }]);
-    });
-
-    it("(d) a refusal that stays a rejection (a signed body that is not JSON) is a logged 403", async () => {
-      const { answer, w } = await legacyRoute("issue_comment", undefined, { raw: "not json" });
-      expect(answer.status).toBe(403);
-      expect(w.logs).toEqual([{ event: "github_webhook.refused", level: "warn", hook: "issue_comment", reason: "refused", deliveryId: D }]);
-      expect(w.writesSince()).toEqual([]);
-    });
-
-    it("a BAD signature is 403 before any of this, whatever the payload (no unsigned probing of the scope or payload checks)", async () => {
-      for (const [event, payload, authorize] of [["issue_comment", prComment({ issue: { number: 7 } }), true], ["issue_comment", prComment(), false], ["issue_comment", prComment(), "not_linked"], ["issue_comment", prComment(), true]] as const) {
-        const { answer, w } = await legacyRoute(event, payload, { signWith: "forged-".padEnd(40, "f"), authorize });
-        expect(answer.status).toBe(403);
-        expect(w.logs).toEqual([{ event: "github_webhook.signature_invalid" }]);
-        expect(w.writesSince()).toEqual([]);
-      }
-    });
-
-    it("a handled, mappable delivery is unchanged: ACCEPTED and one delivery row", async () => {
-      const { answer, w } = await legacyRoute("issue_comment", prComment());
-      expect(answer).toMatchObject({ status: 200, body: { delivery: "ACCEPTED", deliveryId: D } });
-      expect(w.db.find((item) => String(item.pk).startsWith("GITHUB_DELIVERY#"))).toHaveLength(1);
-      expect(w.logs.some((entry) => entry.event === "github_webhook.ignored" || entry.event === "github_webhook.refused")).toBe(false);
-    });
-  });
 
   it("a missing event header with a valid signature is still a 403 rejection", async () => {
     const w = await world();
@@ -380,14 +286,6 @@ describe("the signature is checked on the raw body, before any work", () => {
     await w.post("issue_comment", comment(), { signWith: "forged-".padEnd(40, "f") });
     expect(w.secretCalls.filter((call) => call?.refresh === true)).toHaveLength(2);
     expect(w.writesSince()).toEqual([]);
-  });
-
-  it("answers 503 and does no work while the secret is not configured, without asking the legacy path", async () => {
-    const w = await world();
-    const answer = await handleGithubWebhookRoute({ headers: { "x-github-event": "issue_comment", "x-github-delivery": "550e8400-e29b-41d4-a716-000000000001", "x-hub-signature-256": `sha256=${"a".repeat(64)}` },
-      body: "{}", secret: async () => { throw new Error("missing"); }, isSecretMissing: () => true, now: () => NOW, log: () => undefined, legacy: w.legacy });
-    expect(answer.status).toBe(503);
-    expect(w.legacy).not.toHaveBeenCalled();
   });
 });
 
@@ -440,26 +338,6 @@ describe("replay protection and the delivery rows", () => {
     const counter = rows.find((item) => String(item.pk).startsWith("GITHUB_RL"))!;
     expect(counter[INDEX_EXPIRY_ATTRIBUTE] as number).toBeGreaterThan(Math.floor(NOW / 1000));
     expect(counter[INDEX_EXPIRY_ATTRIBUTE] as number).toBeLessThan(Math.floor(NOW / 1000) + 3_600);
-  });
-
-  it("the legacy delivery row gets the same numeric 7-day expiry, and a completion refreshes it", async () => {
-    const db = new FakeDynamoDb();
-    const id = "550e8400-e29b-41d4-a716-0000000000cc";
-    const base = { documentClient: db, tableName: "state", deliveryId: id, installationId: 77, repositoryId: 42, eventHash: "e".repeat(64), now: "2026-11-23T12:00:00.000Z",
-      event: { kind: "PR_COMMENT" as const, action: "created", installationId: 77, repositoryId: 42, fullName: "example/demo", number: 7 } };
-    expect(await reserveGithubWebhookDelivery(base)).toBe("reserved");
-    expect(db.get(`GITHUB_DELIVERY#${id}`, "META")![INDEX_EXPIRY_ATTRIBUTE]).toBe(Math.floor(Date.parse(base.now) / 1000) + GITHUB_DELIVERY_TTL_SECONDS);
-  });
-
-  it("a core delivery row is COMPLETED at once, holds no event body, and never enters the legacy recovery index", async () => {
-    const w = await world();
-    const id = "550e8400-e29b-41d4-a716-0000000000dd";
-    await w.post("issue_comment", comment({ comment: { id: 9, body: "secret words" } }), { deliveryId: id });
-    const stored = w.db.get(`GITHUB_DELIVERY#${id}`, "META")!;
-    expect(stored).toMatchObject({ status: "COMPLETED", core: true, companyId: ORG_A });
-    for (const field of ["event", "webhookRecoveryPk", "webhookRecoverySk", "nextAttemptAt", "leaseToken"]) expect(stored[field], field).toBeUndefined();
-    expect(JSON.stringify(w.db.find(() => true))).not.toContain("secret words");
-    expect(await listDueGithubWebhookDeliveries({ documentClient: w.db, tableName: "state", now: "2026-12-30T00:00:00.000Z", limit: 100 })).toEqual([]);
   });
 
   it("a wake that fails releases the reservation, so GitHub's redelivery is processed, not taken for a duplicate", async () => {
@@ -584,54 +462,24 @@ describe("the mapping is exact and never crosses a company", () => {
     expect(JSON.stringify(w.row(TASK_B))).toBe(other);
   });
 
-  it("leaves a legacy task to the legacy path, with the secret that verified", async () => {
+  it("a task that is not the core's (the retired workflow engine's) is IGNORED (202, reason not_core_task): nothing is read for it beyond the mapping, nothing is written and no handler runs (D1)", async () => {
     const w = await world();
     seed(w.db, { taskId: TASK_A, company: ORG_A, number: 7, engine: "workflow" });
-    expect((await w.post("issue_comment", comment())).status).toBe(200);
-    expect(w.legacy).toHaveBeenCalledTimes(1);
-    expect(w.legacy).toHaveBeenCalledWith(SECRET);
-    expect(w.writesSince()).toEqual([]);
-  });
-
-  it("an installation with no binding row (the install's old single company) is the legacy path's, not a core wake", async () => {
-    const db = new FakeDynamoDb();
-    const bindings = new GithubInstallationBindings(db, "state");
-    seed(db, { taskId: TASK_A, company: IMPLICIT_COMPANY_ID, number: 7, engine: "core" });
-    const legacy = vi.fn(async () => ({ status: "ACCEPTED" as const, deliveryId: "x" }));
-    const raw = JSON.stringify(comment());
-    const answer = await handleGithubWebhookRoute({ headers: { "x-github-event": "issue_comment", "x-github-delivery": "550e8400-e29b-41d4-a716-0000000000a1", "x-hub-signature-256": `sha256=${createHmac("sha256", SECRET).update(raw).digest("hex")}` },
-      body: raw, secret: async () => SECRET, isSecretMissing: () => false, now: () => NOW, log: () => undefined, legacy, core: { documentClient: db, tableName: "state", bindings } });
-    expect(answer.status).toBe(200);
-    expect(legacy).toHaveBeenCalledTimes(1);
-    expect(db.get(recoveryRowKey(TASK_A).pk, recoveryRowKey(TASK_A).sk)!["lastHintAt"]).toBeUndefined();
-  });
-
-  it("where the legacy handler is unscoped (hosted), an installation with no binding row AFTER the backfill marker is the legacy path's, never a core 202", async () => {
-    const w = await world({ legacyUnscoped: true });
-    expect((await w.post("issue_comment", comment({ installation: { id: 999 } }))).status).toBe(200);
-    expect(w.legacy).toHaveBeenCalledTimes(1);
-    expect(w.writesSince()).toEqual([]);
-  });
-
-  it("where the legacy handler is unscoped, a legacy task with NO companyId on an installation bound to a named company is the legacy path's, not company_mismatch", async () => {
-    const w = await world({ legacyUnscoped: true });
-    seed(w.db, { taskId: TASK_A, company: ORG_A, number: 7, engine: "workflow" });
-    const record = w.db.get(taskRecordKey(TASK_A).pk, taskRecordKey(TASK_A).sk)!;
-    delete record["companyId"];
-    w.db.set(record);
-    expect((await w.post("issue_comment", comment())).status).toBe(200);
-    expect(w.legacy).toHaveBeenCalledTimes(1);
-  });
-
-  it("an unscoped legacy never hands over another company's task: a legacy task of an explicit other company is still IGNORED", async () => {
-    const w = await world({ legacyUnscoped: true });
-    seed(w.db, { taskId: TASK_A, company: ORG_B, number: 7, engine: "workflow" });
     expect(await w.post("issue_comment", comment())).toEqual({ status: 202, body: { delivery: "IGNORED" } });
+    expect(w.logs.at(-1)).toMatchObject({ event: "github_webhook.ignored", reason: "not_core_task" });
     expect(w.legacy).not.toHaveBeenCalled();
+    expect(w.writesSince()).toEqual([]);
   });
 
-  it("review R5: where the legacy handler is unscoped, a CORE task with no companyId stays the core's (company_mismatch, 202 IGNORED): legacyUnscoped only hands over legacy-owned tasks", async () => {
-    const w = await world({ legacyUnscoped: true });
+  it("an installation with no binding row AFTER the backfill marker is nobody's: 202 IGNORED (unknown_installation), nothing written", async () => {
+    const w = await world();
+    expect(await w.post("issue_comment", comment({ installation: { id: 999 } }))).toEqual({ status: 202, body: { delivery: "IGNORED" } });
+    expect(w.logs.at(-1)).toMatchObject({ reason: "unknown_installation" });
+    expect(w.writesSince()).toEqual([]);
+  });
+
+  it("review R5: a CORE task with no companyId stays the core's (company_mismatch, 202 IGNORED)", async () => {
+    const w = await world();
     seed(w.db, { taskId: TASK_A, company: ORG_A, number: 7, engine: "core" });
     const record = w.db.get(taskRecordKey(TASK_A).pk, taskRecordKey(TASK_A).sk)!;
     delete record["companyId"];
@@ -641,15 +489,15 @@ describe("the mapping is exact and never crosses a company", () => {
     expect(w.writesSince()).toEqual([]);
   });
 
-  it("review R6: where the legacy handler is unscoped, a CORE-stamped task with no record at all is never handed to the legacy path", async () => {
-    const w = await world({ legacyUnscoped: true });
+  it("review R6: a CORE-stamped task with no record at all is IGNORED, never handed on", async () => {
+    const w = await world();
     seed(w.db, { taskId: TASK_A, company: ORG_A, number: 7, engine: "core" });
     w.db.delete(taskRecordKey(TASK_A).pk, taskRecordKey(TASK_A).sk);
     expect(await w.post("issue_comment", comment())).toEqual({ status: 202, body: { delivery: "IGNORED" } });
     expect(w.legacy).not.toHaveBeenCalled();
   });
 
-  it("review R7: where the legacy handler IS scoped (default), a legacy task with no companyId on a named company's installation keeps the W0 answer (202 IGNORED, legacy not called)", async () => {
+  it("review R7: a task of the retired engine with no companyId on a named company's installation is IGNORED (company_mismatch)", async () => {
     const w = await world();
     seed(w.db, { taskId: TASK_A, company: ORG_A, number: 7, engine: "workflow" });
     const record = w.db.get(taskRecordKey(TASK_A).pk, taskRecordKey(TASK_A).sk)!;
@@ -659,11 +507,13 @@ describe("the mapping is exact and never crosses a company", () => {
     expect(w.legacy).not.toHaveBeenCalled();
   });
 
-  it("without installation bindings there is no core branch: every delivery goes to the legacy path", async () => {
+  it("without installation bindings there is no core branch: every delivery that is not an installation event is IGNORED (202), nothing is read or written", async () => {
     const w = await world();
-    expect((await w.post("issue_comment", comment(), { core: false })).status).toBe(200);
-    expect(w.legacy).toHaveBeenCalledTimes(1);
+    expect(await w.post("issue_comment", comment(), { core: false })).toEqual({ status: 202, body: { delivery: "IGNORED" } });
+    expect(w.legacy).not.toHaveBeenCalled();
+    expect(w.writesSince()).toEqual([]);
   });
+
 });
 
 describe("what each event does to the tracking row", () => {

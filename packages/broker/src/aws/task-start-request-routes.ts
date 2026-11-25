@@ -1,7 +1,7 @@
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { AgentXError, StartDeveloperTaskRequestSchema, agentXError } from "@agentx/contracts";
 import type { AdaptedHttpRequest } from "./lambda.js";
-import { readTaskStamp, entryOwner } from "./engine-boundary.js";
+import { readTaskStamp } from "./engine-boundary.js";
 import { engineStampKey } from "../core-host/engine-stamp.js";
 import { readStartRequest, startReadNotFound, startReadUnavailable } from "../core/task-flow/start-request-read.js";
 import { resolveTaskPeopleReadAccess } from "../developer/task-people.js";
@@ -29,7 +29,7 @@ export async function taskStartRequestRoute(deps: DeveloperRouteDependencies, re
         } } }, taskId);
         const item = raw as Record<string, unknown> | undefined;
         const key = engineStampKey(taskId);
-        if (stamp === undefined || entryOwner(stamp, "flow") !== "core" || item?.pk !== key.pk || item.sk !== key.sk || item.entityType !== "TASK_ENGINE"
+        if (stamp === undefined || stamp.areas.flow !== "core" || item?.pk !== key.pk || item.sk !== key.sk || item.entityType !== "TASK_ENGINE"
           || item.taskId !== taskId || item.orgId !== companyId || !Number.isFinite(Date.parse(stamp.stampedAt))) throw startReadUnavailable();
         return raw;
       },

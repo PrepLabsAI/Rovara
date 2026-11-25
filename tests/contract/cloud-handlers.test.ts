@@ -218,6 +218,34 @@ describe("AWS control-plane handlers", () => {
     }));
   });
 
+  // D1-2 (outbox gap B, arch 2026-11-25): the old-shape handler SURVIVES D1 (the oldest engine still writes old-shape outbox rows: Slack chat, workspace prepare/close/cancel, pull request actions,
+  // project setup smoke), so its terminal-receive-count rule for a guard that could not decide stays, and this is its only direct test (it used to be proved only by 09-resilience).
+  it("keeps a message whose task-access guard could not decide a retryable failure at the terminal receive count: no sign, no post, no terminal fail", async () => {
+    const { guardTaskDispatch } = await import("../../packages/broker/src/aws/task-dispatch-access.js");
+    const unreadable = { send: async () => { throw Object.assign(new Error("State unavailable"), { name: "ServiceUnavailable" }); } };
+    const deliverEc2 = vi.fn(async (): Promise<Ec2Delivery> => "DELIVERED");
+    const markDispatching = vi.fn(async () => undefined);
+    const markDelivered = vi.fn(async () => undefined);
+    const markFailed = vi.fn(async () => undefined);
+    const log = vi.fn();
+    const handler = createDispatcherHandler({
+      guardTaskDispatch: (record) => guardTaskDispatch({ documentClient: unreadable, tableName: "state" }, record),
+      deliverEc2, markDispatching, markDelivered, markFailed, maxAttempts: 3, log,
+    });
+    const operationId = randomUUID();
+    const workspaceId = randomUUID();
+    const outbox = { deploymentMode: "ec2-ebs" as const, id: randomUUID(), entityType: "OUTBOX", status: "QUEUED", operationId, workspaceId,
+      invocation: { protocolVersion: 1, operationId, workspaceId, kind: "task", fence: 2, projectRevision: 1, callbackCapability: "c".repeat(64), payload: { conversationId: randomUUID(), prompt: "p", conversationStarted: false } } };
+    // The terminal receive count (3 of 3): an ordinary failure would end the operation; a guard that could not decide must not.
+    await expect(handler({ Records: [{ messageId: "guard", body: JSON.stringify(outbox), attributes: { ApproximateReceiveCount: "3" } }] }))
+      .resolves.toEqual({ batchItemFailures: [{ itemIdentifier: "guard" }] });
+    expect(markFailed).not.toHaveBeenCalled();
+    expect(markDispatching).not.toHaveBeenCalled();
+    expect(deliverEc2).not.toHaveBeenCalled();
+    expect(markDelivered).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.objectContaining({ event: "dispatch.attempt_failed", attempt: 3, maxAttempts: 3, terminal: false }));
+  });
+
   it("accepts one fenced publication and scopes its grant to push on the selected repository", async () => {
     Object.assign(process.env, {
       AWS_REGION: "us-east-1",
@@ -627,6 +655,22 @@ describe("AWS control-plane handlers", () => {
       // A thread publication carries its Slack attribution into the pull request.
       body: `Requested in Slack thread https://slack.com/archives/${channelId}/p1758240000000100 by U0123456789.`,
     });
+
+    // D1-2: the old workflow engine's worker callbacks are not routes any more; each answers what a callback name nobody ever had answers (same capability, same operation).
+    const callbackAnswer = async (name: string) => {
+      const answer = await handler({
+        version: "2.0",
+        rawPath: `/v1/internal/workspaces/${workspaceId}/operations/${body.operation.id}/${name}`,
+        headers: { "x-agentx-callback-capability": invocation.callbackCapability },
+        body: JSON.stringify({ schemaVersion: 1 }),
+        requestContext: { requestId: "retired-callback", http: { method: "POST" } },
+      });
+      return { status: answer.statusCode, error: (JSON.parse(answer.body) as { error?: { code?: string; message?: string } }).error };
+    };
+    const never = await callbackAnswer("never-a-callback");
+    for (const retired of ["candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "feedback-bundles", "feedback-approval"]) {
+      expect(await callbackAnswer(retired), retired).toEqual(never);
+    }
 
     const editRequestId = randomUUID();
     const editEvent = {

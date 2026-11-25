@@ -23,7 +23,7 @@ import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "./core-host-fakes.js";
 import { workflowSlackHandlers, createSlackPressDispatcher, type SlackBlockAction } from "../../packages/broker/src/aws/slack-interactivity.js";
 import { taskActionDepsFrom, taskActionPressHandler, taskActionSubmission } from "../../packages/broker/src/aws/slack-task-actions.js";
-import { ownerOfTaskId } from "../../packages/broker/src/aws/engine-boundary.js";
+import { isCoreTask } from "../../packages/broker/src/aws/engine-boundary.js";
 
 export const OTHER_COMPANY = "org_corehost00000000000b";
 export const CORE_PROJECT: ProjectDefinition = {
@@ -173,7 +173,7 @@ export function hostedPressDispatcher(world: CoreSlackWorld) {
       return method === "views.open" ? { view: { id: `V${String(views.length)}` } } : {};
     },
     respondEphemeral,
-    isCoreTask: async (taskId) => await ownerOfTaskId({ documentClient: world.harness.db, tableName: "state" }, taskId) === "core",
+    isCoreTask: async (taskId) => await isCoreTask({ documentClient: world.harness.db, tableName: "state" }, taskId),
     log: () => undefined,
   });
   const taskActions = taskActionPressHandler(handlerDeps);

@@ -2,6 +2,8 @@
 
 Status: checked 2026-11-15 on `pr/r2-engine-boundary-3` (`4f604a5ee`). This closes deferred row CORE-REQUALIFY-HOLD-CHECK.
 
+Update (D1-2, 2026-11-25): the spec 056 workflow's four system starts named below, `aws/workflow-cancel-reconcile.ts` and the other readers of `workflowE2EAdmission` on the old workflow path are deleted with the old workflow engine. What is said below about them is the record of why the core needed no hold check; it is no longer a description of live code.
+
 ## Question
 
 The renewal of the browser and API test machine (AUTOREQUALIFY, `packages/broker/src/e2e/requalify-hold.ts`) places a HOLD row while it drains the old machine and switches to the new one. The workflow's starts check that hold. The core engine does not check it.

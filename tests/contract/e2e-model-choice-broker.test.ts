@@ -1,12 +1,10 @@
-import { createHash } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
-import { GetCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { E2E_DEFAULT_MODEL_ROUTE_ID, e2eModelRouteRevision, type E2EWorkflowAdmissionRef } from "@agentx/contracts";
+import { describe, expect, it } from "vitest";
+import { type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { E2E_DEFAULT_MODEL_ROUTE_ID } from "@agentx/contracts";
 import {
   E2E_MODEL_ROUTE_PARTITION, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, deriveE2EAgentRoute, e2eAgentInstallationFromParameters, e2eAgentRouteDefinitionDigest,
   e2eModelRouteRevisionKey, e2eModelRouteShapeKey, planE2EAgentRoute, readE2EModelRouteShape, type E2EAgentInstallation,
 } from "../../packages/broker/src/e2e/model-route-registry.js";
-import { createWorkflowE2EAdmissionModelChoiceReader } from "../../packages/broker/src/aws/workflow-e2e-admission-schema.js";
 import { FakeDynamoDb, assumeDrivingTestsPassed } from "../support/fake-dynamodb.js";
 import { SECRET_ARN } from "../support/e2e-model-fixtures.js";
 
@@ -120,48 +118,5 @@ describe("the setup approval sentence (test 14)", () => {
 
   it("does not mention the request shape", () => {
     expect(agentRouteSummary(available({ ...bedrock, e2eModel: HAIKU_45_US, payloadShape: "minimal" }))).not.toMatch(/minimal|shape/i);
-  });
-});
-
-describe("the admission reader behind the dispatch check (test 15)", () => {
-  const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
-  const referenceFor = (bytes: Buffer): E2EWorkflowAdmissionRef => ({ schemaVersion: 1, taskId: "11111111-1111-4111-8111-111111111111", workflowRevision: 3, candidateDigest: "a".repeat(64),
-    roundId: "22222222-2222-4222-8222-222222222222", groupRunIds: ["33333333-3333-4333-8333-333333333333"], kind: "application", agentSteps: true,
-    admissionRef: { key: `workflow-e2e-admissions/sha256/${sha(bytes)}.json`, sha256: sha(bytes), byteLength: bytes.byteLength } } as unknown as E2EWorkflowAdmissionRef);
-  const s3Returning = (text: string) => ({ send: vi.fn(async () => ({ Body: { transformToString: async () => text } })) });
-
-  const registered = (definition: ReturnType<typeof available>) => {
-    const db = new FakeDynamoDb();
-    const revision = e2eModelRouteRevision(definition);
-    db.set({ ...e2eModelRouteRevisionKey(definition.routeId, definition.revision), entityType: "E2E_MODEL_ROUTE", routeId: definition.routeId, revisionNumber: definition.revision, revision,
-      definitionDigest: e2eAgentRouteDefinitionDigest(definition), definition, approvedAt: "2026-10-23T00:00:00.000Z" });
-    return { db, route: { routeId: definition.routeId, routeRevision: revision } };
-  };
-  const answer = async (admission: Record<string, unknown>, db: FakeDynamoDb) => {
-    const bytes = Buffer.from(JSON.stringify(admission));
-    const reader = createWorkflowE2EAdmissionModelChoiceReader({ s3: s3Returning(bytes.toString("utf8")), bucket: "b", readRow: async (key) => ((await db.send(new GetCommand({ TableName: TABLE, Key: key }))) as { Item?: Record<string, unknown> }).Item });
-    return reader(referenceFor(bytes));
-  };
-
-  it("says a chosen model or the minimal shape needs the feature, and the recommended default does not", async () => {
-    const bedrock = { provider: "amazon-bedrock", region: "us-east-1" } as const;
-    const recommended = registered(available(bedrock));
-    expect(await answer({ modelRoute: recommended.route }, recommended.db)).toBe(false);
-    const chosen = registered(available({ ...bedrock, e2eModel: HAIKU_45_US }));
-    expect(await answer({ modelRoute: chosen.route }, chosen.db)).toBe(true);
-    const minimal = registered(available({ ...bedrock, payloadShape: "minimal" }));
-    expect(await answer({ modelRoute: minimal.route }, minimal.db)).toBe(true);
-  });
-
-  it("answers false for an admission that pins no route, and undefined for anything it cannot establish", async () => {
-    const empty = new FakeDynamoDb();
-    expect(await answer({ modelRoute: null }, empty)).toBe(false);
-    // A route the registry does not hold, a malformed route, and bytes that do not match the reference.
-    expect(await answer({ modelRoute: { routeId: "rovara-e2e-default", routeRevision: "r1-aaaaaaaaaaaa" } }, empty)).toBeUndefined();
-    expect(await answer({ modelRoute: { routeId: 4 } }, empty)).toBeUndefined();
-    expect(await answer({}, empty)).toBeUndefined();
-    const bytes = Buffer.from(JSON.stringify({ modelRoute: null }));
-    const mismatched = createWorkflowE2EAdmissionModelChoiceReader({ s3: s3Returning(JSON.stringify({ modelRoute: null, extra: 1 })), bucket: "b", readRow: async () => undefined });
-    expect(await mismatched(referenceFor(bytes))).toBeUndefined();
   });
 });

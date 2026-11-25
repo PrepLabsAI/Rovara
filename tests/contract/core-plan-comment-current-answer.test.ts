@@ -1,8 +1,10 @@
+import type { TaskReadDecision } from "../../packages/broker/src/core/task-flow/read-rule.js";
 // A queued question is answered using the document's current human comments, including changes after it was queued.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { sharedTaskKey } from "@agentx/contracts";
-import { createPageComment, deletePageComment, editPageComment, workflowTaskAnswerContext } from "../../packages/broker/src/aws/developer-tasks.js";
+import { workflowTaskAnswerContext } from "../../packages/broker/src/aws/developer-tasks.js";
+import { createCoreTaskRuleRoutes } from "../../packages/broker/src/aws/core-task-rule-routes.js";
 import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
 import { pageTask, pagePlan, PRIYA } from "../support/page-tasks.js";
 
@@ -18,10 +20,19 @@ async function question() {
   const thread = { teamId: share.teamId, channelId: share.channelId, threadTs: share.threadTs };
   h.db.set({ ...sharedTaskKey(thread), taskId: h.taskId, workflowThread: true });
   h.deps.slackRequestQueue = { send: async () => undefined };
-  const post = (text: string, ask = false) => createPageComment(h.deps, PRIYA, h.taskId, { requestId: randomUUID(), document: "plan", version: 1, target: { kind: "document" }, text, ask });
+  // D1: the page's comment routes are gone; a comment is posted through the core's own route (POST /v1/dev/tasks/<id>/comments), which writes the rows the answer context reads.
+  const routes = createCoreTaskRuleRoutes(() => h.deps);
+  const path = `/v1/dev/tasks/${h.taskId}/comments`;
+  const post = async (text: string, _ask = false) => {
+    void _ask;
+    const answer = await routes.route({ request: { method: "POST", path, headers: {}, body: JSON.stringify({ requestId: randomUUID(), document: "plan", text }) }, path,
+      person: { developerId: PRIYA.developerId, name: PRIYA.name }, companyId: "org_corehost00000000000a", task: h.db.get(`DEVTASK#${h.taskId}`, "META")!, store: { query: async () => ({ items: [] }) },
+      authorize: async () => ({ task: h.db.get(`DEVTASK#${h.taskId}`, "META")! } as unknown as TaskReadDecision) });
+    return JSON.parse(answer.body) as { comment: { id?: string; commentId: string } };
+  };
   const asked = await post("Which placement now?", true);
   if (typeof task["workspaceId"] !== "string") throw new Error("workspace missing");
-  const input = { taskId: h.taskId, workspaceId: task["workspaceId"], thread, commentId: asked.comment.id };
+  const input = { taskId: h.taskId, workspaceId: task["workspaceId"], thread, commentId: asked.comment.commentId };
   const context = () => workflowTaskAnswerContext(h.deps, input);
   h.advance(1000);
   return { ...h, post, asked, context };
@@ -34,37 +45,17 @@ describe("a core comment answer uses the current document's comment set", () => 
     expect(await h.context()).toContain("ADDED_AFTER_QUEUED_QUESTION");
   });
 
-  it("edit: replaces another comment's old text in the answer context", async () => {
-    const h = await question();
-    const comment = await h.post("OBSOLETE_OTHER_COMMENT");
-    expect(await h.context()).toContain("OBSOLETE_OTHER_COMMENT");
-    await editPageComment(h.deps, PRIYA, h.taskId, { commentId: comment.comment.id, rev: 1, text: "REPLACEMENT_OTHER_COMMENT" });
-    const context = await h.context();
-    expect(context).toContain("REPLACEMENT_OTHER_COMMENT");
-    expect(context).not.toContain("OBSOLETE_OTHER_COMMENT");
-  });
-
-  it("delete: removes another comment from the answer context", async () => {
-    const h = await question();
-    const comment = await h.post("REMOVE_OTHER_COMMENT");
-    expect(await h.context()).toContain("REMOVE_OTHER_COMMENT");
-    await deletePageComment(h.deps, PRIYA, h.taskId, { commentId: comment.comment.id, rev: 1 });
-    const context = await h.context();
-    expect(context).not.toContain("REMOVE_OTHER_COMMENT");
-    expect(context?.match(/<page_comment /gu)).toHaveLength(1);
-  });
-
   it.each(["agent", "other document", "future version"] as const)("excludes %s text from current human comments", async (kind) => {
     const h = await question();
     const comment = await h.post("EXCLUDED_CURRENT_COMMENT");
-    const row = h.db.get(`DEVTASK#${h.taskId}`, `COMMENT#${comment.comment.id}`)!;
+    const row = h.db.get(`DEVTASK#${h.taskId}`, `COMMENT#${comment.comment.commentId}`)!;
     h.db.set({ ...row, ...(kind === "agent" ? { author: { kind: "agentx", source: "answer" } } : kind === "other document" ? { document: "design" } : { version: 99 }) });
     expect(await h.context()).not.toContain("EXCLUDED_CURRENT_COMMENT");
   });
 
   it.each(["deleted", "agent", "missing"] as const)("a %s queued question has no answer context", async (kind) => {
     const h = await question();
-    const pk = `DEVTASK#${h.taskId}`, sk = `COMMENT#${h.asked.comment.id}`;
+    const pk = `DEVTASK#${h.taskId}`, sk = `COMMENT#${h.asked.comment.commentId}`;
     if (kind === "missing") h.db.delete(pk, sk);
     else h.db.set({ ...h.db.get(pk, sk)!, ...(kind === "agent" ? { author: { kind: "agentx", source: "answer" } } : { text: "", deletedAt: "2026-11-22T12:00:00.000Z" }) });
     expect(await h.context()).toBeUndefined();
@@ -73,18 +64,12 @@ describe("a core comment answer uses the current document's comment set", () => 
   it("the version ceiling comes from the question's document, even when another document has newer versions", async () => {
     const h = await question();
     const comment = await h.post("FUTURE_PLAN_COMMENT");
-    const row = h.db.get(`DEVTASK#${h.taskId}`, `COMMENT#${comment.comment.id}`)!;
+    const row = h.db.get(`DEVTASK#${h.taskId}`, `COMMENT#${comment.comment.commentId}`)!;
     h.db.set({ ...row, version: 2 });
     h.addVersion("design", pagePlan());
     h.addVersion("design", pagePlan());
     const context = await h.context();
     expect(context).toContain("Which placement now?");
     expect(context).not.toContain("FUTURE_PLAN_COMMENT");
-  });
-
-  it("an edited queued question cannot be answered from its obsolete queue text", async () => {
-    const h = await question();
-    await editPageComment(h.deps, PRIYA, h.taskId, { commentId: h.asked.comment.id, rev: 1, text: "Changed question" });
-    expect(await h.context()).toBeUndefined();
   });
 });

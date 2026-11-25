@@ -2,6 +2,7 @@ import { AgentXError, IMPLICIT_COMPANY_ID, type WorkspaceInstance } from "@agent
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import type { DeveloperTaskActions } from "../../packages/broker/src/aws/developer-task-actions.js";
 import type { AdaptedHttpRequest } from "../../packages/broker/src/aws/lambda.js";
+import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
 import { FakeDynamoDb } from "./fake-dynamodb.js";
 import { namedCompany } from "../../packages/broker/src/aws/company-layout.js";
 import { companyProjectRow } from "./company-layout-projects.js";
@@ -60,6 +61,8 @@ export function companyRouteHarness() {
       ...(companyId === undefined ? {} : { companyId }),
     };
     db.set(item);
+    // DEC 254zzz502 (D1-2): only a task with the core's mark is listed, so the harness's tasks carry it.
+    db.set({ ...engineStampKey(id), entityType: "TASK_ENGINE", coreEngine: { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "cc=on", stampedAt: TIME } });
     db.set({ pk: `DEVELOPER#${PERSON}`, sk: `TASK#${TIME}#${id}`, entityType: "DEVELOPER_TASK_INDEX", taskId: id, title, project: "shared-project", status: "STARTING", shared: false, createdAt: TIME, updatedAt: TIME });
     return item;
   };

@@ -1,23 +1,16 @@
 // Spec 061 slice 2: comments, replies and suggestions on a task page. Each is its own item in the task's partition
 // (`DEVTASK#<taskId>`), never inside the task item, and every write is conditional: comments on `rev`, the comment counter
 // on its cap, rate items on their window. The writer's name and owner flag come from the session and its role.
-import { createHash } from "node:crypto";
 import { GetCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import {
-  AGENTX_ANSWER_MAX_CHARS, AGENTX_ASK_RATE, ANSWER_STALE_MS, COMMENT_RATE, COMMENT_THREAD_REPLIES_MAX, NUDGE_WINDOW_MS, SlackPageCommentMessageSchema, TASK_COMMENT_ITEMS_MAX, TaskCommentSchema,
-  TaskSuggestionSchema, agentXError, agentxAnswerCommentId, cleanCommentText, diffPlanDocuments, pageCommentAttributes, pageCommentEventId, pageCommentId,
-  planClaimIds, plannerReplyCommentId, redactText, sharedTaskKey,
-  type AgentXError, type AgentXErrorCode, type CommentAnswer, type CommentDocument, type CommentTarget, type PlanDocument, type TaskComment,
-  type TaskSuggestion, type WorkflowDecisionDetail, type WorkflowSnapshot,
-} from "@agentx/contracts";
+import { AGENTX_ANSWER_MAX_CHARS, AGENTX_ASK_RATE, COMMENT_RATE, COMMENT_THREAD_REPLIES_MAX, NUDGE_WINDOW_MS, TASK_COMMENT_ITEMS_MAX, TaskCommentSchema, agentXError, agentxAnswerCommentId, cleanCommentText, pageCommentId, planClaimIds, redactText, type AgentXError, type AgentXErrorCode, type CommentDocument, type CommentTarget, type TaskComment, type WorkflowSnapshot } from "@agentx/contracts";
 import type { DeveloperCaller } from "../aws/developer-routes.js";
 import type { DeveloperTaskRouteDependencies } from "../aws/developer-tasks.js";
 import { isConditional } from "../aws/broker-shared.js";
-import { plainName } from "../aws/task-web.js";
+import { plainName } from "./plain-name.js";
 import { loadWorkflowDocument, type LoadedDocument } from "./plan-document-reader.js";
 import { can, taskOpen, type TaskAccess } from "./task-access.js";
 import { taskAccessFence } from "./task-people.js";
-import { plannerRepliesKey, taskKey, type DeveloperTaskRecord } from "./task-records.js";
+import { taskKey, type DeveloperTaskRecord } from "./task-records.js";
 
 type CommentDependencies = Pick<DeveloperTaskRouteDependencies, "documentClient" | "tableName" | "actions" | "now" | "log">;
 type TableDependencies = Pick<DeveloperTaskRouteDependencies, "documentClient" | "tableName">;
@@ -64,8 +57,6 @@ const iso = (deps: Pick<DeveloperTaskRouteDependencies, "now">) => new Date(deps
 const partition = (taskId: string) => `DEVTASK#${taskId}`;
 export const commentKey = (taskId: string, commentId: string) => ({ pk: partition(taskId), sk: `COMMENT#${commentId}` });
 export const commentCounterKey = (taskId: string) => ({ pk: partition(taskId), sk: "COMMENTS" });
-const suggestionKey = (taskId: string, document: CommentDocument, decisionId: string, developerId: string) =>
-  ({ pk: partition(taskId), sk: `SUGGEST#${document}#${decisionId}#${developerId}` });
 const rateKey = (taskId: string, kind: string, actor: string) => ({ pk: partition(taskId), sk: `RATE#${kind}#${actor}` });
 const nudgeKey = (taskId: string, developerId: string) => ({ pk: partition(taskId), sk: `NUDGE#${developerId}` });
 
@@ -100,14 +91,6 @@ async function getComment(deps: TableDependencies, taskId: string, commentId: st
   return parsed.success ? parsed.data : undefined;
 }
 
-async function pageTaskStillCurrent(deps: TableDependencies, task: DeveloperTaskRecord): Promise<boolean> {
-  const stored = await getItem(deps, taskKey(task.taskId));
-  const workflow = task.workflow;
-  if (stored === undefined || stored.closedAt !== undefined) return false;
-  if (workflow === undefined) return stored.workflow === undefined;
-  const current = stored.workflow as Partial<WorkflowSnapshot> | undefined;
-  return current?.revision === workflow.revision && current.stage === workflow.stage && current.state === workflow.state;
-}
 
 /** Every item of the task whose sort key starts with `prefix`, read page by page (at most `max`). */
 async function queryPrefix(deps: TableDependencies, taskId: string, prefix: string, max: number): Promise<Array<Record<string, unknown>>> {
@@ -139,13 +122,6 @@ export async function listTaskComments(deps: TableDependencies & Pick<DeveloperT
   return comments.sort(byTime);
 }
 
-/** Comments a decision on `document` may include: people's, not deleted, not already sent, on any version up to `uptoVersion`; oldest first. */
-export function openCommentsFor(comments: readonly TaskComment[], document: CommentDocument, uptoVersion: number): TaskComment[] {
-  return comments
-    .filter((comment) => comment.author.kind === "person" && comment.deletedAt === undefined && comment.lockedBy === undefined
-      && comment.document === document && comment.version <= uptoVersion)
-    .sort(byTime);
-}
 
 /** The document the task's current planning step is about (while it is written or waiting for its owner), if any. */
 export function currentStepDocument(workflow: WorkflowSnapshot | undefined): CommentDocument | undefined {
@@ -391,232 +367,12 @@ export async function createTaskComment(
   return { comment, duplicate: false };
 }
 
-/** The author's own comment, still theirs to change: not sent with a decision, not deleted, and at the revision they saw. */
-async function changeableComment(deps: CommentDependencies, actor: PageActor, commentId: string, rev: number): Promise<TaskComment> {
-  if (!can(actor.role, "comment")) throw pageRefusal("not_allowed");
-  if (!taskOpen(actor.task)) throw pageRefusal("closed");
-  const comment = await getComment(deps, actor.task.taskId, commentId);
-  if (comment === undefined) throw pageRefusal("not_here");
-  if (comment.author.kind !== "person" || comment.author.developerId !== actor.caller.developerId) throw pageRefusal("not_yours");
-  if (comment.lockedBy !== undefined) throw pageRefusal("locked");
-  if (comment.deletedAt !== undefined) throw pageRefusal("gone");
-  if (comment.rev !== rev) throw pageRefusal("changed");
-  // Edits and deletes are limited as new comments are: each one is a write every open page sees.
-  if (!await takeRate(deps, { taskId: actor.task.taskId, kind: "change", actor: actor.caller.developerId }, COMMENT_RATE.changes, COMMENT_RATE.windowMs, actor)) {
-    throw pageRefusal("slow_down");
-  }
-  return comment;
-}
-
-/** Writes an edit or a delete conditioned on the revision the author saw; a lost race says what happened instead. */
-async function writeChange(deps: CommentDependencies, actor: PageActor, comment: TaskComment, change: { set: string; values: Record<string, unknown> }): Promise<void> {
-  try {
-    await deps.documentClient.send(new TransactWriteCommand({
-      TransactItems: [
-        {
-          Update: {
-            TableName: deps.tableName, Key: commentKey(comment.taskId, comment.commentId),
-            UpdateExpression: `SET ${change.set}, #rev = #rev + :one`,
-            ConditionExpression: "#rev = :rev AND attribute_not_exists(lockedBy) AND attribute_not_exists(deletedAt) AND #author.#developerId = :me",
-            ExpressionAttributeNames: { "#rev": "rev", "#author": "author", "#developerId": "developerId", "#text": "text" },
-            ExpressionAttributeValues: { ...change.values, ":one": 1, ":rev": comment.rev, ":me": actor.caller.developerId },
-          },
-        },
-        counterTouch(deps, comment.taskId),
-        taskPageFence(deps.tableName, actor.task),
-        taskAccessFence(deps.tableName, comment.taskId, actor.peopleRevision),
-      ] as never,
-    }));
-  } catch (error) {
-    if (error instanceof Error && error.name === "TransactionCanceledException") {
-      const now = await getComment(deps, comment.taskId, comment.commentId);
-      throw pageRefusal(now?.lockedBy !== undefined ? "locked" : now?.deletedAt !== undefined ? "gone" : "changed");
-    }
-    throw error;
-  }
-}
-
-/** The author edits their comment's text (cleaned and redacted again); the comment's revision moves on. */
-export async function editTaskComment(deps: CommentDependencies, actor: PageActor, input: { commentId: string; rev: number; text: string }): Promise<TaskComment> {
-  const comment = await changeableComment(deps, actor, input.commentId, input.rev);
-  const cleaned = cleanCommentText(input.text);
-  if (!cleaned.ok) throw pageRefusal(cleaned.reason);
-  const at = iso(deps);
-  await writeChange(deps, actor, comment, { set: "#text = :text, editedAt = :at", values: { ":text": cleaned.text, ":at": at } });
-  return TaskCommentSchema.parse({ ...comment, text: cleaned.text, editedAt: at, rev: comment.rev + 1 });
-}
-
-/** The author deletes their comment: its text is removed at once; who wrote it, when, and its place in the thread stay. */
-export async function deleteTaskComment(deps: CommentDependencies, actor: PageActor, input: { commentId: string; rev: number }): Promise<TaskComment> {
-  const comment = await changeableComment(deps, actor, input.commentId, input.rev);
-  const at = iso(deps);
-  await writeChange(deps, actor, comment, { set: "#text = :empty, deletedAt = :at", values: { ":empty": "", ":at": at } });
-  return TaskCommentSchema.parse({ ...comment, text: "", deletedAt: at, rev: comment.rev + 1 });
-}
-
-/**
- * A teammate suggests one option on a decision of the current step's latest version, or (null) takes their suggestion
- * back. One per person per decision; only an owner's answer is ever recorded as the decision.
- */
-export async function setSuggestion(deps: CommentDependencies, actor: PageActor, input: { document: CommentDocument; decisionId: string; optionId: string | null }): Promise<void> {
-  const { task, caller } = actor;
-  if (!can(actor.role, "suggest")) throw pageRefusal(actor.role === "owner" ? "owners_answer" : "not_allowed");
-  if (!taskOpen(task)) throw pageRefusal("closed");
-  const version = latestVersion(task.workflow, input.document);
-  if (currentStepDocument(task.workflow) !== input.document || version === undefined) throw pageRefusal("not_here");
-  const loaded = await loadDocumentVersion(deps, task, input.document, version);
-  const decision = loaded?.format === "structured" ? loaded.plan.decisions.find((entry) => entry.id === input.decisionId) : undefined;
-  if (loaded === undefined || decision === undefined || (input.optionId !== null && !decision.options.some((option) => option.id === input.optionId))) {
-    throw pageRefusal("not_here");
-  }
-  if (!await takeRate(deps, { taskId: task.taskId, kind: "suggestion", actor: caller.developerId }, COMMENT_RATE.suggestions, COMMENT_RATE.windowMs, actor)) {
-    throw pageRefusal("slow_down");
-  }
-  const Key = suggestionKey(task.taskId, input.document, input.decisionId, caller.developerId);
-  const existing = await getItem(deps, Key);
-  const rev = typeof existing?.rev === "number" ? existing.rev : undefined;
-  const guard = rev === undefined
-    ? { ConditionExpression: "attribute_not_exists(pk)" }
-    : { ConditionExpression: "#rev = :rev", ExpressionAttributeNames: { "#rev": "rev" }, ExpressionAttributeValues: { ":rev": rev } };
-  let write: unknown;
-  if (input.optionId === null) {
-    if (existing === undefined) return;
-    write = { Delete: { TableName: deps.tableName, Key, ...guard } };
-  } else {
-    const suggestion = TaskSuggestionSchema.parse({
-      document: input.document, decisionId: input.decisionId, developerId: caller.developerId, optionId: input.optionId, name: writerName(caller),
-      artifactSha256: loaded.artifact.sha256, version, at: iso(deps), rev: (rev ?? 0) + 1,
-    });
-    write = { Put: { TableName: deps.tableName, Item: { ...Key, entityType: "TASK_SUGGESTION", ...suggestion }, ...guard } };
-  }
-  try {
-    await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [write, counterTouch(deps, task.taskId), taskPageFence(deps.tableName, task), taskAccessFence(deps.tableName, task.taskId, actor.peopleRevision)] as never }));
-  } catch (error) {
-    if (error instanceof Error && error.name === "TransactionCanceledException") throw pageRefusal("changed");
-    throw error;
-  }
-}
-
-/** Every suggestion on the task, as stored. */
-export async function listSuggestions(deps: TableDependencies & Pick<DeveloperTaskRouteDependencies, "log">, taskId: string): Promise<TaskSuggestion[]> {
-  const suggestions: TaskSuggestion[] = [];
-  for (const item of await queryPrefix(deps, taskId, "SUGGEST#", 2_000)) {
-    const parsed = TaskSuggestionSchema.safeParse(withoutKeys(item));
-    if (parsed.success) suggestions.push(parsed.data);
-    else log(deps, { event: "developer.task_suggestion_unreadable", taskId });
-  }
-  return suggestions.sort((left, right) => left.at.localeCompare(right.at) || left.developerId.localeCompare(right.developerId));
-}
-
-/**
- * The suggestions that still apply to `version` of a document: those made on it, and those made on an earlier version
- * whose decision did not change and whose option still exists.
- */
-export function suggestionsFor(
-  suggestions: readonly TaskSuggestion[],
-  input: { document: CommentDocument; version: number; plan: PlanDocument; plans: ReadonlyMap<number, PlanDocument> },
-): TaskSuggestion[] {
-  return suggestions.filter((suggestion) => {
-    if (suggestion.document !== input.document || suggestion.version > input.version) return false;
-    const decision = input.plan.decisions.find((entry) => entry.id === suggestion.decisionId);
-    if (decision === undefined || !decision.options.some((option) => option.id === suggestion.optionId)) return false;
-    if (suggestion.version === input.version) return true;
-    const earlier = input.plans.get(suggestion.version);
-    if (earlier === undefined) return false;
-    const diff = diffPlanDocuments(earlier, input.plan);
-    return !diff.decisionsChanged.includes(decision.id) && !diff.decisionsAdded.includes(decision.id);
-  });
-}
-
-/**
- * The planner's answers to the comments a Request changes or an Approve sent (refs c1, c2 and so on, in the decision's
- * order), written as replies from AgentX under each comment's thread, on the document the comment was made on. Each reply has an ID derived from the comment and the new version,
- * so a repeat finds it already there. Each one counts toward the task's 300 items; once the cap is reached the rest are
- * left out and logged (counts only, never text). A write that meets another in flight is tried once more; any other
- * failure skips that one reply (logged) and the rest are still written.
- */
-export async function writePlannerReplies(
-  deps: TableDependencies & Pick<DeveloperTaskRouteDependencies, "now" | "log">,
-  input: { taskId: string; artifactId: string; version: number; detail: WorkflowDecisionDetail; answers: readonly CommentAnswer[] },
-): Promise<{ written: number }> {
-  const { taskId } = input;
-  let written = 0;
-  for (const [index, answer] of input.answers.entries()) {
-    const commentId = input.detail.includedCommentIds[Number(answer.ref.slice(1)) - 1];
-    if (!/^c[1-9][0-9]*$/u.test(answer.ref) || commentId === undefined) continue;
-    const comment = await getComment(deps, taskId, commentId);
-    if (comment === undefined) continue;
-    const reply = TaskCommentSchema.parse({
-      schemaVersion: 1, taskId, commentId: plannerReplyCommentId(commentId, input.artifactId), parentId: comment.parentId ?? comment.commentId,
-      document: comment.document, version: comment.version, target: comment.target,
-      // Which document handled the comment, and the claim it cites, are worked out when the page is read (nothing more is stored).
-      author: { kind: "agentx", source: "planner", outcome: answer.outcome, forVersion: input.version },
-      text: answer.reason, createdAt: iso(deps), rev: 1,
-    });
-    const send = () => deps.documentClient.send(new TransactWriteCommand({
-      TransactItems: [
-        { Put: { TableName: deps.tableName, Item: { ...commentKey(taskId, reply.commentId), entityType: "TASK_COMMENT", ...reply }, ConditionExpression: "attribute_not_exists(pk)" } },
-        counterAdd(deps, taskId),
-      ] as never,
-    }));
-    // Best effort per entry: one reply that cannot be written is logged (names only, never text) and the rest go on.
-    const outcome = await send().then(() => "written" as const, async (error: unknown) => {
-      const codes = cancellationCodes(error);
-      if (error instanceof Error && error.name === "TransactionCanceledException" && codes.includes("TransactionConflict")) {
-        return send().then(() => "written" as const, (again: unknown) => classify(again));
-      }
-      return classify(error);
-    }).catch((error: unknown) => {
-      log(deps, { event: "developer.planner_reply_not_written", taskId, errorName: error instanceof Error ? error.name : "unknown" });
-      return "skipped" as const;
-    });
-    if (outcome === "written") written += 1;
-    if (outcome === "full") {
-      log(deps, { event: "developer.planner_replies_full", taskId, written, skipped: input.answers.length - index });
-      break;
-    }
-  }
-  return { written };
-}
-
-/** The most answers one plan's record holds: the comments one decision sends are capped at 25. */
-const PLANNER_REPLIES_RECORDED_MAX = 25;
-
-/**
- * The record kept with a plan that answered the comments sent with a decision, written in the same transaction as the plan
- * so it is there whenever the plan is: the comments the planner answered (each by ID, with its outcome; the same ones
- * `writePlannerReplies` then writes as replies) and the version. The Slack card for the plan counts from it, so the card
- * never waits for the replies. It is not a comment and takes no place in the task's comment count.
- */
-export function plannerRepliesItem(tableName: string, input: { taskId: string; artifactId: string; version: number; detail: WorkflowDecisionDetail; answers: readonly CommentAnswer[] }, at: string) {
-  const answered = new Map<string, "done" | "not_changed">();
-  for (const answer of input.answers) {
-    const commentId = /^c[1-9][0-9]*$/u.test(answer.ref) ? input.detail.includedCommentIds[Number(answer.ref.slice(1)) - 1] : undefined;
-    if (commentId !== undefined && !answered.has(commentId) && answered.size < PLANNER_REPLIES_RECORDED_MAX) answered.set(commentId, answer.outcome);
-  }
-  return {
-    TableName: tableName,
-    Item: { ...plannerRepliesKey(input.taskId, input.artifactId), entityType: "PLANNER_REPLIES", taskId: input.taskId, artifactId: input.artifactId, version: input.version,
-      answered: [...answered].map(([commentId, outcome]) => ({ commentId, outcome })), at },
-  };
-}
-
-/** What a failed planner reply write means: already written (a repeat), the task is full, or anything else (thrown). */
-function classify(error: unknown): "duplicate" | "full" {
-  if (error instanceof Error && error.name === "TransactionCanceledException") {
-    const codes = cancellationCodes(error);
-    if (codes[0] === "ConditionalCheckFailed") return "duplicate";
-    if (codes[1] === "ConditionalCheckFailed") return "full";
-  }
-  throw error;
-}
 
 /** Where a page comment's question goes: the Slack service's request queue (FIFO). */
 export interface SlackRequestQueue {
   send(message: { body: string; groupId: string; deduplicationId: string; attributes: Record<string, { DataType: "String"; StringValue: string }> }): Promise<void>;
 }
 
-type AskDependencies = CommentDependencies & { slackRequestQueue?: SlackRequestQueue | undefined };
 
 /** Records what became of a question to AgentX on the comment, conditioned on the comment being the one the page wrote. */
 async function setAsk(
@@ -645,76 +401,6 @@ async function setAsk(
   return { ...comment, ask };
 }
 
-/**
- * "Ask AgentX to reply to this comment" (spec 061 slice 2): queues the comment's question for the Slack service, which answers it in
- * task mode with no tools and writes the answer back. Only for a task started in Slack (its own thread) when the queue is
- * set up; otherwise the comment says AgentX can answer only there. Limited per person (6 an hour), per task (20 an hour)
- * and per thread (5 AgentX answers); a limited ask leaves the comment as it is. A queue that refuses the message marks the
- * question failed; the comment always stands. Answers on one task run one at a time and never queue behind the thread.
- */
-export async function queueCommentAnswer(
-  deps: AskDependencies,
-  input: { task: DeveloperTaskRecord; comment: TaskComment; caller: DeveloperCaller; access?: Pick<TaskAccess, "peopleRevision" | "task"> },
-): Promise<{ outcome: "queued" | "limited" | "unavailable" | "failed"; comment: TaskComment }> {
-  const { task, comment, caller } = input;
-  let answering: TaskComment | undefined;
-  try {
-    const share = task.share;
-    const userId = caller.slackUserId ?? task.slackUserId;
-    const threadTs = share?.threadTs;
-    const shared = share === undefined || threadTs === undefined ? undefined
-      : await getItem(deps, sharedTaskKey({ teamId: share.teamId, channelId: share.channelId, threadTs }));
-    const startedInSlack = shared?.taskId === task.taskId && shared.workflowThread === true && shared.closedAt === undefined;
-    const queue = deps.slackRequestQueue;
-    if (queue === undefined || share === undefined || threadTs === undefined || !startedInSlack || userId === undefined || comment.author.kind !== "person") {
-      return { outcome: "unavailable", comment: await setAsk(deps, comment, "unavailable", undefined, input.access) };
-    }
-    // The message is built (and checked) before anything is spent or marked.
-    const message = SlackPageCommentMessageSchema.parse({
-      version: 1, eventId: pageCommentEventId(comment.commentId), thread: { teamId: share.teamId, channelId: share.channelId, threadTs }, userId,
-      text: comment.text, receivedAt: iso(deps), pageComment: { taskId: task.taskId, commentId: comment.commentId },
-    });
-    // The thread's limit first: AgentX's answers there and the questions still being answered (no limit is spent on a
-    // refused ask). Then every hourly limit is checked before any of them is spent.
-    const threadId = comment.parentId ?? comment.commentId;
-    const inThread = (await listTaskComments(deps, task.taskId)).filter((item) => item.commentId !== comment.commentId && (item.parentId === threadId || item.commentId === threadId));
-    // A question still "answering" past ANSWER_STALE_MS already shows as "couldn't answer", so it holds no place.
-    const now = deps.now();
-    const answers = inThread.filter((item) => (item.author.kind === "agentx" && item.author.source === "answer")
-      || (item.ask?.state === "answering" && now - Date.parse(item.ask.at) <= ANSWER_STALE_MS));
-    if (answers.length >= AGENTX_ASK_RATE.perThread) return { outcome: "limited", comment };
-    const limits = [
-      { key: rateKey(task.taskId, "ask", caller.developerId), limit: AGENTX_ASK_RATE.perPersonPerHour },
-      { key: rateKey(task.taskId, "ask", "task"), limit: AGENTX_ASK_RATE.perTaskPerHour },
-      { key: askRateAcrossTasksKey(caller.developerId), limit: AGENTX_ASK_RATE.perPersonAllTasksPerHour },
-    ];
-    for (const entry of limits) if (!await rateRoom(deps, entry.key, entry.limit, HOUR_MS)) return { outcome: "limited", comment };
-    for (const entry of limits) {
-      const taken = await takeRateAt(deps, entry.key, entry.limit, HOUR_MS,
-        input.access === undefined ? undefined : { task, ...(input.access.peopleRevision === undefined ? {} : { peopleRevision: input.access.peopleRevision }) });
-      if (!taken) {
-        if (input.access !== undefined && !await pageTaskStillCurrent(deps, task)) throw pageRefusal("changed");
-        return { outcome: "limited", comment };
-      }
-    }
-    answering = await setAsk(deps, comment, "answering", undefined, input.access);
-    await queue.send({
-      body: JSON.stringify(message),
-      groupId: createHash("sha256").update(`page-comment\0${task.taskId}`, "utf8").digest("hex"),
-      deduplicationId: message.eventId,
-      attributes: pageCommentAttributes(),
-    });
-    log(deps, { event: "developer.comment_answer_queued", taskId: task.taskId });
-    return { outcome: "queued", comment: answering };
-  } catch (error) {
-    // The comment is posted whatever happens here: the question reads as not answered rather than waiting for ever.
-    log(deps, { event: "developer.comment_answer_queue_failed", taskId: task.taskId, errorName: error instanceof Error ? error.name : "unknown" });
-    const failed = answering === undefined
-      ? await setAsk(deps, comment, "failed", undefined, input.access).catch(() => undefined)
-      : await setAsk(deps, answering, "failed", "answering", input.access).catch(() => undefined);
-    return { outcome: "failed", comment: failed ?? { ...comment, ask: { state: "failed", at: iso(deps) } } };
-  }
-}
 
 /** The per-person limit on questions to AgentX over all of a person's tasks: its own item, outside any task. */
 const askRateAcrossTasksKey = (developerId: string) => ({ pk: `ASKRATE#${developerId}`, sk: "RATE#ask" });
@@ -724,12 +410,6 @@ export function takeAskRateAcrossTasks(deps: TableDependencies & Pick<DeveloperT
   return takeRateAt(deps, askRateAcrossTasksKey(developerId), AGENTX_ASK_RATE.perPersonAllTasksPerHour, HOUR_MS);
 }
 
-/** Whether a fixed-window limit has room for one more, without counting it. */
-async function rateRoom(deps: TableDependencies & Pick<DeveloperTaskRouteDependencies, "now">, Key: { pk: string; sk: string }, limit: number, windowMs: number): Promise<boolean> {
-  const window = Math.floor(deps.now() / windowMs) * windowMs;
-  const stored = await getItem(deps, Key);
-  return stored === undefined || typeof stored.windowStart !== "number" || stored.windowStart < window || typeof stored.count !== "number" || stored.count < limit;
-}
 
 const HOUR_MS = 3_600_000;
 

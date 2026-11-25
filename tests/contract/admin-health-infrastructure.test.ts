@@ -131,26 +131,17 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/aws/developer-task-notifier.ts", "packages/broker/src/aws/broker.ts",
       // Permanent project identity NEVER expires: these guards refuse/fence an expiry field rather than writing a TTL.
       "packages/broker/src/core/project-incarnation.ts", "packages/broker/src/aws/core-project-backfill.ts",
-      // The workflow dispatch row's one definition, shared by the broker and the developer task routes.
-      "packages/broker/src/aws/broker-shared.ts",
+      // D1-2: the one fixed answer to a press of a retired Slack workflow button leaves a private note for the thread (a REFUSAL row, delivered within the hour), expiring on it.
+      "packages/broker/src/aws/slack-retired-buttons.ts",
       "packages/contracts/src/admin-changes.ts", "packages/broker/src/aws/admin-changes.ts",
       // Learning loop contracts (lane L1): a project's learning records expire on it.
       "packages/contracts/src/project-learning.ts",
-      // The plan evidence job row (spec 061) expires on it too.
-      "packages/broker/src/developer/plan-evidence-jobs.ts",
-      // Retired and quarantined recovery rows only; active retries remove the due/lease fields without TTL.
-      "packages/broker/src/aws/workflow-merge-recovery.ts",
       // The AI navigation day-budget rows (M1.4 Task 4.2) expire on it: one tiny row per project per UTC day.
       "packages/broker/src/e2e/model-route-registry.ts",
       // The model check rows (M1.4 Task 4.10C: a requested check and the pointer to the latest one) expire on it after one day.
       "packages/broker/src/e2e/model-checks.ts",
       // The worker's callback for those day-budget rows (M1.4 Task 4.3a) writes the day's row and one reservation row per model call; both expire on it at the end of their UTC day.
       "packages/broker/src/e2e/model-budget-endpoint.ts",
-      // The baseline round's record (M1.3 Task 3.7b, owner decision D4): it expires 30 days after it was last written.
-      "packages/broker/src/aws/workflow-e2e-baseline.ts",
-      "packages/broker/src/aws/workflow-e2e-grounding.ts",
-      // The audit replay's record (M1.4 Task 4.6b) has the baseline record's expiry: 30 days after it was last written.
-      "packages/broker/src/aws/workflow-e2e-replay.ts",
       // The marker a project setup run leaves for the test machine renewal's drain (AUTOREQUALIFY AR-3) ends at the run's deadline and expires on it a day later.
       "packages/broker/src/e2e/requalify-hold.ts",
       // TE-C3: the full-suite follow-up, its task pointer (30 days) and the project's day count (3 days) expire on it.
@@ -267,31 +258,19 @@ describe("the health route's grants (A13)", () => {
   it("sets the TTL attribute in broker.ts on the channel-operation marker, workflow dispatch rows and Slack refusal notes alone, and in the notifier on NOTICE items alone (25c note 2, gap 6, Task 19)", () => {
     const broker = readFileSync("packages/broker/src/aws/broker.ts", "utf8");
     const brokerUses = broker.split("\n").filter((line) => /indexExpiresAt\(|INDEX_EXPIRY_ATTRIBUTE\]/.test(line));
+    // D1-2: the channel-operation marker is the only item broker.ts expires; the held plan's marker and the refusal-note writer went with the old workflow engine (the refusal note is written in slack-retired-buttons.ts).
     expect(brokerUses).toEqual([
-      "        slackUserId: user.data, channelId: thread.data.channelId, threadTs: thread.data.threadTs, message, at, [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(at) },",
       "      [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(operation.createdAt),",
-      // T7c: the held plan's marker (a small item the recovery sweep reads), always given a TTL; every finish deletes it, the TTL is only the backstop.
-      "        [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(planHold.deadlineAt) / 1000) + 7 * 86_400 } } }]",
     ]);
-    const holdMarker = broker.slice(broker.indexOf("// The hold's own marker"), broker.indexOf("// The hold's own marker") + 700);
-    expect(holdMarker).toContain('entityType: "PLAN_GROUNDING_HOLD"');
-    expect(holdMarker).toContain(brokerUses.at(-1));
-    // Task 19: a refused Slack press's private note, delivered within the hour and then dead weight.
-    const refusal = broker.slice(broker.indexOf("async function recordSlackWorkflowRefusal("), broker.indexOf("async function answerSlackWorkflowEvent("));
-    expect(refusal).toContain('entityType: "WORKFLOW_ACTION_REFUSAL"');
-    expect(refusal).toContain(brokerUses.shift());
+    const retired = readFileSync("packages/broker/src/aws/slack-retired-buttons.ts", "utf8");
+    expect(retired).toContain('entityType: "WORKFLOW_ACTION_REFUSAL"');
+    expect(retired.split("\n").filter((line) => /\[INDEX_EXPIRY_ATTRIBUTE\]/.test(line))).toHaveLength(1);
     const channelOperation = broker.slice(broker.indexOf("function channelOperation("), broker.indexOf("function requesterOf("));
     expect(channelOperation).toContain('entityType: "CHANNEL_OPERATION"');
     expect(channelOperation).toContain(brokerUses[0]);
-    // Gap 6: a backstop for a workflow dispatch row that is somehow never resolved (the sweep gives up long before).
+    // D1-2: the workflow dispatch row (its one definition and its TTL backstop) went with the old workflow engine; broker-shared.ts names the attribute nowhere.
     const shared = readFileSync("packages/broker/src/aws/broker-shared.ts", "utf8");
-    const dispatchItem = shared.slice(shared.indexOf("export function workflowDispatchItem("));
-    expect(dispatchItem).toContain('entityType: "WORKFLOW_DISPATCH"');
-    expect(shared.split("\n").filter((line) => /indexExpiresAt|INDEX_EXPIRY_ATTRIBUTE/.test(line)).map((line) => line.trim())).toEqual([
-      'import { INDEX_EXPIRY_ATTRIBUTE, OPERATION_PROMPT_MAX_BYTES } from "@agentx/contracts";',
-      "indexExpiresAt: number;",
-      "[INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(now) / 1000) + WORKFLOW_DISPATCH_RETENTION_SECONDS,",
-    ]);
+    expect(shared.split("\n").filter((line) => /indexExpiresAt|INDEX_EXPIRY_ATTRIBUTE/.test(line))).toEqual([]);
     const notifier = readFileSync("packages/broker/src/aws/developer-task-notifier.ts", "utf8");
     const writes = notifier.split("\n").filter((line) => line.includes("noticeExpiry(deps)"));
     expect(writes.length).toBeGreaterThanOrEqual(4);
@@ -308,36 +287,6 @@ describe("the health route's grants (A13)", () => {
       'ExpressionAttributeNames: { "#expires": INDEX_EXPIRY_ATTRIBUTE },',
       '":expires": noticeExpiry(deps)[INDEX_EXPIRY_ATTRIBUTE] },',
     ]);
-  });
-
-  it("sets the TTL attribute on the baseline round's record alone, in its own module, and refreshes it with every write of that record (Task 3.7b, D4)", () => {
-    const baseline = readFileSync("packages/broker/src/aws/workflow-e2e-baseline.ts", "utf8");
-    const named = baseline.split("\n").filter((line) => /indexExpiresAt|INDEX_EXPIRY_ATTRIBUTE/.test(line)).map((line) => line.trim());
-    expect(named[0]).toMatch(/^import \{ .*INDEX_EXPIRY_ATTRIBUTE.*indexExpiresAt.* \} from "@agentx\/contracts";$|^import \{ .*indexExpiresAt.*INDEX_EXPIRY_ATTRIBUTE.* \} from "@agentx\/contracts";$/);
-    expect(baseline).toContain('entityType: "WORKFLOW_E2E_BASELINE"');
-    // Every write of the record carries a fresh expiry, and the module writes no other kind of item.
-    const writes = baseline.split("\n").filter((line) => /new (Put|Update)Command|Update: \{/.test(line));
-    expect(writes.length).toBeGreaterThanOrEqual(4);
-    const expiryWrites = baseline.split("\n").filter((line) => /\[INDEX_EXPIRY_ATTRIBUTE\]|#expires|":expires"/.test(line));
-    expect(expiryWrites.length).toBeGreaterThanOrEqual(4);
-    expect(baseline.match(/entityType: "[A-Z0-9_]+"/g)?.every((match) => match === 'entityType: "WORKFLOW_E2E_BASELINE"')).toBe(true);
-  });
-
-  it("expires only retired or quarantined recovery rows, while active retries stay due without TTL", () => {
-    const recovery = readFileSync("packages/broker/src/aws/workflow-merge-recovery.ts", "utf8");
-    expect(recovery).toContain("const RETIRED_TTL_SECONDS = 7 * 24 * 60 * 60;");
-    const quarantineStart = recovery.indexOf("async function quarantine(");
-    const quarantineEnd = recovery.indexOf("async function claimRow(", quarantineStart);
-    expect(quarantineStart).toBeGreaterThanOrEqual(0);
-    expect(quarantineEnd).toBeGreaterThan(quarantineStart);
-    const quarantine = recovery.slice(quarantineStart, quarantineEnd);
-    expect(quarantine).toContain("recoveryStatus = :status");
-    expect(quarantine).toContain("indexExpiresAt = :ttl REMOVE nextAttemptAt, dispatchDuePk, dispatchDueSk");
-    const retire = recovery.slice(recovery.indexOf("async function retire("), recovery.indexOf("async function setGlobalCooldown("));
-    expect(retire).toContain("recoveryStatus = :status, retiredAt = :now, updatedAt = :now, indexExpiresAt = :ttl");
-    const retry = recovery.slice(recovery.indexOf("async function settleActive("), recovery.indexOf("async function retire("));
-    expect(retry).toContain("SET attempts = :attempts, nextAttemptAt = :next, dispatchDuePk = :pk, dispatchDueSk = :due, updatedAt = :now REMOVE leaseToken, leaseExpiresAt");
-    expect(retry).not.toContain("indexExpiresAt");
   });
 
   it("gives the legacy template (production) the same health grants, and leaves its State table's expiry as it was", () => {

@@ -6,7 +6,7 @@ import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/
 import { createAllowAllAdmission, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import type { CoreRegistryError} from "../../packages/broker/src/core-host/index.js";
 import {
-  CORE_ENGINE_ON, CORE_JOBS, coreAreaOn, coreInUseKey, createCoreHostApp, engineOfStoredTask, engineStampKey, ensureCoreInUse, parseCoreSwitch,
+  CORE_ENGINE_ON, CORE_JOBS, coreAreaOn, coreInUseKey, createCoreHostApp, engineStampKey, ensureCoreInUse, parseCoreSwitch,
   scheduleEventOf, stampForNewTask, stampOf, type CoreHostApp, type CoreService, type CoreServiceName,
 } from "../../packages/broker/src/core-host/index.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
@@ -60,16 +60,15 @@ describe("the engine stamp", () => {
     expect(stampForNewTask({ combined: { mode: "on" }, areas: { merge: { mode: "off" } } }, FAKE_COMPANY, now).areas).toEqual({ merge: "workflow", build: "core", flow: "core" });
   });
 
-  it("reads an unstamped or malformed task as the workflow", async () => {
+  it("reads an unstamped or malformed stamp item as no stamp (the boundary's `isCoreTask` then treats an unreadable one as an error, never as not the core's)", async () => {
     const world = createFakeWorld();
-    expect(await engineOfStoredTask(world.store, "t-none", "flow")).toBe("workflow");
+    expect(stampOf(await world.store.get(engineStampKey("t-none")))).toBeUndefined();
     await world.store.put({ item: { ...engineStampKey("t-bad"), coreEngine: { engine: "core", areas: { merge: "core" }, flags: "x", stampedAt: "x" } } });
     expect(stampOf(await world.store.get(engineStampKey("t-bad")))).toBeUndefined();
-    expect(await engineOfStoredTask(world.store, "t-bad", "flow")).toBe("workflow");
     await world.store.put({ item: { ...engineStampKey("t-null"), coreEngine: { engine: "core", areas: null, flags: "x", stampedAt: "x" } } });
-    expect(await engineOfStoredTask(world.store, "t-null", "flow")).toBe("workflow");
+    expect(stampOf(await world.store.get(engineStampKey("t-null")))).toBeUndefined();
     await world.store.put({ item: { ...engineStampKey("t-cloud"), coreEngine: { engine: "cloud", areas: { merge: "cloud", build: "cloud", flow: "cloud" }, flags: "x", stampedAt: "x" } } });
-    expect(await engineOfStoredTask(world.store, "t-cloud", "flow")).toBe("workflow");
+    expect(stampOf(await world.store.get(engineStampKey("t-cloud")))).toBeUndefined();
   });
 
   it("writes the in-use mark once per company per store, only when absent", async () => {
@@ -117,7 +116,7 @@ describe("the registry", () => {
 });
 
 describe("a task keeps the engine it started on", () => {
-  it("a core start writes the stamp with the task, and the task's areas are read from its stamp", async () => {
+  it("a core start writes the stamp with the task", async () => {
     const world = createFakeWorld();
     await registerProject(world, FAKE_COMPANY);
     const on = appOver(world);
@@ -127,9 +126,7 @@ describe("a task keeps the engine it started on", () => {
     expect(await on.runtimeFor(FAKE_COMPANY)).toBe(runtime);
     const owner = { principal: localOwnerPrincipal({ companyId: FAKE_COMPANY }), client: "test", origin: "app" as const };
     const { task } = await runtime.flow.start(owner, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
-    expect(await on.engineOfTask(world.store, task.taskId, "build")).toBe("core");
     expect(stampOf(await world.store.get(engineStampKey(task.taskId)))).toMatchObject({ engine: "core", flags: "cc=on" });
-    for (const area of ["merge", "build", "flow"] as const) expect(await on.engineOfTask(world.store, task.taskId, area)).toBe("core");
   });
 
   it("refuses a runtime whose switched areas lack a service (never a half-wired core)", async () => {

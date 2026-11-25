@@ -26,7 +26,7 @@ export async function hostedFeedbackWorld(status: "COMPLETE" | "BLOCKED" = "COMP
   w.h.deps.taskCapUsd = async () => 10;
   w.h.deps.taskSpendUsd = async () => 0;
   const runtime = { companyId: w.h.deps.companyId, flow: w.h.flow, services: {} };
-  const app: CoreHostApp = { flags: CORE_ENGINE_ON, engineForNewTask: () => "core", engineOfTask: async () => "core", runtimeFor: async () => runtime, registry: async () => w.registry, handleScheduledJob: async () => undefined, relayOutbox: async () => [] };
+  const app: CoreHostApp = { flags: CORE_ENGINE_ON, engineForNewTask: () => "core", runtimeFor: async () => runtime, registry: async () => w.registry, handleScheduledJob: async () => undefined, relayOutbox: async () => [] };
   const caller: DeployedCaller = { principal: w.h.owner.principal, client: "cli" };
   const membership = { companyId: runtime.companyId, role: "member" as const };
   if (missing === "ownerActing") delete w.h.deps.access.ownerActing;

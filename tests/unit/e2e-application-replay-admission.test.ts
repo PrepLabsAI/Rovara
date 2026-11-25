@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { E2EApplicationPlanIntentSchema, E2E_MODEL_ROUTE_DEFAULT_BUDGETS, canonicalJson, deriveE2EApplicationRuntimeAccountRef, e2eApplicationMetadataSourceRefs, type E2EScenario } from "@agentx/contracts";
 import { decodeE2EApplicationExecutionAdmission, e2eApplicationGroupAgentSteps, e2eApplicationGroupUsesModel, validateE2EApplicationExecutionAdmission } from "@agentx/verifier";
@@ -7,7 +6,6 @@ import { ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/applic
 import { applicationApprovedPlanDigest, buildApplicationExecutionAdmission, buildApplicationReplayAdmission, type ApplicationAdmissionInput, type ApplicationRoundApproval } from "../../packages/broker/src/e2e/application-admission.js";
 import { evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
 import { e2eAgentRoutePolicyLimits } from "../../packages/broker/src/e2e/model-route-registry.js";
-import { createWorkflowE2EAdmissionAgentStepsReader } from "../../packages/broker/src/aws/workflow-e2e-admission-schema.js";
 import { createRealCandidate, disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { ordersManifestWith, registryFor } from "../support/e2e-account-registry-fixtures.js";
 import { PROFILE, approvedSetup, binding, csvScenario, snapshotOf, webApiRow } from "../support/e2e-application-plan-fixtures.js";
@@ -128,11 +126,6 @@ describe("an audit replay of a verified application round runs the cases the rou
     // The AI navigation step is still in the plan (it runs, from its recording): the case and its recording are the round's.
     expect(suites.reduce((count, suite) => count + e2eApplicationGroupAgentSteps(suite).length, 0)).toBe(1);
     expect(replay.replay?.traces.map((trace) => trace.caseId)).toEqual([s.agentCase.caseId]);
-    // The dispatcher is told the same: a replay is not a model round.
-    const reader = createWorkflowE2EAdmissionAgentStepsReader({ s3: { send: async () => ({ Body: { transformToString: async () => built.bytes.toString("utf8") } }) }, bucket: "b" });
-    const ref = (admission: { bytes: Buffer; sha256: string }) => ({ schemaVersion: 1 as const, kind: "application" as const, taskId: TASK, workflowRevision: 7, candidateDigest: "a".repeat(64), roundId: randomUUID(),
-      groupRunIds: [randomUUID()], admissionRef: { key: `workflow-e2e-admissions/sha256/${admission.sha256}.json`, sha256: admission.sha256, byteLength: admission.bytes.byteLength } });
-    await expect(reader(ref(built))).resolves.toBe(false);
     // Control: the same plan as a candidate round does have a group with the model channel, so the replay's lack of one is the replay's own doing.
     const candidateSuites = validateE2EApplicationExecutionAdmission(decodeE2EApplicationExecutionAdmission(s.source.bytes)).applicationSuites;
     expect(candidateSuites.filter((suite) => e2eApplicationGroupUsesModel(suite))).toHaveLength(1);
@@ -156,22 +149,5 @@ describe("an audit replay of a verified application round runs the cases the rou
     expect(requalified[1]!.generation).not.toBe(s.rows()[1]!.generation);
     expect(canonicalJson(s.candidateOf(APPROVAL, requalified).admission.round.groupBindings.flatMap((g) => g.expectedCases.map((c) => c.caseId)).sort())).not.toBe(canonicalJson(s.cases.map((c) => c.caseId).sort()));
     expect(() => s.replayRound({ rows: requalified })).toThrow(/replay-source-unavailable.*other cases/);
-  });
-});
-
-describe("the broker derives a replay's plan identity from the one function the candidate round uses", () => {
-  const source = readFileSync(new URL("../../packages/broker/src/aws/broker.ts", import.meta.url), "utf8");
-  const bodyOf = (name: string) => {
-    const start = source.indexOf(`async function ${name}(`);
-    expect(start, name).toBeGreaterThan(-1);
-    return source.slice(start, source.indexOf("\n}\n", start));
-  };
-  it("builds the replay admission through the shared function, without a plan identity of its own", () => {
-    const replay = bodyOf("startReplayApplicationRound");
-    expect(replay).toContain("buildApplicationReplayAdmission(");
-    expect(replay).not.toContain("buildApplicationExecutionAdmission(");
-    expect(replay).not.toMatch(/planDigest|e2e-replay-plan/);
-    expect(bodyOf("startApplicationE2EChecksDispatch")).toContain("applicationApprovedPlanDigest(task.taskId, approval)");
-    expect(source).not.toContain("workflow-application-e2e-replay-plan");
   });
 });

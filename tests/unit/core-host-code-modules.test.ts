@@ -195,7 +195,10 @@ describe("Code's retention for core writes", () => {
     // A `keep` is the dangerous side: the deployed broker must expire that kind itself.
     for (const [kind, action] of Object.entries(CORE_EXPIRY_COLLISIONS)) if (action === "keep" && !KEPT_ON_SEPARATE_KEYS.has(kind)) expect(deployed.expiring.has(kind), kind).toBe(true);
     // The scan sees the forms it must: a digit in a kind, a `change.set` of it, an UpdateExpression value.
-    for (const kind of ["WORKFLOW_E2E_BASELINE", "TASK_RATE", "CHANNEL_THREAD"]) expect(collisions, kind).toContain(kind);
+    for (const kind of ["TASK_RATE", "CHANNEL_THREAD"]) expect(collisions, kind).toContain(kind);
+    // D1-2: WORKFLOW_E2E_BASELINE (a digit in the kind) is now written only by the core, so it is seen as a core expiring kind and no longer a collision.
+    expect(core.expiring.has("WORKFLOW_E2E_BASELINE")).toBe(true);
+    expect(collisions).not.toContain("WORKFLOW_E2E_BASELINE");
   });
 
   it("keeps the core's own expiries and strips only the kinds decided as strip", () => {

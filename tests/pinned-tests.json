@@ -65,10 +65,16 @@
     },
     {
       "path": "tests/contract/task-people.test.ts",
-      "minimumTests": 36,
+      "minimumTests": 34,
       "reason": "Read-only People authority refuses reconciliation without calling a writer. RESTORE-8F1BE0A80 item 3 restores our one removed case (35 to 36); the other removed old-engine cases are outside this lane.",
       "decision": "DEC 254zzz333",
-      "restoreTarget": 36
+      "restoreTarget": 34,
+      "reviewed": {
+        "kind": "lowered",
+        "from": 36,
+        "decision": "DEC 254zzz457",
+        "reason": "D1-2: two cases of the old workflow task page's People presentation reader went with their subject; the live proposal cases were restored (36 to 34)."
+      }
     },
     {
       "path": "tests/contract/knowledge-hosted-routes.test.ts",
@@ -103,9 +109,15 @@
     },
     {
       "path": "tests/contract/aws-engine-boundary.test.ts",
-      "minimumTests": 26,
+      "minimumTests": 25,
       "reason": "Always-run regression ratchet; preserve its runnable declarations.",
-      "decision": "DEC 254zzz333"
+      "decision": "DEC 254zzz333",
+      "reviewed": {
+        "kind": "lowered",
+        "from": 26,
+        "decision": "DEC 254zzz457",
+        "reason": "D1-2: two cases of the old workflow engine's Slack Keep and requireOperation boundary went with their subject."
+      }
     },
     {
       "path": "tests/contract/company-member-boundary.test.ts",
@@ -289,7 +301,13 @@
       "path": "tests/journeys/page.test.ts",
       "minimumTests": 6,
       "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journey 15, the task page for a core task (sign-in expiry and revocation, who sees what, CSRF and Origin, deep links, comment limits, and the G1 proof for a removed member). DELETED WITH CODE'S TASK PAGE (DEC 254zzz511): D1-3 removes this row with the file; it does not gate D1. A whole task on the real core and real worker, in every pull request run; the floor is the file's 6 runnable declarations, and deleting or trimming one is a reviewed edit.",
-      "decision": "DEC 254zzz459"
+      "decision": "DEC 254zzz459",
+      "reviewed": {
+        "kind": "retired",
+        "from": 6,
+        "decision": "DEC 254zzz511",
+        "reason": "D1-2: journey 15 (Code's own HTML task page for a core task) is deleted with the page; the file and its harness are gone and the journey is off JOURNEYS."
+      }
     },
     {
       "path": "tests/journeys/mcp.test.ts",
@@ -299,9 +317,15 @@
     },
     {
       "path": "tests/unit/github-webhook-install-cases.test.ts",
-      "minimumTests": 6,
+      "minimumTests": 5,
       "reason": "G-G (D1-PLAN 5.3, DEC 254zzz459): the install and webhook cases that survive the old engine, on the route with the real secret loader and the real core branch: no webhook secret, the webhook added after the pull request opened, a rotated secret, an event the App is not subscribed to, and a project registered again under DynamoDB's map order. The floor is the file's 6 runnable declarations, and deleting or trimming one is a reviewed edit.",
-      "decision": "DEC 254zzz459"
+      "decision": "DEC 254zzz459",
+      "reviewed": {
+        "kind": "lowered",
+        "from": 6,
+        "decision": "DEC 254zzz457",
+        "reason": "D1-2: one case of the old workflow engine's webhook handler went with it; the core branch cases remain."
+      }
     },
     {
       "path": "tests/journeys/surviving-surfaces.test.ts",

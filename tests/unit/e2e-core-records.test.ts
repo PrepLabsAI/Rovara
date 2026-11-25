@@ -13,7 +13,7 @@ import {
 import {
   groundingStartItem, markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, recordWorkflowE2EGrounding, requestWorkflowE2EGroundingRound,
 } from "../../packages/broker/src/core/e2e/grounding.js";
-import { E2E_BASELINE_ATTEMPT } from "../../packages/broker/src/aws/workflow-e2e-baseline.js";
+import { E2E_BASELINE_ATTEMPT } from "../../packages/broker/src/core/e2e/baseline.js";
 
 const AT = "2026-11-10T10:00:00.000Z";
 const LATER = "2026-11-10T10:30:00.000Z";
@@ -261,56 +261,5 @@ describe("the grounding record", () => {
     expect((await readWorkflowE2EGroundingRecord(deps, ref))).not.toHaveProperty("reason");
     await store.put({ item: { ...base, state: "REQUESTED", scenarioIds: [] } });
     expect(await readWorkflowE2EGroundingRecord(deps, ref)).toBeUndefined();
-  });
-});
-
-// The records must stay byte-identical to what the DynamoDB versions write, so Cloud can read what Code wrote and the other way round: the same legacy functions are driven with a client
-// that only records the request, and the document the new version stores is compared with it.
-describe("the stored records equal what the DynamoDB versions write", () => {
-  type Sent = { Item: Record<string, unknown> & { pk: string; sk: string } };
-  const capture = () => {
-    const sent: Sent[] = [];
-    return { sent, store: { tableName: "t", documentClient: { send: async (command: { input: Sent }) => { sent.push(command.input); return {}; } } } as never };
-  };
-  const bare = (item: Record<string, unknown>) => { const { requestedAt: _a, [INDEX_EXPIRY_ATTRIBUTE]: _b, ...rest } = item; void _a; void _b; return rest; };
-
-  it("for a baseline, a replay and a grounding request and start", async () => {
-    const legacy = await import("../../packages/broker/src/aws/workflow-e2e-baseline.js");
-    const legacyReplay = await import("../../packages/broker/src/aws/workflow-e2e-replay.js");
-    const legacyGrounding = await import("../../packages/broker/src/aws/workflow-e2e-grounding.js");
-    const task = { taskId: "task-1", workflow: { e2e: { required: true, contractDigest: hex("a"), applicationSelection: {} } } } as never;
-    const store = new MemoryDocumentStore();
-    const deps = { store, now: clock(AT) };
-
-    const old = capture();
-    await legacy.requestWorkflowE2EBaselineRound(old.store, task, { enabled: true });
-    await requestWorkflowE2EBaselineRound(deps, task, { enabled: true });
-    const written = await store.get({ pk: old.sent[0]!.Item.pk, sk: old.sent[0]!.Item.sk });
-    expect(bare(written!)).toEqual(bare(old.sent[0]!.Item));
-
-    const baselineStart = { baseCommitSha: "b".repeat(40), operationId: "op-1", roundId: "round-1", admissionSha256: hex("c"), startedAt: AT, deadlineAt: LATER };
-    const oldStart = legacy.baselineStartItem({ tableName: "t" }, task, baselineStart).Update;
-    const newStart = baselineStartItem(task, baselineStart);
-    expect(newStart).toMatchObject({ kind: "update", key: oldStart.Key });
-    const setBy = (item: TransactItem): Record<string, unknown> => Object.fromEntries((item as unknown as { ops: Array<{ path: string[]; value: unknown }> }).ops.map((op): [string, unknown] => [op.path[0]!, op.value]));
-    const values = oldStart.ExpressionAttributeValues;
-    // Restating the existing kind avoids a hosted retention pre-read; every other persisted field stays legacy-compatible.
-    expect(setBy(newStart)).toEqual({ entityType: old.sent[0]!.Item["entityType"], state: values[":started"], baseCommitSha: values[":base"], operationId: values[":operation"], roundId: values[":round"], admissionSha256: values[":admission"],
-      startedAt: values[":startedAt"], deadlineAt: values[":deadline"], [INDEX_EXPIRY_ATTRIBUTE]: values[":expires"] });
-
-    const oldReplay = capture();
-    await legacyReplay.requestWorkflowE2EReplay(oldReplay.store, { taskId: "task-1" }, { sourceRoundId: "src-1", attempt: 1, requestedBy: "developer:ops" });
-    await requestWorkflowE2EReplay(deps, { taskId: "task-1" }, { sourceRoundId: "src-1", attempt: 1, requestedBy: "developer:ops" });
-    expect(bare((await store.get({ pk: oldReplay.sent[0]!.Item.pk, sk: oldReplay.sent[0]!.Item.sk }))!)).toEqual(bare(oldReplay.sent[0]!.Item));
-    const replayStart = { sourceRoundId: "src-1", attempt: 1, operationId: "op-1", roundId: "round-1", admissionSha256: hex("c"), startedAt: AT, deadlineAt: LATER };
-    expect(replayStartItem({ taskId: "task-1" }, replayStart)).toMatchObject({ key: legacyReplay.replayStartItem({ tableName: "t" }, { taskId: "task-1" }, replayStart).Update.Key });
-
-    const ref = { taskId: "task-1", planArtifactSha256: hex("a"), attempt: 1 };
-    const oldGrounding = capture();
-    await legacyGrounding.requestWorkflowE2EGroundingRound(oldGrounding.store, ref, { scenarioIds: ["s1"], planArtifactId: "art-1" });
-    await requestWorkflowE2EGroundingRound(deps, ref, { scenarioIds: ["s1"], planArtifactId: "art-1" });
-    expect(bare((await store.get({ pk: oldGrounding.sent[0]!.Item.pk, sk: oldGrounding.sent[0]!.Item.sk }))!)).toEqual(bare(oldGrounding.sent[0]!.Item));
-    const groundingStart = { baseCommitSha: "b".repeat(40), operationId: "op-1", roundId: "round-1", admissionSha256: hex("c"), selectionDigest: hex("d"), startedAt: AT, deadlineAt: LATER };
-    expect(groundingStartItem(ref, groundingStart)).toMatchObject({ key: legacyGrounding.groundingStartItem({ tableName: "t" }, ref, groundingStart).Update.Key });
   });
 });

@@ -563,8 +563,8 @@ describe("assertOnlyExpectedChanges for every control-plane Lambda (change set d
   });
 
   it("refuses a change set that is missing one of the code units", () => {
-    const changes = fresh().filter((change) => change.ResourceChange?.LogicalResourceId !== "PlanEvidence3615C4CB");
-    expect(() => assertOnlyExpectedChanges(observedChanges(changes), all)).toThrow(/missing the expected Modify PlanEvidence3615C4CB/);
+    const changes = fresh().filter((change) => change.ResourceChange?.LogicalResourceId !== "OutboxPublisherD572F72E");
+    expect(() => assertOnlyExpectedChanges(observedChanges(changes), all)).toThrow(/missing the expected Modify OutboxPublisherD572F72E/);
   });
 
   it("refuses a code unit that also changes its environment", () => {

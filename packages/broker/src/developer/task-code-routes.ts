@@ -18,7 +18,7 @@ import {
 import type { DeveloperCaller } from "../aws/developer-routes.js";
 import type { DeveloperTaskRouteDependencies } from "../aws/developer-tasks.js";
 import { isConditional } from "../aws/broker-shared.js";
-import { plainName } from "../aws/task-web.js";
+import { plainName } from "./plain-name.js";
 import { NOTE_KEEP_SECONDS, NOTE_SK_PREFIX, noteKey } from "../core/sessions/notes.js";
 import type { TaskReadDecision } from "../core/task-flow/read-rule.js";
 import { rowCompany, rowInCompany } from "./company-rows.js";

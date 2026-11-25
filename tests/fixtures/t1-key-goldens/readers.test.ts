@@ -1,21 +1,18 @@
 // T1 Part 0: repeat the engine boundary census on 2e717e946 with complete core workspace rows.
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { companyScoped } from "@agentx/contracts";
 import { createBroker, loadSlackBroker } from "../../support/slack-broker.js";
 import { createHarness } from "../../support/task-flow-harness.js";
 import { workspaceOperations } from "../../../packages/broker/src/core/task-flow/reads.js";
 import { stampForNewTask, stampItem } from "../../../packages/broker/src/core-host/engine-stamp.js";
 import { CORE_ENGINE_ON } from "../../../packages/broker/src/core-host/flags.js";
-import type { processGithubWorkflowEvent } from "../../../packages/broker/src/aws/broker.js";
 import type { DeveloperTaskActions } from "../../../packages/broker/src/aws/developer-task-actions.js";
 import { requireOperation } from "../../../packages/broker/src/aws/cancellation.js";
 import { requalifyDrainStatus } from "../../../packages/broker/src/e2e/requalify-hold.js";
 import { DRAIN_FIXTURE_NOW, drainFixtureRows, drainIamClient } from "../../support/drain-iam-client.js";
 
-// ANSWER-2: flipped by T1 round 7 (2026-11-16): the workspace pointer routes all three direct readers to the core engine, so each refuses (NOT_FOUND).
-const LEGACY_CORE_READERS_GUARDED = true;
 
-let actionsModule: { createDeveloperTaskActions(input: never): DeveloperTaskActions; processGithubWorkflowEvent: typeof processGithubWorkflowEvent };
+let actionsModule: { createDeveloperTaskActions(input: never): DeveloperTaskActions };
 beforeAll(async () => {
   actionsModule = await loadSlackBroker() as unknown as typeof actionsModule;
 });
@@ -66,37 +63,6 @@ describe("T1 Part 0 AWS reader boundary", () => {
     expect(await actions.operations(operation.workspaceId)).toEqual([]);
   });
 
-  for (const action of ["workflowBinding", "workflowCandidateSourceExportDigest", "cancellation.requireOperation"] as const) {
-    it(`known gap: ${action} reads legacy core rows but finds no scoped core operation`, async () => {
-      const { operation, rows, stamp } = await coreOperation();
-      for (const scoped of [false, true]) {
-        const { db, brokerInput } = createBroker();
-        for (const row of rows) db.set({ ...row, pk: scoped ? companyScoped(operation.companyId, row.pk) : row.pk });
-        db.set(stamp);
-        const sent = vi.spyOn(db, "send");
-        const actions = actionsModule.createDeveloperTaskActions(brokerInput as never);
-        const read = (id: string) => action === "cancellation.requireOperation"
-          ? requireOperation({ documentClient: db as never, tableName: brokerInput.tableName }, operation.workspaceId, id)
-          : actions[action](operation.workspaceId, id);
-        // The same complete partition, pointer and engine stamp refuse the routed list.
-        expect(await actions.operations(operation.workspaceId)).toEqual([]);
-        sent.mockClear();
-        if (scoped || LEGACY_CORE_READERS_GUARDED) {
-          await expect(read(operation.id)).rejects.toMatchObject({ code: "NOT_FOUND" });
-        } else if (action === "cancellation.requireOperation") {
-          await expect(read(operation.id)).resolves.toMatchObject({ id: operation.id });
-        } else {
-          await expect(read(operation.id)).resolves.toBeUndefined();
-        }
-        const storedPk = scoped ? companyScoped(operation.companyId, rows[0]!.pk) : rows[0]!.pk;
-        expect(sent.mock.calls.some(([command]) => {
-          const input = (command as { input: { Key?: { pk?: string; sk?: string } } }).input;
-          return input.Key?.pk === storedPk && input.Key.sk === operation.sk;
-        })).toBe(!scoped && !LEGACY_CORE_READERS_GUARDED);
-        await expect(read("missing-operation")).rejects.toMatchObject({ code: "NOT_FOUND" });
-      }
-    });
-  }
 
   it("known gap: renewal drain reports drained while scoped application operations are running", async () => {
     const { operation } = await coreOperation();
@@ -148,23 +114,4 @@ describe("T1 remaining concrete AWS workspace readers", () => {
     db.set(row);
     expect(await workspaceBinding(db as never, brokerInput.tableName, ws)).toEqual(binding);
   });
-});
-
-it("known gap: GitHub webhook recordedHead finds no scoped pull request", async () => {
-  const webhooks = await import("../../../packages/broker/src/aws/github-webhooks.js");
-  const { db, brokerInput } = createBroker(); const ws = "webhook-workspace";
-  let observed: string | undefined;
-  const reconcile = vi.spyOn(webhooks, "reconcileTaskPullRequestFeedback").mockImplementation(async (input) => {
-    observed = await input.recordedHead!(ws, "demo", 1); return false;
-  });
-  const row = { pk: `WORKSPACE#${ws}`, sk: "PULL_REQUEST#demo#000000000001", expectedHeadCommit: "a".repeat(40) };
-  const dependencies = { ...brokerInput, githubPullRequests: { ...brokerInput.githubPullRequests, getPullRequestFeedback: vi.fn() } };
-  try {
-    db.set({ ...row, pk: companyScoped("org_00000000000000000000", row.pk) });
-    await actionsModule.processGithubWorkflowEvent(dependencies as never, { fullName: "example/demo", number: 1 } as never, "delivery");
-    expect(reconcile).toHaveBeenCalledOnce(); expect(observed).toBeUndefined();
-    db.set(row);
-    await actionsModule.processGithubWorkflowEvent(dependencies as never, { fullName: "example/demo", number: 1 } as never, "delivery");
-    expect(observed).toBe(row.expectedHeadCommit);
-  } finally { reconcile.mockRestore(); }
 });

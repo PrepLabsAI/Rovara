@@ -833,10 +833,11 @@ describe("task-token key and membership IAM", () => {
     // is configured. Pin the complete new template AND prove this exact output is its only delta.
     expect(remainder.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     // F1 L1a-1 (2026-11-25): re-pinned for exactly the deletion of the two dead invitation parameters and their two packed broker settings (tu, tv). Rule D: with them put back (`text`, next line) the pin recorded before holds.
-    expect(createHash("sha256").update(JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("c94d1038a5827e483d68f6164315cab1de5fa3e8d22bbeedf6c0ba9d35746e4a");
-    expect(createHash("sha256").update(text).digest("hex")).toBe("185703cb9f7d43c6b9bf301e25dfc84923d7dbf3135f9115fd53d278dbd7f0ac");
+    // D1-2 (declared change set, D1-PLAN section 8, rebased onto train 90): every pin below moved for exactly the removal of the three recovery Schedules, the two Scheduler roles and their policies (and, in the named template, the PlanEvidence function, its log group, role and policy); the removed resources were in every older state these pins describe.
+    expect(createHash("sha256").update(JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("3d5bb591d5e28fcd40d85cf284d3e0799922209275ebcc92cb1572f83d524399");
+    expect(createHash("sha256").update(text).digest("hex")).toBe("61857cd305f7a80d59d1f1f14dffa4bab687fa3c54886b803ac7db0e449518e1");
     // RETAIN (Rule D): with exactly the policies put back the recorded pins hold (six of the seven: this chain takes the task token key out with the core engine).
-    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(withSwitches), "named", { expectSeven: 6 })).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("9d3f6f734b745c5d93a2d5a4fb79505c9c91a9bab4e5d9ecdbe1f0cb9070eac5");
+    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(withSwitches), "named", { expectSeven: 6 })).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("fac6a7a83cd1aa38b0737536b44cc3ad6ad4d3239605c9a1adcb2f75be7e8a19");
     const beforeFirstGateway = structuredClone(withSwitches);
     delete beforeFirstGateway.Outputs.ModelRunPriceVersion;
     const beforeText = JSON.stringify(beforeFirstGateway).replace(/[a-f0-9]{64}/g, "<asset-hash>");

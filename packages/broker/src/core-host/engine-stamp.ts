@@ -55,20 +55,10 @@ export function stampOf(record: Readonly<Record<string, unknown>> | undefined): 
   return value as EngineStamp;
 }
 
-/** The engine that runs this area of an existing task. Unstamped (or unreadable): the workflow. */
-export function engineOfTask(record: Readonly<Record<string, unknown>> | undefined, area: CoreArea): Engine {
-  return stampOf(record)?.areas[area] ?? "workflow";
-}
-
 /** The stamp item, written once with the core's start (a repeat of the start writes nothing new: `when.absent()`). */
 export function stampItem(companyId: string, taskId: string, stamp: EngineStamp): Extract<TransactItem, { kind: "put" }> {
   const item: StoredDocument = { ...engineStampKey(taskId), entityType: "TASK_ENGINE", orgId: companyId, taskId, [ENGINE_STAMP_ATTRIBUTE]: { engine: stamp.engine, areas: { ...stamp.areas }, flags: stamp.flags, stampedAt: stamp.stampedAt } };
   return { kind: "put", item, condition: when.absent() };
-}
-
-/** The engine that runs this area of an existing task, read from its stamp item. No stamp (or an unreadable one): the workflow. */
-export async function engineOfStoredTask(store: Pick<DocumentStore, "get">, taskId: string, area: CoreArea): Promise<Engine> {
-  return engineOfTask(await store.get(engineStampKey(taskId)), area);
 }
 
 /**

@@ -106,16 +106,6 @@ export function developerRecordKeyedBy<T extends object>(item: T | undefined, de
   return { ...item, developerId };
 }
 
-/**
- * The task's stored creator is the exact native Slack owner: their sign-in row (`DEVELOPER#<id>` / `META`) is a live `slack` row for this Slack user.
- * The row keeps its id only in its key (real rows have no `developerId` attribute), so the id is derived from the key; a present attribute that disagrees
- * with the key refuses (fail closed).
- */
-export function isExactNativeSlackOwner(record: DeveloperRecord | undefined, creatorId: string, slackUserId: string): boolean {
-  const keyed = developerRecordKeyedBy(record, creatorId);
-  return keyed !== undefined && keyed.developerId === creatorId && keyed.provider === "slack" && keyed.slackUserId === slackUserId && keyed.revoked === false;
-}
-
 
 /** E8: the email index's key, the SHA-256 of the trimmed, lowercased email, so no email is stored as a key. */
 export function emailIndexKey(email: string, companyId?: string): { pk: string; sk: "META" } {
