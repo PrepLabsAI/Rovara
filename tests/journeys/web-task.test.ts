@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { createJourneyWorld, MAYA, type JourneyWorld } from "./harness/hosted-core.js";
 import { buildUntilPullRequest, hostReady, planFullToImplement, planUntilCard, startTask } from "./harness/task.js";
+import { decide, fixUntilPush, openPullRequest, reviewRound } from "./harness/feedback.js";
 
 let world: JourneyWorld | undefined;
 afterEach(async () => { await world?.close(); world = undefined; });
@@ -151,6 +152,58 @@ describe("journey 1: the web task, start to close", () => {
     const repeated = await world.maya("POST", `/v1/dev/tasks/${taskId}/cancel`, { requestId });
     expect(repeated.status).toBe(200);
     expect((await world.maya("GET", `/v1/dev/tasks/${taskId}`)).body.task, "after the repeat").toMatchObject({ status: "CANCELLED" });
+    world.proof.assertAllCore();
+  }, 120_000);
+
+  // G1 (grant exchange binding): what a Stop buys. The worker's repository grant lives 15 minutes; the owner's Stop ends what it may do at once.
+  const grantOf = (invocation: { payload: Record<string, unknown> }): string => String(invocation.payload["repositoryGrant"]);
+  const expectRefusedWithTheGrantsId = (w: JourneyWorld, refusals: Array<{ status: number; body: Record<string, unknown>; id: string }>, accesses: Array<"clone" | "push">) => {
+    for (const refused of refusals) expect({ status: refused.status, code: (refused.body.error as { code: string }).code }, "refused with the stable code").toEqual({ status: 403, code: "FORBIDDEN" });
+    const lines = w.coreLogs.filter((line) => line["event"] === "repository.credential_refused");
+    expect(lines.map((line) => [line["kind"], line["grantId"], line["reason"] === "stopping" || line["reason"] === "ended"]), "one refusal line per attempt, naming the grant").toEqual(accesses.map((access) => [access, refusals[0]!.id, true]));
+    const everything = JSON.stringify(w.coreLogs);
+    expect(everything, "no credential in any line").not.toContain("synthetic-local-host-token");
+  };
+
+  it("journey 5 (Git exchange, push): after the owner's Stop, the pushing worker's grant buys no push credential; the refusal is logged with the grant's id", async () => {
+    world = await createJourneyWorld();
+    const w = world;
+    // A pull request is open, a teammate's comment is approved as a fix, and the core asks the machine to push it (the maintain step): the worker holds a push grant.
+    const { taskId, pullRequest } = await openPullRequest(w);
+    w.harness.world.host.model.addDiscussionComment(pullRequest.draft.id, "priya", "Please trim the name.");
+    const card = await reviewRound(w, taskId);
+    expect((await decide(w, taskId, card, "APPROVE")).status).toBe(200);
+    const push = await fixUntilPush(w, "mv repo/demo/health.txt repo/demo/status.txt");
+    const { workspaceId } = w.taskRow(taskId)!;
+    const grant = grantOf(push.invocation);
+    const before = await w.exchangeGrant(workspaceId, push.invocation.operationId, grant, "push");
+    expect({ status: before.status, credential: Boolean(before.body.credential) }, "live: given").toEqual({ status: 200, credential: true });
+    const pumping = w.pumpDispatcher();
+    // TODO(STOP-DURING-PUBLISH, the lane that is being built): when it lands, send this press as an ordinary one (drop `proof.probe`), assert it answers 200 and the operation CANCELLED, and delete the FINDING below.
+    // The press is a probe because of the finding below: the core's answer to it is a 400, which the real-core proof would call the old handler's.
+    const stopped = await w.proof.probe(() => w.maya("POST", `/v1/dev/tasks/${taskId}/cancel`, { requestId: randomUUID() })).finally(pumping);
+    // FINDING (not this lane's): today the press on a running push is answered 400 CONFIG_INVALID "pull request stage must be ready" (the workflow cannot take the "You stopped this step" block at that stage), after the
+    // operation was already asked to stop. What this journey holds is the safety property: whatever the answer, the operation is no longer live, and its grant buys nothing.
+    expect(["CANCEL_REQUESTED", "CANCELLED"], `the press was answered ${String(stopped.status)}`).toContain(String(w.harness.db.find((row) => row.entityType === "OPERATION" && row.id === push.invocation.operationId)[0]!.status));
+    const after = await w.exchangeGrant(workspaceId, push.invocation.operationId, grant, "push");
+    expectRefusedWithTheGrantsId(w, [after], ["push"]);
+    w.proof.assertAllCore();
+  }, 240_000);
+
+  it("journey 5 (Git exchange, clone): after the owner's Stop, the preparing worker's grant buys no clone credential; the refusal is logged with the grant's id", async () => {
+    world = await createJourneyWorld();
+    const taskId = await startTask(world);
+    const { workspaceId } = world.taskRow(taskId)!;
+    // The preparation is issued to a machine and is running when the owner presses Stop.
+    const preparing = await world.holdPrepare(taskId);
+    const grant = grantOf(preparing.invocation);
+    const before = await world.exchangeGrant(workspaceId, preparing.invocation.operationId, grant, "clone");
+    expect({ status: before.status, credential: Boolean(before.body.credential) }, "live: given").toEqual({ status: 200, credential: true });
+    const pumping = world.pumpDispatcher();
+    const stopped = await world.maya("POST", `/v1/dev/tasks/${taskId}/cancel`, { requestId: randomUUID() }).finally(pumping);
+    expect(stopped.status, JSON.stringify(stopped.body).slice(0, 300)).toBe(200);
+    const after = await world.exchangeGrant(workspaceId, preparing.invocation.operationId, grant, "clone");
+    expectRefusedWithTheGrantsId(world, [after], ["clone"]);
     world.proof.assertAllCore();
   }, 120_000);
 

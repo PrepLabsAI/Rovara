@@ -427,7 +427,7 @@ import { mergeRecoveryItem, runDueWorkflowMergeRecovery, type GithubMergeReadBud
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
-import { RepositoryGrantService } from "../repository-access.js";
+import { RepositoryGrantService } from "../repository-access.js"; import { exchangeLegacyGitCredential } from "./legacy-repository-exchange.js";
 import { publicWorkspace } from "../workspaces.js";
 import { SessionManager } from "./sessions.js"; import { loadCallbackSigningKey } from "./callback-signing-key.js"; // one line: no line of broker.ts moves (the company inventory pins its sites by line)
 import { STUCK_SETUP_MESSAGE } from "./stuck-setup.js";
@@ -15750,23 +15750,45 @@ async function exchangeRepositoryCredential(
     throw agentXError("CONFIG_INVALID", "repositoryUrl is invalid");
   }
   const operation = await requireOperation(dependencies, workspaceId, operationId);
-  if (operation.kind === "publish") await assertCurrentWorkflowPublication(dependencies, operation);
-  if (dependencies.githubBindings !== undefined) {
-    const claims = dependencies.repositoryGrants.inspect(grant);
-    if (claims.workspaceId !== workspaceId || claims.operationId !== operationId || !claims.repositories.some(repository => repository.credentialRef === credentialRef && repository.repositoryUrl === input.repositoryUrl && repository.access === access)) {
-      throw agentXError("FORBIDDEN", "repository credential grant does not cover this request");
-    }
-    const workspace = await requireWorkspace(dependencies, workspaceId);
-    const project = await readWorkspaceTaskLegacyProject(dependencies, workspace.id, () => requireProject(dependencies, workspace.projectName, workspace.projectRevision));
-    await requireGithubProjectBinding(dependencies, project, input.repositoryUrl);
-  }
-  return dependencies.repositoryGrants.exchange(grant, {
-    workspaceId,
-    operationId,
-    credentialRef,
-    repositoryUrl: input.repositoryUrl,
-    access,
+  const repositoryUrl = input.repositoryUrl;
+  return exchangeLegacyGitCredential({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, grants: dependencies.repositoryGrants, log: (entry) => console.log(JSON.stringify(entry)) }, {
+    grant, workspaceId, operationId, operation, credentialRef, repositoryUrl, access,
+    async closing() { const workspace = await getItem<{ status?: unknown }>(dependencies, workspaceKey(workspaceId)); return workspace?.status === "CLOSING" || workspace?.status === "CLOSED"; },
+    authority: () => assertLegacyPushAuthority(dependencies, operation, access),
+    async binding() {
+      if (dependencies.githubBindings === undefined) return;
+      const claims = dependencies.repositoryGrants.inspect(grant);
+      if (claims.workspaceId !== workspaceId || claims.operationId !== operationId || !claims.repositories.some(repository => repository.credentialRef === credentialRef && repository.repositoryUrl === repositoryUrl && repository.access === access)) {
+        throw agentXError("FORBIDDEN", "repository credential grant does not cover this request");
+      }
+      const workspace = await requireWorkspace(dependencies, workspaceId);
+      const project = await readWorkspaceTaskLegacyProject(dependencies, workspace.id, () => requireProject(dependencies, workspace.projectName, workspace.projectRevision));
+      await requireGithubProjectBinding(dependencies, project, repositoryUrl);
+    },
   });
+}
+
+/**
+ * The authority a legacy exchange needs before it gives out a credential. A workflow publication's candidate is checked as it always was (`assertCurrentWorkflowPublication`). The operation must still be its
+ * workspace's active one at its fence, for a clone as for a push. A PUSH that has no candidate to check (a maintain, or a publish without `expectedTreeSha`) used to be given with no check at all: it also
+ * needs the task (when there is one) to be open, and, for a maintain, the pull request's recorded head to be the one it was started on, and the workflow's candidate (when it has one) to be the one it was started for.
+ */
+async function assertLegacyPushAuthority(dependencies: AwsBrokerDependencies, operation: OperationRecord, access: "clone" | "push"): Promise<void> {
+  if (operation.kind === "publish") await assertCurrentWorkflowPublication(dependencies, operation);
+  const stale = (): never => { throw agentXError("CALLBACK_FORBIDDEN", "push authority is stale"); };
+  const workspace = await requireWorkspace(dependencies, operation.workspaceId);
+  if (workspace.fence !== operation.fence || workspace.activeOperationId !== operation.id) stale();
+  if (access !== "push" || (operation.kind === "publish" && operation.publication?.expectedTreeSha !== undefined)) return;
+  const taskPointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(operation.workspaceId));
+  const task = taskPointer === undefined ? undefined : await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskPointer.taskId));
+  if (task !== undefined && (task.workspaceId !== operation.workspaceId || task.closedAt !== undefined)) stale();
+  if (operation.kind !== "maintain") return;
+  const maintenance = operation.maintenance;
+  if (maintenance === undefined) return stale();
+  const record = await getItem<PullRequestRecord>(dependencies, pullRequestKey(operation.workspaceId, maintenance.repository, maintenance.pullRequestNumber));
+  if (record === undefined || record.expectedHeadCommit !== maintenance.expectedHeadCommit) stale();
+  const binding = maintenance.workflowCandidate;
+  if (binding !== undefined && (task?.workflow === undefined || task.workflow.stage !== "PULL_REQUEST" || task.workflow.state !== "RUNNING" || task.workflow.candidate?.digest !== binding.candidateDigest)) stale();
 }
 
 /** A stored mode is a selector, not continuing authority: reload the current task and project before issuing push credentials. */

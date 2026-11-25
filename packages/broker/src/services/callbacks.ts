@@ -48,7 +48,7 @@ import { DESIGN_REVIEW_RESULT_MAX_BYTES } from "../core/design-review/outcome.js
 import { handleSetupAgentCallback, type SetupAgentCallbackDeps } from "../core/setup-agent/callback.js";
 import { handleWikiBuildCallback, type WikiBuildCallbackDeps } from "../core/wiki-build/callback.js";
 import type { RepositoryCredential, RepositoryGrantService } from "../repository-access.js";
-import { registryCredentialRoute } from "../core/project-registries/operations.js";
+import { registryCredentialRoute } from "../core/project-registries/operations.js"; import { exchangeGitCredential } from "./repository-exchange.js";
 
 import { handleModelAccess, MODEL_ACCESS_PATH, type ModelGateway } from "../core/model-gateway/route.js";
 
@@ -344,20 +344,19 @@ async function assertPushAuthority(deps: CallbackDeps, operation: OperationRecor
 }
 
 /**
- * A clone or push credential for the repositories this operation's grant names. The grant is the proof (signed, short-lived, one workspace and operation); the operation must still be live,
- * so a grant kept after the job ended gets nothing.
+ * A clone or push credential for the repositories this operation's grant names. The grant is the proof (signed, short-lived, one workspace and operation); the rest is `repository-exchange.ts`: the
+ * operation must be live (not stopping, not over, not closing) and still hold its workspace, a push needs its publication authority current, each repository has a few exchanges, and every one is
+ * audited and logged. A grant kept after the job was stopped or ended gets nothing.
  */
 async function exchangeCredential(deps: CallbackDeps, request: BrokerRequest, workspaceId: string, operationId: string): Promise<RepositoryCredential> {
   const grant = request.headers["x-agentx-repository-grant"];
   if (grant === undefined || grant === "") throw agentXError("FORBIDDEN", "a repository grant is required");
   const operation = await operationOf(deps, workspaceId, operationId);
-  if (operation.status === "SUCCEEDED" || operation.status === "FAILED" || operation.status === "CANCELLED" || operation.status === "INTERRUPTED") throw agentXError("FORBIDDEN", "this operation has ended");
-  if (await acceptedCloseForRun(deps.flow, operation) !== undefined) throw agentXError("FORBIDDEN", "this operation is closing");
   const body = bodyOf(request);
   const { credentialRef, repositoryUrl, access } = body;
   if (typeof credentialRef !== "string" || typeof repositoryUrl !== "string" || (access !== "clone" && access !== "push")) throw agentXError("CONFIG_INVALID", "name the credential, the repository and the access");
-  await assertPushAuthority(deps, operation, access);
-  return deps.grants.exchange(grant, { workspaceId, operationId, credentialRef, repositoryUrl, access });
+  return exchangeGitCredential({ flow: deps.flow, grants: deps.grants }, { grant, workspaceId, operationId, operation, credentialRef, repositoryUrl, access,
+    authority: () => assertPushAuthority(deps, operation, access), closing: async () => await acceptedCloseForRun(deps.flow, operation) !== undefined });
 }
 
 const uploadStores = (deps: CallbackDeps): UploadStores => ({ store: deps.flow.store, objects: deps.blobs, ...(deps.flow.now === undefined ? {} : { now: deps.flow.now }), ...(deps.flow.newId === undefined ? {} : { newId: deps.flow.newId }) });

@@ -1,4 +1,4 @@
-import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { agentXError } from "@agentx/contracts";
 
 interface RepositoryGrantClaims {
@@ -72,24 +72,15 @@ export class RepositoryGrantService {
     },
   ): Promise<RepositoryCredential> {
     const claims = this.verify(grant);
-    if (
-      claims.workspaceId !== request.workspaceId ||
-      claims.operationId !== request.operationId ||
-      !claims.repositories.some(
-        (repository) =>
-          repository.credentialRef === request.credentialRef &&
-          repository.repositoryUrl === request.repositoryUrl &&
-          repository.access === request.access,
-      )
-    ) {
-      throw agentXError("FORBIDDEN", "repository credential grant does not cover this request");
-    }
+    if (!grantCovers(claims, request)) throw agentXError("FORBIDDEN", "repository credential grant does not cover this request");
     return this.resolveCredential(request.credentialRef, request.repositoryUrl, request.access);
   }
 
-  inspect(grant: string): Omit<RepositoryGrantClaims, "nonce"> {
+  /** What a verified grant says, and its id: a short hash of its nonce, safe to log (the grant, its signature and its nonce are never). */
+  inspect(grant: string): Omit<RepositoryGrantClaims, "nonce"> & { grantId: string } {
     const claims = this.verify(grant);
     return {
+      grantId: grantIdOf(claims.nonce),
       version: claims.version,
       ownerKey: claims.ownerKey,
       projectName: claims.projectName,
@@ -127,6 +118,20 @@ export class RepositoryGrantService {
   private sign(payload: string): string {
     return createHmac("sha256", this.signingKey).update(payload).digest("base64url");
   }
+}
+
+/** The first 12 hex characters of sha256(nonce): enough to tell one grant from another in a log, and no help to anyone holding the log. */
+function grantIdOf(nonce: unknown): string {
+  return createHash("sha256").update(typeof nonce === "string" ? nonce : "").digest("hex").slice(0, 12);
+}
+
+/** True when the grant is for this workspace and operation and names this exact credential, repository and access. */
+export function grantCovers(
+  claims: { workspaceId: string; operationId: string; repositories: readonly RepositoryGrantScope[] },
+  request: { workspaceId: string; operationId: string; credentialRef: string; repositoryUrl: string; access: RepositoryAccess },
+): boolean {
+  return claims.workspaceId === request.workspaceId && claims.operationId === request.operationId
+    && claims.repositories.some((repository) => repository.credentialRef === request.credentialRef && repository.repositoryUrl === request.repositoryUrl && repository.access === request.access);
 }
 
 function uniqueScopes(scopes: readonly RepositoryGrantScope[]): RepositoryGrantScope[] {

@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { canonicalJson, createCandidateManifest, when, WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, type TransactItem, type WorkflowSnapshot } from "@agentx/contracts";
 import type { ApplicationE2ESeams } from "../../packages/broker/src/core/e2e/application-seams.js";
 import { createCallbackHandler } from "../../packages/broker/src/services/callbacks.js";
+import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
 import { startPublication, openPullRequest, recordPublished } from "../../packages/broker/src/core/build-step/publish.js";
 import { recordMaintained, updatePullRequest } from "../../packages/broker/src/core/build-step/maintain.js";
 import { pullRequestRecordKey } from "../../packages/broker/src/core/build-step/records.js";
@@ -15,6 +16,8 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
 import { host, ORG } from "../support/service-host.js";
 
+/** A grant id as the broker logs it: 12 hex characters. */
+const GRANT_ID = expect.stringMatching(/^[0-9a-f]{12}$/u) as string;
 const at = "2026-11-09T10:00:00.000Z";
 const authorityKey = { pk: "AUTHORITY#publication-test", sk: "META" };
 const authorityItems: TransactItem[] = [{ kind: "check", key: authorityKey, condition: when.eq("revision", 1) }];
@@ -213,7 +216,8 @@ describe("publication credential release", () => {
     const w = await world({ workspaceId: "33333333-3333-4333-8333-333333333333" });
     const { operation } = await w.started();
     const exchange = vi.fn(async () => ({ token: "fixture-token" }));
-    const handler = createCallbackHandler({ flow: w.h.deps, blobs: createDocumentObjectStorage(w.h.store, { companyId: ORG }), grants: { exchange, inspect: () => { throw new Error("unused"); } } });
+    const handler = createCallbackHandler({ flow: w.h.deps, blobs: createDocumentObjectStorage(w.h.store, { companyId: ORG }), grants: { exchange, inspect: () => ({ grantId: "fixture-id", version: 3, ownerKey: "owner", projectName: w.workspace.projectName, workspaceId: w.workspace.id, operationId: operation!.id, expiresAt: 4_000_000_000,
+      repositories: (["clone", "push"] as const).map((access) => ({ credentialRef: "host-app", repositoryUrl: "https://github.com/acme/app", access })) }) } });
     const post = (access: "clone" | "push" = "push") => handler({ method: "POST",
       path: `/v1/internal/workspaces/${w.workspace.id}/operations/${operation!.id}/repository-credentials`,
       headers: { "x-agentx-repository-grant": "fixture-grant" },
@@ -459,4 +463,215 @@ it("refuses recording an append if the task closes after its final authority rea
       baseBranch: "main", previousCommit: w.oldHead, commit: w.commit })).rejects.toMatchObject({ code: "STALE_FENCE" });
     expect(await w.h.store.get(key)).toEqual(before);
   } finally { spy.mockRestore(); }
+});
+
+// G1 (grant exchange binding): the core's Git exchange gives a credential only to a LIVE operation that still holds its workspace, counts the exchanges, audits a push before it leaves and logs every outcome with the grant's id.
+describe("repository credential exchange: liveness, count, audit and log", () => {
+  const TOKEN = "ghs_FIXTURE_INSTALLATION_TOKEN";
+  const URL_OF_APP = "https://github.com/acme/app";
+  async function exchangeWorld() {
+    const w = await world({ workspaceId: "33333333-3333-4333-8333-333333333333" });
+    const { operation } = await w.started();
+    const resolve = vi.fn(async () => ({ username: "x-access-token", password: TOKEN }));
+    const grants = new RepositoryGrantService(Buffer.alloc(32, 7), resolve);
+    const lines: Array<Record<string, unknown>> = [];
+    w.h.deps.log = (entry) => { lines.push(entry); };
+    const handler = createCallbackHandler({ flow: w.h.deps, blobs: createDocumentObjectStorage(w.h.store, { companyId: ORG }), grants });
+    const grantFor = () => grants.issue({ ownerKey: "owner", projectName: "web", workspaceId: w.workspace.id, operationId: operation!.id,
+      repositories: (["clone", "push"] as const).map((access) => ({ credentialRef: "host-app", repositoryUrl: URL_OF_APP, access })) });
+    const post = async (grant: string, access: "clone" | "push" = "push", repositoryUrl: string = URL_OF_APP) => {
+      const answer = await handler({ method: "POST", path: `/v1/internal/workspaces/${w.workspace.id}/operations/${operation!.id}/repository-credentials`,
+        headers: { "x-agentx-repository-grant": grant }, body: JSON.stringify({ credentialRef: "host-app", repositoryUrl, access }) });
+      const body = JSON.parse(answer.body ?? "{}") as { error?: { code?: string } };
+      return { status: answer.statusCode, code: body.error?.code };
+    };
+    const setOperation = (changes: Record<string, unknown>) => w.h.store.put({ item: toDocument({ ...operation!, ...changes }) });
+    /** The workspace as stored now (the start of the publication raised its fence and made the operation its active one). */
+    const changeWorkspace = async (changes: Record<string, string | number | null>) => { const stored = (await w.h.store.get({ pk: w.workspace.pk, sk: w.workspace.sk }))!; await w.h.store.put({ item: { ...stored, ...changes } }); return stored; };
+    const countOf = async () => (await w.h.store.get({ pk: operation!.pk, sk: operation!.sk }))?.["repositoryCredentialCount"];
+    const refusals = () => lines.filter((line) => line["event"] === "repository.credential_refused");
+    const nonceOf = (grant: string) => (JSON.parse(Buffer.from(grant.split(".")[0]!, "base64url").toString("utf8")) as { nonce: string }).nonce;
+    return { ...w, operation: operation!, resolve, lines, grantFor, post, setOperation, changeWorkspace, countOf, refusals, nonceOf, grants };
+  }
+
+  it("the happy publish path: two exchanges for the repository pass, each audited before it leaves, counted, and logged with the grant's id and no secret", async () => {
+    const w = await exchangeWorld();
+    const grant = w.grantFor();
+    expect(await w.post(grant)).toEqual({ status: 200, code: undefined });
+    expect(await w.post(grant)).toEqual({ status: 200, code: undefined });
+    expect(w.resolve).toHaveBeenCalledTimes(2);
+    expect(await w.countOf()).toBe(2);
+    const issued = w.lines.filter((line) => line["event"] === "repository.credential_issued");
+    const id = createHash("sha256").update(w.nonceOf(grant)).digest("hex").slice(0, 12);
+    expect(issued).toHaveLength(2);
+    expect(issued[1]).toMatchObject({ outcome: "issued", grantId: id, operationId: w.operation.id, workspaceId: w.workspace.id, repository: "app", kind: "push", headBranch: w.operation.publication!.headBranch, count: 2 });
+    const requested = w.h.audit.filter((event) => event.action === "repository_credential.requested");
+    const given = w.h.audit.filter((event) => event.action === "repository_credential.issued");
+    expect([requested.length, given.length], "a row for the request before the mint, a row for the credential after it").toEqual([2, 2]);
+    expect(requested[0]).toMatchObject({ companyId: ORG, details: { repository: "app", kind: "push", grantId: id, count: 1, operationId: w.operation.id } });
+    expect(w.h.audit.filter((event) => event.action === "repository_credential.used")).toEqual([]);
+    // The grant, its nonce and the credential are in no line and no audit row.
+    const raw = JSON.stringify([w.lines, w.h.audit]);
+    for (const secret of [TOKEN, grant, grant.split(".")[0]!, grant.split(".")[1]!, w.nonceOf(grant)]) expect(raw).not.toContain(secret);
+  });
+
+  it("a replacement machine after a lost one asks again with a new grant: a whole redelivery fits inside the cap; the next exchange is refused with the fixed words and takes no credential", async () => {
+    const w = await exchangeWorld();
+    const first = w.grantFor(); const second = w.grantFor();
+    for (const grant of [first, first, second, second]) expect((await w.post(grant)).status).toBe(200);
+    expect(await w.countOf()).toBe(4);
+    expect(new Set(w.lines.map((line) => line["grantId"])).size, "two grants, two ids").toBe(2);
+    expect(await w.post(second)).toEqual({ status: 403, code: "FORBIDDEN" });
+    expect(w.resolve).toHaveBeenCalledTimes(4);
+    expect(await w.countOf(), "a refused request does not count").toBe(4);
+    expect(w.refusals()[0]).toMatchObject({ outcome: "refused", reason: "limit", grantId: GRANT_ID });
+  });
+
+  it("six requests at once take four slots: two cannot both take the last one", async () => {
+    const w = await exchangeWorld();
+    const grant = w.grantFor();
+    const answers = await Promise.all(Array.from({ length: 6 }, () => w.post(grant)));
+    expect(answers.filter((answer) => answer.status === 200)).toHaveLength(4);
+    expect(w.resolve).toHaveBeenCalledTimes(4);
+    expect(await w.countOf()).toBe(4);
+  });
+
+  it.each(["push", "clone"] as const)("a Stop (or a money stop) has asked the operation to stop: a %s exchange is refused, nothing is minted, and the line names the grant", async (access) => {
+    const w = await exchangeWorld();
+    const grant = w.grantFor();
+    expect((await w.post(grant, access)).status).toBe(200);
+    await w.setOperation({ status: "CANCEL_REQUESTED" });
+    expect(await w.post(grant, access)).toEqual({ status: 403, code: "FORBIDDEN" });
+    expect(w.resolve).toHaveBeenCalledTimes(1);
+    expect(w.refusals()).toEqual([expect.objectContaining({ reason: "stopping", kind: access, grantId: GRANT_ID, operationId: w.operation.id })]);
+  });
+
+  /** Runs `change` once, just before the transaction that takes the slot (the one that adds to the count), as a person's press or a close would land between the read and the count. */
+  function betweenReadAndCount(w: Awaited<ReturnType<typeof exchangeWorld>>, change: () => Promise<unknown>): void {
+    const transact = w.h.store.transact.bind(w.h.store);
+    let landed = false;
+    vi.spyOn(w.h.store, "transact").mockImplementation(async (items) => {
+      if (!landed && items.some((item) => item.kind === "update" && item.ops.some((op) => op.path[0] === "repositoryCredentialCount"))) { landed = true; await change(); }
+      return transact(items);
+    });
+  }
+
+  it("a stop that lands between the read and the count takes no slot and mints nothing", async () => {
+    const w = await exchangeWorld();
+    betweenReadAndCount(w, () => w.setOperation({ status: "CANCEL_REQUESTED" }));
+    expect(await w.post(w.grantFor())).toEqual({ status: 403, code: "FORBIDDEN" });
+    expect(w.resolve).not.toHaveBeenCalled();
+    expect(await w.countOf()).toBeUndefined();
+    expect(w.refusals()[0]).toMatchObject({ reason: "stopping" });
+  });
+
+  it.each([["a close accepted", { status: "CLOSING" }], ["a newer fence", { fence: 99 }], ["another active operation", { activeOperationId: "55555555-5555-4555-8555-555555555555" }]] as const)("%s between the read and the count takes no slot and mints nothing (the count's own transaction checks the workspace)", async (_name, changes) => {
+    const w = await exchangeWorld();
+    betweenReadAndCount(w, () => w.changeWorkspace({ ...changes }));
+    expect(await w.post(w.grantFor(), "clone")).toEqual({ status: 409, code: "STALE_FENCE" });
+    expect(w.resolve).not.toHaveBeenCalled();
+    expect(await w.countOf()).toBeUndefined();
+    expect(w.refusals()[0]).toMatchObject({ reason: "stale" });
+  });
+
+  it.each(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"] as const)("a %s operation gets nothing", async (status) => {
+    const w = await exchangeWorld();
+    await w.setOperation({ status });
+    expect(await w.post(w.grantFor())).toEqual({ status: 403, code: "FORBIDDEN" });
+    expect(w.resolve).not.toHaveBeenCalled();
+    expect(w.refusals()[0]).toMatchObject({ reason: "ended" });
+  });
+
+  it.each(["push", "clone"] as const)("a workspace that has moved to a newer fence refuses a %s exchange", async (access) => {
+    const w = await exchangeWorld();
+    const stored = await w.changeWorkspace({});
+    expect(stored["activeOperationId"], "the workspace holds this operation at the operation's fence").toBe(w.operation.id);
+    expect(stored["fence"]).toBe(w.operation.fence);
+    await w.changeWorkspace({ fence: w.operation.fence + 1 });
+    expect(await w.post(w.grantFor(), access)).toEqual({ status: 409, code: "STALE_FENCE" });
+    expect(w.resolve).not.toHaveBeenCalled();
+    expect(w.refusals()[0]).toMatchObject({ reason: "stale" });
+  });
+
+  it.each(["push", "clone"] as const)("a workspace whose active operation is another one refuses a %s exchange", async (access) => {
+    const w = await exchangeWorld();
+    await w.changeWorkspace({ activeOperationId: "55555555-5555-4555-8555-555555555555" });
+    expect(await w.post(w.grantFor(), access)).toEqual({ status: 409, code: "STALE_FENCE" });
+    await w.changeWorkspace({ activeOperationId: null });
+    expect(await w.post(w.grantFor(), access)).toEqual({ status: 409, code: "STALE_FENCE" });
+    expect(w.resolve).not.toHaveBeenCalled();
+  });
+
+  it.each(["CLOSING", "CLOSED", "STOPPED"] as const)("a %s workspace refuses the exchange", async (status) => {
+    const w = await exchangeWorld();
+    await w.changeWorkspace({ status });
+    expect(await w.post(w.grantFor(), "push")).toEqual({ status: 409, code: "STALE_FENCE" });
+    expect(w.resolve).not.toHaveBeenCalled();
+  });
+
+  it("a workspace that was closed (closedAt set) refuses the exchange", async () => {
+    const w = await exchangeWorld();
+    await w.changeWorkspace({ closedAt: at });
+    expect(await w.post(w.grantFor(), "clone")).toEqual({ status: 409, code: "STALE_FENCE" });
+  });
+
+  it("a push that cannot be audited is refused, mints nothing and gives its slot back; a clone goes on and the line says the record failed", async () => {
+    const w = await exchangeWorld();
+    w.h.deps.audit = { stage: () => [], record: async () => { throw new Error("audit store down"); } };
+    const grant = w.grantFor();
+    expect(await w.post(grant, "push")).toEqual({ status: 503, code: "RUNTIME_UNAVAILABLE" });
+    expect(w.resolve).not.toHaveBeenCalled();
+    expect(w.refusals()[0]).toMatchObject({ reason: "audit" });
+    expect(await w.countOf(), "nothing was handed out, so nothing is spent").toBe(0);
+    expect(await w.post(grant, "clone")).toEqual({ status: 200, code: undefined });
+    expect(w.lines.find((line) => line["event"] === "repository.credential_issued")).toMatchObject({ kind: "clone", auditFailed: true });
+    expect(await w.countOf(), "a clone that was given stays counted").toBe(1);
+  });
+
+  it("a mint that fails (the host is down) is a refusal of its own, gives its slot back, leaves a request row and no issued row, and a retry can still pass", async () => {
+    const w = await exchangeWorld();
+    const grant = w.grantFor();
+    w.resolve.mockRejectedValueOnce(new Error("GitHub 502 for https://user:HOSTSECRET@host/x"));
+    const failed = await w.post(grant, "push");
+    expect(failed).toEqual({ status: 503, code: "RUNTIME_UNAVAILABLE" });
+    expect(w.refusals()[0]).toMatchObject({ reason: "mint", grantId: GRANT_ID });
+    expect(await w.countOf()).toBe(0);
+    expect(w.h.audit.map((event) => event.action)).toEqual(["repository_credential.requested"]);
+    expect(JSON.stringify([w.lines, w.h.audit]), "the host's error text is in no line").not.toContain("HOSTSECRET");
+    expect((await w.post(grant, "push")).status).toBe(200);
+    expect(await w.countOf()).toBe(1);
+    expect(w.h.audit.map((event) => event.action)).toEqual(["repository_credential.requested", "repository_credential.requested", "repository_credential.issued"]);
+  });
+
+  it("the log line names the repository from the verified grant, never from the request: an address with user information, or one the grant does not name, logs no repository", async () => {
+    const w = await exchangeWorld();
+    const grant = w.grantFor();
+    const hostile = "https://user:HOSTILESECRET@evil.example.test";
+    expect(await w.post(grant, "push", hostile)).toEqual({ status: 403, code: "FORBIDDEN" });
+    expect(await w.post(grant, "push", "https://github.com/acme/other")).toEqual({ status: 403, code: "FORBIDDEN" });
+    expect(w.refusals()).toHaveLength(2);
+    for (const line of w.refusals()) { expect(line).toMatchObject({ reason: "not-covered", grantId: GRANT_ID }); expect(line).not.toHaveProperty("repository"); }
+    expect(await w.post(grant.replace(/.$/u, "x"), "push", hostile)).toEqual({ status: 403, code: "FORBIDDEN" });
+    expect(JSON.stringify(w.lines)).not.toContain("HOSTILESECRET");
+    expect(JSON.stringify(w.lines)).not.toContain("evil.example");
+    expect((await w.post(grant, "push")).status).toBe(200);
+    expect(w.lines.at(-1)).toMatchObject({ event: "repository.credential_issued", repository: "app" });
+  });
+
+  it("a grant that fails verification is refused and logged as such, before anything is read or counted", async () => {
+    const w = await exchangeWorld();
+    expect((await w.post(w.grantFor().replace(/.$/u, "x"))).status).toBe(403);
+    expect(await w.countOf()).toBeUndefined();
+    expect(w.refusals()[0]).toMatchObject({ reason: "grant" });
+    expect(w.refusals()[0]).not.toHaveProperty("grantId");
+  });
+
+  it("a request the grant does not name (a push on a clone-only grant, another repository) is refused before it is counted", async () => {
+    const w = await exchangeWorld();
+    const cloneOnly = w.grants.issue({ ownerKey: "owner", projectName: "web", workspaceId: w.workspace.id, operationId: w.operation.id, repositories: [{ credentialRef: "host-app", repositoryUrl: URL_OF_APP, access: "clone" }] });
+    expect(await w.post(cloneOnly, "push")).toEqual({ status: 403, code: "FORBIDDEN" });
+    expect(w.resolve).not.toHaveBeenCalled();
+    expect(await w.countOf()).toBeUndefined();
+    expect(w.refusals()[0]).toMatchObject({ reason: "not-covered", grantId: GRANT_ID });
+  });
 });
