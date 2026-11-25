@@ -29,6 +29,7 @@ import { agentXError, companyLog, ON_THE_WEBSITE_MESSAGE, OrgIdSchema } from "@a
 import { Membership, membershipKey } from "./company-check.js";
 import { githubUninstallUrl, projectsUsingInstallation } from "./github-lifecycle.js";
 import type { DeveloperCaller } from "./developer-routes.js";
+import { SESSION_BINDING_PATTERN, sameSessionBinding, sessionBindingOf } from "../developer/session-binding.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import type { ControlledInstallation } from "../plugins/code-host/github/user-authorization.js";
 import type { GithubInstallationBindings, PersonClaimOutcome } from "./github-credentials.js";
@@ -99,7 +100,7 @@ const ClaimBody = z.object({
 const ChooseBody = z.object({ ticket: Secret, installationId: InstallationId }).strict();
 const Stored = z.object({
   entityType: z.literal("GITHUB_CONNECT_STATE"), provider: z.enum([STATE_PROVIDER, TICKET_PROVIDER]), status: z.literal("live"),
-  companyId: OrgIdSchema, personId: z.string().regex(/^[a-f0-9]{64}$/), sessionId: z.string().min(1).max(256),
+  companyId: OrgIdSchema, personId: z.string().regex(/^[a-f0-9]{64}$/), sessionBinding: z.string().regex(SESSION_BINDING_PATTERN),
   createdAt: z.iso.datetime(), expiresAt: z.number().int().positive(),
   githubUser: z.object({ id: InstallationId, login: z.string().min(1).max(39) }).strict().optional(),
   installations: z.array(z.object({ installationId: InstallationId, accountLogin: z.string().min(1).max(39), accountType: z.enum(["User", "Organization"]), suspended: z.boolean() }).strict()).max(100).optional(),
@@ -127,7 +128,13 @@ async function liveMembership(ctx: GithubConnectContext, caller: DeveloperCaller
 const isAdmin = (member: z.infer<typeof Membership>) => member.role === "admin" || member.role === "owner";
 
 /** Mints and stores (hashed) a state or a ticket for this company, person and session. */
-async function mint(ctx: GithubConnectContext, who: { companyId: string; personId: string; sessionId: string }, provider: typeof STATE_PROVIDER | typeof TICKET_PROVIDER,
+/** The state rows keep a digest of the caller's sign-in session, so a caller with none (a registered service's own token has no sign-in session) never mints or spends one. */
+const sessionBindingOfCaller = (caller: DeveloperCaller): string => {
+  if (typeof caller.sessionId !== "string" || caller.sessionId === "") throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  return sessionBindingOf(caller.sessionId);
+};
+
+async function mint(ctx: GithubConnectContext, who: { companyId: string; personId: string; sessionBinding: string }, provider: typeof STATE_PROVIDER | typeof TICKET_PROVIDER,
   extra: Record<string, unknown> = {}): Promise<{ secret: string; expiresAt: number }> {
   const bytes = ctx.wiring.random?.() ?? randomBytes(32);
   if (bytes.length !== 32) throw new Error("random");
@@ -140,19 +147,19 @@ async function mint(ctx: GithubConnectContext, who: { companyId: string; personI
 }
 
 /** Spends a live state or ticket once, only for the same company, person, session and provider, before its expiry. Undefined for anything else. */
-async function spend(ctx: GithubConnectContext, secret: string, who: { companyId: string; personId: string; sessionId: string }, provider: typeof STATE_PROVIDER | typeof TICKET_PROVIDER): Promise<z.infer<typeof Stored> | undefined> {
+async function spend(ctx: GithubConnectContext, secret: string, who: { companyId: string; personId: string; sessionBinding: string }, provider: typeof STATE_PROVIDER | typeof TICKET_PROVIDER): Promise<z.infer<typeof Stored> | undefined> {
   try {
     const key = keyOf(secret);
     const nowSeconds = Math.floor(ctx.now() / 1000);
     const response = await ctx.documentClient.send(new GetCommand({ TableName: ctx.tableName, Key: key, ConsistentRead: true })) as { Item?: unknown };
     const row = Stored.parse(response.Item);
-    if (row.provider !== provider || row.companyId !== who.companyId || row.personId !== who.personId || row.sessionId !== who.sessionId || row.expiresAt <= nowSeconds) return undefined;
+    if (row.provider !== provider || row.companyId !== who.companyId || row.personId !== who.personId || !sameSessionBinding(row.sessionBinding, who.sessionBinding) || row.expiresAt <= nowSeconds) return undefined;
     await ctx.documentClient.send(new UpdateCommand({ TableName: ctx.tableName, Key: key,
       UpdateExpression: "SET #status = :used, usedAt = :at",
-      ConditionExpression: "#status = :live AND #provider = :provider AND companyId = :company AND personId = :person AND sessionId = :session AND expiresAt > :now",
+      ConditionExpression: "#status = :live AND #provider = :provider AND companyId = :company AND personId = :person AND sessionBinding = :session AND expiresAt > :now",
       ExpressionAttributeNames: { "#status": "status", "#provider": "provider" },
       ExpressionAttributeValues: { ":used": "used", ":live": "live", ":at": new Date(ctx.now()).toISOString(), ":provider": provider,
-        ":company": who.companyId, ":person": who.personId, ":session": who.sessionId, ":now": nowSeconds } }));
+        ":company": who.companyId, ":person": who.personId, ":session": who.sessionBinding, ":now": nowSeconds } }));
     return row;
   } catch { return undefined; }
 }
@@ -181,7 +188,8 @@ async function bind(ctx: GithubConnectContext, companyId: string, personId: stri
  */
 export async function routeGithubConnect(ctx: GithubConnectContext, caller: DeveloperCaller, companyId: string, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   const member = await liveMembership(ctx, caller, companyId);
-  const who = { companyId: member.companyId, personId: caller.developerId, sessionId: caller.sessionId };
+  // Only the paths that mint or spend a state ask for this: it refuses a caller with no sign-in session before anything is written or read.
+  const whoOf = () => ({ companyId: member.companyId, personId: caller.developerId, sessionBinding: sessionBindingOfCaller(caller) });
 
   const one = INSTALLATION_PATH.exec(url.pathname);
   if (one !== null && url.pathname !== CONNECT && url.pathname !== CLAIM && url.pathname !== CHOOSE) {
@@ -203,7 +211,8 @@ export async function routeGithubConnect(ctx: GithubConnectContext, caller: Deve
     catch { throw agentXError("RUNTIME_UNAVAILABLE", CONNECT_NOT_SET_UP); }
     if (client === undefined || !/^[A-Za-z0-9.]{1,64}$/.test(client.clientId)) throw agentXError("RUNTIME_UNAVAILABLE", CONNECT_NOT_SET_UP);
     let minted: { secret: string; expiresAt: number };
-    try { minted = await mint(ctx, who, STATE_PROVIDER); } catch { throw agentXError("RUNTIME_UNAVAILABLE", CONNECT_UNAVAILABLE); }
+    const startWho = whoOf();
+    try { minted = await mint(ctx, startWho, STATE_PROVIDER); } catch { throw agentXError("RUNTIME_UNAVAILABLE", CONNECT_UNAVAILABLE); }
     const state = encodeURIComponent(minted.secret);
     return {
       state: minted.secret, expiresAt: new Date(minted.expiresAt * 1000).toISOString(),
@@ -221,7 +230,7 @@ export async function routeGithubConnect(ctx: GithubConnectContext, caller: Deve
     const input = parsed.data;
     const requested = input.setupAction === "request";
     if (requested ? input.installationId !== undefined : input.code === undefined) throw startAgain();
-    if (await spend(ctx, input.state, who, STATE_PROVIDER) === undefined) throw startAgain();
+    if (await spend(ctx, input.state, whoOf(), STATE_PROVIDER) === undefined) throw startAgain();
     // GitHub sends "request" when the person asked their GitHub admin to install: nothing is installed yet, so nothing binds.
     if (requested) return { status: "requested" as const };
     let checked: Awaited<ReturnType<GithubConnectWiring["github"]["userControlledInstallations"]>>;
@@ -238,7 +247,8 @@ export async function routeGithubConnect(ctx: GithubConnectContext, caller: Deve
     const installations = checked.installations.map((row, index) => ({ ...row,
       connection: owners[index] === member.companyId ? "this_company" as const : owners[index] === undefined ? "unbound" as const : "another_company" as const }));
     let ticket: { secret: string; expiresAt: number };
-    try { ticket = await mint(ctx, who, TICKET_PROVIDER, { githubUser: checked.user, installations: checked.installations }); }
+    const ticketWho = whoOf();
+    try { ticket = await mint(ctx, ticketWho, TICKET_PROVIDER, { githubUser: checked.user, installations: checked.installations }); }
     catch { throw agentXError("RUNTIME_UNAVAILABLE", CONNECT_UNAVAILABLE); }
     return { status: "choose" as const, ticket: ticket.secret, expiresAt: new Date(ticket.expiresAt * 1000).toISOString(), githubUser: checked.user, installations };
   }
@@ -246,7 +256,7 @@ export async function routeGithubConnect(ctx: GithubConnectContext, caller: Deve
   if (url.pathname === CHOOSE) {
     const parsed = ChooseBody.safeParse(body(request));
     if (!parsed.success) throw startAgain();
-    const ticket = await spend(ctx, parsed.data.ticket, who, TICKET_PROVIDER);
+    const ticket = await spend(ctx, parsed.data.ticket, whoOf(), TICKET_PROVIDER);
     const installation = ticket?.installations?.find((row) => row.installationId === parsed.data.installationId);
     if (ticket?.githubUser === undefined || installation === undefined) throw startAgain();
     return bind(ctx, member.companyId, caller.developerId, installation, ticket.githubUser);

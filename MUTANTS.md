@@ -538,3 +538,8 @@ The two Denies now use `StringEquals ProviderPermissionsRequired = read_write` i
 | release-pipeline.ts preflightProject | The Deny condition value `read_only` instead of `read_write` (denies the clone, allows the push) | killed, 1 failed |
 | release-pipeline.ts preflightProject | The Deny block skipped for the Production Code Preflight | killed, 1 failed |
 | release-pipeline.ts preflightProject | `StringNotEquals` instead of `StringEquals` (denies a request without the key) | killed, 1 failed |
+| session-binding.ts (session-id-at-rest) | `sameSessionBinding` always true; `sessionBindingOf` returns the raw id | killed (2) |
+| the six state-row families (slack-company-install, github-connect-routes, github-account-link-routes, linear-connections + linear-connect/account-link-routes, sign-in-links) | the row keeps the raw `caller.sessionId` in place of the digest | killed (all six) |
+| same | the spend's in-code digest compare removed alone | survived: equivalent (the DynamoDB condition on the digest still refuses; the two layers are redundant by design) |
+| same | the in-code compare AND the condition's digest value both neutralised (condition compares the row with itself) | killed (all six) |
+| slack-company-install.ts, github-connect-routes.ts, linear-connect-routes.ts `sessionBindingOfCaller` | the empty/missing session-id guard removed | killed (2 each) |

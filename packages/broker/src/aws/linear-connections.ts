@@ -24,6 +24,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
+import { SESSION_BINDING_PATTERN, sameSessionBinding } from "../developer/session-binding.js";
 import { agentXError, companyLog, INDEX_EXPIRY_ATTRIBUTE, OrgIdSchema, orgScoped } from "@agentx/contracts";
 import { isConditional } from "./broker-shared.js";
 import { LinearOAuthFailure, refreshLinearTokens, revokeLinearToken, type LinearApp, type LinearTeam, type LinearTokens, type LinearWorkspace } from "./linear-oauth-client.js";
@@ -108,7 +109,7 @@ const STATE_KINDS = {
 export type LinearStateKind = keyof typeof STATE_KINDS;
 const stateFields = {
   status: z.literal("live"), companyId: OrgIdSchema,
-  personId: z.string().regex(/^[a-f0-9]{64}$/), sessionId: z.string().min(1).max(256), createdAt: z.iso.datetime(), expiresAt: z.number().int().positive(),
+  personId: z.string().regex(/^[a-f0-9]{64}$/), sessionBinding: z.string().regex(SESSION_BINDING_PATTERN), createdAt: z.iso.datetime(), expiresAt: z.number().int().positive(),
   sealedVerifier: z.string().min(1).max(16_384),
 };
 const StateRow = z.object({ entityType: z.literal("LINEAR_CONNECT_STATE"), provider: z.literal("linear"), ...stateFields }).passthrough();
@@ -156,16 +157,16 @@ export class LinearConnections {
 
 
   /** A connect start for this company, person and session: the state (returned once) and the PKCE verifier (sealed, kept here). */
-  async mintState(who: { companyId: string; personId: string; sessionId: string }): Promise<{ state: string; verifier: string; expiresAt: number }> {
+  async mintState(who: { companyId: string; personId: string; sessionBinding: string }): Promise<{ state: string; verifier: string; expiresAt: number }> {
     return this.mint("connect", who);
   }
 
   /** A member's own-account link start (R1 + L1): the same as a connect start, in the link flow's own key family. */
-  async mintLinkState(who: { companyId: string; personId: string; sessionId: string }): Promise<{ state: string; verifier: string; expiresAt: number }> {
+  async mintLinkState(who: { companyId: string; personId: string; sessionBinding: string }): Promise<{ state: string; verifier: string; expiresAt: number }> {
     return this.mint("link", who);
   }
 
-  private async mint(kind: LinearStateKind, who: { companyId: string; personId: string; sessionId: string }): Promise<{ state: string; verifier: string; expiresAt: number }> {
+  private async mint(kind: LinearStateKind, who: { companyId: string; personId: string; sessionBinding: string }): Promise<{ state: string; verifier: string; expiresAt: number }> {
     const stateBytes = this.random(32); const verifierBytes = this.random(32);
     if (stateBytes.length !== 32 || verifierBytes.length !== 32) throw new Error("random");
     const state = stateBytes.toString("base64url"); const verifier = verifierBytes.toString("base64url");
@@ -179,27 +180,27 @@ export class LinearConnections {
   }
 
   /** Spends a live state once, only for the same company, person and session, before it expires; its PKCE verifier. Undefined for anything else. */
-  async spendState(state: string, who: { companyId: string; personId: string; sessionId: string }): Promise<string | undefined> {
+  async spendState(state: string, who: { companyId: string; personId: string; sessionBinding: string }): Promise<string | undefined> {
     return this.spend("connect", state, who);
   }
 
   /** Spends a member's own-account link state (only a link state: a connect state is nobody's here, and the reverse). */
-  async spendLinkState(state: string, who: { companyId: string; personId: string; sessionId: string }): Promise<string | undefined> {
+  async spendLinkState(state: string, who: { companyId: string; personId: string; sessionBinding: string }): Promise<string | undefined> {
     return this.spend("link", state, who);
   }
 
-  private async spend(kind: LinearStateKind, state: string, who: { companyId: string; personId: string; sessionId: string }): Promise<string | undefined> {
+  private async spend(kind: LinearStateKind, state: string, who: { companyId: string; personId: string; sessionBinding: string }): Promise<string | undefined> {
     try {
       const key = linearStateKey(state, kind);
       const nowSeconds = Math.floor(this.deps.now() / 1000);
       const row = (kind === "connect" ? StateRow : LinkStateRow).parse(await this.get(key));
-      if (row.companyId !== who.companyId || row.personId !== who.personId || row.sessionId !== who.sessionId || row.expiresAt <= nowSeconds) return undefined;
+      if (row.companyId !== who.companyId || row.personId !== who.personId || !sameSessionBinding(row.sessionBinding, who.sessionBinding) || row.expiresAt <= nowSeconds) return undefined;
       await this.deps.documentClient.send(new UpdateCommand({ TableName: this.table, Key: key,
         UpdateExpression: "SET #status = :used, usedAt = :at REMOVE sealedVerifier",
-        ConditionExpression: "#status = :live AND #provider = :provider AND companyId = :company AND personId = :person AND sessionId = :session AND expiresAt > :now",
+        ConditionExpression: "#status = :live AND #provider = :provider AND companyId = :company AND personId = :person AND sessionBinding = :session AND expiresAt > :now",
         ExpressionAttributeNames: { "#status": "status", "#provider": "provider" },
         ExpressionAttributeValues: { ":used": "used", ":live": "live", ":at": new Date(this.deps.now()).toISOString(), ":provider": STATE_KINDS[kind].provider,
-          ":company": who.companyId, ":person": who.personId, ":session": who.sessionId, ":now": nowSeconds } }));
+          ":company": who.companyId, ":person": who.personId, ":session": who.sessionBinding, ":now": nowSeconds } }));
       return await this.deps.sealer.open(row.sealedVerifier, verifierContext(kind, who.companyId, who.personId, key.pk));
     } catch { return undefined; }
   }
