@@ -305,8 +305,11 @@ export interface TaskFlowDeps {
    * dispatched with the `context-tools` capability and `contextSources: true`, and so only on a worker that lists `task.contextSources.v1`. Absent: no stage has sources.
    */
   contextSources?: { stageHasSources(task: { project: string }, mode: string): Promise<boolean> };
-  /** Told, best effort, after a task was closed and its machines and allowances given back (what a task kept only for its own lifetime, such as live-only source text, goes now). Never fails the close. */
-  taskEnded?: (event: { orgId: OrgId; taskId: string }) => Promise<void>;
+  /**
+   * Told, best effort, after a task ended (closed, or completed by its merge) and its machines and allowances given back (what a task kept only for its own lifetime, such as live-only source text, goes now). Never fails the close.
+   * A host that delivers over a network answers `"pending"` when the notice did not get through (and is not an error): the end is then sent again by `reconcileTaskEnds`.
+   */
+  taskEnded?: (event: { orgId: OrgId; taskId: string }) => Promise<void | "pending">;
   /** How long (seconds) a worker machine may be lost or unhealthy before the operation running on it is ended INTERRUPTED (`sweepLostRuns`). Default `RUN_LOST_GRACE_SECONDS`. */
   runLostGraceSeconds?: number;
   /**

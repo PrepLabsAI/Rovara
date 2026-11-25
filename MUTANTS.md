@@ -889,3 +889,17 @@ Each guard removed or inverted in a scratch edit (restored afterwards); `tests/u
 | a closed task's lost run is booked as a $0 estimate, not unknown (`awaiting_usage`) | 2 failed |
 | a run created before the gateway began indexing by run (`indexedSince`) is read as a final sum | 1 failed |
 | a gateway answer with NO `indexedSince` is read (the required-time check in `readRunCharges` removed) | 4 failed |
+## TASK-ENDED-NOTICE: the hosted task-end notice to the model gateway and its reconcile (2026-11-25)
+
+Measured on the lane's working tree over tests/unit/task-ended-notice.test.ts (25 tests). Each mutant was applied alone, the one file run, and the file restored.
+
+| Mutant / location | Mutation | Failing tests (of the file) | Restored |
+|---|---|---|---|
+| M1, core-host/task-ended-http.ts answer check | any 200 body counts as delivered (no same company and task check) | 5 of 25 | green |
+| M2, task-ended-http.ts status split | a 404 (an older gateway) is retried like a 5xx | 3 of 25 | green |
+| M3, task-ended-http.ts `TASK_ENDED_TRIES` | four tries instead of three | 1 of 25 | green |
+| M4, core/task-flow/task-end.ts `reconcileTaskEnds` | another company's markers are sent | 1 of 25 | green |
+| M5, task-end.ts `callTaskEndSeam` | a "pending" answer is recorded as delivered | 5 of 25 | green |
+| M6, task-end.ts `announceTaskEnd` | waits for the host without the time bound | 1 of 25 | green |
+| M7, task-end.ts `reconcileTaskEnds` | the `notifiedAt` filter is dropped | SURVIVES, on purpose not killed: a delivered marker has already left the due-time index, so the filter is a second guard on a row the index no longer lists. |
+| M8, task-end.ts `reconcileTaskEnds` | no age limit | 1 of 25 | green |
