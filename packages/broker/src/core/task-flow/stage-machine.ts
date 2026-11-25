@@ -456,10 +456,11 @@ export async function runDueDispatches(deps: TaskFlowDeps, options: { limit?: nu
     } catch (error) {
       const attempts = row.attempts + 1;
       const message = error instanceof Error ? error.message : "unknown";
-      log(deps, { event: "task_flow.dispatch_row_failed", taskId: row.taskId, kind: row.kind, attempts, error: error instanceof AgentXError ? error.code : "unknown" });
+      log(deps, { event: "task_flow.dispatch_row_failed", taskId: row.taskId, kind: row.kind, attempts, error: error instanceof AgentXError ? error.code : "unknown", cause: message.slice(0, 300) });
       try {
         if (attempts >= DISPATCH_ROW_ATTEMPTS_MAX) {
-          await blockDispatchFailure(deps, row, `Rovara could not start the ${STEP_NAMES[row.kind]}: ${message}`.slice(0, 500));
+          // Fixed plain words for the person; the raw cause (`message`: a store or machine error) stays in the dispatch row and the log, never in the block reason.
+          await blockDispatchFailure(deps, row, row.kind === "REVIEW" ? WORKFLOW_BLOCK_REASONS.reviewsCouldNotStart : `Rovara could not start the ${STEP_NAMES[row.kind]}. Press Retry.`);
           await deps.store.transact([resolveRowItem(deps, row.taskId, row.workflowRevision)]);
           report.blocked += 1;
         } else {

@@ -89,6 +89,9 @@ export const REASON_WORDS = {
   waitMachine: "No machine is free; Rovara will try again",
   waitRateLimit: "The AI provider is limiting requests; Rovara will try again",
   waitAllowance: "The daily allowance is used up; the work goes on when it resets",
+  // A step whose start failed and the sweep is still trying again (attempts 1 to 7): the task is waiting, not stuck, and nobody is asked yet.
+  waitStartReviews: "Starting the reviews, trying again",
+  waitStartStep: "Starting the next step, trying again",
   waitSlack: "Rovara is waiting for Slack to answer the access check",
   stoppedFinished: "the run finished and nothing is running; the work is kept",
   unavailable: "Status unavailable",
@@ -109,10 +112,22 @@ export const STATUS_LINES = {
   planWaiting: { reason: "the plan is waiting for approval", next: "Review it and approve, or ask for changes.", nextOthers: "Waiting for the task owner." },
   questionsWaiting: { reason: "questions about the request need answers", next: "Answer them.", nextOthers: "Waiting for the task owner." },
   readyToMerge: { next: "Ready to merge: review the pull request and merge it.", nextOthers: "The pull request is in review." },
+  // A pull request that waits but is not ready to merge yet (its checks, review or branch say so): the status is `checking`, never "Ready to merge".
+  pullRequestChecking: { reason: "the pull request is not ready to merge yet", next: "Rovara keeps watching; it tells you when the pull request is ready to merge.", nextOthers: "The pull request is in review." },
+  pullRequestChecksFailing: { reason: "the pull request's checks are failing", next: "Rovara keeps watching; it tells you when the pull request is ready to merge.", nextOthers: "The pull request is in review." },
+  // A blocked review says WHY a person is needed: the reviewers found problems with the change, or the review could not finish (unreadable, timed out).
+  reviewFoundProblems: { reason: "the review found problems with the change", next: "Accept or fix each problem, or send it back to coding.", nextOthers: "Waiting for the task owner." },
+  reviewsCouldNotStart: { reason: "Rovara could not start the reviews", next: "Press Retry.", nextOthers: "Waiting for the task owner." },
+  reviewCouldNotFinish: { reason: "the review could not finish", next: "Retry the review.", nextOthers: "Waiting for the task owner." },
   understanding: { next: "A plan follows once the request is understood." },
   planning: { next: "You review the plan when it is ready." },
   building: { next: "Checks and a pull request follow." },
   checking: { next: "A pull request is opened once the checks pass." },
+} as const;
+
+/** The one-line notices that are not a status (nobody is asked): a company admin who is not the task's owner stopped the owner's task. The name is the admin's display name, cut and made safe by the caller. */
+export const NOTICE_WORDS = {
+  stoppedByAdmin: (name: string): string => `${name === "" ? "A company admin" : name} stopped your task`,
 } as const;
 
 /** "<sentence> (round 2 of 3)". */

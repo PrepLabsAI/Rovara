@@ -45,6 +45,8 @@ export const CHECKS_NOT_PASSED_LEGACY_REASON = "candidate checks failed or have 
 export const CHECKS_BROKEN_LEGACY_REASON = "the checks couldn't run";
 
 export const WORKFLOW_BLOCK_REASONS = {
+  /** The reviews could not be started (the dispatch of the review step failed on its last attempt: the sweep tries no more). Fixed plain words: the raw cause (a store or machine error) is for the log only and never reaches a person. The standing reads this reason to say so. */
+  reviewsCouldNotStart: "Rovara could not start the reviews. Press Retry.",
   checksUnconfirmed: "AgentX couldn't confirm the selected checks ran on the final code. Choose checks and retry.",
   checkRetryStale: "This check run no longer matches the task's current step. Use the latest update in the thread.",
   checkReportUnreadable: "AgentX couldn't read the check results for the final code. Choose checks and retry.",

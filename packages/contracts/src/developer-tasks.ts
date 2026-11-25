@@ -1,6 +1,7 @@
 import { TaskMoneyV1Schema } from "./task-money-schema.js";
 import { z } from "zod";
 import { TaskStatusSchema } from "./task-status.js";
+import { TaskStandingReaderSchema } from "./task-standing.js";
 import {ModelFallbacksSchema} from "./stage-model-shared.js";
 import { DeveloperShareModeSchema } from "./project.js";
 import { AGENT_RUN_STATES, AGENT_RUN_STEP_STATUSES, AgentStepToolsSchema } from "./agent-run.js";
@@ -117,6 +118,11 @@ export const DeveloperTaskViewSchema = z.object({
   owner: z.object({ developerId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/), name: z.string().min(1).max(80) }).strict().optional(),
   /** UX2 slice 2: where the task stands in the one status model (state, reason, next step), the words every surface shows instead of `status`. Absent from older servers. */
   statusView: TaskStatusSchema.optional(),
+  /**
+   * F2-B: where the task stands for THE PERSON READING (phase, step, the strip, the pill, who it waits on, the moves they may make), from the one rule (`taskStandingFor`). Served only on the task read, never stored. Read tolerantly: a
+   * key a newer Code adds still reads (strings, not enums), an action this build does not know is skipped, and a value that does not read at all is left out (`catch`), so it can never fail the whole task answer. Absent from older servers.
+   */
+  standing: TaskStandingReaderSchema.optional().catch(undefined),
   /**
    * UX2 slice 2 item 3: a blocked task's review findings and the two ways on that the task page offers (Resolve findings, Send back to coding), as Slack and the MCP tools offer them. The findings are the
    * blocking ones of the current code not yet accepted (reviewer words, redacted and capped; plain text every reader escapes). The routes re-check who may. Absent unless the task is blocked with one to offer.

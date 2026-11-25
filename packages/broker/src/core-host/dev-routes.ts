@@ -57,6 +57,7 @@ import { coreTaskRuleOf } from "./task-rule-paths.js";
 import { involvedListOptions, listInvolvedTasks, wantsInvolved } from "../core/task-flow/involved.js";
 import type { TaskActionsOptions } from "../core/task-flow/owner-round.js";
 import { createTaskActions, type TaskActions } from "../core/task-flow/task-actions.js";
+import type { TaskStanding } from "../core/task-view/index.js";
 import { stopTaskOnRequest } from "../core/task-flow/stop-request.js";
 import { SECURITY_ACCEPT_ON_THE_PAGE } from "../core/task-flow/security-accept.js";
 import { routeDecisionCards, type DecisionCaller, type DecisionRouteDependencies } from "../core/decisions/routes.js";
@@ -435,6 +436,8 @@ interface Mounted {
   sessions?: ReturnType<typeof createSessionRoutes>; inbox?: ReturnType<typeof createInboxRoutes>;
   playbook?: ReturnType<typeof createLocalPlaybook>;
   actions?: TaskActions;
+  /** F2-B: where a task stands for this person (`taskStandingFor`), for a deployment that serves the owner's moves; `undefined` where it does not or the person has no standing. */
+  standing?: (membership: CompanyMembership, caller: DeployedCaller, task: TaskRecord) => Promise<TaskStanding | undefined>;
 }
 
 /** The audit sink of one request: the deployment's own (it names the caller), else the runtime's. */
@@ -480,9 +483,27 @@ async function moneyOf(target: Mounted, task: TaskRecord, knownCap?: { limitUsd:
 /** The developer task view with the caller's share of its figures: the owner's (money, run estimate, design review money), a live co-owner's (the task's `money` alone) or none. */
 async function taskViewFor(target: Mounted, record: TaskRecord, caller: DeployedCaller, membership: CompanyMembership): Promise<Record<string, unknown>> {
   const view = await taskViewOf(target.runtime.flow.deps, record);
-  if (maySeeTaskMoney(target, record, caller, membership)) return withDecidedByYou(await developerTaskView(record, view, target.blobs, undefined, await moneyOf(target, record), true), target, record, caller, membership);
-  const base = await developerTaskView(record, view, target.blobs, undefined, undefined, false);
-  return withDecidedByYou(await isLiveCoOwner(target, record, caller, membership) ? { ...base, money: await moneyOf(target, record) } : base, target, record, caller, membership);
+  const shown = maySeeTaskMoney(target, record, caller, membership)
+    ? await withDecidedByYou(await developerTaskView(record, view, target.blobs, undefined, await moneyOf(target, record), true), target, record, caller, membership)
+    : await (async () => {
+      const base = await developerTaskView(record, view, target.blobs, undefined, undefined, false);
+      return withDecidedByYou(await isLiveCoOwner(target, record, caller, membership) ? { ...base, money: await moneyOf(target, record) } : base, target, record, caller, membership);
+    })();
+  return { ...shown, ...await standingMembers(target, record, caller, membership) };
+}
+
+/**
+ * F2-B: the task's standing for THIS reader and the person-free status line, from the ONE rule (`taskStandingFor`), added to every task answer (the read and each press's answer: a page redraws from the answer it gets). Both are additive
+ * members older readers drop (`standing`) or already know (`statusView`, the strict status of the stored summary, now filled). Not served where the deployment does not serve the owner's moves or the reader has no standing; a standing that
+ * cannot be read leaves the answer as it was (the page says the status is unavailable), it never fails the read.
+ */
+async function standingMembers(target: Mounted, record: TaskRecord, caller: DeployedCaller, membership: CompanyMembership): Promise<Record<string, unknown>> {
+  try {
+    const served = await target.standing?.(membership, caller, record);
+    return served === undefined ? {} : { statusView: served.statusView, standing: served.standing };
+  } catch {
+    return {};
+  }
 }
 
 export interface CoreDevRoutes {
@@ -506,6 +527,8 @@ export interface CoreDevRoutes {
   taskReadable(caller: DeployedCaller, taskId: string): Promise<boolean>;
   /** S1: what one task offers this person now (the task action registry), in process; `undefined` where the deployment does not serve the owner's moves for the person's company. */
   taskActions: ReturnType<typeof createTaskActionRoutes>["taskActions"];
+  /** F2-B: where one task stands for this person now, from the one rule (pill, step, the person-free status line, the offers), in process, for the surfaces that are not the web read (Slack's cards, notices). `undefined` as `taskActions`. */
+  taskStanding: ReturnType<typeof createTaskActionRoutes>["taskStanding"];
   /** S1: a chat press of a task action, or the describe of one, judged again by the registry as the person the chat account is linked to. */
   taskAction: ReturnType<typeof createTaskActionRoutes>["taskAction"];
 }
@@ -571,6 +594,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           ...(wiring.playbook === undefined ? {} : { playbook: createLocalPlaybook({ playbook: wiring.playbook, store: runtime.flow.deps.store, companyId: runtime.companyId }) }),
           // The owner's moves need both the money cap and the company's owner rule; with either missing they are not served (never Code's laptop owner rule on a hosted company).
           ...(wiring.taskActions === undefined || runtime.flow.deps.access.ownerActing === undefined ? {} : { actions: createTaskActions(runtime.flow.deps, { roundCap: wiring.taskActions.roundCap }) }),
+          standing: (membership, deployed, task) => taskActionRoutes.standingFor({ runtime, wiring }, membership, deployed, task),
         };
       });
       found.catch(() => mounted.delete(companyId));
@@ -586,6 +610,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
   return {
     taskActions: (caller, taskId) => taskActionRoutes.taskActions(caller, taskId),
     taskAction: (caller, input) => taskActionRoutes.taskAction(caller, input),
+    taskStanding: (caller, taskId) => taskActionRoutes.taskStanding(caller, taskId),
     async answerForSlackThread(input) {
       if (!ORG_ID.test(input.companyId)) return undefined;
       const target = await mount(input.companyId);

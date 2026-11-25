@@ -254,6 +254,8 @@ describe("the health route's grants (A13)", () => {
       // R1 + L1 6.2b: the hourly tracker-start counter (one TRACKER_START_CAP row per company, person and hour, expiring two hours after it is written). Not a durable record: it only bounds how many
       // tasks one person's tracker acts start in an hour; no other record shares the key (core/intake/trigger.ts).
       "packages/broker/src/core/intake/trigger.ts",
+      // F2-B: an admin's stop of the owner's task writes one NOTIFY_PENDING notice row for the owner in the stop's own claim, expiring with the queue's other pending rows (3 days). A notice item like the attention queue's; not a durable record.
+      "packages/broker/src/core/task-flow/stop-request.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);

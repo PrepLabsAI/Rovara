@@ -245,6 +245,10 @@ it("dispatch exhaustion produces the canonical failed review card through the re
   expect((await readTask(w.h.deps, task.taskId))!.workflow).toMatchObject({ state: "WAITING",
     feedbackReview: { status: "PENDING", reviewRef: { status: "BLOCKED", provider: "broker-lifecycle" } } });
   expect(await w.h.store.get(key)).toBeUndefined();
+    // F2-B: the person is told in fixed words; the raw cause the dispatcher saw ("review cannot start") never reaches the stored card.
+  const stored = JSON.stringify((await readTask(w.h.deps, task.taskId))!.workflow);
+  expect(stored).toContain("Rovara could not start the reviews. Press Retry.");
+  expect(stored).not.toContain("review cannot start");
   expect((await workspaceOperations(w.h.deps, task.workspaceId))[0]?.status).toBe("FAILED");
 });
 

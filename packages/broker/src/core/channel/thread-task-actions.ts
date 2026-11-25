@@ -1,11 +1,12 @@
 // S1: the task action buttons on the cards a thread is given at its two card moments (the plan, the pull request ready), kept out of `thread-notices.ts`. Both are offered only where the thread's adapter declares `taskActions` (the host wired
 // the press) AND the host serves the registry; otherwise the callers post exactly what they posted before. The buttons are the registry's offers for the task's state (public: no right, no price, no text a person wrote); each press is judged
 // again, for whoever presses.
-import type { ApprovalRequirement, ChannelCapabilities, MessageAction, MessagePart } from "@agentx/contracts";
+import { taskStatusText, type ApprovalRequirement, type ChannelCapabilities, type DocumentStore, type MessageAction, type MessagePart, type OrgId } from "@agentx/contracts";
 
 type ChatChannelCapabilities = Pick<ChannelCapabilities, "buttons" | "taskActions">;
 import type { TaskRecord } from "../task-flow/records.js";
 import { stateOffers, type OfferCapabilities } from "../task-actions/offers.js";
+import { standingFactsOf, stateOf } from "../task-view/index.js";
 import { taskActionButtons } from "./task-action-cards.js";
 import { CARD_TTL_SECONDS } from "./cards.js";
 
@@ -30,9 +31,22 @@ export async function registryPlanCard(input: {
   return { cardUntil: Math.floor(input.nowMs / 1000) + CARD_TTL_SECONDS };
 }
 
-/** What the task offers once its pull request is ready (merge, close, stop, ...), sent as the buttons of a follow-up message, once (`send` claims it); nothing is sent when nothing is offered. */
+/**
+ * F2-B: where the task stands, in the ONE rule's words (`stateOf`, person-free), as the heading of a card everyone in the thread reads. A line that asks a person ("Needs you") is not a heading for a public card: where a decision waits there is
+ * no heading, the buttons are the card. Undefined too when the rule cannot be read (the card then says only what it said before).
+ */
+export async function statusLineOf(deps: { store: DocumentStore; companyId: OrgId }, task: TaskRecord): Promise<string | undefined> {
+  try {
+    const status = stateOf(await standingFactsOf(deps, task)).status;
+    return status.state === "needs_you" ? undefined : taskStatusText(status);
+  } catch {
+    return undefined;
+  }
+}
+
+/** What the task offers once its pull request is ready (merge, close, stop, ...), sent as the buttons of a follow-up message, once (`send` claims it); nothing is sent when nothing is offered. Where `statusDeps` is given the message is headed by the rule's status line (see `statusLineOf`). */
 export async function sendRegistryNextMessage(input: {
-  capabilities: ChatChannelCapabilities; served: OfferCapabilities | undefined; task: TaskRecord; taskUrl: string | undefined;
+  capabilities: ChatChannelCapabilities; served: OfferCapabilities | undefined; task: TaskRecord; taskUrl: string | undefined; statusDeps?: { store: DocumentStore; companyId: OrgId } | undefined;
   send(deliver: () => Promise<void>): Promise<void>;
   deliver(data: { text: string; parts: MessagePart[] }): Promise<void>;
 }): Promise<void> {
@@ -40,6 +54,8 @@ export async function sendRegistryNextMessage(input: {
   const offers = await stateOffers(input.served, input.task).catch(() => []);
   const actions: MessageAction[] = taskActionButtons(offers, { taskId: input.task.taskId, taskUrl: input.taskUrl, limit: input.capabilities.buttons });
   if (offers.length === 0 || actions.length === 0) return;
-  const message = { text: "What next for this task:", parts: [{ type: "section" as const, text: "What next for this task:" }, { type: "actions" as const, actions }] };
+  const status = input.statusDeps === undefined ? undefined : await statusLineOf(input.statusDeps, input.task);
+  const text = `${status === undefined ? "" : `${status}. `}What next for this task:`;
+  const message = { text, parts: [{ type: "section" as const, text }, { type: "actions" as const, actions }] };
   await input.send(() => input.deliver(message));
 }

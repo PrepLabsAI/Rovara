@@ -1,11 +1,12 @@
 // The Code API's ONE route table (F3 cut 1, DEC 254zzz459/468): every route Rovara Code's developer API serves, by method and path, with what a caller's token needs to reach it.
 // Moved here unchanged from packages/broker/src/aws/dev-route-scopes.ts (the rows and their comments are the same text, in the same order); the broker keeps only the selectors over
-// these rows (devRouteOf, appRouteOf) and the worker rows, which are not part of this API. This file imports nothing but the scopes: it is data, and a browser may load it.
+// these rows (devRouteOf, appRouteOf) and the worker rows, which are not part of this API. This file imports nothing but the scopes and the standing's reader (zod schemas): it is data, and a browser may load it.
 //
 // A request whose method and path match no row is refused before anyone is authenticated (fail closed), so a new route is unreachable until it is given a row. A sign-in client's token
 // reaches a row only with the row's scope; the Rovara CLI's own token reaches every row, as before. Migration plan v3.2, lane ID part 1 (DEC 214 decision 7): named scopes.
-import type { z } from "zod";
+import { z } from "zod";
 import type { ClientScope } from "./scopes.js";
+import { TaskStandingWireSchema } from "./task-standing.js";
 
 /**
  * What a row needs from a sign-in client's token:
@@ -108,7 +109,8 @@ export const ROUTES: readonly Route[] = [
   // Tasks: read.
   { method: "GET", path: "/v1/dev/projects", requires: "tasks:read" },
   { method: "GET", path: "/v1/dev/tasks", requires: "tasks:read" },
-  { method: "GET", path: "/v1/dev/tasks/{taskId}", requires: "tasks:read" },
+  // F2-B: the task read carries `standing` (where the task stands for the person reading it). The answer is read tolerantly: only `standing` is named here, every other member passes through, and a standing that does not read leaves the answer as it is.
+  { id: "tasks.read", method: "GET", path: "/v1/dev/tasks/{taskId}", requires: "tasks:read", response: z.object({ task: z.object({ standing: TaskStandingWireSchema.optional().catch(undefined) }).passthrough() }).passthrough() },
   { method: "GET", path: "/v1/dev/tasks/{taskId}/events", requires: "tasks:read" },
   { method: "GET", path: "/v1/dev/tasks/{taskId}/plan", requires: "tasks:read" },
   { method: "GET", path: "/v1/dev/tasks/{taskId}/people", requires: "tasks:read" },
