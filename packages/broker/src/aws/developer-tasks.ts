@@ -513,6 +513,8 @@ async function listRowDetail(deps: DeveloperTaskRouteDependencies, caller: Devel
   return parsed.success ? parsed.data : {};
 }
 
+const isCompanyReadLimit = (error: unknown): boolean => error instanceof CompanyReadItemLimit || (error instanceof AgentXError && error.code === "CONFIG_INVALID" && error.message.includes("company read limit exceeded"));
+
 async function listTasks(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, url: URL): Promise<{ tasks: Array<DeveloperTaskListItem & DeveloperTaskListDetail>; nextCursor?: string }> {
   const limit = whole(url.searchParams.get("limit"), DEVELOPER_TASK_LIST_DEFAULT, 1, DEVELOPER_TASK_LIST_MAX, "limit");
   // `detail=1` (exactly) asks for each row's detail; anything else is the ordinary list, byte for byte.
@@ -544,7 +546,12 @@ async function listTasks(deps: DeveloperTaskRouteDependencies, caller: Developer
       const rows = response.Items ?? [];
       for (const [position, row] of rows.entries()) {
         // DEC 254zzz502: an index row whose task has no core mark (its stamp item) is a task the retired old workflow started: it is no longer listed (its records are kept, not deleted). The mark is read per row.
-        const core = await isCoreTask(deps, row.taskId);
+        // A mark that cannot be read (a damaged item, or a failed read) is no core task's: the row is skipped and the person's list is not lost (PROJECT-GRANT-RECHECK: fail closed, per task). A company read bound still ends the page.
+        const core = await isCoreTask(deps, row.taskId).catch((markError: unknown) => {
+          if (isCompanyReadLimit(markError)) throw markError;
+          log(deps, { event: "developer.task_list_mark_unreadable", taskId: row.taskId, error: markError instanceof Error ? markError.name : "unknown" });
+          return false;
+        });
         if (!core) {
           // An old row is skipped without using up the page (in company mode a page counts its own rows against `limit`, so a person whose newest rows are all old would get an empty page with a cursor);
           // old rows are bounded on their own, and the cursor carries on from the last one examined.
@@ -582,7 +589,7 @@ async function listTasks(deps: DeveloperTaskRouteDependencies, caller: Developer
     // filtered rows. An individual oversized task still refuses with fixed words.
     // Running out of the company read budget (the item limit, or the 512-command / byte / time bounds that old rows' mark reads draw on) ends the page with a cursor at the last row fully examined,
     // never an error, as long as the page made progress (DEC 254zzz502, D1-2 test review S2).
-    const outOfBudget = error instanceof CompanyReadItemLimit || (error instanceof AgentXError && error.code === "CONFIG_INVALID" && error.message.includes("company read limit exceeded"));
+    const outOfBudget = isCompanyReadLimit(error);
     if (outOfBudget && completed !== after && completed !== undefined) return { tasks, nextCursor: encodeCursor(completed) };
     throw error;
   }

@@ -10,6 +10,8 @@ import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 const COMPANY = "org_aaaaaaaaaaaaaaaaaaaa";
 const DEV = "d".repeat(64);
 const caller = { developerId: DEV, sessionId: "s", name: "Maya" } as never;
+// A person lists their own task in a company only while they hold its project (PROJECT-GRANT-RECHECK, #1469); here they do.
+const HOLDS_PROJECT = async () => ({ name: "Maya", projectMember: true });
 
 function seed(db: FakeDynamoDb, taskId: string, at: string, core: boolean, padding = 0) {
   const meta = { pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", taskId, developerId: DEV, companyId: COMPANY, title: core ? "Core" : "Old", project: "payments", createdAt: at, updatedAt: at, shared: false };
@@ -17,7 +19,7 @@ function seed(db: FakeDynamoDb, taskId: string, at: string, core: boolean, paddi
   db.set({ ...meta, pk: `DEVELOPER#${DEV}`, sk: `TASK#${at}#${taskId}`, entityType: "DEVELOPER_TASK_INDEX", status: "CLOSED" });
   if (core) db.set({ ...engineStampKey(taskId), entityType: "TASK_ENGINE", coreEngine: { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "cc=on", stampedAt: at } });
 }
-const list = (db: { send(command: unknown): Promise<unknown> }, query: string) => routeDeveloperTaskRequest({ documentClient: db, tableName: "state", companyId: COMPANY, developer: {} } as never, caller,
+const list = (db: { send(command: unknown): Promise<unknown> }, query: string) => routeDeveloperTaskRequest({ documentClient: db, tableName: "state", companyId: COMPANY, developer: {}, taskReaderPerson: HOLDS_PROJECT } as never, caller,
   { method: "GET", path: `/v1/dev/tasks${query}`, headers: {} } as never, new URL(`/v1/dev/tasks${query}`, "https://agentx.invalid")) as Promise<{ tasks: Array<{ taskId: string }>; nextCursor?: string }>;
 
 describe("the task list in company mode with old rows newest", () => {
@@ -45,7 +47,7 @@ describe("the task list in company mode with old rows newest", () => {
     for (let n = 0; n < 60; n += 1) { const id = randomUUID(); coreIds.push(id); seed(db, id, `2026-10-${String(1 + (n % 28)).padStart(2, "0")}T0${n % 10}:00:00.000Z`, true); }
     for (let n = 0; n < 210; n += 1) seed(db, randomUUID(), `2026-12-01T00:${String(Math.floor(n / 60)).padStart(2, "0")}:${String(n % 60).padStart(2, "0")}.000Z`, false);
     const scope = boundedCompanyReads(db);
-    const page = await routeDeveloperTaskRequest({ documentClient: scope.client, tableName: "state", companyId: COMPANY, developer: {} } as never, caller,
+    const page = await routeDeveloperTaskRequest({ documentClient: scope.client, tableName: "state", companyId: COMPANY, developer: {}, taskReaderPerson: HOLDS_PROJECT } as never, caller,
       { method: "GET", path: "/v1/dev/tasks", headers: {} } as never, new URL("/v1/dev/tasks?limit=50&detail=1", "https://agentx.invalid")) as { tasks: unknown[]; nextCursor?: string };
     scope.check(page.nextCursor !== undefined);
     // the first 200 old rows use their own bound, so the page ends with a cursor before any core row (an empty page that says there is more)
@@ -53,7 +55,7 @@ describe("the task list in company mode with old rows newest", () => {
     expect(page.nextCursor).toBeDefined();
     // and the next page, from that cursor, reads the rest of the old rows and lists core tasks within the budget
     const scope2 = boundedCompanyReads(db);
-    const next = await routeDeveloperTaskRequest({ documentClient: scope2.client, tableName: "state", companyId: COMPANY, developer: {} } as never, caller,
+    const next = await routeDeveloperTaskRequest({ documentClient: scope2.client, tableName: "state", companyId: COMPANY, developer: {}, taskReaderPerson: HOLDS_PROJECT } as never, caller,
       { method: "GET", path: "/v1/dev/tasks", headers: {} } as never, new URL(`/v1/dev/tasks?limit=50&detail=1&cursor=${page.nextCursor}`, "https://agentx.invalid")) as { tasks: Array<{ taskId: string }>; nextCursor?: string };
     scope2.check(next.nextCursor !== undefined);
     expect(next.tasks).toHaveLength(50);

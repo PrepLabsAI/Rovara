@@ -228,11 +228,7 @@ async function handleGithubBindingEvent(
 }
 
 /** D1: the three schedules of the old workflow engine are gone from the stack; their events, still in flight during the deploy window, are answered and nothing is done (retired-schedules.ts). */
-async function handleRecoveryEvent(
-  _dependencies: AwsBrokerDependencies,
-  event: unknown,
-  _hooks: OperatorEventHooks,
-): Promise<BrokerHttpResponse | undefined> {
+function handleRecoveryEvent(event: unknown): BrokerHttpResponse | undefined {
   if (isRetiredScheduleEvent(event)) return json(RETIRED_SCHEDULE_ANSWER, "retired-schedule");
   return undefined;
 }
@@ -253,7 +249,7 @@ export async function dispatchCoreAndOperatorEvent(
   if (isSlackRovaraEvent(event)) return handleSlackRovaraEvent(dependencies, event);
   const githubBinding = await handleGithubBindingEvent(dependencies, event, hooks);
   if (githubBinding !== undefined) return githubBinding;
-  return handleRecoveryEvent(dependencies, event, hooks);
+  return handleRecoveryEvent(event);
 }
 
 // ---------------------------------------------------------------------------

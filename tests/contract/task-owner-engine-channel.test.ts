@@ -39,6 +39,7 @@ function removedFromProjectStillInChannel(): Harness {
   const h = companyRouteHarness(); h.deps.companies = { companyOf: async () => IMPLICIT_COMPANY_ID };
   h.project(undefined, "grant"); h.task(TASK, IMPLICIT_COMPANY_ID);
   h.db.delete(`MEMBER#${PERSON}`, "PROJECT#shared-project");
+  h.db.delete(`TASK_ENGINE#${TASK}`, "STAMP"); // the harness marks every task as the core's (D1-2); each case sets the mark it is about
   h.db.set({ pk: "SLACK_BINDING#T0SHARED", sk: "CHANNEL#C0SHARED", teamId: "T0SHARED", channelId: "C0SHARED", projectName: "shared-project", updatedAt: TIME });
   return h;
 }
@@ -62,10 +63,11 @@ describe("a NEW-engine task's own person: grant only (a person removed from the 
     expect(await rule(h, "readers")).toBe(404);
   });
 
-  it("a stamp whose flow stays on the workflow (a mixed one) is an OLD-engine task: the channel still holds it", async () => {
+  // D1-2 (D1-PLAN item 1, "stamp as the only discriminator"): a stamp that is there makes the task the core's whatever its areas say, so a mixed one is grant only too.
+  it("a stamp whose flow stays on the workflow (a mixed one) is the core's task now: grant only, the channel does not hold it", async () => {
     const h = removedFromProjectStillInChannel(); stamp(h, { ...STAMP, engine: "workflow", areas: { merge: "core", build: "core", flow: "workflow" } });
-    expect(await listed(h)).toEqual([TASK]);
-    expect(await ownerRead(h)).toBe(200);
+    expect(await listed(h)).toEqual([]);
+    expect(await ownerRead(h)).toBe(404);
   });
 
   it("an engine stamp that is there but cannot be read is NOT an old-engine task: grant only (fail closed)", async () => {
@@ -86,19 +88,23 @@ describe("a NEW-engine task's own person: grant only (a person removed from the 
     expect(await rule(h, "events")).toBe(404);
   });
 
-  it("one page of the list, one project, an old-engine and a new-engine task: only the old-engine task lists (a channel hold is never kept for the project)", async () => {
+  it("one page of the list, one project, an old-engine and a new-engine task: only the new-engine task lists, and only by the grant (an old row is never listed; D1-2)", async () => {
     const OTHER = "22222222-2222-4222-8222-222222222222";
     for (const stampedFirst of [true, false]) {
       const h = removedFromProjectStillInChannel();
-      h.task(OTHER, IMPLICIT_COMPANY_ID);
+      h.task(OTHER, IMPLICIT_COMPANY_ID); h.db.delete(`TASK_ENGINE#${OTHER}`, "STAMP");
       h.db.set({ ...engineStampKey(stampedFirst ? TASK : OTHER), entityType: "TASK_ENGINE", orgId: IMPLICIT_COMPANY_ID, taskId: stampedFirst ? TASK : OTHER, coreEngine: STAMP });
-      expect(await listed(h)).toEqual([stampedFirst ? OTHER : TASK]);
+      // The person holds no grant here, so the stamped (core) task is not listed either (and the channel hold is not remembered for the project); the unstamped (old) row is never listed.
+      expect(await listed(h)).toEqual([]);
+      // With the grant back, the core task lists and the old row still does not.
+      h.project(undefined, "grant");
+      expect(await listed(h)).toEqual([stampedFirst ? TASK : OTHER]);
     }
   });
 
-  it("the OLD-engine counterpart (no stamp) keeps its task through the channel, and loses it on leaving", async () => {
+  it("the OLD-engine counterpart (no stamp) keeps its task through the channel on the own-person path, and loses it on leaving (an old row is not listed: D1-2)", async () => {
     const h = removedFromProjectStillInChannel();
-    expect(await listed(h)).toEqual([TASK]);
+    expect(await listed(h)).toEqual([]);
     expect(await ownerRead(h)).toBe(200);
     expect(await rule(h, "events")).toBe(200);
     leave(h);

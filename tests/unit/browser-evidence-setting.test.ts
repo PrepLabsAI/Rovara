@@ -47,7 +47,8 @@ describe("Cloud", () => {
   });
   it("is wired into Cloud's callback route before the capability is judged (the route is listed and the refusal is called)", () => {
     const source = readFileSync("packages/broker/src/aws/broker.ts", "utf8");
-    expect(source).toContain("|e2e-evidence|browser-evidence|");
+    // D1-2: the old workflow engine's callbacks (e2e-evidence and the others) are gone from the route; browser-evidence is still listed.
+    expect(source).toContain("|result|browser-evidence|");
     expect(source).toMatch(/if \(!token\) throw agentXError\("CALLBACK_FORBIDDEN", "callback capability is required"\); refuseBrowserEvidenceOnCloud\(action\);/u);
   });
 });

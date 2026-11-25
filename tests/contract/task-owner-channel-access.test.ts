@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { developerTaskRouteDependencies, type DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { resolveCoreTaskAccess } from "../../packages/broker/src/developer/task-access.js";
+import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
 import { companyRouteHarness, PERSON, TASK } from "../support/company-route-harness.js";
 
 type Harness = ReturnType<typeof companyRouteHarness>;
@@ -17,26 +18,29 @@ const events = async (h: Harness) => {
 };
 const leave = (h: Harness) => { h.deps.developer.channelMembers = async () => ({ ok: true, memberOf: [] }); };
 const channelsOff = (h: Harness) => h.db.set({ pk: "PROJECT#shared-project", sk: "REV#000000000001", entityType: "PROJECT", definition: { name: "shared-project", revision: 1, developerTasks: { channelMembersMayUse: false } } });
+// D1-2 (DEC 254zzz502): a task row with no core mark is the retired old workflow's and is never listed; only a marked (core) task lists. The own-person path (`events`) still holds an old row through the channel.
+const markCore = (h: Harness) => h.db.set({ ...engineStampKey(TASK), entityType: "TASK_ENGINE", orgId: IMPLICIT_COMPANY_ID, taskId: TASK, coreEngine: { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "test", stampedAt: "2026-11-14T12:00:00.000Z" } });
 const withCompanyLayer = (h: Harness) => { h.deps.companies = { companyOf: async () => IMPLICIT_COMPANY_ID }; };
 
 describe("a channel-access starter's own task (company layer)", () => {
-  const world = (access: "grant" | "channel" | "none") => { const h = companyRouteHarness(); withCompanyLayer(h); h.project(undefined, access); h.task(); return h; };
+  // The harness marks every task as the core's (D1-2); these cases are about the OLD row's own-person hold, so the world starts without the mark (the control re-marks it).
+  const world = (access: "grant" | "channel" | "none") => { const h = companyRouteHarness(); withCompanyLayer(h); h.project(undefined, access); h.task(); h.db.delete(`TASK_ENGINE#${TASK}`, "STAMP"); return h; };
 
   it("control: a grant holder lists and reads their own task", async () => {
-    const h = world("grant");
+    const h = world("grant"); markCore(h);
     expect(await listed(h)).toEqual([TASK]);
     expect(await events(h)).toBe(200);
   });
 
-  it("a channel member starts and lists their own task, and reads it", async () => {
+  it("a channel member starts their own task and reads it (an old row is not listed)", async () => {
     const h = world("channel");
-    expect(await listed(h)).toEqual([TASK]);
+    expect(await listed(h)).toEqual([]);
     expect(await events(h)).toBe(200);
   });
 
   it("the same person after LEAVING the channel loses the task (not listed, 404)", async () => {
     const h = world("channel");
-    expect(await listed(h)).toEqual([TASK]);
+    expect(await events(h)).toBe(200);
     leave(h);
     expect(await listed(h)).toEqual([]);
     expect(await events(h)).toBe(404);
@@ -64,10 +68,10 @@ describe("a channel-access starter's own task (company layer)", () => {
 
   it("a grant removed but still in the channel KEEPS the task (the removal plan says they keep access through it)", async () => {
     const h = world("grant");
-    expect(await listed(h)).toEqual([TASK]);
+    expect(await events(h)).toBe(200);
     h.db.delete(`MEMBER#${PERSON}`, "PROJECT#shared-project");
     h.db.set({ pk: "SLACK_BINDING#T0SHARED", sk: "CHANNEL#C0SHARED", teamId: "T0SHARED", channelId: "C0SHARED", projectName: "shared-project", updatedAt: "2026-11-14T12:00:00.000Z" });
-    expect(await listed(h)).toEqual([TASK]);
+    expect(await listed(h)).toEqual([]);
     expect(await events(h)).toBe(200);
     leave(h);
     expect(await listed(h)).toEqual([]);
