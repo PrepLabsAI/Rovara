@@ -51,10 +51,8 @@ type Write = NonNullable<TransactWriteCommandInput["TransactItems"]>[number];
  * then holds it), and the successor, who must be a live member of the same company (any role) at the moment the removal commits.
  */
 export interface RemovalFence { expectedRole?: Member["role"]; successorId?: string }
-/** `readFailed`: the refusal is NOT a fact about the person: a read or write the join needed FAILED (membership-read.ts). Callers that ignore it refuse as before; the mint check answers the retryable 503 instead. */
-export type CompanyJoin = { ok: true; membership: Member; viaPreapproval?: true } | { ok: false; reason: "not_invited" | "member_elsewhere" | "member_revoked" | "invite_email_mismatch" | "invite_email_unverified"; attributedCompanyId?: string; readFailed?: true };
+export type CompanyJoin = { ok: true; membership: Member; viaPreapproval?: true } | { ok: false; reason: "not_invited" | "member_elsewhere" | "member_revoked" | "invite_email_mismatch" | "invite_email_unverified"; attributedCompanyId?: string; /** A read or write the join needed FAILED (membership-read.ts): the refusal is not a fact about the person. */ readFailed?: true };
 const refused = (): CompanyJoin => ({ ok: false, reason: "not_invited" });
-const UNAVAILABLE_WORDS = "company sign-in unavailable";
 const unavailable = () => new Error(UNAVAILABLE_WORDS);
 const conditional = (error: unknown) => error instanceof Error && (error.name === "ConditionalCheckFailedException" || error.name === "TransactionCanceledException");
 
@@ -141,10 +139,7 @@ export class CompanySignInStore {
         return won === undefined ? refused() : this.memberResult(won, input.companyId);
       }
       return { ok: true, membership: member, ...(legacy ? {} : { viaPreapproval: true as const }) };
-    } catch (error) {
-      // A row that reads and is malformed (`unavailable()`) is a fact: refused. Anything else the join needed (a read, the write) FAILED: still refused here, and marked so the mint check does not read it as "not a member".
-      return error instanceof Error && error.message === UNAVAILABLE_WORDS ? refused() : { ok: false, reason: "not_invited", readFailed: true };
-    }
+    } catch (error) { return isUnreadableMembershipRow(error) ? refused() : { ok: false, reason: "not_invited", readFailed: true }; }
   }
   /**
    * DEC 254h / DEC 254zzz218: join by an invite link's secret only when this sign-in's provider-verified email matches its binding. Every current or future sign-in method must pass its current provider-verified email through this guard before redeeming an invite. Missing verified email refuses a new membership; request fields and saved profile emails are not proof. The secret must be live,
@@ -459,3 +454,7 @@ export class CompanySignInStore {
     await this.operatorWrite(companyId, "company-issuer-set", [{ Put: { TableName: this.input.tableName, Item: { ...companyIssuerKey(companyId), ...record } } }]);
   }
 }
+
+/** The store's own words for a membership row that reads and is MALFORMED (a fact about the row: a refusal), as opposed to a read or write that FAILED (membership-read.ts). */
+const UNAVAILABLE_WORDS = "company sign-in unavailable";
+export const isUnreadableMembershipRow = (error: unknown): boolean => error instanceof Error && error.message === UNAVAILABLE_WORDS;

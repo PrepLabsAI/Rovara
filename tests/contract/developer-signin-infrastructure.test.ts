@@ -2534,7 +2534,8 @@ describe("company sign-in issuer read (DEC 254zzz29)", () => {
     const { w, people } = await twoCompanyWorld();
     for (const { amr, token } of people) {
       const { answer, calls } = await accessUnder(w, accessTuples(withoutIssuerKey(named)), token);
-      expect(answer, amr).toEqual({ status: 401, body: { error: { code: "AUTH_REQUIRED" } } });
+      // MEMBERSHIP-READ-FAILS-SAFE: a company's sign-in settings that cannot be READ (here AccessDenied) are a failed read, the retryable 503, never the 401 that signed the whole company out.
+      expect(answer, amr).toEqual({ status: 503, body: { error: { code: "RUNTIME_UNAVAILABLE" } } });
       expect(calls.filter((call) => !call.allowed), amr).toEqual([{ action: "dynamodb:GetItem", pk: companyScoped(X, "SIGNIN_ISSUER"), allowed: false }]);
     }
   });

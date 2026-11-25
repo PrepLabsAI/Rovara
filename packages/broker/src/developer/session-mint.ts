@@ -4,7 +4,7 @@
 // (2) "write the SESSION row, then issue the access token". Nothing here reads a request; every input is a parameter.
 import { membershipReadFailed } from "../core/membership-read.js";
 import { IMPLICIT_COMPANY_ID, OrgIdSchema, type DeveloperSignInMethod, type SignInClientRecord } from "@agentx/contracts";
-import type { CompanySignInStore } from "./company-membership.js";
+import { isUnreadableMembershipRow, type CompanySignInStore } from "./company-membership.js";
 import type { CodeGrant, DeveloperSignInStore, SessionRecord } from "./store.js";
 
 /** What the membership check reads: the company layer's store, the install's Slack binding, and the companyless rule (a function of the server's own state). */
@@ -59,8 +59,10 @@ export async function companyMayMint(deps: MintCheckDependencies, personId: stri
     // Company is live membership; a registered audience cannot cross its owner.
     return member !== undefined && member.revokedAt === undefined && member.companyId === candidate
       && (registered === undefined || registered.installLevel === true || member.companyId === (registered.companyId ?? IMPLICIT_COMPANY_ID));
-  } catch {
-    // Everything read above is a read of membership, the company's sign-in settings or the Slack binding: a THROW is "the read failed", never "may not mint". Only a read that answers decides a refusal,
+  } catch (error) {
+    // A membership row that reads and is MALFORMED is a fact about the row: no mint, as before (the person is refused, not told to retry forever).
+    if (isUnreadableMembershipRow(error)) return false;
+    // Everything else read above is a read of membership, the company's sign-in settings or the Slack binding: a THROW is "the read failed", never "may not mint". Only a read that answers decides a refusal,
     // so a failed read can neither refuse a person nor (at the refresh) end their session; the caller answers the retryable 503 (membership-read.ts).
     throw membershipReadFailed();
   }

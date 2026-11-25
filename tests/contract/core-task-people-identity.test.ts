@@ -107,12 +107,12 @@ describe("People on a task made by real core start", () => {
     const caller = { principal: { ...w.h.owner.principal, provider: "rovara-sign-in", personId: w.developerId } };
     await expect(loadOwnedTask(w.h.deps, caller, w.task.taskId), "control: the owner reads").resolves.toBeDefined();
     const failing = async (): Promise<never> => { throw membershipReadFailed(); };
-    (w.identity as Record<string, unknown>)[read] = failing;
+    (w.identity as unknown as Record<string, unknown>)[read] = failing;
     await expect(loadOwnedTask(w.h.deps, caller, w.task.taskId)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
     await expect(getTaskPeople(w.people, w.webCaller, w.task.taskId)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
     // A read that ANSWERS "no" is the refusal, as before.
-    if (read === "companyMembership") (w.identity as Record<string, unknown>)[read] = async () => undefined;
-    if (read === "projectGrant") (w.identity as Record<string, unknown>)[read] = async () => false;
+    if (read === "companyMembership") (w.identity as unknown as Record<string, unknown>)[read] = async () => undefined;
+    if (read === "projectGrant") (w.identity as unknown as Record<string, unknown>)[read] = async () => false;
     if (read !== "developerRecord") await expect(loadOwnedTask(w.h.deps, caller, w.task.taskId)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
   });
 

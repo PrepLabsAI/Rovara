@@ -824,6 +824,14 @@ async function grantsOf(deps: DeveloperRouteDependencies, caller: ProjectAccessS
 }
 
 /**
+ * The same dependencies with every read marked: a store read that throws is the one retryable failure (membership-read.ts). Only the SEND is marked, so a refusal the code itself decides (a person
+ * with more grant rows than the web proof reads) stays a refusal and is never mistaken for a failed read.
+ */
+function markedReads(deps: DeveloperRouteDependencies): DeveloperRouteDependencies {
+  return { ...deps, documentClient: { send: (command: unknown) => readingMembership(() => deps.documentClient.send(command)) } as DeveloperRouteDependencies["documentClient"] };
+}
+
+/**
  * DEC 254zzz80: a person's grant rows for the company named by their LIVE membership. A named company's are read from its own partition only (`ORG#<company>#MEMBER#<person>`,
  * company-layout.ts), and a row there whose keys disagree with its project name, or that names another company, is never this company's grant. The built-in company and no
  * company read the legacy rows exactly as before.
@@ -1961,7 +1969,7 @@ export function developerTaskRouteDependencies(
       }
       const revision = await pending;
       if (revision === undefined) throw agentXError("PROJECT_NOT_FOUND", "task person project was not found");
-      const memberships = await readingMembership(() => grantRowsOf<{ pk?: string; sk?: string; projectName: string; role?: string }>(deps, targetDeveloperId, companyId, WEB_PROOF_GRANT_ROWS_MAX));
+      const memberships = await grantRowsOf<{ pk?: string; sk?: string; projectName: string; role?: string }>(markedReads(deps), targetDeveloperId, companyId, WEB_PROOF_GRANT_ROWS_MAX);
       const result = evaluateProjectAuthority({ project, revision: { revision: revision.revision, definition: { developerTasks: revision.developerTasks } }, memberships, bindings: [] });
       if (result.kind === "allowed") return result.access === "granted";
       if (result.kind === "denied" && result.reason === "project-access") return false;
@@ -2005,7 +2013,7 @@ export function developerTaskRouteDependencies(
         const revision = await latestDefinition(deps, project, workspace?.companyId);
         if (revision === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX`);
         const [memberships, allBindings] = await Promise.all([
-          readingMembership(() => grantRowsOf<{ projectName: string; role?: string }>(deps, subject.developerId, workspace?.companyId)),
+          grantRowsOf<{ projectName: string; role?: string }>(markedReads(deps), subject.developerId, workspace?.companyId),
           bindingsOf(deps, workspace),
         ]);
         const result = evaluateProjectAuthority({

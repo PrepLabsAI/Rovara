@@ -96,7 +96,10 @@ describe.each(layouts)("merged session authority on every access check (%s)", (l
     const refused = await w.refusal();
     expect((await w.access()).status).toBe(200);
     w.db.injectFault({ command: "GetCommand", match: (input) => (input.Key as { pk?: string }).pk === `DEVELOPER#${FIRST}`, error: { name: "ServiceUnavailable" } });
-    expect(await w.access()).toEqual(refused);
+    // A hop whose READ fails is not a revoked hop (membership-read.ts): nothing is served and the answer is the retryable 503; the next check, with the read back, is the 200 again.
+    const blip = await w.access();
+    expect(blip.status).toBe(503);
+    expect(blip).not.toEqual(refused);
   });
 
   it.each([
@@ -146,7 +149,8 @@ it("allows eight live merge hops, but refuses a ninth and a read fault in a midd
   w.changeSession({ signedInId: ids[0] });
   expect((await w.access()).status).toBe(200);
   w.db.injectFault({ command: "GetCommand", match: (input) => (input.Key as { pk?: string }).pk === `DEVELOPER#${ids[3]!}`, error: { name: "ServiceUnavailable" } });
-  expect(await w.access()).toEqual(refused);
+  // A read fault in a middle hop serves nothing and is the retryable 503 (it is not a revoked hop); the ninth hop is still the refusal.
+  expect((await w.access()).status).toBe(503);
   w.person(FIRST, { mergedInto: ids[0] }); w.changeSession({ signedInId: FIRST });
   expect(await w.access()).toEqual(refused);
 });
@@ -214,7 +218,8 @@ describe.each(paths)("shared merged sign-in guard: %s", (path) => {
     expect((await w.check()).status).toBe(200);
     const writes = w.writes.length;
     w.db.injectFault({ command: "GetCommand", match: (input) => (input.Key as { pk?: string }).pk === `DEVELOPER#${FIRST}`, error: { name: "ServiceUnavailable" } });
-    expect(await w.check()).toEqual(refused);
+    // A hop whose READ fails is not a revoked hop (membership-read.ts): nothing is served or written, and the answer is the retryable 503.
+    expect((await w.check()).status).toBe(503);
     expect(w.writes).toHaveLength(writes);
   });
 
