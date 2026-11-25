@@ -340,6 +340,12 @@
       "decision": "DEC 254zzz522; DEC 254zzz459"
     },
     {
+      "path": "tests/contract/web-proof-read-failure.test.ts",
+      "minimumTests": 5,
+      "reason": "MEMBERSHIP-READ-FAILS-SAFE: the web proof of a task People-list person over the real route wiring: a failed read of the identity record, the membership row or the grant rows is the retryable 503, never a refusal; a revoked membership still refuses. The floor is the file's 5 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz522; DEC 254zzz459"
+    },
+    {
       "path": "tests/contract/review-window-link.test.ts",
       "minimumTests": 2,
       "reason": "A1-12 (DEC 254zzz459; DEC 254zzz511): the 30-day review window on the channel link page /review/link/{code} (29 days and 23 hours on it opens and links, at 30 days it is a signed-out page and a confirmation is refused, nothing linked; a revoked sign-in, a revoked person and a session with no review window are signed out at once). It is the proof of authenticateDeveloperSessionId's window that stays when D1-3 deletes Code's own task page and D1 deletes the PR-feedback page. The floor is the file's 2 runnable declarations, and deleting or trimming one is a reviewed edit.",
