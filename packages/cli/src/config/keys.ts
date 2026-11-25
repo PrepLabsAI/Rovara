@@ -1,9 +1,10 @@
 // FR-048: agentx config's fixed, documented keys. Each maps to exactly one place: a stack parameter,
 // an SSM value (the environment settings) or a control-plane setting. docs/day-two.md lists the
 // same table.
-import { CHATGPT_DEFAULT_PREFERRED_MODEL, CORE_AGENT_MODEL_CHOICE_DEFAULT, CORE_AGENT_MODEL_CHOICE_PARAMETER, CORE_AGENT_MODEL_CHOICE_VALUES, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PARAMETER, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PARAMETER, CORE_LEARNING_MODEL_MAX_LENGTH, CORE_LEARNING_MODEL_PARAMETER, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PARAMETER, CORE_MODEL_GATEWAY_HOST_PATTERN, ChatGptModelIdSchema, MODEL_FALLBACK_NONE, isClaudeAgentModel, isCoreAgentModelId, isCoreAnswersModelId, isCoreLearningModelId, MODEL_FALLBACK_PATTERN, agentXError, environmentSettingsPrefix, environmentStackName } from "@agentx/contracts";
+import { CODE_SETTING_ROWS, CORE_AGENT_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_LEARNING_MODEL_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN, ChatGptModelIdSchema, MODEL_FALLBACK_NONE, configKeySpecsFromRows, isClaudeAgentModel, isCoreAgentModelId, isCoreAnswersModelId, isCoreLearningModelId, MODEL_FALLBACK_PATTERN, agentXError, environmentSettingsPrefix, environmentStackName } from "@agentx/contracts";
+import type { ConfigKeySpec, ConfigValidator } from "@agentx/contracts";
 import { catalogModel } from "@agentx/model-runtime/catalog";
-import { AlertEmailSchema, MAX_BUDGET_USD } from "../deploy/answer-schemas.js";
+import { AlertEmailSchema } from "../deploy/answer-schemas.js";
 import type { DeployPart } from "../deploy/parameters.js";
 import type { ModelRole } from "../init/prerequisites.js";
 
@@ -165,80 +166,47 @@ const fallbackModel = (key: string) => (value: string): string => {
 
 const email = (key: string) => (value: string): string => (AlertEmailSchema.safeParse(value.trim()).success ? value.trim() : refuse(key, "an email address"));
 
-const parameter = (part: DeployPart, name: string): ConfigTarget => ({ kind: "stack-parameter", part, parameter: name });
+/** The parse function a row's validator names: the data kinds are built here from their parameters, the rest are the functions above. */
+function parseFor(key: string, validator: ConfigValidator): (value: string) => string {
+  switch (validator.kind) {
+    case "oneOf": return oneOf(key, validator.values);
+    case "wholeNumber": return wholeNumber(key, validator.min, validator.max);
+    case "modelId": return modelId(key);
+    case "e2eAgentModel": return e2eAgentModel(key);
+    case "fallbackModel": return fallbackModel(key);
+    case "email": return email(key);
+    case "chatgptModelId": return (value) => (ChatGptModelIdSchema.safeParse(value.trim()).success ? value.trim() : refuse(key, "a model ID such as gpt-6.1-sol"));
+    case "coreModelGatewayUrl": return coreModelGatewayUrl(key);
+    case "coreAgentModel": return coreAgentModel(key);
+    case "coreAnswersModel": return coreAnswersModel(key);
+    case "coreLearningModel": return coreLearningModel(key);
+    case "savedEnvSwitch": return savedEnvSwitchValue;
+  }
+}
 
-export const CONFIG_KEYS: readonly ConfigKey[] = [
-  { key: "models.orchestrator", description: "the model the Slack orchestrator uses", target: parameter("slack", "ModelId"), model: "orchestrator", parse: modelId("models.orchestrator") },
-  { key: "models.classifier", description: "the model the gate classifier uses", target: parameter("slack", "GateClassifierModelId"), model: "classifier", parse: modelId("models.classifier") },
-  { key: "models.worker", description: "the model the coding worker uses", target: parameter("runtime", "ModelId"), model: "worker", parse: modelId("models.worker") },
-  {
-    key: "models.e2eAgent", description: "the AI model that navigates your app in browser checks: default (Rovara's recommendation) or a model id Rovara can use with your provider",
-    target: parameter("runtime", "E2eAgentModelId"), defaultValue: "default", e2eAgentModel: true, parse: e2eAgentModel("models.e2eAgent"),
-  },
-  {
-    key: "models.fallback", description: "the Bedrock model the coding worker, orchestrator and classifier run on when their provider's key secret is missing: none (no fallback; the call fails by name) or a Bedrock model id",
-    target: { kind: "stack-parameter", part: "runtime", parameter: "ModelFallback", also: [{ part: "slack", parameter: "ModelFallback" }] }, defaultValue: "none", fallbackModel: true, parse: fallbackModel("models.fallback"),
-  },
-  {
-    key: "models.chatgpt.enabled", description: "true: people may connect their own ChatGPT plan and their tasks run on it; false: every task uses the worker model",
-    target: { kind: "chatgpt-setting", field: "enabled" }, defaultValue: "false", parse: oneOf("models.chatgpt.enabled", ["true", "false"]),
-  },
-  {
-    key: "models.chatgpt.preferredModel", description: "the model tasks on a ChatGPT plan prefer, where the person's plan allows it",
-    target: { kind: "chatgpt-setting", field: "preferredModel" }, defaultValue: CHATGPT_DEFAULT_PREFERRED_MODEL,
-    parse: (value) => (ChatGptModelIdSchema.safeParse(value.trim()).success ? value.trim() : refuse("models.chatgpt.preferredModel", "a model ID such as gpt-6.1-sol")),
-  },
-  {
-    key: "limits.workspacesPerMember", description: "the most workspaces one person may have open",
-    target: { kind: "control-plane-setting", field: "perPerson", installDefault: { part: "control-plane", parameter: "SlackMemberWorkspaceLimit" } },
-    defaultValue: "3", parse: wholeNumber("limits.workspacesPerMember", 1, 50),
-  },
-  {
-    key: "limits.workspacesPerOrg", description: "the most workspaces the whole organization may have open",
-    target: { kind: "control-plane-setting", field: "perOrganization", installDefault: { part: "control-plane", parameter: "SlackOrganizationWorkspaceLimit" } },
-    defaultValue: "20", parse: wholeNumber("limits.workspacesPerOrg", 1, 1000),
-  },
-  { key: "limits.threadTurnsPerMinute", description: "the most requests one Slack thread may start in a minute", target: parameter("control-plane", "SlackThreadTurnsPerMinute"), defaultValue: "6", parse: wholeNumber("limits.threadTurnsPerMinute", 1, 60) },
-  { key: "slack.appPostedMessages", description: "accept: answer mentions a person posts through another app; ignore: only typed mentions", target: parameter("control-plane", "SlackAppPostedMessages"), defaultValue: "accept", parse: oneOf("slack.appPostedMessages", ["accept", "ignore"]) },
-  { key: "alerts.address", description: "where alarms go: an email address, or a PagerDuty or Opsgenie address (kept secret)", target: { kind: "settings", field: "alertAddress" }, parse: email("alerts.address") },
-  { key: "alerts.slowTurnMinutes", description: "a turn slower than this many minutes raises the SlowTurns alarm", target: parameter("slack", "SlowTurnMinutes"), defaultValue: "5", parse: wholeNumber("alerts.slowTurnMinutes", 1, 60) },
-  { key: "budget.monthlyUsd", description: "the monthly AWS budget in whole US dollars; 0 for none", target: parameter("control-plane", "BudgetMonthlyUsd"), defaultValue: "0", parse: wholeNumber("budget.monthlyUsd", 0, MAX_BUDGET_USD) },
-  { key: "budget.scope", description: "tag: costs tagged agentx:env for this environment; account: the whole account", target: parameter("control-plane", "BudgetScope"), defaultValue: "tag", parse: oneOf("budget.scope", ["tag", "account"]) },
-  // Spec 062: channel adapters (FR-020) and Slack through the channel API as the built-in adapter (FR-074).
-  { key: "channels.adapters", description: "enabled: administrators can register channel adapters (WhatsApp and others) and the channel API takes their signed requests; disabled: none",
-    target: parameter("control-plane", "ChannelAdapters"), defaultValue: "disabled", parse: oneOf("channels.adapters", ["enabled", "disabled"]) },
-  { key: "slack.viaChannel", description: "enabled: Slack goes through the channel API as the built-in Slack adapter; disabled: Slack's own path, as before",
-    target: parameter("control-plane", "SlackViaChannel"), defaultValue: "disabled", parse: oneOf("slack.viaChannel", ["enabled", "disabled"]) },
-  // Core switch-on blocker (2026-11-17): where the core's model calls go, kept across upgrades. Both are needed; either empty leaves the core refusing work by name.
-  { key: "coreEngine.modelGatewayUrl", description: "the Cloud model gateway's https origin the core engine's agents call AI through (no path or credentials); empty (the default, or none) leaves the core engine refusing work. Set coreEngine.agentModel too",
-    target: parameter("control-plane", CORE_MODEL_GATEWAY_HOST_PARAMETER), defaultValue: "", corePairedWith: "coreEngine.agentModel", shown: coreModelGatewayShown, parse: coreModelGatewayUrl("coreEngine.modelGatewayUrl") },
-  { key: "coreEngine.agentModel", description: "the model every core engine step runs on through the model gateway: an Anthropic model id, such as claude-sonnet-4-6, or any model the gateway offers (checked live), such as zai.glm-5; empty (the default, or none) leaves the core engine refusing work. Set coreEngine.modelGatewayUrl too",
-    target: parameter("control-plane", CORE_AGENT_MODEL_PARAMETER), defaultValue: "", corePairedWith: "coreEngine.modelGatewayUrl", gatewayOffered: true, parse: coreAgentModel("coreEngine.agentModel") },
-  // DEC 254zm: Code's workers run test services only once the install's five starter copies are in place: run scripts/test-services-mirror.ts --copy, then --verify, then set this to mirrored.
-  { key: "testServices.images", description: "none (the default): this install's workers do not run test services; mirrored: the five starter image copies were made and checked (scripts/test-services-mirror.ts --verify), so workers pull them at boot and run test services",
-    target: parameter("control-plane", "TestServiceImages"), defaultValue: "none", parse: oneOf("testServices.images", ["none", "mirrored"]) },
-  { key: "savedEnvironments.switch", description: "on: enable saved environment images after the control plane publishes all three image roles and the registry template; off (the default): keep saved environments disabled",
-    target: parameter("control-plane", "SavedEnvironments"), defaultValue: "0", shown: (stored) => stored === "1" ? "on" : "off", parse: savedEnvSwitchValue },
-  // L4-NETG (DEC 254zzz77): how the EC2 worker hosts' task sandboxes and devcontainers reach the internet. Applies to workers booted AFTER the change; a running worker keeps its boot until it stops.
-  { key: "workerSandboxEgress", description: "bridge (the default): task sandboxes and devcontainers reach the internet through the worker host's own network, as before; gateway: the commands the agent runs (shell, setup, checks, install steps, the dev container's own processes) sit on an internal network whose only exit is the host's egress gateway (the install's DNS list applies, raw IP connections and the push-capable registries are refused, S3 is refused unless a project lifts a bucket); a worker whose gateway cannot start does not boot. The image build steps of a dev container (Dockerfile RUN, features) and the end-to-end verifier's build commands go out the same way, and Docker's default bridge is walled. The Docker daemon's own build fetches (`ADD <url>`, a `FROM` base image, a dev container's features) and the host's own image pulls go through the gateway's daemon proxy: only names the install's DNS list allows, no raw addresses, no S3 buckets (packages/worker/ec2/README.md, Sandbox egress gateway). Not covered: what the install's DNS list allows (github.com push, Slack and Atlassian web APIs, a project's additions and lifted S3 buckets) and Rovara's own services. Takes effect for workers booted after the change (named environments only)",
-    target: parameter("control-plane", "WorkerSandboxEgress"), defaultValue: "bridge", parse: oneOf("workerSandboxEgress", ["bridge", "gateway"]) },
-  { key: "coreEngine.answersModel", description: "the model the hosted Just answer and the start-box classifier run on through the model gateway (not coding tasks, which keep coreEngine.agentModel): an Anthropic model id, such as claude-haiku-5-5; empty (the default, or none) uses coreEngine.agentModel, as before",
-    target: parameter("control-plane", CORE_ANSWERS_MODEL_PARAMETER), defaultValue: "", parse: coreAnswersModel("coreEngine.answersModel") },
-  { key: "coreEngine.learningModel", description: "the model the hosted lessons learn with (the reflector and the judges) through the model gateway, on the company's own Anthropic account (not coding tasks, which keep coreEngine.agentModel): an Anthropic model id, such as claude-haiku-5-5; empty (the default, or none) uses claude-haiku-5-5; a company may choose its own in its AI settings, which wins for that company",
-    target: parameter("control-plane", CORE_LEARNING_MODEL_PARAMETER), defaultValue: "", parse: coreLearningModel("coreEngine.learningModel") },
-  { key: "mcp.confirmElicitation", description: "enabled: an admin may confirm a change from an AI tool in the tool's own pop-up; disabled: only the Slack Confirm button or the CLI", target: parameter("control-plane", "McpConfirmElicitation"), defaultValue: "enabled", parse: oneOf("mcp.confirmElicitation", ["enabled", "disabled"]) },
-  // DEC 254zg (a): Code's company layer, one switch for every function that reads COMPANY_SIGNIN and every company-only grant; the Slack service's stack takes the same value.
-  { key: "company.signIn", description: "enabled: Code's company layer is on (company membership sign-in, invites, Add to Slack, Slack company mode); disabled (the default): it is off, and the template holds no company-only grant. Close self-serve (company.selfServe disabled) and migrate the members before enabling it (named environments only)",
-    target: { kind: "stack-parameter", part: "control-plane", parameter: "CompanySignIn", also: [{ part: "slack", parameter: "CompanySignIn" }] }, defaultValue: "disabled", parse: oneOf("company.signIn", ["enabled", "disabled"]) },
-  { key: "company.selfServe", description: "enabled: a person with an operator's invite code may create their own company, only while company.signIn is enabled too; disabled (the default): self-serve create is refused, whatever the stored self-serve setting says (named environments only)",
-    target: parameter("control-plane", "CompanySelfServe"), defaultValue: "disabled", parse: oneOf("company.selfServe", ["enabled", "disabled"]) },
-  // DEC 254zk: per-company Slack bots (Slack company mode, #845), set by a deploy or here: the control plane's SlackCompanyWorkspaces and the Slack service's copy.
-  { key: "slack.companyWorkspaces", description: "enabled: Slack workspaces other than the install's own use their company's own bot token and company checks, only while company.signIn is enabled too; disabled (the default): only the install's workspace is served, as before (named environments only)",
-    target: { kind: "stack-parameter", part: "control-plane", parameter: "SlackCompanyWorkspaces", also: [{ part: "slack", parameter: "SlackCompanyWorkspacesState" }] }, defaultValue: "disabled", parse: oneOf("slack.companyWorkspaces", ["enabled", "disabled"]) },
-  // Live switches check 2026-11-18: a switch the broker read that nothing in infra set (DEC 254n(1)).
-  { key: "coreEngine.agentModelChoice", description: "on: each company picks its core engine model from the models the gateway offers it (setup's AI and spending step), coreEngine.agentModel being the default; off (the default): every company runs coreEngine.agentModel (named environments only)",
-    target: parameter("control-plane", CORE_AGENT_MODEL_CHOICE_PARAMETER), defaultValue: CORE_AGENT_MODEL_CHOICE_DEFAULT, parse: oneOf("coreEngine.agentModelChoice", CORE_AGENT_MODEL_CHOICE_VALUES) },
-];
+const SHOWN: Readonly<Record<NonNullable<ConfigKeySpec["shown"]>, (stored: string) => string>> = {
+  coreModelGatewayUrl: coreModelGatewayShown,
+  savedEnvSwitch: (stored) => (stored === "1" ? "on" : "off"),
+};
+
+function configKeyOf(spec: ConfigKeySpec): ConfigKey {
+  return {
+    key: spec.key,
+    description: spec.description,
+    target: spec.target,
+    ...(spec.defaultValue === undefined ? {} : { defaultValue: spec.defaultValue }),
+    ...(spec.e2eAgentModel === undefined ? {} : { e2eAgentModel: spec.e2eAgentModel }),
+    ...(spec.fallbackModel === undefined ? {} : { fallbackModel: spec.fallbackModel }),
+    ...(spec.corePairedWith === undefined ? {} : { corePairedWith: spec.corePairedWith }),
+    ...(spec.gatewayOffered === undefined ? {} : { gatewayOffered: spec.gatewayOffered }),
+    ...(spec.shown === undefined ? {} : { shown: SHOWN[spec.shown] }),
+    ...(spec.model === undefined ? {} : { model: spec.model }),
+    parse: parseFor(spec.key, spec.validator),
+  };
+}
+
+/** Every `agentx config` key, derived from Code's settings rows (packages/contracts/src/settings/install-rows.ts): adding a key is adding a row, and `docs/day-two.md`'s table is generated from the same rows. */
+export const CONFIG_KEYS: readonly ConfigKey[] = configKeySpecsFromRows(CODE_SETTING_ROWS).map(configKeyOf);
 
 export function configKey(name: string): ConfigKey {
   const found = CONFIG_KEYS.find((entry) => entry.key === name);

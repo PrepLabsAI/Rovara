@@ -50,16 +50,17 @@ describe("parameter-only stack updates (R6)", () => {
     expect(result).toEqual({ changed: true });
   });
 
-  // Spec 025 E16: McpConfirmElicitation is declared only by named environments' templates, so the
-  // legacy deployment is told the setting is not there, not to upgrade.
+  // Spec 025 E16: a setting only named environments' templates declare is refused on the legacy deployment with "not there", not with "upgrade". F1 L1a-1 corrected the list behind it
+  // (derived from `declaredIn`): this test used McpConfirmElicitation, which the legacy template has declared since #1129 (the old hand-kept list wrongly named it, and 17 others), and
+  // BudgetScope as the example of "any other parameter"; BudgetScope is in fact named-only, so the two swap places.
   it("says a named-environment-only setting does not exist on the legacy deployment", async () => {
     const cf = fakeCloudFormation({ parameters: { CallbackSigningKey: "****" } });
     const legacy = (changes: Record<string, string>) =>
       updateStackParameters({ cloudFormation: cf, stackName: "AgentXControlPlane", roleArn: ROLE, changes, label: "config", confirm: async () => true, write: () => undefined, sleep: async () => undefined, pollMs: 1 });
-    await expect(legacy({ McpConfirmElicitation: "disabled" })).rejects.toThrow("stack AgentXControlPlane has no McpConfirmElicitation parameter; that setting exists only in environments installed with agentx init, not in the legacy deployment; nothing changed");
+    await expect(legacy({ BudgetScope: "tag" })).rejects.toThrow("stack AgentXControlPlane has no BudgetScope parameter; that setting exists only in environments installed with agentx init, not in the legacy deployment; nothing changed");
     expect(cf.calls.map((call) => call.name)).toEqual(["DescribeStacksCommand"]);
-    // Any other missing parameter on the legacy stack keeps the upgrade advice.
-    await expect(legacy({ BudgetScope: "tag" })).rejects.toThrow("stack AgentXControlPlane has no BudgetScope parameter; it runs an older AgentX release, so upgrade it with agentx upgrade, then run this again");
+    // A parameter the legacy template declares, missing from an older stack, keeps the upgrade advice (the refusal list never named it correctly before).
+    await expect(legacy({ McpConfirmElicitation: "disabled" })).rejects.toThrow("stack AgentXControlPlane has no McpConfirmElicitation parameter; it runs an older AgentX release, so upgrade it with agentx upgrade, then run this again");
   });
 
   // CODE-PUBLIC-URL (DEC 254zzz505): the issuer follows PublicApiUrl, so changing it on a running stack is an issuer change and needs an explicit confirm.

@@ -2,11 +2,12 @@
 // no AWS write. Each stack's parameter file names every value this upgrade sets (developer sign-in
 // included, from SSM, as agentx upgrade sends it), and marks each deployed parameter an upgrade keeps
 // (ruling F29: the operator's settings and the callback signing key) UsePreviousValue, so the change
-// set keeps them and no secret is in any file.
+// set keeps them and no secret is in any file. Since F1 L1a-1 every other deployed parameter the new template declares is marked too (deploy/carry.ts).
 import { chmod, copyFile, mkdir, mkdtemp, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { agentXError, environmentStackName } from "@agentx/contracts";
-import { keptOperatorParameters, templateParameterNames, upgradeKeptParameterNames, withDeclaredSignIn, type DeployAnswers } from "../deploy/deploy-environment.js";
+import { carriedParameterNames } from "../deploy/carry.js";
+import { keptOperatorParameters, templateParameterNames, upgradeKeptParameterNames, withDeclaredSignIn, withoutUnsetSlackTeamId, type DeployAnswers } from "../deploy/deploy-environment.js";
 import { coreEngineParameters } from "../deploy/core-engine-answers.js";
 import { exportReadinessScript } from "../deploy/export-readiness.js";
 import { assertClaimable } from "../deploy/export-bundle.js";
@@ -33,9 +34,12 @@ function parameterFile(input: { part: DeployPart; version: string; computed: Rec
   }
   const kept = [...upgradeKeptParameterNames(input.part)].filter((name) =>
     !Object.hasOwn(computed, name) && input.deployed?.[name] !== undefined && (input.declared === undefined || input.declared.has(name)));
+  // F1 L1a-1, the one carry rule (deploy/carry.ts): every other deployed parameter the target template declares and this upgrade does not supply is also marked UsePreviousValue,
+  // as the engines carry it; before, it was left out and the change set reset it to the template's default.
+  const carried = carriedParameterNames({ deployed: Object.keys(input.deployed ?? {}), declared: input.declared, supplied: [...Object.keys(computed), ...kept] });
   return [
     ...Object.entries(computed).map(([ParameterKey, ParameterValue]) => ({ ParameterKey, ParameterValue })),
-    ...kept.map((ParameterKey) => ({ ParameterKey, UsePreviousValue: true as const })),
+    ...[...kept, ...carried].map((ParameterKey) => ({ ParameterKey, UsePreviousValue: true as const })),
   ];
 }
 
@@ -104,7 +108,7 @@ export async function writeUpgradeBundle(input: {
         if (!(error instanceof MissingStackOutputError)) throw error;
         throw agentXError("CONFIG_INVALID", `release ${version} needs output ${error.output} of stack ${error.stackName}, which the deployed stack does not have yet, so one bundle cannot upgrade ${stackName}. Run agentx --env ${env} upgrade --to ${version} with admin credentials instead: it deploys ${error.stackName} first, then reads its new output`);
       }
-      const computed = part === "control-plane" && input.answers.developerSignIn !== undefined ? withDeclaredSignIn(raw, declared) : raw;
+      const computed = part === "control-plane" && input.answers.developerSignIn !== undefined ? withoutUnsetSlackTeamId(withDeclaredSignIn(raw, declared), input.answers.developerSignIn) : raw;
       const parameters = parameterFile({ part, version, computed, deployed: input.deployed[part], declared });
       await write(`parameters/${part}.json`, `${JSON.stringify(parameters, null, 2)}\n`);
       await write(`templates/${part}.template.json`, release.template(part, region, env));
@@ -133,7 +137,7 @@ export async function writeUpgradeBundle(input: {
     const readme = [
       `# Upgrade AgentX environment ${env} to ${version}`, "",
       `Environment ${env} (account ${settings.account}, region ${region}) runs ${settings.version}. This bundle upgrades it to ${version}.`,
-      "No file here holds a secret. The parameters an upgrade keeps (the operator's settings, the callback signing key and developer sign-in) are marked UsePreviousValue, so they keep their values. Any other parameter set by hand in the console goes back to the template's default, as it does with agentx upgrade.", "",
+      "No file here holds a secret. Every parameter this upgrade does not set is marked UsePreviousValue (the operator's settings, the callback signing key, developer sign-in and any other parameter the stack holds and the new template still declares), so it keeps its value, as it does with agentx upgrade. A parameter new to the template takes the template's default.", "",
       "Requires Node.js 22+ and the AWS CLI. Run every command below from this bundle's directory. Every write qualifies the selected broker, then checks the gateway for signed prices. Runtime writes also recheck the completed broker. A refusal names the gateway URL; repair it before retrying.",
       `Deploy the stacks in this order, one at a time, each only after the one before it finished: ${input.parts.map((part) => environmentStackName(env, part)).join(", ")}.`,
       "Read each change set before executing it: a replaced or deleted table, user pool, bucket, key or secret loses its data.",

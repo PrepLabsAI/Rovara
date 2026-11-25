@@ -15,8 +15,7 @@
  * The infrastructure (infra/lib/broker-names.ts) and the broker both take these tables, so a name added to one cannot be missing from the other.
  * tests/contract/lambda-environment-size.test.ts holds the broker under its ceiling with the longest names: a value that can be derived is derived, not added as a variable.
  */
-import { ATTENTION_EMAIL_FUNCTION_VARIABLE, CORE_OUTBOX_STREAM_RELAY_VARIABLE, coreAttentionEmailFunctionName, coreDispatchDeadLetterName, coreDispatchQueueName, coreLessonsReflectDeadLetterName, coreLessonsReflectQueueName, CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, CORE_AGENT_MODEL_CHOICE_VARIABLE, CORE_AGENT_MODEL_VARIABLE, CORE_ANSWERS_MODEL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_LEARNING_MODEL_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE } from "./core-engine-infra.js";
-import { PUBLIC_API_URL_VARIABLE } from "./public-api-url.js";
+import { ATTENTION_EMAIL_FUNCTION_VARIABLE, coreAttentionEmailFunctionName, coreDispatchDeadLetterName, coreDispatchQueueName, coreLessonsReflectDeadLetterName, coreLessonsReflectQueueName, CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE } from "./core-engine-infra.js";
 import {
   environmentAlarmPrefix,
   environmentChannelAdapterSecretPrefix,
@@ -27,11 +26,11 @@ import {
   environmentProjectSetupRuntimeCatalogId,
   environmentSettingsPrefix,
 } from "./environments.js";
+import { brokerSettingsFromRows } from "./settings/derive.js";
+import { INSTALL_ROWS } from "./settings/install-rows.js";
 
-/** DEC 254z-amend3: the variable the core reads the test services switch from, on a laptop and on AWS alike. */
-export const TEST_SERVICES_SETTING_VARIABLE = "ROVARA_TEST_SERVICES";
-/** DEC 254zm: the variable the hosted functions read the TestServiceImages setting from (aws/hosted-test-services.ts). */
-export const TEST_SERVICE_IMAGES_SETTING_VARIABLE = "ROVARA_TEST_SERVICES_HOSTED_IMAGES";
+// The two variables below moved to settings/variables.ts (the install rows name them, and this file imports the rows); they are exported from here as before.
+export { TEST_SERVICES_SETTING_VARIABLE, TEST_SERVICE_IMAGES_SETTING_VARIABLE } from "./settings/variables.js";
 
 /** The variable the broker reads the dedicated GitHub webhook secret's name from (derived, DERIVED_BROKER_VARIABLES). */
 export const GITHUB_WEBHOOK_SECRET_VARIABLE = "GITHUB_WEBHOOK_SECRET_ID";
@@ -179,61 +178,8 @@ export const BROKER_SWITCH_FLAG_VALUES: Readonly<Record<string, "enabled" | "dis
  * The broker's settings that are stack parameters already constrained to plain text (a Number, an AllowedValues list or an AllowedPattern without separators): the infrastructure
  * refuses any other. A free-text value (an issuer URL, JSON) does not belong here; it stays a variable of its own, or it is derived. Codes as in BROKER_NAMES: once each, never reused.
  */
-export const BROKER_SETTINGS = {
-  memberWorkspaceLimit: { code: "ml", variable: "SLACK_MEMBER_WORKSPACE_LIMIT" },
-  organizationWorkspaceLimit: { code: "ol", variable: "SLACK_ORGANIZATION_WORKSPACE_LIMIT" },
-  taskPeopleChanges: { code: "tc", variable: "AGENTX_TASK_PEOPLE_CHANGES_ENABLED" },
-  taskPeoplePublicInvitations: { code: "tu", variable: "AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED" },
-  taskPeoplePrivateInvitations: { code: "tv", variable: "AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED" },
-  workflowDependencies: { code: "wd", variable: "AGENTX_WORKFLOW_DEPENDENCIES_ENABLED" },
-  slackTeamId: { code: "tm", variable: "SLACK_TEAM_ID" },
-  signInSlack: { code: "ss", variable: "DEVELOPER_SIGNIN_SLACK" },
-  signInSlackSince: { code: "sn", variable: "DEVELOPER_SIGNIN_SLACK_SINCE" },
-  oidcSince: { code: "os", variable: "DEVELOPER_OIDC_SINCE" },
-  // DEC 254h: GitHub sign-in (Code's company layer only) and when it was last turned on.
-  signInGithub: { code: "gh", variable: "DEVELOPER_SIGNIN_GITHUB" },
-  githubSince: { code: "gs", variable: "DEVELOPER_GITHUB_SINCE" },
-  mcpConfirmElicitation: { code: "mc", variable: "MCP_CONFIRM_ELICITATION" },
-  coreTaskCap: { code: "ct", variable: "ROVARA_CORE_TASK_CAP_USD" },
-  coreCompanyDayCap: { code: "cd", variable: "ROVARA_CORE_COMPANY_DAY_CAP_USD" },
-  coreLessons: { code: "cl", variable: "ROVARA_CORE_LESSONS" },
-  // L4-P1 (owner DEC 254zzl): the per-company flag of system-started runs (the stack parameter CoreSystemRuns, default off).
-  coreSystemRuns: { code: "sy", variable: "ROVARA_CORE_SYSTEM_RUNS" },
-  // CORE-RUN-STOP-RELAY (G1): "on" where the core's outbox stream relay is deployed, so the admission declares enforcesCost (a run is stopped at its cap), for the broker and the dispatcher. A constant, set in infra/lib/core-engine.ts.
-  coreOutboxStreamRelay: { code: "rl", variable: CORE_OUTBOX_STREAM_RELAY_VARIABLE },
-  // Core switch-on blocker (2026-11-17): the model gateway's host and agent model (the stack parameters CoreModelGatewayHost and CoreAgentModel), packed
-  // to make room for the gateway settings in the broker's 4 KB.
-  /** DEC 254o (b), L2-2: Slack company mode for workspaces other than SLACK_TEAM_ID (stack parameter SlackCompanyWorkspaces; the broker also needs COMPANY_SIGNIN=enabled). */
-  slackCompanyWorkspaces: { code: "cw", variable: "SLACK_COMPANY_WORKSPACES", switchFlag: true },
-  coreModelGateway: { code: "gw", variable: CORE_MODEL_GATEWAY_URL_VARIABLE, httpsOrigin: true },
-  coreAgentModel: { code: "am", variable: CORE_AGENT_MODEL_VARIABLE },
-  // DEC 254z-amend3: test services, ON unless exactly "0" (the stack parameter TestServices, TEST_SERVICES_PARAMETER_VALUES). The broker's core reads it as ROVARA_TEST_SERVICES (the laptop's own switch).
-  // Not `tx`: Cloud's own table gives that code to its own test services switch, which is off by default; a code means one thing in both.
-  testServices: { code: "td", variable: TEST_SERVICES_SETTING_VARIABLE },
-  /** L4-SE: saved environments, default off. */
-  savedEnvironments: { code: "sv", variable: "ROVARA_SAVED_ENVIRONMENTS" },
-  // DEC 254zm: whether the install's copies of the starter images are in place (the stack parameter TestServiceImages, TEST_SERVICE_IMAGES_PARAMETER_VALUES). Only exactly "mirrored" lets Code's workers run test services.
-  testServiceImages: { code: "ti", variable: TEST_SERVICE_IMAGES_SETTING_VARIABLE },
-  // L4-AM (DEC 254zzn(2)): the hosted answers model (the stack parameter CoreAnswersModel), the BROKER only (the dispatcher does not answer), empty = the agent model.
-  coreAnswersModel: { code: "aa", variable: CORE_ANSWERS_MODEL_VARIABLE },
-  // DEC 254zzz58: the hosted lessons' learning model (the stack parameter CoreLearningModel), the BROKER only (the lessons' learning calls run there), empty = claude-haiku-5-5 (DEC 254zzz63).
-  coreLearningModel: { code: "lm", variable: CORE_LEARNING_MODEL_VARIABLE },
-  // DEC 254h (room for GitHub sign-in's gh/gs in the broker's 4 KB): the channel adapters' switch (the ChannelAdapters parameter, AllowedValues enabled/disabled), packed.
-  channelAdapters: { code: "ca", variable: "CHANNEL_ADAPTERS" },
-  // DEC 254zg (a): Code's company layer (the CompanySignIn parameter, through its condition: enabled or disabled), packed.
-  companySignIn: { code: "si", variable: "COMPANY_SIGNIN", switchFlag: true },
-  // Web task channel C8 (option b): the attention email switch (CoreAttentionEmail, AllowedValues off/on), packed. The web app's host is NOT the broker's: only the sender function has it
-  // (the broker writes links on a reserved placeholder origin, which the sender replaces), so the broker's 4 KB grows by this one short setting.
-  coreAttentionEmail: { code: "ae", variable: "ROVARA_ATTENTION_EMAIL" },
-  // Live switches check 2026-11-18 (DEC 254n(1)): the per-company agent model choice (the stack parameter CoreAgentModelChoice, off/on, default off), the BROKER only.
-  coreAgentModelChoice: { code: "mx", variable: CORE_AGENT_MODEL_CHOICE_VARIABLE },
-  // #1149: which layout the install's names follow. Only the legacy install (production, the un-named template) sets it, to LEGACY_INSTALL_LAYOUT, and then the broker derives
-  // only what DERIVED_BROKER_VARIABLES marks `legacy` (a value identical to the legacy install's own); a named environment never sets it.
-  installLayout: { code: "ly", variable: "AGENTX_INSTALL_LAYOUT" },
-  // CODE-PUBLIC-URL (owner DEC 254zzz505): the configured public address (the stack parameter PublicApiUrl), packed as its host (a URL's slashes cannot be packed; the broker reads `https://<host>`),
-  // for the BROKER only: it derives its sign-in issuer from it (broker-environment.ts) where the control plane would otherwise name the API's own host. Empty (the default): the API's own host.
-  publicApiUrl: { code: "pu", variable: PUBLIC_API_URL_VARIABLE, httpsOrigin: true },
-} as const satisfies Record<string, BrokerSettingSpec>;
+export const BROKER_SETTINGS = brokerSettingsFromRows(INSTALL_ROWS) satisfies Record<string, BrokerSettingSpec>;
+
 
 /** DEC 254z-amend3: the values of the TestServices stack parameter. "1" is on (the default); "0" is the owner's opt-out. The broker reads anything but exactly "0" as on. */
 export const TEST_SERVICES_PARAMETER_VALUES = ["1", "0"] as const;

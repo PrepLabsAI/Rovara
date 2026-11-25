@@ -10,12 +10,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CloudFormationClient } from "@aws-sdk/client-cloudformation";
 import type { S3Client } from "@aws-sdk/client-s3";
-import { AgentXError, type ReleaseManifest } from "@agentx/contracts";
+import { AgentXError, OMITTED_PARAMETER_BY_ENGINE, type ReleaseManifest } from "@agentx/contracts";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { PROTECTED_PARTS, type DeployEvent, type DeployRequest } from "../../packages/cli/src/deploy/deployer.js";
 import type { DeployPart } from "../../packages/cli/src/deploy/parameters.js";
 import type { LoadedRelease } from "../../packages/cli/src/deploy/release.js";
 import { templatesDeployer } from "../../packages/cli/src/deploy/templates-engine.js";
+import { keptAdditionsOfL1a1 } from "../support/kept-additions.js";
 
 skipLambdaBundling();
 
@@ -1237,4 +1238,60 @@ it.each(["unchanged", "changed-host", "first-host", "changed-model", "first-mode
     expect(fake.inputs("CreateChangeSet")).toEqual([]);
     expect(transport).toHaveBeenCalledTimes(1);
   } finally { transport.mockRestore(); }
+});
+
+// F1 lane L1a-1 (deploy/carry.ts): the ONE carry rule. Until L1a-0 this engine sent only the keys it was given, so CloudFormation reset every omitted parameter to the template's default while the
+// cdk engine (cdk-engine.test.ts) carried it. Now a parameter the deploy does not name keeps its deployed value (UsePreviousValue) when the release's template still declares it.
+describe("an upgrade does not name a parameter: the templates engine carries its deployed value (F1 L1a-1)", () => {
+  const withParameters = (names: string[]) => (part: DeployPart, region: string, env: string) => JSON.stringify({ part, region, env, Parameters: Object.fromEntries(names.map((name) => [name, { Type: "String" }])) });
+  const upgrade = async (deployedParameters: Array<{ ParameterKey: string; ParameterValue: string }>, declared: string[], parameters: Record<string, string>, fakeOptions: { status?: string } = {}) => {
+    const deployed = { Stacks: [{ StackStatus: fakeOptions.status ?? "UPDATE_COMPLETE", EnableTerminationProtection: true, Outputs: [], Parameters: deployedParameters }] };
+    const fake = fakeClients({ DescribeStacks: [deployed, protectedStack("UPDATE_COMPLETE")], HeadObject: [{ Metadata: { sha256: sha256(zipBytes[RUNTIME_ASSET]!) } }], PutObject: [{}],
+      CreateChangeSet: [{}], DescribeChangeSet: [ready(), executed()], ExecuteChangeSet: [{}] });
+    await deployer(fake, { release: makeRelease(withParameters(declared)) }).deploy(request("runtime", { parameters }));
+    return fake.inputs("CreateChangeSet")[0]!;
+  };
+
+  it("sends UsePreviousValue for each deployed parameter the template declares and the deploy does not name", async () => {
+    const sent = await upgrade(
+      [{ ParameterKey: "E2eAgentModelId", ParameterValue: "a-model-the-operator-chose" }, { ParameterKey: "PromptCacheRetention", ParameterValue: "short" }, { ParameterKey: "ModelId", ParameterValue: "model" }],
+      ["E2eAgentModelId", "PromptCacheRetention", "ModelId", "PermissionsBoundaryArn"], { PermissionsBoundaryArn: "", ModelId: "model" });
+    expect(sent).toMatchObject({ ChangeSetType: "UPDATE" });
+    expect(sent.Parameters).toEqual([
+      { ParameterKey: "PermissionsBoundaryArn", ParameterValue: "" },
+      { ParameterKey: "ModelId", ParameterValue: "model" },
+      { ParameterKey: "E2eAgentModelId", UsePreviousValue: true },
+      { ParameterKey: "PromptCacheRetention", UsePreviousValue: true },
+    ]);
+    expect(OMITTED_PARAMETER_BY_ENGINE.templates).toMatch(/^is carried/u);
+  });
+
+  it.each(keptAdditionsOfL1a1().map(({ part, name }) => [`${part}/${name}`, name] as const))("carries %s, a parameter L1a-1 added to the kept set, when the deploy does not name it", async (_label, name) => {
+    const sent = await upgrade([{ ParameterKey: name, ParameterValue: "the-deployed-value" }], [name, "PermissionsBoundaryArn"], {});
+    expect(sent.Parameters).toContainEqual({ ParameterKey: name, UsePreviousValue: true });
+    expect((sent.Parameters as Array<{ ParameterKey: string }>).filter((parameter) => parameter.ParameterKey === name)).toHaveLength(1);
+  });
+
+  it("never sends a name the new template does not declare (CloudFormation refuses an undeclared parameter), and sends nothing for a parameter new to the template", async () => {
+    const sent = await upgrade([{ ParameterKey: "RemovedInThisRelease", ParameterValue: "x" }, { ParameterKey: "ModelId", ParameterValue: "model" }], ["ModelId", "NewInThisRelease"], { ModelId: "model" });
+    const names = (sent.Parameters as Array<{ ParameterKey: string }>).map((parameter) => parameter.ParameterKey);
+    expect(names).toEqual(["PermissionsBoundaryArn", "ModelId"]);
+  });
+
+  it("names a supplied value once: the supplied value wins over the deployed one (SSM sign-in, the answers)", async () => {
+    const sent = await upgrade([{ ParameterKey: "ModelId", ParameterValue: "old" }], ["ModelId"], { ModelId: "new" });
+    expect(sent.Parameters).toEqual([{ ParameterKey: "PermissionsBoundaryArn", ParameterValue: "" }, { ParameterKey: "ModelId", ParameterValue: "new" }]);
+  });
+
+  it("carries a NoEcho secret the deploy does not name as UsePreviousValue, so its value never leaves CloudFormation", async () => {
+    const sent = await upgrade([{ ParameterKey: "CallbackSigningKey", ParameterValue: "****" }], ["CallbackSigningKey", "ModelId"], { ModelId: "model" });
+    expect(sent.Parameters).toEqual([{ ParameterKey: "PermissionsBoundaryArn", ParameterValue: "" }, { ParameterKey: "ModelId", ParameterValue: "model" }, { ParameterKey: "CallbackSigningKey", UsePreviousValue: true }]);
+  });
+
+  it("carries nothing on a first install: there is no deployed value", async () => {
+    const fake = fakeClients({ DescribeStacks: [stackAbsent("agentx-staging-runtime"), protectedStack("CREATE_COMPLETE")], HeadObject: [{ Metadata: { sha256: sha256(zipBytes[RUNTIME_ASSET]!) } }], PutObject: [{}],
+      CreateChangeSet: [{}], DescribeChangeSet: [ready(), executed()], ExecuteChangeSet: [{}] });
+    await deployer(fake, { release: makeRelease(withParameters(["ModelId", "E2eAgentModelId"])) }).deploy(request("runtime", { parameters: { ModelId: "model" } }));
+    expect(fake.inputs("CreateChangeSet")[0]).toMatchObject({ ChangeSetType: "CREATE", Parameters: [{ ParameterKey: "PermissionsBoundaryArn", ParameterValue: "" }, { ParameterKey: "ModelId", ParameterValue: "model" }] });
+  });
 });
