@@ -44,6 +44,7 @@ import { companyEngineModelRoute } from "../../core-host/company-engine-model.js
 import { hostedSystemRunsFor, readSystemRunsSwitch } from "../../core-host/system-runs.js";
 import { dispatcherStoredAgentModelChoice } from "../../core-host/stored-agent-model-choice.js";
 import { createCompanyTaskSpend } from "../../core-host/company-task-spend.js";
+import { createUnreportedRunSettler } from "../../core-host/unreported-run-settle.js";
 import { createTaskTestEnvironment } from "../../core/test-env/seam.js";
 import { hostedServiceCatalog } from "../hosted-test-services.js";
 import { createWikiForStep } from "../../core/wiki/agent-context.js";
@@ -316,7 +317,9 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
         wiki: createWikiForStep({ store: registry.require("storage"), companyId, now: () => now().getTime() }),
         // L4-TSU: what a task has cost, for automatic fixing's per-task dollar cap (the broker's own reader: this company's cost ledger, fresh each time, unknown throws and is never "nothing spent").
         autofixDayBudgetHasRoom: hostedAutofixDayBudgetHasRoom({ store: registry.require("storage"), companyId, settings: "settings" in admissionSettings ? admissionSettings.settings : undefined, now }),
-        taskSpendUsd: createCompanyTaskSpend({ store: registry.require("storage"), companyId, refused: (reason) => inputs.log({ event: "dispatch.task_spend_refused", companyId, reason }) }),
+        taskSpendUsd: createCompanyTaskSpend({ store: registry.require("storage"), companyId, refused: (reason) => inputs.log({ event: "dispatch.task_spend_refused", companyId, reason }),
+          // SPEND-UNREPORTED-RUN: the same settle as the broker's read (only where the dispatcher has a money stop to settle with).
+          ...unreportedSettle(inputs, registry, companyId, now) }),
         // Lead 4 W4: told when a wiki build's task ended, so the wiki's build record says how it ended (this company's store only).
         wikiBuildEnded: wikiBuildEndedHook({ store: registry.require("storage"), companyId, now: () => now().getTime() }),
         ...(inputs.moneyStop === undefined ? {} : { moneyStop: inputs.moneyStop(registry, companyId) }),
@@ -360,4 +363,12 @@ export const dispatcherStopInstance: SessionWorkerMachinesDependencies["stopInst
 /** The core queue's ARN from the dispatcher's environment (absent in the legacy template). */
 export function coreDispatchQueueArn(env: NodeJS.ProcessEnv): string | undefined {
   return required(env[CORE_DISPATCH_QUEUE_ARN_VARIABLE]);
+}
+
+
+/** SPEND-UNREPORTED-RUN: the spend reader's `settle` for a company, or nothing where this dispatcher has no money stop to settle with. */
+function unreportedSettle(inputs: Pick<DispatcherCoreInputs, "moneyStop" | "log">, registry: AdapterRegistry, companyId: OrgId, now: () => Date): { settle?: (taskId: string) => Promise<void> } {
+  const moneyStop = inputs.moneyStop;
+  if (moneyStop === undefined) return {};
+  return { settle: async (taskId) => { await createUnreportedRunSettler({ store: registry.require("storage"), companyId, moneyStop: moneyStop(registry, companyId), now, log: inputs.log })(taskId); } };
 }

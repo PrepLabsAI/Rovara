@@ -157,8 +157,9 @@ describe("the hosted task spend reader (L4-TSU)", () => {
       }
     });
 
-    it("a run kept as an estimate leaves its hold's room outside the total, so even with its estimate entry booked it is not reported", async () => {
-      expect(await refusedFor([...HEALTHY, { id: "op-3", workflowMode: "IMPLEMENT", status: "INTERRUPTED", usageUnflushed: true, booked: "usage" }])).toEqual({ answer: "refused", seen: ["run_unreported"] });
+    it("a run kept as an estimate is reported once its estimate entry is booked (SPEND-UNREPORTED-RUN: the figure then adds what its hold kept, tested in spend-unreported-run-settle.test.ts); without the entry it is not", async () => {
+      expect(await refusedFor([...HEALTHY, { id: "op-3", workflowMode: "IMPLEMENT", status: "INTERRUPTED", usageUnflushed: true, booked: "usage" }])).toEqual({ answer: 4.25, seen: [] });
+      expect(await refusedFor([...HEALTHY, { id: "op-3", workflowMode: "IMPLEMENT", status: "INTERRUPTED", usageUnflushed: true, booked: "none" }])).toEqual({ answer: "refused", seen: ["run_unreported"] });
     });
 
     it("a task whose record cannot be found, or is another company's, and a task with more runs than are read, are not reported", async () => {
