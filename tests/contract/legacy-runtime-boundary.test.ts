@@ -128,8 +128,8 @@ describe("legacy runtime boundary: which roles carry it", () => {
 
   it("is on no release pipeline role, and no other legacy stack gets a boundary policy", () => {
     const pipeline = rolesOf(PIPELINE_STACK);
-    // 6 before L1: the pipeline role, the source role, the two release build roles and the two stage action roles. L1 adds the two Code Preflight project roles, the Cloud source role and one CDK action role for each of 14 new actions.
-    expect(pipeline).toHaveLength(23);
+    // 6 before L1: the pipeline role, the source role, the two release build roles and the two stage action roles. L1 adds the two Code Preflight project roles, the Cloud source role and one CDK action role for each of 14 new actions. PROD-APPROVAL-BOUND adds one more action role, for the Production approval (no policy of its own).
+    expect(pipeline).toHaveLength(24);
     for (const [id, role] of pipeline) expect(role.Properties.PermissionsBoundary, id).toBeUndefined();
     for (const stackName of [PIPELINE_STACK, "AgentXProductionRuntime"]) {
       expect(JSON.stringify(template(stackName)), stackName).not.toContain("PermissionsBoundary");
