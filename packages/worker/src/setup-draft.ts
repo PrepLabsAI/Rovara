@@ -142,11 +142,13 @@ export function labelSmokeChecks(answer: Record<string, unknown>): Record<string
       return false;
     });
   }
-  const checks = [...(Array.isArray(answer["checks"]) ? answer["checks"] : []), ...moved.map((entry) => ({ ...entry, smokeCheck: true }))];
+  const own: unknown[] = Array.isArray(answer["checks"]) ? (answer["checks"] as unknown[]) : [];
+  const checks: unknown[] = [...own, ...moved.map((entry) => ({ ...entry, smokeCheck: true }))];
   if (checks.length > 0) {
-    result["checks"] = checks.map((entry) => {
+    result["checks"] = checks.map((entry): unknown => {
       if (!isObject(entry) || !isSmoke(entry)) return entry;
-      const { smokeCheck: _mark, ...rest } = entry;
+      const rest = { ...entry };
+      delete rest["smokeCheck"];
       return { ...rest, name: smokeName(entry["name"]), from: smokeCitations(entry["from"], entry["repo"]) };
     });
   }
