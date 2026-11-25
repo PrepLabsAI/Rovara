@@ -141,6 +141,30 @@ Each mutant was applied singly to the production file in the lane worktree, the 
 | M11 - lessons/load-record.ts `recordLessonLoad` | The use rows are not written. | 2 failed |
 
 Also checked: the lease test's worker clock is passed to the gateway model (`now`). With the test clock placed before the real date, removing that option fails 5 of 6 tests, with it all pass (the same condition as a real clock moving past the fixed test epoch).
+
+
+## PROJECT-GRANT-RECHECK: the stored person holds a task only with the live project grant (2026-11-25)
+
+| Mutant | Change | Killed by | Result |
+| --- | --- | --- | --- |
+| M1, `hostedTaskAccess.resolve` | the stored-person branches skip `inputs.projectGrant` | tests/journeys/project-grant-recheck.test.ts | red (3 of 6) |
+| M2, `taskAccessOfRecord` | the legacy owner skips `holdsOwnTask` | same file (Code's task page rows) | red (1 of 6) |
+| M3, `core-task-rule-routes` | events and readers: `owner = task.developerId === caller` | same file (events, readers) | red (1 of 6) |
+| M4, `sessions/access.ts` | the owner of a task session needs no grant | same file (session stop, tell, close) | red (1 of 6) |
+| M5, `lessons-api.ts` | the off-roster own-task exception is back | tests/unit/core-host-lessons-api.test.ts | red (1 of 57) |
+| M6, `developer-tasks.ts listTasks` | the own list ignores the grant | same file as M1 (task list) | red (1 of 6) |
+| M7, `script-tokens/authenticate.ts` | the token's project is not re-checked live | tests/unit/script-token-project-grant.test.ts | red (3 of 3) |
+
+## PROJECT-GRANT-RECHECK, channel-access starters (2026-11-25)
+
+All killed by tests/contract/task-owner-channel-access.test.ts (9 tests).
+
+| Mutant | Change | Result |
+| --- | --- | --- |
+| C1, `taskReaderPerson` own-task answer | a person with no grant is `mayStart` with no `checkProjectAccess` call | red (6 of 9: leave, channel use off, Slack down, no Slack link, grant-removed-then-leaves, neither) |
+| C2, `taskReaderPerson` own-task answer | a failed or refused start check answers `mayStart: true` (fail open) | red (6 of 9) |
+| C3, `taskReaderPerson` own-task answer | the start check is asked as a fixed Slack user, not the person's own link | red (1 of 9: no Slack link) |
+| C4, `holdsOwnTask` | reads `projectMember` only (the first hotfix) | red (3 of 9: the red commit) |
 ## RD-2.0 - contract rows for the task page reads (commit 567630b57 plus the S2/S3 follow-up)
 
 Production guards this lane adds: the `owns()` clause and the mount hunk in `core-host/dev-routes.ts`, GET-only and the anchored path regex in `core-host/task-screen-routes.ts`, the stub's fixed `ROUTE_NOT_SERVED` refusal (`task-spec-routes.ts`, the other three stubs are the same line), the code's 404 status (`packages/code-api/src/errors.ts`), and the existing script-token line that keeps a token off the four paths. Each mutant was applied singly to the working tree, one targeted run, then the file was restored with `git checkout -- <file>`.

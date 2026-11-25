@@ -55,6 +55,7 @@ import { createTaskFactsSource } from "../../packages/broker/src/local/app/facts
 import { recordTaskThread } from "../../packages/broker/src/core/channel/threads.js";
 import { createFakeWorld, FAKE_COMPANY, type FakeWorld, type FakeWorldOptions } from "./core-host-fakes.js";
 import { createPriceTableMetering } from "../../packages/broker/src/ports/policy-defaults.js";
+import type { ChatThreads } from "../../packages/broker/src/core-host/chat-threads.js";
 import { createDeveloperTaskBroker, MAYA, OMAR, type memoryS3 } from "./developer-task-broker.js";
 import type { FakeDynamoDb } from "./fake-dynamodb.js";
 
@@ -121,6 +122,8 @@ export interface CoreBrowserBrokerOptions {
   realJobServices?: boolean;
   /** Options of the fake world (its admission, machines, ...), for a journey that needs the deployment's admission to refuse. */
   world?: FakeWorldOptions;
+  /** Names the person a chat account is (`ChatThreads.personOf`), so a chat press can reach the task action registry. Absent: the chat names no one (every journey but the ones that press from a chat). */
+  chatPerson?: ChatThreads["personOf"];
   /**
    * Linear on the hosted root (aws/linear-wiring.ts's pieces): the connections over the broker's table, the company's connect and link routes, the Linear app webhook route on the broker's front and the
    * tracker intake from each company's own runtime. Built with a lazy table client and the world's clock, because both exist only once the broker is built.
@@ -183,7 +186,7 @@ export async function createCoreBrowserBroker(options: CoreBrowserBrokerOptions 
         codeModules: () => ({}) as never, origin: () => "https://api.example.test", log: () => undefined, now: () => new Date(world!.clock.now),
         taskRules: (person, companyId) => ({ ...developerTaskRouteDependencies({ documentClient: db, tableName: "state", developer: signIn!, companies: companyMembershipFromDynamo(db, "signin"), now: Date.now }, { developerId: person.developerId, sessionId: "core", name: person.name, amr: "oidc" }, undefined, null), companyId }),
         ciReporting: { honest: true, ciMode: async () => "sandbox_only" as const },
-        chatThreads: { channels: ["examplechat"], companyOf: ({ tenant }) => tenant === "journey-team" ? JOURNEY_COMPANY : undefined, adapterFor: (company, name) => company === JOURNEY_COMPANY && name === "examplechat" ? channel : undefined },
+        chatThreads: { channels: ["examplechat"], ...(options.chatPerson === undefined ? {} : { personOf: options.chatPerson }), companyOf: ({ tenant }) => tenant === "journey-team" ? JOURNEY_COMPANY : undefined, adapterFor: (company, name) => company === JOURNEY_COMPANY && name === "examplechat" ? channel : undefined },
         services: (companyId, flow, registry, wiring) => {
           const clock = () => new Date(world!.clock.now);
           // 27c (8c288c790): the job services read the merge requesters from the task People list and refuse to build without that source; the same state table the deployed broker gives it.

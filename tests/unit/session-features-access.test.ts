@@ -221,7 +221,7 @@ describe("what each feature asks of the levels", () => {
     expect((await recordPresence(deps, person("vic"), ORG, SESSION)).viewingNow.map((who) => who.name)).toEqual(["vic"]);
     const taker = person("tia", "Tia");
     const taken = await world({ task: { currentOwner: { developerId: id(taker), name: "Tia", provider: "oidc", since: T0 } } });
-    expect(await followSession({ store: taken.store, members: members({ tia: { role: "member" } }) }, taker, ORG, SESSION)).toEqual({ following: true });
+    expect(await followSession({ store: taken.store, members: members({ tia: { role: "member", grants: { web: "contributor" } } }) }, taker, ORG, SESSION)).toEqual({ following: true });
     expect((await taken.session()).followerCount).toBe(0);
   });
 

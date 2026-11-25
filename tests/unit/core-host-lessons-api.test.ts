@@ -544,7 +544,7 @@ describe("lessons used by a task", () => {
     expect(await call(target, "a-out", "GET", `${P}/tasks/${taskId}/lessons`)).toEqual({ ok: false, code: "NOT_FOUND", status: 404, message: NO_SUCH_PROJECT });
   });
 
-  it("does not expose wiki-use page ids to an off-roster task owner", async () => {
+  it("a person off the project's roster reads nothing about a task they started: no lessons, no wiki-use page ids (project-grant recheck)", async () => {
     const w = await setUp();
     const real = w.lessons.get(A)!;
     const taskId = w.tasks.get(A)!;
@@ -553,7 +553,7 @@ describe("lessons used by a task", () => {
       lessonsOf: async (companyId) => companyId === A ? { ...real, readTask: async () => ({ companyId: A, project: "payments", developerId: "a-out" }) } : undefined,
       wikiTaskUse,
     });
-    expect(await call(target, "a-out", "GET", `${P}/tasks/${taskId}/lessons`)).toMatchObject({ ok: true, body: { lessons: [] } });
+    expect(await call(target, "a-out", "GET", `${P}/tasks/${taskId}/lessons`)).toEqual({ ok: false, code: "NOT_FOUND", status: 404, message: NO_SUCH_PROJECT });
     expect(wikiTaskUse).not.toHaveBeenCalled();
   });
 });

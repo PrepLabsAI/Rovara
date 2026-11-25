@@ -130,6 +130,12 @@ export const STATUS_LINES = {
   spendUnreadable: { reason: "Rovara could not read this task's spend yet", next: "Rovara settles the spend on its own. Try again in a little while." },
 } as const;
 
+/**
+ * What an admin who can still see a task reads when its owner no longer has access to the task's project (they were removed from it): nobody is waiting on that person, and what the reader can do today. Served by the
+ * session view and the work list; a surface never words it itself. Taking such a task over is not offered yet.
+ */
+export const OWNER_LEFT_PROJECT_WORDS = "The owner of this task no longer has access to this project, so nobody can decide it for them. A project admin or company admin can stop it, or merge its pull request.";
+
 /** The one-line notices that are not a status (nobody is asked): a company admin who is not the task's owner stopped the owner's task. The name is the admin's display name, cut and made safe by the caller. */
 export const NOTICE_WORDS = {
   stoppedByAdmin: (name: string): string => `${name === "" ? "A company admin" : name} stopped your task`,

@@ -175,6 +175,12 @@ interface Computed {
   heldRole: SessionProjectRole | undefined;
 }
 
+/** Whether the person owns the session: they are its effective owner, and for a task's session they still hold a project grant (read now), as a People entry must. */
+function ownsSession(person: SessionPerson, effectiveOwner: { developerId: string }, session: AgentSessionRecord, grantRole: SessionProjectRole | undefined): boolean {
+  if (person.developerId !== effectiveOwner.developerId) return false;
+  return session.subject.kind !== "task" || (grantRole !== undefined && WEB_PEOPLE_GRANTS.has(grantRole));
+}
+
 async function compute(deps: SessionAccessDependencies, person: SessionPerson, companyRole: SessionCompanyRole, session: AgentSessionRecord, options: SessionAccessOptions): Promise<Computed> {
   const readOnly = options.readOnlyPath === true;
   const isAdmin = isAdminRole(companyRole);
@@ -209,10 +215,12 @@ async function compute(deps: SessionAccessDependencies, person: SessionPerson, c
     if (found !== undefined && (found["orgId"] ?? found["companyId"]) === session.orgId) task = found;
   }
   const effectiveOwner = effectiveOwnerOf(session, task);
-  const owner = person.developerId === effectiveOwner.developerId;
   const projectRoles = session.project === undefined ? undefined : await roleOn(session.project);
   const projectRole = projectRoles?.effective;
   const grantRole = projectRoles?.grant;
+  // The owner of a TASK session (the starter, or the taker) owns it only while they still hold a project grant, read now: the test a People entry meets below. A person removed from the project keeps their old task as
+  // nothing (no read, no steer, no stop, no close); a company admin who is not the owner, and a current maintainer, still reach it by their own rule.
+  const owner = ownsSession(person, effectiveOwner, session, grantRole);
   const orgAdmin = isAdmin && session.kind !== "local";
 
   let level: "none" | SessionLevel = owner ? "edit" : "none";
