@@ -219,6 +219,11 @@ export interface DesignReviewSteps {
   onEnded(deps: TaskFlowDeps, task: TaskRecord, operation: OperationRecord, ended: { status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED"; error?: string | undefined; outcome?: StepOutcome | undefined }): Promise<boolean>;
   /** Understand answered `ready`: the workflow with the design review switched on when the mode says so (Full path forced), else as it was. */
   afterUnderstand(deps: TaskFlowDeps, task: TaskRecord, workflow: WorkflowSnapshot, assessment: unknown, now: string): Promise<WorkflowSnapshot>;
+  /**
+   * Whether a design review could run for this task now: the stage is switched on, the company allows it and the project's effective setting is not `never`. The "bigger than Quick" record reads it (a design reading is only a
+   * reason to offer Full where the review the offer is about can run). Rejects when the setting cannot be read; the caller then reads it as "cannot run". Absent: the review cannot run.
+   */
+  reviewCanRun?(deps: TaskFlowDeps, task: TaskRecord): Promise<boolean>;
   /** The row the workflow's new state makes due (a design handed to the reviewers, the planner's turn to answer them), or undefined. */
   rowFor(workflow: WorkflowSnapshot): "CRITIQUE" | "CRITIC_REPLAN" | undefined;
   /** What the planner is told beside its prompt while the design review is on and the phase is the design (the fixed template), or undefined. */
