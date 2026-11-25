@@ -14,6 +14,7 @@ import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/c
 import { createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 import { DIGEST, v1Pack } from "../support/evidence-v2-fixtures.js";
+import { readsAsRow } from "../support/code-api-row-read.js";
 
 const HONEST_CI = { honest: true as const, ciMode: () => "their_ci_fix" as const };
 const OTHER = "org_corehost00000000000b";
@@ -146,6 +147,21 @@ describe("GET /v1/dev/tasks/{id}/evidence on a core task", () => {
     // The same person, a member of A, whose token names B: refused before any task is read.
     const crossed: DeployedCaller = { principal: localOwnerPrincipal({ companyId: OTHER, personId: OWNER_ID }), client: "cli" };
     expect((await w.read(crossed, taskA))?.statusCode).not.toBe(200);
+  });
+
+  it("RD-2.0: the served index (with and without failures) reads, whole, with the `tasks.evidence.list` row's schema", async () => {
+    const w = await world();
+    const owner = w.person(OWNER_ID, FAKE_COMPANY);
+    const failing = Array.from({ length: 13 }, (_, index) => `tests/many.test.ts::case ${String(index)}`);
+    for (const pack of [undefined, failingPack(failing)]) {
+      const taskId = await w.taskOf(owner, FAKE_COMPANY, pack);
+      const answer = await w.read(owner, taskId);
+      expect(answer?.statusCode).toBe(200);
+      const served = JSON.parse(answer!.body) as { items: unknown[]; failures?: unknown[]; failuresNotListed?: number };
+      expect(served.items.length).toBeGreaterThan(0);
+      if (pack !== undefined) expect([served.failures?.length, served.failuresNotListed]).toEqual([10, 3]);
+      readsAsRow("tasks.evidence.list", served);
+    }
   });
 
   it("lists at most ten failing tests and counts the rest", async () => {

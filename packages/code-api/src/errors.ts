@@ -146,6 +146,8 @@ export const AgentXErrorCodeSchema = z.enum([
   "TASK_ACTION_NEEDS_WEB",
   // R1 + L1 6.2b (409, the default status): the Linear team picked for a project is already another project of the company's (a ticket would start work in both). Appended at the end: no code changes meaning or moves.
   "LINEAR_TEAM_TAKEN",
+  // RD-2.0 (404): a route the table lists whose read is not built yet (the task page's spec, checks, changes and timeline reads answer it until their lanes fill them). A client shows its "not available yet" words, never a raw 404. Appended: no code changes meaning.
+  "ROUTE_NOT_SERVED",
 ]);
 
 /** A confirmed write whose current task view could not be read; never a pre-commit refusal. */
@@ -157,6 +159,9 @@ export type AgentXErrorCode = z.infer<typeof AgentXErrorCodeSchema>;
 
 /** What INTENT_NOT_WAITING (409) says: answers arrived for a task that is not waiting for them. */
 export const INTENT_NOT_WAITING_MESSAGE = "This task isn't waiting for answers.";
+
+/** What ROUTE_NOT_SERVED (404) says: the route has a row in the table but Code does not serve its read yet. Fixed words, the same for every task. */
+export const ROUTE_NOT_SERVED_MESSAGE = "This information is not available yet.";
 
 /** What TRASH_EXPIRED (410) says: discarded work past its 7 days. */
 export const TRASH_EXPIRED_MESSAGE = "This discarded work was removed after 7 days.";
@@ -224,7 +229,7 @@ const STATUS_GROUPS: readonly (readonly [number, readonly AgentXErrorCode[]])[] 
   [401, ["AUTH_REQUIRED"]],
   // The sign-in is valid but too old, or the wrong kind, for this change: 403, so a client does not treat it as a sign-in that ended.
   [403, ["CSRF_STALE", "REAUTH_REQUIRED", "FORBIDDEN", "SLACK_TEAM_NOT_BOUND", "SLACK_ACCOUNT_NOT_LINKED", "PROJECT_ACCESS_DENIED", "PROJECT_TASKS_DISABLED", "TASK_ACCESS_DENIED", "TRIAL_LOCKED", "AGENT_NOT_ON_PROJECT", "AGENT_TOOL_NOT_GRANTED", "MODEL_NOT_ALLOWED", "REMOVED_FROM_ORG", "GITHUB_NOT_CONNECTED", "SESSION_LEVEL_REQUIRED", "LOCAL_AGENT_NOT_ALLOWED", "PROCESS_SELF_CONFIRM", "LINK_START_AGAIN", "TASK_ACTION_NEEDS_WEB"]],
-  [404, ["NOT_FOUND", "PROJECT_NOT_FOUND", "TASK_NOT_FOUND", "LEARNING_OFF", "LEARNING_LOCKED", "LESSONS_SWITCHED_OFF", "NOT_AVAILABLE_HERE"]],
+  [404, ["NOT_FOUND", "PROJECT_NOT_FOUND", "TASK_NOT_FOUND", "LEARNING_OFF", "LEARNING_LOCKED", "LESSONS_SWITCHED_OFF", "NOT_AVAILABLE_HERE", "ROUTE_NOT_SERVED"]],
   [402, ["BUDGET_EXCEEDED", "ORG_BUDGET_EXCEEDED", "MACHINE_TIME_EXCEEDED", "PROJECT_BUDGET_EXCEEDED", "AGENT_BUDGET_EXCEEDED", "TEST_ALLOWANCE_USED", "CHAIN_BUDGET_EXCEEDED"]],
   [400, ["CONFIG_INVALID", "PROCESS_UNAVAILABLE", "AUDIT_RANGE_INVALID", "AUDIT_REASON_REQUIRED", "AUDIT_FILTER_TOO_WIDE", "TASK_ACTION_NEEDS_INPUT"]],
   [429, ["TOO_MANY_REQUESTS"]],
