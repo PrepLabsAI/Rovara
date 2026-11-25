@@ -9,15 +9,16 @@
 //                   SDK and the CDK. Still refused: a private adapter inside the public adapters package (only four generic adapters, DynamoDB, SQS, S3
 //                   and Secrets Manager, live there), and an AWS SDK client or CDK import off that list in the adapters package or in a NEW file
 //                   anywhere else. The list is data (scripts/boundary-allowlist.json), read by this guard and by Cloud's boundary check
-//   cloud-path (deployment)  a NEW file under aws/ or infra/ (a merge that adds one included) whose path names Cloud-only work: a gateway, billing,
+//   cloud-path (deployment)  a NEW file under aws/ or infra/ (a merge that adds one included) whose path names Cloud-only work: billing,
 //                   budgets, the company or org admin backend, the team record, the audit ledger, devices, the Cloud web app or anything called cloud
-//                   (DEC 214: those stay in Cloud), or holds a letter outside ASCII
+//                   (DEC 214: those stay in Cloud), or holds a letter outside ASCII. The model gateway is no longer Cloud-only: it moved into Code (#1478)
 //   cloud-import    a TypeScript/JavaScript file (any name that carries a .ts/.js/... extension, or text that reads as such code) that imports one of those (also a vendor/ folder, a `cloud-*` package or an AWS client off the list), or a package/CI file that names one of those packages
 //   stray-file      an editor, merge or sed backup/scratch file (`*-E`, `*.orig`, `*.rej`, `*.bak`, `*~`, `*.swp`, `*.tmp`, `.DS_Store` and kin): a stray
 //                   copy can hold raw Cloud source under a name no other rule reads (a lane once committed 27 `*.ts-E` files from `sed -i -E`)
 //   build-detector  the internal build-system detector (decision 45.11: an optional plug-in package, never core)
 //   private-name    a prospect or customer name (matched against a salted hash list, so no name is written in this file), the staging account id, an account id inside an ARN, an API Gateway host, a
-//                   host under the product's dev domain, a private branch name (an integration or Cloud lane branch), or the private repository's name, on an added line
+//                   host under the product's dev domain, or a private branch name (an integration or Cloud lane branch), on an added line. The
+//                   Cloud repository's name is no longer on the list: the model gateway's AWS resources carry it and are public in Code (#1478)
 //   link            a symlink or a submodule (a link can point at a Cloud-only file, and the scan reads blobs, not targets)
 //   scan-bypass     an inline allow comment for gitleaks, or a gitleaks config / ignore file (they would switch the secret scan off)
 //   guard-files     an edit to the guard itself, its tests, or the CI workflow that runs it (the controller reviews those by hand;
@@ -263,7 +264,8 @@ export function cloudPathRule(path: string, names: NameSource = DEFAULT_NAMES): 
 // ---------------------------------------------------------------------------------------------------------------------------------
 // Rule: cloud-aws (decision 72, O2, changed by migration plan v3.2, DEC 214). Only the four generic adapters (DynamoDB storage, SQS queue, S3 objects,
 // Secrets Manager secrets) live in the public adapters package. Code's own AWS deployment (its aws/ handlers and its infra/ CDK) is Code's and public;
-// Cloud-only work (the model gateway, billing, the company admin backend, the team record, the audit ledger, the Cloud web app) stays in Cloud.
+// Cloud-only work (billing, the company admin backend, the team record, the audit ledger, the Cloud web app) stays in Cloud. The model gateway
+// moved into Code and is public (#1478).
 
 /** Why a path inside the public adapters package is not allowed there (a private adapter among the four), or null. */
 export function adaptersPackageRule(path: string): string | null {
@@ -288,34 +290,26 @@ const DEPLOYMENT_PATH = /(^|\/)aws\/|^infra\//i;
 const isDeploymentTestPath = (lower: string): boolean => /\.test\.[cm]?[jt]sx?$/.test(lower) && (/^tests\//.test(lower) || DEPLOYMENT_PATH.test(lower));
 
 /**
- * Words that name Cloud-only work in a deployment path (DEC 214: the model gateway, billing, the company admin backend and the other Cloud-only
+ * Words that name Cloud-only work in a deployment path (DEC 214: billing, the company admin backend and the other Cloud-only
  * parts stay in Cloud; also the Cloud-only directories of decision 41). The path is split into words at separators, digits and camel-case
  * humps (tenantBilling is tenant + billing), then lower-cased. Then:
- * - ANYWHERE: a word, or two or three adjacent words joined, that CONTAINS one of these is refused (mybilling, llmgateway, orgadmin);
- * - PREFIX: a word or join that STARTS with one of these (gateways, spending, budgets, organizations);
+ * - ANYWHERE: a word, or two or three adjacent words joined, that CONTAINS one of these is refused (mybilling, orgadmin);
+ * - PREFIX: a word or join that STARTS with one of these (spending, budgets, organizations);
  * - WHOLE: a word that IS one of these (org, orgs, price, devices; "organic" and "storage" are ordinary);
  * - a word that starts or ends with "cloud", unless it is an AWS service name (cloudwatch, cloudformation, ...);
- * - "gateway" unless the word before it in the same file or folder name names an AWS gateway (nat, internet, api, vpc, transit, ...) or
- *   "endpoint" follows it; a word starting with "cloud" is read with its next camel hump only (CloudWatch), never across - or /.
  * Any letter outside ASCII in a deployment path is refused outright, so a look-alike letter cannot split a word.
  */
 const CLOUD_DEPLOYMENT_ANYWHERE = [
-  "billing", "invoic", "stripe", "metering", "teamrecord", "auditledger", "modelproxy", "modelsproxy", "modelgateway", "modelsgateway",
-  "llmgateway", "aigateway", "llmproxy", "aiproxy", "companyadmin", "orgadmin", "admincons", "embedder", "webapp", "customdomain",
+  // The model gateway (and its old name, the model proxy) left this list when it moved into Code (#1478).
+  "billing", "invoic", "stripe", "metering", "teamrecord", "auditledger", "companyadmin", "orgadmin", "admincons", "embedder", "webapp", "customdomain",
   "subscription", "entitlement",
 ];
 const CLOUD_DEPLOYMENT_PREFIX = ["pricing", "spend", "budget", "organization", "edition", "payment", "quota", "usagequota"];
-/** Words that make a gateway in the same name the model gateway, whatever AWS word sits between (model-api-gateway). */
-const MODEL_WORDS = new Set(["model", "models", "llm", "llms", "ai"]);
 const CLOUD_DEPLOYMENT_WHOLE = new Set(["org", "orgs", "price", "prices", "meter", "meters", "devices"]);
-const AWS_GATEWAY_BEFORE = new Set([
-  "nat", "internet", "api", "apis", "vpc", "vpn", "transit", "egress", "virtual", "private", "customer", "storage", "http", "rest", "websocket", "lb",
-  "load", "balancer", "connect", "carrier", "local", "iot",
-]);
 const AWS_CLOUD_WORDS = /^cloud(?:watch|formation|front|trail|map|search|hsm|shell|9)/;
 
 const DEPLOYMENT_DETAIL =
-  "a Cloud-only part in Code's deployment (the model gateway, billing, budgets, the company or org admin backend, the team record, the audit ledger, devices, the Cloud web app or anything called cloud stays in Cloud, DEC 214)";
+  "a Cloud-only part in Code's deployment (billing, budgets, the company or org admin backend, the team record, the audit ledger, devices, the Cloud web app or anything called cloud stays in Cloud, DEC 214)";
 
 /** Why a deployment path names Cloud-only work, or null (also null for a path outside aws/ and infra/). */
 export function cloudDeploymentPathRule(path: string): string | null {
@@ -345,20 +339,11 @@ export function cloudWordsReason(path: string): string | null {
   });
   const cloudy = (word: string): boolean => (word.startsWith("cloud") && !AWS_CLOUD_WORDS.test(word)) || (word.length > 5 && word.endsWith("cloud"));
   for (let i = 0; i < words.length; i += 1) {
-    const { word, segment, run: from } = words[i]!;
+    const { word, run: from } = words[i]!;
     const next = words[i + 1];
-    const before = words[i - 1];
     // A camel-cased AWS service name (CloudWatch) is split by the humps: read it with the next hump of the same run only (not across - or /).
     const awsName = next !== undefined && next.run === from && AWS_CLOUD_WORDS.test(word + next.word);
     if ((cloudy(word) && !awsName) || CLOUD_DEPLOYMENT_WHOLE.has(word)) return DEPLOYMENT_DETAIL;
-    // An AWS gateway (nat-gateway, NatGateway, gateway-endpoints) names its kind in the same file or folder name, never across a slash.
-    const awsGateway = (before !== undefined && before.segment === segment && AWS_GATEWAY_BEFORE.has(before.word)) ||
-      word.slice(7).startsWith("endpoint") || (next !== undefined && next.segment === segment && next.word.startsWith("endpoint"));
-    // "gateway" also when written in two words (gate-way), and always when a model, llm or ai word comes earlier in the same name.
-    const sameName = next !== undefined && next.segment === segment ? next.word : "";
-    const isGateway = word.startsWith("gateway") || (word === "gate" && sameName.startsWith("way"));
-    const modelBefore = words.slice(0, i).some((entry) => entry.segment === segment && MODEL_WORDS.has(entry.word));
-    if (isGateway && (modelBefore || !awsGateway)) return DEPLOYMENT_DETAIL;
     for (let n = 1; n <= 3 && i + n <= words.length; n += 1) {
       // "web application" (as in a web application firewall) is an AWS name, not the Cloud web app.
       const candidate = words.slice(i, i + n).map((entry) => entry.word).join("").replaceAll("webapplication", "");
@@ -390,7 +375,7 @@ export function awsImportReason(file: string, specifier: string, isNewFile: bool
   const lower = file.replaceAll("\\", "/").replace(/^\.\//, "").toLowerCase();
   const inAdapters = lower.startsWith(adaptersDir(data));
   if (!inAdapters && !isNewFile) return null;
-  // Code's deployment code and its deployment tests may import any of them, unless the path names Cloud-only work (a "test" that is gateway code).
+  // Code's deployment code and its deployment tests may import any of them, unless the path names Cloud-only work (a "test" that is billing code).
   if (!inAdapters && (DEPLOYMENT_PATH.test(lower) || isDeploymentTestPath(lower)) && cloudWordsReason(file.replaceAll("\\", "/").replace(/^\.\//, "")) === null) return null;
   if (!inAdapters && data.awsSdkPublicPaths.some((prefix) => lower.startsWith(prefix.toLowerCase()))) return null;
   if (!inAdapters && data.awsImportFixturePaths.some((prefix) => lower.startsWith(prefix.toLowerCase()))) return null;
@@ -598,7 +583,7 @@ export function importFindings(file: string, source: string, names: NameSource =
 // Rule: private-name (added lines only).
 
 /** AWS documentation placeholder account ids. They name no real account. */
-const PLACEHOLDER_ACCOUNTS = new Set(["123456789012", "111122223333", "222222222222", "000000000000", "999988887777", "210987654321"]);
+const PLACEHOLDER_ACCOUNTS = new Set(["123456789012", "111111111111", "111122223333", "222222222222", "000000000000", "999988887777", "210987654321"]);
 /** API Gateway host labels that are obvious placeholders (a real API id is ten random letters and digits). */
 const PLACEHOLDER_API_IDS = new Set(["abc", "abc123", "example", "examplehost", "test"]);
 
@@ -678,7 +663,6 @@ const DEFAULT_ENTRIES: readonly NameEntry[] = [
   { label: "a prospect pilot name", fnv: 1356487453, sha: "e81ea3d03b89bde150d1840221d478dccd004df637b5a6718902457479afd7a8" },
   { label: "a prospect product name", fnv: 1800621379, sha: "9a34ede7b086ee57c3eb5919e4d822be75d5f5a663a983bcbb63852171cbfbfc", len: 15 },
   { label: "the staging account id", fnv: 768729539, sha: "699050960619e7a80b433b54ac72d202beee7d04f5737eb33a3ae4d0c7d5718d", len: 12 },
-  { label: "the private repository name", fnv: 838782955, sha: "1696afefb858617e6b341027e68db7f492f801e7013cc70644c036883d64cac4" },
 ];
 const DEFAULT_DETECTORS: readonly NameEntry[] = [
   { label: "the internal build-system detector", fnv: 2469444183, sha: "cedb6af9fe7ce1177ad9a2bfff7707c36c89babb67c33253d6a40ad19fc6d6b7" },

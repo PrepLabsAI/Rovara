@@ -97,7 +97,11 @@ exit 0`);
     expect(result.code).toBe(1);
     const calls = readFileSync(log, "utf8");
     expect(calls).toContain("npm run build");
-    expect(calls.indexOf("npm run build")).toBeLessThan(calls.indexOf("describe-stacks"));
+    // CANARY-SESSION: the production lock reads the live control plane's parameters before anything is built (assertNoCanaryPlacement), so exactly ONE describe-stacks call comes before the build;
+    // the stack read that stops the release ("must exist before the worker settings are released") still comes after it.
+    const beforeBuild = calls.slice(0, calls.indexOf("npm run build"));
+    expect(beforeBuild.match(/describe-stacks/gu)).toHaveLength(1);
+    expect(calls.indexOf("npm run build")).toBeLessThan(calls.lastIndexOf("describe-stacks"));
     expect(existsSync(join(root, "packages/code-api/dist/errors.js"))).toBe(true);
   }, 120_000);
 
