@@ -1086,3 +1086,31 @@ Measured over tests/contract/company-github-signin.test.ts (33 tests). The mutan
 | Mutant / location | Mutation | Failing tests (of the file) | Restored |
 |---|---|---|---|
 | M1, broker/src/developer/server.ts `authorize` | the `method=github` check for a request carrying `browserReturnTo` is dropped | 1 of 33 | green |
+## BEDROCK-BYO-CHECK-FIXES (gateway copy; same sessions tests as Rovara Cloud)
+
+| Mutant | Change | Killed by | Result |
+| --- | --- | --- | --- |
+| M1, `#modelCheck` (bedrock-byo-sessions.ts) | drop the retry | tests/unit/model-gateway-bedrock-byo-sessions.test.ts: "asks once more..." and "logs both asks..." | red (2 of 18) |
+| M2, `classifyAnswer`/`#ask` | map `no_answer` back to `unavailable` | same file: "tells each model's state...", the retry, caller-abort and retry-log tests | red (4 of 18) |
+| M7, `classifyAnswer` | any 2xx is ready | same file: "tells each model's state..." and the retry test | red (2 of 18) |
+| M11, `recheckBedrock` (product-keys.ts) | a check again saves nothing new (returns the old summary) | tests/unit/model-gateway-bedrock-byo.test.ts: "a check again re-runs the test for the SAVED connection..." | red (1 of 27) |
+
+## Pre-review round: gateway copy (Cloud 1d33e9794 bytes; append only)
+
+| Mutant | Change | Killed by | Result |
+| --- | --- | --- | --- |
+| M12, `classifyAnswer` | retry on any status of 400 or more | tests/unit/model-gateway-bedrock-byo-sessions.test.ts: "asks once more..." (401, 408, 413, 422, 424, 499 are one ask) | red (1 of 20) |
+| M13, `expectedAnswer` | a Messages answer is ready only with stop_reason max_tokens | same file: "tells each model's state..." | red (1 of 20) |
+| M14, `#modelCheck` | no budget check before the retry | same file: "does not ask again when a whole ask no longer fits..." | red (1 of 20) |
+| M18, `#logCheck` | the company id is left out of the log line | same file: the logging tests | red (2 of 20) |
+| M16, `answerBedrockCheck` | no per-company limit | tests/unit/model-gateway-bedrock-check-company-limit.test.ts | red (1 of 2) |
+| M17, `parseDoc` | an unknown stored state word is kept as it is | tests/unit/model-gateway-bedrock-byo.test.ts: "a state word a later release stored reads as no_answer..." | red (1 of 29) |
+| M17b, `validBedrockSummary` | the strict word list again | same test | red (1 of 29) |
+| M9s, `recheckBedrock` | a good re-check keeps a call-time refusal marker | same file: "a check again clears a call-time refusal marker..." | red (1 of 29) |
+
+## Product models and stale divergences (Code; append only)
+
+| Mutant | Change | Killed by | Result |
+| --- | --- | --- | --- |
+| M23, `gatewayBedrockCheck` | the answer is read only for the agents' picks (product models read unavailable) | tests/unit/model-gateway-bedrock-check-company-limit.test.ts: "tells the gateway the connection's product models..." | red (1 of 3) |
+| M25, `runProof` | the stale-divergence check is not run | tests/contract/gateway-catch-up-proof.test.ts: "fails on a divergence record that is Cloud's own pinned blob..." | red (1 of 15) |

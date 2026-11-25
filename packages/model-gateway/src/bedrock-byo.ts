@@ -66,10 +66,14 @@ export interface BedrockConnection {
 }
 /** The connection test's answer per model (bedrock-byo-sessions.ts). */
 /**
- * `no_quota`: Bedrock throttled the $0 check itself, which an account whose tokens-per-minute quota for the model is 0 does for every call. A busy account can be
+ * `no_quota`: Bedrock throttled the check itself, which an account whose tokens-per-minute quota for the model is 0 does for every call. A busy account can be
  * throttled too, so it is shown as "no room right now", never as a fact about the account's quota. It never stops a connection (a later test can clear it).
+ * `no_answer`: AWS did not answer the check (a 5xx or a failed call twice, or an answer that is not the expected one). It says nothing about the model; the
+ * test can be run again. Added after the other words: a reader that does not know a word must show it in generic words (the Settings page does), and a
+ * stored document that holds a word this release does not know is still read: the word reads as `no_answer` (knownBedrockChecks). Releases before
+ * `no_answer` reject the whole document, which is why rollback-floors.json holds a floor for it.
  */
-export const BEDROCK_MODEL_CHECKS = ["ready", "not_enabled", "refused", "not_found", "no_quota", "unavailable"] as const;
+export const BEDROCK_MODEL_CHECKS = ["ready", "not_enabled", "refused", "not_found", "no_quota", "unavailable", "no_answer"] as const;
 export type BedrockModelCheck = typeof BEDROCK_MODEL_CHECKS[number];
 /** What Settings may show (nothing here is secret; the sealed connection is the same plus the scheme). */
 export interface BedrockSummary {
@@ -154,6 +158,14 @@ export function serializeBedrockConnection(c: BedrockConnection): string {
 export function bedrockSummary(c: BedrockConnection, checks: Readonly<Record<string, BedrockModelCheck>>, checkedAt: number): BedrockSummary {
   return { roleArn: c.roleArn, region: c.region, models: sortedModels(c.models), allowGlobal: c.allowGlobal, ...(c.productModels === undefined || c.productModels.length === 0 ? {} : { productModels: [...c.productModels].sort() }), checks: { ...checks }, checkedAt };
 }
+/** The shape of a state word a later release may have stored: lower-case words with underscores. */
+const STATE_WORD = /^[a-z][a-z_]{0,31}$/u;
+/** A summary with every state word this release does not know read as `no_answer` ("AWS did not answer, check again"): never a guess that a model works or fails. */
+export function knownBedrockChecks(summary: BedrockSummary): BedrockSummary {
+  const checks: Record<string, BedrockModelCheck> = {};
+  for (const [id, state] of Object.entries(summary.checks)) checks[id] = BEDROCK_MODEL_CHECKS.find((known) => known === state) ?? "no_answer";
+  return { ...summary, checks };
+}
 export function validBedrockSummary(v: unknown): v is BedrockSummary {
   const s = record(v); const checks = record(s?.checks);
   const required = ["roleArn", "region", "models", "allowGlobal", "checks", "checkedAt"];
@@ -162,7 +174,7 @@ export function validBedrockSummary(v: unknown): v is BedrockSummary {
   if (!validModels(s.models, s.region, s.allowGlobal)) return false;
   if (Object.hasOwn(s, "productModels") && !validProductModels(s.productModels, s.models, s.region, s.allowGlobal)) return false;
   const ids = new Set(bedrockConnectionIds({ models: s.models, ...(Array.isArray(s.productModels) ? { productModels: s.productModels as string[] } : {}) }));
-  return Object.entries(checks).every(([id, state]) => ids.has(id) && BEDROCK_MODEL_CHECKS.some((c) => c === state));
+  return Object.entries(checks).every(([id, state]) => ids.has(id) && typeof state === "string" && STATE_WORD.test(state));
 }
 
 /**
