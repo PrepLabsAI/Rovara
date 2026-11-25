@@ -32,6 +32,9 @@ import { taskSessionId } from "../sessions/create.js";
 import { inertTicketTitle } from "../ticket-updates/handler.js";
 import { setupBrokenTaskWords, setupEvidenceOf, setupBrokenWarningMessage, setupTrustLineOf } from "../setup-agent/recheck-rows.js";
 import { postApprovalCard } from "./cards.js";
+import type { OfferCapabilities } from "../task-actions/offers.js";
+import { registryPlanCard, sendRegistryNextMessage } from "./thread-task-actions.js";
+import type { TaskRecord } from "../task-flow/records.js";
 import { personIsServed, tenantIsCompanys, type ChannelCompanyOf, type ChannelMemberRule } from "./company.js";
 import { readTaskThread, type TaskThread } from "./threads.js";
 
@@ -72,6 +75,11 @@ export interface ThreadNoticeDeps {
   /** Hosted document details, prepared inside the card's durable send claim. */
   document?: ((taskId: string, workflow: WorkflowSnapshot, thread: TaskThread) => Promise<{ url?: string; summary?: string[] }>) | undefined;
   closeout?: ((taskId: string, thread: TaskThread) => Promise<string | undefined>) | undefined;
+  /**
+   * S1: what the host can serve of the task action registry. Where it is given AND the thread's adapter declares `taskActions` (the host wired the press), the plan card and the pull request line carry the registry's buttons (judged again
+   * at each press, for whoever presses); otherwise the cards are exactly what they were.
+   */
+  taskActions?: OfferCapabilities | undefined;
   log?: Log | undefined;
 }
 
@@ -265,6 +273,12 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
           const document = await deps.document?.(taskId, workflow as WorkflowSnapshot, thread);
           const detail = [document?.summary?.join("\n"), document?.url].filter(Boolean).join("\n");
           const cardWords = `${extra === undefined ? words : `${words}\n${extra}`}${detail === "" ? "" : `\n${detail}`}`;
+          // S1: where the adapter takes the registry's presses, the plan card is the registry's: Approve, Request changes (and Reject where the approvers take it from the chat), judged again at each press.
+          const registryCard = await registryPlanCard({
+            capabilities: adapter.capabilities, served: deps.taskActions, chatTakes, requirement: found.requirement, chatMethod: `${CHAT_METHOD_PREFIX}${conversation.channel}`,
+            task: task as unknown as TaskRecord, taskUrl, text: cardWords, nowMs: deps.now(), deliver: (data) => adapter.deliver({ ...base(key), type: "message", data }),
+          });
+          if (registryCard !== undefined) return registryCard;
           const posted = await postApprovalCard({ store: deps.store, orgId, now: deps.now, companyOf: deps.companyOf }, {
             channel: conversation.channel, adapter, conversation, kind: "plan_approval", subject: { type: WORKFLOW_DOCUMENT_KIND, id: taskId }, revision: found.revision, artifactDigest: found.artifactDigest, risk, signInOnly: !chatTakes,
             text: cardWords,
@@ -290,6 +304,10 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
         await send(orgId, sessionId, key, () => tell(links.length === 1 && trust === undefined && evalLine === undefined && e2e === ""
           ? { ...base(key), type: "pr", data: { url: links[0]!, title, action: "opened", ...(milestone.verdict === undefined ? {} : { verdict: milestone.verdict }) } }
           : { ...base(key), type: "progress", data: { text: `A pull request is ready for review for "${title}".${milestone.verdict === undefined ? "" : ` ${milestone.verdict}.`}${links.map((link) => `\n${link}`).join("")}${evalLine === undefined ? "" : `\n${evalLine}`}${trust === undefined ? "" : `\n${trust}`}${e2e === "" ? "" : `\n${e2e}`}`.slice(0, adapter.capabilities.maxTextLength) } }));
+        // S1: where the adapter takes the registry's presses, what the task offers once its pull request is ready (merge, close, ...) follows as buttons, judged again at each press.
+        const next = `${key}#actions`;
+        await sendRegistryNextMessage({ capabilities: adapter.capabilities, served: deps.taskActions, task: task as unknown as TaskRecord, taskUrl: deps.taskUrl?.(taskId, taskWhere), statusDeps: { store: deps.store, companyId: orgId },
+          send: (deliver) => send(orgId, sessionId, next, deliver), deliver: (data) => tell({ ...base(next), type: "message", data }) });
         return;
       }
 

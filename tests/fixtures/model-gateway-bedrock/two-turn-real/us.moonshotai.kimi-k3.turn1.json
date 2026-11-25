@@ -1,0 +1,22 @@
+{
+ "status": 200,
+ "stop": "tool_use",
+ "blocks": [
+  {
+   "type": "thinking",
+   "thinking": "We need respond to user requesting call ping tool. Need use functions.ping. Then final maybe brief. Let's call ping.",
+   "signature": ""
+  },
+  {
+   "type": "tool_use",
+   "id": "call_a2b1b7edffc055289491dc6ae2e1ef65",
+   "name": "ping",
+   "input": {}
+  }
+ ],
+ "usage": {
+  "input": 153,
+  "output": 60
+ },
+ "complete": true
+}

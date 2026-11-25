@@ -10,7 +10,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EVAL_BLOCKED_HOST, EVAL_DEPENDENCY_DATABASES_MAX, EVAL_DEPENDENCY_ENV_NAME, EVAL_DEPENDENCY_ENV_VARS_MAX, EVAL_DEPENDENCY_HOSTS_MAX, EVAL_PINNED_IMAGE, EvalDependencyListSchema, type EvalDependencyList, type SetupEvalDiscoveryReport } from "@agentx/contracts";
-import type { DockerCli } from "../swebench/containers.js";
+import type { DockerCli } from "../docker-cli.js";
 import { createFreshEvalSandbox, type EvalDryRunObservation, type FreshEvalSandbox, type FreshEvalSandboxConfig } from "./eval-bridged-exec.js";
 import { cleanHost, diagnoseEvalFailure, findAllReaches, isModelRoute } from "./eval-run-diagnostic.js";
 import { EVAL_WORKER_IMAGE_VARIABLE } from "./eval-wiring.js";

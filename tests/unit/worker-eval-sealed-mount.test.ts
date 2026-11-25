@@ -9,7 +9,7 @@ import {
   checkSandboxArgProblems, checkSandboxPlan, checkSandboxRunArgs, detachWorkingSandbox, pauseWorkingSandbox, startCheckSandbox, withDetachedWorking, type CheckSandboxInput, type CheckSandboxNetwork,
 } from "../../packages/worker/src/check-sandbox.js";
 import { runNetworkAddresses, runNetworkLabelArgs, runNetworkName } from "../../packages/worker/src/run-network.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 import { taskSandboxRunArgs } from "../../packages/worker/src/task-sandbox.js";
 
 const RUN = "11111111-1111-4111-8111-111111111111";

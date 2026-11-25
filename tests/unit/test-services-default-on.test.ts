@@ -3,9 +3,7 @@
 // project's own checks; nothing is planned with dependencies and no catalog is read.
 import { describe, expect, it } from "vitest";
 import { TestEnvironmentBodySchema, type OrgId, type ProjectCommand, type TestEnvironmentBody } from "@agentx/contracts";
-import { evidenceEnvironmentOf } from "../../packages/broker/src/core/test-env/evidence-line.js";
 import { testEnvironmentView } from "../../packages/broker/src/core/test-env/local-view.js";
-import { testEnvImplementPlanFor, testEnvPlanFor } from "../../packages/broker/src/core/test-env/task-plan.js";
 import { TEST_SERVICES_UNAVAILABLE_REASONS, TEST_SERVICES_UNAVAILABLE_VARIABLE, TEST_SERVICES_UNAVAILABLE_WORDS } from "../../packages/broker/src/core/test-env/test-services-switch.js";
 import { UNUSED_REASONS, UNUSED_WORDS, environmentUnusedReason, readTestEnvPin, testEnvironmentForStart } from "../../packages/broker/src/core/test-env/usable.js";
 import { pinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
@@ -28,7 +26,6 @@ const body = (dependencies: unknown[] | null = [postgres]): TestEnvironmentBody 
   prodDeny: { accountIds: [], hosts: [], arnPrefixes: [] }, capture: { screenshots: "failed", video: false, traces: false },
   ...(dependencies === null ? {} : { dependencies }),
 });
-const readiness = [cmd("pytest", ["-q"])];
 const unavailable = (reason: string): NodeJS.ProcessEnv => ({ ROVARA_TEST_ENVIRONMENT: "1", [TEST_SERVICES_UNAVAILABLE_VARIABLE]: reason });
 
 /** An approved environment with a Postgres dependency, approved while test services could run (nothing set: the default). */
@@ -40,27 +37,6 @@ async function approved() {
 }
 
 describe("switched on, but the host cannot run them", () => {
-  it("is not used: the task starts, the pin and the evidence say why in fixed words, nothing is planned and the catalog is not read", async () => {
-    for (const reason of TEST_SERVICES_UNAVAILABLE_REASONS) {
-      const h = await approved();
-      let reads = 0;
-      h.deps.serviceCatalog = async () => { reads += 1; return verifiedCatalog(pinnedCatalog()); };
-      const env = unavailable(reason);
-      const taskId = `t-${reason}`;
-      const started = await testEnvironmentForStart(h.deps, { orgId: ORG, project: PROJECT, taskId }, env);
-      expect(started.used, reason).toBeUndefined();
-      await h.store.transact([started.pin!]);
-      const pin = await readTestEnvPin(h.deps, ORG, PROJECT, taskId);
-      expect(pin?.unused, reason).toBe(`dependencies_unavailable_${reason}`);
-      const evidence = await evidenceEnvironmentOf(h.deps, { orgId: ORG, project: PROJECT, taskId }, env);
-      expect(evidence.note?.text, reason).toBe(`${TEST_SERVICES_UNAVAILABLE_WORDS[reason]}: the project's own test setup was used`);
-      expect(evidence.note?.text).toMatch(/^Test services not available here: /u);
-      expect(evidence.dependencies).toBeUndefined();
-      expect((await testEnvPlanFor(h.deps, { orgId: ORG, project: PROJECT, taskId, readiness }, env))?.dependencies).toBeUndefined();
-      expect(await testEnvImplementPlanFor(h.deps, { orgId: ORG, project: PROJECT, taskId }, env)).toBeUndefined();
-      expect(reads, reason).toBe(0);
-    }
-  });
 
   it("names an unknown marker 'other', in the same fixed words and never with the marker's value", async () => {
     const h = await approved();

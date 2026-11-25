@@ -107,7 +107,7 @@ export function knowledgeSwitchedOff(request: Pick<KnowledgeRequest, "method" | 
 export function scriptTokenAuthenticator(options: {
   lessonsSwitch: CoreSwitch;
   /** One company's own store, audit sink and identity. Throws when the company has none here (the token is then refused like an unknown one). */
-  companyOf(companyId: OrgId): Promise<{ store: DocumentStore; audit: AuditSink; identity: Pick<IdentityProvider, "getPrincipal"> }>;
+  companyOf(companyId: OrgId): Promise<{ store: DocumentStore; audit: AuditSink; identity: Pick<IdentityProvider, "getPrincipal">; projectGrant?: (personId: string, project: string, role: OrgRole) => Promise<boolean> }>;
   now: () => number;
   enabled?: (() => boolean) | undefined;
 }): (request: KnowledgeRequest) => Promise<KnowledgeTokenCaller> {
@@ -118,7 +118,7 @@ export function scriptTokenAuthenticator(options: {
     let company: Awaited<ReturnType<typeof options.companyOf>>;
     try { company = await options.companyOf(parsed.orgId); } catch { throw refused(); }
     const authenticated = await authenticateScriptToken(
-      { store: company.store, audit: company.audit, now: options.now, companyId: parsed.orgId, identity: company.identity, ...(options.enabled === undefined ? {} : { enabled: options.enabled }) },
+      { store: company.store, audit: company.audit, now: options.now, companyId: parsed.orgId, identity: company.identity, ...(company.projectGrant === undefined ? {} : { projectGrant: company.projectGrant }), ...(options.enabled === undefined ? {} : { enabled: options.enabled }) },
       { method: request.method, path: request.path, headers: { authorization: request.authorization }, ...(request.body === undefined ? {} : { body: request.body }) },
     );
     return { companyId: parsed.orgId, personId: authenticated.caller.principal.personId, token: authenticated.caller.scriptToken };

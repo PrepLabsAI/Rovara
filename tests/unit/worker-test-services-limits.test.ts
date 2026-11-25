@@ -14,7 +14,7 @@ import { startTestServicesRun, type TestServicesConfig } from "../../packages/wo
 import { fakeServicesDocker } from "../support/fake-services-docker.js";
 import { RUN_FIXED_CONTAINERS, HelperStartError, startHelpers, type HelperFiles } from "../../packages/worker/src/service-helpers.js";
 import { TEST_SERVICES_OWNER_IMAGES_ENVIRONMENT, TestServicesError, failureOf, testServicesConfigFromEnvironment } from "../../packages/worker/src/test-services-run.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const WORKER_IMAGE = `sha256:${"a".repeat(64)}`;
 const env = (extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({

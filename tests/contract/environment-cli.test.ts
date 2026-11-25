@@ -99,7 +99,7 @@ describe("agentx env adopt", () => {
     AgentXSlackOrchestrator: { outputs: {}, parameters: { ModelId: "us.anthropic.claude-sonnet-4-6", GateClassifierModelId: "us.anthropic.claude-haiku-4-5-20251001-v1:0" }, status: "UPDATE_COMPLETE" },
   };
   const stacks: StackReader = { describe: async (name) => liveStacks[name] };
-  const identity: CallerIdentity = { get: async () => ({ account: "944937319445", arn: "arn:aws:iam::944937319445:user/admin" }) };
+  const identity: CallerIdentity = { get: async () => ({ account: "123456789012", arn: "arn:aws:iam::123456789012:user/admin" }) };
 
   it("registers the existing deployment through the CLI, in the {ok,data} JSON shape", async () => {
     const store = new MemoryParameterStore();
@@ -111,7 +111,7 @@ describe("agentx env adopt", () => {
     expect(code).toBe(0);
     expect(JSON.parse(io.out.join(""))).toMatchObject({
       ok: true,
-      data: { env: "production", account: "944937319445", region: "us-east-1", naming: "legacy", controlPlaneUrl: "https://abc.execute-api.us-east-1.amazonaws.com" },
+      data: { env: "production", account: "123456789012", region: "us-east-1", naming: "legacy", controlPlaneUrl: "https://abc.execute-api.us-east-1.amazonaws.com" },
     });
   });
 

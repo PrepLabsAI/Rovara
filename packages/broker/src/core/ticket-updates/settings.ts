@@ -2,7 +2,7 @@
 // the defaults (comments on, status changes OFF). A save is conditional on the revision the owner read, so two saves at once give a clear conflict, never a silent overwrite; the same request id again
 // answers the stored settings and writes nothing. The key layout is Cloud's.
 import {
-  DEFAULT_TICKET_UPDATES, TicketUpdatesSettingsSchema, agentXError, change, orgScoped, ticketUpdatesSettingsKey, ticketWriteAccessKey, when,
+  DEFAULT_TICKET_UPDATES, NEW_HOSTED_TICKET_UPDATES, TicketUpdatesSettingsSchema, agentXError, change, orgScoped, ticketUpdatesSettingsKey, ticketWriteAccessKey, when,
   type DocumentStore, type OrgId, type StoredDocument, type TicketUpdatesSettings,
 } from "@agentx/contracts";
 
@@ -10,6 +10,14 @@ export interface TicketUpdatesTable {
   store: Pick<DocumentStore, "get" | "put" | "update" | "query">;
   now: () => number;
 }
+
+/**
+ * What a NEW hosted project's first team pick saves (R1 + L1 6.2, owner DEC 254zzz466 c): the whole conversation (`level: "full"`) AND the ticket's status moved as the work goes (In Progress, In Review, Done).
+ * Code's own constant: the shared `NEW_HOSTED_TICKET_UPDATES` still says `changeStatus: false` in the copy Cloud holds, and that file is changed on both sides together, never here alone.
+ */
+export const HOSTED_SEED_TICKET_UPDATES: Readonly<TicketUpdatesSettings> = { ...NEW_HOSTED_TICKET_UPDATES, changeStatus: true, statuses: { ...NEW_HOSTED_TICKET_UPDATES.statuses } };
+/** The request id of the first save a team pick makes (`seedTicketUpdatesIfUnset`): a row that still has it was never chosen by a person. */
+export const SEED_REQUEST_ID = "seed-new-hosted-default";
 
 const defaults = (): TicketUpdatesSettings => ({ ...DEFAULT_TICKET_UPDATES, statuses: { ...DEFAULT_TICKET_UPDATES.statuses } });
 
@@ -50,7 +58,7 @@ export async function seedTicketUpdatesIfUnset(table: TicketUpdatesTable, input:
   const written = await table.store.put({
     item: {
       ...ticketUpdatesSettingsKey(input.orgId, input.project), entityType: "TICKET_UPDATES", orgId: input.orgId, project: input.project, settings: JSON.parse(JSON.stringify(parsed)) as StoredDocument,
-      revision: 1, requestId: "seed-new-hosted-default", by: input.by, at: new Date(table.now()).toISOString(),
+      revision: 1, requestId: SEED_REQUEST_ID, by: input.by, at: new Date(table.now()).toISOString(),
     },
     condition: when.absent(),
   });
@@ -82,4 +90,30 @@ export async function readWriteAccess(table: TicketUpdatesTable, orgId: OrgId, t
     const item = found.get(tracker);
     return item?.["state"] === "needs_write_access" && typeof item["at"] === "string" ? { tracker, state: "needs_write_access" as const, at: item["at"] } : { tracker, state: "ok" as const };
   });
+}
+
+/** The small table the status-missing notes need (the handler's store has all of it). */
+export interface StatusNoteTable { store: Pick<DocumentStore, "get" | "put" | "delete" | "query">; now: () => number }
+const statusMissingKey = (orgId: OrgId, tracker: string, project: string, moment: string) => ({ pk: orgScoped(orgId, "TICKET_STATUS_MISSING"), sk: `TRACKER#${tracker}#PROJECT#${project}#MOMENT#${moment}` });
+
+/**
+ * Notes that the tracker's team has no status with a name a project asked for ("In Review"), so the move was skipped and the comment still went. One row per company, tracker, project and moment, holding the name
+ * asked for (the project's own word). Best effort: a failure to note is not the task's. Read by the project's ticket-updates card in the Cloud half; it is NOT part of `TicketWriteAccessView` (a new state there
+ * is a change to a copy Cloud parses strictly: it ships with the Cloud half).
+ */
+export async function noteStatusMissing(table: StatusNoteTable, orgId: OrgId, tracker: string, project: string, moment: string, name: string): Promise<void> {
+  await table.store.put({ item: { ...statusMissingKey(orgId, tracker, project, moment), entityType: "TICKET_STATUS_MISSING", orgId, tracker, project, moment, name: name.slice(0, 100), at: new Date(table.now()).toISOString() } });
+}
+
+/** A status move worked for this project and moment: whatever was noted as missing for it is cleared. */
+export async function clearStatusMissing(table: StatusNoteTable, orgId: OrgId, tracker: string, project: string, moment: string): Promise<void> {
+  await table.store.delete({ key: statusMissingKey(orgId, tracker, project, moment) });
+}
+
+/** The statuses a project asked for that its team does not have, as last seen: `{ moment: name }`. Empty when none was noted. */
+export async function readStatusMissing(table: StatusNoteTable, orgId: OrgId, tracker: string, project: string): Promise<Record<string, string>> {
+  const page = await table.store.query({ pk: orgScoped(orgId, "TICKET_STATUS_MISSING"), sk: { op: "beginsWith", prefix: `TRACKER#${tracker}#PROJECT#${project}#MOMENT#` }, limit: 20 });
+  const found: Record<string, string> = {};
+  for (const item of page.items) if (item["orgId"] === orgId && item["project"] === project && typeof item["moment"] === "string" && typeof item["name"] === "string") found[item["moment"]] = item["name"];
+  return found;
 }

@@ -42,7 +42,7 @@ export const PROGRAM_DIRECTORY = "node_modules/.cache/lint-shards";
  */
 export const SHARD_DIRECTORIES: readonly { name: string; directories: readonly string[]; heapMb?: number }[] = [
   { name: "tests-contract-a-d", directories: ["tests/contract/a*.ts", "tests/contract/b*.ts", "tests/contract/c*.ts", "tests/contract/d*.ts"] },
-  { name: "tests-contract-e-j", directories: ["tests/contract/e*.ts", "tests/contract/f*.ts", "tests/contract/fixtures", "tests/contract/g*.ts", "tests/contract/h*.ts", "tests/contract/i*.ts", "tests/contract/j*.ts"] },
+  { name: "tests-contract-e-j", directories: ["tests/contract/e*.ts", "tests/contract/f*.ts", "tests/contract/fixtures", "tests/contract/g*.ts", "tests/contract/golden", "tests/contract/h*.ts", "tests/contract/i*.ts", "tests/contract/j*.ts"] },
   { name: "tests-contract-l-p", directories: ["tests/contract/l*.ts", "tests/contract/m*.ts", "tests/contract/n*.ts", "tests/contract/o*.ts", "tests/contract/p*.ts"] },
   { name: "tests-contract-r-s", directories: ["tests/contract/r*.ts", "tests/contract/s*.ts"] },
   { name: "tests-contract-t-z", directories: ["tests/contract/t*.ts", "tests/contract/u*.ts", "tests/contract/v*.ts", "tests/contract/w*.ts"] },
@@ -51,7 +51,10 @@ export const SHARD_DIRECTORIES: readonly { name: string; directories: readonly s
   // Code train 6: the browser-round core-* tests took tests-unit-c past the 4 GB default; one letter stays one shard (the alphabet rule), so it gets a bigger heap.
   { name: "tests-unit-c", directories: ["tests/unit/c*.ts"], heapMb: 6144 },
   { name: "tests-unit-e", directories: ["tests/unit/e*.ts"] },
-  { name: "tests-unit-g-q", directories: ["tests/unit/g*.ts", "tests/unit/h*.ts", "tests/unit/i*.ts", "tests/unit/j*.ts", "tests/unit/k*.ts", "tests/unit/l*.ts", "tests/unit/m*.ts", "tests/unit/n*.ts", "tests/unit/o*.ts", "tests/unit/p*.ts", "tests/unit/q*.ts"] },
+  // #1478: the model gateway's ~140 tests/unit/model-gateway-* files took tests-unit-g-q past the 4 GB heap on CI, so m (232 files) is a shard of its own with a bigger heap.
+  { name: "tests-unit-g-l", directories: ["tests/unit/g*.ts", "tests/unit/h*.ts", "tests/unit/i*.ts", "tests/unit/j*.ts", "tests/unit/k*.ts", "tests/unit/l*.ts"] },
+  { name: "tests-unit-m", directories: ["tests/unit/m*.ts"], heapMb: 6144 },
+  { name: "tests-unit-n-q", directories: ["tests/unit/n*.ts", "tests/unit/o*.ts", "tests/unit/p*.ts", "tests/unit/q*.ts"] },
   { name: "tests-unit-r-v", directories: ["tests/unit/r*.ts", "tests/unit/s*.ts", "tests/unit/t*.ts", "tests/unit/u*.ts", "tests/unit/v*.ts"] },
   { name: "tests-unit-w-z", directories: ["tests/unit/w*.ts", "tests/unit/x*.ts", "tests/unit/y*.ts", "tests/unit/z*.ts"] },
   { name: "tests-unit-folders", directories: ["tests/unit/context-sources", "tests/unit/contracts", "tests/unit/cx-a", "tests/unit/intake", "tests/unit/knowledge", "tests/unit/knowledge-wiring", "tests/unit/lessons", "tests/unit/lessons-by-area", "tests/unit/support", "tests/unit/task-log"] },
@@ -62,7 +65,7 @@ export const SHARD_DIRECTORIES: readonly { name: string; directories: readonly s
   { name: "worker", directories: ["packages/worker"] },
   { name: "verifier", directories: ["packages/verifier"] },
   { name: "contracts", directories: ["packages/contracts"] },
-  { name: "small-packages", directories: ["packages/gateway", "packages/mcp", "packages/model-runtime", "packages/orchestrator", "packages/slack-service", "packages/testing"] },
+  { name: "small-packages", directories: ["packages/code-api", "packages/gateway", "packages/mcp", "packages/model-gateway", "packages/model-runtime", "packages/orchestrator", "packages/slack-service", "packages/testing"] },
   { name: "infra-scripts", directories: ["infra", "scripts"] },
 ];
 

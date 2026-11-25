@@ -52,13 +52,13 @@ import { lessonsUsedReaderOver, lessonsUsedSection, type LessonsUsedSummary, typ
 import { pausedKindsFor } from "./paused-kinds.js";
 import { planLoadFacts } from "./plan-facts.js";
 import { LESSON_USE_KEEP_SECONDS } from "./use-count.js";
+import { lessonLoadRefItem, lessonUseItem } from "./load-record.js";
 import type { OutcomeRowReader } from "./task-outcome-rows.js";
 
 /** The longest a step's dispatch waits for the loader: a slow load sends nothing, and the step runs as it would without lessons. */
 export const LESSON_LOAD_DEADLINE_MS = 2_500;
 /** The messages one pass takes off the reflection queue. */
 export const REFLECT_PER_PASS = 2;
-const LOAD_RECORD_KEEP_SECONDS = 30 * 86_400;
 /** The use rows ("used in N tasks", `use-count.ts`) are kept as long as that module counts them. */
 const USE_RECORD_KEEP_SECONDS = LESSON_USE_KEEP_SECONDS;
 export const INTENT_REQUEST_CHARS = 600;
@@ -223,10 +223,10 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
         if (loaded.learnedContext === undefined && knowledgeContext === undefined) return {};
         // What this dispatch loaded, so the worker's report is applied to this stage's manifest only; and, for the lessons page, which tasks used which lessons.
         if (loaded.learnedContext !== undefined) {
-          await flow.store.put({ item: { pk: companyScoped(companyId, "LESSON_LOAD"), sk: request.operationId, entityType: "LESSON_LOAD_REF", taskId: task.taskId, project: task.project, stage, round, ...ttl(LOAD_RECORD_KEEP_SECONDS) } });
+          await flow.store.put({ item: lessonLoadRefItem({ companyId, operationId: request.operationId, taskId: task.taskId, project: task.project, stage, round, now: now(), ttlAttribute: flow.store.ttlAttribute }) });
           for (const lesson of loaded.learnedContext.lessons) {
             if (abandoned) return {};
-            await flow.store.put({ item: { pk: companyScoped(companyId, `LESSON_USE#${task.project}#${lesson.id}`), sk: task.taskId, entityType: "LESSON_USE", taskId: task.taskId, title: task.title.slice(0, 200), at: now(), ...ttl(USE_RECORD_KEEP_SECONDS) } }).catch(() => undefined);
+            await flow.store.put({ item: lessonUseItem({ companyId, project: task.project, lessonId: lesson.id, taskId: task.taskId, title: task.title, now: now(), ttlAttribute: flow.store.ttlAttribute }) }).catch(() => undefined);
           }
         }
         // The ids this delivery gave (never text), so the worker's use report can only speak about this operation's own delivery.

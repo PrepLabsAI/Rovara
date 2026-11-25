@@ -90,7 +90,7 @@ it.each(paths)("%s profile persistence failure records exactly one fixed-cause r
 it.each(["web", "browser"] as const)("%s durable credential failure never records success", async (path) => {
   const { w, rows, start } = await world(path);
   const finish = await start();
-  if (path === "browser") vi.spyOn(w.deps.store, "createSession").mockRejectedValueOnce(new Error(canary));
+  if (path === "browser") vi.spyOn(w.deps.store, "createBrowserSession").mockRejectedValueOnce(new Error(canary));
   else vi.spyOn(w.deps.store, "issueCode").mockRejectedValueOnce(new Error(canary));
   noCredentials(await finish());
   expect(rows()).toEqual([expect.objectContaining({ action: "signin.refused", details: { method: "web", cause: "sign_in_failed" } })]);

@@ -85,7 +85,7 @@ describe("the cdk engine's review: cdk diff (FR-042)", () => {
   it("reads a real cdk diff (CDK 2, --method=template): additions and changed functions are no data risk; IAM is (Task 20 live check)", () => {
     // Recorded against live15eb's control plane on 2026-09-29, trimmed to its structure.
     const real = [
-      "Stack AgentXControlPlane (agentx-live15eb-control-plane) (aws://944937319445/us-east-1)",
+      "Stack AgentXControlPlane (agentx-live15eb-control-plane) (aws://210987654321/us-east-1)",
       "IAM Statement Changes",
       "┌───┬──────────────────────────────────────┬────────┬──────────────────┐",
       "│   │ Resource                             │ Effect │ Action           │",
@@ -108,7 +108,7 @@ describe("the cdk engine's review: cdk diff (FR-042)", () => {
     // multi-line conditions, the IAM Policy Changes table and its NOTE, and the indented property lines
     // under a changed policy and a changed function.
     const verbatim = [
-      "Stack AgentXControlPlane (agentx-live15eb-control-plane) (aws://944937319445/us-east-1)",
+      "Stack AgentXControlPlane (agentx-live15eb-control-plane) (aws://210987654321/us-east-1)",
       "IAM Statement Changes",
       "┌───┬────────────────────────────────────────────────────┬────────┬───────────────────────────────┬───────────────────────────────────────────────────┬──────────────────────────────────┐",
       "│   │ Resource                                           │ Effect │ Action                        │ Principal                                         │ Condition                        │",
@@ -177,7 +177,7 @@ describe("the cdk engine's review: cdk diff (FR-042)", () => {
 
   it("flags IAM from the IAM Statement Changes table alone, with no IAM resource line (review M8)", () => {
     const statementsOnly = [
-      "Stack AgentXControlPlane (agentx-live15eb-control-plane) (aws://944937319445/us-east-1)",
+      "Stack AgentXControlPlane (agentx-live15eb-control-plane) (aws://210987654321/us-east-1)",
       "IAM Statement Changes",
       "┌───┬────────────────────────────────────────────────────┬────────┬───────────────────────────────┬───────────────────────────────────────────────────┬──────────────────────────────────┐",
       "│   │ Resource                                           │ Effect │ Action                        │ Principal                                         │ Condition                        │",

@@ -42,7 +42,8 @@ export function hostedSlackThreads(options: HostedSlackThreadsOptions): ChatThre
         return channel;
       };
       found = {
-        capabilities: { ...SLACK_CAPABILITIES, documents: true }, projects: [], stepUp: ["plan_approval", "admin"],
+        // S1: the hosted adapter takes the task action registry's presses (the interactivity side is wired in company mode, the only mode with a core thread) and shows up to ten buttons on a card.
+        capabilities: { ...SLACK_CAPABILITIES, documents: true, taskActions: true, buttons: 10 }, projects: [], stepUp: ["plan_approval", "admin"],
         async deliver(event: ChannelEvent): Promise<void> {
           // A person-to-person message has no conversation here, and only a Slack conversation is ours.
           if (event.type === "direct" || event.channel !== SLACK_CHANNEL || event.conversation.channel !== SLACK_CHANNEL) throw new Error("not a Slack conversation");

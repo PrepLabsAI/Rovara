@@ -178,7 +178,7 @@ describe("projects the person administers (company layout keys, DEC 254zzz80)", 
   const roleOn = (h: ReturnType<typeof world>, companyId: string, person: string, project: string) => { const key = grantKeyFor(companyId, person, project); return (h.db.get(key.pk, key.sk) as { role?: string } | undefined)?.role; };
   const reverseOn = (h: ReturnType<typeof world>, companyId: string, person: string, project: string) => { const key = projectMemberRowKeyFor(companyId, project, person); return (h.db.get(key.pk, key.sk) as { role?: string } | undefined)?.role; };
 
-  it("the successor becomes administrator (new grant, or their developer grant raised); the person's administrator grants go; a developer grant of theirs is not handed over", async () => {
+  it("the successor becomes administrator (new grant, or their developer grant raised); the person's administrator grants go; a developer grant of theirs is not handed over, and goes with them", async () => {
     const h = world();
     grant(h, A, LEAVER, "alpha", "administrator"); grant(h, A, LEAVER, "beta", "administrator"); grant(h, A, PEER, "beta", "developer");
     grant(h, A, LEAVER, "gamma", "developer"); grant(h, A, LEAVER, "delta", "administrator"); grant(h, A, PEER, "delta", "administrator");
@@ -188,8 +188,18 @@ describe("projects the person administers (company layout keys, DEC 254zzz80)", 
       expect(roleOn(h, A, PEER, project), project).toBe("administrator"); expect(reverseOn(h, A, PEER, project), project).toBe("administrator");
       expect(roleOn(h, A, LEAVER, project), project).toBeUndefined(); expect(reverseOn(h, A, LEAVER, project), project).toBeUndefined();
     }
-    expect(roleOn(h, A, PEER, "gamma")).toBeUndefined(); expect(roleOn(h, A, LEAVER, "gamma")).toBe("developer");
+    // A developer grant is not handed over (the successor gets none), and it goes with the person (arch cleanup, rule 7: company-member-removal-rejoin.test.ts).
+    expect(roleOn(h, A, PEER, "gamma")).toBeUndefined(); expect(roleOn(h, A, LEAVER, "gamma")).toBeUndefined(); expect(reverseOn(h, A, LEAVER, "gamma")).toBeUndefined();
     expect(h.db.get(grantKeyFor(A, PEER, "alpha").pk, grantKeyFor(A, PEER, "alpha").sk)).toMatchObject({ entityType: "MEMBERSHIP", ownerKey: PEER, projectName: "alpha", role: "administrator" });
+  });
+
+  it("a project whose current revision cannot be read (arch rule 9) does not block the hand-over of the leaver's others: its grants move too", async () => {
+    const h = world();
+    grant(h, A, LEAVER, "alpha", "administrator"); grant(h, A, LEAVER, "broken", "administrator");
+    h.db.set({ pk: `ORG#${A}#PROJECT#broken`, sk: "REV#000000000001", entityType: "PROJECT", definition: { name: "broken", revision: 1 } });
+    const answer = await h.remove(LEAVER, { requestId: randomUUID(), expectedRole: "member", successorId: PEER });
+    expect(answer.body["moved"]).toMatchObject({ projects: 2 });
+    for (const project of ["alpha", "broken"]) expect(roleOn(h, A, PEER, project), project).toBe("administrator");
   });
 
   it("another company's grants, and a row under the successor's key that names another company, are never moved or overwritten", async () => {

@@ -1,0 +1,10 @@
+{
+  "name": "@rovara/model-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloud model gateway ports, task-token verifier and streaming money core.",
+  "type": "module",
+  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "types": "./dist/index.d.ts",
+  "scripts": { "build": "tsc -b" }
+}

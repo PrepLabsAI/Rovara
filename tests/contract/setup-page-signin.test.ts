@@ -80,7 +80,8 @@ describe("the identity stack while the install runs in the cloud", () => {
   it("is deployed with the address only by an install in the cloud", () => {
     const outputs = {};
     const base = { env: "staging", region: "us-east-1", account: "123456789012", release: { version: "1.2.3" } as never, models: sampleAnswers().models, identity: { mode: "cognito" as const }, github: { appId: "", privateKeySecretArn: "" }, callbackSigningKey: "k".repeat(40) };
-    expect(stackParameters("identity", base, outputs, { packages: false })).not.toHaveProperty("SetupPageUrl");
+    // F1 L1a-1 review B1: always sent, empty unless this is a cloud install, so an upgrade (and the one carry rule) never keeps an installer address that no longer exists.
+    expect(stackParameters("identity", base, outputs, { packages: false })).toMatchObject({ SetupPageUrl: "" });
     expect(stackParameters("identity", { ...base, setupPageUrl: ORIGIN }, outputs, { packages: false })).toMatchObject({ SetupPageUrl: ORIGIN });
   });
 });

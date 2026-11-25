@@ -25,9 +25,12 @@
 //   - Reads are bounded in total; past a bound the whole answer is refused, never a partial one.
 //   - L4-GH2: a removal takes the person's GitHub link (core/people/github-links.ts) with it, in the same request, only after the removal itself succeeded. The cleanup is conditional and idempotent, never blocks
 //     the removal (a failure is logged in fixed words, no cause), and a repeat of the same removal request retries it (the repeat is still answered "already removed"). Only this company's rows are read or removed.
+//   - Arch cleanup (rule 7, one deletion path for "this person left this company"): the same removal also ends the person's sessions (the sign-in Lambda's `end-developer-sessions`, the admin "end sign-in" path; a person has
+//     one company) and drops their NON-administrator project grants (`dropNonAdminGrants`, through admin-actions.ts `revokeProjectAccess`), so a person restored or re-added later gets none back. A grant that cannot be dropped
+//     leaves the removal "not finished" (the same request drops it); sessions never block. Their administrator grants are the hand-over's. Code keeps no monthly limit override per member to drop.
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { AgentXError, ON_THE_WEBSITE_MESSAGE, OrgIdSchema, agentXError, companyLog, type DocumentStore, type OrgRole } from "@agentx/contracts";
+import { AgentXError, ON_THE_WEBSITE_MESSAGE, OrgIdSchema, agentXError, companyLog, type DocumentStore, type EndDeveloperSessionsRequest, type EndDeveloperSessionsResponse, type OrgRole } from "@agentx/contracts";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { Membership, membershipKey, ownPartitionRow, recordInCompany } from "./company-check.js";
 import { grantsPkFor, namedCompany } from "./company-layout.js";
@@ -40,7 +43,7 @@ import {
   CompanyMember, MEMBER_CHANGED, MEMBER_LAST_OWNER, MEMBER_ONLY_OWNER, MEMBER_REVOKED, MEMBER_SUCCESSOR_INVALID, memberCursorPerson, type CompanyMemberReply,
 } from "../developer/company-member-contract.js";
 import {
-  HANDOVER_TOO_BIG, HandOverRaced, HandOverTooBig, dropStartedRemoval, finishHandOver, finishReceipt, pendingHandOver, pendingHandOvers, planHandOver, readRemoval, sameRemoval, startRemoval,
+  HANDOVER_TOO_BIG, HandOverRaced, HandOverTooBig, dropNonAdminGrants, dropStartedRemoval, finishHandOver, finishReceipt, pendingHandOver, pendingHandOvers, planHandOver, readRemoval, sameRemoval, startRemoval,
   type HandOverContext, type MemberRemovalRecord,
 } from "./company-member-handover.js";
 
@@ -89,6 +92,11 @@ export interface CompanyMemberRouteContext {
   githubLinks?: { store: Pick<DocumentStore, "get" | "delete" | "transact">; log: (entry: Record<string, unknown>) => void };
   /** R1 + L1: where the members' own outside-account links (Linear) live (the core's own store) and the broker's log sink. Absent: a removal removes no such link (the install has none). */
   accountLinks?: { store: Pick<DocumentStore, "get" | "delete" | "transact" | "query">; log: (entry: Record<string, unknown>) => void };
+  /**
+   * Arch cleanup (rule 7): the one way a person's sign-in sessions end, the admin "end sign-in" kind of the sign-in Lambda (`end-developer-sessions`), and the broker's log sink. A removal ends the
+   * leaver's sessions with it (a person has one company, so their sessions are the company's). Absent: a removal ends none (the install has no developer sign-in).
+   */
+  sessions?: { end: (request: EndDeveloperSessionsRequest) => Promise<EndDeveloperSessionsResponse>; log: (entry: Record<string, unknown>) => void };
   /** DEC 254zzz84 (5): Task People, as the task routes build it, so open tasks can be handed over. Absent: no task is handed over (each is counted as left). */
   taskHandOver?: HandOverContext["tasks"];
 }
@@ -111,6 +119,38 @@ async function dropAccountLinks(ctx: CompanyMemberRouteContext, companyId: strin
   } catch {
     try { companyLog(companyId, ctx.accountLinks.log)({ event: "member_removal.account_link_not_removed", level: "error", person: personId }); } catch { /* a log sink that fails must not turn a finished removal into an error */ }
   }
+}
+
+/**
+ * Arch cleanup: the removed person's sign-in sessions end now (every session that started before this moment; `sessionsEndedAt` on their sign-in record, checked on every request and at refresh, so a
+ * refresh token ends with its session and a later restore brings none back). Never throws: the removal has happened, and a failure is only logged by name and person id. "Never signed in" is an answer.
+ */
+async function dropSessions(ctx: CompanyMemberRouteContext, companyId: string, personId: string): Promise<void> {
+  if (ctx.sessions === undefined) return;
+  try {
+    const answer = await ctx.sessions.end({ kind: "end-developer-sessions", developerId: personId, at: new Date(ctx.now()).toISOString() });
+    if (answer.ok || answer.error === "not_found") return;
+  } catch { /* logged below, without the cause */ }
+  try { companyLog(companyId, ctx.sessions.log)({ event: "member_removal.sessions_not_ended", level: "error", person: personId }); } catch { /* a log sink that fails must not turn a finished removal into an error */ }
+}
+
+/** What a removal takes from the person beyond the membership and the hand-over, each never throwing: their GitHub link, their outside-account links, their sessions. */
+async function dropTies(ctx: CompanyMemberRouteContext, companyId: string, personId: string): Promise<void> {
+  await dropGithubLink(ctx, companyId, personId); await dropAccountLinks(ctx, companyId, personId); await dropSessions(ctx, companyId, personId);
+}
+
+/** As `dropNonAdminGrants`, for an answer that must not change: a failure is only logged by name and person id (to whichever broker log sink this route has). */
+async function dropGrantsQuietly(ctx: CompanyMemberRouteContext, handOver: HandOverContext, companyId: string, personId: string): Promise<void> {
+  try { await dropNonAdminGrants(handOver, { companyId, leaverId: personId }); } catch {
+    const log = ctx.sessions?.log ?? ctx.githubLinks?.log ?? ctx.accountLinks?.log;
+    try { if (log !== undefined) companyLog(companyId, log)({ event: "member_removal.grants_not_removed", level: "error", person: personId }); } catch { /* a log sink that fails must not turn an answer into an error */ }
+  }
+}
+
+/** After the membership ended by this removal: the ties (never throwing), then the non-administrator grants, which throw "not finished" so the same request drops them again. */
+async function dropLeaversHold(ctx: CompanyMemberRouteContext, handOver: HandOverContext, companyId: string, personId: string): Promise<void> {
+  await dropTies(ctx, companyId, personId);
+  try { await dropNonAdminGrants(handOver, { companyId, leaverId: personId }); } catch { throw agentXError("RUNTIME_UNAVAILABLE", HANDOVER_UNFINISHED); }
 }
 
 const MEMBERS = "/v1/dev/company/members";
@@ -268,7 +308,8 @@ async function removeWithHandOver(ctx: CompanyMemberRouteContext, caller: Develo
     if (!endedBy(target, record)) {
       // This request's own STARTED record (someone else ended the membership first) is dropped, with its pending row, so it never blocks the one that did.
       if (record?.state === "STARTED") await dropStartedRemoval(handOver, record);
-      await dropGithubLink(ctx, companyId, leaverId); await dropAccountLinks(ctx, companyId, leaverId);
+      // Their non-administrator grants too (never blocking this answer: a repeat retries). Their administrator grants are a pending hand-over's.
+      await dropTies(ctx, companyId, leaverId); await dropGrantsQuietly(ctx, handOver, companyId, leaverId);
       throw agentXError("MEMBER_ALREADY_REMOVED", MEMBER_REVOKED);
     }
   } else {
@@ -294,9 +335,12 @@ async function removeWithHandOver(ctx: CompanyMemberRouteContext, caller: Develo
       if (!revoked.ok && (revoked.error !== "unavailable" || "message" in revoked)) await dropStartedRemoval(handOver, record);
       unwrap(revoked);
     }
-    await dropGithubLink(ctx, companyId, leaverId); await dropAccountLinks(ctx, companyId, leaverId);
   }
   if (record === undefined) throw agentXError("RUNTIME_UNAVAILABLE", MEMBERS_UNAVAILABLE);
+  // The membership has ended (by this removal): what else the person held in the company goes now, before anything is handed over, and again on a repeat of this request that finds it
+  // not finished. Their links and sessions never block; their non-administrator grants do (the removal is then "not finished", and the same request drops them), so a person who is
+  // restored later never finds an old grant. Their administrator grants are the hand-over's (moved to the successor below).
+  await dropLeaversHold(ctx, handOver, companyId, leaverId);
   // The successor was live when the membership ended (T3b's fence); they must still be when what was theirs moves.
   await liveSuccessor(ctx, companyId, request.successorId, leaverId);
   for (let attempt = 0; attempt < 3; attempt++) {

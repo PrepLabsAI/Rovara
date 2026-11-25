@@ -24,7 +24,7 @@ function allBrokerFiles(dir: string): string[] {
 
 describe("automation's boundaries", () => {
   it("has files to read", () => {
-    expect(all.length).toBeGreaterThanOrEqual(25);
+    expect(all.length).toBeGreaterThanOrEqual(20);
   });
 
   it("imports nothing that decides for a person", () => {

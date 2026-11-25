@@ -157,6 +157,8 @@ describe("connecting a second sign-in (DEC 254w)", () => {
     // The task the Slack session starts is owned by its token's person (developer-tasks.ts: taskIndexKey(caller.developerId, ...)).
     const owner = decodeJwt(slack.access!).sub as string;
     const at = new Date(w.now()).toISOString(), taskId = "22222222-2222-4222-8222-222222222222";
+    // The person (a member of X) holds a grant on the project: their own list shows a task only while they do.
+    w.db.set({ pk: `ORG#${X}#MEMBER#${owner}`, sk: "PROJECT#p", entityType: "MEMBERSHIP", ownerKey: owner, projectName: "p", role: "developer", grantedAt: at });
     w.db.set({ pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", taskId, developerId: owner, provider: "slack", developerName: "Link Me", client: "slack", project: "p", title: "from Slack",
       workspaceId: "w", ownerKey: owner, conversationId: "c", startingRevision: 1, shared: false, createdAt: at, updatedAt: at, companyId: X });
     w.db.set({ pk: `DEVELOPER#${owner}`, sk: `TASK#${at}#${taskId}`, entityType: "DEVELOPER_TASK_INDEX", taskId, title: "from Slack", project: "p", status: "CLOSED", shared: false, createdAt: at, updatedAt: at });

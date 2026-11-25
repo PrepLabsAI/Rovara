@@ -191,7 +191,7 @@ const authorityRefusals: Array<{ name: string; reason: string | RegExp; change(w
   { name: "missing recorded selection", reason: "no-recorded-application-selection", change: w => { delete w.task.workflow!.e2e!.applicationSelection; } },
   { name: "another admitted intent", reason: "approved-plan-is-not-the-admitted-intent", change: w => { w.admission.intent.scenarios[0]!.requirementId += "-changed"; } },
   { name: "missing latest project", reason: "current-project-latest-revision-unavailable", change: w => { w.deps.projects = { ...w.deps.projects, latest: async () => undefined }; } },
-  { name: "changed catalog", reason: "current-project-latest-revision-unavailable", change: async w => { await w.store.update({ key: orgProjectCatalogKey(COMPANY, w.task.project), ops: [change.set("latestRevision", 99)] }); } },
+  { name: "changed catalog", reason: "current-authority-loader-exception:project-record", change: async w => { await w.store.update({ key: orgProjectCatalogKey(COMPANY, w.task.project), ops: [change.set("latestRevision", 99)] }); } },
   { name: "missing setup approval", reason: "current-project-setup-approval-unavailable", change: async w => { const key = projectRevisionKey(COMPANY, w.task.project, 1); const row = (await w.store.get(key))!; delete row["setupApproval"]; await w.store.put({ item: row }); } },
   { name: "changed admitted policy", reason: "current-project-policy-or-runtime-changed", change: w => { w.admission.policy.capture.screenshots = !w.admission.policy.capture.screenshots; } },
   { name: "creator can only view", reason: "current-creator-can-only-view-project", change: w => { w.deps.access = { checkStep: async () => ({ allowed: false, message: "view-only" }) }; } },

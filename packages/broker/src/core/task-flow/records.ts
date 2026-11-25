@@ -48,6 +48,11 @@ export type TaskRecord = Omit<DeveloperTaskRecord, "provider" | "charge"> & {
   setupAgentLimits?: SetupAgentLimits;
   /** A re-run of a setup run (DEC 254zzz431): what the project's last ended run found, bounded, fixed when the run started (core/setup-agent/carry-over.ts). Absent on a first run. */
   setupAgentCarryOver?: SetupCarryOver;
+  /**
+   * F2-B: a person's Stop of this task (the owner's, a co-owner's or a company admin's) and when, with the workflow revision it stopped at. Written in the stop's own claim, before the cancel, so the standing can say Stopped:
+   * it holds while nothing has started the work again (the step the stop blocked is revision + 1; a retry moves past it). A sibling attribute: released readers of the task row ignore it. Never read by the old engine.
+   */
+  personStop?: { at: string; revision?: number };
   /** A setup run: who pressed Stop and when. Written before the cancel, so the end can tell a person's stop from any other cancel. */
   setupAgentStop?: { by: string; at: string };
   /** L4-T5: when a setup run's worker last talked to the broker (noted at most once a minute). A run silent for 10 minutes reads as stopped. */

@@ -101,7 +101,8 @@ describe("docker application host", () => {
     expect(password.length).toBeGreaterThan(16);
     expect(tail).not.toContain(password);
     expect(Buffer.byteLength(tail)).toBeLessThanOrEqual(64 * 1024);
-    expect(tail).toContain("<account:");
+    // The log line is "password <value>": redactText (password-in-prose rule) masks it before the run's own <account:...> scrub sees it. Either marker keeps the value out.
+    expect(tail).toContain("password [REDACTED]");
   });
 
   it.each([124, 130])("reads nothing from the out directory when docker run was killed (exit %i): the container may still be running", async (code) => {

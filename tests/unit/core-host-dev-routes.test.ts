@@ -3,6 +3,7 @@ import { CORE_CONTEXT_WORKER_ROUTES, coreContextWorkerRouteOf, appRouteOf as con
 // membership only and fails closed; another company's task reads exactly like a missing one; unwired parts say so in fixed words; a script token is never made through this API.
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ROUTES, ROUTE_NOT_SERVED_MESSAGE, routeIdOf } from "@preplabsai/rovara-code-api";
 import { ON_THE_WEBSITE_MESSAGE, WorkflowSnapshotSchema, agentXError, orgProjectCatalogKey, projectRevisionKey, change, type CodeBuildCheckResult, type AuditSink, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -20,6 +21,7 @@ import { createScriptToken, readScriptToken } from "../../packages/broker/src/co
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { createCoreHostApp, engineStampKey, stampOf, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { INVOLVED_UNAVAILABLE, NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, SESSION_CAP_UNREADABLE, SIGN_IN_AGAIN, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
+import { taskScreenRoute } from "../../packages/broker/src/core-host/task-screen-routes.js";
 import { involvedRowKey, writeInvolvedRow } from "../../packages/broker/src/core/task-flow/involved.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 import type { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
@@ -216,6 +218,61 @@ describe("the core's handlers on the deployed API", () => {
       expect((JSON.parse(answer!.body) as { error: { message: string } }).error.message).toBe(NOT_FOR_SCRIPT_TOKENS);
     }
     expect((await routes.route(get(`/v1/dev/tasks/${randomUUID()}`), caller))?.statusCode).toBe(404);
+  });
+
+  // RD-2.0: the task page's four new reads are mounted once and answer the fixed ROUTE_NOT_SERVED refusal (fail closed) until each lane fills its handler.
+  describe("the task page's new reads (RD-2.0)", () => {
+    const READS = ["spec", "checks", "changes", "timeline"] as const;
+    const notServed = { error: { code: "ROUTE_NOT_SERVED", message: ROUTE_NOT_SERVED_MESSAGE } };
+
+    it("answers ROUTE_NOT_SERVED, the row's own example refusal, the same for a real task, a missing one and another company's, and writes nothing", async () => {
+      const { world, app, companyOf, remember } = await world2();
+      const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
+      const own = remember(FAKE_COMPANY);
+      const runtime = await app.runtimeFor(FAKE_COMPANY);
+      const { task } = await runtime.flow.start({ principal: own.principal, origin: "app", client: "test" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
+      const before = await world.store.get(taskKey(task.taskId));
+      for (const read of READS) {
+        const row = ROUTES.find((candidate) => routeIdOf(candidate) === `tasks.${read}`)!;
+        const answers = [
+          await routes.route(get(`/v1/dev/tasks/${task.taskId}/${read}`), own),
+          await routes.route(get(`/v1/dev/tasks/${randomUUID()}/${read}`), own),
+          await routes.route(get(`/v1/dev/tasks/${task.taskId}/${read}`), remember(OTHER)),
+        ];
+        for (const answer of answers) {
+          expect(answer?.statusCode, read).toBe(404);
+          expect(JSON.parse(answer!.body), read).toEqual(notServed);
+          expect(JSON.parse(answer!.body), read).toEqual(row.example!.refusal);
+        }
+        expect(answers[0], read).toEqual({ ...answers[1], body: answers[0]!.body });
+        expect(answers[0]!.body, read).not.toContain(task.taskId);
+        expect(row.errors).toContainEqual({ code: "ROUTE_NOT_SERVED", status: 404 });
+      }
+      expect(await world.store.get(taskKey(task.taskId))).toEqual(before);
+    });
+
+    it("serves GET only (any other method stays the old broker's), keeps a script token out, and refuses a caller whose company is not the member's before anything is built", async () => {
+      const { app, companyOf, remember } = await world2();
+      const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
+      const own = remember(FAKE_COMPANY);
+      const id = randomUUID();
+      for (const read of READS) {
+        expect(await routes.route(post(`/v1/dev/tasks/${id}/${read}`), own), read).toBeUndefined();
+        expect(await routes.route({ ...get(`/v1/dev/tasks/${id}/${read}`), method: "PUT" }, own), read).toBeUndefined();
+        const token = await routes.route(get(`/v1/dev/tasks/${id}/${read}`), { ...own, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } });
+        expect(token?.statusCode, read).toBe(403);
+        expect((JSON.parse(token!.body) as { error: { message: string } }).error.message, read).toBe(NOT_FOR_SCRIPT_TOKENS);
+      }
+      // Another path under a task is not one of these reads.
+      expect(await routes.route(get(`/v1/dev/tasks/${id}/specs`), own)).toBeUndefined();
+      expect(taskScreenRoute(`/v1/dev/tasks/${id}/spec`, "GET")).toEqual({ taskId: id, read: "spec" });
+      expect(taskScreenRoute(`/v1/dev/tasks/not-a-task/spec`, "GET")).toBeUndefined();
+      expect(taskScreenRoute(`/v1/dev/tasks/${id}/spec/x`, "GET")).toBeUndefined();
+      const built = vi.spyOn(app, "runtimeFor");
+      const crossed = await createCoreDevRoutes({ app, companyOf: async () => ({ companyId: OTHER, role: "owner" }), wiring: () => WIRED }).route(get(`/v1/dev/tasks/${id}/spec`), own);
+      expect(crossed?.statusCode).toBe(401);
+      expect(built).not.toHaveBeenCalled();
+    });
   });
 });
 

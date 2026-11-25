@@ -12,8 +12,7 @@ import {
   developerTaskPolicy,
   AgentXError,
   WorkOriginSchema,
-  UNRUNNABLE_EXTERNAL_CHECK_MESSAGE,
-  unrunnableExternalCheck,
+  projectUseRefusal,
   ROVARA_CODE_V2_FOR_NEW_ORGS,
   StartDeveloperTaskRequestSchema,
   WORKFLOW_PATH_REQUIRED,
@@ -144,7 +143,14 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
   }
   if (request.agent !== undefined || request.input !== undefined) return refused(agentXError("CONFIG_INVALID", "agents are not set up in this deployment"));
 
-  const project = await deps.projects.latest(request.project);
+  // The project's current revision that cannot be read is refused with its stable sentence (arch rule 9), after the refusal is recorded; it is never swapped for an older one.
+  let project: Awaited<ReturnType<typeof deps.projects.latest>>;
+  try {
+    project = await deps.projects.latest(request.project);
+  } catch (error) {
+    if (error instanceof AgentXError) return refused(error);
+    throw error;
+  }
   if (project === undefined) return refused(agentXError("PROJECT_NOT_FOUND", `project \`${request.project}\` doesn't exist`));
   // An archived project accepts no new work (Cloud's requireNewWorkAllowed).
   if (project.archived === true) return refused(agentXError("PROJECT_ARCHIVED", `project \`${request.project}\` is archived; unarchive it to start new work`));
@@ -167,8 +173,10 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
   const setupRefusal = await failedSetupRefusal(deps, request.project, project.definition, run);
   if (setupRefusal !== undefined) return refused(setupRefusal);
 
-  // An external check nothing in this release runs is refused here, with the clear sentence, before the budget, the limits and any machine (lane P2, review M2).
-  if (unrunnableExternalCheck(project.definition.repositories) !== undefined) return refused(agentXError("CONFIG_INVALID", UNRUNNABLE_EXTERNAL_CHECK_MESSAGE));
+  // The stored record reads without the rules that judge new input (arch rule 8), so they are asked again here, where it is used, before the budget, the limits and any machine: an external check nothing in this release runs (lane P2, review M2, the
+  // sentence it has always had), a reserved or secret-looking command env, an allowed website that is a public suffix, a reserved E2E check id. Each refuses with its own fixed sentence and stable id (`projectUseRefusal`).
+  const barred = projectUseRefusal(project.definition);
+  if (barred !== undefined) return refused(barred);
 
   const understandFirst = asWorkflow && (deps.understandFirst ?? ROVARA_CODE_V2_FOR_NEW_ORGS);
   // A workflow with no Quick or Full path is Understand's to choose on version 1.1.0; anywhere else the explicit path is required.

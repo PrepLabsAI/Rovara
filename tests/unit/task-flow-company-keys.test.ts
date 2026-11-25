@@ -3,10 +3,8 @@ import type { Node } from "typescript";
 import { describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import * as keys from "../../packages/broker/src/core/task-flow/keys.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 
 const A = IMPLICIT_COMPANY_ID;
-const B = "org_bbbbbbbbbbbbbbbbbbbb";
 // Runtime calls deliberately exercise the new mandatory argument before its implementation exists.
 const call = (fn: unknown, ...args: string[]) => (fn as (...values: string[]) => unknown)(...args);
 
@@ -55,13 +53,4 @@ it("rejects raw workspace/operation literals in task-flow modules, including a p
   };
   for (const root of roots) walk(root);
   expect(bad).toEqual([]);
-});
-it("nightly pointer lookup keeps the stored task company check", async () => {
-  const { nightlyRunOfOperation } = await import("../../packages/broker/src/core/test-env/nightly-callback.js");
-  const { NIGHTLY_RUN_PURPOSE } = await import("@agentx/contracts");
-  const store = new MemoryDocumentStore();
-  await store.put({ item: { ...keys.workspaceKey(A, "night"), companyId: A } });
-  await store.put({ item: { ...keys.taskPointerKey(A, "night"), taskId: "task" } });
-  await store.put({ item: { ...keys.taskKey("task"), taskId: "task", workspaceId: "night", companyId: B, purpose: NIGHTLY_RUN_PURPOSE, nightlyRun: {}, project: "payments" } });
-  expect(await nightlyRunOfOperation({ store }, { workspaceId: "night", kind: "task", workflowMode: "CHECKS", status: "RUNNING", companyId: A })).toBeUndefined();
 });

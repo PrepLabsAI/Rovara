@@ -12,16 +12,16 @@
 // Before any of this, the core has read the task from the caller's OWN company (live membership, never the request) and refused anyone else as a missing task (core-host/dev-routes.ts). The person is the one the
 // broker's sign-in vouched for (the core's principal, whose id is the developer id on a deployed install); a script token never reaches here.
 import {
-  DEVELOPER_EVENTS_DEFAULT, DEVELOPER_EVENTS_MAX, DEVELOPER_EVENT_TEXT_MAX, TaskPeopleAddRequestSchema, TaskPeopleRoleRequestSchema, TaskPeopleTakeOwnershipRequestSchema, agentXError, redactText,
+  DEVELOPER_EVENTS_DEFAULT, DEVELOPER_EVENTS_MAX, DEVELOPER_EVENT_TEXT_MAX, TaskPeopleAddRequestSchema, type TaskPeopleView, TaskPeopleRoleRequestSchema, TaskPeopleTakeOwnershipRequestSchema, agentXError, redactText,
   type DeveloperTaskEvent, type DocumentStore, type OrgId, type TaskLogEntry, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import type { z } from "zod";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskRouteDependencies } from "./developer-tasks.js";
-import { grantTaskReader, listTaskReaders, readsAsReader, revokeTaskReader } from "./task-readers.js";
+import { grantTaskReader, holdsOwnTask, listTaskReaders, readsAsReader, revokeTaskReader } from "./task-readers.js";
 import { getTaskPeople } from "../developer/task-people.js";
-import { addTaskWebPerson, getTaskPeopleCandidates, getTaskPeopleProposal, proposeTaskOwnership, proposeTaskPeopleRole } from "../developer/task-people-effects.js";
+import { addTaskWebPerson, confirmTaskPeopleProposal, getTaskPeopleCandidates, getTaskPeopleProposal, proposeTaskOwnership, proposeTaskPeopleRole } from "../developer/task-people-effects.js";
 import { createCorePlanComment, listCorePlanComments, readCoreTaskDiff } from "../developer/task-code-routes.js";
 import type { ArtifactReader } from "../core/task-flow/deps.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
@@ -46,6 +46,11 @@ export interface CoreTaskRuleRoutes {
   route(input: CoreTaskRuleRouteInput): Promise<BrokerResponse>;
   /** DEC 254zzz44 (a): the old task read's reader rule (spec 067, `readsAsReader`) for a task of this company: shared with this person, who is still a member of its project. */
   readsAsReader(input: Pick<CoreTaskRuleRouteInput, "person" | "companyId" | "task">): Promise<boolean>;
+  /** S1: the People moves of the task action registry, in process (the same People functions the routes call): the view, and taking over a task nobody owns (the propose step, then the confirm step, each re-reading the revision and the person's right). */
+  people: {
+    view(input: Pick<CoreTaskRuleRouteInput, "person" | "companyId" | "task">): Promise<TaskPeopleView>;
+    takeOwnership(input: Pick<CoreTaskRuleRouteInput, "person" | "companyId" | "task"> & { requestId: string; expectedPeopleRevision: number }): Promise<void>;
+  };
 }
 
 const json = (value: unknown): BrokerResponse => ({ statusCode: 200, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
@@ -144,7 +149,26 @@ async function documentRoute(rest: string, deps: DeveloperTaskRouteDependencies,
 }
 
 export function createCoreTaskRuleRoutes(depsFor: (person: { developerId: string; name: string }, companyId: OrgId) => DeveloperTaskRouteDependencies, artifacts?: ArtifactReader): CoreTaskRuleRoutes {
+  const peopleOf = (input: Pick<CoreTaskRuleRouteInput, "person" | "companyId" | "task">) => {
+    const task = input.task as unknown as DeveloperTaskRecord;
+    if (input.task["companyId"] !== input.companyId || typeof task.taskId !== "string") throw agentXError("TASK_NOT_FOUND", "no task of yours");
+    const deps: DeveloperTaskRouteDependencies = { ...ruleDependencies(depsFor(input.person, input.companyId), artifacts), companyId: input.companyId };
+    const caller: DeveloperCaller = { developerId: input.person.developerId, sessionId: "core", amr: "oidc", name: input.person.name };
+    return { deps, caller, taskId: task.taskId };
+  };
   return {
+    people: {
+      async view(input) {
+        const { deps, caller, taskId } = peopleOf(input);
+        return await getTaskPeople(deps, caller, taskId);
+      },
+      async takeOwnership(input) {
+        const { deps, caller, taskId } = peopleOf(input);
+        // Two server steps, never one: the propose step binds the People revision the person saw and checks their right; the confirm step reads both again.
+        const proposed = await proposeTaskOwnership(effects(deps), caller, taskId, { requestId: input.requestId, expectedPeopleRevision: input.expectedPeopleRevision });
+        if (proposed.status === "PENDING") await confirmTaskPeopleProposal(effects(deps), caller, taskId, input.requestId);
+      },
+    },
     async readsAsReader(input) {
       const task = input.task as unknown as DeveloperTaskRecord;
       if (input.task["companyId"] !== input.companyId || typeof task.taskId !== "string") return false;
@@ -171,7 +195,8 @@ export function createCoreTaskRuleRoutes(depsFor: (person: { developerId: string
       const document = await documentRoute(rest, deps, caller, task, url, input.request);
       if (document !== undefined) return document;
       // Readers and the timeline: the task's own person, or (to read) a reader it is shared with who is still a project member; anyone else reads no such task, in the old owner check's words.
-      const owner = task.developerId === caller.developerId;
+      // The task's own person counts only while they still hold the project grant in this company (read now): removed from the project or the company, they read no such task, as anyone else does.
+      const owner = await holdsOwnTask(deps, task, caller.developerId);
       const reader = !owner && await readsAsReader(deps, task, caller.developerId);
       if (!owner && !reader) throw agentXError("TASK_NOT_FOUND", `no task ${taskId} of yours`);
       if (rest === "events") return json({ events: await coreTimeline(input.store, input.companyId, task, whole(url.searchParams.get("limit"), DEVELOPER_EVENTS_DEFAULT, 1, DEVELOPER_EVENTS_MAX, "limit")) });

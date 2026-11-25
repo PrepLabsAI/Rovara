@@ -9,6 +9,7 @@ import { signInClientRegistration, signInClientUpdate } from "../../packages/cli
 import { DEV_ROUTES, devRouteOf, type DevRoute } from "../../packages/broker/src/aws/dev-route-scopes.js";
 import type { DeveloperApiConfiguration, DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { routeDeveloperTaskRequest } from "../../packages/broker/src/aws/developer-tasks.js";
+import { taskScreenRoute } from "../../packages/broker/src/core-host/task-screen-routes.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
 import { createAdminBroker, type AdminHandler } from "../support/admin-broker.js";
@@ -17,6 +18,12 @@ import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const NAMED: readonly ClientScope[] = ["profile:name", "projects:members", "projects:create", "tasks:read", "tasks:start", "tasks:act", "tasks:share", "decisions:decide"];
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
+/**
+ * RD-2.0: the rows only the CORE host serves (the task page's spec, checks, changes and timeline reads, mounted in core-host/task-screen-routes.ts). The older developer router has no such path and answers "route not found", on purpose:
+ * a task of a company that is not on the core has none of these reads. The mount's own matcher says which rows these are, so this list cannot drift from it.
+ */
+const CORE_ONLY_ID = "11111111-1111-4111-8111-111111111111";
+const coreOnlyRow = (path: string): boolean => taskScreenRoute(path.replaceAll("{taskId}", CORE_ONLY_ID).replaceAll("{}", CORE_ONLY_ID), "GET") !== undefined;
 const sample = (path: string) => path.replaceAll("{emailHash}", "a".repeat(64)).replaceAll("{inviteId}", "a".repeat(64)).replace(/\{[A-Za-z]+\}/g, "x1");
 
 // ---- The table ----
@@ -107,7 +114,9 @@ describe("every /v1/dev route the broker registers", () => {
     const found = new Set([...routerPaths()].map(normal));
     expect(found.size).toBeGreaterThan(30);
     expect([...found].filter((path) => !tablePaths.has(path)), "router paths with no table row").toEqual([]);
-    expect([...tablePaths].filter((path) => !found.has(path)), "table rows no router names").toEqual([]);
+    expect([...tablePaths].filter((path) => !found.has(path) && !coreOnlyRow(path)), "table rows no router names").toEqual([]);
+    // The four core-only rows are exactly the task page's new reads.
+    expect([...tablePaths].filter(coreOnlyRow).sort()).toEqual(["/v1/dev/tasks/{}/changes", "/v1/dev/tasks/{}/checks", "/v1/dev/tasks/{}/spec", "/v1/dev/tasks/{}/timeline"]);
   });
 
   // The task router, called directly: a method and path it serves touches its dependencies (here a trap); one it does
@@ -117,7 +126,7 @@ describe("every /v1/dev route the broker registers", () => {
     const caller: DeveloperCaller = { developerId: "a".repeat(64), sessionId: "s", amr: "oidc", name: "Ada" };
     // The readers route loads the task before it looks at the method; the gate refuses the other methods there.
     const checksMethodAfterLoading = (path: string) => /^\/v1\/dev\/tasks\/\{\}\/readers(\/\{\})?$/.test(path);
-    for (const path of [...tablePaths].filter((candidate) => candidate === "/v1/dev/tasks" || (candidate.startsWith("/v1/dev/tasks/") && candidate !== "/v1/dev/tasks/start-requests/{}"))) {
+    for (const path of [...tablePaths].filter((candidate) => candidate === "/v1/dev/tasks" || (candidate.startsWith("/v1/dev/tasks/") && candidate !== "/v1/dev/tasks/start-requests/{}") && !coreOnlyRow(candidate))) {
       for (const method of METHODS) {
         const concrete = path.replaceAll("{}", "x1");
         let served = true;
@@ -188,7 +197,7 @@ async function setUp(mode: "linking" | "developer") {
     linearLink: { connections: {} as never, links: new MemoryDocumentStore(), app: async () => undefined, fetch: vi.fn() as never, log: () => undefined },
     // L2-4: the waiting-ticket routes need the core's intake to exist; this one holds no tickets, so only the route table's answer is tested here.
     coreTasks: { route: previewCore },
-    coreIntake: { intakeFor: async () => undefined, waiting: async () => ({ items: [], sources: [] }), start: async () => ({ outcome: "not_found" }), seedTicketUpdates: async () => "no_intake", dismiss: async () => false },
+    coreIntake: { intakeFor: async () => undefined, mayStart: async () => false, waiting: async () => ({ items: [], sources: [] }), start: async () => ({ outcome: "not_found" }), seedTicketUpdates: async () => "no_intake", dismiss: async () => false },
     // Guided onboarding PR 14: the company engine model route needs its wiring to exist; this gateway offers nothing readable, so only the route table's answer is tested here.
     companyEngineModel: { offered: async () => { throw new Error("none"); }, installModel: () => undefined, log: () => undefined },
     // DEC 254zzz63: the company learning model route, the same way.
@@ -257,7 +266,7 @@ describe("the developer API with a scoped client's token (a named environment)",
 
   it("leaves the Rovara CLI's token as it was: every row, with the person's rights", async () => {
     const token = await cli();
-    for (const route of gated) {
+    for (const route of gated.filter((row) => !coreOnlyRow(row.path))) {
       const response = await call(route.method, sample(route.path), token);
       expect(response.body.error?.message ?? "", `${route.method} ${route.path}`).not.toMatch(/scope|full access|route not found/);
     }

@@ -56,7 +56,7 @@ describe("the device executor image", () => {
   it("builds the one program the worker starts, and nothing else of the repository", () => {
     expect(dockerfile).toContain('CMD ["node", "/opt/agentx/packages/verifier/dist/executor/device-evidence-entry.js"]');
     const copies = instructions.filter((row) => /^COPY (?!--from)/u.test(row)).map((row) => row.split(/\s+/u)[1]);
-    expect(copies.filter((path) => path?.startsWith("packages/") && !path.endsWith("package.json"))).toEqual(["packages/contracts", "packages/verifier"]);
+    expect(copies.filter((path) => path?.startsWith("packages/") && !path.endsWith("package.json"))).toEqual(["packages/code-api", "packages/contracts", "packages/verifier"]);
     expect(copies).not.toContain(".");
   });
 });

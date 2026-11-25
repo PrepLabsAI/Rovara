@@ -114,8 +114,8 @@ export const SETUP_RUN_REFUSED_MESSAGES = {
   isolationUnavailable: "setup isolation unavailable on this worker, so AgentX did not run the setup (nothing was run); other tasks are not affected",
 } as const;
 export type SetupRunRefusal = keyof typeof SETUP_RUN_REFUSED_MESSAGES;
-/** Why a run that ended `infrastructure` could not go on when trying again cannot help: a company admin turned setup runs off while it ran. Only the worker sets it, from the broker's own poll answer. */
-export const SETUP_RUN_CANNOT_REASONS = ["company_off"] as const;
+/** Why a run that ended `infrastructure` could not go on when trying again cannot help: a company admin turned setup runs off while it ran (`company_off`, from the broker's own poll answer), or the company has no monthly AI limit (`company_limit_not_set`, `rovara_ai_not_confirmed`: the gateway's fixed stops, DEC 254zzz491; this list is plain literals because this module imports only zod, and a test holds them equal to `GATEWAY_STOPS`). Only the worker sets it. */
+export const SETUP_RUN_CANNOT_REASONS = ["company_off", "company_limit_not_set", "rovara_ai_not_confirmed"] as const;
 
 export function isSetupRunLimitStop(word: string): word is SetupRunLimitStop {
   return (SETUP_RUN_LIMIT_STOPS as readonly string[]).includes(word);
@@ -157,6 +157,23 @@ export type SetupJournalEntry = z.infer<typeof SetupJournalEntrySchema>;
 function utf8ByteLength(text: string): number {
   return new TextEncoder().encode(text).byteLength;
 }
+
+// ---- a setup that ends with no tests or no commands (DEC 254zzz495, N3)
+
+/**
+ * The words of the two normal ends that are not a failure and not a dead end. `readyNoTests`: the approved (or waiting) setup has no test command; its chip is Ready. `noCommands`: the run found nothing it could verify;
+ * the person can still use the project without setup or tests. The pull-request note is a later lane's (N4), so the body promises tasks only. Pure text, browser-safe.
+ */
+export const SETUP_READY_NO_TESTS_WORDS = {
+  headline: "Ready, no automated tests",
+  body: (project: string): string => `Rovara installed ${project} and found no tests. Tasks run normally.`,
+  looked: (places: readonly string[]): string => `Looked for tests in: ${places.join(", ")}. None found.`,
+} as const;
+export const SETUP_NO_COMMANDS_WORDS = {
+  title: "Rovara found no commands it could verify",
+  body: (project: string): string => `You can still use ${project}. Tasks run without an install step, and Rovara tells you when something it needed was missing.`,
+  use: "Use without setup or tests",
+} as const;
 
 /** A host the run needs: one card per host per project. `journalN` is the command that led to it, `from` the repository line that named it; both are optional and only point. */
 export const SetupHostAskSchema = z

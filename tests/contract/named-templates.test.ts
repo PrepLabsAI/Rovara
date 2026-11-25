@@ -19,11 +19,21 @@ import { createHash } from "node:crypto";
 import { withoutBatchFAdditions } from "../support/batch-f-template.js";
 import { withoutBrokerMemberConditionCheck } from "../support/broker-member-condition-check-template.js";
 import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js";
+import { withoutLinearWebhookGuard } from "../support/linear-webhook-route-template.js";
 import { withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
 import { withoutApiAccessLog } from "../support/api-access-log-template.js";
+import { withoutDispatcherLessonsPeople } from "../support/dispatcher-lessons-people-template.js";
+import { withoutMachineGone } from "../support/machine-gone-template.js";
+import { withoutRetainPolicies } from "../support/retain-policies-template.js";
 import { withoutWorkerCallbackAlarm } from "../support/worker-callback-alarm-template.js";
+import { withoutPublicApiAllowDomain, withoutPublicApiUrl } from "../support/public-api-url-template.js";
+import { withoutCoreOutboxStreamRelay } from "../support/core-outbox-stream-relay-template.js";
+import { withTaskPeopleInvitationSwitches } from "../support/task-people-invitations-template.js";
 
 skipLambdaBundling();
+// CODE-PUBLIC-URL (2026-11-24): the named control plane's external URL bases that now go through the public address helper (the sign-in issuer and its two function variables, CONTROL_PLANE_URL for the notifier,
+// the session steps and the broker, the channel adapters' variables, and the outputs an operator copies), counted so a URL that bypasses the helper moves it.
+const PUBLIC_API_SITES = 23;
 const STAGING = { alarmName: "agentx-staging-SessionStuckStopping", namespace: "AgentX/staging", env: "staging" };
 
 type Resource = { Type: string; Properties: Record<string, unknown> };
@@ -194,19 +204,10 @@ function withoutTaskPeopleControls(template: unknown): unknown {
       Description: "Whether task people role changes are enabled in this environment",
       Type: "String",
     },
-    TaskPeoplePublicInvitationsEnabled: {
-      AllowedValues: ["true", "false"],
-      Default: "false",
-      Description: "Whether task people may invite members to public channels in this environment",
-      Type: "String",
-    },
-    TaskPeoplePrivateInvitationsEnabled: {
-      AllowedValues: ["true", "false"],
-      Default: "false",
-      Description: "Whether task people may invite members to private channels in this environment",
-      Type: "String",
-    },
   };
+  // F1 L1a-1 deleted the two invitation switches: the template declares neither (and so packs neither).
+  expect(parameters).not.toHaveProperty("TaskPeoplePublicInvitationsEnabled");
+  expect(parameters).not.toHaveProperty("TaskPeoplePrivateInvitationsEnabled");
   for (const [name, expected] of Object.entries(expectedParameters)) {
     expect(parameters[name]).toStrictEqual(expected);
     delete parameters[name];
@@ -219,20 +220,17 @@ function withoutTaskPeopleControls(template: unknown): unknown {
   expect(brokerFunctions).toHaveLength(1);
   const brokerEnvironmentNames = [
     "AGENTX_TASK_PEOPLE_CHANGES_ENABLED",
-    "AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED",
-    "AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED",
   ];
   const brokerVariables = variablesFor(brokerFunctions[0]![1]);
   const expectedBrokerReferences = {
     AGENTX_TASK_PEOPLE_CHANGES_ENABLED: { Ref: "TaskPeopleChangesEnabled" },
-    AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED: { Ref: "TaskPeoplePublicInvitationsEnabled" },
-    AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED: { Ref: "TaskPeoplePrivateInvitationsEnabled" },
   };
-  // ENV-ROOM: the named Broker gets them as pieces of AGENTX_SETTINGS (codes tc, tu, tv).
+  // ENV-ROOM: the named Broker gets it as a piece of AGENTX_SETTINGS (code tc; the two invitation switches' codes tu and tv are retired).
   const unpacked = unpackedBrokerVariables(brokerVariables);
   expect(Object.fromEntries(brokerEnvironmentNames.map((name) => [name, unpacked[name]]))).toStrictEqual(expectedBrokerReferences);
   for (const name of brokerEnvironmentNames) expect(brokerVariables).not.toHaveProperty(name);
-  removePackedPieces(brokerVariables, "AGENTX_SETTINGS", ["tc", "tu", "tv"]);
+  removePackedPieces(brokerVariables, "AGENTX_SETTINGS", ["tc"]);
+  expect(JSON.stringify(brokerVariables.AGENTX_SETTINGS)).not.toMatch(/"t[uv]="/u);
 
   const notifierFunctions = functions.filter(([id]) => id.startsWith("DeveloperTaskNotifier"));
   expect(notifierFunctions).toHaveLength(1);
@@ -297,7 +295,9 @@ describe("named environment templates", () => {
   for (const stack of stacks) {
     if (stack.stackName === "agentx-staging-control-plane") {
       it("removing only Batch F additions preserves code/next's agentx-staging-control-plane template", () => {
-        const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(normalizedTemplate(stack), { env: "staging" }), STAGING))));
+        // F1 L1a-1: the two deleted invitation switches are put back innermost (Rule D, tests/support/task-people-invitations-template.ts), so this older pin holds as recorded.
+        // Linear webhook guard: the Linear route's throttle and alarm are asserted and taken out too (outermost), so this recorded pin still holds.
+        const beforeBatchF = withoutLinearWebhookGuard(withoutWebhookSecretLane(withoutBatchFAdditions(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(withoutMachineGone(withTaskPeopleInvitationSwitches(withoutCoreOutboxStreamRelay(normalizedTemplate(stack)))), "named")), { named: true, sites: PUBLIC_API_SITES }), { env: "staging" }), STAGING)))));
         expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("8edf09fff29983cc3c3338a6b2d24bb27d061db29960bfa2e77a52c068618972");
       }, 120_000);
     }
@@ -309,12 +309,45 @@ describe("named environment templates", () => {
       if (stack.stackName === "agentx-staging-control-plane") {
         // APIGW-ACCESS-LOGS (2026-11-24): re-pinned for exactly the access log group and the `$default` stage AccessLogSettings. Rule D: with those two taken out the old pin
         // 5b526b779a52869b09cb602a1d0a97545f10818f29983a879129dbf70553c745 holds (checked on the next line).
-        expect(createHash("sha256").update(JSON.stringify(template)).digest("hex")).toBe("ee257190b12ebbfc2e493432f8f3f130a7173a64cb80434cc87fcbc44805997e");
-        expect(createHash("sha256").update(JSON.stringify(withoutApiAccessLog(structuredClone(template), { env: "staging" }))).digest("hex"), "minus only the access log").toBe("5b526b779a52869b09cb602a1d0a97545f10818f29983a879129dbf70553c745");
+        // LESSONS-PORT-FIX (DEC 254zzz473, rebased onto train 29 without turn-on): re-pinned for exactly the dispatcher's DEVELOPER_SIGNIN_TABLE_NAME variable and its DispatcherLessonsPeople policy. Rule D: with those
+        // taken out (withoutDispatcherLessonsPeople) train 29's pin ee257190b12ebbfc2e493432f8f3f130a7173a64cb80434cc87fcbc44805997e holds (checked on the next line).
+        // CODE-PUBLIC-URL (2026-11-24): re-pinned for exactly the PublicApiUrl parameter and condition, each external URL base becoming Fn::If [HasPublicApiUrl, PublicApiUrl, the API's own host] (resolved equal while
+        // the parameter is empty), the broker's packed public host and the new LinearWebhookUrl output. Rule D: with those taken out (withoutPublicApiUrl, tests/support/public-api-url-template.ts) lessons-port's and RETAIN's
+        // pins below hold as recorded (checked on the lines after the next).
+        // LINEAR-WEBHOOK-GUARD (2026-11-24, rebased onto the public-URL pin): re-pinned for exactly the Linear route's stage throttle (one RouteSettings entry), its stage dependency and one alarm. Rule D: with those
+        // taken out (withoutLinearWebhookGuard, asserted field by field in tests/support/linear-webhook-route-template.ts) the public-URL pin 74e8f0a3e94b69a322a78fb6c1c4e2952689f71f5af7c5bc6c0da4b4e9a38a69 holds (checked on the lines after the next).
+        // WORKER-DELIVERY-IDENTITY (2026-11-25, rebased onto the relay pin): re-pinned for exactly the instance state-change handler, its rule and the dispatcher's one Describe statement (outermost). Rule D: with those
+        // taken out (withoutMachineGone, tests/support/machine-gone-template.ts) the relay pin 9dbf7050b5448a66e1fd3e12cae432ed321209d710ea10789996304703b9e603 holds as recorded (checked on the next lines).
+        // F1 L1a-1 (2026-11-25): this full pin moved for exactly the deletion of the two dead invitation parameters and their two packed broker settings (tu, tv). Rule D: with those put back (withTaskPeopleInvitationSwitches) the pin recorded before, d4df1277..., holds (the second line).
+        expect(createHash("sha256").update(JSON.stringify(template)).digest("hex")).toBe("f582465af955689f301062349662aa7cec8f24d880a83a5c4115313dfcc34100");
+        expect(createHash("sha256").update(JSON.stringify(withTaskPeopleInvitationSwitches(structuredClone(template)))).digest("hex"), "with the two deleted invitation switches put back").toBe("d4df12774320923c2c47402221aebe99cbc2ec7ae2658c2ecde98caf4325c40d");
+        const withRelayOnly = withoutMachineGone(structuredClone(template));
+        expect(createHash("sha256").update(JSON.stringify(withRelayOnly)).digest("hex"), "minus only the machine-gone additions, without the two deleted invitation switches").toBe("443eebd1581ab34387d39b2c158db9c7d64972afc9d8c776e7407a33db4161fe");
+        // CORE-RUN-STOP-RELAY (G1, 2026-11-25): re-pinned for exactly the packed setting `rl=on` on the broker and the dispatcher. Rule D: with it taken out (withoutCoreOutboxStreamRelay,
+        // tests/support/core-outbox-stream-relay-template.ts) the Linear guard pin 830e2fa7346af112695e09ceb5bab02848cc595c5598cad3347951b790898738 holds (checked on the next lines).
+        // F1 L1a-1 (2026-11-25): re-pinned again for exactly the deletion of the two dead invitation parameters and their two packed broker settings (tu, tv). Rule D: with those put back
+        // (withTaskPeopleInvitationSwitches) the previous pin 9dbf7050b5448a66e1fd3e12cae432ed321209d710ea10789996304703b9e603 holds (the second line), with the relay taken out too the pin 830e2fa7... holds, and so does every older pin below.
+        expect(createHash("sha256").update(JSON.stringify(withTaskPeopleInvitationSwitches(structuredClone(withRelayOnly)))).digest("hex"), "with the two deleted invitation switches put back").toBe("9dbf7050b5448a66e1fd3e12cae432ed321209d710ea10789996304703b9e603");
+        const beforeRelay = withTaskPeopleInvitationSwitches(withoutCoreOutboxStreamRelay(structuredClone(withRelayOnly)));
+        expect(createHash("sha256").update(JSON.stringify(beforeRelay)).digest("hex"), "minus only the outbox stream relay setting").toBe("830e2fa7346af112695e09ceb5bab02848cc595c5598cad3347951b790898738");
+        const withoutGuard = withoutLinearWebhookGuard(structuredClone(beforeRelay));
+        expect(createHash("sha256").update(JSON.stringify(withoutGuard)).digest("hex"), "minus only the Linear webhook guard").toBe("74e8f0a3e94b69a322a78fb6c1c4e2952689f71f5af7c5bc6c0da4b4e9a38a69");
+        const beforePublicApi = withoutPublicApiUrl(structuredClone(withoutGuard), { named: true, sites: PUBLIC_API_SITES });
+        expect(createHash("sha256").update(JSON.stringify(beforePublicApi)).digest("hex"), "minus only the public API URL").toBe("32f5c0957135cc03888fb1c4233d7f632cd98bb877f9464583ee87126e3c1381");
+        // RETAIN (arch ruling 2026-11-24): re-pinned for exactly DeletionPolicy RetainExceptOnCreate and UpdateReplacePolicy Retain on the control plane's five keys, channel state table and adapter secret.
+        // Rule D: with those put back (withoutRetainPolicies) lessons-port's pin ff86d95eeb270fd7cba3301dc0022e0f08a51794c5c4cc22f873de0e4f000ace holds (checked on the next line).
+        expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(beforePublicApi), "named"))).digest("hex"), "minus only the RETAIN policies").toBe("ff86d95eeb270fd7cba3301dc0022e0f08a51794c5c4cc22f873de0e4f000ace");
+        expect(createHash("sha256").update(JSON.stringify(withoutDispatcherLessonsPeople(withoutRetainPolicies(structuredClone(beforePublicApi), "named")))).digest("hex"), "minus only the dispatcher lessons people grant").toBe("ee257190b12ebbfc2e493432f8f3f130a7173a64cb80434cc87fcbc44805997e");
+        expect(createHash("sha256").update(JSON.stringify(withoutApiAccessLog(withoutDispatcherLessonsPeople(withoutRetainPolicies(structuredClone(beforePublicApi), "named")), { env: "staging" }))).digest("hex"), "minus only the access log").toBe("5b526b779a52869b09cb602a1d0a97545f10818f29983a879129dbf70553c745");
         // Webhook lane W3: the webhook secret slot, its throttle and one alarm, pinned exactly in tests/support/webhook-secret-template.ts, then removed.
         // APIGW-ACCESS-LOGS (2026-11-24): the full-template pin above moved; the access log group and the stage setting are asserted and taken out, so every pin and snapshot below still holds.
-        template = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutApiAccessLog(structuredClone(template), { env: "staging" })));
+        // F1 L1a-1: the snapshot below is of the template as it is now, without the two deleted invitation switches (the strippers after this read the broker's packed settings with today's table), so the
+        // same strippers (the machine-gone additions and the relay setting out first, as on code/next) are applied to `template` itself rather than to the put-back copy the pins above were taken from.
+        const currentBeforePublicApi = withoutPublicApiUrl(structuredClone(withoutLinearWebhookGuard(withoutCoreOutboxStreamRelay(structuredClone(withRelayOnly)))), { named: true, sites: PUBLIC_API_SITES });
+        template = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutApiAccessLog(withoutDispatcherLessonsPeople(currentBeforePublicApi), { env: "staging" })));
       }
+      // CODE-PUBLIC-URL (rev 9.2): the foundation's firewall gains one allow-list entry (and its parameter); taken out, the recorded snapshot holds.
+      if (stack.stackName === "agentx-staging-foundation") template = withoutPublicApiAllowDomain(structuredClone(template));
       const parity = stack.stackName === "agentx-staging-foundation" ? withoutNatEgressAddresses(withoutDnsFirewall(template))
         : stack.stackName === "agentx-staging-access" ? withoutSavedEnvAccess(withoutDnsFirewallAccess(template), "staging")
         // ENV-ROOM 2 (2026-11-17): the broker's names parameter is checked and the names put back in its environment first, as the rest was recorded.

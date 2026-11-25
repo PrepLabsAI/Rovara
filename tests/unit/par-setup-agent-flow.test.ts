@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, SETUP_RUN_REFUSED_MESSAGES, WORKER_INVOCATION_FEATURES, agentXError, orgProjectCatalogKey, type AdapterRegistry, type Approvers, type WorkerInvocation } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, SETUP_RUN_REFUSED_MESSAGES, WORKER_INVOCATION_FEATURES, agentXError, orgProjectCatalogKey, projectRevisionKey, type AdapterRegistry, type Approvers, type WorkerInvocation } from "@agentx/contracts";
 import { createDecisionGate } from "../../packages/broker/src/core/decisions/approval-gate.js";
 import { SETUP_APPLY_KIND } from "../../packages/broker/src/core/setup-agent/apply.js";
 import { SETUP_HOST_KIND, hostAskDigest, hostAskSubjectId, HOST_ASK_REVISION } from "../../packages/broker/src/core/setup-agent/host-ask.js";
@@ -335,6 +335,33 @@ describe("a setup run, from the owner's request to the use of what it found", ()
     }
   });
 
+  it("DEC 254zzz491: a run for a company with no monthly AI limit fails with the shared sentence, whole, however the worker ended it", async () => {
+    const SENTENCE = "No monthly AI limit is set for your company. Set one in Admin, AI and spending.";
+    const summary = await launch();
+    const summaryRun = await startRun(summary);
+    await summary.callback(summaryRun.job, "result", { status: "SUCCEEDED", result: { setupRunSummary: { ...SUMMARY, stop: "infrastructure", partial: true, cannot: "company_limit_not_set" } } });
+    expect((await summary.api(ROUTE)).body).toMatchObject({ status: "failed", stop: "infrastructure", failure: SENTENCE });
+    const errored = await launch();
+    const erroredRun = await startRun(errored);
+    await errored.callback(erroredRun.job, "result", { status: "FAILED", error: agentXError("MODEL_NOT_ALLOWED", SENTENCE).message });
+    expect((await errored.api(ROUTE)).body).toMatchObject({ status: "failed", stop: "infrastructure", failure: SENTENCE });
+    // The second stop (Rovara AI not confirmed): its own sentence, whole, by the summary and by a FAILED operation.
+    const NOT_CONFIRMED = "Choose how Rovara pays for AI: confirm Rovara AI, billed to your company, up to your monthly limit, or connect your own AI key.";
+    const confirmed = await launch();
+    const confirmedRun = await startRun(confirmed);
+    await confirmed.callback(confirmedRun.job, "result", { status: "SUCCEEDED", result: { setupRunSummary: { ...SUMMARY, stop: "infrastructure", partial: true, cannot: "rovara_ai_not_confirmed" } } });
+    expect((await confirmed.api(ROUTE)).body).toMatchObject({ status: "failed", stop: "infrastructure", failure: NOT_CONFIRMED });
+    const confirmedErr = await launch();
+    const confirmedErrRun = await startRun(confirmedErr);
+    await confirmedErr.callback(confirmedErrRun.job, "result", { status: "FAILED", error: agentXError("MODEL_NOT_ALLOWED", NOT_CONFIRMED).message });
+    expect((await confirmedErr.api(ROUTE)).body).toMatchObject({ status: "failed", stop: "infrastructure", failure: NOT_CONFIRMED });
+    // A longer text that only contains the sentence is an ordinary fault.
+    const longer = await launch();
+    const longerRun = await startRun(longer);
+    await longer.callback(longerRun.job, "result", { status: "FAILED", error: `${agentXError("MODEL_NOT_ALLOWED", SENTENCE).message} more` });
+    expect((await longer.api(ROUTE)).body).toMatchObject({ status: "failed", stop: "infrastructure", failure: "The setup run could not go on. Try again." });
+  });
+
   it("L4-T5: a run a company admin turned off says so and what to do; the same stop without that cause says to try again, and the cause on any other stop changes nothing", async () => {
     const off = await launch();
     const offRun = await startRun(off);
@@ -348,16 +375,6 @@ describe("a setup run, from the owner's request to the use of what it found", ()
     const otherRun = await startRun(other);
     await other.callback(otherRun.job, "result", { status: "SUCCEEDED", result: { setupProposal: proposal(), setupRunSummary: { ...SUMMARY, cannot: "company_off" } } });
     expect((await other.api(ROUTE)).body).toMatchObject({ status: "ready", stop: "proposed" });
-  });
-
-  it("L4-T5: the setup has no test command: the sentence says what to do", async () => {
-    const h = await launch();
-    const run = await startRun(h);
-    const noTests = { ...proposal(), tests: [] };
-    await h.callback(run.job, "result", { status: "SUCCEEDED", result: { setupProposal: noTests, setupRunSummary: SUMMARY } });
-    const answer = await h.api(`${ROUTE}/confirm`, { method: "POST", body: { requestId: randomUUID(), expectedRevision: 1 } });
-    expect(answer.status).toBe(400);
-    expect((answer.body["error"] as { message: string }).message).toBe("The setup has no test command to prove, so there is nothing to use yet. Add a test command to the project's setup, or run the setup again.");
   });
 
   it("keeps what a run learned when it stopped at a limit, and never offers it for use when it needs a code change", async () => {
@@ -510,6 +527,158 @@ describe("a setup run, from the owner's request to the use of what it found", ()
   }
   const decideProposal = (h: Harness, link: URL, offer: { requestId: string; revision: number; artifactDigest: string }, credential?: { method: string; token: string }) => h.runtime.app.gate.decide({
     companyId: IMPLICIT_COMPANY_ID, kind: SETUP_APPLY_KIND, subjectId: "payments", requestId: offer.requestId, outcome: "approve", seen: { revision: offer.revision, artifactDigest: offer.artifactDigest }, credentials: [credential ?? pageProof(h, link, offer)],
+  });
+
+  // DEC 254zzz495 (N3): no test command is a normal end ("Ready, no automated tests"), never a refusal. The candidate records the fact, goes through the same check on a fresh machine and the same approval, and the fact is the
+  // project's only once a person approved it. A later approved setup with a test command clears it.
+  const noTestsProposal = (over: Record<string, unknown> = {}) => ({ ...proposal(), tests: [], ...over });
+  const projectRevision = async (h: Harness, revision: number) => (await h.store.get(projectRevisionKey(IMPLICIT_COMPANY_ID, "payments", revision)))!["definition"] as Record<string, any>;
+  /** The fact lives on the revision ROW beside the definition (rollback safety), never inside the definition. */
+  const projectFact = async (h: Harness, revision: number) => (await h.store.get(projectRevisionKey(IMPLICIT_COMPANY_ID, "payments", revision)))!["noAutomatedTests"] as Record<string, any> | undefined;
+
+  it("N3: a setup with no test command is used like any other: no refusal, the candidate records the fact and where the run looked, and the person's approval makes it the project's", async () => {
+    const h = await launch();
+    const run = await startRun(h);
+    await h.callback(run.job, "setup-agent", { kind: "journal", entries: [entry(1, "npm ci"), entry(2, "ls tests", { exitCode: 2 }), entry(3, "grep -rn pytest . 2>/dev/null", { exitCode: 1, tail: "" })] });
+    await h.callback(run.job, "result", { status: "SUCCEEDED", result: { setupProposal: noTestsProposal(), setupRunSummary: SUMMARY } });
+    const confirmed = await h.api(`${ROUTE}/confirm`, { method: "POST", body: { requestId: randomUUID(), expectedRevision: 1 } });
+    expect(confirmed.status, JSON.stringify(confirmed.body)).toBe(200);
+    expect(confirmed.body).toMatchObject({ used: ["setup-demo"], candidateRevision: 2, proved: false });
+    // The candidate is stored, not the project's: nothing changed for tasks. It holds the fact and no test command.
+    const candidate = await projectRevision(h, 2);
+    expect(candidate).toMatchObject({ setup: [{ executable: "npm", args: ["ci"] }], readiness: [] });
+    expect(candidate).not.toHaveProperty("noAutomatedTests");
+    expect(await projectFact(h, 2)).toMatchObject({ looked: ["tests_folder"], at: expect.any(String) });
+    expect(((await h.api("/v1/dev/projects")).body["projects"] as Array<{ latestRevision: number }>)[0]!.latestRevision).toBe(1);
+    // The same check on a fresh machine, then the same approval, on the owner's page.
+    const apply = (await h.store.get({ pk: `ORG#${IMPLICIT_COMPANY_ID}#SETUP_DRAFT#payments`, sk: "APPLY" }))!;
+    const checkJob = await h.nextJob((apply["check"] as { workspaceId: string }).workspaceId, new Set());
+    expect(checkJob).toMatchObject({ kind: "prepare", projectRevision: 2 });
+    expect(JSON.stringify(checkJob.payload)).not.toContain("noAutomatedTests");
+    expect((await h.callback(checkJob, "result", { status: "SUCCEEDED", result: {} })).status).toBe(200);
+    const link = await h.browse("/setup/payments");
+    const shown = await raw(h.runtime.pagesUrl, { path: link.pathname, headers: { host: link.host } });
+    expect(shown.body).toContain("Ready, no automated tests");
+    expect(shown.body).toContain("Rovara installed payments and found no tests. Tasks run normally.");
+    const offer = { requestId: proposalRequestId(String(apply["digest"]), 2), revision: 2, artifactDigest: String(apply["digest"]) };
+    expect(await decideProposal(h, link, offer)).toMatchObject({ status: "decided" });
+    expect(((await h.api("/v1/dev/projects")).body["projects"] as Array<{ latestRevision: number }>)[0]!.latestRevision).toBe(2);
+    expect(await projectFact(h, 2)).toMatchObject({ looked: ["tests_folder"] });
+  });
+
+  it("N3: an empty setup can always be used: nothing ticked is the person's explicit choice (no command changes), and a run that found no setup or test at all is usable too", async () => {
+    const h = await launch();
+    const run = await startRun(h);
+    await h.callback(run.job, "result", { status: "SUCCEEDED", result: { setupProposal: proposal(), setupRunSummary: SUMMARY } });
+    const confirmed = await h.api(`${ROUTE}/confirm`, { method: "POST", body: { requestId: randomUUID(), expectedRevision: 1, itemIds: [] } });
+    expect(confirmed.status, JSON.stringify(confirmed.body)).toBe(200);
+    expect(confirmed.body).toMatchObject({ used: [], candidateRevision: 2 });
+    expect(await projectRevision(h, 2)).toMatchObject({ setup: [], readiness: [] });
+    expect(await projectFact(h, 2)).toMatchObject({ looked: [] });
+    // An empty setup's check (no command to run) passes on a fresh machine like any other, and the person's approval makes it the project's.
+    const apply = (await h.store.get({ pk: `ORG#${IMPLICIT_COMPANY_ID}#SETUP_DRAFT#payments`, sk: "APPLY" }))!;
+    const checkJob = await h.nextJob((apply["check"] as { workspaceId: string }).workspaceId, new Set());
+    expect((checkJob.payload as { project: { setup: unknown[]; readiness: unknown[] } }).project).toMatchObject({ setup: [], readiness: [] });
+    expect((await h.callback(checkJob, "result", { status: "SUCCEEDED", result: {} })).status).toBe(200);
+    const link = await h.browse("/setup/payments");
+    expect(await decideProposal(h, link, { requestId: proposalRequestId(String(apply["digest"]), 2), revision: 2, artifactDigest: String(apply["digest"]) })).toMatchObject({ status: "decided" });
+    expect(await projectRevision(h, 2)).toMatchObject({ setup: [], readiness: [] });
+    expect(await projectFact(h, 2)).toBeDefined();
+  });
+
+  it("N3: a run that found no setup, test or prompt-location item at all can be used too (the person's one button, nothing ticked)", async () => {
+    const h = await launch();
+    const run = await startRun(h);
+    await h.callback(run.job, "result", { status: "SUCCEEDED", result: { setupProposal: { basedOnRevision: 1, knowledge: [{ repo: "demo", path: "package.json", kind: "keyDoc", from: [cite(2, "\"scripts\": {")] }] }, setupRunSummary: SUMMARY } });
+    const nothing = await h.api(`${ROUTE}/confirm`, { method: "POST", body: { requestId: randomUUID(), expectedRevision: 1 } });
+    expect(nothing.status, JSON.stringify(nothing.body)).toBe(200);
+    expect(nothing.body).toMatchObject({ used: [], candidateRevision: 2 });
+    // On the owner's page the same choice is one button: "Use without setup or tests" (nothing ticked is an explicit empty choice, not "every item that passed").
+    await h.api(`${ROUTE}/discard`, { method: "POST", body: { requestId: randomUUID() } });
+    const link = await h.browse("/setup/payments");
+    const shown = await raw(h.runtime.pagesUrl, { path: link.pathname, headers: { host: link.host } });
+    expect(shown.body).toContain("Use without setup or tests");
+    const form = formOf(shown.body, "/confirm");
+    expect(form.fields["none"]).toBe("1");
+    expect((await h.post(link, form.action, { ...form.fields })).headers["location"]).toContain("n=setupdone");
+    expect(await projectRevision(h, 2)).toMatchObject({ setup: [], readiness: [] });
+  });
+
+  it("N3: a choice that names only items that cannot be used is still refused as 'nothing' (the empty choice is not a way around the checks)", async () => {
+    const h = await launch();
+    const run = await startRun(h);
+    const bad = { ...proposal(), setup: [{ repo: "demo", commands: ["npm ci"], confidence: "high", from: [cite(3, "\"ci\": \"invented words here\"")] }], tests: [] };
+    await h.callback(run.job, "result", { status: "SUCCEEDED", result: { setupProposal: bad, setupRunSummary: SUMMARY } });
+    const refused = await h.api(`${ROUTE}/confirm`, { method: "POST", body: { requestId: randomUUID(), expectedRevision: 1, itemIds: ["setup-demo"] } });
+    expect(refused.status).toBe(400);
+    expect((refused.body["error"] as { message: string }).message).toContain("None of the suggestions can be used");
+  });
+
+  it("N3: a later approved setup with a test command clears the fact; a registration body cannot carry it, and a clean registration carries only the project's own live fact", async () => {
+    const h = await launch();
+    const first = await startRun(h);
+    await h.callback(first.job, "result", { status: "SUCCEEDED", result: { setupProposal: noTestsProposal(), setupRunSummary: SUMMARY } });
+    expect((await h.api(`${ROUTE}/confirm`, { method: "POST", body: { requestId: randomUUID(), expectedRevision: 1 } })).status).toBe(200);
+    const applyOf = async () => (await h.store.get({ pk: `ORG#${IMPLICIT_COMPANY_ID}#SETUP_DRAFT#payments`, sk: "APPLY" }))!;
+    const apply = await applyOf();
+    await h.callback(await h.nextJob((apply["check"] as { workspaceId: string }).workspaceId, new Set()), "result", { status: "SUCCEEDED", result: {} });
+    const link = await h.browse("/setup/payments");
+    expect(await decideProposal(h, link, { requestId: proposalRequestId(String(apply["digest"]), 2), revision: 2, artifactDigest: String(apply["digest"]) })).toMatchObject({ status: "decided" });
+    expect(await projectFact(h, 2)).toBeDefined();
+    // A registration body cannot carry the fact: the strict definition refuses it, and nothing is stored.
+    const sent = { ...PROJECT, setup: (await projectRevision(h, 2))["setup"], noAutomatedTests: { at: "2026-11-24T00:00:00.000Z", looked: ["makefile"] } };
+    expect((await h.api("/v1/admin/projects", { method: "POST", body: sent })).status).toBe(400);
+    expect(await h.store.get(projectRevisionKey(IMPLICIT_COMPANY_ID, "payments", 3))).toBeUndefined();
+    // The project file registered again (a person's, no fact in it) carries the project's own live fact to the new row while it still has no test command.
+    const clean = { ...PROJECT, setup: (await projectRevision(h, 2))["setup"], orchestratorInstructions: "Changed." };
+    expect((await h.api("/v1/admin/projects", { method: "POST", body: clean })).status).toBe(201);
+    expect(await projectFact(h, 3)).toEqual(await projectFact(h, 2));
+    // ...and drops it when the registered file has a test command (no approval, no fact), and a later file without one does not bring it back.
+    const withTests = { ...clean, readiness: ((await projectRevision(h, 3))["readiness"] as unknown[]).concat([{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 600 }]) };
+    expect((await h.api("/v1/admin/projects", { method: "POST", body: withTests })).status).toBe(201);
+    expect(await projectFact(h, 4)).toBeUndefined();
+    expect((await h.api("/v1/admin/projects", { method: "POST", body: { ...clean, orchestratorInstructions: "Again." } })).status).toBe(201);
+    expect(await projectFact(h, 5)).toBeUndefined();
+  });
+
+  it("N3: a later approved setup run that finds a test command drops the fact", async () => {
+    const h = await launch();
+    const first = await startRun(h);
+    await h.callback(first.job, "result", { status: "SUCCEEDED", result: { setupProposal: noTestsProposal(), setupRunSummary: SUMMARY } });
+    expect((await h.api(`${ROUTE}/confirm`, { method: "POST", body: { requestId: randomUUID(), expectedRevision: 1 } })).status).toBe(200);
+    const applyOf = async () => (await h.store.get({ pk: `ORG#${IMPLICIT_COMPANY_ID}#SETUP_DRAFT#payments`, sk: "APPLY" }))!;
+    let apply = await applyOf();
+    await h.callback(await h.nextJob((apply["check"] as { workspaceId: string }).workspaceId, new Set()), "result", { status: "SUCCEEDED", result: {} });
+    let link = await h.browse("/setup/payments");
+    expect(await decideProposal(h, link, { requestId: proposalRequestId(String(apply["digest"]), 2), revision: 2, artifactDigest: String(apply["digest"]) })).toMatchObject({ status: "decided" });
+    const second = await startRun2(h);
+    await h.callback(second.job, "result", { status: "SUCCEEDED", result: { setupProposal: { ...proposal(), basedOnRevision: 2 }, setupRunSummary: SUMMARY } });
+    expect((await h.api(`${ROUTE}/confirm`, { method: "POST", body: { requestId: randomUUID(), expectedRevision: 2 } })).status).toBe(200);
+    apply = await applyOf();
+    await h.callback(await h.nextJob((apply["check"] as { workspaceId: string }).workspaceId, new Set()), "result", { status: "SUCCEEDED", result: {} });
+    link = await h.browse("/setup/payments");
+    expect(await decideProposal(h, link, { requestId: proposalRequestId(String(apply["digest"]), 3), revision: 3, artifactDigest: String(apply["digest"]) })).toMatchObject({ status: "decided" });
+    expect(await projectRevision(h, 3)).toMatchObject({ readiness: [{ executable: "npm", args: ["test"] }] });
+    expect(await projectFact(h, 3)).toBeUndefined();
+  });
+
+  it("N3: 'use without setup or tests' on a project that already has tests makes no no-op candidate", async () => {
+    const h = await launch();
+    const run = await startRun(h);
+    await h.callback(run.job, "result", { status: "SUCCEEDED", result: { setupProposal: proposal(), setupRunSummary: SUMMARY } });
+    expect((await h.api(`${ROUTE}/confirm`, { method: "POST", body: { requestId: randomUUID(), expectedRevision: 1 } })).status).toBe(200);
+    const applyRow = async () => (await h.store.get({ pk: `ORG#${IMPLICIT_COMPANY_ID}#SETUP_DRAFT#payments`, sk: "APPLY" }))!;
+    const first = await applyRow();
+    await h.callback(await h.nextJob((first["check"] as { workspaceId: string }).workspaceId, new Set()), "result", { status: "SUCCEEDED", result: {} });
+    const link = await h.browse("/setup/payments");
+    expect(await decideProposal(h, link, { requestId: proposalRequestId(String(first["digest"]), 2), revision: 2, artifactDigest: String(first["digest"]) })).toMatchObject({ status: "decided" });
+    const next = await startRun2(h);
+    await h.callback(next.job, "result", { status: "SUCCEEDED", result: { setupProposal: { ...proposal(), basedOnRevision: 2 }, setupRunSummary: SUMMARY } });
+    const none = await h.api(`${ROUTE}/confirm`, { method: "POST", body: { requestId: randomUUID(), expectedRevision: 2, itemIds: [] } });
+    expect(none.status).toBe(400);
+    expect((none.body["error"] as { message: string }).message).toContain("Nothing changes");
+    expect((await applyRow())["state"]).toBe("approved");
+    expect(await h.store.get(projectRevisionKey(IMPLICIT_COMPANY_ID, "payments", 3))).toBeUndefined();
   });
 
   // L4-T5: the sentence for "another setup is waiting" offers only what the person can do with THAT setup, by where its check stands (it used to say "Decide it" while a failed check could only be discarded).

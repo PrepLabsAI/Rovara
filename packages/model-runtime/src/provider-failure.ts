@@ -1,4 +1,4 @@
-import { E2E_MODEL_FAILURE_SIGNAL_PATTERN, MODEL_NOT_ENABLED_CODE, type E2EModelFailure, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
+import { E2E_MODEL_FAILURE_SIGNAL_PATTERN, GATEWAY_STOPS, MODEL_NOT_ENABLED_CODE, gatewayStopOfAnswer, type GatewayStopCode, type E2EModelFailure, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
 
 /**
  * Provider-neutral failure classes (M1.4 Task 4.10B, plan D-5). One pure function from what a failed provider call showed (an HTTP status, the error's own name or code, a network
@@ -120,6 +120,28 @@ export function runPriceRefusedBody(status: number, body: string): boolean {
   const { type, code } = error as { type?: unknown; code?: unknown };
   return type === RUN_PRICE_REFUSED_CODE || code === RUN_PRICE_REFUSED_CODE;
 }
+
+// ---- the gateway's fixed stops (DEC 254zzz491: a company with no monthly AI limit; the table is GATEWAY_STOPS in contracts, one entry per stop)
+
+/** The hosted model gateway's 403 code: the company has no monthly AI limit set. The words a person reads are `COMPANY_LIMIT_NOT_SET_MESSAGE` (contracts), never the body's. */
+export const COMPANY_LIMIT_NOT_SET_CODE = "company_limit_not_set";
+/** The stable token the model-call note carries for it (letters only, so it passes the failure-signal allow-list). */
+export const COMPANY_LIMIT_NOT_SET_SIGNAL = GATEWAY_STOPS.company_limit_not_set.signal;
+
+/**
+ * Which of the gateway's fixed stops an answer is: its HTTP status and `{ error: { type | code: <the stop's code> } }`. A STOP, never a retry and never read as a refused key: the same company is refused again until
+ * someone acts. Matched whole, never kept; any other status, code or shape (a 5xx outage, another 403) is not one.
+ */
+export function gatewayStopBody(status: number, body: string): GatewayStopCode | undefined {
+  let parsed: unknown;
+  try { parsed = JSON.parse(body); } catch { return undefined; }
+  const error = parsed !== null && typeof parsed === "object" ? (parsed as { error?: unknown }).error : undefined;
+  if (error === null || typeof error !== "object") return undefined;
+  const { type, code } = error as { type?: unknown; code?: unknown };
+  return gatewayStopOfAnswer(status, type) ?? gatewayStopOfAnswer(status, code);
+}
+/** Whether a gateway answer is the missing-limit refusal (403 `company_limit_not_set`). */
+export const companyLimitNotSetBody = (status: number, body: string): boolean => gatewayStopBody(status, body) === "company_limit_not_set";
 
 // ---- the gateway's fixed quota sentences (a Bedrock throttle: the model's AWS quota is used up or set to 0)
 

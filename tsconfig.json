@@ -1,10 +1,12 @@
 {
   "files": [],
   "references": [
+    { "path": "packages/code-api" },
     { "path": "packages/contracts" },
     { "path": "packages/verifier" },
     { "path": "packages/model-runtime" },
     { "path": "packages/gateway" },
+    { "path": "packages/model-gateway" },
     { "path": "packages/broker" },
     { "path": "packages/local-adapters" },
     { "path": "packages/testing" },

@@ -1,4 +1,5 @@
-import type { TaskMoneyV1 } from "@agentx/contracts";
+import type { ActionOffer, TaskMoneyV1 } from "@agentx/contracts";
+import type { TaskActionAnswer, TaskActionInput } from "../core-host/task-action-routes.js";
 import { logWorkspacePointerIntegrity } from "../core/task-flow/workspace-pointer.js";
 // Engine boundary (migration plan v3.2 lane E2, step 6 part): every AWS entry point that reads or acts on an EXISTING task goes by the task's stored engine (its stamp,
 // core-host/engine-stamp.ts), never by the switch.
@@ -23,6 +24,7 @@ import { setupCheckRecordKey } from "../core/setup-agent/check.js";
 import { engineStampKey, stampOf, type Engine, type EngineStamp } from "../core-host/engine-stamp.js";
 import type { CoreArea } from "../core-host/flags.js";
 import { NOT_ON_THE_CORE_YET, type DeployedCaller } from "../core-host/dev-routes.js";
+import { answerTaskRoute } from "../core-host/task-route-answer.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { taskPointerKey } from "../developer/task-records.js";
 import type { ChatThreadInput, ChatThreadInputResult } from "../core-host/chat-thread-input.js";
@@ -206,6 +208,16 @@ export interface CoreTaskEntry {
    * may try again). Absent: the deployment takes no decision from a chat (the card is the sign-in card).
    */
   chatDecision?(caller: CoreEntryCaller, press: ChatDecisionPress): Promise<ChatDecisionResult>;
+  /**
+   * S1: what one core task offers this person now (the task action registry, `core/task-actions`). `undefined`: the deployment does not serve the registry for them. Absent: the deployment serves no registry.
+   */
+  taskActions?(caller: CoreEntryCaller, taskId: string): Promise<ActionOffer[] | undefined>;
+  /**
+   * S1: a chat press of a task action, or the describe of one (the form and the confirm it needs), in process (no HTTP request is made or faked). The caller is the person the broker resolved from the chat account; the core resolves the
+   * account again, checks the workspace, binds the surface from the verified chat (never from the press) and judges the press (who, when, revision, confirm digest) before any write. A refusal is an answer; a throw means nothing was done.
+   * Absent: the deployment takes no task action from a chat.
+   */
+  taskAction?(caller: CoreEntryCaller, input: TaskActionInput): Promise<TaskActionAnswer>;
 }
 
 /**
@@ -245,7 +257,8 @@ const isStart = (request: BrokerRequest): boolean => request.method === "POST" &
  * routes take it from membership.
  */
 export function coreTaskEntryFrom(
-  routes: { route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined>; taskMoney?(caller: DeployedCaller, taskId: string): Promise<{ costUsd?: number; runLimitUsd: number; money?: TaskMoneyV1 } | undefined>; taskReadable?(caller: DeployedCaller, taskId: string): Promise<boolean> },
+  routes: { route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined>; taskMoney?(caller: DeployedCaller, taskId: string): Promise<{ costUsd?: number; runLimitUsd: number; money?: TaskMoneyV1 } | undefined>; taskReadable?(caller: DeployedCaller, taskId: string): Promise<boolean>;
+    /** S1: the task action registry (core-host/task-action-routes.ts). */ taskActions?(caller: DeployedCaller, taskId: string): Promise<ActionOffer[] | undefined>; taskAction?(caller: DeployedCaller, input: TaskActionInput): Promise<TaskActionAnswer> },
   deployedCallerOf: (caller: CoreEntryCaller) => Promise<DeployedCaller | undefined>,
   /** L4-U5b: the deployment's thread recording, asked with the caller as the core knows them (`deployedCallerOf`). Absent: the entry has no `recordThread`. */
   recordThread?: (deployed: DeployedCaller, input: { taskId: string; conversation: ConversationRef; actor: ActorRef }) => Promise<boolean>,
@@ -256,7 +269,29 @@ export function coreTaskEntryFrom(
 ): CoreTaskEntry {
   const taskMoney = routes.taskMoney?.bind(routes);
   const taskReadable = routes.taskReadable?.bind(routes);
+  const taskActions = routes.taskActions?.bind(routes);
+  const taskAction = routes.taskAction?.bind(routes);
   return {
+    ...(taskActions === undefined ? {} : {
+      async taskActions(caller: CoreEntryCaller, taskId: string) {
+        let deployed: DeployedCaller | undefined;
+        try { deployed = await deployedCallerOf(caller); } catch { return undefined; }
+        if (deployed === undefined) return undefined;
+        try { return await taskActions(deployed, taskId); } catch { return undefined; }
+      },
+    }),
+    ...(taskAction === undefined ? {} : {
+      async taskAction(caller: CoreEntryCaller, input: TaskActionInput): Promise<TaskActionAnswer> {
+        // No membership is the same refusal as a person who may not: nothing is written.
+        const refused: TaskActionAnswer = input.mode === "describe"
+          ? { mode: "describe", description: { status: "refused", code: "TASK_NOT_FOUND", reason: "not_found" } }
+          : { mode: "perform", result: { status: "refused", code: "TASK_NOT_FOUND", reason: "not_found", writes: "none" } };
+        let deployed: DeployedCaller | undefined;
+        try { deployed = await deployedCallerOf(caller); } catch { deployed = undefined; }
+        if (deployed === undefined) return refused;
+        return await taskAction(deployed, input);
+      },
+    }),
     ...(taskReadable === undefined ? {} : {
       async taskReadable(caller: CoreEntryCaller, taskId: string) {
         let deployed: DeployedCaller | undefined;
@@ -337,7 +372,17 @@ export function coreAnswerValue(answer: BrokerResponse): unknown {
 }
 
 /**
- * A developer task route for a task the core owns. The core's handlers answer it when they serve it. When they do not (no core entry on this install, or an operation it has no handler
+ * D1-1: a developer task route for a task the core owns. The core answers it, whatever the answer is (`core-host/task-route-answer.ts` over the entry's final `route`: its own words for a task it may not show this caller, and for a route it does not serve);
+ * this only turns the answer into the developer route's value or error. An install with no core entry has no core to answer: `missing()` is the old route's branch for a task that is not the core's.
+ */
+export async function serveCoreTaskRoute(entry: CoreTaskEntry | undefined, request: BrokerRequest, caller: CoreEntryCaller, taskId: string, missing: () => Promise<unknown>): Promise<unknown> {
+  if (entry === undefined) return await missing();
+  return coreAnswerValue(await answerTaskRoute((asked, by) => entry.route(asked, by), request, caller, taskId));
+}
+
+/**
+ * A developer task route for a task the core owns, with the CALLER'S words for a task it may not see (the Slack Keep press's own sentence). The developer routes use `serveCoreTaskRoute`, where the core says the words;
+ * this one goes with the Slack press handler bodies (D1-2a). The core's handlers answer it when they serve it. When they do not (no core entry on this install, or an operation it has no handler
  * for), the core's own task read decides what may be said: someone it lets read the task is told the operation is not on the core here yet; anyone else gets `missing()`, which is the
  * developer route's own answer for an id with no task (input checks, wrong method and words included), so a core task's id answers exactly like an id with no task. Never falls back to
  * the workflow's readers for the task itself.
@@ -374,4 +419,13 @@ export async function involvedOnCore(entry: CoreTaskEntry | undefined, request: 
   const answer = await entry.route(request, caller);
   if (answer === undefined || answer.statusCode === 401 || answer.statusCode === 404) return none;
   return coreAnswerValue(answer);
+}
+
+/**
+ * S1: the task action registry's two methods of an entry, to be passed on as they are (a wrapper that composes an entry from another must carry them: a method left out is dropped silently, and `tests/unit/task-actions-surfaces.test.ts`
+ * fails when `coreTaskEntryFrom`, the interface and the root's wrapper disagree).
+ */
+export function taskActionMethodsOf(entry: CoreTaskEntry): Pick<CoreTaskEntry, "taskActions" | "taskAction"> {
+  return { ...(entry.taskActions === undefined ? {} : { taskActions: (caller: CoreEntryCaller, taskId: string) => entry.taskActions!(caller, taskId) }),
+    ...(entry.taskAction === undefined ? {} : { taskAction: (caller: CoreEntryCaller, input: TaskActionInput) => entry.taskAction!(caller, input) }) };
 }

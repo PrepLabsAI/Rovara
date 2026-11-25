@@ -22,7 +22,7 @@ import { legacyWorkspaceKey } from "../task-flow/legacy-keys.js";
 import { taskOwnerKey } from "../../developer/task-records.js";
 import { documentOf, type TestEnvDeps } from "./deps.js";
 import { readApprovedBy, readApprovedTestEnvironment } from "./environment.js";
-import type { SavedEnvDeps } from "./saved-env.js";
+import type { RebuildJob, SavedEnvDeps, SavedEnvState } from "./saved-env.js";
 import { savedEnvEnabled } from "./saved-env-switch.js";
 import { startMarkerItem } from "./saved-env-markers.js";
 
@@ -67,27 +67,62 @@ export interface RebuildStartDeps {
   env?: NodeJS.ProcessEnv | undefined;
 }
 
-export async function startSavedEnvRebuild(deps: RebuildStartDeps, ids: { orgId: string; projectId: string }): Promise<StartRebuildResult> {
+/** What both starts of a rebuild (this file's, and the system run's, `saved-env-run.ts`) read before they write anything: the queued job and everything it must still agree with. */
+export interface RebuildFacts {
+  job: RebuildJob;
+  state: SavedEnvState;
+  project: NonNullable<Awaited<ReturnType<TaskFlowDeps["projects"]["latest"]>>>;
+  approved: NonNullable<Awaited<ReturnType<typeof readApprovedTestEnvironment>>>;
+  build: SavedEnvBuildInputs;
+}
+export type RebuildFactsRefusal = "disabled" | "nothing_queued" | "no_project" | "approved_moved" | "commits_mismatch" | "no_build_inputs";
+
+/**
+ * The guards of a rebuild's start, all of them reads: the switch is on; the project has a queued job nobody has been given the lease of, whose lease is live; the project is live; the approved environment is still
+ * the one the job was queued for; every repository of the project has a commit in the job and the job names no other; the install can say the build's inputs.
+ */
+export async function readRebuildFacts(deps: Omit<RebuildStartDeps, "ownerFor">, ids: { orgId: string; projectId: string }): Promise<{ ok: true; facts: RebuildFacts } | { ok: false; why: RebuildFactsRefusal }> {
   const saved = deps.saved;
-  if (!savedEnvEnabled(deps.env ?? process.env) || !saved.session.config.enabled) return { started: false, why: "disabled" };
+  if (!savedEnvEnabled(deps.env ?? process.env) || !saved.session.config.enabled) return { ok: false, why: "disabled" };
   const state = await saved.store.get(ids.orgId, ids.projectId);
   const job = state?.job;
   // Only a queued job that nobody has been given the lease of, and whose lease is live.
-  if (state === undefined || job === undefined || job.dispatchedAt !== undefined || Date.parse(job.leaseUntil) <= saved.now() || state.deleted === true || state.archived === true || !state.enabled) return { started: false, why: "nothing_queued" };
+  if (state === undefined || job === undefined || job.dispatchedAt !== undefined || Date.parse(job.leaseUntil) <= saved.now() || state.deleted === true || state.archived === true || !state.enabled) return { ok: false, why: "nothing_queued" };
   const project = await deps.flow.projects.latest(ids.projectId);
-  if (project === undefined || project.archived === true) return { started: false, why: "no_project" };
+  if (project === undefined || project.archived === true) return { ok: false, why: "no_project" };
   // The environment the job was queued for is still the newest approved one: the build proves THIS body.
   const approved = await readApprovedTestEnvironment(deps.test, ids.orgId, ids.projectId);
-  if (approved === undefined || approved.revision !== job.approved.revision || testEnvDigest(approved.environment) !== job.approved.digest) return { started: false, why: "approved_moved" };
+  if (approved === undefined || approved.revision !== job.approved.revision || testEnvDigest(approved.environment) !== job.approved.digest) return { ok: false, why: "approved_moved" };
+  // Every repository of the project has a commit in the job, and the job names no other: the pins are the job's commits, whole.
+  const names = workerProjectDefinition(project.definition).repositories.map((repository) => repository.name);
+  const committed = Object.keys(job.commits);
+  if (names.length !== committed.length || names.some((name) => job.commits[name] === undefined)) return { ok: false, why: "commits_mismatch" };
+  const build = await deps.inputs?.(ids.orgId, ids.projectId);
+  if (build === undefined) return { ok: false, why: "no_build_inputs" };
+  return { ok: true, facts: { job, state, project, approved, build } };
+}
+
+/** The preparation a rebuild is: read only, PINNED to the job's commits, carrying the job (`savedEnvBuild`) and no credential. The caller adds who it runs as and what it writes beside it. */
+export function rebuildPreparation(saved: SavedEnvDeps, ids: { orgId: string; projectId: string }, facts: RebuildFacts): { pins: Array<{ repository: string; commit: string }>; savedEnvBuild: PrepareSavedEnvBuild } {
+  const { job, approved, build, project } = facts;
+  const names = workerProjectDefinition(project.definition).repositories.map((repository) => repository.name);
+  return {
+    pins: names.map((repository) => ({ repository, commit: job.commits[repository]! })),
+    savedEnvBuild: {
+      jobId: job.jobId, reason: job.reason, approved: job.approved, repository: savedEnvRepositoryName({ env: saved.session.config.env, orgId: ids.orgId, projectId: ids.projectId }),
+      expectedKey: job.expectedKey, environment: approved.environment, commits: job.commits, detectorGlobs: [...build.detectorGlobs], secretNames: [...build.secretNames], baseImageDigest: build.baseImageDigest,
+    },
+  };
+}
+
+export async function startSavedEnvRebuild(deps: RebuildStartDeps, ids: { orgId: string; projectId: string }): Promise<StartRebuildResult> {
+  const saved = deps.saved;
+  const read = await readRebuildFacts(deps, ids);
+  if (!read.ok) return { started: false, why: read.why };
+  const { job, project, approved } = read.facts;
   const owner = await (deps.ownerFor ?? (async ({ orgId, project: name, approvedRevision }) => readApprovedBy(deps.test, orgId, name, approvedRevision)))({ orgId: ids.orgId, project: ids.projectId, approvedRevision: approved.revision });
   if (owner === undefined) return { started: false, why: "no_owner" };
-  const repositories = workerProjectDefinition(project.definition).repositories;
-  // Every repository of the project has a commit in the job, and the job names no other: the pins are the job's commits, whole.
-  const names = repositories.map((repository) => repository.name);
-  const committed = Object.keys(job.commits);
-  if (names.length !== committed.length || names.some((name) => job.commits[name] === undefined)) return { started: false, why: "commits_mismatch" };
-  const build = await deps.inputs?.(ids.orgId, ids.projectId);
-  if (build === undefined) return { started: false, why: "no_build_inputs" };
+  const { pins, savedEnvBuild } = rebuildPreparation(saved, ids, read.facts);
 
   const nowMs = saved.now();
   const now = new Date(nowMs).toISOString();
@@ -99,11 +134,6 @@ export async function startSavedEnvRebuild(deps: RebuildStartDeps, ids: { orgId:
     ...workspaceKey(deps.flow.companyId, workspaceId), entityType: "WORKSPACE", id: workspaceId, companyId: deps.flow.companyId, orgId: deps.flow.companyId, ownerKey, projectName: ids.projectId, projectRevision: project.definition.revision,
     status: "PREPARING", activeOperationId: operationId, fence: 1, createdAt: now, updatedAt: now,
   });
-  const pins = names.map((repository) => ({ repository, commit: job.commits[repository]! }));
-  const savedEnvBuild: PrepareSavedEnvBuild = {
-    jobId: job.jobId, reason: job.reason, approved: job.approved, repository: savedEnvRepositoryName({ env: saved.session.config.env, orgId: ids.orgId, projectId: ids.projectId }),
-    expectedKey: job.expectedKey, environment: approved.environment, commits: job.commits, detectorGlobs: [...build.detectorGlobs], secretNames: [...build.secretNames], baseImageDigest: build.baseImageDigest,
-  };
   const prepare = buildOperation(deps.flow, {
     workspace: { pk: workspace.pk, id: workspaceId, fence: 1, ownerKey }, kind: "prepare", requestId: (deps.flow.newId ?? randomUUID)(), operationId, now, recordRequest: false,
     dispatch: {

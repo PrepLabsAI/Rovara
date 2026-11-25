@@ -17,6 +17,7 @@ import { coreTaskEntryFrom, type CoreTaskEntry } from "../../packages/broker/src
 import { createCoreTaskRuleRoutes } from "../../packages/broker/src/aws/core-task-rule-routes.js";
 import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { MAYA, OMAR, bearerFor, createDeveloperTaskBroker, grantProject, type Developer } from "../support/developer-task-broker.js";
+import { readsAsRow } from "../support/code-api-row-read.js";
 import { pagePlan, pageTask } from "../support/page-tasks.js";
 import { loadSlackBroker } from "../support/slack-broker.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
@@ -112,7 +113,7 @@ async function ruleWorld(options: { rules?: boolean } = {}) {
     return JSON.parse(JSON.stringify(answer).replaceAll(id, task.taskId)) as typeof answer;
   };
   const rows = () => JSON.stringify(db.find((item) => String(item.pk).includes(task.taskId)));
-  return { world, app, db, dev, missing, rows, task, owner, objects: harness.s3.objects };
+  return { world, app, db, dev, missing, rows, task, owner, objects: harness.s3.objects, rules };
 }
 
 describe("readers on a core task (spec 067's rule)", () => {
@@ -164,6 +165,7 @@ describe("the events timeline of a core task (the core's log and decisions)", ()
     const events = (answer.body as { events: Array<{ at: string; kind: string; text: string }> }).events;
     expect(events.map((event) => event.at)).toEqual(["2026-11-15T10:00:00.000Z", "2026-11-15T10:01:00.000Z", "2026-11-15T10:02:00.000Z", "2026-11-15T10:04:00.000Z"]);
     expect(events.map((event) => event.kind)).toEqual(["status", "message", "message", "status"]);
+    readsAsRow("tasks.events", answer.body);
     expect(events[0]!.text).toBe("Task started");
     expect(events[2]!.text).toBe("Answer from Maya Chen: /health");
     expect(events[3]!.text).toBe("Approved: Looks right.");
@@ -210,6 +212,7 @@ describe("plan comments and People on a core task (the old routes' own functions
     const root = first.body["comment"] as { commentId: string };
     expect(await h.dev(MAYA, "POST", path, { requestId: "reply", document: "plan", text: "Keep the button visible", replyTo: root.commentId })).toMatchObject({ status: 200, body: { comment: { replyTo: root.commentId, anchor: "claim:2.1" } } });
     const fresh = await h.dev(MAYA, "GET", path);
+    readsAsRow("tasks.comments", fresh.body);
     const comments = fresh.body["comments"] as Array<{ replyTo?: string; anchor?: string }>;
     expect(comments.find((comment) => comment.replyTo === root.commentId)).toMatchObject({ anchor: "claim:2.1" });
     await h.dev(MAYA, "PUT", `/v1/dev/tasks/${h.task.taskId}/readers/${TESS.developerId}`, { requestId: randomUUID(), role: "viewer" });
@@ -286,5 +289,23 @@ describe("DEC 254zzz44 (a): a reader the owner shared a core task with opens it 
     const unwired = await ruleWorld({ rules: false });
     unwired.db.set({ pk: `DEVTASK#${unwired.task.taskId}`, sk: `READER#${TESS.developerId}`, schemaVersion: 1, developerId: TESS.developerId, role: "viewer", grantedBy: MAYA.developerId, grantedAt: "2026-11-15T00:00:00.000Z" });
     expect(await unwired.dev(TESS, "GET", `/v1/dev/tasks/${unwired.task.taskId}`)).toEqual(await unwired.missing(TESS, "GET", ""));
+  });
+});
+
+
+// S1: the People moves of the task action registry, in process (the same People functions the routes call). Where People is not configured the move says so (the same refusal as the route), a task of another company is refused as missing
+// before any People function runs, and nothing is written either way.
+describe("the registry's People moves on a core task (S1)", () => {
+  it("answers as the People routes do where People is not configured, and refuses another company's task as missing; nothing is written", async () => {
+    const h = await ruleWorld();
+    const record = (await h.world.store.get(taskKey(h.task.taskId)))!;
+    const viewer = (who: Developer, task: Record<string, unknown> = record) => ({ person: { developerId: who.developerId, name: who.name }, companyId: FAKE_COMPANY, task });
+    const before = h.rows();
+    await expect(h.rules.people.view(viewer(MAYA))).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    await expect(h.rules.people.takeOwnership({ ...viewer(MAYA), requestId: randomUUID(), expectedPeopleRevision: 1 })).rejects.toBeDefined();
+    const foreign = { ...record, companyId: OTHER };
+    await expect(h.rules.people.view(viewer(MAYA, foreign))).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    await expect(h.rules.people.takeOwnership({ ...viewer(MAYA, foreign), requestId: randomUUID(), expectedPeopleRevision: 1 })).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    expect(h.rows()).toBe(before);
   });
 });

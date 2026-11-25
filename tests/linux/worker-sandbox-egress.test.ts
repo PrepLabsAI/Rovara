@@ -117,6 +117,25 @@ const onBridge = (script: string) => docker("run", "--rm", "--pull=never", "--ne
 const connectOutcome = (host: string, port: number): string => `
 const n=require('net');const s=n.connect({host:${JSON.stringify(host)},port:${String(port)},timeout:4000});
 s.on('connect',()=>{console.log('open');process.exit(0)});s.on('timeout',()=>{console.log('timeout');process.exit(0)});s.on('error',e=>{console.log(e.code);process.exit(0)});`;
+const RAW_IP_CONTROL_LOG_PREFIX = "[F11 raw-IP control]";
+/**
+ * Node source for the F11 POSITIVE raw-IP control: from the default-bridge control network each address must
+ * accept a TCP connection on 443 (so the sandbox's blocked raw-IP probes are shown against a path that is open).
+ * A single 4s connect on a shared CI runner can time out on a slow moment (seen once, #1408), so each address gets
+ * a bounded number of attempts and every failed attempt is logged. This only ever retries the control: it never
+ * turns a failed connect into "open", and it exits non-zero (naming the last failure) when no attempt connects.
+ * The sandbox-side assertions (raw IP, DNS, proxy, registry, ...) are separate and are not retried.
+ */
+const rawIpOpenControlScript = (hosts: string[], attempts = 3, timeoutMs = 5000, gapMs = 500): string => `
+const n=require('net');const hosts=${JSON.stringify(hosts)};const attempts=${String(attempts)};
+const once=(host)=>new Promise((ok,bad)=>{const s=n.connect({host,port:443,timeout:${String(timeoutMs)}});
+  s.on('connect',()=>{s.destroy();ok('open')});
+  s.on('timeout',()=>{s.destroy();bad(Error('raw-IP control timed out: '+host))});
+  s.on('error',(e)=>{s.destroy();bad(Error('raw-IP control failed: '+host+' '+(e.code||e.message)))})});
+const control=async(host)=>{let last;for(let i=1;i<=attempts;i++){try{return await once(host)}catch(e){last=e;
+  console.error('${RAW_IP_CONTROL_LOG_PREFIX} attempt '+i+'/'+attempts+' '+e.message+(i<attempts?'; retrying':'; giving up'));
+  if(i<attempts)await new Promise((r)=>setTimeout(r,${String(gapMs)}))}}throw last};
+Promise.all(hosts.map(control)).then(a=>console.log(JSON.stringify(a))).catch(e=>{console.error(e.message);process.exit(1)});`;
 const lookupOutcome = (name: string): string => `require('dns').lookup(${JSON.stringify(name)},{family:4},(e,a)=>{console.log(e?e.code:a);process.exit(0)});`;
 const httpsOutcome = (url: string): string => `
 const https=require('https');const r=https.get(${JSON.stringify(url)},{timeout:8000,rejectUnauthorized:false,headers:{accept:'application/dns-json'}},res=>{console.log('status '+res.statusCode);res.resume();res.on('end',()=>process.exit(0))});
@@ -824,7 +843,8 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       // probes, including refreshed raw-IP and registry controls alongside them.
       const controls = async () => {
         const raw = await docker("run", "--rm", "--pull=never", "--name", controlName, "--network", CONTROL_NETWORK, "--cap-drop=ALL", "--security-opt", "no-new-privileges", image, "node", "-e",
-          `const n=require('net');Promise.all(['1.1.1.1','8.8.8.8'].map(host=>new Promise((ok,bad)=>{const s=n.connect({host,port:443,timeout:4000});s.on('connect',()=>{s.destroy();ok('open')});s.on('timeout',()=>{s.destroy();bad(Error('raw-IP control timed out: '+host))});s.on('error',bad)}))).then(a=>console.log(JSON.stringify(a))).catch(e=>{console.error(e);process.exit(1)})`);
+          rawIpOpenControlScript(["1.1.1.1", "8.8.8.8"]));
+        if (raw.stderr.includes(RAW_IP_CONTROL_LOG_PREFIX)) console.log(raw.stderr.trim());
         expect(raw.code, raw.stderr).toBe(0);
         expect(JSON.parse(raw.stdout.trim()) as string[]).toEqual(["open", "open"]);
         await Promise.all([

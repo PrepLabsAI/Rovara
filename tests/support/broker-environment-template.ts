@@ -31,6 +31,9 @@ export function brokerNamesParameterOf(template: ResourcesTemplate, pointer: str
   return { id, revision: match[1]!, names: { "Fn::Join": ["", match[2] === "" ? rest : [match[2]!, ...rest]] } };
 }
 
+/** A packed variable's pieces as `code -> value` (an intrinsic, or the literal that sits inside a merged string). */
+export const packedPiecesOf = (raw: unknown): Map<string, unknown> => pieces(raw);
+
 function pieces(raw: unknown): Map<string, unknown> {
   const join = (raw as { "Fn::Join"?: [string, unknown[]] } | undefined)?.["Fn::Join"];
   const found = new Map<string, unknown>();

@@ -1,3 +1,4 @@
+import { signingWorld } from "./model-gateway.js";
 import type { CoreRuntime } from "../../packages/broker/src/core-host/core-runtime.js";
 // Native journeys share the State table and bucket across core and hosted routes.
 // Sign-in stays in a separate physical fake table; lifecycle verdicts always come from core.
@@ -7,7 +8,7 @@ import { cp, mkdir, mkdtemp, readFile, readdir, realpath, writeFile } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect } from "vitest";
-import { E2EPolicySchema, createCandidateManifest, isSafeE2ESourcePath, projectPk, WORKER_INVOKE_AUTHORIZATION_SCHEME, workerInvokeToken, workerInvokeTokenPayload, type E2ESourceSnapshot, type WorkerInvocation, type DeveloperTaskView, type E2EScenarioResults } from "@agentx/contracts";
+import { E2EPolicySchema, agentModelIdentity, createCandidateManifest, isSafeE2ESourcePath, projectPk, WORKER_INVOKE_AUTHORIZATION_SCHEME, workerInvokeToken, workerInvokeTokenPayload, type E2ESourceSnapshot, type WorkerInvocation, type DeveloperTaskView, type E2EScenarioResults } from "@agentx/contracts";
 import { locateWorkspace } from "../../packages/broker/src/core/task-flow/workspace-location.js";
 import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
 import { createDockerApplicationHost, createProcessDockerCli } from "@agentx/verifier";
@@ -33,23 +34,29 @@ import { vi } from "vitest";
 import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
 import * as dynamo from "@aws-sdk/client-dynamodb";
 import { FakeDynamoDb as WireDynamo } from "./ports/dynamodb-fake.js";
-import { IMPLICIT_COMPANY_ID, ProjectDefinitionSchema, canonicalJson, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, ProjectDefinitionSchema, canonicalJson, orgProjectCatalogKey, projectRevisionKey, type DocumentStore, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
 import { DynamoDocumentStore } from "../../packages/aws-adapters/src/dynamodb/document-store.js";
 import { S3ObjectStorage } from "../../packages/aws-adapters/src/s3/index.js";
 import { developerTaskRouteDependencies, type DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
+import { codeSettingsReader } from "../../packages/broker/src/aws/project-code-settings.js";
+import { linearAppIntakeDeliver } from "../../packages/broker/src/aws/linear-app-intake.js";
+import type { LinearAppSettings, LinearConnections } from "../../packages/broker/src/aws/linear-connections.js";
+import { createBrokerCoreServices } from "../../packages/broker/src/aws/core-job-services.js";
 import { createBrokerCoreRoot, membershipWithRoleFromDynamo, hostedDisplayNameOf, type BrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
 import { stateTableIndexes } from "../../packages/broker/src/core-host/code-modules.js";
 import type { CoreAdapterModule } from "../../packages/broker/src/core-host/registry.js";
 import type { ApplicationE2ESeams } from "../../packages/broker/src/core/e2e/application-seams.js";
 import { companyMembershipFromDynamo } from "../../packages/broker/src/aws/company-check.js";
+import { githubLinkReaderOver } from "../../packages/broker/src/core/people/github-links.js";
 import { createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { approvalProofKeyOf, createHostedApprovers } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
 import { createNoticeService, createSessionService } from "../../packages/broker/src/services/index.js";
 import { createTaskFactsSource } from "../../packages/broker/src/local/app/facts.js";
 import { recordTaskThread } from "../../packages/broker/src/core/channel/threads.js";
-import { createFakeWorld, FAKE_COMPANY, type FakeWorld } from "./core-host-fakes.js";
+import { createFakeWorld, FAKE_COMPANY, type FakeWorld, type FakeWorldOptions } from "./core-host-fakes.js";
 import { createPriceTableMetering } from "../../packages/broker/src/ports/policy-defaults.js";
+import type { ChatThreads } from "../../packages/broker/src/core-host/chat-threads.js";
 import { createDeveloperTaskBroker, MAYA, OMAR, type memoryS3 } from "./developer-task-broker.js";
 import type { FakeDynamoDb } from "./fake-dynamodb.js";
 
@@ -110,6 +117,30 @@ export interface CoreBrowserBrokerOptions {
   definition?: ProjectDefinition;
   brokerExtra?: Record<string, unknown>;
   developerExtra?: Partial<DeveloperApiConfiguration>;
+  /** The journeys' real-core proof (tests/journeys/harness/core-proof.ts): a wrapper the broker is given instead of the root, to record which requests the core answered. The returned harness keeps the real root. */
+  wrapCore?: (root: BrokerCoreRoot) => BrokerCoreRoot;
+  /** The model gateway's address and the install's task-token key on the hosted root (as a deployment sets them): the root then wires the hosted model calls (the grown tier's reviews) over `fetch`, which a journey stands in front of. */
+  modelGateway?: { url: string; model: string };
+  /** The deployed job services (merge tracking, session sweep, notice delivery: `createBrokerCoreServices`) instead of this fixture's stand-ins, so a journey can run the jobs a deployment's schedules run. */
+  realJobServices?: boolean;
+  /** Options of the fake world (its admission, machines, ...), for a journey that needs the deployment's admission to refuse. */
+  world?: FakeWorldOptions;
+  /** Names the person a chat account is (`ChatThreads.personOf`), so a chat press can reach the task action registry. Absent: the chat names no one (every journey but the ones that press from a chat). */
+  chatPerson?: ChatThreads["personOf"];
+  /** The core's log lines (a journey that reads what the broker logged); default: dropped. */
+  log?: (entry: Record<string, unknown>) => void;
+  /**
+   * Linear on the hosted root (aws/linear-wiring.ts's pieces): the connections over the broker's table, the company's connect and link routes, the Linear app webhook route on the broker's front and the
+   * tracker intake from each company's own runtime. Built with a lazy table client and the world's clock, because both exist only once the broker is built.
+   */
+  linear?: (ports: { db: { send(command: unknown, options?: unknown): Promise<unknown> }; now: () => number }) => CoreBrowserLinear;
+}
+
+export interface CoreBrowserLinear {
+  connections: LinearConnections;
+  app: () => Promise<LinearAppSettings | undefined>;
+  fetch: typeof fetch;
+  log: (entry: Record<string, unknown>) => void;
 }
 
 /** A contract-only base cannot run a baseline; runnable results fixtures retain the product default. */
@@ -118,30 +149,55 @@ export function journeyProjectDefinition(definition: ProjectDefinition, runnable
 }
 
 type DeveloperTaskBrokerHarness = Awaited<ReturnType<typeof createDeveloperTaskBroker>>;
-export interface CoreBrowserBrokerHarness extends DeveloperTaskBrokerHarness { core: BrokerCoreRoot; world: FakeWorld; runtime: CoreRuntime; channel: FakeChannelAdapter }
+export interface CoreBrowserBrokerHarness extends DeveloperTaskBrokerHarness { core: BrokerCoreRoot; world: FakeWorld; runtime: CoreRuntime; channel: FakeChannelAdapter; storeWire: WireDynamo; wire: WireDynamo }
 
 export async function createCoreBrowserBroker(options: CoreBrowserBrokerOptions = {}): Promise<CoreBrowserBrokerHarness> {
   let core: BrokerCoreRoot | undefined;
   let world: FakeWorld | undefined;
+  const gatewaySigner = options.modelGateway === undefined ? undefined : signingWorld().signer;
   const channel = new FakeChannelAdapter();
+  // Linear's pieces need the table client and the core's store, which exist only inside the broker's own construction below: they are reached through these.
+  let tableRef: { send(command: unknown, options?: unknown): Promise<unknown> } | undefined;
+  let storeRef: DocumentStore | undefined;
+  // The core's own table (the one its store writes to), for a journey that makes the table refuse some writes (journey 14: reviews that cannot start).
+  let storeWire: ReturnType<typeof wireClient> | undefined;
+  const lazyTable = { send: (command: unknown, sendOptions?: unknown) => tableRef!.send(command, sendOptions) };
+  const lazyStore = new Proxy({} as DocumentStore, { get: (_target, field) => { const value = (storeRef as unknown as Record<PropertyKey, unknown>)[field]; return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(storeRef) : value; } });
+  const linear = options.linear?.({ db: lazyTable, now: () => world?.clock.now ?? Date.now() });
+  const linearDeveloper = (linear === undefined ? {} : {
+    companies: companyMembershipFromDynamo(lazyTable, "signin"),
+    linearConnect: { connections: linear.connections, app: linear.app, fetch: linear.fetch, log: linear.log, links: lazyStore },
+    linearLink: { connections: linear.connections, links: lazyStore, app: linear.app, fetch: linear.fetch, log: linear.log },
+  }) as Partial<DeveloperApiConfiguration>;
+  const linearBroker: Record<string, unknown> = linear === undefined ? {} : {
+    linearWebhook: { connections: linear.connections, app: linear.app, now: () => world?.clock.now ?? Date.now(), log: linear.log,
+      deliver: linearAppIntakeDeliver({ connections: linear.connections, app: linear.app, intakeFor: async (companyId) => core?.intake?.intakeFor(companyId), fetch: linear.fetch, log: linear.log }) },
+  };
   const harness = await createDeveloperTaskBroker({ register: false,
-    ...(options.developerExtra === undefined ? {} : { developerExtra: options.developerExtra }), ...(options.brokerExtra === undefined ? {} : { brokerExtra: options.brokerExtra }),
+    ...(options.developerExtra === undefined && linear === undefined ? {} : { developerExtra: { ...options.developerExtra, ...linearDeveloper } }),
+    ...(options.brokerExtra === undefined && linear === undefined ? {} : { brokerExtra: { ...options.brokerExtra, ...linearBroker } }),
     coreRoot: ({ db, s3, callbackSigningKey }) => {
-      const store = new DynamoDocumentStore({ client: wireClient(db), tableName: "state", indexes: stateTableIndexes(), retryBaseMs: 1 });
+      storeWire = wireClient(db);
+      const store = new DynamoDocumentStore({ client: storeWire, tableName: "state", indexes: stateTableIndexes(), retryBaseMs: 1 });
+      tableRef = db;
+      storeRef = store;
       const objects = new S3ObjectStorage({ client: { send: (command) => s3.send(command as Parameters<typeof s3.send>[0]) }, bucket: "artifacts" });
-      world = createFakeWorld({ store, objects });
+      world = createFakeWorld({ store, objects, ...options.world });
       world.clock.now = Date.now();
-      const identity = createHostedIdentity({ membershipOf: membershipWithRoleFromDynamo(db, "signin"), displayNameOf: hostedDisplayNameOf(db, "signin") });
-      adapters.modules = world.modules.map((module) => module.point === "identity" ? { ...module, create: () => identity } : module.point === "metering" ? { ...module, create: () => createPriceTableMetering({ currency: "USD", models: { [PLANNER_MODEL_KEY]: PRICE, [`${FAUX_MODEL.provider}/${FAUX_MODEL.modelId}`]: PRICE } }) } : module.point === "approvers" ? { ...module, create: () => createHostedApprovers({ store, identity, key: approvalProofKeyOf(callbackSigningKey), now: () => new Date(world!.clock.now) }) } : module);
-      core = createBrokerCoreRoot({ env: { AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID: typeof options.brokerExtra?.["e2eFeatureRuntimeCatalogId"] === "string" ? options.brokerExtra["e2eFeatureRuntimeCatalogId"] : "catalog" }, documentClient: db, stateTableName: "state", signInTableName: "signin", callbackSigningKey,
+      const identity = createHostedIdentity({ membershipOf: membershipWithRoleFromDynamo(db, "signin"), displayNameOf: hostedDisplayNameOf(db, "signin"), githubLinks: githubLinkReaderOver(store) });
+      adapters.modules = world.modules.filter((module) => options.modelGateway === undefined || module.point !== "model-keys").map((module) => module.point === "identity" ? { ...module, create: () => identity } : module.point === "metering" ? { ...module, create: () => createPriceTableMetering({ currency: "USD", models: { [PLANNER_MODEL_KEY]: PRICE, [`${FAUX_MODEL.provider}/${FAUX_MODEL.modelId}`]: PRICE, ...(options.modelGateway === undefined ? {} : { [`${agentModelIdentity(options.modelGateway.model).provider}/${options.modelGateway.model}`]: PRICE }) } }) } : module.point === "approvers" ? { ...module, create: () => createHostedApprovers({ store, identity, key: approvalProofKeyOf(callbackSigningKey), now: () => new Date(world!.clock.now) }) } : module);
+      core = createBrokerCoreRoot({ ...(linear === undefined ? {} : { linearIntake: { connections: linear.connections, fetch: linear.fetch } }), env: { AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID: typeof options.brokerExtra?.["e2eFeatureRuntimeCatalogId"] === "string" ? options.brokerExtra["e2eFeatureRuntimeCatalogId"] : "catalog", ...(options.modelGateway === undefined ? {} : { ROVARA_CORE_MODEL_GATEWAY_URL: options.modelGateway.url, ROVARA_CORE_AGENT_MODEL: options.modelGateway.model }) },
+        ...(gatewaySigner === undefined ? {} : { taskTokens: () => ({ signer: gatewaySigner, issuer: "https://api.example/v1/auth" }) }), documentClient: db, stateTableName: "state", signInTableName: "signin", codeSettings: codeSettingsReader({ documentClient: db, tableName: "state" }), callbackSigningKey,
         ...(options.brokerExtra?.["projectSetupSource"] === undefined ? {} : { applicationSource: async (repositoryUrl, ref) => (options.brokerExtra!["projectSetupSource"] as { capture(input: { repositoryUrl: string; ref: string }): Promise<E2ESourceSnapshot> }).capture({ repositoryUrl, ref }) }),
         repositoryGrantKey: Buffer.alloc(32, 4), repositoryCredential: async () => ({ token: "synthetic-local-host-token" }),
-        codeModules: () => ({}) as never, origin: () => "https://api.example.test", log: () => undefined, now: () => new Date(world!.clock.now),
+        codeModules: () => ({}) as never, origin: () => "https://api.example.test", log: options.log ?? (() => undefined), now: () => new Date(world!.clock.now),
         taskRules: (person, companyId) => ({ ...developerTaskRouteDependencies({ documentClient: db, tableName: "state", developer: signIn!, companies: companyMembershipFromDynamo(db, "signin"), now: Date.now }, { developerId: person.developerId, sessionId: "core", name: person.name, amr: "oidc" }, undefined, null), companyId }),
         ciReporting: { honest: true, ciMode: async () => "sandbox_only" as const },
-        chatThreads: { channels: ["examplechat"], companyOf: ({ tenant }) => tenant === "journey-team" ? JOURNEY_COMPANY : undefined, adapterFor: (company, name) => company === JOURNEY_COMPANY && name === "examplechat" ? channel : undefined },
+        chatThreads: { channels: ["examplechat"], ...(options.chatPerson === undefined ? {} : { personOf: options.chatPerson }), companyOf: ({ tenant }) => tenant === "journey-team" ? JOURNEY_COMPANY : undefined, adapterFor: (company, name) => company === JOURNEY_COMPANY && name === "examplechat" ? channel : undefined },
         services: (companyId, flow, registry, wiring) => {
           const clock = () => new Date(world!.clock.now);
+          // 27c (8c288c790): the job services read the merge requesters from the task People list and refuse to build without that source; the same state table the deployed broker gives it.
+          if (options.realJobServices === true) return createBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!, now: clock, taskPeople: { documentClient: db, tableName: "state" } });
           const notices = createNoticeService({ store, registry: wiring.notification?.registry ?? registry, now: clock, ...wiring.notification,
             e2e: async (session) => {
               const task = await store.get({ pk: `DEVTASK#${(session.subject.kind === "task" ? session.subject.taskId : "")}`, sk: "META" }) as unknown as Parameters<JourneyApplicationPorts["results"]["notice"]>[0] | undefined;
@@ -151,7 +207,7 @@ export async function createCoreBrowserBroker(options: CoreBrowserBrokerOptions 
           return { "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async ({ budgetMs }) => ({ ...await sessions.sweep({ companyId, budgetMs }) }) }, "notify-deliver": { pass: async ({ budgetMs }) => ({ ...await notices.deliver({ companyId, deadlineMs: world!.clock.now + budgetMs }) }) } };
         },
       });
-      return core;
+      return options.wrapCore === undefined ? core : options.wrapCore(core);
     },
   });
   const signIn = harness.brokerInput.developer;
@@ -165,7 +221,7 @@ export async function createCoreBrowserBroker(options: CoreBrowserBrokerOptions 
   const runtime = await core.app.runtimeFor(JOURNEY_COMPANY);
   await runtime.flow.deps.store.put({ item: { ...projectRevisionKey(JOURNEY_COMPANY, definition.name, definition.revision), entityType: "PROJECT", runtimeBinding, definition: JSON.parse(canonicalJson(definition)) as JsonValue } });
   await runtime.flow.deps.store.put({ item: { ...orgProjectCatalogKey(JOURNEY_COMPANY, definition.name), entityType: "PROJECT_CATALOG", latestRevision: definition.revision } });
-  return { ...harness, core, world, runtime, channel };
+  return { ...harness, core, world, runtime, channel, storeWire: storeWire!, wire: storeWire! };
 }
 
 /** Use the actual decision card and its digest; never manufacture approval/workflow rows. */
@@ -186,14 +242,14 @@ export async function approveJourneyPlan(harness: Awaited<ReturnType<typeof crea
 export type JourneyObjects = ReturnType<typeof memoryS3>;
 
 /** Drain core's own outbox/recovery/dispatch; fake compute reports readiness, never rewrites operation rows. */
-export async function takeCoreInvocation(harness: Awaited<ReturnType<typeof createCoreBrowserBroker>>, workspaceId: string, mode: string, after?: string) {
+export async function takeCoreInvocation(harness: Awaited<ReturnType<typeof createCoreBrowserBroker>>, workspaceId: string, mode: string, after?: string | ReadonlySet<string>) {
   for (let attempt = 0; attempt < 40; attempt += 1) {
     await harness.runtime.flow.sweepOnce();
     await harness.runtime.flow.relayOnce();
     await harness.runtime.flow.dispatchOnce({ waitSeconds: 0 });
     const rows = harness.db.find((row) => row.entityType === "OPERATION" && row.workspaceId === workspaceId && typeof row.machineId === "string");
     for (const row of rows) {
-      const found = harness.world.machines.delivered(String(row.machineId)).find((invocation) => invocation.operationId !== after && (mode === "prepare" ? invocation.kind === "prepare" : mode === "publish" ? invocation.kind === "publish" : invocation.kind === "task" && invocation.payload.workflowMode === mode));
+      const found = harness.world.machines.delivered(String(row.machineId)).find((invocation) => !(typeof after === "string" ? invocation.operationId === after : after?.has(invocation.operationId) === true) && (mode === "prepare" ? invocation.kind === "prepare" : mode === "publish" ? invocation.kind === "publish" : mode === "maintain" ? invocation.kind === "maintain" : invocation.kind === "task" && invocation.payload.workflowMode === mode));
       if (found !== undefined) return { invocation: found, machineId: String(row.machineId) };
     }
     harness.world.clock.advance(5);

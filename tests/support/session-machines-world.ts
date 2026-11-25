@@ -6,6 +6,7 @@ import { AGENTX_PROTOCOL_VERSION, WorkerInvocationSchema, type Ec2RuntimeBinding
 import { SessionManager, type ProvisioningInput, type DeletionInput } from "../../packages/broker/src/aws/sessions.js";
 import { createReaperHandler, type ReaperReport } from "../../packages/broker/src/aws/session-reaper.js";
 import { createSessionStepsHandler } from "../../packages/broker/src/aws/session-steps.js";
+import { createMachineVerifier } from "../../packages/broker/src/aws/machine-check.js";
 import { SessionWorkerFleet, type SessionWorkerMachines, type SessionWorkerMachinesDependencies, type SessionWorkerPing } from "../../packages/broker/src/aws/worker-machines/session-worker-machines.js";
 import { workspaceCompanyReader } from "../../packages/broker/src/aws/worker-machines/workspace-company.js";
 import { WORKER_IMPLEMENTED_FEATURES } from "../../packages/worker/src/implemented-features.js";
@@ -67,6 +68,8 @@ export interface SessionMachinesWorld {
   /** One idle-reaper tick over this world (the real handler): READY sessions are never idle here, a STOPPING session's instance is ended and, once gone, it is marked STOPPED with its volume kept. */
   reap(): Promise<ReaperReport>;
   provisionerHolds: boolean;
+  /** The machine check's log lines (dispatch.machine_gone, dispatch.machine_check_unavailable), in order. */
+  machineLog: Array<Record<string, unknown>>;
 }
 
 export function invocationFor(workspaceId: string, operationId: string = randomUUID(), kind: "task" | "publish" = "task"): WorkerInvocation {
@@ -178,10 +181,26 @@ export function createSessionMachinesWorld(options: { startedAt?: number } = {})
     return answer(200, { accepted: true, operationId: invocation.operationId, status: "ACCEPTED", duplicate }, invocation);
   };
 
+  // The dispatcher's machine check (machine-check.ts, the real code) over this world's instances in place of EC2: an instance is as EC2 would describe it, and a row it does not match is marked lost.
+  const machineLog: Array<Record<string, unknown>> = [];
+  const verifyMachine = createMachineVerifier({
+    reader: {
+      async byInstanceId(instanceId) {
+        const instance = instances.get(instanceId);
+        return instance === undefined ? undefined : { instanceId, state: instance.running ? "running" : "terminated", privateIp: instance.privateIp, workspaceId: instance.workspaceId, subnetId: BINDING.subnets[0]!.subnetId };
+      },
+      async byPrivateIp(privateIp) {
+        return [...instances.values()].filter((instance) => instance.running && instance.privateIp === privateIp).map((instance) => ({ instanceId: instance.instanceId, state: "running", privateIp, workspaceId: instance.workspaceId, subnetId: BINDING.subnets[0]!.subnetId }));
+      },
+    },
+    markLost: (seen) => sessions.markLost(seen),
+    log: (entry) => { machineLog.push(entry); },
+  });
+
   const sign = async (message: Uint8Array) => new Uint8Array(signBytes("sha256", message, { key: privateKey, dsaEncoding: "der" }));
 
   const world: SessionMachinesWorld = {
-    db, sessions, executions, instances, posts, publicKey: publicKeyText, provisionerHolds: false, sign,
+    db, sessions, executions, instances, posts, publicKey: publicKeyText, provisionerHolds: false, machineLog, sign,
     workspace(company, fields = {}) {
       const workspaceId = randomUUID();
       db.set({
@@ -206,6 +225,7 @@ export function createSessionMachinesWorld(options: { startedAt?: number } = {})
         sign,
         post,
         ping,
+        verifyMachine,
         now: () => clock,
         ...overrides,
       });

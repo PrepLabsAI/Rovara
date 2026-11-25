@@ -22,6 +22,7 @@ import type { CodeMilestoneHandler } from "../milestones/milestones.js";
 import { taskKey } from "../task-flow/keys.js";
 import { sessionBindingsOf } from "../sessions/bindings.js";
 import { noteWriteAccessMissing, noteWriteAccessOk, readTicketUpdates } from "./settings.js";
+import { noteStatusAnswer } from "./status-answer.js";
 import { KEPT_SECONDS, claim, scopeCoversCompany, countWithin, giveBack, hourOf, isFinal, refusalOf, release, settle } from "./claims.js";
 import { inertTicketTitle, plainHttpsLink } from "./text.js";
 import { effectiveLevel, refreshThreadOfTask, sendThreadMilestone, type ThreadOutcome } from "./thread.js";
@@ -173,6 +174,7 @@ export async function sendTicketUpdate(deps: TicketUpdatesDependencies, mileston
       const answer = await tracker.setStatusByName(ref, status, deps.scope).catch((error: unknown) => { if (isFinal(error)) return refusalOf(error); throw error; });
       if (answer === "moved") moved = status;
       if (answer === "needs_write_access") missing = true;
+      await noteStatusAnswer({ store: deps.store, now: deps.now, log: deps.log }, { orgId, tracker: ticket.tracker, project, moment: moment!, name: status, answer });
     }
     let posted = "comments_off";
     if (settings.comments) {

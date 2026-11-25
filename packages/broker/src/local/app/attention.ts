@@ -6,7 +6,8 @@ import {
   type MergeTrackingItem, type TaskStatus, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import type { AttentionView } from "../../core/local-pages/views.js";
-import { DEFAULT_CI_MODE, ciCountsAsPassing, type ProjectCiMode } from "../../core/merge/merge-tracking.js";
+import { readyToMerge, type ProjectCiMode } from "../../core/merge/merge-tracking.js";
+import { growthOwedOf } from "../../core/merge/grown-owed.js";
 import { readMergeTracking } from "../../core/merge/store.js";
 import { proofHoldLine, type ProofHoldReason } from "@agentx/contracts";
 import { readProofHold } from "../../core/merge/proof-hold.js";
@@ -23,11 +24,7 @@ const RETRY_STAGES = new Set(["UNDERSTAND", "PLAN", "PLAN_CRITIQUE", "IMPLEMENT"
 export const retryableBlock = (workflow: WorkflowSnapshot): boolean =>
   workflow.state === "BLOCKED" && (RETRY_STAGES.has(workflow.stage) || (workflow.stage === "WAIT_FOR_MERGE" && workflow.blockReason === WORKFLOW_BLOCK_REASONS.pullRequestUpdateFailed));
 
-/** Whether a pull request is ready for a person to merge, from what tracking read (the same words the session says). */
-export function readyToMerge(item: Pick<MergeTrackingItem, "state" | "draft" | "ci" | "review" | "branch" | "headByRovara">, ciMode: ProjectCiMode = DEFAULT_CI_MODE): boolean {
-  // A review that was asked for and has not come is not "ready": ready needs the reviews approved, or none asked for.
-  return item.state === "open" && !item.draft && ciCountsAsPassing(item.ci, ciMode) && (item.review === "approved" || item.review === "not_requested") && item.branch !== "conflicted" && item.headByRovara;
-}
+export { readyToMerge };
 
 const CI_WORDS: Record<MergeTrackingItem["ci"], string> = { none: `${CI_STATE_WORDS.none}: no checks run on it`, unreadable: CI_STATE_WORDS.unreadable, required_missing: CI_STATE_WORDS.required_missing, pending: "its checks are running", passing: "its checks pass", failing: "its checks are failing" };
 const REVIEW_WORDS: Record<MergeTrackingItem["review"], string> = { not_requested: "no review asked for yet", requested: "waiting for a review", approved: "approved", changes_requested: "changes were requested" };
@@ -38,6 +35,18 @@ export interface TaskAttention {
   step?: string;
   /** The status model's words, when the pull request or an ask changes what the default would say. */
   display?: TaskStatus;
+}
+
+/** What a pull request that is not ready yet is waiting for, in the one line the sessions show. */
+function waitingStepOf(items: readonly MergeTrackingItem[]): string {
+  if (items.some((entry) => entry.ci === "failing")) return "Waiting to fix failing checks";
+  if (items.some((entry) => entry.ci === "unreadable")) return "CI not readable";
+  if (items.some((entry) => entry.ci === "required_missing")) return CI_STATE_WORDS.required_missing;
+  if (items.some((entry) => entry.ci === "none" && entry.draft)) return "No CI on this repository: left as a draft";
+  if (items.some((entry) => entry.ci === "pending" || entry.draft)) return "Waiting for the pull request's checks";
+  if (items.some((entry) => entry.review === "changes_requested")) return "Changes requested on the pull request";
+  if (items.some((entry) => entry.review === "requested")) return items.some((entry) => entry.ci === "none") ? "No CI on this repository; waiting for a review" : "Checks pass; waiting for a review";
+  return "Watching the pull request";
 }
 
 /** Active work takes precedence over the pull request's previous readiness. */
@@ -110,16 +119,20 @@ export async function attentionOf(deps: Pick<TaskFlowDeps, "store" | "companyId"
     }
     // MR3b: the order the pull requests merge in, and what Rovara does when one was merged ahead of the one it depends on (nothing for one repository or without dependency facts).
     lines.push(...await deps.mergeOrderLines?.(task).catch(() => [] as string[]) ?? []);
-    const ready = items.length > 0 && items.length === (workflow.pullRequests ?? []).length && items.every((entry) => readyToMerge(entry, options.ciMode)) && workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING";
+    // TIER-GROWTH-MERGE: a change that grew owes the higher level's reviews on its current head. Never "Ready to merge" while it does (the merge view and the press say the same words).
+    const growth = growthOwedOf(workflow, items);
+    const ready = growth === undefined && items.length > 0 && items.length === (workflow.pullRequests ?? []).length && items.every((entry) => readyToMerge(entry, options.ciMode)) && workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING";
     if (workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING") {
-      lines.push(ready ? "Ready to merge. Rovara never merges by itself: a person merges it on the code host." : "Rovara is watching it. It is not ready to merge yet.");
-      if (heldReasons !== undefined && !ready) {
+      lines.push(growth !== undefined ? growth.words : ready ? "Ready to merge. Rovara never merges by itself: a person merges it on the code host." : "Rovara is watching it. It is not ready to merge yet.");
+      if (growth !== undefined) {
+        step = growth.state === "reviewing" ? `Running the ${growth.level} reviews` : `The ${growth.level} reviews need you`;
+        display = { state: growth.state === "reviewing" ? "checking" : "needs_you", reason: growth.reason, next: growth.next };
+      } else if (heldReasons !== undefined && !ready) {
         const why = proofHoldLine(heldReasons).replace(/^Held as a draft: /u, "").replace(/\.$/u, "");
         step = `Held: ${why} · Mark ready anyway`;
         display = { state: "needs_you", reason: `the change proof holds the draft: ${why}`, next: "Mark it ready anyway on the task page if you have checked it, or ask for changes." };
       } else if (!ready && workflow.state === "WAITING") {
-        const failing = items.some((entry) => entry.ci === "failing");
-        step = failing ? "Waiting to fix failing checks" : items.some((entry) => entry.ci === "unreadable") ? "CI not readable" : items.some((entry) => entry.ci === "required_missing") ? CI_STATE_WORDS.required_missing : items.some((entry) => entry.ci === "none" && entry.draft) ? "No CI on this repository: left as a draft" : items.some((entry) => entry.ci === "pending" || entry.draft) ? "Waiting for the pull request's checks" : items.some((entry) => entry.review === "changes_requested") ? "Changes requested on the pull request" : items.some((entry) => entry.review === "requested") ? (items.some((entry) => entry.ci === "none") ? "No CI on this repository; waiting for a review" : "Checks pass; waiting for a review") : "Watching the pull request";
+        step = waitingStepOf(items);
         display = { state: "checking", reason: step.toLowerCase(), next: "Rovara keeps watching; it tells you when the pull request is ready to merge." };
       } else {
         step = "Ready to merge";

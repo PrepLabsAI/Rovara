@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { installGatewayFixture, readyCoreEngine, brokerTemplate } from "../support/install-gateway.js";
 import { describe, expect, it, vi } from "vitest";
 import { environmentStackName, type ReleaseManifest } from "@agentx/contracts";
@@ -405,7 +406,7 @@ describe("deployEnvironment with lockHeld", () => {
 });
 
 describe("an upgrade keeps what the operator set (OPERATOR_PARAMETERS)", () => {
-  const declared = ["BudgetMonthlyUsd", "BudgetScope", "SlackAppPostedMessages", "SlackThreadTurnsPerMinute", "SlackMemberWorkspaceLimit", "SlackOrganizationWorkspaceLimit", "TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled", "TaskPersonProofEnabled"];
+  const declared = ["BudgetMonthlyUsd", "BudgetScope", "SlackAppPostedMessages", "SlackThreadTurnsPerMinute", "SlackMemberWorkspaceLimit", "SlackOrganizationWorkspaceLimit", "TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled"];
 
   async function installed(): Promise<{ store: MemoryParameterStore; secrets: ReturnType<typeof memorySecrets> }> {
     const store = new MemoryParameterStore();
@@ -559,4 +560,54 @@ it("stops before the signing key or any stack deploy when the deployed control-p
 
   expect(upgrade.requests).toEqual([]);
   expect(secrets.creates).toEqual([]);
+});
+
+// F1 L1a-1: the parameters the kept set grew by (read from the two golden lists: the base and what the lists are now), each one sent on an upgrade from the DEPLOYED value when nothing
+// supplies it. This is the explicit half of the one carry rule; the engines' half (an omitted parameter is carried) is in templates-engine.test.ts and cdk-engine.test.ts.
+describe("an upgrade keeps each parameter the kept set grew by in L1a-1 (the explicit half of the one carry rule)", () => {
+  const golden = (file: string) => (JSON.parse(readFileSync(`tests/contract/golden/${file}`, "utf8")) as { operatorParameters: Record<string, string[]> }).operatorParameters;
+  const before = golden("install-settings.base.golden.json");
+  const now = golden("install-settings.golden.json");
+  const added = (part: string) => (now[part] ?? []).filter((name) => !(before[part] ?? []).includes(name));
+  const releaseDeclaring = (part: DeployPart, names: readonly string[]): LoadedRelease => ({
+    ...fakeRelease(),
+    template: (requested) => (requested === part || requested === "control-plane"
+      ? JSON.stringify({ Parameters: Object.fromEntries((requested === part ? names : []).map((name) => [name, { Type: "String" }])), Outputs: { ModelRunPriceVersion: { Value: "1" } } })
+      : brokerTemplate()),
+  });
+  const upgradeOnly = async (part: DeployPart, deployed: Record<string, string>, answers: DeployAnswers = baseAnswers()) => {
+    const store = new MemoryParameterStore();
+    const secrets = memorySecrets();
+    await deployEnvironment({ mode: "install", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: fakeDeployer(scriptedOutputs()).deployer, store, secrets, holder: HOLDER });
+    const upgrade = fakeDeployer(scriptedOutputs());
+    await deployEnvironment({
+      mode: "upgrade", engine: "templates", answers, release: releaseDeclaring(part, Object.keys(deployed)), deployer: upgrade.deployer, store, secrets, holder: HOLDER, parts: [part],
+      deployedParameters: async () => ({ CoreModelGatewayHost: "gateway.example", CoreAgentModel: "claude-sonnet-4-6", ...deployed }),
+    });
+    return upgrade.requests.find((request) => request.part === part)!;
+  };
+
+  it.each(["runtime", "control-plane", "slack"] as DeployPart[])("sends the deployed value of every parameter %s gained", async (part) => {
+    const names = added(part);
+    expect(names.length).toBeGreaterThan(0);
+    const request = await upgradeOnly(part, Object.fromEntries(names.map((name) => [name, `deployed-${name}`])));
+    for (const name of names) expect(request.parameters[name], `${part}/${name}`).toBe(`deployed-${name}`);
+  });
+
+  it("lets a stored sign-in choice win over the stack, and keeps the stack's value for what the choice does not name", async () => {
+    const names = added("control-plane");
+    const deployed = Object.fromEntries(names.map((name) => [name, `deployed-${name}`]));
+    const signIn = { slackTeamId: "T0STORED1", settings: { schemaVersion: 1 as const, env: ENV, slack: true, updatedAt: "2026-11-25T00:00:00.000Z", updatedBy: "someone" } };
+    const request = await upgradeOnly("control-plane", deployed, { ...baseAnswers(), developerSignIn: signIn });
+    expect(request.parameters).toMatchObject({ SlackTeamId: "T0STORED1", DeveloperSignInSlack: "enabled", DeveloperOidcIssuer: "" });
+    // GitHub sign-in was never turned on in the stored choice, so the choice sends none of its three: the stack's stay.
+    for (const name of ["DeveloperSignInGithub", "DeveloperGithubClientId", "DeveloperGithubSince"]) expect(request.parameters[name], name).toBe(`deployed-${name}`);
+  });
+
+  it("keeps the deployed SlackTeamId when the stored sign-in names no Slack team id (an empty one would clear it)", async () => {
+    const signIn = { settings: { schemaVersion: 1 as const, env: ENV, slack: false, github: { clientId: "gh-client", clientSecretName: `agentx/${ENV}/developer-github` }, since: { github: 3 }, updatedAt: "2026-11-25T00:00:00.000Z", updatedBy: "someone" } };
+    const request = await upgradeOnly("control-plane", { SlackTeamId: "T0DEPLOYED", DeveloperSignInSlack: "disabled" }, { ...baseAnswers(), developerSignIn: signIn });
+    expect(request.parameters.SlackTeamId).toBe("T0DEPLOYED");
+    expect(request.parameters.DeveloperSignInSlack).toBe("disabled");
+  });
 });

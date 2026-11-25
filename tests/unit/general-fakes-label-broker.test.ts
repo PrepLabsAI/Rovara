@@ -2,10 +2,8 @@
 // on the recorded verification result, the proof table reads it as a `made_by_rovara` dependency (so the check is never Proven), and the pull request's checks section says so on the check's own line.
 import { describe, expect, it } from "vitest";
 import {
-  AGENTX_PREAMBLE_VERSION, CheckEntrySchema, GENERAL_FAKE_LABEL, VerificationResultsSchema, agentxPreambleSha256, checksSection, type CheckEntry, type PlanDocument,
+  AGENTX_PREAMBLE_VERSION, CheckEntrySchema, GENERAL_FAKE_LABEL, VerificationResultsSchema, agentxPreambleSha256, checksSection, type CheckEntry,
 } from "@agentx/contracts";
-import { loadProofContext } from "../../packages/broker/src/core/proof/proof-inputs.js";
-import { proofCheckResults } from "../../packages/broker/src/core/proof/proof-section.js";
 import { verificationResultsOf } from "../../packages/broker/src/core/build-step/check-results.js";
 
 const DIGEST = "1".repeat(64);
@@ -39,34 +37,6 @@ describe("the pull request's checks section", () => {
   });
 });
 
-describe("the proof table reads the recorded label", () => {
-  const plan: PlanDocument = {
-    schemaVersion: 1, title: "Retry", why: [{ text: "Payments drop.", author: "Priya" }], claims: [{ id: "1", text: "Payments are retried." }], notChanging: [], risks: [], decisions: [],
-    checks: { proposed: [{ id: "unit", label: "Unit tests", command: { cwd: "repo/payments", executable: "npm", args: ["test"], timeoutSeconds: 30 } }], proves: { unit: ["1"] } },
-  };
-  const approved = { format: "structured", plan, markdown: "", artifact: {} } as never;
-  const noProof = { operations: async () => [], artifacts: async () => [], readArtifact: async () => undefined } as never;
-  const workflowWith = (result: object) => ({
-    candidate: { digest: DIGEST }, checkPolicy: { required: [], optional: [], selectedOptionalIds: [], proposed: [{ id: "unit", label: "Unit tests", kind: "test", command: { cwd: "repo/payments", executable: "npm", args: ["test"], timeoutSeconds: 30 } }] },
-    verification: { candidateDigest: DIGEST, results: [{ checkId: "unit", status: "PASS", ...result }] },
-  }) as never;
-  const task = { ownerKey: "owner-key", workspaceId: "ws-1" };
-
-  it("a recorded result with the label becomes a made_by_rovara dependency, without any test proof", async () => {
-    const context = await loadProofContext({ actions: noProof }, task, workflowWith({ madeByRovara: true }), approved);
-    expect(context?.checkDependencies?.get("unit")).toEqual([{ dependencyId: "general_fake", trust: "made_by_rovara" }]);
-    expect(proofCheckResults(workflowWith({ madeByRovara: true }))[0]).toMatchObject({ checkId: "unit", madeByRovara: true });
-  });
-
-  it("the label and the test proof's own facts for the same check give one dependency, not two", async () => {
-    const stored = { schemaVersion: 1, candidateDigest: DIGEST, status: "checked", note: "completed", changedTests: { added: 1, changed: 0, deleted: 0 }, durationMs: 1,
-      items: [{ checkId: "readiness:0", label: "Unit tests", granularity: "check", verdict: "proves_change", reason: "assertion_failed_on_old" }], madeByRovara: [{ checkId: "readiness:0", served: 2 }] };
-    const actions = { operations: async () => [{ id: "op-1", kind: "task", status: "SUCCEEDED", createdAt: "2026-11-16T10:00:00.000Z" }], artifacts: async () => [{ name: "test-proof.json", objectKey: "private/owner-key/ws-1/op-1/test-proof.json" }], readArtifact: async () => JSON.stringify(stored) } as never;
-    const context = await loadProofContext({ actions }, task, workflowWith({ madeByRovara: true }), approved);
-    expect(context?.testProof).toBeDefined();
-    expect(context?.checkDependencies?.get("unit")).toEqual([{ dependencyId: "general_fake", trust: "made_by_rovara" }]);
-  });
-});
 
 describe("the recorded results (core build step)", () => {
   const selected = [0, 1, 2, 3, 4].map((index) => ({ id: `check-${String(index)}`, command: { cwd: "repo", executable: "npm", args: ["test"] } }));

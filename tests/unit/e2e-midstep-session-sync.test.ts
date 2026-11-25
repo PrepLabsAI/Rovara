@@ -15,7 +15,6 @@ import { E2E_SESSION_SYNC_PENDING_LIMIT_MS, createE2ESessionSyncSource, type E2E
 import { createE2EAgentModelAdapter } from "../../packages/verifier/src/executor/agent-model-adapter.js";
 import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
 import { parseSetCookie } from "../../packages/verifier/src/executor/form-login.js";
-import { isSessionStorageCredential } from "../../packages/verifier/src/executor/session-storage-secret.js";
 import { createE2ECredentialGuard } from "../../packages/worker/src/e2e-model-credential-guard.js";
 import { e2eSecretSpellings } from "../../packages/worker/src/e2e-secret-spellings.js";
 import { startE2EModelProxy, type E2EModelEvidenceSink, type E2EModelProxy, type E2EModelTranscript } from "../../packages/worker/src/e2e-model-proxy.js";
@@ -457,25 +456,6 @@ describe("the executor's session source reads the browser before each sync", () 
     expect(evidenceOnly).toEqual(["Quarterly report for ACME", "https://app.example.com/settings?tab=billing"]);
   });
 
-  it("tells a credential in local storage from app data by its value and its key", () => {
-    const jwt = `${Buffer.from('{"alg":"HS256"}').toString("base64url")}.${Buffer.from('{"sub":"user-1234"}').toString("base64url")}.c2lnbmF0dXJlLWJ5dGVz`;
-    for (const entry of [
-      { name: "anything", value: jwt },
-      { name: "anything", value: "9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c" },
-      { name: "sb-project-auth-token", value: "keyed-opaque-value-1234" },
-      { name: "ID_TOKEN", value: "keyed-opaque-value-1234" },
-    ]) expect(isSessionStorageCredential(entry), entry.name).toBe(true);
-    for (const entry of [
-      { name: "draft", value: "Quarterly report for ACME" },
-      { name: "returnTo", value: "https://app.example.com/settings" },
-      { name: "searchHistory", value: "orders,invoices,customers-with-open-balances" },
-      { name: "access_token", value: "short" },
-      { name: "access_token", value: "has whitespace in the value 1234" },
-      { name: "locale", value: "en-US" },
-      { name: "i18nextLng", value: "x".repeat(40) },
-      { name: "sessionDraft", value: "a draft that is text and has spaces" },
-    ]) expect(isSessionStorageCredential(entry), `${entry.name}=${entry.value}`).toBe(false);
-  });
 
   it("an ordinary app-data value in local storage that the page shows does not fail the step (end to end)", async () => {
     const run = await startRun({ begin: false });

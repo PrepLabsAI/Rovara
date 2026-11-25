@@ -6,7 +6,7 @@ import {
   AgentXError, IntentAnswerRefusal, TaskCloseActionSchema, SESSION_ACTIONS, SessionIdSchema, WorkflowTransitionError, agentSessionKey, agentXError,
   type AgentSessionRecord, type OrgId, type SessionId,
 } from "@agentx/contracts";
-import { AGENT_SESSION_CONTRACT_VERSION } from "@agentx/contracts";
+import { AGENT_SESSION_CONTRACT_VERSION, OWNER_LEFT_PROJECT_WORDS } from "@agentx/contracts";
 import { closeHasDigest } from "../../core/task-flow/close-acceptance.js";
 import { parseBody } from "../../core/task-flow/owner-round.js";
 import type { ControlResult } from "../../core/sessions/control.js";
@@ -94,6 +94,26 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
     return false;
   });
 
+  /**
+   * The words an admin reads when the task's owner no longer holds the task's project (read now, from the one words table). The owner is named by the task record; the hosted members seam proves a person by a principal,
+   * so the owner's is rebuilt from the task and the reader's own (same company and sign-in), and believed only when it names the session's effective owner. Undefined: for the owner, with no members seam (a laptop), or
+   * when the owner cannot be named; and while the owner holds the project.
+   */
+  const ownerLeft = async (session: AgentSessionRecord, you: SessionAccess, task: TaskRecord | undefined, caller: TaskCaller): Promise<string | undefined> => {
+    const personId = task === undefined ? undefined : taskOwnerView(task)?.developerId;
+    const members = deps.members;
+    if (members === undefined || you.owner || session.kind !== "task" || session.project === undefined || personId === undefined) return undefined;
+    const principal = { ...caller.principal, personId, displayName: you.effectiveOwner.name, roles: ["member"] };
+    if (developerIdOf(principal) !== you.effectiveOwner.developerId) return undefined;
+    try { return await members.projectGrant({ companyId: session.orgId, developerId: you.effectiveOwner.developerId, principal }, session.project) === undefined ? OWNER_LEFT_PROJECT_WORDS : undefined; } catch { return undefined; }
+  };
+
+  /** A row of the list for this person: the tile, with the words when the task's owner no longer holds its project. */
+  const tileFor = async (session: AgentSessionRecord, level: string, you: SessionAccess, task: TaskRecord | undefined, caller: TaskCaller): Promise<Record<string, unknown>> => {
+    const left = await ownerLeft(session, you, task, caller);
+    return { ...tile(session, level, task !== undefined && maySeeMoney(task, you, caller)), ...(left === undefined ? {} : { ownerLeft: left }) };
+  };
+
   const view = async (session: AgentSessionRecord, you: SessionAccess, caller: TaskCaller): Promise<Record<string, unknown>> => {
     if (session.subject.kind !== "task") throw agentXError("NOT_FOUND", "There is no such session.");
     const task = await readTask(flow.deps, session.subject.taskId);
@@ -107,7 +127,7 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
       approvals: [], followers: session.followerCount, viewingNow: await viewingNow(store, session, (flow.deps.now?.() ?? new Date()).getTime()),
       you: {
         level: you.level, owner: you.owner, following: you.owner || (await store.get(agentSessionKey(session.orgId, session.sessionId, `FOLLOWER#${developerIdOf(caller.principal)}`))) !== undefined,
-        actions: actionsFor(you, snapshot.actions), ...(you.mayAsk && deps.ask !== undefined ? { live: { ask: true } } : {}),
+        actions: actionsFor(you, snapshot.actions), ...(await ownerLeft(session, you, task, caller) === undefined ? {} : { ownerLeft: OWNER_LEFT_PROJECT_WORDS }), ...(you.mayAsk && deps.ask !== undefined ? { live: { ask: true } } : {}),
       },
       link: `${deps.origin()}/v1/app/sessions/${session.sessionId}`, bindings: await sessionBindingsOf(store, session.orgId, session.sessionId), legs: session.legs, revision: session.revision, createdAt: session.createdAt, updatedAt: session.updatedAt, endedAt: session.endedAt,
       body: { kind: "task", task: await developerTaskView(task, await taskViewOf(flow.deps, task), deps.blobs, deps.secondReview?.taskView(task, task.workflow?.candidate?.digest), undefined, revealMoney) },
@@ -155,7 +175,7 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
           if (level !== "none") {
             const you = await access.of(caller.principal, row);
             const task = row.subject.kind === "task" ? await readTask(flow.deps, row.subject.taskId) : undefined;
-            rows.push(tile(row, level, task !== undefined && maySeeMoney(task, you, caller)));
+            rows.push(await tileFor(row, level, you, task, caller));
           }
         }
         return json(200, { sessions: rows, ...(listed.cursor === undefined ? {} : { next: listed.cursor }) });

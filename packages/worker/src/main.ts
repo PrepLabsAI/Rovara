@@ -43,7 +43,7 @@ import { runSetupProveJob } from "./setup-prove.js";
 import { runEvalHealthRider } from "./eval-health-run.js";
 import { rememberCredentials, runSavedEnvRebuild } from "./saved-env/rebuild.js";
 import { savedEnvOptionsOf } from "./saved-env/use.js";
-import { createDockerCli } from "./swebench/containers.js";
+import { createDockerCli } from "./docker-cli.js";
 import { assertWorkerScratchReady, checkWorkerScratch, workerBootFailureOf } from "./worker-scratch.js";
 import { collectTestServicesUsage, testServicesAdvertisedFeatures, testServicesAtWorkerBoot, testServicesConfigFromEnvironment } from "./test-services-run.js";
 import { createEvalServicesStarter } from "./verification/eval-services.js";

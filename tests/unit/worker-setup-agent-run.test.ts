@@ -12,7 +12,7 @@ import { createSetupSandbox, type TrackedFilesVerdict } from "../../packages/wor
 import { helperRunArgs, networkCreateArgs, setupNetworkAddresses, setupNetworkName, setupNetworkSlot, startRunNetwork } from "../../packages/worker/src/setup-network.js";
 import type { PiSessionHandle } from "../../packages/worker/src/pi-session.js";
 import type { RunNetwork } from "../../packages/worker/src/setup-network.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -582,6 +582,32 @@ describe("L4-SR2: the gateway's upkeep pause", () => {
     }
     const ordinary = await world();
     expect((await runSetupAgent(ordinary.input)).setupRunSummary).not.toHaveProperty("pause");
+  });
+});
+
+// DEC 254zzz491: the gateway refused a call because the company has no monthly AI limit (403 `company_limit_not_set`); model-runtime hands the worker Code's fixed sentence. The run ends `infrastructure` at once and says
+// why in the summary (`cannot`), which the broker words as the sentence. A plain refusal or any other fault carries no such reason.
+describe("DEC 254zzz491: a company with no monthly AI limit", () => {
+  const SENTENCE = "No monthly AI limit is set for your company. Set one in Admin, AI and spending.";
+  const errored = (message: string) => async ({ emit }: { emit: (event: unknown) => void }) => { emit({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: message, content: [], usage: { input: 0 } } }); };
+  it("a turn that failed with the sentence ends the run `infrastructure` with `cannot: company_limit_not_set`", async () => {
+    const t = await world({ script: errored(SENTENCE) });
+    const result = await runSetupAgent(t.input);
+    expect(result.setupRunSummary).toMatchObject({ stop: "infrastructure", cannot: "company_limit_not_set" });
+    expect(result.setupRunSummary).not.toHaveProperty("pause");
+    expect(SetupRunSummarySchema.safeParse(result.setupRunSummary).success).toBe(true);
+  });
+  it("the Rovara-AI-not-confirmed stop ends the run the same way, with its own reason", async () => {
+    const t = await world({ script: errored("Choose how Rovara pays for AI: confirm Rovara AI, billed to your company, up to your monthly limit, or connect your own AI key.") });
+    const result = await runSetupAgent(t.input);
+    expect(result.setupRunSummary).toMatchObject({ stop: "infrastructure", cannot: "rovara_ai_not_confirmed" });
+    expect(SetupRunSummarySchema.safeParse(result.setupRunSummary).success).toBe(true);
+  });
+  it("any other refusal, and words that only look like the sentence, carry no such reason", async () => {
+    for (const script of [errored("the provider is down"), errored(`${SENTENCE} extra`), errored("company_limit_not_set"), async () => { throw new Error("the provider is down"); }]) {
+      const t = await world({ script });
+      expect((await runSetupAgent(t.input)).setupRunSummary).not.toHaveProperty("cannot");
+    }
   });
 });
 

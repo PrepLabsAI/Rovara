@@ -127,6 +127,32 @@ function endedOf(facts: SessionTaskFacts, at: string): Ended | undefined {
   return undefined;
 }
 
+/** What an open workflow's stage and state say of its session: the status (only a stage that waits on a person is not running), whether a blocked step can be retried, and the step line a no-code-change block adds. */
+function workflowOpenStatus(workflow: NonNullable<SessionTaskFacts["workflow"]>, facts: SessionTaskFacts): { status: SessionStatus; workflowBlocked?: true; step?: string } {
+  const blocked = workflow.state === "BLOCKED";
+  // A coding run that needed no code change reads as that, not as "Coding" (the person is asked to close the task or ask for a change; nothing is running).
+  const step = blocked && isNoCodeChangedReason(workflow.blockReason) ? NO_CODE_CHANGED_STEP : undefined;
+  const parts = { ...(blocked ? { workflowBlocked: true as const } : {}), ...(step === undefined ? {} : { step }) };
+  // Only a stage that waits on a person is not running: a plan under review needs its owner, a blocked task needs someone, a pull request waits to be merged. The checks and reviews also sit in WAITING
+  // between runs, but nobody is needed for them. Understand's questions wait for a person too.
+  if ((workflow.stage === "PLAN_REVIEW" && workflow.state === "WAITING") || (workflow.stage === "UNDERSTAND" && workflow.state === "WAITING") || blocked) return { status: "needs_person", ...parts };
+  if (workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING") return { status: "waiting", ...parts };
+  // A stop that landed before the instructions ran cancels nothing and leaves the step marked running with nothing behind it; the task reads cancelled then, and so does the session.
+  if (facts.runStatus === "CANCELLED" && workflow.state === "RUNNING") return { status: "stopped", ...parts };
+  return { status: facts.runStatus === "STARTING" ? "starting" : "running", ...parts };
+}
+
+/** What the last run says of a task with no workflow: its session status, whether it failed, and the step line a failure adds. */
+function plainTaskStatus(facts: SessionTaskFacts): { status: SessionStatus; lastRunFailed?: true; step?: string } {
+  switch (facts.runStatus) {
+    case "STARTING": return { status: "starting" };
+    case "RUNNING": return { status: "running" };
+    case "CANCELLED": return { status: "stopped" };
+    case "FAILED": case "INTERRUPTED": return { status: "waiting", lastRunFailed: true, step: `Failed: ${failureCause(facts.failureCategory)}` };
+    default: return { status: "waiting" };
+  }
+}
+
 /** The summary of a task session from the task's facts and its cost. Pure: no store, no clock beyond `nowMs`. */
 export function computeTaskState(facts: SessionTaskFacts, costUsd: number, previous: SessionSummary | undefined, nowMs: number): Computed {
   const workflow = facts.workflow;
@@ -144,35 +170,20 @@ export function computeTaskState(facts: SessionTaskFacts, costUsd: number, previ
   let openStep = step;
   let lastRunFailed: true | undefined;
   let workflowBlocked: true | undefined;
-  const starting = facts.runStatus === "STARTING";
-  if (facts.budgetPaused === true) {
-    status = "paused";
-    // A blocked workflow can still be retried although the budget paused it (the flag lets the session offer the button).
+  if (facts.budgetPaused === true || facts.stoppedByPerson === true) {
+    // The budget pause outranks a stop. F2-B: a person's own Stop is not a wait for them (the standing's Stopped pill): the session reads stopped. Either way a blocked step can still be retried (the flag lets the session offer the button).
+    status = facts.budgetPaused === true ? "paused" : "stopped";
     if (workflow?.state === "BLOCKED") workflowBlocked = true;
   } else if (workflow !== undefined) {
-    // A coding run that needed no code change reads as that, not as "Coding" (the person is asked to close the task or ask for a change; nothing is running).
-    if (workflow.state === "BLOCKED" && isNoCodeChangedReason(workflow.blockReason)) openStep = NO_CODE_CHANGED_STEP;
-    if (workflow.state === "BLOCKED") workflowBlocked = true;
-    // Only a stage that waits on a person is not running: a plan under review needs its owner, a blocked task needs someone, a pull request waits to be merged. The checks and reviews also sit in WAITING
-    // between runs, but nobody is needed for them. Understand's questions wait for a person too.
-    if ((workflow.stage === "PLAN_REVIEW" && workflow.state === "WAITING") || (workflow.stage === "UNDERSTAND" && workflow.state === "WAITING") || workflow.state === "BLOCKED") status = "needs_person";
-    else if (workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING") status = "waiting";
-    // A stop that landed before the instructions ran cancels nothing and leaves the step marked running with nothing behind it; the task reads cancelled then, and so does the session.
-    else if (facts.runStatus === "CANCELLED" && workflow.state === "RUNNING") status = "stopped";
-    else status = starting ? "starting" : "running";
+    const open = workflowOpenStatus(workflow, facts);
+    status = open.status;
+    workflowBlocked = open.workflowBlocked;
+    openStep = open.step ?? openStep;
   } else {
-    switch (facts.runStatus) {
-      case "STARTING": status = "starting"; break;
-      case "RUNNING": status = "running"; break;
-      case "CANCELLED": status = "stopped"; break;
-      case "FAILED":
-      case "INTERRUPTED":
-        status = "waiting";
-        lastRunFailed = true;
-        openStep = `Failed: ${failureCause(facts.failureCategory)}`;
-        break;
-      default: status = "waiting";
-    }
+    const plain = plainTaskStatus(facts);
+    status = plain.status;
+    lastRunFailed = plain.lastRunFailed;
+    openStep = plain.step ?? openStep;
   }
   const needsPeople = [...(facts.waitingOn ?? [])];
   // The person the task waits on is its owner; a task that waits on a decision with nobody named waits on the owner.

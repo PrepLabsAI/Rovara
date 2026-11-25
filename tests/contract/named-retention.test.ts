@@ -36,8 +36,11 @@ describe("retained resources in a named environment", () => {
       "agentx-staging-access": ["ArtifactBucket AWS::S3::Bucket"],
       "agentx-staging-control-plane": [
         // DEC 254za (#872): the callback signing key's own secret, kept like the Slack secret (its name is checked below). Webhook lane W3: the GitHub webhook secret slot, kept the same way (its name is checked below).
-        "Artifacts AWS::S3::Bucket", "CallbackSigningKeySecret AWS::SecretsManager::Secret", "DeveloperSignInTable AWS::DynamoDB::Table", "GithubWebhookSecret AWS::SecretsManager::Secret", "SlackSecret AWS::SecretsManager::Secret", "SlackThreadSessions AWS::S3::Bucket",
-        "SlackThreads AWS::DynamoDB::Table", "State AWS::DynamoDB::Table", "TurnRecords AWS::DynamoDB::Table",
+        // RETAIN (arch ruling 2026-11-24, tests/contract/retain-stateful-resources.test.ts): the five KMS keys (ChatGptConnectionKey seals every ChatGPT and Linear token), the channel API state table and the adapter signing secret.
+        "Artifacts AWS::S3::Bucket", "CallbackSigningKeySecret AWS::SecretsManager::Secret", "ChannelApiSlackAdapterSecret AWS::SecretsManager::Secret", "ChannelApiState AWS::DynamoDB::Table",
+        "ChatGptConnectionKey AWS::KMS::Key", "DeveloperSignInPolicyHookKey AWS::KMS::Key", "DeveloperSignInTable AWS::DynamoDB::Table", "DeveloperSignInTaskTokenKey AWS::KMS::Key",
+        "DeveloperSignInTokenKey AWS::KMS::Key", "GithubWebhookSecret AWS::SecretsManager::Secret", "InvokeSigningKey AWS::KMS::Key", "SlackSecret AWS::SecretsManager::Secret",
+        "SlackThreadSessions AWS::S3::Bucket", "SlackThreads AWS::DynamoDB::Table", "State AWS::DynamoDB::Table", "TurnRecords AWS::DynamoDB::Table",
       ],
       // Batch 13 (#906, DEC 254zm): the five test-service starter copy repositories, kept so a pinned copy outlives a replacement (their names are checked below).
       "agentx-staging-foundation": [
@@ -88,10 +91,17 @@ describe("retained resources in a named environment", () => {
     expect(retained).toEqual([
       // Spec 064: developer records and session history outlive the stack, as in named environments.
       // DEC 254za (#872): the callback signing key's own secret (agentx/production/callback-key, checked below), Retain like the Slack secret.
-      "AgentXControlPlane Artifacts AWS::S3::Bucket", "AgentXControlPlane CallbackSigningKeySecret AWS::SecretsManager::Secret", "AgentXControlPlane DeveloperSignInTable AWS::DynamoDB::Table", "AgentXControlPlane GithubWebhookSecret AWS::SecretsManager::Secret", "AgentXControlPlane SlackSecret AWS::SecretsManager::Secret", "AgentXControlPlane SlackThreadSessions AWS::S3::Bucket",
-      "AgentXControlPlane SlackThreads AWS::DynamoDB::Table", "AgentXControlPlane State AWS::DynamoDB::Table", "AgentXControlPlane TurnRecords AWS::DynamoDB::Table",
+      // RETAIN (arch ruling 2026-11-24, tests/contract/retain-stateful-resources.test.ts): the five KMS keys, the channel API state table and the adapter signing secret are kept too.
+      "AgentXControlPlane Artifacts AWS::S3::Bucket", "AgentXControlPlane CallbackSigningKeySecret AWS::SecretsManager::Secret", "AgentXControlPlane ChannelApiSlackAdapterSecret AWS::SecretsManager::Secret",
+      "AgentXControlPlane ChannelApiState AWS::DynamoDB::Table", "AgentXControlPlane ChatGptConnectionKey AWS::KMS::Key", "AgentXControlPlane DeveloperSignInPolicyHookKey AWS::KMS::Key",
+      "AgentXControlPlane DeveloperSignInTable AWS::DynamoDB::Table", "AgentXControlPlane DeveloperSignInTaskTokenKey AWS::KMS::Key", "AgentXControlPlane DeveloperSignInTokenKey AWS::KMS::Key",
+      "AgentXControlPlane GithubWebhookSecret AWS::SecretsManager::Secret", "AgentXControlPlane InvokeSigningKey AWS::KMS::Key", "AgentXControlPlane SlackSecret AWS::SecretsManager::Secret",
+      "AgentXControlPlane SlackThreadSessions AWS::S3::Bucket", "AgentXControlPlane SlackThreads AWS::DynamoDB::Table", "AgentXControlPlane State AWS::DynamoDB::Table",
+      "AgentXControlPlane TurnRecords AWS::DynamoDB::Table",
       // #1159: the test-service starter copies, kept on delete as in named environments (test-service-mirror.ts).
       ...[0, 1, 2, 3, 4].map((index) => `AgentXProductionFoundation Ec2WorkersTestServiceMirrorRepository${String(index)} AWS::ECR::Repository`),
+      // RETAIN (arch ruling 2026-11-24): the two NAT addresses are customers' allow-listed egress addresses, kept in the legacy layout as in named environments.
+      "AgentXProductionFoundation NatEip1 AWS::EC2::EIP", "AgentXProductionFoundation NatEip2 AWS::EC2::EIP",
       "AgentXProductionFoundation VpcFlowLogs AWS::Logs::LogGroup", "AgentXProductionFoundation WorkspaceKey AWS::KMS::Key",
       "AgentXReleasePipeline Artifacts AWS::S3::Bucket",
     ]);

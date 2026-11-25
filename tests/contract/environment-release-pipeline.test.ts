@@ -846,7 +846,7 @@ describe("environment release pipeline: selection and the production pipeline", 
     expect(stackIds).toContain("AgentXReleasePipeline");
     const production = app.node.children.find((child) => child.node.id === "AgentXReleasePipeline") as ReleasePipelineStack;
     expect(production).toBeInstanceOf(ReleasePipelineStack);
-    // The RAW template's sha256 (a normalized template rewrites every 64-hex string, so a changed pinned tool checksum would pass), recorded from d66d3c158 and equal on this lane's code.
+    // The RAW template's sha256 (a normalized template rewrites every 64-hex string, so a changed pinned tool checksum would pass), recorded from d66d3c158 and equal on that lane's code; re-pinned by L1 below.
     const digest = createHash("sha256").update(JSON.stringify(Template.fromStack(production).toJSON())).digest("hex");
     expect(digest).toBe(PRODUCTION_PIPELINE_TEMPLATE_SHA256);
   });
@@ -868,4 +868,49 @@ function regionPattern(): string {
 }
 
 /** Recorded from the production release pipeline's normalized template before this lane changed release-pipeline.ts (a refactor that moved the shared tool-install commands to exports). */
-const PRODUCTION_PIPELINE_TEMPLATE_SHA256 = "01152c761e64805857a650b5473c6e80ceac9fd586f39e062df2a836f2dc72c0";
+// L1 (2026-11-24): re-pinned for exactly the Cloud half of the one pipeline and the Code Preflight. Pin before: 01152c761e64805857a650b5473c6e80ceac9fd586f39e062df2a836f2dc72c0. Changed resources: ReleaseBuild and BetaReleaseBuild (the
+// buildspecs: a CODE_RELEASE check and skip guard on every Code step; the production one no longer closes the gate), ReleaseBuildRoleDefaultPolicy (the ClosePromotionGate statement moved out),
+// PipelineRoleDefaultPolicy (may assume the new action roles), Pipeline (second source, the Cloud actions and a Code Preflight in each stage, three V2 variables, a Cloud tag trigger).
+// Added: BetaCodePreflight and ProductionCodePreflight (CodeBuild project, role and policy each), CloudSourceActionRole (role and policy), and one CDK action role and policy for each of the
+// 14 new actions (12 Cloud, 2 Code Preflight). Added parameters: CloudRepoOwner, CloudRepoName, CloudRepoBranch, CloudConnectionArn, CloudBetaProjectName, CloudProductionProjectName,
+// PortGuardNamesParameterName, PortGuardNamesKeyArn. Added output: ArtifactBucketName. Nothing removed.
+// L1 follow-up after the Opus review (pin before it: c46ace5e600246bccd478643c6b609bcb183c3c52ed2cada4442849a29e10640). Changed again, and only these: ReleaseBuild and BetaReleaseBuild (the buildspecs: a last command that records the
+// released Code commit), ReleaseBuildRoleDefaultPolicy and BetaReleaseBuildRoleDefaultPolicy (one RecordReleasedCode ssm:PutParameter statement each), BetaCodePreflight and
+// ProductionCodePreflight (the buildspec: the released commit is the trust anchor and the guard scans the full range from it), their two role default policies (one ReadReleasedCode
+// ssm:GetParameter statement each) and Pipeline (a fourth variable PIPELINE_MODE, and PIPELINE_MODE and ROVARA_EXPECTED_DEPLOY_ACCOUNT on the 12 Cloud actions). Nothing added or removed.
+// L1 follow-up 2 (pin before it: f831f1b1c94d538eb995700155b821ba596ace36618e42ca69f289914fd2ecdc): BetaCodePreflight and ProductionCodePreflight (the buildspec: PIPELINE_MODE default, a pre_build note that refuses any value but release or adopt) and Pipeline
+// (PIPELINE_MODE on the two CodePreflight actions). Nothing added or removed; no ROVARA_ADOPT_* anywhere.
+// L1 follow-up 3 (pin before it: 5e6b0f2ca31c79736bae0a0f6595d926ce124d0608aeb5cc53285493b569aae0): BetaCodePreflight and ProductionCodePreflight only (the buildspec: the refusal of a linear landing says how many commits and what to do). Nothing else.
+// L1 follow-up 4 (pin before it: e0570793a770024be7c9ae931556aeaff5fe8c8159e165a9120c1e8966f17b3f): ReleaseBuild and BetaReleaseBuild (the record is CODEBUILD_RESOLVED_SOURCE_VERSION, checked to be 40 hex, in one braced group), BetaCodePreflight and
+// ProductionCodePreflight (the linear-landing message says only what happened; an octopus merge has its own check and message). Nothing else; no policy, parameter or Pipeline change.
+// L9b (2026-11-24; pin before it, L1 final: 63e95810236c96b19bd43940c2ac70d57ea2b7c55a6bfe5f5c001c2777b7703d; the first L9b pin f6c558b4... was replaced after the review's 1000-character finding): a Code rollback through the pipeline.
+// Changed, and only these (nothing added or removed; no parameter or output change): ReleaseBuild and BetaReleaseBuild (the buildspecs: the release history is written first in the same braced step as the record; the mode,
+// target and history/ancestor checks; a rollback checks the target out before anything is installed and records it), ReleaseBuildRoleDefaultPolicy and BetaReleaseBuildRoleDefaultPolicy (one RecordCodeHistory
+// ssm:GetParameter and ssm:PutParameter statement each, on that stage's history parameter), BetaCodePreflight and ProductionCodePreflight (the buildspec: the rollback checks and the second guard range, one exported
+// CODE_CTX), their role default policies (a ReadCodeHistory ssm:GetParameter statement each; Beta's also ReadWaitingRun, codepipeline:GetPipelineState and GetPipelineExecution on this pipeline) and Pipeline (a fifth
+// variable CODE_ROLLBACK_TARGET, a namespace on the two CodePreflight actions, PIPELINE_MODE and CODE_ROLLBACK_TARGET on the Code release actions, and CODE_CTX on the two Cloud Preflight actions only).
+// PH-S3-PREFIXES (2026-11-25; pin before it, L9b: 291ca54736e9e0f05f06fcbed1c04e118baea14d90ab4e5867786548eb1cdc80): each Code release role writes only its own output artifact into the artifact bucket. Changed, and only these (nothing added or removed;
+// no parameter, output or bucket change; shown by a resource-by-resource comparison of the synthesized templates before and after): ReleaseBuildRoleDefaultPolicy and BetaReleaseBuildRoleDefaultPolicy (CDK's whole-bucket read-write
+// statement became a read statement on the bucket and one s3:PutObject on that role's own output prefix, plus one Deny of s3:PutObject*, s3:DeleteObject* and s3:AbortMultipartUpload on everything but that prefix) and Pipeline (the twelve Cloud state
+// (the Allow is s3:PutObject and s3:AbortMultipartUpload on that prefix; first pin of this change 82b1f0fc1d625770784c47b04832a0a19fce66d901f751c362078d2d57236f82, before the abort was added; re-run against the rebased base 6336ff3b0, whose own template is the same 291ca547 pin)
+// artifacts renamed from Beta<Action>State and Production<Action>State to State<Beta|Prod><Action>, in the actions' input and output artifacts and in PIPELINE_STATE_ARTIFACT).
+// PIPELINE-NAMESPACE-FIX (2026-11-25; pin before it: 5d132f12052ae5d438250549e7edca670208048e96421b91b4688586219eb679): CodePipeline refused the Cloud source action's namespace "CloudSource" (equal to its output artifact name). Changed, and only this: Pipeline, the Namespace of
+// the CloudGitHub action, "CloudSource" -> "CloudSourceVariables" (the artifact keeps its name; nothing reads a #{CloudSource.*} variable; the legacy-templates snapshot changes by that one line).
+// L1-RELEASE-TAG-TRIGGER (2026-11-25; pin before it: a1a1b3c352ec39a5cdb923036fb981ad32e749c770beb6d00119dfa968fbbecd): a Cloud tag push started a run with CLOUD_PROD=on and CLOUD_REF=latest. Changed, and only this: Pipeline (the CLOUD_REF variable's default
+// latest -> from-trigger and its description; the CLOUD_PROD variable's default on -> off and its description; one CLOUD_SOURCE_COMMIT variable, #{CloudSourceVariables.CommitId}, on the Beta Cloud Preflight action only).
+// Nothing added or removed, no other resource; the legacy-templates snapshot changes by those same lines.
+// PROD-APPROVAL-BOUND (2026-11-25; pin before it: 6afbab33423ee9f888a3b10ea01311b6a1c3a46599d6521b25551d844b84d325; DEC 254zzz506, every production deploy needs the owner's approval for THAT run): the Production stage holds a CodePipeline manual approval,
+// ApproveProduction, right after the read-only Code Preflight (which closes the transition first, so a rejected or timed-out run leaves the gate closed). An interim pin of the first draft, which put the approval FIRST, was b1a94978e3dd134df0c83c269750cc8fd956e2a38775f854533e9a66021044db.
+// Changed, and only these (a resource-by-resource comparison of the synthesized templates before and after; the legacy-templates snapshot changes by the same hunks, edited by hand, no -u):
+//   1. Pipeline: the Production stage gains the ApproveProduction action as its SECOND action (Approval/AWS/Manual, run order 2, a 1440-minute timeout, CustomData naming the execution, the Code commit, the Cloud source commit and the five run variables,
+//      its own action role); the Code Preflight keeps run order 1 and the seven Production actions after the approval move one run order later (2-8 became 3-9); the disabled transition's Reason text changed (it names both steps).
+//   2. PipelineProductionApproveProductionCodePipelineActionRole02F1F3F2: a NEW IAM role, assumable only by the pipeline role, with no policy of any kind (like every other action role of the pipeline).
+//   3. PipelineRoleDefaultPolicy: one more sts:AssumeRole statement, on that new role.
+//   4. ProductionCodePreflight (the CodeBuild project): its first install command (the disable-stage-transition call) passes the new Reason text.
+//   5. ProductionCodePreflightRoleDefaultPolicy (added by the read-only-clone follow-up, pin before it: 2d8fa90cc5c8619e1cd99bb46eef16d0960ce240b03e389b0aa09acaee23aa0b): two Deny statements, ReadOnlyConnectionUse and ReadOnlyConnectionUseLegacy, on UseConnection of the GitHub connection
+//      when codeconnections: / codestar-connections:ProviderPermissionsRequired is read_write (StringEquals, so a request without the key is not denied), so the step that runs before the owner's approval can clone but not push (11 -> 13 statements; nothing else moved).
+//      Interim pin of the first draft of this hunk (StringNotEquals read_only): 84adb7fbf8b04fd6b8d84124c09eb547e7b0cdd73c875ab69affce9f65b461a9.
+// No parameter, output, bucket, trigger, variable, other role or other policy moved; no role was given any codepipeline permission (release-pipeline-prod-approval.test.ts pins that).
+// RELEASE-STACKS-ADDRESS (2026-11-25; pin before it: 7e66d04fc164d8a3edc90962636c21a8d514ec15369e0275dc04fa8283a30d46): the release roles may read the address stack. Changed, and only these (nothing added or removed; shown by a resource-by-resource comparison of the synthesized templates before and after):
+// ReleaseBuildRoleDefaultPolicy and BetaReleaseBuildRoleDefaultPolicy, whose ReadReleaseStacks cloudformation:DescribeStacks statement gains one resource, stack/AgentXApiAddress/* (AGENTX_RELEASE_STACKS gained "AgentXApiAddress"). The legacy-templates snapshot changes by those two resources.
+const PRODUCTION_PIPELINE_TEMPLATE_SHA256 = "ddd23afa7a00a60f4559a3fd980009d3b476e0a5cead70d1e3e0307faa5f927b";

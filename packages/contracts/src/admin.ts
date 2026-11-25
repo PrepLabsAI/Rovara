@@ -221,16 +221,16 @@ export type AdminWorkspacesResponse = z.infer<typeof AdminWorkspacesResponseSche
  * tests/contract/admin-health-infrastructure.test.ts checks the list against a named app's alarms.
  */
 export const HEALTH_ALARM_SUFFIXES = [
-  "BedrockThrottling", "ChannelRequestDeadLetters", "ChannelEventDeadLetters", "CheckerFailures", "ClassifierThrottling", "ConnectorBroken", "ConnectorNotConnected", "CoreDispatchDeadLetters",
-  "DeveloperNoticeDeadLetters", "DeveloperNoticeStreamFailures", "DispatchDeadLetters", "EmptyResponses",
-  "EvalBatchTickErrors", "EvalBatchWatcherErrors", "EvalExecutionsFailed", "GithubWebhookRejected",
+  "BedrockThrottling", "CanarySessionInvocations", "CanarySessionMints", "CanarySessionRefused", "ChannelRequestDeadLetters", "ChannelEventDeadLetters", "CheckerFailures", "ClassifierThrottling", "ConnectorBroken", "ConnectorNotConnected", "CoreDispatchDeadLetters",
+  "DeveloperNoticeDeadLetters", "DeveloperNoticeStreamFailures", "DispatchDeadLetters", "DispatchStaleAddress", "EmptyResponses",
+  "EvalBatchTickErrors", "EvalBatchWatcherErrors", "EvalExecutionsFailed", "GithubWebhookRejected", "LinearWebhookRejected",
   "ReconcilerLostInstances", "ReconcilerQualifiedAmiReadFailures", "ReconcilerQuarantinedVolumes", "ReconcilerStuckProvisioning", "RecordingFailures",
   "RuntimeRequalifyAgeUnreadable", "RuntimeRequalifyMachineFailures", "RuntimeRequalifyStale", "RuntimeRequalifyStepErrors",
-  "SessionDeleterFailures", "SessionProvisionerFailures", "SessionReaperErrors", "SessionReconcilerErrors", "SessionStuckStopping",
+  "SessionDeleterFailures", "SessionProvisionerFailures", "SessionReaperErrors", "SessionReconcilerErrors", "SessionStuckStopping", "SetupMachineUnverified",
   "SlackDeadLetters", "SlackDeliveryFailed", "SlackHandOffFailures", "SlowTurns", "StuckCancels", "TestAlarm", "TurnErrors", "UnwaitedTaskFailures", "WorkerTerminalCallbackFailed",
 ] as const;
-/** The listed alarms an environment creates only on Amazon Bedrock (or, for RuntimeRequalify*, only with the automatic renewal on), so their absence is expected. */
-export const HEALTH_ALARM_CONDITIONAL_SUFFIXES = ["BedrockThrottling", "ClassifierThrottling", "RuntimeRequalifyAgeUnreadable", "RuntimeRequalifyMachineFailures", "RuntimeRequalifyStale", "RuntimeRequalifyStepErrors"] as const satisfies ReadonlyArray<typeof HEALTH_ALARM_SUFFIXES[number]>;
+/** The listed alarms an environment creates only on Amazon Bedrock (or, for RuntimeRequalify*, only with the automatic renewal on; for CanarySession*, only the beta install that holds the canary session function), so their absence is expected. */
+export const HEALTH_ALARM_CONDITIONAL_SUFFIXES = ["BedrockThrottling", "CanarySessionInvocations", "CanarySessionMints", "CanarySessionRefused", "ClassifierThrottling", "RuntimeRequalifyAgeUnreadable", "RuntimeRequalifyMachineFailures", "RuntimeRequalifyStale", "RuntimeRequalifyStepErrors"] as const satisfies ReadonlyArray<typeof HEALTH_ALARM_SUFFIXES[number]>;
 /** The state the health route gives a listed alarm CloudWatch did not return. */
 export const MISSING_ALARM_STATE = "MISSING";
 

@@ -124,6 +124,36 @@ export async function containWorkspace(
   throw agentXError("RUNTIME_UNAVAILABLE", "AgentX kept finding programs or containers started from the workspace, so it did not push");
 }
 
+/** The seams (for tests) and the wait that every step which fetches a push-capable repository credential shares: publication and maintenance. */
+export interface ContainedCredentialOptions {
+  sweepWorkspaceContainers?: (rootPath: string) => Promise<{ removed: number }>;
+  stopWorkspaceProcesses?: (rootPath: string) => Promise<{ stopped: number } | void>;
+  otherOperationActive?: () => boolean;
+  otherOperationWait?: OtherOperationWait;
+}
+
+/**
+ * The one way a step that can push asks for its repository credential: first no container but the worker's own and no
+ * process of the worker's user is left (`containWorkspace`), then the credential is requested. When the containment
+ * fails, no credential is requested and the step fails with containWorkspace's fixed words. A new push-capable step
+ * calls this, never the provider itself (tests/contract/worker-credential-fetch-cleanup.test.ts lists every fetch).
+ */
+export async function fetchContainedCredential(
+  input: ContainedCredentialOptions & {
+    rootPath: string;
+    repository: Parameters<RepositoryCredentialProvider>[0];
+    credentialProvider: RepositoryCredentialProvider;
+  },
+): ReturnType<RepositoryCredentialProvider> {
+  await containWorkspace(input.rootPath, {
+    sweep: input.sweepWorkspaceContainers ?? ((root: string) => sweepWorkspaceContainers({ rootPath: root })),
+    stop: input.stopWorkspaceProcesses ?? ((root: string) => stopWorkspaceProcesses({ rootPath: root })),
+    ...(input.otherOperationActive === undefined ? {} : { otherOperationActive: input.otherOperationActive }),
+    ...(input.otherOperationWait === undefined ? {} : { otherOperationWait: input.otherOperationWait }),
+  });
+  return input.credentialProvider(input.repository);
+}
+
 export async function publishWorkspace(
   options: PublishWorkspaceOptions,
 ): Promise<PullRequestResult | PullRequestLifecycleResult> {
@@ -171,15 +201,7 @@ export async function publishWorkspace(
   // reads; a container is out of the worker's process view (workspace-containers.ts). Nothing is fetched or pushed when
   // they cannot all be stopped. A fetch of the latest base, for an ordinary publication or a revert, takes its own
   // credential before the readiness checks run, so it is preceded by its own stop too.
-  const fetchCredential = async () => {
-    await containWorkspace(rootPath, {
-      sweep: options.sweepWorkspaceContainers ?? ((root: string) => sweepWorkspaceContainers({ rootPath: root })),
-      stop: options.stopWorkspaceProcesses ?? ((root: string) => stopWorkspaceProcesses({ rootPath: root })),
-      ...(options.otherOperationActive === undefined ? {} : { otherOperationActive: options.otherOperationActive }),
-      ...(options.otherOperationWait === undefined ? {} : { otherOperationWait: options.otherOperationWait }),
-    });
-    return options.credentialProvider(repository);
-  };
+  const fetchCredential = () => fetchContainedCredential({ ...options, rootPath, repository });
   let commit: string;
   if (candidateTreeSha !== undefined) {
     const publicationMode = invocation.payload.publicationMode;

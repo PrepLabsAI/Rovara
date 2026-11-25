@@ -1,7 +1,7 @@
 // L4-EVC (DEC 254zzz20 D8): the eval's cost as the setup card says it, in plain dollars. Pure: no store, no clock, no model. One function works out the figures from the numbers the BROKER holds (the
 // question count and the per-question bounds the confirmed suite carries, and the company's monthly cap), and the same words are used on every surface (the setup page, the hosted card, the "Needs
 // approval" line), so a person is never shown one figure and asked to approve another. No calls, tokens or micro-dollars reach a sentence.
-import type { EvalSpendDollars, EvalSpendPlan } from "@agentx/contracts";
+import { EVAL_BEDROCK_COST_WORDS, EVAL_BEDROCK_ROW, type EvalSpendDollars, type EvalSpendPlan } from "@agentx/contracts";
 
 /** How many changed cases a check re-asks (the question rule's ten down and ten up), each three times on both sides. */
 const REASK_CASES_MAX = 20;
@@ -44,9 +44,12 @@ export function dollarRangeOf(lowMicros: number, highMicros: number): string {
   return lowMicros < 10_000 ? `up to ${high}` : `about ${low}-${high}`;
 }
 
-/** The card's one sentence (DEC 254zzz20 D8), in dollars only. */
-export function evalApprovalSentence(dollars: EvalSpendDollars): string {
-  return `Running your evals on each AI change will cost ${dollarRangeOf(dollars.perCheckLowMicros, dollars.perCheckHighMicros)} per PR, at most ${dollarsUpOf(dollars.monthlyCapMicros)} a month. Approve?`;
+/**
+ * The card's one sentence (DEC 254zzz20 D8), in dollars only. RF-5: for the Bedrock row the same sentence says whose cap counts the money (the dollars are the company's own AWS bill; the eval's own cost line reads 0 for Bedrock calls).
+ */
+export function evalApprovalSentence(dollars: EvalSpendDollars, catalogRowId?: string): string {
+  const where = catalogRowId === EVAL_BEDROCK_ROW ? ` ${EVAL_BEDROCK_COST_WORDS}` : "";
+  return `Running your evals on each AI change will cost ${dollarRangeOf(dollars.perCheckLowMicros, dollars.perCheckHighMicros)} per PR, at most ${dollarsUpOf(dollars.monthlyCapMicros)} a month.${where} Approve?`;
 }
 
 /** The opt-in health run's button words (DEC 254zzz20 D5): three runs of every case on the project's main code, shown with its cost. */

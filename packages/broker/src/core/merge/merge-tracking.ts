@@ -6,6 +6,7 @@
 // on changes (`decisionDigest`), so a pass that saw nothing new writes nothing, and the workflow snapshot changes only when a decision changes the workflow.
 //
 // Merge tracking never presses merge: a person always does (owner decision 1). It marks a draft ready and asks for reviewers; fixes and syncs are other tasks' deciders.
+import { owedLevelOf } from "./grown-owed.js";
 import { createHash } from "node:crypto";
 import { providerOf } from "../../plugins/routing.js";
 import {
@@ -121,6 +122,12 @@ export function ciAllowsReady(ci: MergeTrackingItem["ci"], mode: ProjectCiMode):
  * only where the project's mode says it does not rely on CI (`sandbox_only`). Unreadable CI never counts.
  */
 export const ciCountsAsPassing = (ci: MergeTrackingItem["ci"], mode: ProjectCiMode): boolean => ci === "passing" || (ci === "none" && mode === "sandbox_only");
+
+/** Whether a pull request is ready for a person to merge, from what tracking read (the one reading: the attention reader, the session summary and the task standing say "ready to merge" by it). */
+export function readyToMerge(item: Pick<MergeTrackingItem, "state" | "draft" | "ci" | "review" | "branch" | "headByRovara">, ciMode: ProjectCiMode = DEFAULT_CI_MODE): boolean {
+  // A review that was asked for and has not come is not "ready": ready needs the reviews approved, or none asked for.
+  return item.state === "open" && !item.draft && ciCountsAsPassing(item.ci, ciMode) && (item.review === "approved" || item.review === "not_requested") && item.branch !== "conflicted" && item.headByRovara;
+}
 /** The start of a person's head's missing-check wait, kept for the head it was seen on only. */
 export function missingSinceOf(item: Pick<MergeTrackingItem, "headSha" | "ciMissingSince"> | undefined, head: string): number | undefined {
   if (item === undefined || item.headSha !== head || item.ciMissingSince === undefined) return undefined;
@@ -893,7 +900,8 @@ async function trackOne(
     const where = deps.origin !== undefined && task.sessionId !== undefined ? `: ${sessionLink(deps.origin, task.sessionId)}` : ".";
     return deps.milestones.items({
       kind: "approved", orgId: task.orgId, taskId: task.taskId, ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }), at: stamp,
-      text: `Approved by ${inertLine(announce.login)}. Ready to merge${where}`, pullRequests: [{ repository: pullRequest.repositoryId, number: pullRequest.number, url: pullRequest.url }],
+      // A change that grew is not ready until the higher level's reviews ran on its head (the merge view says so): the approval is told, "ready" is not.
+      text: owedLevelOf(task.workflow) === undefined ? `Approved by ${inertLine(announce.login)}. Ready to merge${where}` : `Approved by ${inertLine(announce.login)}${where}`, pullRequests: [{ repository: pullRequest.repositoryId, number: pullRequest.number, url: pullRequest.url }],
     }, announce.n, { definitionVersion: task.workflow.definitionVersion });
   };
 

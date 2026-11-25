@@ -19,29 +19,21 @@ export const nativeP0Files = [
 // worker-env-detect-redos (#1256): about 160 s, the same detectors on every file kind filled to the 256 KiB read limit with hostile bodies. Split from
 // worker-env-detect-hardening, whose fast security checks (userinfo, variable names, key-shaped resource names) still run in every run.
 // local-up-flow: a whole task through `rovara up` on SQLite against a fake worker (243 tests, about 4 minutes).
-// workflow-e2e/*: the hosted task lifecycle, suite by suite, against fakes (about 17 minutes in all). Every file in the folder, new ones included.
-const WORKFLOW_E2E_DIR = "tests/integration/workflow-e2e";
-const workflowE2eFiles = readdirSync(fileURLToPath(new URL(`../../${WORKFLOW_E2E_DIR}`, import.meta.url)))
-  .filter((name) => name.endsWith(".test.ts"))
-  .sort()
-  .map((name) => `${WORKFLOW_E2E_DIR}/${name}`);
+// (#1350: the workflow-e2e/* suites drove the retired spec 056 workflow, which no longer starts a task, and were removed.)
 
 export const nightlyOnlyFiles = [
   "tests/unit/eval-question-simulation.test.ts",
   "tests/unit/worker-env-detect-growth.test.ts",
   "tests/unit/worker-env-detect-redos.test.ts",
   "tests/unit/local-up-flow.test.ts",
-  ...workflowE2eFiles,
 ];
 
 // #1242: integration journeys that belong after a deployed beta environment in the release pipeline, not on code merge. Until that stage exists they
 // run only in CI's nightly job: unlike nightlyOnlyFiles, no pull request or push run includes them, not even when the change reaches them.
-// slack-workflow-e2e: 32 Slack-to-draft-pull-request journeys in one process (about 115 s).
 export const postDeployFiles = [
-  "tests/integration/slack-workflow-e2e.test.ts",
   // #1272: more integration journeys, about 7.5 test-minutes in all: the real `rovara up` task flow under attack (stage-selection-adversarial), pull
   // request publication and maintenance against real local git remotes, the worker's real session rerunning checks, the install qualification web
-  // journey, and the workflow-e2e harness's own self-tests (its suites are already nightly).
+  // journey, and the workflow-e2e harness's own self-tests.
   "tests/unit/stage-selection-adversarial.test.ts",
   "tests/integration/pull-request-publication.test.ts",
   "tests/integration/worker-verification.test.ts",

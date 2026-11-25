@@ -1,0 +1,4042 @@
+{
+  "status": "FAIL",
+  "harnessVersion": "7575dee03e41f8d57c1ff0b4735a57aa754eccbec7ff936c4865736e1a90eba8",
+  "chargedMicros": 0,
+  "reservedMicros": 0,
+  "exposureMicros": 0,
+  "spendCapMicros": 1,
+  "perModelCapMicros": 50000,
+  "models": [
+    {
+      "model": "thinkingmachines/inkling-2-mini",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "radixark/daisyrose-27b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "mistralai/pixtral-large-2502",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-4-neon",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.request missing required field (not allowlisted); pricing.input_cache_write=\"0.0000000833333333333333\"; pricing.image=\"0.000003\"; pricing.audio=\"0.000003\"; pricing.input_audio_cache=\"0.00000015\"; pricing.web_search=\"0.014\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-6.2-astra-pro",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-6.2-astra",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-6.2-sol-pro",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-6.2-sol",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "tencent/hy4-flash",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen4-max",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-4-hydrogen",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.request missing required field (not allowlisted); pricing.input_cache_write=\"0.0000000833333333333333\"; pricing.image=\"0.0000015\"; pricing.audio=\"0.0000015\"; pricing.input_audio_cache=\"0.000000075\"; pricing.web_search=\"0.014\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "baidu/ernie-light-dt-1.0-intl",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-4-carbon",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.request missing required field (not allowlisted); pricing.image=\"0.000002\"; pricing.audio=\"0.000002\"; pricing.input_audio_cache=\"0.0000001\"; pricing.web_search=\"0.014\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "nex-agi/nex-n2.6",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "thinkingmachines/inkling-2-small",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "anthropic/claude-fable-5.2",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.input_cache_write_1h=\"0.000016\"",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "meta/muse-ember",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.0025\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "liquid/lfm-3-1.7b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-omni-1.2-flash",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "kt/midm-k-3.0-pro",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-omni-1.1-flash",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "ricursiveai/ripple-65b-preview",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "tencent/hy4",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "motif-technologies/motif-3",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "z-ai/glm-5.3-flashx-legal",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "particle-ai/particle-1",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-6.1-terra-pro",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-6.1-terra",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "moonshotai/kimi-k3.1-pro",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "minimax/minimax-m3.1-flash",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "elorian/glimpse",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "reflection/beam-1.0-501b-a23b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "prism-ml/ternary-bonsai-2-9b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "moondream/moondream3-preview",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "moondream/moondream3.1-9b-a2b",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "meta/muse-spark-open",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "nvidia/nemotron-3.5-super-vl",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "unbiased/pareto-26.10",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "unbiased/pareto-26.9",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "liquid/lfm-2.5-24b-a2b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-4-argon",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.request missing required field (not allowlisted); pricing.image=\"0.000002\"; pricing.audio=\"0.000002\"; pricing.input_audio_cache=\"0.0000001\"; pricing.web_search=\"0.014\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "scaledown/summarize",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "scaledown/extract",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "meta/muse-wonder",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "stepfun/step-5-preview",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "anthropic/claude-haiku-5.5",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.input_cache_write_1h=\"0.0000002\"; pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-nano-banana-2.1",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.image_output=\"0.00003\"; pricing.web_search=\"0.014\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "mistralai/mistral-large-4-0",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "inclusionai/ling-3.1-flash",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "unbiased/pareto-26.10-preview",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-6.1-sol-pro",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-6.1-sol",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "anthropic/claude-sonnet-5.5",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.input_cache_write_1h=\"0.000004\"",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "perceptron/perceptron-mk1.5",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "fireworks/ember-1",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "z-ai/glm-5.3-prime",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3.8-max-prime",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "aion-labs/aion-3.5-mini",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "aion-labs/aion-3.5",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "upstage/solar-mini4",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "cohere/command-a-plus",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-6-luna-pro",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-6-sol-pro",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-6-sol",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "anthropic/claude-opus-5.5",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.input_cache_write_1h=\"0.000008\"",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "xiaomi/mimo-v2.6-pro-ultraspeed",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "xiaomi/mimo-v2.6-flash",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "xiaomi/mimo-v2.6-pro",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "x-ai/grok-4.7",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.005\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3.8-omni-flash",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "prism-ml/ternary-bonsai-2-27b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "z-ai/glm-5.3-flashx",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "inference-net/schematron-v2-turbo",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "inference-net/schematron-v2-small",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "sakana/fugu-ultra-v2",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "sakana/fugu-max",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "inclusionai/ling-3.0-flash-vl",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "deepseek/deepseek-v4.1-flash",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "nex-agi/nex-n2.5-mini",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "nex-agi/nex-n2.5-pro",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-6-astra",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-6-astra-pro",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3.8-max-0902",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "meta/muse-spark-1.3",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.0025\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-3.8-flash",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.request missing required field (not allowlisted); pricing.input_cache_write=\"0.0000000416666666666667\"; pricing.image=\"0.00000075\"; pricing.audio=\"0.00000075\"; pricing.input_audio_cache=\"0.000000075\"; pricing.web_search=\"0.014\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "anthropic/claude-fable-5.1",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.input_cache_write_1h=\"0.00002\"",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "ibm-granite/granite-4.2-8b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "tencent/hy4-preview",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3.8-flash",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "z-ai/glm-5.3-flash",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "deepseek/deepseek-v4-flash-vision-exp",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "tencent/hy-mt2-1.8b",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "tencent/hy-mt2-30b-a3b",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "tencent/hy-mt2-7b",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "z-ai/glm-5.3",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3.8-27b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-3.7-flash",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.request missing required field (not allowlisted); pricing.input_cache_write=\"0.0000000416666666666667\"; pricing.image=\"0.00000075\"; pricing.audio=\"0.00000075\"; pricing.input_audio_cache=\"0.000000075\"; pricing.web_search=\"0.014\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "bytedance-seed/seed-2-1-turbo",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3.8-2.4t-a95b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "deepseek/deepseek-v4-pro-0813",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "x-ai/grok-4.6",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.005\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "nvidia/nemotron-3.5-lightning",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "upstage/solar-pro4",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "meta/muse-glimmer-30b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "inclusionai/ling-3.0-tiny",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "meta/muse-spark-1.2",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.0025\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "deepseek/deepseek-v4-flash-0731",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "thinkingmachines/inkling-small",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3.7-flash",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "anthropic/claude-opus-5",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.input_cache_write_1h=\"0.00001\"",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "inclusionai/ling-3.0-flash",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.request missing required field (not allowlisted); pricing.input_cache_write=\"0.0000000416666666666667\"; pricing.image=\"0.00000075\"; pricing.audio=\"0.00000075\"; pricing.input_audio_cache=\"0.000000075\"; pricing.web_search=\"0.014\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-3.5-flash-lite",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.request missing required field (not allowlisted); pricing.input_cache_write=\"0.0000000833333333333333\"; pricing.image=\"0.0000003\"; pricing.audio=\"0.0000003\"; pricing.input_audio_cache=\"0.00000003\"; pricing.web_search=\"0.014\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "thinkingmachines/inkling",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "moonshotai/kimi-k3",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "meta/muse-spark-1.1",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.0025\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5.6-luna-pro",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5.6-luna",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5.6-terra-pro",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5.6-terra",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5.6-sol-pro",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "x-ai/grok-4.5",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.005\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "aion-labs/aion-3.0-mini",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "aion-labs/aion-3.0",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "tencent/hy3",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "anthropic/claude-sonnet-5",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.input_cache_write_1h=\"0.000004\"",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-3.1-flash-lite-image",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "sakana/fugu-ultra",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-3.1-flash-image",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-3-pro-image",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.request missing required field (not allowlisted); pricing.image=\"0.000002\"; pricing.image_output=\"0.00012\"; pricing.audio=\"0.000002\"; pricing.input_audio_cache=\"0.0000002\"; pricing.web_search=\"0.014\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "z-ai/glm-5.2",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "moonshotai/kimi-k2.7-code",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "anthropic/claude-fable-5",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.input_cache_write_1h=\"0.00002\"",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "nvidia/nemotron-3.5-content-safety",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "nvidia/nemotron-3-ultra-550b-a55b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3.7-plus",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "minimax/minimax-m3",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "stepfun/step-3.7-flash",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "anthropic/claude-opus-4.8",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.input_cache_write_1h=\"0.00001\"",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3.7-max",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-3.5-flash",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.request missing required field (not allowlisted); pricing.input_cache_write=\"0.0000000833333333333333\"; pricing.image=\"0.0000015\"; pricing.audio=\"0.000003\"; pricing.input_audio_cache=\"0.0000003\"; pricing.web_search=\"0.014\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "perceptron/perceptron-mk1",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-3.1-flash-lite",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.request missing required field (not allowlisted); pricing.input_cache_write=\"0.0000000833333333333333\"; pricing.image=\"0.00000025\"; pricing.audio=\"0.0000005\"; pricing.input_audio_cache=\"0.00000005\"; pricing.web_search=\"0.014\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-chat-latest",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "x-ai/grok-4.3",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.005\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "mistralai/mistral-medium-3-5",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3.5-plus-20260420",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3.6-flash",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3.6-35b-a3b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3.6-27b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5.5-pro",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5.5",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "deepseek/deepseek-v4-pro",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "deepseek/deepseek-v4-flash",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "xiaomi/mimo-v2.5-pro",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "xiaomi/mimo-v2.5",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5.4-image-2",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "moonshotai/kimi-k2.6",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "anthropic/claude-opus-4.7",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.input_cache_write_1h=\"0.00001\"",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "z-ai/glm-5.1",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemma-4-26b-a4b-it",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemma-4-31b-it",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3.6-plus",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "z-ai/glm-5v-turbo",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "x-ai/grok-4.20-multi-agent",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "x-ai/grok-4.20",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.005\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/lyria-3-pro-preview",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/lyria-3-clip-preview",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "rekaai/reka-edge",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "minimax/minimax-m2.7",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5.4-nano",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5.4-mini",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "mistralai/mistral-small-2603",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "z-ai/glm-5-turbo",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "nvidia/nemotron-3-super-120b-a12b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "bytedance-seed/seed-2.0-lite",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3.5-9b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5.4-pro",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5.4",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-3.1-flash-lite-preview",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.request missing required field (not allowlisted); pricing.input_cache_write=\"0.0000000833333333333333\"; pricing.image=\"0.00000025\"; pricing.audio=\"0.0000005\"; pricing.input_audio_cache=\"0.00000005\"; pricing.web_search=\"0.014\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "bytedance-seed/seed-2.0-mini",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-3.1-flash-image-preview",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3.5-35b-a3b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3.5-27b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3.5-122b-a10b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3.5-flash-02-23",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-3.1-pro-preview-customtools",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.request missing required field (not allowlisted); pricing.image=\"0.000002\"; pricing.audio=\"0.000002\"; pricing.input_audio_cache=\"0.0000002\"; pricing.web_search=\"0.014\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5.3-codex",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "aion-labs/aion-2.0",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-3.1-pro-preview",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.request missing required field (not allowlisted); pricing.image=\"0.000002\"; pricing.audio=\"0.000002\"; pricing.input_audio_cache=\"0.0000002\"; pricing.web_search=\"0.014\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "anthropic/claude-sonnet-4.6",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.input_cache_write_1h=\"0.000006\"",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3.5-plus-02-15",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3.5-397b-a17b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "minimax/minimax-m2.5",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "z-ai/glm-5",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "anthropic/claude-opus-4.6",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.input_cache_write_1h=\"0.00001\"",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3-coder-next",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "moonshotai/kimi-k2.5",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "writer/palmyra-x5",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-audio",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.audio=\"0.000032\"; pricing.audio_output=\"0.000064\"",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-audio-mini",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.audio=\"0.0000006\"; pricing.audio_output=\"0.0000024\"",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "z-ai/glm-4.7-flash",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5.2-codex",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "z-ai/glm-4.7",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-3-flash-preview",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.request missing required field (not allowlisted); pricing.input_cache_write=\"0.0000000833333333333333\"; pricing.image=\"0.0000005\"; pricing.audio=\"0.000001\"; pricing.input_audio_cache=\"0.0000001\"; pricing.web_search=\"0.014\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "nvidia/nemotron-3-nano-30b-a3b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5.2-pro",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5.2",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "mistralai/devstral-2512",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "relace/relace-search",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "z-ai/glm-4.6v",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5.1-codex-max",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "amazon/nova-2-lite-v1",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "mistralai/ministral-14b-2512",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "mistralai/ministral-8b-2512",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "mistralai/ministral-3b-2512",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "mistralai/mistral-large-2512",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "deepseek/deepseek-v3.2",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "anthropic/claude-opus-4.5",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.input_cache_write_1h=\"0.00001\"",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-3-pro-image-preview",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5.1",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5.1-codex",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5.1-codex-mini",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "moonshotai/kimi-k2-thinking",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "amazon/nova-premier-v1",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "perplexity/sonar-pro-search",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "mistralai/voxtral-small-24b-2507",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.audio=\"0.0001\"",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-oss-safeguard-20b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5-image-mini",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "anthropic/claude-haiku-4.5",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.input_cache_write_1h=\"0.000002\"",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3-vl-8b-instruct",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5-image",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-2.5-flash-image",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3-vl-30b-a3b-instruct",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5-pro",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "z-ai/glm-4.6",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "anthropic/claude-sonnet-4.5",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.input_cache_write_1h=\"0.000006\"; pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "deepseek/deepseek-v3.2-exp",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "thedrummer/cydonia-24b-v4.1",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "relace/relace-apply-3",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3-vl-235b-a22b-instruct",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "deepseek/deepseek-v3.1-terminus",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3-coder-flash",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3-next-80b-a3b-instruct",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "moonshotai/kimi-k2-0905",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "nousresearch/hermes-4-405b",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "deepseek/deepseek-chat-v3.1",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "mistralai/mistral-medium-3.1",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "z-ai/glm-4.5v",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-5-mini",
+      "status": "FAIL",
+      "reason": "pricing.discount=0; pricing.discount=0; pricing.discount=0",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": [
+        {
+          "route": "openai/flex",
+          "status": "FAIL",
+          "cause": "unpriced_component",
+          "reasons": {
+            "unpriced_component": "pricing.discount=0"
+          }
+        },
+        {
+          "route": "azure",
+          "status": "FAIL",
+          "cause": "unpriced_component",
+          "reasons": {
+            "unpriced_component": "pricing.discount=0"
+          }
+        },
+        {
+          "route": "openai",
+          "status": "FAIL",
+          "cause": "unpriced_component",
+          "reasons": {
+            "unpriced_component": "pricing.discount=0"
+          }
+        }
+      ],
+      "tariffSignature": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "exposureMicros": 0
+    },
+    {
+      "model": "openai/gpt-5-nano",
+      "status": "FAIL",
+      "reason": "pricing.discount=0; pricing.discount=0; pricing.discount=0",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": [
+        {
+          "route": "openai/flex",
+          "status": "FAIL",
+          "cause": "unpriced_component",
+          "reasons": {
+            "unpriced_component": "pricing.discount=0"
+          }
+        },
+        {
+          "route": "azure",
+          "status": "FAIL",
+          "cause": "unpriced_component",
+          "reasons": {
+            "unpriced_component": "pricing.discount=0"
+          }
+        },
+        {
+          "route": "openai",
+          "status": "FAIL",
+          "cause": "unpriced_component",
+          "reasons": {
+            "unpriced_component": "pricing.discount=0"
+          }
+        }
+      ],
+      "tariffSignature": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "exposureMicros": 0
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-oss-120b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-oss-20b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "anthropic/claude-opus-4.1",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted); pricing.input_cache_write_1h=\"0.00003\"",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "mistralai/codestral-2508",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3-coder-30b-a3b-instruct",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3-30b-a3b-instruct-2507",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "z-ai/glm-4.5",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "z-ai/glm-4.5-air",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3-235b-a22b-thinking-2507",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3-coder",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "bytedance/ui-tars-1.5-7b",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-2.5-flash-lite",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.request missing required field (not allowlisted); pricing.input_cache_write=\"0.0000000833333333333333\"; pricing.image=\"0.0000001\"; pricing.audio=\"0.0000003\"; pricing.input_audio_cache=\"0.00000003\"; pricing.web_search=\"0.014\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3-235b-a22b-2507",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "moonshotai/kimi-k2",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "cognitivecomputations/dolphin-mistral-24b-venice-edition",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "morph/morph-v3-large",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "morph/morph-v3-fast",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "mistralai/mistral-small-3.2-24b-instruct",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-2.5-flash",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.request missing required field (not allowlisted); pricing.input_cache_write=\"0.0000000833333333333333\"; pricing.image=\"0.0000003\"; pricing.audio=\"0.000001\"; pricing.input_audio_cache=\"0.0000001\"; pricing.web_search=\"0.014\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-2.5-pro",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.request missing required field (not allowlisted); pricing.image=\"0.00000125\"; pricing.audio=\"0.00000125\"; pricing.input_audio_cache=\"0.000000125\"; pricing.web_search=\"0.014\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/o3-pro",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemini-2.5-pro-preview",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.request missing required field (not allowlisted); pricing.image=\"0.00000125\"; pricing.audio=\"0.00000125\"; pricing.input_audio_cache=\"0.000000125\"; pricing.web_search=\"0.014\" (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "deepseek/deepseek-r1-0528",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "mistralai/mistral-medium-3",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "meta-llama/llama-guard-4-12b",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3-30b-a3b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3-14b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen3-32b",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/o3",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-4.1",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-4.1-mini",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-4.1-nano",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); pricing.web_search=\"0.01\" (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "meta-llama/llama-4-maverick",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "meta-llama/llama-4-scout",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "deepseek/deepseek-chat-v3-0324",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "mistralai/mistral-small-3.1-24b-instruct",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemma-3-4b-it",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemma-3-12b-it",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "cohere/command-a",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "rekaai/reka-flash-3",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemma-3-27b-it",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "thedrummer/skyfall-36b-v2",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "perplexity/sonar-reasoning-pro",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "perplexity/sonar-pro",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "perplexity/sonar-deep-research",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "mistralai/mistral-saba",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "aion-labs/aion-rp-llama-3.1-8b",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen2.5-vl-72b-instruct",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen-plus",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.overrides=[invalid]",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "mistralai/mistral-small-24b-instruct-2501",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "perplexity/sonar",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "microsoft/phi-4",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "deepseek/deepseek-chat",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "cohere/command-r7b-12-2024",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); max_completion_tokens < 4096",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "meta-llama/llama-3.3-70b-instruct",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "amazon/nova-lite-v1",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "amazon/nova-micro-v1",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "amazon/nova-pro-v1",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-4o-2024-11-20",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "mistralai/mistral-large-2407",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen-2.5-coder-32b-instruct",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "thedrummer/unslopnemo-12b",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "anthracite-org/magnum-v4-72b",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "meta-llama/llama-3.2-3b-instruct",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "qwen/qwen-2.5-72b-instruct",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "cohere/command-r-08-2024",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); max_completion_tokens < 4096",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "cohere/command-r-plus-08-2024",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); max_completion_tokens < 4096",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "sao10k/l3.1-euryale-70b",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "sao10k/l3-lunaris-8b",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-4o-2024-08-06",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "meta-llama/llama-3.1-70b-instruct",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "meta-llama/llama-3.1-8b-instruct",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "mistralai/mistral-nemo",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-4o-mini",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-4o-mini-2024-07-18",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "google/gemma-2-27b-it",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-4o",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-4o-2024-05-13",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "mistralai/mixtral-8x22b-instruct",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "mistralai/mistral-large",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-3.5-turbo-0613",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted); max_completion_tokens < 4096",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-3.5-turbo-16k",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "mancer/weaver",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "undi95/remm-slerp-l2-13b",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "gryphe/mythomax-l2-13b",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "openai/gpt-4",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "typesafe/jev-router",
+      "status": "FAIL",
+      "reason": "catalogue tariff unbounded: pricing.prompt=\"-1\"; pricing.completion=\"-1\"; pricing.internal_reasoning missing required field (not allowlisted); pricing.request missing required field (not allowlisted); pricing.input_cache_read missing required field (not allowlisted); pricing.input_cache_write missing required field (not allowlisted)",
+      "causes": [
+        "unpriced_component"
+      ],
+      "providers": []
+    },
+    {
+      "model": "nvidia/switchyard",
+      "status": "FAIL",
+      "reason": "catalogue does not declare tool/function calling",
+      "causes": [
+        "no_tools_support"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    },
+    {
+      "model": "[invalid model]",
+      "status": "FAIL",
+      "reason": "invalid or duplicate model identifier",
+      "causes": [
+        "catalogue"
+      ],
+      "providers": []
+    }
+  ],
+  "notReached": [],
+  "failuresByCause": {
+    "unpriced_component": 285,
+    "no_tools_support": 58,
+    "catalogue": 98
+  },
+  "proposedTariffRows": [],
+  "errors": []
+}

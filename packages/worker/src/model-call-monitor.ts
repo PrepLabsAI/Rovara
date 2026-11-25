@@ -1,4 +1,4 @@
-import { MODEL_PROVIDERS, canonicalModelName, editionFromEnvironment, modelNotEnabledSentence, type Edition, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
+import { GATEWAY_STOPS, GATEWAY_STOP_CODES, MODEL_PROVIDERS, canonicalModelName, editionFromEnvironment, modelNotEnabledSentence, type Edition, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
 import { MODEL_NOT_ENABLED_SIGNAL, MODEL_NOT_OFFERED_DETAIL, MODEL_QUOTA_DETAIL, MODEL_QUOTA_SIGNAL, MODEL_NOT_OFFERED_SIGNAL, RUN_PRICE_REFUSED_MESSAGE, RUN_PRICE_REFUSED_SIGNAL, classifyProviderFailure } from "@agentx/model-runtime";
 import type { WorkerLogSink } from "./worker-log.js";
 
@@ -123,12 +123,14 @@ function keyedFacts(provider: ModelProvider, message: Record<string, unknown>): 
 
 /**
  * A routed call the model gateway refused in model-runtime's own fixed sentence, whichever provider the message names: DEC 254g (the gateway does not offer the model: `model-not-found ModelNotOffered`, 400) and
- * the run price refusal (the run's price authorization no longer fits the call: `request-rejected RunPriceRefused`, 409, a stop with its own stable signal and no new class). Matched whole, never copied.
+ * a fixed gateway stop (GATEWAY_STOPS, e.g. the missing monthly AI limit: `request-rejected CompanyLimitNotSet`, 403) and the run price refusal (the run's price authorization no longer fits the call: `request-rejected RunPriceRefused`, 409, a stop with its own stable signal and no new class). Matched whole, never copied.
  */
 function fixedSentenceFailure(message: Record<string, unknown>, attempt: number, provider: ModelProvider | undefined, durationMs: number | undefined): ModelCallNotePayload | undefined {
   const text = typeof message.errorMessage === "string" ? message.errorMessage : undefined;
   const common = { attempt, ...(provider === undefined ? {} : { provider }) };
   const tail = durationMs === undefined ? {} : { durationMs };
+  const stop = GATEWAY_STOP_CODES.find((code) => GATEWAY_STOPS[code].message === text);
+  if (stop !== undefined) return { modelCall: { outcome: "failed", class: "request-rejected", signal: GATEWAY_STOPS[stop].signal, ...common, status: GATEWAY_STOPS[stop].status, ...tail } };
   if (text === RUN_PRICE_REFUSED_MESSAGE) return { modelCall: { outcome: "failed", class: "request-rejected", signal: RUN_PRICE_REFUSED_SIGNAL, ...common, status: 409, ...tail } };
   if (text !== undefined && TRANSPORT_FAILURE.exec(text.slice(0, 4_000))?.[1] === MODEL_NOT_OFFERED_DETAIL) return { modelCall: { outcome: "failed", class: "model-not-found", signal: MODEL_NOT_OFFERED_SIGNAL, ...common, status: 400, ...tail } };
   if (text !== undefined && TRANSPORT_FAILURE.exec(text.slice(0, 4_000))?.[1] === MODEL_QUOTA_DETAIL) return { modelCall: { outcome: "failed", class: "limit-or-rate-limited", signal: MODEL_QUOTA_SIGNAL, ...common, status: 429, ...tail } };

@@ -18,7 +18,7 @@ function variablesOf(template: Template, pattern: RegExp): Record<string, unknow
   return (found[0]![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
 }
 
-export function withoutCompanySignIn(input: unknown, options: { proof?: boolean } = {}): unknown {
+export function withoutCompanySignIn(input: unknown): unknown {
   const template = input as Template;
   expect(template.Parameters?.CompanySignIn).toMatchObject({ Type: "String", Default: "disabled", AllowedValues: ["enabled", "disabled"] });
   expect(template.Parameters?.CompanySelfServe).toMatchObject({ Type: "String", Default: "disabled", AllowedValues: ["enabled", "disabled"] });
@@ -41,7 +41,7 @@ export function withoutCompanySignIn(input: unknown, options: { proof?: boolean 
     Sid: "WriteSlackWorkspaceTokens", Effect: "Allow", Action: ["secretsmanager:CreateSecret", "secretsmanager:PutSecretValue", "secretsmanager:GetSecretValue"] })]);
   delete template.Resources[policyId];
   const conditioned = (value: unknown, condition: string, on: string, off: string) => expect(value).toStrictEqual({ "Fn::If": [condition, on, off] });
-  for (const pattern of [...READERS, ...(options.proof === true ? [/^TaskPersonProofFunction[0-9A-F]{8}$/u] : [])]) {
+  for (const pattern of READERS) {
     const variables = variablesOf(template, pattern);
     conditioned(variables.COMPANY_SIGNIN, on, "enabled", "disabled");
     delete variables.COMPANY_SIGNIN;
@@ -50,7 +50,8 @@ export function withoutCompanySignIn(input: unknown, options: { proof?: boolean 
   conditioned(signIn.COMPANY_SELF_SERVE, selfServe, "enabled", "disabled");
   delete signIn.COMPANY_SELF_SERVE;
   const broker = variablesOf(template, /^Broker[0-9A-F]{8}$/u);
-  expect(JSON.stringify(broker.AGENTX_SETTINGS)).toContain(`",si=",{"Fn::If":["${on}","1","0"]}`);
+  // (`si=",` without the leading quote: a literal piece such as `rl=on` is merged into the string before it.)
+  expect(JSON.stringify(broker.AGENTX_SETTINGS)).toContain(`si=",{"Fn::If":["${on}","1","0"]}`);
   removePackedPieces(broker, "AGENTX_SETTINGS", ["si"]);
   for (const id of conditions) delete template.Conditions![id];
   return template;

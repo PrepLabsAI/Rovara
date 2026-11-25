@@ -29,8 +29,8 @@ export const USAGE_RECORD_USERS: readonly string[] = [
   "packages/contracts/src/test-services-usage.ts", "packages/contracts/src/index.ts",
   // the evidence file the worker writes (EvidenceRawSchema) carries the record under `testServices`, so evidence.ts imports its schema (s1-broker T4)
   "packages/contracts/src/evidence.ts", `${W}service-usage-record.ts`, `${W}test-services-run.ts`, `${W}verification/evidence-raw.ts`,
-  // Code's broker keeps the test environment under core/test-env/: candidate-check.ts keeps the record on the candidate check (recordCandidateUsage, keepCandidateUsage) and prove-from-setup-check.ts derives the two Prove steps from it
-  "packages/broker/src/core/test-env/candidate-check.ts", "packages/broker/src/core/test-env/prove-from-setup-check.ts",
+  // Code's broker keeps the test environment under core/test-env/: prove-from-setup-check.ts derives the two Prove steps from it
+  "packages/broker/src/core/test-env/prove-from-setup-check.ts",
 ];
 
 const SEALED_MODULES = /["'][^"']*\/(?:check-round-runners|service-usage-record)(?:\.js|\.ts)?["']/u;
@@ -114,7 +114,7 @@ describe("the sealed round's source guards", () => {
     }
     // The allowed ones pass.
     expect(bad(`${W}test-services-run.ts`, 'import { buildServiceUsageRecord } from "./service-usage-record.js";\nimport { runSealedCheckRound } from "./check-round-runners.js";\nimport type { TestServicesUsageRecord } from "@agentx/contracts";')).toEqual([]);
-    expect(bad("packages/broker/src/core/test-env/candidate-check.ts", 'import type { TestServicesUsageRecord } from "@agentx/contracts";')).toEqual([]);
+    expect(bad("packages/broker/src/core/test-env/prove-from-setup-check.ts", 'import type { TestServicesUsageRecord } from "@agentx/contracts";')).toEqual([]);
   });
 
   it("the allowlists name files that exist or are the planned wiring, and nothing agent-facing", () => {

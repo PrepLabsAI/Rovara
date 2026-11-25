@@ -49,14 +49,16 @@ import type { TaskMoneyV1 } from "@agentx/contracts";
 //     call with the sign-in refusal; there is no fallback to the install's company.
 //   - A handler the deployment has not wired answers a fixed "not on the core yet" (never a laptop default: the session levels, decision authority and the playbook's code host are the
 //     deployment's).
-import { AgentXError, ON_THE_WEBSITE_MESSAGE, OrgRoleSchema, type DeveloperSignInMethod, SavedEnvPanelSchema, agentXError, orgProjectCatalogKey, type AnswerResponse, type AuditSink, type DocumentStore, type ObjectStorage, type OrgId, type OrgRole, type Principal } from "@agentx/contracts";
+import { AgentXError, ON_THE_WEBSITE_MESSAGE, type TaskPeopleView, OrgRoleSchema, type DeveloperSignInMethod, SavedEnvPanelSchema, agentXError, orgProjectCatalogKey, type AnswerResponse, type AuditSink, type DocumentStore, type ObjectStorage, type OrgId, type OrgRole, type Principal } from "@agentx/contracts";
 import type { TaskCaller } from "../core/task-flow/deps.js";
 import type { TaskRecord } from "../core/task-flow/records.js";
 import { loadOwnedTask, loadReadableTask, readTask, taskViewOf } from "../core/task-flow/reads.js";
 import { coreTaskRuleOf } from "./task-rule-paths.js";
+import { routeTaskScreen, taskScreenRoute } from "./task-screen-routes.js";
 import { involvedListOptions, listInvolvedTasks, wantsInvolved } from "../core/task-flow/involved.js";
 import type { TaskActionsOptions } from "../core/task-flow/owner-round.js";
 import { createTaskActions, type TaskActions } from "../core/task-flow/task-actions.js";
+import type { TaskStanding } from "../core/task-view/index.js";
 import { stopTaskOnRequest } from "../core/task-flow/stop-request.js";
 import { SECURITY_ACCEPT_ON_THE_PAGE } from "../core/task-flow/security-accept.js";
 import { routeDecisionCards, type DecisionCaller, type DecisionRouteDependencies } from "../core/decisions/routes.js";
@@ -104,7 +106,9 @@ import { isAgentDirectoryPath, routeHostedAgentDirectory } from "./agent-directo
 import { isSystemRunsPath, routeHostedSystemRuns } from "./system-runs-routes.js";
 import { isPackageRegistriesPath, routeHostedPackageRegistries, type HostedPackageRegistriesWiring } from "./package-registries-routes.js";
 import { isHostedMergePath, routeHostedMerge, type HostedMergeWiring } from "./hosted-merge-routes.js";
+import { createTaskActionRoutes, type TaskActionChat } from "./task-action-routes.js";
 import { isTicketUpdatesPath, routeHostedTicketUpdates, type HostedTicketUpdatesWiring } from "./ticket-updates-routes.js";
+import { isIntakePath, routeHostedIntake, type HostedIntakeAppWiring } from "./intake-routes.js";
 
 async function applicationReadProjection(runtime: CoreRuntime, record: TaskRecord, personId: string) {
   if (record.workflow === undefined) return {};
@@ -257,6 +261,11 @@ export interface CoreDevWiring {
    */
   taskRules?: {
     route(input: { request: BrokerRequest; path: string; person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown>; store: Pick<DocumentStore, "query"> }): Promise<BrokerResponse>;
+    /** S1: the People moves the registry's first cut offers, in process (the same People functions the routes above call): the view, and taking over a task nobody owns (propose, then confirm, each re-read). */
+    people?: {
+      view(input: { person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown> }): Promise<TaskPeopleView>;
+      takeOwnership(input: { person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown>; requestId: string; expectedPeopleRevision: number }): Promise<void>;
+    };
     /** DEC 254zzz44 (a): whether this person is a reader the task's owner shared it with (spec 067) who is still a member of its project, read live. A read that fails is "no". */
     readsAsReader(input: { person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown> }): Promise<boolean>;
   };
@@ -270,6 +279,8 @@ export interface CoreDevWiring {
   merge?: HostedMergeWiring;
   /** Audit gap 11b: a project's ticket-sharing settings (`/v1/app/projects/<p>/intake/updates`, ticket-updates-routes.ts). Absent: that path says "not on the core yet". */
   ticketUpdates?: HostedTicketUpdatesWiring;
+  /** R1 + L1 6.2b: a project's waiting tickets at the one `/v1/app/projects/{project}/intake` address (core-host/intake-routes.ts). Absent: those paths are not on the core. */
+  intake?: HostedIntakeAppWiring;
   /** PRIVATE-PACKAGES P1b: the company's package tokens (`/v1/app/company/package-registries`, package-registries-routes.ts). Absent: that path says "not on the core yet". */
   packageRegistries?: HostedPackageRegistriesWiring;
 }
@@ -281,6 +292,8 @@ export interface CoreDevRoutesOptions {
   /** The company's wiring, built once per company (a build that fails is tried again on the next request, as the runtime is). */
   wiring(runtime: CoreRuntime): CoreDevWiring | Promise<CoreDevWiring>;
   log?: (entry: Record<string, unknown>) => void;
+  /** S1: the chat the registry's presses come from (the chat seam, the install's proof key, the company's approval gate). Absent: the registry takes no chat press. */
+  chat?: TaskActionChat | undefined;
 }
 
 /**
@@ -324,8 +337,8 @@ function owns(path: string, method: string, query: string): boolean {
   if (INBOX_PATH.test(path)) return inboxOwns(path, method);
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
   if (isSetupRunPath(path, method) || isSetupCheckPath(path, method) || isWikiMapPath(path, method) || isReportPath(path, method)) return true;
-  if (isKnownFailingPath(path, method) || isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method) || isEvalCheckPath(path, method) || isBrowserTestingPath(path, method) || isAgentDirectoryPath(path, method) || isSystemRunsPath(path, method) || isPackageRegistriesPath(path, method) || isTicketUpdatesPath(path, method)) return true;
-  return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path) || parityTaskRoute(path, method) !== undefined || isPrFeedbackPath(path, method);
+  if (isKnownFailingPath(path, method) || isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method) || isEvalCheckPath(path, method) || isBrowserTestingPath(path, method) || isAgentDirectoryPath(path, method) || isSystemRunsPath(path, method) || isPackageRegistriesPath(path, method) || isTicketUpdatesPath(path, method) || isIntakePath(path, method)) return true;
+  return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path) || parityTaskRoute(path, method) !== undefined || isPrFeedbackPath(path, method) || taskScreenRoute(path, method) !== undefined;
 }
 /** Neither decisions surface relies on sign-in time or methods (DEC 254zzz73). */
 function decisionCallerOf(caller: DeployedCaller, companyId: string): DeployedDecisionCaller {
@@ -424,6 +437,8 @@ interface Mounted {
   sessions?: ReturnType<typeof createSessionRoutes>; inbox?: ReturnType<typeof createInboxRoutes>;
   playbook?: ReturnType<typeof createLocalPlaybook>;
   actions?: TaskActions;
+  /** F2-B: where a task stands for this person (`taskStandingFor`), for a deployment that serves the owner's moves; `undefined` where it does not or the person has no standing. */
+  standing?: (membership: CompanyMembership, caller: DeployedCaller, task: TaskRecord) => Promise<TaskStanding | undefined>;
 }
 
 /** The audit sink of one request: the deployment's own (it names the caller), else the runtime's. */
@@ -469,9 +484,27 @@ async function moneyOf(target: Mounted, task: TaskRecord, knownCap?: { limitUsd:
 /** The developer task view with the caller's share of its figures: the owner's (money, run estimate, design review money), a live co-owner's (the task's `money` alone) or none. */
 async function taskViewFor(target: Mounted, record: TaskRecord, caller: DeployedCaller, membership: CompanyMembership): Promise<Record<string, unknown>> {
   const view = await taskViewOf(target.runtime.flow.deps, record);
-  if (maySeeTaskMoney(target, record, caller, membership)) return withDecidedByYou(await developerTaskView(record, view, target.blobs, undefined, await moneyOf(target, record), true), target, record, caller, membership);
-  const base = await developerTaskView(record, view, target.blobs, undefined, undefined, false);
-  return withDecidedByYou(await isLiveCoOwner(target, record, caller, membership) ? { ...base, money: await moneyOf(target, record) } : base, target, record, caller, membership);
+  const shown = maySeeTaskMoney(target, record, caller, membership)
+    ? await withDecidedByYou(await developerTaskView(record, view, target.blobs, undefined, await moneyOf(target, record), true), target, record, caller, membership)
+    : await (async () => {
+      const base = await developerTaskView(record, view, target.blobs, undefined, undefined, false);
+      return withDecidedByYou(await isLiveCoOwner(target, record, caller, membership) ? { ...base, money: await moneyOf(target, record) } : base, target, record, caller, membership);
+    })();
+  return { ...shown, ...await standingMembers(target, record, caller, membership) };
+}
+
+/**
+ * F2-B: the task's standing for THIS reader and the person-free status line, from the ONE rule (`taskStandingFor`), added to every task answer (the read and each press's answer: a page redraws from the answer it gets). Both are additive
+ * members older readers drop (`standing`) or already know (`statusView`, the strict status of the stored summary, now filled). Not served where the deployment does not serve the owner's moves or the reader has no standing; a standing that
+ * cannot be read leaves the answer as it was (the page says the status is unavailable), it never fails the read.
+ */
+async function standingMembers(target: Mounted, record: TaskRecord, caller: DeployedCaller, membership: CompanyMembership): Promise<Record<string, unknown>> {
+  try {
+    const served = await target.standing?.(membership, caller, record);
+    return served === undefined ? {} : { statusView: served.statusView, standing: served.standing };
+  } catch {
+    return {};
+  }
 }
 
 export interface CoreDevRoutes {
@@ -493,6 +526,12 @@ export interface CoreDevRoutes {
    * missing id, a read that fails): the row then carries no round. Nothing is returned from the task here, so the list builds the round from the task record it already read.
    */
   taskReadable(caller: DeployedCaller, taskId: string): Promise<boolean>;
+  /** S1: what one task offers this person now (the task action registry), in process; `undefined` where the deployment does not serve the owner's moves for the person's company. */
+  taskActions: ReturnType<typeof createTaskActionRoutes>["taskActions"];
+  /** F2-B: where one task stands for this person now, from the one rule (pill, step, the person-free status line, the offers), in process, for the surfaces that are not the web read (Slack's cards, notices). `undefined` as `taskActions`. */
+  taskStanding: ReturnType<typeof createTaskActionRoutes>["taskStanding"];
+  /** S1: a chat press of a task action, or the describe of one, judged again by the registry as the person the chat account is linked to. */
+  taskAction: ReturnType<typeof createTaskActionRoutes>["taskAction"];
 }
 
 function taskCallerOf(caller: DeployedCaller): TaskCaller {
@@ -533,6 +572,9 @@ async function feedbackAnswer(target: Mounted, request: BrokerRequest, taskCalle
 function taskSurfaceAnswer(target: Mounted, request: BrokerRequest, taskCaller: TaskCaller, caller: DeployedCaller, membership: CompanyMembership): Promise<BrokerResponse | undefined> | undefined {
   const path = request.path.split("?")[0]!;
   if (isPrFeedbackPath(path, request.method)) return feedbackAnswer(target, request, taskCaller, caller, membership);
+  // RD-2.0: the task page's new reads (spec, checks, changes, timeline), one mount; each answers ROUTE_NOT_SERVED until its lane fills its handler (task-screen-routes.ts).
+  const screen = taskScreenRoute(path, request.method);
+  if (screen !== undefined) return routeTaskScreen({ flow: target.runtime.flow, blobs: target.blobs, caller: taskCaller, request }, screen);
   const parity = parityTaskRoute(path, request.method);
   if (parity === undefined) return undefined;
   return routeParityTask({
@@ -556,6 +598,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           ...(wiring.playbook === undefined ? {} : { playbook: createLocalPlaybook({ playbook: wiring.playbook, store: runtime.flow.deps.store, companyId: runtime.companyId }) }),
           // The owner's moves need both the money cap and the company's owner rule; with either missing they are not served (never Code's laptop owner rule on a hosted company).
           ...(wiring.taskActions === undefined || runtime.flow.deps.access.ownerActing === undefined ? {} : { actions: createTaskActions(runtime.flow.deps, { roundCap: wiring.taskActions.roundCap }) }),
+          standing: (membership, deployed, task) => taskActionRoutes.standingFor({ runtime, wiring }, membership, deployed, task),
         };
       });
       found.catch(() => mounted.delete(companyId));
@@ -564,7 +607,14 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
     return found;
   };
 
+  const taskActionRoutes = createTaskActionRoutes({
+    companyOf: (caller) => options.companyOf(caller), chat: options.chat, now: () => Date.now(), ...(options.log === undefined ? {} : { log: options.log }),
+    mount: async (companyId) => { const target = await mount(companyId); return { runtime: target.runtime, wiring: target.wiring }; },
+  });
   return {
+    taskActions: (caller, taskId) => taskActionRoutes.taskActions(caller, taskId),
+    taskAction: (caller, input) => taskActionRoutes.taskAction(caller, input),
+    taskStanding: (caller, taskId) => taskActionRoutes.taskStanding(caller, taskId),
     async answerForSlackThread(input) {
       if (!ORG_ID.test(input.companyId)) return undefined;
       const target = await mount(input.companyId);
@@ -643,7 +693,9 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
       // A script token reaches task reads or the two scoped wiki reads; never sessions, decisions, playbooks or token management.
       // An owner's move on a task is never a script token's, and its answer must not tell a token which task ids exist: it reads like a missing task (the boundary's own answer).
       if (caller.scriptToken !== undefined && (feedbackOrParity(path, request.method) || TASK_ACTION.test(path) || TASK_CANCEL.test(path) || TASK_PAGE_FINDINGS.test(path) || isHostedMergePath(path, request.method) || coreTaskRuleOf(path, request.method) !== undefined)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
-      if (caller.scriptToken !== undefined && !TASK_READ.test(path) && scriptTokenRoute(request.method, path)?.permission !== "wiki") return errorAnswer(agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS));
+      // A task's proof index is refused to a script token too, but only AFTER the task is looked up (below): refusing it here, by path alone, told another company's token that the id is a real task (403) where an
+      // id with no task reads as a missing task (404). Every other path left here names no task id.
+      if (caller.scriptToken !== undefined && !TASK_READ.test(path) && !TASK_EVIDENCE.test(path) && scriptTokenRoute(request.method, path)?.permission !== "wiki") return errorAnswer(agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS));
       const target: Mounted = await mount(companyId);
       const taskCaller = taskCallerOf(caller);
       try {
@@ -686,6 +738,8 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           // Exactly the task read's rule (the flow's owned read: the company, then the company's access rule; another company's task, or none, answers the same "not found"), then the pack kept for
           // exactly the task's current code, as the proof page reads it. A pack that is missing or cannot be read leaves only what Rovara recorded itself.
           const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, evidence[1]!);
+          // Only now: someone who may not read the task has been told it is missing; the task's own owner's script token is told what a script token cannot do.
+          if (caller.scriptToken !== undefined && scriptTokenRoute(request.method, path)?.permission !== "wiki") throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
           // The pack is read through the company-bound store (the key must name a workspace of this company and its owner), not the shared bucket as it is.
           const pack = await loadEvidencePack(hostedEvidenceBlobs({ blobs: target.blobs, store: target.runtime.flow.deps.store, companyId: target.runtime.companyId }), { ownerKey: record.ownerKey, workspaceId: record.workspaceId, taskId: record.taskId }, record.workflow?.candidate?.digest);
           return json(200, proofIndexOf(record.taskId, record.workflow, pack));
@@ -846,6 +900,12 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           });
         }
         if (isKnownFailingPath(path, request.method)) return await routeKnownFailing({ flow: target.runtime.flow.deps, principal: caller.principal, companyId: target.runtime.companyId, members: target.wiring.members, webApp: caller.webApp === true, path, request, ...(target.wiring.testEnvironment === undefined ? {} : { env: target.wiring.testEnvironment.env }) });
+        if (isIntakePath(path, request.method)) {
+          // R1 + L1 6.2b: the company's own runtime, the caller's live standing on the project (read inside); the company's intake is built by the root, so an install without it is "not on the core".
+          const intake = target.wiring.intake?.intake();
+          if (target.wiring.intake === undefined || intake === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          return await routeHostedIntake({ request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.intake, intake });
+        }
         if (isTicketUpdatesPath(path, request.method)) {
           // Audit gap 11b: the company's own runtime and store, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
           if (target.wiring.ticketUpdates === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);

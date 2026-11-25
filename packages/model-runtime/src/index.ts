@@ -7,6 +7,8 @@ import { TRANSPORTS, carriesUnsignedReasoning, requestCompat } from "./transport
 import { TOOL_DECLARATIONS_MISSING_WORDS, toolBlocksWithoutTools } from "./tool-history.js";
 import { ModelBudgetExhaustedError, ModelNotAllowedError, budgetExhaustedMarker, budgetScopeOfProxyBody, modelNotAllowedMarker, type ModelBudgetScope } from "./budget.js";
 export { ModelBudgetExhaustedError, ModelNotAllowedError, budgetExhaustedFromMarker, modelNotAllowedFromMarker, type ModelBudgetScope } from "./budget.js";
+import { markFailedBeforeResponse } from "./failed-before-response.js";
+export { MODEL_CALL_FAILED_BEFORE_RESPONSE, failedBeforeResponse, type FailedBeforeResponse } from "./failed-before-response.js";
 export { readOpenRouterKey, readProviderKey, openRouterRouting, openRouterModel, requireKeyedModel } from "./config.js";
 // The governed e2e model route (M1.4): its own surface, never reached through the coding-task fallback above.
 export * from "./e2e-route.js";
@@ -16,10 +18,10 @@ export { createE2EProviderInvoke } from "./e2e-provider-invoke.js";
 export type { E2EProviderInvoke, E2EProviderInvokeDependencies } from "./e2e-provider-invoke.js";
 export * from "./e2e-environment-guard.js";
 export * from "./e2e-route-derive.js";
-export { classifyProviderFailure, isNetworkCode, signalPattern, BEDROCK_SIGNAL_PATTERN, KEYED_SIGNAL_PATTERN, MODEL_NOT_ENABLED_SIGNAL, MODEL_NOT_OFFERED_SIGNAL, RUN_PRICE_REFUSED_CODE, RUN_PRICE_REFUSED_MESSAGE, RUN_PRICE_REFUSED_SIGNAL, runPriceRefusedBody, GATEWAY_QUOTA_ANSWERS, MODEL_QUOTA_DETAIL, MODEL_QUOTA_SIGNAL, gatewayQuotaBody } from "./provider-failure.js";
-import { MODEL_QUOTA_DETAIL as QUOTA_DETAIL, RUN_PRICE_REFUSED_MESSAGE, gatewayQuotaBody, runPriceRefusedBody } from "./provider-failure.js";
+export { classifyProviderFailure, isNetworkCode, signalPattern, BEDROCK_SIGNAL_PATTERN, KEYED_SIGNAL_PATTERN, MODEL_NOT_ENABLED_SIGNAL, MODEL_NOT_OFFERED_SIGNAL, RUN_PRICE_REFUSED_CODE, RUN_PRICE_REFUSED_MESSAGE, RUN_PRICE_REFUSED_SIGNAL, runPriceRefusedBody, COMPANY_LIMIT_NOT_SET_CODE, COMPANY_LIMIT_NOT_SET_SIGNAL, companyLimitNotSetBody, gatewayStopBody, GATEWAY_QUOTA_ANSWERS, MODEL_QUOTA_DETAIL, MODEL_QUOTA_SIGNAL, gatewayQuotaBody } from "./provider-failure.js";
+import { MODEL_QUOTA_DETAIL as QUOTA_DETAIL, RUN_PRICE_REFUSED_MESSAGE, gatewayQuotaBody, gatewayStopBody, runPriceRefusedBody } from "./provider-failure.js";
 export type { ProviderFailureFacts } from "./provider-failure.js";
-import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, ROVARA_AI_PAUSED_MESSAGE, isRovaraAiPaused, agentXError, isClaudeAgentModel, isKeyedModelProvider, isOpenAiAgentModel, type RunPrice, type RateQuoteV1 as RateQuote, type InvocationModelRoute, type KeyedModelProvider, type ModelIdentifier, type ThinkingLevel } from "@agentx/contracts";
+import { CHATGPT_PLAN_LIMIT_ERROR, GATEWAY_STOPS, KEYED_MODEL_PROVIDERS, isGatewayStopStatus, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, ROVARA_AI_PAUSED_MESSAGE, isRovaraAiPaused, agentXError, isClaudeAgentModel, isKeyedModelProvider, isOpenAiAgentModel, type RunPrice, type RateQuoteV1 as RateQuote, type InvocationModelRoute, type GatewayStopCode, type KeyedModelProvider, type ModelIdentifier, type ThinkingLevel } from "@agentx/contracts";
 import { InMemoryCredentialStore, createAssistantMessageEventStream, type Api, type Model, type SimpleStreamOptions, type TranscriptContext, type AssistantMessage, type AssistantMessageEventStream, type OpenAICompletionsCompat } from "@earendil-works/pi-ai";
 import { streamSimple as openAICompletionsStream } from "@earendil-works/pi-ai/api/openai-completions";
 import { streamSimple as anthropicMessagesStream } from "@earendil-works/pi-ai/api/anthropic-messages";
@@ -420,9 +422,14 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
   // Set when the model gateway answered 429 in its fixed quota sentence (a Bedrock throttle: the model's AWS quota is used up or set to 0).
   let quotaUsedUp = false;
   let installPaused = false;
+  // Set once a response whose stream may carry content was handed on (an OK answer with a body). An error before it is a call that failed BEFORE any response: the provider returned nothing, with or
+  // without an HTTP status, and the failed message says so by a stable code (`markFailedBeforeResponse`), never by its words.
+  let streamBegan = false;
   // Set when the model gateway answered 409 `run_price_authorization_required`: the run's price authorization no longer fits the call. A stop, never a retry (see observedFetch).
   let runPriceRefused = false;
-  const errorText = (ordinary: string): string => installPaused ? ROVARA_AI_PAUSED_MESSAGE : runPriceRefused ? RUN_PRICE_REFUSED_MESSAGE : ordinary;
+  // Set when the model gateway answered one of its fixed company stops (GATEWAY_STOPS; today 403 `company_limit_not_set`, DEC 254zzz491). A stop, never a retry, in Code's fixed sentence (never the gateway's body).
+  let gatewayStop: GatewayStopCode | undefined;
+  const errorText = (ordinary: string): string => installPaused ? ROVARA_AI_PAUSED_MESSAGE : runPriceRefused ? RUN_PRICE_REFUSED_MESSAGE : gatewayStop !== undefined ? GATEWAY_STOPS[gatewayStop].message : ordinary;
   let returnedModel: string | undefined;
   let returnedProvider: string | undefined;
   const observedFetch: typeof fetch = async (input, init) => {
@@ -442,12 +449,15 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
     // The gateway's 409 for a run whose price authorization no longer fits the call is a STOP: the same grant is refused again. The body is matched (never kept) on the hosted gateway route only. The
     // answer is handed on with `x-should-retry: false` so the Anthropic client does not retry it, and its error text is the fixed sentence, which Pi's retry list does not match: one call, no retry.
     runPriceRefused = response.status === 409 && route !== undefined && plan === undefined && runPriceRefusedBody(409, (await response.clone().text().catch(() => "")).slice(0, 65_536));
-    if (runPriceRefused) {
+    // The gateway's 403 for a company with no monthly AI limit is a STOP too (matched, never kept, hosted gateway route only), handed on the same way so the client does not retry it. Any other 403 is unchanged.
+    gatewayStop = isGatewayStopStatus(response.status) && route !== undefined && plan === undefined && !installPaused ? gatewayStopBody(response.status, (await response.clone().text().catch(() => "")).slice(0, 65_536)) : undefined;
+    if (runPriceRefused || gatewayStop !== undefined) {
       const headers = new Headers(response.headers);
       headers.set("x-should-retry", "false");
       return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
     }
     if (!response.ok || !response.body) return response;
+    streamBegan = true;
     // Observe only the serving model and router provider identifiers; never record request/response bodies.
     const decoder = new TextDecoder();
     let pending = "";
@@ -524,7 +534,10 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
           return await fallBack(plan.fallback, refusal);
         }
         started = true;
-        if (event.type === "error") event.error.errorMessage = errorText(safeError(provider, event.reason === "aborted", failureStatus, chatgpt, exhausted, route !== undefined, notEnabled, notOffered, quotaUsedUp));
+        if (event.type === "error") {
+          event.error.errorMessage = errorText(safeError(provider, event.reason === "aborted", failureStatus, chatgpt, exhausted, route !== undefined, notEnabled, notOffered, quotaUsedUp));
+          if (event.reason !== "aborted" && !streamBegan) markFailedBeforeResponse(event.error, failureStatus);
+        }
         if (event.type === "done" || event.type === "error") {
           const message = event.type === "done" ? event.message : event.error;
           // Pi retains the response in the transcript. This record also identifies the serving model
@@ -547,6 +560,7 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
         content: [], timestamp: Date.now(), stopReason: aborted ? "aborted" : "error", errorMessage: errorText(error instanceof ToolDeclarationsMissing ? TOOL_DECLARATIONS_MISSING_WORDS : error instanceof ModelNotAllowedError && !aborted ? modelNotAllowedMarker(error.text) : safeError(provider, aborted, failureStatus, chatgpt, exhausted ?? (error instanceof ModelBudgetExhaustedError ? error.scope : undefined), route !== undefined, notEnabled, notOffered, quotaUsedUp)),
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
       };
+      if (!aborted && !streamBegan) markFailedBeforeResponse(message, failureStatus);
       output.push({ type: "error", reason: aborted ? "aborted" : "error", error: message });
       output.end(message);
     }

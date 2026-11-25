@@ -2,7 +2,6 @@
 import { describe, expect, it } from "vitest";
 import { TestEnvironmentBodySchema, type TestEnvironmentBody } from "@agentx/contracts";
 import { DEPENDENCIES_LEFT_OUT_NOTE, DEPENDENCIES_NO_CATALOG_NOTE, DEPENDENCIES_NOT_PROPOSED_NOTE } from "../../packages/broker/src/core/test-env/dependency-proposal.js";
-import { dependencyCardLines } from "../../packages/broker/src/core/test-env/dependency-card-lines.js";
 import { sanitizeTestEnvDraft } from "../../packages/broker/src/core/test-env/draft.js";
 import { TEST_SERVICES_MIN_CATALOG_REVISION } from "../../packages/broker/src/core/test-env/dependency-plan.js";
 import { pinnedCatalog, unpinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
@@ -51,24 +50,4 @@ describe("a draft's dependency candidates", () => {
 
 });
 
-describe("the card's lines", () => {
-  it("show a repository's text safely", () => {
-    // The schema refuses hidden characters in a path; a value that got here some other way is still shown as codes.
-    const dependency = {
-      id: "postgres", name: "Postgres", kind: "database", family: "postgres", found: [{ path: "a\u202Eb/compose.yml", line: 2 }], usedBy: ["integration"], backing: { kind: "local", catalogId: "postgres@16", config: {} },
-      connect: { env: [], hostAliases: [] }, seeds: [], reset: "fresh_per_round",
-    } as never;
-    const [line] = dependencyCardLines([dependency]);
-    expect(line).toContain("[U+202E]");
-    expect(line).not.toContain("\u202E");
-  });
-
-  it("say what backs each kind of dependency in fixed words", () => {
-    const words = (backing: unknown) => dependencyCardLines([{ id: "x", name: "Thing", kind: "other", family: "x", found: ["model"], usedBy: ["unit"], backing, connect: { env: [], hostAliases: [] }, seeds: [], reset: "fresh_per_round" } as never])[0];
-    expect(words({ kind: "test_account", accountId: "a" })).toContain("second person approves");
-    expect(words({ kind: "project_image", imageId: "a" })).toContain("your own image");
-    expect(words({ kind: "none", reason: "faked_by_tests" })).toContain("faked by your own tests");
-    expect(words({ kind: "local", catalogId: "postgres@16", config: {} })).toContain("Found by Rovara's reading of the code.");
-  });
-});
 

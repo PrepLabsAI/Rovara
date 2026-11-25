@@ -17,6 +17,12 @@ export const GATE_FLAGS_ON: Readonly<Record<string, string>> = {
 export const VALUE_KEYS: readonly string[] = [
   "agentxEnv", "agentxRegion", "agentxDeploymentMode", "agentxIdentity", "agentxSynthesizer", "agentx:autoRequalifyHourUtc", "agentxDnsFirewall", "agentxEgressAllowDomains",
   "CoreModelGatewayHost", "agentxReleasePipeline", "agentxReleaseBranch",
+  // The address stack (infra/lib/api-address.ts) is opted into by naming its domain; it declares no role (a topic policy and an alarm only), so the census has nothing to cover in it.
+  "agentxApiAddress",
+  // The model gateway's app mode (#1478): -c rovaraModelGateway=<env> makes only the gateway's two stacks, never an environment's, and the rest set
+  // up those stacks. Every role there carries Cloud's boundary, which the RequireCloudBoundary aspect enforces at synth (infra/lib/model-gateway-boundary.ts).
+  "rovaraModelGateway", "rovaraModelGatewayProductAi", "rovaraModelGatewayRovaraAi", "rovaraModelGatewayRovaraAiExempt", "rovaraModelGatewayRovaraAiDisabled",
+  "rovaraModelGatewayBedrockByo", "rovaraModelGatewayOfferedPrices", "rovaraModelGatewayProviderSecretNames", "rovaraAiSourceKinds", "rovaraCloudSha",
 ];
 /** Flags for stacks that exist only in the deployment that predates environments (no boundary applies there). */
 export const LEGACY_ONLY_FLAGS: readonly string[] = ["agentxBetaAccess", "agentxBetaDomain"];

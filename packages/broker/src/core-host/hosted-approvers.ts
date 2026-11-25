@@ -261,15 +261,15 @@ export function createHostedApprovers(options: HostedApproversOptions): Approver
   return {
     async requirement(request: ApprovalRequest): Promise<ApprovalRequirement> {
       // One method for every answer: the broker's proof of one act. No sign-in freshness rule (DEC 254zzz73).
-      const withChat = [...method, ...chatMethodsOf(chat, request)]; // HW5b: a chat press is offered for a task's plan of low or medium risk and nothing else (never a strong or a rejecting method)
+      const withChat = [...method, ...chatMethodsOf(chat, request)]; // HW5b: a chat press is offered for a task's document of low or medium risk and nothing else (never a strong method; S1: it may reject with a reason)
       return {
         methods: withChat, minApprovers: 1, selfApprovalAllowed: true,
-        strongMethods: [...method], rejectMethods: [...method], changesMethods: withChat,
+        strongMethods: [...method], rejectMethods: withChat, changesMethods: withChat,
       };
     },
 
     async verify(request: ApprovalRequest, proof: ApprovalProof): Promise<ApprovalVerdict> {
-      const refuse = (reason: string): ApprovalVerdict => ({ approved: false, reason }); if (chat !== undefined && proof?.method === chatApprovalMethod(chat.channel)) return await verifyChatPress({ store, identity, now: nowMs }, chat, request, proof);
+      const refuse = (reason: string): ApprovalVerdict => ({ approved: false, reason }); if (chat !== undefined && proof?.method === chatApprovalMethod(chat.channel)) return await verifyChatPress({ store, identity, now: nowMs, taskOwner: options.taskOwner }, chat, request, proof);
       if (proof?.method !== APPROVAL_PROOF_METHOD) return refuse("unknown_method");
       if (key === undefined) return refuse("method_not_available");
       // A read-only check of a one-time part would leave it replayable: only a caller that settles claims may use this method.

@@ -1,6 +1,6 @@
 import { isAbsolute, posix, resolve } from "node:path";
 import type { DevcontainerPaths } from "./devcontainer.js";
-import type { DockerCli } from "./swebench/containers.js";
+import type { DockerCli } from "./docker-cli.js";
 
 /**
  * Which host folders the devcontainer sees, and where. The file tools run inside the devcontainer (file-ops-exec.ts), but

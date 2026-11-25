@@ -44,10 +44,8 @@ describe("test-deploy's control-plane code units", () => {
   });
 
   it("leaves out only a function a code-only change set cannot move, with the reason", () => {
-    // The proof function is invoked through a published version: new code in the function would not change what runs.
     // The attention email sender (#907, batch 14) exists only while CoreAttentionEmail is on (off by default), so a code-only change set cannot count on it.
-    expect(Object.keys(CONTROL_PLANE_LAMBDAS_NOT_DEPLOYED)).toEqual(["TaskPersonProofFunction817A5A36", "CoreEngineJobsAttentionEmailSenderC7CE396D"]);
-    expect(CONTROL_PLANE_LAMBDAS_NOT_DEPLOYED["TaskPersonProofFunction817A5A36"]).toMatch(/version/i);
+    expect(Object.keys(CONTROL_PLANE_LAMBDAS_NOT_DEPLOYED)).toEqual(["CoreEngineJobsAttentionEmailSenderC7CE396D"]);
     expect(CONTROL_PLANE_LAMBDAS_NOT_DEPLOYED["CoreEngineJobsAttentionEmailSenderC7CE396D"]).toMatch(/CoreAttentionEmail is on/);
   });
 });

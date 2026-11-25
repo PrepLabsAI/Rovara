@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { COMMENT_RATE, WORKFLOW_THREAD_NOTES_MAX } from "@agentx/contracts";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
+import { readsAsRow } from "../support/code-api-row-read.js";
 import { createPlanComment, DIFF_PATCH_MAX_CHARS, DIFF_PATCH_TOO_LONG, listPlanComments, listTaskMessages, MESSAGES_PAGE_MAX, readCoreTaskDiff, readTaskDiff, sendTaskMessage } from "../../packages/broker/src/developer/task-code-routes.js";
 import { expectLinearScalingAsync } from "../support/scaling.js";
 import { OMAR, PRIYA, SAM, START, pagePlan, pageTask, type PageTaskFixture } from "../support/page-tasks.js";
@@ -62,6 +63,7 @@ describe("plan comments", () => {
     expect(owner.comment).toMatchObject({ anchor: "claim:2.1", replyTo: created.comment.commentId });
     const listed = Comments.parse(await listPlanComments(fixture.deps, PRIYA, fixture.taskId));
     expect(listed.comments.map((comment) => comment.commentId)).toEqual([created.comment.commentId, owner.comment.commentId]);
+    readsAsRow("tasks.comments", JSON.parse(JSON.stringify(listed)));
     // The same request again is the same comment.
     expect((await createPlanComment(fixture.deps, SAM, fixture.taskId, { requestId: "req-1", document: "plan", text: "Different", anchor: "claim:2.1" })).comment.commentId).toBe(created.comment.commentId);
     expect(Comments.parse(await listPlanComments(fixture.deps, PRIYA, fixture.taskId)).comments).toHaveLength(2);
@@ -390,6 +392,7 @@ describe("core task diff parity", () => {
     const read = vi.fn(goodDiff);
     withPullRequests(fixture, read, []);
     const result = await readCoreTaskDiff(fixture.deps, PRIYA, task, at(fixture, "/diff?repository=demo&number=7&page=2"));
+    readsAsRow("tasks.diff", JSON.parse(JSON.stringify(result)));
     expect(result).toMatchObject({ repository: "demo", number: 7, page: 2, more: true, files: [{ path: "src/a.ts", additions: 3, deletions: 1, patch: "@@ -1 +1,3 @@\n-a\n+b\n+c\n+d" }, { path: "logo.png", additions: 0, deletions: 0, patch: "" }] });
     expect(read).toHaveBeenCalledWith("https://github.com/acme/demo", 7, 2);
     read.mockClear();

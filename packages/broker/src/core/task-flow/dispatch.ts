@@ -23,6 +23,7 @@ import {
   change,
   when,
   workerProjectDefinition,
+  projectUseRefusal,
   type ProjectDefinition,
   PREPARE_EGRESS_S3_FEATURE,
   projectAllowedS3Hosts,
@@ -484,7 +485,11 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
     payload = { ...payload, workflowDependencies: serial };
   }
   // The worker's copy of the project can refuse (an external check nothing runs): that is a failed operation with its sentence, never an uncaught throw that redelivers until the attempts run out (review M2).
-  const toWorker = <D extends object>(definition: D): ReturnType<typeof workerProjectDefinition<D>> | string => {
+  // The stored record reads without the rules that judge new input (arch rule 8). Every branch that sends the project to a worker (prepare, publish, maintain: each can run its commands, with their env) asks them again here, so a revision
+  // pinned before a rule tightened is refused with the rule's fixed sentence and stable id, as a failed operation, and never run.
+  const toWorker = (definition: ProjectDefinition): ReturnType<typeof workerProjectDefinition<ProjectDefinition>> | string => {
+    const barred = projectUseRefusal(definition);
+    if (barred !== undefined) return barred.message.replace(/^CONFIG_INVALID: /u, "");
     try {
       return workerProjectDefinition(definition);
     } catch (error) {

@@ -17,7 +17,9 @@ import { GetCommand, QueryCommand, TransactWriteCommand, type TransactWriteComma
 import { z } from "zod";
 import { OrgIdSchema, OrgRoleSchema, agentDirectoryKey, agentKey, chainDirectoryKey, chainKey, companyScoped, type AuditEvent, type OrgId, type OrgRole } from "@agentx/contracts";
 import { DocumentAuditSink } from "@agentx/local-adapters";
+import { revokeProjectAccess } from "./admin-actions.js";
 import { ownPartitionRow, recordInCompany } from "./company-check.js";
+import { isProjectUnreadable } from "../core/project-left-out.js";
 import { grantKeyFor, grantsPkFor, latestRevisionRowFor, namedCompany, projectMemberRowKeyFor } from "./company-layout.js";
 import { involvedPartition } from "../core/task-flow/involved.js";
 import { taskOwnershipHandOverSteps, type TaskHandOverSkip, type TaskPeopleDependencies } from "../developer/task-people.js";
@@ -159,7 +161,14 @@ function companyGrant(row: Record<string, unknown> | undefined, companyId: OrgId
 
 /** Whether the project's latest revision lives in this company's own layout (a named company's partition; the legacy one naming this company). A read error throws. */
 async function projectInCompany(ctx: HandOverContext, companyId: OrgId, project: string): Promise<boolean> {
-  const revision = await latestRevisionRowFor(ctx.documentClient, ctx.tableName, companyId, project);
+  let revision;
+  try {
+    revision = await latestRevisionRowFor(ctx.documentClient, ctx.tableName, companyId, project);
+  } catch (error) {
+    // A project whose current revision cannot be read (arch rule 9) is still in the named company's own partition, where the read found it: a hand-over only moves grants, so one such project must not block the leaver's others.
+    if (!isProjectUnreadable(error) || namedCompany(companyId) === undefined) throw error;
+    return true;
+  }
   return revision !== undefined && (namedCompany(companyId) !== undefined || recordInCompany(revision, companyId));
 }
 
@@ -206,6 +215,25 @@ async function administeredProjects(ctx: HandOverContext, companyId: OrgId, leav
       ExpressionAttributeNames: { "#role": "role" }, ExpressionAttributeValues: { ":projectMember": "PROJECT_MEMBER", ":developer": "developer", ":administrator": "administrator" } } });
   }
   return { count, steps };
+}
+
+/**
+ * The leaver's NON-administrator project grants in this company, dropped when they leave (arch cleanup, rule 7: the one grant revoke, `revokeProjectAccess`, which removes the grant and its
+ * project-side row in one transaction, and in a named company the legacy row of that name too). An administrator grant is not touched here: it is the hand-over's, moved to the successor.
+ * Idempotent (a grant already gone is skipped). Only this company's own rows (`companyGrant`); a row naming another company is left. Past the list bound the whole drop is refused, never partial.
+ * Throws when a read or a delete fails: the caller says the removal is not finished, and the same request runs this again.
+ */
+export async function dropNonAdminGrants(ctx: HandOverContext, input: { companyId: string; leaverId: string }): Promise<number> {
+  const companyId = OrgIdSchema.parse(input.companyId);
+  const projects: string[] = [];
+  for (const row of await rows(ctx, grantsPkFor(companyId, input.leaverId), "PROJECT#", HANDOVER_LIMITS.directoryRows)) {
+    const project = typeof row["projectName"] === "string" ? row["projectName"] : undefined;
+    if (project === undefined || row["role"] === "administrator") continue;
+    if (companyGrant(row, companyId, grantKeyFor(companyId, input.leaverId, project), project) !== undefined) projects.push(project);
+  }
+  let dropped = 0;
+  for (const answer of await inBatches(projects, (project) => revokeProjectAccess(ctx, project, input.leaverId, companyId))) if (answer.revoked) dropped++;
+  return dropped;
 }
 
 /** The leaver's open tasks in this company: the ones they started (their task index) and the ones they co-own (their involved rows), each read live. */

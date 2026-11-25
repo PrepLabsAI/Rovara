@@ -4,8 +4,8 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { SETUP_AGENT_LIMITS_DEFAULT, SETUP_AGENT_LIMITS_MAX, SETUP_JOURNAL_MAX_ENTRIES, SETUP_RUN_LIMIT_STOPS, SetupJournalEntrySchema, SetupRunSummarySchema, type SetupAgentLimits, type SetupRunEndWord } from "../../packages/contracts/src/index.js";
-import { SETUP_AGENT_MAX_OUTPUT_TOKENS, SetupAgentGovernor, estimateNextTurnCents, finishStoppedRun, governorSessionListener, isProbeCommand, stepKeyOf, type SetupGovernorInput } from "../../packages/worker/src/setup-agent-journal.js";
+import { setupResultOf, SETUP_AGENT_LIMITS_DEFAULT, SETUP_AGENT_LIMITS_MAX, SETUP_JOURNAL_MAX_ENTRIES, SETUP_RUN_LIMIT_STOPS, SetupJournalEntrySchema, SetupRunSummarySchema, type SetupAgentLimits, type SetupRunEndWord } from "../../packages/contracts/src/index.js";
+import { SETUP_AGENT_MAX_OUTPUT_TOKENS, SetupAgentGovernor, estimateNextTurnCents, finishStoppedRun, governorSessionListener, isProbeCommand, shellOneLine, stepKeyOf, type SetupGovernorInput } from "../../packages/worker/src/setup-agent-journal.js";
 import { setupAgentShell, type SetupCommandRecord } from "../../packages/worker/src/setup-agent.js";
 
 const roots: string[] = [];
@@ -237,3 +237,66 @@ describe("fix round 1: one model turn cannot carry the run past the budget", () 
   });
 });
 
+describe("a search that finds nothing is not a failed try (DEC 254zzz495, N1)", () => {
+  it("a pure search that exits 1 with no output counts no try, however often it runs; the run is not stopped", () => {
+    const h = harness({ limits: { sameStepTries: 2 } });
+    for (let n = 0; n < 6; n += 1) expect(h.run("grep -rn pytest .", { exitCode: 1 })).toBe(true);
+    expect(h.governor.ended()).toBeUndefined();
+    expect(h.run("cd repo/x && find . -name '*test*' | grep -v node_modules", { exitCode: 1 })).toBe(true);
+    expect(h.governor.ended()).toBeUndefined();
+  });
+  it("the same search with output, or an exit of 2, is a real failure and counts as before", () => {
+    const withOutput = harness({ limits: { sameStepTries: 2 } });
+    expect(withOutput.run("grep -rn pytest .", { exitCode: 1, tail: "grep: ./x: Permission denied" })).toBe(true);
+    expect(withOutput.run("grep -rn pytest .", { exitCode: 1, tail: "grep: ./x: Permission denied" })).toBe(true);
+    expect(withOutput.run("grep -rn pytest .", { exitCode: 1 })).toBe(false);
+    expect(withOutput.governor.ended()).toBe("attempts_used");
+    const exit2 = harness({ limits: { sameStepTries: 2 } });
+    exit2.run("rg pytest", { exitCode: 2 });
+    exit2.run("rg pytest", { exitCode: 2 });
+    expect(exit2.run("rg pytest", { exitCode: 2 })).toBe(false);
+    expect(exit2.governor.ended()).toBe("attempts_used");
+  });
+  it("the real beta case (a source step in front of the find) stays a failure and counts its tries", () => {
+    const h = harness({ limits: { sameStepTries: 2 } });
+    const beta = 'cd repo/x && source .venv/bin/activate && find . -name "*test*" | grep -v node_modules';
+    expect(h.run(beta, { exitCode: 1 })).toBe(true);
+    expect(h.run(beta, { exitCode: 1 })).toBe(true);
+    expect(h.run(beta, { exitCode: 1 })).toBe(false);
+    expect(h.governor.ended()).toBe("attempts_used");
+  });
+  it("a nothing-found search neither adds a failed try nor clears the ones a step already has", () => {
+    const h = harness({ limits: { sameStepTries: 2 } });
+    h.run("npm ci", { exitCode: 1 });
+    h.run("grep -rn pytest .", { exitCode: 1 });
+    h.run("npm ci", { exitCode: 1 });
+    expect(h.run("npm ci", { exitCode: 1 })).toBe(false);
+    expect(h.governor.ended()).toBe("attempts_used");
+  });
+  it("a multi-line command is journaled the way a shell reads it (a line break is `;`), so a chain whose last line fails silently never reads as a search later", () => {
+    expect(shellOneLine("grep -q x a\npython -c 'import sys; sys.exit(1)'")).toBe("grep -q x a ; python -c 'import sys; sys.exit(1)'");
+    expect(shellOneLine("cd repo/x &&\n  source .venv/bin/activate &&\n  find . -name '*test*' |\n  grep -v node_modules")).toBe("cd repo/x && source .venv/bin/activate && find . -name '*test*' | grep -v node_modules");
+    expect(shellOneLine("npm ci \\\n  --prefer-offline\n\n").replace(/\s+/gu, " ")).toBe("npm ci --prefer-offline");
+    expect(shellOneLine("ls")).toBe("ls");
+    const h = harness();
+    h.run("grep -q x a\npython -c 'import sys; sys.exit(1)'", { exitCode: 1 });
+    const stored = h.governor.entries()[0]!;
+    expect(stored.command).toBe("grep -q x a ; python -c 'import sys; sys.exit(1)'");
+    expect(setupResultOf(stored)).toBe("failed");
+  });
+  it("only an ODD number of trailing backslashes continues a line; an even number is a literal backslash and the line ends there", () => {
+    // `grep -q foo\\` is the program grep with the argument `foo\`; the next line is a new command, so the chain stays failed (the last line's `false` is not a search).
+    expect(shellOneLine("grep -q foo\\\\\nfalse")).toBe("grep -q foo\\\\ ; false");
+    expect(shellOneLine("echo a\\\\\\\nb")).toBe("echo a\\\\ b");
+    expect(shellOneLine("echo a\\\\\\\\\nb")).toBe("echo a\\\\\\\\ ; b");
+    expect(shellOneLine("npm ci \\\n --x").replace(/\s+/gu, " ")).toBe("npm ci --x");
+    const h = harness();
+    h.run("grep -q foo\\\\\nfalse", { exitCode: 1 });
+    expect(h.governor.entries().map((stored) => [stored.command, setupResultOf(stored)])).toEqual([["grep -q foo\\\\ ; false", "failed"]]);
+  });
+  it("the journal still records the search with its real exit code", () => {
+    const h = harness();
+    h.run("grep -rn pytest .", { exitCode: 1 });
+    expect(h.governor.entries().map((entry) => [entry.command, entry.exitCode])).toEqual([["grep -rn pytest .", 1]]);
+  });
+});

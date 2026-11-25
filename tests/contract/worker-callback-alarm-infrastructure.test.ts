@@ -20,7 +20,8 @@ describe("the worker's lost-callback alarm", () => {
       const json = structuredClone(template.toJSON()) as { Resources: Record<string, { Type: string }> };
       const before = Object.keys(json.Resources).length;
       withoutWorkerCallbackAlarm(json);
-      expect(before - Object.keys(json.Resources).length).toBe(2);
+      // Four: the worker's filter and alarm, and the dispatcher's stale-address filter and alarm (`withoutWorkerCallbackAlarm` takes both pairs out).
+      expect(before - Object.keys(json.Resources).length).toBe(4);
     }
   });
 

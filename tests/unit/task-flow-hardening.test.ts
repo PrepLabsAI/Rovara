@@ -185,7 +185,10 @@ describe("the dispatch rows", () => {
       blocked += (await h.flow.sweepOnce()).blocked;
     }
     expect(blocked).toBe(1);
-    expect((await h.flow.get(h.owner, started.task.taskId)).workflow).toMatchObject({ state: "BLOCKED", blockReason: expect.stringContaining("prompt builder broke") as string });
+    // F2-B (arch ruling): the person reads fixed plain words, never the raw cause ("prompt builder broke" stays in the dispatch row and the log).
+    const workflow = (await h.flow.get(h.owner, started.task.taskId)).workflow;
+    expect(workflow).toMatchObject({ state: "BLOCKED", blockReason: "Rovara could not start the step that reads the request. Press Retry." });
+    expect(JSON.stringify(workflow)).not.toContain("prompt builder broke");
   });
 
   it("gives up on a row whose workspace never becomes free", async () => {

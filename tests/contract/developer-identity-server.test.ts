@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { developerIdentityConfigFromEnvironment, taskPublicKeysFromEnvironment, parseOidcClientSecret, parseSlackSignInSecret, unconfiguredProvider } from "../../packages/broker/src/aws/developer-identity.js";
 import { CHANNEL_MEMBERS_MAX_CHANNELS, TaskPeopleDisplayReadRequestSchema, TaskPeopleDisplayReadResponseSchema, TaskPersonProofRequestSchema, TaskPersonProofResponseSchema } from "@agentx/contracts";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { ProviderNotConfiguredError } from "../../packages/broker/src/developer/providers.js";
 import type { HttpResult } from "../../packages/broker/src/developer/server.js";
+import { sessionLogId } from "../../packages/broker/src/developer/session-log-id.js";
 import { kmsTokenSigner } from "../../packages/broker/src/developer/tokens.js";
 import { BOT_TOKEN, CLI_REDIRECT, ISSUER, OIDC_CLIENT_SECRET, OIDC_ISSUER, SLACK_CLIENT_SECRET, TEAM, fakeKms, authorizeQuery, httpEvent, identityHarness, type FakeSlackUser } from "../support/developer-fakes.js";
 
@@ -17,7 +19,7 @@ describe("discovery (FR-001, FR-048)", () => {
   it("reports the environment, API version and the methods that can actually be used", async () => {
     const both = identityHarness({ oidc: {} });
     expect(json((await both.http(httpEvent("GET", "/v1/auth/.well-known/agentx-configuration"))).body)).toEqual({
-      env: "staging", apiVersion: "1.2", adminApiVersion: "1.1", issuer: ISSUER, authorizationEndpoint: `${ISSUER}/authorize`, tokenEndpoint: `${ISSUER}/token`,
+      env: "staging", apiVersion: "1.5", adminApiVersion: "1.1", issuer: ISSUER, authorizationEndpoint: `${ISSUER}/authorize`, tokenEndpoint: `${ISSUER}/token`,
       revocationEndpoint: `${ISSUER}/revoke`, clientId: "agentx-cli", methods: { slack: true, oidc: { displayName: "Okta" } },
       confirm: { elicitation: true, slack: true },
     });
@@ -121,6 +123,8 @@ describe("browser sign-in for an AgentX feedback review", () => {
     // A fixed 30 days from sign-in, with the stored record's clean-up time kept in step with it.
     expect(h.db.get(`SESSION#${sessionId}`, "META")).toMatchObject({ developerId: mayaId, amr: "slack", reviewExpiresAt: signedInAt + 30 * 86_400, endsAt: signedInAt + 30 * 86_400, expiresAt: signedInAt + 31 * 86_400 });
     expect(h.logs.some(line => JSON.stringify(line).includes(sessionId))).toBe(false);
+    // The cookie is the whole credential: the sign-in writes no refresh-token row for it at all.
+    expect([...h.db.items.values()].filter((item) => String(item.pk).startsWith("REFRESH#") && item.sessionId === sessionId)).toEqual([]);
   });
 
   it("refuses the callback if its browser PKCE verifier is missing or incorrect", async () => {
@@ -226,6 +230,50 @@ describe("the token endpoint (FR-001, FR-005, FR-007)", () => {
     expect(again.body.refresh_token).not.toBe(next.body.refresh_token);
     expect(revocations(h.logs)).toEqual([]);
     expect((await h.refresh(String(again.body.refresh_token))).status).toBe(200);
+  });
+
+  it("refuses to refresh a browser sign-in session, whose cookie is its only credential", async () => {
+    const h = identityHarness({ slackUsers: [maya] });
+    const code = (await h.signIn("slack", maya.userId)).searchParams.get("code")!;
+    const cli = await h.exchange(code);
+    const endsAt = Math.floor(h.now() / 1000) + 30 * 86_400;
+    // A browser session that, against the sign-in route, was handed a refresh token anyway.
+    const { session, refreshToken } = await h.deps.store.createSession({ developerId: mayaId, amr: "slack", slackUserId: maya.userId, reviewExpiresAt: endsAt, endsAt });
+    const refused = await h.refresh(refreshToken);
+    expect(refused.status).toBe(400);
+    expect(refused.body.error).toBe("invalid_grant");
+    expect(refused.body.access_token).toBeUndefined();
+    expect(refused.body.refresh_token).toBeUndefined();
+    expect(JSON.stringify(h.logs)).not.toContain(session.sessionId);
+    // The impossible case shows up as one fixed line with no id.
+    expect(h.logs.filter((entry) => entry.event === "signin.browser_refresh_refused")).toEqual([{ event: "signin.browser_refresh_refused" }]);
+    // A CLI or registered-client (code-grant) session still refreshes.
+    expect((await h.refresh(String(cli.body.refresh_token))).status).toBe(200);
+    expect(h.logs.filter((entry) => entry.event === "signin.browser_refresh_refused")).toHaveLength(1);
+  });
+
+  const sidOf = (accessToken: unknown) => String((JSON.parse(Buffer.from(String(accessToken).split(".")[1]!, "base64url").toString("utf8")) as { sid: string }).sid);
+  const hashOf = (id: string) => createHash("sha256").update(id).digest("hex").slice(0, 12);
+
+  it("logs a short stable hash of the session id, never the id, on start, grace refresh and revocation", async () => {
+    const h = identityHarness({ slackUsers: [maya] });
+    const code = (await h.signIn("slack", maya.userId)).searchParams.get("code")!;
+    const first = await h.exchange(code);
+    const sid = sidOf(first.body.access_token);
+    expect(sid).toMatch(/^[0-9a-f-]{36}$/);
+    await h.refresh(String(first.body.refresh_token));
+    h.tick(30_000);
+    const again = await h.refresh(String(first.body.refresh_token));
+    expect(again.status).toBe(200);
+    h.tick(120_000);
+    expect((await h.refresh(String(first.body.refresh_token))).body.error).toBe("invalid_grant");
+    const lines = h.logs.filter((entry) => ["signin.session_started", "signin.refresh_grace", "signin.session_revoked"].includes(String(entry.event)));
+    expect(lines.map((entry) => entry.event)).toEqual(["signin.session_started", "signin.refresh_grace", "signin.session_revoked"]);
+    for (const line of lines) expect(line.session).toBe(hashOf(sid));
+    expect(hashOf(sid)).toMatch(/^[0-9a-f]{12}$/);
+    expect(sessionLogId(sid)).toBe(hashOf(sid));
+    expect(JSON.stringify(h.logs)).not.toContain(sid);
+    expect(lines.some((entry) => "sessionId" in entry)).toBe(false);
   });
 
   it("revokes when the grace window closes between the lookup and the rotation", async () => {

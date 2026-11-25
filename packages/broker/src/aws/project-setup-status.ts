@@ -25,7 +25,7 @@
 import { randomUUID } from "node:crypto";
 import { GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  IMPLICIT_COMPANY_ID, OrgIdSchema, ProjectSetupEvalNoneBodySchema, ProjectSetupSkipBodySchema, SETUP_SKIPPABLE_ROWS, SETUP_STATUS_ROWS, SetupJournalEntrySchema, SetupProposalSchema, ProjectDefinitionSchema, agentXError, companyScoped, projectRevisionKey, redactAndCap, workspaceProjectIndexValue,
+  IMPLICIT_COMPANY_ID, OrgIdSchema, ProjectSetupEvalNoneBodySchema, ProjectSetupSkipBodySchema, SETUP_SKIPPABLE_ROWS, SETUP_STATUS_ROWS, SetupJournalEntrySchema, SetupProposalSchema, agentXError, readStoredProject, NoAutomatedTestsSchema, noAutomatedTestsOf, setupResultOf, companyScoped, projectRevisionKey, redactAndCap, workspaceProjectIndexValue,
   type DocumentKey, type DocumentStore, type OrgId, type ProjectSetupChecklist, type SetupJournalEntry, type SetupProposal, type SetupApproval, type SetupRowState, type SetupSkippableRow, type SetupStatusRow, type StoredDocument,
   WORKSPACE_PROJECT_INDEX,
 } from "@agentx/contracts";
@@ -98,7 +98,9 @@ export interface SetupStatusInput {
   companyId: string;
   project: string;
   /** The project's latest revision row (already checked to be this company's). */
-  definition: { revision: number; repositories?: unknown };
+  definition: { revision: number; repositories?: unknown; readiness?: unknown };
+  /** The revision ROW's no-automated-tests fact (an attribute beside `definition`, DEC 254zzz495), as stored: read through its schema. */
+  noAutomatedTests?: unknown;
   viewer: { companyRole: "owner" | "admin" | "member" | null; projectAdmin: boolean };
   readers: SetupStatusReaders;
 }
@@ -309,7 +311,8 @@ async function journalOf(client: Client, tableName: string, companyId: OrgId, pr
 }
 
 function failedCommandOf(entries: readonly SetupJournalEntry[]): NonNullable<ProjectSetupChecklist["setupRun"]["failedCommand"]> | undefined {
-  const failed = [...entries].reverse().find((entry) => entry.timedOut || (entry.exitCode !== null && entry.exitCode !== 0));
+  // DEC 254zzz495 (N1): a pure search that matched nothing is an answer, never "the command that failed".
+  const failed = [...entries].reverse().find((entry) => { const result = setupResultOf(entry); return result === "timed_out" || (result === "failed" && entry.exitCode !== null); });
   if (failed === undefined) return undefined;
   const tail = redactAndCap(failed.tail, TAIL_REDACT_CHARS).text.split("\n").filter((line) => line.trim() !== "").slice(-TAIL_LINES).map((line) => line.slice(0, TAIL_LINE_CHARS));
   return { n: failed.n, command: redactAndCap(failed.command, 2_000).text, exitCode: failed.exitCode, timedOut: failed.timedOut, lastLines: tail };
@@ -346,7 +349,7 @@ const checkOf = (state: { status: NonNullable<ApprovalRead["check"]>["status"]; 
  */
 async function keptApproval(flow: TaskFlowDeps, store: DocumentStore, companyId: OrgId, project: string, earlier: { revision: number; at: string }): Promise<{ check: NonNullable<ApprovalRead["check"]> } | undefined> {
   const stored = await store.get(projectRevisionKey(companyId, project, earlier.revision));
-  const definition = ProjectDefinitionSchema.safeParse(stored?.["definition"]);
+  const definition = readStoredProject(stored?.["definition"]);
   if (stored === undefined || !definition.success || definition.data.revision !== earlier.revision) return undefined;
   return { check: checkOf(await setupStateOf(flow, project, definition.data)) };
 }
@@ -396,11 +399,21 @@ function setupRowState(run: { status: "ready"; proposalWaiting: boolean } | { st
   return { state: "needs_you" };
 }
 
+/**
+ * DEC 254zzz495 (N3): the approved setup has no test command: the run's end state is "Ready, no automated tests" (a normal end, and still done once approved and checked). Only the approved revision's own fact counts, and only
+ * while that revision has no test command (`noAutomatedTestsOf`). Nothing when the setup is not approved yet or the fact does not read.
+ */
+function noTestsFacts(input: Pick<SetupStatusInput, "definition" | "noAutomatedTests">, approval: SetupApproval): { endState?: "ready_no_tests"; noAutomatedTests?: { at: string; looked: string[] } } {
+  const fact = approval === "approved" ? NoAutomatedTestsSchema.safeParse(input.noAutomatedTests).data : undefined;
+  const noTests = fact === undefined ? undefined : noAutomatedTestsOf({ readiness: input.definition.readiness as readonly unknown[] | undefined, noAutomatedTests: fact });
+  return noTests === undefined ? {} : { endState: "ready_no_tests", noAutomatedTests: { at: noTests.at, looked: [...noTests.looked] } };
+}
+
 async function setupRunRow(input: SetupStatusInput, client: Client, companyId: OrgId): Promise<ProjectSetupChecklist["setupRun"]> {
   const store = readOnlyStore(client, input.tableName);
   const view = (await readState({ store, companyId, now: input.now }, input.project, input.definition.revision)).view;
   const approval = await approvalRead(input, client, companyId);
-  const approvalFacts = { approval: approval.approval, ...(approval.check === undefined ? {} : { check: approval.check }), ...(approval.approvedAt === undefined ? {} : { approvedAt: approval.approvedAt }) };
+  const approvalFacts = { approval: approval.approval, ...(approval.check === undefined ? {} : { check: approval.check }), ...(approval.approvedAt === undefined ? {} : { approvedAt: approval.approvedAt }), ...noTestsFacts(input, approval.approval) };
   if (view.status === "none") return { ...setupRowState({ status: "none" }, approval), status: "none", ...approvalFacts };
   const base = { status: view.status, ...(view.startedAt === undefined ? {} : { startedAt: view.startedAt }), ...approvalFacts };
   if (view.status === "running") return { state: "running", ...base };

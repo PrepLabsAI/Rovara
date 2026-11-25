@@ -3,7 +3,6 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment -- vitest's expect.* matchers are typed any */
 import { describe, expect, it, vi } from "vitest";
 import { TestEnvironmentBodySchema, projectPk, type StoredDocument, type TransactItem, type OrgId, type TestEnvironment, type TestEnvironmentBody, type ProjectCommand } from "@agentx/contracts";
-import { evidenceEnvironmentOf } from "../../packages/broker/src/core/test-env/evidence-line.js";
 import { testEnvPlanFor } from "../../packages/broker/src/core/test-env/task-plan.js";
 import { testEnvRevisionKey } from "../../packages/broker/src/core/test-env/environment.js";
 import { UNUSED_WORDS, environmentUnusedReason, readTestEnvPin, testEnvPinItem, testEnvironmentForStart, usableTestEnvironment } from "../../packages/broker/src/core/test-env/usable.js";
@@ -94,7 +93,6 @@ describe("which approved environment a task may use", () => {
       expect(await usableTestEnvironment(counted, ORG, PROJECT, undefined, env)).toEqual({ ok: false, reason: "none" });
       expect(await testEnvironmentForStart(counted, { orgId: ORG, project: PROJECT, taskId: "t1" }, env)).toEqual({});
       expect(await testEnvPlanFor(counted, { orgId: ORG, project: PROJECT, taskId: "t1", readiness: [cmd("pytest", ["-q"])] }, env)).toBeUndefined();
-      expect(await evidenceEnvironmentOf(counted, { orgId: ORG, project: PROJECT, taskId: "t1" }, env)).toEqual({});
     }
     expect(reads).not.toHaveBeenCalled();
   });

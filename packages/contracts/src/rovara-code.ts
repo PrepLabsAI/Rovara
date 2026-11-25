@@ -618,6 +618,8 @@ export const MERGE_NOT_READY_MESSAGES = {
   presserLostRight: "You can no longer merge this task, so nothing was merged.",
   notTrackedYet: "I haven't finished reading this pull request from GitHub yet. Try again in a minute.",
   notMerged: (repository: string, reason: string): string => `${repository} didn't merge: ${reason}. Check it on GitHub, then press Merge again.`,
+  /** An approval a press already used and did not give back (that press may have merged, or its outcome is unknown): say what happened and what to do. */
+  approvalUsed: "An earlier press already used this approval, and it may have merged. Check the pull request on GitHub; if it is not merged, approve it again and press Merge.",
   changedAfterConfirm: "The pull request changed after you confirmed. Check it and press Merge again.",
   halfMerged: (merged: string, failed: string, reason: string): string => `${merged} merged, but ${failed} didn't: ${reason}. Merge it on GitHub or press Merge again.`,
   /** Where the repository has a CODEOWNERS file that covers changed paths, a code owner has to approve (owner decision 2026-10-27). `owners` are the logins and teams, as the file names them. */

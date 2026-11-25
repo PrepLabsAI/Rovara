@@ -45,6 +45,7 @@
     "@aws-sdk/lib-dynamodb": "3.1134.0",
     "@aws-sdk/util-dynamodb": "3.996.9",
     "@hpcc-js/wasm-graphviz": "1.29.0",
+    "@preplabsai/rovara-code-api": "0.1.0",
     "@rovara/aws-adapters": "0.1.0",
     "jose": "6.2.12",
     "yaml": "2.9.1",

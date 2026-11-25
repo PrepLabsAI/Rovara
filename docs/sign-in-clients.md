@@ -141,8 +141,8 @@ The member list shows grants made once this release is in. A grant made before i
 
 ## Named scopes on the developer API
 
-Every developer API route (`/v1/dev/*`) has one row in the broker's route table
-(`packages/broker/src/aws/dev-route-scopes.ts`) naming what a service's token needs to use it. A method and path with
+Every developer API route (`/v1/dev/*`) has one row in the Code API's route table
+(`packages/code-api/src/routes.ts`; the broker selects over it in `packages/broker/src/aws/dev-route-scopes.ts`) naming what a service's token needs to use it. A method and path with
 no row is refused with 404 before anyone is signed in, so a new route can't be reached until it has a row.
 
 | Scope | What it opens |

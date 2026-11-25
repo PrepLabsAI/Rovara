@@ -1,11 +1,9 @@
 // Design review stage: the estimate, the cost gate and the spend card source. Money, so every edge is pinned: the estimate equals the second-review picker's
 // own function for one reviewer, "Cost unavailable" is never a number, a gate never runs on its own, and the card's choices are the ones the rules allow.
 import { describe, expect, it } from "vitest";
-import { DecisionCardSchema, type ModelIdentifier } from "@agentx/contracts";
+import { type ModelIdentifier } from "@agentx/contracts";
 import * as estimateModule from "../../packages/broker/src/core/design-review/estimate.js";
-import { PLANNER_REVISION_TOKENS, MERGE_TOKENS, REVIEWER_CACHE_READ_SHARE, ROLE_INPUT_FLOOR_TOKENS, ROLE_INPUT_TURN_FACTOR, ROLE_OUTPUT_TOKENS, estimateReviewerUsd, routeCaches, plannerRunsFor, estimateDesignReviewUsd as estimateWithPacket, designReviewKeyBudgets, gateDesignReviewCost, recordedReviewerCost, TIER_REVIEWERS, type DesignReviewEstimate, type DesignReviewEstimateInput, type PriceLookup } from "../../packages/broker/src/core/design-review/estimate.js";
-import { designSpendCardItem, designSpendChoicePath } from "../../packages/broker/src/core/design-review/spend-card.js";
-import { cardOfItem } from "../../packages/broker/src/core/decisions/project.js";
+import { PLANNER_REVISION_TOKENS, MERGE_TOKENS, REVIEWER_CACHE_READ_SHARE, ROLE_INPUT_FLOOR_TOKENS, ROLE_INPUT_TURN_FACTOR, ROLE_OUTPUT_TOKENS, estimateReviewerUsd, routeCaches, plannerRunsFor, estimateDesignReviewUsd as estimateWithPacket, designReviewKeyBudgets, recordedReviewerCost, TIER_REVIEWERS, type DesignReviewEstimate, type DesignReviewEstimateInput, type PriceLookup } from "../../packages/broker/src/core/design-review/estimate.js";
 import { estimateSecondReviewUsd } from "../../packages/broker/src/core/design-review/estimate.js";
 
 const STRONG: ModelIdentifier = { provider: "anthropic", modelId: "strong-model" };
@@ -154,54 +152,6 @@ describe("M5 and an unpriced run is bounded by the keys' ceilings, not by a stop
   });
 });
 
-describe("the approve_spend card source", () => {
-  const TASK = "11111111-1111-4111-8111-111111111111";
-  const base = { revealMoney: true, taskId: TASK, subjectId: "dr-spend-1", project: "payments", title: "Partner ranking by region", createdAt: "2026-11-03T10:00:00.000Z", openPath: `/app/sessions/ses_${"a".repeat(20)}`, contentVersion: "v1", capUsd: 1 };
-  const standard = priced(estimateDesignReviewUsd({ tier: "standard", models, price }));
-  const light = priced(estimateDesignReviewUsd({ tier: "light", models, price }));
-
-  it("makes a card whose actions are the allowed choices, as POSTs of this server, and which the card contract accepts", () => {
-    const gate = gateDesignReviewCost({ spentUsd: 0, tier: "standard", capUsd: (light.usd + standard.usd) / 2, estimate: standard, lowerTier: { tier: "light", estimate: light }, canSkip: true });
-    if (gate.kind !== "ask") throw new Error("expected an ask");
-    const item = designSpendCardItem({ ...base, capUsd: (light.usd + standard.usd) / 2, gate });
-    const made = cardOfItem(item);
-    expect(made).toBeDefined();
-    const card = made!.card;
-    expect(DecisionCardSchema.safeParse(card).success).toBe(true);
-    expect(card.kind).toBe("approve_spend");
-    expect(card.actions.filter((a) => a.kind === "choose").map((a) => a.href)).toEqual([
-      designSpendChoicePath(TASK, "lower_tier"), designSpendChoicePath(TASK, "raise_cap"), designSpendChoicePath(TASK, "skip"),
-    ]);
-    expect(card.actions.every((a) => a.kind === "open" ? a.method === "GET" : a.method === "POST")).toBe(true);
-    // Never an approve action: a choice names what happens, none is a blanket yes.
-    expect(card.actions.some((a) => a.kind === "approve")).toBe(false);
-    expect(card.recommended.action).toBe("choose");
-    expect(card.evidence.map((c) => c.label)).toEqual(["Estimate", "Limit for this task"]);
-    expect(card.next.costUsd).toBe(standard.usd);
-  });
-
-  it("a gate with no choice left gives a card that only opens the page", () => {
-    const card = cardOfItem(designSpendCardItem({ ...base, capUsd: 10, gate: { kind: "ask", why: "over_cap", estimateUsd: 250, choices: [] } }))!.card;
-    expect(card.actions.map((a) => a.kind)).toEqual(["open"]);
-    expect(card.recommended.action).toBe("open");
-    // $250 is above the admin amount: high risk, and a high card has only "Open to decide".
-    expect(card.risk).toBe("high");
-  });
-
-  it.each([false, undefined])("keeps another member's card reduced when revealMoney is %s, with the same risk and choices", (revealMoney) => {
-    for (const estimate of [standard, estimateDesignReviewUsd({ tier: "standard", models, price: () => undefined })]) {
-      const gate = gateDesignReviewCost({ spentUsd: 0, tier: "standard", capUsd: 1, estimate, canSkip: true });
-      if (gate.kind !== "ask") throw new Error("expected an ask");
-      const full = cardOfItem(designSpendCardItem({ ...base, gate }))!.card;
-      const reduced = cardOfItem(designSpendCardItem({ ...base, revealMoney, gate }))!.card;
-      expect(reduced.evidence).toEqual([{ kind: "cost", label: "Design review limit", value: "Blocked", state: "warning" }]);
-      expect(reduced.next.costUsd).toBeUndefined();
-      expect(JSON.stringify(reduced)).not.toContain("$");
-      expect(reduced.risk).toBe(full.risk);
-      expect(reduced.actions.map(({ kind, href, method }) => ({ kind, href, method }))).toEqual(full.actions.map(({ kind, href, method }) => ({ kind, href, method })));
-    }
-  });
-});
 
 describe("money N3 (pure parts): what each reviewer's key may spend, and what a run records", () => {
 

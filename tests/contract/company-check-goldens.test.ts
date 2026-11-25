@@ -9,6 +9,8 @@ it.each(["project", "status", "stale-updatedAt"] as const)("filtered implicit-co
   for (const enabled of [false, true]) {
     const h = companyRouteHarness();
     if (enabled) h.deps.companies = { companyOf: async () => IMPLICIT_COMPANY_ID };
+    // A real member of the project holds a grant on it; the person's own list shows a task only while they do (project-grant re-check).
+    h.project();
     const task = h.task();
     const newest = h.task("22222222-2222-4222-8222-222222222222");
     const key = { pk: `DEVELOPER#${PERSON}`, sk: `TASK#${TIME}#${newest.taskId}` };

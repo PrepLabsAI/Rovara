@@ -383,7 +383,7 @@ describe("R2-F1 follow-up (DEC 254zzz106): the review's legacy-row and race find
     const { revokeProjectAccess } = await import("../../packages/broker/src/aws/admin-actions.js");
     const sent: string[] = [];
     const client = { send: async (command: unknown) => { sent.push((command as { constructor: { name: string } }).constructor.name); return w.db.send(command as never); } };
-    expect(await revokeProjectAccess({ documentClient: client, tableName: "State" } as never, "old-app", LEGACY, IMPLICIT_COMPANY_ID)).toEqual({ revoked: true });
+    expect(await revokeProjectAccess({ documentClient: client, tableName: "State" }, "old-app", LEGACY, IMPLICIT_COMPANY_ID)).toEqual({ revoked: true });
     expect(sent).toEqual(["TransactWriteCommand"]);
     expect(grantRowsOf(w, LEGACY)).toEqual([]);
     // The same delete for a person of the built-in company never touches a named company's rows.

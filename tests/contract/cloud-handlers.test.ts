@@ -203,8 +203,10 @@ describe("AWS control-plane handlers", () => {
     }] })).resolves.toEqual({ batchItemFailures: [] });
     expect(markFailed).toHaveBeenCalledWith(
       expect.objectContaining({ operationId, workspaceId }),
-      expect.stringMatching(/dispatch failed after 3 attempts.*worker rejected the invocation/u),
+      // The reason is fixed words with a stable code; the error's own text is in the log line below, not in the stored reason.
+      expect.stringMatching(/^RUNTIME_UNAVAILABLE: worker dispatch failed after 3 attempts \(WORKER_START_FAILED\): Rovara could not start this step on a worker machine\.$/u),
     );
+    expect((markFailed.mock.calls[0] as unknown as [unknown, string])[1]).not.toContain("worker rejected the invocation");
     expect(markDelivered).not.toHaveBeenCalled();
     expect(log).toHaveBeenCalledWith(expect.objectContaining({
       event: "dispatch.attempt_failed",

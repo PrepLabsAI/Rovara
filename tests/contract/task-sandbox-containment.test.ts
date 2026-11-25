@@ -12,7 +12,7 @@ import { prepareWorkspace } from "../../packages/worker/src/prepare.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 import type { PiSessionAdapter, PiSessionInput } from "../../packages/worker/src/pi-session.js";
 import { createCheckRunners } from "../../packages/worker/src/verification/checks.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const run = promisify(execFile);
 const IMAGE = "registry.example.test/agentx/worker@sha256:" + "b".repeat(64);

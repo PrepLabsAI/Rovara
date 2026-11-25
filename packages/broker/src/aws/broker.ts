@@ -1,28 +1,24 @@
-import "./broker-environment-init.js"; import { companyMembershipFromDynamo, resolveAdminCompany, resolveCompany } from "./company-check.js"; // ENV-ROOM: the init first (broker-environment-init.ts; kept first by tests/contract/broker-environment-first.test.ts)
+import "./broker-environment-init.js"; import { companyMembershipFromDynamo, resolveCompany } from "./company-check.js"; // ENV-ROOM: the init first (broker-environment-init.ts; kept first by tests/contract/broker-environment-first.test.ts)
 import { coreKeepPullRequests } from "./slack-core-feedback.js";
-import type { TaskRecord as CoreApplicationTaskRecord } from "../core/task-flow/records.js";
 import { coreContextWorkerRouteOf } from "./dev-route-scopes.js";
 import { isServerReadRequest } from "./developer-routes.js";
 import { createHostedBrokerCoreServices } from "./core-job-services.js"; import { codeSettingsReader, companyCodeSettingsReader } from "./project-code-settings.js"; import { hostedPolicySource } from "./core-policy-source.js";
 import { guardCoreProjectSource, planCoreProjectWrites, planCanonicalProjectIdentity, coreProjectSnapshotFence } from "./core-project-backfill.js"; import { coreCopyRefusalWords } from "./core-copy-refusal.js";
 import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
-import { createSlackLinkCodes, createSlackPersonResolver, slackBindingCompany, slackCompanyPerson, slackCompanyProject, type SlackCompanyDependencies, type SlackWorkspaceAccess } from "./slack-person.js";
+import { createSlackPersonResolver, slackBindingCompany, slackCompanyPerson, slackCompanyProject, type SlackCompanyDependencies } from "./slack-person.js";
 import { latestRevisionRowFor } from "./company-layout.js";
-import { namedCompanySlackBinding, slackChannelBindingKeyFor } from "./slack-company-layout.js";
-import { companyThenInstallLinkCodes, installAdapterLinkCodes, installTeamOnLegacyPath, splitBySlackTeam, withoutSlackCompanyMode } from "./slack-company-split.js";
-import { answerSlackLinkNotice, isSlackLinkNoticeEvent, slackCompanyDependenciesFromEnvironment } from "./slack-company-wiring.js";
+import { slackChannelBindingKeyFor } from "./slack-company-layout.js";
+import { installTeamOnLegacyPath, splitBySlackTeam, withoutSlackCompanyMode } from "./slack-company-split.js";
+import { slackCompanyDependenciesFromEnvironment } from "./slack-company-wiring.js";
 import { askSlackAnswerForIdentity } from "./slack-answers.js";
 import { askSlackModelAccessForIdentity } from "./slack-model-access.js";
-import type { TokenSigner } from "../developer/tokens.js";
 import { SLACK_WEB_SIGNIN_NOTICE } from "./slack-action-classes.js";
-import { createSlackWorkspaceBindings, isSlackWorkspaceOperatorEvent, SlackWorkspaceOperatorEventSchema, type SlackWorkspaceOperatorEvent } from "./slack-workspace-binding.js";
-import { handleSlackWorkspaceRemoved, type SlackInstallWiring } from "./slack-company-install.js";
+import { createSlackWorkspaceBindings, type SlackWorkspaceOperatorEvent } from "./slack-workspace-binding.js";
+import { type SlackInstallWiring } from "./slack-company-install.js";
 import { slackInstallThroughLambda } from "./slack-install-identity.js";
 import type { SlackChannelWiring } from "./slack-channel-link.js";
-import { handleSlackRovara, isSlackRovaraEvent, SlackRovaraEventSchema, slackSignInUrlOf } from "./slack-rovara-command.js";
-import { isSlackWorkspaceRemovedEvent, SlackWorkspaceRemovedEventSchema } from "./slack-workspace-removal.js";
 import { refuseBrowserEvidenceOnCloud } from "./browser-evidence-seam.js";
-import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import { posix as posixPath } from "node:path";
 import { cancelCallbackForbidden, verifyCancelCallbackCapability } from "./cancel-callback-capability.js";
 import { CloudWatchClient } from "@aws-sdk/client-cloudwatch";
@@ -45,314 +41,50 @@ import { machineSizePicker, optionalPicker } from "./worker-machines/machine-siz
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
-import {
-  AgentXError,
-  E2ESetupProposalSchema,
-  E2ESharedViewSchema,
-  E2EPolicySchema,
-  E2EScenarioBundleSchema,
-  e2eScenarioBundleDigest,
-  e2ePlanHasCompleteRequiredCriteria,
-  E2ERunBindingSchema,
-  E2ERoundSchema,
-  buildE2ESharedView,
-  CandidateManifestSchema,
-    inspectE2ERepository, inspectE2ERepositoryBeforeContractApiTargets,
-  proposeE2ESetup,
-  WEB_API_RUNTIME_PROFILE_ID,
-  verifyE2ESourceSnapshot,
-  verifyE2ESetupProposal,
-  CHANNEL_TURN_REQUEST_MAX,
-  AGENTX_PROTOCOL_VERSION,
-  CheckReportSchema,
-  LatestChecksSchema,
-  PULL_REQUEST_BODY_MAX_CHARS,
-  checksForSection,
-  StandingFailuresSchema,
-  checksMakeDraft,
-  checksSection,
-  nextStandingFailures,
-  type StandingFailure,
-  submitWorkflowArtifact,
-  parsePlanDocument, groundingScenarioIds,
-  parseCommentAnswers,
-  commentRefInAuthor,
-  commentIdInAuthor,
-  COMMENT_AUTHOR_PREFIX,
-  UNPLACED_COMMENT_AUTHOR,
-  plainPageRefs,
-  type PlanQualityFinding,
-  type CommentAnswer,
-  type PlanClaim,
-  type WorkflowDecisionDetail,
-  type DeveloperTaskView,
-  retiredClaimIds,
-  canonicalPlanJson,
-  canonicalJson,
-  type PlanDocument,
-  type PlanEvidenceBundle,
-  WORKFLOW_REGRESSED_CHECK_MAX,
-  WORKFLOW_REGRESSED_CHECKS_MAX,
-  workflowIsReviewOnly,
-  workflowPullRequestTrees,
-  workflowSelectedChecks,
-  blockWorkflow,
-  WorkflowDependencyResultSchema,
-  WorkItemProgressV1Schema,
-  WorkflowSnapshotSchema,
-  taskGraphOrder,
-  workflowDependencyAttemptTerminalProgress,
-  validateTaskGraph,
-  completeWorkflowFeedbackReview,
-  createCandidateManifest,
-  WORKFLOW_HISTORY_REWRITTEN_MESSAGE,
-  WORKFLOW_NO_CODE_CHANGE_MESSAGE,
-  WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE,
-  WORKFLOW_BLOCK_REASONS,
-  WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON,
-  WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE,
-  WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE,
-  WORKFLOW_DISPATCH_DUE_INDEX,
-  WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE,
-  WorkflowReviewBaseSchema as PreparedBaseSchema,
-  recordWorkflowVerification,
-  submitWorkflowReview,
-  registerWorkflowPullRequest,
-  blockWorkflowPullRequestUpdate,
-  nextWorkflowPullRequestUpdate,
-  recordWorkflowPullRequestUpdate,
-  observeWorkflowPullRequestMergedWithFix,
-  workflowPullRequestUpdateDue,
-  WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED,
-  type WorkflowPullRequestUpdateCause,
-  taskResultChecks,
-  type CheckEntry,
-  type LatestChecks,
-  CONNECTOR_SECRET_PREFIX,
-  ChannelTurnSchema,
-  DEVELOPER_TASK_OWNER_ISSUER,
-  SharedTaskRecordSchema,
-  sharedTaskKey,
-  type SharedTaskRecord,
-  ConnectorCallRequestSchema,
-  GitHubMcpRequestSchema,
-  OperationRequestSchema,
-  PullRequestRequestSchema,
-  PullRequestLifecycleRequestSchema,
-  PullRequestLifecycleResultSchema,
-  PullRequestResultSchema,
-  ProjectDefinitionSchema,
-  type ClientRepositoriesResponse,
-  type Ec2RuntimeBinding,
-  ProjectModelOptionsSchema,
-  OPERATION_PROMPT_MAX_BYTES,
-  ProjectModelSelectionRequestSchema,
-  approvedToolCount,
-  githubConnectorOf,
-  presentedNameProblems,
-  toolBudget,
-  TOOL_LIMIT,
-  TOOL_WARNING_THRESHOLD,
-  legacyProjectFields,
-  SLACK_THREAD_OWNER_ISSUER,
-  SLACK_CHANNEL,
-  ActorRefSchema,
-  SlackChannelBindingSchema,
-  channelBindingAttributes,
-  channelBindingFromSlack,
-  channelBindingKey,
-  readChannelBindingItem,
-  slackBindingOf,
-  type ChannelBinding,
-  type ChannelSpaceRef,
-  SlackChannelIdSchema,
-  SlackMessageTimestampSchema,
-  SlackRequesterSchema,
-  SlackTaskAnswerRequestSchema,
-  SlackThreadNoteAnsweredRequestSchema,
-  SlackCommentAnsweredRequestSchema,
-  SlackThreadSchema,
-  SlackTeamIdSchema,
-  WorkspaceClosePreflightResultSchema,
-  WorkspaceInstanceSchema,
-  agentXError,
-  parseSlackThreadSubject,
-  slackThreadSubject,
-  slackThreadUrl,
-  unhandledDeploymentMode,
-  legacyWorkspaceProjectIndexAttributes,
-  workspaceRecordFields,
-  workflowRequestId,
-  type Operation,
-  type OperationRequester,
-  workspaceSessionKey,
-  type OperationStatus,
-  type ChannelTurn,
-  type CodeBuildCheckResult,
-  type CodeBuildGateDefinition,
-  codeBuildGatesOf,
-  type ProjectDefinition,
-  type ProjectCommand,
-  type WorkflowFeedbackApprovalBinding,
-  type WorkflowDependencyInvocation,
-  type WorkflowReviewBase,
-  type WorkflowReviewChecks,
-  type WorkflowApprovedPlan,
-  type WorkflowReviewPlan,
-  type WorkflowReviewFeedback,
-  type WorkflowReviewNote,
-  type RegistrationPreflight,
-  type PullRequestLifecycleResult,
-  type SlackChannelBinding,
-  type SlackRequester,
-  type DeveloperRequester,
-  type SlackThread,
-  type SlackThreadPrepareResult,
-  type SlackThreadWorkspaceResult,
-  type SlackWorkspaceCloseCompleteResult,
-  type SlackWorkspaceCloseStartResult,
-  type ThreadConnector,
-  type WorkerInvocation,
-  type WorkspaceInstance,
-  type WorkflowSnapshot,
-  type CandidateRepository,
-  WORKFLOW_PLAN_MAX_BYTES,
-  WorkflowFeedbackBundleRefSchema,
-  WorkflowFeedbackTaskChecksSchema,
-  type WorkflowFeedbackTaskChecks,
-  WorkflowFeedbackBundleSchema,
-  WorkflowFeedbackApprovalBindingSchema,
-  workflowFeedbackApprovalMatchesReview,
-  WorkflowFeedbackReviewReportSchema,
-  WORKFLOW_FEEDBACK_REVIEW_ANSWER_ARTIFACT,
-  WorkflowFeedbackReviewRefSchema,
-  cleanDisplayName,
-  redactAndCap,
-  redactText,
-  DISPLAY_NAME_MAX_ENCODED_LENGTH,
-  modelKey,
-  type ModelIdentifier,
-  type ModelRef,
-  type ModelSelection,
-  type ProjectModelOptions,
-  projectCatalogKey,
-  orgProjectCatalogKey,
-  type OrgId,
-  type ChannelMembersRequest,
-  isAdminChangePressEvent,
-  type AdminChangeOutcome,
-  type AdminChangePressEvent,
-  INDEX_EXPIRY_ATTRIBUTE,
-  indexExpiresAt,
-  WORKFLOW_RESOLVE_FINDINGS_MAX,
-  sameJsonContent,
-  type E2ESourceSnapshot,
-  type E2EReplayRefusal,
-  type E2EReplaySourceCase,
-  E2E_REPLAY_ATTEMPTS_MAX, E2E_REPLAY_RECORDS_MAX,
-  type E2EWorkflowAdmissionRef,
-  E2EWorkflowAdmissionRefSchema,
-  E2EWorkflowEvidenceRefSchema,
-  E2EWorkflowGroupEvidenceRefSchema,
-  type E2ESetupProposal,
-  type E2EPolicy,
-  type PlanApprovalRef,
-  type E2EApplicationPlanIntent,
-  type E2EApplicationSelectionRecord, type E2ERuntimeAccountRef, type E2EApplicationAccountDefinition, readE2EApplicationProjectContract, e2eSyntheticAccountContractDigest,
-  E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, e2eAnonymousTargetId, e2eAnonymousVariantOf,
-  E2E_AGENT_UNAVAILABLE_REASONS, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE, E2E_MODEL_ROUTE_DEFAULT_BUDGETS,
-  E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES, E2EApplicationBuildSourceManifestSchema, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX,
-  WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX,
-  type E2EScenarioResults, type E2ESharedView,
-  type E2EApplicationExecutionAdmission, isE2EApplicationAdmissionSchemaVersion,
-  type E2ERegisteredRuntime,
-  ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
-  projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey,
-  E2E_MODEL_FREE_LIMITS,
-  PLAN_DRY_RUN_FEATURE,
-  type PlanDryRunClass,
-  WorkerInvocationSchema,
-  workflowPublicationContext,
-  workflowPublicationContextDigest,
-  cutEvidenceReason, EVAL_PLAN_DELIVERY_ACTION,
-} from "@agentx/contracts";
+import { AgentXError, E2ESetupProposalSchema, E2EPolicySchema, E2EScenarioBundleSchema, e2eScenarioBundleDigest, E2ERunBindingSchema, E2ERoundSchema, CandidateManifestSchema, inspectE2ERepository, inspectE2ERepositoryBeforeContractApiTargets, proposeE2ESetup, WEB_API_RUNTIME_PROFILE_ID, verifyE2ESourceSnapshot, verifyE2ESetupProposal, CHANNEL_TURN_REQUEST_MAX, AGENTX_PROTOCOL_VERSION, CheckReportSchema, LatestChecksSchema, PULL_REQUEST_BODY_MAX_CHARS, checksForSection, StandingFailuresSchema, checksMakeDraft, checksSection, nextStandingFailures, type StandingFailure, submitWorkflowArtifact, parsePlanDocument, groundingScenarioIds, parseCommentAnswers, commentRefInAuthor, commentIdInAuthor, COMMENT_AUTHOR_PREFIX, UNPLACED_COMMENT_AUTHOR, plainPageRefs, type PlanQualityFinding, type CommentAnswer, type PlanClaim, type WorkflowDecisionDetail, retiredClaimIds, canonicalPlanJson, canonicalJson, type PlanDocument, type PlanEvidenceBundle, WORKFLOW_REGRESSED_CHECK_MAX, WORKFLOW_REGRESSED_CHECKS_MAX, workflowIsReviewOnly, workflowPullRequestTrees, workflowSelectedChecks, blockWorkflow, WorkflowDependencyResultSchema, WorkItemProgressV1Schema, WorkflowSnapshotSchema, taskGraphOrder, workflowDependencyAttemptTerminalProgress, validateTaskGraph, completeWorkflowFeedbackReview, createCandidateManifest, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_NO_CODE_CHANGE_MESSAGE, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON, WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_DISPATCH_DUE_INDEX, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, WorkflowReviewBaseSchema as PreparedBaseSchema, recordWorkflowVerification, submitWorkflowReview, registerWorkflowPullRequest, blockWorkflowPullRequestUpdate, nextWorkflowPullRequestUpdate, recordWorkflowPullRequestUpdate, observeWorkflowPullRequestMergedWithFix, workflowPullRequestUpdateDue, WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED, type WorkflowPullRequestUpdateCause, taskResultChecks, type CheckEntry, type LatestChecks, CONNECTOR_SECRET_PREFIX, ChannelTurnSchema, DEVELOPER_TASK_OWNER_ISSUER, sharedTaskKey, type SharedTaskRecord, ConnectorCallRequestSchema, GitHubMcpRequestSchema, OperationRequestSchema, PullRequestRequestSchema, PullRequestLifecycleRequestSchema, PullRequestLifecycleResultSchema, PullRequestResultSchema, ProjectDefinitionSchema, type ClientRepositoriesResponse, OPERATION_PROMPT_MAX_BYTES, approvedToolCount, githubConnectorOf, presentedNameProblems, toolBudget, TOOL_LIMIT, TOOL_WARNING_THRESHOLD, legacyProjectFields, SLACK_THREAD_OWNER_ISSUER, SlackChannelBindingSchema, channelBindingAttributes, channelBindingFromSlack, SlackChannelIdSchema, SlackMessageTimestampSchema, SlackRequesterSchema, SlackTaskAnswerRequestSchema, SlackThreadNoteAnsweredRequestSchema, SlackCommentAnsweredRequestSchema, SlackThreadSchema, SlackTeamIdSchema, WorkspaceClosePreflightResultSchema, WorkspaceInstanceSchema, agentXError, parseSlackThreadSubject, slackThreadSubject, slackThreadUrl, unhandledDeploymentMode, workspaceRecordFields, workflowRequestId, type Operation, type OperationRequester, workspaceSessionKey, type OperationStatus, type ChannelTurn, type CodeBuildCheckResult, type CodeBuildGateDefinition, codeBuildGatesOf, type ProjectDefinition, type ProjectCommand, type WorkflowFeedbackApprovalBinding, type WorkflowDependencyInvocation, type WorkflowReviewBase, type WorkflowReviewChecks, type WorkflowApprovedPlan, type WorkflowReviewPlan, type WorkflowReviewFeedback, type WorkflowReviewNote, type RegistrationPreflight, type PullRequestLifecycleResult, type SlackChannelBinding, type SlackRequester, type SlackThread, type SlackThreadPrepareResult, type SlackThreadWorkspaceResult, type SlackWorkspaceCloseCompleteResult, type SlackWorkspaceCloseStartResult, type ThreadConnector, type WorkerInvocation, type WorkspaceInstance, type WorkflowSnapshot, type CandidateRepository, WORKFLOW_PLAN_MAX_BYTES, WorkflowFeedbackBundleRefSchema, WorkflowFeedbackTaskChecksSchema, type WorkflowFeedbackTaskChecks, WorkflowFeedbackBundleSchema, WorkflowFeedbackApprovalBindingSchema, workflowFeedbackApprovalMatchesReview, WorkflowFeedbackReviewReportSchema, WORKFLOW_FEEDBACK_REVIEW_ANSWER_ARTIFACT, WorkflowFeedbackReviewRefSchema, cleanDisplayName, redactAndCap, redactText, DISPLAY_NAME_MAX_ENCODED_LENGTH, projectCatalogKey, orgProjectCatalogKey, type OrgId, type ChannelMembersRequest, type AdminChangePressEvent, INDEX_EXPIRY_ATTRIBUTE, indexExpiresAt, sameJsonContent, type E2ESourceSnapshot, type E2EReplayRefusal, type E2EReplaySourceCase, E2E_REPLAY_ATTEMPTS_MAX, E2E_REPLAY_RECORDS_MAX, type E2EWorkflowAdmissionRef, E2EWorkflowAdmissionRefSchema, E2EWorkflowEvidenceRefSchema, E2EWorkflowGroupEvidenceRefSchema, type E2ESetupProposal, type E2EPolicy, type PlanApprovalRef, type E2EApplicationPlanIntent, type E2EApplicationSelectionRecord, type E2ERuntimeAccountRef, type E2EApplicationAccountDefinition, readE2EApplicationProjectContract, e2eSyntheticAccountContractDigest, E2EApplicationSelectionRecordSchema, E2E_AGENT_UNAVAILABLE_REASONS, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE, E2E_MODEL_ROUTE_DEFAULT_BUDGETS, E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES, E2EApplicationBuildSourceManifestSchema, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, type E2EApplicationExecutionAdmission, isE2EApplicationAdmissionSchemaVersion, type E2ERegisteredRuntime, ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema, projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey, PLAN_DRY_RUN_FEATURE, type PlanDryRunClass, WorkerInvocationSchema, workflowPublicationContext, workflowPublicationContextDigest, EVAL_PLAN_DELIVERY_ACTION } from "@agentx/contracts";
 import { selectE2EExecutionPlan } from "@agentx/contracts/e2e-execution-plan";
-import { compileE2EScenarios, collectE2EActualCliRun, qualifyE2ECollection, e2eSnapshotSourceDigest, parseE2EFirstPartyCapture, e2ePrivateTransferMaxBytes, decodeE2EApplicationExecutionAdmission } from "@agentx/verifier";
-import { renderE2EMcpProjection, renderE2EPageHtml, renderE2EScenarioRowsHtml, renderE2EScenarioSlackBlocks, renderE2ESlackBlocks, renderE2ENotifierSlackBlocks } from "../e2e-presentation.js";
-import type { DisplayArtifact } from "../e2e/application-display.js";
-import { loadStoredScenarioResults, loadWorkflowE2EArtifact as loadStoredWorkflowE2EArtifact, resultsWithStoredArtifacts, storeWorkflowE2EArtifacts } from "./workflow-e2e-artifacts.js";
+import { compileE2EScenarios, collectE2EActualCliRun, e2eSnapshotSourceDigest, parseE2EFirstPartyCapture, e2ePrivateTransferMaxBytes, decodeE2EApplicationExecutionAdmission } from "@agentx/verifier";
+import { resultsWithStoredArtifacts, storeWorkflowE2EArtifacts } from "./workflow-e2e-artifacts.js";
 import { BaselineSourceBodySchema, BaselineSourceWireSchema, StoredBaselineSourceSchema, assessBaselineSource, parseBaselineExport, type ReadyBaselineSource, type StoredBaselineSource } from "./baseline-source.js";
-import {
-  E2E_BASELINE_ATTEMPT, E2E_BASELINE_PURPOSE, E2E_BASELINE_RUN_GRACE_MS, baselineStartFailureReason, baselineStartItem, markWorkflowE2EBaselineUnavailable, projectE2EBaselineWanted, readWorkflowE2EBaseline, readWorkflowE2EBaselineRecord,
-  recordWorkflowE2EBaseline, requestWorkflowE2EBaselineRound, verifyBaselineEvidence, type BaselineRecord, type BaselineUnavailableReason, type SkippedAiScenarios,
-} from "./workflow-e2e-baseline.js";
-import {
-  E2E_REPLAY_PURPOSE, E2E_REPLAY_RUN_GRACE_MS, listWorkflowE2EReplayRecords, markWorkflowE2EReplayUnavailable, readWorkflowE2EReplayRecord, recordWorkflowE2EReplay, replaySourceCasesOf, replayStartItem,
-  requestWorkflowE2EReplay, verifyReplayEvidence, type ReplayRecord, type ReplayUnavailableReason,
-} from "./workflow-e2e-replay.js";
+import { E2E_BASELINE_ATTEMPT, E2E_BASELINE_PURPOSE, E2E_BASELINE_RUN_GRACE_MS, baselineStartFailureReason, baselineStartItem, markWorkflowE2EBaselineUnavailable, projectE2EBaselineWanted, readWorkflowE2EBaselineRecord, requestWorkflowE2EBaselineRound, type BaselineRecord, type BaselineUnavailableReason } from "./workflow-e2e-baseline.js";
+import { E2E_REPLAY_PURPOSE, E2E_REPLAY_RUN_GRACE_MS, listWorkflowE2EReplayRecords, markWorkflowE2EReplayUnavailable, readWorkflowE2EReplayRecord, replaySourceCasesOf, replayStartItem, requestWorkflowE2EReplay, type ReplayRecord } from "./workflow-e2e-replay.js";
 import type { AuthenticatedIdentity } from "../auth.js";
-import { adminReader, queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
+import { adminReader, queryAllItems, type AdminReadDependencies } from "./admin-reads.js";
 import { outcomeMetric } from "./admin-change-audit.js";
-import { pressAdminChange, routeAdminChange, type AdminChangeDependencies } from "./admin-changes.js";
+import { type AdminChangeDependencies } from "./admin-changes.js";
 import type { AdminChangeHandlers, PlanDependencies, ReviewedChannelBinding } from "./admin-change-plans.js";
 import { ZodError, z } from "zod";
 import { healthProbes } from "./health-probes.js";
 import { recordPrepareFailureEvent } from "./operation-events.js";
-import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js"; import { coreThreadNote } from "./slack-core-thread-input.js"; import { answerSlackCorePress, isSlackCorePressEvent } from "./slack-core-decision.js"; import type { ThreadInputNotice } from "./slack-thread-input-words.js"; import { isOwnSlackStart, startSlackWorkflowOnCore } from "./slack-core-start.js"; import { hostedSlackThreads } from "./slack-thread-channel.js";
+import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js"; import { coreThreadNote } from "./slack-core-thread-input.js";   import type { ThreadInputNotice } from "./slack-thread-input-words.js"; import { isOwnSlackStart, startSlackWorkflowOnCore } from "./slack-core-start.js"; import { hostedSlackThreads } from "./slack-thread-channel.js";
 import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
-import type { GitHubAppCredentialProvider } from "../github-app.js";
 import { GithubMergeRateLimitError, isWebhookSecretMissing, parseGitHubRepository, pullRequestBodyWithDraftNote } from "../github-app.js";
-import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, githubDisconnectedRefusal, GithubInstallationBindings, isGithubDisconnected } from "./github-credentials.js"; import { handleGithubInstallationWebhook, isGithubInstallationEvent } from "./github-lifecycle.js"; import { GitHubAppCredentialProvider as GitHubAppClient } from "../plugins/code-host/github/client.js"; import { bulkCreate, COMMIT_DEADLINE_MS, companyProjectCreatorOf, eachLimited, LOOKUP_CONCURRENCY, nameTaken, notAvailable, onCompanyInstallations, projectRepositoryName, projectsByRepository, repositoryChoices, REPOSITORY_CHOICES_UNAVAILABLE, unavailable, uniqueRepositoryNames, type LiveRepositoryInstallation } from "./client-project-create.js"; import { brokerCoreCodeHost } from "./core-code-host.js"; import { companyNameClaimWrites, companyNameTaken, companyProjectNaming, type ClientProjectNaming } from "./company-project-names.js";
-import { handleLinearAppWebhook, LINEAR_WEBHOOK_PATH, linearWebhookResponse, type LinearWebhookWiring } from "./linear-app-webhook.js";
+import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, githubDisconnectedRefusal, GithubInstallationBindings, isGithubDisconnected } from "./github-credentials.js"; import { handleGithubInstallationWebhook, isGithubInstallationEvent } from "./github-lifecycle.js"; import { GitHubAppCredentialProvider as GitHubAppClient } from "../plugins/code-host/github/client.js"; import { bulkCreate, COMMIT_DEADLINE_MS, companyProjectCreatorOf, eachLimited, LOOKUP_CONCURRENCY, nameTaken, notAvailable, onCompanyInstallations, projectRepositoryName, projectsByRepository, repositoryChoices, REPOSITORY_CHOICES_UNAVAILABLE, unavailable, uniqueRepositoryNames } from "./client-project-create.js"; import { brokerCoreCodeHost } from "./core-code-host.js"; import { companyNameClaimWrites, companyNameTaken, companyProjectNaming, type ClientProjectNaming } from "./company-project-names.js";
 import { linearCompanyWiring } from "./linear-wiring.js";
-import { readTaskLegacyProject, boundedCompanyReads, ownPartitionRow, recordInCompany, type CompanyMembershipReader } from "./company-check.js"; import { OFFERED_MODELS_COMPANY_PARAMETER, offeredModelsCompany } from "./admin-offered-models.js";
-import { grantKeyFor, namedCompany, revisionKeyFor } from "./company-layout.js";
-import { refuseNamedCompanyName } from "./admin-name-collision.js";
+import { readTaskLegacyProject, boundedCompanyReads, ownPartitionRow, recordInCompany } from "./company-check.js"; import { grantKeyFor, namedCompany, revisionKeyFor } from "./company-layout.js";
 import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubRecoveryContinuation, readGithubWebhookEvent } from "./github-webhooks.js";
 import { handleGithubWebhookRoute } from "./github-webhook-route.js";
 import { GithubWebhookRefusal, linkedGithubWebhookVerdict, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
-import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
+import { CredentialUnavailable } from "@agentx/gateway";
 import { unsupportedThinkingLevels } from "@agentx/model-runtime/thinking-levels";
 import { executeGitHubTool, toGitHubCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
 import { DynamoConnectorLedger, GITHUB_LEDGER } from "./connector-ledger.js";
 import { observeConnectorRoute } from "./connector-metrics.js";
-import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConnector, discoverLegacyGitHubScope, stripCode, type ConnectorContextBase, type ScopeDiscovery } from "./connector-routes.js";
-import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
-import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
-import {
-  deleteChannelAdapter,
-  deleteChannelBinding,
-  getChannelAdapter,
-  listChannelAdapters,
-  putChannelBinding,
-  registerChannelAdapter,
-  secretsManagerAdapterSecrets,
-  type ChannelAdapterConfiguration,
-  type ChannelAdapterDependencies,
-} from "./channel-adapters.js";
-import { linkedDeveloper, removeLink } from "./channel-links.js";
-import {
-  channelCharge,
-  channelConversationIdentity,
-  channelRequester,
-  channelThreadChargeItems,
-  channelThreadReleaseItems,
-  isConversationChargeMarker,
-  readConversationHeaders,
-  storedCharge,
-  type ChannelConversationDependencies,
-} from "./channel-conversation.js";
-import { companyReadsFromEnvironment, policyHookInstallFromEnvironment, type CompanyReadsConfiguration } from "./hosted-wiring.js";
+import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConnector, discoverLegacyGitHubScope, stripCode, type ConnectorContextBase } from "./connector-routes.js";
+import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
+import { secretsManagerSource } from "./credentials.js";
+import { secretsManagerAdapterSecrets } from "./channel-adapters.js";
+import { channelCharge, channelConversationIdentity, channelRequester, channelThreadChargeItems, channelThreadReleaseItems, isConversationChargeMarker, readConversationHeaders, storedCharge } from "./channel-conversation.js";
+import { companyReadsFromEnvironment, policyHookInstallFromEnvironment } from "./hosted-wiring.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
 import { brokerCoreWorkerMachines } from "./worker-machines/broker-core.js";
-import { CORE_OFFERED_MODELS_NOT_SET_UP, OFFERED_MODELS_READ_FAILED, adminOfferedModelsFromEnvironment } from "../core-host/offered-models-http.js";
+import { adminOfferedModelsFromEnvironment } from "../core-host/offered-models-http.js";
 import { installEngineModel } from "../core-host/company-engine-model.js"; import { installLearningModel } from "../core-host/company-learning-model.js";
 import { createHostedLessonsPeople } from "./hosted-lessons-people.js"; import { hostedLessonsSlack } from "./hosted-slack-thread.js";
 import { hostedLessonsLearning } from "../core-host/hosted-learning.js";
-import { CORE_MODEL_ACCESS_PATH, brokerCoreModuleDeps, createBrokerCoreRoot, outboxCompaniesOf, taskTokensFromEnvironment, withCoreRoutes, type BrokerCoreRoot } from "./core-engine-root.js";
-import { isCoreJobEvent } from "../core-host/jobs.js";
-import { developerRecordKeyedBy, isExactNativeSlackOwner, type DeveloperRecord } from "../developer/store.js";
+import { CORE_MODEL_ACCESS_PATH, brokerCoreModuleDeps, createBrokerCoreRoot, taskTokensFromEnvironment, withCoreRoutes } from "./core-engine-root.js";
+import { isExactNativeSlackOwner, type DeveloperRecord } from "../developer/store.js";
 import { decisionComments, ownerAnswersFor, pageCommentsPrompt, promptComments, readDecisionDetail } from "../developer/owner-answers.js";
 import { isPageRefusal, plannerRepliesItem, writeCommentAnswer, writePlannerReplies, type SlackRequestQueue } from "../developer/page-comments.js";
 import { loadWorkflowDocument, readObjectText as readStoredText, shortenMarkdown } from "../developer/plan-artifacts.js";
@@ -362,20 +94,19 @@ import { WORKFLOW_APPROVAL_OUT_OF_DATE, WORKFLOW_BUTTON_OUT_OF_DATE } from "../d
 import { slackRefusalMessage } from "./slack-refusals.js";
 import { STOP_WHILE_PUBLISHING_REFUSAL } from "../developer/workflow-actions.js";
 import { approvedFeedbackFixes, withFeedbackFixes, withStatusLines } from "../developer/pull-request-feedback-section.js";
-import { projectKey, requireProject } from "./project-records.js";
-import { admitProjectSetupRuntime, projectSetupBindingDigest, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "./project-setup-runtime-catalog.js";
+import { requireProject } from "./project-records.js";
+import { admitProjectSetupRuntime, projectSetupBindingDigest, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema, setupSessionInstance } from "./project-setup-runtime-catalog.js";
 import { projectSetupTerminalAuthorityChecks } from "./project-setup-terminal-conditions.js";
 import { verifyProjectSetupCapability } from "./project-setup-capability.js";
 import { issueProjectSetupCapability } from "./project-setup-capability.js";
 import { deriveProjectSetupSourceSmoke } from "../e2e/project-setup-source-smoke.js";
 import { buildE2EFeatureRound, deriveE2EFeatureExecutionAdmission, E2EPortablePlanReferenceError } from "../e2e/feature-plan-intent.js";
-import { admitE2EFeatureVerifier, e2eFeatureVerifierKey, E2EFeatureVerifierRecordSchema, E2E_FEATURE_PROCESS_RESPONSE_SCOPE } from "./e2e-feature-verifier-catalog.js";
-import { issueRuntimeInstallChallenge, registerRuntimeInstallation, type RuntimeInstallationDependencies } from "./runtime-installation.js";
-import { applicationRuntimeRowFences, e2eRegisteredRuntimeKey, readE2ERuntimeStatus, readExpiredE2ERuntimes, readProjectAdmittedE2ERuntimes, readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles, type ReadyE2ERuntime } from "./e2e-runtime-readiness.js";
+import { e2eFeatureVerifierKey } from "./e2e-feature-verifier-catalog.js";
+import { applicationRuntimeRowFences, e2eRegisteredRuntimeKey, readExpiredE2ERuntimes, readProjectAdmittedE2ERuntimes, readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles, type ReadyE2ERuntime } from "./e2e-runtime-readiness.js";
 import { accountRegistryFences, planSetupAccountWrites, readAccountRegistryEntries } from "./e2e-account-registry.js";
 import { E2EAccountRegistryError, unreadableAccountMessage, type E2EAccountRegistryEntry } from "../e2e/application-account-registry.js";
-import { resolveWorkflowE2ECanonicalApproval, workflowE2ECurrentAuthorityMatches } from "./workflow-e2e-current-authority.js";
-import { createWorkflowE2EDisplayObject, readWorkflowE2ENotifierProjection } from "./workflow-e2e-notifier-projection.js";
+import { resolveWorkflowE2ECanonicalApproval } from "./workflow-e2e-current-authority.js";
+import { createWorkflowE2EDisplayObject } from "./workflow-e2e-notifier-projection.js";
 import { ownerOfExistingTask, ownerOfTaskId, ownerOfWorkspace } from "./engine-boundary.js"; import { coreAdminStop, type CoreStopOutcome } from "./core-stop-entry.js"; import { coreStopButton, coreThreadStop } from "./slack-core-stop.js";
 import {
   TERMINAL, getItem, issueCapability, operationKey, operationRecord, outboxRecord, publicOperation, requestCancellation, requireOperation,
@@ -386,402 +117,90 @@ import { limitReached, readWorkspaceLimits } from "../developer/limits.js";
 import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, type WorkflowE2EReadinessMarker, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, PROJECT_RECORD_NEEDS_ADMIN, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
 import { buildFeatureE2EPlanningContext, isExactFeatureE2ESourceSnapshot } from "../e2e/feature-plan-planning-context.js";
 import { offersApplicationE2EPlan } from "../e2e/feature-plan-executable-kinds.js";
-import { applicationIntentDigest, applicationIntentWithAccountRefs, applicationRoundIntent, evaluateApplicationPlanApproval, type ApplicationAccountsInput, type ApplicationRefusalScope } from "../e2e/application-plan-approval.js";
+import { evaluateApplicationPlanApproval, type ApplicationAccountsInput } from "../e2e/application-plan-approval.js";
 import { portableFeatureIntentOf } from "../e2e/portable-feature-intent.js";
 import { E2E_OWNER_SENTENCES } from "../e2e/owner-sentences.js";
 import { ApplicationRuntimeRenewed, assertNoRequalifyHold, recycleDriftedWorker, rethrowAsDeferredIfHeld, requalifyHoldFence, replayPredatesRenewal, requalifyHoldActive, requalifySetupWorkRow, selectionChangedRefusal } from "../e2e/requalify-hold.js";
 import { ApplicationDispatchRefusal, ApplicationPlanDefect, applicationAccountsRefusal, applicationRoundRefusal, applicationRuntimeRefusal, applicationSelectionStillCurrent } from "../e2e/application-dispatch-check.js";
-import { applicationApprovedPlanDigest, buildApplicationExecutionAdmission, buildApplicationGroundingAdmission, buildApplicationReplayAdmission, groundingPlanDigest } from "../e2e/application-admission.js";
-import {
-  groundingRoundLapsed, E2E_GROUNDING_ATTEMPT, E2E_GROUNDING_PURPOSE, groundingStartFailureReason, groundingStartItem, markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, recordWorkflowE2EGrounding, requestWorkflowE2EGroundingRound,
-  verifyGroundingEvidence, type GroundingRecord, type GroundingUnavailableReason,
-} from "./workflow-e2e-grounding.js";
-import { CORE_OFFERED_MODELS_ADMIN_PATH, EGRESS_ADDRESSES_VARIABLE, IMPLICIT_COMPANY_ID, SLACK_ANSWER_SERVICE_PATH, SLACK_MODEL_ACCESS_SERVICE_PATH, OrgIdSchema, companyLog, type OfferedAgentModels, QuickAutoStartRequestSchema, REQUEST_ROUTE_MESSAGE_MAX, SLACK_INTAKE_RECORD_SECONDS, planQualityFinding, type QuickAutoStartResult } from "@agentx/contracts"; import { EVIDENCE_RETENTION_TAGS } from "../core-host/hosted-evidence.js";
+import { applicationApprovedPlanDigest, buildApplicationExecutionAdmission, buildApplicationGroundingAdmission, buildApplicationReplayAdmission } from "../e2e/application-admission.js";
+import { groundingRoundLapsed, E2E_GROUNDING_ATTEMPT, E2E_GROUNDING_PURPOSE, groundingStartFailureReason, groundingStartItem, markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, requestWorkflowE2EGroundingRound, type GroundingRecord, type GroundingUnavailableReason } from "./workflow-e2e-grounding.js";
+import { EGRESS_ADDRESSES_VARIABLE, IMPLICIT_COMPANY_ID, SLACK_ANSWER_SERVICE_PATH, SLACK_MODEL_ACCESS_SERVICE_PATH, OrgIdSchema, QuickAutoStartRequestSchema, REQUEST_ROUTE_MESSAGE_MAX, SLACK_INTAKE_RECORD_SECONDS, planQualityFinding, type QuickAutoStartResult } from "@agentx/contracts"; import { EVIDENCE_RETENTION_TAGS } from "../core-host/hosted-evidence.js";
 import { quickAutoStartRefusal } from "../core/intake/quick-auto-start.js";
 import { groundingFindingsOf, plannedExpectation } from "../developer/plan-grounding-findings.js";
 import { handleE2EModelBudgetCallback } from "../e2e/model-budget-endpoint.js";
-import { ModelCheckError, readCurrentTiers, readModelCheck, startModelCheck, untestedRouteSentence, type ModelCheckDependencies } from "../e2e/model-checks.js";
-import { E2EModelRouteError, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, deriveE2EAgentRoute, e2eAgentInstallationFromParameters, readE2EModelRouteShape, e2eAgentRoutePolicyLimits, isTransientAwsFault, e2eDayBudgetRoom, planE2EAgentRoute,
-  type E2EAgentInstallation, type PlannedE2EAgentRoute } from "../e2e/model-route-registry.js";
-import { applicationEvidenceLimits, modelRouteForAdmission, verifyApplicationE2EEvidence, type ApplicationEvidenceVerification, type VerifiedAgentTrace } from "../e2e/application-evidence.js";
+import { ModelCheckError, readCurrentTiers, readModelCheck, startModelCheck, type ModelCheckDependencies } from "../e2e/model-checks.js";
+import { E2EModelRouteError, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, deriveE2EAgentRoute, e2eAgentInstallationFromParameters, readE2EModelRouteShape, isTransientAwsFault, e2eDayBudgetRoom, type E2EAgentInstallation } from "../e2e/model-route-registry.js";
+import { applicationEvidenceLimits, modelRouteForAdmission, verifyApplicationE2EEvidence, type VerifiedAgentTrace } from "../e2e/application-evidence.js";
 import { developerIdForSlackUser, projectMemberKey } from "./admin-actions.js";
 import { workerBindingFromPairs } from "./worker-binding.js";
 import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
-import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
-import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from "../chatgpt/connections.js";
+import { chatGptConnections, kmsChatGptSealer } from "../chatgpt/connections.js";
 import { chatGptHostId } from "../chatgpt/oauth.js";
 import { companyInvitesThroughLambda, companyPreapprovalsThroughLambda, companySelfCreateThroughLambda, channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, setDisplayNameThroughLambda, routeAppRequest, routeDeveloperRequest, routeLinkingRequest, signInClientsThroughLambda, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller, type DeveloperRouteDependencies } from "./developer-routes.js";
 import { companyMemberActionsThroughLambda } from "./company-member-forwarding.js"; import { githubLinkWiringFromEnvironment } from "./github-link-wiring.js"; import { signInLinksThroughLambda } from "./sign-in-link-routes.js";
 import { companyImportThroughLambda } from "./company-import-forwarding.js";
-import { planCompanyImport, planCompanyImportUndo } from "./install-company-import.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
-import { adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, planUnreadablePrompt, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EBaselineFromSystem, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowE2EGroundingFromSystem, startTaskWorkflowE2EReplayFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPlanRevisionFromSystem, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, systemTaskDispatchAccessFence, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
+import { adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, planUnreadablePrompt, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EBaselineFromSystem, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowE2EGroundingFromSystem, startTaskWorkflowE2EReplayFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPlanRevisionFromSystem, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, systemTaskDispatchAccessFence, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { createDeveloperApiConfiguration } from "./workflow-dependencies-configuration.js";
 import { planQualityFindings } from "../developer/plan-quality.js";
 import { planDryRunFindings, readPlanDryRunOutcome } from "../developer/plan-dry-run-results.js";
 import { planUnreadableCategory } from "../developer/plan-check-summary.js";
-import { AUTOFIX_ROUND_ESTIMATE_USD, autofixConfigFromEnvironment, autofixDayBudgetNeed, postponeAutofixRow, recordAutofixGiveUpAsk, runWorkflowAutofix, type AutofixConfig, type AutofixDependencies } from "./workflow-autofix-runner.js";
+import { AUTOFIX_ROUND_ESTIMATE_USD, autofixConfigFromEnvironment, autofixDayBudgetNeed, postponeAutofixRow, recordAutofixGiveUpAsk, runWorkflowAutofix, type AutofixDependencies } from "./workflow-autofix-runner.js";
 import { PLAN_AUTO_REVISIONS_MAX, PlanSelfCheckRecordSchema, autoRevisableFindings, planRevisionPrompt, planRevisionsUsed, planSelfCheckKey, planQualityContextOf, recordedPlanQualityContext, selfCheckNotes, groundingNotCheckedNote, groundingUndecidedNote, PLAN_GROUNDING_HOLD_MS, type GroundingOutcome, type PlanGroundingHold, type PlanSelfCheckSkipReason, type PlanSelfCheckState } from "../developer/plan-self-check.js";
 import { CandidateBuildSourceBodySchema, StoredCandidateBuildSourceSchema, assessCandidateBuildSource, candidateBuildSourceAdmissionReference, type StoredCandidateBuildSource } from "./candidate-build-source.js";
-import { mergeRecoveryItem, runDueWorkflowMergeRecovery, type GithubMergeReadBudget, type MergeRecoveryResult } from "./workflow-merge-recovery.js";
+import { mergeRecoveryItem, type GithubMergeReadBudget, type MergeRecoveryResult } from "./workflow-merge-recovery.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
-import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
-import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
-import { RepositoryGrantService } from "../repository-access.js";
+import { dynamoTurnRecordSource } from "./turns.js";
+import { createCodeBuildGateway } from "../codebuild.js";
+import { RepositoryGrantService } from "../repository-access.js"; import { exchangeLegacyGitCredential } from "./legacy-repository-exchange.js";
 import { publicWorkspace } from "../workspaces.js";
 import { SessionManager } from "./sessions.js"; import { loadCallbackSigningKey } from "./callback-signing-key.js"; // one line: no line of broker.ts moves (the company inventory pins its sites by line)
 import { STUCK_SETUP_MESSAGE } from "./stuck-setup.js";
 import { workflowRunEndedReason } from "./outbox-failure.js";
 import { blockStoppedWorkflowRun, stopBlocksWorkflowStep, workflowStepStage } from "./workflow-cancel-reconcile.js";
 import { autofixBlockCauseOf, autofixBlockRows, autofixRowHeld, dispatchExhaustRows, ownerStopRows } from "./workflow-autofix-dispatch-exhaust.js";
-import {
-  adaptHttpApiEvent,
-  identityFromJwtClaims,
-  isAssumedRoleOf,
-  ownerKeyForSubject,
-  parseRuntimeBinding,
-  requiredEnvironment,
-  type AdaptedHttpRequest,
-  type HttpApiV2Event,
-  type RuntimeBinding,
-} from "./lambda.js";
-import {
-  deleteSwebenchChannel,
-  getSwebenchChannel,
-  getSwebenchRunForThread,
-  handleSwebenchCallback,
-  isSwebenchCallbackPath,
-  putSwebenchChannel,
-  startSwebenchRun,
-  stopSwebenchRun,
-  type SwebenchSlackContext,
-} from "./swebench.js";
-import { withEvalBatches, type EvalBatchDependencies } from "./eval-batch.js";
+import { adaptHttpApiEvent, identityFromJwtClaims, isAssumedRoleOf, ownerKeyForSubject, parseRuntimeBinding, requiredEnvironment, type AdaptedHttpRequest, type HttpApiV2Event } from "./lambda.js";
+import { getSwebenchRunForThread, startSwebenchRun, stopSwebenchRun } from "./swebench.js";
 import { dropWatchedBatch, listWatchedBatches, recordWatchedBatchThread, startSlackBatch, updateWatchedBatch } from "./eval-batch-service.js";
-import { batchResults, parseStartBody, requireBatchProject, showBatch, startBatch, stopBatchById } from "./eval-batch-admin.js";
 import { swebenchDeploymentFromParameters } from "./swebench-settings.js";
 import { slackWorkflowCaller } from "./slack-workflow-caller.js";
 import { can, resolveTaskAccess, type TaskAccess, type TaskAction } from "../developer/task-access.js";
 import { resolveTaskDispatchPeople, taskAccessFence } from "../developer/task-people.js";
-
-const MAX_ARTIFACT_BYTES = 5_000_000;
-const MAX_SETUP_PROPOSAL_BYTES = 24 * 1024 * 1024;
-// This derived ceiling bounds only the chunked private carrier; each report,
-// frame, literal, record, and admitted group keeps its existing component limit.
-const MAX_SETUP_EVIDENCE_BYTES = e2ePrivateTransferMaxBytes(64, 4);
-/** This path keeps one project namespace; the E2E account and day-budget rows it shares with the ports-based core sit under Code's one company, as Cloud's do under an org. */
-const LEGACY_E2E_COMPANY = OrgIdSchema.parse(IMPLICIT_COMPANY_ID);
-const SETUP_ARTIFACT_CHUNK_BYTES = 64 * 1024;
-// 100,000 complete tree paths at the 1,024-byte path ceiling, plus the accepted 4 MiB source
-// materialization (base64 expansion and bounded JSON envelope). This is a private chunked object
-// ceiling, not a larger HTTP/report limit.
-const MAX_WORKFLOW_CANDIDATE_EXPORT_BYTES = 112 * 1024 * 1024;
-const WORKFLOW_CANDIDATE_CHUNK_BYTES = 64 * 1024;
-const EVENT_TRANSACTION_CHUNK = 80;
-
-/**
- * The capture policy a new setup proposal and its approval carry (owner decision D3, as amended by Ruling CJ): screenshots of failed cases and downloads; no video, and no
- * traces (deferred past M1.3, because a Playwright trace keeps session tokens that cannot be scrubbed reliably). The executor keeps screenshots only for failed cases and
- * only inside a fixed budget (Task 3.6).
- * A project whose setup was approved earlier keeps the policy it was approved with (its stored all-false policy is read as written), so it gets screenshots only after its
- * setup is approved again. A proposal made before this default existed is no longer approvable ("propose the setup again"), though a decision already recorded for it is still
- * answered as an idempotent retry.
- */
-export const PROJECT_SETUP_CAPTURE_POLICY = Object.freeze({ screenshots: true, traces: false, video: false, downloads: true });
-
-function projectSetupPolicy(proposal: E2ESetupProposal, agentRoute?: { revision: string; definition: { budgets: Parameters<typeof e2eAgentRoutePolicyLimits>[0] } }): ReturnType<typeof E2EPolicySchema.parse> {
-  return E2EPolicySchema.parse({
-    schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: [], targets: proposal.targets,
-    defaultSandboxProfileId: "default-sandbox", fallback: "mock-unconnected", modelRouteRevision: agentRoute?.revision ?? null,
-    capture: PROJECT_SETUP_CAPTURE_POLICY,
-    // A setup that pins a route runs under limits derived from the route's budgets (D2); one that pins none gets the normal limits (a build and an app start need minutes), with model budgets of one (RUN-1).
-    limits: agentRoute === undefined
-      ? { ...E2E_MODEL_FREE_LIMITS }
-      : e2eAgentRoutePolicyLimits(agentRoute.definition.budgets),
-  });
-}
-
-/**
- * The AI navigation route this installation would approve now (Task 4.2), read by key. Undefined when the installation's worker settings cannot be read or give no usable
- * route (no provider, a keyed provider without its secret, an unproven OpenRouter default): the setup is then proposed and approved without AI navigation, and agent steps stay
- * unavailable with `agent-route-not-approved`.
- */
-async function plannedAgentRoute(dependencies: Pick<AwsBrokerDependencies, "documentClient" | "tableName" | "e2eAgentInstallation">): Promise<Extract<PlannedE2EAgentRoute, { status: "available" }> | undefined> {
-  if (dependencies.e2eAgentInstallation === undefined) return undefined;
-  try {
-    const planned = await planE2EAgentRoute({ documentClient: dependencies.documentClient, tableName: dependencies.tableName }, await dependencies.e2eAgentInstallation());
-    return planned.status === "available" ? planned : undefined;
-  } catch { return undefined; }
-}
-
-/**
- * What a setup proposal says when the installation's route is well-formed but has no passed driving test (Task 4.10C): the provider, the model and the sentence "AI navigation steps
- * will not run: the driving test with <provider> `<model>` has not passed (<why>)". Null when the route is available, or cannot be made at all (the CLI's own sentence says that).
- */
-async function untestedAgentRouteNote(dependencies: Pick<AwsBrokerDependencies, "documentClient" | "tableName" | "e2eAgentInstallation">): Promise<{ provider: string; modelId: string; sentence: string } | null> {
-  if (dependencies.e2eAgentInstallation === undefined) return null;
-  try {
-    const store = { documentClient: dependencies.documentClient, tableName: dependencies.tableName };
-    const planned = await planE2EAgentRoute(store, await dependencies.e2eAgentInstallation());
-    if (planned.status !== "unavailable" || planned.untested === undefined) return null;
-    return { provider: planned.untested.provider, modelId: planned.untested.modelId, sentence: await untestedRouteSentence(store, { ...planned.untested, routeId: E2E_DEFAULT_MODEL_ROUTE_ID }) };
-  } catch { return null; }
-}
-
-export interface RegisteredProjectRecord {
-  pk: string;
-  sk: string;
-  entityType: "PROJECT";
-  companyId?: string;
-  definition: ProjectDefinition;
-  runtimeBinding: RuntimeBinding;
-  registeredBy: string;
-  registeredAt: string;
-  setupApproval?: { proposalRef: string; proposalSha256: string; candidateDigest: string; decision: "approve" | "decline" };
-}
-
-interface MembershipRecord {
-  pk: string;
-  sk: string;
-  entityType: "MEMBERSHIP";
-  ownerKey: string;
-  projectName: string;
-  role: "developer" | "administrator";
-  grantId: string;
-  /** Set when an administrator granted the access (the other grant paths record it too). */
-  grantedBy?: { issuer: string; subject: string };
-  grantedAt?: string;
-}
-
-interface ProjectModelSelectionRecord {
-  pk: string;
-  sk: "SELECTION";
-  entityType: "PROJECT_MODEL_SELECTION";
-  model: ModelIdentifier;
-  updatedAt: string;
-  updatedBy: SlackRequester | DeveloperRequester;
-}
-
-interface PullRequestRecord {
-  pk: string;
-  sk: string;
-  entityType: "PULL_REQUEST";
-  workspaceId: string;
-  repository: string;
-  repositoryUrl: string;
-  number: number;
-  url: string;
-  state: "open" | "closed" | "merged";
-  headBranch: string;
-  baseBranch: string;
-  expectedHeadCommit: string;
-  title: string;
-  body: string;
-  /** Set when GitHub refused to open this pull request as a draft and it was opened as a normal one (INTG1). */
-  draftRefused?: true;
-  createdByOperationId: string;
-  replacedBy?: number;
-  replacementFor?: number;
-  updatedAt: string;
-}
-
-interface CodeBuildRecord {
-  pk: string;
-  sk: string;
-  entityType: "CODEBUILD";
-  workspaceId: string;
-  operationId: string;
-  fence: number;
-  repository: string;
-  gate: string;
-  projectName: string;
-  requestedSourceVersion: string;
-  idempotencyToken: string;
-  buildId: string;
-  evidence: CodeBuildCheckResult;
-  createdAt: string;
-  updatedAt: string;
-}
-
-interface AwsBrokerDependencies {
-  core?: BrokerCoreRoot;
-  /** DEC 254zzz79 (3): the gateway's settings and the task-token signer, for the Slack service's model access (slack-model-access.ts). Absent: every company thread's model access is `unavailable`. */
-  slackModelAccess?: { env: NodeJS.ProcessEnv; taskTokens: () => { signer: TokenSigner; issuer: string } | undefined };
-  workspaces?: SlackWorkspaceAccess;
-  companies?: CompanyMembershipReader;
-  /** L2-2 PR 18c: the membership reader Slack company mode brings (slack-company-wiring.ts); given only to the company handler, never to the install team's legacy handler. */
-  slackCompanies?: CompanyMembershipReader;
-  /** Install workspace for the additive operator backfill; independent of sign-in being enabled. */
-  slackWorkspaceLegacyTeamId?: string;
-  /** L2-2 PR 18b: set only on the install team's legacy view (withoutSlackCompanyMode): another team's binding is "not bound" there. */
-  slackInstallTeamOnly?: string;
-  /**
-   * DEC 254zzz80 (R2-F1): set only on the install team's legacy view while Slack company mode is on. The install team's company (its operator binding) picks where its channel
-   * bindings are read (slack-person.ts slackBindingCompany): a NAMED company's own partition, else the legacy keys.
-   */
-  installTeamCompany?: (teamId: string) => Promise<string>;
-  /**
-   * DEC 254zzz80 (R2-F1): with `installTeamCompany`, the company path's own dependencies. A Slack start in the install team whose company is NAMED is that company's start
-   * (startSlackWorkflow: the linked person, the company's binding and the core), never the single-workspace start, whose unscoped keys that company has none of.
-   */
-  installTeamCompanyMode?: { workspaces: SlackWorkspaceAccess; companies?: CompanyMembershipReader };
-  /** Guided onboarding PR 4: Add to Slack's wiring (named environments with the company layer); absent, a Slack removal event is refused. */
-  slackInstall?: SlackInstallWiring;
-  /** Guided onboarding PR 5: channel links and /rovara (named environments with the company layer); absent, /rovara answers "not set up". */
-  slackChannels?: SlackChannelWiring;
-  /** Guided onboarding PR 5: where /rovara's "Sign in to Rovara first" links to; only an https address is used. */
-  slackSignInUrl?: string;
-  documentClient: DynamoDBDocumentClient;
-  s3: S3Client;
-  /** Starts deleting an ec2-ebs workspace's instance and volume (#84). */
-  deleteEc2Session?: (workspaceId: string) => Promise<void>;
-  tableName: string;
-  artifactBucketName: string;
-  issuer: string;
-  adminClaim: string;
-  adminValues: readonly string[];
-  callbackSigningKey: string;
-  repositoryGrants: RepositoryGrantService;
-  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "installationIdFor" | "getRepositoryIdentity" | "getPullRequestChangedFiles" | "getPullRequestFilesPage" | "getPullRequestFeedback" | "getPullRequestMergeObservation" | "getCommitTree" | "getCommitParents" | "getBranchHead" | "getFileAtCommit">>;
-  /** Trusted server-side source capture for setup discovery and exact-commit E2E planning context. */
-  projectSetupSource?: { capture: (input: { repositoryUrl: string; ref: string }) => Promise<E2ESourceSnapshot> };
-  /** Server-selected catalog namespace for an already configured setup verifier. */
-  projectSetupRuntimeCatalogId?: string;
-  /** Separate server-selected namespace for the already qualified portable feature verifier. */
-  e2eFeatureRuntimeCatalogId?: string;
-  /**
-   * The installation's worker model settings (provider, a keyed provider's secret ARN, the OpenRouter allowlist, the region): what the AI browser-test agent's route is derived from at
-   * setup approval and again at dispatch (M1.4 Task 4.2). Absent, or throwing, the route cannot be derived and agent steps stay unavailable with `agent-route-not-approved`.
-   */
-  e2eAgentInstallation?: () => Promise<E2EAgentInstallation>;
-  /** Reads the GitHub webhook HMAC key from the configured GitHub App secret; `refresh` asks for a fresh read of the secret. */
-  githubBindings?: GithubInstallationBindings;
-  githubBindingInstallations?: {
-    get(installationId: number): Promise<{ installationId: number; accountLogin: string } | undefined>;
-    page(page: number): Promise<{ installations: Array<{ installationId: number; accountLogin: string }>; more: boolean }>;
-  };
-  githubWebhookSecret?: (options?: { refresh?: boolean }) => Promise<string>;
-  /** Guided onboarding PR 7: the Linear OAuth app's webhooks (linear-app-webhook.ts). Absent: the route answers 404. */
-  linearWebhook?: LinearWebhookWiring;
-  /** How long a PR description update (D2) may take before it gives up without writing; 5 seconds when absent. */
-  descriptionUpdateMaxMs?: number;
-  /** Refuses, with CONFIG_INVALID, a repository its credential cannot reach; checked at registration. */
-  checkRepositoryAccess?: (repository: { credentialRef: string; url: string }) => Promise<void>;
-  codeBuild: CodeBuildGateway;
-  slack?: SlackServiceConfiguration;
-  /** Spec 062: channel adapters; absent unless the deployment turns them on, and /v1/admin/channels answers NOT_FOUND. */
-  channelAdapters?: ChannelAdapterConfiguration;
-  /** Spec 025 developer sign-in; absent when the deployment has none, and /v1/dev/* answers NOT_FOUND. */
-  developer?: DeveloperApiConfiguration;
-  /**
-   * Spec 065b: what a project a sign-in client creates is built from: the GitHub App's credential and its view of a
-   * repository, and the foundation's worker binding. Absent, POST /v1/dev/client/projects answers NOT_FOUND.
-   */
-  clientProjects?: {
-    credentialRef: string;
-    repositoryDefaults(url: string): Promise<{ owner: string; name: string; defaultBranch: string }>;
-    /** The repositories the GitHub App can reach, for GET /v1/dev/client/repositories. */
-    repositories(): Promise<ClientRepositoriesResponse["installations"]>;
-    workerBinding(): Promise<Ec2RuntimeBinding>;
-    /**
-     * Guided onboarding PR 6: which installation serves a repository and whether it is suspended, read from GitHub now (no cache). Every create
-     * checks it against the company's bindings; absent while bindings are on, the multi-repository and bulk creates refuse every repository.
-     */
-    repositoryInstallation?(url: string): Promise<LiveRepositoryInstallation>; /** gh-bindings: the company GitHub bindings for THESE routes only (`withClientGithubBindings`), used where a membership reader is wired. */ bindings?: GithubInstallationBindings;
-  };
-  /**
-   * Lanes AU and EV: the company audit and event reads for a company administrator (`/v1/dev/client/company/*`): the company's document store, the host's company
-   * resolver (membership) and a name lookup. Absent, both routes answer NOT_FOUND.
-   */
-  companyReads?: CompanyReadsConfiguration;
-  /**
-   * Spec 064: the legacy deployment's sign-in, for account linking only. Set instead of `developer`, so developer
-   * tasks, sharing and admin changes stay off; /v1/dev/* and /review/* serve linking alone (routeLinkingRequest).
-   */
-  linking?: DeveloperApiConfiguration;
-  /** Sign in with ChatGPT (#338): each developer's ChatGPT connection; absent without its key. */
-  chatgpt?: ChatGptConnections;
-  /**
-   * DEC 254g: what the model gateway offers one company's agents (core-host/offered-models-http.ts `adminOfferedModelsFromEnvironment`), for an administrator's
-   * `agentx config set coreEngine.agentModel`; absent without the gateway's origin.
-   */
-  coreOfferedModels?: (companyId: string) => Promise<OfferedAgentModels>;
-  githubMcp?: GitHubMcpDependencies;
-  catalogs: CatalogCache<ScopeDiscovery>;
-  credentialRegistry?: CredentialRegistry;
-  /** The administrator turn record export; absent when the deployment has no TurnRecords table. */
-  turnRecords?: TurnRecordExport;
-  /** The TurnRecords table developer task audit records go to (spec 025); absent when there is none. */
-  turnRecordsTableName?: string;
-  /** Connector types this deployment serves; the built-in types when absent. */
-  connectorTypes?: Record<string, ConnectorType>;
-  /** Spec 025 C14: the Slack threads table, read for a shared thread's waiting messages; absent in legacy. */
-  slackThreadsTableName?: string;
-  /** Spec 025 phase 25d: the admin read routes' injected probes and clock; the defaults serve production. */
-  adminReads?: Partial<Pick<AdminReadDependencies, "me" | "health" | "now" | "log">>;
-  /** Spec 025 phase 25e: the admin changes' method switch, clock and metric; the defaults serve production. */
-  adminChanges?: { confirm?: { elicitation: boolean; slack: boolean }; now?: () => number; metric?: (outcome: AdminChangeOutcome) => void };
-  /** Spec 061: asks the PlanEvidence job to work a plan's evidence row (an async Lambda invoke); absent when the deployment has none. */
-  startPlanEvidenceJob?: (event: PlanEvidenceEvent) => Promise<void>;
-  /** Plan self-check (checks every coding plan, asks the planner again once when it finds a fixable problem): on unless this is false, the installation's kill switch (PLAN_SELF_CHECK_ENABLED=false). */
-  planSelfCheck?: boolean;
-  /** T7c: false turns the hold for the current-app check off (a plan is shown at once); the default is on. */
-  planGrounding?: boolean;
-  /** T7c: starts the held plan's check on the current app; tests replace it (the real one builds an admission from an exported source). */
-  startPlanGrounding?: typeof startPlanGroundingRound;
-  /** AUTOFIX: automatic fixing of blocked checks and reviews. Absent: off (the harnesses); the deployed Lambda sets it from its environment (on unless AUTOFIX_ENABLED=false). */
-  autofix?: AutofixConfig;
-  /** Spec 043: SWE-bench runs; absent in a harness that does not exercise them. */
-  swebench?: Pick<EvalBatchDependencies, "deployment" | "startExecution" | "stopBatchForThread" | "onRunEnded" | "now" | "estimateRunCostUsd">;
-}
-
-/**
- * What callers supply; the handler creates the per-container catalog cache when none is given, and
- * the credential registry from `connectorCredentials` unless one is injected, and the turn record
- * export from `turnRecordsTableName` unless one is injected.
- */
-export type AwsBrokerInput = Omit<AwsBrokerDependencies, "catalogs"> & {
-  /** Lane E2 step 6: the core engine's root (aws/core-engine-root.ts). Absent, or its switch off: the broker never reaches the core. */
-  core?: BrokerCoreRoot;
-  catalogs?: CatalogCache<ScopeDiscovery>;
-  connectorCredentials?: ConnectorCredentialsConfiguration;
-  turnRecordsTableName?: string;
-};
-
-interface SlackServiceConfiguration {
-  orchestratorRoleArn: string;
-  memberWorkspaceLimit: number;
-  organizationWorkspaceLimit: number;
-}
-
-/** A "." or ".." path segment, also percent-encoded (%2e in any case). */
-const DOT_SEGMENT = /(?:^|\/)(?:\.|%2e){1,2}(?:\/|$)/i;
-const DEVELOPER_ROUTE_KEY = "ANY /v1/dev/{proxy+}";
-/** Lane L12: the core's /v1/app/* routes (named environments only), with no API Gateway authorizer: the broker verifies the developer token itself, as on /v1/dev/*. */
-const CORE_APP_ROUTE_KEY = "ANY /v1/app/{proxy+}";
-const FEEDBACK_REVIEW_ROUTE_KEY = "ANY /review/{proxy+}";
-
-/** The handler's dependencies from what callers supply (see AwsBrokerInput). */
-function brokerDependencies(input: AwsBrokerInput): AwsBrokerDependencies {
-  // One cache per container: discovery per revision, connector and repository costs one vendor round trip.
-  const { connectorCredentials, turnRecordsTableName, ...rest } = input;
-  const credentialRegistry = input.credentialRegistry ?? (connectorCredentials
-    ? new CredentialRegistry({ ...connectorCredentials, documentClient: input.documentClient, tableName: input.tableName })
-    : undefined);
-  const turnRecords = input.turnRecords ?? (turnRecordsTableName
-    ? new TurnRecordExport({
-        source: dynamoTurnRecordSource(input.documentClient, turnRecordsTableName),
-        projectOf: workspaceProjectReader(input.documentClient, input.tableName),
-      })
-    : undefined);
-  return {
-    ...rest,
-    catalogs: input.catalogs ?? new CatalogCache<ScopeDiscovery>({ ttlMs: 600_000, maxEntries: 256 }),
-    ...(credentialRegistry ? { credentialRegistry } : {}),
-    ...(turnRecords ? { turnRecords } : {}),
-    ...(turnRecordsTableName ? { turnRecordsTableName } : {}),
-  };
-}
+import { MAX_ARTIFACT_BYTES, MAX_SETUP_PROPOSAL_BYTES, MAX_SETUP_EVIDENCE_BYTES, LEGACY_E2E_COMPANY, SETUP_ARTIFACT_CHUNK_BYTES, MAX_WORKFLOW_CANDIDATE_EXPORT_BYTES, WORKFLOW_CANDIDATE_CHUNK_BYTES, EVENT_TRANSACTION_CHUNK, NAMED_COMPANY_CANDIDATE_WAITING, type RegisteredProjectRecord, type MembershipRecord, type PullRequestRecord, type CodeBuildRecord, type AwsBrokerDependencies, type AwsBrokerInput, type SlackServiceConfiguration, DOT_SEGMENT, DEVELOPER_ROUTE_KEY, CORE_APP_ROUTE_KEY, FEEDBACK_REVIEW_ROUTE_KEY, CLIENT_PROJECT_INSTRUCTIONS, TASK_ID_PATTERN, LEGACY_REVISION_GRANT, type WorkflowE2EProjection, type WorkflowE2EVerificationDiagnostic } from "./broker-types.js";
+import { type SlackStopTaskEvent, type SlackWorkflowStartEvent, type SlackWorkflowDecisionEvent, type SlackWorkflowRetryEvent, type SlackWorkflowSendBackEvent, type SlackWorkflowResolveFindingsEvent, type SlackWorkflowCloseEvent, type SlackWorkflowReviewRetryEvent, type SlackWorkflowFeedbackFindingsDecisionEvent, type SlackWorkflowFeedbackNoteEvent, type SlackTaskAuthorizationEvent, type SlackTaskPeopleConfirmEvent, type SlackTaskPeopleReadEvent, type SlackTaskPeopleChangeEvent, type SlackTaskPeopleTakeOwnershipEvent, type SlackIntakeRecordEvent, type SlackWorkflowPublishRetryEvent, type SlackWorkflowKeepPullRequestsEvent, type SlackWorkflowFeedbackReviewRetryEvent, type SlackThreadNoteEvent } from "./slack-broker-events.js";
+import { projectSetupPolicy, plannedAgentRoute, untestedAgentRouteNote, brokerDependencies, adminCompanyReader, sharedThread, sharedThreadOpen, slackThreadOwnRow, taskLegacyScope, workspaceTaskScope, readWorkspaceTaskLegacyProject, getSlackBinding, developerRequested, requireOwnedWorkspace, requireWorkspace, getDefaultWorkspace, getThreadWorkspace, slackCallerRouteDependencies, channelLinkRouteDependencies, channelConversationDependencies, conversationStarterId, conversationProjectName, requireLatestProject, getProjectModels, putProjectModel, resolveProjectModel, requirePullRequest, adoptLegacyPullRequest, requireMembership, getMembership, grantCompany, storedCompanyOf, requireAdministrator, requireAdministratorGrant, replayRecordView, closeReleasesStorage, workspaceRuntime, workspaceItem, membershipRecord, githubRepositoryFullName, pullRequestMatchesRepository, workspaceKey, pullRequestKey, codeBuildKey, issueRepositoryGrant, requireGithubProjectBinding, verifyCapability, object, parseBody, uuid, name, positiveInteger, encodeCursor, decodeCursor, startsConversation, isStatus, parseStoredEvent, json } from "./broker-primitives.js";
+import { swebenchDependencies, swebenchSlackContext } from "./broker-swebench-routes.js";
+import { dispatchAdminHttpRoute, dispatchCoreAndOperatorEvent, dispatchPreAuthHttpRoute, dispatchSlackIngressEvent } from "./broker-router.js";
+import {
+  WORKFLOW_E2E_ADMISSION_MAX_BYTES,
+  candidateSourceOperation,
+  creatorGrantKey,
+  getWorkflowE2ECreatorIdentity,
+  loadApplicationEvidenceInputs,
+  loadWorkflowCandidateSourceExport,
+  loadWorkflowE2EArtifact,
+  loadWorkflowE2EScenarioResultsWithHooks,
+  readStoredCandidateSourceExport,
+  settleBaselineRoundWithHooks,
+  settleGroundingRoundWithHooks,
+  settleReplayRoundWithHooks,
+  verifyWorkflowE2EEvidence as verifyWorkflowE2EEvidenceWithHooks,
+  workflowCandidateSourceExportSchema,
+  workflowE2EApplicationAuthorityIsValidWithHooks,
+  workflowE2ECreatorAuthorityProof,
+  workflowE2ECurrentAuthorityIsValidWithHooks,
+  workflowE2EPresentation as workflowE2EPresentationWithHooks,
+  workflowE2EPresentationDetailed as workflowE2EPresentationDetailedWithHooks,
+  workflowE2EPublicationChecks as workflowE2EPublicationChecksWithHooks,
+  type ApplicationSelectionNow,
+  type E2EVerificationHooks,
+} from "./broker-e2e-verification.js";
+export { PROJECT_SETUP_CAPTURE_POLICY, NAMED_COMPANY_CANDIDATE_WAITING, type RegisteredProjectRecord, type AwsBrokerInput, type WorkflowE2EVerificationDiagnostic } from "./broker-types.js";
+export { type SlackStopTaskEvent, type SlackWorkflowStartEvent, type SlackWorkflowDecisionEvent, type SlackWorkflowRetryEvent, type SlackWorkflowSendBackEvent, type SlackWorkflowResolveFindingsEvent, type SlackWorkflowCloseEvent, type SlackWorkflowReviewRetryEvent, type SlackWorkflowFeedbackFindingsDecisionEvent, type SlackWorkflowFeedbackNoteEvent, type SlackTaskAuthorizationEvent, type SlackTaskPeopleConfirmEvent, type SlackTaskPeopleReadEvent, type SlackTaskPeopleChangeEvent, type SlackTaskPeopleTakeOwnershipEvent, isSlackTaskPeopleReadEvent, isSlackTaskPeopleChangeEvent, isSlackTaskPeopleTakeOwnershipEvent, isSlackTaskPeopleConfirmEvent, isSlackTaskAuthorizationEvent, isSlackWorkflowStartEvent, type SlackIntakeRecordEvent, isSlackIntakeRecordEvent, isSlackWorkflowDecisionEvent, isSlackWorkflowRetryEvent, isSlackWorkflowSendBackEvent, isSlackWorkflowResolveFindingsEvent, isSlackWorkflowCloseEvent, isSlackWorkflowReviewRetryEvent, type SlackWorkflowPublishRetryEvent, isSlackWorkflowPublishRetryEvent, type SlackWorkflowKeepPullRequestsEvent, isSlackWorkflowKeepPullRequestsEvent, isSlackWorkflowFeedbackFindingsDecisionEvent, isSlackWorkflowFeedbackNoteEvent, type SlackWorkflowFeedbackReviewRetryEvent, isSlackWorkflowFeedbackReviewRetryEvent, type SlackThreadNoteEvent, isSlackThreadNoteEvent, isSlackStopTaskEvent } from "./slack-broker-events.js";
+export { channelLinkRouteDependencies } from "./broker-primitives.js";
+export { loadWorkflowE2EArtifact };
+import { answerSlackCorePress, isSlackCorePressEvent } from "./slack-core-decision.js";
+export const NAMED_COMPANY_SETUP_APPROVAL_REFUSED = "a company's browser testing is set up on the project's Browser testing page, and the rest of its setup goes through the project's setup flow, not through a setup approval sent with registration";
 
 /** The broker actions developer task routes call (spec 025); tests and the route wiring use this factory. */
 export function createDeveloperTaskActions(input: AwsBrokerInput): DeveloperTaskActions {
@@ -811,11 +230,6 @@ function adminReadDependencies(dependencies: AwsBrokerDependencies): AdminReadDe
     log: brokerLogLine,
     ...dependencies.adminReads,
   };
-}
-
-/** DEC 254zzz6 D2: the live company membership reader for admin routes: the top-level one (tests, the Slack company handler), else the developer configuration's (production). */
-function adminCompanyReader(dependencies: AwsBrokerDependencies): CompanyMembershipReader | undefined {
-  return dependencies.companies ?? dependencies.developer?.companies;
 }
 
 /** Spec 025 phase 25e: the existing admin handlers a confirmed change applies through (FR-040). */
@@ -947,7 +361,7 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
       if (error instanceof AgentXError && error.code === "NOT_FOUND") return undefined;
       throw error;
     }),
-    ensureProjectCatalogPointer: (name, task) => ensureProjectCatalogPointer(dependencies, name, task),
+    ensureProjectCatalogPointer: async (name, task) => { await ensureProjectCatalogPointer(dependencies, name, task); },
     preparation: (identity, project, requestId) => newWorkspacePreparation(dependencies, identity, project, identity.ownerKey, requestId),
     // Lane E2: these readers answer only a workflow task's workspace. A core task's workspace reads as missing (engine-boundary.ts); its own handlers read it.
     workspace: (id) => requireWorkspace(dependencies, id),
@@ -1371,549 +785,151 @@ async function routeGithubWebhook(dependencies: AwsBrokerDependencies, request: 
   return json(answer.body, request.requestId, answer.status);
 }
 
+async function dispatchReviewHttpRoute(
+  core: AwsBrokerInput["core"],
+  dependencies: AwsBrokerDependencies,
+  tasks: DeveloperTaskActions,
+  request: AdaptedHttpRequest,
+  url: URL,
+): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> {
+  if (url.pathname.startsWith("/review/") && !dependencies.developer && dependencies.linking) {
+    return await routeLinkingRequest(linkingRouteDependencies(dependencies, dependencies.linking), request, url) as { statusCode: number; headers: Record<string, string>; body: string };
+  }
+  if (!url.pathname.startsWith("/review/") || !dependencies.developer) throw agentXError("NOT_FOUND", "route not found");
+  return await routeDeveloperRequest({
+    ...(dependencies.developer.companies === undefined ? {} : { companies: dependencies.developer.companies }),
+    ...(core?.lessons === undefined ? {} : { lessons: core.lessons }),
+    ...(core?.lessonsSlackSwitch === undefined ? {} : { lessonsSlackSwitch: core.lessonsSlackSwitch }),
+    ...(core?.knowledgeSwitch === undefined ? {} : { knowledgeSwitch: core.knowledgeSwitch }),
+    documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
+    ...channelLinkRouteDependencies(dependencies),
+    ...clientProjectRouteDependencies(dependencies),
+    ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
+    ...workflowApplicationRouteDependencies(dependencies),
+  }, request, url) as { statusCode: number; headers: Record<string, string>; body: string };
+}
+
+async function dispatchWorkerInternalHttpRoute(
+  core: AwsBrokerInput["core"],
+  dependencies: AwsBrokerDependencies,
+  request: AdaptedHttpRequest,
+  url: URL,
+): Promise<{ statusCode: number; headers: Record<string, string>; body: string } | undefined> {
+  // Lane E2 step 6: a worker's callback for a workspace a core task holds is the core's (its own capability and grant exchange; the root matches the paths).
+  const contextRead = coreContextWorkerRouteOf(request.method, url.pathname);
+  const isCoreGet = request.method === "GET" && (url.pathname === CORE_MODEL_ACCESS_PATH
+    || contextRead?.path === "/v1/internal/context-tools" || contextRead?.path === "/v1/internal/design-review/packet");
+  if (core !== undefined && (request.method === "POST" || isCoreGet)) {
+    const answer = await core.callback(request);
+    if (answer !== undefined) return answer;
+  }
+  // Internal worker routes authenticate with operation-scoped capabilities; user JWT auth starts below them.
+  const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|candidate-export|candidate-build-source|baseline-source|e2e-admission|e2e-evidence|browser-evidence|e2e-model-budget|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild|chatgpt-token|chatgpt-status|eval-plan)$/.exec(
+    url.pathname,
+  );
+  if (request.method === "POST" && callback?.[1] && callback[2] && callback[3]) {
+    return await handleCallback(dependencies, request, callback[1], callback[2], callback[3]);
+  }
+  const credentialExchange = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/repository-credentials$/.exec(url.pathname);
+  if (request.method === "POST" && credentialExchange?.[1] && credentialExchange[2]) {
+    return json({ credential: await exchangeRepositoryCredential(dependencies, request, credentialExchange[1], credentialExchange[2]) }, request.requestId);
+  }
+  return undefined;
+}
+
+async function dispatchDevAndAppHttpRoute(
+  core: AwsBrokerInput["core"],
+  dependencies: AwsBrokerDependencies,
+  tasks: DeveloperTaskActions,
+  routeKey: string | undefined,
+  request: AdaptedHttpRequest,
+  url: URL,
+): Promise<{ statusCode: number; headers: Record<string, string>; body: string } | undefined> {
+  if (url.pathname.startsWith("/v1/service/")) return await routeServiceRequest(dependencies, tasks, request, url);
+  if (url.pathname.startsWith("/v1/app/") && (routeKey === CORE_APP_ROUTE_KEY || dependencies.developer?.coreApp !== undefined)) {
+    if (dependencies.developer?.coreApp === undefined) throw agentXError("NOT_FOUND", "route not found");
+    return await routeAppRequest({ ...(dependencies.developer.companies === undefined ? {} : { companies: dependencies.developer.companies }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now }, request, url);
+  }
+  if (!url.pathname.startsWith("/v1/dev/")) return undefined;
+  if (!dependencies.developer && dependencies.linking) return json(await routeLinkingRequest(linkingRouteDependencies(dependencies, dependencies.linking), request, url), request.requestId);
+  if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
+  const developer = dependencies.developer;
+  return await developerRouteResponse(request, url, () => routeDeveloperRequest({
+    serverReadSender: { send: (command, options) => dependencies.documentClient.send(command as never, options) },
+    ...(developer.companies === undefined ? {} : { companies: developer.companies }),
+    ...(core?.lessons === undefined ? {} : { lessons: core.lessons }),
+    ...(core?.lessonsSlackSwitch === undefined ? {} : { lessonsSlackSwitch: core.lessonsSlackSwitch }),
+    ...(core?.knowledgeSwitch === undefined ? {} : { knowledgeSwitch: core.knowledgeSwitch }),
+    ...(core?.knowledge === undefined ? {} : { knowledge: core.knowledge }),
+    documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks,
+    ...channelLinkRouteDependencies(dependencies),
+    ...clientProjectRouteDependencies(dependencies),
+    ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
+    ...workflowApplicationRouteDependencies(dependencies),
+  }, request, url));
+}
 
 function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBrokerDependencies) {
   // Spec 025: the broker actions the developer task routes call, built once per handler.
   const tasks = developerTaskActions(dependencies);
   const adminReads = adminReadDependencies(dependencies);
   const adminChanges = adminChangeDependencies(dependencies, adminReads);
+  const operatorHooks = {
+    operatorGithubBindings, brokerLogLine,
+    logStderr: (entry: Record<string, unknown>) => { process.stderr.write(`${JSON.stringify(entry)}\n`); },
+    operatorEventRefused,
+    isGithubWebhookRecoveryEvent, retryDueGithubWebhookEvents,
+    isWorkflowMergeRecoveryEvent, reconcileWorkflowMergeRecoveryTask,
+    isWorkflowDispatchRecoveryEvent, retryDueWorkflowDispatches,
+    startDuePlanEvidenceJobs, developerTaskActions,
+  };
+  const slackHooks = {
+    brokerLogLine,
+    namedInstallTeamView, developerTaskActions, unexpectedErrorAnswer, replyNotSavedAnswer,
+    stopSlackThreadTask, authorizeSlackTaskAction, confirmSlackTaskPeople, handleSlackTaskPeople,
+    startSlackWorkflow, answerSlackWorkflowEvent, decideSlackWorkflow, retrySlackWorkflowChecks,
+    retrySlackWorkflowReviews, retrySlackWorkflowPublication, keepSlackWorkflowPullRequests,
+    sendSlackWorkflowBack, resolveSlackWorkflowFindings, closeSlackWorkflowTask,
+    decideSlackWorkflowFeedbackFindings, retrySlackWorkflowFeedbackReview,
+    recordSlackIntake, companySlackCaller, recordSlackThreadNote, captureSlackWorkflowFeedbackNote,
+    dispatchSlackCorePress: async (slackView: AwsBrokerDependencies, event: unknown) => (isSlackCorePressEvent(event) ? answerSlackCorePress(slackView.developer?.coreTasks, event, (thread, userId) => companySlackCaller(slackView, thread, userId)) : undefined),
+    approvalOutOfDate: SLACK_APPROVAL_OUT_OF_DATE, buttonOutOfDate: SLACK_BUTTON_OUT_OF_DATE,
+  };
+  const preAuthHooks = {
+    routeGithubWebhook, handleProjectSetupCallback, handleProjectSetupExecutionRead,
+    handleProjectSetupEvidenceInit, handleProjectSetupEvidenceChunk, handleProjectSetupEvidenceFinalize,
+  };
+  const adminHooks = {
+    adminChanges, adminReads, tasks,
+    retryGithubWebhookAsAdministrator, retryProjectSetupAsAdministrator,
+    routeSetupProposal, routeSetupApproval, registerProject, adminModelChecks,
+    prepareWorkspace, putSlackBinding, deleteSlackBinding, cancelWorkspaceTask,
+    stopWorkspace, adminTaskE2EReplay, adminTaskShareMode,
+  };
   return async (event: HttpApiV2Event | SlackWorkspaceOperatorEvent | SlackStopTaskEvent | SlackTaskAuthorizationEvent | SlackTaskPeopleConfirmEvent | SlackTaskPeopleReadEvent | SlackTaskPeopleChangeEvent | SlackTaskPeopleTakeOwnershipEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | SlackWorkflowRetryEvent | SlackWorkflowReviewRetryEvent | SlackWorkflowSendBackEvent | SlackWorkflowResolveFindingsEvent | SlackWorkflowCloseEvent | AdminChangePressEvent | { source: "agentx.github-webhook-recovery" } | { source: "agentx.github-binding-backfill"; continuation?: number } | { source: "agentx.github-binding-claim"; installationId: number; companyId: string } | { source: "agentx.workflow-dispatch-recovery" } | { source: "agentx.workflow-merge-recovery" }, context?: { awsRequestId?: string; getRemainingTimeInMillis?: () => number }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
-    // Lane E2 step 6: a core job's schedule, or a State table stream batch for the outbox. Only with a core root; with its switch off the answer says so and nothing is read.
-    if (core !== undefined && (isCoreJobEvent(event) || outboxCompaniesOf(event) !== undefined)) {
-      try {
-        const remainingMs = typeof context?.getRemainingTimeInMillis === "function" ? context.getRemainingTimeInMillis() : undefined;
-        return json((await core.handleEvent(event, { remainingMs })) ?? { skipped: "not_core" }, "core-engine");
-      } catch (error) {
-        process.stderr.write(`${JSON.stringify({ component: "broker", event: "core_engine.event_failed", error: error instanceof Error ? error.name : "unknown" })}\n`);
-        if (error instanceof Error && error.message === "The core engine settings are not readable.") {
-          return json({ error: { code: "CORE_SWITCH_BLOCKED", message: "The core engine settings are not readable." } }, "core-engine", 503);
-        }
-        return json({ error: "core_event_failed" }, "core-engine", 500);
-      }
-    }
-    // L2-2 PR 18c: the Slack Lambda (no State write, #126) asks for an unlinked person's link notice; only the company handler has `workspaces`, so the install's team is refused.
-    if (dependencies.workspaces !== undefined && isSlackLinkNoticeEvent(event)) return json(await answerSlackLinkNotice(dependencies, event), "slack-link-notice");
-    // Spec 025 E14: a Slack Confirm or Cancel press, invoked directly by the ingress (never through API Gateway).
-    if (isAdminChangePressEvent(event)) {
-      if (dependencies.workspaces !== undefined) return json({ error: { code: "FORBIDDEN", message: SLACK_WEB_SIGNIN_NOTICE } }, "slack-ingress", 403);
-      if (adminChanges === undefined) return json({ error: { code: "NOT_FOUND", message: "admin changes are not set up in this deployment" } }, "slack-ingress", 404);
-      try {
-        return json(await pressAdminChange(adminChanges, event), "slack-ingress");
-      } catch (error) {
-        console.log(JSON.stringify({ component: "broker", event: "admin_change.press_failed", changeId: event.changeId, error: error instanceof AgentXError ? error.code : error instanceof Error ? error.name : "unknown" }));
-        return json({ outcome: "failed", changeId: event.changeId }, "slack-ingress", 500);
-      }
-    }
-    if (isSlackWorkspaceOperatorEvent(event)) {
-      const parsed = SlackWorkspaceOperatorEventSchema.safeParse(event);
-      if (!parsed.success) return json({ outcome: "refused" }, "slack-workspace", 404);
-      const workspaces = createSlackWorkspaceBindings({ client: dependencies.documentClient, tableName: dependencies.tableName, legacyTeamId: dependencies.slackWorkspaceLegacyTeamId });
-      try {
-        if (parsed.data.source === "agentx.slack-workspace-backfill") return json({ outcome: "backfilled", ...await workspaces.backfill() }, "slack-workspace");
-        await workspaces.bind(parsed.data.companyId, parsed.data.teamId, parsed.data.by);
-        return json({ outcome: "bound" }, "slack-workspace");
-      } catch { return json({ outcome: "refused" }, "slack-workspace", 404); }
-    }
-    // Guided onboarding PR 4: the Slack ingress's verified app_uninstalled / tokens_revoked. IAM protects the direct invoke; the company comes from the team's binding.
-    if (isSlackWorkspaceRemovedEvent(event)) {
-      const parsed = SlackWorkspaceRemovedEventSchema.safeParse(event);
-      if (!parsed.success || dependencies.slackInstall === undefined) return parsed.success ? json({ outcome: "ignored" }, "slack-workspace") : json({ outcome: "refused" }, "slack-workspace", 404); // not wired (COMPANY_SIGNIN off): a well-formed removal is acknowledged, nothing read or written, so Slack does not retry
-      try { return json(await handleSlackWorkspaceRemoved({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, now: Date.now, wiring: dependencies.slackInstall }, parsed.data), "slack-workspace"); }
-      catch { return json({ outcome: "failed" }, "slack-workspace", 500); }
-    }
-    // Guided onboarding PR 5: a /rovara command or press from the Slack Lambda, after Slack's signature check there. IAM protects the direct invoke; company and person come
-    // from the team's binding and the person's own sign-in, never from the event.
-    if (isSlackRovaraEvent(event)) {
-      const parsed = SlackRovaraEventSchema.safeParse(event);
-      if (!parsed.success) return json({ error: "invalid_request" }, "slack-rovara", 400);
-      const signInTableName = dependencies.developer?.signInTableName;
-      const context = dependencies.slackChannels === undefined || signInTableName === undefined ? undefined : {
-        documentClient: dependencies.documentClient, tableName: dependencies.tableName, signInTableName, now: Date.now, wiring: dependencies.slackChannels,
-        ...(dependencies.slackWorkspaceLegacyTeamId === undefined ? {} : { installTeamId: dependencies.slackWorkspaceLegacyTeamId }),
-        ...(slackSignInUrlOf(dependencies.slackSignInUrl) === undefined ? {} : { signInUrl: slackSignInUrlOf(dependencies.slackSignInUrl)! }),
-      };
-      return json(await handleSlackRovara(context, parsed.data), "slack-rovara");
-    }
-    if (typeof event === "object" && event !== null && "source" in event && event.source === "agentx.github-binding-claim") {
-      try {
-        // IAM protects direct Lambda invocation. HTTP/admin-shaped envelopes are
-        // refused even if they carry the source string; no body flag grants authority.
-        const input = z.object({ source: z.literal("agentx.github-binding-claim"), installationId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), companyId: OrgIdSchema }).strict().parse(event);
-        const bindings = operatorGithubBindings(dependencies);
-        if (dependencies.githubBindingInstallations === undefined) throw githubBindingRefusal();
-        const installation = await dependencies.githubBindingInstallations.get(input.installationId);
-        if (installation === undefined || installation.installationId !== input.installationId) throw githubBindingRefusal();
-        await bindings.claimOperator(input.companyId, installation);
-        companyLog(input.companyId, brokerLogLine)({ event: "github.binding_claimed", installationId: input.installationId });
-        return json({ claimed: true }, "github-binding-claim");
-      } catch (error) {
-        operatorEventRefused("github.binding_claim_refused", error);
-        return json({ error: { code: "GITHUB_NOT_CONNECTED", message: "the GitHub installation is not connected" } }, "github-binding-claim", 403);
-      }
-    }
-    if (typeof event === "object" && event !== null && "source" in event && event.source === "agentx.github-binding-backfill") {
-      try {
-        const input = z.object({ source: z.literal("agentx.github-binding-backfill"), continuation: z.number().int().positive().max(1_000_000).optional() }).strict().parse(event);
-        const bindings = operatorGithubBindings(dependencies);
-        if (dependencies.githubBindingInstallations === undefined) throw githubBindingRefusal();
-        return json(await bindings.backfillPage(page => dependencies.githubBindingInstallations!.page(page), input.continuation), "github-binding-backfill");
-      } catch (error) {
-        operatorEventRefused("github.binding_backfill_refused", error);
-        return json({ error: "backfill_failed" }, "github-binding-backfill", 500);
-      }
-    }
-    if (isGithubWebhookRecoveryEvent(event)) {
-      try { return json(await retryDueGithubWebhookEvents(dependencies, "continuation" in event ? event.continuation : undefined), "github-webhook-recovery"); }
-      catch (error) {
-        console.log(JSON.stringify({ component: "broker", event: "github.webhook_recovery_failed", error: error instanceof Error ? error.name : "unknown" }));
-        return json({ error: "recovery_failed" }, "github-webhook-recovery", 500);
-      }
-    }
-    if (isWorkflowMergeRecoveryEvent(event)) {
-      try {
-        const result = await runDueWorkflowMergeRecovery({
-          documentClient: dependencies.documentClient,
-          tableName: dependencies.tableName,
-          now: Date.now,
-          reconcile: (taskId, budget) => reconcileWorkflowMergeRecoveryTask(dependencies, taskId, budget),
-        });
-        return json(result, "workflow-merge-recovery");
-      } catch (error) {
-        console.log(JSON.stringify({ component: "broker", event: "workflow.merge_recovery_failed", error: error instanceof Error ? error.name : "unknown" }));
-        return json({ error: "recovery_failed" }, "workflow-merge-recovery", 500);
-      }
-    }
-    // Gap 6: the scheduled sweep that re-runs any workflow dispatch left behind after its result committed.
-    if (isWorkflowDispatchRecoveryEvent(event)) {
-      try {
-        const dispatches = await retryDueWorkflowDispatches(dependencies);
-        // The plan evidence rows ride the same schedule; their failure never hides the dispatches' result.
-        const planEvidence = await startDuePlanEvidenceJobs(dependencies).catch((error: unknown) => {
-          console.log(JSON.stringify({ component: "broker", event: "plan_evidence.sweep_failed", error: error instanceof Error ? error.name : "unknown" }));
-          return { attempted: 0, started: 0 };
-        });
-        // Finished tasks whose release found the workspace busy, failed or never ran: their slot and workspace are given back.
-        const releases = await releasePendingFinishedTasks({ tableName: dependencies.tableName, actions: developerTaskActions(dependencies), documentClient: dependencies.documentClient })
-          .catch((error: unknown) => {
-            console.log(JSON.stringify({ component: "broker", event: "developer.finished_task_sweep_failed", error: error instanceof Error ? error.name : "unknown" }));
-            return { attempted: 0, released: 0 };
-          });
-        return json({ ...dispatches, planEvidence, releases }, "workflow-dispatch-recovery");
-      }
-      catch (error) {
-        console.log(JSON.stringify({ component: "broker", event: "workflow.dispatch_recovery_failed", error: error instanceof Error ? error.name : "unknown" }));
-        return json({ error: "recovery_failed" }, "workflow-dispatch-recovery", 500);
-      }
-    }
-    // Sign in with ChatGPT from Slack (#340): the ingress asks, as the Slack user's own developer.
-    if (isSlackChatGptCommandEvent(event) || isSlackChatGptFinishEvent(event)) {
-      if (dependencies.workspaces !== undefined) return json({ error: { code: "FORBIDDEN", message: SLACK_WEB_SIGNIN_NOTICE } }, "slack-ingress", 403);
-      try {
-        return json(await answerSlackChatGpt({
-          ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
-          ...(dependencies.developer?.slackTeamId === undefined ? {} : { slackTeamId: dependencies.developer.slackTeamId }),
-        }, event), "slack-ingress");
-      } catch (error) {
-        if (error instanceof AgentXError) {
-          return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
-        }
-        return unexpectedErrorAnswer(error, "slack-ingress");
-      }
-    }
-    // DEC 254zzz95 (owner, R2-F1): the install team's Slack actions (Stop, task people, presses, intake, core presses, thread and feedback notes, the start) run as its
-    // NAMED company when its operator binding names one: the same switch as the start (namedInstallTeamView). Every other case keeps `dependencies` exactly.
-    let slackView = dependencies;
-    const slackTeam = slackIngressThreadTeam(event);
-    if (slackTeam !== undefined) {
-      try { slackView = await namedInstallTeamView(dependencies, slackTeam); }
-      catch { return json({ error: { code: "RUNTIME_UNAVAILABLE", message: "This Slack workspace is not available." } }, "slack-ingress", 503); }
-    }
-    const slackTasks = slackView === dependencies ? tasks : developerTaskActions(slackView);
-    if (isSlackStopTaskEvent(event)) {
-      try {
-        return json(await stopSlackThreadTask(slackView, event), "slack-ingress");
-      } catch (error) {
-        if (error instanceof AgentXError) {
-          return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
-        }
-        return unexpectedErrorAnswer(error, "slack-ingress");
-      }
-    }
-    if (isSlackTaskAuthorizationEvent(event)) {
-      try { return json(await authorizeSlackTaskAction(slackView, slackTasks, event), "slack-ingress"); }
-      catch (error) {
-        if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
-        return unexpectedErrorAnswer(error, "slack-ingress");
-      }
-    }
-    if (isSlackTaskPeopleConfirmEvent(event)) {
-      try { return json(await confirmSlackTaskPeople(slackView, slackTasks, event), "slack-ingress"); }
-      catch (error) {
-        if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
-        return unexpectedErrorAnswer(error, "slack-ingress");
-      }
-    }
-    if (isSlackTaskPeopleReadEvent(event) || isSlackTaskPeopleChangeEvent(event) || isSlackTaskPeopleTakeOwnershipEvent(event)) {
-      try { return json(await handleSlackTaskPeople(slackView, slackTasks, event), "slack-ingress"); }
-      catch (error) {
-        if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
-        return unexpectedErrorAnswer(error, "slack-ingress");
-      }
-    }
-    if (isSlackWorkflowStartEvent(event)) {
-      try {
-        const task = await startSlackWorkflow(slackView, slackTasks, event);
-        return json({ taskId: task.task.taskId }, "slack-ingress");
-      } catch (error) {
-        if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
-        return unexpectedErrorAnswer(error, "slack-ingress");
-      }
-    }
-    // Task 19: every Slack press the interactivity hands over asynchronously; a refusal is told to the presser privately.
-    const approval = { outOfDate: SLACK_APPROVAL_OUT_OF_DATE, awsRequestId: context?.awsRequestId };
-    const button = { outOfDate: SLACK_BUTTON_OUT_OF_DATE, awsRequestId: context?.awsRequestId };
-    if (isSlackWorkflowDecisionEvent(event)) return answerSlackWorkflowEvent(slackView, event, "decision", () => decideSlackWorkflow(slackView, slackTasks, event), approval);
-    if (isSlackWorkflowRetryEvent(event)) return answerSlackWorkflowEvent(slackView, event, "verification_retry", () => retrySlackWorkflowChecks(slackView, slackTasks, event), button);
-    if (isSlackWorkflowReviewRetryEvent(event)) return answerSlackWorkflowEvent(slackView, event, "review_retry", () => retrySlackWorkflowReviews(slackView, slackTasks, event), button);
-    if (isSlackWorkflowPublishRetryEvent(event)) return answerSlackWorkflowEvent(slackView, event, "publish_retry", () => retrySlackWorkflowPublication(slackView, slackTasks, event), button);
-    if (isSlackWorkflowKeepPullRequestsEvent(event)) return answerSlackWorkflowEvent(slackView, event, "keep_pull_requests", () => keepSlackWorkflowPullRequests(slackView, slackTasks, event), button);
-    if (isSlackWorkflowSendBackEvent(event)) return answerSlackWorkflowEvent(slackView, event, "send_back", () => sendSlackWorkflowBack(slackView, slackTasks, event), button);
-    if (isSlackWorkflowResolveFindingsEvent(event)) return answerSlackWorkflowEvent(slackView, event, "resolve_findings", () => resolveSlackWorkflowFindings(slackView, slackTasks, event), button);
-    if (isSlackWorkflowCloseEvent(event)) return answerSlackWorkflowEvent(slackView, event, "close", () => closeSlackWorkflowTask(slackView, slackTasks, event), button);
-    if (isSlackWorkflowFeedbackFindingsDecisionEvent(event)) {
-      return answerSlackWorkflowEvent(slackView, event, "feedback_findings_decision", () => decideSlackWorkflowFeedbackFindings(slackView, slackTasks, event), approval);
-    }
-    if (isSlackWorkflowFeedbackReviewRetryEvent(event)) {
-      return answerSlackWorkflowEvent(slackView, event, "feedback_review_retry", () => retrySlackWorkflowFeedbackReview(slackView, slackTasks, event), button);
-    }
-    // Decision 134: the broker's own record of a routed request, from the ingress (never the Slack service).
-    if (isSlackIntakeRecordEvent(event)) {
-      try { return json(await recordSlackIntake(slackView, event), "slack-ingress"); }
-      catch (error) {
-        if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
-        return unexpectedErrorAnswer(error, "slack-ingress");
-      }
-    }
-    if (isSlackCorePressEvent(event)) return await answerSlackCorePress(slackView.developer?.coreTasks, event, (thread, userId) => companySlackCaller(slackView, thread, userId)); if (isSlackThreadNoteEvent(event)) {
-      try {
-        const result = await recordSlackThreadNote(slackView, slackTasks, event);
-        // Never the note's text: only who and where.
-        console.log(JSON.stringify({ component: "broker", event: "slack.thread_note", taskId: event.taskId, eventId: event.eventId, outcome: result.outcome }));
-        // Exactly the outcome: the ingress reads nothing else.
-        return { statusCode: 200, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify(result) };
-      } catch (error) {
-        // Every expected refusal is a 200 outcome above, so anything thrown means the reply was not saved: a
-        // server error, never the 400 an unexpected error otherwise gets, which the ingress would read as a refusal.
-        return replyNotSavedAnswer(error, event);
-      }
-    }
-    if (isSlackWorkflowFeedbackNoteEvent(event)) {
-      try {
-        return json(await captureSlackWorkflowFeedbackNote(slackView, slackTasks, event), "slack-ingress");
-      } catch (error) {
-        if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
-        // The ingress reads a 4xx as a refusal; an unexpected failure must make Slack retry instead.
-        return replyNotSavedAnswer(error, event);
-      }
-    }
-    const request = adaptHttpApiEvent(event);
+    const coreOrOperator = await dispatchCoreAndOperatorEvent(core, dependencies, adminChanges, event, context, operatorHooks);
+    if (coreOrOperator !== undefined) return coreOrOperator;
+    const slackIngress = await dispatchSlackIngressEvent(dependencies, tasks, event, context?.awsRequestId, slackHooks);
+    if (slackIngress !== undefined) return slackIngress;
+    const request = adaptHttpApiEvent(event as HttpApiV2Event);
     try {
-      // Checked on the raw path, before URL parsing normalizes it: /v1/dev/../v1/admin/x reaches
-      // the broker through the authorizer-free /v1/dev route (D17), so it must never be resolved.
-      if (DOT_SEGMENT.test(event.rawPath ?? "/")) throw agentXError("NOT_FOUND", "route not found");
+      // Checked on the raw path, before URL parsing normalizes it (D17).
+      if (DOT_SEGMENT.test((event as HttpApiV2Event).rawPath ?? "/")) throw agentXError("NOT_FOUND", "route not found");
       const url = new URL(request.path, "https://agentx.invalid");
-      // The browser page uses its own opaque revocable session cookie and reauthorizes each
-      // request. Only API Gateway's exact public review route may reach this branch.
-      if (event.routeKey === FEEDBACK_REVIEW_ROUTE_KEY) {
-        if (url.pathname.startsWith("/review/") && !dependencies.developer && dependencies.linking) {
-          return await routeLinkingRequest(linkingRouteDependencies(dependencies, dependencies.linking), request, url) as { statusCode: number; headers: Record<string, string>; body: string };
-        }
-        if (!url.pathname.startsWith("/review/") || !dependencies.developer) throw agentXError("NOT_FOUND", "route not found");
-        return await routeDeveloperRequest({ ...(dependencies.developer.companies === undefined ? {} : { companies: dependencies.developer.companies }), ...(core?.lessons === undefined ? {} : { lessons: core.lessons }), ...(core?.lessonsSlackSwitch === undefined ? {} : { lessonsSlackSwitch: core.lessonsSlackSwitch }), ...(core?.knowledgeSwitch === undefined ? {} : { knowledgeSwitch: core.knowledgeSwitch }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
-          ...channelLinkRouteDependencies(dependencies),
-          ...clientProjectRouteDependencies(dependencies),
-          ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
-          ...workflowApplicationRouteDependencies(dependencies) }, request, url) as { statusCode: number; headers: Record<string, string>; body: string };
-      }
-      // The /v1/dev route has no API Gateway authorizer, so what it carries goes to the developer API or nowhere.
-      if (event.routeKey === DEVELOPER_ROUTE_KEY && !url.pathname.startsWith("/v1/dev/")) throw agentXError("NOT_FOUND", "route not found");
-      // Lane L12: the same for the core's /v1/app/* route: what it carries goes to the core's routes or nowhere.
-      if (event.routeKey === CORE_APP_ROUTE_KEY && !url.pathname.startsWith("/v1/app/")) throw agentXError("NOT_FOUND", "route not found");
-      // Guided onboarding PR 7: the Linear app's webhooks verify their own signature (HMAC of the raw body under the app's signing secret); no sign-in.
-      if (url.pathname === LINEAR_WEBHOOK_PATH) {
-        if (request.method !== "POST" || dependencies.linearWebhook === undefined) return json({ error: { code: "NOT_FOUND", message: "route not found" } }, request.requestId, 404);
-        return linearWebhookResponse(await handleLinearAppWebhook(dependencies.linearWebhook, { rawBody: request.body, headers: request.headers }), request.requestId);
-      }
-      if (url.pathname === "/v1/github/webhooks") return await routeGithubWebhook(dependencies, request);
-      // Spec 043: an eval runner's callbacks, authorized by the run's own capability.
-      const evalCallback = isSwebenchCallbackPath(url.pathname);
-      if (request.method === "POST" && evalCallback !== undefined) {
-        return json(await handleSwebenchCallback(swebenchDependencies(dependencies), request.headers["x-agentx-callback-capability"], evalCallback.runId, evalCallback.action, parseBody(request.body)), request.requestId);
-      }
-      const setupCallback = /^\/v1\/internal\/project-setups\/([0-9a-f-]{36})\/operations\/([0-9a-f-]{36})\/result$/.exec(url.pathname);
-      if (request.method === "POST" && setupCallback?.[1] && setupCallback[2]) {
-        return json(await handleProjectSetupCallback(dependencies, request, setupCallback[1], setupCallback[2]), request.requestId);
-      }
-      const setupArtifact = /^\/v1\/internal\/project-setups\/([0-9a-f-]{36})\/(execution|evidence(?:\/init|\/chunks|\/finalize)?)$/.exec(url.pathname);
-      if (setupArtifact?.[1] && setupArtifact[2] === "execution" && request.method === "GET") {
-        return json(await handleProjectSetupExecutionRead(dependencies, request, setupArtifact[1], url.searchParams.get("offset")), request.requestId);
-      }
-      if (setupArtifact?.[1] && setupArtifact[2] === "evidence/init" && request.method === "POST") {
-        return json(await handleProjectSetupEvidenceInit(dependencies, request, setupArtifact[1]), request.requestId);
-      }
-      if (setupArtifact?.[1] && setupArtifact[2] === "evidence/chunks" && request.method === "POST") {
-        return json(await handleProjectSetupEvidenceChunk(dependencies, request, setupArtifact[1]), request.requestId);
-      }
-      if (setupArtifact?.[1] && setupArtifact[2] === "evidence/finalize" && request.method === "POST") {
-        return json(await handleProjectSetupEvidenceFinalize(dependencies, request, setupArtifact[1]), request.requestId);
-      }
-      // Lane E2 step 6: a worker's callback for a workspace a core task holds is the core's (its own capability and grant exchange; the root matches the paths). Undefined: not a core workspace, or the switch is off. L2b: also its model-access GET. Also the exact worker context and packet GETs in the inventory.
-      const contextRead = coreContextWorkerRouteOf(request.method, url.pathname);
-      if (core !== undefined && (request.method === "POST" || (request.method === "GET" && (url.pathname === CORE_MODEL_ACCESS_PATH
-        || contextRead?.path === "/v1/internal/context-tools" || contextRead?.path === "/v1/internal/design-review/packet")))) {
-        const answer = await core.callback(request);
-        if (answer !== undefined) return answer;
-      }
-      // Internal worker routes authenticate with operation-scoped capabilities; user JWT auth starts below them.
-      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|candidate-export|candidate-build-source|baseline-source|e2e-admission|e2e-evidence|browser-evidence|e2e-model-budget|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild|chatgpt-token|chatgpt-status|eval-plan)$/.exec(
-        url.pathname,
-      );
-      if (request.method === "POST" && callback?.[1] && callback[2] && callback[3]) {
-        return await handleCallback(dependencies, request, callback[1], callback[2], callback[3]);
-      }
-      const credentialExchange = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/repository-credentials$/.exec(
-        url.pathname,
-      );
-      if (request.method === "POST" && credentialExchange?.[1] && credentialExchange[2]) {
-        return json(
-          {
-            credential: await exchangeRepositoryCredential(
-              dependencies,
-              request,
-              credentialExchange[1],
-              credentialExchange[2],
-            ),
-          },
-          request.requestId,
-        );
-      }
-
-      // The hosted Slack orchestrator authenticates with its IAM role and acts only as a Slack thread owner.
-      if (url.pathname.startsWith("/v1/service/")) return await routeServiceRequest(dependencies, tasks, request, url);
-
-      // Lane L12: the core's own /v1/app/* routes, only while the core switch serves (the developer configuration then has `coreApp`). Off, a request on the core's route is refused
-      // before anything is read, and one that reached the broker another way goes on exactly as before.
-      if (url.pathname.startsWith("/v1/app/") && (event.routeKey === CORE_APP_ROUTE_KEY || dependencies.developer?.coreApp !== undefined)) {
-        if (dependencies.developer?.coreApp === undefined) throw agentXError("NOT_FOUND", "route not found");
-        return await routeAppRequest({ ...(dependencies.developer.companies === undefined ? {} : { companies: dependencies.developer.companies }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now }, request, url);
-      }
-      // Spec 025: the developer API. /v1/dev/* has no API Gateway authorizer (D17): the broker
-      // verifies the developer token, then checks the method and session (FR-009).
-      if (url.pathname.startsWith("/v1/dev/")) {
-        if (!dependencies.developer && dependencies.linking) return json(await routeLinkingRequest(linkingRouteDependencies(dependencies, dependencies.linking), request, url), request.requestId);
-        if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
-        const developer = dependencies.developer;
-        return await developerRouteResponse(request, url, () => routeDeveloperRequest({ serverReadSender: { send: (command, options) => dependencies.documentClient.send(command as never, options) }, ...(developer.companies === undefined ? {} : { companies: developer.companies }), ...(core?.lessons === undefined ? {} : { lessons: core.lessons }), ...(core?.lessonsSlackSwitch === undefined ? {} : { lessonsSlackSwitch: core.lessonsSlackSwitch }), ...(core?.knowledgeSwitch === undefined ? {} : { knowledgeSwitch: core.knowledgeSwitch }), ...(core?.knowledge === undefined ? {} : { knowledge: core.knowledge }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks,
-          ...channelLinkRouteDependencies(dependencies),
-          ...clientProjectRouteDependencies(dependencies),
-          ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
-          ...workflowApplicationRouteDependencies(dependencies) }, request, url));
-      }
-
+      const routeKey = (event as HttpApiV2Event).routeKey;
+      if (routeKey === FEEDBACK_REVIEW_ROUTE_KEY) return await dispatchReviewHttpRoute(core, dependencies, tasks, request, url);
+      if (routeKey === DEVELOPER_ROUTE_KEY && !url.pathname.startsWith("/v1/dev/")) throw agentXError("NOT_FOUND", "route not found");
+      if (routeKey === CORE_APP_ROUTE_KEY && !url.pathname.startsWith("/v1/app/")) throw agentXError("NOT_FOUND", "route not found");
+      const handled = await dispatchPreAuthHttpRoute(dependencies, request, url, preAuthHooks)
+        ?? await dispatchWorkerInternalHttpRoute(core, dependencies, request, url)
+        ?? await dispatchDevAndAppHttpRoute(core, dependencies, tasks, routeKey, request, url);
+      if (handled !== undefined) return handled;
       const identity = identityFromJwtClaims(request.jwtClaims, {
         issuer: dependencies.issuer,
         adminClaim: dependencies.adminClaim,
         adminValues: dependencies.adminValues,
       });
-      const webhookRetry = /^\/v1\/admin\/github\/webhook-deliveries\/([0-9a-f-]{36})\/retry$/.exec(url.pathname);
-      if (request.method === "POST" && webhookRetry?.[1]) {
-        return json(await retryGithubWebhookAsAdministrator(dependencies, identity, webhookRetry[1]), request.requestId, 202);
-      }
-      const projectSetupRetry = /^\/v1\/admin\/projects\/setup-executions\/([0-9a-f-]{36})\/retry$/.exec(url.pathname);
-      if (request.method === "POST" && projectSetupRetry?.[1]) {
-        return json(await retryProjectSetupAsAdministrator(dependencies, identity, projectSetupRetry[1], parseBody(request.body)), request.requestId, 202);
-      }
-      const body = parseBody(request.body);
-      // Spec 025 phase 25e: admin changes (FR-039 to FR-041, FR-052).
-      const changed = await routeAdminChange(adminChanges, identity, { method: request.method, headers: request.headers, body }, url);
-      if (changed !== undefined) return json(changed.body, request.requestId, changed.status);
-      // Spec 025 phase 25d: the admin read routes (FR-038), each behind the admin claim (A2).
-      const adminRead = await routeAdminRead(adminReads, identity, request, url);
-      if (adminRead !== undefined) return json(adminRead, request.requestId);
-
-      if (request.method === "POST" && url.pathname === "/v1/admin/runtime-installation/challenges") {
-        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-        if (!dependencies.projectSetupRuntimeCatalogId || !dependencies.e2eFeatureRuntimeCatalogId) throw agentXError("RUNTIME_UNAVAILABLE", "runtime installation catalogs are not configured in this deployment");
-        const runtimeDeps: RuntimeInstallationDependencies = { documentClient: dependencies.documentClient, s3: dependencies.s3,
-          tableName: dependencies.tableName, artifactBucketName: dependencies.artifactBucketName,
-          setupCatalogId: dependencies.projectSetupRuntimeCatalogId, featureCatalogId: dependencies.e2eFeatureRuntimeCatalogId };
-        return json(await issueRuntimeInstallChallenge(runtimeDeps, identity, body), request.requestId, 201);
-      }
-      if (request.method === "POST" && url.pathname === "/v1/admin/runtime-installation/registrations") {
-        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-        if (!dependencies.projectSetupRuntimeCatalogId || !dependencies.e2eFeatureRuntimeCatalogId) throw agentXError("RUNTIME_UNAVAILABLE", "runtime installation catalogs are not configured in this deployment");
-        const runtimeDeps: RuntimeInstallationDependencies = { documentClient: dependencies.documentClient, s3: dependencies.s3,
-          tableName: dependencies.tableName, artifactBucketName: dependencies.artifactBucketName,
-          setupCatalogId: dependencies.projectSetupRuntimeCatalogId, featureCatalogId: dependencies.e2eFeatureRuntimeCatalogId };
-        return json(await registerRuntimeInstallation(runtimeDeps, identity, body), request.requestId, 201);
-      }
-
-      if (request.method === "POST" && url.pathname === "/v1/admin/projects/setup-proposals") {
-        return await routeSetupProposal(dependencies, request, identity, body);
-      }
-
-      if (request.method === "POST" && url.pathname === "/v1/admin/projects/setup-approvals") {
-        return await routeSetupApproval(dependencies, request, identity, body);
-      }
-
-      if (request.method === "POST" && url.pathname === "/v1/admin/projects") {
-        return json(await registerProject(dependencies, identity, body), request.requestId, 201);
-      }
-      if (url.pathname === "/v1/admin/credentials" && (request.method === "POST" || request.method === "GET")) {
-        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-        if (!dependencies.credentialRegistry) throw agentXError("RUNTIME_UNAVAILABLE", "connector credentials are not configured in this deployment");
-        return request.method === "POST"
-          ? json(await dependencies.credentialRegistry.register(identity, body), request.requestId, 201)
-          : json(await dependencies.credentialRegistry.list(identity), request.requestId);
-      }
-      // RUN-3: when the browser and API runtime registrations expire, for agentx doctor (an administrator reads state and times only).
-      if (request.method === "GET" && url.pathname === "/v1/admin/runtime-installation/status") {
-        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-        if (!dependencies.e2eFeatureRuntimeCatalogId) throw agentXError("NOT_FOUND", "browser and API runtimes are not set up in this deployment");
-        return json(await readE2ERuntimeStatus({ runtimeCatalogId: dependencies.e2eFeatureRuntimeCatalogId, profileId: WEB_API_RUNTIME_PROFILE_ID,
-          read: (key) => getItem<Record<string, unknown>>(dependencies, key) }), request.requestId);
-      }
-      // M1.4 Task 4.10C: the on-account model checks (a driving test of one model, or a discovery of the models this account sees), served by the qualified runner.
-      const modelCheck = /^\/v1\/admin\/e2e\/model-checks(?:\/([0-9a-f-]{36}))?$/.exec(url.pathname);
-      if (modelCheck !== null && ((request.method === "POST" && modelCheck[1] === undefined) || (request.method === "GET" && modelCheck[1] !== undefined) || (request.method === "GET" && url.pathname.endsWith("/model-checks")))) {
-        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-        return await adminModelChecks(dependencies, request.method, modelCheck[1], body, request.requestId);
-      }
-      // Spec 063: the registered sign-in clients, never a secret's hash.
-      if (request.method === "GET" && url.pathname === "/v1/admin/sign-in-clients") {
-        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-        // Spec 064: the legacy deployment's linking-only sign-in keeps the same registry.
-        const registry = (dependencies.developer ?? dependencies.linking)?.signInClients;
-        if (registry === undefined) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
-        return json({ clients: await registry.list(await resolveAdminCompany((dependencies.developer ?? dependencies.linking)?.companies, identity.ownerKey)) }, request.requestId);
-      }
-      // DEC 254a: the install's invite codes (ids, status and times only) and the self-serve switch, for an install administrator.
-      if (request.method === "GET" && url.pathname === "/v1/admin/company-invites") {
-        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-        const invites = dependencies.developer?.companyInvites;
-        if (invites === undefined) throw agentXError("NOT_FOUND", "company sign-up is not set up in this deployment");
-        return json(await invites.list(), request.requestId);
-      }
-      // DEC 254b (b): the preview of an import of the install's old company layout into Code's company records (or of its undo). Reads only; ids, never emails.
-      if (request.method === "GET" && url.pathname === "/v1/admin/company-import") {
-        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-        const developer = dependencies.developer;
-        if (developer?.companyImport === undefined) throw agentXError("NOT_FOUND", "company import is not set up in this deployment");
-        const companyId = OrgIdSchema.safeParse(url.searchParams.get("companyId"));
-        const mode = url.searchParams.get("mode") ?? "import";
-        if (!companyId.success || (mode !== "import" && mode !== "undo")) throw agentXError("CONFIG_INVALID", "give the install's company id (org_ and 20 letters or digits), and the mode import or undo");
-        const reads = { documentClient: dependencies.documentClient, tableName: dependencies.tableName, signInTableName: developer.signInTableName };
-        return json((mode === "undo" ? await planCompanyImportUndo(reads, companyId.data) : await planCompanyImport(reads, companyId.data)).preview, request.requestId);
-      }
-      // #343: Sign in with ChatGPT, for rovara doctor.
-      if (request.method === "GET" && url.pathname === "/v1/admin/chatgpt") {
-        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-        if (!dependencies.chatgpt) throw agentXError("NOT_FOUND", "Sign in with ChatGPT is not set up in this deployment");
-        return json(await dependencies.chatgpt.health(), request.requestId);
-      }
-      // DEC 254g: the models the model gateway offers the administrator's company now, which agentx config set checks coreEngine.agentModel against (fail closed). Read only; fixed words on failure.
-      if (request.method === "GET" && url.pathname === CORE_OFFERED_MODELS_ADMIN_PATH) {
-        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-        if (dependencies.coreOfferedModels === undefined) throw agentXError("NOT_FOUND", CORE_OFFERED_MODELS_NOT_SET_UP);
-        const signIn = dependencies.developer ?? dependencies.linking; // P0-14: the company the operator names (or its own membership), never AUTH_REQUIRED for one in no company (admin-offered-models.ts).
-        const company = await offeredModelsCompany({ named: url.searchParams.getAll(OFFERED_MODELS_COMPANY_PARAMETER), companies: signIn?.companies, ownerKey: identity.ownerKey, signIn: signIn === undefined ? undefined : { documentClient: dependencies.documentClient, signInTableName: signIn.signInTableName } });
-        let offered: OfferedAgentModels;
-        try { offered = await dependencies.coreOfferedModels(company); } catch { throw agentXError("RUNTIME_UNAVAILABLE", OFFERED_MODELS_READ_FAILED); }
-        return json(offered, request.requestId);
-      }
-      if (request.method === "GET" && url.pathname === "/v1/admin/turns") {
-        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-        if (!dependencies.turnRecords) throw agentXError("RUNTIME_UNAVAILABLE", "turn records are not configured in this deployment");
-        return json(await dependencies.turnRecords.page(url.searchParams), request.requestId);
-      }
-      if (request.method === "POST" && url.pathname === "/v1/admin/workspaces/prepare") {
-        return json(await prepareWorkspace(dependencies, identity, body), request.requestId, 202);
-      }
-      const slackBinding = /^\/v1\/admin\/slack\/bindings\/([^/]+)\/([^/]+)$/.exec(url.pathname);
-      if (slackBinding?.[1] && slackBinding[2] && request.method === "PUT") {
-        return json(await putSlackBinding(dependencies, identity, slackBinding[1], slackBinding[2], body), request.requestId);
-      }
-      if (slackBinding?.[1] && slackBinding[2] && request.method === "DELETE") {
-        return json(await deleteSlackBinding(dependencies, identity, slackBinding[1], slackBinding[2]), request.requestId);
-      }
-      // Spec 062 FR-020, FR-024: channel adapters and their bindings.
-      const channelRoute = /^\/v1\/admin\/channels(?:\/([^/]+)(?:\/bindings\/([^/]+)\/([^/]+))?)?$/.exec(url.pathname);
-      if (channelRoute !== null) {
-        const channels = channelAdapterDependencies(dependencies);
-        const [, channel, tenant, space] = channelRoute;
-        if (channel === undefined && request.method === "GET") return json(await listChannelAdapters(channels, identity), request.requestId);
-        if (channel !== undefined && tenant === undefined && request.method === "PUT") {
-          return json(await registerChannelAdapter(channels, identity, channel, body, { rotate: url.searchParams.get("rotate") === "true" }), request.requestId);
-        }
-        if (channel !== undefined && tenant === undefined && request.method === "DELETE") return json(await deleteChannelAdapter(channels, identity, channel), request.requestId);
-        if (channel !== undefined && tenant !== undefined && space !== undefined && request.method === "PUT") {
-          return json(await putChannelBinding(channels, identity, channel, tenant, space, body), request.requestId);
-        }
-        if (channel !== undefined && tenant !== undefined && space !== undefined && request.method === "DELETE") {
-          return json(await deleteChannelBinding(channels, identity, channel, tenant, space), request.requestId);
-        }
-      }
-      // FR-031: an administrator removes anyone's channel link.
-      const adminLink = /^\/v1\/admin\/channel-links\/([^/]+)\/([^/]+)\/([^/]+)$/.exec(url.pathname);
-      if (adminLink !== null && request.method === "DELETE") {
-        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-        const links = channelLinkRouteDependencies(dependencies).channelLinks;
-        if (links === undefined) throw agentXError("NOT_FOUND", "channel adapters are not enabled in this deployment");
-        const actor = ActorRefSchema.safeParse({ channel: decodeURIComponent(adminLink[1]!), tenant: decodeURIComponent(adminLink[2]!), userId: decodeURIComponent(adminLink[3]!) });
-        if (!actor.success || actor.data.channel === SLACK_CHANNEL) throw agentXError("NOT_FOUND", "link not found");
-        return json(await removeLink(links, actor.data, undefined), request.requestId);
-      }
-      // Spec 052: batches of eval runs, started, shown, stopped and read by an administrator of the channel's project.
-      if (url.pathname === "/v1/admin/evals/batches" && request.method === "POST") {
-        return json(await routeStartEvalBatch(dependencies, identity, body), request.requestId);
-      }
-      const evalBatch = /^\/v1\/admin\/evals\/batches\/([0-9a-f-]{36})(?:\/(stop|results))?$/.exec(url.pathname);
-      if (evalBatch?.[1]) {
-        const action = evalBatch[2];
-        if ((action === undefined || action === "results") && request.method === "GET") {
-          return json(await routeEvalBatch(dependencies, identity, evalBatch[1], action ?? "show"), request.requestId);
-        }
-        if (action === "stop" && request.method === "POST") return json(await routeEvalBatch(dependencies, identity, evalBatch[1], "stop"), request.requestId);
-      }
-      const evalChannel = /^\/v1\/admin\/evals\/channels\/([^/]+)\/([^/]+)$/.exec(url.pathname);
-      if (evalChannel?.[1] && evalChannel[2] && (request.method === "PUT" || request.method === "DELETE" || request.method === "GET")) {
-        return json(await routeSwebenchChannel(dependencies, identity, request.method, evalChannel[1], evalChannel[2], body), request.requestId);
-      }
-      const cancelTask = /^\/v1\/admin\/workspaces\/([0-9a-f-]+)\/cancel$/.exec(url.pathname);
-      if (request.method === "POST" && cancelTask?.[1]) {
-        return json(await cancelWorkspaceTask(dependencies, identity, cancelTask[1]), request.requestId, 202);
-      }
-      const stop = /^\/v1\/admin\/workspaces\/([0-9a-f-]+)\/stop$/.exec(url.pathname);
-      if (request.method === "POST" && stop?.[1]) {
-        return json({ workspace: await stopWorkspace(dependencies, identity, stop[1]) }, request.requestId, 202);
-      }
-      // Spec 025 C25: an admin switches a shared task's mode, within its project's policy.
-      // Any segment: a mistyped task ID gets TASK_NOT_FOUND from the handler, not the catch-all refusal.
-      const taskE2EReplay = /^\/v1\/admin\/tasks\/([^/]+)\/e2e-replay$/.exec(url.pathname);
-      if ((request.method === "POST" || request.method === "GET") && taskE2EReplay?.[1]) {
-        return json(await adminTaskE2EReplay(dependencies, identity, taskE2EReplay[1], request.method, body, url.searchParams), request.requestId, request.method === "POST" ? 202 : 200);
-      }
-      const taskShareMode = /^\/v1\/admin\/tasks\/([^/]+)\/share-mode$/.exec(url.pathname);
-      if (request.method === "POST" && taskShareMode?.[1]) {
-        return json(await adminTaskShareMode(dependencies, identity, taskShareMode[1], body, tasks), request.requestId);
-      }
-
-      // Developer workflows run in Slack threads, which reach the same handlers through
-      // /v1/service/*. The OIDC entry point serves administration only.
-      throw agentXError(
-        "FORBIDDEN",
-        "AgentX developer workflows run in the project's Slack channel; this endpoint serves administration only",
-      );
+      return await dispatchAdminHttpRoute(dependencies, identity, request, url, adminHooks);
     } catch (error) {
       if (error instanceof AgentXError) {
         return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, request.requestId, error.statusCode);
@@ -2614,12 +1630,6 @@ async function readProjectCatalogSnapshot(dependencies: AwsBrokerDependencies, p
   return { catalog, newestRevision, ...(newest === undefined ? {} : { newest }) };
 }
 
-/** R2-F1 review M1: a named company's project with a setup change waiting for approval takes no other revision until that change is decided. */
-export const NAMED_COMPANY_CANDIDATE_WAITING = "a setup change for this project is waiting for approval; approve or decline it before registering another revision";
-
-/** Why a named company's registration may not carry the admin setup approval (DEC 254zzz80). */
-export const NAMED_COMPANY_SETUP_APPROVAL_REFUSED = "a company's browser testing is set up on the project's Browser testing page, and the rest of its setup goes through the project's setup flow, not through a setup approval sent with registration";
-
 /**
  * DEC 254zzz80: registerProject's snapshot for a named company, from its own partition: the catalog row (`orgProjectCatalogKey`; a row written by the core may leave its name and
  * company out, but one that names another project or company is refused) and the newest stored revision of any kind (a candidate occupies its revision number too).
@@ -2726,7 +1736,6 @@ async function repairProjectCatalogPointerFromHistory(dependencies: AwsBrokerDep
     }
   }
 }
-
 
 /**
  * Publication authority guards the project's catalog row with `latestRevision = :latest`. Rows written before the
@@ -2899,7 +1908,7 @@ async function createProjectSetupAdmissionRows(
     deadlineAt: setupRunContext.deadlineAt, evidenceByteLimit, createdAt: now.toISOString(),
     ...(retry ? { retryOfExecutionId: retry.retryOfExecutionId, retryActorKey: identity.ownerKey } : {}) });
   const session = ProjectSetupSessionSchema.parse({ schemaVersion: 1, setupExecutionId, subjectId, transportCorrelationId,
-    approvalRevision: 1, bindingDigest: runtime.bindingDigest, state: "READY", generation: runtime.generation, privateIp: endpoint.hostname });
+    approvalRevision: 1, bindingDigest: runtime.bindingDigest, state: "READY", generation: runtime.generation, privateIp: endpoint.hostname, ...setupSessionInstance(runtime) });
   const operation = { ...projectSetupOperationKey(setupExecutionId, operationId), entityType: "PROJECT_SETUP_OPERATION",
     ...ProjectSetupOperationSchema.parse({ schemaVersion: 1, setupExecutionId, operationId, transportCorrelationId, fence,
       status: "ACCEPTED", createdAt: now.toISOString(), updatedAt: now.toISOString() }) };
@@ -3303,28 +2312,6 @@ async function slackServiceIdentity(
   };
 }
 
-/** Spec 025 FR-035, FR-054: the thread's shared task record, or undefined for an ordinary thread. */
-async function sharedThread(dependencies: AwsBrokerDependencies, thread: SlackThread): Promise<SharedTaskRecord | undefined> {
-  // Developer tasks exist only where developer sign-in is set up (D14); nothing else reads this key.
-  if (dependencies.developer === undefined) return undefined;
-  const item = await getItem<Record<string, unknown>>(dependencies, sharedTaskKey(thread));
-  if (item === undefined) return undefined;
-  const record = SharedTaskRecordSchema.safeParse(item);
-  // Fail closed: an unreadable record must never let the thread act as an ordinary one.
-  if (!record.success || record.data.ownerKey !== taskOwnerKey(record.data.developerId, record.data.taskId)) {
-    throw agentXError("FORBIDDEN", "this thread's shared task record cannot be read; ask an admin");
-  }
-  return record.data;
-}
-
-/**
- * C11, F16: a shared thread acts on the task only in continue, before the close, while its channel serves the task's
- * project, and never when it is a Slack-started task's own thread (only its owner's buttons move that task).
- */
-function sharedThreadOpen(shared: SharedTaskRecord, binding: SlackChannelBinding): boolean {
-  return shared.mode === "continue" && shared.closedAt === undefined && shared.workflowThread !== true && binding.projectName === shared.project;
-}
-
 function sharedStopForbidden(): never {
   throw agentXError("FORBIDDEN", "this shared thread is not bound to the task's workspace");
 }
@@ -3495,73 +2482,6 @@ async function deleteSlackBinding(
     throw agentXError("CHANGE_STALE", "The channel binding changed after review; ask for the change again to review its current binding.");
   }
   return { deleted: true, binding };
-}
-
-/**
- * DEC 254zzz98 (delta review H1, re-review M, round-3 M1): the row a Slack thread's route actually read. When the thread's binding is a NAMED company's (it carries `companyId`),
- * the legacy revision the route loaded by name must be that company's own (recordInCompany): names are not unique between a named company's own partition and the legacy
- * namespace, so a built-in (or another company's) namesake, a pinned older revision of another company, or one registered mid-request never serves the thread; it is refused
- * as unbound. Checked on each legacy read (not on the identity), so a namesake never blocks the company's routes that read no legacy revision (the core's quick start, answers,
- * thread notes). Any other identity (no Slack binding, or the built-in company's): the row, unchanged.
- */
-function slackThreadOwnRow<T>(identity: AuthenticatedIdentity | undefined, row: T): T {
-  return bindingOwnRow(identity?.slack?.binding, row);
-}
-
-/** The same check for a route that holds the channel binding itself (the SWE-bench routes): a NAMED company's binding needs the legacy row it read to be that company's. */
-function bindingOwnRow<T>(binding: SlackChannelBinding | undefined, row: T): T {
-  return slackCompanyOwnRow((binding as { companyId?: string } | undefined)?.companyId, row);
-}
-
-/** Slack binding authority is separate from the persisted task's project authority. */
-function slackCompanyOwnRow<T>(companyId: string | undefined, row: T): T {
-  if (companyId !== undefined && !OrgIdSchema.safeParse(companyId).success) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
-  if (!recordInCompany(row, companyId)) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
-  return row;
-}
-
-/** Validate the task/workspace link; recover only the old single-install scope. Project ownership is checked by readTaskLegacyProject. */
-async function workspaceTaskScope(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord | undefined, workspace: WorkspaceInstance): Promise<DeveloperTaskRecord> {
-  const refuse = () => agentXError("FORBIDDEN", "Slack channel is not bound to a project");
-  if (task === undefined || task.entityType !== "DEVELOPER_TASK" || typeof task.taskId !== "string" || typeof task.project !== "string"
-    || task.pk !== taskKey(task.taskId).pk || task.sk !== "META"
-    || task.workspaceId !== workspace.id || task.project !== workspace.projectName || task.ownerKey !== workspace.ownerKey) throw refuse();
-  return taskLegacyScope(dependencies, task);
-}
-
-/** Unstamped persisted tasks belong to the built-in company, including on hosted installs. The project read still refuses named-company rows. */
-async function taskLegacyScope<T extends { companyId?: unknown; share?: { teamId?: string } }>(_dependencies: AwsBrokerDependencies, task: T): Promise<T> {
-  return task.companyId === undefined ? { ...task, companyId: IMPLICIT_COMPANY_ID } : task;
-}
-
-async function getLegacySlackBinding(
-  dependencies: AwsBrokerDependencies,
-  teamId: string,
-  channelId: string,
-): Promise<SlackChannelBinding | undefined> {
-  const binding = await getChannelBinding(dependencies, { channel: SLACK_CHANNEL, tenant: teamId, space: channelId });
-  return binding === undefined || !await slackCompanyProject(dependencies, teamId, binding.projectName) ? undefined : slackBindingOf(binding);
-}
-
-/**
- * DEC 254zzz80 (R2-F1): a Slack channel's binding for the team's company. A NAMED company's bindings live only in its own partition (`ORG#<company>#SLACK_BINDING#<team>`), read
- * by key under the team's company as resolved now; the built-in company and no company layer keep the legacy read above, unchanged.
- */
-async function getSlackBinding(
-  dependencies: AwsBrokerDependencies,
-  teamId: string,
-  channelId: string,
-): Promise<SlackChannelBinding | undefined> {
-  const named = await slackBindingCompany(dependencies, teamId);
-  if (named === undefined) return getLegacySlackBinding(dependencies, teamId, channelId);
-  const binding = await namedCompanySlackBinding(dependencies.documentClient, dependencies.tableName, named, teamId, channelId);
-  // The bound project must be a project of the company's own partition (the core's order; a row naming another company is absent).
-  return binding !== undefined && await latestRevisionRowFor(dependencies.documentClient, dependencies.tableName, named, binding.projectName) !== undefined ? binding : undefined;
-}
-
-/** Spec 062 FR-010: one space's binding on any channel. Rows written before channels followed the latest revision also carry projectRevision; it is ignored. */
-async function getChannelBinding(dependencies: AwsBrokerDependencies, ref: ChannelSpaceRef): Promise<ChannelBinding | undefined> {
-  return readChannelBindingItem(ref, await getItem<Record<string, unknown>>(dependencies, channelBindingKey(ref)));
 }
 
 /** The close preflight's operation, worker invocation and outbox item: the Slack close's and a developer task's. */
@@ -4878,11 +3798,6 @@ function slackRequesterOf(identity: AuthenticatedIdentity): { requestedBy?: Slac
   return identity.slack ? { requestedBy: identity.slack.requester } : {};
 }
 
-function slackBindingKey(teamId: string, channelId: string) {
-  return channelBindingKey({ channel: SLACK_CHANNEL, tenant: teamId, space: channelId });
-}
-
-
 /** Attempts at a thread's retry: a release or another retry that commits meanwhile is decided again once. */
 const THREAD_RETRY_ATTEMPTS = 2;
 
@@ -5060,15 +3975,6 @@ async function createConversation(
     ConditionExpression: "attribute_not_exists(pk)",
   }));
   return conversation;
-}
-
-/** Ordinary workspaces have no task pointer. A task workspace always uses its persisted company's scope, for every caller including callbacks. */
-async function readWorkspaceTaskLegacyProject<T>(dependencies: AwsBrokerDependencies, workspaceId: string, read: () => Promise<T>): Promise<T> {
-  const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspaceId));
-  if (pointer === undefined) return read();
-  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
-  const workspace = await requireWorkspace(dependencies, workspaceId);
-  return readTaskLegacyProject(await workspaceTaskScope(dependencies, task, workspace), read);
 }
 
 /** A task operation, its worker invocation and outbox item: acceptTask's and the first developer task's (R3). */
@@ -5298,17 +4204,6 @@ function accountDefinitionIsForOtherContract(snapshot: E2ESourceSnapshot): (defi
     } catch { return false; }
   };
 }
-
-/** What deriving a task's application selection against the approved setup and the runtime rows READY right now came to. */
-type ApplicationSelectionNow =
-  | { ok: true; selection: E2EApplicationSelectionRecord; conditions: TransactItems;
-    /** What the derivation read, for a caller that builds the admission from the same facts: the pinned policy, the approved setup and the READY rows. */
-    inputs: { policy: E2EPolicy; setup: { snapshot: E2ESourceSnapshot; setupProposal: E2ESetupProposal; setupApproval: PlanApprovalRef }; rows: E2ERegisteredRuntime[];
-      runtimeCatalogId: string; runtimeBinding: ReturnType<typeof parseRuntimeBinding>;
-      /** The registry rows of the plan's test accounts, as read for this derivation. */
-      accountEntries: E2EAccountRegistryEntry[] } }
-  /** `unevaluable`: something it needs could not be read (try again later). `refused`: it read everything and the plan cannot run as approved. */
-  | { ok: false; kind: "unevaluable" | "refused"; reason: string; scope?: ApplicationRefusalScope };
 
 /**
  * Derives the selection of a schema-v2 application intent against the task's pinned project (its own revision and runtime binding, never the latest),
@@ -6342,161 +5237,6 @@ async function cancelWorkspaceTask(
   return cancelRunningTask(dependencies, workspace, {});
 }
 
-/**
- * The Slack ingress's stop command (#126): a thread's messages queue behind its running task, so a
- * "stop" in the thread is handled before the queue, here. Invoked by the ingress Lambda only, never
- * through API Gateway. Any member of the bound channel may stop the thread's task, as any member
- * may start one.
- */
-export interface SlackStopTaskEvent {
-  source: "agentx.slack-ingress";
-  action: "stop-task";
-  thread: SlackThread;
-  userId: string;
-}
-
-export interface SlackWorkflowStartEvent {
-  source: "agentx.slack-ingress";
-  action: "start-workflow";
-  thread: SlackThread;
-  userId: string;
-  instructions: string;
-  workflowPath: "QUICK" | "FULL";
-  requestId: string;
-}
-
-export interface SlackWorkflowDecisionEvent {
-  source: "agentx.slack-ingress";
-  action: "workflow-decision";
-  taskId: string;
-  userId: string;
-  thread: SlackThread;
-  requestId: string;
-  expectedRevision: number;
-  artifactDigest: string;
-  workBreakdownDigest?: string;
-  decision: "APPROVE" | "REQUEST_CHANGES";
-  reason: string;
-  selectedOptionalCheckIds: string[];
-}
-
-export interface SlackWorkflowRetryEvent {
-  source: "agentx.slack-ingress";
-  action: "workflow-retry";
-  taskId: string;
-  userId: string;
-  thread: SlackThread;
-  requestId: string;
-  expectedRevision: number;
-  selectedOptionalCheckIds: string[];
-  /** The approved plan's proposed checks the owner kept; all of them when absent. */
-  selectedProposedCheckIds?: string[];
-  /** Task 16: which blocked step the owner retries; the checks when absent. */
-  step?: "plan" | "coding";
-}
-
-/** Task 16: the owner's Send back to coding, from the task's own thread. */
-export interface SlackWorkflowSendBackEvent {
-  source: "agentx.slack-ingress";
-  action: "workflow-send-back";
-  taskId: string;
-  userId: string;
-  thread: SlackThread;
-  requestId: string;
-  expectedRevision: number;
-}
-
-/** The owner's answer for each blocking review finding (the Resolve findings form), from the task's own thread. */
-export interface SlackWorkflowResolveFindingsEvent {
-  source: "agentx.slack-ingress";
-  action: "workflow-resolve-findings";
-  taskId: string;
-  userId: string;
-  thread: SlackThread;
-  requestId: string;
-  expectedRevision: number;
-  candidateDigest: string;
-  resolutions: Array<{ findingId: string; action: "ACCEPT" | "FIX"; note: string }>;
-}
-
-/** Task 16: the owner's confirmed Close task, from the task's own thread. */
-export interface SlackWorkflowCloseEvent {
-  source: "agentx.slack-ingress";
-  action: "workflow-close";
-  taskId: string;
-  userId: string;
-  thread: SlackThread;
-  requestId: string;
-  /** Decision 134: the Stop button of a request that started Quick on its own: a running step is cancelled before the close. */
-  stop?: true;
-}
-
-export interface SlackWorkflowReviewRetryEvent {
-  source: "agentx.slack-ingress";
-  action: "workflow-review-retry";
-  taskId: string;
-  userId: string;
-  thread: SlackThread;
-  requestId: string;
-  expectedRevision: number;
-  candidateDigest: string;
-}
-
-export interface SlackWorkflowFeedbackFindingsDecisionEvent {
-  source: "agentx.slack-ingress";
-  action: "workflow-feedback-findings-decision";
-  taskId: string; userId: string; thread: SlackThread; requestId: string; expectedRevision: number;
-  reviewDigest: string; proposalDigest: string; bundleSetDigest: string;
-  /** ANSWER: the owner's words answer the reviewer's questions shown on the card; they approve those findings only. */
-  selection: "RECOMMENDED" | "ANSWER";
-  /** ANSWER only: the findings whose questions the card showed (one to three). */
-  questionFindingIds?: string[];
-  decision: "APPROVE" | "REQUEST_CHANGES" | "DISMISS"; ownerNote?: string;
-}
-
-export interface SlackWorkflowFeedbackNoteEvent {
-  source: "agentx.slack-ingress"; action: "feedback-note"; taskId: string; userId: string; thread: SlackThread;
-  eventId: string; messageTs: string; text: string;
-}
-
-export interface SlackTaskAuthorizationEvent {
-  source: "agentx.slack-ingress"; action: "task-people-authorize"; taskId: string; userId: string; thread: SlackThread;
-  taskAction: "decide" | "retry" | "publish" | "feedback" | "close" | "control";
-}
-
-export interface SlackTaskPeopleConfirmEvent {
-  source: "agentx.slack-ingress"; action: "task-people-confirm"; taskId: string; requestId: string; userId: string; thread: SlackThread;
-}
-
-export interface SlackTaskPeopleReadEvent {
-  source: "agentx.slack-ingress"; action: "task-people-read"; taskId: string; userId: string; thread: SlackThread;
-}
-export interface SlackTaskPeopleChangeEvent {
-  source: "agentx.slack-ingress"; action: "task-people-change"; taskId: string; requestId: string; expectedPeopleRevision: number;
-  slackUserId: string; role: "owner" | "commenter" | "viewer" | "denied"; userId: string; thread: SlackThread;
-}
-export interface SlackTaskPeopleTakeOwnershipEvent {
-  source: "agentx.slack-ingress"; action: "task-people-take-ownership"; taskId: string; requestId: string; expectedPeopleRevision: number;
-  userId: string; thread: SlackThread;
-}
-
-function slackTaskPeopleBase(event: unknown, action: SlackTaskPeopleReadEvent["action"] | SlackTaskPeopleChangeEvent["action"] | SlackTaskPeopleTakeOwnershipEvent["action"]): event is Record<string, unknown> {
-  if (!event || typeof event !== "object") return false;
-  const value = event as Record<string, unknown>;
-  return value.source === "agentx.slack-ingress" && value.action === action && value.requestContext === undefined
-    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.thread === "object" && value.thread !== null;
-}
-export const isSlackTaskPeopleReadEvent = (event: unknown): event is SlackTaskPeopleReadEvent => slackTaskPeopleBase(event, "task-people-read");
-export const isSlackTaskPeopleChangeEvent = (event: unknown): event is SlackTaskPeopleChangeEvent => {
-  if (!slackTaskPeopleBase(event, "task-people-change")) return false;
-  return typeof event.requestId === "string" && Number.isSafeInteger(event.expectedPeopleRevision) && typeof event.slackUserId === "string"
-    && (event.role === "owner" || event.role === "commenter" || event.role === "viewer" || event.role === "denied");
-};
-export const isSlackTaskPeopleTakeOwnershipEvent = (event: unknown): event is SlackTaskPeopleTakeOwnershipEvent => {
-  if (!slackTaskPeopleBase(event, "task-people-take-ownership")) return false;
-  return typeof event.requestId === "string" && Number.isSafeInteger(event.expectedPeopleRevision);
-};
-
 /** Resolve on each backend execution, including requests that waited in a queue. */
 async function companySlackCaller(dependencies: AwsBrokerDependencies, thread: SlackThread, userId: string): Promise<DeveloperCaller> {
   const legacy = slackWorkflowCaller(userId);
@@ -6543,13 +5283,6 @@ async function handleSlackTaskPeople(dependencies: AwsBrokerDependencies, tasks:
     slackUserId: SlackRequesterSchema.shape.userId.parse(event.slackUserId), role: event.role, teamId: thread.teamId, channelId: thread.channelId });
 }
 
-export function isSlackTaskPeopleConfirmEvent(event: unknown): event is SlackTaskPeopleConfirmEvent {
-  if (!event || typeof event !== "object") return false;
-  const value = event as Record<string, unknown>;
-  return value.source === "agentx.slack-ingress" && value.action === "task-people-confirm" && value.requestContext === undefined
-    && typeof value.taskId === "string" && typeof value.requestId === "string" && typeof value.userId === "string" && typeof value.thread === "object" && value.thread !== null;
-}
-
 async function confirmSlackTaskPeople(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackTaskPeopleConfirmEvent) {
   if (dependencies.workspaces !== undefined) throw agentXError("FORBIDDEN", SLACK_WEB_SIGNIN_NOTICE);
   if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
@@ -6561,14 +5294,6 @@ async function confirmSlackTaskPeople(dependencies: AwsBrokerDependencies, tasks
   const access = await resolveTaskAccess(routeDeps, caller, taskId, "read");
   if (access.task.share?.teamId !== thread.teamId || access.task.share.channelId !== thread.channelId || access.task.share.threadTs !== thread.threadTs) throw agentXError("FORBIDDEN", "this task belongs to another Slack thread");
   return confirmTaskPeopleProposal(routeDeps, caller, taskId, requestId);
-}
-
-export function isSlackTaskAuthorizationEvent(event: unknown): event is SlackTaskAuthorizationEvent {
-  if (!event || typeof event !== "object") return false;
-  const value = event as Record<string, unknown>;
-  return value.source === "agentx.slack-ingress" && value.action === "task-people-authorize" && value.requestContext === undefined
-    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.thread === "object" && value.thread !== null
-    && ["decide", "retry", "publish", "feedback", "close", "control"].includes(String(value.taskAction));
 }
 
 async function authorizeSlackTaskAction(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackTaskAuthorizationEvent) {
@@ -6586,14 +5311,6 @@ async function authorizeSlackTaskAction(dependencies: AwsBrokerDependencies, tas
     throw agentXError("FORBIDDEN", "this task belongs to another Slack thread");
   }
   return { authorized: true };
-}
-
-export function isSlackWorkflowStartEvent(event: unknown): event is SlackWorkflowStartEvent {
-  if (!event || typeof event !== "object") return false;
-  const value = event as Record<string, unknown>;
-  return value.source === "agentx.slack-ingress" && value.action === "start-workflow" && value.requestContext === undefined
-    && typeof value.instructions === "string" && value.instructions.trim().length > 0
-    && typeof value.requestId === "string" && (value.workflowPath === "QUICK" || value.workflowPath === "FULL");
 }
 
 async function startSlackWorkflow(view: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowStartEvent) {
@@ -6628,24 +5345,6 @@ async function startSlackWorkflow(view: AwsBrokerDependencies, tasks: DeveloperT
     body: JSON.stringify({ requestId, project: binding.projectName, instructions, client: "slack", workflow: true, workflowPath: event.workflowPath, shareToChannel: true, channel: thread.channelId }),
   };
   return await routeDeveloperTaskRequest(routeDeps, caller, request, new URL(request.path, "https://agentx.invalid")) as { task: { taskId: string } };
-}
-
-/**
- * The Slack team of a Slack Lambda direct invoke (`source: agentx.slack-ingress`, never an HTTP request): its thread's team, or a core plan press's conversation tenant when the
- * press's actor names the same tenant (slackCorePress refuses any other press). Undefined for anything else.
- */
-function slackIngressThreadTeam(event: unknown): string | undefined {
-  if (event === null || typeof event !== "object" || Array.isArray(event)) return undefined;
-  const value = event as { source?: unknown; requestContext?: unknown; thread?: unknown; press?: unknown };
-  if (value.source !== "agentx.slack-ingress" || value.requestContext !== undefined) return undefined;
-  if (value.thread !== null && typeof value.thread === "object") {
-    const team = (value.thread as { teamId?: unknown }).teamId;
-    return typeof team === "string" ? team : undefined;
-  }
-  if (value.press === null || typeof value.press !== "object") return undefined;
-  const press = value.press as { conversation?: { tenant?: unknown } | null; actor?: { tenant?: unknown } | null };
-  const tenant = press.conversation?.tenant;
-  return typeof tenant === "string" && press.actor?.tenant === tenant ? tenant : undefined;
 }
 
 /**
@@ -6736,17 +5435,6 @@ async function closeStoppedTask(dependencies: AwsBrokerDependencies, taskId: str
   }
 }
 
-/** Decision 134: a routed request as the Slack ingress received it, which the broker keeps for a quick start. */
-export interface SlackIntakeRecordEvent { source: "agentx.slack-ingress"; action: "intake-record"; choiceId: string; thread: SlackThread; userId: string; text: string }
-
-export function isSlackIntakeRecordEvent(event: unknown): event is SlackIntakeRecordEvent {
-  if (!event || typeof event !== "object") return false;
-  const value = event as Record<string, unknown>;
-  return value.source === "agentx.slack-ingress" && value.action === "intake-record" && value.requestContext === undefined
-    && typeof value.choiceId === "string" && typeof value.userId === "string" && typeof value.text === "string"
-    && typeof value.thread === "object" && value.thread !== null;
-}
-
 const slackIntakeKey = (choiceId: string) => ({ pk: `SLACK_INTAKE#${choiceId}`, sk: "META" as const });
 
 /** The routed request's record: one per choice (a redelivery writes nothing), kept a few minutes, used once. */
@@ -6818,51 +5506,6 @@ async function startQuickFromIntake(dependencies: AwsBrokerDependencies, tasks: 
 
 const randomUUIDSchema = { parse(value: string): string { if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) throw agentXError("CONFIG_INVALID", "workflow request ID is invalid"); return value; } };
 
-export function isSlackWorkflowDecisionEvent(event: unknown): event is SlackWorkflowDecisionEvent {
-  if (!event || typeof event !== "object") return false;
-  const value = event as Record<string, unknown>;
-  return value.source === "agentx.slack-ingress" && value.action === "workflow-decision" && value.requestContext === undefined
-    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.requestId === "string"
-    && Number.isInteger(value.expectedRevision) && typeof value.artifactDigest === "string"
-    && (value.workBreakdownDigest === undefined || (typeof value.workBreakdownDigest === "string" && /^[a-f0-9]{64}$/.test(value.workBreakdownDigest)))
-    && (value.decision === "APPROVE" || value.decision === "REQUEST_CHANGES") && typeof value.reason === "string"
-    && Array.isArray(value.selectedOptionalCheckIds);
-}
-
-export function isSlackWorkflowRetryEvent(event: unknown): event is SlackWorkflowRetryEvent {
-  if (!event || typeof event !== "object") return false;
-  const value = event as Record<string, unknown>;
-  return value.source === "agentx.slack-ingress" && value.action === "workflow-retry" && value.requestContext === undefined
-    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.requestId === "string"
-    && Number.isInteger(value.expectedRevision) && Array.isArray(value.selectedOptionalCheckIds)
-    && value.selectedOptionalCheckIds.every((id) => typeof id === "string") && typeof value.thread === "object" && value.thread !== null
-    && (value.selectedProposedCheckIds === undefined || (Array.isArray(value.selectedProposedCheckIds) && value.selectedProposedCheckIds.every((id) => typeof id === "string")))
-    && (value.step === undefined || value.step === "plan" || value.step === "coding");
-}
-
-export function isSlackWorkflowSendBackEvent(event: unknown): event is SlackWorkflowSendBackEvent {
-  if (!event || typeof event !== "object") return false;
-  const value = event as Record<string, unknown>;
-  return value.source === "agentx.slack-ingress" && value.action === "workflow-send-back" && value.requestContext === undefined
-    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.requestId === "string"
-    && Number.isInteger(value.expectedRevision) && typeof value.thread === "object" && value.thread !== null;
-}
-
-export function isSlackWorkflowResolveFindingsEvent(event: unknown): event is SlackWorkflowResolveFindingsEvent {
-  if (!event || typeof event !== "object") return false;
-  const value = event as Record<string, unknown>;
-  return value.source === "agentx.slack-ingress" && value.action === "workflow-resolve-findings" && value.requestContext === undefined
-    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.requestId === "string"
-    && Number.isInteger(value.expectedRevision) && typeof value.candidateDigest === "string" && /^[a-f0-9]{64}$/.test(value.candidateDigest)
-    && typeof value.thread === "object" && value.thread !== null
-    && Array.isArray(value.resolutions) && value.resolutions.length >= 1 && value.resolutions.length <= WORKFLOW_RESOLVE_FINDINGS_MAX
-    && value.resolutions.every((entry: unknown) => {
-      const resolution = entry as Record<string, unknown> | null;
-      return typeof resolution === "object" && resolution !== null && typeof resolution.findingId === "string" && /^[a-f0-9]{64}$/.test(resolution.findingId)
-        && (resolution.action === "ACCEPT" || resolution.action === "FIX") && typeof resolution.note === "string";
-    });
-}
-
 /** The owner's answers to the blocking review findings, through the same route an AI tool uses; the route holds every rule. */
 async function resolveSlackWorkflowFindings(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowResolveFindingsEvent) {
   const { taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "resolve these review findings");
@@ -6871,14 +5514,6 @@ async function resolveSlackWorkflowFindings(dependencies: AwsBrokerDependencies,
     resolutions: event.resolutions.map((resolution) => ({ findingId: resolution.findingId, action: resolution.action, note: resolution.note })) });
   const path = `/v1/dev/tasks/${taskId}/workflow/review-findings`;
   return routeDeveloperTaskRequest(routeDeps, caller, { method: "POST", path, headers: {}, requestId, body }, new URL(path, "https://agentx.invalid"));
-}
-
-export function isSlackWorkflowCloseEvent(event: unknown): event is SlackWorkflowCloseEvent {
-  if (!event || typeof event !== "object") return false;
-  const value = event as Record<string, unknown>;
-  return value.source === "agentx.slack-ingress" && value.action === "workflow-close" && value.requestContext === undefined
-    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.requestId === "string"
-    && typeof value.thread === "object" && value.thread !== null;
 }
 
 /**
@@ -7023,15 +5658,6 @@ async function closeSlackWorkflowTask(dependencies: AwsBrokerDependencies, tasks
   return routeDeveloperTaskRequest(routeDeps, caller, { method: "POST", path, headers: {}, requestId: closeRequestId, body }, new URL(path, "https://agentx.invalid"));
 }
 
-export function isSlackWorkflowReviewRetryEvent(event: unknown): event is SlackWorkflowReviewRetryEvent {
-  if (!event || typeof event !== "object") return false;
-  const value = event as Record<string, unknown>;
-  return value.source === "agentx.slack-ingress" && value.action === "workflow-review-retry" && value.requestContext === undefined
-    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.requestId === "string"
-    && Number.isInteger(value.expectedRevision) && typeof value.candidateDigest === "string" && /^[a-f0-9]{64}$/.test(value.candidateDigest)
-    && typeof value.thread === "object" && value.thread !== null;
-}
-
 async function retrySlackWorkflowChecks(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowRetryEvent) {
   // The same checks as every other Slack press: this Slack workspace, the task's owner, and the task's own thread.
   const { taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "retry verification");
@@ -7055,24 +5681,6 @@ async function retrySlackWorkflowReviews(dependencies: AwsBrokerDependencies, ta
   return routeDeveloperTaskRequest(routeDeps, caller, { method: "POST", path, headers: {}, requestId, body }, new URL(path, "https://agentx.invalid"));
 }
 
-export interface SlackWorkflowPublishRetryEvent {
-  source: "agentx.slack-ingress";
-  action: "workflow-publish-retry";
-  taskId: string;
-  userId: string;
-  thread: SlackThread;
-  requestId: string;
-  expectedRevision: number;
-}
-
-export function isSlackWorkflowPublishRetryEvent(event: unknown): event is SlackWorkflowPublishRetryEvent {
-  if (!event || typeof event !== "object") return false;
-  const value = event as Record<string, unknown>;
-  return value.source === "agentx.slack-ingress" && value.action === "workflow-publish-retry" && value.requestContext === undefined
-    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.requestId === "string"
-    && Number.isInteger(value.expectedRevision) && typeof value.thread === "object" && value.thread !== null;
-}
-
 /** Task 12: the owner's Retry opening the pull request, from the task's own thread. */
 async function retrySlackWorkflowPublication(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowPublishRetryEvent) {
   // The same checks as every other Slack press: this Slack workspace, the task's owner, and the task's own thread.
@@ -7081,25 +5689,6 @@ async function retrySlackWorkflowPublication(dependencies: AwsBrokerDependencies
   const body = JSON.stringify({ requestId, expectedRevision: event.expectedRevision });
   const path = `/v1/dev/tasks/${taskId}/workflow/publish-retry`;
   return routeDeveloperTaskRequest(routeDeps, caller, { method: "POST", path, headers: {}, requestId, body }, new URL(path, "https://agentx.invalid"));
-}
-
-/** The owner's "Keep the pull request as it is" after an approved fix changed nothing, from the task's own thread. */
-export interface SlackWorkflowKeepPullRequestsEvent {
-  source: "agentx.slack-ingress";
-  action: "workflow-keep-pull-requests";
-  taskId: string;
-  userId: string;
-  thread: SlackThread;
-  requestId: string;
-  expectedRevision: number;
-}
-
-export function isSlackWorkflowKeepPullRequestsEvent(event: unknown): event is SlackWorkflowKeepPullRequestsEvent {
-  if (!event || typeof event !== "object") return false;
-  const value = event as Record<string, unknown>;
-  return value.source === "agentx.slack-ingress" && value.action === "workflow-keep-pull-requests" && value.requestContext === undefined
-    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.requestId === "string"
-    && Number.isInteger(value.expectedRevision) && typeof value.thread === "object" && value.thread !== null;
 }
 
 /** Keep the pull request as it is, through the same route an AI tool uses. */
@@ -7127,32 +5716,6 @@ async function decideSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: D
     decision: event.decision, reason: event.reason, selectedOptionalCheckIds: event.selectedOptionalCheckIds,
   });
   return routeDeveloperTaskRequest(routeDeps, caller, { method: "POST", path: `/v1/dev/tasks/${taskId}/workflow/decision`, headers: {}, requestId, body }, new URL(`/v1/dev/tasks/${taskId}/workflow/decision`, "https://agentx.invalid"));
-}
-
-export function isSlackWorkflowFeedbackFindingsDecisionEvent(event: unknown): event is SlackWorkflowFeedbackFindingsDecisionEvent {
-  if (!event || typeof event !== "object") return false;
-  const value = event as Record<string, unknown>;
-  return value.source === "agentx.slack-ingress" && value.action === "workflow-feedback-findings-decision" && value.requestContext === undefined
-    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.requestId === "string"
-    && Number.isInteger(value.expectedRevision) && typeof value.reviewDigest === "string" && /^[a-f0-9]{64}$/.test(value.reviewDigest)
-    && typeof value.proposalDigest === "string" && /^[a-f0-9]{64}$/.test(value.proposalDigest)
-    && typeof value.bundleSetDigest === "string" && /^[a-f0-9]{64}$/.test(value.bundleSetDigest)
-    && ((value.selection === "RECOMMENDED" && (value.decision === "APPROVE" || value.decision === "REQUEST_CHANGES" || value.decision === "DISMISS"))
-      || (value.selection === "ANSWER" && value.decision === "APPROVE" && Array.isArray(value.questionFindingIds)
-        && value.questionFindingIds.length >= 1 && value.questionFindingIds.length <= 3
-        && value.questionFindingIds.every(id => typeof id === "string" && id.length > 0 && id.length <= 128)))
-    && (value.selection === "ANSWER" || value.questionFindingIds === undefined)
-    && (value.ownerNote === undefined || typeof value.ownerNote === "string");
-}
-
-export function isSlackWorkflowFeedbackNoteEvent(event: unknown): event is SlackWorkflowFeedbackNoteEvent {
-  if (!event || typeof event !== "object") return false;
-  const value = event as Record<string, unknown>;
-  return value.source === "agentx.slack-ingress" && value.action === "feedback-note" && value.requestContext === undefined
-    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.eventId === "string"
-    && value.eventId.length > 0 && value.eventId.length <= 128 && typeof value.messageTs === "string"
-    && typeof value.text === "string" && value.text.trim().length > 0 && value.text.trim().length <= 500
-    && typeof value.thread === "object" && value.thread !== null;
 }
 
 async function decideSlackWorkflowFeedbackFindings(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowFeedbackFindingsDecisionEvent) {
@@ -7188,21 +5751,6 @@ async function decideSlackWorkflowFeedbackFindings(dependencies: AwsBrokerDepend
   });
 }
 
-/** The owner's Retry review on a failed PR feedback review's card, from the task's own thread. */
-export interface SlackWorkflowFeedbackReviewRetryEvent {
-  source: "agentx.slack-ingress"; action: "workflow-feedback-review-retry";
-  taskId: string; userId: string; thread: SlackThread; requestId: string; reviewDigest: string;
-}
-
-export function isSlackWorkflowFeedbackReviewRetryEvent(event: unknown): event is SlackWorkflowFeedbackReviewRetryEvent {
-  if (!event || typeof event !== "object") return false;
-  const value = event as Record<string, unknown>;
-  return value.source === "agentx.slack-ingress" && value.action === "workflow-feedback-review-retry" && value.requestContext === undefined
-    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.requestId === "string"
-    && typeof value.reviewDigest === "string" && /^[a-f0-9]{64}$/.test(value.reviewDigest)
-    && typeof value.thread === "object" && value.thread !== null;
-}
-
 async function retrySlackWorkflowFeedbackReview(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowFeedbackReviewRetryEvent) {
   // The same checks as every other Slack press: this Slack workspace, the task's owner, and the task's own thread.
   const { taskId, developer, caller } = await ownedSlackWorkflowTask(dependencies, event, "retry this review", true);
@@ -7227,23 +5775,6 @@ async function captureSlackWorkflowFeedbackNote(dependencies: AwsBrokerDependenc
     throw agentXError("FORBIDDEN", "this PR feedback belongs to another Slack thread");
   }
   return captureWorkflowFeedbackNote(routeDeps, caller, taskId, event);
-}
-
-export interface SlackThreadNoteEvent {
-  source: "agentx.slack-ingress"; action: "thread-note"; taskId: string; userId: string; thread: SlackThread;
-  eventId: string; messageTs: string; text: string; /** L4-U5d: the reply is an @mention of Rovara (as against a plain reply); only a mention answers a core task's questions. */ mention?: true;
-  /** Decision 134: the ingress read the reply as small talk; it is saved only when the task waits on this person. */
-  smallTalk?: true;
-}
-
-export function isSlackThreadNoteEvent(event: unknown): event is SlackThreadNoteEvent {
-  if (!event || typeof event !== "object") return false;
-  const value = event as Record<string, unknown>;
-  return value.source === "agentx.slack-ingress" && value.action === "thread-note" && value.requestContext === undefined
-    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.eventId === "string"
-    && value.eventId.length > 0 && value.eventId.length <= 128 && typeof value.messageTs === "string"
-    && typeof value.text === "string" && value.text.trim().length > 0
-    && typeof value.thread === "object" && value.thread !== null;
 }
 
 /**
@@ -7281,13 +5812,6 @@ async function recordSlackThreadNote(dependencies: AwsBrokerDependencies, tasks:
     }
   }
   return result;
-}
-
-export function isSlackStopTaskEvent(event: unknown): event is SlackStopTaskEvent {
-  if (!event || typeof event !== "object") return false;
-  const value = event as Record<string, unknown>;
-  // API Gateway always sets requestContext, so a request from outside can never take this path.
-  return value.source === "agentx.slack-ingress" && value.action === "stop-task" && value.requestContext === undefined;
 }
 
 async function stopSlackThreadTask(dependencies: AwsBrokerDependencies, event: SlackStopTaskEvent): Promise<TaskCancellation | CoreStopOutcome | { outcome: "NOT_OWNER" }> {
@@ -7887,7 +6411,6 @@ const GROUNDING_SOURCE_REFUSED_REASON = "the unchanged code's build source was r
 const GROUNDING_SOURCE_NOT_EXPORTED_REASON = "the worker could not export the unchanged code for the plan";
 
 const WORKFLOW_E2E_TRANSFER_CHUNK_BYTES = 64 * 1024;
-const WORKFLOW_E2E_ADMISSION_MAX_BYTES = 24 * 1024 * 1024;
 
 /**
  * An application admission as the evidence upload judges it: decoded by the worker's own decoder (its content address is already checked), with the groups the
@@ -8120,15 +6643,6 @@ async function handleWorkflowE2EEvidenceUpload(dependencies: AwsBrokerDependenci
   ] }));
   for (const chunkKey of chunkKeys) await dependencies.s3.send(new DeleteObjectCommand({ Bucket: dependencies.artifactBucketName, Key: chunkKey }));
   return { key: evidenceRef.key, sha256: evidenceRef.sha256 };
-}
-
-function workflowCandidateSourceExportSchema() {
-  return z.object({ schemaVersion: z.literal("workflow-candidate-source/v1"), candidate: CandidateManifestSchema,
-    repositories: z.array(z.object({ repositoryId: z.string().min(1).max(200), commitSha: z.string().regex(/^[a-f0-9]{40}$/), treeSha: z.string().regex(/^[a-f0-9]{40}$/),
-      baseCommitSha: z.string().regex(/^[a-f0-9]{40}$/).optional(), treeComplete: z.literal(true), treePaths: z.array(z.string().min(1).max(1024)).max(100_000),
-      sources: z.array(z.object({ path: z.string().min(1).max(1024), sha256: z.string().regex(/^[a-f0-9]{64}$/), bytesBase64: z.string().max(700_000), kind: z.literal("blob") }).strict()).max(512),
-    }).strict()).max(32),
-  }).strict();
 }
 
 async function handleProjectSetupExecutionRead(dependencies: AwsBrokerDependencies, request: AdaptedHttpRequest, setupExecutionId: string, rawOffset: string | null): Promise<unknown> {
@@ -8691,1099 +7205,67 @@ async function verifyProjectSetupSmokeEvidence(
   }
 }
 
-/** What a verification hands the presentation: the authenticated plan and round, the broker's own re-collected results, and (for a browser and API round) the display rows derived from them. */
-type WorkflowE2EProjection = { plan?: unknown; round?: unknown; results: unknown[]; allowStaleProjection?: boolean; display?: NonNullable<ApplicationEvidenceVerification["display"]> };
+const e2eVerificationHooks: E2EVerificationHooks = {
+  ensureProjectCatalogPointer,
+  catalogKeyFor: (projectName) => projectCatalogKey(projectName),
+  log: brokerLogLine,
+  evaluateWorkflowE2EApplicationSelectionNow,
+};
 
-export interface WorkflowE2EVerificationDiagnostic {
-  reason?: string;
-  /** Set when the evidence verified was an application round's, whose reasons are safe and useful to show the owner. */
-  application?: true;
-  /** Set once current authority was judged (valid or not): a reason found without it is about the evidence, not about authority. */
-  authorityEvaluated?: true;
-  /**
-   * Why an application round's authority moved, when it was the runtime: `requalified` (the admitted row was replaced; the owner approves the plan again against the
-   * new row) or `unusable` (no ready row of that kind; an administrator qualifies the runtime again). `accounts`: a test account the plan was approved with is not the
-   * registered one now (the owner approves the plan again). The result callback words its block by it.
-   */
-  runtimeChange?: "requalified" | "unusable" | "accounts";
-  /** Exact authority rows validated for this result, carried into the same task-state transaction. */
-  authorityChecks?: Array<Record<string, unknown>>;
+function settleBaselineRound(dependencies: AwsBrokerDependencies, operation: OperationRecord, status: OperationStatus) {
+  return settleBaselineRoundWithHooks(dependencies, e2eVerificationHooks, operation, status);
 }
 
-/**
- * A terminal CHECKS operation's broker timestamp may anchor a later re-collection only when
- * the task still carries the exact canonical outcome written from that operation's immutable
- * admission and evidence. This never supplies a receipt for an active or first-time result.
- */
-function workflowE2ETerminalReceiptAt(
-  operation: OperationRecord,
-  task: DeveloperTaskRecord,
-  candidateDigest: string,
-  reference: E2EWorkflowAdmissionRef,
-  round: ReturnType<typeof E2ERoundSchema.parse>,
-  allowStaleProjection: boolean,
-): { at: string; outcome: "PASS" | "FAILED" } | undefined {
-  if (operation.kind !== "task" || operation.workflowMode !== "CHECKS"
-    || operation.status !== "SUCCEEDED" && operation.status !== "FAILED"
-    || operation.workflowE2EAdmission === undefined || canonicalJson(operation.workflowE2EAdmission) !== canonicalJson(reference)
-    || operation.workflowE2EEvidenceRef === undefined || operation.workflowE2EEvidenceRef.key !== `workflow-e2e-evidence/sha256/${operation.workflowE2EEvidenceRef.sha256}.json`
-    || reference.taskId !== task.taskId || reference.candidateDigest !== candidateDigest || reference.roundId !== round.roundId
-    || reference.workflowRevision !== round.workflowRevision || canonicalJson(reference.groupRunIds) !== canonicalJson(round.groupBindings.map((binding) => binding.runId))
-    || new Set(operation.workflowE2EGroupRunIds ?? []).size !== reference.groupRunIds.length
-    || canonicalJson([...(operation.workflowE2EGroupRunIds ?? [])].sort()) !== canonicalJson([...reference.groupRunIds].sort())) return undefined;
-  const receiptTime = Date.parse(operation.updatedAt);
-  if (!Number.isFinite(receiptTime) || new Date(receiptTime).toISOString() !== operation.updatedAt
-    || receiptTime > Date.parse(round.deadlineAt)) return undefined;
-
-  const workflowE2E = task.workflow?.e2e;
-  if (operation.status === "SUCCEEDED" && !allowStaleProjection) {
-    const qualified = workflowE2E?.qualifiedRound;
-    if (!qualified || qualified.candidateDigest !== candidateDigest
-      || qualified.roundId !== reference.roundId || canonicalJson(qualified.groupRunIds) !== canonicalJson(reference.groupRunIds)
-      || qualified.admissionSha256 !== reference.admissionRef.sha256 || qualified.evidenceSha256 !== operation.workflowE2EEvidenceRef.sha256
-      || qualified.contractDigest !== workflowE2E.contractDigest || qualified.policyDigest !== workflowE2E.policyDigest
-      || qualified.bundleDigest !== workflowE2E.bundleDigest || qualified.executionPlanDigest !== workflowE2E.executionPlanDigest
-      || workflowE2E.currentRoundId !== qualified.roundId || canonicalJson(workflowE2E.currentGroupRunIds) !== canonicalJson(qualified.groupRunIds)) return undefined;
-    return { at: operation.updatedAt, outcome: "PASS" };
-  }
-  const failed = workflowE2E?.failedRound;
-  if (!allowStaleProjection || failed?.status !== "FAILED" || failed.candidateDigest !== candidateDigest
-    || failed.roundId !== reference.roundId || canonicalJson(failed.groupRunIds) !== canonicalJson(reference.groupRunIds)
-    || failed.admissionSha256 !== reference.admissionRef.sha256 || failed.evidenceSha256 !== operation.workflowE2EEvidenceRef.sha256) return undefined;
-  return { at: operation.updatedAt, outcome: "FAILED" };
+function settleReplayRound(dependencies: AwsBrokerDependencies, operation: OperationRecord, status: OperationStatus) {
+  return settleReplayRoundWithHooks(dependencies, e2eVerificationHooks, operation, status);
 }
 
-/** Independently recompiles and collects every group; worker-supplied verdict fields are ignored. */
-async function verifyWorkflowE2EEvidence(
+export function settleGroundingRound(dependencies: AwsBrokerDependencies, operation: OperationRecord, status: OperationStatus) {
+  return settleGroundingRoundWithHooks(dependencies, e2eVerificationHooks, operation, status);
+}
+
+function verifyWorkflowE2EEvidence(
   dependencies: AwsBrokerDependencies, operation: OperationRecord, task: DeveloperTaskRecord, candidate: ReturnType<typeof CandidateManifestSchema.parse>,
-  projection?: WorkflowE2EProjection,
-  diagnostic?: WorkflowE2EVerificationDiagnostic,
-  /** How the CHECKS operation is ending, when its stored record has not been written yet (the result callback verifies before it writes the terminal state). */
-  options?: { terminalStatus?: "SUCCEEDED" | "FAILED" },
-): Promise<"PASS" | "FAILED" | "UNKNOWN"> {
-  const unavailable = (reason: string): "UNKNOWN" => { if (diagnostic !== undefined) diagnostic.reason = reason; return "UNKNOWN"; };
-  try {
-    const workflow = task.workflow;
-    if (workflow === undefined) return unavailable("workflow-missing");
-    const reference = operation.workflowE2EAdmission;
-    // M1.3 Task 3.7b: this is the candidate's verification. A baseline round (the unchanged code, for information only) is never a candidate round, whatever the workflow's current
-    // round says: its own completion path verifies it (verifyBaselineEvidence), and nothing here can turn it into a verdict on the candidate.
-    if (reference?.purpose === "baseline") return unavailable("baseline-admission-is-not-a-candidate-round");
-    if (reference?.purpose === "replay") return unavailable("replay-admission-is-not-a-candidate-round");
-    if (reference?.purpose === "grounding") return unavailable("grounding-admission-is-not-a-candidate-round");
-    const evidenceRef = operation.workflowE2EEvidenceRef;
-    const groupEvidenceRefs = operation.workflowE2EGroupEvidenceRefs ?? [];
-    const groupEvidenceRunIds = operation.workflowE2EGroupRunIds ?? [];
-    const staleProjection = projection?.allowStaleProjection === true;
-    if (!reference || reference.taskId !== task.taskId || reference.candidateDigest !== candidate.digest
-      || (!staleProjection && (workflow.e2e?.currentRoundId !== reference.roundId
-        || canonicalJson(workflow.e2e.currentGroupRunIds) !== canonicalJson(reference.groupRunIds)))) return unavailable("current-admission-reference-mismatch");
-    const admissionText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, reference.admissionRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
-    // The admission names its own kind. An application admission is verified by the application verifier and never reaches the portable code below; a task whose approved
-    // plan is an application plan has no portable verification at all (Ruling AX), whatever admission and evidence are recorded for it.
-    if (isE2EApplicationAdmissionSchemaVersion(storedAdmissionSchemaVersion(admissionText))) {
-      if (diagnostic !== undefined) diagnostic.application = true;
-      return await verifyApplicationWorkflowE2EEvidence({ dependencies, operation, task, candidate, reference, admissionText: admissionText!, projection, diagnostic, unavailable,
-        ...(options?.terminalStatus === undefined ? {} : { terminalStatus: options.terminalStatus }) });
-    }
-    if (workflow.e2e?.applicationSelection !== undefined) {
-      if (diagnostic !== undefined) diagnostic.application = true;
-      return unavailable("application-e2e-plan-needs-application-verification");
-    }
-    const evidenceText = evidenceRef === undefined ? undefined
-      : await readStoredText(dependencies.s3, dependencies.artifactBucketName, evidenceRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
-    if (admissionText === undefined || createHash("sha256").update(admissionText).digest("hex") !== reference.admissionRef.sha256
-      || Buffer.byteLength(admissionText) !== reference.admissionRef.byteLength
-      || evidenceRef !== undefined && (evidenceText === undefined || evidenceRef.key !== `workflow-e2e-evidence/sha256/${evidenceRef.sha256}.json`
-        || createHash("sha256").update(evidenceText).digest("hex") !== evidenceRef.sha256 || Buffer.byteLength(evidenceText) !== evidenceRef.byteLength)) {
-      return unavailable("admission-or-evidence-reference-integrity");
-    }
-    const admission = JSON.parse(admissionText) as Record<string, unknown>;
-    const evidence = evidenceText === undefined ? undefined : JSON.parse(evidenceText) as Record<string, unknown>;
-    if (admission.schemaVersion !== "workflow-e2e-admission/v1" || evidence !== undefined && (evidence.schemaVersion !== "workflow-e2e-evidence/v1"
-      || evidence.admissionSha256 !== reference.admissionRef.sha256 || evidence.taskId !== task.taskId || evidence.operationId !== operation.id
-      || evidence.operationFence !== operation.fence || evidence.workflowRevision !== reference.workflowRevision || evidence.candidateDigest !== candidate.digest)) {
-      return unavailable("admission-or-evidence-subject-binding");
-    }
-    const sourceRecord = admission.sourceSnapshot as Record<string, unknown>;
-    if (!sourceRecord || !Array.isArray(sourceRecord.sources)) return unavailable("admitted-source-snapshot-shape");
-    const snapshot = { ...sourceRecord, sources: sourceRecord.sources.map((raw) => {
-      const row = raw as Record<string, unknown>;
-      if (typeof row.path !== "string" || typeof row.sha256 !== "string" || row.kind !== "blob" || typeof row.bytesBase64 !== "string") throw new Error("invalid source row");
-      const bytes = Buffer.from(row.bytesBase64, "base64");
-      if (bytes.toString("base64") !== row.bytesBase64) throw new Error("invalid source encoding");
-      return { path: row.path, sha256: row.sha256, kind: "blob" as const, bytes };
-    }) } as unknown as E2ESourceSnapshot;
-    verifyE2ESourceSnapshot(snapshot, candidate);
-    E2EPolicySchema.parse(admission.policy);
-    const selectionInput = { ...(admission.selectionInput as Record<string, unknown>), sourceSnapshot: snapshot };
-    const plan = selectE2EExecutionPlan(selectionInput as never);
-    const bundle = E2EScenarioBundleSchema.parse(admission.bundle);
-    const round = E2ERoundSchema.parse(admission.round);
-    const projectionResults: unknown[] = [];
-    const runtime = admission.runtime as Record<string, unknown>;
-    const runnerEnvironment = ProjectSetupRunnerEnvironmentSchema.parse(runtime.runnerEnvironment);
-    const runnerToolchain = ProjectSetupRunnerToolchainSchema.parse(runtime.runnerToolchain);
-    const groupAdmissions = admission.groupAdmissions as Array<Record<string, unknown>>;
-    const aggregateGroupRuns = evidence?.groupRuns;
-    if (admission.taskId !== task.taskId || admission.operationId !== operation.id || admission.operationFence !== operation.fence
-      || admission.workflowRevision !== reference.workflowRevision || admission.candidateDigest !== candidate.digest
-      || round.roundId !== reference.roundId || round.taskId !== task.taskId || round.operationId !== operation.id || round.operationFence !== operation.fence
-      || round.workflowRevision !== reference.workflowRevision || plan.groups.length === 0 || plan.groups.length !== groupAdmissions.length
-      || plan.groups.length !== reference.groupRunIds.length
-      || canonicalJson(plan) !== canonicalJson(admission.plan) || bundle.bundleDigest !== e2eScenarioBundleDigest(bundle)) return unavailable("current-plan-round-or-group-binding");
-    if (evidence !== undefined && (!Array.isArray(aggregateGroupRuns) || aggregateGroupRuns.length !== reference.groupRunIds.length)) return unavailable("aggregate-group-results-incomplete");
-    if (groupEvidenceRefs.length !== groupEvidenceRunIds.length
-      || canonicalJson(groupEvidenceRefs.map((raw) => E2EWorkflowGroupEvidenceRefSchema.parse(raw).groupRunId)) !== canonicalJson(groupEvidenceRunIds)
-      || new Set(groupEvidenceRunIds).size !== groupEvidenceRunIds.length
-      || groupEvidenceRunIds.some((runId) => !reference.groupRunIds.includes(runId))) return unavailable("accepted-group-reference-list-invalid");
-    if (evidence === undefined && groupEvidenceRefs.length === 0) return unavailable("group-results-not-yet-accepted");
-    const aggregateByRun = new Map<string, Record<string, unknown>>();
-    if (Array.isArray(aggregateGroupRuns)) {
-      for (const raw of aggregateGroupRuns) {
-        if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return unavailable("aggregate-group-result-shape");
-        const run = raw as Record<string, unknown>;
-        const binding = run.binding as Record<string, unknown> | undefined;
-        if (typeof binding?.runId !== "string" || aggregateByRun.has(binding.runId)) return unavailable("aggregate-group-result-identity");
-        aggregateByRun.set(binding.runId, run);
-      }
-    }
-    const groupRunsById = new Map<string, Record<string, unknown>>();
-    for (const raw of groupEvidenceRefs) {
-      const parsedRef = E2EWorkflowGroupEvidenceRefSchema.safeParse(raw);
-      if (!parsedRef.success) return unavailable("accepted-group-reference-schema");
-      const { groupRunId, evidenceRef: storedGroupRef } = parsedRef.data;
-      const index = reference.groupRunIds.indexOf(groupRunId);
-      if (index < 0 || groupRunsById.has(groupRunId) || storedGroupRef.key !== `workflow-e2e-group-evidence/sha256/${storedGroupRef.sha256}.json`) {
-        return unavailable("accepted-group-reference-subject");
-      }
-      const expectedCaseCount = groupAdmissions[index]?.expectedCases;
-      if (!Array.isArray(expectedCaseCount)) return unavailable("admitted-group-case-count");
-      const groupText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, storedGroupRef.key,
-        Math.min(WORKFLOW_E2E_ADMISSION_MAX_BYTES, e2ePrivateTransferMaxBytes(expectedCaseCount.length, 1)));
-      if (groupText === undefined || Buffer.byteLength(groupText) !== storedGroupRef.byteLength
-        || createHash("sha256").update(groupText).digest("hex") !== storedGroupRef.sha256) return unavailable("accepted-group-evidence-integrity");
-      const envelope = JSON.parse(groupText) as Record<string, unknown>;
-      const groupRun = envelope.groupRun as Record<string, unknown> | undefined;
-      if (!groupRun || envelope.schemaVersion !== "workflow-e2e-group-evidence/v1" || envelope.admissionSha256 !== reference.admissionRef.sha256
-        || envelope.taskId !== task.taskId || envelope.operationId !== operation.id || envelope.operationFence !== operation.fence
-        || envelope.workflowRevision !== reference.workflowRevision || envelope.candidateDigest !== candidate.digest
-        || canonicalJson(envelope.round) !== canonicalJson(round) || canonicalJson(groupRun.binding) !== canonicalJson(round.groupBindings[index])
-        || canonicalJson(groupRun.group) !== canonicalJson(plan.groups[index])) return unavailable("accepted-group-evidence-subject");
-      const aggregateRun = aggregateByRun.get(groupRunId);
-      if (evidence !== undefined && (aggregateRun === undefined || canonicalJson(aggregateRun) !== canonicalJson(groupRun))) return unavailable("aggregate-group-evidence-mismatch");
-      groupRunsById.set(groupRunId, groupRun);
-    }
-    if (evidence !== undefined && (groupEvidenceRefs.length !== reference.groupRunIds.length
-      || canonicalJson([...groupRunsById.keys()].sort()) !== canonicalJson([...reference.groupRunIds].sort())
-      || canonicalJson([...aggregateByRun.keys()].sort()) !== canonicalJson([...reference.groupRunIds].sort()))) return unavailable("aggregate-does-not-cover-accepted-groups");
-    const semantic = (admission.portableApprovalBinding as { semanticApproval?: { digest?: unknown } } | undefined)?.semanticApproval?.digest;
-    if (typeof semantic !== "string" || !/^[a-f0-9]{64}$/u.test(semantic)) return unavailable("semantic-approval-binding");
-    const semanticApprovalDigests = new Map(bundle.scenarios.map((scenario) => [scenario.scenarioId, semantic]));
-    const terminalReceipt = workflowE2ETerminalReceiptAt(operation, task, candidate.digest, reference, round, staleProjection);
-    const qualifications: Array<"PASS" | "FAILED" | "UNKNOWN"> = [];
-    for (const [index, group] of plan.groups.entries()) {
-      const admitted = groupAdmissions[index]; const run = groupRunsById.get(reference.groupRunIds[index]!);
-      if (!admitted || canonicalJson(admitted.group) !== canonicalJson(group)) return unavailable("admitted-group-identity");
-      const compiled = compileE2EScenarios(bundle, plan.effectiveTargets, group, { selectionInput, executionPlan: plan, group } as never);
-      if (admitted.expectedConfigDigest !== compiled.expectedConfigDigest || admitted.compiledInventoryDigest !== compiled.inventory.digest
-        || admitted.selectionPacketPath !== compiled.selectionPacketPath || canonicalJson(admitted.expectedCases) !== canonicalJson(compiled.expectedCases)) return unavailable("compiled-group-expectations");
-      const binding = E2ERunBindingSchema.parse(admitted.binding);
-      if (binding.runId !== reference.groupRunIds[index] || binding.taskId !== task.taskId || binding.operationId !== operation.id
-        || binding.operationFence !== operation.fence || binding.workflowRevision !== reference.workflowRevision || binding.candidateDigest !== candidate.digest
-        || binding.roundId !== reference.roundId || canonicalJson(round.groupBindings[index]) !== canonicalJson(binding)) return unavailable("group-run-binding");
-      if (run === undefined) { qualifications.push("UNKNOWN"); continue; }
-      if (canonicalJson(run.group) !== canonicalJson(group) || canonicalJson(run.binding) !== canonicalJson(binding)) return unavailable("group-run-result-binding");
-      const selection = JSON.parse(compiled.files.get(compiled.selectionPacketPath) ?? "null") as unknown;
-      if (canonicalJson(run.selection) !== canonicalJson(selection) || !Array.isArray(run.hostRequestIds)) return unavailable("compiled-selection-or-host-request-list");
-      const hostRequestIds = new Map<string, string>();
-      for (const entry of run.hostRequestIds) {
-        if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string" || typeof entry[1] !== "string" || hostRequestIds.has(entry[0])) return unavailable("host-request-identity-list");
-        hostRequestIds.set(entry[0], entry[1]);
-      }
-      if (hostRequestIds.size !== compiled.hostRequestPayloads.size) return unavailable("host-request-count");
-      const rawActual = run.actual as Record<string, unknown>;
-      if (!rawActual || typeof rawActual.launchId !== "string" || typeof rawActual.rawReportBase64 !== "string" || typeof rawActual.runStartCaptureBase64 !== "string"
-        || canonicalJson(rawActual.runnerToolchain) !== canonicalJson(runnerToolchain) || !Array.isArray(rawActual.candidateCaptures)
-        || !Array.isArray(rawActual.assertionReceipts) || typeof rawActual.cleanupConfirmed !== "boolean" || typeof rawActual.cleanupServerListening !== "boolean") return unavailable("actual-run-capture-shape-or-toolchain");
-      const rawReportBytes = Buffer.from(rawActual.rawReportBase64, "base64");
-      const runStartCaptureBytes = Buffer.from(rawActual.runStartCaptureBase64, "base64");
-      if (rawReportBytes.toString("base64") !== rawActual.rawReportBase64 || runStartCaptureBytes.toString("base64") !== rawActual.runStartCaptureBase64) return unavailable("actual-run-capture-encoding");
-      const actual = { ...rawActual, rawReportBytes: new Uint8Array(rawReportBytes), runStartCaptureBytes: new Uint8Array(runStartCaptureBytes),
-        runStartCapture: parseE2EFirstPartyCapture(runStartCaptureBytes, rawActual.launchId), evidenceDirectory: "" } as never;
-      const result = collectE2EActualCliRun({ actual, compiled, binding, round, selection: selection as never,
-        sourceDigest: e2eSnapshotSourceDigest(compiled, snapshot.sources.map(({ path, sha256 }) => ({ path, sha256 }))),
-        semanticApprovalDigests, hostRequestIds,
-        declaredMockComponentIds: Array.isArray(rawActual.declaredMockComponentIds) ? rawActual.declaredMockComponentIds as string[] : [],
-        environment: runnerEnvironment,
-        usage: { discoveredResults: Number(rawActual.selected) + Number(rawActual.filtered), maxAgentContextBytes: 0, maxLedgerBytes: 0, maxObservationBytes: 0, artifactBytes: 0, downloads: 0, events: 0, modelTokens: 0, maxModelCallsInStep: 0, maxActionStepsInStep: 0 },
-        limits: { maxAgentContextBytes: 16_384, maxLedgerBytes: 8_192, maxObservationBytes: 262_144, maxEventsPerStep: 1_000, maxModelTokensPerCall: 64_000 } });
-      const qualification = terminalReceipt !== undefined && result.collection !== null && result.oracle !== null
-        ? qualifyE2ECollection(result.oracle, { ...result.collection, receivedAt: terminalReceipt.at })
-        : result.qualification;
-      const process = rawActual.runProcess as Record<string, unknown> | undefined;
-      if (qualification?.result !== null && qualification?.result !== undefined) {
-        // This is a broker-side projection of the independently re-collected result. The raw
-        // collector labels its structural output exploratory; only this verified path promotes
-        // the projection after matching the stored admission, source, round, capture and receipts.
-        projectionResults.push({ ...qualification.result, producer: "broker-independent-e2e-verifier", qualification: "trusted",
-          ...(process?.status === 0 && process.signal === null && process.aborted === false && process.timedOut === false ? {} : { status: "failed", reason: "host-process-failed" }) });
-      }
-      if (process?.status !== 0 || process.signal !== null || process.aborted !== false || process.timedOut !== false) qualifications.push("FAILED");
-      else if (terminalReceipt?.outcome === "FAILED" && qualification?.status !== "FAILED") qualifications.push("UNKNOWN");
-      else qualifications.push(qualification?.status ?? "UNKNOWN");
-    }
-    // Re-collect every supported admitted group for an honest scoped projection even when a
-    // required criterion has no executable source-interface case. That criterion still holds
-    // aggregate readiness: incomplete required coverage can never become PASS.
-    const currentAuthorityValid = await workflowE2ECurrentAuthorityIsValid(dependencies, task, candidate, admission, snapshot, diagnostic);
-    if (projection !== undefined) {
-      projection.plan = plan;
-      projection.round = round;
-      if (currentAuthorityValid) projection.results.push(...projectionResults);
-    }
-    if (!currentAuthorityValid) return unavailable(diagnostic?.reason ?? "current-owner-policy-source-or-runtime-authority");
-    if (!e2ePlanHasCompleteRequiredCriteria(plan)) return unavailable("required-criteria-unavailable");
-    return qualifications.includes("FAILED") ? "FAILED" : qualifications.every((item) => item === "PASS") ? "PASS" : "UNKNOWN";
-  } catch { return unavailable("verification-exception"); }
+  projection?: WorkflowE2EProjection, diagnostic?: WorkflowE2EVerificationDiagnostic, options?: { terminalStatus?: "SUCCEEDED" | "FAILED" },
+) {
+  return verifyWorkflowE2EEvidenceWithHooks(dependencies, e2eVerificationHooks, operation, task, candidate, projection, diagnostic, options);
 }
 
-type AuthorityMark = (stage: string) => void;
-type AuthorityReject = (reason: string) => false;
-
-/**
- * The task, plan and approval every current-authority check, portable or application, starts from: the task is open and still on this candidate with required E2E, its
- * latest plan is the one the E2E contract was approved for, and the Owner's approval of exactly that plan resolves. Calls `reject` and returns undefined when any of it fails.
- */
-async function loadCurrentApprovedPlan(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, candidate: ReturnType<typeof CandidateManifestSchema.parse>,
-  mark: AuthorityMark, reject: AuthorityReject) {
-  const workflow = task.workflow;
-  const catalogId = dependencies.e2eFeatureRuntimeCatalogId;
-  if (!workflow || workflow.e2e?.required !== true || workflow.candidate?.digest !== candidate.digest || !catalogId
-    || task.closedAt !== undefined) { reject("current-task-or-approval-missing"); return undefined; }
-  const artifact = workflow.artifacts.filter((entry) => entry.type === "plan").at(-1);
-  if (artifact === undefined || workflow.e2e.contractDigest !== artifact.sha256) { reject("current-canonical-plan-missing-or-stale"); return undefined; }
-  mark("canonical-artifact");
-  const approved = await loadWorkflowDocument((key, maxBytes) => readStoredText(dependencies.s3, dependencies.artifactBucketName, key, maxBytes), artifact, {});
-  if (approved?.format !== "structured") { reject("canonical-artifact-or-owner-decision-mismatch"); return undefined; }
-  const canonicalApproval = resolveWorkflowE2ECanonicalApproval({ taskId: task.taskId,
-    workflow: workflow as NonNullable<typeof workflow> & { artifacts: Array<{ id: string; type: string; sha256: string }>;
-      decisions: Array<{ decision: string; actorId: string; artifactDigest?: string; workBreakdownDigest?: string; workflowRevision: number }> },
-    artifact, plan: approved.plan });
-  if (canonicalApproval === undefined) { reject("canonical-artifact-or-owner-decision-mismatch"); return undefined; }
-  return { workflow, e2e: workflow.e2e, catalogId, artifact, approved, canonicalApproval };
+export function workflowE2ECurrentAuthorityIsValid(
+  dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, candidate: ReturnType<typeof CandidateManifestSchema.parse>,
+  admission: Record<string, unknown>, admittedSnapshot: E2ESourceSnapshot, diagnostic?: WorkflowE2EVerificationDiagnostic,
+) {
+  return workflowE2ECurrentAuthorityIsValidWithHooks(dependencies, e2eVerificationHooks, task, candidate, admission, admittedSnapshot, diagnostic);
 }
 
-/** The task's pinned project and the latest one, which must hold the same E2E policy and runtime binding, with the catalog entry that names the latest. */
-async function loadCurrentProjectAuthority(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, mark: AuthorityMark, reject: AuthorityReject) {
-  mark("project-record");
-  const project = await readTaskLegacyProject(await taskLegacyScope(dependencies, task), () => requireProject(dependencies, task.project, task.startingRevision));
-  const latestProject = await readTaskLegacyProject(await taskLegacyScope(dependencies, task), () => requireLatestProject(dependencies, task.project));
-  if (latestProject.setupApproval === undefined) { reject("current-project-setup-approval-unavailable"); return undefined; }
-  // A catalog row written before the latest-revision pointer existed is repaired from the revision history first (never created);
-  // the strict comparison below and the catalog fence in the transaction then stay exact. Both the portable and the application
-  // authority come through here.
-  mark("project-catalog-pointer");
-  try {
-    await ensureProjectCatalogPointer(dependencies, task.project, task);
-  } catch (error) {
-    if (error instanceof AgentXError && error.code === "CONFIG_INVALID") { reject(`config-invalid-project-catalog-pointer-unrepairable:${task.project}`); return undefined; }
-    throw error;
-  }
-  const catalogKey = projectCatalogKey(task.project);
-  const projectCatalog = await getItem<Record<string, unknown>>(dependencies, catalogKey);
-  if (projectCatalog?.entityType !== "PROJECT_CATALOG" || projectCatalog.name !== task.project
-    || projectCatalog.latestRevision !== latestProject.definition.revision) { reject("current-project-latest-revision-unavailable"); return undefined; }
-  const policy = E2EPolicySchema.parse(latestProject.definition.e2e);
-  const pinnedPolicy = E2EPolicySchema.parse(project.definition.e2e);
-  if (canonicalJson(policy) !== canonicalJson(pinnedPolicy)
-    || canonicalJson(parseRuntimeBinding(latestProject.runtimeBinding)) !== canonicalJson(parseRuntimeBinding(project.runtimeBinding))) {
-    reject("current-project-policy-or-runtime-changed"); return undefined;
-  }
-  return { project, latestProject, setupApproval: latestProject.setupApproval, catalogKey, policy };
+export function workflowE2EApplicationAuthorityIsValid(
+  dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, candidate: ReturnType<typeof CandidateManifestSchema.parse>,
+  admission: E2EApplicationExecutionAdmission, diagnostic?: WorkflowE2EVerificationDiagnostic,
+) {
+  return workflowE2EApplicationAuthorityIsValidWithHooks(dependencies, e2eVerificationHooks, task, candidate, admission, diagnostic);
 }
 
-/**
- * The creator's current authority over the project (an unrevoked identity with a versioned direct grant or locally bound channels), which must be exactly the proof the
- * round was admitted under (`admittedProof`): a grant re-issued, a role changed or a channel rebound during the round refuses.
- */
-/**
- * DEC 254zzz80: the creator's grant row, in the company checkProjectAccess reads it in (the creator's LIVE membership through the same reader): a named company's own
- * partition, else the legacy row. So the proof and the transaction fence watch the very grant the access check used.
- */
-async function creatorGrantKey(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord): Promise<{ pk: string; sk: string }> {
-  const reader = dependencies.companies ?? dependencies.developer?.companies;
-  const company = reader === undefined ? undefined : namedCompany(await resolveCompany(reader, task.developerId));
-  return grantKeyFor(company, task.developerId, task.project);
+function workflowE2EPresentation(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, operations: readonly unknown[], actor: "owner" | "viewer", ending?: { operationId: string; status: "SUCCEEDED" | "FAILED" }) {
+  return workflowE2EPresentationWithHooks(dependencies, e2eVerificationHooks, task, operations, actor, ending);
 }
 
-async function loadCurrentCreatorAuthority(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, admittedProof: unknown, mark: AuthorityMark, reject: AuthorityReject) {
-  mark("creator-project-access");
-  const creator = await getWorkflowE2ECreatorIdentity(dependencies, task.developerId);
-  if (creator === undefined || creator.revoked || dependencies.developer === undefined) { reject("current-creator-identity-unavailable"); return undefined; }
-  let creatorAccess: Awaited<ReturnType<typeof checkProjectAccess>>;
-  try {
-    creatorAccess = await checkProjectAccess({ ...slackCallerRouteDependencies(dependencies), documentClient: dependencies.documentClient, tableName: dependencies.tableName,
-      developer: dependencies.developer, now: Date.now },
-    { developerId: task.developerId, ...(creator.slackUserId === undefined ? {} : { slackUserId: creator.slackUserId }) }, task.project);
-  } catch { reject("current-creator-project-access-unavailable"); return undefined; }
-  const creatorMembershipKey = await creatorGrantKey(dependencies, task);
-  const creatorMembership = await getItem<Record<string, unknown>>(dependencies, creatorMembershipKey);
-  const creatorAuthority = await workflowE2ECreatorAuthorityProof(dependencies, task, creatorMembership, creatorAccess);
-  if (creatorAuthority === undefined || canonicalJson(admittedProof) !== canonicalJson(creatorAuthority)) { reject("creator-membership-proof-changed-or-unavailable"); return undefined; }
-  return { creatorAuthority, creatorAccess, creatorMembershipKey, developer: dependencies.developer };
+function workflowE2EPresentationDetailed(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, operations: readonly unknown[], actor: "owner" | "viewer", ending?: { operationId: string; status: "SUCCEEDED" | "FAILED" }) {
+  return workflowE2EPresentationDetailedWithHooks(dependencies, e2eVerificationHooks, task, operations, actor, ending);
 }
 
-/**
- * The rows the project, the creator and the creator's grant stand on, as conditions the transaction that records the verdict carries, so it fails if any of them moved
- * after it was checked. `base` is the project catalog, the project revision and the creator's identity; `creator` is the direct grant and the channel bindings.
- */
-async function currentAuthorityFences(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, input: {
-  catalogKey: { pk: string; sk: string }; latestProject: Awaited<ReturnType<typeof requireLatestProject>>; setupApproval: unknown; policy: E2EPolicy;
-  creatorAuthority: NonNullable<Awaited<ReturnType<typeof workflowE2ECreatorAuthorityProof>>>; creatorAccess: Awaited<ReturnType<typeof checkProjectAccess>>;
-  creatorMembershipKey: { pk: string; sk: string }; developer: NonNullable<AwsBrokerDependencies["developer"]>;
-}, reject: AuthorityReject): Promise<{ base: Array<Record<string, unknown>>; creator: Array<Record<string, unknown>> } | undefined> {
-  const { latestProject, creatorAuthority, creatorAccess, developer } = input;
-  const base: Array<Record<string, unknown>> = [
-    { ConditionCheck: { TableName: dependencies.tableName, Key: input.catalogKey,
-      ConditionExpression: "entityType = :entity AND #name = :name AND latestRevision = :revision",
-      ExpressionAttributeNames: { "#name": "name" },
-      ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": task.project, ":revision": latestProject.definition.revision } } },
-    { ConditionCheck: { TableName: dependencies.tableName, Key: projectKey(task.project, latestProject.definition.revision),
-      ConditionExpression: "entityType = :entity AND registeredBy = :registeredBy AND #definition.#e2e = :policy AND runtimeBinding = :binding AND setupApproval = :setupApproval",
-      ExpressionAttributeNames: { "#definition": "definition", "#e2e": "e2e" },
-      ExpressionAttributeValues: { ":entity": "PROJECT", ":registeredBy": latestProject.registeredBy, ":policy": input.policy,
-        ":binding": latestProject.runtimeBinding, ":setupApproval": input.setupApproval } } },
-    { ConditionCheck: { TableName: developer.signInTableName, Key: { pk: `DEVELOPER#${task.developerId}`, sk: "META" },
-      ConditionExpression: "entityType = :entity AND revoked = :notRevoked",
-      ExpressionAttributeValues: { ":entity": "DEVELOPER", ":notRevoked": false } } },
-  ];
-  const creator: Array<Record<string, unknown>> = [];
-  if (creatorAuthority.kind === "direct-membership") {
-    creator.push({ ConditionCheck: { TableName: dependencies.tableName, Key: input.creatorMembershipKey,
-      ConditionExpression: "entityType = :entity AND ownerKey = :ownerKey AND projectName = :project AND #role = :role AND grantId = :grantId",
-      ExpressionAttributeNames: { "#role": "role" },
-      ExpressionAttributeValues: { ":entity": "MEMBERSHIP", ":ownerKey": task.developerId, ":project": task.project,
-        ":role": creatorAuthority.role, ":grantId": creatorAuthority.grantId } } });
-  }
-  if (creatorAccess.access === "channel") {
-    const teamId = developer.slackTeamId;
-    if (teamId === undefined || creatorAccess.channelIds.length === 0) { reject("current-channel-access-proof-unavailable"); return undefined; }
-    for (const channelId of creatorAccess.channelIds) {
-      const bindingKey: { pk: string; sk: string } = slackBindingKey(teamId, channelId);
-      const binding: Record<string, unknown> | undefined = await getItem<Record<string, unknown>>(dependencies, bindingKey);
-      if (binding?.teamId !== teamId || binding.channelId !== channelId || binding.projectName !== task.project
-        || typeof binding.updatedAt !== "string" || binding.updatedAt.length === 0) { reject("current-channel-binding-unavailable"); return undefined; }
-      creator.push({ ConditionCheck: { TableName: dependencies.tableName, Key: bindingKey,
-        ConditionExpression: "teamId = :teamId AND channelId = :channelId AND projectName = :projectName AND updatedAt = :updatedAt",
-        ExpressionAttributeValues: { ":teamId": teamId, ":channelId": channelId, ":projectName": task.project, ":updatedAt": binding.updatedAt } } });
-    }
-  }
-  return { base, creator };
+function workflowE2EPublicationChecks(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, operations: readonly unknown[]) {
+  return workflowE2EPublicationChecksWithHooks(dependencies, e2eVerificationHooks, task, operations);
 }
 
-/** Rebuilds the admitted feature context from current canonical approval, project policy, source and runtime rows. Exported for tests. */
-export async function workflowE2ECurrentAuthorityIsValid(
-  dependencies: AwsBrokerDependencies,
-  task: DeveloperTaskRecord,
-  candidate: ReturnType<typeof CandidateManifestSchema.parse>,
-  admission: Record<string, unknown>,
-  admittedSnapshot: E2ESourceSnapshot,
-  diagnostic?: WorkflowE2EVerificationDiagnostic,
-): Promise<boolean> {
-  const reject = (reason: string): false => { if (diagnostic !== undefined) diagnostic.reason = reason; return false; };
-  let stage = "workflow";
-  const mark: AuthorityMark = (next) => { stage = next; };
-  try {
-    const plan = await loadCurrentApprovedPlan(dependencies, task, candidate, mark, reject);
-    if (plan === undefined) return false;
-    const { catalogId, artifact, approved, canonicalApproval } = plan;
-    // Application (v2) intents are verified by the application verification path (Task 2.4); this portable verifier never reads one.
-    const portableIntent = portableFeatureIntentOf(approved.plan);
-    if (!portableIntent.ok) return reject(portableIntent.reason);
-    const e2eIntent = portableIntent.intent;
-    const projectAuthority = await loadCurrentProjectAuthority(dependencies, task, mark, reject);
-    if (projectAuthority === undefined) return false;
-    const { project, latestProject, setupApproval, catalogKey, policy } = projectAuthority;
-    const creator = await loadCurrentCreatorAuthority(dependencies, task, admission.creatorAuthority, mark, reject);
-    if (creator === undefined) return false;
-    const { creatorAuthority, creatorAccess, creatorMembershipKey, developer } = creator;
-    stage = "candidate-source-operation";
-    const sourceOperation = await candidateSourceOperation(dependencies, task, candidate.digest);
-    if (!sourceOperation) return reject("candidate-source-operation-missing");
-    stage = "candidate-source-export";
-    const sourceExport = await loadWorkflowCandidateSourceExport(dependencies, sourceOperation, candidate);
-    if (!sourceExport || sourceExport.repositories.length !== 1) return reject("candidate-source-export-missing-or-ambiguous");
-    const repository = sourceExport.repositories[0]!;
-    const snapshot: E2ESourceSnapshot = { candidate, commitSha: repository.commitSha, treeSha: repository.treeSha, treeComplete: true,
-      treePaths: repository.treePaths, sources: repository.sources.map((source) => ({ path: source.path, sha256: source.sha256,
-        kind: "blob" as const, bytes: Buffer.from(source.bytesBase64, "base64") })) };
-    stage = "current-feature-runtime";
-    const featureRow = await getItem<Record<string, unknown>>(dependencies, e2eFeatureVerifierKey(catalogId, policy.defaultSandboxProfileId));
-    const runtimeBinding = parseRuntimeBinding(project.runtimeBinding);
-    const parsedFeatureRow = featureRow === undefined || typeof featureRow.pk !== "string" || typeof featureRow.sk !== "string"
-      ? undefined : E2EFeatureVerifierRecordSchema.safeParse(Object.fromEntries(Object.entries(featureRow).filter(([key]) => key !== "pk" && key !== "sk")));
-    if (parsedFeatureRow === undefined || !parsedFeatureRow.success) return reject("current-feature-runtime-schema-invalid");
-    const admittedRuntime = admitE2EFeatureVerifier(featureRow, { runtimeCatalogId: catalogId, profileId: policy.defaultSandboxProfileId,
-      binding: runtimeBinding, scope: E2E_FEATURE_PROCESS_RESPONSE_SCOPE, now: Date.now() });
-    if (!admittedRuntime) {
-      const record = parsedFeatureRow.data;
-      const expectedKey = e2eFeatureVerifierKey(catalogId, policy.defaultSandboxProfileId);
-      if (featureRow?.pk !== expectedKey.pk || featureRow.sk !== expectedKey.sk) return reject("current-feature-runtime-storage-key-mismatch");
-      if (record.state !== "READY") return reject("current-feature-runtime-not-ready");
-      if (record.runtimeCatalogId !== catalogId || record.profileId !== policy.defaultSandboxProfileId) return reject("current-feature-runtime-catalog-or-profile-mismatch");
-      if (record.bindingDigest !== projectSetupBindingDigest(runtimeBinding) || canonicalJson(record.binding) !== canonicalJson(runtimeBinding)) return reject("current-feature-runtime-binding-mismatch");
-      if (!record.supportedFeatureScopes.includes(E2E_FEATURE_PROCESS_RESPONSE_SCOPE)) return reject("current-feature-runtime-scope-mismatch");
-      if (Date.parse(record.qualifiedAt) > Date.now() || Date.parse(record.expiresAt) <= Date.now()) return reject("current-feature-runtime-freshness-mismatch");
-      return reject("current-feature-runtime-admission-mismatch");
-    }
-    const planDigest = createHash("sha256").update(canonicalJson({
-      domain: "workflow-feature-e2e-approved-plan/v1", taskId: task.taskId, artifactId: canonicalApproval.artifactId, artifactSha256: canonicalApproval.artifactDigest,
-      graphDigest: canonicalApproval.graphDigest, graphRunId: canonicalApproval.runId, workflowRevision: canonicalApproval.workflowRevision, actorId: canonicalApproval.actorId,
-    })).digest("hex");
-    stage = "current-admission-derivation";
-    const currentAdmission = deriveE2EFeatureExecutionAdmission({ intent: e2eIntent, snapshot, artifactId: artifact.id,
-      artifactSha256: artifact.sha256, planDigest, policy, runtimeCatalogId: catalogId, runtimeBinding,
-      featureVerifier: featureRow, now: Date.now() });
-    const binding = admission.portableApprovalBinding as { semanticApproval?: { artifactId?: unknown; digest?: unknown }; planDigest?: unknown } | undefined;
-    const semantic = binding?.semanticApproval;
-    if (semantic?.artifactId !== artifact.id || semantic.digest !== artifact.sha256 || binding?.planDigest !== planDigest) return reject("canonical-approval-binding-mismatch");
-    const approvalRecord = canonicalApproval;
-    const authorityMatches = workflowE2ECurrentAuthorityMatches({
-      admission: { candidateDigest: candidate.digest, intent: admission.intent, policy: admission.policy, runtime: admission.runtime,
-        portableApprovalBinding: admission.portableApprovalBinding, creatorAuthority: admission.creatorAuthority, approval: approvalRecord },
-      current: { candidateDigest: candidate.digest, intent: e2eIntent, policy, runtime: currentAdmission.runtime,
-        portableApprovalBinding: currentAdmission.portableApprovalBinding, creatorAuthority, approval: approvalRecord, approvedDecision: true,
-        creatorHasProjectAccess: true, now: Date.now() },
-    }) && canonicalJson(admission.plan) === canonicalJson(currentAdmission.plan)
-      && canonicalJson(admission.bundle) === canonicalJson(currentAdmission.bundle)
-      && sameE2ESourceSnapshot(admittedSnapshot, snapshot);
-    if (!authorityMatches) return reject("current-admission-runtime-plan-or-source-mismatch");
-    const fences = await currentAuthorityFences(dependencies, task, { catalogKey, latestProject, setupApproval, policy, creatorAuthority, creatorAccess, creatorMembershipKey, developer }, reject);
-    if (fences === undefined) return false;
-    const key = e2eFeatureVerifierKey(catalogId, policy.defaultSandboxProfileId);
-    const feature = parsedFeatureRow.data;
-    const authorityChecks: Array<Record<string, unknown>> = [
-      ...fences.base,
-      { ConditionCheck: { TableName: dependencies.tableName, Key: key,
-        ConditionExpression: "entityType = :entity AND #state = :ready AND runtimeCatalogId = :catalog AND catalogRevision = :catalogRevision AND profileId = :profile AND bindingDigest = :bindingDigest AND binding = :binding AND manifestDigest = :manifestDigest AND runnerEnvironmentDigest = :environmentDigest AND runnerEnvironment = :environment AND runnerToolchainDigest = :toolchainDigest AND runnerToolchain = :toolchain AND generation = :generation AND transportCorrelationId = :correlation AND supportedFeatureScopes = :scopes AND qualifiedAt = :qualifiedAt AND expiresAt = :expiresAt",
-        ExpressionAttributeNames: { "#state": "state" },
-        ExpressionAttributeValues: { ":entity": "E2E_FEATURE_VERIFIER", ":ready": "READY", ":catalog": feature.runtimeCatalogId,
-          ":catalogRevision": feature.catalogRevision, ":profile": feature.profileId, ":bindingDigest": feature.bindingDigest, ":binding": feature.binding,
-          ":manifestDigest": feature.manifestDigest, ":environmentDigest": feature.runnerEnvironmentDigest, ":environment": feature.runnerEnvironment,
-          ":toolchainDigest": feature.runnerToolchainDigest, ":toolchain": feature.runnerToolchain, ":generation": feature.generation,
-          ":correlation": feature.transportCorrelationId, ":scopes": feature.supportedFeatureScopes, ":qualifiedAt": feature.qualifiedAt, ":expiresAt": feature.expiresAt } } },
-      ...fences.creator,
-    ];
-    if (diagnostic !== undefined) diagnostic.authorityChecks = authorityChecks;
-    return true;
-  } catch (error) {
-    const detail = error instanceof Error ? error.message.replace(/[^A-Za-z0-9 _./:-]/gu, "?").slice(0, 120) : "unknown-error";
-    return reject(`current-authority-loader-exception:${stage}:${detail || "empty-error"}`);
-  }
+export function loadWorkflowE2EScenarioResults(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, operations: readonly unknown[], actor: "owner" | "viewer" = "viewer") {
+  return loadWorkflowE2EScenarioResultsWithHooks(dependencies, e2eVerificationHooks, task, operations, actor);
 }
 
-function storedAdmissionSchemaVersion(admissionText: string | undefined): string | undefined {
-  if (admissionText === undefined) return undefined;
-  try {
-    const parsed = JSON.parse(admissionText) as { schemaVersion?: unknown };
-    return typeof parsed?.schemaVersion === "string" ? parsed.schemaVersion : undefined;
-  } catch { return undefined; }
-}
-
-const APPLICATION_VERDICT_REASON_MAX_CHARS = 240;
-
-/**
- * The evidence an application round's operation has accepted, read back and held to the content addresses the broker recorded: the aggregate (when it was accepted), each accepted
- * group's evidence, and the broker's own receipt time of each group (when its upload started). The candidate's verification and the baseline's both start from this, so what a
- * round is judged on is read the same way for both. `unavailable` names the first thing that could not be read or does not match.
- */
-async function loadApplicationEvidenceInputs(dependencies: AwsBrokerDependencies, operation: OperationRecord, reference: E2EWorkflowAdmissionRef, admission: E2EApplicationExecutionAdmission):
-  Promise<{ aggregate: unknown; groupEvidence: Map<string, unknown>; receivedAt: Map<string, string> } | { unavailable: string }> {
-  const unavailableInputs = (reason: string) => ({ unavailable: reason });
-  const limits = applicationEvidenceLimits(admission);
-  const evidenceRef = operation.workflowE2EEvidenceRef;
-  const groupEvidenceRefs = operation.workflowE2EGroupEvidenceRefs ?? [];
-  const groupEvidenceRunIds = operation.workflowE2EGroupRunIds ?? [];
-  if (groupEvidenceRefs.length !== groupEvidenceRunIds.length
-    || canonicalJson(groupEvidenceRefs.map((raw) => E2EWorkflowGroupEvidenceRefSchema.parse(raw).groupRunId)) !== canonicalJson(groupEvidenceRunIds)
-    || new Set(groupEvidenceRunIds).size !== groupEvidenceRunIds.length
-    || groupEvidenceRunIds.some((runId) => !reference.groupRunIds.includes(runId))) return unavailableInputs("accepted-group-reference-list-invalid");
-  if (evidenceRef === undefined && groupEvidenceRefs.length === 0) return unavailableInputs("group-results-not-yet-accepted");
-  let aggregate: unknown;
-  if (evidenceRef !== undefined) {
-    const aggregateText = evidenceRef.key === `workflow-e2e-evidence/sha256/${evidenceRef.sha256}.json`
-      ? await readStoredText(dependencies.s3, dependencies.artifactBucketName, evidenceRef.key, limits.aggregate) : undefined;
-    if (aggregateText === undefined || createHash("sha256").update(aggregateText).digest("hex") !== evidenceRef.sha256 || Buffer.byteLength(aggregateText) !== evidenceRef.byteLength) {
-      return unavailableInputs("admission-or-evidence-reference-integrity");
-    }
-    aggregate = JSON.parse(aggregateText) as unknown;
-  }
-  const groupEvidence = new Map<string, unknown>();
-  const receivedAt = new Map<string, string>();
-  for (const raw of groupEvidenceRefs) {
-    const parsedRef = E2EWorkflowGroupEvidenceRefSchema.safeParse(raw);
-    if (!parsedRef.success) return unavailableInputs("accepted-group-reference-schema");
-    const { groupRunId, evidenceRef: stored } = parsedRef.data;
-    const limit = limits.byGroup.get(groupRunId);
-    if (limit === undefined || groupEvidence.has(groupRunId) || stored.key !== `workflow-e2e-group-evidence/sha256/${stored.sha256}.json`) return unavailableInputs("accepted-group-reference-subject");
-    const groupText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, stored.key, limit);
-    if (groupText === undefined || Buffer.byteLength(groupText) !== stored.byteLength || createHash("sha256").update(groupText).digest("hex") !== stored.sha256) {
-      return unavailableInputs("accepted-group-evidence-integrity");
-    }
-    groupEvidence.set(groupRunId, JSON.parse(groupText) as unknown);
-    // The broker's own receipt of this group's evidence: the start of the upload that was accepted, recorded once with its row. A row that is not exactly this
-    // operation's completed upload of exactly this content gives no receipt, and the group is then UNKNOWN.
-    const upload = await getItem<Record<string, unknown>>(dependencies, { pk: `WORKSPACE#${operation.workspaceId}`, sk: `WORKFLOW_E2E_UPLOAD#${operation.id}#${groupRunId}` });
-    const accepted = E2EWorkflowGroupEvidenceRefSchema.safeParse(upload?.groupEvidenceRef);
-    if (upload?.entityType === "WORKFLOW_E2E_EVIDENCE_UPLOAD" && upload.status === "COMPLETE" && upload.operationId === operation.id && upload.groupRunId === groupRunId
-      && upload.fence === operation.fence && upload.admissionSha256 === reference.admissionRef.sha256 && accepted.success && accepted.data.evidenceRef.sha256 === stored.sha256
-      && typeof upload.receivedAt === "string") receivedAt.set(groupRunId, upload.receivedAt);
-  }
-  return { aggregate, groupEvidence, receivedAt };
-}
-
-/**
- * Independently decides what the stored evidence of an application round proves, for the result callback, the task presentation and publication alike. Everything the
- * verifier compares the worker's evidence with is the broker's: the stored admission, the operation's own reference and fence, the content-addressed evidence it accepted
- * itself, and the receipt time it recorded when each group's upload started. The verdict is then held to the current authority (creator, project, source, runtime rows),
- * so a round whose owner, source or runtime moved is UNKNOWN, as a portable round is.
- */
-async function verifyApplicationWorkflowE2EEvidence(input: {
-  dependencies: AwsBrokerDependencies; operation: OperationRecord; task: DeveloperTaskRecord; candidate: ReturnType<typeof CandidateManifestSchema.parse>;
-  reference: E2EWorkflowAdmissionRef; admissionText: string; projection: WorkflowE2EProjection | undefined;
-  diagnostic: WorkflowE2EVerificationDiagnostic | undefined; unavailable: (reason: string) => "UNKNOWN"; terminalStatus?: "SUCCEEDED" | "FAILED";
-}): Promise<"PASS" | "FAILED" | "UNKNOWN"> {
-  const { dependencies, operation, task, candidate, reference, admissionText, projection, diagnostic, unavailable } = input;
-  const admissionBytes = Buffer.from(admissionText, "utf8");
-  if (createHash("sha256").update(admissionBytes).digest("hex") !== reference.admissionRef.sha256 || admissionBytes.byteLength !== reference.admissionRef.byteLength) {
-    return unavailable("admission-or-evidence-reference-integrity");
-  }
-  let admission: E2EApplicationExecutionAdmission;
-  try { admission = decodeE2EApplicationExecutionAdmission(admissionBytes); } catch { return unavailable("application-admission-undecodable"); }
-  const loaded = await loadApplicationEvidenceInputs(dependencies, operation, reference, admission);
-  if ("unavailable" in loaded) return unavailable(loaded.unavailable);
-  const { aggregate, groupEvidence, receivedAt } = loaded;
-  const terminalStatus = input.terminalStatus ?? (operation.status === "SUCCEEDED" || operation.status === "FAILED" ? operation.status : undefined);
-  // Task 4.4a (ruling DJ): a round with an AI navigation step is judged against the model route registry's own definition of the revision it was admitted under, never a definition the
-  // worker uploads; one GetItem, only for a round that has such a step. A registry that cannot be asked leaves the round unverifiable, not judged.
-  const route = await modelRouteForAdmission((key) => getItem<Record<string, unknown>>(dependencies, key), admission);
-  if ("unavailable" in route) return unavailable(route.unavailable);
-  const modelRouteDefinition = route.definition;
-  const verified = verifyApplicationE2EEvidence({ admissionBytes, subject: { taskId: task.taskId, operationId: operation.id, operationFence: operation.fence, workflowRevision: reference.workflowRevision,
-    candidateDigest: candidate.digest, roundId: reference.roundId, groupRunIds: reference.groupRunIds, admissionSha256: reference.admissionRef.sha256 },
-  aggregate, groupEvidence, receivedAt, terminalStatus, ...(modelRouteDefinition === undefined ? {} : { modelRouteDefinition }) });
-  const authorityValid = await workflowE2EApplicationAuthorityIsValid(dependencies, task, candidate, admission, diagnostic);
-  if (projection !== undefined) {
-    if (verified.plan !== undefined) projection.plan = verified.plan;
-    if (verified.round !== undefined) projection.round = verified.round;
-    if (authorityValid) {
-      projection.results.push(...verified.results);
-      if (verified.display !== undefined) projection.display = verified.display;
-    }
-  }
-  if (!authorityValid) return unavailable(diagnostic?.reason ?? "current-owner-policy-source-or-runtime-authority");
-  if (verified.verdict !== "PASS" && diagnostic !== undefined) {
-    diagnostic.reason = cutEvidenceReason(verified.reason.replace(/\p{Cc}+/gu, " ").replace(/\s+/gu, " ").trim(), APPLICATION_VERDICT_REASON_MAX_CHARS);
-  }
-  return verified.verdict;
-}
-
-/**
- * M1.3 Task 3.7b: the baseline round's own completion. When its operation ends, this settles the baseline's record, and does nothing else: no workflow transition, no
- * `qualifiedRound` or `failedRound`, no send-back, no publication. An operation that did not succeed leaves the record saying the unchanged code could not be checked; one that
- * succeeded is verified exactly as a candidate's evidence is read (`loadApplicationEvidenceInputs`, then the verifier for the purpose it was signed with), and only that
- * verification's rows are recorded, conditionally, on the plan, base commit, attempt, operation and round the record started. It never throws: whatever goes wrong here, the baseline
- * is a record that stays STARTED and is shown as not run once its time is up.
- */
-async function settleBaselineRound(dependencies: AwsBrokerDependencies, operation: OperationRecord, status: OperationStatus): Promise<void> {
-  const reference = operation.workflowE2EAdmission;
-  if (operation.kind !== "task" || reference?.purpose !== "baseline" || reference.baseCommitSha === undefined || reference.attempt === undefined) return;
-  try {
-    const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(reference.taskId));
-    if (task === undefined || task.workspaceId !== operation.workspaceId) return;
-    const record = await readWorkflowE2EBaselineRecord(dependencies, task);
-    if (record === undefined || record.state !== "STARTED" || record.operationId !== operation.id) return;
-    const unavailable = (reason: BaselineUnavailableReason) => markWorkflowE2EBaselineUnavailable(dependencies, task, reason, { from: ["STARTED"], operationId: operation.id });
-    // A baseline cancelled while its record still says it is running was stopped by someone (the system marks the record before it cancels a round that ran out of time).
-    if (status !== "SUCCEEDED") { await unavailable(status === "CANCELLED" ? "stopped" : "run-failed"); return; }
-    const verified = await verifyBaselineRound(dependencies, operation, reference, record.skippedAiScenarios);
-    if (verified === undefined) { await unavailable("unverified"); return; }
-    await recordWorkflowE2EBaseline({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, s3: dependencies.s3, artifactBucketName: dependencies.artifactBucketName }, task,
-      { verified, expected: { operationId: operation.id, roundId: reference.roundId, admissionSha256: reference.admissionRef.sha256, baseCommitSha: reference.baseCommitSha, attempt: reference.attempt } });
-  } catch (error) {
-    console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_baseline_settle_failed", taskId: reference.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown" }));
-  }
-}
-
-/** The broker's own verification of a finished baseline round's evidence, or undefined when the admission or the evidence cannot be read or verify to no rows. */
-async function verifyBaselineRound(dependencies: AwsBrokerDependencies, operation: OperationRecord, reference: E2EWorkflowAdmissionRef, skippedAiScenarios?: SkippedAiScenarios) {
-  const admissionText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, reference.admissionRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
-  if (admissionText === undefined) return undefined;
-  const admissionBytes = Buffer.from(admissionText, "utf8");
-  if (createHash("sha256").update(admissionBytes).digest("hex") !== reference.admissionRef.sha256 || admissionBytes.byteLength !== reference.admissionRef.byteLength) return undefined;
-  let admission: E2EApplicationExecutionAdmission;
-  try { admission = decodeE2EApplicationExecutionAdmission(admissionBytes); } catch { return undefined; }
-  const loaded = await loadApplicationEvidenceInputs(dependencies, operation, reference, admission);
-  if ("unavailable" in loaded) return undefined;
-  return verifyBaselineEvidence({ admissionBytes, subject: { taskId: reference.taskId, operationId: operation.id, operationFence: operation.fence, workflowRevision: reference.workflowRevision,
-    candidateDigest: reference.candidateDigest, roundId: reference.roundId, groupRunIds: reference.groupRunIds, admissionSha256: reference.admissionRef.sha256 },
-  aggregate: loaded.aggregate, groupEvidence: loaded.groupEvidence, receivedAt: loaded.receivedAt, terminalStatus: "SUCCEEDED", ...(skippedAiScenarios === undefined ? {} : { skippedAiScenarios }) });
-}
-
-/**
- * M1.4 Task 4.6b: the audit replay's own completion. When its operation ends, this settles the replay's record, and does nothing else: no workflow transition, no `qualifiedRound` or
- * `failedRound`, no send-back, no publication, no task page. An operation that did not succeed leaves the record saying the replay could not be run; one that succeeded is verified exactly
- * as a candidate's evidence is read (`loadApplicationEvidenceInputs`, then the verifier for the purpose it was signed with), and only that verification is recorded, conditionally, on the
- * source round, attempt, operation, round and admission the record started. It never throws: whatever goes wrong here, the replay is a record that stays STARTED and is read as not run
- * once its time is up.
- */
-async function settleReplayRound(dependencies: AwsBrokerDependencies, operation: OperationRecord, status: OperationStatus): Promise<void> {
-  const reference = operation.workflowE2EAdmission;
-  if (operation.kind !== "task" || reference?.purpose !== "replay" || reference.sourceRoundId === undefined || reference.attempt === undefined) return;
-  try {
-    const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(reference.taskId));
-    if (task === undefined || task.workspaceId !== operation.workspaceId) return;
-    const round = { sourceRoundId: reference.sourceRoundId, attempt: reference.attempt };
-    const record = await readWorkflowE2EReplayRecord(dependencies, task.taskId, round);
-    if (record === undefined || record.state !== "STARTED" || record.operationId !== operation.id) return;
-    const unavailable = (reason: ReplayUnavailableReason) => markWorkflowE2EReplayUnavailable(dependencies, task, round, reason, { from: ["STARTED"], operationId: operation.id });
-    if (status !== "SUCCEEDED") { await unavailable(status === "CANCELLED" ? "stopped" : "run-failed"); return; }
-    const verified = await verifyReplayRound(dependencies, operation, reference);
-    if (verified === undefined) { await unavailable("unverified"); return; }
-    await recordWorkflowE2EReplay(dependencies, task, { verified, expected: { ...round, operationId: operation.id, roundId: reference.roundId, admissionSha256: reference.admissionRef.sha256 } });
-  } catch (error) {
-    console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_replay_settle_failed", taskId: reference.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown" }));
-  }
-}
-
-/** The broker's own verification of a finished replay round's evidence, or undefined when the admission or the evidence cannot be read or verify to nothing. */
-async function verifyReplayRound(dependencies: AwsBrokerDependencies, operation: OperationRecord, reference: E2EWorkflowAdmissionRef) {
-  const admissionText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, reference.admissionRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
-  if (admissionText === undefined) return undefined;
-  const admissionBytes = Buffer.from(admissionText, "utf8");
-  if (createHash("sha256").update(admissionBytes).digest("hex") !== reference.admissionRef.sha256 || admissionBytes.byteLength !== reference.admissionRef.byteLength) return undefined;
-  let admission: E2EApplicationExecutionAdmission;
-  try { admission = decodeE2EApplicationExecutionAdmission(admissionBytes); } catch { return undefined; }
-  if (admission.replay === undefined) return undefined;
-  const loaded = await loadApplicationEvidenceInputs(dependencies, operation, reference, admission);
-  if ("unavailable" in loaded) return undefined;
-  return verifyReplayEvidence({ admissionBytes, subject: { taskId: reference.taskId, operationId: operation.id, operationFence: operation.fence, workflowRevision: reference.workflowRevision,
-    candidateDigest: reference.candidateDigest, roundId: reference.roundId, groupRunIds: reference.groupRunIds, admissionSha256: reference.admissionRef.sha256 },
-  aggregate: loaded.aggregate, groupEvidence: loaded.groupEvidence, receivedAt: loaded.receivedAt, terminalStatus: "SUCCEEDED", replay: admission.replay });
-}
-
-/**
- * T7b: the grounding round's own completion. When its operation ends, this settles the grounding record, and does nothing else: no workflow transition, no `qualifiedRound` or `failedRound`,
- * no send-back, no publication, no model spend. An operation that did not succeed leaves the record saying the plan could not be checked on the current app (a fixed reason); one that
- * succeeded is verified exactly as a candidate's evidence is read (`loadApplicationEvidenceInputs`, then the verifier for the purpose it was signed with, bound to the plan digest and base
- * commit recomputed from the record), and only that verification is recorded, conditionally, on the plan artifact, base commit, attempt, operation, round and admission the record started.
- * It never throws: whatever goes wrong here, the record stays STARTED and is read as not run once its time is up. Whoever holds the plan's card back reads the record afterwards.
- */
-export async function settleGroundingRound(dependencies: AwsBrokerDependencies, operation: OperationRecord, status: OperationStatus): Promise<void> {
-  const reference = operation.workflowE2EAdmission;
-  if (operation.kind !== "task" || reference?.purpose !== "grounding" || reference.baseCommitSha === undefined || reference.attempt === undefined || reference.planArtifactSha256 === undefined) return;
-  try {
-    const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(reference.taskId));
-    if (task === undefined || task.workspaceId !== operation.workspaceId) return;
-    const ref = { taskId: task.taskId, planArtifactSha256: reference.planArtifactSha256, attempt: reference.attempt };
-    const record = await readWorkflowE2EGroundingRecord(dependencies, ref);
-    if (record === undefined || record.state !== "STARTED" || record.operationId !== operation.id) return;
-    const unavailable = (reason: GroundingUnavailableReason) => markWorkflowE2EGroundingUnavailable(dependencies, ref, reason, { from: ["STARTED"], operationId: operation.id });
-    if (status !== "SUCCEEDED") { await unavailable(status === "CANCELLED" ? "stopped" : "run-failed"); return; }
-    const verified = await verifyGroundingRound(dependencies, operation, reference, record);
-    if (verified === undefined) { await unavailable("unverified"); return; }
-    await recordWorkflowE2EGrounding({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, s3: dependencies.s3, artifactBucketName: dependencies.artifactBucketName }, task, ref,
-      { verified, expected: { operationId: operation.id, roundId: reference.roundId, admissionSha256: reference.admissionRef.sha256, baseCommitSha: reference.baseCommitSha } });
-  } catch (error) {
-    console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_grounding_settle_failed", taskId: reference.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown" }));
-  }
-}
-
-/** The broker's own verification of a finished grounding round's evidence, or undefined when the admission or the evidence cannot be read or verify to no rows. */
-async function verifyGroundingRound(dependencies: AwsBrokerDependencies, operation: OperationRecord, reference: E2EWorkflowAdmissionRef, record: GroundingRecord) {
-  const admissionText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, reference.admissionRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
-  if (admissionText === undefined || reference.baseCommitSha === undefined || reference.attempt === undefined) return undefined;
-  const admissionBytes = Buffer.from(admissionText, "utf8");
-  if (createHash("sha256").update(admissionBytes).digest("hex") !== reference.admissionRef.sha256 || admissionBytes.byteLength !== reference.admissionRef.byteLength) return undefined;
-  let admission: E2EApplicationExecutionAdmission;
-  try { admission = decodeE2EApplicationExecutionAdmission(admissionBytes); } catch { return undefined; }
-  const loaded = await loadApplicationEvidenceInputs(dependencies, operation, reference, admission);
-  if ("unavailable" in loaded) return undefined;
-  const planDigest = groundingPlanDigest({ taskId: reference.taskId, artifactId: record.planArtifactId, artifactSha256: record.planArtifactSha256, workflowRevision: reference.workflowRevision,
-    baseCommitSha: reference.baseCommitSha, attempt: reference.attempt });
-  return verifyGroundingEvidence({ admissionBytes, subject: { taskId: reference.taskId, operationId: operation.id, operationFence: operation.fence, workflowRevision: reference.workflowRevision,
-    candidateDigest: reference.candidateDigest, roundId: reference.roundId, groupRunIds: reference.groupRunIds, admissionSha256: reference.admissionRef.sha256 },
-  aggregate: loaded.aggregate, groupEvidence: loaded.groupEvidence, receivedAt: loaded.receivedAt, terminalStatus: "SUCCEEDED", grounding: { planDigest, baseCommitSha: reference.baseCommitSha } });
-}
-
-/**
- * The current authority an application round's verdict stands on, held against what the round was admitted under: the approved plan and its recorded selection, the
- * pinned project and its policy, the creator's access (exactly the proof the admission carries), the candidate's exported source, and the runtime rows. A row that is not
- * exactly the admitted one was requalified (or revoked, or expired) during the round, and the evidence cannot be judged against a runtime that has moved. The rows are also
- * returned as conditions, so the transaction that records the verdict fails if any of this moves after it was checked. Exported for tests.
- */
-export async function workflowE2EApplicationAuthorityIsValid(
-  dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, candidate: ReturnType<typeof CandidateManifestSchema.parse>, admission: E2EApplicationExecutionAdmission,
-  diagnostic?: WorkflowE2EVerificationDiagnostic,
-): Promise<boolean> {
-  const reject = (reason: string): false => { if (diagnostic !== undefined) diagnostic.reason = reason; return false; };
-  if (diagnostic !== undefined) diagnostic.authorityEvaluated = true;
-  let stage = "workflow";
-  const mark: AuthorityMark = (next) => { stage = next; };
-  try {
-    const plan = await loadCurrentApprovedPlan(dependencies, task, candidate, mark, reject);
-    if (plan === undefined) return false;
-    const { e2e, artifact, approved } = plan;
-    // An application admission is only ever verified for an approved application (v2) plan, and only for the intent that plan carries and the selection recorded for it.
-    const storedIntent = approved.plan.e2e;
-    if (storedIntent?.schemaVersion !== 2) return reject("application-admission-needs-application-plan");
-    // The stored plan is the planner's: it leaves out what the schema makes optional, which the admission writes out as empty lists. Both sides are therefore held in the
-    // form the admission builder derives its intent in (`applicationRoundIntent`), and the plan is bound to the approval record by the digest approval recorded.
-    const parsedIntent = E2EApplicationPlanIntentSchema.safeParse(storedIntent);
-    if (!parsedIntent.success) return reject("approved-plan-intent-is-not-readable");
-    const intent = parsedIntent.data;
-    const recorded = E2EApplicationSelectionRecordSchema.safeParse(e2e.applicationSelection);
-    if (!recorded.success) return reject("no-recorded-application-selection");
-    // The round ran with the account refs approval pinned, not the ones the stored plan was written with (they are the same until the plan is approved again).
-    if (canonicalJson(applicationRoundIntent(applicationIntentWithAccountRefs(intent, recorded.data.accountRefs))) !== canonicalJson(admission.intent)) return reject("approved-plan-is-not-the-admitted-intent");
-    const projectAuthority = await loadCurrentProjectAuthority(dependencies, task, mark, reject);
-    if (projectAuthority === undefined) return false;
-    const { latestProject, setupApproval, catalogKey, policy } = projectAuthority;
-    // The admitted policy is the project's with the signed-out variants derived from its base targets (Ruling AZ, derived, never stored): held to the project's, each derived target
-    // must be exactly the variant of a base target the project's policy holds.
-    const admittedPolicy = E2EPolicySchema.parse(admission.policy);
-    const derivedVariant = (target: E2EPolicy["targets"][number]) => target.accountProfileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID
-      && policy.targets.some((base) => base.kind === target.kind && e2eAnonymousTargetId(base.targetId) === target.targetId && canonicalJson(e2eAnonymousVariantOf(base)) === canonicalJson(target));
-    if (canonicalJson(policy) !== canonicalJson({ ...admittedPolicy, targets: admittedPolicy.targets.filter((target) => !derivedVariant(target)) })) return reject("current-project-policy-or-runtime-changed");
-    const creator = await loadCurrentCreatorAuthority(dependencies, task, admission.creatorAuthority, mark, reject);
-    if (creator === undefined) return false;
-    const { creatorAuthority, creatorAccess, creatorMembershipKey, developer } = creator;
-    mark("candidate-source-export");
-    const sourceOperation = await candidateSourceOperation(dependencies, task, candidate.digest);
-    if (!sourceOperation) return reject("candidate-source-operation-missing");
-    const sourceExport = await loadWorkflowCandidateSourceExport(dependencies, sourceOperation, candidate);
-    if (!sourceExport || sourceExport.repositories.length !== 1) return reject("candidate-source-export-missing-or-ambiguous");
-    const repository = sourceExport.repositories[0]!;
-    const snapshot: E2ESourceSnapshot = { candidate, commitSha: repository.commitSha, treeSha: repository.treeSha, treeComplete: true,
-      treePaths: repository.treePaths, sources: repository.sources.map((source) => ({ path: source.path, sha256: source.sha256, kind: "blob" as const, bytes: Buffer.from(source.bytesBase64, "base64") })) };
-    const admittedSnapshot: E2ESourceSnapshot = { ...admission.sourceSnapshot, sources: admission.sourceSnapshot.sources.map((source) => ({ path: source.path, sha256: source.sha256,
-      kind: "blob" as const, bytes: Buffer.from(source.bytesBase64, "base64") })) };
-    if (!sameE2ESourceSnapshot(admittedSnapshot, snapshot) || admission.candidateCommitSha !== snapshot.commitSha || admission.candidateTreeSha !== snapshot.treeSha) {
-      return reject("current-admission-runtime-plan-or-source-mismatch");
-    }
-    mark("current-runtime-rows");
-    const current = await evaluateWorkflowE2EApplicationSelectionNow(dependencies, task, intent, artifact, { mode: "current", pinned: recorded.data.accountRefs });
-    if (!current.ok) {
-      if (current.kind === "refused" && current.scope === "runtime" && diagnostic !== undefined) diagnostic.runtimeChange = "unusable";
-      if (current.kind === "refused" && current.scope === "accounts" && diagnostic !== undefined) diagnostic.runtimeChange = "accounts";
-      return reject(`${current.kind === "unevaluable" ? "application-selection-unavailable" : "application-selection-refused"}: ${current.reason}`);
-    }
-    // The runtime rows the round was admitted on are the rows it is judged on: a row that is gone, not ready, or not exactly the admitted one was changed under the round.
-    for (const { value: admitted } of admission.runtimeBindings) {
-      const row = current.inputs.rows.find((item) => item.capabilities.kind === admitted.capabilities.kind && item.profileId === admitted.profileId);
-      const label = `${admitted.capabilities.kind} runtime ${admitted.profileId}`;
-      if (row === undefined) {
-        if (diagnostic !== undefined) diagnostic.runtimeChange = "unusable";
-        return reject(`the ${label} this round was admitted on is not ready now`);
-      }
-      if (canonicalJson(row) !== canonicalJson(admitted)) {
-        if (diagnostic !== undefined) diagnostic.runtimeChange = "requalified";
-        return reject(`the ${label} was requalified during the round (${changedRuntimeFields(row, admitted)})`);
-      }
-    }
-    const unchanged = applicationSelectionStillCurrent(recorded.data, current.selection);
-    if (!unchanged.ok) return reject(`application-selection-changed: ${unchanged.reason}`);
-    if (canonicalJson(admission.selectionInput.approvedSemanticApproval) !== canonicalJson(recorded.data.semanticApproval)
-      || canonicalJson(admission.selectionInput.setupApproval) !== canonicalJson(recorded.data.setupApproval)
-      || applicationIntentDigest(intent) !== recorded.data.intentDigest
-      || admission.intentDigest !== createHash("sha256").update(canonicalJson(admission.intent)).digest("hex")) return reject("canonical-approval-binding-mismatch");
-    const fences = await currentAuthorityFences(dependencies, task, { catalogKey, latestProject, setupApproval, policy, creatorAuthority, creatorAccess, creatorMembershipKey, developer }, reject);
-    if (fences === undefined) return false;
-    // Each runtime row the verdict rests on, exactly as read, sits between the project's fences and the creator's.
-    const authorityChecks = [...fences.base, ...current.conditions as Array<Record<string, unknown>>, ...fences.creator];
-    if (diagnostic !== undefined) diagnostic.authorityChecks = authorityChecks;
-    return true;
-  } catch (error) {
-    const detail = error instanceof Error ? error.message.replace(/[^A-Za-z0-9 _./:-]/gu, "?").slice(0, 120) : "unknown-error";
-    return reject(`current-authority-loader-exception:${stage}:${detail || "empty-error"}`);
-  }
-}
-
-/** What moved in a runtime row that is not the admitted one: its generation if that did, else its expiry or qualification time, else that its record changed. */
-function changedRuntimeFields(now: E2ERegisteredRuntime, admitted: E2ERegisteredRuntime): string {
-  const moved = (["generation", "expiresAt", "qualifiedAt"] as const).find((field) => now[field] !== admitted[field]);
-  if (moved === undefined) return "another field of its record changed";
-  return moved === "generation" ? `generation ${now.generation} now, ${admitted.generation} when admitted` : `${moved} now ${now[moved]}, ${admitted[moved]} when admitted`;
-}
-
-async function workflowE2ECreatorAuthorityProof(
-  dependencies: AwsBrokerDependencies,
-  task: DeveloperTaskRecord,
-  membership: Record<string, unknown> | undefined,
-  access: Awaited<ReturnType<typeof checkProjectAccess>>,
-): Promise<({ kind: "direct-membership"; developerId: string; project: string; role: "developer" | "administrator"; grantId: string }
-  | { kind: "channel-access"; developerId: string; project: string; teamId: string; channelIds: string[]; bindings: Array<{ channelId: string; updatedAt: string }> }) | undefined> {
-  if (membership?.entityType === "MEMBERSHIP" && membership.ownerKey === task.developerId && membership.projectName === task.project
-    && (membership.role === "developer" || membership.role === "administrator") && typeof membership.grantId === "string"
-    && /^[0-9a-f-]{36}$/iu.test(membership.grantId)) {
-    return { kind: "direct-membership", developerId: task.developerId, project: task.project, role: membership.role, grantId: membership.grantId };
-  }
-  if (access.access !== "channel" || dependencies.developer?.slackTeamId === undefined || access.channelIds.length === 0) return undefined;
-  const teamId = dependencies.developer.slackTeamId;
-  const channelIds = [...new Set(access.channelIds)].sort();
-  const bindings: Array<{ channelId: string; updatedAt: string }> = [];
-  for (const channelId of channelIds) {
-    const row = await getItem<Record<string, unknown>>(dependencies, slackBindingKey(teamId, channelId));
-    if (row?.teamId !== teamId || row.channelId !== channelId || row.projectName !== task.project
-      || typeof row.updatedAt !== "string" || row.updatedAt.length === 0) return undefined;
-    bindings.push({ channelId, updatedAt: row.updatedAt });
-  }
-  return { kind: "channel-access", developerId: task.developerId, project: task.project, teamId, channelIds, bindings };
-}
-
-function sameE2ESourceSnapshot(left: E2ESourceSnapshot, right: E2ESourceSnapshot): boolean {
-  if (canonicalJson(left.candidate) !== canonicalJson(right.candidate) || left.commitSha !== right.commitSha || left.treeSha !== right.treeSha
-    || left.treeComplete !== right.treeComplete || canonicalJson(left.treePaths) !== canonicalJson(right.treePaths)
-    || left.sources.length !== right.sources.length) return false;
-  const rightByPath = new Map(right.sources.map((source) => [source.path, source]));
-  return left.sources.every((source) => {
-    const actual = rightByPath.get(source.path);
-    return actual !== undefined && source.sha256 === actual.sha256 && source.kind === actual.kind
-      && Buffer.from(source.bytes).equals(Buffer.from(actual.bytes));
-  });
-}
-
-async function coreApplicationTask(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord) {
-  const core = dependencies.core;
-  const companyId = storedCompanyOf(task);
-  if (core === undefined || companyId === undefined) return undefined;
-  const registry = await core.app.registry();
-  if (await core.app.engineOfTask(registry.require("storage"), task.taskId, "flow") !== "core") return undefined;
-  const flow = (await core.app.runtimeFor(companyId)).flow.deps;
-  const stored = await flow.store.get({ pk: `DEVTASK#${task.taskId}`, sk: "META" }) as unknown as CoreApplicationTaskRecord | undefined;
-  if (stored?.companyId !== companyId || stored.workflow === undefined || flow.applicationE2E === undefined) throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
-  return { task: { ...stored, workflow: stored.workflow }, seams: flow.applicationE2E };
-}
-
-/** Builds task projections only after reloading and independently qualifying the stored current CHECKS evidence. */
-async function workflowE2EPresentation(
-  dependencies: AwsBrokerDependencies,
-  task: DeveloperTaskRecord,
-  operations: readonly unknown[],
-  actor: "owner" | "viewer",
-  /** A CHECKS operation whose terminal state is being written by the caller and is not yet in its stored record. */
-  ending?: { operationId: string; status: "SUCCEEDED" | "FAILED" },
-): Promise<NonNullable<DeveloperTaskView["e2ePresentation"]> | undefined> {
-  const core = await coreApplicationTask(dependencies, task);
-  if (core !== undefined) return (await core.seams.results.read(core.task, actor))?.presentation;
-  return (await workflowE2EPresentationDetailed(dependencies, task, operations, actor, ending))?.presentation;
-}
-
-/** The page HTML and Slack blocks of a presentation with the rows added: the rows' section joins the page HTML only while the whole stays within the presentation's bound. */
-function presentationWithResults(taskId: string, shared: E2ESharedView, results: E2EScenarioResults | undefined): { pageHtml: string; slackBlocks: unknown[] } {
-  const artifactPath = (sha256: string) => `/review/${taskId}/task/api/e2e/artifacts/${sha256}`;
-  const base = renderE2EPageHtml(shared);
-  const candidates = results === undefined ? [] : [results, ...(results.baseline === undefined ? [] : [{ scenarios: results.scenarios }])];
-  const section = candidates.map((candidate) => renderE2EScenarioRowsHtml(candidate, { artifactPath })).find((html) => base.length + html.length <= 65_536) ?? "";
-  return { pageHtml: `${base}${section}`, slackBlocks: [...(results === undefined ? [] : renderE2EScenarioSlackBlocks(results)), ...renderE2ESlackBlocks(shared)].slice(0, 16) };
-}
-
-/**
- * The presentation of a task's current browser and API or portable round, and (for a browser and API round) its per-scenario rows and the screenshots behind them. The rows
- * are derived by the verification from evidence the broker re-collected itself; the baseline, when there is one, is the record of the informational round on the unchanged code.
- */
-async function workflowE2EPresentationDetailed(
-  dependencies: AwsBrokerDependencies,
-  task: DeveloperTaskRecord,
-  operations: readonly unknown[],
-  actor: "owner" | "viewer",
-  ending?: { operationId: string; status: "SUCCEEDED" | "FAILED" },
-): Promise<{ presentation: NonNullable<DeveloperTaskView["e2ePresentation"]>; scenarioResults?: E2EScenarioResults; artifacts: readonly DisplayArtifact[] } | undefined> {
-  const workflow = task.workflow;
-  const progress = workflow?.e2e;
-  const candidateResult = CandidateManifestSchema.safeParse(workflow?.candidate);
-  if (workflow === undefined || progress?.required !== true
-    || candidateResult.success !== true || candidateResult.data.digest !== workflow.candidate?.digest) return undefined;
-  if (task.closedAt !== undefined) {
-    const qualified = progress.qualifiedRound;
-    const failed = progress.failedRound;
-    const round = qualified ?? failed;
-    const roundMatchesClosedTask = round !== undefined && round.candidateDigest === candidateResult.data.digest
-      && round.roundId === progress.currentRoundId && round.groupRunIds.length === progress.currentGroupRunIds.length
-      && round.groupRunIds.every((runId, index) => runId === progress.currentGroupRunIds[index]);
-    let captured: Awaited<ReturnType<typeof readWorkflowE2ENotifierProjection>>;
-    if (roundMatchesClosedTask && round !== undefined && progress.displayRef !== undefined) {
-      captured = await readWorkflowE2ENotifierProjection({
-        ref: progress.displayRef, ownerKey: task.ownerKey, workspaceId: task.workspaceId,
-        current: { candidateDigest: round.candidateDigest, roundId: round.roundId, groupRunIds: [...round.groupRunIds],
-          admissionSha256: round.admissionSha256, evidenceSha256: round.evidenceSha256 },
-        readPrivateObject: async (key, maxBytes) => {
-          try {
-            const object = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: key })) as { ContentLength?: number; Body?: { transformToByteArray(): Promise<Uint8Array> } };
-            if (!Number.isSafeInteger(object.ContentLength) || object.ContentLength! > maxBytes) return undefined;
-            const bytes = await object.Body?.transformToByteArray();
-            return bytes !== undefined && bytes.byteLength === object.ContentLength && bytes.byteLength <= maxBytes ? bytes : undefined;
-          } catch { return undefined; }
-        },
-      });
-    }
-    const current = E2ESharedViewSchema.parse({ schemaVersion: 1,
-      setup: { status: "unavailable", selectedTargetIds: [], executionPlanDigest: null, blockingInputIds: [], mockSubstitutableInputIds: [] },
-      e2e: { status: "UNKNOWN", label: "Current eligibility unavailable: task closed.", executionPlanDigest: null,
-        expectedGroups: 0, receivedGroups: 0, executedCases: 0, qualifiedCriteria: 0, requiredCriteria: 0,
-        unavailableCriteria: 0, optionalUnavailableCriteria: 0, mockedComponentIds: [], observedMockedComponentIds: [],
-        unexercisedBehaviors: [], policyPresence: "absent", workflowPhase: "closed", requiredUnexercisedCriteriaIds: [] }, actions: [] });
-    const historyMatchesCloseTime = captured !== undefined && Date.parse(captured.capturedAt) <= Date.parse(task.closedAt);
-    const history = historyMatchesCloseTime && captured !== undefined && (qualified !== undefined ? captured.view.e2e.status === "PASS"
-      : failed !== undefined && captured.view.e2e.status === "FAILED") ? captured : undefined;
-    const historicalHtml = history === undefined ? "" : `<section aria-labelledby="e2e-historical-${history.roundId}"><h2 id="e2e-historical-${history.roundId}">Recorded historical E2E result</h2><p>Recorded ${history.view.e2e.status} at ${history.capturedAt}; this is not current eligibility.</p>${renderE2EPageHtml(history.view).replaceAll("e2e-summary", `e2e-historical-summary-${history.roundId}`)}</section>`;
-    const scope = history === undefined
-      ? "Current eligibility unavailable: task closed. No verified historical E2E display is available."
-      : `Current eligibility unavailable: task closed. Recorded historical ${history.view.e2e.status} at ${history.capturedAt}, candidate ${history.candidateDigest}, round ${history.roundId}; groups ${history.view.e2e.receivedGroups}/${history.view.e2e.expectedGroups}, cases ${history.view.e2e.executedCases}, criteria ${history.view.e2e.qualifiedCriteria}/${history.view.e2e.requiredCriteria}; these counts are historical only.`;
-    const currentHtml = `<section aria-labelledby="e2e-current-eligibility"><h2 id="e2e-current-eligibility">Current E2E eligibility</h2><p>Unavailable because the task is closed. No current run counts are available.</p></section>`;
-    const currentSlack = { type: "section", text: { type: "mrkdwn", text: "*Current E2E eligibility: UNKNOWN*\nTask closed. No current run counts are available." } };
-    // A closed task keeps showing the rows its display recorded, as history: they are not current eligibility either.
-    const recordedRows = history?.scenarioResults;
-    const recordedRowsHtml = recordedRows === undefined ? "" : renderE2EScenarioRowsHtml(recordedRows, { artifactPath: (sha256) => `/review/${task.taskId}/task/api/e2e/artifacts/${sha256}` });
-    const closedPageHtml = `${currentHtml}${historicalHtml}`;
-    return { presentation: { shared: current,
-      slackBlocks: [currentSlack, ...(history === undefined ? [] : renderE2ENotifierSlackBlocks(history.view,
-        { candidateDigest: history.candidateDigest, roundId: history.roundId, capturedAt: history.capturedAt, ...(recordedRows === undefined ? {} : { scenarioResults: recordedRows }) }))].slice(0, 16),
-      pageHtml: (closedPageHtml.length + recordedRowsHtml.length <= 65_536 ? `${closedPageHtml}${recordedRowsHtml}` : closedPageHtml).slice(0, 65_536),
-      mcp: { ...renderE2EMcpProjection(current), scope: `${renderE2EMcpProjection(current).scope} ${scope}`.slice(0, 2_000) } },
-      ...(recordedRows === undefined ? {} : { scenarioResults: recordedRows }), artifacts: [] };
-  }
-  const failedRound = progress.failedRound;
-  const staleFailure = workflow.stage === "IMPLEMENT" && failedRound?.status === "FAILED"
-    && failedRound.candidateDigest === candidateResult.data.digest;
-  const presentationRoundId = staleFailure ? failedRound.roundId : progress.currentRoundId;
-  if (presentationRoundId === undefined) return undefined;
-  for (const raw of operations) {
-    if (typeof raw !== "object" || raw === null || !("id" in raw) || typeof raw.id !== "string" || !("workflowMode" in raw) || raw.workflowMode !== "CHECKS") continue;
-    const operation = await getItem<OperationRecord>(dependencies, operationKey(task.workspaceId, raw.id));
-    const admission = operation?.workflowE2EAdmission;
-    if (operation === undefined || operation.kind !== "task" || operation.workflowMode !== "CHECKS" || admission === undefined
-      || admission.taskId !== task.taskId || admission.roundId !== presentationRoundId
-      || admission.candidateDigest !== candidateResult.data.digest
-      || operation.workflowE2EEvidenceRef === undefined && (operation.workflowE2EGroupEvidenceRefs?.length ?? 0) === 0) continue;
-    if (staleFailure && (operation.workflowE2EEvidenceRef === undefined || failedRound.admissionSha256 !== admission.admissionRef.sha256
-      || failedRound.evidenceSha256 !== operation.workflowE2EEvidenceRef.sha256
-      || canonicalJson(failedRound.groupRunIds) !== canonicalJson(admission.groupRunIds))) continue;
-    const projection: WorkflowE2EProjection & { allowStaleProjection: boolean } = { results: [], allowStaleProjection: staleFailure };
-    await verifyWorkflowE2EEvidence(dependencies, operation, task, candidateResult.data, projection, undefined, ending?.operationId === operation.id ? { terminalStatus: ending.status } : undefined);
-    if (projection.plan === undefined || projection.round === undefined) return undefined;
-    const selectedTargetIds: string[] = [];
-    const plan = projection.plan as Record<string, unknown>;
-    if (typeof plan.digest !== "string" || !Array.isArray(plan.effectiveTargets)) return undefined;
-    for (const target of plan.effectiveTargets as unknown[]) {
-      if (typeof target !== "object" || target === null || Array.isArray(target)
-        || !("targetId" in target) || typeof target.targetId !== "string") return undefined;
-      selectedTargetIds.push(target.targetId);
-    }
-    const shared = buildE2ESharedView({
-      plan: projection.plan,
-      currentRound: projection.round,
-      // After SendBack the old receipts are retained for explanation, but they cannot qualify the new candidate.
-      // Keeping the authenticated plan and round with no current results preserves the obligation as UNKNOWN.
-      results: staleFailure ? [] : projection.results,
-      setup: { status: "unavailable", selectedTargetIds, executionPlanDigest: plan.digest, blockingInputIds: [], mockSubstitutableInputIds: [] },
-      actor,
-      control: { policyPresent: true, workflowPhase: "e2e", ownerActionProposals: [] },
-    });
-    // The per-scenario rows of a browser and API round (display schema v2), shown for the task's current round only: after SendBack the old round's rows are not shown as
-    // current. The baseline is the informational record of the round on the unchanged code, read apart from this round and never able to change it.
-    const rows = staleFailure || projection.display === undefined || projection.display.scenarios.length === 0 ? undefined : projection.display;
-    const baseline = rows === undefined ? undefined : await readWorkflowE2EBaseline(dependencies, task).catch(() => undefined);
-    const scenarioResults: E2EScenarioResults | undefined = rows === undefined ? undefined : { scenarios: [...rows.scenarios], ...(baseline === undefined ? {} : { baseline }) };
-    const shown = presentationWithResults(task.taskId, shared, scenarioResults);
-    return { presentation: { shared, slackBlocks: shown.slackBlocks, pageHtml: shown.pageHtml, mcp: renderE2EMcpProjection(shared) },
-      ...(scenarioResults === undefined ? {} : { scenarioResults }), artifacts: rows?.artifacts ?? [] };
-  }
-  return undefined;
-}
-
-/**
- * The per-scenario rows of the task's current browser and API round (and the baseline round's), for the task page. Read-only; undefined when the task has none.
- * The rows are those of the stored display, which the result callback wrote from the broker's own verification when the round ended: the page does not verify the evidence
- * again on every render, every link on it is one the artifact route serves (the screenshots were stored before the display that names them), and a baseline recorded after
- * the display shows from the next display. A closed task keeps its recorded rows through the presentation, which reads the same display.
- */
-export async function loadWorkflowE2EScenarioResults(
-  dependencies: AwsBrokerDependencies,
-  task: DeveloperTaskRecord,
-  operations: readonly unknown[],
-  actor: "owner" | "viewer" = "viewer",
-): Promise<E2EScenarioResults | undefined> {
-  const core = await coreApplicationTask(dependencies, task);
-  if (core !== undefined) return (await core.seams.results.read(core.task, actor))?.scenarioResults;
-  if (task.closedAt !== undefined) return (await workflowE2EPresentationDetailed(dependencies, task, operations, actor))?.scenarioResults;
-  const stored = await loadStoredScenarioResults({ s3: dependencies.s3, artifactBucketName: dependencies.artifactBucketName }, task);
-  // M1.3 Task 3.7b: the baseline round has a record of its own and runs before the candidate's, so it shows as soon as it is recorded, or known not to have run, whether or not the
-  // candidate's round has a single row yet. The record is the baseline's truth: a display written earlier may not carry it.
-  const baseline = await readWorkflowE2EBaseline(dependencies, task).catch(() => undefined);
-  if (stored === undefined && baseline === undefined) return undefined;
-  return { scenarios: stored?.scenarios ?? [], ...((baseline ?? stored?.baseline) === undefined ? {} : { baseline: (baseline ?? stored?.baseline)! }) };
-}
-
-/** A screenshot behind a row of the task's current display, by its digest; undefined for a digest the display does not name. The caller has already checked who may read it. */
-export async function loadWorkflowE2EArtifact(
-  dependencies: AwsBrokerDependencies,
-  task: DeveloperTaskRecord,
-  sha256: string,
-): Promise<{ contentType: "image/jpeg"; bytes: Uint8Array } | undefined> {
-  const core = await coreApplicationTask(dependencies, task);
-  if (core !== undefined) return core.seams.results.artifact(core.task, sha256);
-  const baseline = await readWorkflowE2EBaseline(dependencies, task).catch(() => undefined);
-  return loadStoredWorkflowE2EArtifact({ s3: dependencies.s3, artifactBucketName: dependencies.artifactBucketName }, task, sha256, baseline === undefined ? {} : { baseline });
-}
-
-/** Reloads the exact current CHECKS evidence for publication and returns its final-effect fences. */
-async function workflowE2EPublicationChecks(
-  dependencies: AwsBrokerDependencies,
-  task: DeveloperTaskRecord,
-  operations: readonly unknown[],
-): Promise<TransactItems | undefined> {
-  if (task.workflow?.e2e?.required !== true) return [];
-  const candidate = CandidateManifestSchema.safeParse(task.workflow.candidate);
-  const roundId = task.workflow.e2e.currentRoundId;
-  if (!candidate.success || roundId === undefined || task.closedAt !== undefined) return undefined;
-  const candidates = operations.flatMap((raw) => {
-    if (typeof raw !== "object" || raw === null || !("id" in raw) || typeof raw.id !== "string") return [];
-    return [raw.id];
-  });
-  const checks: OperationRecord[] = [];
-  for (const id of candidates) {
-    const operation = await getItem<OperationRecord>(dependencies, operationKey(task.workspaceId, id));
-    if (operation?.entityType === "OPERATION" && operation.kind === "task" && operation.workflowMode === "CHECKS"
-      && operation.workflowE2EAdmission?.taskId === task.taskId && operation.workflowE2EAdmission.roundId === roundId
-      && operation.workflowE2EAdmission.candidateDigest === candidate.data.digest && operation.workflowE2EEvidenceRef !== undefined) checks.push(operation);
-  }
-  checks.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
-  const operation = checks[0];
-  if (operation === undefined) return undefined;
-  const diagnostic: WorkflowE2EVerificationDiagnostic = {};
-  if (await verifyWorkflowE2EEvidence(dependencies, operation, task, candidate.data, undefined, diagnostic) !== "PASS"
-    || diagnostic.authorityChecks === undefined || diagnostic.authorityChecks.length === 0) return undefined;
-  return diagnostic.authorityChecks;
-}
-
-/** Shared loader for authenticated task detail, page, and notifier projections. */
-export async function loadWorkflowE2EPresentation(
-  dependencies: AwsBrokerDependencies,
-  task: DeveloperTaskRecord,
-  operations: readonly unknown[],
-  actor: "owner" | "viewer" = "viewer",
-): Promise<NonNullable<DeveloperTaskView["e2ePresentation"]> | undefined> {
+export function loadWorkflowE2EPresentation(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, operations: readonly unknown[], actor: "owner" | "viewer" = "viewer") {
   return workflowE2EPresentation(dependencies, task, operations, actor);
 }
 
-/** The final-effect fences publication takes from the current CHECKS evidence, or undefined when that evidence does not qualify (publication is then STALE). */
-export async function loadWorkflowE2EPublicationChecks(
-  dependencies: AwsBrokerDependencies,
-  task: DeveloperTaskRecord,
-  operations: readonly unknown[],
-): Promise<TransactItems | undefined> {
+export function loadWorkflowE2EPublicationChecks(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, operations: readonly unknown[]) {
   return workflowE2EPublicationChecks(dependencies, task, operations);
 }
 
@@ -11606,7 +9088,6 @@ function isWorkflowMergeRecoveryEvent(event: unknown): event is { source: "agent
   return event !== null && typeof event === "object" && (event as { source?: unknown }).source === "agentx.workflow-merge-recovery";
 }
 
-
 const WORKFLOW_DISPATCH_SWEEP_LIMIT = 25;
 const PLAN_EVIDENCE_SWEEP_LIMIT = 25;
 /** After this many failed runs the task is blocked with a plain reason and the owner's Retry reviews (or Retry opening the pull request) takes over. */
@@ -11617,7 +9098,6 @@ const WORKFLOW_DISPATCH_MAX_BACKOFF_MINUTES = 15;
 function workflowDispatchBackoffMinutes(attempts: number): number {
   return Math.min(2 ** Math.max(attempts - 1, 0), WORKFLOW_DISPATCH_MAX_BACKOFF_MINUTES);
 }
-
 
 /**
  * A failed run: count it and push the row's due time back, or at the cap delete the row and block the task with a
@@ -12188,18 +9668,6 @@ async function runAutofixDispatch(dependencies: AwsBrokerDependencies, item: Acc
   return "RETRY";
 }
 
-/** Reads the original creator from its authoritative, separately scoped sign-in table. */
-async function getWorkflowE2ECreatorIdentity(dependencies: AwsBrokerDependencies, developerId: string): Promise<Pick<DeveloperRecord, "revoked" | "slackUserId"> & { entityType?: unknown } | undefined> {
-  const signInTableName = dependencies.developer?.signInTableName;
-  if (signInTableName === undefined) return undefined;
-  const response = await dependencies.documentClient.send(new GetCommand({
-    TableName: signInTableName,
-    Key: { pk: `DEVELOPER#${developerId}`, sk: "META" },
-    ConsistentRead: true,
-  })) as unknown as { Item?: Pick<DeveloperRecord, "revoked" | "slackUserId"> & { entityType?: unknown } };
-  return response.Item?.entityType === "DEVELOPER" ? response.Item : undefined;
-}
-
 /**
  * Ruling AL, dispatch half: derives the approved application selection again from the approved setup and the runtime rows READY right now, and refuses
  * (a terminal ApplicationDispatchRefusal that blocks the workflow with its reason) when anything differs from what the Owner approved. The block text begins with
@@ -12231,15 +9699,6 @@ const isNonCandidateRound = (reference: { purpose?: "baseline" | "replay" | "gro
 
 const NO_COMMITTED_EXPORT_REASON = "the candidate has no committed source export, so there is no source to build and run";
 const NO_BUILD_SOURCE_REASON = "no build source manifest was exported for this candidate";
-
-/** The newest IMPLEMENT operation that exported the given candidate's committed source (its `candidateSourceRef` names the candidate). */
-async function candidateSourceOperation(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, candidateDigest: string): Promise<OperationRecord | undefined> {
-  return (await queryAllItems(dependencies, `WORKSPACE#${task.workspaceId}`, "OPERATION#"))
-    .filter((item) => item.entityType === "OPERATION" && item.kind === "task" && item.workflowMode === "IMPLEMENT")
-    .map((item) => item as unknown as OperationRecord)
-    .filter((operation) => operation.candidateSourceRef?.candidateDigest === candidateDigest)
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
-}
 
 /**
  * The build source the worker exported for the candidate and the broker judged (Task 2.4b), as the IMPLEMENT operation records it: READY, or a refusal with its
@@ -12761,7 +10220,6 @@ async function startReplayApplicationRound(
 
 /** How long a replay that was asked for and never started holds the next attempt back. */
 const REPLAY_REQUEST_GRACE_MS = 10 * 60_000;
-
 
 /**
  * Loads the task's qualified round by the content addresses `qualifiedRound` binds (its admission and its evidence), verifies it again as the broker verified it, with the registry's own
@@ -13337,32 +10795,6 @@ async function completedPullRequestUpdateItems(
   // More pull requests to go: the next push is due, as the first one was after the reviews.
   ...(next.stage === "PULL_REQUEST" && next.state === "READY" && next.candidate !== undefined
     ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, "UPDATE", next.candidate.digest, now)] : [])];
-}
-
-async function readStoredCandidateSourceExport(
-  dependencies: AwsBrokerDependencies,
-  reference: NonNullable<OperationRecord["candidateSourceRef"]>,
-): Promise<z.infer<ReturnType<typeof workflowCandidateSourceExportSchema>> | undefined> {
-  if (reference.byteLength <= 0 || reference.byteLength > MAX_WORKFLOW_CANDIDATE_EXPORT_BYTES || !/^[a-f0-9]{64}$/.test(reference.sha256)) return undefined;
-  const text = await readStoredText(dependencies.s3, dependencies.artifactBucketName, reference.key, MAX_WORKFLOW_CANDIDATE_EXPORT_BYTES);
-  if (text === undefined) return undefined;
-  const bytes = Buffer.from(text, "utf8");
-  if (bytes.byteLength !== reference.byteLength || createHash("sha256").update(bytes).digest("hex") !== reference.sha256) return undefined;
-  const parsed = workflowCandidateSourceExportSchema().safeParse(JSON.parse(text) as unknown);
-  return parsed.success ? parsed.data : undefined;
-}
-
-async function loadWorkflowCandidateSourceExport(
-  dependencies: AwsBrokerDependencies,
-  operation: OperationRecord,
-  expectedCandidate: ReturnType<typeof createCandidateManifest>,
-): Promise<z.infer<ReturnType<typeof workflowCandidateSourceExportSchema>> | undefined> {
-  const reference = operation.candidateSourceRef;
-  if (!reference || reference.candidateDigest !== expectedCandidate.digest) return undefined;
-  const parsed = await readStoredCandidateSourceExport(dependencies, reference);
-  if (parsed === undefined || parsed.candidate.digest !== expectedCandidate.digest
-    || canonicalJson(parsed.candidate) !== canonicalJson(expectedCandidate)) return undefined;
-  return parsed;
 }
 
 type WorkflowTaskRecord = DeveloperTaskRecord & { workflow: WorkflowSnapshot };
@@ -14920,50 +12352,6 @@ async function getAuthorizedOperation(
   return publicOperation(operation);
 }
 
-/** An operation a developer started from an AI tool (FR-022), rather than from Slack. */
-function developerRequested(operation: Pick<OperationRecord, "requestedBy">): boolean {
-  const requester = operation.requestedBy;
-  return requester !== undefined && "kind" in requester && requester.kind === "developer";
-}
-
-async function requireOwnedWorkspace(
-  dependencies: AwsBrokerDependencies,
-  identity: AuthenticatedIdentity,
-  workspaceId: string,
-): Promise<WorkspaceInstance> {
-  const workspace = await requireWorkspace(dependencies, workspaceId);
-  if (workspace.ownerKey !== identity.ownerKey) throw agentXError("NOT_FOUND", "workspace not found");
-  return workspace;
-}
-
-async function requireWorkspace(dependencies: AwsBrokerDependencies, workspaceId: string): Promise<WorkspaceInstance> {
-  // Lane E2: a core task's workspace is not the workflow's to read or act on (engine-boundary.ts); it answers like a missing one.
-  if (await ownerOfWorkspace(dependencies, workspaceId) === "core") throw agentXError("NOT_FOUND", "workspace not found");
-  const item = await getItem<Record<string, unknown>>(dependencies, workspaceKey(workspaceId));
-  if (!item) throw agentXError("NOT_FOUND", "workspace not found");
-  return WorkspaceInstanceSchema.parse(workspaceRecordFields(item));
-}
-
-async function getDefaultWorkspace(
-  dependencies: AwsBrokerDependencies,
-  ownerKey: string,
-  projectName: string,
-): Promise<WorkspaceInstance | undefined> {
-  const mapping = await getItem<{ workspaceId: string }>(dependencies, {
-    pk: `OWNER#${ownerKey}`,
-    sk: `PROJECT#${projectName}`,
-  });
-  return mapping ? requireWorkspace(dependencies, mapping.workspaceId) : undefined;
-}
-
-async function getThreadWorkspace(
-  dependencies: AwsBrokerDependencies,
-  ownerKey: string,
-): Promise<WorkspaceInstance | undefined> {
-  const thread = await getItem<{ workspaceId?: string }>(dependencies, slackThreadKey(ownerKey));
-  return typeof thread?.workspaceId === "string" ? requireWorkspace(dependencies, thread.workspaceId) : undefined;
-}
-
 /**
  * The definition a publication or maintenance run works from: the workspace's own revision for
  * everything that touches its disk, and the project's latest registered revision for the settings
@@ -15000,9 +12388,6 @@ async function publicationProject(
 function linkingRouteDependencies(dependencies: AwsBrokerDependencies, linking: DeveloperApiConfiguration) {
   return { documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: linking, now: Date.now, ...(linking.companies === undefined ? {} : { companies: linking.companies }), ...channelLinkRouteDependencies(dependencies), ...clientProjectRouteDependencies(dependencies) };
 }
-
-/** What a chat agent is told about a project a sign-in client created; the project's administrators refine it later. */
-const CLIENT_PROJECT_INSTRUCTIONS = "Delegate every repository read, edit, shell command, build and test to the remote AgentX worker. Before reporting a change done, run the project's test commands.";
 
 /** Spec 065b: a sign-in client's signed-in Rovara administrator creates a project from one GitHub repository. Guided onboarding PR 6: or from several, or one per repository. */
 function clientProjectRouteDependencies(brokerDependencies_: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "createClientProject" | "createClientProjects" | "createClientProjectsBulk" | "clientRepositories" | "clientRepositoryChoices" | "companyProjectCreator" | "companyReads"> {
@@ -15131,377 +12516,6 @@ function clientProjectRouteDependencies(brokerDependencies_: AwsBrokerDependenci
   };
 }
 
-function slackCallerRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "workspaces" | "companies"> {
-  return { ...(dependencies.workspaces === undefined ? {} : { workspaces: dependencies.workspaces }), ...(dependencies.companies === undefined ? {} : { companies: dependencies.companies }) };
-}
-export function channelLinkRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "channelLinks" | "channelLinkCodes" | "workspaces" | "companies"> {
-  const channelAdapters = dependencies.channelAdapters;
-  if (dependencies.workspaces !== undefined) {
-    // L2-2 PR 18b: the company's Slack codes, then the install's adapter codes as before (the link page is served only by the company handler when company mode is on).
-    const install = channelAdapters === undefined ? undefined : { documentClient: dependencies.documentClient, stateTableName: dependencies.tableName, now: Date.now };
-    return { ...slackCallerRouteDependencies(dependencies), channelLinkCodes: companyThenInstallLinkCodes(
-      createSlackLinkCodes({ workspaces: dependencies.workspaces, store: dependencies.workspaces.store, companies: dependencies.companies }),
-      install === undefined ? undefined : installAdapterLinkCodes(install)) };
-  }
-  return channelAdapters === undefined ? {} : { channelLinks: { documentClient: dependencies.documentClient, stateTableName: dependencies.tableName, now: Date.now } };
-}
-
-/** Spec 062 Phase 4: what an adapter conversation's service identity is checked against. */
-function channelConversationDependencies(dependencies: AwsBrokerDependencies): ChannelConversationDependencies {
-  return {
-    getAdapter: (channel) => getChannelAdapter(dependencies, channel),
-    getBinding: (ref) => getChannelBinding(dependencies, ref),
-    linkedDeveloper: (actor) => linkedDeveloper({ documentClient: dependencies.documentClient, stateTableName: dependencies.tableName, now: Date.now }, actor),
-    getDeveloper: async (developerId) => {
-      const signInTableName = (dependencies.developer ?? dependencies.linking)?.signInTableName;
-      if (signInTableName === undefined) return undefined;
-      const response = await dependencies.documentClient.send(new GetCommand({ TableName: signInTableName, Key: { pk: `DEVELOPER#${developerId}`, sk: "META" }, ConsistentRead: true }));
-      const item = developerRecordKeyedBy(response.Item as Partial<DeveloperRecord> | undefined, developerId);
-      if (item === undefined || typeof item.developerId !== "string" || (item.provider !== "slack" && item.provider !== "oidc") || typeof item.displayName !== "string") return undefined;
-      return {
-        developerId: item.developerId, provider: item.provider, displayName: item.displayName, revoked: item.revoked === true,
-        ...(typeof item.slackUserId === "string" ? { slackUserId: item.slackUserId } : {}),
-      };
-    },
-  };
-}
-
-/** The ID a thread record's starter is compared with: the Slack member's, or the adapter actor's linked developer's. */
-function conversationStarterId(identity: AuthenticatedIdentity): string | undefined {
-  return identity.slack?.requester.userId ?? identity.channel?.developer.developerId;
-}
-
-/** The project a conversation's space is bound to: a Slack channel's or an adapter space's. */
-function conversationProjectName(identity: AuthenticatedIdentity): string | undefined {
-  return identity.slack?.binding.projectName ?? identity.channel?.projectName;
-}
-
-/** Spec 062: the channel adapter routes' dependencies; NOT_FOUND when the deployment has no channel adapters. */
-function channelAdapterDependencies(dependencies: AwsBrokerDependencies): ChannelAdapterDependencies {
-  const channelAdapters = dependencies.channelAdapters;
-  if (channelAdapters === undefined) throw agentXError("NOT_FOUND", "channel adapters are not enabled in this deployment");
-  return {
-    documentClient: dependencies.documentClient,
-    tableName: dependencies.tableName,
-    channelAdapters,
-    requireAdministrator: (identity, projectName) => requireAdministrator(dependencies, identity, projectName),
-    requireProject: async (projectName) => { await requireLatestProject(dependencies, projectName); },
-  };
-}
-
-async function requireLatestProject(
-  dependencies: AwsBrokerDependencies,
-  projectName: string,
-): Promise<RegisteredProjectRecord> {
-  // Revision sort keys are zero-padded, so the last key in descending order is the highest revision.
-  const response = await dependencies.documentClient.send(new QueryCommand({
-    TableName: dependencies.tableName,
-    KeyConditionExpression: "pk = :pk AND begins_with(sk, :revision)",
-    ExpressionAttributeValues: { ":pk": `PROJECT#${projectName}`, ":revision": "REV#" },
-    ScanIndexForward: false,
-    Limit: 1,
-    ConsistentRead: true,
-  }));
-  const project = response.Items?.[0] as RegisteredProjectRecord | undefined;
-  if (!project) throw agentXError("NOT_FOUND", "registered project not found");
-  return project;
-}
-
-function projectModelSelectionKey(projectName: string) {
-  return { pk: `PROJECT#${projectName}`, sk: "SELECTION" as const };
-}
-
-async function getProjectModels(
-  dependencies: AwsBrokerDependencies,
-  identity: AuthenticatedIdentity,
-): Promise<ProjectModelOptions> {
-  const projectName = conversationProjectName(identity);
-  if (!projectName) throw agentXError("FORBIDDEN", "a conversation's project binding is required");
-  const project = slackThreadOwnRow(identity, await requireLatestProject(dependencies, projectName));
-  const policy = project.definition.models;
-  if (!policy) throw agentXError("CONFIG_INVALID", "this project has no approved coding models; ask an administrator to configure models");
-  const selection = await getItem<ProjectModelSelectionRecord>(dependencies, projectModelSelectionKey(projectName));
-  const selected = selection === undefined
-    ? undefined
-    : policy.approved.find((candidate) => modelKey(candidate) === modelKey(selection.model));
-  const current = selected ?? approvedDefault(policy.default, policy.approved);
-  return ProjectModelOptionsSchema.parse({
-    projectName,
-    approved: policy.approved,
-    current,
-    source: selected === undefined ? "default" : "selection",
-  });
-}
-
-async function putProjectModel(
-  dependencies: AwsBrokerDependencies,
-  identity: AuthenticatedIdentity,
-  value: unknown,
-): Promise<ProjectModelOptions> {
-  if (dependencies.workspaces !== undefined && (identity.slack !== undefined || identity.channel?.ref.channel === SLACK_CHANNEL)) throw agentXError("FORBIDDEN", SLACK_WEB_SIGNIN_NOTICE);
-  const projectName = conversationProjectName(identity);
-  const requester = identity.slack?.requester ?? (identity.channel === undefined ? undefined : channelRequester(identity.channel));
-  if (!projectName || !requester) throw agentXError("FORBIDDEN", "a conversation's project binding and requester are required");
-  const requested = ProjectModelSelectionRequestSchema.parse(value);
-  const project = slackThreadOwnRow(identity, await requireLatestProject(dependencies, projectName));
-  const policy = project.definition.models;
-  if (!policy) throw agentXError("CONFIG_INVALID", "this project has no approved coding models; ask an administrator to configure models");
-  const selected = policy.approved.find((candidate) => modelKey(candidate) === modelKey(requested));
-  if (!selected) throw agentXError("CONFIG_INVALID", `model ${requested.provider}/${requested.modelId} is not approved for this project`);
-  const record: ProjectModelSelectionRecord = {
-    ...projectModelSelectionKey(projectName),
-    entityType: "PROJECT_MODEL_SELECTION",
-    model: { provider: selected.provider, modelId: selected.modelId },
-    updatedAt: new Date().toISOString(),
-    updatedBy: requester,
-  };
-  await dependencies.documentClient.send(new PutCommand({ TableName: dependencies.tableName, Item: record }));
-  return ProjectModelOptionsSchema.parse({
-    projectName,
-    approved: policy.approved,
-    current: selected,
-    source: "selection",
-  });
-}
-
-async function resolveProjectModel(
-  dependencies: AwsBrokerDependencies,
-  project: RegisteredProjectRecord,
-): Promise<{ model?: ModelSelection; diagnostic?: string }> {
-  const policy = project.definition.models;
-  if (!policy) return {};
-  const selection = await getItem<ProjectModelSelectionRecord>(dependencies, projectModelSelectionKey(project.definition.name));
-  const selected = selection === undefined
-    ? undefined
-    : policy.approved.find((candidate) => modelKey(candidate) === modelKey(selection.model));
-  const effective = selected ?? approvedDefault(policy.default, policy.approved);
-  return {
-    model: approvedSelection(effective),
-    ...(selection !== undefined && selected === undefined
-      ? { diagnostic: `The project's selected coding model ${selection.model.provider}/${selection.model.modelId} is no longer approved. This task uses the project default ${effective.provider}/${effective.modelId}.` }
-      : {}),
-  };
-}
-
-/** Spec 053: what a task or eval run runs: the approved entry's model and, only when it has one, its level. */
-function approvedSelection(model: ModelRef): ModelSelection {
-  return {
-    provider: model.provider,
-    modelId: model.modelId,
-    ...(model.thinkingLevel === undefined ? {} : { thinkingLevel: model.thinkingLevel }),
-  };
-}
-
-function approvedDefault(defaultModel: ModelRef, approved: readonly ModelRef[]): ModelRef {
-  const model = approved.find((candidate) => modelKey(candidate) === modelKey(defaultModel));
-  if (!model) throw agentXError("CONFIG_INVALID", "project default model is not approved");
-  return model;
-}
-
-async function requirePullRequest(
-  dependencies: AwsBrokerDependencies,
-  workspaceId: string,
-  repository: string,
-  number: number,
-): Promise<PullRequestRecord> {
-  const record = await getItem<PullRequestRecord>(dependencies, pullRequestKey(workspaceId, repository, number));
-  if (!record) throw agentXError("NOT_FOUND", "AgentX pull request record not found");
-  return record;
-}
-
-async function adoptLegacyPullRequest(
-  dependencies: AwsBrokerDependencies,
-  workspaceId: string,
-  repository: string,
-  repositoryUrl: string,
-  remote: Awaited<ReturnType<GitHubAppCredentialProvider["getPullRequest"]>>,
-): Promise<PullRequestRecord> {
-  const match = /^agentx\/([0-9a-f-]{36})$/iu.exec(remote.headBranch);
-  if (!match?.[1]) throw agentXError("NOT_FOUND", "pull request is not owned by this AgentX workspace");
-  const operation = await requireOperation(dependencies, workspaceId, match[1]);
-  if (
-    operation.kind !== "publish" || operation.status !== "SUCCEEDED" || !operation.publication ||
-    operation.publication.repository !== repository || operation.publication.repositoryUrl !== repositoryUrl ||
-    operation.publication.headBranch !== remote.headBranch || operation.publication.baseBranch !== remote.baseBranch
-  ) {
-    throw agentXError("NOT_FOUND", "pull request is not backed by a successful AgentX publication");
-  }
-  const record: PullRequestRecord = {
-    ...pullRequestKey(workspaceId, repository, remote.number),
-    entityType: "PULL_REQUEST",
-    workspaceId,
-    repository,
-    repositoryUrl,
-    number: remote.number,
-    url: remote.url,
-    state: remote.state,
-    headBranch: remote.headBranch,
-    baseBranch: remote.baseBranch,
-    expectedHeadCommit: remote.headCommit,
-    title: remote.title,
-    body: remote.body,
-    createdByOperationId: operation.id,
-    updatedAt: new Date().toISOString(),
-  };
-  await dependencies.documentClient.send(new PutCommand({ TableName: dependencies.tableName, Item: record }));
-  return record;
-}
-
-async function requireMembership(
-  dependencies: AwsBrokerDependencies,
-  ownerKey: string,
-  projectName: string,
-): Promise<MembershipRecord> {
-  // DEC 254zzz98 (one rule; review M1, the feature 007 and connector MCP routes): a grant is read beside the revision the route reads. Every caller here (the workflow
-  // workspace routes: resolveWorkspace's requireProject, the MCP routes' requireLatestProject, the workspace actions) reads the project's LEGACY revision `PROJECT#<name>`,
-  // so the grant is the legacy `MEMBER#<person>` row, whatever company a stamped legacy row names (as requireAdministratorGrant reads it). A named company's own-partition
-  // grant never opens a legacy revision here; a named company's revoke also removes its legacy row (admin-actions.ts revokeProjectAccess).
-  const membership = await getMembership(dependencies, ownerKey, projectName, undefined);
-  if (!membership) throw agentXError("NOT_FOUND", "project not found");
-  return membership;
-}
-
-/** DEC 254zzz80: a person's grant row, where `companyId` keeps grants (company-layout.ts: a named company's own partition, else the legacy row). A row naming another company is none. */
-async function getMembership(dependencies: AwsBrokerDependencies, ownerKey: string, projectName: string, companyId: string | undefined) {
-  const key = grantKeyFor(companyId, ownerKey, projectName);
-  const row = await getItem<MembershipRecord>(dependencies, key);
-  const company = namedCompany(companyId);
-  return row === undefined || company === undefined || (row.pk === key.pk && row.sk === key.sk && ownPartitionRow(row as unknown as Record<string, unknown>, company)) ? row : undefined;
-}
-
-/**
- * DEC 254zzz98 (one rule): a project's grants live where its revisions live. Where the revision's key is picked by a company (registration's `revisionKeyFor(companyId)`,
- * a task of a named company), that company picks the grant's layout too: a NAMED company's own partition, else the legacy keys (company-layout.ts `grantKeyFor`). A LEGACY
- * revision's grant is always the legacy row (LEGACY_REVISION_GRANT), whatever company a stamped legacy row names. No separate company-layer check here.
- */
-/**
- * DEC 254zzz98 (one rule; delta review M1): the grant beside a LEGACY revision (`PROJECT#<name>`, read by requireProject / requireLatestProject / the workflow paths) is the
- * legacy `MEMBER#<person>` row, whatever company a stamped legacy row names. Every legacy-revision reader, writer and fence (workspace preparation, thread workspaces, the
- * setup run's owner checks and terminal fence, requireMembership) keys its grant with this.
- */
-const LEGACY_REVISION_GRANT: undefined = undefined;
-
-function grantCompany(_dependencies: AwsBrokerDependencies, companyId: string | undefined): string | undefined {
-  return companyId;
-}
-
-/** The company a stored record names (`companyId`), or undefined (unstamped: the built-in company's). */
-function storedCompanyOf(record: unknown): string | undefined {
-  const company = (record as { companyId?: unknown } | undefined)?.companyId;
-  return typeof company === "string" ? company : undefined;
-}
-
-
-/**
- * A name-only admin project route's check: the claim, the name-keyed administrator grant, then (DEC 254zzz6 D2) a refusal when a named company also has a project of
- * that name (admin-name-collision.ts). The collision check runs last, so a caller without the grant gets exactly today's answers.
- */
-async function requireAdministrator(
-  dependencies: AwsBrokerDependencies,
-  identity: AuthenticatedIdentity,
-  projectName: string,
-): Promise<void> {
-  await requireAdministratorGrant(dependencies, identity, projectName);
-  await refuseNamedCompanyName({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, companies: adminCompanyReader(dependencies) }, identity.developer?.developerId ?? identity.ownerKey, projectName);
-}
-
-/** The claim and the name-keyed administrator grant only. Only for a caller that binds the grant to a company itself (the core's administrator stop, core-stop-entry.ts). */
-async function requireAdministratorGrant(
-  dependencies: AwsBrokerDependencies,
-  identity: AuthenticatedIdentity,
-  projectName: string,
-): Promise<void> {
-  if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-  // The name-keyed (legacy) grant, as DEC 254zzz6 D2 describes these name-only admin routes: a named company's own-partition grant is never read here, and a name a named
-  // company uses is refused by the collision check (requireAdministrator), never served.
-  const membership = await getMembership(dependencies, identity.ownerKey, projectName, undefined);
-  if (!membership) throw agentXError("NOT_FOUND", "project not found");
-  if (membership.role !== "administrator") throw agentXError("FORBIDDEN", "administrator project membership is required");
-}
-
-/** Spec 043: the SWE-bench module's dependencies, from the broker's; spec 052 wires its batches into them. */
-function swebenchDependencies(dependencies: AwsBrokerDependencies): EvalBatchDependencies {
-  const swebench = dependencies.swebench;
-  if (swebench === undefined) throw agentXError("NOT_FOUND", "SWE-bench runs are not available in this deployment");
-  return withEvalBatches({
-    documentClient: dependencies.documentClient,
-    s3: dependencies.s3,
-    tableName: dependencies.tableName,
-    artifactBucketName: dependencies.artifactBucketName,
-    callbackSigningKey: dependencies.callbackSigningKey,
-    ...swebench,
-  });
-}
-
-/** The thread, requester and project model a SWE-bench run takes from the Slack service identity. */
-function swebenchSlackContext(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity): SwebenchSlackContext {
-  const slack = identity.slack;
-  if (!slack) throw agentXError("FORBIDDEN", "Slack thread context is required");
-  return { thread: slack.thread, requester: slack.requester, ...swebenchProjectContext(dependencies, slack.binding) };
-}
-
-/** The project and its approved models, for a run or batch whose thread and requester the caller supplies. */
-function swebenchProjectContext(dependencies: AwsBrokerDependencies, binding: SlackChannelBinding): Pick<SwebenchSlackContext, "projectName" | "projectModel"> {
-  const projectName = binding.projectName;
-  return {
-    projectName,
-    projectModel: async (requested) => {
-      const project = bindingOwnRow(binding, await requireLatestProject(dependencies, projectName));
-      const policy = project.definition.models;
-      if (requested !== undefined) {
-        const approved = policy?.approved.find((candidate) => modelKey(candidate) === modelKey(requested));
-        if (!approved) throw agentXError("CONFIG_INVALID", `model ${requested.provider}/${requested.modelId} is not approved for this project`);
-        return approvedSelection(approved);
-      }
-      return (await resolveProjectModel(dependencies, project)).model;
-    },
-  };
-}
-
-/** Spec 052 FR-001: an administrator of the channel's project starts a batch from a file. */
-async function routeStartEvalBatch(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, value: unknown): Promise<unknown> {
-  const body = parseStartBody(value);
-  const binding = await getSlackBinding(dependencies, body.teamId, body.channelId);
-  if (!binding) throw agentXError("NOT_FOUND", "Slack channel binding not found; bind the channel to a project first");
-  await requireAdministrator(dependencies, identity, binding.projectName);
-  return startBatch(swebenchDependencies(dependencies), swebenchProjectContext(dependencies, binding), body);
-}
-
-/** Spec 052 FR-009, FR-010: show, stop or read the results of a batch, for an administrator of its channel's project. */
-async function routeEvalBatch(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, batchId: string, action: "show" | "stop" | "results"): Promise<unknown> {
-  // The admin claim first, so a non-administrator learns nothing about which batch IDs exist.
-  if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-  const swebench = swebenchDependencies(dependencies);
-  // The project stored on the batch, not the channel's current binding: a rebound channel does not hand over old batches.
-  await requireAdministrator(dependencies, identity, await requireBatchProject(swebench, batchId));
-  if (action === "stop") return stopBatchById(swebench, batchId);
-  return action === "results" ? batchResults(swebench, batchId) : showBatch(swebench, batchId);
-}
-
-/** Spec 043 FR-002: an administrator of the channel's project enables, reads or disables SWE-bench runs there. */
-async function routeSwebenchChannel(
-  dependencies: AwsBrokerDependencies,
-  identity: AuthenticatedIdentity,
-  method: "PUT" | "DELETE" | "GET",
-  teamIdValue: string,
-  channelIdValue: string,
-  body: unknown,
-): Promise<unknown> {
-  const teamId = SlackTeamIdSchema.parse(decodeURIComponent(teamIdValue));
-  const channelId = SlackChannelIdSchema.parse(decodeURIComponent(channelIdValue));
-  const binding = await getSlackBinding(dependencies, teamId, channelId);
-  if (!binding) throw agentXError("NOT_FOUND", "Slack channel binding not found; bind the channel to a project first");
-  await requireAdministrator(dependencies, identity, binding.projectName);
-  const swebench = swebenchDependencies(dependencies);
-  if (method === "PUT") return { channel: await putSwebenchChannel(swebench, teamId, channelId, body), projectName: binding.projectName };
-  if (method === "DELETE") return deleteSwebenchChannel(swebench, teamId, channelId);
-  const channel = await getSwebenchChannel(swebench, teamId, channelId);
-  if (!channel) throw agentXError("NOT_FOUND", "SWE-bench runs are not enabled in this channel");
-  return { channel, projectName: binding.projectName };
-}
-
-const TASK_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
 /**
  * Spec 025 C25: the admin claim first, so a non-admin learns nothing about task IDs; then the task;
  * then the administrator membership on the task's project (FR-015). The audit record names the
@@ -15596,144 +12610,6 @@ async function adminTaskE2EReplay(dependencies: AwsBrokerDependencies, identity:
     admin: { issuer: identity.issuer, subject: identity.subject, ownerKey: identity.ownerKey, ...(claimed === undefined ? {} : { displayName: claimed.trim() }) } }) };
 }
 
-/** What the operator reads of a replay record: its state, when, and the broker's own result; never an id of an operation or an object. */
-function replayRecordView(record: ReplayRecord) {
-  return { attempt: record.attempt, state: record.state, requestedAt: record.requestedAt, ...(record.startedAt === undefined ? {} : { startedAt: record.startedAt }),
-    ...(record.recordedAt === undefined ? {} : { recordedAt: record.recordedAt }), ...(record.reason === undefined ? {} : { reason: record.reason }), ...(record.replay === undefined ? {} : { replay: record.replay }) };
-}
-
-/** Whether closing a workspace of this mode deletes its storage. */
-function closeReleasesStorage(workspace: WorkspaceInstance): boolean {
-  switch (workspace.deploymentMode) {
-    case "instances-ebs":
-    case "ec2-ebs":
-      return true;
-    case "demo-microvm":
-      return false;
-    default:
-      return unhandledDeploymentMode(workspace);
-  }
-}
-
-/** The workspace fields a project's runtime binding fixes. An ec2-ebs workspace keeps only its mode. */
-function workspaceRuntime(runtimeBinding: RuntimeBinding) {
-  switch (runtimeBinding.deploymentMode) {
-    case "instances-ebs":
-    case "demo-microvm":
-      throw agentXError("CONFIG_INVALID", "retired project revision cannot create workspaces; register an ec2-ebs revision");
-    case "ec2-ebs":
-      return { deploymentMode: runtimeBinding.deploymentMode };
-    default:
-      return unhandledDeploymentMode(runtimeBinding);
-  }
-}
-
-function workspaceItem(workspace: WorkspaceInstance) {
-  // Spec 041: the sparse byWorkspaceProject index attributes make this record findable by project,
-  // which is how a developer's workspaces are listed. They are storage keys, not record fields, so
-  // workspaceRecordFields strips them again on the way back.
-  return {
-    ...workspaceKey(workspace.id),
-    entityType: "WORKSPACE",
-    ...legacyWorkspaceProjectIndexAttributes(workspace),
-    ...workspace,
-  };
-}
-
-/** DEC 254zzz80: a named company's grant row is in its own partition (company-layout.ts); otherwise the legacy key. */
-function membershipRecord(ownerKey: string, projectName: string, role: MembershipRecord["role"], companyId?: string): MembershipRecord {
-  return { ...grantKeyFor(companyId, ownerKey, projectName), entityType: "MEMBERSHIP", ownerKey, projectName, role, grantId: randomUUID() };
-}
-
-function githubRepositoryFullName(repositoryUrl: string): string {
-  let url: URL;
-  try { url = new URL(repositoryUrl); } catch { throw agentXError("CONFIG_INVALID", "registered repository URL is invalid for GitHub PR tracking"); }
-  const segments = url.pathname.split("/").filter(Boolean);
-  const name = segments[1]?.endsWith(".git") ? segments[1].slice(0, -4) : segments[1];
-  if (url.protocol !== "https:" || url.hostname.toLowerCase() !== "github.com" || url.port !== ""
-    || url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== ""
-    || segments.length !== 2 || segments.some((segment) => segment.includes("%"))
-    || !segments[0] || !name || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(segments[0])
-    || !/^[A-Za-z0-9_.-]{1,100}$/.test(name)) {
-    throw agentXError("CONFIG_INVALID", "registered repository URL is not a canonical GitHub repository");
-  }
-  return `${segments[0]}/${name}`;
-}
-
-function pullRequestMatchesRepository(pullRequestUrl: string, repositoryFullName: string, number: number): boolean {
-  try {
-    const url = new URL(pullRequestUrl);
-    return url.protocol === "https:" && url.hostname.toLowerCase() === "github.com" && url.port === ""
-      && url.username === "" && url.password === "" && url.search === "" && url.hash === ""
-      && url.pathname.toLowerCase() === `/${repositoryFullName.toLowerCase()}/pull/${number}`;
-  } catch {
-    return false;
-  }
-}
-
-function workspaceKey(id: string) {
-  return { pk: `WORKSPACE#${id}`, sk: "META" };
-}
-
-function pullRequestKey(workspaceId: string, repository: string, number: number) {
-  return {
-    pk: `WORKSPACE#${workspaceId}`,
-    sk: `PULL_REQUEST#${repository}#${String(number).padStart(12, "0")}`,
-  };
-}
-
-function codeBuildKey(workspaceId: string, operationId: string, gate: string) {
-  return {
-    pk: `WORKSPACE#${workspaceId}`,
-    sk: `CODEBUILD#${operationId}#${gate}`,
-  };
-}
-
-function issueRepositoryGrant(
-  dependencies: AwsBrokerDependencies,
-  project: RegisteredProjectRecord,
-  ownerKey: string,
-  workspaceId: string,
-  operationId: string,
-  access: "clone" | "push" = "clone",
-  repositoryName?: string,
-): string {
-  return dependencies.repositoryGrants.issue({
-    ownerKey,
-    projectName: project.definition.name,
-    workspaceId,
-    operationId,
-    repositories: project.definition.repositories
-      .filter((repository) => repositoryName === undefined || repository.name === repositoryName)
-      .map((repository) => ({
-      credentialRef: repository.credentialRef,
-      repositoryUrl: repository.url,
-      access,
-    })),
-  });
-}
-
-async function requireGithubProjectBinding(dependencies: AwsBrokerDependencies, project: RegisteredProjectRecord, repositoryUrl: string): Promise<void> {
-  if (dependencies.githubBindings === undefined) return;
-  try {
-    const raw = (project as RegisteredProjectRecord & { companyId?: unknown }).companyId;
-    const companyId = OrgIdSchema.parse(raw === undefined ? IMPLICIT_COMPANY_ID : raw);
-    if (dependencies.githubPullRequests.installationIdFor === undefined) throw githubBindingRefusal();
-    await dependencies.githubBindings.requireBound(companyId, await dependencies.githubPullRequests.installationIdFor(repositoryUrl));
-  } catch (error) {
-    // Guided onboarding PR 3: the company's own uninstalled or suspended GitHub says so, in one fixed sentence.
-    if (isGithubDisconnected(error) || await githubDisconnectedFor(dependencies, project, repositoryUrl)) throw githubDisconnectedRefusal();
-    throw githubBindingRefusal();
-  }
-}
-
-async function githubDisconnectedFor(dependencies: AwsBrokerDependencies, project: RegisteredProjectRecord, repositoryUrl: string): Promise<boolean> {
-  try {
-    const raw = (project as RegisteredProjectRecord & { companyId?: unknown }).companyId;
-    return await dependencies.githubBindings!.disconnectedFor(OrgIdSchema.parse(raw === undefined ? IMPLICIT_COMPANY_ID : raw), parseGitHubRepository(repositoryUrl).owner);
-  } catch { return false; }
-}
-
 async function exchangeRepositoryCredential(
   dependencies: AwsBrokerDependencies,
   request: AdaptedHttpRequest,
@@ -15750,23 +12626,45 @@ async function exchangeRepositoryCredential(
     throw agentXError("CONFIG_INVALID", "repositoryUrl is invalid");
   }
   const operation = await requireOperation(dependencies, workspaceId, operationId);
-  if (operation.kind === "publish") await assertCurrentWorkflowPublication(dependencies, operation);
-  if (dependencies.githubBindings !== undefined) {
-    const claims = dependencies.repositoryGrants.inspect(grant);
-    if (claims.workspaceId !== workspaceId || claims.operationId !== operationId || !claims.repositories.some(repository => repository.credentialRef === credentialRef && repository.repositoryUrl === input.repositoryUrl && repository.access === access)) {
-      throw agentXError("FORBIDDEN", "repository credential grant does not cover this request");
-    }
-    const workspace = await requireWorkspace(dependencies, workspaceId);
-    const project = await readWorkspaceTaskLegacyProject(dependencies, workspace.id, () => requireProject(dependencies, workspace.projectName, workspace.projectRevision));
-    await requireGithubProjectBinding(dependencies, project, input.repositoryUrl);
-  }
-  return dependencies.repositoryGrants.exchange(grant, {
-    workspaceId,
-    operationId,
-    credentialRef,
-    repositoryUrl: input.repositoryUrl,
-    access,
+  const repositoryUrl = input.repositoryUrl;
+  return exchangeLegacyGitCredential({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, grants: dependencies.repositoryGrants, log: brokerLogLine }, {
+    grant, workspaceId, operationId, operation, credentialRef, repositoryUrl, access,
+    async closing() { const workspace = await getItem<{ status?: unknown }>(dependencies, workspaceKey(workspaceId)); return workspace?.status === "CLOSING" || workspace?.status === "CLOSED"; },
+    authority: () => assertLegacyPushAuthority(dependencies, operation, access),
+    async binding() {
+      if (dependencies.githubBindings === undefined) return;
+      const claims = dependencies.repositoryGrants.inspect(grant);
+      if (claims.workspaceId !== workspaceId || claims.operationId !== operationId || !claims.repositories.some(repository => repository.credentialRef === credentialRef && repository.repositoryUrl === repositoryUrl && repository.access === access)) {
+        throw agentXError("FORBIDDEN", "repository credential grant does not cover this request");
+      }
+      const workspace = await requireWorkspace(dependencies, workspaceId);
+      const project = await readWorkspaceTaskLegacyProject(dependencies, workspace.id, () => requireProject(dependencies, workspace.projectName, workspace.projectRevision));
+      await requireGithubProjectBinding(dependencies, project, repositoryUrl);
+    },
   });
+}
+
+/**
+ * The authority a legacy exchange needs before it gives out a credential. A workflow publication's candidate is checked as it always was (`assertCurrentWorkflowPublication`). The operation must still be its
+ * workspace's active one at its fence, for a clone as for a push. A PUSH that has no candidate to check (a maintain, or a publish without `expectedTreeSha`) used to be given with no check at all: it also
+ * needs the task (when there is one) to be open, and, for a maintain, the pull request's recorded head to be the one it was started on, and the workflow's candidate (when it has one) to be the one it was started for.
+ */
+async function assertLegacyPushAuthority(dependencies: AwsBrokerDependencies, operation: OperationRecord, access: "clone" | "push"): Promise<void> {
+  if (operation.kind === "publish") await assertCurrentWorkflowPublication(dependencies, operation);
+  const stale = (): never => { throw agentXError("CALLBACK_FORBIDDEN", "push authority is stale"); };
+  const workspace = await requireWorkspace(dependencies, operation.workspaceId);
+  if (workspace.fence !== operation.fence || workspace.activeOperationId !== operation.id) stale();
+  if (access !== "push" || (operation.kind === "publish" && operation.publication?.expectedTreeSha !== undefined)) return;
+  const taskPointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(operation.workspaceId));
+  const task = taskPointer === undefined ? undefined : await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskPointer.taskId));
+  if (task !== undefined && (task.workspaceId !== operation.workspaceId || task.closedAt !== undefined)) stale();
+  if (operation.kind !== "maintain") return;
+  const maintenance = operation.maintenance;
+  if (maintenance === undefined) return stale();
+  const record = await getItem<PullRequestRecord>(dependencies, pullRequestKey(operation.workspaceId, maintenance.repository, maintenance.pullRequestNumber));
+  if (record === undefined || record.expectedHeadCommit !== maintenance.expectedHeadCommit) stale();
+  const binding = maintenance.workflowCandidate;
+  if (binding !== undefined && (task?.workflow === undefined || task.workflow.stage !== "PULL_REQUEST" || task.workflow.state !== "RUNNING" || task.workflow.candidate?.digest !== binding.candidateDigest)) stale();
 }
 
 /** A stored mode is a selector, not continuing authority: reload the current task and project before issuing push credentials. */
@@ -15806,87 +12704,6 @@ async function assertCurrentWorkflowPublication(dependencies: AwsBrokerDependenc
   }
 }
 
-function verifyCapability(
-  dependencies: AwsBrokerDependencies,
-  token: string,
-  action: CallbackClaims["actions"][number],
-): CallbackClaims {
-  const [body, signature, extra] = token.split(".");
-  if (!body || !signature || extra) throw agentXError("CALLBACK_FORBIDDEN", "invalid callback capability");
-  const expected = createHmac("sha256", dependencies.callbackSigningKey).update(body).digest();
-  const actual = Buffer.from(signature, "base64url");
-  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
-    throw agentXError("CALLBACK_FORBIDDEN", "invalid callback signature");
-  }
-  const claims = JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as CallbackClaims;
-  if (claims.expiresAt <= Math.floor(Date.now() / 1_000) || !claims.actions.includes(action)) {
-    throw agentXError("CALLBACK_FORBIDDEN", `callback capability does not allow ${action}`);
-  }
-  return claims;
-}
-
-function object(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw agentXError("CONFIG_INVALID", `${label} must be an object`);
-  }
-  return value as Record<string, unknown>;
-}
-
-function parseBody(body: string | undefined): unknown {
-  if (!body) return {};
-  try {
-    return JSON.parse(body) as unknown;
-  } catch {
-    // Issue #48: the parser's own words quote the body, so fixed words instead.
-    throw agentXError("CONFIG_INVALID", "the request body is not valid JSON");
-  }
-}
-
-function uuid(value: unknown, label: string): string {
-  if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
-    throw agentXError("CONFIG_INVALID", `${label} must be a UUID`);
-  }
-  return value;
-}
-
-function name(value: unknown, label: string): string {
-  if (typeof value !== "string" || !/^[a-z][a-z0-9-]{0,62}$/.test(value)) {
-    throw agentXError("CONFIG_INVALID", `${label} is invalid`);
-  }
-  return value;
-}
-
-function positiveInteger(value: unknown, label: string): number {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
-    throw agentXError("CONFIG_INVALID", `${label} must be a positive integer`);
-  }
-  return value;
-}
-
-function encodeCursor(sequence: number): string {
-  return Buffer.from(String(sequence)).toString("base64url");
-}
-
-function decodeCursor(cursor: string | undefined): number {
-  if (!cursor) return 0;
-  const value = Number.parseInt(Buffer.from(cursor, "base64url").toString("utf8"), 10);
-  if (!Number.isInteger(value) || value < 0) throw agentXError("CONFIG_INVALID", "event cursor is invalid");
-  return value;
-}
-
-/** The worker reports, once per conversation, that a saved session now exists for it. */
-function startsConversation(value: unknown): boolean {
-  if (!value || typeof value !== "object" || !("conversation" in value)) return false;
-  const conversation = value.conversation;
-  return Boolean(
-    conversation && typeof conversation === "object" && "started" in conversation && conversation.started === true,
-  );
-}
-
-function isStatus(value: unknown, status: string): boolean {
-  return Boolean(value && typeof value === "object" && "status" in value && value.status === status);
-}
-
 function withoutKeys(record: RegisteredProjectRecord): Omit<RegisteredProjectRecord, "pk" | "sk"> {
   return {
     entityType: record.entityType,
@@ -15894,40 +12711,6 @@ function withoutKeys(record: RegisteredProjectRecord): Omit<RegisteredProjectRec
     runtimeBinding: record.runtimeBinding,
     registeredBy: record.registeredBy,
     registeredAt: record.registeredAt,
-  };
-}
-
-function parseStoredEvent(item: Record<string, unknown>): {
-  sequence: number;
-  type: string;
-  timestamp: string;
-  payload: unknown;
-} {
-  if (
-    typeof item.sequence !== "number" ||
-    typeof item.type !== "string" ||
-    typeof item.timestamp !== "string"
-  ) {
-    throw agentXError("RUNTIME_UNAVAILABLE", "stored event is invalid");
-  }
-  return {
-    sequence: item.sequence,
-    type: item.type,
-    timestamp: item.timestamp,
-    payload: item.payload,
-  };
-}
-
-function json(
-  value: unknown,
-  requestId: string,
-  statusCode = 200,
-): { statusCode: number; headers: Record<string, string>; body: string } {
-  const body = value && typeof value === "object" ? { ...value, requestId } : { data: value, requestId };
-  return {
-    statusCode,
-    headers: { "content-type": "application/json", "cache-control": "no-store" },
-    body: JSON.stringify(body),
   };
 }
 
@@ -15973,7 +12756,9 @@ const linear = linearCompanyWiring({ env: process.env, documentClient, tableName
   connectorSecretPrefix: process.env.CONNECTOR_SECRET_PREFIX ?? CONNECTOR_SECRET_PREFIX, log: brokerLogLine, dynamo: dynamoClient,
   // L2-4: each company's tracker intake from the core root (built below; asked only at delivery time).
   // Batch 12 (#872 builds the core root on the first request, after the callback key is read): the root built then; no delivery reaches this before it.
-  intakeFor: async (companyId) => await builtCoreRoot?.intake?.intakeFor(companyId) });
+  intakeFor: async (companyId, options) => await builtCoreRoot?.intake?.intakeFor(companyId, options),
+  // R1 + L1 6.2b: a delivery before the root is built is answered 503 so Linear tries again; once it is built, a company with no intake is a quiet skip.
+  rootBuilt: () => builtCoreRoot !== undefined });
 // Guided onboarding PR 14 (DEC 254n item 1): the company engine model route's read of the gateway's live list for one company; set only where the gateway's origin is.
 const companyEngineModelOffered = adminOfferedModelsFromEnvironment(process.env, () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)));
 /** Set only in named environments with developer sign-in (infra/lib/developer-signin.ts). */
@@ -16040,7 +12825,6 @@ function slackRequestQueue(queueUrl: string): SlackRequestQueue {
 const signIn = developerConfiguration();
 const linkingOnly = process.env.DEVELOPER_API_SCOPE === "linking";
 const linking = linkingOnly ? signIn : undefined;
-
 
 // DEC 254g: the gateway's offered models for an administrator's config set; set only where the gateway's origin is.
 const offeredModelsKms = new KMSClient(awsClientConfiguration);
@@ -16116,7 +12900,7 @@ function buildBrokerHandler(callbackSigningKey: string) {
     codeSettings: codeSettingsReader({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }),
     // `taskPeople` (the task People list the merge requesters are read from, aws/hosted-merge-people.ts) is REQUIRED by the job services: a root built without it throws.
     services: (companyId, flow, registry, wiring) => createHostedBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!,
-      settings: companyCodeSettingsReader({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }, companyId), taskPeople: { documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }, ...(wiring.humanEdit === undefined ? {} : { humanEdit: wiring.humanEdit }), ...(wiring.threadMoments === true ? { threadMoments: true } : {}), ...(wiring.threadRefresh === undefined ? {} : { threadRefresh: wiring.threadRefresh }),
+      settings: companyCodeSettingsReader({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }, companyId), taskPeople: { documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }, ...(wiring.humanEdit === undefined ? {} : { humanEdit: wiring.humanEdit }), ...(wiring.threadMoments === true ? { threadMoments: true } : {}), ...(wiring.ticketMoments === true ? { ticketMoments: true } : {}), ...(wiring.threadRefresh === undefined ? {} : { threadRefresh: wiring.threadRefresh }),
       // The email seams travel with the upkeep notice's (#959); L4-AK1H: a queued admin notice (unusual team knowledge reading) is told only to someone who is an admin now (the core root answers once built; before that: no one).
       notification: { ...(wiring.notification ?? {}), ...(wiring.upkeep === undefined ? {} : { upkeep: wiring.upkeep }), adminNotice: async (orgId, developerId) => (await builtCoreRoot?.adminNotice?.(orgId, developerId)) === true },
     }),

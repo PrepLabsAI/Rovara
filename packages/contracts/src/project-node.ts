@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { redactText } from "./redaction.js";
-import { agentXError } from "./errors.js";
+import { AgentXError, agentXError, errorStatus } from "./errors.js";
 import { AgentXNameSchema } from "./names.js";
 import { RelativeWorkspacePathSchema, ProjectCommandSchema, DeveloperShareModeSchema } from "./project.js";
 import { StoredAllowedDomainSchema, firstRefusedDomainIndex, ALLOWED_DOMAIN_MESSAGE } from "./app-projects.js";
@@ -15,7 +15,7 @@ import { SpecTargetSchema } from "./spec-target.js";
 import { GeneralFakesSettingSchema } from "./general-fakes.js";
 import { PromptLocationsSchema } from "./prompt-locations.js";
 import { ExternalIdSchema, PluginKindSchema } from "./plugins/common.js";
-import { ProjectRegistriesSchema } from "./project-registries.js";
+import { ProjectRegistriesSchema, StoredProjectRegistriesSchema } from "./project-registries.js";
 
 export const OCI_DIGEST_PATTERN = /@sha256:[a-f0-9]{64}$/;
 
@@ -347,6 +347,39 @@ export const ProjectOriginsSchema = z.partialRecord(z.enum(PROJECT_ORIGIN_FIELDS
 export type ProjectOrigins = z.infer<typeof ProjectOriginsSchema>;
 
 /**
+ * DEC 254zzz495 / N3: where a setup run may say it looked for tests, as fixed words (never free text: the line is shown on the setup card and written to the log, and nothing from a repository can be added).
+ * `testPlacesLooked` (broker `setup-agent/end-summary.ts`) picks them from a run's commands.
+ */
+export const SETUP_TEST_PLACES = ["pytest_config", "tests_folder", "test_py_files", "conftest", "package_scripts", "js_test_files", "go_test_files", "java_src_test", "makefile", "ci_workflows", "readme"] as const;
+export type SetupTestPlace = (typeof SETUP_TEST_PLACES)[number];
+
+/**
+ * DEC 254zzz495 / N3: the project's setup was APPROVED with no test command ("Ready, no automated tests"): `at` is when the candidate that carried it was made, `looked` where the setup run looked for tests (fixed words).
+ * A fact of the project's own approved revision, kept as an attribute of the revision ROW beside `definition` (like `setupApproval` and `runtimeBinding`), NOT inside the strict `definition`: an older release parses only
+ * `definition` and ignores unknown row attributes, so a rollback stays safe. Written only by a setup candidate (`confirmSetupAgent` through `storeSetupCandidate`) that a person approves; no registration body can carry it
+ * (it is not a definition field). It means something only while the revision's `readiness` is empty (`noAutomatedTestsOf`): a revision that gains a test command ignores it, and a candidate with test commands drops it.
+ */
+export const NoAutomatedTestsSchema = z.object({
+  at: z.string().datetime(),
+  looked: z.array(z.enum(SETUP_TEST_PLACES)).max(SETUP_TEST_PLACES.length),
+}).strict();
+export type NoAutomatedTests = z.infer<typeof NoAutomatedTestsSchema>;
+
+/**
+ * The no-automated-tests fact of a project revision, or undefined. Fail-safe: a revision that has any test (readiness) command reads as having tests whatever the stored fact says, so a person who adds a test command turns
+ * the tests-before-a-PR rule back on without anyone clearing a flag. Pure.
+ */
+export function noAutomatedTestsOf(definition: { readiness?: readonly unknown[] | undefined; noAutomatedTests?: NoAutomatedTests | undefined }): NoAutomatedTests | undefined {
+  return definition.noAutomatedTests !== undefined && (definition.readiness?.length ?? 0) === 0 ? definition.noAutomatedTests : undefined;
+}
+
+/** The no-automated-tests fact as a revision ROW holds it (`row.noAutomatedTests`), read through its schema again; undefined when the row has none or it does not read. Pure. */
+export function noAutomatedTestsOfRow(row: unknown): NoAutomatedTests | undefined {
+  const value = typeof row === "object" && row !== null ? (row as { noAutomatedTests?: unknown }).noAutomatedTests : undefined;
+  return value === undefined ? undefined : NoAutomatedTestsSchema.safeParse(value).data;
+}
+
+/**
  * M7 slice 2: the project's `afterMergeWatch` setting (decision 160 item 5: its own setting, not an automation). OFF unless `enabled` is true. `windowMinutes` (default 30) is how long the project's alarms are watched after a
  * deploy of a merge Rovara made; `environments` names the environments that count (compared without case; empty: all); `revert` says whether a revert is only reported on or also offered (a person's press still starts it).
  * Control-plane only (`workerProjectDefinition`). The watcher checks the stored value again every time it reads it (a value that does not check is off).
@@ -359,7 +392,7 @@ export const AfterMergeWatchSettingSchema = z.object({
 }).strict();
 export type AfterMergeWatchSetting = z.infer<typeof AfterMergeWatchSettingSchema>;
 
-function projectDefinitionObject<Connectors extends z.ZodTypeAny>(connectorsSchema: Connectors) {
+function projectDefinitionObject<Connectors extends z.ZodTypeAny, Registries extends z.ZodTypeAny = typeof ProjectRegistriesSchema>(connectorsSchema: Connectors, registriesSchema: Registries = ProjectRegistriesSchema as unknown as Registries) {
   return z
     .object({
       name: AgentXNameSchema,
@@ -370,7 +403,7 @@ function projectDefinitionObject<Connectors extends z.ZodTypeAny>(connectorsSche
       devcontainer: DevcontainerDefinitionSchema.optional(),
       network: ProjectNetworkSchema.optional(),
       /** N9 (INTG2): the project's private package registries. A CodeArtifact registry: where it is, never a token (a company's package tokens are the company's, set once; a generic registry here is refused). Control-plane only (`workerProjectDefinition`). */
-      registries: ProjectRegistriesSchema.optional(),
+      registries: registriesSchema.optional(),
       orchestratorInstructions: z.string().min(1).max(32_768),
       models: ProjectModelsSchema.optional(),
       integrations: z.object({
@@ -512,7 +545,7 @@ export const ProjectDefinitionSchema = projectDefinitionObject(ConnectorsSchema)
  * still validates exactly as strictly as `ProjectDefinitionSchema` does. Registration always uses
  * `ProjectDefinitionSchema`, which keeps refusing an unknown connector type.
  */
-const StoredProjectDefinitionObjectSchema = projectDefinitionObject(StoredConnectorsSchema).superRefine(checkProjectDefinition);
+const StoredProjectDefinitionObjectSchema = projectDefinitionObject(StoredConnectorsSchema, StoredProjectRegistriesSchema).superRefine(checkProjectDefinition);
 
 /** Parses a definition that may predate the removal of {@link LEGACY_PROJECT_FIELDS}, and that may
  * carry a connector of a type this release does not know (see `StoredConnectorsSchema`). */
@@ -520,6 +553,69 @@ export const StoredProjectDefinitionSchema = z.preprocess(
   (value) => withoutFields(value, LEGACY_PROJECT_FIELDS),
   StoredProjectDefinitionObjectSchema,
 );
+
+/**
+ * REGISTRY-TOLERANT-READ (arch rule 8): how a STORED project revision is read by the broker's own readers (task start, edits, setup status, application readiness). Not the input schema: a person's new input still goes
+ * through `ProjectDefinitionSchema`, and an edit is checked by it again before anything is written. The shape is the same as `ProjectDefinitionSchema`'s (so the value is a `ProjectDefinition`), except that:
+ *   - the legacy keys of {@link LEGACY_PROJECT_FIELDS} are dropped, as `StoredProjectDefinitionSchema` does;
+ *   - `registries` drops a generic npm/pypi/maven entry (see `StoredProjectRegistriesSchema`);
+ *   - the rules that judge what a person typed are not applied: a reserved or secret-looking command `env`, the Public Suffix List on `network.allowedDomains`, a rule that matches no tool in the `actionPolicy`, a reserved
+ *     E2E check id, an external check nothing in this release runs. Some of those do safety work where a record is USED, so `projectUseRefusal` asks them again at the point of use (task start, and the dispatcher's
+ *     prepare), and refuses there with a stable rule id. The `actionPolicy`'s own shape stays in the read (`ActionPolicySchema`); a rule that matches no tool is inert in the action gate, so it is dropped.
+ * A connector of a type this release does not know still fails the read, as before (`StoredProjectDefinitionSchema` passes it through, but then the value is not a `ProjectDefinition`).
+ */
+const StoredProjectReadObjectSchema = projectDefinitionObject(ConnectorsSchema, StoredProjectRegistriesSchema).superRefine(checkProjectDefinition);
+export const StoredProjectReadSchema = z.preprocess((value) => withoutFields(value, LEGACY_PROJECT_FIELDS), StoredProjectReadObjectSchema);
+
+/** Reads a stored project revision's `definition` (see `StoredProjectReadSchema`). Never throws. */
+export function readStoredProject(value: unknown): { success: true; data: ProjectDefinition } | { success: false } {
+  const parsed = StoredProjectReadSchema.safeParse(value);
+  return parsed.success ? { success: true, data: parsed.data } : { success: false };
+}
+
+/** Arch rule 9: what is said when a project's CURRENT revision cannot be read. The stable id ends the sentence; nothing is run on another revision instead. The one definition: every reader refuses with it. */
+export const PROJECT_REVISION_UNREADABLE = "This project's current settings can't be read, so nothing was started. Ask an admin to look at the project's settings. [project_revision_unreadable]";
+export const PROJECT_REVISION_UNREADABLE_RULE = "project_revision_unreadable";
+
+/**
+ * The refusal of a project whose current revision cannot be read (missing, or does not read). A class, so a reader that must leave ONE such project out of a list (or count it) decides by `instanceof`, never by the text.
+ * Its name stays "AgentXError": code that recognises an AgentX error by name keeps doing so. CONFIG_INVALID, as the sentence has always said.
+ */
+export class ProjectRevisionUnreadableError extends AgentXError {
+  constructor() { super("CONFIG_INVALID", PROJECT_REVISION_UNREADABLE, errorStatus("CONFIG_INVALID")); }
+}
+
+/** The stable ids of the rules a stored project is held to when it is USED (they are not applied when it is read). */
+export const PROJECT_USE_RULES = ["project_external_check", "project_allowed_domain", "project_command_env", "project_e2e_reserved_id"] as const;
+export type ProjectUseRule = (typeof PROJECT_USE_RULES)[number];
+
+/** Fixed sentences, one per rule: they name no value (a refusal reaches logs and other people's screens). The external check's is the one a task start has always said. */
+export const PROJECT_USE_MESSAGES: Readonly<Record<ProjectUseRule, string>> = {
+  project_external_check: UNRUNNABLE_EXTERNAL_CHECK_MESSAGE,
+  project_allowed_domain: "This project allows a website address that is not allowed any more (a whole public domain or an address that is not a name), so nothing was started. Remove or correct it in the project's allowed websites.",
+  project_command_env: "A setup or test command of this project sets an environment variable that is reserved or looks like a secret, so nothing was started. Remove it from the command, and use a credential reference for a secret.",
+  project_e2e_reserved_id: "This project has an end-to-end target named for Rovara's own check (project-e2e), so nothing was started. Rename the target.",
+};
+
+/** The rules of {@link PROJECT_USE_RULES} that a stored project breaks, in a fixed order. Pure; empty when the project may be used. */
+export function projectUseProblems(project: Pick<ProjectDefinition, "repositories" | "setup" | "readiness"> & { network?: ProjectDefinition["network"]; e2e?: ProjectDefinition["e2e"] }): ProjectUseRule[] {
+  const broken: ProjectUseRule[] = [];
+  if (unrunnableExternalCheck(project.repositories) !== undefined) broken.push("project_external_check");
+  if (firstRefusedDomainIndex(project.network?.allowedDomains ?? []) !== undefined) broken.push("project_allowed_domain");
+  if ([...project.setup, ...project.readiness].some((command) => projectCommandEnvProblems(command.env ?? {}).length > 0)) broken.push("project_command_env");
+  if ((project.e2e?.targets ?? []).some((target) => target.targetId === E2E_PROJECT_CHECK_ID)) broken.push("project_e2e_reserved_id");
+  return broken;
+}
+
+/**
+ * The refusal for a stored project that may not be used, or undefined. CONFIG_INVALID with the rule's fixed sentence; every rule but the external check's (whose sentence is unchanged) ends with its stable id in
+ * brackets, so a log line or a person's report names the rule. The first broken rule is the one said.
+ */
+export function projectUseRefusal(project: Parameters<typeof projectUseProblems>[0]): AgentXError | undefined {
+  const rule = projectUseProblems(project)[0];
+  if (rule === undefined) return undefined;
+  return agentXError("CONFIG_INVALID", rule === "project_external_check" ? PROJECT_USE_MESSAGES[rule] : `${PROJECT_USE_MESSAGES[rule]} [${rule}]`);
+}
 
 /** The legacy fields a value carries, so a caller can name them in its own error. */
 export function legacyProjectFields(value: unknown): string[] {

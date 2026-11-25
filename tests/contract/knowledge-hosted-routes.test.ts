@@ -164,9 +164,16 @@ describe("the knowledge routes at the developer router", () => {
     const linearLinks = ["GET /v1/dev/me/tracker-accounts/linear full", "DELETE /v1/dev/me/tracker-accounts/linear full", "POST /v1/dev/me/tracker-accounts/linear/link full", "POST /v1/dev/me/tracker-accounts/linear/link/claim full",
       "GET /v1/dev/company/linear/people full", "DELETE /v1/dev/company/linear/people/{personId} full"];
     expect(all.filter((row) => linearLinks.includes(row))).toEqual(linearLinks);
-    const withPreview = all.filter((row) => !added.includes(row) && row !== inviteResend && !serverReads.includes(row) && !linearLinks.includes(row));
+    // RD-2.0 (Code API 1.5): the task page's four new reads (spec, checks, changes, timeline) are additive, tasks:read only; pinned by name here and kept out of the older digest (removing exactly those 4 rows gives back the pin below).
+    const taskPageReads = ["spec", "checks", "changes", "timeline"].map((tail) => `GET /v1/dev/tasks/{taskId}/${tail} tasks:read`);
+    expect(all.filter((row) => taskPageReads.includes(row))).toEqual(taskPageReads);
+    const withPreview = all.filter((row) => !added.includes(row) && row !== inviteResend && !serverReads.includes(row) && !linearLinks.includes(row) && !taskPageReads.includes(row));
     const others = withPreview.filter((row) => row !== preview && row !== closePreview);
-    expect(others).toHaveLength(DEV_ROUTES.length - 14);
+    expect(others).toHaveLength(DEV_ROUTES.length - 18);
+    // R1 + L1 6.2b (rule D): the three hosted-only `/v1/dev/projects/{project}/intake*` rows moved to the one `/v1/app` address (the MCP and CLI's own). They are put back where they stood, so this pin proves exactly those three rows are gone and every other row is unchanged.
+    const movedIntake = ["GET /v1/dev/projects/{project}/intake full", "POST /v1/dev/projects/{project}/intake/{itemId}/start full", "POST /v1/dev/projects/{project}/intake/{itemId}/dismiss full"];
+    expect(all.filter((row) => movedIntake.includes(row))).toEqual([]);
+    others.splice(others.indexOf("GET /v1/dev/company/egress-addresses full") + 1, 0, ...movedIntake);
     expect(createHash("sha256").update(others.join("\n")).digest("hex")).toBe(OTHER_ROWS_DIGEST);
     // L4-JA7 (rule D): the pin above moved only by the four hosted knowledge-switch rows; with exactly those removed the digest is the one the table had before.
     const switchRows = others.filter((row) => row.includes("/lessons/local-tools "));

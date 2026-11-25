@@ -189,7 +189,7 @@ describe("what the approver adapter requires is enforced by the press", () => {
 });
 
 describe("a proof that names one act is used up by what it is", () => {
-  it("does not let one approving comment approve a second request, even with a new request id, and does not burn a local session", async () => {
+  it("a host refusal that merged nothing frees the approval for the same head, and one comment still approves only one merge", async () => {
     const mode = { value: "ok" as "ok" | "refuse" | "unknown", calls: 0, refuseOnce: true };
     const world = await mergeWorld({ codeHost: (model) => countingHost(model, mode) });
     await world.seedTracking();
@@ -199,17 +199,17 @@ describe("a proof that names one act is used up by what it is", () => {
     });
     const deps = { ...world.deps, approvers };
     const comment = (prepared: Awaited<ReturnType<typeof prepareMerge>>) => world.proofFor(prepared, { method: CODE_HOST_COMMENT_METHOD, token: "comment-9001" });
-    // The first request: the host refuses the merge after the claim consumed the comment.
+    // The first request: the host refuses the merge after the claim made the use of the comment. Nothing merged, so the comment goes back with the claim.
     const first = await prepareMerge(deps, { taskId: TASK_ID, requestId: world.requestId() });
     expect((await rejects(() => pressMerge(deps, { taskId: TASK_ID, requestId: first.request.requestId, proof: comment(first) }))).message).toContain("didn't merge");
-    // A new request id (and the same comment) is refused, and nothing is claimed.
-    const second = await prepareMerge(deps, { taskId: TASK_ID, requestId: world.requestId() });
-    const refusal = await rejects(() => pressMerge(deps, { taskId: TASK_ID, requestId: second.request.requestId, proof: comment(second) }));
-    expect(refusal).toMatchObject({ code: "FORBIDDEN", message: "This approval was already used. Ask for a new one." });
     expect((await world.trackingOf(world.prs[0]!))!["mergeClaim"]).toBeUndefined();
-    // The owner's local session is a standing secret by design: it approves the next request.
-    const third = await prepareMerge(deps, { taskId: TASK_ID, requestId: world.requestId() });
-    expect((await pressMerge(deps, { taskId: TASK_ID, requestId: third.request.requestId, proof: world.proofFor(third) })).status).toBe("MERGED");
+    // A new request for the same head with the same comment merges (the comment is bound to this exact merge by the digest).
+    const second = await prepareMerge(deps, { taskId: TASK_ID, requestId: world.requestId() });
+    const proof = comment(second);
+    expect((await pressMerge(deps, { taskId: TASK_ID, requestId: second.request.requestId, proof })).status).toBe("MERGED");
+    // After a merge the comment is used up for good, and the words say so.
+    expect(await rejects(() => pressMerge(deps, { taskId: TASK_ID, requestId: second.request.requestId, proof }))).toMatchObject({ code: "FORBIDDEN", message: M.approvalUsed });
+    expect(mode.calls).toBe(2);
     void ORG;
   });
 });

@@ -68,7 +68,7 @@ describe("shared release helpers", () => {
   it("creates immutable release tags and validates digest-scoped images", () => {
     expect(releaseTag(new Date("2026-09-23T17:50:35.123Z"), "4f885bb4a8eaffff"))
       .toBe("release-20260923T175035Z-4f885bb4a8ea");
-    const repository = "944937319445.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production";
+    const repository = "123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production";
     const image = `${repository}@sha256:${"a".repeat(64)}`;
     expect(() => assertDigestImage(image, repository)).not.toThrow();
     expect(() => assertDigestImage(`${repository}:latest`, repository)).toThrow(/immutable/);
@@ -126,7 +126,7 @@ describe("production release command", () => {
 });
 
 describe("worker image reuse", () => {
-  const repositoryUri = "944937319445.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production";
+  const repositoryUri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production";
   const deployedImage = `${repositoryUri}@sha256:${"b".repeat(64)}`;
   const options = parseProductionReleaseArgs(["--reuse-unchanged-worker"], {});
   let stdout: MockInstance<typeof process.stdout.write>;
@@ -220,7 +220,7 @@ describe("release ordering", () => {
   it("updates the production runtime before the control plane", () => {
     const source = readFileSync("scripts/release-production.ts", "utf8");
     const runtimeDeploy = source.indexOf("\n    RUNTIME_STACK,\n");
-    const controlPlaneDeploy = source.indexOf("\n  deployControlPlane(runner, options, foundation, firewallContext);\n");
+    const controlPlaneDeploy = source.indexOf("\n  deployControlPlane(runner, options, foundation, firewallContext, publicApiUrl);\n");
     expect(runtimeDeploy).toBeGreaterThan(-1);
     expect(controlPlaneDeploy).toBeGreaterThan(-1);
     expect(runtimeDeploy).toBeLessThan(controlPlaneDeploy);
@@ -284,7 +284,10 @@ describe("release pipeline trigger", () => {
   it("starts the pipeline for every worker and Slack orchestrator image input and control-plane source", () => {
     // The aws-adapters and testing manifests are copied only so npm ci sees every workspace; the trigger list stays as the legacy template has it, and a
     // dependency change of that package always changes package-lock.json, which starts the pipeline.
-    const notTriggered = new Set(["packages/aws-adapters/package.json", "packages/testing/package.json"]);
+    // F3 cut 1: packages/code-api (the Code API package) is copied into both images and built through contracts, but it is not in the trigger list yet: the legacy production template must stay byte-identical
+    // (tests/contract/legacy-templates.test.ts), and every commit that changes it so far also changes contracts or the broker, which start the pipeline. Adding it is a change to the production pipeline's own stack.
+    // #1478: the model gateway's manifest likewise (the gateway is its own image and stacks; the worker and Slack images never run it).
+    const notTriggered = new Set(["packages/aws-adapters/package.json", "packages/testing/package.json", "packages/model-gateway/package.json", "packages/code-api"]);
     const samples = [...WORKER_IMAGE_INPUTS, ...SLACK_ORCHESTRATOR_IMAGE_INPUTS].filter((input) => !notTriggered.has(input)).map((input) =>
       statSync(input).isDirectory() ? `${input}/src/index.ts` : input);
     expect(samples.filter((sample) => !triggered(sample))).toEqual([]);
@@ -294,6 +297,9 @@ describe("release pipeline trigger", () => {
     expect(triggered("infra/lib/control-plane.ts")).toBe(true);
     expect(triggered("packages/orchestrator/src/orchestrator.ts")).toBe(true);
     expect(triggered("packages/cli/src/main.ts")).toBe(true);
+    // F3 cut 1: the published Code API package. A change only there releases (it is not an image input, so beta gets a control-plane deploy, no new worker).
+    expect(triggered("packages/code-api/src/index.ts")).toBe(true);
+    expect(triggered("packages/code-api/package.json")).toBe(true);
     expect(triggered("packages/slack-service/src/main.ts")).toBe(true);
     expect(triggered("environments/slack/Dockerfile")).toBe(true);
   });

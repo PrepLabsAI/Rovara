@@ -17,9 +17,11 @@ import { EnvironmentRolePath } from "./role-path.js";
 import { SlackOrchestratorStack } from "./slack-orchestrator.js";
 import { SwebenchEvalStack, swebenchNames } from "./swebench-eval.js";
 import { CiRunnerStack } from "./ci-runner.js";
+import { maybeApiAddressStack } from "./api-address.js";
 import { BetaDomainStack } from "./beta-domain.js";
 import { BetaReleaseAccessStack } from "./beta-release-access.js";
 import { WorkerSettingsStack } from "./worker-settings.js";
+import { maybeModelGateway } from "./model-gateway-app.js";
 
 /** The context the App will go on to use, with CDK's own precedence (moved out of buildAgentXApp unchanged, to keep its complexity under the ratchet). */
 function mergedAppContext(context: Record<string, unknown>): Record<string, unknown> {
@@ -88,6 +90,8 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
   });
   // The environment release pipeline (-c agentxReleasePipeline=<environment>) is the only stack then; unset, nothing here runs and every other template is unchanged.
   if (maybeEnvironmentReleasePipeline(app)) return app;
+  // The model gateway (-c rovaraModelGateway=<environment>, #1478) is its two stacks only; unset, nothing here runs.
+  if (maybeModelGateway(app)) return app;
   const naming = namingFromContext(app);
   const deploymentRegion = app.node.tryGetContext("agentxRegion") as string | undefined;
   const deploymentMode =
@@ -225,5 +229,7 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
       applyPermissionsBoundaryParameter(stack, naming.env);
     }
   }
+  // The permanent public address (-c agentxApiAddress=<domain>), only when asked for, by hand; created after the boundary loop on purpose (it declares no role, so it takes no boundary parameter). No release deploys it.
+  maybeApiAddressStack(app, naming, deploymentRegion);
   return app;
 }

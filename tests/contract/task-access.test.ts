@@ -85,6 +85,22 @@ describe("resolveTaskReadAccess", () => {
   });
 });
 
+describe("resolveTaskAccess: the task's own person holds it only while they hold the project (project-grant recheck)", () => {
+  it("a person removed from the project, or from the company, or whose membership cannot be read, reads and acts on nothing; every action is refused as not found", async () => {
+    for (const projectMember of [false, "throws", "unavailable"] as const) {
+      const fixture = pageTask();
+      fixture.addVersion("plan", pagePlan());
+      if (projectMember === "throws") fixture.deps.taskReaderPerson = async () => { throw new Error("grant store unavailable"); };
+      else if (projectMember === "unavailable") delete (fixture.deps as { taskReaderPerson?: unknown }).taskReaderPerson;
+      else fixture.deps.taskReaderPerson = async () => ({ name: "Priya", projectMember: false });
+      for (const action of [undefined, "read", "decide", "retry", "close", "control", "publish", "feedback", "ask", "comment"] as const) {
+        const error = await refusal(resolveTaskAccess(fixture.deps, PRIYA, fixture.taskId, action));
+        expect([String(projectMember), action, error.code]).toEqual([String(projectMember), action, "TASK_NOT_FOUND"]);
+      }
+    }
+  });
+});
+
 describe("resolveTaskAccess", () => {
   it("the owner, a channel member who can use the project, and everyone else", async () => {
     const fixture = pageTask();

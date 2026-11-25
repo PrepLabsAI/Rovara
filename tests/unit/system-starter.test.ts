@@ -2,7 +2,7 @@
 // the audit record written FIRST, the project's monthly count held, one check at a time, and the machine time attributed to the company and project. P1 starts the two free kinds and nothing that spends AI.
 // Each guard has a test that fails if the guard is removed (the mutants are listed in the PR body).
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, SYSTEM_RUN_AI_KINDS, SYSTEM_RUN_KINDS, SYSTEM_RUN_REASONS, UPKEEP_ORIGIN, WORKER_INVOCATION_FEATURES, projectMetaKey, queryAll, systemOwnerIdOf, systemRunOrigin, type OrgId, type ProjectDefinition } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, SYSTEM_RUN_AI_KINDS, SYSTEM_RUN_FREE_KINDS, SYSTEM_RUN_JOB, SYSTEM_RUN_KIND_WORDS, SYSTEM_RUN_KINDS, SYSTEM_RUN_REASONS, SYSTEM_RUN_REASON_WORDS, AUTOMATIC_JOB_WORDS, SystemRunUsageSchema, UPKEEP_ORIGIN, WORKER_INVOCATION_FEATURES, projectMetaKey, queryAll, systemOwnerIdOf, systemRunOrigin, type OrgId, type ProjectDefinition } from "@agentx/contracts";
 import { readAutomaticRunsUse, setAutomaticRunsCap } from "../../packages/broker/src/core/automatic-runs/cap.js";
 import { setupStateOf, type SetupCheckMark } from "../../packages/broker/src/core/setup-agent/check.js";
 import { createSystemStarter, type SystemStartInput, type SystemStartResult } from "../../packages/broker/src/core/system-runs/starter.js";
@@ -62,17 +62,28 @@ const queued = async (w: World): Promise<number> => {
 };
 
 describe("the closed list of kinds", () => {
-  it("is exactly four kinds, two of which spend no AI, and the AI kinds are stamped `nightly`", () => {
-    expect([...SYSTEM_RUN_KINDS]).toEqual(["setup_check", "nightly_check", "repair_draft", "wiki_refresh"]);
+  it("is exactly five kinds, three of which spend no AI, and the AI kinds are stamped `nightly`", () => {
+    expect([...SYSTEM_RUN_KINDS]).toEqual(["setup_check", "nightly_check", "saved_env_rebuild", "repair_draft", "wiki_refresh"]);
+    expect([...SYSTEM_RUN_FREE_KINDS]).toEqual(["setup_check", "nightly_check", "saved_env_rebuild"]);
     expect([...SYSTEM_RUN_AI_KINDS]).toEqual(["repair_draft", "wiki_refresh"]);
     for (const kind of SYSTEM_RUN_AI_KINDS) expect(systemRunOrigin(kind)).toBe(UPKEEP_ORIGIN);
     expect(UPKEEP_ORIGIN).toBe("nightly");
-    for (const kind of ["setup_check", "nightly_check"] as const) expect(systemRunOrigin(kind)).toBe("automatic");
-    expect([...SYSTEM_RUN_REASONS]).toEqual(["task_start", "nightly", "check_failed"]);
+    for (const kind of ["setup_check", "nightly_check", "saved_env_rebuild"] as const) expect(systemRunOrigin(kind)).toBe("automatic");
+    expect([...SYSTEM_RUN_REASONS]).toEqual(["task_start", "nightly", "check_failed", "image_out_of_date"]);
   });
 
-  it.each([["task"]])(
-    "refuses %j before anything is read or written", async (kind) => {
+  it("the image rebuild kind has its job, its words and its reason words, and the usage row accepts it", () => {
+    expect(SYSTEM_RUN_JOB["saved_env_rebuild"]).toBe("image_rebuild");
+    expect(SYSTEM_RUN_KIND_WORDS["saved_env_rebuild"]).toBe(AUTOMATIC_JOB_WORDS["image_rebuild"]);
+    expect(SYSTEM_RUN_REASON_WORDS["image_out_of_date"]).toBe("the project's saved image is out of date");
+    for (const code of SYSTEM_RUN_REASONS) expect(SYSTEM_RUN_REASON_WORDS[code].length).toBeGreaterThan(0);
+    const row = { orgId: "org_aaaaaaaaaaaaaaaaaaaa", project: "payments", kind: "saved_env_rebuild", workspaceId: "ws-1", requestId: "r-1", month: "2026-11", startedAt: "2026-11-25T00:00:00.000Z" };
+    expect(SystemRunUsageSchema.safeParse(row).success).toBe(true);
+    expect(SystemRunUsageSchema.safeParse({ ...row, kind: "image_rebuild" }).success).toBe(false);
+  });
+
+  it.each([["task"], ["saved_env_rebuild"]])(
+    "refuses %j before anything is read or written (a starter that was given no rebuild start refuses the image rebuild kind like a kind outside the list: the hosted starter has none in this release)", async (kind) => {
       const w = await world();
       const answer = await ask(w, { kind });
       expect(answer).toEqual({ outcome: "refused", reason: "kind_not_allowed" });

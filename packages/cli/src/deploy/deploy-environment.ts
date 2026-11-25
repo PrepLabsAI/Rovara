@@ -11,9 +11,10 @@ import { currentLockHolder, withEnvironmentLock } from "../environments/lock.js"
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, writeEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
 import { installOrder, OPERATOR_PARAMETERS, SECRET_PARAMETERS, stackParameters, upgradeOrder, type DeployPart, type InstallAnswers, type StackOutputs } from "./parameters.js";
+import { controlPlaneUrlOf, planFromDeploy, withDeclaredPublicApiUrlFor, withPublicApiUrl } from "./public-api-url.js";
 import type { LoadedRelease } from "./release.js";
 import { callbackSigningKey, type SecretValueStore } from "./signing-key.js";
-import { GITHUB_SIGN_IN_PARAMETER_NAMES, readStoredDeveloperSignIn, SIGN_IN_PARAMETER_NAMES } from "../signin/settings.js";
+import { GITHUB_SIGN_IN_PARAMETER_NAMES, readStoredDeveloperSignIn, SIGN_IN_PARAMETER_NAMES, type StoredDeveloperSignIn } from "../signin/settings.js";
 
 export type { SecretValueStore } from "./signing-key.js";
 
@@ -43,6 +44,8 @@ export interface DeployEnvironmentInput {
   /** An upgrade reads each deployed stack's parameters here, to keep OPERATOR_PARAMETERS (Task 1 of
    * phase 15e). Required for an upgrade that deploys a part with operator parameters. */
   deployedParameters?: (stackName: string) => Promise<Record<string, string> | undefined>;
+  /** CODE-PUBLIC-URL: the operator confirms that a first or changed PublicApiUrl on a running install is an issuer change (public-api-url.ts). */
+  confirmPublicApiUrlChange?: boolean;
   /** The parameter names each part's template declares, when the engine knows them better than the
    * release does: the cdk engine's synth of its source (issue 152, prepareDeployment). Omitted, they
    * are read from the release's own templates (templateParameterNames), as the templates engine does. */
@@ -113,6 +116,19 @@ export function withDeclaredSignIn(parameters: Record<string, string>, declared:
 }
 
 /**
+ * F1 L1a-1 (the one carry rule: a parameter an upgrade does not supply keeps its deployed value). The stored sign-in names a Slack team id only when its SSM parameter holds one (it is
+ * never stored empty), so a stored sign-in without one supplies nothing for the control plane's SlackTeamId: it is left out here, and the deployed team id is kept. Sending the
+ * empty string `stackParameters` writes for it would clear a team id set another way and turn Slack sign-in off. (`agentx signin` itself, which sets the stack from the same
+ * settings, still sends the empty value on purpose: parameter-update.ts.)
+ */
+export function withoutUnsetSlackTeamId(parameters: Record<string, string>, stored: StoredDeveloperSignIn | undefined): Record<string, string> {
+  if (stored === undefined || stored.slackTeamId !== undefined || !Object.hasOwn(parameters, "SlackTeamId")) return parameters;
+  const rest = { ...parameters };
+  delete rest.SlackTeamId;
+  return rest;
+}
+
+/**
  * Keeps what the operator set (OPERATOR_PARAMETERS) on an upgrade: each listed parameter the answers
  * did not set keeps its deployed value, when the release's template still declares it. One the
  * template no longer declares is reported as dropped and never sent: CloudFormation refuses an
@@ -148,10 +164,11 @@ export function keptOperatorParameters(input: {
  * setting's deployed value); the export marks each UsePreviousValue. A secret's value never leaves
  * AWS: agentx upgrade sends it from Secrets Manager, the export keeps the deployed one.
  *
- * Developer sign-in is not kept from the stack on either path: both send the choice stored in SSM
- * (readStoredDeveloperSignIn, then withDeclaredSignIn), so when SSM and the stack disagree, both
- * apply SSM's. Any other deployed parameter (one set by hand in the console) goes back to the
- * template's default on both paths.
+ * Developer sign-in: both paths send the choice stored in SSM (readStoredDeveloperSignIn, then
+ * withDeclaredSignIn), so when SSM and the stack disagree, both apply SSM's; the sign-in
+ * parameters SSM does not name (no stored choice, no GitHub sign-in ever, no Slack team id) are
+ * kept from the stack like any operator setting (L1a-1). Any other deployed parameter (one set
+ * by hand in the console) is carried by the engine on every path, never reset (carry.ts).
  */
 export function upgradeKeptParameterNames(part: DeployPart): ReadonlySet<string> {
   return new Set([...OPERATOR_PARAMETERS[part], ...SECRET_PARAMETERS]);
@@ -306,18 +323,22 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
 
     const outputs: Partial<Record<DeployPart, StackOutputs>> = {};
     const droppedParameters: DeployEnvironmentResult["droppedParameters"] = [];
+    // CODE-PUBLIC-URL: decided before any stack changes, so a refusal deploys nothing.
+    const publicApiUrl = await planFromDeploy({ ...input, env, deploySet });
+    const answersWithAddress: InstallAnswers = withPublicApiUrl(fullAnswers, publicApiUrl);
 
     await readDeploymentOutputs({ existing, deployer, env, fullOrder, deploySet, outputs });
 
     for (const part of fullOrder) {
       if (!deploySet.has(part)) continue;
       const stackName = environmentStackName(env, part);
-      const rawParameters = stackParameters(part, fullAnswers, outputs, { packages: engine === "templates" });
+      const rawParameters = stackParameters(part, answersWithAddress, outputs, { packages: engine === "templates" });
       // F24: only when this deploy is actually sending a stored sign-in choice to the control plane
       // are the declared parameters even consulted (every other deploy never calls `release.template`).
       let parameters = part === "control-plane" && developerSignIn !== undefined
-        ? withDeclaredSignIn(rawParameters, declaredFor("control-plane"))
+        ? withoutUnsetSlackTeamId(withDeclaredSignIn(rawParameters, declaredFor("control-plane")), developerSignIn)
         : rawParameters;
+      parameters = withDeclaredPublicApiUrlFor(parameters, part, declaredFor);
       if (mode === "upgrade" && OPERATOR_PARAMETERS[part].length > 0) {
         // The F6 guard above already refused this before anything deployed. Never skip carrying the
         // parameters: skipping would reset them to the template defaults, the bug this code prevents.
@@ -387,7 +408,8 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
         "control-plane": controlPlaneStack,
         slack: slackStack,
       },
-      controlPlaneUrl: requiredOutput(outputs, "control-plane", "ApiEndpoint", env),
+      // CODE-PUBLIC-URL: the control plane's permanent address where the install has one (what `agentx login` names and the sign-in callbacks are built on), else its API endpoint, as before.
+      controlPlaneUrl: controlPlaneUrlOf(controlPlaneOutputs, () => requiredOutput(outputs, "control-plane", "ApiEndpoint", env)),
       identity: identitySettings,
       models: answers.models,
       // F16: set after install (agentx setup alerts, agentx config set alerts.address); no deploy's answers carry it.

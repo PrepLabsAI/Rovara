@@ -73,10 +73,28 @@ const STEP_CAUSE: Readonly<Record<(typeof NIGHTLY_HEALTH_SETUP_STEPS)[number], N
   pull: "pull_failed", update: "update_failed", setup: "setup_failed", build: "build_failed", boot: "boot_failed", mocks: "mocks_failed", preprod_probe: "preprod_unreachable",
 };
 
+/** A check that runs tests but collected none: the environment's fault, unless the project has no automated tests (DEC 254zzz495, N3), which has nothing to collect. */
+const collectedNoTests = (checks: ReadonlyArray<{ runsTests: boolean; testsCollected?: number | undefined }>, noAutomatedTests: boolean): boolean =>
+  !noAutomatedTests && checks.some((check) => check.runsTests && check.testsCollected === 0);
+
+/**
+ * A run in which no test actually ran (nothing collected, or everything skipped) proves nothing: the environment is not healthy. A project with no automated tests has nothing to collect: its night is healthy when the
+ * setup steps put the code in place and nothing failed (checked before), and anything less is an incomplete run, never a repair state.
+ */
+function emptyRunHealth(noAutomatedTests: boolean, codeInPlace: boolean): NightlyHealth {
+  if (!noAutomatedTests) return { class: "environment", cause: "no_tests_collected" };
+  return codeInPlace ? { class: "passed" } : { class: "unclear", cause: "incomplete_run" };
+}
+
 /**
  * What one nightly run says about the project's health. `input` is parsed here, and anything that is not exactly the bounded shape is "unclear", never "passed".
  */
-export function classifyNightlyHealth(input: unknown, context: { /** The broker's own approved environment for this night defines NO smoke check: a skipped `smoke` step is then all of its (no) checks passing. The worker's word is never used for this. */ noSmokeCheck?: boolean } = {}): NightlyHealth {
+export function classifyNightlyHealth(input: unknown, context: {
+  /** The broker's own approved environment for this night defines NO smoke check: a skipped `smoke` step is then all of its (no) checks passing. The worker's word is never used for this. */
+  noSmokeCheck?: boolean;
+  /** DEC 254zzz495 (N3): the project's approved setup has no test command ("Ready, no automated tests", the broker's own fact, `noAutomatedTestsOf`). A night in which no test ran is then what it should be, not "no tests collected" (an environment fault). */
+  noAutomatedTests?: boolean;
+} = {}): NightlyHealth {
   const parsed = NightlyHealthInputSchema.safeParse(input);
   if (!parsed.success) return { class: "unclear", cause: "unreadable" };
   const { checks, tests } = parsed.data;
@@ -93,7 +111,7 @@ export function classifyNightlyHealth(input: unknown, context: { /** The broker'
   // 2. a check that never gave tests a chance to run
   if (checks.some((check) => !check.started)) return { class: "environment", cause: "check_never_started" };
   if (checks.some((check) => check.timedOut)) return { class: "environment", cause: "check_timed_out" };
-  if (checks.some((check) => check.runsTests && check.testsCollected === 0)) return { class: "environment", cause: "no_tests_collected" };
+  if (collectedNoTests(checks, context.noAutomatedTests === true)) return { class: "environment", cause: "no_tests_collected" };
   if (checks.some((check) => check.reportApproved && !check.reportWritten)) return { class: "environment", cause: "no_report_written" };
 
   // 3. every failure is a collection or import error and it touches more than a fifth of the tests
@@ -107,7 +125,7 @@ export function classifyNightlyHealth(input: unknown, context: { /** The broker'
   if (tests.failures + tests.errors === 0) {
     if (testStepFailed) return { class: "unclear", cause: "steps_disagree" };
     // A run in which no test actually ran (nothing collected, or everything skipped) proves nothing: the environment is not healthy.
-    if (tests.total - tests.skipped === 0) return { class: "environment", cause: "no_tests_collected" };
+    if (tests.total - tests.skipped === 0) return emptyRunHealth(context.noAutomatedTests === true, codeInPlace);
     // "Passed" needs the whole run on record: at least one check, a passing test, no setup step failed (checked above), and both test steps present and passed.
     const testStepsPassed = NIGHTLY_HEALTH_TEST_STEPS.every((step) => steps.some((entry) => entry.step === step && entry.status === "passed"));
     // Skipped setup steps are fine one by one, but at least one of the steps that put the code in place (pull, update, setup, build) must have passed (`codeInPlace`, above).

@@ -1,19 +1,14 @@
 // Test services: the evidence of a round with dependencies. The pack's dependency rows and labels are the BROKER's (from what it pinned); the worker's usage record only says whether a dependency really
 // ran. The pull request says what each was backed by, unknown calls are counted as registrable domain + count, and a pack without dependencies is what it was.
 import { describe, expect, it } from "vitest";
-import { testEnvDigest, EvidenceRawSchema, TestEnvironmentBodySchema, type CheckEntry, type EvidenceEnvironment, type OrgId, type EvidenceRaw } from "@agentx/contracts";
+import { EvidenceRawSchema, type CheckEntry, type EvidenceEnvironment, type EvidenceRaw } from "@agentx/contracts";
 import { BLOCKED_CALLS_ITEM_ID, NO_USAGE_RECORD_ITEM, dependencyEvidenceOf } from "../../packages/broker/src/core/proof/dependency-evidence.js";
 import { buildEvidencePack } from "../../packages/broker/src/core/proof/evidence-pack.js";
 import { keepEvidence, loadEvidencePack, type KeepEvidenceDeps } from "../../packages/broker/src/core/proof/evidence-keep.js";
 import { evidenceLines } from "../../packages/broker/src/core/proof/evidence-lines.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createDocumentEvidenceBlobStore } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
-import type { TestEnvDeps } from "../../packages/broker/src/core/test-env/deps.js";
-import { testEnvLatestKey, testEnvRevisionKey } from "../../packages/broker/src/core/test-env/environment.js";
-import { evidenceEnvironmentOf } from "../../packages/broker/src/core/test-env/evidence-line.js";
-import { testEnvironmentForStart } from "../../packages/broker/src/core/test-env/usable.js";
 import { scanTextForTests } from "../support/evidence-scan.js";
-import { projectStore } from "../support/test-env-world.js";
 
 const DIGEST = "c".repeat(64);
 const ENV: EvidenceEnvironment = { tier: "sandbox", envRevision: 4, services: [], data: "synthetic", accounts: [] };
@@ -103,34 +98,3 @@ describe("the pack kept for a task that pinned dependencies", () => {
   });
 });
 
-describe("the evidence's environment with dependencies", () => {
-  const ORG = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
-  const PROJECT = "service";
-  const ON = { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "1" };
-  const cmd = (executable: string, args: string[] = []) => ({ cwd: "service", executable, args, timeoutSeconds: 600 });
-  const body = TestEnvironmentBodySchema.parse({
-    tier: "sandbox", repos: [{ repositoryId: "service", setupCommands: [], checks: [{ id: "unit", label: "Unit", command: cmd("pytest", ["-q"]), kind: "test" }] }], roundBudgetMin: 30,
-    selection: { method: "full", alwaysRun: [], fullSuiteOn: [] }, nightly: { enabled: false, cronUtc: "0 6 * * *", branch: "main" }, services: [], data: { seeds: [], generator: "faker_seeded", seed: 1 }, accounts: [],
-    prodDeny: { accountIds: [], hosts: [], arnPrefixes: [] }, capture: { screenshots: "failed", video: false, traces: false },
-    dependencies: [{ id: "postgres", name: "Postgres", kind: "database", family: "postgres", found: [{ path: "docker-compose.yml", line: 4 }], usedBy: ["integration"], backing: { kind: "local", catalogId: "postgres@16", config: {} }, connect: { env: [{ name: "DATABASE_URL", template: "postgres://{user}:{password}@{host}:{port}/{db}" }], hostAliases: ["postgres"] }, seeds: [], reset: "fresh_per_round" }],
-  });
-
-  const fakeBody = TestEnvironmentBodySchema.parse({
-    ...body,
-    dependencies: [{ id: "payments", name: "Payments", kind: "http_api", family: "http:api.example-pay.com", found: ["model"], usedBy: ["integration"], backing: { kind: "fake", fixtureSetRef: "a".repeat(64), unmatched: "fail", provenance: { origin: "rovara_task", mockSet: { setId: "payments-mocks", version: 1, store: "rovara" } } }, connect: { env: [], hostAliases: [] }, seeds: [], reset: "fresh_per_round" }],
-  });
-
-  it("pins a fake Rovara made as made by Rovara, from the approved backing's provenance (review M3)", async () => {
-    const store = await projectStore(ORG, PROJECT);
-    const deps: TestEnvDeps = { store, now: () => Date.UTC(2026, 10, 3, 10, 0, 0), env: ON };
-    // The approved revision as the approval gate writes it (the gate itself is covered where the approval is).
-    const digest = testEnvDigest(fakeBody);
-    await store.put({ item: JSON.parse(JSON.stringify({ ...testEnvRevisionKey(ORG, PROJECT, 1), entityType: "TEST_ENV_REVISION", orgId: ORG, project: PROJECT, revision: 1, approvedAt: "2026-11-03T10:00:00.000Z", approvedBy: "dev_a", digest, requestId: "r1", lessSafe: [], environment: fakeBody })) as never });
-    await store.put({ item: { ...testEnvLatestKey(ORG, PROJECT), entityType: "TEST_ENV_LATEST", orgId: ORG, project: PROJECT, revision: 1, digest } });
-    const start = await testEnvironmentForStart(deps, { orgId: ORG, project: PROJECT, taskId: "t1" }, ON);
-    await store.transact([start.pin!]);
-    const chosen = await evidenceEnvironmentOf(deps, { orgId: ORG, project: PROJECT, taskId: "t1" }, ON);
-    expect(chosen.dependencies).toEqual([{ id: "payments", name: "Payments", backing: "fake", fake: { origin: "hand_written", madeByRovara: true } }]);
-    expect(chosen.environment).toEqual({ tier: "sandbox", envRevision: 1, services: [], data: "synthetic", accounts: [] });
-  });
-});

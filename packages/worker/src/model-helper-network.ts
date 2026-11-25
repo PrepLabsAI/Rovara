@@ -21,7 +21,7 @@ import { modelHelperContainerName, modelHelperRunArgs } from "./model-helper-lau
 import { planModelHostBlock, type ModelHostBlock } from "./model-helper-block.js";
 import { TEST_SERVICES_BOOT_FACTS_ENVIRONMENT, parseBootFacts } from "./test-services-report.js";
 import { notPulledRepositories } from "./test-services-run.js";
-import type { DockerCli } from "./swebench/containers.js";
+import type { DockerCli } from "./docker-cli.js";
 
 /** The worker feature a worker advertises when it offers the model helper (one release before the broker sends any model plan). */
 export const MODEL_HELPER_FEATURE = "task.modelHelper.v1";

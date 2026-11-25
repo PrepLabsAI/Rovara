@@ -5,8 +5,6 @@ import { describe, expect, it } from "vitest";
 import { AWS_EMULATOR_ENGINE_VERSION, TestEnvironmentBodySchema, WORKER_INVOCATION_FEATURES, TEST_SERVICES_AWS_PLAN_FEATURE, type OrgId, type ProjectCommand, type TestEnvironment, type TestEnvironmentBody, type VerifiedCatalog } from "@agentx/contracts";
 import { TEST_SERVICES_MIN_CATALOG_REVISION, dependenciesStartableNow, taskDependencyPlansOf } from "../../packages/broker/src/core/test-env/dependency-plan.js";
 import { EMULATED_DEFAULT_REGION, proposeDependencies } from "../../packages/broker/src/core/test-env/dependency-proposal.js";
-import { dependencyCardLines } from "../../packages/broker/src/core/test-env/dependency-card-lines.js";
-import { evidenceEnvironmentOf } from "../../packages/broker/src/core/test-env/evidence-line.js";
 import { environmentUnusedReason, testEnvironmentForStart } from "../../packages/broker/src/core/test-env/usable.js";
 import { dependencyEvidenceOf, type PinnedDependency, type RawUsage } from "../../packages/broker/src/core/proof/dependency-evidence.js";
 import { packDependencyLines } from "../../packages/broker/src/core/proof/dependency-lines.js";
@@ -187,14 +185,6 @@ describe("the proposal from detector candidates", () => {
 
 });
 
-describe("the approve card", () => {
-  it("shows them as Rovara local AWS with the plain risk wording", () => {
-    const lines = dependencyCardLines(threeAws() as never);
-    expect(lines).toContain("S3: runs against Rovara local AWS. Not checked here: AWS permissions and exact AWS behaviour. Found in template.yaml, line 40.");
-    expect(lines.filter((line) => line.includes("Rovara local AWS"))).toHaveLength(3);
-    expect(lines.join(" ")).not.toMatch(/floci|localstack|moto/iu);
-  });
-});
 
 // ---- evidence and the pull request
 
@@ -221,11 +211,4 @@ describe("evidence and the pull request", () => {
     expect(evidenceNotTestedLines(pack, 0).filter((line) => /permissions/iu.test(line))).toEqual([]);
   });
 
-  it("builds the pinned rows from the approved environment (the pack's rows are the broker's, never the worker's words)", async () => {
-    const h = await approved(body());
-    const choice = await evidenceEnvironmentOf(h.deps, { orgId: ORG, project: PROJECT, taskId: "t1" }, ON);
-    expect(choice.dependencies).toEqual(pinnedRows);
-    const realOnly = await approved(body([postgres()]));
-    expect((await evidenceEnvironmentOf(realOnly.deps, { orgId: ORG, project: PROJECT, taskId: "t1" }, ON)).dependencies).toEqual([{ id: "postgres", name: "Postgres", backing: "local" }]);
   });
-});

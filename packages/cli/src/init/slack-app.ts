@@ -6,7 +6,7 @@
 // checks the interactivity URL, so AgentX sends both URLs a correctly signed Slack-style request
 // itself, then asks the engineer to confirm the Event Subscriptions page shows Verified.
 import { createHmac, randomBytes } from "node:crypto";
-import { AgentXError, agentXError, environmentStackName, errorStatus } from "@agentx/contracts";
+import { AgentXError, agentXError, controlPlaneBase, environmentStackName, errorStatus } from "@agentx/contracts";
 import type { InitContext, InitSecrets, SecretFlags } from "./context.js";
 import { SLACK_BOT_HANDLE_PATTERN, type InstallProgress } from "./install-state.js";
 import { askForm, checkSlackBotToken, checkSlackSigningSecret, cleanSecret, fieldCheck, secretFromSource, type FormField, type SecretSource } from "./prompts.js";
@@ -376,7 +376,8 @@ async function controlPlaneSlackUrls(context: InitContext): Promise<{ stackName:
   if (eventsUrl === undefined || interactivityUrl === undefined) {
     throw agentXError("CONFIG_INVALID", `stack ${stackName} reports no Slack URLs; the control-plane step must finish first, so run agentx init again`);
   }
-  const apiEndpoint = outputs?.ApiEndpoint;
+  // CODE-PUBLIC-URL: the sign-in callback is built on the control plane's permanent address where it has one (the issuer output follows it), else its API endpoint.
+  const apiEndpoint = outputs === undefined ? undefined : controlPlaneBase(outputs);
   return { stackName, eventsUrl, interactivityUrl, ...(apiEndpoint === undefined ? {} : { apiEndpoint }) };
 }
 

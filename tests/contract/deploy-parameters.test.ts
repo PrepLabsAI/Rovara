@@ -88,6 +88,23 @@ describe("deploy parameters", () => {
       expect(Object.keys(stackParameters(part, answers(), outputs, { packages: true }))).not.toEqual(expect.arrayContaining(["AnthropicSecretArn"]));
     }
   });
+  // F1 L1a-1 review (R1, R2, B1): under the one carry rule a parameter left out keeps its deployed value, so the three whose empty/default value is a meaning are always sent.
+  it("sends the classifier's provider always: a move to all-Bedrock (the answers drop `providers`) resets it from openrouter, never keeps it beside a Bedrock model id", () => {
+    const toOpenRouter = answers();
+    toOpenRouter.models.providers = { orchestrator: "openrouter", classifier: "openrouter", worker: "openrouter" };
+    toOpenRouter.models.openRouter = { secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:openrouter-AbCdEf" };
+    expect(stackParameters("slack", toOpenRouter, outputs, { packages: true }).GateClassifierProvider).toBe("openrouter");
+    expect(stackParameters("slack", answers(), outputs, { packages: true }).GateClassifierProvider).toBe("amazon-bedrock");
+  });
+  it("sends an empty OperatorExternalId when the answers name none, so clearing the operator principal clears the external id the stack's own rule would otherwise refuse", () => {
+    expect(stackParameters("access", answers(), outputs, { packages: true })).toMatchObject({ OperatorPrincipalArn: "", OperatorExternalId: "" });
+    const crossAccount = { ...answers(), operatorPrincipalArn: "arn:aws:iam::210987654321:role/operator", operatorExternalId: "an-external-id-1" };
+    expect(stackParameters("access", crossAccount, outputs, { packages: true })).toMatchObject({ OperatorExternalId: "an-external-id-1" });
+  });
+  it("sends an empty SetupPageUrl on every install but a cloud one, so an upgrade does not keep the installer's address", () => {
+    expect(stackParameters("identity", answers(), outputs, { packages: true })).toMatchObject({ SetupPageUrl: "" });
+    expect(stackParameters("identity", { ...answers(), setupPageUrl: "https://setup.example.com" }, outputs, { packages: true })).toMatchObject({ SetupPageUrl: "https://setup.example.com" });
+  });
   it("passes the channel queues to the Slack stack only when the control plane has them (spec 062)", () => {
     expect(stackParameters("slack", answers(), outputs, { packages: true })).not.toHaveProperty("ChannelRequestQueueUrl");
     const channel = { ChannelRequestQueueUrl: "https://sqs.us-east-1.amazonaws.com/123456789012/r.fifo", ChannelEventQueueUrl: "https://sqs.us-east-1.amazonaws.com/123456789012/e" };
@@ -235,7 +252,6 @@ describe("deploy parameters", () => {
     for (const [part, names] of Object.entries(OPERATOR_PARAMETERS)) {
       const declared = Object.keys(templates.get(part)?.Parameters ?? {});
       for (const name of names) {
-        if (name === "TaskPersonProofEnabled") continue; // Declared only in the owner-approved named TEST template.
         expect(declared, `${part} ${name}`).toContain(name);
       }
     }
@@ -354,20 +370,14 @@ describe("deploy parameters", () => {
     expect(stackParameters("control-plane", answers(), outputs, { packages: true })).not.toHaveProperty("DeveloperSignInSlack");
   });
 
-  it("keeps People mutation controls as operator parameters without setting them from sign-in answers", () => {
-    expect(OPERATOR_PARAMETERS["control-plane"]).toEqual(expect.arrayContaining([
-      "TaskPeopleChangesEnabled",
-      "TaskPeoplePublicInvitationsEnabled",
-      "TaskPeoplePrivateInvitationsEnabled",
-    ]));
+  it("keeps the People role-change control as an operator parameter without setting it from sign-in answers (the two invitation switches were deleted in F1 L1a-1: nothing read them)", () => {
+    expect(OPERATOR_PARAMETERS["control-plane"]).toContain("TaskPeopleChangesEnabled");
     expect(stackParameters("control-plane", answers(), outputs, { packages: true })).not.toHaveProperty("TaskPeopleChangesEnabled");
-    expect(stackParameters("control-plane", answers(), outputs, { packages: true })).not.toHaveProperty("TaskPeoplePublicInvitationsEnabled");
-    expect(stackParameters("control-plane", answers(), outputs, { packages: true })).not.toHaveProperty("TaskPeoplePrivateInvitationsEnabled");
-  });
-
-  it("preserves the proof installation parameter without turning it into an install answer", () => {
-    expect(OPERATOR_PARAMETERS["control-plane"]).toContain("TaskPersonProofEnabled");
-    expect(stackParameters("control-plane", answers(), outputs, { packages: true })).not.toHaveProperty("TaskPersonProofEnabled");
+    for (const name of ["TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled"]) {
+      expect(OPERATOR_PARAMETERS["control-plane"]).not.toContain(name);
+      expect(templates.get("control-plane")!.Parameters, name).not.toHaveProperty(name);
+      expect(stackParameters("control-plane", answers(), outputs, { packages: true })).not.toHaveProperty(name);
+    }
   });
 });
 

@@ -4,12 +4,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
-import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { crc32 as zlibCrc32, deflateRawSync, inflateRawSync } from "node:zlib";
 import { evaluateMediaGate, evaluatePublicationGate, type MediaGateInput, type EvidenceEnvironment, type EvidenceRaw } from "../../packages/contracts/src/index.js";
-import { MEDIA_DIR, MEDIA_LISTING_FILE, MEDIA_VIDEO_MAX_BYTES, MEDIA_TRACE_MAX_BYTES, admittedMediaPolicy, createMediaRecorder, finalizeMedia, mediaFileName } from "../../packages/verifier/src/executor/media.js";
 import { TRACE_BLANKED, scrubTraceLines, scrubTraceZip } from "../../packages/verifier/src/executor/trace-scrub.js";
 import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
 import { finishWebCaseMedia, startWebCaseTrace, type E2EWebMediaPorts } from "../../packages/verifier/src/web-runtime.js";
@@ -19,7 +18,6 @@ import { buildEvidencePack } from "../../packages/broker/src/core/proof/evidence
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const roots: string[] = [];
-async function temp(): Promise<string> { const dir = await realpath(await mkdtemp(join(tmpdir(), "media-test-"))); roots.push(dir); return dir; }
 afterEach(async () => { await Promise.all(roots.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
 
 const PASSWORD = "planted-Password-7f3a91c2d4e8b0aa";
@@ -198,6 +196,14 @@ describe("scrubbing a trace", () => {
     expect(bomb.length).toBeLessThan(1_000_000);
     expect(scrubTraceZip(bomb, () => false)).toBeNull();
   });
+  it("refuses a trace line nested too deep to walk, with null rather than a RangeError (PC-N6)", () => {
+    const deep = `${"[".repeat(200_000)}${"]".repeat(200_000)}`;
+    expect(() => scrubTraceLines(`${deep}\n`)).not.toThrow();
+    expect(scrubTraceLines(`${deep}\n`)).toBeNull();
+    const nested = zip([{ name: "trace.trace", data: `${deep}\n` }]);
+    expect(() => scrubTraceZip(nested, () => false)).not.toThrow();
+    expect(scrubTraceZip(nested, () => false)).toBeNull();
+  });
   it("refuses a zip64 archive and a central directory that points outside the file", () => {
     const z64 = Buffer.from(zip([{ name: "a", data: "x" }])); z64.writeUInt16LE(0xffff, z64.length - 22 + 10);
     expect(scrubTraceZip(z64, () => false)).toBeNull();
@@ -274,112 +280,7 @@ describe("the zip structure and the new scrub rules (C2, M3, M4)", () => {
   });
 });
 
-describe("the executor's media recorder", () => {
-  it("is off unless the host was given proof the accounts are run-scoped", () => {
-    expect(admittedMediaPolicy({ video: false, traces: false })).toEqual({ video: false, trace: false });
-    expect(() => admittedMediaPolicy({ video: true, traces: false })).toThrow(/run-scoped/);
-    expect(() => admittedMediaPolicy({ video: false, traces: true }, { runScoped: false })).toThrow(/run-scoped/);
-    expect(admittedMediaPolicy({ video: true, traces: true }, { runScoped: true })).toEqual({ video: true, trace: true });
-  });
-  it("writes nothing for a kind that is not admitted", async () => {
-    const root = await temp();
-    const recorder = createMediaRecorder({ root, policy: { video: false, trace: true }, caseIds: ["case-a"], redactor: redactor() });
-    expect(recorder.enabled("video")).toBe(false);
-    expect(await recorder.record({ caseId: "case-a", kind: "video", bytes: WEBM })).toBeNull();
-    expect(await readdir(root)).toEqual([]);
-  });
-  it("keeps a clean video and a trace that is scrubbed on disk", async () => {
-    const root = await temp();
-    const recorder = createMediaRecorder({ root, policy: { video: true, trace: true }, caseIds: ["case-a", "case-b"], redactor: redactor() });
-    expect(await recorder.record({ caseId: "case-b", kind: "video", bytes: WEBM })).toMatchObject({ caseId: "case-b", kind: "video", bytes: WEBM.length });
-    const trace = await recorder.record({ caseId: "case-b", kind: "trace", bytes: goodTrace() });
-    expect(trace?.omitted).toBeUndefined();
-    const onDisk = await readFile(join(root, MEDIA_DIR, mediaFileName(1, "trace")));
-    expect(sha(onDisk)).toBe(trace?.sha256);
-    expect(unzipEntries(onDisk).get("trace.network")).not.toContain(SESSION);
-    expect(await readFile(join(root, MEDIA_DIR, mediaFileName(1, "video")))).toEqual(WEBM);
-  });
-  it("records what the scrub did on the trace's entry, and the listing keeps the counts", async () => {
-    const root = await temp();
-    const recorder = createMediaRecorder({ root, policy: { video: false, trace: true }, caseIds: ["a"], redactor: redactor() });
-    const entry = await recorder.record({ caseId: "a", kind: "trace", bytes: goodTrace() });
-    expect(entry?.scrub).toMatchObject({ blankedValues: expect.any(Number) as number, droppedSnapshots: 0, droppedFrames: 0, droppedEntries: 0, secrets: expect.any(Number) as number });
-    expect(entry?.scrub?.blankedValues).toBeGreaterThan(0);
-    const listing = await finalizeMedia({ outDir: root, policy: { video: false, trace: true }, caseIds: ["a"] });
-    expect(listing[0]?.scrub).toEqual(entry?.scrub);
-  });
-  it("drops a file that is not the kind it says, over its cap, or one a second time", async () => {
-    const root = await temp();
-    const recorder = createMediaRecorder({ root, policy: { video: true, trace: true }, caseIds: ["case-a", "case-b", "case-c"], redactor: redactor() });
-    expect(await recorder.record({ caseId: "case-a", kind: "video", bytes: Buffer.from("not a webm file") })).toMatchObject({ omitted: "not_that_kind" });
-    expect(await recorder.record({ caseId: "case-a", kind: "trace", bytes: WEBM })).toMatchObject({ omitted: "not_that_kind" });
-    expect(await recorder.record({ caseId: "case-b", kind: "video", bytes: Buffer.concat([WEBM, Buffer.alloc(MEDIA_VIDEO_MAX_BYTES)]) })).toMatchObject({ omitted: "size_over_cap" });
-    const big = Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.alloc(MEDIA_TRACE_MAX_BYTES)]);
-    expect(await recorder.record({ caseId: "case-b", kind: "trace", bytes: big })).toMatchObject({ omitted: "size_over_cap" });
-    await recorder.record({ caseId: "case-c", kind: "video", bytes: WEBM });
-    await expect(recorder.record({ caseId: "case-c", kind: "video", bytes: WEBM })).rejects.toThrow(/one file/);
-    await expect(recorder.record({ caseId: "nope", kind: "video", bytes: WEBM })).rejects.toThrow(/unknown case/);
-    await expect(recorder.record({ caseId: "case-a", kind: "gif" as never, bytes: WEBM })).rejects.toThrow(/unknown media kind/);
-    expect((await readdir(join(root, MEDIA_DIR))).filter((name) => name !== "entries")).toEqual([mediaFileName(2, "video")]);
-  });
-  it("keeps at most one round's worth of video", async () => {
-    const root = await temp();
-    const recorder = createMediaRecorder({ root, policy: { video: true, trace: false }, caseIds: ["a", "b", "c"], redactor: redactor() });
-    const chunk = Buffer.concat([WEBM, Buffer.alloc(9 * 1_048_576)]);
-    expect((await recorder.record({ caseId: "a", kind: "video", bytes: chunk }))?.omitted).toBeUndefined();
-    expect((await recorder.record({ caseId: "b", kind: "video", bytes: chunk }))?.omitted).toBeUndefined();
-    expect((await recorder.record({ caseId: "c", kind: "video", bytes: chunk }))?.omitted).toBe("size_over_cap");
-  });
-  it("positive control: a video carrying the password is dropped with no file, and the same video without it is kept", async () => {
-    const root = await temp();
-    const recorder = createMediaRecorder({ root, policy: { video: true, trace: true }, caseIds: ["a", "b"], redactor: redactor() });
-    expect(await recorder.record({ caseId: "a", kind: "video", bytes: Buffer.concat([WEBM, Buffer.from(PASSWORD)]) })).toMatchObject({ omitted: "unsafe_content" });
-    expect((await recorder.record({ caseId: "b", kind: "video", bytes: WEBM }))?.omitted).toBeUndefined();
-    expect((await readdir(join(root, MEDIA_DIR))).filter((name) => name !== "entries")).toEqual([mediaFileName(1, "video")]);
-  });
-  it("keeps a trace with a credential inside it only with the credential blanked, and drops one it cannot scrub", async () => {
-    const root = await temp();
-    const recorder = createMediaRecorder({ root, policy: { video: false, trace: true }, caseIds: ["a", "b"], redactor: redactor() });
-    const kept = await recorder.record({ caseId: "a", kind: "trace", bytes: zip([{ name: "trace.trace", data: `${JSON.stringify({ text: PASSWORD })}\n` }]) });
-    expect(kept?.omitted).toBeUndefined();
-    expect(unzipEntries(await readFile(join(root, MEDIA_DIR, mediaFileName(0, "trace")))).get("trace.trace")).not.toContain(PASSWORD);
-    expect(await recorder.record({ caseId: "b", kind: "trace", bytes: zip([{ name: "trace.network", data: "garbage line\n" }]) })).toMatchObject({ omitted: "unsafe_content" });
-    expect((await readdir(join(root, MEDIA_DIR))).filter((name) => name !== "entries")).toEqual([mediaFileName(0, "trace")]);
-  });
-});
 
-describe("settling a group's media", () => {
-  const policy = { video: true, trace: true };
-  it("lists what was kept and dropped, and removes the working files", async () => {
-    const root = await temp();
-    const recorder = createMediaRecorder({ root, policy, caseIds: ["a", "b"], redactor: redactor() });
-    await recorder.record({ caseId: "a", kind: "video", bytes: WEBM });
-    await recorder.record({ caseId: "b", kind: "video", bytes: Buffer.from("junk") });
-    const listing = await finalizeMedia({ outDir: root, policy, caseIds: ["a", "b"] });
-    expect(listing.map((row) => [row.caseId, row.kind, row.omitted])).toEqual([["a", "video", undefined], ["b", "video", "not_that_kind"]]);
-    expect(JSON.parse(await readFile(join(root, MEDIA_LISTING_FILE), "utf8"))).toMatchObject({ schemaVersion: "e2e-executor-media/v1" });
-    expect(await readdir(join(root, MEDIA_DIR))).toEqual([mediaFileName(0, "video")]);
-  });
-  it("removes a media file nobody listed, one that differs from its listing, and one for a kind not admitted", async () => {
-    const root = await temp();
-    const recorder = createMediaRecorder({ root, policy, caseIds: ["a", "b"], redactor: redactor() });
-    await recorder.record({ caseId: "a", kind: "video", bytes: WEBM });
-    await writeFile(join(root, MEDIA_DIR, mediaFileName(1, "trace")), goodTrace());
-    await writeFile(join(root, MEDIA_DIR, "stray.webm"), WEBM);
-    await finalizeMedia({ outDir: root, policy, caseIds: ["a", "b"] });
-    expect(await readdir(join(root, MEDIA_DIR))).toEqual([mediaFileName(0, "video")]);
-    const root2 = await temp();
-    await createMediaRecorder({ root: root2, policy, caseIds: ["a"], redactor: redactor() }).record({ caseId: "a", kind: "video", bytes: WEBM });
-    await writeFile(join(root2, MEDIA_DIR, mediaFileName(0, "video")), Buffer.concat([WEBM, Buffer.from("swapped")]));
-    const swapped = await finalizeMedia({ outDir: root2, policy, caseIds: ["a"] });
-    expect(swapped[0]?.omitted).toBe("unsafe_content");
-    expect(await readdir(join(root2, MEDIA_DIR))).toEqual([]);
-    const root3 = await temp();
-    await createMediaRecorder({ root: root3, policy, caseIds: ["a"], redactor: redactor() }).record({ caseId: "a", kind: "video", bytes: WEBM });
-    expect(await finalizeMedia({ outDir: root3, policy: { video: false, trace: false }, caseIds: ["a"] })).toEqual([]);
-    expect(await readdir(root3)).toEqual([]);
-  });
-});
 
 describe("the web case hooks", () => {
   const ports = (over: Partial<E2EWebMediaPorts> = {}, calls: string[] = []): E2EWebMediaPorts => ({ trace: true, tracePath: (caseId) => `/scratch/${caseId}.zip`, readFile: async () => goodTrace(), record: async (input) => { calls.push(`${input.kind}:${input.caseId}`); }, ...over });
@@ -430,19 +331,7 @@ describe("the broker keeps its own bytes and the pack applies the gate", () => {
     expect(unzipEntries(stored.data).get("trace.network")).not.toContain(SESSION);
     expect(prepared.rows).toEqual([{ scenarioId: "checkout", trace: stored.ref }]);
   });
-  it("leaves out a trace it cannot scrub, a video with a credential, the wrong kind, an over-cap file and a second of a kind", () => {
-    const prepared = prepareMediaArtifacts([
-      { scenarioId: "a", kind: "trace", bytes: zip([{ name: "trace.network", data: "not json\n" }]) },
-      { scenarioId: "b", kind: "video", bytes: Buffer.concat([WEBM, Buffer.from(EMAIL)]) },
-      { scenarioId: "c", kind: "video", bytes: goodTrace() },
-      { scenarioId: "d", kind: "video", bytes: Buffer.concat([WEBM, Buffer.alloc(MEDIA_VIDEO_MAX_BYTES)]) },
-      { scenarioId: "e", kind: "video", bytes: WEBM }, { scenarioId: "e", kind: "video", bytes: Buffer.concat([WEBM, Buffer.from("x")]) },
-    ], { contains, gate: OPEN_GATE });
-    expect(prepared.problems.map((item) => [item.scenarioId, item.problem])).toEqual([["a", "unsafe_content"], ["b", "unsafe_content"], ["c", "not_that_kind"], ["d", "over_cap"], ["e", "duplicate"]]);
-    expect(prepared.rows.map((row) => row.scenarioId)).toEqual(["e"]);
-    expect(prepared.artifacts).toHaveLength(1);
-  });
-  it("hands back what the broker's own scrub did to each trace it kept", () => {
+    it("hands back what the broker's own scrub did to each trace it kept", () => {
     const prepared = prepareMediaArtifacts([{ scenarioId: "checkout", kind: "trace", bytes: goodTrace() }, { scenarioId: "checkout", kind: "video", bytes: WEBM }], { contains, gate: OPEN_GATE });
     expect(prepared.scrubbed).toHaveLength(1);
     expect(prepared.scrubbed[0]).toMatchObject({ scenarioId: "checkout", stats: { blankedValues: expect.any(Number) as number } });

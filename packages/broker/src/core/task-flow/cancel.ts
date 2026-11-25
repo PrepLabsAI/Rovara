@@ -9,12 +9,16 @@ import { iso } from "./support.js";
 import { commitWorkflow } from "./stage-machine.js";
 import { resolveRowItem } from "./dispatch-rows.js";
 
+/** The two sentences a person's Stop blocks a step with. Exported so the standing reads the stop's OWN block by these words (a block for any other reason near the stop is not the Stop). */
+export const STOPPED_STEP_REASON = "You stopped this step. Retry to run it again.";
+export const STOPPED_CHECKS_REASON = "You stopped the checks. Retry to run them again.";
+
 async function stopQueuedChecks(deps: TaskFlowDeps, task: NonNullable<Awaited<ReturnType<typeof readTask>>>, workspace: WorkspaceRecord, location: Awaited<ReturnType<typeof workspaceKeys>>) {
   // A managed round may still be due, before the dispatcher has acquired a worker. Stop invalidates that
   // revision atomically with its due row, so recovery and an admission already being prepared cannot revive it.
   const workflow = task.workflow;
   if (workflow?.stage === "VERIFY" && workflow.state === "WAITING" && workflow.e2e?.required === true) {
-    const stopped = blockWorkflow(workflow, "You stopped the checks. Retry to run them again.", iso(deps));
+    const stopped = blockWorkflow(workflow, STOPPED_CHECKS_REASON, iso(deps));
     const applied = await commitWorkflow(deps, task, stopped, [resolveRowItem(deps, task.taskId, workflow.revision),
       { kind: "check", key: location.workspaceKey, condition: when.and(when.eq("activeOperationId", null), when.eq("fence", workspace.fence)) }]);
     return { nothingRunning: !applied };
@@ -43,5 +47,5 @@ export async function cancelTask(deps: TaskFlowDeps, taskId: string, expectedOpe
     },
   ]);
   if (!stopped.applied) return { nothingRunning: true };
-  return finishCancellation(deps, taskId, workspace, operation, "You stopped this step. Retry to run it again.", expectedOperationId);
+  return finishCancellation(deps, taskId, workspace, operation, STOPPED_STEP_REASON, expectedOperationId);
 }

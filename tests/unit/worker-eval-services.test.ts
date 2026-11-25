@@ -11,7 +11,7 @@ import { EVAL_BRIDGE_SOCKET_NAME, EVAL_HELPER_DIR_NAME, createFreshEvalSandbox, 
 import { createEvalServicesStarter, type EvalServicesStarted, type EvalServicesStarter } from "../../packages/worker/src/verification/eval-services.js";
 import { runNetworkHelperIp } from "../../packages/worker/src/run-network.js";
 import { testServicesConfigFromEnvironment, TEST_SERVICES_OWNER_IMAGES_ENVIRONMENT } from "../../packages/worker/src/test-services-run.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 import { EVAL_REPORT_FILE, fakeEvalDaemon } from "../support/fake-eval-sealed-daemon.js";
 
 const WS = "0123456789abcdef";

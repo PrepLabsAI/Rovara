@@ -8,6 +8,7 @@ import { Construct } from "constructs";
 import { packagedFunction } from "./control-plane.js";
 import { addBrokerSetting, addDerivedBrokerVariable } from "./broker-names.js";
 import type { AgentXNaming } from "./naming.js";
+import { publicApiBase, publicApiUrl } from "./public-api-url.js";
 
 export interface ChannelAdaptersProps {
   naming: AgentXNaming;
@@ -81,14 +82,15 @@ export class ChannelAdapters extends Construct {
       secretName: slackAdapterSecretName,
       description: "Signing secret of the built-in Slack channel adapter (spec 062 FR-073); 64 letters and digits, read as base64",
       generateSecretString: { passwordLength: 64, excludePunctuation: true, includeSpace: false },
-      removalPolicy: RemovalPolicy.DESTROY,
+      // Retained: the value is generated once and cannot be read back from anywhere else; a deleted secret is a new value for every reader and a signature failure for anything in flight.
+      removalPolicy: RemovalPolicy.RETAIN,
     });
     const builtInAdapter = this.builtInAdapter = {
       BUILT_IN_ADAPTER: slackViaChannel,
       BUILT_IN_ADAPTER_CHANNEL: "slack",
-      BUILT_IN_ADAPTER_CALLBACK_URL: `${props.api.attrApiEndpoint}/v1/slack/channel-events`,
+      BUILT_IN_ADAPTER_CALLBACK_URL: publicApiUrl(props.api, "/v1/slack/channel-events"),
       // Phase 7c: posts the core must know the result of, and Canvases.
-      BUILT_IN_ADAPTER_COMMANDS_URL: `${props.api.attrApiEndpoint}/v1/slack/channel-commands`,
+      BUILT_IN_ADAPTER_COMMANDS_URL: publicApiUrl(props.api, "/v1/slack/channel-commands"),
       BUILT_IN_ADAPTER_SECRET_NAME: slackAdapterSecretName,
     };
 
@@ -99,7 +101,8 @@ export class ChannelAdapters extends Construct {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
       timeToLiveAttribute: "expiresAt",
-      removalPolicy: RemovalPolicy.DESTROY,
+      // Retained: replay and link-notice claims expire, but the LAST_EVENT rows (the newest event per conversation) do not, and must outlive a stack deletion.
+      removalPolicy: RemovalPolicy.RETAIN,
     });
 
     // Accepted messages and decisions, ordered per conversation, run by the hosted orchestrator.
@@ -135,7 +138,7 @@ export class ChannelAdapters extends Construct {
       CHANNEL_STATE_TABLE_NAME: channelState.tableName,
       CHANNEL_REQUEST_QUEUE_URL: requests.queueUrl,
       CHANNEL_EVENT_QUEUE_URL: events.queueUrl,
-      CHANNEL_LINK_ORIGIN: props.api.attrApiEndpoint,
+      CHANNEL_LINK_ORIGIN: publicApiBase(props.api),
       ...builtInAdapter,
       SLACK_THREADS_TABLE_NAME: props.slack.threads.tableName,
       BROKER_FUNCTION_NAME: props.broker.functionName,
@@ -229,7 +232,7 @@ export class ChannelAdapters extends Construct {
     // The built-in Slack adapter: Slack's ingress signs with the adapter's secret, hands requests to the channel API and
     // takes the core's events for Slack on its own route. The route answers 404 while SlackViaChannel is off.
     props.slack.ingress.addEnvironment("SLACK_VIA_CHANNEL", slackViaChannel);
-    props.slack.ingress.addEnvironment("CHANNEL_API_URL", props.api.attrApiEndpoint);
+    props.slack.ingress.addEnvironment("CHANNEL_API_URL", publicApiBase(props.api));
     props.slack.ingress.addEnvironment("SLACK_ADAPTER_SECRET_NAME", slackAdapterSecretName);
     slackAdapterSecret.grantRead(props.slack.ingress);
     // Phase 7c2: the orchestrator posts a routing card and a private answer through the adapter's commands.

@@ -55,8 +55,9 @@ describe("the health route's grants (A13)", () => {
     expect(egressAlarmNames.every((name) => allNames.includes(name))).toBe(true);
     const stacks = buildAgentXApp({ agentxEnv: "live25d" }).node.children.filter((child): child is Stack => Stack.isStack(child));
     // The automatic renewal's alarms exist only where its CDK context is on (AR-2).
-    expect([...alarmNamesOf({})].sort()).toStrictEqual(HEALTH_ALARM_SUFFIXES.filter((suffix) => !suffix.startsWith("RuntimeRequalify")).map((suffix) => `agentx-live25d-${suffix}`).sort());
-    expect([...alarmNamesOf({ "agentx:autoRequalify": "enabled" })].sort()).toStrictEqual(HEALTH_ALARM_SUFFIXES.map((suffix) => `agentx-live25d-${suffix}`).sort());
+    expect([...alarmNamesOf({})].sort()).toStrictEqual(HEALTH_ALARM_SUFFIXES.filter((suffix) => !suffix.startsWith("RuntimeRequalify") && !suffix.startsWith("CanarySession")).map((suffix) => `agentx-live25d-${suffix}`).sort());
+    // CANARY-SESSION: its three alarms are the legacy (beta) install's alone; a named environment has none (listed so the probe reads them where they exist, conditional so their absence is expected).
+    expect([...alarmNamesOf({ "agentx:autoRequalify": "enabled" })].sort()).toStrictEqual(HEALTH_ALARM_SUFFIXES.filter((suffix) => !suffix.startsWith("CanarySession")).map((suffix) => `agentx-live25d-${suffix}`).sort());
     expect(stacks.flatMap((stack) => Object.keys(Template.fromStack(stack).findResources("AWS::CloudWatch::CompositeAlarm")))).toEqual([]);
   }, 120_000);
 
@@ -200,7 +201,9 @@ describe("the health route's grants (A13)", () => {
       // The setup agent: a run's journal, a person's commands and their request marks, the website asks (with their counters and index rows) and the per-run refusal counts, which are kept 31 days like Cloud's setup rows; and the check's record (31 days).
       "packages/broker/src/core/setup-agent/keys.ts", "packages/broker/src/core/setup-agent/check.ts", "packages/broker/src/core/setup-agent/command.ts", "packages/broker/src/core/setup-agent/host-ask.ts",
       // The project's test environment: the proposal and approval bookkeeping, the saved-environment markers (a closed workspace's row and the rebuild-due marker), the candidate setup check's row and the nightly status rows expire after their own retention.
-      "packages/broker/src/core/test-env/deps.ts", "packages/broker/src/core/test-env/saved-env-markers.ts", "packages/broker/src/core/test-env/candidate-check.ts", "packages/broker/src/core/test-env/night-status.ts",
+      "packages/broker/src/core/test-env/deps.ts", "packages/broker/src/core/test-env/saved-env-markers.ts", "packages/broker/src/core/test-env/night-status.ts",
+      // SI-2: a saved-image rebuild's start record (kept 30 days) and its slot rows (a day past their lease) are small bookkeeping rows that expire on their own; no durable record shares their keys.
+      "packages/broker/src/core/test-env/saved-env-run.ts", "packages/broker/src/core/test-env/saved-env-slots.ts",
       // Tickets that ask for work: a ticket's item (30 days while it waits, 400 once started), the event and change claims (30 and 7 days), the owner's notices (30 days), the poll's hourly read counts (2 hours), Rovara's notes of its own writes, and the ticket updates' claims and counts.
       "packages/broker/src/core/intake/store.ts", "packages/broker/src/core/intake/poll.ts", "packages/broker/src/core/intake/notices.ts", "packages/broker/src/core/intake/own-writes.ts", "packages/broker/src/core/ticket-updates/handler.ts",
       // L4-LP: the ticket updates' claims and counts moved unchanged into claims.ts; the ticket thread's state row (400 days) and the task log's rows (400 days) are new rows with their own retention.
@@ -211,7 +214,7 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/connections/request-marks.ts",
       // Automation: a request row (7 days), a trigger's activity (30 days), its hourly and daily counters and its subject note (2 hours to 2 days), the automatic runs' month and claim rows, started and paused markers and the run watch (62 days at most, 14 days for the watch) and the open record of an unattended run with its reservation (62 days).
       "packages/broker/src/core/automation/kit.ts", "packages/broker/src/core/automation/run-seam.ts", "packages/broker/src/core/triggers/store.ts", "packages/broker/src/core/triggers/dispatch.ts",
-      "packages/broker/src/core/automatic-runs/cap.ts", "packages/broker/src/core/automatic-runs/start.ts", "packages/broker/src/core/automatic-runs/end.ts",
+      "packages/broker/src/core/automatic-runs/cap.ts",
       // Nightly upkeep (lead 4 N1): the last-night, per-night and pause-notice marker rows expire after 62 days (`upkeepExpiryOf`); the switch row (SETTINGS) is durable and carries no expiry.
       "packages/broker/src/core/upkeep/keys.ts",
       // Work events (U3): one row per flow fact of a task, kept 13 months after its month (WORK_EVENT_RETENTION_MONTHS), then expired. Not a durable record of the work itself.
@@ -251,6 +254,11 @@ describe("the health route's grants (A13)", () => {
       // Webhook lane W0: the GitHub delivery rows (GITHUB_DELIVERY#, kept 7 days: GitHub lets an operator redeliver for 3), the replay-guard rows (GITHUB_BODY#<sha256>) and the per-installation minute counters
       // (GITHUB_RL#), each a numeric epoch-SECONDS expiry, then expired. Not durable records: a delivery's effect is stored on the task, and these rows only say "seen".
       "packages/broker/src/aws/github-core-webhooks.ts", "packages/broker/src/aws/github-webhooks.ts",
+      // R1 + L1 6.2b: the hourly tracker-start counter (one TRACKER_START_CAP row per company, person and hour, expiring two hours after it is written). Not a durable record: it only bounds how many
+      // tasks one person's tracker acts start in an hour; no other record shares the key (core/intake/trigger.ts).
+      "packages/broker/src/core/intake/trigger.ts",
+      // F2-B: an admin's stop of the owner's task writes one NOTIFY_PENDING notice row for the owner in the stop's own claim, expiring with the queue's other pending rows (3 days). A notice item like the attention queue's; not a durable record.
+      "packages/broker/src/core/task-flow/stop-request.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);

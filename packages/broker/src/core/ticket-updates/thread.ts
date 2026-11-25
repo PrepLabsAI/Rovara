@@ -22,6 +22,7 @@ import { taskKey } from "../task-flow/keys.js";
 import { KEPT_SECONDS, claim, claimKey, scopeCoversCompany, countWithin, giveBack, hourOf, isFinal, refusalOf, release, settle } from "./claims.js";
 import type { TicketRef, TicketUpdatesDependencies } from "./handler.js";
 import { noteWriteAccessMissing, noteWriteAccessOk } from "./settings.js";
+import { noteStatusAnswer } from "./status-answer.js";
 import { renderReplies, renderRoot, visibleEntries } from "./thread-render.js";
 
 export const THREAD_REPLIES_PER_TASK = 20;
@@ -304,6 +305,7 @@ export async function sendThreadMilestone(deps: TicketUpdatesDependencies, input
           if (answer !== "moved") { await giveBack(deps, hour).catch(() => undefined); spent = false; }
           if (answer === "needs_write_access") await noteWriteAccessMissing(deps, orgId, ticket.tracker).catch(() => undefined);
           else if (answer === "moved") await noteWriteAccessOk(deps, orgId, ticket.tracker).catch(() => undefined);
+          await noteStatusAnswer({ store: deps.store, now: deps.now, log: deps.log }, { orgId, tracker: ticket.tracker, project: input.project, moment: input.moment, name: input.status, answer });
           await settle(deps, milestone.taskId, name, answer);
         }
       } catch (error) {

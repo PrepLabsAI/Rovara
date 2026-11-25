@@ -1,6 +1,5 @@
 import { expect, it, vi } from "vitest";
 import * as identity from "../../packages/broker/src/aws/developer-identity.js";
-import * as proof from "../../packages/broker/src/aws/task-person-proof-runtime.js";
 import { identityHarness } from "../support/developer-fakes.js";
 import { slackTokens } from "../../packages/testing/src/channel/slack-world.js";
 const A = { companyId: "org_aaaaaaaaaaaaaaaaaaaa", teamId: "T0AAAAAAA" };
@@ -32,21 +31,6 @@ it("identity invokes use a workspace directory and recheck cached bindings", asy
   expect(await h.handler({ ...request, workspace: A } as never)).toEqual({ ok: false, error: "slack_unavailable" });
   expect(w.calls).toHaveLength(2); expect(h.fetch.calls).toHaveLength(0);
 });
-it("dedicated proof uses the envelope's record-derived workspace and refuses absent/foreign scope", async () => {
-  const w = world(); expect(typeof proof.createTaskPersonProofRuntime).toBe("function");
-  const run = proof.createTaskPersonProofRuntime({ ...w, env: { AGENTX_ENV: "agentxlivetest123", AWS_REGION: "us-east-1" } });
-  const event = (workspace?: typeof A) => ({ kind: "task-dispatch-person-proof", ...(workspace === undefined ? {} : { workspace }),
-    request: { kind: "task-person-proof", slackUserId: USER, channelIds: [CHANNEL], ...(workspace === undefined ? {} : { workspace }) },
-    admission: { version: 1, id: "11111111-1111-4111-8111-111111111111", deadlineAt: Date.now() + 6000, remainingMs: 6000, slackCallsLimit: 10 } });
-  const context = { getRemainingTimeInMillis: () => 7000 };
-  const [a, b] = await Promise.all([run(event(A), context), run(event(B), context)]);
-  expect(a.result).toMatchObject({ ok: true, user: { teamId: A.teamId, name: "alpha" } });
-  expect(b.result).toMatchObject({ ok: true, user: { teamId: B.teamId, name: "beta" } });
-  for (const workspace of [undefined, { ...A, teamId: B.teamId }]) await expect(run(event(workspace), context)).rejects.toThrow("task person identity proof is unavailable");
-  await expect(run({ ...event(A), request: event(B).request }, context)).rejects.toThrow("task person identity proof is unavailable");
-  expect(w.calls).toHaveLength(4);
-});
-
 it("directory cache has one total bound across all companies and teams", async () => {
   const h = identityHarness({});
   const factory = identity.createWorkspaceSlackDirectory({ legacy: h.deps.directory,

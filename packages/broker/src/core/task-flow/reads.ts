@@ -1,6 +1,6 @@
 import { locateWorkspace, type WorkspaceLocation } from "./workspace-location.js";
 // Lane L6a, task flow core: reading a task. A task of someone else reads as "not found" (no leak).
-import { PullRequestSummarySchema, AgentXError, IMPLICIT_COMPANY_ID, OrgIdSchema, agentXError, type DeveloperTaskFailure, type DeveloperTaskView, type DeveloperTaskStatus, type StoredDocument, type WorkflowSnapshot } from "@agentx/contracts";
+import { PullRequestSummarySchema, AgentXError, redactBlockReason, IMPLICIT_COMPANY_ID, OrgIdSchema, agentXError, type DeveloperTaskFailure, type DeveloperTaskView, type DeveloperTaskStatus, type StoredDocument, type WorkflowSnapshot } from "@agentx/contracts";
 import { taskStartupView, deriveTaskStatus, taskIndexKey, type DeveloperTaskIndexRecord } from "../../developer/task-records.js";
 import { taskOwnerView, type TaskOwnerView } from "../../developer/task-owner-view.js";
 import { taskNotFound } from "./access.js";
@@ -135,7 +135,7 @@ export async function taskViewOf(deps: TaskFlowDeps, task: TaskRecord): Promise<
     ...(task.closedAt === undefined ? {} : { closedAt: task.closedAt }),
     ...(workflow === undefined ? {} : { workflow: {
       definitionVersion: workflow.definitionVersion, path: workflow.path, stage: workflow.stage, state: workflow.state, revision: workflow.revision,
-      ...(workflow.blockReason === undefined ? {} : { blockReason: workflow.blockReason }),
+      ...(workflow.blockReason === undefined ? {} : { blockReason: redactBlockReason(workflow.blockReason, 500) }),
     } }),
     ...(derived.failure === undefined ? {} : { failure: derived.failure }),
     operations: operations.map((operation) => ({ id: operation.id, kind: operation.kind, status: operation.status, ...(operation.workflowMode === undefined ? {} : { workflowMode: operation.workflowMode }) })),

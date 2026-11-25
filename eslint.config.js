@@ -27,6 +27,8 @@ export default tseslint.config(
       "tests/fixtures/device-evidence-app/**",
       "tests/fixtures/model-helper/scripted-run/**",
       "eslint.config.js",
+      // Rovara Cloud's plain Node OpenRouter qualifier, ported with the model gateway (#1478): outside every TypeScript program, like the fixture .mjs files.
+      "scripts/openrouter-qualify.mjs",
     ],
   },
   eslint.configs.recommended,

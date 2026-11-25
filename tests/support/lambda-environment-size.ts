@@ -70,6 +70,8 @@ export const DEPLOY_PARAMETER_VALUES: Record<string, string> = {
   CoreAnswersModel: `claude-${"m".repeat(32)}`,
   // DEC 254zzz58: the hosted lessons learning model at its parameter's longest (CORE_LEARNING_MODEL_MAX_LENGTH, 39).
   CoreLearningModel: `claude-${"m".repeat(32)}`,
+  // CODE-PUBLIC-URL: the public address at the parameter's longest (PUBLIC_API_URL_MAX_LENGTH: `https://` and a host of 64 characters); only its host is packed into the broker's AGENTX_SETTINGS.
+  PublicApiUrl: `https://${"a".repeat(60)}.dev`,
 };
 const RANDOM = "A1B2C3D4E5F6G";
 const UUID = "12345678-1234-1234-1234-123456789012";

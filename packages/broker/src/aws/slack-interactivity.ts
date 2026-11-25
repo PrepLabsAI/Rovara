@@ -80,6 +80,7 @@ import {
 import { confirmationAction, slackChannelActionClientFromEnvironment, slackChannelForwarderFromEnvironment } from "./slack-adapter.js";
 import { FORM_SLACK_PRESSES, channelActionOfAdminPress, channelActionOfPress, channelActionOfSubmission } from "./slack-press-routing.js";
 import { chatPostEphemeral, slackWebFetch } from "./slack-web.js";
+import { awsTaskActionPress, firstSubmission, registryHandlerFor } from "./slack-task-actions.js";
 import { PROJECT_TASKS_DISABLED_TEXT, WORKFLOW_APPROVAL_OUT_OF_DATE, WORKFLOW_BUTTON_OUT_OF_DATE } from "../developer/workflow-actions.js";
 import { FEEDBACK_REVIEW_RETRY_ACTION, WORKFLOW_ACTION_IDS, answeredWorkflowCard, cleanLine, slackText, workflowModalCopy } from "../developer/workflow-messages.js";
 
@@ -128,9 +129,11 @@ export interface SlackInteractivityDependencies extends SlackCompanyDependencies
   secrets: () => Promise<SlackSecrets>;
   /** Guided onboarding PR 5 (slack-rovara-front.ts): `/rovara` and its Link / Unlink presses, given the raw body only after Slack's signature verified. Undefined: not ours. */
   rovara?: (rawBody: string) => Promise<HttpResponse | undefined>;
-  handlers: readonly SlackActionHandler[]; /** HW5b (slack-core-plan-press.ts): the box Request changes opens on a core task's plan card; undefined for any other form. */ coreSubmission?: (payload: Record<string, unknown>) => Promise<Record<string, unknown> | undefined>;
+  handlers: readonly SlackActionHandler[]; /** HW5b (slack-core-plan-press.ts): the box Request changes opens on a core task's plan card; undefined for any other form. */ coreSubmission?: ((payload: Record<string, unknown>) => Promise<Record<string, unknown> | undefined>) | undefined;
   /** Answers the clicking member privately when no handler matches the button (an old button after a rollback). */
   respondEphemeral?: (responseUrl: string, text: string) => Promise<void>;
+  /** S1: the task action registry's press handler. It is consulted BEFORE the workflow handlers: every `rovara_task:*` button is its, and so is an older card's Stop button for a task the core owns (the old path refuses a core task). */
+  taskActions?: { claims(action: SlackBlockAction): Promise<boolean>; handle(action: SlackBlockAction): Promise<void> } | undefined;
   now?: () => number;
   log?: SlackIngressLog;
   /**
@@ -518,16 +521,21 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
   };
 }
 
+/** The handler of the older presses: the workflow's for its own buttons, else the first whose id matches. */
+function legacyPressHandler(dependencies: Pick<SlackInteractivityDependencies, "handlers" | "workflow">, action: SlackBlockAction): { matches: () => boolean; handle: (value: SlackBlockAction) => Promise<void> } | SlackActionHandler | undefined {
+  return dependencies.workflow && WORKFLOW_ACTION_IDS.has(action.actionId)
+    ? { matches: () => true, handle: (value: SlackBlockAction) => dependencies.workflow!.handleAction(value) }
+    : dependencies.handlers.find((entry) => entry.matches(action.actionId));
+}
+
 /**
  * One press, answered by the handler its action ID names, with the member told privately when it failed. Spec 062
  * Phase 7c3: the channel API runs this same dispatcher for the presses the Slack adapter hands it.
  */
-export function createSlackPressDispatcher(dependencies: Pick<SlackInteractivityDependencies, "handlers" | "workflow" | "respondEphemeral" | "log">): (action: SlackBlockAction) => Promise<void> {
+export function createSlackPressDispatcher(dependencies: Pick<SlackInteractivityDependencies, "handlers" | "workflow" | "respondEphemeral" | "log" | "taskActions">): (action: SlackBlockAction) => Promise<void> {
   const log: SlackIngressLog = dependencies.log ?? (() => undefined);
   return async (action) => {
-    const handler = dependencies.workflow && WORKFLOW_ACTION_IDS.has(action.actionId)
-      ? { matches: () => true, handle: (value: SlackBlockAction) => dependencies.workflow!.handleAction(value) }
-      : dependencies.handlers.find((entry) => entry.matches(action.actionId));
+    const handler = await registryHandlerFor(dependencies.taskActions, action) ?? legacyPressHandler(dependencies, action);
     if (!handler) {
       log("interaction.ignored", { reason: "unknown_action", actionId: action.actionId.slice(0, 64) });
       try {
@@ -1100,7 +1108,13 @@ export function createAwsSlackInteractivityHandler(company: SlackCompanyDependen
     await handOffAction(channelAction);
     return true;
   };
-  const corePlan = company.workspaces === undefined || brokerFunctionName === undefined ? undefined : corePlanDepsFrom({ invokeBroker, api: async (method, body, timeoutMs) => slackApi(await slackCompanyToken(company, async () => (await secrets()).botToken), method, body, fetch, timeoutMs), respondEphemeral, log }); const interactivity = createSlackInteractivityHandler({
+  const corePlan = company.workspaces === undefined || brokerFunctionName === undefined ? undefined : corePlanDepsFrom({ invokeBroker, api: async (method, body, timeoutMs) => slackApi(await slackCompanyToken(company, async () => (await secrets()).botToken), method, body, fetch, timeoutMs), respondEphemeral, log });
+  // S1: the task action registry's presses (company mode only, like the plan card's). A task is the core's by its engine stamp in the state table; an older card's Stop button is taken only then.
+  const taskPress = awsTaskActionPress({
+    enabled: company.workspaces !== undefined && brokerFunctionName !== undefined, invokeBroker, token: async () => slackCompanyToken(company, async () => (await secrets()).botToken), log,
+    stateTable: { documentClient, tableName: process.env.STATE_TABLE_NAME },
+  });
+  const interactivity = createSlackInteractivityHandler({
     ...company,
     secrets,
     log,
@@ -1111,7 +1125,8 @@ export function createAwsSlackInteractivityHandler(company: SlackCompanyDependen
       chatgptSubmission: (payload: Record<string, unknown>) => chatGptSubmission({ handOff: (event) => handOffToSelf(lambda, event) }, payload),
     }),
     ...(adminChange === undefined ? {} : { adminChange }),
-    ...(workflow === undefined ? {} : { workflow }), ...(corePlan === undefined ? {} : { coreSubmission: corePlanSubmission(corePlan) }),
+    ...(workflow === undefined ? {} : { workflow }), taskActions: taskPress?.handler,
+    coreSubmission: firstSubmission(taskPress?.submission, corePlan, corePlanSubmission),
     // The module's own respondEphemeral, for a button no handler knows.
     respondEphemeral,
     handlers: [...(corePlan === undefined ? [] : [corePlanPressHandler(corePlan)]), chatGptActionHandler({ openView, respondEphemeral: (responseUrl, text) => respondEphemeral(responseUrl, text) }), confirmationActionHandler({

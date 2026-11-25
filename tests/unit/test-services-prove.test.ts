@@ -1,19 +1,10 @@
 // Test services: the Prove of an environment with dependencies. The two new steps ("start dependencies", "dependency usage check") are derived by the broker from the usage record the candidate check
 // reported; a check with no record proves nothing about them; an environment with dependencies is proved only when both passed; the record is kept, validated, on the candidate check; the plan for the check is pinned.
 import { describe, expect, it } from "vitest";
-import { INDEX_EXPIRY_ATTRIBUTE, TEST_ENV_REFUSALS, projectRevisionKey, TestEnvironmentBodySchema, TestEnvProveReportSchema, testEnvDigest, testEnvIsProved, type OrgId, type TestServicesUsageRecord } from "@agentx/contracts";
-import { candidateDependencyPlan } from "../../packages/broker/src/core/test-env/candidate-plan.js";
-import { CANDIDATE_CHECK_ENTITY, candidateCheckKey, readCandidateCheck, recordCandidateUsage } from "../../packages/broker/src/core/test-env/candidate-check.js";
-import { DEPENDENCY_PLAN_REFUSAL_WORDS } from "../../packages/broker/src/core/test-env/dependency-plan.js";
+import { TEST_ENV_REFUSALS, TestEnvironmentBodySchema, TestEnvProveReportSchema, testEnvDigest, testEnvIsProved, type TestServicesUsageRecord } from "@agentx/contracts";
 import { TEST_ENV_REFUSAL_WORDS, proveReportFromSetupCheck } from "../../packages/broker/src/core/test-env/prove-from-setup-check.js";
-import { pinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 
-const ORG = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
-const fresh = (): MemoryDocumentStore => new MemoryDocumentStore();
-const PROJECT = "service";
 const NOW = Date.UTC(2026, 10, 3, 12, 0, 0);
-const ON = { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "1" };
 const cmd = (executable: string, args: string[] = [], cwd = "service") => ({ cwd, executable, args, timeoutSeconds: 600 });
 const postgres = {
   id: "postgres", name: "Postgres", kind: "database", family: "postgres", found: [{ path: "docker-compose.yml", line: 4 }], usedBy: ["integration"], backing: { kind: "local", catalogId: "postgres@16", config: {} },
@@ -75,46 +66,3 @@ describe("proved means the dependency steps passed", () => {
     expect(testEnvIsProved(report([{ step: "full_suite", status: "passed" }], environment), testEnvDigest(environment), {})).toBe(true);
   });
 });
-
-describe("the candidate check keeps the record", () => {
-  const DIGEST = "d".repeat(64);
-  const seed = (db: MemoryDocumentStore, extra: Record<string, unknown> = {}) => db.put({ item: {
-    ...candidateCheckKey(ORG, PROJECT, DIGEST, 4), entityType: CANDIDATE_CHECK_ENTITY, orgId: ORG, project: PROJECT, workspaceId: "ws-1", revision: 4, startedAt: "2026-11-03T10:00:00.000Z", startedBy: "dev_a",
-    digest: DIGEST, setup: [], readiness: [cmd("pytest", ["-q"])], [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(NOW / 1000) + 86_400, ...extra,
-  } });
-  const deps = (db: MemoryDocumentStore) => ({ store: db, now: () => NOW });
-
-  it("keeps nothing that does not parse, and nothing for a check that is not there", async () => {
-    const db = fresh();
-    await seed(db);
-    for (const bad of [{ ...usage(), extra: 1 }, { ...usage(), dependencies: [{ id: "postgres", started: false, healthy: true, startMs: 0, resetCount: 0 }] }, "text", undefined]) {
-      expect(await recordCandidateUsage(deps(db), { orgId: ORG, project: PROJECT, digest: DIGEST, revision: 4, usage: bad })).toBe(false);
-    }
-    expect((await readCandidateCheck(deps(db), ORG, PROJECT, DIGEST, 4))?.usage).toBeUndefined();
-    expect(await recordCandidateUsage(deps(fresh()), { orgId: ORG, project: PROJECT, digest: DIGEST, revision: 4, usage: usage() })).toBe(false);
-  });
-});
-
-describe("the plan a candidate check carries", () => {
-  const catalogSource = async () => verifiedCatalog(pinnedCatalog());
-  const project = async (devcontainer: boolean) => {
-    const db = fresh();
-    await db.put({ item: { ...projectRevisionKey(ORG, PROJECT, 1), entityType: "PROJECT", registeredBy: "seed", registeredAt: "2026-10-01T00:00:00.000Z", runtimeBinding: {}, definition: { name: PROJECT, revision: 1, repositories: [{ name: "web", url: "https://github.com/acme/web.git", path: "repo/web", defaultBranch: "main", credentialRef: "github-app" }], setup: [], readiness: [], orchestratorInstructions: "x", ...(devcontainer ? { devcontainer: { repository: "web" } } : {}) } } });
-    return { store: db };
-  };
-  const scope = { orgId: ORG, project: PROJECT };
-
-  it("is pinned from the signed catalog for a proposal with dependencies, and nothing (and no read) for one without", async () => {
-    const plan = await candidateDependencyPlan({ ...(await project(false)), serviceCatalog: catalogSource }, body([postgres]), scope, ON);
-    expect(plan?.map((entry) => [entry.id, entry.catalogId])).toEqual([["postgres", "postgres@16"]]);
-    const unread = { store: { get: async () => { throw new Error("must not be called"); } } as never };
-    expect(await candidateDependencyPlan(unread, body(), scope, ON)).toBeUndefined();
-  });
-
-  it("refuses the check, in fixed words, with tx off, with no catalog, or for a project with a dev container", async () => {
-    await expect(candidateDependencyPlan({ ...(await project(false)), serviceCatalog: catalogSource }, body([postgres]), scope, { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" })).rejects.toThrow(DEPENDENCY_PLAN_REFUSAL_WORDS.not_available_yet);
-    await expect(candidateDependencyPlan(await project(false), body([postgres]), scope, ON)).rejects.toThrow(DEPENDENCY_PLAN_REFUSAL_WORDS.no_catalog);
-    await expect(candidateDependencyPlan({ ...(await project(true)), serviceCatalog: catalogSource }, body([postgres]), scope, ON)).rejects.toThrow(/dev container/u);
-  });
-});
-

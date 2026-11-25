@@ -246,6 +246,19 @@ describe("fake approvers: the gaps as a plug-in states them", () => {
   });
 });
 
+describe("fake approvers: a caller that records the use itself (useRecordedByCaller)", () => {
+  it("does not remember the proof at verify, so the same proof verifies again; without the flag it is used once", async () => {
+    const approvers = fake();
+    const recorded = { ...REQUEST, useRecordedByCaller: true as const };
+    const proof = proofFor(recorded, { method: FAKE_SESSION_METHOD, parts: undefined });
+    expect((await approvers.verify(recorded, proof)).approved).toBe(true);
+    expect((await approvers.verify(recorded, proof)).approved).toBe(true);
+    const plain = proofFor(REQUEST, { method: FAKE_SESSION_METHOD, parts: undefined });
+    expect(await approvers.verify(REQUEST, plain)).toMatchObject({ approved: true });
+    expect(await approvers.verify(REQUEST, plain)).toMatchObject({ approved: false, reason: "proof_already_used" });
+  });
+});
+
 describe("fake approvers G3: a proof with two secrets, claimed by verify and then spent or given back", () => {
   const next = (n: number): ApprovalRequest => ({ ...SETTLING, requestId: `req-1.${String(n)}` });
   const claimOf = async (approvers: ReturnType<typeof fake>, request: ApprovalRequest): Promise<string> => {

@@ -10,7 +10,7 @@
 //     is decided once, by the same rule (the decision record is written with `when.absent()`).
 //   - the change to the subject carries the condition the subject loaded it under (its revision and that it still waits), so a concurrent change loses; the whole decision is one transaction.
 //   - policy on top of the seam, which only narrows what it allows: a high-risk approval and every rejection accept only the methods the approvers plug-in names as strong (`ApprovalRequirement.strongMethods`,
-//     `rejectMethods`; default the local session) and NEVER a comment method (`strong-methods.ts`: `code-host-comment`, any `code-host-*`, the plug-in's `commentMethods`), whatever is named (a comment is an approval of a change
+//     `rejectMethods`; default the local session) and NEVER a comment method (`strong-methods.ts`: `code-host-comment`, any `code-host-*`, the plug-in's `commentMethods`), whatever is named, with ONE exception for a rejection (S1, owner DEC 254zzz477): a chat method the requirement itself NAMES in `rejectMethods` (the hosted approvers do, at low and medium risk) may reject, with a reason (a comment is an approval of a change
 //     request, and says nothing about a rejection); a request for changes accepts the methods the plug-in names (default the local session or a comment); the gate's policy option can only narrow the plug-in's sets (or the default when it names none; `createDecisionGate` refuses a policy of only comment methods for a strong set, and `verifyPolicy` refuses one that
 //     is disjoint from the plug-in's sets, instead of a silent lock-out); when the plug-in sets a sign-in rule (`ApprovalRequirement.signIn`, a company setting) the approver's sign-in time must satisfy it for a
 //     high-risk approval and a rejection; a request that does not allow self-approval refuses the person who asked; `minApprovers` distinct approvers are needed.
@@ -44,7 +44,7 @@ export interface LoadedSubject {
 
 /** A subject refused the decision for a reason of its own (the transition is not allowed, the outcome is not offered). Never carries a secret. */
 export class SubjectRefusal extends Error {
-  constructor(readonly code: "invalid_outcome" | "not_the_approver" | "invalid", message: string) {
+  constructor(readonly code: "invalid_outcome" | "not_the_approver" | "invalid" | "spend_unreadable", message: string) {
     super(message);
     this.name = "SubjectRefusal";
   }
@@ -104,7 +104,9 @@ export interface DecisionAttempt {
 export type GateRefusalReason =
   | "unsupported" | "invalid" | "not_found" | "not_waiting" | "stale" | "expired"
   | "method_not_allowed" | "not_approved" | "self_approval_not_allowed" | "needs_more_approvers"
-  | "proof_already_used" | "request_id_reused" | "not_the_approver" | "invalid_outcome" | "sign_in_not_fresh" | "link_gone";
+  | "proof_already_used" | "request_id_reused" | "not_the_approver" | "invalid_outcome" | "sign_in_not_fresh" | "link_gone"
+  /** SPEND-UNREPORTED-RUN item 3: approving would start paid work and the task's spend cannot be read yet. A stable code of its own, so a card says the real reason and not "isn't ready". */
+  | "spend_unreadable";
 
 export interface ApprovalRecord {
   requestId: string;

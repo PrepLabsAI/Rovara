@@ -87,6 +87,12 @@ export const ProjectSetupChecklistSchema = z.object({
     approvedAt: z.string().max(40).optional(),
     /** L4-T2b: with `approval: "approved"`, a newer proposal that waits or was rejected (see SETUP_NEWER_PROPOSALS). The row's state follows the approved setup's own check, not this. Absent: none. */
     newerProposal: z.enum(SETUP_NEWER_PROPOSALS).optional(),
+    /**
+     * DEC 254zzz495 (N3): `ready_no_tests` when the setup a person approved has no test command ("Ready, no automated tests": a normal end, the row is done by the same rule), with `noAutomatedTests` saying when and where the run
+     * looked for tests (fixed words). Absent otherwise. Additive: a reader that does not know them ignores them.
+     */
+    endState: z.literal("ready_no_tests").optional(),
+    noAutomatedTests: z.object({ at: z.string().max(40), looked: z.array(z.string().max(40)).max(16) }).passthrough().optional(),
     /** The command that failed and the last lines of its (redacted, bounded) output, as the run's journal shows them. Only on a failed run that kept a journal. */
     failedCommand: z.object({ n: z.number().int().min(1), command: z.string().max(2_000), exitCode: z.number().int().nullable(), timedOut: z.boolean(), lastLines: z.array(z.string().max(300)).max(20) }).passthrough().optional(),
   }).passthrough(),

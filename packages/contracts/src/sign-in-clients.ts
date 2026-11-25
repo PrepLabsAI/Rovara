@@ -2,6 +2,7 @@
 // audience), which Rovara's own API never accepts unless the client has full access (spec 066), and may ask Rovara what
 // a signed-in person can do.
 import { z } from "zod";
+import { CLIENT_SCOPES } from "@preplabsai/rovara-code-api";
 import { OrgIdSchema, OrgRoleSchema } from "./company-scope.js";
 import { AGENTX_CLI_CLIENT_ID, DEVELOPER_TOKEN_AUDIENCE } from "./developer.js";
 import { publicHttpsUrlProblem } from "./mcp-connector.js";
@@ -24,10 +25,7 @@ export const SignInRedirectUriSchema = z.string().max(2_048).superRefine((value,
  * Plan v3.2 lane ID: each /v1/dev/* route needs one of them (the broker's route table, dev-route-scopes.ts), or full
  * access. A scope only narrows what the person may do; it never adds a right.
  */
-export const CLIENT_SCOPES = [
-  "projects:members", "projects:create",
-  "profile:name", "tasks:read", "tasks:start", "tasks:act", "tasks:share", "decisions:decide",
-] as const;
+export { CLIENT_SCOPES };
 export const ClientScopeSchema = z.enum(CLIENT_SCOPES);
 export type ClientScope = z.infer<typeof ClientScopeSchema>;
 const ClientScopesSchema = z.array(ClientScopeSchema).max(CLIENT_SCOPES.length).refine((scopes) => new Set(scopes).size === scopes.length, "scopes must be unique");

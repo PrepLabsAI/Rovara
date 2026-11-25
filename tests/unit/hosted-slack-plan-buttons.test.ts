@@ -3,9 +3,9 @@
 // (`coreTaskEntryFrom` -> `chatDecision`), the broker's route (`slackCorePress`) and the interactivity handlers (`corePlanPressHandler`, `corePlanSubmission`). Mutants are listed in the PR body with the test that kills each.
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
-  SLACK_CHANNEL, canonicalPlanJson, createWorkflowSnapshot, orgChannelLinkKey, orgProjectCatalogKey, projectRevisionKey, submitWorkflowArtifact,
+  SLACK_CHANNEL, WORKFLOW_STOP_ACTION, taskActionButtonId, taskActionOfButtonId, canonicalPlanJson, createWorkflowSnapshot, orgChannelLinkKey, orgProjectCatalogKey, projectRevisionKey, submitWorkflowArtifact,
   type ActorRef, type AdapterRegistry, type ConversationRef, type JsonValue, type OrgId, type OrgRole, type Principal, type ProjectDefinition, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import type { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
@@ -15,6 +15,7 @@ import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity } from "../../packages/b
 import { chatApprovalMethod, createHostedApprovers, approvalProofKeyOf } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { hostedChatApproval, hostedDecisionService, type DeployedPeople } from "../../packages/broker/src/core-host/deployed-decisions.js";
 import { decideFromChat } from "../../packages/broker/src/core-host/chat-decision.js";
+import { createTaskActionRoutes, relinkedBefore } from "../../packages/broker/src/core-host/task-action-routes.js";
 import { chatPressToken } from "../../packages/broker/src/core-host/hosted-chat-approval.js";
 import { hostedThreadHandler } from "../../packages/broker/src/core-host/thread-notification.js";
 import { coreTaskEntryFrom, type CoreEntryCaller, type CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
@@ -33,6 +34,8 @@ import { WORKFLOW_DOCUMENT_KIND } from "../../packages/broker/src/core/decisions
 import { taskSessionId } from "../../packages/broker/src/core/sessions/index.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { CHANGES_CALLBACK, CHANGES_INPUT } from "../../packages/broker/src/plugins/channel/slack/index.js";
+import { TASK_ACTION_FORM } from "../../packages/broker/src/plugins/channel/slack/task-actions.js";
+import { channelActionOfPress, channelActionOfSubmission } from "../../packages/broker/src/aws/slack-press-routing.js";
 import { FAKE_COMPANY, createFakeWorld } from "../support/core-host-fakes.js";
 import { planDocument } from "../support/plan-documents.js";
 
@@ -562,6 +565,48 @@ describe("a signed Slack request through the company interactivity gate", () => 
     expect(JSON.parse(own.body)).toEqual({ response_action: "clear" });
     expect(await decisionsOf(w)).toEqual(["REQUEST_CHANGES"]);
   });
+
+  // S1 review (Opus): production runs SlackViaChannel=enabled, where the interactivity handler first offers each press to `routePress` and each form to `routeSubmission` (the channel API). The registry's buttons, an older
+  // card's Stop and the registry's form must NOT be taken by that path (the channel-presses Lambda has no registry handler): they fall through to the dispatcher / `coreSubmission` that hold the registry. The route gates below
+  // are the real ones (`channelActionOfPress`, `channelActionOfSubmission`), as `createAwsSlackInteractivityHandler` wires them under `viaChannel`.
+  it("with the via-channel routes wired (production), a registry press, an older Stop and the registry form reach the registry, and a routed workflow press still goes to the channel API", async () => {
+    const w = await world({ kind: "medium" });
+    const workspaces = { store: w.fake.store, getProject: async () => ({ companyId: ORG }), linkUrl: (code: string) => `https://example.test/link/${code}`, requireCompany: w.bindings.requireCompany, tokenForEvent: async (team: string) => ({ companyId: w.teams[team]!.company, token: w.teams[team]!.token }) };
+    const routed: string[] = [];
+    const registry: string[] = [];
+    const submitted: string[] = [];
+    const handler = createSlackInteractivityHandler({
+      workspaces, companies: w.companies, now: () => NOW, secrets: async () => ({ signingSecret: SIGNING, botToken: tokenOf("legacy000000") }),
+      handlers: [], respondEphemeral: async () => undefined,
+      routePress: async (action) => { if (channelActionOfPress(action) === undefined) return false; routed.push(action.actionId); return true; },
+      routeSubmission: async (payload) => { if (channelActionOfSubmission(payload, NOW) === undefined) return undefined; routed.push("submission"); return { response_action: "clear" }; },
+      taskActions: {
+        claims: async (action) => taskActionOfButtonId(action.actionId) !== undefined || action.actionId === WORKFLOW_STOP_ACTION,
+        handle: async (action) => { registry.push(action.actionId); },
+      },
+      coreSubmission: async (payload) => { const view = payload.view as { callback_id?: unknown }; if (view.callback_id !== TASK_ACTION_FORM) return undefined; submitted.push(String(view.callback_id)); return { response_action: "clear" }; },
+    });
+    const press = (actionId: string, value: string) => ({
+      type: "block_actions", team: { id: TEAM_A }, user: { id: OWNER, team_id: TEAM_A }, channel: { id: CHANNEL }, trigger_id: "1000.abcdef",
+      container: { channel_id: CHANNEL, message_ts: CARD_TS, thread_ts: TS }, message: { ts: CARD_TS, thread_ts: TS, text: "card" },
+      actions: [{ action_id: actionId, value, action_ts: "1700000002.000300" }], response_url: RESPONSE_URL,
+    });
+    const taskId = w.task.taskId;
+    expect((await handler(signed(press(taskActionButtonId("task.stop"), JSON.stringify({ t: taskId, r: 0 }))))).statusCode).toBe(200);
+    expect((await handler(signed(press(WORKFLOW_STOP_ACTION, JSON.stringify({ taskId }))))).statusCode).toBe(200);
+    expect((await handler(signed(press(taskActionButtonId("task.close"), JSON.stringify({ t: taskId, r: 1, n: 1 }))))).statusCode).toBe(200);
+    expect(registry).toEqual([taskActionButtonId("task.stop"), WORKFLOW_STOP_ACTION, taskActionButtonId("task.close")]);
+    expect(routed).toEqual([]);
+    // The registry form's submission is not a channel API form: it reaches `coreSubmission`.
+    const form = { type: "view_submission", team: { id: TEAM_A }, user: { id: OWNER, team_id: TEAM_A }, view: { id: "V0FORM00001", callback_id: TASK_ACTION_FORM, private_metadata: "{}", state: { values: {} } } };
+    expect(JSON.parse((await handler(signed(form))).body)).toEqual({ response_action: "clear" });
+    expect(submitted).toEqual([TASK_ACTION_FORM]);
+    expect(routed).toEqual([]);
+    // Control: a press the channel API does take (a workflow send-back) is routed there, not to the registry.
+    expect((await handler(signed(press("agentx_workflow_send_back", JSON.stringify({ taskId }))))).statusCode).toBe(200);
+    expect(routed).toEqual(["agentx_workflow_send_back"]);
+    expect(registry).toHaveLength(3);
+  });
 });
 
 describe("the approvers' chat method on its own", () => {
@@ -588,9 +633,11 @@ describe("the approvers' chat method on its own", () => {
       const verdict = await approvers.verify(request, proofOf(request, account ?? undefined));
       return verdict.approved ? "approved" : verdict.reason;
     };
-    // Only a plan's decision, only from the decision gate, only with the broker's own proof.
+    // Only a task document's decision (S1: plan, requirements and design), only from the decision gate, only with the broker's own proof.
     expect(await refusal({ kind: "merge" })).toBe("no_rule_for_this_request");
-    expect(await refusal({ kind: "requirements" })).toBe("no_rule_for_this_request");
+    expect(await refusal({ kind: "scope_question" })).toBe("no_rule_for_this_request");
+    expect(await refusal({ kind: "requirements" })).toBe("approved");
+    expect(await refusal({ kind: "design" })).toBe("approved");
     expect(await refusal({ settlesClaims: undefined })).toBe("needs_settling_caller");
     const real = requestOf(w);
     expect(await approvers.verify(real as never, proofOf(real as never, owner, "t".repeat(64)) as never)).toEqual({ approved: false, reason: "not_a_valid_proof" });
@@ -601,7 +648,10 @@ describe("the approvers' chat method on its own", () => {
     expect(await approvers.verify(real as never, { ...proofOf(real as never, { ...owner, accountId: PEER }), claimedAccount: owner })).toEqual({ approved: false, reason: "not_a_valid_proof" });
     expect(await refusal({ risk: "high" })).toBe("chat_not_enough_for_this_risk");
     expect(await refusal({ risk: undefined })).toBe("chat_not_enough_for_this_risk");
-    expect(await refusal({ outcome: "reject" })).toBe("chat_cannot_reject");
+    // S1 (owner DEC 254zzz477): a rejection is taken in the chat at low and medium risk, never above; any other answer is no answer.
+    expect(await refusal({ outcome: "reject" })).toBe("approved");
+    expect(await refusal({ outcome: "reject", risk: "high" })).toBe("chat_not_enough_for_this_risk");
+    expect(await refusal({ outcome: "skip" })).toBe("chat_cannot_reject");
     expect(await refusal({ subject: { type: "setup_proposal", id: "payments" } })).toBe("no_rule_for_this_request");
     expect(await refusal({ subject: { type: "task", id: "not-a-task" } })).toBe("no_rule_for_this_request");
     expect(await refusal({ companyId: OTHER })).toBe("wrong_company");
@@ -644,3 +694,155 @@ describe("the wiring (guards on the source, beside the behaviour above)", () => 
   });
 });
 
+
+// S1: the same plan, decided through the TASK ACTION REGISTRY (`core-host/task-action-routes.ts`): the real hosted approvers with their `chat-slack` method, the company's decision gate, the Slack seam and the person resolver over real link
+// rows. Plan decisions use the one `owner` rule; requirements and design are taken like a plan; a rejection needs a reason; a high risk plan is decided on the web in this cut; and a refused press writes nothing.
+describe("the plan decided through the task action registry", () => {
+  const factsOf = (kind: Kind) => async () => [{
+    kind: "approve_plan" as const, path: "quick" as const, files: ["src/health.ts"], claims: 0, untestedClaims: 0, subjectId: "plan-1", taskId: "", project: "payments", title: "Add a health endpoint", createdAt: "2026-11-15T10:00:00.000Z",
+    openPath: "/app/tasks/x", contentVersion: "v1", ...(kind === "high" ? {} : {}),
+  }];
+  async function registryWorld(kind: Kind = "medium", peopleOver?: Record<string, unknown>) {
+    const w = await world({ kind, post: false });
+    const stored = (await w.fake.store.get(taskKey(w.task.taskId)))!;
+    const workflow = stored["workflow"] as unknown as WorkflowSnapshot;
+    const digest = workflow.artifacts.at(-1)!.sha256;
+    const binding = { revision: workflow.revision, digest };
+    const wiring = {
+      origin: () => ORIGIN, taskActions: { roundCap: async () => undefined },
+      ...(peopleOver === undefined ? {} : { taskRules: { people: peopleOver } }),
+      decisions: { sources: {
+        list: async () => (await factsOf(kind)()).map((item) => ({ ...item, taskId: w.task.taskId, binding: { revision: workflow.revision, artifactDigest: digest } })),
+        locks: async () => ({}),
+      } },
+    };
+    const routes = createTaskActionRoutes({
+      companyOf: async (caller) => w.memberships.get(caller.principal.personId), now: () => w.fake.clock.now,
+      mount: async () => ({ runtime: w.runtime, wiring: wiring as never }),
+      // The gate is built from the runtime the registry hands it (its audit stamped with the surface), as the deployed root builds it.
+      chat: { threads: w.threads, proofKey: PROOF_KEY, gateFor: (runtime, companyId) => hostedDecisionService({ deps: runtime.flow.deps, registry: w.registry, companyId: companyId, now: () => new Date(w.fake.clock.now) }).gate },
+    });
+    const caller = (personId: string) => ({ principal: principalOf(personId) });
+    const as = (userId: string, personId: string) => ({ conversation: CONVERSATION, actor: ACTOR(userId), personId });
+    let n = 0;
+    const press = (who: { personId: string; conversation: ConversationRef; actor: ActorRef }, actionId: string, extra: Record<string, unknown> = {}) =>
+      routes.taskAction(caller(who.personId), { mode: "perform", actionId, taskId: w.task.taskId, binding, requestKey: `k${String(++n)}`, conversation: who.conversation, actor: who.actor, ...extra } as never);
+    return { w, routes, press, as, binding, caller, workflowOf: w.stepWorkflow };
+  }
+
+  it("approves a medium risk plan as the task's owner, recorded as the chat's method, and the same press again is the same decision", async () => {
+    const { w, press, as, workflowOf } = await registryWorld("medium");
+    const answer = await press(as(OWNER, "dev-a"), "plan.approve");
+    expect(answer).toMatchObject({ mode: "perform", result: { status: "started" } });
+    expect((await workflowOf()).decisions.map((entry) => entry.decision)).toEqual(["APPROVE"]);
+    expect(w.fake.audit.some((event) => String(event.action).startsWith("decision.") && JSON.stringify(event.details ?? {}).includes("chat-slack"))).toBe(true);
+    // The decision's audit names the surface too, as every other move of the registry does (what an audit read filtering on `via` finds).
+    expect(w.fake.audit.filter((event) => String(event.action).startsWith("decision.")).every((event) => event.details?.["via"] === "slack")).toBe(true);
+    const again = await press(as(OWNER, "dev-a"), "plan.approve");
+    expect(["replayed", "refused"]).toContain((again as { result: { status: string } }).result.status);
+    expect((await workflowOf()).decisions).toHaveLength(1);
+  });
+
+  it("asks a reason for a request for changes and for a rejection, and takes both with it", async () => {
+    const changes = await registryWorld("low");
+    expect(await changes.press(changes.as(OWNER, "dev-a"), "plan.request-changes")).toMatchObject({ result: { status: "refused", reason: "needs_input", writes: "none" } });
+    expect(await changes.press(changes.as(OWNER, "dev-a"), "plan.request-changes", { values: { reason: "Use the shared client." } })).toMatchObject({ result: { status: "done" } });
+    expect((await changes.workflowOf()).decisions.map((entry) => entry.decision)).toEqual(["REQUEST_CHANGES"]);
+    const rejected = await registryWorld("medium");
+    expect(await rejected.press(rejected.as(OWNER, "dev-a"), "plan.reject", { values: { reason: "Not what we want." } })).toMatchObject({ result: { status: "done" } });
+    expect((await rejected.workflowOf()).decisions.map((entry) => entry.decision)).toEqual(["REJECT"]);
+  });
+
+  it("refuses a colleague who owns nothing here, another company's person and an unlinked account; nothing is written", async () => {
+    const { w, press, as, workflowOf } = await registryWorld("medium");
+    const before = await w.snapshot();
+    expect(await press(as(PEER, "dev-b"), "plan.approve")).toMatchObject({ result: { status: "refused", writes: "none" } });
+    expect(await press({ ...as(OTHERCO, "dev-x"), conversation: { ...CONVERSATION, tenant: TEAM_B }, actor: ACTOR(OTHERCO, TEAM_B) }, "plan.approve")).toMatchObject({ result: { status: "refused", reason: "not_found" } });
+    expect(await press(as(STRANGER, "dev-a"), "plan.approve")).toMatchObject({ result: { status: "refused", reason: "not_linked", code: "SLACK_ACCOUNT_NOT_LINKED" } });
+    expect(await w.snapshot()).toBe(before);
+    expect((await workflowOf()).decisions).toEqual([]);
+  });
+
+  it("does not offer a high risk plan in this cut, and refuses a card named for an older document", async () => {
+    const high = await registryWorld("high");
+    const before = await high.w.snapshot();
+    expect(await high.press(high.as(OWNER, "dev-a"), "plan.approve")).toMatchObject({ result: { status: "refused", reason: "not_offered", writes: "none" } });
+    expect(await high.w.snapshot()).toBe(before);
+    const stale = await registryWorld("medium");
+    expect(await stale.press(stale.as(OWNER, "dev-a"), "plan.approve", { binding: { revision: stale.binding.revision, digest: "f".repeat(64) } })).toMatchObject({ result: { status: "refused", reason: "stale", writes: "none" } });
+  });
+
+  it("refuses once the account is unlinked: the link's own fence is in the decision's transaction", async () => {
+    const { w, press, as, workflowOf } = await registryWorld("medium");
+    // The press resolved the account, then the link was removed before the write: the same press now reads not linked, and nothing was decided.
+    const key = orgChannelLinkKey(ORG, ACTOR(OWNER));
+    await w.fake.store.delete({ key });
+    expect(await press(as(OWNER, "dev-a"), "plan.approve")).toMatchObject({ result: { status: "refused", reason: "not_linked" } });
+    expect((await workflowOf()).decisions).toEqual([]);
+  });
+
+  it("refuses taking over a task when the account is unlinked while the request runs, and writes nothing", async () => {
+    const taken = vi.fn(async () => undefined);
+    let calls = 0;
+    const hooks: { unlink?: () => Promise<void> } = {};
+    const people = {
+      view: async () => { calls += 1; if (calls === 5) await hooks.unlink!(); return { revision: 3, orphaned: true, people: [], canManage: false, canTakeOwnership: true }; },
+      takeOwnership: taken,
+    };
+    const { w, routes, caller } = await registryWorld("medium", people);
+    hooks.unlink = async () => { await w.fake.store.delete({ key: orgChannelLinkKey(ORG, ACTOR(OWNER)) }); };
+    const common = { actionId: "people.take-ownership", taskId: w.task.taskId, binding: { revision: 3 }, conversation: CONVERSATION, actor: ACTOR(OWNER) };
+    const described = await routes.taskAction(caller("dev-a"), { mode: "describe", ...common } as never);
+    const digest = (described as { description: { confirmDigest?: string } }).description.confirmDigest;
+    expect(digest).toMatch(/^[a-f0-9]{64}$/u);
+    const answer = await routes.taskAction(caller("dev-a"), { mode: "perform", ...common, confirmDigest: digest, requestKey: "k-take" } as never);
+    expect(answer).toMatchObject({ result: { status: "refused", reason: "not_linked", code: "SLACK_ACCOUNT_NOT_LINKED", writes: "none" } });
+    expect(taken).not.toHaveBeenCalled();
+  });
+});
+
+// S1 (arch ruling: ONE `owner` rule for a plan decision, the web's): the chat press used a narrower check (the task's own person alone), so a People co-owner could decide on the web and not in Slack. With the live owner rule given, the chat
+// press uses it: a co-owner counts, a reader does not, and a person the rule refuses is refused whoever the task runs for.
+describe("a chat press is judged by the web's owner rule (S1)", () => {
+  it("accepts a People co-owner of the task, refuses a reader, and asks the live rule every time", async () => {
+    const w = await world({ kind: "medium", post: false });
+    const asked: string[] = [];
+    const approvers = (owner: (personId: string) => boolean) => createHostedApprovers({
+      store: w.fake.store, identity: w.registry.require("identity"), key: PROOF_KEY, now: () => new Date(w.fake.clock.now), chat: hostedChatApproval(w.threads, w.people, PROOF_KEY),
+      taskOwner: async ({ principal }) => { asked.push(principal.personId); return owner(principal.personId); },
+    });
+    const request = { companyId: ORG, requestId: "req-1.x", kind: "plan", subject: { type: "task", id: w.task.taskId }, revision: 1, artifactDigest: "a".repeat(64), risk: "medium" as const, outcome: "approve" as const, projectName: "payments", settlesClaims: true as const };
+    const proofFor = (userId: string) => ({
+      proofId: randomUUID(), method: "chat-slack", requestId: request.requestId, revision: request.revision, artifactDigest: request.artifactDigest,
+      token: chatPressToken(PROOF_KEY, { companyId: ORG, requestId: "req-1", revision: 1, artifactDigest: request.artifactDigest, outcome: "approve", tenant: TEAM_A, userId }),
+      claimedAccount: { provider: SLACK_CHANNEL, tenant: TEAM_A, accountId: userId },
+    });
+    // dev-b is a co-owner of this task though the task runs for dev-a: the web lets them decide, and so does Slack now.
+    expect(await approvers((personId) => personId === "dev-b").verify(request as never, proofFor(PEER) as never)).toMatchObject({ approved: true, approver: { personId: "dev-b" } });
+    // The task's own person is refused when the live rule says no (an ownership change the narrower check never saw).
+    expect(await approvers((personId) => personId === "dev-b").verify(request as never, proofFor(OWNER) as never)).toEqual({ approved: false, reason: "not_the_task_owner" });
+    expect(await approvers(() => false).verify(request as never, proofFor(PEER) as never)).toEqual({ approved: false, reason: "not_the_task_owner" });
+    expect(asked).toEqual(["dev-b", "dev-a", "dev-b"]);
+  });
+});
+
+// S1 follow-up (U1): the writes that cannot join the core store's transaction (the merge on GitHub, the People write) read the chat link again just before they are made. An unlink that lands in the middle of the request refuses them.
+describe("a move made outside the core store's transaction re-reads the chat link first", () => {
+  it("guards the merge and the take-over wrappers: the host is not asked once the link is gone, and is asked while it holds", async () => {
+    let linked = true;
+    const guard = relinkedBefore(async () => linked);
+    const press = vi.fn(async () => undefined);
+    const take = vi.fn(async () => undefined);
+    const merge = guard.merge({ standing: async () => ({ may: true }), readiness: async () => ({ ready: true }), press })!;
+    const people = guard.people({ view: async () => undefined, canTakeOwnership: async () => undefined, takeOwnership: take })!;
+    await merge.press({} as never, {} as never, {} as never);
+    await people.takeOwnership({} as never, {} as never, {} as never);
+    expect([press.mock.calls.length, take.mock.calls.length]).toEqual([1, 1]);
+    linked = false;
+    await expect(merge.press({} as never, {} as never, {} as never)).rejects.toMatchObject({ code: "SLACK_ACCOUNT_NOT_LINKED", detail: { writes: "none" } });
+    await expect(people.takeOwnership({} as never, {} as never, {} as never)).rejects.toMatchObject({ code: "SLACK_ACCOUNT_NOT_LINKED" });
+    expect([press.mock.calls.length, take.mock.calls.length]).toEqual([1, 1]);
+    expect(guard.merge(undefined)).toBeUndefined();
+    expect(guard.people(undefined)).toBeUndefined();
+  });
+});

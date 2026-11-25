@@ -1,0 +1,1384 @@
+[
+ {
+  "model": "aion-labs/aion-2.0",
+  "route": "aion-labs",
+  "pricing": {
+   "prompt": "0.0000008",
+   "completion": "0.0000016",
+   "internal_reasoning": "0.0000016",
+   "request": "0",
+   "input_cache_read": "0.0000002",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795502000015,
+  "expiresAt": 1795588400015,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "aion-labs/aion-3.0-mini",
+  "route": "aion-labs",
+  "pricing": {
+   "prompt": "0.0000007",
+   "completion": "0.0000014",
+   "internal_reasoning": "0.0000014",
+   "request": "0",
+   "input_cache_read": "0.00000018",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795500179048,
+  "expiresAt": 1795586579048,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "anthropic/claude-haiku-5.5",
+  "route": "amazon-bedrock",
+  "pricing": {
+   "prompt": "0.0000005",
+   "completion": "0.0000025",
+   "internal_reasoning": "0.0000025",
+   "request": "0",
+   "input_cache_read": "0.00000005",
+   "input_cache_write": "0.000000625"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795506237674,
+  "expiresAt": 1795592637674,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model"
+ },
+ {
+  "model": "deepseek/deepseek-chat-v3.1",
+  "route": "deepinfra/fp4",
+  "pricing": {
+   "prompt": "0.00000025",
+   "completion": "0.00000095",
+   "internal_reasoning": "0.00000095",
+   "request": "0",
+   "input_cache_read": "0.00000013",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795498149690,
+  "expiresAt": 1795584549690,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "deepseek/deepseek-v4-flash",
+  "route": "relace/fp4",
+  "pricing": {
+   "prompt": "0.00000005",
+   "completion": "0.00000045",
+   "internal_reasoning": "0.00000045",
+   "request": "0",
+   "input_cache_read": "0.00000005",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795488875418,
+  "expiresAt": 1795575275418,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "deepseek/deepseek-v4-pro",
+  "route": "siliconflow/fp8",
+  "pricing": {
+   "prompt": "0.0000009",
+   "completion": "0.0000017",
+   "internal_reasoning": "0.0000017",
+   "request": "0",
+   "input_cache_read": "0.00000008",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795501149780,
+  "expiresAt": 1795587549780,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "elorian/glimpse",
+  "route": "together",
+  "pricing": {
+   "prompt": "0.0000006",
+   "completion": "0.000003",
+   "internal_reasoning": "0.000003",
+   "request": "0",
+   "input_cache_read": "0.00000006",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795506914973,
+  "expiresAt": 1795593314973,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "google/gemini-3-flash-preview",
+  "route": "google-ai-studio/priority",
+  "pricing": {
+   "prompt": "0.0000009",
+   "completion": "0.0000054",
+   "internal_reasoning": "0.0000054",
+   "request": "0",
+   "input_cache_read": "0.00000009",
+   "input_cache_write": "0.00000015"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795501048127,
+  "expiresAt": 1795587448127,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model"
+ },
+ {
+  "model": "google/gemini-3.1-flash-lite",
+  "route": "google-ai-studio/priority",
+  "pricing": {
+   "prompt": "0.00000045",
+   "completion": "0.0000027",
+   "internal_reasoning": "0.0000027",
+   "request": "0",
+   "input_cache_read": "0.000000045",
+   "input_cache_write": "0.00000015"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795496918842,
+  "expiresAt": 1795583318842,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model"
+ },
+ {
+  "model": "google/gemini-3.1-flash-lite-preview",
+  "route": "google-ai-studio/priority",
+  "pricing": {
+   "prompt": "0.00000045",
+   "completion": "0.0000027",
+   "internal_reasoning": "0.0000027",
+   "request": "0",
+   "input_cache_read": "0.000000045",
+   "input_cache_write": "0.00000015"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795496962116,
+  "expiresAt": 1795583362116,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model"
+ },
+ {
+  "model": "google/gemini-3.5-flash",
+  "route": "google-ai-studio/priority",
+  "pricing": {
+   "prompt": "0.0000027",
+   "completion": "0.0000162",
+   "internal_reasoning": "0.0000162",
+   "request": "0",
+   "input_cache_read": "0.00000027",
+   "input_cache_write": "0.00000015"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795508724688,
+  "expiresAt": 1795595124688,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model"
+ },
+ {
+  "model": "google/gemini-3.5-flash-lite",
+  "route": "google-vertex/global/priority",
+  "pricing": {
+   "prompt": "0.00000054",
+   "completion": "0.0000045",
+   "internal_reasoning": "0.0000045",
+   "request": "0",
+   "input_cache_read": "0.000000054",
+   "input_cache_write": "0.00000015"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795499253932,
+  "expiresAt": 1795585653932,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model"
+ },
+ {
+  "model": "google/gemini-3.6-flash",
+  "route": "google-ai-studio/priority",
+  "pricing": {
+   "prompt": "0.00000135",
+   "completion": "0.00000675",
+   "internal_reasoning": "0.00000675",
+   "request": "0",
+   "input_cache_read": "0.000000135",
+   "input_cache_write": "0.000000075"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795503391969,
+  "expiresAt": 1795589791969,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model"
+ },
+ {
+  "model": "google/gemini-4-hydrogen",
+  "route": "google-ai-studio/priority",
+  "pricing": {
+   "prompt": "0.0000027",
+   "completion": "0.0000135",
+   "internal_reasoning": "0.0000135",
+   "request": "0",
+   "input_cache_read": "0.000000135",
+   "input_cache_write": "0.00000015"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795507460951,
+  "expiresAt": 1795593860951,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model"
+ },
+ {
+  "model": "google/gemma-4-31b-it",
+  "route": "coreweave/fp4",
+  "pricing": {
+   "prompt": "0.0000001",
+   "completion": "0.00000034",
+   "internal_reasoning": "0.00000034",
+   "request": "0",
+   "input_cache_read": "0.0000001",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795492457075,
+  "expiresAt": 1795578857075,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "ibm-granite/granite-4.2-8b",
+  "route": "coreweave/bf16",
+  "pricing": {
+   "prompt": "0.00000006",
+   "completion": "0.00000015",
+   "internal_reasoning": "0.00000015",
+   "request": "0",
+   "input_cache_read": "0.000000015",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795489713904,
+  "expiresAt": 1795576113904,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "kt/midm-k-3.0-pro",
+  "route": "kt",
+  "pricing": {
+   "prompt": "0.0000002",
+   "completion": "0.0000008",
+   "internal_reasoning": "0.0000008",
+   "request": "0",
+   "input_cache_read": "0.00000004",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795497281635,
+  "expiresAt": 1795583681635,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "liquid/lfm-2.5-24b-a2b",
+  "route": "liquid",
+  "pricing": {
+   "prompt": "0.00000005",
+   "completion": "0.0000007",
+   "internal_reasoning": "0.0000007",
+   "request": "0",
+   "input_cache_read": "0.000000025",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795496459686,
+  "expiresAt": 1795582859686,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "meta/muse-ember",
+  "route": "google-vertex/global",
+  "pricing": {
+   "prompt": "0.0000001",
+   "completion": "0.0000005",
+   "internal_reasoning": "0.0000005",
+   "request": "0",
+   "input_cache_read": "0.000000004",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795495980614,
+  "expiresAt": 1795582380614,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "meta/muse-glimmer-30b",
+  "route": "deepinfra/bf16",
+  "pricing": {
+   "prompt": "0.0000003",
+   "completion": "0.0000012",
+   "internal_reasoning": "0.0000012",
+   "request": "0",
+   "input_cache_read": "0.00000004",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795498956124,
+  "expiresAt": 1795585356124,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "minimax/minimax-m2.5",
+  "route": "digitalocean",
+  "pricing": {
+   "prompt": "0.0000003",
+   "completion": "0.0000012",
+   "internal_reasoning": "0.0000012",
+   "request": "0",
+   "input_cache_read": "0.00000006",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795498377067,
+  "expiresAt": 1795584777067,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "minimax/minimax-m3",
+  "route": "coreweave/fp4",
+  "pricing": {
+   "prompt": "0.00000023",
+   "completion": "0.00000096",
+   "internal_reasoning": "0.00000096",
+   "request": "0",
+   "input_cache_read": "0.00000005",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795497717168,
+  "expiresAt": 1795584117168,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "minimax/minimax-m3.1-flash",
+  "route": "makora/fp4",
+  "pricing": {
+   "prompt": "0.0000001",
+   "completion": "0.0000004",
+   "internal_reasoning": "0.0000004",
+   "request": "0",
+   "input_cache_read": "0.000000025",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795494052515,
+  "expiresAt": 1795580452515,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "mistralai/mistral-large-4-0",
+  "route": "mistral/zdr",
+  "pricing": {
+   "prompt": "0.0000007",
+   "completion": "0.0000021",
+   "internal_reasoning": "0.0000021",
+   "request": "0",
+   "input_cache_read": "0.00000007",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795504782923,
+  "expiresAt": 1795591182923,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "motif-technologies/motif-3",
+  "route": "kt",
+  "pricing": {
+   "prompt": "0.0000003",
+   "completion": "0.0000012",
+   "internal_reasoning": "0.0000012",
+   "request": "0",
+   "input_cache_read": "0.00000006",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795499085744,
+  "expiresAt": 1795585485744,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "nex-agi/nex-n2.5-pro",
+  "route": "nex-agi/fp8",
+  "pricing": {
+   "prompt": "0.000000075",
+   "completion": "0.00000025",
+   "internal_reasoning": "0.00000025",
+   "request": "0",
+   "input_cache_read": "0.000000015",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795491560736,
+  "expiresAt": 1795577960736,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "nvidia/nemotron-3-ultra-550b-a55b",
+  "route": "deepinfra/fp4/flex",
+  "pricing": {
+   "prompt": "0.0000004",
+   "completion": "0.00000176",
+   "internal_reasoning": "0.00000176",
+   "request": "0",
+   "input_cache_read": "0.00000008",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795502303975,
+  "expiresAt": 1795588703975,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "nvidia/nemotron-3.5-lightning",
+  "route": "darkbloom/int4",
+  "pricing": {
+   "prompt": "0.00000002",
+   "completion": "0.000000096",
+   "internal_reasoning": "0.000000096",
+   "request": "0",
+   "input_cache_read": "0.00000001",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795487850342,
+  "expiresAt": 1795574250342,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "nvidia/nemotron-3.5-super-vl",
+  "route": "darkbloom/nvfp4",
+  "pricing": {
+   "prompt": "0.00000006",
+   "completion": "0.00000035",
+   "internal_reasoning": "0.00000035",
+   "request": "0",
+   "input_cache_read": "0.00000001",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795493179476,
+  "expiresAt": 1795579579476,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "openai/gpt-5-mini",
+  "route": "openai/flex",
+  "pricing": {
+   "prompt": "0.000000125",
+   "completion": "0.000001",
+   "internal_reasoning": "0.000001",
+   "request": "0",
+   "input_cache_read": "0.0000000125",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795498512842,
+  "expiresAt": 1795584912842,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "openai/gpt-5.1-codex-mini",
+  "route": "azure",
+  "pricing": {
+   "prompt": "0.00000025",
+   "completion": "0.000002",
+   "internal_reasoning": "0.000002",
+   "request": "0",
+   "input_cache_read": "0.00000003",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795503768453,
+  "expiresAt": 1795590168453,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "openai/gpt-5.4-mini",
+  "route": "openai/flex",
+  "pricing": {
+   "prompt": "0.000000375",
+   "completion": "0.00000225",
+   "internal_reasoning": "0.00000225",
+   "request": "0",
+   "input_cache_read": "0.0000000375",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795505393110,
+  "expiresAt": 1795591793110,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "openai/gpt-5.4-nano",
+  "route": "openai/flex",
+  "pricing": {
+   "prompt": "0.0000001",
+   "completion": "0.000000625",
+   "internal_reasoning": "0.000000625",
+   "request": "0",
+   "input_cache_read": "0.00000001",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795496317784,
+  "expiresAt": 1795582717784,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "openai/gpt-5.6-luna",
+  "route": "openai/flex",
+  "pricing": {
+   "prompt": "0.0000002",
+   "completion": "0.0000009",
+   "internal_reasoning": "0.0000009",
+   "request": "0",
+   "input_cache_read": "0.00000002",
+   "input_cache_write": "0.00000025"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795497887216,
+  "expiresAt": 1795584287216,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model"
+ },
+ {
+  "model": "openai/gpt-6-luna",
+  "route": "openai/flex",
+  "pricing": {
+   "prompt": "0.0000001",
+   "completion": "0.000000375",
+   "internal_reasoning": "0.000000375",
+   "request": "0",
+   "input_cache_read": "0.00000001",
+   "input_cache_write": "0.000000125"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795493622723,
+  "expiresAt": 1795580022723,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model"
+ },
+ {
+  "model": "openai/gpt-oss-20b",
+  "route": "akashml/fp4",
+  "pricing": {
+   "prompt": "0.000000018",
+   "completion": "0.00000009",
+   "internal_reasoning": "0.00000009",
+   "request": "0",
+   "input_cache_read": "0.000000009",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795485448153,
+  "expiresAt": 1795571848153,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "particle-ai/particle-1",
+  "route": "particle-ai/us/flex",
+  "pricing": {
+   "prompt": "0.000000035",
+   "completion": "0.00000025",
+   "internal_reasoning": "0.00000025",
+   "request": "0",
+   "input_cache_read": "0.000000015",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795491611782,
+  "expiresAt": 1795578011782,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "prism-ml/ternary-bonsai-2-27b",
+  "route": "darkbloom/int4",
+  "pricing": {
+   "prompt": "0.000000075",
+   "completion": "0.0000005",
+   "internal_reasoning": "0.0000005",
+   "request": "0",
+   "input_cache_read": "0.0000000375",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795496076919,
+  "expiresAt": 1795582476919,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "qwen/qwen3.6-27b",
+  "route": "reka",
+  "pricing": {
+   "prompt": "0.0000006",
+   "completion": "0.000006",
+   "internal_reasoning": "0.000006",
+   "request": "0",
+   "input_cache_read": "0.0000005",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795504258671,
+  "expiresAt": 1795590658671,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "qwen/qwen3.7-flash",
+  "route": "alibaba",
+  "pricing": {
+   "prompt": "0.0000002",
+   "completion": "0.0000008",
+   "internal_reasoning": "0.0000008",
+   "request": "0",
+   "input_cache_read": "0.00000004",
+   "input_cache_write": "0.00000025"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795497318773,
+  "expiresAt": 1795583718773,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model"
+ },
+ {
+  "model": "qwen/qwen3.7-max",
+  "route": "alibaba",
+  "pricing": {
+   "prompt": "0.000001475",
+   "completion": "0.000004425",
+   "internal_reasoning": "0.000004425",
+   "request": "0",
+   "input_cache_read": "0.000000295",
+   "input_cache_write": "0.00000184375"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795508618739,
+  "expiresAt": 1795595018739,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model"
+ },
+ {
+  "model": "qwen/qwen3.7-plus",
+  "route": "alibaba",
+  "pricing": {
+   "prompt": "0.00000096",
+   "completion": "0.00000384",
+   "internal_reasoning": "0.00000384",
+   "request": "0",
+   "input_cache_read": "0.000000192",
+   "input_cache_write": "0.0000012"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795507815542,
+  "expiresAt": 1795594215542,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model"
+ },
+ {
+  "model": "qwen/qwen3.8-27b",
+  "route": "chutes/fp8",
+  "pricing": {
+   "prompt": "0.000000039",
+   "completion": "0.00000125",
+   "internal_reasoning": "0.00000125",
+   "request": "0",
+   "input_cache_read": "0.0000000039",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795499387884,
+  "expiresAt": 1795585787884,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "qwen/qwen3.8-flash",
+  "route": "alibaba/us-east-1",
+  "pricing": {
+   "prompt": "0.00000015",
+   "completion": "0.00000047",
+   "internal_reasoning": "0.00000047",
+   "request": "0",
+   "input_cache_read": "0.000000016",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795494626437,
+  "expiresAt": 1795581026437,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "qwen/qwen3.8-omni-flash",
+  "route": "alibaba",
+  "pricing": {
+   "prompt": "0.00000015",
+   "completion": "0.00000047",
+   "internal_reasoning": "0.00000047",
+   "request": "0",
+   "input_cache_read": "0.000000016",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795494774253,
+  "expiresAt": 1795581174253,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "reflection/beam-1.0-501b-a23b",
+  "route": "nebius/fp4",
+  "pricing": {
+   "prompt": "0.00000025",
+   "completion": "0.000001",
+   "internal_reasoning": "0.000001",
+   "request": "0",
+   "input_cache_read": "0.00000005",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795498688648,
+  "expiresAt": 1795585088648,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "ricursiveai/ripple-65b-preview",
+  "route": "primeintellect/bf16",
+  "pricing": {
+   "prompt": "0.0000001",
+   "completion": "0.0000003",
+   "internal_reasoning": "0.0000003",
+   "request": "0",
+   "input_cache_read": "0.000000025",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795492371502,
+  "expiresAt": 1795578771502,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "tencent/hy3",
+  "route": "tencent/fp8",
+  "pricing": {
+   "prompt": "0.000000132",
+   "completion": "0.000000528",
+   "internal_reasoning": "0.000000528",
+   "request": "0",
+   "input_cache_read": "0.000000033",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795496142286,
+  "expiresAt": 1795582542286,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "tencent/hy4",
+  "route": "together",
+  "pricing": {
+   "prompt": "0.000000834",
+   "completion": "0.000002501",
+   "internal_reasoning": "0.000002501",
+   "request": "0",
+   "input_cache_read": "0.000000042",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795506373662,
+  "expiresAt": 1795592773662,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "tencent/hy4-flash",
+  "route": "primalabs/fp8",
+  "pricing": {
+   "prompt": "0.00000007",
+   "completion": "0.000000281",
+   "internal_reasoning": "0.000000281",
+   "request": "0",
+   "input_cache_read": "0.000000003",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795492325373,
+  "expiresAt": 1795578725373,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "tencent/hy4-preview",
+  "route": "deepinfra/fp4",
+  "pricing": {
+   "prompt": "0.000000834",
+   "completion": "0.000002501",
+   "internal_reasoning": "0.000002501",
+   "request": "0",
+   "input_cache_read": "0.000000042",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795506427310,
+  "expiresAt": 1795592827310,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "thinkingmachines/inkling",
+  "route": "together",
+  "pricing": {
+   "prompt": "0.000001",
+   "completion": "0.00000405",
+   "internal_reasoning": "0.00000405",
+   "request": "0",
+   "input_cache_read": "0.00000017",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795508157122,
+  "expiresAt": 1795594557122,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "thinkingmachines/inkling-2-mini",
+  "route": "primeintellect/fp4",
+  "pricing": {
+   "prompt": "0.000000075",
+   "completion": "0.0000003",
+   "internal_reasoning": "0.0000003",
+   "request": "0",
+   "input_cache_read": "0.000000015",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795490398740,
+  "expiresAt": 1795576798740,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "thinkingmachines/inkling-2-small",
+  "route": "primeintellect/flex",
+  "pricing": {
+   "prompt": "0.000000075",
+   "completion": "0.00000025",
+   "internal_reasoning": "0.00000025",
+   "request": "0",
+   "input_cache_read": "0.000000015",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795491689104,
+  "expiresAt": 1795578089104,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "thinkingmachines/inkling-small",
+  "route": "deepinfra/fp4",
+  "pricing": {
+   "prompt": "0.00000045",
+   "completion": "0.0000012",
+   "internal_reasoning": "0.0000012",
+   "request": "0",
+   "input_cache_read": "0.0000001",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795499122561,
+  "expiresAt": 1795585522561,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "xiaomi/mimo-v2.5",
+  "route": "venice/fp8",
+  "pricing": {
+   "prompt": "0.0000004",
+   "completion": "0.000002",
+   "internal_reasoning": "0.000002",
+   "request": "0",
+   "input_cache_read": "0.00000008",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795504315601,
+  "expiresAt": 1795590715601,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "xiaomi/mimo-v2.6-flash",
+  "route": "darkbloom/fp4",
+  "pricing": {
+   "prompt": "0.0000001",
+   "completion": "0.00000028",
+   "internal_reasoning": "0.00000028",
+   "request": "0",
+   "input_cache_read": "0.0000000028",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795491969131,
+  "expiresAt": 1795578369131,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "xiaomi/mimo-v2.6-pro",
+  "route": "streamlake",
+  "pricing": {
+   "prompt": "0.000000435",
+   "completion": "0.00000087",
+   "internal_reasoning": "0.00000087",
+   "request": "0",
+   "input_cache_read": "0.0000000036",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795497557443,
+  "expiresAt": 1795583957443,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "z-ai/glm-4.5",
+  "route": "z-ai/fp8",
+  "pricing": {
+   "prompt": "0.0000006",
+   "completion": "0.0000022",
+   "internal_reasoning": "0.0000022",
+   "request": "0",
+   "input_cache_read": "0.00000011",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795504994088,
+  "expiresAt": 1795591394088,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "z-ai/glm-4.5v",
+  "route": "novita/fp8",
+  "pricing": {
+   "prompt": "0.0000006",
+   "completion": "0.0000018",
+   "internal_reasoning": "0.0000018",
+   "request": "0",
+   "input_cache_read": "0.00000011",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795503234724,
+  "expiresAt": 1795589634724,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "z-ai/glm-4.6",
+  "route": "z-ai/fp4",
+  "pricing": {
+   "prompt": "0.0000006",
+   "completion": "0.0000022",
+   "internal_reasoning": "0.0000022",
+   "request": "0",
+   "input_cache_read": "0.00000011",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795502258426,
+  "expiresAt": 1795588658426,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "z-ai/glm-4.7",
+  "route": "novita/fp8",
+  "pricing": {
+   "prompt": "0.0000006",
+   "completion": "0.0000022",
+   "internal_reasoning": "0.0000022",
+   "request": "0",
+   "input_cache_read": "0.00000011",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795500463841,
+  "expiresAt": 1795586863841,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "z-ai/glm-5",
+  "route": "siliconflow/fp8",
+  "pricing": {
+   "prompt": "0.00000095",
+   "completion": "0.00000255",
+   "internal_reasoning": "0.00000255",
+   "request": "0",
+   "input_cache_read": "0.0000002",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795505119593,
+  "expiresAt": 1795591519593,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ },
+ {
+  "model": "z-ai/glm-5.3-flash",
+  "route": "open-inference/fp4",
+  "pricing": {
+   "prompt": "0.00000005",
+   "completion": "0.00000045",
+   "internal_reasoning": "0.00000045",
+   "request": "0",
+   "input_cache_read": "0.000000025",
+   "input_cache_write": "0"
+  },
+  "max_completion_tokens": 2048,
+  "reasoning": {
+   "mode": "bounded",
+   "max_tokens": 1024
+  },
+  "verifiedAt": 1795486040298,
+  "expiresAt": 1795572440298,
+  "evidence": "Opus tariff review TARIFFS PASS 64 (OpenRouter v3 owner paid run 2 2026-11-24); briefs/codex/openrouter-harness-v3/REVIEW-OPUS-TARIFFS-2.md and OPENROUTER-V3-REPORT-2.json; installed as-is, one row per model",
+  "cacheWriteBasis": "never_requested_enforced",
+  "cacheWriteEnforcementVersion": "openrouter-no-cache-write-v1"
+ }
+]

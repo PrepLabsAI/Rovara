@@ -23,12 +23,12 @@ import { createEvalGatewayAccess } from "./eval-gateway-access.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EVAL_VERTEX_ROW, evalImageDigestOf, evalStandInsOn, type EvalEnvironment, type EvalStandInDescriptor, type TaskDependencyPlan } from "@agentx/contracts";
+import { EVAL_BEDROCK_ROW, EVAL_VERTEX_ROW, evalImageDigestOf, evalStandInsOn, type EvalEnvironment, type EvalStandInDescriptor, type TaskDependencyPlan } from "@agentx/contracts";
 import { prepareEvalStandIns, type PreparedEvalStandIns } from "../eval-stand-in-plan.js";
 import type { EvalServicesStarter } from "./eval-services.js";
 import { createBridgedEvalExec, createFreshEvalSandbox, freshEvalSandboxOffered, FRESH_EVAL_RUN_MAX_MS, type FreshEvalSandbox, type FreshEvalSandboxConfig } from "./eval-bridged-exec.js";
 import { createProcessCandidateGit } from "../e2e-candidate-source.js";
-import type { DockerCli } from "../swebench/containers.js";
+import type { DockerCli } from "../docker-cli.js";
 import { createEvalFinalCheckPorts, type EvalHostCapabilities } from "./eval-host.js";
 import type { EvalFinalCheckPorts } from "./eval-final-check.js";
 import type { EvalMeterOptions } from "./eval-model-access.js";
@@ -171,11 +171,13 @@ export interface EvalFreshHost {
 
 const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 /**
- * The one path shape a frame of this eval row may have for the plan's model (the worker's model pin). A `vertex` row (L4-EVV) takes only the Vertex form (`/v1` or `/v1beta1`, a project and a location of the plain shapes, Google's own
+ * The one path shape a frame of this eval row may have for the plan's model (the worker's model pin). A `bedrock` row (RF-5) takes only Bedrock Runtime's `/model/<id>/<operation>` forms. A `vertex` row (L4-EVV) takes only the Vertex form (`/v1` or `/v1beta1`, a project and a location of the plain shapes, Google's own
  * publisher, the model, one of the two operations); any other row is the Gemini API form exactly as before. The project and location are not pinned here: the worker does not know the connected ones, and the gateway builds its upstream path
  * from its own key store and refuses any pair that is neither the connected one nor Rovara's placeholder.
  */
 export function evalModelPathPattern(rowId: string, model: string): RegExp {
+  // RF-5: the Bedrock row takes only the four product operations, for the plan's model alone. An AWS SDK writes the model id's colon as `%3A` (the helper's path rule lets that through, and the product egress decodes it); a literal colon is the same model.
+  if (rowId === EVAL_BEDROCK_ROW) return new RegExp(`^/model/${escapeRegExp(model).replace(/:/gu, "(?::|%3[Aa])")}/(?:converse|converse-stream|invoke|invoke-with-response-stream)$`, "u");
   const operations = "(?:generateContent|streamGenerateContent)";
   return rowId === EVAL_VERTEX_ROW
     ? new RegExp(`^/(?:v1|v1beta1)/projects/(?:[a-z][a-z0-9-]{4,28}[a-z0-9]|[0-9]{1,20})/locations/(?:global|[a-z]{2,15}-[a-z]{2,15}[0-9]{1,2})/publishers/google/models/${escapeRegExp(model)}:${operations}$`, "u")

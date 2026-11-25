@@ -1,5 +1,7 @@
 import { crc32 as zlibCrc32, deflateRawSync, inflateRawSync } from "node:zlib";
 import { e2eSecretSpellings } from "@agentx/contracts";
+import { markupTextOf } from "./trace-scrub-markup.js";
+import { htmlSafeJsonSpellings, snapshotTextOf } from "./trace-scrub-text.js";
 
 /**
  * Proof and evidence B4 (and fix round 1, Opus review C2): a Playwright trace is a ZIP of JSON-lines files (`trace.trace`, `trace.network`, `trace.stacks`), screencast images and blobs (`resources/`: response
@@ -36,6 +38,8 @@ export const TRACE_HEADER_ALLOW: ReadonlySet<string> = new Set([
 ]);
 const HEADER_CONTAINERS = new Set(["headers", "requestheaders", "responseheaders", "extrahttpheaders"]);
 const PAIR_CONTAINERS = new Set(["querystring", "params"]);
+/** Parents of `{ name, value }` pairs whose values are the round's own: cookies, and the web storage of a storage state. */
+const STORAGE_CONTAINERS = new Set(["cookies", "localStorage", "sessionStorage"]);
 /** A header whose value is a secret by its name: its value (and, for Authorization, the part after the scheme) is harvested. */
 const SENSITIVE_HEADER = /auth|token|session|key|secret|cookie|csrf|xsrf|credential|jwt|bearer|signature|^x-(?!request-id$|amzn-requestid$|forwarded|frame|content-type|powered)/iu;
 /** A field of a JSON body whose string value is harvested as a secret. */
@@ -132,14 +136,20 @@ const looksLikeUrl = (text: string) => /^https?:\/\//iu.test(text);
 
 /** A query or fragment run inside any text: from a `?` or `#` to the next space, quote or angle bracket. */
 const RUN = /[?#][^\s"'<>]*/gu;
+/** `;jsessionid=<value>` anywhere in a text (the name is kept, as for any other pair). */
+const JSESSION = /(;jsessionid=)[^\s/?#&;"'<>]+/giu;
+/** A run that is one bare token (no `key=`): a `#<jwt>` or `?<code>` of at least 16 token characters with a digit in it. A short anchor such as `#buy` is left alone. */
+const BARE_TOKEN = /^[?#](?=[\w.~+/-]*\d)[\w.~+/-]{16,}$/u;
 /**
  * Blanks the value of every `key=value` pair of every query or fragment run in a text, whatever its length, whatever the scheme (a relative `/reset?token=...`, a `wss://` address, a URL in the middle of a
  * console message), and drops userinfo in `scheme://user:pass@host`. A pair with an empty value stays as it is.
  */
 export function blankQueryText(text: string): string {
-  if (!text.includes("?") && !text.includes("#") && !text.includes("@")) return text;
+  if (!text.includes("?") && !text.includes("#") && !text.includes("@") && !/;jsessionid=/iu.test(text)) return text;
   const noUserinfo = text.replace(/(\/\/)[^\s/@"'<>]+@/gu, "$1");
-  return noUserinfo.replace(RUN, (run) => run.replace(/([^?#&;=]+)=([^&;#]*)/gu, (_pair, key: string, value: string) => (value === "" || value === TRACE_BLANKED ? `${key}=${value}` : `${key}=${TRACE_BLANKED}`)));
+  // A servlet session carried in the path (`;jsessionid=...`), whatever follows it.
+  const noSession = noUserinfo.replace(JSESSION, (_match, name: string) => `${name}${TRACE_BLANKED}`);
+  return noSession.replace(RUN, (run) => (BARE_TOKEN.test(run) ? `${run[0]}${TRACE_BLANKED}` : run.replace(/([^?#&;=]+)=([^&;#]*)/gu, (_pair, key: string, value: string) => (value === "" || value === TRACE_BLANKED ? `${key}=${value}` : `${key}=${TRACE_BLANKED}`))));
 }
 /** The values of every pair of every query or fragment run in a text. */
 function queryValuesOf(text: string): string[] {
@@ -172,7 +182,7 @@ function harvest(node: unknown, into: Secrets, parentKey: string, body: boolean)
       if (item !== null && typeof item === "object" && !Array.isArray(item)) {
         const entry = item as Record<string, unknown>;
         if (typeof entry.name === "string" && typeof entry.value === "string") {
-          if (parentKey === "cookies") into.add(entry.value);
+          if (STORAGE_CONTAINERS.has(parentKey)) into.add(entry.value);
           else if (HEADER_CONTAINERS.has(parentKey.toLowerCase())) harvestHeader(entry.name, entry.value, into);
         }
       }
@@ -191,6 +201,8 @@ function harvest(node: unknown, into: Secrets, parentKey: string, body: boolean)
   if (typeof node === "string") {
     if (looksLikeUrl(node)) harvestUrl(node, into);
     for (const value of queryValuesOf(node)) into.add(value);
+    // A form-encoded body held inline (`postData.text`, a console message): the values of its sensitive fields.
+    harvestForm(node, into);
     // JSON held inside a string (a console message, a stringified body) is read as the body it is.
     if ((node.startsWith("{") || node.startsWith("[")) && node.length <= 100_000) { try { harvest(JSON.parse(node), into, "", true); } catch { /* not JSON */ } }
   }
@@ -212,7 +224,7 @@ function newSecrets(known: readonly string[]): Secrets & { list(): string[] } {
 /** A search for the round's secrets, every spelling, in bytes or text. */
 function searcher(secrets: readonly string[], contains: (bytes: Uint8Array) => boolean): (data: Uint8Array | string) => boolean {
   // Every spelling, plus the PHP/JavaScript habit of escaping the slash in JSON (`a\/b`).
-  const needles = secrets.flatMap((secret) => [...e2eSecretSpellings(secret), secret.replace(/\//gu, "\\/")]).filter((form) => form.length >= MIN_SECRET_LENGTH).map((form) => Buffer.from(form, "utf8"));
+  const needles = secrets.flatMap((secret) => [...e2eSecretSpellings(secret), secret.replace(/\//gu, "\\/"), ...htmlSafeJsonSpellings(secret)]).filter((form) => form.length >= MIN_SECRET_LENGTH).map((form) => Buffer.from(form, "utf8"));
   return (data) => {
     const bytes = typeof data === "string" ? Buffer.from(data, "utf8") : Buffer.from(data.buffer, data.byteOffset, data.byteLength);
     return contains(bytes) || needles.some((needle) => bytes.includes(needle));
@@ -289,6 +301,14 @@ function joinedStrings(node: unknown, into: string[] = []): string {
  * dropped. `null` when a line is not JSON or a secret survives (also split across strings). `hit` is the full scan.
  */
 export function scrubTraceLinesWith(text: string, hit: (text: string) => boolean, stats: ScrubStats = newStats(), plan?: FramePlan): string | null {
+  try { return rewriteTraceLines(text, hit, stats, plan); } catch (error) {
+    // A line nested too deep to walk is a line that cannot be made safe: refuse it, as for any other line that cannot be read.
+    if (error instanceof RangeError) return null;
+    throw error;
+  }
+}
+
+function rewriteTraceLines(text: string, hit: (text: string) => boolean, stats: ScrubStats, plan: FramePlan | undefined): string | null {
   const out: string[] = [];
   for (const line of text.split("\n")) {
     if (line.trim() === "") { out.push(line); continue; }
@@ -296,7 +316,7 @@ export function scrubTraceLinesWith(text: string, hit: (text: string) => boolean
     try { parsed = JSON.parse(line); } catch { return null; }
     const record = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
     const type = record?.type;
-    if (typeof type === "string" && SNAPSHOT_TYPES.has(type) && hit(line)) { stats.droppedSnapshots += 1; continue; }
+    if (typeof type === "string" && SNAPSHOT_TYPES.has(type) && hit(`${line}\n${snapshotTextOf(parsed)}`)) { stats.droppedSnapshots += 1; continue; }
     if (type === "screencast-frame" && record !== undefined && plan?.dropFrame(record) === true) {
       stats.droppedFrames += 1;
       if (typeof record.file === "string") plan.droppedFiles.add(record.file);
@@ -325,6 +345,14 @@ interface SnapshotSeen { page: string | undefined; time: number | undefined; sec
  * or symlink survives, and entries keep the archive's order.
  */
 export function scrubTrace(zip: Uint8Array, contains: (bytes: Uint8Array) => boolean, options: ScrubOptions = {}): { zip: Uint8Array; stats: ScrubStats } | null {
+  try { return scrubTraceEntries(zip, contains, options); } catch (error) {
+    // JSON nested too deep to walk (the stack runs out) cannot be made safe: null, not a throw.
+    if (error instanceof RangeError) return null;
+    throw error;
+  }
+}
+
+function scrubTraceEntries(zip: Uint8Array, contains: (bytes: Uint8Array) => boolean, options: ScrubOptions): { zip: Uint8Array; stats: ScrubStats } | null {
   const entries = readEntries(zip);
   if (entries === null) return null;
   const names = new Set<string>();
@@ -386,7 +414,9 @@ export function scrubTrace(zip: Uint8Array, contains: (bytes: Uint8Array) => boo
       if (event.type !== "frame-snapshot") continue;
       const page = typeof event.snapshot?.pageId === "string" ? event.snapshot.pageId : undefined;
       const time = typeof event.snapshot?.timestamp === "number" && Number.isFinite(event.snapshot.timestamp) ? event.snapshot.timestamp : undefined;
-      seen.push({ page, time, secret: secretHit(line), any: hitBytes(Buffer.from(line, "utf8")) });
+      // A secret a page rendered across sibling DOM nodes (two spans) is whole only in the snapshot's text, not in the line's JSON.
+      const scanned = `${line}\n${snapshotTextOf(event)}`;
+      seen.push({ page, time, secret: secretHit(scanned), any: hitBytes(Buffer.from(scanned, "utf8")) });
     }
   }
   // A snapshot that shows a round secret but names no page or time cannot be tied to the frames that show it: the trace is refused.
@@ -425,8 +455,8 @@ export function scrubTrace(zip: Uint8Array, contains: (bytes: Uint8Array) => boo
     let data = item.data;
     if (LINE_FILES.test(item.entry.name)) {
       data = lineOutputs.get(item.entry.name)!;
-    } else if (RESOURCE.test(item.entry.name) && hitBytes(data)) {
-      // A blob (a response body, the page source) that contains a round secret keeps its place and loses its content.
+    } else if (RESOURCE.test(item.entry.name) && hitBytes(Buffer.concat([data, Buffer.from(`\n${markupTextOf(item.text)}`, "utf8")]))) {
+      // A blob (a response body, the page source) that contains a round secret, whole or split by markup, keeps its place and loses its content.
       data = Buffer.from(TRACE_BLANKED, "utf8");
       stats.blankedResources += 1;
     } else if (hitBytes(data)) {

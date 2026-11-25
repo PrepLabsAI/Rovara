@@ -1,6 +1,7 @@
 // Spec 025 phase 25a: the developer sign-in's shared names and wire shapes. The CLI parses server
 // responses with the non-strict schemas here, so a newer control plane can add fields.
 import { z } from "zod";
+import { CODE_API_VERSION } from "@preplabsai/rovara-code-api";
 import { OrgIdSchema } from "./browser-ids.js";
 import { ProjectRoleSchema } from "./app-projects.js";
 import { EnvironmentNameSchema } from "./environments.js";
@@ -11,7 +12,8 @@ import { DeveloperTaskPolicySchema } from "./project-node.js";
 import { SlackChannelIdSchema, SlackTeamIdSchema, SlackUserIdSchema } from "./slack.js";
 import { WorkspaceStatusSchema } from "./workspace.js";
 
-export const DEVELOPER_API_VERSION = "1.2";
+/** The Code API's version: one number, defined in @preplabsai/rovara-code-api (version.ts) and kept here under its old name. */
+export const DEVELOPER_API_VERSION = CODE_API_VERSION;
 export const AGENTX_CLI_CLIENT_ID = "agentx-cli";
 export const DEVELOPER_TOKEN_AUDIENCE = "agentx-developer";
 export const DEVELOPER_ACCESS_TOKEN_SECONDS = 3600;
@@ -213,35 +215,6 @@ export const TaskPersonProofResponseSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(false), error: z.enum(["invalid_request", "slack_unavailable", "ineligible"]) }).strict(),
 ]);
 export type TaskPersonProofResponse = z.infer<typeof TaskPersonProofResponseSchema>;
-
-/** Bounded internal Lambda envelope for fresh task-dispatch proof. Never an HTTP request shape. */
-export const TaskDispatchProofRequestSchema = z.object({
-  kind: z.literal("task-dispatch-person-proof"), workspace: SlackWorkspaceScopeSchema.optional(),
-  request: TaskPersonProofRequestSchema,
-  admission: z.object({
-    version: z.literal(1),
-    id: z.string().uuid(),
-    deadlineAt: z.number().int().nonnegative(),
-    remainingMs: z.number().int().min(1).max(6_000),
-    slackCallsLimit: z.number().int().min(1).max(100),
-  }).strict(),
-}).strict().superRefine((value, context) => {
-  if (new Set(value.request.channelIds).size !== value.request.channelIds.length) {
-    context.addIssue({ code: "custom", path: ["request", "channelIds"], message: "channel IDs must be unique" });
-  }
-});
-export type TaskDispatchProofRequest = z.infer<typeof TaskDispatchProofRequestSchema>;
-
-export const TaskDispatchProofResponseSchema = z.object({
-  kind: z.literal("task-dispatch-person-proof-result"),
-  admissionId: z.string().uuid(),
-  usage: z.object({
-    slackCallsUsed: z.number().int().min(0).max(100),
-    completedAt: z.number().int().nonnegative(),
-  }).strict(),
-  result: TaskPersonProofResponseSchema,
-}).strict();
-export type TaskDispatchProofResponse = z.infer<typeof TaskDispatchProofResponseSchema>;
 
 const TaskPersonInviteAdmissionSchema = z.object({
   version: z.literal(1),

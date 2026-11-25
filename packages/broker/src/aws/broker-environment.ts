@@ -16,7 +16,7 @@
 // value, so a broker that cannot name what it needs does not start.
 import {
   BROKER_ACCOUNT_VARIABLE, BROKER_NAMES, BROKER_NAMES_PARAMETER_VARIABLE, BROKER_NAMES_VARIABLE, BROKER_SETTINGS, BROKER_SETTINGS_VARIABLE, BROKER_SETTING_VALUE, BROKER_SWITCH_FLAG_VALUES, DERIVED_BROKER_VARIABLES, EnvironmentNameSchema,
-  LEGACY_INSTALL_LAYOUT, decodeBrokerList, environmentRolePath, type BrokerNameSpec, type BrokerSettingSpec,
+  LEGACY_INSTALL_LAYOUT, PUBLIC_API_URL_VARIABLE, decodeBrokerList, environmentRolePath, type BrokerNameSpec, type BrokerSettingSpec,
 } from "@agentx/contracts";
 
 export type MutableEnvironment = Record<string, string | undefined>;
@@ -67,6 +67,9 @@ function build(spec: BrokerNameSpec, value: string, env: MutableEnvironment): st
     case "queueUrl":
     case "deadLetterQueue": return queueUrl(requiredScope(env, needed), value);
     case "apiIssuer": {
+      // CODE-PUBLIC-URL: an install with a public address (hydrateBrokerSettings set it from the packed setting, which runs first) has its address as its issuer, not the API's own host.
+      const origin = env[PUBLIC_API_URL_VARIABLE];
+      if (isSet(origin)) return `${origin}/v1/auth`;
       const scope = requiredScope(env, needed);
       return `https://${value}.execute-api.${scope.region}.amazonaws.com${suffix(scope)}/v1/auth`;
     }

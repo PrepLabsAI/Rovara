@@ -54,7 +54,13 @@ describe("the staging foundation keeps the live DNS firewall and egress alarms",
   });
 
   it("adds only the Google Vertex AI group to the allow list: the live domains in the live order, with exactly these exact hosts in one block after the default list's own names", () => {
-    const synthesized = withoutMetadata(stagingStacks.foundation.Resources[allowListId]!);
+    const withPublicApiHost = withoutMetadata(stagingStacks.foundation.Resources[allowListId]!);
+    // CODE-PUBLIC-URL (rev 9.2): the one entry the public API host adds (Fn::If on HasPublicApiUrl, NoValue while empty) is asserted and taken out, as every older claim here was recorded without it
+    // (tests/contract/public-api-url-infrastructure.test.ts pins it).
+    const allDomains = withPublicApiHost.Properties.Domains as unknown[];
+    const isPublicApiEntry = (domain: unknown): boolean => JSON.stringify(domain).includes("HasPublicApiUrl");
+    expect(allDomains.filter(isPublicApiEntry)).toEqual([{ "Fn::If": ["HasPublicApiUrl", { "Fn::Select": [1, { "Fn::Split": ["://", { Ref: "PublicApiUrl" }] }] }, { Ref: "AWS::NoValue" }] }]);
+    const synthesized = { ...withPublicApiHost, Properties: { ...withPublicApiHost.Properties, Domains: allDomains.filter((domain) => !isPublicApiEntry(domain)) } };
     const domains = synthesized.Properties.Domains as string[];
     const start = domains.indexOf(vertexHosts[0]!);
     expect(start).toBeGreaterThan(0);

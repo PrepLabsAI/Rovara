@@ -14,12 +14,14 @@ import { projectIncarnationUpdate } from "../project-incarnation.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
-  PROMPT_LOCATIONS_MAX, ProjectDefinitionSchema, SETUP_TIMEOUT, TEST_TIMEOUT, agentXError, canonicalJson, change, formatCommandLine, orgProjectCatalogKey, parseCommandLine, projectMetaKey, projectRevisionKey, promptLocationKey, promptLocationsOf, setupItemsOf, when,
-  type DocumentKey, type DocumentStore, type OrgId, type Principal, type ProjectCommand, type ProjectDefinition, type PromptLocation, type SetupVerification, type TransactItem, type UpdateOp,
+  PROMPT_LOCATIONS_MAX, ProjectDefinitionSchema, SETUP_TIMEOUT, TEST_TIMEOUT, agentXError, canonicalJson, change, formatCommandLine, noAutomatedTestsOf, noAutomatedTestsOfRow, orgProjectCatalogKey, parseCommandLine, projectMetaKey, projectRevisionKey, promptLocationKey, promptLocationsOf, readStoredProject, setupItemsOf, when,
+  type DocumentKey, type DocumentStore, type NoAutomatedTests, type OrgId, type Principal, type ProjectCommand, type ProjectDefinition, type PromptLocation, type SetupVerification, type TransactItem, type UpdateOp,
 } from "@agentx/contracts";
 import { SubjectRefusal, type AppliedDecision, type DecisionAttempt, type DecisionSubject, type LoadedSubject } from "../decisions/approval-gate.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { readState, verifiedView, type SetupAgentDeps } from "./agent.js";
+import { testPlacesLooked } from "./end-summary.js";
+import { readSetupJournal } from "./journal.js";
 import { buildSetupCheck, relayCheck, setupStateOfCheck, type SetupCheckMark } from "./check.js";
 import { setupPartition } from "./keys.js";
 import { BROWSER_TESTING_WORDS, type BrowserCandidateFacts } from "./browser-testing-state.js";
@@ -47,8 +49,9 @@ export const SETUP_CONFIRM_WORDS = {
   notChecked: "Rovara could not finish checking where each suggestion came from. Try again in a minute.",
   nothing: "None of the suggestions can be used: each one failed its check, or is a command Rovara does not carry into a project's setup.",
   unknownItem: "That suggestion is not part of this setup.",
-  noTest: "The setup has no test command to prove, so there is nothing to use yet. Add a test command to the project's setup, or run the setup again.",
   invalid: "The commands could not be made into the project's setup.",
+  /** DEC 254zzz495 (N3): "use without setup or tests" on a project that already has test commands changes nothing, so no candidate is made. */
+  nothingChanges: "Nothing changes: this project already has setup and test commands, and none of Rovara's suggestions was chosen.",
   /** L4-T5: the sentence when the check cannot be read (the neutral one); `waitingSetupWords` picks the exact one. */
   waiting: "Another setup is waiting. If its check passed, approve or reject it; otherwise discard it. Then use this one.",
   tooLong: "A command in this setup is too long to show whole, so it cannot be approved.",
@@ -128,7 +131,7 @@ export interface CandidateCommands { setup?: ProjectCommand[]; readiness?: Proje
  */
 export function commandsFromProposal(
   proposal: Parameters<typeof setupItemsOf>[0], verification: Readonly<Record<string, SetupVerification>>, definition: { repositories: ReadonlyArray<{ name: string; path: string }> }, only?: ReadonlySet<string>,
-): CandidateCommands | { error: "nothing" | "unknown_item" | "no_test"; id?: string } {
+): CandidateCommands | { error: "nothing" | "unknown_item"; id?: string } {
   const wanted = setupItemsOf(proposal).filter((item) => item.kind === "setup" || item.kind === "tests");
   if (only !== undefined) for (const id of only) if (!wanted.some((item) => item.id === id)) return { error: "unknown_item", id };
   const left: CandidateCommands["left"] = [];
@@ -201,6 +204,10 @@ export function chooseCandidateItems(
   proposal: Parameters<typeof setupItemsOf>[0], verification: Readonly<Record<string, SetupVerification>>, definition: { repositories: ReadonlyArray<{ name: string; path: string }>; promptLocations?: unknown }, itemIds: readonly string[] | undefined,
 ): { made: CandidateCommands; locations: CandidatePromptLocations } {
   const items = setupItemsOf(proposal);
+  // DEC 254zzz495 (N3): an empty setup can always be used. A person who ticked nothing ("Use without setup or tests"), or a run that found no setup, test or prompt-location item at all, has the empty choice: no commands change
+  // (the project keeps the setup and tests it has) and nothing is refused. A choice that names items which all fail their checks is still refused as "nothing".
+  const emptyChoice = itemIds === undefined ? !items.some((item) => item.kind === "setup" || item.kind === "tests" || item.kind === "prompt_location") : itemIds.length === 0;
+  if (emptyChoice) return { made: { used: [], unchecked: [], left: [] }, locations: { locations: promptLocationsOf(definition.promptLocations), used: [], unchecked: [], left: [] } };
   const chosen = itemIds === undefined ? undefined : new Set(itemIds);
   const kindOf = (id: string) => items.find((item) => item.id === id)?.kind;
   const commandChoice = chosen === undefined ? undefined : new Set([...chosen].filter((id) => kindOf(id) !== "prompt_location"));
@@ -249,15 +256,37 @@ export async function confirmSetupAgent(deps: SetupApplyDeps, project: string, r
   const { made, locations } = chooseCandidateItems(view.proposal!, view.verification, full.definition, body.itemIds);
   const setup = made.setup ?? full.definition.setup;
   const readiness = made.readiness ?? full.definition.readiness;
-  if (readiness.length === 0) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.noTest);
+  if (made.used.length === 0 && locations.used.length === 0 && readiness.length > 0) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.nothingChanges);
   const candidateRevision = full.definition.revision + 1;
   const withLocations = locations.used.length > 0 ? { promptLocations: locations.locations } : {};
+  // DEC 254zzz495 (N3): a candidate with no test command is a normal end ("Ready, no automated tests"): its revision ROW records the fact (when, and where the run looked for tests; not the definition: rollback safety) and it goes
+  // through the same check on a fresh machine and the same approval; the fact is the project's from the approval on. A candidate that has test commands carries none (a later approved setup with a test command clears it).
+  const fact = readiness.length === 0 ? { at: new Date(deps.now()).toISOString(), looked: await placesLookedOf(deps, project, view.taskId) } : undefined;
   const candidate = ProjectDefinitionSchema.safeParse({
     ...full.definition, revision: candidateRevision, setup, readiness, ...withLocations,
     origins: { ...(full.definition.origins ?? {}), ...(made.setup === undefined ? {} : { setup: "agent" }), ...(made.readiness === undefined ? {} : { readiness: "agent" }) },
   });
   if (!candidate.success) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.invalid);
-  return storeSetupCandidate(deps, { project, by, requestId: body.requestId, taskId: view.taskId ?? "", baseRevision: full.definition.revision, candidate: candidate.data, replyExtra: { used: [...made.used, ...locations.used], unchecked: [...made.unchecked, ...locations.unchecked], left: [...made.left, ...locations.left] }, alsoTransact: [] });
+  return storeSetupCandidate(deps, { project, by, requestId: body.requestId, taskId: view.taskId ?? "", baseRevision: full.definition.revision, candidate: candidate.data, replyExtra: { used: [...made.used, ...locations.used], unchecked: [...made.unchecked, ...locations.unchecked], left: [...made.left, ...locations.left] }, alsoTransact: [], ...(fact === undefined ? {} : { noAutomatedTests: fact }) });
+}
+
+/** Where the run looked for tests, as the fixed words (`testPlacesLooked` of the run's journal). A journal that cannot be read gives none: the candidate is made all the same. */
+async function placesLookedOf(deps: Pick<SetupApplyDeps, "store" | "companyId">, project: string, taskId: string | undefined): Promise<ReturnType<typeof testPlacesLooked>> {
+  if (taskId === undefined || taskId === "") return [];
+  try {
+    return testPlacesLooked((await readSetupJournal({ store: deps.store }, { orgId: deps.companyId, project, taskId })).map((entry) => entry.command));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The fact the candidate's revision row carries, and only while the candidate has NO test command: the one the setup run's confirm named, else the base revision's own live fact (a plan update or a browser testing candidate that
+ * keeps no tests keeps "Ready, no automated tests"). A candidate with a test command carries none, whatever its base held, so the fact can never come back without a setup a person approved.
+ */
+export async function noTestsOfCandidate(deps: Pick<SetupApplyDeps, "store" | "companyId">, input: StoreCandidateInput): Promise<NoAutomatedTests | undefined> {
+  if (input.candidate.readiness.length > 0) return undefined;
+  return input.noAutomatedTests ?? noAutomatedTestsOfRow(await deps.store.get(projectRevisionKey(deps.companyId, input.project, input.baseRevision)));
 }
 
 export interface StoreCandidateInput {
@@ -272,6 +301,8 @@ export interface StoreCandidateInput {
   alsoTransact: readonly TransactItem[];
   /** More of the candidate the approval must be bound to (L4-SC: the fakes a plan's mock adds), folded into the digest the approver sees and approves. Absent: the digest is of the commands only, as before. */
   digestExtra?: Record<string, unknown>;
+  /** DEC 254zzz495 (N3): the fact the candidate's revision ROW carries. Used only while the candidate has no test command; absent, the base revision's own fact is carried (a plan update that keeps no tests keeps "Ready, no automated tests"). */
+  noAutomatedTests?: NoAutomatedTests;
   /** Browser testing: marks the proposal row as a browser testing candidate (the facts its approval writes from). Absent: an ordinary setup candidate. */
   rowExtra?: { browserTesting: BrowserCandidateFacts };
 }
@@ -290,6 +321,7 @@ export async function storeSetupCandidate(deps: Pick<SetupApplyDeps, "flow" | "s
   // L4-EVP (batch 17): the candidate's prompt locations are bound into the digest too, on every way a candidate is made (none: the digest is as before).
   const promptLocations = candidate.promptLocations ?? [];
   const digest = setupApplyDigest(candidate.setup, candidate.readiness, { ...(promptLocations.length === 0 ? {} : { promptLocations }), ...input.digestExtra });
+  const noTests = await noTestsOfCandidate(deps, input);
   const started = buildSetupCheck(deps.flow, { project, revision: candidateRevision, startedBy: by, requestId, candidate: true });
   const reply = { digest, ...input.replyExtra, candidateRevision, proved: false, next: "check" };
   const now = new Date(deps.now()).toISOString();
@@ -300,7 +332,7 @@ export async function storeSetupCandidate(deps: Pick<SetupApplyDeps, "flow" | "s
   const row: SetupApplyRow = { entityType: "SETUP_APPLY", orgId, project, taskId, requestId, by, digest, baseRevision, candidateRevision, state: "checking", check: started.mark, reply, createdAt: now, ...(baseCommits === undefined ? {} : { baseCommits }), ...(earlierApproval === undefined ? {} : { earlierApproval }), ...(input.rowExtra ?? {}) };
   const result = await deps.store.transact([
     // The candidate revision: stored, not the project's latest (the catalog row still names the base), so no task starts on it.
-    { kind: "put", item: { ...projectRevisionKey(orgId, project, candidateRevision), entityType: "PROJECT", candidate: true, definition: JSON.parse(JSON.stringify(candidate)) as never }, condition: when.absent() },
+    { kind: "put", item: { ...projectRevisionKey(orgId, project, candidateRevision), entityType: "PROJECT", candidate: true, definition: JSON.parse(JSON.stringify(candidate)) as never, ...(noTests === undefined ? {} : { noAutomatedTests: noTests }) }, condition: when.absent() },
     // The proposal row replaces a finished one, never a waiting one; the project must still be at the revision the person looked at.
     { kind: "put", item: { ...setupApplyKey(orgId, project), ...(JSON.parse(JSON.stringify(row)) as Record<string, never>) }, condition: when.or(when.absent(), when.not(when.eq("state", "checking"))) },
     { kind: "check", key: orgProjectCatalogKey(orgId, project), condition: when.eq("latestRevision", baseRevision) },
@@ -313,19 +345,21 @@ export async function storeSetupCandidate(deps: Pick<SetupApplyDeps, "flow" | "s
 }
 
 /** What the page shows of the waiting proposal: the commands, and where the check on them stands. */
-export async function readSetupApply(deps: Pick<SetupApplyDeps, "flow" | "store" | "companyId" | "now">, project: string): Promise<(SetupApplyRow & { checkState: Awaited<ReturnType<typeof setupStateOfCheck>>; setup: string[]; readiness: string[]; fakes?: unknown; promptLocations: string[] }) | undefined> {
+export async function readSetupApply(deps: Pick<SetupApplyDeps, "flow" | "store" | "companyId" | "now">, project: string): Promise<(SetupApplyRow & { checkState: Awaited<ReturnType<typeof setupStateOfCheck>>; setup: string[]; readiness: string[]; fakes?: unknown; promptLocations: string[]; noAutomatedTests?: NoAutomatedTests }) | undefined> {
   const raw = await deps.store.get(setupApplyKey(deps.companyId, project));
   if (raw === undefined || raw["entityType"] !== "SETUP_APPLY") return undefined;
   const row = raw as unknown as SetupApplyRow;
   const revision = await deps.store.get(projectRevisionKey(deps.companyId, project, row.candidateRevision));
-  const definition = ProjectDefinitionSchema.safeParse((revision as { definition?: unknown } | undefined)?.definition);
+  const definition = readStoredProject((revision as { definition?: unknown } | undefined)?.definition);
   if (!definition.success) return undefined;
   const checkState = await setupStateOfCheck(deps.flow, row.check, definition.data);
   // Each command as the person would type it (quoted where it needs it) and whole: the approver must see all of what will run.
   const text = (commands: readonly ProjectCommand[]): string[] => commands.map((command) => formatCommandLine(command));
   // L4-EVP: the approver sees every prompt location the candidate holds, whole (repository, file, kind and name).
   const locations = (definition.data.promptLocations ?? []).map((location) => `${location.repo}/${location.path}: ${location.kind === "file" ? "the whole file" : `${location.kind.replace("_", " ")} ${location.symbol ?? ""}`}`);
-  return { ...row, checkState, setup: text(definition.data.setup), readiness: text(definition.data.readiness), fakes: definition.data.generalFakes, promptLocations: locations };
+  // DEC 254zzz495 (N3): the candidate has no test command ("Ready, no automated tests"), as its own definition says.
+  const noTests = noAutomatedTestsOf({ readiness: definition.data.readiness, noAutomatedTests: noAutomatedTestsOfRow(revision) });
+  return { ...row, checkState, setup: text(definition.data.setup), readiness: text(definition.data.readiness), fakes: definition.data.generalFakes, promptLocations: locations, ...(noTests === undefined ? {} : { noAutomatedTests: noTests }) };
 }
 
 /**
@@ -375,7 +409,7 @@ async function snapshotOfApproved(flow: Pick<TaskFlowDeps, "store" | "companyId"
   }
   async function readIt(): Promise<Awaited<ReturnType<typeof takeSetupSnapshot>>> {
     const stored = await flow.store.get(projectRevisionKey(flow.companyId, row.project, row.candidateRevision));
-    const definition = ProjectDefinitionSchema.safeParse((stored as { definition?: unknown } | undefined)?.definition);
+    const definition = readStoredProject((stored as { definition?: unknown } | undefined)?.definition);
     if (!definition.success) return undefined;
     return await takeSetupSnapshot({ companyId: flow.companyId, codeHosts: flow.codeHosts }, { definition: definition.data, setupRevision: row.candidateRevision, at, commits: row.baseCommits! });
   }
