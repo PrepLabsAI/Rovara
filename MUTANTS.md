@@ -413,6 +413,57 @@ Each mutant applied singly, tests/unit/machine-check.test.ts, tests/contract/wor
 | same | A cancel fails the active operation even when it is not the cancel's target | killed, 1 failed |
 | ec2-delivery.ts `machineToCheck` | A setup run held to the wrong subnets | killed, 2 failed |
 
+## SI-LEASE-HANDOFF (the dispatcher hands a rebuild its lease token), code head e36884e49
+
+Each mutant applied singly to the production file; tests/unit/saved-env-dispatch-lease.test.ts, aws-core-dispatch-host.test.ts, saved-env-rebuild.test.ts and saved-env-registry.test.ts run (103 tests), restored with git checkout.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| dispatch.ts `savedEnvBuildWithLease` | The token is dropped from the invocation | killed, 4 failed |
+| same | A token stored in the payload wins over the registry's | killed, 1 failed |
+| same | The token is written to a log line | killed, 1 failed |
+| same | The job id asked for is the operation's id (not the stored job's) | killed, 5 failed |
+| same | The project asked for is empty | killed, 5 failed |
+| same | The operation asked for is the workspace's id | killed, 3 failed |
+| same | The worker-feature check removed (the token is taken for a worker that cannot build) | killed, 1 failed |
+| same | No seam wired: the build is sent without a token | killed, 1 failed |
+| same | A refused lease: the build is sent without a token | killed, 5 failed |
+| same | A lost write race is not retried (1 try) | killed, 1 failed |
+| same | After the tries the build is sent without a token | killed, 1 failed |
+| dispatch.ts prepare branch | Every preparation asks for a lease, not only a rebuild's | killed, 1 failed |
+| saved-env.ts `leaseForDispatch` | The named job id is not compared (another job is marked taken) | killed, 2 failed |
+| same | An expired lease is still handed over | killed, 2 failed |
+| saved-env-dispatch-lease.ts `savedEnvDispatchLeaseOf` | The company asked for is the implicit one, not the seam's | killed, 1 failed |
+| `savedEnvDispatchLeaseFor` | A seam is made with the switch off | killed, 2 failed |
+| `savedEnvDispatchLeaseOf` | An empty operation id accepted | first survived (the test's earlier call had already taken the token); killed, 1 failed, by the added test |
+| same | The result carries the whole job, not the token | killed, 3 failed |
+| same | The job-id belt on the registry's answer removed | equivalent (`leaseForDispatch` already answers only for the named job); kept as a belt |
+| dispatcher-core.ts | The dispatcher does not wire the seam | killed, 1 failed |
+
+SI-LEASE-HANDOFF re-run: the lease step moved out of dispatch.ts into task-flow/saved-env-lease-step.ts (complexity ratchet), called from `preparedProject`. All 20 mutants above re-applied on code head 7c3ed5b68 (the dispatch.ts rows now apply to saved-env-lease-step.ts; "every preparation asks" removes the `savedEnvBuild === undefined` guard): 19 killed, only the job-id belt (equivalent) survives.
+
+## SI-LEASE-HANDOFF, pre-review round (M1, S1-S3), code head 17fb72182
+
+Each mutant applied singly; tests/unit/saved-env-dispatch-lease.test.ts, aws-core-dispatch-host, saved-env-rebuild, saved-env-registry and saved-env-ending run (114-116 tests), restored with git checkout.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| saved-env-lease-step.ts `savedEnvBuildFields` | The stored job-id guard removed | first survived (the check before the start refuses first); killed by the added direct tests of the step |
+| `beforeMachine` | The check before the start never runs | killed, 7 failed |
+| `savedEnvPrecheck` | A refusal is ignored | killed, 4 failed |
+| same | A registry that cannot be read ends the operation (not a retry) | killed, 1 failed |
+| same | No seam lets it through | killed, 1 failed |
+| `savedEnvBuildFields` | A fault after the claim ends the operation | killed, 1 failed |
+| same | An exhausted lost race ends the operation | killed, 1 failed |
+| same | The pause between tries removed | first survived (timing); killed by the added pacing test |
+| saved-env-dispatch-lease.ts `check` | The check takes (marks the job taken) | killed, 3 failed |
+| saved-env.ts `leasableJob` | A job given to another operation is given again | killed, 6 failed |
+| same | The named job id is not compared | killed, 3 failed |
+| same | The run-time id guard removed | killed, 1 failed |
+| saved-env-dispatch-lease.ts `wellFormed` | The id guard removed there only | killed, 1 failed (the project id is only guarded here) |
+| both guards | Removed at once | killed, 3 failed |
+
+SI-LEASE-HANDOFF Opus leftovers (N1): `beforeMachine` call in dispatch.ts, "the retry before the start is capped like the standing-instruction read": the cap replaced by `true` (retried without end) is killed by the added test (1 failed).
 
 ## CANARY-SESSION: the beta canary person's session function (2026-11-25)
 
@@ -658,3 +709,8 @@ The two Denies now use `StringEquals ProviderPermissionsRequired = read_write` i
 | release-pipeline.ts preflightProject | The Deny condition value `read_only` instead of `read_write` (denies the clone, allows the push) | killed, 1 failed |
 | release-pipeline.ts preflightProject | The Deny block skipped for the Production Code Preflight | killed, 1 failed |
 | release-pipeline.ts preflightProject | `StringNotEquals` instead of `StringEquals` (denies a request without the key) | killed, 1 failed |
+| session-binding.ts (session-id-at-rest) | `sameSessionBinding` always true; `sessionBindingOf` returns the raw id | killed (2) |
+| the six state-row families (slack-company-install, github-connect-routes, github-account-link-routes, linear-connections + linear-connect/account-link-routes, sign-in-links) | the row keeps the raw `caller.sessionId` in place of the digest | killed (all six) |
+| same | the spend's in-code digest compare removed alone | survived: equivalent (the DynamoDB condition on the digest still refuses; the two layers are redundant by design) |
+| same | the in-code compare AND the condition's digest value both neutralised (condition compares the row with itself) | killed (all six) |
+| slack-company-install.ts, github-connect-routes.ts, linear-connect-routes.ts `sessionBindingOfCaller` | the empty/missing session-id guard removed | killed (2 each) |

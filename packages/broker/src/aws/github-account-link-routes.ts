@@ -30,6 +30,7 @@ import { agentXError, companyLog, when, OrgIdSchema, type DocumentStore } from "
 import { githubAccountKey, githubAuditPk, githubLinkOf, githubPersonKey, isGithubLogin, linkGithubAccount, unlinkGithubAccount } from "../core/people/github-links.js";
 import { Membership, membershipKey } from "./company-check.js";
 import type { DeveloperCaller } from "./developer-routes.js";
+import { SESSION_BINDING_PATTERN, sameSessionBinding, sessionBindingOf } from "../developer/session-binding.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 
 export const GITHUB_LINK_PATH = "/v1/dev/me/github";
@@ -85,7 +86,7 @@ const NoBody = z.object({}).strict();
 const ClaimBody = z.object({ state: Secret, code: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/) }).strict();
 const StoredState = z.object({
   entityType: z.literal("GITHUB_LINK_STATE"), provider: z.literal(STATE_PROVIDER), status: z.literal("live"),
-  companyId: OrgIdSchema, personId: z.string().regex(/^[a-f0-9]{64}$/), sessionId: z.string().min(1).max(256),
+  companyId: OrgIdSchema, personId: z.string().regex(/^[a-f0-9]{64}$/), sessionBinding: z.string().regex(SESSION_BINDING_PATTERN),
   createdAt: z.iso.datetime(), expiresAt: z.number().int().positive(),
 }).passthrough();
 
@@ -109,19 +110,19 @@ async function liveMembership(ctx: GithubLinkContext, caller: DeveloperCaller, c
 }
 
 /** Spends a live state once, only for the same company, person and session, before its expiry. `true` only when this call spent it. */
-async function spend(ctx: GithubLinkContext, secret: string, who: { companyId: string; personId: string; sessionId: string }): Promise<boolean> {
+async function spend(ctx: GithubLinkContext, secret: string, who: { companyId: string; personId: string; sessionBinding: string }): Promise<boolean> {
   try {
     const key = stateKey(secret);
     const nowSeconds = Math.floor(ctx.now() / 1000);
     const row = await ctx.wiring.store.get(key);
     if (row === undefined) return false;
     const stored = StoredState.parse(Object.fromEntries(Object.entries(row).filter(([name]) => name !== "pk" && name !== "sk")));
-    if (stored.companyId !== who.companyId || stored.personId !== who.personId || stored.sessionId !== who.sessionId || stored.expiresAt <= nowSeconds) return false;
+    if (stored.companyId !== who.companyId || stored.personId !== who.personId || !sameSessionBinding(stored.sessionBinding, who.sessionBinding) || stored.expiresAt <= nowSeconds) return false;
     const spent = await ctx.wiring.store.update({
       key,
       ops: [{ op: "set", path: ["status"], value: "used" }, { op: "set", path: ["usedAt"], value: new Date(ctx.now()).toISOString() }],
       condition: when.and(
-        when.eq("status", "live"), when.eq("provider", STATE_PROVIDER), when.eq("companyId", who.companyId), when.eq("personId", who.personId), when.eq("sessionId", who.sessionId),
+        when.eq("status", "live"), when.eq("provider", STATE_PROVIDER), when.eq("companyId", who.companyId), when.eq("personId", who.personId), when.eq("sessionBinding", who.sessionBinding),
         when.gt("expiresAt", nowSeconds),
       ),
     });
@@ -140,7 +141,7 @@ export async function routeGithubLink(ctx: GithubLinkContext, caller: DeveloperC
   // and pass the code back, which would link that someone's account to this person. Cloud's cookie binding is the only thing tying the browser at GitHub to the person, and it is the web app's.
   if (caller.webApp !== true) throw agentXError("FORBIDDEN", LINK_WEB_ONLY);
   const member = await liveMembership(ctx, caller, companyId);
-  const who = { companyId: member.companyId, personId: caller.developerId, sessionId: caller.sessionId };
+  const who = { companyId: member.companyId, personId: caller.developerId, sessionBinding: sessionBindingOf(caller.sessionId) };
   const store = ctx.wiring.store;
   const log = companyLog(member.companyId, ctx.wiring.log);
 
