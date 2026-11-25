@@ -683,7 +683,9 @@ function feedbackReviewStarted(workflow: WorkflowSnapshot): string | undefined {
 
 
 /** The Retry review button of a failed PR feedback review's card. */
-export const FEEDBACK_REVIEW_RETRY_ACTION = "agentx_feedback_review_retry";/**
+export const FEEDBACK_REVIEW_RETRY_ACTION = "agentx_feedback_review_retry";
+
+/**
  * Why pushing the fix failed, in the owner's words, by its recorded cause, and what follows: the merge is still followed,
  * except after the pull request changed on GitHub (a merge of someone else's head never completes the task).
  */

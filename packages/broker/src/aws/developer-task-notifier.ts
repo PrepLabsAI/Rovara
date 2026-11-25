@@ -163,7 +163,9 @@ async function deliverPeopleNotification(deps: NotifierDependencies, notice: Not
  */
 export const ADMIN_CHANGE_EXPIRY_GRACE_MS = 5_000;
 /** SQS's longest per-message delay. */
-const MAX_DELAY_SECONDS = 900;/**
+const MAX_DELAY_SECONDS = 900;
+
+/**
  * One line of the reviewer's words (made inert by cleanLine) at most `limit` characters long once escaped: an escaped
  * character (`&amp;`, `&lt;`) takes several, so the line is cut shorter until its escaped form fits.
  */
@@ -854,6 +856,7 @@ async function feedbackReviewNotification(deps: NotifierDependencies, task: Deve
   void deps; void task; void notice;
   return undefined;
 }
+
 type Outcome = "posted" | "recorded" | "not_shared" | "before_share" | "after_close" | "delivered" | "no_thread" | "stale" | "scheduled" | "skipped";
 
 /** Another delivery of an admin change's message holds the claim: this one is retried (C9). */

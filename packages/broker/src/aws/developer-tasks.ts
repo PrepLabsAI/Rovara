@@ -406,6 +406,7 @@ export async function taskView(
     ...(spent === undefined ? {} : { spent }),
   };
 }
+
 const whole = (value: string | null, fallback: number, min: number, max: number, name: string): number => {
   if (value === null) return fallback;
   const parsed = /^\d{1,3}$/.test(value) ? Number(value) : Number.NaN;
