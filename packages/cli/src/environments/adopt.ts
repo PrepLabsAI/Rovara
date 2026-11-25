@@ -1,6 +1,7 @@
 import { DescribeStacksCommand, type CloudFormationClient, type DescribeStacksCommandOutput } from "@aws-sdk/client-cloudformation";
 import { GetCallerIdentityCommand, type STSClient } from "@aws-sdk/client-sts";
 import { agentXError, DEFAULT_ENVIRONMENT, KEYED_MODEL_PROVIDERS, type StackPart } from "@agentx/contracts";
+import { controlPlaneUrlOf } from "../deploy/public-api-url.js";
 import { DIRECT_PROVIDERS, ModelsAnswersSchema, type DirectProvider } from "../deploy/answer-schemas.js";
 import { writeEnvironmentCache } from "./cache.js";
 import { withEnvironmentLock } from "./lock.js";
@@ -157,7 +158,7 @@ export async function adoptEnvironment(input: {
       version: "unversioned",
       naming: "legacy",
       stacks: { ...names },
-      controlPlaneUrl: required(control, names["control-plane"], "outputs", "ApiEndpoint"),
+      controlPlaneUrl: controlPlaneUrlOf(control.outputs, () => required(control, names["control-plane"], "outputs", "ApiEndpoint")),
       identity: { mode: issuer.startsWith("https://cognito-idp.") ? "cognito" : "oidc", issuer, audience, clientId: input.clientId ?? audience },
       models,
       updatedAt: new Date(now()).toISOString(),

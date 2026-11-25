@@ -131,3 +131,20 @@ node packages/cli/dist/bin.js --env <env> init --region <region> --release ./rel
 
 The images are referenced by digest only. [Releases](releases.md#checking-a-release-on-your-own-machine)
 covers building and checking a release directory.
+
+## A permanent public address (PublicApiUrl)
+
+By default every address the control plane gives out (the Slack, GitHub and Linear webhook URLs, the sign-in callbacks, the review and notification links, and the token issuer) is
+its API's own `https://<id>.execute-api.<region>.amazonaws.com` host. That host changes if the API is ever rebuilt, and every app that points at it has to be edited again.
+
+The stack parameter `PublicApiUrl` replaces it with one address you own, for example `https://api.example.com` (an https origin with a lowercase host: no path, port or trailing
+slash). Empty, the default, changes nothing: every URL is the API's own host. Set, it is used everywhere, and the outputs `SlackEventsUrl`, `GithubWebhookUrl`,
+`SlackInteractivityUrl`, `SlackAdapterCommandsUrl` and `LinearWebhookUrl` print it (`ApiEndpoint` stays the API's own host). Point `agentx login` and your apps at it once.
+
+- The address needs an API Gateway custom domain, a certificate and DNS in front of the API. Those live in their own long-lived stack (the address stack, `agentx-<env>-address`),
+  which outputs `PublicApiOrigin`. Where that stack exists, `agentx init` and `agentx upgrade` take `PublicApiUrl` from that output for the foundation, the control plane and the Slack
+  service, and refuse an empty value or any other value, so a rebuilt control plane never falls back to the API's own host.
+- The foundation's DNS firewall allows the address's host (an exact name, never a wildcard), so workers and the Slack orchestrator can reach the control plane through it.
+- The token issuer follows the address. Setting it, or changing it, on an install that already runs changes the issuer, which a hosted web app keys its sealed company AI keys, spend
+  meters and Bedrock external ids on, and the sign-in callbacks and webhook addresses change with it. `agentx upgrade` refuses that without
+  `--confirm-public-api-url-change`; confirm only when the hosted app's `CodeUrl` moves in the same window.

@@ -16,6 +16,7 @@
  * tests/contract/lambda-environment-size.test.ts holds the broker under its ceiling with the longest names: a value that can be derived is derived, not added as a variable.
  */
 import { ATTENTION_EMAIL_FUNCTION_VARIABLE, coreAttentionEmailFunctionName, coreDispatchDeadLetterName, coreDispatchQueueName, coreLessonsReflectDeadLetterName, coreLessonsReflectQueueName, CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, CORE_AGENT_MODEL_CHOICE_VARIABLE, CORE_AGENT_MODEL_VARIABLE, CORE_ANSWERS_MODEL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_LEARNING_MODEL_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE } from "./core-engine-infra.js";
+import { PUBLIC_API_URL_VARIABLE } from "./public-api-url.js";
 import {
   environmentAlarmPrefix,
   environmentChannelAdapterSecretPrefix,
@@ -110,7 +111,7 @@ export type BrokerNameKind =
   | "lambdaFunctionArn"
   /** A role's name, in the environment's role path (`/agentx/<env>/`, every role of a named environment's control plane); the variable gets its ARN. */
   | "roleArn"
-  /** An HTTP API's id; the variable gets the control plane's sign-in issuer (`https://<id>.execute-api.<region>.amazonaws.com/v1/auth`). */
+  /** An HTTP API's id; the variable gets the control plane's sign-in issuer (`https://<id>.execute-api.<region>.amazonaws.com/v1/auth`, or `<ROVARA_PUBLIC_API_URL>/v1/auth` where the install has a public address). */
   | "apiIssuer"
   /** A dead-letter queue's name, which the health route lists under `label`; the variable gets the JSON of every such queue, `{ label: URL }`, in this table's order. */
   | "deadLetterQueue";
@@ -227,6 +228,9 @@ export const BROKER_SETTINGS = {
   // #1149: which layout the install's names follow. Only the legacy install (production, the un-named template) sets it, to LEGACY_INSTALL_LAYOUT, and then the broker derives
   // only what DERIVED_BROKER_VARIABLES marks `legacy` (a value identical to the legacy install's own); a named environment never sets it.
   installLayout: { code: "ly", variable: "AGENTX_INSTALL_LAYOUT" },
+  // CODE-PUBLIC-URL (owner DEC 254zzz505): the configured public address (the stack parameter PublicApiUrl), packed as its host (a URL's slashes cannot be packed; the broker reads `https://<host>`),
+  // for the BROKER only: it derives its sign-in issuer from it (broker-environment.ts) where the control plane would otherwise name the API's own host. Empty (the default): the API's own host.
+  publicApiUrl: { code: "pu", variable: PUBLIC_API_URL_VARIABLE, httpsOrigin: true },
 } as const satisfies Record<string, BrokerSettingSpec>;
 
 /** DEC 254z-amend3: the values of the TestServices stack parameter. "1" is on (the default); "0" is the owner's opt-out. The broker reads anything but exactly "0" as on. */

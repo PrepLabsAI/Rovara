@@ -1,6 +1,6 @@
-import { RemovalPolicy, aws_logs as logs, aws_route53resolver as resolver } from "aws-cdk-lib";
+import { RemovalPolicy, Token, aws_logs as logs, aws_route53resolver as resolver } from "aws-cdk-lib";
 import { Construct } from "constructs";
-import { DEFAULT_AGENT_ALLOW_DOMAINS } from "@agentx/contracts";
+import { DEFAULT_AGENT_ALLOW_DOMAINS, isPublicApiUrl } from "@agentx/contracts";
 
 // A named environment's DNS firewall: the machines in the install's VPC resolve only an allowlist of websites. Ported from the hosted install's foundation (agentx-<env>-foundation,
 // 0.5.18) with the same construct ids, names and list, so an in-place update of a stack that already has it keeps the live firewall instead of deleting and recreating it.
@@ -94,8 +94,20 @@ export function installAwsAllowDomains(region: string, account?: string): string
 }
 
 /** The base allow-list of a named environment: Code's default list, then the install's own AWS hosts. */
-export function installAgentAllowDomains(region: string, account?: string): string[] {
-  return [...DEFAULT_AGENT_ALLOW_DOMAINS, ...installAwsAllowDomains(region, account)];
+export function installAgentAllowDomains(region: string, account?: string, publicApiHost?: string): string[] {
+  return [...DEFAULT_AGENT_ALLOW_DOMAINS, ...installAwsAllowDomains(region, account), ...publicApiAllowDomain(publicApiHost)];
+}
+
+/**
+ * CODE-PUBLIC-URL (rev 9.2): the control plane's permanent public address, as one EXACT name (never a wildcard), on the base list whenever the install has one. The list names the control
+ * plane's API only as `*.execute-api.<region>.amazonaws.com`; after the switch CONTROL_PLANE_URL and CHANNEL_API_URL are the permanent address, which that entry does not cover, so
+ * without this entry every worker callback and every Slack orchestrator call would be blocked (production runs the firewall in `block`). `host` may be a CloudFormation token that
+ * is the host while the install's PublicApiUrl is set and nothing (AWS::NoValue) while it is empty (production-foundation.ts); a literal host is checked here.
+ */
+export function publicApiAllowDomain(host: string | undefined): string[] {
+  if (host === undefined) return [];
+  if (!Token.isUnresolved(host) && (host.startsWith("*") || !isPublicApiUrl(`https://${host}`))) throw new Error("the public API host on the DNS firewall's allow list must be one exact lowercase host name, never a wildcard");
+  return [host];
 }
 
 const BROAD_ALLOW_ENTRIES: readonly string[] = ["*.amazonaws.com", "*.aws", "*.github.com", "*.githubusercontent.com"];

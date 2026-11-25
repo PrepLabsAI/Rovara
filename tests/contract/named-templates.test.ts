@@ -24,8 +24,12 @@ import { withoutApiAccessLog } from "../support/api-access-log-template.js";
 import { withoutDispatcherLessonsPeople } from "../support/dispatcher-lessons-people-template.js";
 import { withoutRetainPolicies } from "../support/retain-policies-template.js";
 import { withoutWorkerCallbackAlarm } from "../support/worker-callback-alarm-template.js";
+import { withoutPublicApiAllowDomain, withoutPublicApiUrl } from "../support/public-api-url-template.js";
 
 skipLambdaBundling();
+// CODE-PUBLIC-URL (2026-11-24): the named control plane's external URL bases that now go through the public address helper (the sign-in issuer and its two function variables, CONTROL_PLANE_URL for the notifier,
+// the session steps and the broker, the channel adapters' variables, and the outputs an operator copies), counted so a URL that bypasses the helper moves it.
+const PUBLIC_API_SITES = 23;
 const STAGING = { alarmName: "agentx-staging-SessionStuckStopping", namespace: "AgentX/staging", env: "staging" };
 
 type Resource = { Type: string; Properties: Record<string, unknown> };
@@ -299,7 +303,7 @@ describe("named environment templates", () => {
   for (const stack of stacks) {
     if (stack.stackName === "agentx-staging-control-plane") {
       it("removing only Batch F additions preserves code/next's agentx-staging-control-plane template", () => {
-        const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(withoutRetainPolicies(normalizedTemplate(stack), "named")), { env: "staging" }), STAGING))));
+        const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(normalizedTemplate(stack), "named")), { named: true, sites: PUBLIC_API_SITES }), { env: "staging" }), STAGING))));
         expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("8edf09fff29983cc3c3338a6b2d24bb27d061db29960bfa2e77a52c068618972");
       }, 120_000);
     }
@@ -313,16 +317,23 @@ describe("named environment templates", () => {
         // 5b526b779a52869b09cb602a1d0a97545f10818f29983a879129dbf70553c745 holds (checked on the next line).
         // LESSONS-PORT-FIX (DEC 254zzz473, rebased onto train 29 without turn-on): re-pinned for exactly the dispatcher's DEVELOPER_SIGNIN_TABLE_NAME variable and its DispatcherLessonsPeople policy. Rule D: with those
         // taken out (withoutDispatcherLessonsPeople) train 29's pin ee257190b12ebbfc2e493432f8f3f130a7173a64cb80434cc87fcbc44805997e holds (checked on the next line).
-        expect(createHash("sha256").update(JSON.stringify(template)).digest("hex")).toBe("32f5c0957135cc03888fb1c4233d7f632cd98bb877f9464583ee87126e3c1381");
+        // CODE-PUBLIC-URL (2026-11-24): re-pinned for exactly the PublicApiUrl parameter and condition, each external URL base becoming Fn::If [HasPublicApiUrl, PublicApiUrl, the API's own host] (resolved equal while
+        // the parameter is empty), the broker's packed public host and the new LinearWebhookUrl output. Rule D: with those taken out (withoutPublicApiUrl, tests/support/public-api-url-template.ts) lessons-port's and RETAIN's
+        // pins below hold as recorded (checked on the lines after the next).
+        expect(createHash("sha256").update(JSON.stringify(template)).digest("hex")).toBe("74e8f0a3e94b69a322a78fb6c1c4e2952689f71f5af7c5bc6c0da4b4e9a38a69");
+        const beforePublicApi = withoutPublicApiUrl(structuredClone(template), { named: true, sites: PUBLIC_API_SITES });
+        expect(createHash("sha256").update(JSON.stringify(beforePublicApi)).digest("hex"), "minus only the public API URL").toBe("32f5c0957135cc03888fb1c4233d7f632cd98bb877f9464583ee87126e3c1381");
         // RETAIN (arch ruling 2026-11-24): re-pinned for exactly DeletionPolicy RetainExceptOnCreate and UpdateReplacePolicy Retain on the control plane's five keys, channel state table and adapter secret.
         // Rule D: with those put back (withoutRetainPolicies) lessons-port's pin ff86d95eeb270fd7cba3301dc0022e0f08a51794c5c4cc22f873de0e4f000ace holds (checked on the next line).
-        expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(template), "named"))).digest("hex"), "minus only the RETAIN policies").toBe("ff86d95eeb270fd7cba3301dc0022e0f08a51794c5c4cc22f873de0e4f000ace");
-        expect(createHash("sha256").update(JSON.stringify(withoutDispatcherLessonsPeople(withoutRetainPolicies(structuredClone(template), "named")))).digest("hex"), "minus only the dispatcher lessons people grant").toBe("ee257190b12ebbfc2e493432f8f3f130a7173a64cb80434cc87fcbc44805997e");
-        expect(createHash("sha256").update(JSON.stringify(withoutApiAccessLog(withoutDispatcherLessonsPeople(withoutRetainPolicies(structuredClone(template), "named")), { env: "staging" }))).digest("hex"), "minus only the access log").toBe("5b526b779a52869b09cb602a1d0a97545f10818f29983a879129dbf70553c745");
+        expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(beforePublicApi), "named"))).digest("hex"), "minus only the RETAIN policies").toBe("ff86d95eeb270fd7cba3301dc0022e0f08a51794c5c4cc22f873de0e4f000ace");
+        expect(createHash("sha256").update(JSON.stringify(withoutDispatcherLessonsPeople(withoutRetainPolicies(structuredClone(beforePublicApi), "named")))).digest("hex"), "minus only the dispatcher lessons people grant").toBe("ee257190b12ebbfc2e493432f8f3f130a7173a64cb80434cc87fcbc44805997e");
+        expect(createHash("sha256").update(JSON.stringify(withoutApiAccessLog(withoutDispatcherLessonsPeople(withoutRetainPolicies(structuredClone(beforePublicApi), "named")), { env: "staging" }))).digest("hex"), "minus only the access log").toBe("5b526b779a52869b09cb602a1d0a97545f10818f29983a879129dbf70553c745");
         // Webhook lane W3: the webhook secret slot, its throttle and one alarm, pinned exactly in tests/support/webhook-secret-template.ts, then removed.
         // APIGW-ACCESS-LOGS (2026-11-24): the full-template pin above moved; the access log group and the stage setting are asserted and taken out, so every pin and snapshot below still holds.
-        template = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutApiAccessLog(withoutDispatcherLessonsPeople(structuredClone(template)), { env: "staging" })));
+        template = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutApiAccessLog(withoutDispatcherLessonsPeople(structuredClone(beforePublicApi)), { env: "staging" })));
       }
+      // CODE-PUBLIC-URL (rev 9.2): the foundation's firewall gains one allow-list entry (and its parameter); taken out, the recorded snapshot holds.
+      if (stack.stackName === "agentx-staging-foundation") template = withoutPublicApiAllowDomain(structuredClone(template));
       const parity = stack.stackName === "agentx-staging-foundation" ? withoutNatEgressAddresses(withoutDnsFirewall(template))
         : stack.stackName === "agentx-staging-access" ? withoutSavedEnvAccess(withoutDnsFirewallAccess(template), "staging")
         // ENV-ROOM 2 (2026-11-17): the broker's names parameter is checked and the names put back in its environment first, as the rest was recorded.

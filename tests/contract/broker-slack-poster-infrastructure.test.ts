@@ -13,6 +13,7 @@ import { adapterTakesCommand, SLACK_CHANNEL } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { builtInAdapterFromEnvironment } from "../../packages/broker/src/aws/channel-adapters.js";
 import { hostedLessonsSlack } from "../../packages/broker/src/aws/hosted-slack-thread.js";
+import { withoutPublicApiUrl } from "../support/public-api-url-template.js";
 import { brokerSlackSecretPolicyDocument, slackPosterVariables } from "../support/broker-slack-poster-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
@@ -109,7 +110,8 @@ describe("the broker's Slack poster and its read of the Slack adapter secret (L4
   let baseline: { identitySecretStatements: string };
 
   beforeAll(() => {
-    named = Template.fromStack(stacksOf(buildAgentXApp({ agentxEnv: "staging" })).find((stack) => stack.stackName === "agentx-staging-control-plane")!).toJSON() as TemplateJson;
+    // CODE-PUBLIC-URL: the public address additions are taken out first (asserted exactly by tests/support/public-api-url-template.ts), so the poster is checked against the raw API endpoint it always held.
+    named = withoutPublicApiUrl(JSON.parse(JSON.stringify(Template.fromStack(stacksOf(buildAgentXApp({ agentxEnv: "staging" })).find((stack) => stack.stackName === "agentx-staging-control-plane")!).toJSON())) as TemplateJson, { named: true });
     legacy = Template.fromStack(stacksOf(buildAgentXApp()).find((stack) => stack.node.id === "AgentXControlPlane")!).toJSON() as TemplateJson;
     // The broker's identity Secrets Manager / KMS statements as this tree synthesizes them: the mutants below add to a copy and must differ from this. That the head equals the base here (this change adds
     // none) is shown by the base-versus-head template diff in the PR and by the digest pins, which take out only the additions asserted above; the first test pins their shape.

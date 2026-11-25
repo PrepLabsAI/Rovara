@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 // Nothing from packages/ is imported at the top of this file: the release builds run `npm ci` and then this script on a fresh checkout, with no `dist/` anywhere, and contracts source reaches
-// workspace packages through their built `dist/` (F3 cut 1). The two contracts constants it needs are loaded after the build step below.
+// workspace packages through their built `dist/` (F3 cut 1). The two contracts constants it needs, and the public API URL names and guards (loadPublicApiUrlContracts), are loaded after the build step below.
 import {
   Runner,
   assertDigestImage,
@@ -25,6 +25,20 @@ import {
 
 // Set by releaseProduction once the build has run (see the comment at the top of this file); deployControlPlane runs only after that.
 let CONTROL_PLANE_FOUNDATION_PARAMETERS: readonly string[] = [];
+// CODE-PUBLIC-URL: the address stack's names and the PublicApiUrl guards, from packages/contracts. Not imported at the top (see the comment at the top of this file): loadPublicApiUrlContracts sets them once
+// the build has run, before readPublicApiInputs, plannedPublicApiUrl or deployControlPlane use any of them. contracts/src/api-address.ts and public-api-url.ts import only zod, never a package's dist/.
+const NOT_LOADED = "loadPublicApiUrlContracts must run (after the build) before the public API URL is planned";
+let LEGACY_ADDRESS_STACK_NAME = "";
+let PUBLIC_API_ORIGIN_OUTPUT = "";
+let PUBLIC_API_URL_PARAMETER = "";
+let publicApiUrlChangeWarning: (current: string | undefined, proposed: string | undefined) => string | undefined = () => { throw new Error(NOT_LOADED); };
+let resolvePublicApiUrl: (input: { addressOrigin: string | undefined; proposed?: string | undefined; required?: boolean }) => string | undefined = () => { throw new Error(NOT_LOADED); };
+
+/** Loads the public API URL names and guards. Idempotent; releaseProduction calls it right after `npm run build`, a test calls it before `plannedPublicApiUrl`. */
+export async function loadPublicApiUrlContracts(): Promise<void> {
+  ({ LEGACY_ADDRESS_STACK_NAME, PUBLIC_API_ORIGIN_OUTPUT } = await import("../packages/contracts/src/api-address.js"));
+  ({ PUBLIC_API_URL_PARAMETER, publicApiUrlChangeWarning, resolvePublicApiUrl } = await import("../packages/contracts/src/public-api-url.js"));
+}
 const DEFAULT_REPOSITORY = "agentx-worker-production";
 const CONTROL_PLANE_STACK = "AgentXControlPlane";
 const FOUNDATION_STACK = "AgentXProductionFoundation";
@@ -38,7 +52,8 @@ const DNS_FIREWALL_CONTEXT_KEY = "agentxDnsFirewall";
 const EGRESS_ALLOW_DOMAINS_CONTEXT_KEY = "agentxEgressAllowDomains";
 const DNS_FIREWALL_MODE_OUTPUT = "DnsFirewallMode";
 const EGRESS_ALLOW_DOMAINS_OUTPUT = "EgressAllowDomains";
-const PRODUCTION_FLAGS = ["--reuse-unchanged-worker", "--require-existing-foundation", "--create-slack-orchestrator"];
+// CODE-PUBLIC-URL: --require-public-api-address refuses a release that has no address stack to take the permanent address from; --confirm-public-api-url-change names the issuer change a first or changed address is.
+const PRODUCTION_FLAGS = ["--reuse-unchanged-worker", "--require-existing-foundation", "--create-slack-orchestrator", "--require-public-api-address", "--confirm-public-api-url-change"];
 const RELEASE_TAG_PATTERN = /^release-\d{8}T\d{6}Z-([a-f0-9]{7,40})$/;
 
 // Every path that environments/base/Dockerfile copies into the worker image, plus the build files.
@@ -97,6 +112,10 @@ export interface ProductionReleaseOptions extends ReleaseOptions {
   reuseUnchangedWorker: boolean;
   requireExistingFoundation: boolean;
   createSlackOrchestrator: boolean;
+  /** CODE-PUBLIC-URL: this install is declared to have an address stack (AgentXApiAddress); a release without one is refused. */
+  requirePublicApiAddress: boolean;
+  /** CODE-PUBLIC-URL: the operator confirms that a first or changed PublicApiUrl is an issuer change (Cloud's CodeUrl moves in the same window). */
+  confirmPublicApiUrlChange: boolean;
 }
 
 export interface ProductionReleaseManifest extends ReleaseManifest {
@@ -126,7 +145,71 @@ export function parseProductionReleaseArgs(
     reuseUnchangedWorker: argv.includes("--reuse-unchanged-worker"),
     requireExistingFoundation: argv.includes("--require-existing-foundation"),
     createSlackOrchestrator: argv.includes("--create-slack-orchestrator"),
+    requirePublicApiAddress: argv.includes("--require-public-api-address"),
+    confirmPublicApiUrlChange: argv.includes("--confirm-public-api-url-change"),
   };
+}
+
+function describeIfExists(runner: Runner, region: string, stack: string): StackDescription | undefined {
+  return stackExists(runner, region, stack) ? describeStack(runner, region, stack) : undefined;
+}
+
+/** CODE-PUBLIC-URL: what plannedPublicApiUrl needs, read once from AWS (read-only) before anything is deployed. */
+function readPublicApiInputs(runner: Runner, options: ProductionReleaseOptions): Parameters<typeof plannedPublicApiUrl>[0] {
+  return {
+    address: describeIfExists(runner, options.region, LEGACY_ADDRESS_STACK_NAME),
+    controlPlane: describeIfExists(runner, options.region, CONTROL_PLANE_STACK),
+    foundation: describeIfExists(runner, options.region, FOUNDATION_STACK),
+    proposed: process.env.AGENTX_PUBLIC_API_URL,
+    required: options.requirePublicApiAddress,
+    confirmChange: options.confirmPublicApiUrlChange,
+  };
+}
+
+/** The control plane deploy's `--parameters` for PublicApiUrl: none while the release sends nothing. */
+function publicApiUrlArguments(publicApiUrl: string | undefined): string[] {
+  return publicApiUrl === undefined ? [] : ["--parameters", `${CONTROL_PLANE_STACK}:${PUBLIC_API_URL_PARAMETER}=${publicApiUrl}`];
+}
+
+/** Where the Slack orchestrator reaches the control plane: the permanent address where the install has one (its host is on the firewall's list, checked by plannedPublicApiUrl), else the API's own host. */
+function orchestratorControlPlaneUrl(publicApiUrl: string | undefined, apiEndpoint: () => string): string {
+  return publicApiUrl === undefined || publicApiUrl === "" ? apiEndpoint() : publicApiUrl;
+}
+
+function assertChangeConfirmed(controlPlane: StackDescription | undefined, value: string, confirmed: boolean): void {
+  if (controlPlane === undefined) return;
+  const warning = publicApiUrlChangeWarning(stackParameter(controlPlane, PUBLIC_API_URL_PARAMETER) ?? "", value);
+  if (warning !== undefined && !confirmed) throw new Error(`${warning}; nothing was changed. Pass --confirm-public-api-url-change once Cloud's CodeUrl is ready to move`);
+}
+
+function assertFirewallAllows(foundation: StackDescription | undefined, value: string): void {
+  if (foundation === undefined || value === "" || foundation.Outputs?.some((output) => output.OutputKey === "ProjectAllowListId") !== true) return;
+  const onFirewall = stackParameter(foundation, PUBLIC_API_URL_PARAMETER) ?? "";
+  if (onFirewall === value) return;
+  throw new Error(`${FOUNDATION_STACK}'s DNS firewall allows ${onFirewall === "" ? "no public API host" : onFirewall} but this release's PublicApiUrl is ${value}: workers and the Slack orchestrator could not reach the control plane. Deploy the foundation with ${PUBLIC_API_URL_PARAMETER}=${value} first`);
+}
+
+/**
+ * CODE-PUBLIC-URL (DEC 254zzz505, rev 9.2): the PublicApiUrl this release sends to the control plane (and expects of the foundation's DNS firewall), or undefined to send nothing (an install
+ * with no address stack, which keeps its raw API host: no behaviour change). Where the address stack exists its PublicApiOrigin output is the only value a create or an update may carry:
+ * an empty output, or an `AGENTX_PUBLIC_API_URL` that is empty or differs from it, is refused (a rebuilt control plane would otherwise get the empty default and fall back to the raw host).
+ * A first or changed value on a running control plane is an issuer change and needs the explicit confirm. Where the foundation has the DNS firewall, its PublicApiUrl must already be the same
+ * value: production runs it in `block`, and without the host on its allow list every worker callback and every Slack orchestrator call would be refused.
+ */
+export function plannedPublicApiUrl(input: {
+  address: StackDescription | undefined;
+  controlPlane: StackDescription | undefined;
+  foundation: StackDescription | undefined;
+  proposed: string | undefined;
+  required: boolean;
+  confirmChange: boolean;
+}): string | undefined {
+  const origin = input.address === undefined ? undefined : input.address.Outputs?.find((output) => output.OutputKey === PUBLIC_API_ORIGIN_OUTPUT)?.OutputValue ?? "";
+  const value = resolvePublicApiUrl({ addressOrigin: origin, proposed: input.proposed, required: input.required });
+  if (value === undefined) return undefined;
+  assertChangeConfirmed(input.controlPlane, value, input.confirmChange);
+  assertFirewallAllows(input.foundation, value);
+  return value;
 }
 
 export function releaseRevisionFromTags(tags: readonly string[]): string | undefined {
@@ -213,6 +296,7 @@ export async function releaseProduction(
         ? "4. Refuse to continue unless the protected VPC/EBS capacity foundation already exists."
         : "4. Create the protected VPC/EBS capacity foundation only when it does not exist.",
       "5. Refuse foundation drift on routine releases; publish the EC2 worker image and model settings to SSM.",
+      "5b. Where AgentXApiAddress exists, refuse an empty or different PublicApiUrl, and a foundation firewall that does not allow its host.",
       "6. Update the control plane after the worker settings.",
       options.createSlackOrchestrator
         ? "7. Build or reuse the Slack orchestrator image and create or update AgentXSlackOrchestrator."
@@ -251,6 +335,7 @@ export async function releaseProduction(
   runner.run("npm", ["run", "build"]);
   const { AGENTX_PROTOCOL_VERSION } = await import("../packages/contracts/src/protocol.js");
   ({ CONTROL_PLANE_FOUNDATION_PARAMETERS } = await import("../packages/contracts/src/session.js"));
+  await loadPublicApiUrlContracts();
   if (!stackExists(runner, options.region, CONTROL_PLANE_STACK)) {
     throw new Error("AgentXControlPlane must exist before the worker settings are released");
   }
@@ -264,6 +349,9 @@ export async function releaseProduction(
   if (!modelProvider || !modelId) {
     throw new Error("AGENTX_MODEL_PROVIDER and AGENTX_MODEL_ID are required for the first production release");
   }
+
+  // CODE-PUBLIC-URL: decided before anything is deployed, so a refusal leaves AWS as it was.
+  const publicApiUrl = plannedPublicApiUrl(readPublicApiInputs(runner, options));
 
   let firewallContext: string[] = [];
   if (!stackExists(runner, options.region, FOUNDATION_STACK)) {
@@ -306,8 +394,8 @@ export async function releaseProduction(
   // field an older worker image does not know about fails the task. Publishing the image first
   // means every worker booted after this point is the tolerant side of the window; a worker
   // already running keeps its image until the idle reaper stops it.
-  deployControlPlane(runner, options, foundation, firewallContext);
-  const slackOrchestratorImage = await releaseSlackOrchestrator(runner, options, identity.Account, revision, foundation, firewallContext);
+  deployControlPlane(runner, options, foundation, firewallContext, publicApiUrl);
+  const slackOrchestratorImage = await releaseSlackOrchestrator(runner, options, identity.Account, revision, foundation, firewallContext, publicApiUrl);
 
   const manifest: ProductionReleaseManifest = {
     releasedAt: new Date().toISOString(),
@@ -339,6 +427,7 @@ async function releaseSlackOrchestrator(
   revision: string,
   foundation: StackDescription,
   firewallContext: readonly string[],
+  publicApiUrl: string | undefined,
 ): Promise<string | undefined> {
   const exists = stackExists(runner, options.region, SLACK_ORCHESTRATOR_STACK);
   if (!exists && !options.createSlackOrchestrator) {
@@ -390,7 +479,7 @@ async function releaseSlackOrchestrator(
     ...parameter("OrchestratorImageUri", image),
     ...parameter("OrchestratorImageRepositoryName", "agentx-slack-orchestrator"),
     ...parameter("TaskRoleArn", stackOutput(controlPlane, "SlackOrchestratorTaskRoleArn")),
-    ...parameter("ControlPlaneUrl", stackOutput(controlPlane, "ApiEndpoint")),
+    ...parameter("ControlPlaneUrl", orchestratorControlPlaneUrl(publicApiUrl, () => stackOutput(controlPlane, "ApiEndpoint"))),
     ...parameter("SlackRequestQueueUrl", stackOutput(controlPlane, "SlackRequestQueueUrl")),
     ...parameter("SlackThreadsTableName", stackOutput(controlPlane, "SlackThreadsTableName")),
     ...parameter("TurnRecordsTableName", stackOutput(controlPlane, "TurnRecordsTableName")),
@@ -490,7 +579,7 @@ function assertFoundationHasNoPendingChanges(runner: Runner, options: ReleaseOpt
   }
 }
 
-function deployControlPlane(runner: Runner, options: ReleaseOptions, foundation: StackDescription, firewallContext: readonly string[]): void {
+function deployControlPlane(runner: Runner, options: ReleaseOptions, foundation: StackDescription, firewallContext: readonly string[], publicApiUrl: string | undefined): void {
   runner.run("npx", [
     "cdk",
     "deploy",
@@ -507,6 +596,7 @@ function deployControlPlane(runner: Runner, options: ReleaseOptions, foundation:
     ...firewallContext,
     ...profileArgs(options.profile),
     ...optionalControlPlaneParameters(),
+    ...publicApiUrlArguments(publicApiUrl),
     ...CONTROL_PLANE_FOUNDATION_PARAMETERS.flatMap((name) => ["--parameters", `${CONTROL_PLANE_STACK}:${name}=${stackOutput(foundation, name)}`]),
     "--outputs-file",
     "cdk.out/agentx-control-plane-outputs.json",
@@ -523,6 +613,8 @@ function usage(): string {
     `  --reuse-unchanged-worker   Reuse the deployed worker and Slack orchestrator images when their inputs are unchanged\n` +
     `  --require-existing-foundation  Fail instead of creating the production foundation\n` +
     `  --create-slack-orchestrator    Create AgentXSlackOrchestrator if it does not exist (first release only)\n` +
+    `  --require-public-api-address   Refuse unless AgentXApiAddress exists: its PublicApiOrigin is the only PublicApiUrl a release may carry (AGENTX_PUBLIC_API_URL, if set, must equal it)\n` +
+    `  --confirm-public-api-url-change  Confirm that a first or changed PublicApiUrl changes the token issuer (Cloud's CodeUrl moves in the same window)\n` +
     `  --allow-dirty              Explicitly allow releasing an uncommitted checkout\n` +
     `  --skip-checks              Skip typecheck, lint, and tests\n` +
     `  --dry-run                  Print the release stages without changing AWS\n` +

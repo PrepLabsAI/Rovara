@@ -58,7 +58,9 @@ describe.each(["legacy", "named", "longest name"])("the dispatcher's lessons peo
     expect(variables[SIGNIN_TABLE_VARIABLE]).toStrictEqual({ Ref: ids.table });
     expect(template.Resources[ids.table]!.Type).toBe("AWS::DynamoDB::Table");
     // Nothing else in the template overwrites it for this function, and no other function was given a different table.
-    expect(JSON.stringify(variables)).not.toContain('"Fn::If"');
+    // CODE-PUBLIC-URL: the issuer variable's base is Fn::If [HasPublicApiUrl, PublicApiUrl, the API's own host]; that is the only condition any variable may carry, so none gates this one.
+    expect([...JSON.stringify(variables).matchAll(/"Fn::If":\["([^"]+)"/gu)].map((match) => match[1]).filter((condition) => condition !== "HasPublicApiUrl")).toStrictEqual([]);
+    expect(JSON.stringify(variables[SIGNIN_TABLE_VARIABLE])).not.toContain("Fn::If");
     expect(Object.keys(variables).filter((key) => key === SIGNIN_TABLE_VARIABLE)).toHaveLength(1);
   });
 

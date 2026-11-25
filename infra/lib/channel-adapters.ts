@@ -8,6 +8,7 @@ import { Construct } from "constructs";
 import { packagedFunction } from "./control-plane.js";
 import { addBrokerSetting, addDerivedBrokerVariable } from "./broker-names.js";
 import type { AgentXNaming } from "./naming.js";
+import { publicApiBase, publicApiUrl } from "./public-api-url.js";
 
 export interface ChannelAdaptersProps {
   naming: AgentXNaming;
@@ -87,9 +88,9 @@ export class ChannelAdapters extends Construct {
     const builtInAdapter = this.builtInAdapter = {
       BUILT_IN_ADAPTER: slackViaChannel,
       BUILT_IN_ADAPTER_CHANNEL: "slack",
-      BUILT_IN_ADAPTER_CALLBACK_URL: `${props.api.attrApiEndpoint}/v1/slack/channel-events`,
+      BUILT_IN_ADAPTER_CALLBACK_URL: publicApiUrl(props.api, "/v1/slack/channel-events"),
       // Phase 7c: posts the core must know the result of, and Canvases.
-      BUILT_IN_ADAPTER_COMMANDS_URL: `${props.api.attrApiEndpoint}/v1/slack/channel-commands`,
+      BUILT_IN_ADAPTER_COMMANDS_URL: publicApiUrl(props.api, "/v1/slack/channel-commands"),
       BUILT_IN_ADAPTER_SECRET_NAME: slackAdapterSecretName,
     };
 
@@ -137,7 +138,7 @@ export class ChannelAdapters extends Construct {
       CHANNEL_STATE_TABLE_NAME: channelState.tableName,
       CHANNEL_REQUEST_QUEUE_URL: requests.queueUrl,
       CHANNEL_EVENT_QUEUE_URL: events.queueUrl,
-      CHANNEL_LINK_ORIGIN: props.api.attrApiEndpoint,
+      CHANNEL_LINK_ORIGIN: publicApiBase(props.api),
       ...builtInAdapter,
       SLACK_THREADS_TABLE_NAME: props.slack.threads.tableName,
       BROKER_FUNCTION_NAME: props.broker.functionName,
@@ -231,7 +232,7 @@ export class ChannelAdapters extends Construct {
     // The built-in Slack adapter: Slack's ingress signs with the adapter's secret, hands requests to the channel API and
     // takes the core's events for Slack on its own route. The route answers 404 while SlackViaChannel is off.
     props.slack.ingress.addEnvironment("SLACK_VIA_CHANNEL", slackViaChannel);
-    props.slack.ingress.addEnvironment("CHANNEL_API_URL", props.api.attrApiEndpoint);
+    props.slack.ingress.addEnvironment("CHANNEL_API_URL", publicApiBase(props.api));
     props.slack.ingress.addEnvironment("SLACK_ADAPTER_SECRET_NAME", slackAdapterSecretName);
     slackAdapterSecret.grantRead(props.slack.ingress);
     // Phase 7c2: the orchestrator posts a routing card and a private answer through the adapter's commands.

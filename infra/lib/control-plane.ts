@@ -46,6 +46,7 @@ import { addGithubWebhookSecret, GITHUB_WEBHOOK_ROUTE, guardGithubWebhookRoute }
 import { SavedEnvImages } from "./saved-env-images.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
 import { connectDispatcherLessonsPeople } from "./dispatcher-lessons-people.js";
+import { declarePublicApiUrl, publicApiBase, publicApiUrl, rawApiEndpoint } from "./public-api-url.js";
 import { addBrokerDeadLetterQueues, addBrokerName, addBrokerSetting, addDerivedBrokerVariable, brokerEnvironmentName, brokerNamesParameterArn } from "./broker-names.js";
 import { CompanySignInSwitch } from "./company-signin.js";
 import { DeveloperTaskNotifier } from "./developer-task-notifier.js";
@@ -165,6 +166,8 @@ export class ControlPlaneStack extends Stack {
     // Spec 025 phase 25a: declared on the stack itself so the names are exact. The legacy deployment (production) has
     // the developer task settings too, so it runs tasks as named environments do.
     const signInParameters = developerSignInParameters(this, { tasks: true });
+    // CODE-PUBLIC-URL: declared here, with the other install parameters; every external URL below goes through publicApiBase (public-api-url.ts).
+    declarePublicApiUrl(this);
 
     const state = new dynamodb.Table(this, "State", {
       partitionKey: { name: "pk", type: dynamodb.AttributeType.STRING },
@@ -912,12 +915,16 @@ export class ControlPlaneStack extends Stack {
       authorizationType: "NONE",
     });
     // Guided onboarding PR 7: the Linear OAuth app signs its webhook bodies itself; the broker verifies the HMAC, the timestamp and the workspace's binding. Named environments only.
-    if (naming.env !== undefined) new apigwv2.CfnRoute(this, "LinearWebhookRoute", {
-      apiId: api.ref,
-      routeKey: "POST /v1/linear/webhooks",
-      target: `integrations/${integration.ref}`,
-      authorizationType: "NONE",
-    });
+    if (naming.env !== undefined) {
+      new apigwv2.CfnRoute(this, "LinearWebhookRoute", {
+        apiId: api.ref,
+        routeKey: "POST /v1/linear/webhooks",
+        target: `integrations/${integration.ref}`,
+        authorizationType: "NONE",
+      });
+      // CODE-PUBLIC-URL: the Linear webhook had no output; the operator pastes this into the Linear app (the route exists in named environments only).
+      new CfnOutput(this, "LinearWebhookUrl", { value: publicApiUrl(api, "/v1/linear/webhooks") });
+    }
     // GitHub signs webhook bodies itself; the broker verifies its HMAC and linked repository scope.
     const githubWebhookRoute = new apigwv2.CfnRoute(this, "GithubWebhookRoute", {
       apiId: api.ref,
@@ -1041,7 +1048,7 @@ export class ControlPlaneStack extends Stack {
       registry: true, sharedTasks: naming.env !== undefined,
       turnRecords: { table: turnRecords, detailsAttributes: TURN_DETAILS_READ_ATTRIBUTES },
     });
-    new CfnOutput(this, "SlackAdapterCommandsUrl", { value: `${api.attrApiEndpoint}/v1/slack/channel-commands` });
+    new CfnOutput(this, "SlackAdapterCommandsUrl", { value: publicApiUrl(api, "/v1/slack/channel-commands") });
     new CfnOutput(this, "SlackAdapterSecretName", { value: `agentx/${naming.env ?? "production"}/channel-adapter/slack` });
     new CfnOutput(this, "ChannelRequestQueueUrl", { value: channelAdapters.requests.queueUrl });
     new CfnOutput(this, "ChannelEventQueueUrl", { value: channelAdapters.events.queueUrl });
@@ -1151,7 +1158,7 @@ export class ControlPlaneStack extends Stack {
       } else chatGptConnectionKey.grant(broker, "kms:Encrypt", "kms:Decrypt");
       addBrokerName(broker, naming, "chatGptConnectionKey", chatGptConnectionKey.keyId, chatGptConnectionKey.keyArn);
       // Spec 025 phase 25c: sharing, named environments only (D14).
-      const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, coreBroker: broker, controlPlaneUrl: api.attrApiEndpoint, state, artifactBucket: artifacts, slackSecret, taskPeopleChangesEnabled: taskParameters.taskPeopleChangesEnabled, notifyOperator });
+      const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, coreBroker: broker, controlPlaneUrl: publicApiBase(api), state, artifactBucket: artifacts, slackSecret, taskPeopleChangesEnabled: taskParameters.taskPeopleChangesEnabled, notifyOperator });
       if (companySignIn !== undefined) companySignIn.addTo(notifier.function);
       // Migration plan v3.2 lane E2: the core engine's dispatch queue and its scheduled jobs (core-engine.ts), for every install (#1148: the legacy install too, under "production").
       new CoreEngine(this, "CoreEngineJobs", { naming, env: naming.env ?? "production", broker, dispatcher, notifyOperator });
@@ -1445,7 +1452,7 @@ export class ControlPlaneStack extends Stack {
       const hour = Number(this.node.tryGetContext("agentx:autoRequalifyHourUtc") ?? REQUALIFY_DEFAULT_HOUR_UTC);
       new RuntimeRequalify(this, "RuntimeRequalify", {
         naming, state, artifacts, invokeSigningKey, operatorTopic: operatorAlerts, notifyOperator,
-        catalogIds: { setup: projectSetupRuntimeCatalogId, feature: e2eFeatureRuntimeCatalogId }, controlPlaneUrl: api.attrApiEndpoint,
+        catalogIds: { setup: projectSetupRuntimeCatalogId, feature: e2eFeatureRuntimeCatalogId }, controlPlaneUrl: publicApiBase(api),
         foundation: {
           privateSubnetIds: foundationValue("PrivateSubnetIds"), launchTemplateId: foundationValue("Ec2WorkerLaunchTemplateId"), workerRoleArn: foundationValue("Ec2WorkerInstanceRoleArn"),
           workspaceKmsKeyArn: foundationValue("WorkspaceKmsKeyArn"), logGroupName: naming.ec2.workerLogGroupName,
@@ -1454,7 +1461,7 @@ export class ControlPlaneStack extends Stack {
         scheduleEnabled: this.node.tryGetContext("agentx:autoRequalifySchedule") === "enabled",
       });
     }
-    sessions.steps.addEnvironment("CONTROL_PLANE_URL", api.attrApiEndpoint);
+    sessions.steps.addEnvironment("CONTROL_PLANE_URL", publicApiBase(api));
     sessions.connectDispatcher(dispatcher);
     sessions.connectBroker(broker);
     if (naming.env !== undefined) broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["states:StartExecution"], resources: [sessions.deleter.stateMachineArn, swebenchStateMachineArn] }));
@@ -1567,13 +1574,14 @@ export class ControlPlaneStack extends Stack {
     // This certifies the installed broker, including installs awaiting their first gateway.
     // Gateway admission is checked separately before configuration or worker activation.
     new CfnOutput(this, "ModelRunPriceVersion", { value: "1", description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
-    new CfnOutput(this, "ApiEndpoint", { value: api.attrApiEndpoint });
+    // CODE-PUBLIC-URL: the raw output keeps naming the API itself (what a rebuild changes); the outputs an operator copies into other apps print the public base.
+    new CfnOutput(this, "ApiEndpoint", { value: rawApiEndpoint(api) });
     new CfnOutput(this, "StateTableName", { value: state.tableName });
     new CfnOutput(this, "ArtifactBucketName", { value: artifacts.bucketName });
     new CfnOutput(this, "DispatchDeadLetterQueueUrl", { value: deadLetterQueue.queueUrl });
-    new CfnOutput(this, "SlackEventsUrl", { value: `${api.attrApiEndpoint}/v1/slack/events` });
-    new CfnOutput(this, "GithubWebhookUrl", { value: `${api.attrApiEndpoint}/v1/github/webhooks` });
-    new CfnOutput(this, "SlackInteractivityUrl", { value: `${api.attrApiEndpoint}/v1/slack/interactions` });
+    new CfnOutput(this, "SlackEventsUrl", { value: publicApiUrl(api, "/v1/slack/events") });
+    new CfnOutput(this, "GithubWebhookUrl", { value: publicApiUrl(api, "/v1/github/webhooks") });
+    new CfnOutput(this, "SlackInteractivityUrl", { value: publicApiUrl(api, "/v1/slack/interactions") });
     new CfnOutput(this, "SlackSecretArn", { value: slackSecret.secretArn });
     new CfnOutput(this, "SlackRequestQueueUrl", { value: slackRequestQueue.queueUrl });
     new CfnOutput(this, "SlackRequestDeadLetterQueueUrl", { value: slackDeadLetterQueue.queueUrl });

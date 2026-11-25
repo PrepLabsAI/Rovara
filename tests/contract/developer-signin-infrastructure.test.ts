@@ -4,6 +4,7 @@ import { STARTBUILD_OVERRIDE_KEYS, brokerCodeBuildStartStatements, withoutBroker
 import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js";
 import { stuckStoppingInstall, withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
 import { withoutApiAccessLog } from "../support/api-access-log-template.js";
+import { withoutPublicApiUrl } from "../support/public-api-url-template.js";
 import { withoutWorkerCallbackAlarm } from "../support/worker-callback-alarm-template.js";
 import { withoutDispatcherLessonsPeople } from "../support/dispatcher-lessons-people-template.js";
 import { App, CfnParameter, Stack, aws_iam as iam } from "aws-cdk-lib";
@@ -194,7 +195,7 @@ function withoutBrokerMemberConditionCheck(template: TemplateJson): TemplateJson
 describe("broker membership condition-check grant", () => {
   it("adds only the exact member-key statement to the broker; every other action, resource and principal stays pinned", () => {
     // Webhook lane W3 + DEC 254zzz432: the webhook secret slot and the stuck-stopping alarm are asserted and taken out too, so both pins below still hold.
-    const before = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(structuredClone(namedRaw)), { env: "staging" }), stuckStoppingInstall("staging")))));
+    const before = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(structuredClone(namedRaw)), { named: true }), { env: "staging" }), stuckStoppingInstall("staging")))));
     // The providers branch also adds this exact capability output. Keep a measured
     // combined pin, then remove only the asserted output to retain the upstream pin.
     expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("c15528809bc3dac1d2d2caf3cce7776a14d387dbf10b607732ae86ac28b468af");
@@ -445,7 +446,10 @@ describe("developer sign-in infrastructure (named environments)", () => {
       expect(variables(prefix).DEVELOPER_SIGNIN_SLACK_SINCE).toEqual({ Ref: "DeveloperSignInSlackSince" });
       expect(variables(prefix).DEVELOPER_OIDC_SINCE).toEqual({ Ref: "DeveloperOidcSince" });
     }
-    const [separator, [endpoint, suffix]] = (named.Outputs.DeveloperSignInIssuer!.Value as { "Fn::Join": [string, [{ "Fn::GetAtt": [string, string] }, string]] })["Fn::Join"];
+    // CODE-PUBLIC-URL: the issuer's base is the public address while PublicApiUrl is set, and the API's own endpoint (the third element) while it is empty.
+    const [separator, [base, suffix]] = (named.Outputs.DeveloperSignInIssuer!.Value as { "Fn::Join": [string, [{ "Fn::If": [string, unknown, { "Fn::GetAtt": [string, string] }] }, string]] })["Fn::Join"];
+    expect(base["Fn::If"].slice(0, 2)).toEqual(["HasPublicApiUrl", { Ref: "PublicApiUrl" }]);
+    const endpoint = base["Fn::If"][2];
     expect(separator).toBe("");
     expect(endpoint["Fn::GetAtt"][0]).toMatch(/^HttpApi/);
     expect(endpoint["Fn::GetAtt"][1]).toBe("ApiEndpoint");
@@ -708,7 +712,7 @@ describe("task-token key and membership IAM", () => {
   it("changes only the named task key, alias, two env vars, public read and membership list item", () => {
     // ENV-ROOM 2 is checked in full by broker-names-parameter-infrastructure.test.ts; its shape is asserted and it is taken out first, so the digest still pins everything else.
     // Webhook lane W3 + DEC 254zzz432: as above, so the digest below still holds.
-    const remainder = withoutWebhookSecretLane(withoutBrokerNamesParameter(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(structuredClone(named)), { env: "staging" }), stuckStoppingInstall("staging"))))));
+    const remainder = withoutWebhookSecretLane(withoutBrokerNamesParameter(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(structuredClone(named)), { named: true }), { env: "staging" }), stuckStoppingInstall("staging"))))));
     withoutCoreModelAccessRoute(remainder);
     // Guided onboarding PR 7: the Linear app's webhook route (no authorizer; the broker verifies the HMAC). Its shape is asserted here, then it is taken out so the digest still pins everything else.
     expect(remainder.Resources["LinearWebhookRoute"]).toMatchObject({ Type: "AWS::ApiGatewayV2::Route", Properties: { RouteKey: "POST /v1/linear/webhooks", AuthorizationType: "NONE" } });

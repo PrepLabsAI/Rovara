@@ -6,6 +6,7 @@ import { SIGN_IN_CLIENTS_PK } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
 import { addBrokerName, addBrokerSetting, addDerivedBrokerVariable } from "./broker-names.js";
 import { addRouteSettings } from "./route-settings.js";
+import { publicApiHostSetting, publicApiIssuer } from "./public-api-url.js";
 import { packagedFunction } from "./control-plane.js";
 import { COMPANY_SELF_SERVE_VARIABLE, companySignInParameters, type CompanySignInParameters, type CompanySignInSwitch } from "./company-signin.js";
 
@@ -124,7 +125,8 @@ export class DeveloperSignIn extends Construct {
     const p = props.parameters;
     // Spec 064: without the task settings (the legacy deployment) the broker serves account linking only.
     const tasks = p.tasks;
-    const issuer = `${props.api.attrApiEndpoint}/v1/auth`;
+    // CODE-PUBLIC-URL: the issuer follows the install's public address (the raw API host while PublicApiUrl is empty), so a rebuilt API keeps it.
+    const issuer = publicApiIssuer(props.api);
 
     const table = this.table = new dynamodb.Table(this, "Table", {
       partitionKey: { name: "pk", type: dynamodb.AttributeType.STRING },
@@ -427,6 +429,8 @@ export class DeveloperSignIn extends Construct {
     const broker = props.broker;
     // ENV-ROOM (broker-names.ts): in a named environment, the names packed and the constrained settings packed; the legacy template passes each whole, as before.
     addBrokerName(broker, props.naming, "signInApi", props.api.ref, issuer);
+    // CODE-PUBLIC-URL: the broker rebuilds the issuer from the API id above; where the install has a public address it gets that address too (packed: the host), and derives the issuer from it.
+    addBrokerSetting(broker, props.naming, "publicApiUrl", publicApiHostSetting(stack));
     broker.addEnvironment("AGENTX_ENV", props.env);
     addBrokerName(broker, props.naming, "signInTable", table.tableName, table.tableName);
     addBrokerName(broker, props.naming, "identityFunction", fn.functionName, fn.functionArn);
