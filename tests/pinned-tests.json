@@ -202,6 +202,24 @@
       "deletedBy": "8f1be0a80"
     },
     {
+      "path": "tests/unit/core-host-parity.test.ts",
+      "minimumTests": 18,
+      "reason": "Per-root parity of late-bound deps keys and service names (a reviewed fixture): the safety net for the F4 engine restructuring.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/unit/second-review-failure-rules.test.ts",
+      "minimumTests": 12,
+      "reason": "Per-hook failure rules and per-site order pinned as today's behaviour: the safety net for the F4 engine restructuring.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/unit/second-review-money-exits.test.ts",
+      "minimumTests": 10,
+      "reason": "Every second-review money exit (incl. the dispatcher's sweep-only exit) pinned as today's behaviour: the safety net for the F4 engine restructuring.",
+      "decision": "DEC 254zzz459"
+    },
+    {
       "path": "tests/journeys/journey-gate.test.ts",
       "minimumTests": 9,
       "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): the gate that fails when a journey lacks a file or a named known gap, or is skipped, or runs outside every affected run. A whole task on the real core and real worker, in every pull request run; the floor is the file's 9 runnable declarations, and deleting or trimming one is a reviewed edit.",
