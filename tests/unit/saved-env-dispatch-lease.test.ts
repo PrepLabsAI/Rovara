@@ -29,7 +29,9 @@ async function queuedBuild(options: { features?: string[]; seam?: boolean | ((re
   const job = (await w.deps.store.get(COMPANY, PROJECT))!.job!;
   const marker = (await w.h.store.get(startMarkerKey(job.jobId)))!;
   const real = savedEnvDispatchLeaseOf(w.deps, COMPANY);
-  if (options.seam !== false) Object.assign(w.h.deps, { savedEnvLease: typeof options.seam === "function" ? options.seam(real) : real });
+  // the harness wires the real seam by default (as the hosted dispatcher does); a test may swap it or take it away
+  if (options.seam === false) delete w.h.deps.savedEnvLease;
+  else Object.assign(w.h.deps, { savedEnvLease: typeof options.seam === "function" ? options.seam(real) : real });
   return { w, job, workspaceId: textOf(marker, "workspaceId"), operationId: textOf(marker, "operationId"), logs };
 }
 
