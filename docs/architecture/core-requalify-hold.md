@@ -15,9 +15,8 @@ Can a core operation start on that machine while the hold stands?
 The renewed machine serves two kinds of work. Neither is ever started by the core.
 
 1. **Browser and API application rounds.** A round is a CHECKS operation that carries `workflowE2EAdmission`.
-   - Only the spec 056 workflow on AWS sets that field. It is set only by the four starts in `aws/developer-tasks.ts`: `startTaskWorkflowE2EChecksFromSystem`, `...BaselineFromSystem`, `...GroundingFromSystem` and `...ReplayFromSystem`. Each passes it through `acceptTask`, and `aws/broker.ts` puts it on the operation.
-   - `aws/ec2-delivery.ts`, `aws/workflow-cancel-reconcile.ts`, `aws/dispatcher.ts`, `aws/outbox-failure.ts` and `e2e/model-budget-endpoint.ts` only read it.
-   - Each of the four starts commits only with `requalifyHoldFence` in its own transaction (`developer-tasks.ts` around lines 3447, 3497, 3547 and 3597). The replay start also checks the hold in `aws/broker.ts` (around line 11889).
+   - Only the spec 056 workflow on AWS ever set that field, through four starts in `aws/developer-tasks.ts` (`startTaskWorkflowE2EChecksFromSystem`, `...BaselineFromSystem`, `...GroundingFromSystem` and `...ReplayFromSystem`). **Those four starts were deleted with the old workflow engine (D1).** Nothing on AWS writes the field now, so no round starts on the renewed machine from this code.
+   - `aws/ec2-delivery.ts`, `aws/dispatcher.ts` and `e2e/model-budget-endpoint.ts` only read it (the old cancel and outbox-failure readers went with the engine).
    - Under `packages/broker/src/core`, `core-host` and `local`, `workflowE2EAdmission` is only read and compared, never written. See `core/e2e/callbacks.ts:57`, `core/e2e/verification.ts:50` and `core/build-step/results.ts`.
    - The core verifies and settles a round's evidence; it does not start one.
 2. **Project setup runs** (`PROJECT_SETUP#<id>` executions).
