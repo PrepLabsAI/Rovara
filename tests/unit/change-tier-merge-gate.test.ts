@@ -7,7 +7,7 @@ import { prepareMerge } from "../../packages/broker/src/core/merge/index.js";
 import { tierGate } from "../../packages/broker/src/core/merge/merge.js";
 import { patchDigestOf, recordQuestionsAnswered, recordTierReview, type TierLevel } from "../../packages/broker/src/core/decisions/change-tier.js";
 import { readReviewInput } from "../../packages/broker/src/core/merge/change-tier-read.js";
-import { ORG, TASK_ID, mergeWorld, type MergeWorld } from "../support/merge-world.js";
+import { ORG, TASK_ID, mergeWorld, pressAsOwner, type MergeWorld } from "../support/merge-world.js";
 import { GROWTH_WORDS, MERGE_NOT_READY_MESSAGES as M } from "../../packages/contracts/src/index.js";
 import { growthOwedOf } from "../../packages/broker/src/core/merge/grown-owed.js";
 
