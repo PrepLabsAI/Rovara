@@ -84,6 +84,39 @@ for (const hosted of [false, true]) describe(`the one read rule: 16 kinds of per
   }
 });
 
+// RD-2d: the file behind a link of the checks read is a part of the checks: for every kind of person it is decided exactly as the checks read is (a share is told the part is not shown; a person the task is not shown to, the missing task).
+for (const hosted of [false, true]) describe(`the one read rule: the evidence file read answers every person as the checks read does (${hosted ? "the hosted rule" : "a rule that trusts the stored person"})`, () => {
+  for (const persona of ALL_PERSONAS) {
+    it(`${persona.name}`, async () => {
+      const w = await readRuleWorld({ hosted });
+      const checks = await outcomeOf(decideAs(w, persona, "checks"));
+      const file = await outcomeOf(decideAs(w, persona, "evidenceFile"));
+      // A script token reads the task read and the proof index alone; the evidence file is refused to it (the mount refuses it before the rule).
+      expect(file, persona.name).toBe(persona.scriptToken === true ? "refused" : checks);
+      expect(await outcomeOf(decideAs(w, persona, "evidenceFile")), persona.name).toBe(file);
+    });
+  }
+});
+
+describe("the one read rule: the evidence file route asks it (RD-2d)", () => {
+  const request = (id: string) => ({ method: "GET", path: `/v1/app/tasks/${id}/evidence/${"a".repeat(64)}`, headers: {}, body: "" });
+  it("a share is told the checks are not shown (403), a person the task is not shown to reads a missing task, and nobody is served a file the pack does not name", async () => {
+    const w = await readRuleWorld({ hosted: true });
+    for (const name of ["shared reader", "admin and shared"] as const) {
+      const persona = personaOf(name);
+      const answer = await w.routes.route(request(w.taskIdOf(persona)), w.caller(persona));
+      expect(answer?.statusCode, name).toBe(403);
+      expect(JSON.parse(answer!.body), name).toEqual({ error: { code: "TASK_PART_NOT_SHOWN", message: "The owner shared this task's summary with you. The checks are not shown." } });
+    }
+    for (const name of ["owner", "co-owner", "commenter", "viewer", "stranger", "company admin", "other company", "left the project"] as const) {
+      const persona = personaOf(name);
+      const answer = await w.routes.route(request(w.taskIdOf(persona)), w.caller(persona));
+      expect(answer?.statusCode, name).toBe(404);
+      expect((JSON.parse(answer!.body) as { error: { code: string } }).error.code, name).toBe("TASK_NOT_FOUND");
+    }
+  }, 60_000);
+});
+
 for (const hosted of [false, true]) describe(`the one read rule: the same table on the real routes (${hosted ? "the hosted rule" : "a rule that trusts the stored person"})`, () => {
   // The route's answer, said as the function says it: admitted or refused (or told the part is not shown). The removed member and the script token are answered before the rule is asked, by the host.
   const routeCell = (read: ReadName, answer: { status: number; code?: string; message?: string; shape?: string }): "admitted" | "refused" | "part" | "other" => {

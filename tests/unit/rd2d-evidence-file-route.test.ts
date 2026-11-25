@@ -7,6 +7,8 @@ import { orgProjectCatalogKey, projectRevisionKey, type EvidencePack, type JsonV
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
+import type { TaskReadDecision } from "../../packages/broker/src/core/task-flow/read-rule.js";
+import type { TaskRecord } from "../../packages/broker/src/core/task-flow/records.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { evidencePackKey } from "../../packages/broker/src/core/proof/evidence-keep.js";
 import { evidenceArtifactKey } from "../../packages/broker/src/core/proof/evidence-artifacts.js";
@@ -14,7 +16,7 @@ import { evidenceHref, evidenceViewOf } from "../../packages/broker/src/core/pro
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
-import { EVIDENCE_FILE_WORDS, EVIDENCE_READ_AUDIT, mayReadCodeDetails, readTaskEvidenceFile, taskEvidenceFileRoute } from "../../packages/broker/src/core-host/task-evidence-file-routes.js";
+import { EVIDENCE_FILE_WORDS, EVIDENCE_READ_AUDIT, readTaskEvidenceFile, taskEvidenceFileRoute } from "../../packages/broker/src/core-host/task-evidence-file-routes.js";
 import { appRouteOf } from "../../packages/broker/src/aws/dev-route-scopes.js";
 import { FAKE_COMPANY, createFakeWorld } from "../support/core-host-fakes.js";
 import { DIGEST, v1Pack } from "../support/evidence-v2-fixtures.js";
@@ -29,7 +31,12 @@ const PROJECT: ProjectDefinition = {
   repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "host-app" }],
 };
 const SERVICES = () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } });
-const WIRED: CoreDevWiring = { origin: () => "https://api.example" };
+/** The deployment's wiring: the live project grant is re-read on every read (the hosted `canReadProject`), so the read rule proves it and `decision.codeDetails` is true. */
+const WIRED: CoreDevWiring = { origin: () => "https://api.example", canReadProject: async () => true };
+/** A laptop: no live-grant seam, nothing is proved, so the read rule gives no code details. */
+const WIRED_LAPTOP: CoreDevWiring = { origin: () => "https://api.example" };
+/** A decision as the one read rule makes it, for a test that calls the route's function directly (the mount's rule is tested through the routes and in task-read-rule.test.ts). */
+const decisionOf = (task: TaskRecord, codeDetails: boolean): TaskReadDecision => ({ task, mode: "owner", money: false, sourceCode: codeDetails, codeDetails, decidedByReadRule: true });
 const get = (path: string) => ({ method: "GET", path, headers: {} });
 const shaOf = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const fileOf = (kind: "jpeg" | "log_txt" | "api_sample_json", bytes: Buffer) => ({ kind, sha256: shaOf(bytes), bytes: bytes.byteLength, retentionClass: "evidence-std" as const, content: bytes });
@@ -80,6 +87,7 @@ async function world() {
     return { principal: localOwnerPrincipal({ companyId, personId }), client: "cli" };
   };
   const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
+  const laptop = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED_LAPTOP });
   const blobs = (await app.registry()).require("object-storage");
   /** A task of `companyId` started by `owner` with a checked candidate (the fixture's digest), a kept pack and the files it names (`stored`, written under this task's own key unless `under` names another task's). */
   const taskOf = async (owner: DeployedCaller, companyId: string, options: { pack?: EvidencePack; packFor?: string; stored?: Stored[] } = {}) => {
@@ -94,9 +102,10 @@ async function world() {
     return { ...owned, record };
   };
   const putFile = (owned: { ownerKey: string; workspaceId: string; taskId: string }, sha256: string, content: Uint8Array) =>
-    blobs.put(evidenceArtifactKey(owned.ownerKey, owned.workspaceId, owned.taskId, sha256), content, { contentType: "text/plain", metadata: {}, retention: "evidence-std" }, { overwrite: true });
+    blobs.put(evidenceArtifactKey(owned.ownerKey, owned.workspaceId, owned.taskId, sha256), content, { contentType: "text/plain", metadata: { sha256 }, retention: "evidence-std" }, { overwrite: true });
   const read = (caller: DeployedCaller, taskId: string, sha256: string) => routes.route(get(`/v1/app/tasks/${taskId}/evidence/${sha256}`), caller);
-  return { fake, app, routes, readers, person, taskOf, read, blobs, putFile };
+  const readOnLaptop = (caller: DeployedCaller, taskId: string, sha256: string) => laptop.route(get(`/v1/app/tasks/${taskId}/evidence/${sha256}`), caller);
+  return { fake, app, routes, readers, person, taskOf, read, readOnLaptop, blobs, putFile };
 }
 
 const codeOf = (answer: { body: string } | undefined) => (JSON.parse(answer!.body) as { error?: { code?: string; message?: string } }).error;
@@ -206,6 +215,20 @@ describe("the task read's own rule first: every one who may not read the task ge
     expect(w.fake.audit.filter((event) => event.action === EVIDENCE_READ_AUDIT).map((event) => event.actor.id)).toEqual([COLLEAGUE_ID]);
   });
 
+  it("the links the checks read serves lead here: the output link of the checks read (EVIDENCE_FILES_SERVED) is this route's address and answers the file", async () => {
+    const w = await world();
+    const owner = w.person(OWNER_ID, FAKE_COMPANY);
+    const tail = fileOf("log_txt", TAIL);
+    const { taskId } = await w.taskOf(owner, FAKE_COMPANY, { pack: packWith({ tail }), stored: [tail] });
+    const checks = await w.routes.route(get(`/v1/dev/tasks/${taskId}/checks`), owner);
+    expect(checks?.statusCode).toBe(200);
+    const row = (JSON.parse(checks!.body) as { checks: { rows: Array<{ id: string; output?: { href?: string } }> } }).checks.rows.find((candidate) => candidate.id === "build");
+    expect(row?.output?.href).toBe(`/v1/app/tasks/${taskId}/evidence/${tail.sha256}`);
+    const served = await w.routes.route(get(row!.output!.href!), owner);
+    expect(served?.statusCode).toBe(200);
+    expect(served?.body).toBe(TAIL.toString("utf8"));
+  });
+
   it("a script token never reaches a file (it reads like a route that does not exist, before anything of the task is read)", async () => {
     const w = await world();
     const owner = w.person(OWNER_ID, FAKE_COMPANY);
@@ -219,20 +242,25 @@ describe("the task read's own rule first: every one who may not read the task ge
     expect(w.fake.audit.filter((event) => event.action === EVIDENCE_READ_AUDIT)).toEqual([]);
   });
 
-  it("the code-details decision is its own: when it says no, the same missing-task answer, and nothing of the pack or the store is read", async () => {
+  it("the code-details decision is its own: when it says no (no live project grant proved: a laptop), the same missing-task answer, and nothing of the pack or the store is read", async () => {
     const w = await world();
     const owner = w.person(OWNER_ID, FAKE_COMPANY);
     const tail = fileOf("log_txt", TAIL);
-    const { taskId, record } = await w.taskOf(owner, FAKE_COMPANY, { pack: packWith({ tail }), stored: [tail] });
-    expect(mayReadCodeDetails({ principal: owner.principal }, record)).toBe(true);
-    expect(mayReadCodeDetails({ principal: localOwnerPrincipal({ companyId: OTHER, personId: OWNER_ID }) }, record)).toBe(false);
+    const { taskId } = await w.taskOf(owner, FAKE_COMPANY, { pack: packWith({ tail }), stored: [tail] });
+    // Through the routes: the hosted wiring proves the grant and serves the file; a wiring that proves none answers exactly as a missing task.
+    expect((await w.read(owner, taskId, tail.sha256))?.statusCode).toBe(200);
+    const blind = await w.readOnLaptop(owner, taskId, tail.sha256);
+    expect(blind?.statusCode).toBe(404);
+    expect(codeOf(blind)).toEqual({ code: "TASK_NOT_FOUND", message: "no such task" });
+    // The function itself, on the decision's own part: nothing of the pack or the store is touched when code details are refused.
     const runtime = await w.app.runtimeFor(FAKE_COMPANY);
+    const record = (await readTask(runtime.flow.deps, taskId))!;
     const touched = vi.fn();
     const watched = new Proxy(w.blobs, { get: (target, name, receiver) => { touched(String(name)); const value = Reflect.get(target, name, receiver) as unknown; return typeof value === "function" ? value.bind(target) as unknown : value; } });
     const context = { flow: runtime.flow, blobs: watched, caller: { principal: owner.principal }, audit: { stage: () => [], record: async () => undefined }, now: () => 0, taskId, sha256: tail.sha256 };
-    await expect(readTaskEvidenceFile(context, { mayReadCodeDetails: () => false })).rejects.toMatchObject({ code: "TASK_NOT_FOUND", message: expect.stringContaining("no such task") as string });
+    await expect(readTaskEvidenceFile({ ...context, decision: decisionOf(record, false) })).rejects.toMatchObject({ code: "TASK_NOT_FOUND", message: expect.stringContaining("no such task") as string });
     expect(touched).not.toHaveBeenCalled();
-    expect((await readTaskEvidenceFile(context, { mayReadCodeDetails: () => true })).statusCode).toBe(200);
+    expect((await readTaskEvidenceFile({ ...context, decision: decisionOf(record, true) })).statusCode).toBe(200);
   });
 });
 
@@ -374,8 +402,9 @@ describe("the audit line comes first", () => {
     const tail = fileOf("log_txt", TAIL);
     const { taskId } = await w.taskOf(owner, FAKE_COMPANY, { pack: packWith({ tail }), stored: [tail] });
     const runtime = await w.app.runtimeFor(FAKE_COMPANY);
+    const record = (await readTask(runtime.flow.deps, taskId))!;
     const audit = { stage: () => [], record: vi.fn(async () => { throw new Error("audit down: secret-detail"); }) };
-    const answer = readTaskEvidenceFile({ flow: runtime.flow, blobs: w.blobs, caller: { principal: owner.principal }, audit, now: () => 0, taskId, sha256: tail.sha256 });
+    const answer = readTaskEvidenceFile({ flow: runtime.flow, blobs: w.blobs, caller: { principal: owner.principal }, audit, now: () => 0, decision: decisionOf(record, true), taskId, sha256: tail.sha256 });
     await expect(answer).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: expect.stringContaining(EVIDENCE_FILE_WORDS.notRecorded) as string });
     await expect(answer).rejects.not.toMatchObject({ message: expect.stringContaining("secret-detail") as string });
     expect(audit.record).toHaveBeenCalledTimes(1);
