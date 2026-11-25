@@ -99,7 +99,7 @@ const changeSetArn = `arn:aws:cloudformation:us-east-1:${ACCOUNT}:changeSet/cs/0
 const cdkRole = (kind: string) => `arn:aws:iam::${ACCOUNT}:role/cdk-hnb659fds-${kind}-${ACCOUNT}-us-east-1`;
 
 describe("legacy runtime boundary: which roles carry it", () => {
-  it("is on every runtime role of the control plane, foundation and Slack orchestrator, pointing at that stack's own policy (31 roles incl. R5's Slack token reader, an in-place property, and the EC2 instance state-change handler's)", () => {
+  it("is on every runtime role of the control plane, foundation and Slack orchestrator, pointing at that stack's own policy (32 roles incl. R5's Slack token reader, an in-place property, the EC2 instance state-change handler's and the canary session function's)", () => {
     let roles = 0;
     for (const [stackName, part] of Object.entries(STACK_PARTS)) {
       const boundary = boundaryOf(stackName);
@@ -112,8 +112,8 @@ describe("legacy runtime boundary: which roles carry it", () => {
         expect(role.Properties.PermissionsBoundary, `${stackName} ${id}`).toStrictEqual({ Ref: boundary.id });
       }
     }
-    expect(roles).toBe(31);
-    expect([rolesOf("AgentXControlPlane").length, rolesOf("AgentXProductionFoundation").length, rolesOf("AgentXSlackOrchestrator").length]).toEqual([28, 2, 1]);
+    expect(roles).toBe(32);
+    expect([rolesOf("AgentXControlPlane").length, rolesOf("AgentXProductionFoundation").length, rolesOf("AgentXSlackOrchestrator").length]).toEqual([29, 2, 1]);
   });
 
   it("names the worker's instance role, the Slack task role and the Lambda roles among the bounded roles", () => {

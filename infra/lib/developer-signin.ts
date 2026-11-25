@@ -1,6 +1,6 @@
 // Spec 025 phase 25a: the control plane as the developers' sign-in server. Spec 064: the legacy deployment has it too,
 // for account linking only (scope "linking"): no developer tasks, task people or AI-tool confirmations there.
-import { ArnFormat, CfnOutput, CfnParameter, Duration, RemovalPolicy, Stack, aws_apigatewayv2 as apigwv2, aws_dynamodb as dynamodb, aws_iam as iam, aws_kms as kms, type aws_lambda_nodejs as lambdaNodejs, type aws_secretsmanager as secretsmanager } from "aws-cdk-lib";
+import { ArnFormat, CfnOutput, CfnParameter, Duration, RemovalPolicy, Stack, aws_apigatewayv2 as apigwv2, aws_dynamodb as dynamodb, aws_iam as iam, aws_kms as kms, type aws_lambda_nodejs as lambdaNodejs, type aws_secretsmanager as secretsmanager, type aws_sns as sns } from "aws-cdk-lib";
 import { Construct } from "constructs";
 import { SIGN_IN_CLIENTS_PK } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
@@ -9,6 +9,7 @@ import { addRouteSettings } from "./route-settings.js";
 import { publicApiHostSetting, publicApiIssuer } from "./public-api-url.js";
 import { packagedFunction } from "./control-plane.js";
 import { COMPANY_SELF_SERVE_VARIABLE, companySignInParameters, type CompanySignInParameters, type CompanySignInSwitch } from "./company-signin.js";
+import { canaryParametersWhere, canarySessionWhere, tokenSigners, type CanarySessionParameters } from "./canary-session.js";
 
 const SIGN_IN_ROUTE_KEY = "ANY /v1/auth/{proxy+}";
 const DEV_ROUTE_KEY = "ANY /v1/dev/{proxy+}";
@@ -26,6 +27,8 @@ export interface DeveloperSignInParameters {
   github?: { enabled: CfnParameter; clientId: CfnParameter; since: CfnParameter };
   /** DEC 254zg (a): Code's company layer (CompanySignIn) and self-serve create (CompanySelfServe), both off by default (company-signin.ts); the legacy deployment too since #1129. */
   company?: CompanySignInParameters;
+  /** CANARY-SESSION, the legacy deployment only (beta and production share that template; only beta's deploy ever sets them): the settings of the canary person's session function, all empty by default. */
+  canary?: CanarySessionParameters;
 }
 
 export interface DeveloperTaskParameters {
@@ -39,7 +42,7 @@ export interface DeveloperTaskParameters {
  * Declared on the stack itself, so the parameter names are exactly these. Spec 064: the legacy deployment
  * (`tasks: false`) gets the sign-in ones only, declared in the same order so named templates are unchanged.
  */
-export function developerSignInParameters(stack: Stack, options: { tasks: boolean } = { tasks: true }): DeveloperSignInParameters {
+export function developerSignInParameters(stack: Stack, options: { tasks: boolean; canary?: boolean } = { tasks: true }): DeveloperSignInParameters {
   const signIn = {
     slackTeamId: new CfnParameter(stack, "SlackTeamId", { type: "String", default: "", allowedPattern: "^$|^[TE][A-Z0-9]{2,31}$", description: "The Slack workspace (team) ID this environment serves; Slack sign-in is refused while it is empty" }),
     slack: new CfnParameter(stack, "DeveloperSignInSlack", { type: "String", default: "disabled", allowedValues: ["enabled", "disabled"], description: "enabled: developers may sign in with Slack; disabled: they may not" }),
@@ -69,7 +72,8 @@ export function developerSignInParameters(stack: Stack, options: { tasks: boolea
   };
   // DEC 254zg (a): declared last, so every parameter before them keeps its order.
   const company = companySignInParameters(stack);
-  return { ...signIn, tasks, github, company };
+  // CANARY-SESSION: declared after every other parameter, so each keeps its order.
+  return { ...signIn, tasks, github, company, ...canaryParametersWhere(stack, options.canary) };
 }
 
 /**
@@ -107,6 +111,8 @@ export interface DeveloperSignInProps {
   turnRecords: dynamodb.Table;
   /** State table containing Code's company-audit rows; sign-in has only the AUDIT-family PutItem below. */
   stateTable: dynamodb.Table;
+  /** The control plane's operator alerts topic (the legacy layout's canary session alarms send there). */
+  alerts?: sns.ITopic;
   /** DEC 254zg (a), named environments only: the company layer's switch (control-plane.ts makes it from parameters.company, before the Slack company mode that requires it). */
   company?: CompanySignInSwitch;
 }
@@ -205,13 +211,16 @@ export class DeveloperSignIn extends Construct {
       conditions: { "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [SIGN_IN_CLIENTS_PK] }, Null: { "dynamodb:LeadingKeys": "false" } },
     }));
     tokenKey.grant(fn, "kms:Sign", "kms:GetPublicKey");
+    // CANARY-SESSION: the legacy deployment (beta, production) may also hold the canary person's session function; its role signs with this key only while it exists (a condition on the
+    // parameters, off in production), so the deny below names the sign-in function's role alone, as always, unless the function does.
+    const canary = canarySessionWhere(tasks !== undefined, this, "CanarySession", p.canary, { naming: props.naming, env: props.env, issuer, table, tokenKey, alerts: props.alerts });
     tokenKey.addToResourcePolicy(new iam.PolicyStatement({
       sid: "SignAndGetPublicKeyOnlyAsDeveloperIdentity",
       effect: iam.Effect.DENY,
       principals: [new iam.AnyPrincipal()],
       actions: ["kms:Sign", "kms:GetPublicKey"],
       resources: ["*"],
-      conditions: { ArnNotEquals: { "aws:PrincipalArn": fn.role!.roleArn } },
+      conditions: { ArnNotEquals: { "aws:PrincipalArn": tokenSigners(canary, fn.role!.roleArn) } },
     }));
     if (taskTokenKey !== undefined) {
       // Direct key-policy grant: the broker inline policy is near CDK's split threshold.

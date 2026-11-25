@@ -32,6 +32,7 @@ import { packedPiecesOf, unpackedBrokerVariables } from "../support/broker-envir
 import { withoutBrokerMemberConditionCheck } from "../support/broker-member-condition-check-template.js";
 import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js";
 import { withoutLinearWebhookRoute } from "../support/linear-webhook-route-template.js";
+import { withoutCanarySession } from "../support/canary-session-template.js";
 
 skipLambdaBundling();
 
@@ -652,7 +653,7 @@ describe("L1a broker environment derivation", () => {
     // WORKER-DELIVERY-IDENTITY (2026-11-25): the instance state-change handler, its rule and the dispatcher's one Describe statement are asserted and taken out first (withoutMachineGone, innermost), so every pin holds as recorded.
     const machineless = () => withoutMachineGone(structuredClone(legacy.toJSON()));
     // CORE-RUN-STOP-RELAY (G1) + F1 L1a-1: every pin below except the full-template ones was recorded without the relay setting and with the two invitation switches, so each starts from the template with exactly the relay taken out and exactly the switches put back (Rule D).
-    const relayless = () => withTaskPeopleInvitationSwitches(withoutCoreOutboxStreamRelay(machineless()));
+    const relayless = () => withTaskPeopleInvitationSwitches(withoutCoreOutboxStreamRelay(withoutCanarySession(machineless())));
     const beforeFirstGateway = withoutLinearWebhookRoute(withoutWebhookSecretLane(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(relayless())), { named: false }) as Json & { Outputs: Record<string, unknown> }), stuckStoppingInstall()))));
     expect(beforeFirstGateway.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     delete beforeFirstGateway.Outputs.ModelRunPriceVersion;
@@ -673,7 +674,7 @@ describe("L1a broker environment derivation", () => {
     // CORE-RUN-STOP-RELAY (G1, 2026-11-25): the same template with the packed `rl=on` on the broker and the dispatcher in has its own pin; Rule D: with exactly that taken out (withoutCoreOutboxStreamRelay) the pin after it (6694babb...) holds.
     // F1 L1a-1 (2026-11-25): that full-template pin is re-pinned for exactly the deletion of the two dead invitation parameters and their two packed broker settings (tu, tv). Rule D: with exactly those put back
     // (withTaskPeopleInvitationSwitches) the pin recorded before holds (the first line below), and with the relay taken out too the pin after it (6694babb...) holds.
-    const withRelay = withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(machineless())), stuckStoppingInstall()));
+    const withRelay = withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(withoutCanarySession(machineless()))), stuckStoppingInstall()));
     expect(digest(withRelay), "legacy with the outbox stream relay setting, without the two deleted invitation switches").toBe("32a056531c8cb8c21aaea8f22289489d317cb7f1965906c3a96a7411701de126");
     expect(digest(withTaskPeopleInvitationSwitches(structuredClone(withRelay))), "legacy with the outbox stream relay setting and the switches put back").toBe("177bca4c6b9eb5b7291f114c5253a536a8c038aeedbf2743bcc084b79189ee1c");
     expect(digest(withTaskPeopleInvitationSwitches(withoutCoreOutboxStreamRelay(structuredClone(withRelay)))), "legacy minus only the outbox stream relay setting").toBe("6694babb0383fdcefffed780d3da49ae296a9706ce9b4d8db102f467aa602d8f");

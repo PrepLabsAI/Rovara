@@ -7,7 +7,8 @@ import { readSessionEvents, sessionSnapshot } from "../sessions/read.js";
 import { SessionStore } from "../sessions/store.js";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
 import { textReaderOf } from "../build-step/plan-input.js";
-import { frameUntrusted, storedWords } from "./frame.js";
+import { randomBytes } from "node:crypto";
+import { frameUntrustedParts, storedWords } from "./frame.js";
 
 export interface AnswerTasks {
   /** Uses this asker's task-page authority. Undefined means no context, including a denied/missing task. */
@@ -19,8 +20,19 @@ function taskStatus(task: TaskRecord, workflow: TaskRecord["workflow"], snapshot
   return task.closedAt !== undefined ? "Closed" : workflow === undefined ? snapshot?.statusText ?? "Starting" : `${workflow.stage} / ${workflow.state}`;
 }
 
-/** Data is already held to the company/path project by the service. No notes, diff or check output is loaded. */
+/** The framed task data for the model, and the task data alone (no frame words, no fixed intro lines): only the second may be quoted as a citation. */
+export interface AnswerTaskContext { frame: string; shown: string }
+
+/** The model's view of a task, as a frame. */
 export async function answerTaskFrame(store: DocumentStore, companyId: OrgId, task: TaskRecord, tasks: AnswerTasks, now: number): Promise<string> {
+  return (await answerTaskContext(store, companyId, task, tasks, now)).frame;
+}
+
+/** The first lines `buildAskContext` writes before any task data: what the text is, and that it is never an instruction. Fixed words, so never evidence. */
+const FIXED_INTRO_LINES = 2;
+
+/** Data is already held to the company/path project by the service. No notes, diff or check output is loaded. */
+export async function answerTaskContext(store: DocumentStore, companyId: OrgId, task: TaskRecord, tasks: AnswerTasks, now: number): Promise<AnswerTaskContext> {
   const workflow = task.workflow;
   let snapshot: ReturnType<typeof sessionSnapshot> | undefined;
   let events: string[] = [];
@@ -37,6 +49,7 @@ export async function answerTaskFrame(store: DocumentStore, companyId: OrgId, ta
   const latest = workflow?.artifacts.filter((artifact) => ["plan", "design", "requirements"].includes(artifact.type)).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.version - b.version).at(-1);
   const loaded = latest === undefined ? undefined : await loadWorkflowDocument(async (key, max) => key.startsWith(`private/${task.ownerKey}/${task.workspaceId}/`) ? textReaderOf(tasks.artifacts)(key, max) : undefined, latest, {}).catch(() => undefined);
   const decisions = (workflow?.decisions ?? []).slice(-20).reverse().map((decision) => `${decision.at} ${decision.decision} (${decision.actorRole})`);
+  // A fresh tag id per call: task text cannot know it, so it cannot forge a tag that carries it (session Ask derives its own from the conversation and request).
   const rendered = buildAskContext("web", {
     title: task.title, request: storedWords(task.requestText ?? "", 1_500),
     status: taskStatus(task, workflow, snapshot),
@@ -45,6 +58,7 @@ export async function answerTaskFrame(store: DocumentStore, companyId: OrgId, ta
     document: latest === undefined ? undefined : loaded === undefined ? "unreadable" : { label: `${latest.type} summary`, version: latest.version, markdown: storedWords(loaded.markdown, 1_500) },
     // The builder retains ordering; both lists arrive newest first.
     timeline: { statusLines: events, decisions },
-  }, "answer-task-state");
-  return frameUntrusted({ from: "the task page this person can read", item: "task-state", text: rendered.text, maxBytes: 24_000 });
+  }, randomBytes(8).toString("hex"));
+  const framed = frameUntrustedParts({ from: "the task page this person can read", item: "task-state", text: rendered.text, maxBytes: 24_000 });
+  return { frame: framed.frame, shown: framed.text.split("\n").slice(FIXED_INTRO_LINES).join("\n") };
 }
