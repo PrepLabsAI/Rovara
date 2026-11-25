@@ -15751,7 +15751,7 @@ async function exchangeRepositoryCredential(
   }
   const operation = await requireOperation(dependencies, workspaceId, operationId);
   const repositoryUrl = input.repositoryUrl;
-  return exchangeLegacyGitCredential({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, grants: dependencies.repositoryGrants, log: (entry) => console.log(JSON.stringify(entry)) }, {
+  return exchangeLegacyGitCredential({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, grants: dependencies.repositoryGrants, log: brokerLogLine }, {
     grant, workspaceId, operationId, operation, credentialRef, repositoryUrl, access,
     async closing() { const workspace = await getItem<{ status?: unknown }>(dependencies, workspaceKey(workspaceId)); return workspace?.status === "CLOSING" || workspace?.status === "CLOSED"; },
     authority: () => assertLegacyPushAuthority(dependencies, operation, access),
