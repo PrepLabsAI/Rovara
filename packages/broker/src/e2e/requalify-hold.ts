@@ -7,7 +7,6 @@ import {
   agentXError, canonicalJson, projectSetupExecutionKey, requalifyDrainProjection, requalifyHoldKey,
   type E2EApplicationSelectionRecord, type E2ERegisteredRuntime, type RequalifyDrainRead,
 } from "@agentx/contracts";
-import type { SessionManager } from "../aws/sessions.js";
 import { isConditional } from "../aws/broker-shared.js";
 import { ApplicationDispatchRefusal, applicationSelectionStillCurrent } from "./application-dispatch-check.js";
 
@@ -229,17 +228,4 @@ export function replayPredatesRenewal(admitted: readonly E2ERegisteredRuntime[],
     const now = current.find((item) => item.capabilities.kind === row.capabilities.kind && item.profileId === row.profileId);
     return now === undefined || canonicalJson(now) !== canonicalJson(row);
   });
-}
-
-// ---- a task worker on another kernel than the test machine ------------------------------------------------------------------------------------------------------------------
-
-/**
- * A round ended `runtime-environment-drifted`: the task's worker booted on another image than the machine the runtime was qualified on. The worker is stopped so that the one automatic
- * retry starts a fresh one (which the provisioner launches from the qualified image, AR-4). Only a READY session is claimed, and with the reaper's own atomic claim: it fails if the
- * worker was touched since it was read or the workspace has an operation running, so a dispatch always wins. Returns whether the worker was claimed; any other state needs nothing.
- */
-export async function recycleDriftedWorker(sessions: Pick<SessionManager, "get" | "claimStop">, workspaceId: string): Promise<boolean> {
-  const seen = await sessions.get(workspaceId);
-  if (seen === undefined || seen.state !== "READY") return false;
-  return sessions.claimStop(seen);
 }
